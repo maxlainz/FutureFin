@@ -2,6 +2,7 @@ use crate::handlers::auth::{login, logout, me, register};
 use crate::handlers::fallback;
 use crate::handlers::health::{health_check, ready_check};
 use crate::handlers::households::{create_household, list_households};
+use crate::handlers::persons::persons_router;
 use crate::openapi::openapi_json;
 use axum::routing::{get, post};
 use axum::Router;
@@ -22,7 +23,8 @@ pub fn app_router() -> Router {
             "/households",
             Router::new()
                 .route("/", get(list_households))
-                .route("/", post(create_household)),
+                .route("/", post(create_household))
+                .merge(persons_router()),
         )
         .fallback(fallback::v1_not_found);
 

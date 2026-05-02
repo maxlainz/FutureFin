@@ -20,6 +20,14 @@ type HouseholdSummary = {
   role: "owner" | "member" | "viewer";
 };
 
+type PersonRow = {
+  id: string;
+  household_id: string;
+  display_name: string;
+  is_primary: boolean;
+  birth_date?: string | null;
+};
+
 type TabId =
   | "summary"
   | "assets"
@@ -84,6 +92,14 @@ export default function App() {
     null,
   );
 
+  const [persons, setPersons] = useState<PersonRow[]>([]);
+  const [personsError, setPersonsError] = useState<string | null>(null);
+  const [personsBusy, setPersonsBusy] = useState(false);
+  const [personDisplayName, setPersonDisplayName] = useState("");
+  const [personBirthDate, setPersonBirthDate] = useState("");
+  const [personIsPrimary, setPersonIsPrimary] = useState(false);
+  const [personMutating, setPersonMutating] = useState(false);
+
   const [activeTab, setActiveTab] = useState<TabId>("summary");
 
   const selectedHousehold =
@@ -129,6 +145,27 @@ export default function App() {
     }
   }, []);
 
+  const loadPersons = useCallback(async (householdId: string) => {
+    setPersonsBusy(true);
+    setPersonsError(null);
+    try {
+      const res = await fetch(
+        `/v1/households/${encodeURIComponent(householdId)}/persons`,
+        defaultFetchInit,
+      );
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      const list = (await res.json()) as PersonRow[];
+      setPersons(list);
+    } catch (e: unknown) {
+      setPersons([]);
+      setPersonsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPersonsBusy(false);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     fetch("/v1/health")
@@ -164,8 +201,19 @@ export default function App() {
       setHouseholds([]);
       setHouseholdsError(null);
       setSelectedHouseholdId(null);
+      setPersons([]);
+      setPersonsError(null);
     }
   }, [user, loadHouseholds]);
+
+  useEffect(() => {
+    if (!selectedHouseholdId) {
+      setPersons([]);
+      setPersonsError(null);
+      return;
+    }
+    void loadPersons(selectedHouseholdId);
+  }, [selectedHouseholdId, loadPersons]);
 
   useEffect(() => {
     if (households.length === 0) {
@@ -226,6 +274,8 @@ export default function App() {
       setUser(null);
       setHouseholds([]);
       setSelectedHouseholdId(null);
+      setPersons([]);
+      setPersonsError(null);
       setActiveTab("summary");
     } catch (e: unknown) {
       setSessionError(e instanceof Error ? e.message : String(e));
@@ -262,6 +312,99 @@ export default function App() {
       setHhBusy(false);
     }
   }
+
+  async function createPerson(ev: FormEvent) {
+    ev.preventDefault();
+    if (!selectedHouseholdId) {
+      return;
+    }
+    setPersonMutating(true);
+    setPersonsError(null);
+    try {
+      const payload: {
+        display_name: string;
+        is_primary: boolean;
+        birth_date?: string;
+      } = {
+        display_name: personDisplayName,
+        is_primary: personIsPrimary,
+      };
+      if (personBirthDate.trim()) {
+        payload.birth_date = personBirthDate.trim();
+      }
+      const res = await fetch(
+        `/v1/households/${encodeURIComponent(selectedHouseholdId)}/persons`,
+        {
+          ...defaultFetchInit,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setPersonDisplayName("");
+      setPersonBirthDate("");
+      setPersonIsPrimary(false);
+      await loadPersons(selectedHouseholdId);
+    } catch (e: unknown) {
+      setPersonsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPersonMutating(false);
+    }
+  }
+
+  async function deletePerson(personId: string) {
+    if (!selectedHouseholdId) {
+      return;
+    }
+    setPersonMutating(true);
+    setPersonsError(null);
+    try {
+      const res = await fetch(
+        `/v1/households/${encodeURIComponent(selectedHouseholdId)}/persons/${encodeURIComponent(personId)}`,
+        { ...defaultFetchInit, method: "DELETE" },
+      );
+      if (!res.ok && res.status !== 204) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      await loadPersons(selectedHouseholdId);
+    } catch (e: unknown) {
+      setPersonsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPersonMutating(false);
+    }
+  }
+
+  async function makePersonPrimary(personId: string) {
+    if (!selectedHouseholdId) {
+      return;
+    }
+    setPersonMutating(true);
+    setPersonsError(null);
+    try {
+      const res = await fetch(
+        `/v1/households/${encodeURIComponent(selectedHouseholdId)}/persons/${encodeURIComponent(personId)}`,
+        {
+          ...defaultFetchInit,
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ is_primary: true }),
+        },
+      );
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      await loadPersons(selectedHouseholdId);
+    } catch (e: unknown) {
+      setPersonsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPersonMutating(false);
+    }
+  }
+
+  const householdCanWrite = selectedHousehold?.role !== "viewer";
 
   if (sessionBusy) {
     return (
@@ -433,6 +576,10 @@ export default function App() {
           <div className="banner error-banner">{householdsError}</div>
         ) : null}
 
+        {personsError ? (
+          <div className="banner error-banner">{personsError}</div>
+        ) : null}
+
         {activeTab === "summary" ? (
           <SummaryView
             household={selectedHousehold}
@@ -450,6 +597,20 @@ export default function App() {
             createHousehold={(e) => void createHousehold(e)}
             health={health}
             healthError={healthError}
+            selectedHouseholdId={selectedHouseholdId}
+            householdCanWrite={householdCanWrite}
+            persons={persons}
+            personsBusy={personsBusy}
+            personDisplayName={personDisplayName}
+            setPersonDisplayName={setPersonDisplayName}
+            personBirthDate={personBirthDate}
+            setPersonBirthDate={setPersonBirthDate}
+            personIsPrimary={personIsPrimary}
+            setPersonIsPrimary={setPersonIsPrimary}
+            personMutating={personMutating}
+            createPerson={(e) => void createPerson(e)}
+            deletePerson={(id) => void deletePerson(id)}
+            makePersonPrimary={(id) => void makePersonPrimary(id)}
           />
         ) : (
           <PlaceholderTab tabLabel={TABS.find((x) => x.id === activeTab)?.label ?? ""} />
@@ -575,6 +736,20 @@ function SettingsView({
   createHousehold,
   health,
   healthError,
+  selectedHouseholdId,
+  householdCanWrite,
+  persons,
+  personsBusy,
+  personDisplayName,
+  setPersonDisplayName,
+  personBirthDate,
+  setPersonBirthDate,
+  personIsPrimary,
+  setPersonIsPrimary,
+  personMutating,
+  createPerson,
+  deletePerson,
+  makePersonPrimary,
 }: {
   households: HouseholdSummary[];
   hhBusy: boolean;
@@ -585,16 +760,133 @@ function SettingsView({
   createHousehold: (e: FormEvent) => void;
   health: HealthResponse | null;
   healthError: string | null;
+  selectedHouseholdId: string | null;
+  householdCanWrite: boolean;
+  persons: PersonRow[];
+  personsBusy: boolean;
+  personDisplayName: string;
+  setPersonDisplayName: (v: string) => void;
+  personBirthDate: string;
+  setPersonBirthDate: (v: string) => void;
+  personIsPrimary: boolean;
+  setPersonIsPrimary: (v: boolean) => void;
+  personMutating: boolean;
+  createPerson: (e: FormEvent) => void;
+  deletePerson: (id: string) => void;
+  makePersonPrimary: (id: string) => void;
 }) {
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Ajustes</h2>
         <p className="workspace-sub">
-          Hogares, moneda base y preferencias del hogar (más opciones cuando la
-          API esté lista).
+          Hogares, moneda base y personas del hogar activo (cabecera). Los
+          visores solo leen.
         </p>
       </div>
+
+      <section className="panel">
+        <h3 className="panel-title">Personas del hogar activo</h3>
+        {!selectedHouseholdId ? (
+          <p className="muted tight">
+            Elige un hogar en la cabecera para ver y editar personas.
+          </p>
+        ) : personsBusy ? (
+          <p className="muted">Cargando personas…</p>
+        ) : persons.length === 0 ? (
+          <p className="muted tight">
+            Ninguna persona todavía. Añade la primera (titular, cónyuge, hijos…).
+          </p>
+        ) : (
+          <ul className="person-list">
+            {persons.map((p) => (
+              <li key={p.id} className="person-row">
+                <div className="person-main">
+                  <span className="person-name">{p.display_name}</span>
+                  {p.birth_date ? (
+                    <span className="person-meta">nac. {p.birth_date}</span>
+                  ) : null}
+                  {p.is_primary ? (
+                    <span className="primary-badge">Principal</span>
+                  ) : null}
+                </div>
+                {householdCanWrite ? (
+                  <div className="person-actions">
+                    {!p.is_primary ? (
+                      <button
+                        type="button"
+                        className="btn ghost text"
+                        disabled={personMutating}
+                        onClick={() => makePersonPrimary(p.id)}
+                      >
+                        Marcar principal
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="btn ghost danger"
+                      disabled={personMutating}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `¿Eliminar a «${p.display_name}» del hogar?`,
+                          )
+                        ) {
+                          deletePerson(p.id);
+                        }
+                      }}
+                    >
+                      Eliminar
+                    </button>
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        )}
+        {selectedHouseholdId && householdCanWrite ? (
+          <form className="stack bordered-top" onSubmit={createPerson}>
+            <h4 className="subsection-title">Nueva persona</h4>
+            <label className="field">
+              <span>Nombre</span>
+              <input
+                value={personDisplayName}
+                onChange={(e) => setPersonDisplayName(e.target.value)}
+                required
+                maxLength={128}
+                placeholder="Ej. María"
+              />
+            </label>
+            <label className="field">
+              <span>Fecha de nacimiento (opcional)</span>
+              <input
+                type="date"
+                value={personBirthDate}
+                onChange={(e) => setPersonBirthDate(e.target.value)}
+              />
+            </label>
+            <label className="field checkbox-field">
+              <input
+                type="checkbox"
+                checked={personIsPrimary}
+                onChange={(e) => setPersonIsPrimary(e.target.checked)}
+              />
+              <span>Persona principal del hogar</span>
+            </label>
+            <button
+              type="submit"
+              className="btn primary"
+              disabled={personMutating || personsBusy}
+            >
+              Añadir persona
+            </button>
+          </form>
+        ) : selectedHouseholdId && !householdCanWrite ? (
+          <p className="hint bordered-top">
+            Tu rol en este hogar es solo lectura; no puedes cambiar personas.
+          </p>
+        ) : null}
+      </section>
 
       <section className="panel">
         <h3 className="panel-title">Tus hogares</h3>

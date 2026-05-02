@@ -17,6 +17,7 @@ pub struct ErrorBody {
 pub enum ErrorCode {
     BadRequest,
     Unauthorized,
+    Forbidden,
     NotFound,
     Conflict,
     Unavailable,
@@ -29,6 +30,8 @@ pub enum ApiError {
     BadRequest(String),
     #[error("unauthorized")]
     Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
     #[error("username already exists")]
     Conflict,
     #[error("database error")]
@@ -44,6 +47,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Conflict => StatusCode::CONFLICT,
             ApiError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -55,6 +59,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(s) => s.clone(),
             ApiError::Unauthorized => "authentication required".into(),
+            ApiError::Forbidden => "forbidden".into(),
             ApiError::NotFound => "not found".into(),
             ApiError::Conflict => "resource conflict".into(),
             ApiError::Unavailable => "dependency unavailable".into(),
@@ -69,6 +74,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => ErrorCode::BadRequest,
             ApiError::Unauthorized => ErrorCode::Unauthorized,
+            ApiError::Forbidden => ErrorCode::Forbidden,
             ApiError::NotFound => ErrorCode::NotFound,
             ApiError::Conflict => ErrorCode::Conflict,
             ApiError::Unavailable => ErrorCode::Unavailable,

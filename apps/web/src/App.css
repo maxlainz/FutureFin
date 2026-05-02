@@ -599,6 +599,80 @@
   text-transform: lowercase;
 }
 
+.person-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+}
+
+.person-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.person-row:last-child {
+  border-bottom: none;
+}
+
+.person-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.person-name {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.person-meta {
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.primary-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 0.35rem;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.person-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.btn.ghost.danger {
+  color: #b91c1c;
+}
+
+.btn.ghost.danger:hover {
+  color: #991b1b;
+}
+
+.checkbox-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.checkbox-field input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

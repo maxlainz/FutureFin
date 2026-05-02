@@ -132,6 +132,7 @@ fn cors_layer() -> CorsLayer {
         .allow_methods([
             Method::GET,
             Method::POST,
+            Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
         ])
