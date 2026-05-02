@@ -43,19 +43,21 @@ El Mac usa **AES-GCM** sobre JSON serializado, con **salt + nonce**, KDF **PBKDF
 
 Alineados con `AppState.importExportCSVFilenames` / `exportBackupCSV`:
 
-| Archivo | Contenido |
-|---------|-----------|
-| `summary_household.csv` | Hogares |
-| `summary_people.csv` | Personas |
-| `categories.csv` | Definiciones de categoría |
-| `assets.csv` | Activos |
-| `liabilities.csv` | Pasivos |
-| `budget.csv` | Presupuesto |
-| `planning.csv` | Upcoming / planned cash flows |
+
+| Archivo                 | Contenido                     |
+| ----------------------- | ----------------------------- |
+| `summary_household.csv` | Hogares                       |
+| `summary_people.csv`    | Personas                      |
+| `categories.csv`        | Definiciones de categoría     |
+| `assets.csv`            | Activos                       |
+| `liabilities.csv`       | Pasivos                       |
+| `budget.csv`            | Presupuesto                   |
+| `planning.csv`          | Upcoming / planned cash flows |
+
 
 ### Headers y columnas
 
-**Fuente normativa:** métodos `export*` y `import*WithDiagnostics` en `CSVService.swift`. La nueva implementación debe:
+**Fuente normativa:** métodos `export`* y `import*WithDiagnostics` en `CSVService.swift`. La nueva implementación debe:
 
 - Emitir CSV compatibles con los **exports actuales**.
 - Aceptar imports con las mismas reglas de **tolerancia** (p. ej. assets legacy con columna `kind`, ausencia de columnas de contribución, etc.).

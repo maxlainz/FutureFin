@@ -1,6 +1,6 @@
 # Publicar el repositorio en GitHub
 
-En este entorno no hay acceso de red para crear el remoto automáticamente. Sigue estos pasos en tu máquina (ya tienes **commits locales** en `main` y rama **`dev`** lista).
+En este entorno no hay acceso de red para crear el remoto automáticamente. Sigue estos pasos en tu máquina (ya tienes **commits locales** en `main` y rama `**dev`** lista).
 
 ## 1. Crear el repositorio en GitHub
 
@@ -29,5 +29,6 @@ En **Settings → General → Default branch** puedes dejar `main` como predeter
 
 ## Estado local ya preparado
 
-- **`main`**: primer commit con `README.md`, `.gitignore` y carpeta `docs/` de especificación.
-- **`dev`**: misma base que `main`; aquí conviene hacer todo el desarrollo nuevo.
+- `**main`**: primer commit con `README.md`, `.gitignore` y carpeta `docs/` de especificación.
+- `**dev`**: misma base que `main`; aquí conviene hacer todo el desarrollo nuevo.
+

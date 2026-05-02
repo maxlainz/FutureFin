@@ -4,12 +4,12 @@ Aplicación de **finanzas personales** pensada para **self-hosting** (Docker): h
 
 ## Estado del repositorio
 
-- Rama **`main`**: base estable y documentación de producto.
-- Rama **`dev`**: desarrollo activo del servidor y del cliente web.
+- Rama `**main`**: base estable y documentación de producto.
+- Rama `**dev`**: desarrollo activo del servidor y del cliente web.
 
 ## Documentación de producto
 
-La especificación MVP (paridad de capacidades respecto al cliente Swift de referencia, modelo multi-usuario, backups, oráculos de tests) vive en [`docs/README.md`](docs/README.md).
+La especificación MVP (paridad de capacidades respecto al cliente Swift de referencia, modelo multi-usuario, backups, oráculos de tests) vive en `[docs/README.md](docs/README.md)`.
 
 ## Requisitos previos (cuando exista el código)
 

@@ -28,11 +28,13 @@ Este documento fija el **contrato de identidad y autorización** para la línea 
 
 ## Roles (MVP)
 
-| Rol | Descripción |
-|-----|-------------|
-| `owner` | Invitar/quitar miembros (salvo último owner), eliminar hogar, backup/export completos, todos los CRUD financieros. |
-| `member` | CRUD financiero completo (equivalente al uso actual del Mac en hogar compartido). |
-| `viewer` | Solo lectura de todas las vistas y métricas (opcional si se prioriza solo owner/member en v1). |
+
+| Rol      | Descripción                                                                                                        |
+| -------- | ------------------------------------------------------------------------------------------------------------------ |
+| `owner`  | Invitar/quitar miembros (salvo último owner), eliminar hogar, backup/export completos, todos los CRUD financieros. |
+| `member` | CRUD financiero completo (equivalente al uso actual del Mac en hogar compartido).                                  |
+| `viewer` | Solo lectura de todas las vistas y métricas (opcional si se prioriza solo owner/member en v1).                     |
+
 
 **Decisión MVP:** incluir al menos `owner` y `member`; `viewer` recomendado si el esfuerzo es bajo.
 
@@ -54,7 +56,7 @@ Este documento fija el **contrato de identidad y autorización** para la línea 
 
 ## Relación con backups
 
-- Export monofichero y ZIP CSV deben estar **acotados al hogar** o **a la instalación** según [`BACKUP_AND_CSV_SPEC.md`](./BACKUP_AND_CSV_SPEC.md). Solo `owner` (y opcionalmente `member` si producto lo permite) ejecutan restore destructivo.
+- Export monofichero y ZIP CSV deben estar **acotados al hogar** o **a la instalación** según `[BACKUP_AND_CSV_SPEC.md](./BACKUP_AND_CSV_SPEC.md)`. Solo `owner` (y opcionalmente `member` si producto lo permite) ejecutan restore destructivo.
 
 ## Preguntas cerradas para implementación
 

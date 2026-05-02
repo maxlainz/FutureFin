@@ -14,9 +14,9 @@
 
 ## Checklist de comunicación
 
-- [ ] Aviso destacado en README del repo Swift (deprecation banner + enlace al repo nuevo).
-- [ ] Nota en última release del `.app` si se publica binario final.
-- [ ] Documentación de usuario única en el repo nuevo (sin referencias cruzadas de import desde Mac).
+- Aviso destacado en README del repo Swift (deprecation banner + enlace al repo nuevo).
+- Nota en última release del `.app` si se publica binario final.
+- Documentación de usuario única en el repo nuevo (sin referencias cruzadas de import desde Mac).
 
 ## Fechas
 
