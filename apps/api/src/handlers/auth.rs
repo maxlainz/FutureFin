@@ -1,5 +1,6 @@
 use crate::auth::password;
 use crate::error::ApiError;
+use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::Extension;
 use axum::Json;
@@ -207,24 +208,9 @@ pub async fn me(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<UserResponse>, ApiError> {
-    let Some(c) = jar.get(SESSION_COOKIE) else {
-        return Err(ApiError::Unauthorized);
-    };
-    let sid = Uuid::parse_str(c.value()).map_err(|_| ApiError::Unauthorized)?;
-    let row: Option<UserRow> = sqlx::query_as(
-        r#"SELECT u.id, u.username
-           FROM sessions s
-           JOIN users u ON u.id = s.user_id
-           WHERE s.id = $1 AND s.expires_at > now()"#,
-    )
-    .bind(sid)
-    .fetch_optional(&state.pool)
-    .await?;
-    let Some(row) = row else {
-        return Err(ApiError::Unauthorized);
-    };
+    let user = require_session_user(&jar, &state.pool).await?;
     Ok(Json(UserResponse {
-        id: UserId(row.id),
-        username: row.username,
+        id: user.id,
+        username: user.username,
     }))
 }
