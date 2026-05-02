@@ -347,6 +347,61 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
         .collect())
 }
 
+/// Suma de precios de compra (>0) en activos incluidos en la vista de proyección.
+async fn sum_assets_purchase_basis(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    session_user_id: Uuid,
+    view: LedgerView,
+) -> Result<Decimal, ApiError> {
+    let v: Decimal = match view {
+        LedgerView::Household => {
+            sqlx::query_scalar(
+                r#"SELECT COALESCE(SUM(purchase_price), 0)
+                   FROM assets
+                   WHERE installation_id = $1
+                     AND purchase_price IS NOT NULL
+                     AND purchase_price > 0"#,
+            )
+            .bind(iid)
+            .fetch_one(pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_scalar(
+                r#"SELECT COALESCE(SUM(purchase_price), 0)
+                   FROM assets
+                   WHERE installation_id = $1
+                     AND owner_user_id = $2
+                     AND purchase_price IS NOT NULL
+                     AND purchase_price > 0"#,
+            )
+            .bind(iid)
+            .bind(session_user_id)
+            .fetch_one(pool)
+            .await?
+        }
+    };
+    Ok(v)
+}
+
+/// Alinea la serie de capital aportado con la base de compras en BD si el motor devolviera un mes 0 menor (p. ej. binario antiguo).
+fn bump_contributed_series_with_purchase_basis(
+    contributed: &mut Vec<Decimal>,
+    basis_sum: Decimal,
+) {
+    if contributed.is_empty() || basis_sum <= Decimal::ZERO {
+        return;
+    }
+    let first = contributed[0];
+    let delta = basis_sum - first;
+    if delta > Decimal::ZERO {
+        for cc in contributed.iter_mut() {
+            *cc += delta;
+        }
+    }
+}
+
 /// Runs the dossier-style projection for the installation ledger view.
 pub(crate) async fn compute_installation_projection(
     pool: &sqlx::PgPool,
@@ -450,7 +505,7 @@ pub async fn get_projection_series(
 
     let horizon_years = months / 12;
 
-    let (output, monthly_delta_assumption) = compute_installation_projection(
+    let (mut output, monthly_delta_assumption) = compute_installation_projection(
         &state.pool,
         iid,
         user.id.0,
@@ -460,6 +515,9 @@ pub async fn get_projection_series(
         inflation_annual_percent,
     )
     .await?;
+
+    let purchase_basis = sum_assets_purchase_basis(&state.pool, iid, user.id.0, view).await?;
+    bump_contributed_series_with_purchase_basis(&mut output.contributed_capital, purchase_basis);
 
     let starting_net_worth = output
         .net_worth

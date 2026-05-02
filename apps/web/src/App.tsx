@@ -513,17 +513,58 @@ function resolveProjectionAxisAgeMode(
   );
 }
 
-function projectionHorizonBadge(basis: string, years: number): string {
-  const y = `${years} años`;
+/**
+ * Subtítulo bajo la gráfica de proyección: evita mostrar `horizon_years` como si fuera
+ * una edad (es la duración en años de la vista). Preferimos edad objetivo + año de fin
+ * de serie cuando procede.
+ */
+function formatProjectionChartHorizonLine(
+  series: ProjectionSeriesApi,
+  projectionTargetAge: number | null,
+): string {
+  const basis = series.horizon_basis;
+  const spanYears = series.horizon_years;
+  const anchorStr = series.anchor_date_ymd?.trim();
+  const anchor = anchorStr ? parseYmdComponents(anchorStr) : null;
+  const mc = series.months;
+
+  const endCivil =
+    anchor != null && mc >= 0
+      ? addMonthsCivil(anchor.y, anchor.m, anchor.d, mc)
+      : null;
+  const endYearStr = endCivil ? formatProjectionAxisYear(endCivil) : null;
+
   switch (basis) {
-    case "mac_target_age":
-      return `${y} · edad objetivo`;
-    case "mac_fallback_no_demographics":
-      return `${y} · sin DOB / sin edad objetivo`;
+    case "mac_target_age": {
+      const parts: string[] = [];
+      if (projectionTargetAge != null) {
+        parts.push(`Edad objetivo ${projectionTargetAge} años`);
+      }
+      if (endYearStr != null) {
+        parts.push(`fin de serie ${endYearStr}`);
+      }
+      if (parts.length > 0) {
+        return parts.join(" · ");
+      }
+      return `Horizonte ${spanYears} años`;
+    }
+    case "mac_fallback_no_demographics": {
+      const tail = "sin DOB / sin edad objetivo fija";
+      if (endYearStr != null) {
+        return `Fin de serie ${endYearStr} · ${tail}`;
+      }
+      return `Horizonte ${spanYears} años · ${tail}`;
+    }
     case "months_override":
-      return `${y} · meses explícitos`;
+      if (endYearStr != null) {
+        return `${spanYears} años de vista · fin ${endYearStr}`;
+      }
+      return `${spanYears} años de vista (meses explícitos)`;
     default:
-      return y;
+      if (endYearStr != null) {
+        return `${spanYears} años de vista · fin ${endYearStr}`;
+      }
+      return `${spanYears} años de vista`;
   }
 }
 
@@ -596,6 +637,12 @@ function formatProjectionAxisYear(civil: { y: number; m: number; d: number }): s
   return new Intl.DateTimeFormat(DISPLAY_NUMBER_LOCALE, {
     year: "numeric",
   }).format(dt);
+}
+
+/** Tooltip en modo fechas: mes/año civil (`MM/YYYY`). */
+function formatProjectionHoverMonthYear(civil: { y: number; m: number; d: number }): string {
+  const mm = String(civil.m).padStart(2, "0");
+  return `${mm}/${civil.y}`;
 }
 
 /**
@@ -725,20 +772,19 @@ function projectionHoverTitle(
 
   if (ageUiMode !== "ages") {
     if (!anchor) {
-      return `Mes ${monthIndex}`;
+      return METRIC_DASH;
     }
     const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthIndex);
-    const label = formatProjectionAxisYear(at);
-    return `${label} · mes ${monthIndex}`;
+    return formatProjectionHoverMonthYear(at);
   }
 
   const birth = parseYmdComponents(userBirthDate);
   if (!birth || !anchor) {
-    return `Mes ${monthIndex}`;
+    return METRIC_DASH;
   }
   const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthIndex);
   const age = ageCompletedYearsCivil(at, birth);
-  return `${age} años · mes ${monthIndex}`;
+  return `${age} años`;
 }
 
 function projectionXTicks(
@@ -2280,9 +2326,12 @@ export default function App() {
       base.contribution_frequency = assetFormContributionFrequency;
       const rw = assetFormRemainderWeight.trim().replace(",", ".");
       base.contribution_remainder_weight = rw === "" ? "0" : rw;
-      const pp = assetFormPurchase.trim();
-      if (pp) {
-        base.purchase_price = pp;
+      const ppTrim = assetFormPurchase.trim().replace(",", ".");
+      if (editingAssetId) {
+        // PATCH: siempre enviar precio de compra — omisión antes podía dejar ambigüedad con el servidor.
+        base.purchase_price = ppTrim === "" ? null : ppTrim;
+      } else if (ppTrim !== "") {
+        base.purchase_price = ppTrim;
       }
       const nt = assetFormNotes.trim();
       if (nt) {
@@ -6636,6 +6685,7 @@ function ProjectionNetWorthChart({
   userBirthDate,
   anchorDateYmd,
   calendarTz,
+  projectionTargetAge,
 }: {
   series: ProjectionSeriesApi;
   currencyIso: string;
@@ -6647,6 +6697,8 @@ function ProjectionNetWorthChart({
   /** Mes 0 del motor (YYYY-MM-DD); prioridad sobre reloj cliente. */
   anchorDateYmd: string | null;
   calendarTz: string;
+  /** Edad objetivo de instalación (no confundir con la duración del horizonte en años). */
+  projectionTargetAge: number | null;
 }) {
   const pts = series.points;
   const gid = useId().replace(/:/g, "");
@@ -6840,7 +6892,7 @@ function ProjectionNetWorthChart({
     setHover(null);
   }
 
-  const horizonLine = projectionHorizonBadge(series.horizon_basis, series.horizon_years);
+  const horizonLine = formatProjectionChartHorizonLine(series, projectionTargetAge);
   const deltaStr = formatCurrencyAmount(series.monthly_delta_assumption, currencyIso);
   const scopeShort = ledgerPersonScope === "mine" ? "Mi vista" : "Hogar";
   const inflationShort = inflationActive
@@ -7013,10 +7065,15 @@ function ProjectionNetWorthChart({
             )}
           </div>
           <div>
-            Patrimonio neto — {formatCurrencyNumber(nw[hover], currencyIso)}
+            Patrimonio neto —{" "}
+            {formatCurrencyOrDash(pts[hover]?.net_worth, currencyIso)}
           </div>
           <div>
-            Capital aportado — {formatCurrencyNumber(cc[hover], currencyIso)}
+            Capital aportado —{" "}
+            {formatCurrencyOrDash(
+              pts[hover]?.contributed_capital,
+              currencyIso,
+            )}
           </div>
         </div>
       ) : null}
@@ -7117,6 +7174,9 @@ function ProjectionView({
             userBirthDate={axisBirth}
             anchorDateYmd={axisAnchor}
             calendarTz={calendarTz}
+            projectionTargetAge={
+              installation?.installation.projection_target_age ?? null
+            }
           />
         </section>
       ) : null}

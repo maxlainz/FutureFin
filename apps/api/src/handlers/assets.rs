@@ -96,10 +96,10 @@ pub struct PatchAssetBody {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub current_value: Option<Decimal>,
+    /// Omitir sin cambio; `null` borra el precio de compra.
     #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub purchase_price: Option<Decimal>,
+    #[schema(value_type = Option<Object>, nullable = true)]
+    pub purchase_price: Option<serde_json::Value>,
     pub is_liquid: Option<bool>,
     #[serde(default)]
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -173,6 +173,33 @@ fn assert_non_negative(d: Decimal, field: &'static str) -> Result<(), ApiError> 
         return Err(ApiError::BadRequest(format!("{field} must be >= 0")));
     }
     Ok(())
+}
+
+/// PATCH: clave ausente → conservar `current`; `null` JSON → `None` en BD; valor → sustituir.
+fn merge_optional_decimal_patch(
+    patch: &Option<serde_json::Value>,
+    current: Option<Decimal>,
+    field: &'static str,
+) -> Result<Option<Decimal>, ApiError> {
+    match patch {
+        None => Ok(current),
+        Some(v) => {
+            if v.is_null() {
+                return Ok(None);
+            }
+            let d: Decimal = if let serde_json::Value::String(s) = v {
+                s.trim().parse().map_err(|_| {
+                    ApiError::BadRequest(format!("{field} must be a valid decimal string"))
+                })?
+            } else {
+                serde_json::from_value(v.clone()).map_err(|_| {
+                    ApiError::BadRequest(format!("{field} must be a valid decimal"))
+                })?
+            };
+            assert_non_negative(d, field)?;
+            Ok(Some(d))
+        }
+    }
 }
 
 fn normalize_asset_contribution_frequency(raw: Option<&str>) -> Result<String, ApiError> {
@@ -473,13 +500,7 @@ pub async fn patch_asset(
         None => current.current_value,
     };
 
-    let new_pp = match body.purchase_price {
-        Some(v) => {
-            assert_non_negative(v, "purchase_price")?;
-            Some(v)
-        }
-        None => current.purchase_price,
-    };
+    let new_pp = merge_optional_decimal_patch(&body.purchase_price, current.purchase_price, "purchase_price")?;
 
     let new_liquid = body.is_liquid.unwrap_or(current.is_liquid);
 

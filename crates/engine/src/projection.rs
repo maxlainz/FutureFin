@@ -308,7 +308,15 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
     let mut net_series = Vec::with_capacity(input.horizon_months as usize + 1);
     let mut contrib_series = Vec::with_capacity(input.horizon_months as usize + 1);
 
-    let mut contributed_cumulative = Decimal::ZERO;
+    // Coste histórico ya invertido (precio de compra) antes del primer mes simulado.
+    let initial_contributed_basis: Decimal = input
+        .assets
+        .iter()
+        .filter_map(|a| a.purchase_price)
+        .filter(|p| *p > Decimal::ZERO)
+        .sum();
+
+    let mut contributed_cumulative = initial_contributed_basis;
     let mut undrained_cumulative = Decimal::ZERO;
     // Monthly savings not routed when remainder weights sum to zero.
     let mut surplus_cash = Decimal::ZERO;
@@ -530,5 +538,31 @@ mod tests {
         assert_eq!(nom.len(), 2);
         assert_eq!(nom[0], Decimal::from(500));
         assert_eq!(nom[1], Decimal::from(500));
+    }
+
+    #[test]
+    fn contributed_capital_month_zero_includes_purchase_prices() {
+        let inp = ProjectionInput {
+            ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            horizon_months: 2,
+            income_regular_monthly: Decimal::ZERO,
+            expense_regular_monthly: Decimal::ZERO,
+            assets: vec![SimAsset {
+                id: Uuid::from_u128(99),
+                value: Decimal::from(100_000),
+                purchase_price: Some(Decimal::from(80_000)),
+                is_liquid: true,
+                expected_annual_return_percent: None,
+                monthly_contribution_fixed: Decimal::ZERO,
+                contribution_remainder_weight: Decimal::ZERO,
+            }],
+            liabilities: vec![],
+            flows: vec![],
+            inflation_annual_percent: None,
+        };
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.contributed_capital[0], Decimal::from(80_000));
+        assert_eq!(out.contributed_capital[1], Decimal::from(80_000));
+        assert_eq!(out.contributed_capital[2], Decimal::from(80_000));
     }
 }
