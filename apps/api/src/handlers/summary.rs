@@ -1,9 +1,10 @@
 use crate::error::ApiError;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::liabilities::purge_expired_liabilities;
+use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
-use axum::extract::Extension;
+use axum::extract::{Extension, Query};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
@@ -34,6 +35,9 @@ pub struct SummaryResponse {
     get,
     path = "/v1/summary",
     tag = "summary",
+    params(
+        ("view" = Option<String>, Query, description = "`mine` = sums for rows attributed to the signed-in user; omit = household."),
+    ),
     responses(
         (status = 200, description = "Installation aggregates (purges expired liability payment plans first, same as liabilities list)", body = SummaryResponse),
         (status = 401, description = "No valid session"),
@@ -44,23 +48,47 @@ pub struct SummaryResponse {
 pub async fn get_summary(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
+    Query(q): Query<LedgerViewQuery>,
 ) -> Result<Json<SummaryResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
     purge_expired_liabilities(&state.pool, iid).await?;
 
-    let total_assets: Decimal =
-        sqlx::query_scalar(r#"SELECT COALESCE(SUM(current_value), 0) FROM assets WHERE installation_id = $1"#)
+    let (total_assets, total_liabilities): (Decimal, Decimal) = match q.resolve() {
+        LedgerView::Household => {
+            let ta: Decimal =
+                sqlx::query_scalar(r#"SELECT COALESCE(SUM(current_value), 0) FROM assets WHERE installation_id = $1"#)
+                    .bind(iid)
+                    .fetch_one(&state.pool)
+                    .await?;
+            let tl: Decimal =
+                sqlx::query_scalar(r#"SELECT COALESCE(SUM(principal), 0) FROM liabilities WHERE installation_id = $1"#)
+                    .bind(iid)
+                    .fetch_one(&state.pool)
+                    .await?;
+            (ta, tl)
+        }
+        LedgerView::Mine => {
+            let ta: Decimal = sqlx::query_scalar(
+                r#"SELECT COALESCE(SUM(current_value), 0) FROM assets
+                   WHERE installation_id = $1 AND owner_user_id = $2"#,
+            )
             .bind(iid)
+            .bind(user.id.0)
             .fetch_one(&state.pool)
             .await?;
-
-    let total_liabilities: Decimal =
-        sqlx::query_scalar(r#"SELECT COALESCE(SUM(principal), 0) FROM liabilities WHERE installation_id = $1"#)
+            let tl: Decimal = sqlx::query_scalar(
+                r#"SELECT COALESCE(SUM(principal), 0) FROM liabilities
+                   WHERE installation_id = $1 AND owner_user_id = $2"#,
+            )
             .bind(iid)
+            .bind(user.id.0)
             .fetch_one(&state.pool)
             .await?;
+            (ta, tl)
+        }
+    };
 
     let net_worth = total_assets - total_liabilities;
 

@@ -54,7 +54,18 @@ fn default_calendar_tz() -> String {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PatchInstallationBody {
-    pub calendar_tz: String,
+    /// When omitted, the time zone is left unchanged.
+    #[serde(default)]
+    pub calendar_tz: Option<String>,
+    /// When omitted, `projection_includes_inflation` is left unchanged.
+    #[serde(default)]
+    pub projection_includes_inflation: Option<bool>,
+    /// When omitted, `projection_target_age` is left unchanged. JSON `null` clears the horizon age.
+    #[serde(default)]
+    pub projection_target_age: Option<Option<i16>>,
+    /// When omitted, `show_age_mode` is left unchanged (`dates` or `ages`).
+    #[serde(default)]
+    pub show_age_mode: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -95,6 +106,10 @@ fn validate_show_age_mode(mode: &str) -> Result<(), ApiError> {
 }
 
 fn validate_target_age(age: Option<i16>) -> Result<(), ApiError> {
+    validate_projection_horizon_age(age)
+}
+
+fn validate_projection_horizon_age(age: Option<i16>) -> Result<(), ApiError> {
     if let Some(a) = age {
         if !(65..=105).contains(&a) {
             return Err(ApiError::BadRequest(
@@ -281,12 +296,68 @@ pub async fn patch_my_installation(
         return Err(ApiError::Forbidden);
     }
 
-    let tz = normalize_calendar_tz(&body.calendar_tz)?;
-    sqlx::query(r#"UPDATE installation SET calendar_tz = $1 WHERE id = $2"#)
-        .bind(&tz)
-        .bind(iid)
-        .execute(&state.pool)
-        .await?;
+    if body.calendar_tz.is_none()
+        && body.projection_includes_inflation.is_none()
+        && body.projection_target_age.is_none()
+        && body.show_age_mode.is_none()
+    {
+        return Err(ApiError::BadRequest(
+            "provide at least one of calendar_tz, projection_includes_inflation, projection_target_age, show_age_mode".into(),
+        ));
+    }
+
+    let row_before: InstallationMemberRow = sqlx::query_as(
+        r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
+                  i.projection_target_age, i.show_age_mode, m.role
+           FROM installation_memberships m
+           JOIN installation i ON i.id = m.installation_id
+           WHERE m.user_id = $1 AND i.id = $2"#,
+    )
+    .bind(user.id.0)
+    .bind(iid)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let new_tz = if let Some(ref raw) = body.calendar_tz {
+        normalize_calendar_tz(raw)?
+    } else {
+        row_before.calendar_tz.clone()
+    };
+
+    let new_inflation = body
+        .projection_includes_inflation
+        .unwrap_or(row_before.projection_includes_inflation);
+
+    let new_target_age = match body.projection_target_age {
+        None => row_before.projection_target_age,
+        Some(inner) => {
+            validate_projection_horizon_age(inner)?;
+            inner
+        }
+    };
+
+    let new_show_age = if let Some(ref raw) = body.show_age_mode {
+        let trimmed = raw.trim();
+        validate_show_age_mode(trimmed)?;
+        trimmed.to_string()
+    } else {
+        row_before.show_age_mode.clone()
+    };
+
+    sqlx::query(
+        r#"UPDATE installation SET calendar_tz = $1,
+               projection_includes_inflation = $2,
+               projection_target_age = $3,
+               show_age_mode = $4
+           WHERE id = $5"#,
+    )
+    .bind(&new_tz)
+    .bind(new_inflation)
+    .bind(new_target_age)
+    .bind(&new_show_age)
+    .bind(iid)
+    .execute(&state.pool)
+    .await?;
 
     let row: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,

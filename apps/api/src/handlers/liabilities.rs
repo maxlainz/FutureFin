@@ -1,9 +1,10 @@
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
+use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
-use axum::extract::{Extension, Path};
+use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
@@ -142,6 +143,7 @@ struct LiabilityRow {
     notes: Option<String>,
     sort_index: i32,
     principal_derived_from_plan: bool,
+    owner_user_id: Option<Uuid>,
 }
 
 fn normalize_label(raw: &str) -> Result<String, ApiError> {
@@ -352,6 +354,9 @@ fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
     get,
     path = "/v1/liabilities",
     tag = "liabilities",
+    params(
+        ("view" = Option<String>, Query, description = "`mine` = rows attributed to the signed-in user; omit or other value = full household."),
+    ),
     responses(
         (status = 200, description = "Liabilities (purges rows whose payment_end_date is past)", body = [LiabilityResponse]),
         (status = 401, description = "No valid session"),
@@ -362,23 +367,42 @@ fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
 pub async fn list_liabilities(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
+    Query(q): Query<LedgerViewQuery>,
 ) -> Result<Json<Vec<LiabilityResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
     purge_expired_liabilities(&state.pool, iid).await?;
 
-    let rows: Vec<LiabilityRow> = sqlx::query_as(
-        r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
-                  payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan
-           FROM liabilities
-           WHERE installation_id = $1
-           ORDER BY sort_index ASC, label ASC"#,
-    )
-    .bind(iid)
-    .fetch_all(&state.pool)
-    .await?;
+    let rows: Vec<LiabilityRow> = match q.resolve() {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
+                          payment_amount, payment_frequency, payment_end_date, notes,
+                          sort_index, principal_derived_from_plan, owner_user_id
+                   FROM liabilities
+                   WHERE installation_id = $1
+                   ORDER BY sort_index ASC, label ASC"#,
+            )
+            .bind(iid)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
+                          payment_amount, payment_frequency, payment_end_date, notes,
+                          sort_index, principal_derived_from_plan, owner_user_id
+                   FROM liabilities
+                   WHERE installation_id = $1 AND owner_user_id = $2
+                   ORDER BY sort_index ASC, label ASC"#,
+            )
+            .bind(iid)
+            .bind(user.id.0)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -463,12 +487,13 @@ pub async fn create_liability(
         r#"INSERT INTO liabilities (
                installation_id, category_id, label, type_tag, principal,
                apr_percent, payment_amount, payment_frequency,
-               payment_end_date, notes, sort_index, principal_derived_from_plan
+               payment_end_date, notes, sort_index, principal_derived_from_plan,
+               owner_user_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            RETURNING id, category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan"#,
+                     sort_index, principal_derived_from_plan, owner_user_id"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -482,6 +507,7 @@ pub async fn create_liability(
     .bind(&notes)
     .bind(sort_index)
     .bind(principal_derived)
+    .bind(user.id.0)
     .fetch_one(&state.pool)
     .await?;
 
@@ -539,7 +565,7 @@ pub async fn patch_liability(
     let row: Option<LiabilityRow> = sqlx::query_as(
         r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan
+                  sort_index, principal_derived_from_plan, owner_user_id
            FROM liabilities
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -644,7 +670,7 @@ pub async fn patch_liability(
            WHERE id = $12 AND installation_id = $13
            RETURNING id, category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan"#,
+                     sort_index, principal_derived_from_plan, owner_user_id"#,
     )
     .bind(new_cat)
     .bind(&new_label)

@@ -254,6 +254,12 @@
   outline-offset: 2px;
 }
 
+.app-global-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
 .app-main {
   flex: 1;
   padding: 1.25rem 1rem 2rem;
@@ -363,6 +369,80 @@
   margin: 0 0 0.5rem;
   font-size: 1rem;
   font-weight: 600;
+}
+
+.panel-head-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.65rem 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.panel-head-row .panel-title {
+  margin: 0;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgb(15 23 42 / 48%);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.modal-dialog {
+  width: 100%;
+  max-width: min(36rem, 100%);
+  margin: max(0.75rem, 6vh) auto 1.5rem;
+  max-height: min(calc(100vh - 2rem), 720px);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.9rem 1.1rem;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.modal-close {
+  flex-shrink: 0;
+  font-size: 1.45rem;
+  line-height: 1;
+  padding: 0.1rem 0.4rem;
+  min-width: auto;
+}
+
+.modal-body {
+  padding: 1rem 1.1rem 1.15rem;
+  overflow-y: auto;
+}
+
+.modal-body .asset-form {
+  margin: 0;
+}
+
+.modal-body .asset-form-actions {
+  padding-bottom: 0;
 }
 
 .placeholder-chips {
@@ -715,21 +795,38 @@
   margin-left: auto;
 }
 
-.category-edit-row {
+.person-filter-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem;
   align-items: center;
-  flex: 1 1 100%;
+  gap: 0.65rem 1rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
 }
 
-.category-edit-input {
-  flex: 1 1 10rem;
-  min-width: 8rem;
-  padding: 0.45rem 0.55rem;
-  border: 1px solid #cbd5e1;
-  border-radius: 0.35rem;
-  font-size: 0.95rem;
+.person-filter-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.person-filter-segmented.segmented {
+  flex-shrink: 0;
+}
+
+.person-filter-hint {
+  flex: 1 1 12rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.tight-banner {
+  margin-bottom: 0;
+}
+
+.modal-form-error {
+  margin: 0 0 0.75rem;
 }
 
 .asset-form-grid {

@@ -9,6 +9,7 @@ use crate::handlers::installation::{
 };
 use crate::handlers::liabilities::liabilities_router;
 use crate::handlers::pending_users::pending_users_router;
+use crate::handlers::planning::planning_router;
 use crate::handlers::summary::summary_router;
 use crate::openapi::openapi_json;
 use axum::routing::{get, post};
@@ -37,6 +38,7 @@ pub fn app_router() -> Router {
         .nest("/liabilities", liabilities_router())
         .nest("/summary", summary_router())
         .nest("/budget", budget_router())
+        .nest("/planning", planning_router())
         .fallback(fallback::v1_not_found);
 
     Router::new()

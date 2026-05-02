@@ -26,6 +26,11 @@ use crate::handlers::budget::{
     __path_patch_budget_entry,
 };
 #[allow(unused_imports)]
+use crate::handlers::planning::{
+    __path_create_planning_flow, __path_delete_planning_flow, __path_list_planning_flows,
+    __path_patch_planning_flow,
+};
+#[allow(unused_imports)]
 use crate::handlers::categories::{
     __path_create_category, __path_delete_category, __path_list_categories,
     __path_patch_category,
@@ -64,6 +69,10 @@ use utoipa::OpenApi;
         create_budget_entry,
         patch_budget_entry,
         delete_budget_entry,
+        list_planning_flows,
+        create_planning_flow,
+        patch_planning_flow,
+        delete_planning_flow,
     ),
     components(schemas(
         crate::handlers::health::HealthBody,
@@ -96,6 +105,10 @@ use utoipa::OpenApi;
         crate::handlers::budget::CreateBudgetEntryBody,
         crate::handlers::budget::PatchBudgetEntryBody,
         crate::handlers::budget::BudgetCategoryScope,
+        crate::handlers::planning::PlanningFlowResponse,
+        crate::handlers::planning::PlanningFlowDirection,
+        crate::handlers::planning::CreatePlanningFlowBody,
+        crate::handlers::planning::PatchPlanningFlowBody,
         ErrorBody,
         ErrorCode,
     )),
@@ -128,6 +141,10 @@ use utoipa::OpenApi;
         (
             name = "budget",
             description = "Persisted income/expense budget lines (weekly→monthly ×52/12); liability-derived debt payments included in snapshot only (parity BudgetTabView)"
+        ),
+        (
+            name = "planning",
+            description = "Upcoming / planned cash flows (income or expense categories); parity PlanningTabView list CRUD"
         ),
     ),
 )]

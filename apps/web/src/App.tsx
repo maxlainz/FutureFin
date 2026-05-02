@@ -1,9 +1,11 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useState,
   type Dispatch,
   type FormEvent,
+  type ReactNode,
   type SetStateAction,
 } from "react";
 import "./App.css";
@@ -99,6 +101,19 @@ type BudgetSnapshotApi = {
 
 type BudgetScopeToggle = "income" | "expense";
 
+type PlanningFlowDirectionApi = "inflow" | "outflow";
+
+type PlanningFlowApiRow = {
+  id: string;
+  category_id: string;
+  direction: PlanningFlowDirectionApi;
+  title: string;
+  expected_amount: string;
+  due_date: string | null;
+  notes: string | null;
+  sort_index: number;
+};
+
 type LiabilityApiRow = {
   id: string;
   category_id: string;
@@ -187,22 +202,6 @@ function paymentIntervalCountUtc(
   return Math.ceil(di / 7);
 }
 
-function liabilityDerivedPrincipalPreview(
-  amountStr: string,
-  freq: LiabilityPaymentFreq,
-  endYmd: string,
-  installationCalendarTz: string,
-): string | null {
-  if (!freq || !endYmd.trim()) return null;
-  const startYmd = todayYmdInTimeZone(installationCalendarTz);
-  const n = paymentIntervalCountUtc(freq, startYmd, endYmd.trim());
-  if (n === null || n <= 0) return null;
-  const amount = Number(amountStr.trim().replace(",", "."));
-  if (!Number.isFinite(amount) || amount <= 0) return null;
-  const total = amount * n;
-  return total.toLocaleString(undefined, { maximumFractionDigits: 4 });
-}
-
 const PAYMENT_FREQ_LABEL: Record<"monthly" | "weekly", string> = {
   monthly: "Mensual",
   weekly: "Semanal",
@@ -249,17 +248,126 @@ const defaultFetchInit: RequestInit = {
 
 const METRIC_DASH = "—";
 
-function formatSummaryAmount(s: string): string {
-  const n = Number(s.replace(",", "."));
-  if (!Number.isFinite(n)) return s;
-  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+/** Hogar = todos los registros de la instalación; usuario actual = solo filas con tu `owner_user_id`. */
+type LedgerPersonScope = "household" | "mine";
+
+const LEDGER_PERSON_SCOPE_STORAGE_KEY = "futurefin-ledger-person-scope";
+
+function ledgerViewQs(scope: LedgerPersonScope): string {
+  return scope === "mine" ? "?view=mine" : "";
+}
+
+/** Locale for grouped amounts and decimal comma (es-ES aligns with UI copy). */
+const DISPLAY_NUMBER_LOCALE = "es-ES";
+
+function parseDisplayDecimal(s: string): number | null {
+  const t = String(s).trim();
+  if (!t) return null;
+  const n = Number(t.replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Formats API decimal strings for money-like fields: grouped thousands,
+ * up to 2 fractional digits, no trailing noise (e.g. 274 instead of 274.0000).
+ */
+function formatMoneyAmount(s: string): string {
+  const n = parseDisplayDecimal(s);
+  if (n === null) return s;
+  return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(n);
+}
+
+function formatMoneyAmountOrDash(s: string | null | undefined): string {
+  if (s == null || String(s).trim() === "") return METRIC_DASH;
+  return formatMoneyAmount(String(s));
+}
+
+/** ISO 4217 code from installation (EUR, USD, GBP); invalid → no symbol formatting. */
+function normalizeCurrencyIso(code: string | undefined | null): string | null {
+  const c = String(code ?? "").trim().toUpperCase();
+  if (c.length !== 3 || !/^[A-Z]{3}$/.test(c)) return null;
+  return c;
+}
+
+function formatCurrencyAmount(s: string, currencyIso: string): string {
+  const n = parseDisplayDecimal(s);
+  if (n === null) return s;
+  const iso = normalizeCurrencyIso(currencyIso);
+  if (!iso) return formatMoneyAmount(s);
+  try {
+    return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+      style: "currency",
+      currency: iso,
+      currencyDisplay: "symbol",
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }).format(n);
+  } catch {
+    return `${formatMoneyAmount(s)} ${iso}`;
+  }
+}
+
+function formatCurrencyOrDash(
+  s: string | null | undefined,
+  currencyIso: string,
+): string {
+  if (s == null || String(s).trim() === "") return METRIC_DASH;
+  return formatCurrencyAmount(String(s), currencyIso);
+}
+
+function formatCurrencyNumber(n: number, currencyIso: string): string {
+  const iso = normalizeCurrencyIso(currencyIso);
+  if (!iso || !Number.isFinite(n)) return formatMoneyAmount(String(n));
+  try {
+    return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+      style: "currency",
+      currency: iso,
+      currencyDisplay: "symbol",
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }).format(n);
+  } catch {
+    return `${formatMoneyAmount(String(n))} ${iso}`;
+  }
+}
+
+/** Percent rates (e.g. TAE): compact, not currency. */
+function formatPercentAmount(s: string): string {
+  const n = parseDisplayDecimal(s);
+  if (n === null) return s;
+  return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 4,
+  }).format(n);
+}
+
+function liabilityDerivedPrincipalPreview(
+  amountStr: string,
+  freq: LiabilityPaymentFreq,
+  endYmd: string,
+  installationCalendarTz: string,
+  currencyIso: string,
+): string | null {
+  if (!freq || !endYmd.trim()) return null;
+  const startYmd = todayYmdInTimeZone(installationCalendarTz);
+  const n = paymentIntervalCountUtc(freq, startYmd, endYmd.trim());
+  if (n === null || n <= 0) return null;
+  const amount = Number(amountStr.trim().replace(",", "."));
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const total = amount * n;
+  return formatCurrencyNumber(total, currencyIso);
 }
 
 function formatDebtToAssetsPct(ratio: string | null | undefined): string {
   if (ratio == null || ratio === "") return METRIC_DASH;
   const r = Number(String(ratio).replace(",", "."));
   if (!Number.isFinite(r)) return METRIC_DASH;
-  return `${(r * 100).toLocaleString(undefined, { maximumFractionDigits: 2 })} %`;
+  return `${(r * 100).toLocaleString(DISPLAY_NUMBER_LOCALE, {
+    maximumFractionDigits: 2,
+  })} %`;
 }
 
 function budgetCategoryMap(
@@ -304,6 +412,87 @@ function sortBudgetEntriesMacStyle(
   });
 }
 
+function ModalFormError({
+  message,
+}: {
+  message: string | null | undefined;
+}) {
+  if (!message) return null;
+  return (
+    <p className="error compact modal-form-error" role="alert">
+      {message}
+    </p>
+  );
+}
+
+function Modal({
+  title,
+  open,
+  onClose,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const titleId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose]);
+
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        className="modal-dialog card-elevated"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
+        <div className="modal-header">
+          <h3 id={titleId} className="modal-title">
+            {title}
+          </h3>
+          <button
+            type="button"
+            className="btn ghost modal-close"
+            aria-label="Cerrar"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 async function errorMessageFromResponse(res: Response): Promise<string> {
   const ct = res.headers.get("content-type") ?? "";
   if (ct.includes("application/json")) {
@@ -327,6 +516,31 @@ export default function App() {
   const [user, setUser] = useState<UserResponse | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
 
+  const [ledgerPersonScope, setLedgerPersonScopeInner] =
+    useState<LedgerPersonScope>(() => {
+      if (typeof window === "undefined") return "household";
+      try {
+        return window.localStorage.getItem(LEDGER_PERSON_SCOPE_STORAGE_KEY) ===
+          "mine"
+          ? "mine"
+          : "household";
+      } catch {
+        return "household";
+      }
+    });
+
+  const setLedgerPersonScope = (next: LedgerPersonScope) => {
+    setLedgerPersonScopeInner(next);
+    try {
+      window.localStorage.setItem(
+        LEDGER_PERSON_SCOPE_STORAGE_KEY,
+        next === "mine" ? "mine" : "household",
+      );
+    } catch {
+      /* ignore */
+    }
+  };
+
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -345,6 +559,15 @@ export default function App() {
   const [setupCalendarTz, setSetupCalendarTz] = useState("UTC");
   const [calendarTzDraft, setCalendarTzDraft] = useState("UTC");
   const [calendarTzSaving, setCalendarTzSaving] = useState(false);
+  const [projectionInflationDraft, setProjectionInflationDraft] =
+    useState(false);
+  const [projectionTargetAgeDraft, setProjectionTargetAgeDraft] =
+    useState("");
+  const [showAgeModeDraft, setShowAgeModeDraft] = useState<"dates" | "ages">(
+    "dates",
+  );
+  const [installationProjectionSaving, setInstallationProjectionSaving] =
+    useState(false);
 
   const [pendingUsers, setPendingUsers] = useState<UserResponse[]>([]);
   const [pendingUsersBusy, setPendingUsersBusy] = useState(false);
@@ -365,6 +588,8 @@ export default function App() {
   const [newCatScope, setNewCatScope] = useState<CategoryScope>("asset");
   const [newCatName, setNewCatName] = useState("");
   const [categorySaving, setCategorySaving] = useState(false);
+  const [categoryModalOpen, setCategoryModalOpen] = useState(false);
+  const [categoryRenameModalOpen, setCategoryRenameModalOpen] = useState(false);
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(
     null,
   );
@@ -382,6 +607,7 @@ export default function App() {
   const [assetFormNotes, setAssetFormNotes] = useState("");
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
   const [assetSaving, setAssetSaving] = useState(false);
+  const [assetModalOpen, setAssetModalOpen] = useState(false);
 
   const [liabilities, setLiabilities] = useState<LiabilityApiRow[]>([]);
   const [liabilitiesBusy, setLiabilitiesBusy] = useState(false);
@@ -408,6 +634,7 @@ export default function App() {
     null,
   );
   const [liabilitySaving, setLiabilitySaving] = useState(false);
+  const [liabilityModalOpen, setLiabilityModalOpen] = useState(false);
 
   const [budgetSnapshot, setBudgetSnapshot] = useState<BudgetSnapshotApi | null>(
     null,
@@ -424,6 +651,7 @@ export default function App() {
   const [budgetLoading, setBudgetLoading] = useState(false);
   const [budgetError, setBudgetError] = useState<string | null>(null);
   const [budgetSaving, setBudgetSaving] = useState(false);
+  const [budgetModalOpen, setBudgetModalOpen] = useState(false);
   const [editingBudgetEntryId, setEditingBudgetEntryId] = useState<
     string | null
   >(null);
@@ -436,6 +664,28 @@ export default function App() {
     "monthly" | "weekly"
   >("monthly");
   const [budgetFormNotes, setBudgetFormNotes] = useState("");
+
+  const [planningFlows, setPlanningFlows] = useState<PlanningFlowApiRow[]>([]);
+  const [planningIncomeCategories, setPlanningIncomeCategories] = useState<
+    CategoryRow[]
+  >([]);
+  const [planningExpenseCategories, setPlanningExpenseCategories] = useState<
+    CategoryRow[]
+  >([]);
+  const [planningLoading, setPlanningLoading] = useState(false);
+  const [planningError, setPlanningError] = useState<string | null>(null);
+  const [planningSaving, setPlanningSaving] = useState(false);
+  const [planningModalOpen, setPlanningModalOpen] = useState(false);
+  const [editingPlanningFlowId, setEditingPlanningFlowId] = useState<
+    string | null
+  >(null);
+  const [planningFormScope, setPlanningFormScope] =
+    useState<BudgetScopeToggle>("expense");
+  const [planningFormCategoryId, setPlanningFormCategoryId] = useState("");
+  const [planningFormTitle, setPlanningFormTitle] = useState("");
+  const [planningFormAmount, setPlanningFormAmount] = useState("");
+  const [planningFormDue, setPlanningFormDue] = useState("");
+  const [planningFormNotes, setPlanningFormNotes] = useState("");
 
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
@@ -491,7 +741,7 @@ export default function App() {
     try {
       const [catRes, astRes] = await Promise.all([
         fetch("/v1/categories?scope=asset", defaultFetchInit),
-        fetch("/v1/assets", defaultFetchInit),
+        fetch(`/v1/assets${ledgerViewQs(ledgerPersonScope)}`, defaultFetchInit),
       ]);
       if (catRes.status === 403 || catRes.status === 404) {
         setAssetCategories([]);
@@ -514,7 +764,7 @@ export default function App() {
     } finally {
       setAssetsBusy(false);
     }
-  }, []);
+  }, [ledgerPersonScope]);
 
   const loadLiabilitiesPage = useCallback(async () => {
     setLiabilitiesBusy(true);
@@ -522,7 +772,10 @@ export default function App() {
     try {
       const [catRes, libRes] = await Promise.all([
         fetch("/v1/categories?scope=liability", defaultFetchInit),
-        fetch("/v1/liabilities", defaultFetchInit),
+        fetch(
+          `/v1/liabilities${ledgerViewQs(ledgerPersonScope)}`,
+          defaultFetchInit,
+        ),
       ]);
       if (catRes.status === 403 || catRes.status === 404) {
         setLiabilityCategories([]);
@@ -545,14 +798,14 @@ export default function App() {
     } finally {
       setLiabilitiesBusy(false);
     }
-  }, []);
+  }, [ledgerPersonScope]);
 
   const loadBudgetPage = useCallback(async () => {
     setBudgetLoading(true);
     setBudgetError(null);
     try {
       const [budRes, incRes, expRes, libCatRes] = await Promise.all([
-        fetch("/v1/budget", defaultFetchInit),
+        fetch(`/v1/budget${ledgerViewQs(ledgerPersonScope)}`, defaultFetchInit),
         fetch("/v1/categories?scope=income", defaultFetchInit),
         fetch("/v1/categories?scope=expense", defaultFetchInit),
         fetch("/v1/categories?scope=liability", defaultFetchInit),
@@ -598,13 +851,62 @@ export default function App() {
     } finally {
       setBudgetLoading(false);
     }
-  }, []);
+  }, [ledgerPersonScope]);
+
+  const loadPlanningPage = useCallback(async () => {
+    setPlanningLoading(true);
+    setPlanningError(null);
+    try {
+      const [flowsRes, incRes, expRes] = await Promise.all([
+        fetch(
+          `/v1/planning/flows${ledgerViewQs(ledgerPersonScope)}`,
+          defaultFetchInit,
+        ),
+        fetch("/v1/categories?scope=income", defaultFetchInit),
+        fetch("/v1/categories?scope=expense", defaultFetchInit),
+      ]);
+
+      if (flowsRes.status === 403 || flowsRes.status === 404) {
+        setPlanningFlows([]);
+      } else if (!flowsRes.ok) {
+        throw new Error(await errorMessageFromResponse(flowsRes));
+      } else {
+        setPlanningFlows((await flowsRes.json()) as PlanningFlowApiRow[]);
+      }
+
+      if (incRes.status === 403 || incRes.status === 404) {
+        setPlanningIncomeCategories([]);
+      } else if (!incRes.ok) {
+        throw new Error(await errorMessageFromResponse(incRes));
+      } else {
+        setPlanningIncomeCategories((await incRes.json()) as CategoryRow[]);
+      }
+
+      if (expRes.status === 403 || expRes.status === 404) {
+        setPlanningExpenseCategories([]);
+      } else if (!expRes.ok) {
+        throw new Error(await errorMessageFromResponse(expRes));
+      } else {
+        setPlanningExpenseCategories((await expRes.json()) as CategoryRow[]);
+      }
+    } catch (e: unknown) {
+      setPlanningFlows([]);
+      setPlanningIncomeCategories([]);
+      setPlanningExpenseCategories([]);
+      setPlanningError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPlanningLoading(false);
+    }
+  }, [ledgerPersonScope]);
 
   const loadSummaryPage = useCallback(async () => {
     setSummaryBusy(true);
     setSummaryError(null);
     try {
-      const res = await fetch("/v1/summary", defaultFetchInit);
+      const res = await fetch(
+        `/v1/summary${ledgerViewQs(ledgerPersonScope)}`,
+        defaultFetchInit,
+      );
       if (res.status === 403 || res.status === 404) {
         setSummary(null);
         return;
@@ -619,7 +921,7 @@ export default function App() {
     } finally {
       setSummaryBusy(false);
     }
-  }, []);
+  }, [ledgerPersonScope]);
 
   const loadCategories = useCallback(async () => {
     setCategoriesBusy(true);
@@ -726,6 +1028,23 @@ export default function App() {
   }, [installation?.installation.calendar_tz]);
 
   useEffect(() => {
+    if (!installation) {
+      setProjectionInflationDraft(false);
+      setProjectionTargetAgeDraft("");
+      setShowAgeModeDraft("dates");
+      return;
+    }
+    const inst = installation.installation;
+    setProjectionInflationDraft(inst.projection_includes_inflation);
+    setProjectionTargetAgeDraft(
+      inst.projection_target_age != null
+        ? String(inst.projection_target_age)
+        : "",
+    );
+    setShowAgeModeDraft(inst.show_age_mode === "ages" ? "ages" : "dates");
+  }, [installation]);
+
+  useEffect(() => {
     if (!user || installation?.role !== "owner") {
       setPendingUsers([]);
       setPendingUsersError(null);
@@ -761,6 +1080,13 @@ export default function App() {
     }
     void loadBudgetPage();
   }, [user, hasMembership, activeTab, loadBudgetPage]);
+
+  useEffect(() => {
+    if (!user || !hasMembership || activeTab !== "upcoming") {
+      return;
+    }
+    void loadPlanningPage();
+  }, [user, hasMembership, activeTab, loadPlanningPage]);
 
   useEffect(() => {
     if (!user || !hasMembership || activeTab !== "summary") {
@@ -829,8 +1155,34 @@ export default function App() {
       setBudgetFormAmount("");
       setBudgetFormFrequency("monthly");
       setBudgetFormNotes("");
+      setPlanningFlows([]);
+      setPlanningIncomeCategories([]);
+      setPlanningExpenseCategories([]);
+      setPlanningError(null);
+      setEditingPlanningFlowId(null);
+      setPlanningFormScope("expense");
+      setPlanningFormCategoryId("");
+      setPlanningFormTitle("");
+      setPlanningFormAmount("");
+      setPlanningFormDue("");
+      setPlanningFormNotes("");
+      setAssetModalOpen(false);
+      setLiabilityModalOpen(false);
+      setBudgetModalOpen(false);
+      setPlanningModalOpen(false);
+      setCategoryModalOpen(false);
+      setCategoryRenameModalOpen(false);
     }
   }, [user]);
+
+  useEffect(() => {
+    setAssetModalOpen(false);
+    setLiabilityModalOpen(false);
+    setBudgetModalOpen(false);
+    setPlanningModalOpen(false);
+    setCategoryModalOpen(false);
+    setCategoryRenameModalOpen(false);
+  }, [activeTab]);
 
   useEffect(() => {
     if (activeTab !== "budget") {
@@ -852,6 +1204,31 @@ export default function App() {
     budgetIncomeCategories,
     budgetExpenseCategories,
     budgetFormCategoryId,
+  ]);
+
+  useEffect(() => {
+    if (activeTab !== "upcoming") {
+      return;
+    }
+    const cats =
+      planningFormScope === "income"
+        ? planningIncomeCategories
+        : planningExpenseCategories;
+    if (cats.length === 0) {
+      return;
+    }
+    if (
+      !planningFormCategoryId ||
+      !cats.some((c) => c.id === planningFormCategoryId)
+    ) {
+      setPlanningFormCategoryId(cats[0].id);
+    }
+  }, [
+    activeTab,
+    planningFormScope,
+    planningIncomeCategories,
+    planningExpenseCategories,
+    planningFormCategoryId,
   ]);
 
   async function submitAuth(ev: FormEvent) {
@@ -961,6 +1338,46 @@ export default function App() {
     }
   }
 
+  async function saveInstallationProjection(ev: FormEvent) {
+    ev.preventDefault();
+    const ageTrim = projectionTargetAgeDraft.trim();
+    let projection_target_age: number | null;
+    if (ageTrim === "") {
+      projection_target_age = null;
+    } else {
+      const n = Number(ageTrim);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 65 || n > 105) {
+        setInstallationError(
+          "Edad objetivo de horizonte: entero entre 65 y 105, o vacío para limpiar.",
+        );
+        return;
+      }
+      projection_target_age = n;
+    }
+    setInstallationProjectionSaving(true);
+    setInstallationError(null);
+    try {
+      const res = await fetch("/v1/installation", {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projection_includes_inflation: projectionInflationDraft,
+          projection_target_age,
+          show_age_mode: showAgeModeDraft,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      await loadInstallation();
+    } catch (e: unknown) {
+      setInstallationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInstallationProjectionSaving(false);
+    }
+  }
+
   async function approvePendingUser(userId: string) {
     const role = approveRoles[userId] ?? "member";
     setApproveBusy(true);
@@ -1009,6 +1426,7 @@ export default function App() {
         throw new Error(await errorMessageFromResponse(res));
       }
       setNewCatName("");
+      setCategoryModalOpen(false);
       await loadCategories();
     } catch (e: unknown) {
       setCategoriesError(e instanceof Error ? e.message : String(e));
@@ -1031,6 +1449,7 @@ export default function App() {
       if (editingCategoryId === id) {
         setEditingCategoryId(null);
         setEditCategoryName("");
+        setCategoryRenameModalOpen(false);
       }
       await loadCategories();
     } catch (e: unknown) {
@@ -1059,6 +1478,7 @@ export default function App() {
       }
       setEditingCategoryId(null);
       setEditCategoryName("");
+      setCategoryRenameModalOpen(false);
       await loadCategories();
     } catch (e: unknown) {
       setCategoriesError(e instanceof Error ? e.message : String(e));
@@ -1131,6 +1551,7 @@ export default function App() {
         }
       }
       resetAssetForm();
+      setAssetModalOpen(false);
       await loadAssetsPage();
     } catch (e: unknown) {
       setAssetsError(e instanceof Error ? e.message : String(e));
@@ -1152,6 +1573,7 @@ export default function App() {
       }
       if (editingAssetId === id) {
         resetAssetForm();
+        setAssetModalOpen(false);
       }
       await loadAssetsPage();
     } catch (e: unknown) {
@@ -1267,6 +1689,7 @@ export default function App() {
         }
       }
       resetLiabilityForm();
+      setLiabilityModalOpen(false);
       await loadLiabilitiesPage();
     } catch (e: unknown) {
       setLiabilitiesError(e instanceof Error ? e.message : String(e));
@@ -1288,6 +1711,7 @@ export default function App() {
       }
       if (editingLiabilityId === id) {
         resetLiabilityForm();
+        setLiabilityModalOpen(false);
       }
       await loadLiabilitiesPage();
     } catch (e: unknown) {
@@ -1379,6 +1803,7 @@ export default function App() {
         }
       }
       resetBudgetForm();
+      setBudgetModalOpen(false);
       await loadBudgetPage();
     } catch (e: unknown) {
       setBudgetError(e instanceof Error ? e.message : String(e));
@@ -1400,6 +1825,7 @@ export default function App() {
       }
       if (editingBudgetEntryId === id) {
         resetBudgetForm();
+        setBudgetModalOpen(false);
       }
       await loadBudgetPage();
     } catch (e: unknown) {
@@ -1417,6 +1843,118 @@ export default function App() {
     setBudgetFormAmount(row.amount);
     setBudgetFormFrequency(row.frequency);
     setBudgetFormNotes(row.notes ?? "");
+  }
+
+  function resetPlanningFlowForm() {
+    setEditingPlanningFlowId(null);
+    const cats =
+      planningFormScope === "income"
+        ? planningIncomeCategories
+        : planningExpenseCategories;
+    setPlanningFormCategoryId(cats[0]?.id ?? "");
+    setPlanningFormTitle("");
+    setPlanningFormAmount("");
+    setPlanningFormDue("");
+    setPlanningFormNotes("");
+  }
+
+  async function submitPlanningFlowForm(ev: FormEvent) {
+    ev.preventDefault();
+    const amt = planningFormAmount.trim();
+    const tit = planningFormTitle.trim();
+    if (!planningFormCategoryId || !amt || !tit) {
+      return;
+    }
+    setPlanningSaving(true);
+    setPlanningError(null);
+    try {
+      const dueTrim = planningFormDue.trim();
+      if (editingPlanningFlowId) {
+        const patchBody: Record<string, unknown> = {
+          category_id: planningFormCategoryId,
+          title: tit,
+          expected_amount: amt,
+          due_date: dueTrim === "" ? null : dueTrim,
+          notes: planningFormNotes.trim(),
+        };
+        const res = await fetch(
+          `/v1/planning/flows/${encodeURIComponent(editingPlanningFlowId)}`,
+          {
+            ...defaultFetchInit,
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patchBody),
+          },
+        );
+        if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        }
+      } else {
+        const base: Record<string, unknown> = {
+          category_id: planningFormCategoryId,
+          title: tit,
+          expected_amount: amt,
+        };
+        if (dueTrim) {
+          base.due_date = dueTrim;
+        }
+        const nt = planningFormNotes.trim();
+        if (nt) {
+          base.notes = nt;
+        }
+        const res = await fetch("/v1/planning/flows", {
+          ...defaultFetchInit,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(base),
+        });
+        if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        }
+      }
+      resetPlanningFlowForm();
+      setPlanningModalOpen(false);
+      await loadPlanningPage();
+    } catch (e: unknown) {
+      setPlanningError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPlanningSaving(false);
+    }
+  }
+
+  async function deletePlanningFlowRow(id: string) {
+    setPlanningSaving(true);
+    setPlanningError(null);
+    try {
+      const res = await fetch(`/v1/planning/flows/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "DELETE",
+      });
+      if (!res.ok && res.status !== 204) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      if (editingPlanningFlowId === id) {
+        resetPlanningFlowForm();
+        setPlanningModalOpen(false);
+      }
+      await loadPlanningPage();
+    } catch (e: unknown) {
+      setPlanningError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPlanningSaving(false);
+    }
+  }
+
+  function beginEditPlanningFlow(row: PlanningFlowApiRow) {
+    setEditingPlanningFlowId(row.id);
+    const scope: BudgetScopeToggle =
+      row.direction === "inflow" ? "income" : "expense";
+    setPlanningFormScope(scope);
+    setPlanningFormCategoryId(row.category_id);
+    setPlanningFormTitle(row.title);
+    setPlanningFormAmount(row.expected_amount);
+    setPlanningFormDue(row.due_date ?? "");
+    setPlanningFormNotes(row.notes ?? "");
   }
 
   if (sessionBusy) {
@@ -1560,38 +2098,81 @@ export default function App() {
         ))}
       </nav>
 
+      {user && hasMembership ? (
+        <div
+          className="person-filter-bar"
+          role="toolbar"
+          aria-label="Ámbito de datos (hogar o usuario actual)"
+        >
+          <span className="person-filter-label">Ver datos:</span>
+          <div className="segmented person-filter-segmented">
+            <button
+              type="button"
+              className={ledgerPersonScope === "household" ? "active" : ""}
+              aria-pressed={ledgerPersonScope === "household"}
+              onClick={() => setLedgerPersonScope("household")}
+            >
+              Hogar (todo)
+            </button>
+            <button
+              type="button"
+              className={ledgerPersonScope === "mine" ? "active" : ""}
+              aria-pressed={ledgerPersonScope === "mine"}
+              onClick={() => setLedgerPersonScope("mine")}
+            >
+              {user.username}
+            </button>
+          </div>
+          <span className="person-filter-hint muted tight">
+            Misma instalación compartida; solo filtra listas y totales (activos,
+            pasivos, presupuesto, próximos, resumen).
+          </span>
+        </div>
+      ) : null}
+
       <main className="app-main">
-        {sessionError ? (
-          <div className="banner error-banner">{sessionError}</div>
-        ) : null}
+        <div
+          className="app-global-errors"
+          role="region"
+          aria-label="Errores y avisos"
+          aria-live="polite"
+        >
+          {sessionError ? (
+            <div className="banner error-banner">{sessionError}</div>
+          ) : null}
 
-        {installationError ? (
-          <div className="banner error-banner">{installationError}</div>
-        ) : null}
+          {installationError ? (
+            <div className="banner error-banner">{installationError}</div>
+          ) : null}
 
-        {pendingUsersError ? (
-          <div className="banner error-banner">{pendingUsersError}</div>
-        ) : null}
+          {pendingUsersError ? (
+            <div className="banner error-banner">{pendingUsersError}</div>
+          ) : null}
 
-        {categoriesError ? (
-          <div className="banner error-banner">{categoriesError}</div>
-        ) : null}
+          {categoriesError ? (
+            <div className="banner error-banner">{categoriesError}</div>
+          ) : null}
 
-        {assetsError ? (
-          <div className="banner error-banner">{assetsError}</div>
-        ) : null}
+          {assetsError ? (
+            <div className="banner error-banner">{assetsError}</div>
+          ) : null}
 
-        {liabilitiesError ? (
-          <div className="banner error-banner">{liabilitiesError}</div>
-        ) : null}
+          {liabilitiesError ? (
+            <div className="banner error-banner">{liabilitiesError}</div>
+          ) : null}
 
-        {budgetError ? (
-          <div className="banner error-banner">{budgetError}</div>
-        ) : null}
+          {budgetError ? (
+            <div className="banner error-banner">{budgetError}</div>
+          ) : null}
 
-        {summaryError ? (
-          <div className="banner error-banner">{summaryError}</div>
-        ) : null}
+          {planningError ? (
+            <div className="banner error-banner">{planningError}</div>
+          ) : null}
+
+          {summaryError ? (
+            <div className="banner error-banner">{summaryError}</div>
+          ) : null}
+        </div>
 
         {!installationBusy &&
         user &&
@@ -1609,6 +2190,7 @@ export default function App() {
             installation={installation}
             loading={installationBusy}
             hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
             summary={summary}
             summaryBusy={summaryBusy}
           />
@@ -1618,6 +2200,16 @@ export default function App() {
             installationBusy={installationBusy}
             hasMembership={hasMembership}
             canEdit={installation?.role !== "viewer"}
+            formError={assetsError}
+            assetModalOpen={assetModalOpen}
+            closeAssetModal={() => {
+              resetAssetForm();
+              setAssetModalOpen(false);
+            }}
+            openNewAssetModal={() => {
+              resetAssetForm();
+              setAssetModalOpen(true);
+            }}
             assets={assets}
             assetsBusy={assetsBusy}
             assetCategories={assetCategories}
@@ -1637,8 +2229,10 @@ export default function App() {
             assetSaving={assetSaving}
             submitAssetForm={(e) => void submitAssetForm(e)}
             deleteAssetRow={(id) => void deleteAssetRow(id)}
-            beginEditAsset={beginEditAsset}
-            resetAssetForm={resetAssetForm}
+            beginEditAsset={(a) => {
+              beginEditAsset(a);
+              setAssetModalOpen(true);
+            }}
           />
         ) : activeTab === "liabilities" ? (
           <LiabilitiesView
@@ -1646,6 +2240,16 @@ export default function App() {
             installationBusy={installationBusy}
             hasMembership={hasMembership}
             canEdit={installation?.role !== "viewer"}
+            formError={liabilitiesError}
+            liabilityModalOpen={liabilityModalOpen}
+            closeLiabilityModal={() => {
+              resetLiabilityForm();
+              setLiabilityModalOpen(false);
+            }}
+            openNewLiabilityModal={() => {
+              resetLiabilityForm();
+              setLiabilityModalOpen(true);
+            }}
             liabilities={liabilities}
             liabilitiesBusy={liabilitiesBusy}
             liabilityCategories={liabilityCategories}
@@ -1673,8 +2277,10 @@ export default function App() {
             liabilitySaving={liabilitySaving}
             submitLiabilityForm={(e) => void submitLiabilityForm(e)}
             deleteLiabilityRow={(id) => void deleteLiabilityRow(id)}
-            beginEditLiability={beginEditLiability}
-            resetLiabilityForm={resetLiabilityForm}
+            beginEditLiability={(row) => {
+              beginEditLiability(row);
+              setLiabilityModalOpen(true);
+            }}
           />
         ) : activeTab === "budget" ? (
           <BudgetView
@@ -1682,6 +2288,16 @@ export default function App() {
             installationBusy={installationBusy}
             hasMembership={hasMembership}
             canEdit={installation?.role !== "viewer"}
+            formError={budgetError}
+            budgetModalOpen={budgetModalOpen}
+            closeBudgetModal={() => {
+              resetBudgetForm();
+              setBudgetModalOpen(false);
+            }}
+            openNewBudgetModal={() => {
+              resetBudgetForm();
+              setBudgetModalOpen(true);
+            }}
             budgetSnapshot={budgetSnapshot}
             budgetLoading={budgetLoading}
             budgetIncomeCategories={budgetIncomeCategories}
@@ -1703,13 +2319,93 @@ export default function App() {
             budgetSaving={budgetSaving}
             submitBudgetForm={(e) => void submitBudgetForm(e)}
             deleteBudgetEntryRow={(id) => void deleteBudgetEntryRow(id)}
-            beginEditBudgetEntry={beginEditBudgetEntry}
-            resetBudgetForm={resetBudgetForm}
+            beginEditBudgetEntry={(row) => {
+              beginEditBudgetEntry(row);
+              setBudgetModalOpen(true);
+            }}
+          />
+        ) : activeTab === "upcoming" ? (
+          <UpcomingView
+            installation={installation}
+            installationBusy={installationBusy}
+            hasMembership={hasMembership}
+            canEdit={installation?.role !== "viewer"}
+            formError={planningError}
+            planningModalOpen={planningModalOpen}
+            closePlanningModal={() => {
+              resetPlanningFlowForm();
+              setPlanningModalOpen(false);
+            }}
+            openNewPlanningModal={() => {
+              resetPlanningFlowForm();
+              setPlanningModalOpen(true);
+            }}
+            planningFlows={planningFlows}
+            planningLoading={planningLoading}
+            planningIncomeCategories={planningIncomeCategories}
+            planningExpenseCategories={planningExpenseCategories}
+            planningFormScope={planningFormScope}
+            setPlanningFormScope={setPlanningFormScope}
+            planningFormCategoryId={planningFormCategoryId}
+            setPlanningFormCategoryId={setPlanningFormCategoryId}
+            planningFormTitle={planningFormTitle}
+            setPlanningFormTitle={setPlanningFormTitle}
+            planningFormAmount={planningFormAmount}
+            setPlanningFormAmount={setPlanningFormAmount}
+            planningFormDue={planningFormDue}
+            setPlanningFormDue={setPlanningFormDue}
+            planningFormNotes={planningFormNotes}
+            setPlanningFormNotes={setPlanningFormNotes}
+            editingPlanningFlowId={editingPlanningFlowId}
+            planningSaving={planningSaving}
+            submitPlanningFlowForm={(e) => void submitPlanningFlowForm(e)}
+            deletePlanningFlowRow={(id) => void deletePlanningFlowRow(id)}
+            beginEditPlanningFlow={(row) => {
+              beginEditPlanningFlow(row);
+              setPlanningModalOpen(true);
+            }}
+          />
+        ) : activeTab === "retirement" ? (
+          <RetirementView
+            installation={installation}
+            installationBusy={installationBusy}
+            hasMembership={hasMembership}
+          />
+        ) : activeTab === "projection" ? (
+          <ProjectionView
+            installation={installation}
+            installationBusy={installationBusy}
+            hasMembership={hasMembership}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
             installation={installation}
             installationBusy={installationBusy}
+            categoryModalOpen={categoryModalOpen}
+            categoryRenameModalOpen={categoryRenameModalOpen}
+            closeCategoryModal={() => {
+              setNewCatName("");
+              setCategoryModalOpen(false);
+            }}
+            openNewCategoryModal={() => {
+              setCategoryRenameModalOpen(false);
+              setEditingCategoryId(null);
+              setEditCategoryName("");
+              setNewCatName("");
+              setCategoryModalOpen(true);
+            }}
+            closeRenameCategoryModal={() => {
+              setEditingCategoryId(null);
+              setEditCategoryName("");
+              setCategoryRenameModalOpen(false);
+            }}
+            openRenameCategoryModal={(row: CategoryRow) => {
+              setCategoryModalOpen(false);
+              setNewCatName("");
+              setEditingCategoryId(row.id);
+              setEditCategoryName(row.name);
+              setCategoryRenameModalOpen(true);
+            }}
             setupCurrency={setupCurrency}
             setSetupCurrency={setSetupCurrency}
             setupCalendarTz={setupCalendarTz}
@@ -1721,8 +2417,17 @@ export default function App() {
             saveInstallationCalendarTz={(e) =>
               void saveInstallationCalendarTz(e)
             }
+            projectionInflationDraft={projectionInflationDraft}
+            setProjectionInflationDraft={setProjectionInflationDraft}
+            projectionTargetAgeDraft={projectionTargetAgeDraft}
+            setProjectionTargetAgeDraft={setProjectionTargetAgeDraft}
+            showAgeModeDraft={showAgeModeDraft}
+            setShowAgeModeDraft={setShowAgeModeDraft}
+            installationProjectionSaving={installationProjectionSaving}
+            saveInstallationProjection={(e) => void saveInstallationProjection(e)}
             health={health}
             healthError={healthError}
+            categoriesError={categoriesError}
             hasMembership={hasMembership}
             canEditCategories={installation?.role !== "viewer"}
             isOwner={installation?.role === "owner"}
@@ -1744,7 +2449,6 @@ export default function App() {
             createCategory={(e) => void createCategory(e)}
             deleteCategory={(id) => void deleteCategory(id)}
             editingCategoryId={editingCategoryId}
-            setEditingCategoryId={setEditingCategoryId}
             editCategoryName={editCategoryName}
             setEditCategoryName={setEditCategoryName}
             saveCategoryEdit={(id) => void saveCategoryEdit(id)}
@@ -1767,6 +2471,10 @@ function AssetsView({
   installationBusy,
   hasMembership,
   canEdit,
+  formError,
+  assetModalOpen,
+  closeAssetModal,
+  openNewAssetModal,
   assets,
   assetsBusy,
   assetCategories,
@@ -1787,12 +2495,15 @@ function AssetsView({
   submitAssetForm,
   deleteAssetRow,
   beginEditAsset,
-  resetAssetForm,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
   canEdit: boolean;
+  formError: string | null;
+  assetModalOpen: boolean;
+  closeAssetModal: () => void;
+  openNewAssetModal: () => void;
   assets: AssetApiRow[];
   assetsBusy: boolean;
   assetCategories: CategoryRow[];
@@ -1813,10 +2524,10 @@ function AssetsView({
   submitAssetForm: (e: FormEvent) => void;
   deleteAssetRow: (id: string) => void;
   beginEditAsset: (a: AssetApiRow) => void;
-  resetAssetForm: () => void;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
+  const currencyIso = installation?.installation.base_currency ?? "";
 
   return (
     <div className="workspace">
@@ -1844,12 +2555,20 @@ function AssetsView({
         </div>
       ) : null}
 
+      {!canEdit && hasMembership ? (
+        <p className="muted tight">
+          Solo lectura: tu rol no permite crear ni editar activos.
+        </p>
+      ) : null}
+
       {canEdit && hasMembership && assetCategories.length > 0 ? (
-        <section className="panel">
-          <h3 className="panel-title">
-            {editingAssetId ? "Editar activo" : "Nuevo activo"}
-          </h3>
-          <form className="asset-form stack bordered-top" onSubmit={submitAssetForm}>
+        <Modal
+          title={editingAssetId ? "Editar activo" : "Nuevo activo"}
+          open={assetModalOpen}
+          onClose={closeAssetModal}
+        >
+          <form className="asset-form stack" onSubmit={submitAssetForm}>
+            <ModalFormError message={formError} />
             <div className="asset-form-grid">
               <label className="field">
                 <span>Categoría</span>
@@ -1922,27 +2641,32 @@ function AssetsView({
               >
                 {editingAssetId ? "Guardar cambios" : "Añadir activo"}
               </button>
-              {editingAssetId ? (
-                <button
-                  type="button"
-                  className="btn ghost"
-                  disabled={assetSaving}
-                  onClick={() => resetAssetForm()}
-                >
-                  Cancelar edición
-                </button>
-              ) : null}
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={assetSaving}
+                onClick={() => closeAssetModal()}
+              >
+                Cancelar
+              </button>
             </div>
           </form>
-        </section>
-      ) : !canEdit && hasMembership ? (
-        <p className="muted tight">
-          Solo lectura: tu rol no permite crear ni editar activos.
-        </p>
+        </Modal>
       ) : null}
 
       <section className="panel">
-        <h3 className="panel-title">Posiciones</h3>
+        <div className="panel-head-row">
+          <h3 className="panel-title">Posiciones</h3>
+          {canEdit && hasMembership && assetCategories.length > 0 ? (
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => openNewAssetModal()}
+            >
+              Nuevo activo
+            </button>
+          ) : null}
+        </div>
         {assetsBusy ? (
           <p className="muted bordered-top">Cargando…</p>
         ) : assets.length === 0 ? (
@@ -1956,9 +2680,7 @@ function AssetsView({
                 <tr>
                   <th>Nombre</th>
                   <th>Categoría</th>
-                  <th className="num">
-                    Valor ({currency})
-                  </th>
+                  <th className="num">Valor</th>
                   <th className="num">Compra</th>
                   <th>Líquido</th>
                   <th>Notas</th>
@@ -1970,9 +2692,11 @@ function AssetsView({
                   <tr key={a.id}>
                     <td>{a.name}</td>
                     <td>{assetCategoryLabel(assetCategories, a.category_id)}</td>
-                    <td className="num">{a.current_value}</td>
                     <td className="num">
-                      {a.purchase_price ?? METRIC_DASH}
+                      {formatCurrencyAmount(a.current_value, currencyIso)}
+                    </td>
+                    <td className="num">
+                      {formatCurrencyOrDash(a.purchase_price, currencyIso)}
                     </td>
                     <td>{a.is_liquid ? "Sí" : "No"}</td>
                     <td className="asset-notes-cell">
@@ -2018,6 +2742,10 @@ function LiabilitiesView({
   installationBusy,
   hasMembership,
   canEdit,
+  formError,
+  liabilityModalOpen,
+  closeLiabilityModal,
+  openNewLiabilityModal,
   liabilities,
   liabilitiesBusy,
   liabilityCategories,
@@ -2046,12 +2774,15 @@ function LiabilitiesView({
   submitLiabilityForm,
   deleteLiabilityRow,
   beginEditLiability,
-  resetLiabilityForm,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
   canEdit: boolean;
+  formError: string | null;
+  liabilityModalOpen: boolean;
+  closeLiabilityModal: () => void;
+  openNewLiabilityModal: () => void;
   liabilities: LiabilityApiRow[];
   liabilitiesBusy: boolean;
   liabilityCategories: CategoryRow[];
@@ -2082,16 +2813,17 @@ function LiabilitiesView({
   submitLiabilityForm: (e: FormEvent) => void;
   deleteLiabilityRow: (id: string) => void;
   beginEditLiability: (row: LiabilityApiRow) => void;
-  resetLiabilityForm: () => void;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
+  const currencyIso = installation?.installation.base_currency ?? "";
 
   const derivePreview = liabilityDerivedPrincipalPreview(
     liabilityFormPaymentAmount,
     liabilityFormPaymentFrequency,
     liabilityFormPaymentEnd,
     installation?.installation.calendar_tz ?? "UTC",
+    currencyIso,
   );
 
   return (
@@ -2120,15 +2852,23 @@ function LiabilitiesView({
         </div>
       ) : null}
 
+      {!canEdit && hasMembership ? (
+        <p className="muted tight">
+          Solo lectura: tu rol no permite crear ni editar pasivos.
+        </p>
+      ) : null}
+
       {canEdit && hasMembership && liabilityCategories.length > 0 ? (
-        <section className="panel">
-          <h3 className="panel-title">
-            {editingLiabilityId ? "Editar pasivo" : "Nuevo pasivo"}
-          </h3>
+        <Modal
+          title={editingLiabilityId ? "Editar pasivo" : "Nuevo pasivo"}
+          open={liabilityModalOpen}
+          onClose={closeLiabilityModal}
+        >
           <form
-            className="asset-form stack bordered-top"
+            className="asset-form stack"
             onSubmit={submitLiabilityForm}
           >
+            <ModalFormError message={formError} />
             <div className="asset-form-grid">
               <label className="field">
                 <span>Categoría</span>
@@ -2202,7 +2942,7 @@ function LiabilitiesView({
                 />
                 {liabilityFormDerivePrincipal && derivePreview ? (
                   <span className="muted tight">
-                    Vista previa ~{derivePreview} {currency} (hoy en{" "}
+                    Vista previa ~{derivePreview} (hoy en{" "}
                     {installation?.installation.calendar_tz ?? "UTC"})
                   </span>
                 ) : null}
@@ -2277,27 +3017,32 @@ function LiabilitiesView({
               >
                 {editingLiabilityId ? "Guardar cambios" : "Añadir pasivo"}
               </button>
-              {editingLiabilityId ? (
-                <button
-                  type="button"
-                  className="btn ghost"
-                  disabled={liabilitySaving}
-                  onClick={() => resetLiabilityForm()}
-                >
-                  Cancelar edición
-                </button>
-              ) : null}
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={liabilitySaving}
+                onClick={() => closeLiabilityModal()}
+              >
+                Cancelar
+              </button>
             </div>
           </form>
-        </section>
-      ) : !canEdit && hasMembership ? (
-        <p className="muted tight">
-          Solo lectura: tu rol no permite crear ni editar pasivos.
-        </p>
+        </Modal>
       ) : null}
 
       <section className="panel">
-        <h3 className="panel-title">Lista</h3>
+        <div className="panel-head-row">
+          <h3 className="panel-title">Lista</h3>
+          {canEdit && hasMembership && liabilityCategories.length > 0 ? (
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => openNewLiabilityModal()}
+            >
+              Nuevo pasivo
+            </button>
+          ) : null}
+        </div>
         {liabilitiesBusy ? (
           <p className="muted bordered-top">Cargando…</p>
         ) : liabilities.length === 0 ? (
@@ -2330,7 +3075,7 @@ function LiabilitiesView({
                     </td>
                     <td>{row.type_tag ?? METRIC_DASH}</td>
                     <td className="num">
-                      {row.principal}
+                      {formatCurrencyAmount(row.principal, currencyIso)}
                       {row.principal_derived_from_plan ? (
                         <span className="muted" title="Principal derivado del plan">
                           {" "}
@@ -2338,9 +3083,13 @@ function LiabilitiesView({
                         </span>
                       ) : null}
                     </td>
-                    <td className="num">{row.apr_percent ?? METRIC_DASH}</td>
                     <td className="num">
-                      {row.payment_amount ?? METRIC_DASH}
+                      {row.apr_percent != null && String(row.apr_percent).trim() !== ""
+                        ? `${formatPercentAmount(row.apr_percent)} %`
+                        : METRIC_DASH}
+                    </td>
+                    <td className="num">
+                      {formatCurrencyOrDash(row.payment_amount, currencyIso)}
                     </td>
                     <td>
                       {row.payment_frequency
@@ -2387,6 +3136,11 @@ const BUDGET_SCOPE_LABEL: Record<BudgetScopeToggle, string> = {
   expense: "Gasto",
 };
 
+const PLANNING_DIRECTION_LABEL: Record<PlanningFlowDirectionApi, string> = {
+  inflow: "Entrada",
+  outflow: "Salida",
+};
+
 function budgetDerivedCatLabel(categories: CategoryRow[], id: string): string {
   return categories.find((x) => x.id === id)?.name ?? id.slice(0, 8);
 }
@@ -2396,6 +3150,10 @@ function BudgetView({
   installationBusy,
   hasMembership,
   canEdit,
+  formError,
+  budgetModalOpen,
+  closeBudgetModal,
+  openNewBudgetModal,
   budgetSnapshot,
   budgetLoading,
   budgetIncomeCategories,
@@ -2418,12 +3176,15 @@ function BudgetView({
   submitBudgetForm,
   deleteBudgetEntryRow,
   beginEditBudgetEntry,
-  resetBudgetForm,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
   canEdit: boolean;
+  formError: string | null;
+  budgetModalOpen: boolean;
+  closeBudgetModal: () => void;
+  openNewBudgetModal: () => void;
   budgetSnapshot: BudgetSnapshotApi | null;
   budgetLoading: boolean;
   budgetIncomeCategories: CategoryRow[];
@@ -2448,10 +3209,10 @@ function BudgetView({
   submitBudgetForm: (e: FormEvent) => void;
   deleteBudgetEntryRow: (id: string) => void;
   beginEditBudgetEntry: (row: BudgetEntryApiRow) => void;
-  resetBudgetForm: () => void;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
+  const currencyIso = installation?.installation.base_currency ?? "";
 
   const categoryMapForSort = budgetCategoryMap(
     budgetIncomeCategories,
@@ -2474,19 +3235,28 @@ function BudgetView({
       : null;
 
   const incM = snap
-    ? formatSummaryAmount(snap.totals.income_monthly_equivalent)
+    ? formatCurrencyAmount(snap.totals.income_monthly_equivalent, currencyIso)
     : METRIC_DASH;
   const expReg = snap
-    ? formatSummaryAmount(snap.totals.expense_regular_monthly_equivalent)
+    ? formatCurrencyAmount(
+        snap.totals.expense_regular_monthly_equivalent,
+        currencyIso,
+      )
     : METRIC_DASH;
   const expDer = snap
-    ? formatSummaryAmount(snap.totals.expense_derived_monthly_equivalent)
+    ? formatCurrencyAmount(
+        snap.totals.expense_derived_monthly_equivalent,
+        currencyIso,
+      )
     : METRIC_DASH;
   const expTot = snap
-    ? formatSummaryAmount(snap.totals.expense_total_monthly_equivalent)
+    ? formatCurrencyAmount(
+        snap.totals.expense_total_monthly_equivalent,
+        currencyIso,
+      )
     : METRIC_DASH;
   const netM = snap
-    ? formatSummaryAmount(snap.totals.net_monthly_equivalent)
+    ? formatCurrencyAmount(snap.totals.net_monthly_equivalent, currencyIso)
     : METRIC_DASH;
 
   return (
@@ -2524,45 +3294,49 @@ function BudgetView({
         <MetricCard
           label="Ingresos (equiv. mensual)"
           value={incM}
-          suffix={currency}
           hint="Entradas recurrentes guardadas en presupuesto."
         />
         <MetricCard
           label="Gastos recurrentes"
           value={expReg}
-          suffix={currency}
         />
         <MetricCard
           label="Gastos derivados (pasivos)"
           value={expDer}
-          suffix={currency}
           hint="Cuotas de planes activos en Pasivos."
         />
         <MetricCard
           label="Gastos totales"
           value={expTot}
-          suffix={currency}
         />
         <MetricCard
           label="Neto mensual"
           value={netM}
-          suffix={currency}
           hint="Ingresos − gastos totales."
         />
       </div>
+
+      {!canEdit && hasMembership ? (
+        <p className="muted tight">
+          Solo lectura: tu rol no permite crear ni editar líneas de presupuesto.
+        </p>
+      ) : null}
 
       {canEdit &&
       hasMembership &&
       (budgetIncomeCategories.length > 0 ||
         budgetExpenseCategories.length > 0) ? (
-        <section className="panel">
-          <h3 className="panel-title">
-            {editingBudgetEntryId ? "Editar línea" : "Nueva línea de presupuesto"}
-          </h3>
-          <form
-            className="asset-form stack bordered-top"
-            onSubmit={submitBudgetForm}
-          >
+        <Modal
+          title={
+            editingBudgetEntryId
+              ? "Editar línea de presupuesto"
+              : "Nueva línea de presupuesto"
+          }
+          open={budgetModalOpen}
+          onClose={closeBudgetModal}
+        >
+          <form className="asset-form stack" onSubmit={submitBudgetForm}>
+            <ModalFormError message={formError} />
             <div className="segmented" role="tablist" aria-label="Ámbito">
               <button
                 type="button"
@@ -2651,27 +3425,35 @@ function BudgetView({
               >
                 {editingBudgetEntryId ? "Guardar cambios" : "Añadir línea"}
               </button>
-              {editingBudgetEntryId ? (
-                <button
-                  type="button"
-                  className="btn ghost"
-                  disabled={budgetSaving}
-                  onClick={() => resetBudgetForm()}
-                >
-                  Cancelar edición
-                </button>
-              ) : null}
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={budgetSaving}
+                onClick={() => closeBudgetModal()}
+              >
+                Cancelar
+              </button>
             </div>
           </form>
-        </section>
-      ) : !canEdit && hasMembership ? (
-        <p className="muted tight">
-          Solo lectura: tu rol no permite crear ni editar líneas de presupuesto.
-        </p>
+        </Modal>
       ) : null}
 
       <section className="panel">
-        <h3 className="panel-title">Líneas guardadas</h3>
+        <div className="panel-head-row">
+          <h3 className="panel-title">Líneas guardadas</h3>
+          {canEdit &&
+          hasMembership &&
+          (budgetIncomeCategories.length > 0 ||
+            budgetExpenseCategories.length > 0) ? (
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => openNewBudgetModal()}
+            >
+              Nueva línea
+            </button>
+          ) : null}
+        </div>
         {budgetLoading ? (
           <p className="muted bordered-top">Cargando…</p>
         ) : sortedEntries.length === 0 ? (
@@ -2702,9 +3484,13 @@ function BudgetView({
                         row.category_id.slice(0, 8)}
                     </td>
                     <td>{row.label ?? METRIC_DASH}</td>
-                    <td className="num">{row.amount}</td>
+                    <td className="num">
+                      {formatCurrencyAmount(row.amount, currencyIso)}
+                    </td>
                     <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
-                    <td className="num">{row.monthly_equivalent}</td>
+                    <td className="num">
+                      {formatCurrencyAmount(row.monthly_equivalent, currencyIso)}
+                    </td>
                     <td className="asset-notes-cell">
                       {row.notes ?? METRIC_DASH}
                     </td>
@@ -2772,10 +3558,315 @@ function BudgetView({
                         row.category_id,
                       )}
                     </td>
-                    <td className="num">{row.amount}</td>
+                    <td className="num">
+                      {formatCurrencyAmount(row.amount, currencyIso)}
+                    </td>
                     <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
-                    <td className="num">{row.monthly_equivalent}</td>
+                    <td className="num">
+                      {formatCurrencyAmount(row.monthly_equivalent, currencyIso)}
+                    </td>
                     <td className="asset-notes-cell">{row.notes}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function UpcomingView({
+  installation,
+  installationBusy,
+  hasMembership,
+  canEdit,
+  formError,
+  planningModalOpen,
+  closePlanningModal,
+  openNewPlanningModal,
+  planningFlows,
+  planningLoading,
+  planningIncomeCategories,
+  planningExpenseCategories,
+  planningFormScope,
+  setPlanningFormScope,
+  planningFormCategoryId,
+  setPlanningFormCategoryId,
+  planningFormTitle,
+  setPlanningFormTitle,
+  planningFormAmount,
+  setPlanningFormAmount,
+  planningFormDue,
+  setPlanningFormDue,
+  planningFormNotes,
+  setPlanningFormNotes,
+  editingPlanningFlowId,
+  planningSaving,
+  submitPlanningFlowForm,
+  deletePlanningFlowRow,
+  beginEditPlanningFlow,
+}: {
+  installation: InstallationAccess | null;
+  installationBusy: boolean;
+  hasMembership: boolean;
+  canEdit: boolean;
+  formError: string | null;
+  planningModalOpen: boolean;
+  closePlanningModal: () => void;
+  openNewPlanningModal: () => void;
+  planningFlows: PlanningFlowApiRow[];
+  planningLoading: boolean;
+  planningIncomeCategories: CategoryRow[];
+  planningExpenseCategories: CategoryRow[];
+  planningFormScope: BudgetScopeToggle;
+  setPlanningFormScope: Dispatch<SetStateAction<BudgetScopeToggle>>;
+  planningFormCategoryId: string;
+  setPlanningFormCategoryId: Dispatch<SetStateAction<string>>;
+  planningFormTitle: string;
+  setPlanningFormTitle: Dispatch<SetStateAction<string>>;
+  planningFormAmount: string;
+  setPlanningFormAmount: Dispatch<SetStateAction<string>>;
+  planningFormDue: string;
+  setPlanningFormDue: Dispatch<SetStateAction<string>>;
+  planningFormNotes: string;
+  setPlanningFormNotes: Dispatch<SetStateAction<string>>;
+  editingPlanningFlowId: string | null;
+  planningSaving: boolean;
+  submitPlanningFlowForm: (e: FormEvent) => void;
+  deletePlanningFlowRow: (id: string) => void;
+  beginEditPlanningFlow: (row: PlanningFlowApiRow) => void;
+}) {
+  const currencyIso = installation?.installation.base_currency ?? "";
+  const categoryById = budgetCategoryMap(
+    planningIncomeCategories,
+    planningExpenseCategories,
+  );
+
+  const formCats =
+    planningFormScope === "income"
+      ? planningIncomeCategories
+      : planningExpenseCategories;
+
+  return (
+    <div className="workspace">
+      <div className="workspace-header">
+        <h2 className="workspace-title">Próximos</h2>
+        <p className="workspace-sub">
+          {installationBusy
+            ? "Cargando instalación…"
+            : !hasMembership
+              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
+              : planningLoading
+                ? "Cargando flujos planificados…"
+                : "Flujos de caja esperados (entradas y salidas) con categorías de ingreso o gasto. Importes en moneda de la instalación con símbolo. Gráfico direccional del Mac vendrá después."}
+        </p>
+      </div>
+
+      {!installationBusy && !hasMembership ? (
+        <div className="banner info-banner">
+          Cuando tengas acceso podrás registrar flujos aquí.
+        </div>
+      ) : null}
+
+      {hasMembership &&
+      planningIncomeCategories.length === 0 &&
+      planningExpenseCategories.length === 0 &&
+      !planningLoading ? (
+        <div className="banner info-banner">
+          Aún no hay categorías de <strong>Ingresos</strong> ni{" "}
+          <strong>Gastos</strong>. Créalas en <strong>Ajustes → Categorías</strong>.
+        </div>
+      ) : null}
+
+      {!canEdit && hasMembership ? (
+        <p className="muted tight">
+          Solo lectura: tu rol no permite crear ni editar flujos planificados.
+        </p>
+      ) : null}
+
+      {canEdit &&
+      hasMembership &&
+      (planningIncomeCategories.length > 0 ||
+        planningExpenseCategories.length > 0) ? (
+        <Modal
+          title={
+            editingPlanningFlowId ? "Editar flujo planificado" : "Nuevo flujo"
+          }
+          open={planningModalOpen}
+          onClose={closePlanningModal}
+        >
+          <form className="asset-form stack" onSubmit={submitPlanningFlowForm}>
+            <ModalFormError message={formError} />
+            <div className="segmented" role="tablist" aria-label="Dirección">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={planningFormScope === "income"}
+                className={planningFormScope === "income" ? "active" : ""}
+                onClick={() => setPlanningFormScope("income")}
+              >
+                Entrada (ingreso)
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={planningFormScope === "expense"}
+                className={planningFormScope === "expense" ? "active" : ""}
+                onClick={() => setPlanningFormScope("expense")}
+              >
+                Salida (gasto)
+              </button>
+            </div>
+            <div className="asset-form-grid">
+              <label className="field">
+                <span>Categoría</span>
+                <select
+                  value={planningFormCategoryId}
+                  onChange={(e) => setPlanningFormCategoryId(e.target.value)}
+                  required
+                  disabled={formCats.length === 0}
+                >
+                  {formCats.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Título</span>
+                <input
+                  value={planningFormTitle}
+                  onChange={(e) => setPlanningFormTitle(e.target.value)}
+                  required
+                  maxLength={200}
+                  placeholder="p. ej. Nómina marzo"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>Importe esperado</span>
+                <input
+                  value={planningFormAmount}
+                  onChange={(e) => setPlanningFormAmount(e.target.value)}
+                  required
+                  inputMode="decimal"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>Fecha prevista (opc.)</span>
+                <input
+                  type="date"
+                  value={planningFormDue}
+                  onChange={(e) => setPlanningFormDue(e.target.value)}
+                />
+              </label>
+            </div>
+            <label className="field">
+              <span>Notas (opc.)</span>
+              <textarea
+                value={planningFormNotes}
+                onChange={(e) => setPlanningFormNotes(e.target.value)}
+                rows={2}
+                maxLength={4000}
+              />
+            </label>
+            <div className="asset-form-actions">
+              <button
+                type="submit"
+                className="btn primary"
+                disabled={planningSaving || formCats.length === 0}
+              >
+                {editingPlanningFlowId ? "Guardar cambios" : "Añadir flujo"}
+              </button>
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={planningSaving}
+                onClick={() => closePlanningModal()}
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
+
+      <section className="panel">
+        <div className="panel-head-row">
+          <h3 className="panel-title">Lista</h3>
+          {canEdit &&
+          hasMembership &&
+          (planningIncomeCategories.length > 0 ||
+            planningExpenseCategories.length > 0) ? (
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => openNewPlanningModal()}
+            >
+              Nuevo flujo
+            </button>
+          ) : null}
+        </div>
+        {planningLoading ? (
+          <p className="muted bordered-top">Cargando…</p>
+        ) : planningFlows.length === 0 ? (
+          <p className="muted bordered-top">
+            No hay flujos planificados en esta instalación.
+          </p>
+        ) : (
+          <div className="table-scroll bordered-top">
+            <table className="assets-table">
+              <thead>
+                <tr>
+                  <th>Dirección</th>
+                  <th>Categoría</th>
+                  <th>Título</th>
+                  <th className="num">Importe</th>
+                  <th>Fecha prevista</th>
+                  <th>Notas</th>
+                  {canEdit ? <th /> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {planningFlows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{PLANNING_DIRECTION_LABEL[row.direction]}</td>
+                    <td>
+                      {categoryById.get(row.category_id)?.name ??
+                        row.category_id.slice(0, 8)}
+                    </td>
+                    <td>{row.title}</td>
+                    <td className="num">
+                      {formatCurrencyAmount(row.expected_amount, currencyIso)}
+                    </td>
+                    <td>{row.due_date ?? METRIC_DASH}</td>
+                    <td className="asset-notes-cell">
+                      {row.notes ?? METRIC_DASH}
+                    </td>
+                    {canEdit ? (
+                      <td className="asset-actions-cell">
+                        <button
+                          type="button"
+                          className="btn ghost"
+                          disabled={planningSaving}
+                          onClick={() => beginEditPlanningFlow(row)}
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost danger"
+                          disabled={planningSaving}
+                          onClick={() => deletePlanningFlowRow(row.id)}
+                        >
+                          Eliminar
+                        </button>
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>
@@ -2791,12 +3882,14 @@ function SummaryView({
   installation,
   loading,
   hasMembership,
+  ledgerPersonScope,
   summary,
   summaryBusy,
 }: {
   installation: InstallationAccess | null;
   loading: boolean;
   hasMembership: boolean;
+  ledgerPersonScope: LedgerPersonScope;
   summary: SummaryResponse | null;
   summaryBusy: boolean;
 }) {
@@ -2805,10 +3898,16 @@ function SummaryView({
 
   const showMetrics =
     hasMembership && !loading && !summaryBusy && summary !== null;
-  const nw = showMetrics ? formatSummaryAmount(summary.net_worth) : METRIC_DASH;
-  const ta = showMetrics ? formatSummaryAmount(summary.total_assets) : METRIC_DASH;
+  const currencyIso = installation?.installation.base_currency ?? "";
+
+  const nw = showMetrics
+    ? formatCurrencyAmount(summary.net_worth, currencyIso)
+    : METRIC_DASH;
+  const ta = showMetrics
+    ? formatCurrencyAmount(summary.total_assets, currencyIso)
+    : METRIC_DASH;
   const tl = showMetrics
-    ? formatSummaryAmount(summary.total_liabilities)
+    ? formatCurrencyAmount(summary.total_liabilities, currencyIso)
     : METRIC_DASH;
   const dta = showMetrics
     ? formatDebtToAssetsPct(summary.debt_to_assets_ratio)
@@ -2842,22 +3941,26 @@ function SummaryView({
         </p>
       </div>
 
+      {hasMembership && ledgerPersonScope === "mine" ? (
+        <div className="banner info-banner tight-banner">
+          Estás viendo solo registros atribuidos a tu usuario. Las filas antiguas
+          sin titular aparecen solo en <strong>Hogar (todo)</strong>.
+        </div>
+      ) : null}
+
       <div className="metric-grid">
         <MetricCard
           label="Patrimonio neto"
           value={nw}
-          suffix={currency}
           hint="Activos − pasivos (principal registrado)."
         />
         <MetricCard
           label="Activos totales"
           value={ta}
-          suffix={currency}
         />
         <MetricCard
           label="Pasivos totales"
           value={tl}
-          suffix={currency}
         />
         <MetricCard
           label="Ratio deuda / activos"
@@ -2866,17 +3969,61 @@ function SummaryView({
         />
       </div>
 
+      {hasMembership && installation ? (
+        <section className="panel">
+          <h3 className="panel-title">
+            FIRE / horizonte (solo configuración por ahora)
+          </h3>
+          <p className="muted tight">
+            Paridad con <strong>SummaryFireRow</strong> del Mac: ETA y objetivos
+            cuando exista el motor en API. Los valores siguientes ya persisten en
+            la instalación y se editan en{" "}
+            <strong>Ajustes → Proyección</strong>.
+          </p>
+          <dl className="settings-meta-dl bordered-top">
+            <div>
+              <dt>Inflación en proyección</dt>
+              <dd>
+                {installation.installation.projection_includes_inflation
+                  ? "Incluida"
+                  : "No incluida"}
+              </dd>
+            </div>
+            <div>
+              <dt>Edad objetivo horizonte</dt>
+              <dd>
+                {installation.installation.projection_target_age != null
+                  ? `${installation.installation.projection_target_age} años`
+                  : METRIC_DASH}
+              </dd>
+            </div>
+            <div>
+              <dt>Modo edad en UI</dt>
+              <dd>
+                {installation.installation.show_age_mode === "ages"
+                  ? "Edades"
+                  : installation.installation.show_age_mode === "dates"
+                    ? "Fechas"
+                    : installation.installation.show_age_mode}
+              </dd>
+            </div>
+          </dl>
+        </section>
+      ) : null}
+
       <section className="panel">
         <h3 className="panel-title">Salud financiera</h3>
         <p className="muted tight">
-          Pendiente de paridad completa: ingresos/gastos recurrentes, tasa de
-          ahorro, runway y cobertura próxima (presupuesto y planeación).
+          Ingresos y gastos recurrentes viven en la pestaña{" "}
+          <strong>Presupuesto</strong>. Aquí faltará paridad cuando calculemos
+          KPIs agregados: tasa de ahorro, runway y cobertura próxima enlazados a
+          planeación.
         </p>
         <div className="placeholder-chips">
-          <span className="chip">Ingresos recurrentes</span>
-          <span className="chip">Gastos</span>
+          <span className="chip muted">Ingresos / gastos → Presupuesto</span>
           <span className="chip">Tasa de ahorro</span>
           <span className="chip">Runway</span>
+          <span className="chip">Cobertura próxima</span>
         </div>
       </section>
 
@@ -2919,6 +4066,12 @@ function MetricCard({
 function SettingsView({
   installation,
   installationBusy,
+  categoryModalOpen,
+  categoryRenameModalOpen,
+  closeCategoryModal,
+  openNewCategoryModal,
+  closeRenameCategoryModal,
+  openRenameCategoryModal,
   setupCurrency,
   setSetupCurrency,
   setupCalendarTz,
@@ -2928,8 +4081,17 @@ function SettingsView({
   setCalendarTzDraft,
   calendarTzSaving,
   saveInstallationCalendarTz,
+  projectionInflationDraft,
+  setProjectionInflationDraft,
+  projectionTargetAgeDraft,
+  setProjectionTargetAgeDraft,
+  showAgeModeDraft,
+  setShowAgeModeDraft,
+  installationProjectionSaving,
+  saveInstallationProjection,
   health,
   healthError,
+  categoriesError,
   hasMembership,
   canEditCategories,
   isOwner,
@@ -2951,13 +4113,18 @@ function SettingsView({
   createCategory,
   deleteCategory,
   editingCategoryId,
-  setEditingCategoryId,
   editCategoryName,
   setEditCategoryName,
   saveCategoryEdit,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
+  categoryModalOpen: boolean;
+  categoryRenameModalOpen: boolean;
+  closeCategoryModal: () => void;
+  openNewCategoryModal: () => void;
+  closeRenameCategoryModal: () => void;
+  openRenameCategoryModal: (row: CategoryRow) => void;
   setupCurrency: "EUR" | "USD" | "GBP";
   setSetupCurrency: (v: "EUR" | "USD" | "GBP") => void;
   setupCalendarTz: string;
@@ -2967,8 +4134,17 @@ function SettingsView({
   setCalendarTzDraft: Dispatch<SetStateAction<string>>;
   calendarTzSaving: boolean;
   saveInstallationCalendarTz: (e: FormEvent) => void;
+  projectionInflationDraft: boolean;
+  setProjectionInflationDraft: Dispatch<SetStateAction<boolean>>;
+  projectionTargetAgeDraft: string;
+  setProjectionTargetAgeDraft: Dispatch<SetStateAction<string>>;
+  showAgeModeDraft: "dates" | "ages";
+  setShowAgeModeDraft: Dispatch<SetStateAction<"dates" | "ages">>;
+  installationProjectionSaving: boolean;
+  saveInstallationProjection: (e: FormEvent) => void;
   health: HealthResponse | null;
   healthError: string | null;
+  categoriesError: string | null;
   hasMembership: boolean;
   canEditCategories: boolean;
   isOwner: boolean;
@@ -2994,11 +4170,15 @@ function SettingsView({
   createCategory: (e: FormEvent) => void;
   deleteCategory: (id: string) => void;
   editingCategoryId: string | null;
-  setEditingCategoryId: Dispatch<SetStateAction<string | null>>;
   editCategoryName: string;
   setEditCategoryName: Dispatch<SetStateAction<string>>;
   saveCategoryEdit: (id: string) => void;
 }) {
+  const renamingCat =
+    editingCategoryId === null
+      ? undefined
+      : categories.find((x) => x.id === editingCategoryId);
+
   const filteredCategories =
     categoryScopeFilter === "all"
       ? categories
@@ -3177,9 +4357,89 @@ function SettingsView({
         </section>
       ) : null}
 
+      {hasMembership && isOwner ? (
+        <section className="panel">
+          <h3 className="panel-title">Proyección y modo de edad</h3>
+          <p className="muted tight">
+            Alineado a <strong>Settings — Installation</strong> del checklist:
+            inflación en series proyectadas, edad objetivo del horizonte (65–105
+            o vacío) y cómo mostrar el tiempo en la UI (fechas vs edades).
+          </p>
+          <form
+            className="stack bordered-top"
+            onSubmit={saveInstallationProjection}
+          >
+            <label className="field checkbox-field">
+              <input
+                type="checkbox"
+                checked={projectionInflationDraft}
+                onChange={(e) =>
+                  setProjectionInflationDraft(e.target.checked)
+                }
+              />
+              <span>Incluir inflación en la proyección de patrimonio</span>
+            </label>
+            <label className="field">
+              <span>Edad objetivo del horizonte (opc.)</span>
+              <input
+                value={projectionTargetAgeDraft}
+                onChange={(e) => setProjectionTargetAgeDraft(e.target.value)}
+                inputMode="numeric"
+                placeholder="Vacío = sin edad fija"
+                autoComplete="off"
+              />
+              <span className="hint">
+                Entero 65–105; deja vacío para borrar el valor guardado.
+              </span>
+            </label>
+            <label className="field">
+              <span>Modo edad en la interfaz</span>
+              <select
+                value={showAgeModeDraft}
+                onChange={(e) =>
+                  setShowAgeModeDraft(
+                    e.target.value === "ages" ? "ages" : "dates",
+                  )
+                }
+              >
+                <option value="dates">Fechas (referencia Mac: dates)</option>
+                <option value="ages">Edades (referencia Mac: ages)</option>
+              </select>
+            </label>
+            <button
+              type="submit"
+              className="btn primary"
+              disabled={installationProjectionSaving}
+            >
+              Guardar proyección
+            </button>
+          </form>
+        </section>
+      ) : hasMembership ? (
+        <section className="panel muted-panel">
+          <h3 className="panel-title">Proyección y modo de edad</h3>
+          <p className="muted tight">
+            Solo el propietario puede cambiar inflación de proyección, edad
+            objetivo y modo fechas/edades. Los valores actuales aparecen en{" "}
+            <strong>Instalación</strong> más abajo.
+          </p>
+        </section>
+      ) : null}
+
       {hasMembership ? (
         <section className="panel">
-          <h3 className="panel-title">Categorías</h3>
+          <div className="panel-head-row">
+            <h3 className="panel-title">Categorías</h3>
+            {canEditCategories ? (
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => openNewCategoryModal()}
+              >
+                Nueva categoría
+              </button>
+            ) : null}
+          </div>
           <p className="muted tight">
             Ámbitos alineados al cliente de referencia. No hay categorías por
             defecto: créalas aquí o al importar datos.
@@ -3206,42 +4466,109 @@ function SettingsView({
             </label>
           </div>
           {canEditCategories ? (
-            <form
-              className="category-add-row bordered-top"
-              onSubmit={createCategory}
+            <Modal
+              title="Nueva categoría"
+              open={categoryModalOpen}
+              onClose={closeCategoryModal}
             >
-              <label className="field">
-                <span>Ámbito</span>
-                <select
-                  value={newCatScope}
-                  onChange={(e) =>
-                    setNewCatScope(e.target.value as CategoryScope)
-                  }
+              <form className="asset-form stack" onSubmit={createCategory}>
+                <ModalFormError message={categoriesError} />
+                <label className="field">
+                  <span>Ámbito</span>
+                  <select
+                    value={newCatScope}
+                    onChange={(e) =>
+                      setNewCatScope(e.target.value as CategoryScope)
+                    }
+                  >
+                    {CATEGORY_SCOPES.map((s) => (
+                      <option key={s} value={s}>
+                        {CATEGORY_SCOPE_LABEL[s]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Nombre</span>
+                  <input
+                    value={newCatName}
+                    onChange={(e) => setNewCatName(e.target.value)}
+                    maxLength={200}
+                    placeholder="p. ej. Efectivo"
+                    autoComplete="off"
+                  />
+                </label>
+                <div className="asset-form-actions">
+                  <button
+                    type="submit"
+                    className="btn primary"
+                    disabled={categorySaving}
+                  >
+                    Añadir
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={categorySaving}
+                    onClick={() => closeCategoryModal()}
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </form>
+            </Modal>
+            <Modal
+              title="Renombrar categoría"
+              open={categoryRenameModalOpen && editingCategoryId !== null}
+              onClose={closeRenameCategoryModal}
+            >
+              {renamingCat ? (
+                <form
+                  className="asset-form stack"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (editingCategoryId) {
+                      void saveCategoryEdit(editingCategoryId);
+                    }
+                  }}
                 >
-                  {CATEGORY_SCOPES.map((s) => (
-                    <option key={s} value={s}>
-                      {CATEGORY_SCOPE_LABEL[s]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field category-add-name">
-                <span>Nombre</span>
-                <input
-                  value={newCatName}
-                  onChange={(e) => setNewCatName(e.target.value)}
-                  maxLength={200}
-                  placeholder="p. ej. Efectivo"
-                />
-              </label>
-              <button
-                type="submit"
-                className="btn primary category-add-submit"
-                disabled={categorySaving}
-              >
-                Añadir
-              </button>
-            </form>
+                  <ModalFormError message={categoriesError} />
+                  <p className="muted tight">
+                    Ámbito:{" "}
+                    <strong>{CATEGORY_SCOPE_LABEL[renamingCat.scope]}</strong>
+                  </p>
+                  <label className="field">
+                    <span>Nombre</span>
+                    <input
+                      value={editCategoryName}
+                      onChange={(e) => setEditCategoryName(e.target.value)}
+                      maxLength={200}
+                      aria-label="Nuevo nombre"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <div className="asset-form-actions">
+                    <button
+                      type="submit"
+                      className="btn primary"
+                      disabled={categorySaving || !editCategoryName.trim()}
+                    >
+                      Guardar
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      disabled={categorySaving}
+                      onClick={() => closeRenameCategoryModal()}
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <p className="muted tight">Categoría no encontrada.</p>
+              )}
+            </Modal>
           ) : (
             <p className="muted bordered-top">
               Solo lectura: tu rol no permite crear ni editar categorías.
@@ -3256,63 +4583,27 @@ function SettingsView({
                   <span className="category-scope-tag">
                     {CATEGORY_SCOPE_LABEL[c.scope]}
                   </span>
-                  {editingCategoryId === c.id ? (
-                    <div className="category-edit-row">
-                      <input
-                        className="category-edit-input"
-                        value={editCategoryName}
-                        onChange={(e) => setEditCategoryName(e.target.value)}
-                        maxLength={200}
-                        aria-label="Nuevo nombre"
-                      />
-                      <button
-                        type="button"
-                        className="btn primary"
-                        disabled={categorySaving}
-                        onClick={() => saveCategoryEdit(c.id)}
-                      >
-                        Guardar
-                      </button>
+                  <span className="category-name">{c.name}</span>
+                  {canEditCategories ? (
+                    <div className="category-row-actions">
                       <button
                         type="button"
                         className="btn ghost"
                         disabled={categorySaving}
-                        onClick={() => {
-                          setEditingCategoryId(null);
-                          setEditCategoryName("");
-                        }}
+                        onClick={() => openRenameCategoryModal(c)}
                       >
-                        Cancelar
+                        Renombrar
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost danger"
+                        disabled={categorySaving}
+                        onClick={() => deleteCategory(c.id)}
+                      >
+                        Eliminar
                       </button>
                     </div>
-                  ) : (
-                    <>
-                      <span className="category-name">{c.name}</span>
-                      {canEditCategories ? (
-                        <div className="category-row-actions">
-                          <button
-                            type="button"
-                            className="btn ghost"
-                            disabled={categorySaving}
-                            onClick={() => {
-                              setEditingCategoryId(c.id);
-                              setEditCategoryName(c.name);
-                            }}
-                          >
-                            Renombrar
-                          </button>
-                          <button
-                            type="button"
-                            className="btn ghost danger"
-                            disabled={categorySaving}
-                            onClick={() => deleteCategory(c.id)}
-                          >
-                            Eliminar
-                          </button>
-                        </div>
-                      ) : null}
-                    </>
-                  )}
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -3340,8 +4631,24 @@ function SettingsView({
               <dd>{installation.role}</dd>
             </div>
             <div>
-              <dt>Modo edad</dt>
+              <dt>Modo edad (UI)</dt>
               <dd>{installation.installation.show_age_mode}</dd>
+            </div>
+            <div>
+              <dt>Inflación en proyección</dt>
+              <dd>
+                {installation.installation.projection_includes_inflation
+                  ? "sí"
+                  : "no"}
+              </dd>
+            </div>
+            <div>
+              <dt>Edad objetivo horizonte</dt>
+              <dd>
+                {installation.installation.projection_target_age != null
+                  ? String(installation.installation.projection_target_age)
+                  : "—"}
+              </dd>
             </div>
           </dl>
         ) : (
@@ -3381,14 +4688,147 @@ function SettingsView({
   );
 }
 
+function RetirementView({
+  installation,
+  installationBusy,
+  hasMembership,
+}: {
+  installation: InstallationAccess | null;
+  installationBusy: boolean;
+  hasMembership: boolean;
+}) {
+  const currency =
+    installation?.installation.base_currency ?? METRIC_DASH;
+  const horizonAge = installation?.installation.projection_target_age;
+  const inflation = installation?.installation.projection_includes_inflation;
+
+  return (
+    <div className="workspace">
+      <div className="workspace-header">
+        <h2 className="workspace-title">Jubilación (FIRE)</h2>
+        <p className="workspace-sub">
+          {installationBusy
+            ? "Cargando instalación…"
+            : !hasMembership
+              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
+              : `Paridad con pestaña Retirement del Mac: KPIs FIRE, modos de gasto y pensiones. Moneda base ${currency}. Oráculos numéricos: docs/spec/ORACLE_TESTS.md.`}
+        </p>
+      </div>
+
+      {!installationBusy && !hasMembership ? (
+        <div className="banner info-banner">
+          Cuando tengas acceso, aquí verás el panel FIRE completo.
+        </div>
+      ) : null}
+
+      <section className="panel">
+        <h3 className="panel-title">KPIs y objetivos</h3>
+        <p className="muted tight">
+          Objetivo de cartera, gasto anual objetivo, ETA FIRE, gap y fases —
+          pendiente de motor <code>fireMilestone</code> en API (
+          <code>SummaryFireRow</code> en Mac).
+        </p>
+        <div className="placeholder-chips bordered-top">
+          <span className="chip muted">ETA / gap → backend</span>
+          <span className="chip muted">Modo fecha vs edad → ya en instalación</span>
+        </div>
+        {hasMembership && installation ? (
+          <p className="muted bordered-top tight">
+            Horizonte configurado: edad objetivo{" "}
+            <strong>{horizonAge != null ? `${horizonAge} años` : METRIC_DASH}</strong>
+            ; inflación en proyección{" "}
+            <strong>{inflation ? "activada" : "desactivada"}</strong> (editar en{" "}
+            <strong>Ajustes → Proyección</strong>).
+          </p>
+        ) : null}
+      </section>
+
+      <section className="panel muted-panel">
+        <h3 className="panel-title">Gasto en jubilación y retiradas</h3>
+        <p className="muted tight">
+          Modos <code>FireRetirementExpenseMode</code> y{" "}
+          <code>FireWithdrawalMode</code> (fijo vs auto, tasa, colchón) —
+          contratos en checklist; UI editable cuando exponga la API.
+        </p>
+      </section>
+
+      <section className="panel muted-panel">
+        <h3 className="panel-title">Pensiones e IRPF</h3>
+        <p className="muted tight">
+          Pensiones por persona y tramos ganancias capital / renta pensión (defaults
+          España opcional en Mac) — sin datos locales hasta CRUD de personas y
+          motor fiscal en servidor.
+        </p>
+      </section>
+    </div>
+  );
+}
+
+function ProjectionView({
+  installation,
+  installationBusy,
+  hasMembership,
+}: {
+  installation: InstallationAccess | null;
+  installationBusy: boolean;
+  hasMembership: boolean;
+}) {
+  const currency =
+    installation?.installation.base_currency ?? METRIC_DASH;
+  const inflation = installation?.installation.projection_includes_inflation;
+
+  return (
+    <div className="workspace">
+      <div className="workspace-header">
+        <h2 className="workspace-title">Proyección</h2>
+        <p className="workspace-sub">
+          {installationBusy
+            ? "Cargando instalación…"
+            : !hasMembership
+              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
+              : `Serie mensual de patrimonio neto y capital aportado; modo inflación acorde al hogar (${inflation ? "inflación incluida en modelo objetivo" : "sin ajuste inflacionario en modelo objetivo"}). Moneda ${currency}.`}
+        </p>
+      </div>
+
+      {!installationBusy && !hasMembership ? (
+        <div className="banner info-banner">
+          Cuando tengas acceso, aquí irá el gráfico interactivo tipo Mac.
+        </div>
+      ) : null}
+
+      <section className="panel">
+        <h3 className="panel-title">Serie y motor</h3>
+        <p className="muted tight">
+          Contrato <code>projectNetWorthSeries</code>: puntos mensuales, línea de
+          capital aportado, baseline de hitos con lógica tipo{" "}
+          <code>upcomingNetForMilestoneBaseline</code>.
+        </p>
+        <div className="placeholder-chips bordered-top">
+          <span className="chip muted">Zoom / pan / marcadores</span>
+          <span className="chip muted">Sin botón «calcular» global</span>
+        </div>
+      </section>
+
+      <section className="panel muted-panel">
+        <h3 className="panel-title">Visualización</h3>
+        <p className="muted tight">
+          Gráfico de líneas (canvas/SVG) enlazado al mismo dataset que el Mac;
+          esta web mostrará datos cuando el endpoint de proyección exista.
+        </p>
+      </section>
+    </div>
+  );
+}
+
 function PlaceholderTab({ tabLabel }: { tabLabel: string }) {
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">{tabLabel}</h2>
         <p className="workspace-sub">
-          Esta sección replica las capacidades del cliente de referencia;
-          conectaremos formularios y datos cuando el backend exponga el modelo.
+          Pendiente de backend y UI alineados al cliente de referencia (ver{" "}
+          <code>docs/spec/PARITY_CHECKLIST.md</code>). Las pestañas ya enlazadas
+          —Activos, Pasivos, Presupuesto— sirven de modelo para las que restan.
         </p>
       </div>
       <div className="panel placeholder-hero">

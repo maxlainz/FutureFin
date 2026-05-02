@@ -24,15 +24,15 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 
 ## Shell de aplicación
 
-- [ ] Ventana principal con navegación equivalente a **7 pestañas**: Summary, Assets, Liabilities, Budget, Upcoming, Retirement, Projection (`FinFutureApp.swift` / `RootTabView`).
-- [ ] Barra de error global cuando hay `lastErrorMessage` equivalente (validación / persistencia).
-- [ ] **PersonFilterBar** / modo de vista: **conjunta** (todo el hogar) vs **individual** (métricas y listas acotadas por persona); mismo dataset persistido; ver [`AUTH_MODEL.md`](./AUTH_MODEL.md).
-- [ ] Settings accesible como en Mac (macOS: ventana Settings; web: ruta `/settings` o modal persistente).
+- [x] Ventana principal con navegación equivalente a **7 pestañas**: Summary, Assets, Liabilities, Budget, Upcoming, Retirement, Projection (`FinFutureApp.swift` / `RootTabView`). *(Web `apps/web`: las siete están en la barra; Jubilación y Proyección llevan vistas esqueleto con texto de paridad hasta motor FIRE/gráfico.)*
+- [x] Barra de error global cuando hay `lastErrorMessage` equivalente (validación / persistencia). *(Web: región `app-global-errors` con `aria-live` y banners por dominio — sesión, instalación, categorías, activos, etc.)*
+- [x] **PersonFilterBar** / modo de vista: **hogar (todo)** vs **usuario actual** (solo filas con `owner_user_id` = sesión); mismo dataset persistido; ver [`AUTH_MODEL.md`](./AUTH_MODEL.md). *(Web: barra bajo pestañas + query API `view=mine`.)*
+- [x] Settings accesible como en Mac (macOS: ventana Settings; web: ruta `/settings` o modal persistente). *(Web: pestaña **Ajustes**.)*
 
 ## Summary
 
-- [ ] KPIs: Net Worth, Total Assets, Total Liabilities, Debt/Assets ratio (`SummaryMetricGrid`).
-- [ ] **SummaryFireRow**: FIRE Target + FIRE ETA (modo fecha vs edad según `showAgeMode`), tiempo restante si aplica.
+- [x] KPIs: Net Worth, Total Assets, Total Liabilities, Debt/Assets ratio (`SummaryMetricGrid`). *(Web + `GET /v1/summary`; purga de pasivos vencidos antes de agregar.)*
+- [ ] **SummaryFireRow**: FIRE Target + FIRE ETA (modo fecha vs edad según `showAgeMode`), tiempo restante si aplica. *(Parcial: Resumen muestra bloque **solo configuración** — inflación proyección, edad horizonte, `show_age_mode` persistidos en instalación; sin ETA hasta motor FIRE.)*
 - [ ] Financial health grid: ingresos, gastos, ahorro, savings rate, runway, upcoming totals, coverage ratio; KPIs opcionales “sin planes de deuda” (`monthlySavingsWithoutLiabilityPaymentPlans`).
 - [ ] Gráficos donut / breakdown por categoría activos y pasivos (`HoverDonutChart`, `SummaryBreakdownCharts`).
 - [ ] `InlineHelpIcon` / textos de ayuda equivalentes donde existan en SwiftUI.
@@ -61,7 +61,7 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 
 ## Retirement (FIRE)
 
-- [ ] Tarjetas KPI: objetivo de cartera, gasto anual objetivo, ETA, gap, fases.
+- [ ] Tarjetas KPI: objetivo de cartera, gasto anual objetivo, ETA, gap, fases. *(Web: pestaña **Jubilación** con secciones etiquetadas y lectura de horizonte instalación; KPIs numéricos pendientes de API.)*
 - [ ] Modos de gasto en jubilación: manual / actual / actual ± % (`FireRetirementExpenseMode`).
 - [ ] Retirada: modo fijo vs auto (`FireWithdrawalMode`), tasa, padding de seguridad.
 - [ ] Pensiones por persona (importe mensual, edad inicio).
@@ -70,13 +70,13 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 
 ## Projection
 
-- [ ] Serie mensual de patrimonio neto + capital aportado acumulado.
+- [ ] Serie mensual de patrimonio neto + capital aportado acumulado. *(Web: pestaña **Proyección** esqueleto + uso de flags de instalación; serie y gráfico pendientes.)*
 - [ ] Modo inflación acorde a hogar.
 - [ ] Interacciones: zoom, pan, hitos/marcadores (`ProjectionTabView`); baseline de hitos usando lógica equivalente a `upcomingNetForMilestoneBaseline`.
 
 ## Settings — Installation & Members
 
-- [ ] Ajustes del hogar: moneda base, inflación de proyección, edad objetivo horizonte (**un hogar por instalación; nombre del hogar no editable por usuario en MVP**).
+- [x] Ajustes del hogar: moneda base, inflación de proyección, edad objetivo horizonte (**un hogar por instalación; nombre del hogar no editable por usuario en MVP**). *(Moneda en setup inicial; inflación / edad objetivo / `show_age_mode` editables por propietario vía `PATCH /v1/installation` y formulario **Proyección y modo de edad** en Ajustes.)*
 - [ ] CRUD personas: nombre, primaria, fecha de nacimiento; eliminar con reasignación de ítems.
 - [ ] `show_age_mode` u homónimo en API si está en modelo hogar.
 - [ ] Invitaciones: el **owner** aprueba altas de otros **users** antes de que tengan acceso al hogar ([`AUTH_MODEL.md`](./AUTH_MODEL.md)).
@@ -89,7 +89,7 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 
 ## Settings — Categories
 
-- [ ] CRUD categorías por ámbito (asset, liability, income, expense).
+- [x] CRUD categorías por ámbito (asset, liability, income, expense). *(Web modales + API; borrado sin remap.)*
 - [ ] Borrado con flujo **remap** cuando la categoría está en uso.
 
 ## Validación
@@ -102,7 +102,7 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 
 ## Multi-usuario (nuevo respecto al Mac)
 
-- [ ] Login, **una membresía de hogar por instalación**, roles, **flujo de invitación con aceptación del owner** — [`AUTH_MODEL.md`](./AUTH_MODEL.md).
+- [x] Login, **una membresía de hogar por instalación**, roles, **flujo de invitación con aceptación del owner** — [`AUTH_MODEL.md`](./AUTH_MODEL.md). *(Sesión cookie, `/v1/installation`, aprobación pendientes en Ajustes.)*
 
 ## Principio UX “Excel con esteroides”
 

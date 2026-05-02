@@ -33,10 +33,10 @@ Este documento fija el **contrato de identidad y autorización** para la línea 
 ## Vistas individual vs conjunta (UX)
 
 - Los datos financieros son **un solo conjunto** persistido en el servidor para esa instalación.
-- La interfaz ofrece al menos dos **modos de visualización** (filtros de cliente, no muros de autorización entre cónyuges en MVP):
-  - **Vista individual:** métricas y listas acotadas a lo asociado a una persona (o al usuario encaja con «su» persona cuando exista modelo).
-  - **Vista conjunta:** todo el ámbito agregado (equivalente a «todo el hogar» en el Mac).
-- Este comportamiento replica la idea del **PersonFilterBar** del cliente de referencia: mismo dataset compartido, distinto alcance de UI.
+- La interfaz ofrece **exactamente dos** modos de visualización (filtros de cliente, no muros de autorización entre cónyuges en MVP):
+  - **Hogar (todo):** todo el ámbito agregado de la instalación (equivalente a vista conjunta en el Mac).
+  - **Usuario actual:** métricas y listas acotadas a filas atribuidas al **`User` con sesión activa** vía columna `owner_user_id` en activos, pasivos, líneas de presupuesto persistidas, flujos de planeación y sus sumarios (`GET ?view=mine`). Las filas legacy sin titular solo aparecen en vista hogar.
+- Replica la idea del **PersonFilterBar** del cliente de referencia con estas dos opciones únicas.
 
 ## Visibilidad y privacidad entre miembros
 

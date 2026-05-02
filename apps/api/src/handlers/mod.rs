@@ -8,5 +8,7 @@ pub mod installation;
 pub mod liabilities;
 pub mod membership;
 pub mod pending_users;
+pub mod person_view;
+pub mod planning;
 pub mod session;
 pub mod summary;

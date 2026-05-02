@@ -1,9 +1,10 @@
 use crate::error::ApiError;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
+use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
-use axum::extract::{Extension, Path};
+use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
@@ -82,6 +83,7 @@ struct AssetRow {
     is_liquid: bool,
     notes: Option<String>,
     sort_index: i32,
+    owner_user_id: Option<Uuid>,
 }
 
 fn normalize_name(raw: &str) -> Result<String, ApiError> {
@@ -168,6 +170,9 @@ fn row_to_response(r: AssetRow) -> AssetResponse {
     get,
     path = "/v1/assets",
     tag = "assets",
+    params(
+        ("view" = Option<String>, Query, description = "`mine` = rows attributed to the signed-in user; omit or other value = full household."),
+    ),
     responses(
         (status = 200, description = "Assets for the installation", body = [AssetResponse]),
         (status = 401, description = "No valid session"),
@@ -178,20 +183,38 @@ fn row_to_response(r: AssetRow) -> AssetResponse {
 pub async fn list_assets(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
+    Query(q): Query<LedgerViewQuery>,
 ) -> Result<Json<Vec<AssetResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    let rows: Vec<AssetRow> = sqlx::query_as(
-        r#"SELECT id, category_id, name, current_value, purchase_price,
-                  is_liquid, notes, sort_index
-           FROM assets
-           WHERE installation_id = $1
-           ORDER BY sort_index ASC, name ASC"#,
-    )
-    .bind(iid)
-    .fetch_all(&state.pool)
-    .await?;
+    let rows: Vec<AssetRow> = match q.resolve() {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT id, category_id, name, current_value, purchase_price,
+                          is_liquid, notes, sort_index, owner_user_id
+                   FROM assets
+                   WHERE installation_id = $1
+                   ORDER BY sort_index ASC, name ASC"#,
+            )
+            .bind(iid)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT id, category_id, name, current_value, purchase_price,
+                          is_liquid, notes, sort_index, owner_user_id
+                   FROM assets
+                   WHERE installation_id = $1 AND owner_user_id = $2
+                   ORDER BY sort_index ASC, name ASC"#,
+            )
+            .bind(iid)
+            .bind(user.id.0)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
 
     Ok(Json(rows.into_iter().map(row_to_response).collect()))
 }
@@ -234,11 +257,11 @@ pub async fn create_asset(
     let row: AssetRow = sqlx::query_as(
         r#"INSERT INTO assets (
                installation_id, category_id, name, current_value,
-               purchase_price, is_liquid, notes, sort_index
+               purchase_price, is_liquid, notes, sort_index, owner_user_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING id, category_id, name, current_value, purchase_price,
-                     is_liquid, notes, sort_index"#,
+                     is_liquid, notes, sort_index, owner_user_id"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -248,6 +271,7 @@ pub async fn create_asset(
     .bind(is_liquid)
     .bind(&notes)
     .bind(sort_index)
+    .bind(user.id.0)
     .fetch_one(&state.pool)
     .await?;
 
@@ -297,7 +321,7 @@ pub async fn patch_asset(
 
     let row: Option<AssetRow> = sqlx::query_as(
         r#"SELECT id, category_id, name, current_value, purchase_price,
-                  is_liquid, notes, sort_index
+                  is_liquid, notes, sort_index, owner_user_id
            FROM assets
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -357,7 +381,7 @@ pub async fn patch_asset(
                updated_at = now()
            WHERE id = $8 AND installation_id = $9
            RETURNING id, category_id, name, current_value, purchase_price,
-                     is_liquid, notes, sort_index"#,
+                     is_liquid, notes, sort_index, owner_user_id"#,
     )
     .bind(new_cat)
     .bind(&new_name)

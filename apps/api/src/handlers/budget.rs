@@ -2,9 +2,10 @@ use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::liabilities::{purge_expired_liabilities, PaymentFrequency};
 use crate::handlers::membership::role_can_write;
+use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
-use axum::extract::{Extension, Path};
+use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
@@ -127,6 +128,7 @@ struct BudgetEntryJoinRow {
     frequency: String,
     notes: Option<String>,
     sort_index: i32,
+    owner_user_id: Option<Uuid>,
 }
 
 #[derive(Debug, FromRow)]
@@ -208,7 +210,7 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
     }
 }
 
-async fn assert_budget_category(
+pub(crate) async fn assert_budget_category(
     pool: &sqlx::PgPool,
     installation_id: Uuid,
     category_id: Uuid,
@@ -241,6 +243,9 @@ async fn assert_budget_category(
     get,
     path = "/v1/budget",
     tag = "budget",
+    params(
+        ("view" = Option<String>, Query, description = "`mine` = persisted budget rows attributed to the signed-in user (derived liability lines filtered the same); omit = household."),
+    ),
     responses(
         (status = 200, description = "Budget snapshot: persisted entries, liability-derived lines (plan end > today), monthly-normalized totals", body = BudgetSnapshotResponse),
         (status = 401, description = "No valid session"),
@@ -251,6 +256,7 @@ async fn assert_budget_category(
 pub async fn get_budget_snapshot(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
+    Query(q): Query<LedgerViewQuery>,
 ) -> Result<Json<BudgetSnapshotResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
@@ -258,17 +264,35 @@ pub async fn get_budget_snapshot(
     let today = installation_naive_today(&state.pool, iid).await?;
     purge_expired_liabilities(&state.pool, iid).await?;
 
-    let rows: Vec<BudgetEntryJoinRow> = sqlx::query_as(
-        r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                  b.frequency AS frequency, b.notes, b.sort_index
-           FROM budget_entries b
-           JOIN categories c ON c.id = b.category_id
-           WHERE b.installation_id = $1
-           ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
-    )
-    .bind(iid)
-    .fetch_all(&state.pool)
-    .await?;
+    let rows: Vec<BudgetEntryJoinRow> = match q.resolve() {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
+                          b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
+                   FROM budget_entries b
+                   JOIN categories c ON c.id = b.category_id
+                   WHERE b.installation_id = $1
+                   ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
+            )
+            .bind(iid)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
+                          b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
+                   FROM budget_entries b
+                   JOIN categories c ON c.id = b.category_id
+                   WHERE b.installation_id = $1 AND b.owner_user_id = $2
+                   ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
+            )
+            .bind(iid)
+            .bind(user.id.0)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
 
     let mut entries = Vec::with_capacity(rows.len());
     let mut income_m = Decimal::ZERO;
@@ -284,20 +308,42 @@ pub async fn get_budget_snapshot(
         entries.push(row_to_entry_response(r)?);
     }
 
-    let derived_raw: Vec<LiabilityDerivedRow> = sqlx::query_as(
-        r#"SELECT id, category_id, label, payment_amount, payment_frequency
-           FROM liabilities
-           WHERE
-               installation_id = $1
-               AND payment_amount IS NOT NULL
-               AND payment_frequency IS NOT NULL
-               AND payment_end_date IS NOT NULL
-               AND payment_end_date > $2"#,
-    )
-    .bind(iid)
-    .bind(today)
-    .fetch_all(&state.pool)
-    .await?;
+    let derived_raw: Vec<LiabilityDerivedRow> = match q.resolve() {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT id, category_id, label, payment_amount, payment_frequency
+                   FROM liabilities
+                   WHERE
+                       installation_id = $1
+                       AND payment_amount IS NOT NULL
+                       AND payment_frequency IS NOT NULL
+                       AND payment_end_date IS NOT NULL
+                       AND payment_end_date > $2"#,
+            )
+            .bind(iid)
+            .bind(today)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT id, category_id, label, payment_amount, payment_frequency
+                   FROM liabilities
+                   WHERE
+                       installation_id = $1
+                       AND owner_user_id = $3
+                       AND payment_amount IS NOT NULL
+                       AND payment_frequency IS NOT NULL
+                       AND payment_end_date IS NOT NULL
+                       AND payment_end_date > $2"#,
+            )
+            .bind(iid)
+            .bind(today)
+            .bind(user.id.0)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
 
     let mut derived_from_liabilities = Vec::with_capacity(derived_raw.len());
     let mut expense_der = Decimal::ZERO;
@@ -372,9 +418,10 @@ pub async fn create_budget_entry(
 
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO budget_entries (
-               installation_id, category_id, label, amount, frequency, notes, sort_index
+               installation_id, category_id, label, amount, frequency, notes, sort_index,
+               owner_user_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id"#,
     )
     .bind(iid)
@@ -384,12 +431,13 @@ pub async fn create_budget_entry(
     .bind(&freq_str)
     .bind(&notes)
     .bind(sort_index)
+    .bind(user.id.0)
     .fetch_one(&state.pool)
     .await?;
 
     let row: BudgetEntryJoinRow = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                  b.frequency AS frequency, b.notes, b.sort_index
+                  b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1"#,
@@ -446,7 +494,7 @@ pub async fn patch_budget_entry(
 
     let row: Option<BudgetEntryJoinRow> = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                  b.frequency AS frequency, b.notes, b.sort_index
+                  b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1 AND b.installation_id = $2"#,
@@ -517,7 +565,8 @@ pub async fn patch_budget_entry(
                      budget_entries.amount,
                      budget_entries.frequency,
                      budget_entries.notes,
-                     budget_entries.sort_index"#,
+                     budget_entries.sort_index,
+                     budget_entries.owner_user_id"#,
     )
     .bind(new_cat)
     .bind(&new_label)
