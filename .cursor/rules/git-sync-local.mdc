@@ -1,0 +1,10 @@
+---
+description: Mantener el clon local alineado con el remoto tras cambios
+alwaysApply: true
+---
+
+# Sincronización Git local
+
+- Al **retomar** trabajo en este repo o tras enterarte de cambios en remoto: ejecuta `git pull --ff-only` en la rama activa (p. ej. `main` / `dev`) antes de asumir el estado del árbol.
+- Tras **terminar** un cambio propio (commit y `git push` cuando aplique): ejecuta de nuevo `git pull --ff-only` para incorporar posibles commits paralelos y dejar el working tree coherente con `origin`.
+- Si `pull` no puede hacer fast-forward, informa al usuario y no reescribas historia sin instrucciones explícitas.
