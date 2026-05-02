@@ -222,8 +222,10 @@ export default function App() {
         <h1>FutureFin</h1>
         <p className="muted tight">
           En Docker, interfaz y API comparten{" "}
-          <code>http://127.0.0.1:8080</code>. Con Vite, desarrollo en{" "}
-          <code>:5173</code> con proxy a la API.
+          <code>http://127.0.0.1:8080</code>. En desarrollo con Vite, la
+          interfaz suele ir en <code>:8080</code> y la API en{" "}
+          <code>:8081</code> (proxy); si el puerto está ocupado, Vite puede usar
+          otro — revisa la consola.
         </p>
       </header>
 
