@@ -51,11 +51,11 @@ use utoipa::OpenApi;
         ),
         (
             name = "households",
-            description = "Multi-tenant households and memberships (`AUTH_MODEL.md`)"
+            description = "Household singleton per installation and memberships — see `docs/spec/AUTH_MODEL.md`"
         ),
         (
             name = "persons",
-            description = "People within a household (Person vs User — see `AUTH_MODEL.md`)"
+            description = "Domain persons in the installation household (Person vs User — `AUTH_MODEL.md`)"
         ),
     ),
 )]

@@ -26,7 +26,7 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 
 - [ ] Ventana principal con navegación equivalente a **7 pestañas**: Summary, Assets, Liabilities, Budget, Upcoming, Retirement, Projection (`FinFutureApp.swift` / `RootTabView`).
 - [ ] Barra de error global cuando hay `lastErrorMessage` equivalente (validación / persistencia).
-- [ ] **PersonFilterBar**: alcance “todo el hogar” vs una persona (filtra vistas y métricas como `filteredAssets`, etc.).
+- [ ] **PersonFilterBar** / modo de vista: **conjunta** (todo el hogar) vs **individual** (métricas y listas acotadas por persona); mismo dataset persistido; ver [`AUTH_MODEL.md`](./AUTH_MODEL.md).
 - [ ] Settings accesible como en Mac (macOS: ventana Settings; web: ruta `/settings` o modal persistente).
 
 ## Summary
@@ -76,9 +76,10 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 
 ## Settings — Household & Members
 
-- [ ] Renombrar hogar, moneda, inflación de proyección, edad objetivo horizonte.
+- [ ] Ajustes del hogar: moneda base, inflación de proyección, edad objetivo horizonte (**un hogar por instalación; nombre del hogar no editable por usuario en MVP**).
 - [ ] CRUD personas: nombre, primaria, fecha de nacimiento; eliminar con reasignación de ítems.
 - [ ] `show_age_mode` u homónimo en API si está en modelo hogar.
+- [ ] Invitaciones: el **owner** aprueba altas de otros **users** antes de que tengan acceso al hogar ([`AUTH_MODEL.md`](./AUTH_MODEL.md)).
 
 ## Settings — Backups (capacidad, UX web)
 
@@ -101,7 +102,7 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 
 ## Multi-usuario (nuevo respecto al Mac)
 
-- [ ] Login, membresía hogar, roles — [`AUTH_MODEL.md`](./AUTH_MODEL.md).
+- [ ] Login, **una membresía de hogar por instalación**, roles, **flujo de invitación con aceptación del owner** — [`AUTH_MODEL.md`](./AUTH_MODEL.md).
 
 ## Principio UX “Excel con esteroides”
 

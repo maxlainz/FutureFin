@@ -223,8 +223,12 @@ Objetivo declarado: **Docker + self-host + acceso desde otros dispositivos + mul
 
 ---
 
-## Pregunta abierta derivada de multi-usuario
+## Multi-usuario (cerrado en especificación)
 
-Convendrá concretar en una siguiente iteración de especificación: **¿un usuario puede pertenecer a varios hogares?** ¿**roles** (admin del hogar vs miembro solo lectura)? ¿Los datos financieros son siempre visibles para todos los miembros del hogar o hay **ámbitos privados**? Esto no está modelado en el código actual y guiará el diseño del servidor.
+Decisión de producto reflejada en [`docs/spec/AUTH_MODEL.md`](../spec/AUTH_MODEL.md):
 
-> **Nota:** En `docs/spec/AUTH_MODEL.md` ya hay decisiones MVP propuestas (multi-hogar sí, roles owner/member/viewer, sin muros de privacidad por persona en v1).
+- **Un hogar por instalación** (sin selector ni creación libre de varios hogares).
+- **Nombre del hogar no editable** por el usuario en MVP.
+- **Invitaciones:** solo el **`owner`** aprueba el alta de nuevos usuarios al hogar.
+- **Roles:** `owner`, `member`, `viewer` (este último recomendado si el esfuerzo es bajo).
+- **Datos:** un único conjunto persistido; **vista individual vs conjunta** es filtro de UI, sin ocultación servidor entre miembros en MVP.

@@ -28,7 +28,7 @@ El Mac usa **AES-GCM** sobre JSON serializado, con **salt + nonce**, KDF **PBKDF
 
 ### Alcance
 
-**Decisión recomendada MVP:** backup **por hogar** (`household_id`), para alinear con multi-usuario y permisos (`owner`). Opción instalación-completa multi-hogar puede ser post-MVP.
+**Decisión MVP:** hay **un único hogar lógico por instalación** (véase [`AUTH_MODEL.md`](./AUTH_MODEL.md)). El backup de ese hogar **es** el backup de la instalación para efectos de permisos (`owner`) y de alcance de datos. No se contempla en MVP export «multi-hogar» dentro de la misma base.
 
 ### Restore
 
