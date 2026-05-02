@@ -21,6 +21,11 @@ use crate::handlers::liabilities::{
     __path_patch_liability,
 };
 #[allow(unused_imports)]
+use crate::handlers::budget::{
+    __path_create_budget_entry, __path_delete_budget_entry, __path_get_budget_snapshot,
+    __path_patch_budget_entry,
+};
+#[allow(unused_imports)]
 use crate::handlers::categories::{
     __path_create_category, __path_delete_category, __path_list_categories,
     __path_patch_category,
@@ -55,6 +60,10 @@ use utoipa::OpenApi;
         patch_liability,
         delete_liability,
         get_summary,
+        get_budget_snapshot,
+        create_budget_entry,
+        patch_budget_entry,
+        delete_budget_entry,
     ),
     components(schemas(
         crate::handlers::health::HealthBody,
@@ -80,6 +89,13 @@ use utoipa::OpenApi;
         crate::handlers::liabilities::PatchLiabilityBody,
         crate::handlers::liabilities::PaymentFrequency,
         crate::handlers::summary::SummaryResponse,
+        crate::handlers::budget::BudgetSnapshotResponse,
+        crate::handlers::budget::BudgetEntryResponse,
+        crate::handlers::budget::DerivedBudgetLineResponse,
+        crate::handlers::budget::BudgetTotalsResponse,
+        crate::handlers::budget::CreateBudgetEntryBody,
+        crate::handlers::budget::PatchBudgetEntryBody,
+        crate::handlers::budget::BudgetCategoryScope,
         ErrorBody,
         ErrorCode,
     )),
@@ -108,6 +124,10 @@ use utoipa::OpenApi;
         (
             name = "summary",
             description = "Installation-wide KPI aggregates (purges expired liabilities before totals; parity SummaryMetricGrid basics)"
+        ),
+        (
+            name = "budget",
+            description = "Persisted income/expense budget lines (weekly→monthly ×52/12); liability-derived debt payments included in snapshot only (parity BudgetTabView)"
         ),
     ),
 )]

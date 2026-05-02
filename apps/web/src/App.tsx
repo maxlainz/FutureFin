@@ -61,6 +61,44 @@ type SummaryResponse = {
   debt_to_assets_ratio: string | null;
 };
 
+type BudgetTotalsApi = {
+  income_monthly_equivalent: string;
+  expense_regular_monthly_equivalent: string;
+  expense_derived_monthly_equivalent: string;
+  expense_total_monthly_equivalent: string;
+  net_monthly_equivalent: string;
+};
+
+type BudgetEntryApiRow = {
+  id: string;
+  category_id: string;
+  scope: "income" | "expense";
+  label: string | null;
+  amount: string;
+  frequency: "monthly" | "weekly";
+  monthly_equivalent: string;
+  notes: string | null;
+  sort_index: number;
+};
+
+type DerivedBudgetLineApi = {
+  liability_id: string;
+  category_id: string;
+  label: string;
+  amount: string;
+  frequency: "monthly" | "weekly";
+  monthly_equivalent: string;
+  notes: string;
+};
+
+type BudgetSnapshotApi = {
+  entries: BudgetEntryApiRow[];
+  derived_from_liabilities: DerivedBudgetLineApi[];
+  totals: BudgetTotalsApi;
+};
+
+type BudgetScopeToggle = "income" | "expense";
+
 type LiabilityApiRow = {
   id: string;
   category_id: string;
@@ -224,6 +262,48 @@ function formatDebtToAssetsPct(ratio: string | null | undefined): string {
   return `${(r * 100).toLocaleString(undefined, { maximumFractionDigits: 2 })} %`;
 }
 
+function budgetCategoryMap(
+  incomeCats: CategoryRow[],
+  expenseCats: CategoryRow[],
+): Map<string, CategoryRow> {
+  const m = new Map<string, CategoryRow>();
+  for (const c of incomeCats) {
+    m.set(c.id, c);
+  }
+  for (const c of expenseCats) {
+    m.set(c.id, c);
+  }
+  return m;
+}
+
+function sortBudgetEntriesMacStyle(
+  entries: BudgetEntryApiRow[],
+  categoryById: Map<string, CategoryRow>,
+): BudgetEntryApiRow[] {
+  const monthlyEq = (e: BudgetEntryApiRow) =>
+    Number(e.monthly_equivalent.replace(",", "."));
+  const byCatTotal = new Map<string, number>();
+  for (const e of entries) {
+    const k = e.category_id;
+    byCatTotal.set(k, (byCatTotal.get(k) ?? 0) + monthlyEq(e));
+  }
+  const catName = (id: string) => categoryById.get(id)?.name ?? id;
+  return [...entries].sort((a, b) => {
+    const ta = byCatTotal.get(a.category_id) ?? 0;
+    const tb = byCatTotal.get(b.category_id) ?? 0;
+    if (tb !== ta) return tb - ta;
+    const cmp = catName(a.category_id).localeCompare(
+      catName(b.category_id),
+      "es",
+    );
+    if (cmp !== 0) return cmp;
+    const ea = monthlyEq(a);
+    const eb = monthlyEq(b);
+    if (eb !== ea) return eb - ea;
+    return (a.label ?? "").localeCompare(b.label ?? "", "es");
+  });
+}
+
 async function errorMessageFromResponse(res: Response): Promise<string> {
   const ct = res.headers.get("content-type") ?? "";
   if (ct.includes("application/json")) {
@@ -328,6 +408,34 @@ export default function App() {
     null,
   );
   const [liabilitySaving, setLiabilitySaving] = useState(false);
+
+  const [budgetSnapshot, setBudgetSnapshot] = useState<BudgetSnapshotApi | null>(
+    null,
+  );
+  const [budgetIncomeCategories, setBudgetIncomeCategories] = useState<
+    CategoryRow[]
+  >([]);
+  const [budgetExpenseCategories, setBudgetExpenseCategories] = useState<
+    CategoryRow[]
+  >([]);
+  const [budgetLiabilityCategories, setBudgetLiabilityCategories] = useState<
+    CategoryRow[]
+  >([]);
+  const [budgetLoading, setBudgetLoading] = useState(false);
+  const [budgetError, setBudgetError] = useState<string | null>(null);
+  const [budgetSaving, setBudgetSaving] = useState(false);
+  const [editingBudgetEntryId, setEditingBudgetEntryId] = useState<
+    string | null
+  >(null);
+  const [budgetFormScope, setBudgetFormScope] =
+    useState<BudgetScopeToggle>("expense");
+  const [budgetFormCategoryId, setBudgetFormCategoryId] = useState("");
+  const [budgetFormLabel, setBudgetFormLabel] = useState("");
+  const [budgetFormAmount, setBudgetFormAmount] = useState("");
+  const [budgetFormFrequency, setBudgetFormFrequency] = useState<
+    "monthly" | "weekly"
+  >("monthly");
+  const [budgetFormNotes, setBudgetFormNotes] = useState("");
 
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
@@ -436,6 +544,59 @@ export default function App() {
       setLiabilitiesError(e instanceof Error ? e.message : String(e));
     } finally {
       setLiabilitiesBusy(false);
+    }
+  }, []);
+
+  const loadBudgetPage = useCallback(async () => {
+    setBudgetLoading(true);
+    setBudgetError(null);
+    try {
+      const [budRes, incRes, expRes, libCatRes] = await Promise.all([
+        fetch("/v1/budget", defaultFetchInit),
+        fetch("/v1/categories?scope=income", defaultFetchInit),
+        fetch("/v1/categories?scope=expense", defaultFetchInit),
+        fetch("/v1/categories?scope=liability", defaultFetchInit),
+      ]);
+
+      if (budRes.status === 403 || budRes.status === 404) {
+        setBudgetSnapshot(null);
+      } else if (!budRes.ok) {
+        throw new Error(await errorMessageFromResponse(budRes));
+      } else {
+        setBudgetSnapshot((await budRes.json()) as BudgetSnapshotApi);
+      }
+
+      if (incRes.status === 403 || incRes.status === 404) {
+        setBudgetIncomeCategories([]);
+      } else if (!incRes.ok) {
+        throw new Error(await errorMessageFromResponse(incRes));
+      } else {
+        setBudgetIncomeCategories((await incRes.json()) as CategoryRow[]);
+      }
+
+      if (expRes.status === 403 || expRes.status === 404) {
+        setBudgetExpenseCategories([]);
+      } else if (!expRes.ok) {
+        throw new Error(await errorMessageFromResponse(expRes));
+      } else {
+        setBudgetExpenseCategories((await expRes.json()) as CategoryRow[]);
+      }
+
+      if (libCatRes.status === 403 || libCatRes.status === 404) {
+        setBudgetLiabilityCategories([]);
+      } else if (!libCatRes.ok) {
+        throw new Error(await errorMessageFromResponse(libCatRes));
+      } else {
+        setBudgetLiabilityCategories((await libCatRes.json()) as CategoryRow[]);
+      }
+    } catch (e: unknown) {
+      setBudgetSnapshot(null);
+      setBudgetIncomeCategories([]);
+      setBudgetExpenseCategories([]);
+      setBudgetLiabilityCategories([]);
+      setBudgetError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBudgetLoading(false);
     }
   }, []);
 
@@ -595,6 +756,13 @@ export default function App() {
   }, [user, hasMembership, activeTab, loadLiabilitiesPage]);
 
   useEffect(() => {
+    if (!user || !hasMembership || activeTab !== "budget") {
+      return;
+    }
+    void loadBudgetPage();
+  }, [user, hasMembership, activeTab, loadBudgetPage]);
+
+  useEffect(() => {
     if (!user || !hasMembership || activeTab !== "summary") {
       return;
     }
@@ -649,8 +817,42 @@ export default function App() {
       setLiabilityFormPaymentFrequency("");
       setLiabilityFormPaymentEnd("");
       setLiabilityFormNotes("");
+      setBudgetSnapshot(null);
+      setBudgetIncomeCategories([]);
+      setBudgetExpenseCategories([]);
+      setBudgetLiabilityCategories([]);
+      setBudgetError(null);
+      setEditingBudgetEntryId(null);
+      setBudgetFormScope("expense");
+      setBudgetFormCategoryId("");
+      setBudgetFormLabel("");
+      setBudgetFormAmount("");
+      setBudgetFormFrequency("monthly");
+      setBudgetFormNotes("");
     }
   }, [user]);
+
+  useEffect(() => {
+    if (activeTab !== "budget") {
+      return;
+    }
+    const cats =
+      budgetFormScope === "income"
+        ? budgetIncomeCategories
+        : budgetExpenseCategories;
+    if (cats.length === 0) {
+      return;
+    }
+    if (!budgetFormCategoryId || !cats.some((c) => c.id === budgetFormCategoryId)) {
+      setBudgetFormCategoryId(cats[0].id);
+    }
+  }, [
+    activeTab,
+    budgetFormScope,
+    budgetIncomeCategories,
+    budgetExpenseCategories,
+    budgetFormCategoryId,
+  ]);
 
   async function submitAuth(ev: FormEvent) {
     ev.preventDefault();
@@ -1109,6 +1311,114 @@ export default function App() {
     setLiabilityFormDerivePrincipal(row.principal_derived_from_plan ?? false);
   }
 
+  function resetBudgetForm() {
+    setEditingBudgetEntryId(null);
+    const cats =
+      budgetFormScope === "income"
+        ? budgetIncomeCategories
+        : budgetExpenseCategories;
+    setBudgetFormCategoryId(cats[0]?.id ?? "");
+    setBudgetFormLabel("");
+    setBudgetFormAmount("");
+    setBudgetFormFrequency("monthly");
+    setBudgetFormNotes("");
+  }
+
+  async function submitBudgetForm(ev: FormEvent) {
+    ev.preventDefault();
+    const amt = budgetFormAmount.trim();
+    if (!budgetFormCategoryId || !amt) {
+      return;
+    }
+    setBudgetSaving(true);
+    setBudgetError(null);
+    try {
+      const base: Record<string, unknown> = {
+        category_id: budgetFormCategoryId,
+        amount: amt,
+        frequency: budgetFormFrequency,
+      };
+      const lb = budgetFormLabel.trim();
+      if (lb) {
+        base.label = lb;
+      }
+      const nt = budgetFormNotes.trim();
+      if (nt) {
+        base.notes = nt;
+      }
+
+      if (editingBudgetEntryId) {
+        const patchBody = {
+          category_id: budgetFormCategoryId,
+          label: budgetFormLabel.trim(),
+          amount: amt,
+          frequency: budgetFormFrequency,
+          notes: budgetFormNotes.trim(),
+        };
+        const res = await fetch(
+          `/v1/budget/entries/${encodeURIComponent(editingBudgetEntryId)}`,
+          {
+            ...defaultFetchInit,
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patchBody),
+          },
+        );
+        if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        }
+      } else {
+        const res = await fetch("/v1/budget/entries", {
+          ...defaultFetchInit,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(base),
+        });
+        if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        }
+      }
+      resetBudgetForm();
+      await loadBudgetPage();
+    } catch (e: unknown) {
+      setBudgetError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBudgetSaving(false);
+    }
+  }
+
+  async function deleteBudgetEntryRow(id: string) {
+    setBudgetSaving(true);
+    setBudgetError(null);
+    try {
+      const res = await fetch(`/v1/budget/entries/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "DELETE",
+      });
+      if (!res.ok && res.status !== 204) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      if (editingBudgetEntryId === id) {
+        resetBudgetForm();
+      }
+      await loadBudgetPage();
+    } catch (e: unknown) {
+      setBudgetError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBudgetSaving(false);
+    }
+  }
+
+  function beginEditBudgetEntry(row: BudgetEntryApiRow) {
+    setEditingBudgetEntryId(row.id);
+    setBudgetFormScope(row.scope);
+    setBudgetFormCategoryId(row.category_id);
+    setBudgetFormLabel(row.label ?? "");
+    setBudgetFormAmount(row.amount);
+    setBudgetFormFrequency(row.frequency);
+    setBudgetFormNotes(row.notes ?? "");
+  }
+
   if (sessionBusy) {
     return (
       <div className="app-loading">
@@ -1275,6 +1585,10 @@ export default function App() {
           <div className="banner error-banner">{liabilitiesError}</div>
         ) : null}
 
+        {budgetError ? (
+          <div className="banner error-banner">{budgetError}</div>
+        ) : null}
+
         {summaryError ? (
           <div className="banner error-banner">{summaryError}</div>
         ) : null}
@@ -1361,6 +1675,36 @@ export default function App() {
             deleteLiabilityRow={(id) => void deleteLiabilityRow(id)}
             beginEditLiability={beginEditLiability}
             resetLiabilityForm={resetLiabilityForm}
+          />
+        ) : activeTab === "budget" ? (
+          <BudgetView
+            installation={installation}
+            installationBusy={installationBusy}
+            hasMembership={hasMembership}
+            canEdit={installation?.role !== "viewer"}
+            budgetSnapshot={budgetSnapshot}
+            budgetLoading={budgetLoading}
+            budgetIncomeCategories={budgetIncomeCategories}
+            budgetExpenseCategories={budgetExpenseCategories}
+            budgetLiabilityCategories={budgetLiabilityCategories}
+            budgetFormScope={budgetFormScope}
+            setBudgetFormScope={setBudgetFormScope}
+            budgetFormCategoryId={budgetFormCategoryId}
+            setBudgetFormCategoryId={setBudgetFormCategoryId}
+            budgetFormLabel={budgetFormLabel}
+            setBudgetFormLabel={setBudgetFormLabel}
+            budgetFormAmount={budgetFormAmount}
+            setBudgetFormAmount={setBudgetFormAmount}
+            budgetFormFrequency={budgetFormFrequency}
+            setBudgetFormFrequency={setBudgetFormFrequency}
+            budgetFormNotes={budgetFormNotes}
+            setBudgetFormNotes={setBudgetFormNotes}
+            editingBudgetEntryId={editingBudgetEntryId}
+            budgetSaving={budgetSaving}
+            submitBudgetForm={(e) => void submitBudgetForm(e)}
+            deleteBudgetEntryRow={(id) => void deleteBudgetEntryRow(id)}
+            beginEditBudgetEntry={beginEditBudgetEntry}
+            resetBudgetForm={resetBudgetForm}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
@@ -2027,6 +2371,411 @@ function LiabilitiesView({
                         </button>
                       </td>
                     ) : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+const BUDGET_SCOPE_LABEL: Record<BudgetScopeToggle, string> = {
+  income: "Ingreso",
+  expense: "Gasto",
+};
+
+function budgetDerivedCatLabel(categories: CategoryRow[], id: string): string {
+  return categories.find((x) => x.id === id)?.name ?? id.slice(0, 8);
+}
+
+function BudgetView({
+  installation,
+  installationBusy,
+  hasMembership,
+  canEdit,
+  budgetSnapshot,
+  budgetLoading,
+  budgetIncomeCategories,
+  budgetExpenseCategories,
+  budgetLiabilityCategories,
+  budgetFormScope,
+  setBudgetFormScope,
+  budgetFormCategoryId,
+  setBudgetFormCategoryId,
+  budgetFormLabel,
+  setBudgetFormLabel,
+  budgetFormAmount,
+  setBudgetFormAmount,
+  budgetFormFrequency,
+  setBudgetFormFrequency,
+  budgetFormNotes,
+  setBudgetFormNotes,
+  editingBudgetEntryId,
+  budgetSaving,
+  submitBudgetForm,
+  deleteBudgetEntryRow,
+  beginEditBudgetEntry,
+  resetBudgetForm,
+}: {
+  installation: InstallationAccess | null;
+  installationBusy: boolean;
+  hasMembership: boolean;
+  canEdit: boolean;
+  budgetSnapshot: BudgetSnapshotApi | null;
+  budgetLoading: boolean;
+  budgetIncomeCategories: CategoryRow[];
+  budgetExpenseCategories: CategoryRow[];
+  budgetLiabilityCategories: CategoryRow[];
+  budgetFormScope: BudgetScopeToggle;
+  setBudgetFormScope: Dispatch<SetStateAction<BudgetScopeToggle>>;
+  budgetFormCategoryId: string;
+  setBudgetFormCategoryId: Dispatch<SetStateAction<string>>;
+  budgetFormLabel: string;
+  setBudgetFormLabel: Dispatch<SetStateAction<string>>;
+  budgetFormAmount: string;
+  setBudgetFormAmount: Dispatch<SetStateAction<string>>;
+  budgetFormFrequency: "monthly" | "weekly";
+  setBudgetFormFrequency: Dispatch<
+    SetStateAction<"monthly" | "weekly">
+  >;
+  budgetFormNotes: string;
+  setBudgetFormNotes: Dispatch<SetStateAction<string>>;
+  editingBudgetEntryId: string | null;
+  budgetSaving: boolean;
+  submitBudgetForm: (e: FormEvent) => void;
+  deleteBudgetEntryRow: (id: string) => void;
+  beginEditBudgetEntry: (row: BudgetEntryApiRow) => void;
+  resetBudgetForm: () => void;
+}) {
+  const currency =
+    installation?.installation.base_currency ?? METRIC_DASH;
+
+  const categoryMapForSort = budgetCategoryMap(
+    budgetIncomeCategories,
+    budgetExpenseCategories,
+  );
+
+  const sortedEntries =
+    budgetSnapshot && !budgetLoading
+      ? sortBudgetEntriesMacStyle(budgetSnapshot.entries, categoryMapForSort)
+      : [];
+
+  const formCats =
+    budgetFormScope === "income"
+      ? budgetIncomeCategories
+      : budgetExpenseCategories;
+
+  const snap =
+    hasMembership && !budgetLoading && budgetSnapshot !== null
+      ? budgetSnapshot
+      : null;
+
+  const incM = snap
+    ? formatSummaryAmount(snap.totals.income_monthly_equivalent)
+    : METRIC_DASH;
+  const expReg = snap
+    ? formatSummaryAmount(snap.totals.expense_regular_monthly_equivalent)
+    : METRIC_DASH;
+  const expDer = snap
+    ? formatSummaryAmount(snap.totals.expense_derived_monthly_equivalent)
+    : METRIC_DASH;
+  const expTot = snap
+    ? formatSummaryAmount(snap.totals.expense_total_monthly_equivalent)
+    : METRIC_DASH;
+  const netM = snap
+    ? formatSummaryAmount(snap.totals.net_monthly_equivalent)
+    : METRIC_DASH;
+
+  return (
+    <div className="workspace">
+      <div className="workspace-header">
+        <h2 className="workspace-title">Presupuesto</h2>
+        <p className="workspace-sub">
+          {installationBusy
+            ? "Cargando instalación…"
+            : !hasMembership
+              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
+              : budgetLoading
+                ? "Cargando presupuesto y categorías…"
+                : `Totales en equivalencia mensual (${currency}). Las cuotas de pasivos con plan activo aparecen como líneas derivadas (solo lectura), alineadas al cliente Mac.`}
+        </p>
+      </div>
+
+      {!installationBusy && !hasMembership ? (
+        <div className="banner info-banner">
+          Cuando tengas acceso podrás ver y editar el presupuesto aquí.
+        </div>
+      ) : null}
+
+      {hasMembership &&
+      budgetIncomeCategories.length === 0 &&
+      budgetExpenseCategories.length === 0 &&
+      !budgetLoading ? (
+        <div className="banner info-banner">
+          Aún no hay categorías de <strong>Ingresos</strong> ni{" "}
+          <strong>Gastos</strong>. Créalas en <strong>Ajustes → Categorías</strong>.
+        </div>
+      ) : null}
+
+      <div className="metric-grid">
+        <MetricCard
+          label="Ingresos (equiv. mensual)"
+          value={incM}
+          suffix={currency}
+          hint="Entradas recurrentes guardadas en presupuesto."
+        />
+        <MetricCard
+          label="Gastos recurrentes"
+          value={expReg}
+          suffix={currency}
+        />
+        <MetricCard
+          label="Gastos derivados (pasivos)"
+          value={expDer}
+          suffix={currency}
+          hint="Cuotas de planes activos en Pasivos."
+        />
+        <MetricCard
+          label="Gastos totales"
+          value={expTot}
+          suffix={currency}
+        />
+        <MetricCard
+          label="Neto mensual"
+          value={netM}
+          suffix={currency}
+          hint="Ingresos − gastos totales."
+        />
+      </div>
+
+      {canEdit &&
+      hasMembership &&
+      (budgetIncomeCategories.length > 0 ||
+        budgetExpenseCategories.length > 0) ? (
+        <section className="panel">
+          <h3 className="panel-title">
+            {editingBudgetEntryId ? "Editar línea" : "Nueva línea de presupuesto"}
+          </h3>
+          <form
+            className="asset-form stack bordered-top"
+            onSubmit={submitBudgetForm}
+          >
+            <div className="segmented" role="tablist" aria-label="Ámbito">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={budgetFormScope === "income"}
+                className={budgetFormScope === "income" ? "active" : ""}
+                onClick={() => setBudgetFormScope("income")}
+              >
+                Ingreso
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={budgetFormScope === "expense"}
+                className={budgetFormScope === "expense" ? "active" : ""}
+                onClick={() => setBudgetFormScope("expense")}
+              >
+                Gasto
+              </button>
+            </div>
+            <div className="asset-form-grid">
+              <label className="field">
+                <span>Categoría ({BUDGET_SCOPE_LABEL[budgetFormScope]})</span>
+                <select
+                  value={budgetFormCategoryId}
+                  onChange={(e) => setBudgetFormCategoryId(e.target.value)}
+                  required
+                  disabled={formCats.length === 0}
+                >
+                  {formCats.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Etiqueta (opc.)</span>
+                <input
+                  value={budgetFormLabel}
+                  onChange={(e) => setBudgetFormLabel(e.target.value)}
+                  maxLength={200}
+                  placeholder="Detalle opcional"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>Importe</span>
+                <input
+                  value={budgetFormAmount}
+                  onChange={(e) => setBudgetFormAmount(e.target.value)}
+                  required
+                  inputMode="decimal"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>Frecuencia</span>
+                <select
+                  value={budgetFormFrequency}
+                  onChange={(e) =>
+                    setBudgetFormFrequency(
+                      e.target.value as "monthly" | "weekly",
+                    )
+                  }
+                >
+                  <option value="monthly">Mensual</option>
+                  <option value="weekly">Semanal</option>
+                </select>
+              </label>
+            </div>
+            <label className="field">
+              <span>Notas (opc.)</span>
+              <textarea
+                value={budgetFormNotes}
+                onChange={(e) => setBudgetFormNotes(e.target.value)}
+                rows={2}
+                maxLength={4000}
+              />
+            </label>
+            <div className="asset-form-actions">
+              <button
+                type="submit"
+                className="btn primary"
+                disabled={budgetSaving || formCats.length === 0}
+              >
+                {editingBudgetEntryId ? "Guardar cambios" : "Añadir línea"}
+              </button>
+              {editingBudgetEntryId ? (
+                <button
+                  type="button"
+                  className="btn ghost"
+                  disabled={budgetSaving}
+                  onClick={() => resetBudgetForm()}
+                >
+                  Cancelar edición
+                </button>
+              ) : null}
+            </div>
+          </form>
+        </section>
+      ) : !canEdit && hasMembership ? (
+        <p className="muted tight">
+          Solo lectura: tu rol no permite crear ni editar líneas de presupuesto.
+        </p>
+      ) : null}
+
+      <section className="panel">
+        <h3 className="panel-title">Líneas guardadas</h3>
+        {budgetLoading ? (
+          <p className="muted bordered-top">Cargando…</p>
+        ) : sortedEntries.length === 0 ? (
+          <p className="muted bordered-top">
+            No hay líneas de presupuesto guardadas.
+          </p>
+        ) : (
+          <div className="table-scroll bordered-top">
+            <table className="assets-table">
+              <thead>
+                <tr>
+                  <th>Ámbito</th>
+                  <th>Categoría</th>
+                  <th>Etiqueta</th>
+                  <th className="num">Importe</th>
+                  <th>Frec.</th>
+                  <th className="num">Equiv. mensual</th>
+                  <th>Notas</th>
+                  {canEdit ? <th /> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {sortedEntries.map((row) => (
+                  <tr key={row.id}>
+                    <td>{BUDGET_SCOPE_LABEL[row.scope]}</td>
+                    <td>
+                      {categoryMapForSort.get(row.category_id)?.name ??
+                        row.category_id.slice(0, 8)}
+                    </td>
+                    <td>{row.label ?? METRIC_DASH}</td>
+                    <td className="num">{row.amount}</td>
+                    <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
+                    <td className="num">{row.monthly_equivalent}</td>
+                    <td className="asset-notes-cell">
+                      {row.notes ?? METRIC_DASH}
+                    </td>
+                    {canEdit ? (
+                      <td className="asset-actions-cell">
+                        <button
+                          type="button"
+                          className="btn ghost"
+                          disabled={budgetSaving}
+                          onClick={() => beginEditBudgetEntry(row)}
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost danger"
+                          disabled={budgetSaving}
+                          onClick={() => deleteBudgetEntryRow(row.id)}
+                        >
+                          Eliminar
+                        </button>
+                      </td>
+                    ) : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <h3 className="panel-title">Derivado de pasivos (solo lectura)</h3>
+        <p className="muted tight">
+          Cuotas de pasivos con plan completo y fecha fin posterior a hoy en la
+          zona civil de la instalación.
+        </p>
+        {budgetLoading ? (
+          <p className="muted bordered-top">Cargando…</p>
+        ) : !budgetSnapshot ||
+          budgetSnapshot.derived_from_liabilities.length === 0 ? (
+          <p className="muted bordered-top">
+            No hay cuotas derivadas en este momento.
+          </p>
+        ) : (
+          <div className="table-scroll bordered-top">
+            <table className="assets-table">
+              <thead>
+                <tr>
+                  <th>Concepto</th>
+                  <th>Categoría pasivo</th>
+                  <th className="num">Cuota</th>
+                  <th>Frec.</th>
+                  <th className="num">Equiv. mensual</th>
+                  <th>Notas</th>
+                </tr>
+              </thead>
+              <tbody>
+                {budgetSnapshot.derived_from_liabilities.map((row) => (
+                  <tr key={row.liability_id}>
+                    <td>{row.label}</td>
+                    <td>
+                      {budgetDerivedCatLabel(
+                        budgetLiabilityCategories,
+                        row.category_id,
+                      )}
+                    </td>
+                    <td className="num">{row.amount}</td>
+                    <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
+                    <td className="num">{row.monthly_equivalent}</td>
+                    <td className="asset-notes-cell">{row.notes}</td>
                   </tr>
                 ))}
               </tbody>

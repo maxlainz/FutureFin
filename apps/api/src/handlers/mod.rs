@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod auth;
+pub mod budget;
 pub mod categories;
 pub mod fallback;
 pub mod health;

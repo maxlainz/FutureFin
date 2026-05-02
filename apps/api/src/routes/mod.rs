@@ -1,5 +1,6 @@
 use crate::handlers::assets::assets_router;
 use crate::handlers::auth::{login, logout, me, register};
+use crate::handlers::budget::budget_router;
 use crate::handlers::categories::categories_router;
 use crate::handlers::fallback;
 use crate::handlers::health::{health_check, ready_check};
@@ -35,6 +36,7 @@ pub fn app_router() -> Router {
         .nest("/assets", assets_router())
         .nest("/liabilities", liabilities_router())
         .nest("/summary", summary_router())
+        .nest("/budget", budget_router())
         .fallback(fallback::v1_not_found);
 
     Router::new()

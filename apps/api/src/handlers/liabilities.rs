@@ -23,14 +23,14 @@ pub enum PaymentFrequency {
 }
 
 impl PaymentFrequency {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             PaymentFrequency::Monthly => "monthly",
             PaymentFrequency::Weekly => "weekly",
         }
     }
 
-    fn parse(s: &str) -> Result<Self, ApiError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, ApiError> {
         match s.trim() {
             "monthly" => Ok(Self::Monthly),
             "weekly" => Ok(Self::Weekly),
