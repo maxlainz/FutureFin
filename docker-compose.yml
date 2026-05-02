@@ -1,6 +1,11 @@
+# Proyecto Compose (nombre visible en `docker compose ls`).
+name: futurefin
+
+# Servicios con nombres explícitos para `docker ps`: futurefin-database / futurefin-api.
 services:
-  postgres:
+  futurefin-database:
     image: postgres:16-alpine
+    container_name: futurefin-database
     environment:
       POSTGRES_USER: futurefin
       POSTGRES_PASSWORD: futurefin
@@ -15,21 +20,22 @@ services:
       timeout: 5s
       retries: 5
 
-  api:
+  futurefin-api:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+    container_name: futurefin-api
     ports:
       - "8080:8080"
     environment:
       PORT: "8080"
-      DATABASE_URL: postgres://futurefin:futurefin@postgres:5432/futurefin
+      DATABASE_URL: postgres://futurefin:futurefin@futurefin-database:5432/futurefin
       RUST_LOG: futurefin_api=info,tower_http=info
       COOKIE_SECURE: "0"
       SESSION_TTL_DAYS: "30"
       CORS_ORIGINS: http://127.0.0.1:5173,http://localhost:5173
     depends_on:
-      postgres:
+      futurefin-database:
         condition: service_healthy
 
 volumes:

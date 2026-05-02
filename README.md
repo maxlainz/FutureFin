@@ -28,7 +28,8 @@ La especificación MVP (paridad de capacidades respecto al cliente Swift de refe
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres   # base de datos (requerida para arrancar la API)
+# Contenedor de BD con nombre fijo `futurefin-database` (véase `docker ps`).
+docker compose up -d futurefin-database
 
 # Terminal 1 — API (puerto 8080; migra la BD al iniciar). Carga `.env` de la raíz del repo automáticamente.
 cd apps/api && cargo run
@@ -40,10 +41,10 @@ npm run dev:web
 
 Comprueba la API: `curl -s http://127.0.0.1:8080/v1/health` · OpenAPI: `curl -s http://127.0.0.1:8080/openapi.json | head`
 
-**Todo el stack con Compose (API + Postgres):**
+**Todo el stack con Compose:** el proyecto se llama `futurefin`; los contenedores aparecen como **`futurefin-database`** (PostgreSQL) y **`futurefin-api`** (servidor HTTP).
 
 ```bash
-docker compose up --build api
+docker compose up -d --build
 ```
 
 Reverse proxy con TLS sigue recomendado para entornos expuestos.
