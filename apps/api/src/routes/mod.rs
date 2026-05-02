@@ -7,13 +7,11 @@ use axum::routing::{get, post};
 use axum::Router;
 
 pub fn app_router() -> Router {
-    Router::new()
+    let v1 = Router::new()
         .route("/health", get(health_check))
-        .route("/v1/health", get(health_check))
-        .route("/v1/ready", get(ready_check))
-        .route("/openapi.json", get(openapi_json))
+        .route("/ready", get(ready_check))
         .nest(
-            "/v1/auth",
+            "/auth",
             Router::new()
                 .route("/register", post(register))
                 .route("/login", post(login))
@@ -21,10 +19,15 @@ pub fn app_router() -> Router {
                 .route("/me", get(me)),
         )
         .nest(
-            "/v1/households",
+            "/households",
             Router::new()
                 .route("/", get(list_households))
                 .route("/", post(create_household)),
         )
-        .fallback(fallback::not_found)
+        .fallback(fallback::v1_not_found);
+
+    Router::new()
+        .route("/health", get(health_check))
+        .route("/openapi.json", get(openapi_json))
+        .nest("/v1", v1)
 }

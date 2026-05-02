@@ -1,10 +1,10 @@
 # Proyecto Compose (nombre visible en `docker compose ls`).
 name: futurefin
 
-# Servicios con nombres explícitos para `docker ps`: futurefin-database / futurefin-api.
+# Imagen de aplicación: etiqueta local `dev`; en Docker Hub usar p.ej. futurefin/futurefin-api:1.0.0
 services:
   futurefin-database:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
     container_name: futurefin-database
     environment:
       POSTGRES_USER: futurefin
@@ -21,6 +21,7 @@ services:
       retries: 5
 
   futurefin-api:
+    image: futurefin/futurefin-api:dev
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -29,11 +30,12 @@ services:
       - "8080:8080"
     environment:
       PORT: "8080"
+      WEB_STATIC_ROOT: /app/web
       DATABASE_URL: postgres://futurefin:futurefin@futurefin-database:5432/futurefin
       RUST_LOG: futurefin_api=info,tower_http=info
       COOKIE_SECURE: "0"
       SESSION_TTL_DAYS: "30"
-      CORS_ORIGINS: http://127.0.0.1:5173,http://localhost:5173
+      CORS_ORIGINS: http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080
     depends_on:
       futurefin-database:
         condition: service_healthy

@@ -17,6 +17,7 @@ pub struct ErrorBody {
 pub enum ErrorCode {
     BadRequest,
     Unauthorized,
+    NotFound,
     Conflict,
     Unavailable,
     Internal,
@@ -34,6 +35,8 @@ pub enum ApiError {
     Db(#[from] sqlx::Error),
     #[error("service unavailable")]
     Unavailable,
+    #[error("not found")]
+    NotFound,
 }
 
 impl ApiError {
@@ -41,6 +44,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Conflict => StatusCode::CONFLICT,
             ApiError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -51,6 +55,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(s) => s.clone(),
             ApiError::Unauthorized => "authentication required".into(),
+            ApiError::NotFound => "not found".into(),
             ApiError::Conflict => "resource conflict".into(),
             ApiError::Unavailable => "dependency unavailable".into(),
             ApiError::Db(err) => {
@@ -64,6 +69,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => ErrorCode::BadRequest,
             ApiError::Unauthorized => ErrorCode::Unauthorized,
+            ApiError::NotFound => ErrorCode::NotFound,
             ApiError::Conflict => ErrorCode::Conflict,
             ApiError::Unavailable => ErrorCode::Unavailable,
             ApiError::Db(_) => ErrorCode::Internal,

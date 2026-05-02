@@ -6,13 +6,16 @@ mod openapi;
 mod routes;
 mod state;
 
+use crate::handlers::fallback;
 use crate::state::AppState;
 use axum::extract::Extension;
 use axum::Router;
 use http::header::{ACCEPT, CONTENT_TYPE};
 use http::Method;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -48,17 +51,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_ttl_days,
     });
 
-    let app = Router::new()
+    let api = Router::new()
         .merge(routes::app_router())
         .layer(Extension(state))
         .layer(cors_layer())
         .layer(TraceLayer::new_for_http());
+
+    let app = match web_static_root() {
+        Some(root) if root.exists() => {
+            tracing::info!(root = %root.display(), "serving web UI and API on one port");
+            let index = root.join("index.html");
+            Router::new()
+                .merge(api)
+                .fallback_service(ServeDir::new(root).fallback(ServeFile::new(index)))
+        }
+        Some(root) => {
+            tracing::warn!(
+                root = %root.display(),
+                "WEB_STATIC_ROOT set but path missing — API only"
+            );
+            Router::new().merge(api).fallback(fallback::not_found)
+        }
+        None => Router::new().merge(api).fallback(fallback::not_found),
+    };
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port()));
     tracing::info!("listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn web_static_root() -> Option<PathBuf> {
+    std::env::var("WEB_STATIC_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 fn load_env() {
@@ -82,7 +110,8 @@ fn port() -> u16 {
 
 fn cors_layer() -> CorsLayer {
     let raw = std::env::var("CORS_ORIGINS").unwrap_or_else(|_| {
-        "http://127.0.0.1:5173,http://localhost:5173".into()
+        "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080"
+            .into()
     });
     let origins: Vec<http::HeaderValue> = raw
         .split(',')

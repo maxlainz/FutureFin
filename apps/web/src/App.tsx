@@ -39,8 +39,9 @@ export default function App() {
     <main className="layout">
       <h1>FutureFin</h1>
       <p className="muted">
-        Cliente web en desarrollo. La API debe estar en{" "}
-        <code>http://127.0.0.1:8080</code> (o usar el proxy de Vite).
+        Entorno único en Docker: interfaz y API comparten{" "}
+        <code>http://127.0.0.1:8080</code>. En desarrollo con Vite, el proxy
+        sigue en el puerto 5173.
       </p>
       <section className="card">
         <h2>Estado de la API</h2>

@@ -22,6 +22,19 @@ La especificación MVP (paridad de capacidades respecto al cliente Swift de refe
 - **Monorepo:** workspace Cargo + npm workspaces.
 - **Ramas:** desarrollo en **`dev`**; `git push origin dev` (evitar subir código nuevo solo a `main` hasta merge explícito).
 
+### Docker: versiones e imágenes de terceros
+
+Las etiquetas **`latest`** no se usan para servicios críticos: en `docker-compose.yml` y en `apps/api/Dockerfile` las bases (**PostgreSQL**, **Node**, **Rust**, **Debian**) van **fijadas por etiqueta acotada + digest** para que un pull arbitrario no rompa instalaciones self-hosted. La imagen de compilación Rust usa `rust:bookworm` (cadena **stable** oficial) con digest concreto — al subir de versión de dependencias que eleven el MSRV, hay que **regenerar `Cargo.lock`** con ese toolchain y, si hace falta, actualizar el digest del builder en el Dockerfile.
+
+Convención al publicar en un registro (Docker Hub u otro):
+
+| Artefacto | Ejemplo de nombre publicado |
+|-----------|-----------------------------|
+| API + UI estática embebida | `futurefin/futurefin-api:1.0.0` |
+| (solo referencia) Postgres oficial | `postgres:16.4-alpine@sha256:…` — ya referenciado en Compose |
+
+La aplicación construida en Compose usa **`image: futurefin/futurefin-api:dev`** junto con `build:` para etiquetar la imagen local de forma reconocible antes de `docker push`.
+
 ### Desarrollo local
 
 **Requisitos:** Rust (stable), Node.js 20+, npm 10+, Docker opcional para Postgres.
@@ -41,11 +54,13 @@ npm run dev:web
 
 Comprueba la API: `curl -s http://127.0.0.1:8080/v1/health` · OpenAPI: `curl -s http://127.0.0.1:8080/openapi.json | head`
 
-**Todo el stack con Compose:** el proyecto se llama `futurefin`; los contenedores aparecen como **`futurefin-database`** (PostgreSQL) y **`futurefin-api`** (servidor HTTP).
+**Todo el stack con Compose:** el proyecto se llama `futurefin`; los contenedores aparecen como **`futurefin-database`** (PostgreSQL) y **`futurefin-api`** (API Rust **y** interfaz web en el mismo puerto **8080**).
 
 ```bash
 docker compose up -d --build
 ```
+
+Abre **`http://127.0.0.1:8080`** para la UI; la API sigue en las mismas rutas (`/v1/…`, `/openapi.json`). Sin `WEB_STATIC_ROOT`, `cargo run` sirve solo la API (útil con Vite en 5173).
 
 Reverse proxy con TLS sigue recomendado para entornos expuestos.
 
