@@ -1,7 +1,8 @@
 pub mod auth;
+pub mod categories;
 pub mod fallback;
 pub mod health;
-pub mod household_access;
-pub mod households;
-pub mod persons;
+pub mod installation;
+pub mod membership;
+pub mod pending_users;
 pub mod session;

@@ -8,7 +8,7 @@ pub use uuid::Uuid;
 /// Monetary amounts and rates stored as decimal, serialized as strings in JSON for precision.
 pub type Money = Decimal;
 
-/// Authenticated account (`AUTH_MODEL.md`: User — not a household [`Person`]).
+/// Authenticated account (`AUTH_MODEL.md`: User — not a domain [`Person`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct UserId(pub Uuid);

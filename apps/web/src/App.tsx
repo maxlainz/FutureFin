@@ -1,5 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
-import type { FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+  type Dispatch,
+  type FormEvent,
+  type SetStateAction,
+} from "react";
 import "./App.css";
 
 type HealthResponse = {
@@ -13,20 +19,41 @@ type UserResponse = {
   username: string;
 };
 
-type HouseholdSummary = {
+type InstallationSnapshot = {
   id: string;
-  name: string;
   base_currency: string;
+  projection_includes_inflation: boolean;
+  projection_target_age: number | null;
+  show_age_mode: string;
+};
+
+type InstallationAccess = {
+  installation: InstallationSnapshot;
   role: "owner" | "member" | "viewer";
 };
 
-type PersonRow = {
+type CategoryScope = "asset" | "liability" | "income" | "expense";
+
+type CategoryRow = {
   id: string;
-  household_id: string;
-  display_name: string;
-  is_primary: boolean;
-  birth_date?: string | null;
+  scope: CategoryScope;
+  name: string;
+  sort_index: number;
 };
+
+const CATEGORY_SCOPE_LABEL: Record<CategoryScope, string> = {
+  asset: "Activos",
+  liability: "Pasivos",
+  income: "Ingresos",
+  expense: "Gastos",
+};
+
+const CATEGORY_SCOPES: CategoryScope[] = [
+  "asset",
+  "liability",
+  "income",
+  "expense",
+];
 
 type TabId =
   | "summary"
@@ -83,27 +110,44 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
 
-  const [households, setHouseholds] = useState<HouseholdSummary[]>([]);
-  const [householdsError, setHouseholdsError] = useState<string | null>(null);
-  const [hhBusy, setHhBusy] = useState(false);
-  const [hhName, setHhName] = useState("");
-  const [hhCurrency, setHhCurrency] = useState<"EUR" | "USD" | "GBP">("EUR");
-  const [selectedHouseholdId, setSelectedHouseholdId] = useState<string | null>(
+  const [installation, setInstallation] = useState<InstallationAccess | null>(
     null,
   );
+  const [installationError, setInstallationError] = useState<string | null>(
+    null,
+  );
+  const [installationBusy, setInstallationBusy] = useState(false);
+  const [setupCurrency, setSetupCurrency] = useState<"EUR" | "USD" | "GBP">(
+    "EUR",
+  );
 
-  const [persons, setPersons] = useState<PersonRow[]>([]);
-  const [personsError, setPersonsError] = useState<string | null>(null);
-  const [personsBusy, setPersonsBusy] = useState(false);
-  const [personDisplayName, setPersonDisplayName] = useState("");
-  const [personBirthDate, setPersonBirthDate] = useState("");
-  const [personIsPrimary, setPersonIsPrimary] = useState(false);
-  const [personMutating, setPersonMutating] = useState(false);
+  const [pendingUsers, setPendingUsers] = useState<UserResponse[]>([]);
+  const [pendingUsersBusy, setPendingUsersBusy] = useState(false);
+  const [pendingUsersError, setPendingUsersError] = useState<string | null>(
+    null,
+  );
+  const [approveRoles, setApproveRoles] = useState<
+    Record<string, "member" | "viewer">
+  >({});
+  const [approveBusy, setApproveBusy] = useState(false);
+
+  const [categories, setCategories] = useState<CategoryRow[]>([]);
+  const [categoriesBusy, setCategoriesBusy] = useState(false);
+  const [categoriesError, setCategoriesError] = useState<string | null>(null);
+  const [categoryScopeFilter, setCategoryScopeFilter] = useState<
+    CategoryScope | "all"
+  >("all");
+  const [newCatScope, setNewCatScope] = useState<CategoryScope>("asset");
+  const [newCatName, setNewCatName] = useState("");
+  const [categorySaving, setCategorySaving] = useState(false);
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(
+    null,
+  );
+  const [editCategoryName, setEditCategoryName] = useState("");
 
   const [activeTab, setActiveTab] = useState<TabId>("summary");
 
-  const selectedHousehold =
-    households.find((h) => h.id === selectedHouseholdId) ?? null;
+  const hasMembership = installation !== null;
 
   const refreshSession = useCallback(async () => {
     setSessionBusy(true);
@@ -127,44 +171,79 @@ export default function App() {
     }
   }, []);
 
-  const loadHouseholds = useCallback(async () => {
-    setHhBusy(true);
-    setHouseholdsError(null);
+  const loadInstallation = useCallback(async () => {
+    setInstallationBusy(true);
+    setInstallationError(null);
     try {
-      const res = await fetch("/v1/households", defaultFetchInit);
+      const res = await fetch("/v1/installation", defaultFetchInit);
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      const list = (await res.json()) as HouseholdSummary[];
-      setHouseholds(list);
+      const body = (await res.json()) as InstallationAccess | null;
+      setInstallation(body);
     } catch (e: unknown) {
-      setHouseholds([]);
-      setHouseholdsError(e instanceof Error ? e.message : String(e));
+      setInstallation(null);
+      setInstallationError(e instanceof Error ? e.message : String(e));
     } finally {
-      setHhBusy(false);
+      setInstallationBusy(false);
     }
   }, []);
 
-  const loadPersons = useCallback(async (householdId: string) => {
-    setPersonsBusy(true);
-    setPersonsError(null);
+  const loadCategories = useCallback(async () => {
+    setCategoriesBusy(true);
+    setCategoriesError(null);
     try {
-      const res = await fetch(
-        `/v1/households/${encodeURIComponent(householdId)}/persons`,
-        defaultFetchInit,
-      );
+      const res = await fetch("/v1/categories", defaultFetchInit);
+      if (res.status === 403 || res.status === 404) {
+        setCategories([]);
+        return;
+      }
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      const list = (await res.json()) as PersonRow[];
-      setPersons(list);
+      const list = (await res.json()) as CategoryRow[];
+      setCategories(list);
     } catch (e: unknown) {
-      setPersons([]);
-      setPersonsError(e instanceof Error ? e.message : String(e));
+      setCategories([]);
+      setCategoriesError(e instanceof Error ? e.message : String(e));
     } finally {
-      setPersonsBusy(false);
+      setCategoriesBusy(false);
     }
   }, []);
+
+  const loadPendingUsers = useCallback(async () => {
+    setPendingUsersBusy(true);
+    setPendingUsersError(null);
+    try {
+      const res = await fetch("/v1/installation/pending-users", defaultFetchInit);
+      if (res.status === 403 || res.status === 404) {
+        setPendingUsers([]);
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      const list = (await res.json()) as UserResponse[];
+      setPendingUsers(list);
+    } catch (e: unknown) {
+      setPendingUsers([]);
+      setPendingUsersError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPendingUsersBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    setApproveRoles((prev) => {
+      const next = { ...prev };
+      for (const u of pendingUsers) {
+        if (next[u.id] === undefined) {
+          next[u.id] = "member";
+        }
+      }
+      return next;
+    });
+  }, [pendingUsers]);
 
   useEffect(() => {
     let cancelled = false;
@@ -196,37 +275,40 @@ export default function App() {
 
   useEffect(() => {
     if (user) {
-      void loadHouseholds();
+      void loadInstallation();
     } else {
-      setHouseholds([]);
-      setHouseholdsError(null);
-      setSelectedHouseholdId(null);
-      setPersons([]);
-      setPersonsError(null);
+      setInstallation(null);
+      setInstallationError(null);
+      setPendingUsers([]);
+      setPendingUsersError(null);
     }
-  }, [user, loadHouseholds]);
+  }, [user, loadInstallation]);
 
   useEffect(() => {
-    if (!selectedHouseholdId) {
-      setPersons([]);
-      setPersonsError(null);
+    if (!user || installation?.role !== "owner") {
+      setPendingUsers([]);
+      setPendingUsersError(null);
       return;
     }
-    void loadPersons(selectedHouseholdId);
-  }, [selectedHouseholdId, loadPersons]);
+    void loadPendingUsers();
+  }, [user, installation?.role, loadPendingUsers]);
 
   useEffect(() => {
-    if (households.length === 0) {
-      setSelectedHouseholdId(null);
+    if (!user || !hasMembership || activeTab !== "settings") {
       return;
     }
-    setSelectedHouseholdId((prev) => {
-      if (prev && households.some((h) => h.id === prev)) {
-        return prev;
-      }
-      return households[0]?.id ?? null;
-    });
-  }, [households]);
+    void loadCategories();
+  }, [user, hasMembership, activeTab, loadCategories]);
+
+  useEffect(() => {
+    if (!user) {
+      setCategories([]);
+      setCategoriesError(null);
+      setEditingCategoryId(null);
+      setEditCategoryName("");
+      setNewCatName("");
+    }
+  }, [user]);
 
   async function submitAuth(ev: FormEvent) {
     ev.preventDefault();
@@ -272,10 +354,9 @@ export default function App() {
         method: "POST",
       });
       setUser(null);
-      setHouseholds([]);
-      setSelectedHouseholdId(null);
-      setPersons([]);
-      setPersonsError(null);
+      setInstallation(null);
+      setPendingUsers([]);
+      setPendingUsersError(null);
       setActiveTab("summary");
     } catch (e: unknown) {
       setSessionError(e instanceof Error ? e.message : String(e));
@@ -284,18 +365,17 @@ export default function App() {
     }
   }
 
-  async function createHousehold(ev: FormEvent) {
+  async function setupInstallation(ev: FormEvent) {
     ev.preventDefault();
-    setHhBusy(true);
-    setHouseholdsError(null);
+    setInstallationBusy(true);
+    setInstallationError(null);
     try {
-      const res = await fetch("/v1/households", {
+      const res = await fetch("/v1/installation/setup", {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: hhName,
-          base_currency: hhCurrency,
+          base_currency: setupCurrency,
           projection_includes_inflation: false,
           projection_target_age: null,
           show_age_mode: "dates",
@@ -304,107 +384,119 @@ export default function App() {
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      setHhName("");
-      await loadHouseholds();
+      await loadInstallation();
     } catch (e: unknown) {
-      setHouseholdsError(e instanceof Error ? e.message : String(e));
+      setInstallationError(e instanceof Error ? e.message : String(e));
     } finally {
-      setHhBusy(false);
+      setInstallationBusy(false);
     }
   }
 
-  async function createPerson(ev: FormEvent) {
-    ev.preventDefault();
-    if (!selectedHouseholdId) {
-      return;
-    }
-    setPersonMutating(true);
-    setPersonsError(null);
+  async function approvePendingUser(userId: string) {
+    const role = approveRoles[userId] ?? "member";
+    setApproveBusy(true);
+    setPendingUsersError(null);
     try {
-      const payload: {
-        display_name: string;
-        is_primary: boolean;
-        birth_date?: string;
-      } = {
-        display_name: personDisplayName,
-        is_primary: personIsPrimary,
-      };
-      if (personBirthDate.trim()) {
-        payload.birth_date = personBirthDate.trim();
-      }
       const res = await fetch(
-        `/v1/households/${encodeURIComponent(selectedHouseholdId)}/persons`,
+        `/v1/installation/pending-users/${encodeURIComponent(userId)}/approve`,
         {
           ...defaultFetchInit,
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify({ role }),
         },
-      );
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
-      }
-      setPersonDisplayName("");
-      setPersonBirthDate("");
-      setPersonIsPrimary(false);
-      await loadPersons(selectedHouseholdId);
-    } catch (e: unknown) {
-      setPersonsError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPersonMutating(false);
-    }
-  }
-
-  async function deletePerson(personId: string) {
-    if (!selectedHouseholdId) {
-      return;
-    }
-    setPersonMutating(true);
-    setPersonsError(null);
-    try {
-      const res = await fetch(
-        `/v1/households/${encodeURIComponent(selectedHouseholdId)}/persons/${encodeURIComponent(personId)}`,
-        { ...defaultFetchInit, method: "DELETE" },
       );
       if (!res.ok && res.status !== 204) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      await loadPersons(selectedHouseholdId);
+      await loadPendingUsers();
     } catch (e: unknown) {
-      setPersonsError(e instanceof Error ? e.message : String(e));
+      setPendingUsersError(e instanceof Error ? e.message : String(e));
     } finally {
-      setPersonMutating(false);
+      setApproveBusy(false);
     }
   }
 
-  async function makePersonPrimary(personId: string) {
-    if (!selectedHouseholdId) {
+  async function createCategory(ev: FormEvent) {
+    ev.preventDefault();
+    const trimmed = newCatName.trim();
+    if (!trimmed) {
       return;
     }
-    setPersonMutating(true);
-    setPersonsError(null);
+    setCategorySaving(true);
+    setCategoriesError(null);
     try {
-      const res = await fetch(
-        `/v1/households/${encodeURIComponent(selectedHouseholdId)}/persons/${encodeURIComponent(personId)}`,
-        {
-          ...defaultFetchInit,
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ is_primary: true }),
-        },
-      );
+      const res = await fetch("/v1/categories", {
+        ...defaultFetchInit,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope: newCatScope,
+          name: trimmed,
+          sort_index: 0,
+        }),
+      });
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      await loadPersons(selectedHouseholdId);
+      setNewCatName("");
+      await loadCategories();
     } catch (e: unknown) {
-      setPersonsError(e instanceof Error ? e.message : String(e));
+      setCategoriesError(e instanceof Error ? e.message : String(e));
     } finally {
-      setPersonMutating(false);
+      setCategorySaving(false);
     }
   }
 
-  const householdCanWrite = selectedHousehold?.role !== "viewer";
+  async function deleteCategory(id: string) {
+    setCategorySaving(true);
+    setCategoriesError(null);
+    try {
+      const res = await fetch(`/v1/categories/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "DELETE",
+      });
+      if (!res.ok && res.status !== 204) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      if (editingCategoryId === id) {
+        setEditingCategoryId(null);
+        setEditCategoryName("");
+      }
+      await loadCategories();
+    } catch (e: unknown) {
+      setCategoriesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCategorySaving(false);
+    }
+  }
+
+  async function saveCategoryEdit(id: string) {
+    const trimmed = editCategoryName.trim();
+    if (!trimmed) {
+      return;
+    }
+    setCategorySaving(true);
+    setCategoriesError(null);
+    try {
+      const res = await fetch(`/v1/categories/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setEditingCategoryId(null);
+      setEditCategoryName("");
+      await loadCategories();
+    } catch (e: unknown) {
+      setCategoriesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCategorySaving(false);
+    }
+  }
 
   if (sessionBusy) {
     return (
@@ -490,7 +582,9 @@ export default function App() {
             ) : null}
             <p className="hint">
               Usuario 3–64 caracteres (<code>.</code> <code>_</code>{" "}
-              <code>-</code>). Contraseña ≥ 12 caracteres.
+              <code>-</code>). Contraseña ≥ 12 caracteres. Cada usuario se crea
+              aquí; el propietario de la instalación debe aprobar el acceso en{" "}
+              <strong>Ajustes</strong>.
             </p>
           </div>
           <footer className="auth-footer muted">
@@ -508,29 +602,7 @@ export default function App() {
           <span className="logo-mark small">FF</span>
           <span className="app-title">FutureFin</span>
         </div>
-        <div className="app-header-center">
-          <label className="hh-select-label">
-            <span className="sr-only">Hogar activo</span>
-            <select
-              className="hh-select"
-              value={selectedHouseholdId ?? ""}
-              onChange={(e) =>
-                setSelectedHouseholdId(e.target.value || null)
-              }
-              disabled={households.length === 0}
-            >
-              {households.length === 0 ? (
-                <option value="">Sin hogares — créalo en Ajustes</option>
-              ) : (
-                households.map((h) => (
-                  <option key={h.id} value={h.id}>
-                    {h.name} ({h.base_currency})
-                  </option>
-                ))
-              )}
-            </select>
-          </label>
-        </div>
+        <div className="app-header-center" aria-hidden />
         <div className="app-header-right">
           <span
             className={`health-dot ${health && !healthError ? "ok" : "bad"}`}
@@ -572,45 +644,69 @@ export default function App() {
           <div className="banner error-banner">{sessionError}</div>
         ) : null}
 
-        {householdsError ? (
-          <div className="banner error-banner">{householdsError}</div>
+        {installationError ? (
+          <div className="banner error-banner">{installationError}</div>
         ) : null}
 
-        {personsError ? (
-          <div className="banner error-banner">{personsError}</div>
+        {pendingUsersError ? (
+          <div className="banner error-banner">{pendingUsersError}</div>
+        ) : null}
+
+        {categoriesError ? (
+          <div className="banner error-banner">{categoriesError}</div>
+        ) : null}
+
+        {!installationBusy &&
+        user &&
+        !hasMembership &&
+        activeTab !== "settings" ? (
+          <div className="banner info-banner">
+            Tu cuenta está registrada pero el propietario aún no ha aprobado tu
+            acceso. Avísale para que te conceda entrada en{" "}
+            <strong>Ajustes</strong>.
+          </div>
         ) : null}
 
         {activeTab === "summary" ? (
           <SummaryView
-            household={selectedHousehold}
-            hhBusy={hhBusy}
-            hasHouseholds={households.length > 0}
+            installation={installation}
+            loading={installationBusy}
+            hasMembership={hasMembership}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
-            households={households}
-            hhBusy={hhBusy}
-            hhName={hhName}
-            setHhName={setHhName}
-            hhCurrency={hhCurrency}
-            setHhCurrency={setHhCurrency}
-            createHousehold={(e) => void createHousehold(e)}
+            installation={installation}
+            installationBusy={installationBusy}
+            setupCurrency={setupCurrency}
+            setSetupCurrency={setSetupCurrency}
+            setupInstallation={(e) => void setupInstallation(e)}
             health={health}
             healthError={healthError}
-            selectedHouseholdId={selectedHouseholdId}
-            householdCanWrite={householdCanWrite}
-            persons={persons}
-            personsBusy={personsBusy}
-            personDisplayName={personDisplayName}
-            setPersonDisplayName={setPersonDisplayName}
-            personBirthDate={personBirthDate}
-            setPersonBirthDate={setPersonBirthDate}
-            personIsPrimary={personIsPrimary}
-            setPersonIsPrimary={setPersonIsPrimary}
-            personMutating={personMutating}
-            createPerson={(e) => void createPerson(e)}
-            deletePerson={(id) => void deletePerson(id)}
-            makePersonPrimary={(id) => void makePersonPrimary(id)}
+            hasMembership={hasMembership}
+            canEditCategories={installation?.role !== "viewer"}
+            isOwner={installation?.role === "owner"}
+            pendingUsers={pendingUsers}
+            pendingUsersBusy={pendingUsersBusy}
+            approveRoles={approveRoles}
+            setApproveRoles={setApproveRoles}
+            approveBusy={approveBusy}
+            approvePendingUser={(id) => void approvePendingUser(id)}
+            categories={categories}
+            categoriesBusy={categoriesBusy}
+            categoryScopeFilter={categoryScopeFilter}
+            setCategoryScopeFilter={setCategoryScopeFilter}
+            newCatScope={newCatScope}
+            setNewCatScope={setNewCatScope}
+            newCatName={newCatName}
+            setNewCatName={setNewCatName}
+            categorySaving={categorySaving}
+            createCategory={(e) => void createCategory(e)}
+            deleteCategory={(id) => void deleteCategory(id)}
+            editingCategoryId={editingCategoryId}
+            setEditingCategoryId={setEditingCategoryId}
+            editCategoryName={editCategoryName}
+            setEditCategoryName={setEditCategoryName}
+            saveCategoryEdit={(id) => void saveCategoryEdit(id)}
           />
         ) : (
           <PlaceholderTab tabLabel={TABS.find((x) => x.id === activeTab)?.label ?? ""} />
@@ -621,34 +717,36 @@ export default function App() {
 }
 
 function SummaryView({
-  household,
-  hhBusy,
-  hasHouseholds,
+  installation,
+  loading,
+  hasMembership,
 }: {
-  household: HouseholdSummary | null;
-  hhBusy: boolean;
-  hasHouseholds: boolean;
+  installation: InstallationAccess | null;
+  loading: boolean;
+  hasMembership: boolean;
 }) {
-  const currency = household?.base_currency ?? "—";
+  const currency =
+    installation?.installation.base_currency ?? METRIC_DASH;
 
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Resumen</h2>
         <p className="workspace-sub">
-          {hhBusy ? (
-            "Cargando hogares…"
-          ) : !hasHouseholds ? (
+          {loading ? (
+            "Cargando datos de la instalación…"
+          ) : !hasMembership ? (
             <>
-              Crea un hogar en <strong>Ajustes</strong> para fijar moneda y
-              contexto.
+              Regístrate en la pantalla de acceso; cuando el propietario apruebe
+              tu usuario en <strong>Ajustes</strong>, verás datos aquí. Para
+              recuperar una base vacía, usa la inicialización en Ajustes.
             </>
-          ) : household ? (
+          ) : (
             <>
-              Vista del hogar <strong>{household.name}</strong> · rol{" "}
-              <span className="role-pill">{household.role}</span>
+              Moneda base <strong>{currency}</strong>. Métricas en vivo cuando
+              el backend exponga activos y pasivos.
             </>
-          ) : null}
+          )}
         </p>
       </div>
 
@@ -680,7 +778,7 @@ function SummaryView({
         <h3 className="panel-title">Salud financiera</h3>
         <p className="muted tight">
           Aquí irán ingresos, gastos, ahorro, runway y coberturas — datos en
-          vivo respecto al hogar seleccionado (pendiente de backend).
+          vivo enlazados a esta instalación (pendiente de backend).
         </p>
         <div className="placeholder-chips">
           <span className="chip">Ingresos recurrentes</span>
@@ -727,214 +825,349 @@ function MetricCard({
 }
 
 function SettingsView({
-  households,
-  hhBusy,
-  hhName,
-  setHhName,
-  hhCurrency,
-  setHhCurrency,
-  createHousehold,
+  installation,
+  installationBusy,
+  setupCurrency,
+  setSetupCurrency,
+  setupInstallation,
   health,
   healthError,
-  selectedHouseholdId,
-  householdCanWrite,
-  persons,
-  personsBusy,
-  personDisplayName,
-  setPersonDisplayName,
-  personBirthDate,
-  setPersonBirthDate,
-  personIsPrimary,
-  setPersonIsPrimary,
-  personMutating,
-  createPerson,
-  deletePerson,
-  makePersonPrimary,
+  hasMembership,
+  canEditCategories,
+  isOwner,
+  pendingUsers,
+  pendingUsersBusy,
+  approveRoles,
+  setApproveRoles,
+  approveBusy,
+  approvePendingUser,
+  categories,
+  categoriesBusy,
+  categoryScopeFilter,
+  setCategoryScopeFilter,
+  newCatScope,
+  setNewCatScope,
+  newCatName,
+  setNewCatName,
+  categorySaving,
+  createCategory,
+  deleteCategory,
+  editingCategoryId,
+  setEditingCategoryId,
+  editCategoryName,
+  setEditCategoryName,
+  saveCategoryEdit,
 }: {
-  households: HouseholdSummary[];
-  hhBusy: boolean;
-  hhName: string;
-  setHhName: (v: string) => void;
-  hhCurrency: "EUR" | "USD" | "GBP";
-  setHhCurrency: (v: "EUR" | "USD" | "GBP") => void;
-  createHousehold: (e: FormEvent) => void;
+  installation: InstallationAccess | null;
+  installationBusy: boolean;
+  setupCurrency: "EUR" | "USD" | "GBP";
+  setSetupCurrency: (v: "EUR" | "USD" | "GBP") => void;
+  setupInstallation: (e: FormEvent) => void;
   health: HealthResponse | null;
   healthError: string | null;
-  selectedHouseholdId: string | null;
-  householdCanWrite: boolean;
-  persons: PersonRow[];
-  personsBusy: boolean;
-  personDisplayName: string;
-  setPersonDisplayName: (v: string) => void;
-  personBirthDate: string;
-  setPersonBirthDate: (v: string) => void;
-  personIsPrimary: boolean;
-  setPersonIsPrimary: (v: boolean) => void;
-  personMutating: boolean;
-  createPerson: (e: FormEvent) => void;
-  deletePerson: (id: string) => void;
-  makePersonPrimary: (id: string) => void;
+  hasMembership: boolean;
+  canEditCategories: boolean;
+  isOwner: boolean;
+  pendingUsers: UserResponse[];
+  pendingUsersBusy: boolean;
+  approveRoles: Record<string, "member" | "viewer">;
+  setApproveRoles: Dispatch<
+    SetStateAction<Record<string, "member" | "viewer">>
+  >;
+  approveBusy: boolean;
+  approvePendingUser: (userId: string) => void;
+  categories: CategoryRow[];
+  categoriesBusy: boolean;
+  categoryScopeFilter: CategoryScope | "all";
+  setCategoryScopeFilter: Dispatch<
+    SetStateAction<CategoryScope | "all">
+  >;
+  newCatScope: CategoryScope;
+  setNewCatScope: Dispatch<SetStateAction<CategoryScope>>;
+  newCatName: string;
+  setNewCatName: Dispatch<SetStateAction<string>>;
+  categorySaving: boolean;
+  createCategory: (e: FormEvent) => void;
+  deleteCategory: (id: string) => void;
+  editingCategoryId: string | null;
+  setEditingCategoryId: Dispatch<SetStateAction<string | null>>;
+  editCategoryName: string;
+  setEditCategoryName: Dispatch<SetStateAction<string>>;
+  saveCategoryEdit: (id: string) => void;
 }) {
+  const filteredCategories =
+    categoryScopeFilter === "all"
+      ? categories
+      : categories.filter((c) => c.scope === categoryScopeFilter);
+
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Ajustes</h2>
         <p className="workspace-sub">
-          Hogares, moneda base y personas del hogar activo (cabecera). Los
-          visores solo leen.
+          Los usuarios se registran en la pantalla de acceso. El propietario
+          concede acceso aquí; los visores solo leen.
         </p>
       </div>
 
-      <section className="panel">
-        <h3 className="panel-title">Personas del hogar activo</h3>
-        {!selectedHouseholdId ? (
+      {!installationBusy && !hasMembership ? (
+        <section className="panel">
+          <h3 className="panel-title">Acceso</h3>
           <p className="muted tight">
-            Elige un hogar en la cabecera para ver y editar personas.
+            Ya tienes cuenta pero el propietario debe aprobarte en esta
+            instalación.
           </p>
-        ) : personsBusy ? (
-          <p className="muted">Cargando personas…</p>
-        ) : persons.length === 0 ? (
-          <p className="muted tight">
-            Ninguna persona todavía. Añade la primera (titular, cónyuge, hijos…).
+          <p className="hint bordered-top">
+            Recuperación: si la base no tiene instalación inicializada pero sí
+            usuarios, puedes crearla aquí (solo cuando la tabla está vacía).
           </p>
-        ) : (
-          <ul className="person-list">
-            {persons.map((p) => (
-              <li key={p.id} className="person-row">
-                <div className="person-main">
-                  <span className="person-name">{p.display_name}</span>
-                  {p.birth_date ? (
-                    <span className="person-meta">nac. {p.birth_date}</span>
-                  ) : null}
-                  {p.is_primary ? (
-                    <span className="primary-badge">Principal</span>
-                  ) : null}
-                </div>
-                {householdCanWrite ? (
-                  <div className="person-actions">
-                    {!p.is_primary ? (
-                      <button
-                        type="button"
-                        className="btn ghost text"
-                        disabled={personMutating}
-                        onClick={() => makePersonPrimary(p.id)}
-                      >
-                        Marcar principal
-                      </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      className="btn ghost danger"
-                      disabled={personMutating}
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `¿Eliminar a «${p.display_name}» del hogar?`,
-                          )
-                        ) {
-                          deletePerson(p.id);
-                        }
-                      }}
-                    >
-                      Eliminar
-                    </button>
-                  </div>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-        {selectedHouseholdId && householdCanWrite ? (
-          <form className="stack bordered-top" onSubmit={createPerson}>
-            <h4 className="subsection-title">Nueva persona</h4>
+          <form className="stack bordered-top" onSubmit={setupInstallation}>
+            <h4 className="subsection-title">Inicializar instalación</h4>
             <label className="field">
-              <span>Nombre</span>
-              <input
-                value={personDisplayName}
-                onChange={(e) => setPersonDisplayName(e.target.value)}
-                required
-                maxLength={128}
-                placeholder="Ej. María"
-              />
-            </label>
-            <label className="field">
-              <span>Fecha de nacimiento (opcional)</span>
-              <input
-                type="date"
-                value={personBirthDate}
-                onChange={(e) => setPersonBirthDate(e.target.value)}
-              />
-            </label>
-            <label className="field checkbox-field">
-              <input
-                type="checkbox"
-                checked={personIsPrimary}
-                onChange={(e) => setPersonIsPrimary(e.target.checked)}
-              />
-              <span>Persona principal del hogar</span>
+              <span>Moneda base</span>
+              <select
+                value={setupCurrency}
+                onChange={(e) =>
+                  setSetupCurrency(e.target.value as "EUR" | "USD" | "GBP")
+                }
+              >
+                <option value="EUR">EUR</option>
+                <option value="USD">USD</option>
+                <option value="GBP">GBP</option>
+              </select>
             </label>
             <button
               type="submit"
               className="btn primary"
-              disabled={personMutating || personsBusy}
+              disabled={installationBusy}
             >
-              Añadir persona
+              Crear instalación
             </button>
           </form>
-        ) : selectedHouseholdId && !householdCanWrite ? (
-          <p className="hint bordered-top">
-            Tu rol en este hogar es solo lectura; no puedes cambiar personas.
+        </section>
+      ) : null}
+
+      {isOwner ? (
+        <section className="panel">
+          <h3 className="panel-title">Aprobar acceso</h3>
+          <p className="muted tight">
+            Usuarios registrados que aún no tienen acceso a esta instalación.
+            Elige rol y aprueba.
           </p>
-        ) : null}
-      </section>
+          {pendingUsersBusy ? (
+            <p className="muted bordered-top">Cargando…</p>
+          ) : pendingUsers.length === 0 ? (
+            <p className="muted bordered-top">Nadie pendiente.</p>
+          ) : (
+            <ul className="pending-users-list">
+              {pendingUsers.map((u) => (
+                <li key={u.id} className="pending-user-row">
+                  <span className="pending-user-name">{u.username}</span>
+                  <div className="pending-user-actions">
+                    <label className="field inline-role">
+                      <span className="sr-only">Rol</span>
+                      <select
+                        value={approveRoles[u.id] ?? "member"}
+                        onChange={(e) =>
+                          setApproveRoles((prev) => ({
+                            ...prev,
+                            [u.id]: e.target.value as "member" | "viewer",
+                          }))
+                        }
+                      >
+                        <option value="member">Miembro</option>
+                        <option value="viewer">Visor</option>
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={approveBusy}
+                      onClick={() => approvePendingUser(u.id)}
+                    >
+                      Aprobar
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+
+      {hasMembership ? (
+        <section className="panel">
+          <h3 className="panel-title">Categorías</h3>
+          <p className="muted tight">
+            Ámbitos alineados al cliente de referencia. No hay categorías por
+            defecto: créalas aquí o al importar datos.
+          </p>
+          <div className="category-toolbar bordered-top">
+            <label className="field inline-role">
+              <span className="sr-only">Filtrar por ámbito</span>
+              <select
+                value={categoryScopeFilter}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setCategoryScopeFilter(
+                    v === "all" ? "all" : (v as CategoryScope),
+                  );
+                }}
+              >
+                <option value="all">Todos los ámbitos</option>
+                {CATEGORY_SCOPES.map((s) => (
+                  <option key={s} value={s}>
+                    {CATEGORY_SCOPE_LABEL[s]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {canEditCategories ? (
+            <form
+              className="category-add-row bordered-top"
+              onSubmit={createCategory}
+            >
+              <label className="field">
+                <span>Ámbito</span>
+                <select
+                  value={newCatScope}
+                  onChange={(e) =>
+                    setNewCatScope(e.target.value as CategoryScope)
+                  }
+                >
+                  {CATEGORY_SCOPES.map((s) => (
+                    <option key={s} value={s}>
+                      {CATEGORY_SCOPE_LABEL[s]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field category-add-name">
+                <span>Nombre</span>
+                <input
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  maxLength={200}
+                  placeholder="p. ej. Efectivo"
+                />
+              </label>
+              <button
+                type="submit"
+                className="btn primary category-add-submit"
+                disabled={categorySaving}
+              >
+                Añadir
+              </button>
+            </form>
+          ) : (
+            <p className="muted bordered-top">
+              Solo lectura: tu rol no permite crear ni editar categorías.
+            </p>
+          )}
+          {categoriesBusy ? (
+            <p className="muted bordered-top">Cargando categorías…</p>
+          ) : (
+            <ul className="category-list">
+              {filteredCategories.map((c) => (
+                <li key={c.id} className="category-row">
+                  <span className="category-scope-tag">
+                    {CATEGORY_SCOPE_LABEL[c.scope]}
+                  </span>
+                  {editingCategoryId === c.id ? (
+                    <div className="category-edit-row">
+                      <input
+                        className="category-edit-input"
+                        value={editCategoryName}
+                        onChange={(e) => setEditCategoryName(e.target.value)}
+                        maxLength={200}
+                        aria-label="Nuevo nombre"
+                      />
+                      <button
+                        type="button"
+                        className="btn primary"
+                        disabled={categorySaving}
+                        onClick={() => saveCategoryEdit(c.id)}
+                      >
+                        Guardar
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        disabled={categorySaving}
+                        onClick={() => {
+                          setEditingCategoryId(null);
+                          setEditCategoryName("");
+                        }}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="category-name">{c.name}</span>
+                      {canEditCategories ? (
+                        <div className="category-row-actions">
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            disabled={categorySaving}
+                            onClick={() => {
+                              setEditingCategoryId(c.id);
+                              setEditCategoryName(c.name);
+                            }}
+                          >
+                            Renombrar
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost danger"
+                            disabled={categorySaving}
+                            onClick={() => deleteCategory(c.id)}
+                          >
+                            Eliminar
+                          </button>
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {!categoriesBusy && filteredCategories.length === 0 ? (
+            <p className="muted bordered-top">
+              No hay categorías en este filtro.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="panel">
-        <h3 className="panel-title">Tus hogares</h3>
-        {hhBusy && households.length === 0 ? (
+        <h3 className="panel-title">Instalación</h3>
+        {installationBusy ? (
           <p className="muted">Cargando…</p>
-        ) : households.length === 0 ? (
-          <p className="muted tight">Ninguno todavía.</p>
+        ) : installation ? (
+          <dl className="settings-meta-dl">
+            <div>
+              <dt>Moneda base</dt>
+              <dd>{installation.installation.base_currency}</dd>
+            </div>
+            <div>
+              <dt>Tu rol</dt>
+              <dd>{installation.role}</dd>
+            </div>
+            <div>
+              <dt>Modo edad</dt>
+              <dd>{installation.installation.show_age_mode}</dd>
+            </div>
+          </dl>
         ) : (
-          <ul className="household-list roomy">
-            {households.map((h) => (
-              <li key={h.id}>
-                <span className="hh-name">{h.name}</span>
-                <span className="hh-meta">
-                  {h.base_currency} · {h.role}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <p className="muted tight">
+            Sin acceso — revisa la sección de acceso arriba si necesitas
+            recuperar la instalación.
+          </p>
         )}
-        <form className="stack bordered-top" onSubmit={createHousehold}>
-          <h4 className="subsection-title">Nuevo hogar</h4>
-          <label className="field">
-            <span>Nombre</span>
-            <input
-              value={hhName}
-              onChange={(e) => setHhName(e.target.value)}
-              required
-              maxLength={128}
-              placeholder="Ej. Casa principal"
-            />
-          </label>
-          <label className="field">
-            <span>Moneda base</span>
-            <select
-              value={hhCurrency}
-              onChange={(e) =>
-                setHhCurrency(e.target.value as "EUR" | "USD" | "GBP")
-              }
-            >
-              <option value="EUR">EUR</option>
-              <option value="USD">USD</option>
-              <option value="GBP">GBP</option>
-            </select>
-          </label>
-          <button type="submit" className="btn primary" disabled={hhBusy}>
-            Crear hogar
-          </button>
-        </form>
       </section>
 
       <section className="panel dev-panel">
@@ -979,7 +1212,7 @@ function PlaceholderTab({ tabLabel }: { tabLabel: string }) {
       <div className="panel placeholder-hero">
         <p className="muted tight">
           Aquí irá la vista completa de <strong>{tabLabel}</strong> — tablas,
-          filtros por persona y KPIs reactivos al editar campos (sin botón global
+          filtros y KPIs reactivos al editar campos (sin botón global
           «calcular»).
         </p>
       </div>

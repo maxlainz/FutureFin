@@ -11,8 +11,8 @@ Objetivo: reproducir las **capacidades** del cliente macOS (`BackupArchiveServic
 - Incluye como mínimo lo que el Mac empaqueta en `BackupPayload` (`BackupArchiveService.swift`):
   - `schemaVersion` (entero, evolución del contenido lógico).
   - `createdAt` (timestamp UTC).
-  - **Snapshot** de dominio: `households`, `persons`, `categories`, `assets`, `liabilities`, `budgetEntries`, `plannedCashFlows` (misma forma conceptual que `SQLiteStore.Snapshot`).
-  - **FIRE settings por hogar**: mapa `household_id → JSON` (equivalente a `fireSettingsByHouseholdID` en Mac).
+  - **Snapshot** de dominio: tabla `installation` (singleton), `persons`, `categories`, `assets`, `liabilities`, `budgetEntries`, `plannedCashFlows` (misma forma conceptual que `SQLiteStore.Snapshot`).
+  - **FIRE settings:** mapa `installation_id → JSON` en servidor (equivalente conceptual a `fireSettingsByHouseholdID` en Mac legacy).
 
 ### Diseño criptográfico (referencia Swift actual)
 

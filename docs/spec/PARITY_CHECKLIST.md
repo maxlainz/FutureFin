@@ -74,7 +74,7 @@ Fuente de comportamiento: código en `FutureFin` / `FinFuture` (`renderer/`, `sr
 - [ ] Modo inflación acorde a hogar.
 - [ ] Interacciones: zoom, pan, hitos/marcadores (`ProjectionTabView`); baseline de hitos usando lógica equivalente a `upcomingNetForMilestoneBaseline`.
 
-## Settings — Household & Members
+## Settings — Installation & Members
 
 - [ ] Ajustes del hogar: moneda base, inflación de proyección, edad objetivo horizonte (**un hogar por instalación; nombre del hogar no editable por usuario en MVP**).
 - [ ] CRUD personas: nombre, primaria, fecha de nacimiento; eliminar con reasignación de ítems.

@@ -12,7 +12,7 @@ Resumen de lo acordado en chat (planificación e implementación de docs/repo). 
 6. **UX:** **reactiva** (“Excel con esteroides”), sin botón global de recalcular.
 7. **Backups:** **monofichero cifrado** (formato nuevo) + **ZIP con 7 CSV** como capacidad equivalente al Mac; detalle en `docs/spec/BACKUP_AND_CSV_SPEC.md`.
 8. **Sin demo:** no `AppState.demo()`, no hogar de muestra, **no categorías por defecto** insertadas por la app; estado vacío hasta crear/importar; fallo de persistencia = **error explícito**.
-9. **Multi-usuario:** login propio; modelo en `docs/spec/AUTH_MODEL.md` — **un hogar por instalación**, nombre de hogar no editable en MVP, altas de usuarios solo con **invitación aprobada por el owner**, roles owner/member/viewer, vistas individual/conjunta en cliente (sin muros de privacidad servidor entre miembros en v1).
+9. **Multi-usuario:** login propio; modelo en `docs/spec/AUTH_MODEL.md` — **singleton por instalación**, altas de usuarios solo con **invitación aprobada por el owner**, roles owner/member/viewer, vistas individual/conjunta en cliente (sin muros de privacidad servidor entre miembros en v1).
 
 ## Artefactos generados en el repo GitHub `FutureFin`
 

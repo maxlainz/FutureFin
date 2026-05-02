@@ -1,14 +1,16 @@
 use crate::error::{ErrorBody, ErrorCode};
-// Required so utoipa-generated `__path_*` types resolve for `#[derive(OpenApi)]`.
 #[allow(unused_imports)]
 use crate::handlers::auth::{__path_login, __path_logout, __path_me, __path_register};
 #[allow(unused_imports)]
 use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
-use crate::handlers::households::{__path_create_household, __path_list_households};
+use crate::handlers::installation::{__path_get_my_installation, __path_setup_installation};
 #[allow(unused_imports)]
-use crate::handlers::persons::{
-    __path_create_person, __path_delete_person, __path_list_persons, __path_update_person,
+use crate::handlers::pending_users::{__path_approve_pending_user, __path_list_pending_users};
+#[allow(unused_imports)]
+use crate::handlers::categories::{
+    __path_create_category, __path_delete_category, __path_list_categories,
+    __path_patch_category,
 };
 use axum::Json;
 use utoipa::OpenApi;
@@ -22,24 +24,30 @@ use utoipa::OpenApi;
         login,
         logout,
         me,
-        list_households,
-        create_household,
-        list_persons,
-        create_person,
-        update_person,
-        delete_person,
+        get_my_installation,
+        setup_installation,
+        list_pending_users,
+        approve_pending_user,
+        list_categories,
+        create_category,
+        patch_category,
+        delete_category,
     ),
     components(schemas(
         crate::handlers::health::HealthBody,
         crate::handlers::auth::RegisterBody,
         crate::handlers::auth::LoginBody,
         crate::handlers::auth::UserResponse,
-        crate::handlers::households::HouseholdSummary,
-        crate::handlers::households::CreateHouseholdBody,
-        crate::handlers::households::HouseholdRole,
-        crate::handlers::persons::PersonResponse,
-        crate::handlers::persons::CreatePersonBody,
-        crate::handlers::persons::UpdatePersonBody,
+        crate::handlers::installation::InstallationSnapshot,
+        crate::handlers::installation::InstallationAccess,
+        crate::handlers::installation::SetupInstallationBody,
+        crate::handlers::membership::MembershipRole,
+        crate::handlers::pending_users::ApprovePendingUserBody,
+        crate::handlers::pending_users::ApproveMemberRole,
+        crate::handlers::categories::CategoryScope,
+        crate::handlers::categories::CategoryResponse,
+        crate::handlers::categories::CreateCategoryBody,
+        crate::handlers::categories::PatchCategoryBody,
         ErrorBody,
         ErrorCode,
     )),
@@ -50,12 +58,12 @@ use utoipa::OpenApi;
             description = "Username/password sessions (OAuth/OIDC traits reserved in `crate::auth::oauth`)"
         ),
         (
-            name = "households",
-            description = "Household singleton per installation and memberships — see `docs/spec/AUTH_MODEL.md`"
+            name = "installation",
+            description = "Singleton installation, setup, and owner approvement of registered users — see `docs/spec/AUTH_MODEL.md`"
         ),
         (
-            name = "persons",
-            description = "Domain persons in the installation household (Person vs User — `AUTH_MODEL.md`)"
+            name = "categories",
+            description = "Installation-scoped categories (asset, liability, income, expense); see parity checklist Settings — Categories"
         ),
     ),
 )]

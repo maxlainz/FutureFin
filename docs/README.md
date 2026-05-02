@@ -15,7 +15,7 @@ Instrucciones paso a paso para crear **FutureFin** en GitHub y subir `main` y `d
 
 | Documento | Contenido |
 |-----------|-----------|
-| [spec/AUTH_MODEL.md](spec/AUTH_MODEL.md) | Un hogar por instalación, invitaciones (owner), roles, vistas individual/conjunta, autorización API |
+| [spec/AUTH_MODEL.md](spec/AUTH_MODEL.md) | Singleton por instalación, invitaciones (owner), roles, vistas individual/conjunta, autorización API |
 | [spec/PARITY_CHECKLIST.md](spec/PARITY_CHECKLIST.md) | Inventario must-have MVP vs vistas Swift |
 | [spec/BACKUP_AND_CSV_SPEC.md](spec/BACKUP_AND_CSV_SPEC.md) | Backup monofichero cifrado + ZIP CSV |
 | [spec/ORACLE_TESTS.md](spec/ORACLE_TESTS.md) | Tests Swift como oráculos numéricos |

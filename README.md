@@ -18,7 +18,7 @@ La especificación MVP (paridad de capacidades respecto al cliente Swift de refe
 - **Persistencia:** PostgreSQL + **SQLx** (consultas parametrizadas; migraciones en `apps/api/migrations`).
 - **Dinero / dominio:** crate `futurefin-domain` con `Decimal` para cantidades (sin `f64` en el modelo financiero).
 - **Auth MVP:** usuario + contraseña (**sin email**), Argon2id (crate `argon2`), sesión en cookie `HttpOnly` (`ff_session`). Traits OAuth/OIDC reservados en `apps/api/src/auth/oauth.rs`.
-- **Instalación = un hogar:** un único contexto de datos por despliegue; nuevos usuarios entran solo tras **invitación aceptada por el owner**; nombre del hogar no configurable en MVP. Contrato en [`docs/spec/AUTH_MODEL.md`](docs/spec/AUTH_MODEL.md).
+- **Una instalación por despliegue:** un único contexto de datos por base de datos; nuevos usuarios entran solo tras **invitación aprobada por el owner**. Contrato en [`docs/spec/AUTH_MODEL.md`](docs/spec/AUTH_MODEL.md).
 - **Web:** React + TypeScript + Vite (`apps/web`).
 - **Monorepo:** workspace Cargo + npm workspaces.
 - **Ramas:** desarrollo en `**dev`**; `git push origin dev` (evitar subir código nuevo solo a `main` hasta merge explícito).

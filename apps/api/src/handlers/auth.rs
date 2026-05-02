@@ -1,5 +1,6 @@
 use crate::auth::password;
 use crate::error::ApiError;
+use crate::handlers::installation::bootstrap_installation_as_owner_if_empty;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::Extension;
@@ -48,7 +49,7 @@ struct UserRow {
     username: String,
 }
 
-fn validate_username(username: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
     let trimmed = username.trim();
     if trimmed != username {
         return Err(ApiError::BadRequest(
@@ -98,6 +99,7 @@ pub async fn register(
 ) -> Result<(axum::http::StatusCode, Json<UserResponse>), ApiError> {
     validate_username(&body.username)?;
     let hash = password::hash_password(&body.password)?;
+    let mut tx = state.pool.begin().await?;
     let row: UserRow = sqlx::query_as(
         r#"INSERT INTO users (username, password_hash)
            VALUES ($1, $2)
@@ -105,9 +107,21 @@ pub async fn register(
     )
     .bind(&body.username)
     .bind(&hash)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(map_unique_violation)?;
+
+    match bootstrap_installation_as_owner_if_empty(&mut tx, &row.id).await
+    {
+        Ok(()) => {}
+        Err(ApiError::Conflict) => {
+            return Err(ApiError::Conflict);
+        }
+        Err(e) => return Err(e),
+    }
+
+    tx.commit().await?;
+
     Ok((
         axum::http::StatusCode::CREATED,
         Json(UserResponse {
