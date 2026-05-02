@@ -24,7 +24,7 @@ La especificación MVP (paridad de capacidades respecto al cliente Swift de refe
 
 ### Docker: versiones e imágenes de terceros
 
-Las etiquetas `**latest**` no se usan para servicios críticos: en `docker-compose.yml` y en `apps/api/Dockerfile` las bases (**PostgreSQL**, **Node**, **Rust**, **Debian**) van **fijadas por etiqueta acotada + digest** para que un pull arbitrario no rompa instalaciones self-hosted. La imagen de compilación Rust usa `rust:bookworm` (cadena **stable** oficial) con digest concreto — al subir de versión de dependencias que eleven el MSRV, hay que **regenerar `Cargo.lock`** con ese toolchain y, si hace falta, actualizar el digest del builder en el Dockerfile.
+Las etiquetas `**latest`** no se usan para servicios críticos: en `docker-compose.yml` y en `apps/api/Dockerfile` las bases (**PostgreSQL**, **Node**, **Rust**, **Debian**) van **fijadas por etiqueta acotada + digest** para que un pull arbitrario no rompa instalaciones self-hosted. La imagen de compilación Rust usa `rust:bookworm` (cadena **stable** oficial) con digest concreto — al subir de versión de dependencias que eleven el MSRV, hay que **regenerar `Cargo.lock`** con ese toolchain y, si hace falta, actualizar el digest del builder en el Dockerfile.
 
 Convención al publicar en un registro (Docker Hub u otro):
 
@@ -56,15 +56,15 @@ npm install
 npm run dev:web
 ```
 
-Abre **`http://127.0.0.1:8080`** para la UI en desarrollo.
+Abre `**http://127.0.0.1:8080**` para la UI en desarrollo.
 
 Comprueba la API: `curl -s http://127.0.0.1:8081/v1/health` · OpenAPI: `curl -s http://127.0.0.1:8081/openapi.json | head`
 
-Si **`8080`** está ocupado, Vite intentará el siguiente puerto libre; añade ese origen (p. ej. `http://127.0.0.1:5173`) a **`CORS_ORIGINS`** en `.env`. Si **`8081`** está ocupado, cambia **`PORT`** en `.env` y **`FUTUREFIN_API_PORT`** al mismo valor.
+Si `**8080**` está ocupado, Vite intentará el siguiente puerto libre; añade ese origen (p. ej. `http://127.0.0.1:5173`) a `**CORS_ORIGINS**` en `.env`. Si `**8081**` está ocupado, cambia `**PORT**` en `.env` y `**FUTUREFIN_API_PORT**` al mismo valor.
 
-**Solo API local** (sin Vite): pon **`PORT=8080`** en `.env` y ejecuta `cargo run`; las rutas quedan en `http://127.0.0.1:8080`.
+**Solo API local** (sin Vite): pon `**PORT=8080`** en `.env` y ejecuta `cargo run`; las rutas quedan en `http://127.0.0.1:8080`.
 
-**Todo el stack con Compose:** el proyecto se llama `futurefin`; los contenedores aparecen como `**futurefin-database`** (PostgreSQL) y `**futurefin-api**` (API Rust **y** interfaz web en el mismo puerto **8080**).
+**Todo el stack con Compose:** el proyecto se llama `futurefin`; los contenedores aparecen como `**futurefin-database`** (PostgreSQL) y `**futurefin-api`** (API Rust **y** interfaz web en el mismo puerto **8080**).
 
 ```bash
 docker compose up -d --build
