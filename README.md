@@ -16,6 +16,10 @@ La especificación MVP (paridad de capacidades respecto al cliente Swift de refe
 - Docker / Docker Compose (recomendado para despliegue).
 - Reverse proxy con TLS para entornos expuestos.
 
+## Publicar en GitHub
+
+Si aún no has enlazado el remoto, sigue [docs/GITHUB_SETUP.md](docs/GITHUB_SETUP.md).
+
 ## Licencia
 
 Por definir.

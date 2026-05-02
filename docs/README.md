@@ -2,6 +2,10 @@
 
 Este directorio materializa el **dossier de producto** para la refactorización completa de FutureFin como aplicación **Docker / web**, multi-usuario, con **paridad de capacidades** respecto al cliente macOS Swift de referencia — salvo exclusiones documentadas (artefactos desktop, datos demo, compatibilidad legacy).
 
+## Publicación del repositorio
+
+Instrucciones paso a paso para crear **FutureFin** en GitHub y subir `main` y `dev`: [GITHUB_SETUP.md](./GITHUB_SETUP.md).
+
 ## Índice de documentos
 
 | Documento | Contenido |
