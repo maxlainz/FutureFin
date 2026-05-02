@@ -4,7 +4,7 @@
   padding: 2rem 1.25rem;
 }
 
-.layout h1 {
+.page-header h1 {
   margin: 0 0 0.5rem;
   font-size: 1.75rem;
 }
@@ -14,12 +14,17 @@
   margin: 0 0 1.5rem;
 }
 
+.tight {
+  margin-bottom: 0;
+}
+
 .card {
   background: #fff;
   border: 1px solid #e2e8f0;
   border-radius: 0.75rem;
   padding: 1rem 1.25rem;
   box-shadow: 0 1px 2px rgb(15 23 42 / 6%);
+  margin-bottom: 1rem;
 }
 
 .card h2 {
@@ -37,4 +42,152 @@
 .error {
   margin: 0;
   color: #b91c1c;
+}
+
+.banner {
+  padding: 0.65rem 0.85rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.row-between {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  margin-bottom: 1rem;
+}
+
+.segmented button {
+  border: none;
+  background: #f8fafc;
+  padding: 0.45rem 0.85rem;
+  font: inherit;
+  cursor: pointer;
+  color: #475569;
+}
+
+.segmented button.active {
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.segmented button:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: -2px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.stack.bordered {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e2e8f0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.field span {
+  color: #334155;
+  font-weight: 500;
+}
+
+.field input,
+.field select {
+  font: inherit;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.45rem;
+}
+
+.field input:focus-visible,
+.field select:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 0;
+}
+
+.btn {
+  font: inherit;
+  padding: 0.5rem 0.85rem;
+  border-radius: 0.45rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.btn.secondary {
+  background: #fff;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+
+.hint {
+  margin: 0.75rem 0 0;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+
+.subsection-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.household-list {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+}
+
+.household-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.household-list li:last-child {
+  border-bottom: none;
+}
+
+.hh-name {
+  font-weight: 500;
+  color: #0f172a;
+}
+
+.hh-meta {
+  font-size: 0.85rem;
+  color: #64748b;
+  text-transform: lowercase;
 }
