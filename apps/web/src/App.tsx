@@ -2,9 +2,13 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
   useState,
   type Dispatch,
   type FormEvent,
+  type PointerEvent,
   type ReactNode,
   type SetStateAction,
 } from "react";
@@ -19,6 +23,8 @@ type HealthResponse = {
 type UserResponse = {
   id: string;
   username: string;
+  /** YYYY-MM-DD desde la API; ausente en clientes antiguos. */
+  birth_date?: string | null;
 };
 
 type InstallationSnapshot = {
@@ -69,6 +75,9 @@ type AssetApiRow = {
   expected_annual_return_percent?: string | null;
   monthly_contribution_fixed: string;
   contribution_remainder_weight: string;
+  contribution_frequency?: AssetContributionFreq;
+  /** Primer mes motor: fija escalada + remanente nominal (API); ausente en clientes antiguos. */
+  contribution_nominal_monthly?: string;
   notes: string | null;
   sort_index: number;
 };
@@ -123,10 +132,8 @@ type BudgetEntryApiRow = {
   id: string;
   category_id: string;
   scope: "income" | "expense";
-  label: string | null;
+  /** Importe mensual */
   amount: string;
-  frequency: "monthly" | "weekly";
-  monthly_equivalent: string;
   notes: string | null;
   sort_index: number;
 };
@@ -192,17 +199,17 @@ type ProjectionPointApi = {
 type ProjectionSeriesApi = {
   points: ProjectionPointApi[];
   months: number;
+  horizon_years: number;
+  horizon_basis: string;
   starting_net_worth: string;
   monthly_delta_assumption: string;
   model_note: string;
-};
-
-type PersonApiRow = {
-  id: string;
-  display_name: string;
-  is_primary: boolean;
-  birth_date?: string | null;
-  sort_index: number;
+  /** Mes 0 de la serie = esta fecha civil (servidor). */
+  anchor_date_ymd?: string;
+  show_age_mode?: string;
+  /** Decisión del servidor: eje en años cumplidos (no inferir solo desde instalación en cliente). */
+  use_age_on_x_axis?: boolean;
+  viewer_birth_date?: string | null;
 };
 
 type LiabilityApiRow = {
@@ -221,6 +228,8 @@ type LiabilityApiRow = {
 };
 
 type LiabilityPaymentFreq = "" | "monthly" | "weekly";
+
+type AssetContributionFreq = "monthly" | "weekly";
 
 /** Fallback civil date when a TZ string is invalid. */
 function utcTodayYmd(): string {
@@ -322,6 +331,13 @@ type TabId =
   | "projection"
   | "settings";
 
+type SettingsSubTabId =
+  | "access"
+  | "calendar"
+  | "projection"
+  | "categories"
+  | "data";
+
 const TABS: { id: TabId; label: string }[] = [
   { id: "summary", label: "Resumen" },
   { id: "assets", label: "Activos" },
@@ -348,7 +364,10 @@ function ledgerViewQs(scope: LedgerPersonScope): string {
   return scope === "mine" ? "?view=mine" : "";
 }
 
-/** Locale for grouped amounts and decimal comma (es-ES aligns with UI copy). */
+/**
+ * Locale para cantidades: coma decimal, y separador de miles «.» cuando el entero
+ * tiene ≥ 5 cifras (≥ 10.000), vía `Intl` es-ES.
+ */
 const DISPLAY_NUMBER_LOCALE = "es-ES";
 
 function parseDisplayDecimal(s: string): number | null {
@@ -359,15 +378,14 @@ function parseDisplayDecimal(s: string): number | null {
 }
 
 /**
- * Formats API decimal strings for money-like fields: grouped thousands,
- * up to 2 fractional digits, no trailing noise (e.g. 274 instead of 274.0000).
+ * Importes sin decimales. Miles con punto a partir de 10.000 (p. ej. `10.000`, no `10000`).
  */
 function formatMoneyAmount(s: string): string {
   const n = parseDisplayDecimal(s);
   if (n === null) return s;
   return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
     minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 0,
   }).format(n);
 }
 
@@ -394,7 +412,7 @@ function formatCurrencyAmount(s: string, currencyIso: string): string {
       currency: iso,
       currencyDisplay: "symbol",
       minimumFractionDigits: 0,
-      maximumFractionDigits: 2,
+      maximumFractionDigits: 0,
     }).format(n);
   } catch {
     return `${formatMoneyAmount(s)} ${iso}`;
@@ -418,21 +436,442 @@ function formatCurrencyNumber(n: number, currencyIso: string): string {
       currency: iso,
       currencyDisplay: "symbol",
       minimumFractionDigits: 0,
-      maximumFractionDigits: 2,
+      maximumFractionDigits: 0,
     }).format(n);
   } catch {
     return `${formatMoneyAmount(String(n))} ${iso}`;
   }
 }
 
-/** Percent rates (e.g. TAE): compact, not currency. */
+/** Equivalente mensual nominal de la cuota fija (semanal ×52/12, mismo criterio que el motor). */
+function assetFixedMonthlyEquivalentNum(a: AssetApiRow): number {
+  const fixed = parseDisplayDecimal(
+    String(a.monthly_contribution_fixed ?? "0").trim(),
+  );
+  if (fixed === null || fixed <= 0) return 0;
+  if (a.contribution_frequency === "weekly") {
+    return (fixed * 52) / 12;
+  }
+  return fixed;
+}
+
+/** Importe nominal mensual (primer mes del motor): cuota fija escalada + parte del remanente. */
+function formatAssetContributionNominalCell(
+  a: AssetApiRow,
+  currencyIso: string,
+): string {
+  const raw = a.contribution_nominal_monthly;
+  if (raw != null && String(raw).trim() !== "") {
+    const n = parseDisplayDecimal(String(raw).trim());
+    if (n !== null && n > 0) {
+      return formatCurrencyAmount(String(raw).trim(), currencyIso);
+    }
+    return METRIC_DASH;
+  }
+  const eq = assetFixedMonthlyEquivalentNum(a);
+  return eq > 0 ? formatCurrencyNumber(eq, currencyIso) : METRIC_DASH;
+}
+
+/** Etiquetas de eje Y: compactas si el importe es muy grande. */
+function formatAxisMoney(n: number, currencyIso: string): string {
+  const iso = normalizeCurrencyIso(currencyIso);
+  if (!iso || !Number.isFinite(n)) return formatMoneyAmount(String(n));
+  try {
+    const big = Math.abs(n) >= 100_000;
+    return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+      style: "currency",
+      currency: iso,
+      currencyDisplay: "symbol",
+      notation: big ? "compact" : "standard",
+      compactDisplay: "short",
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(n);
+  } catch {
+    return formatCurrencyNumber(n, currencyIso);
+  }
+}
+
+function normalizeAgeUiMode(raw: string | null | undefined): "dates" | "ages" {
+  const t = (raw ?? "").trim().toLowerCase();
+  return t === "ages" ? "ages" : "dates";
+}
+
+/** Prioriza `use_age_on_x_axis` del GET /v1/projection/series (fuente de verdad). */
+function resolveProjectionAxisAgeMode(
+  series: ProjectionSeriesApi,
+  installation: InstallationAccess | null,
+): "dates" | "ages" {
+  if (series.use_age_on_x_axis === true) {
+    return "ages";
+  }
+  if (series.use_age_on_x_axis === false) {
+    return "dates";
+  }
+  return normalizeAgeUiMode(
+    series.show_age_mode ?? installation?.installation.show_age_mode,
+  );
+}
+
+function projectionHorizonBadge(basis: string, years: number): string {
+  const y = `${years} años`;
+  switch (basis) {
+    case "mac_target_age":
+      return `${y} · edad objetivo`;
+    case "mac_fallback_no_demographics":
+      return `${y} · sin DOB / sin edad objetivo`;
+    case "months_override":
+      return `${y} · meses explícitos`;
+    default:
+      return y;
+  }
+}
+
+/** Civil Y-M-D desde `YYYY-MM-DD` o prefijo ISO (`YYYY-MM-DDTHH:mm:ss`). */
+function parseYmdComponents(
+  ymd: string | null | undefined,
+): { y: number; m: number; d: number } | null {
+  if (!ymd || typeof ymd !== "string") return null;
+  const t = ymd.trim();
+  const mm = /^(\d{4})-(\d{2})-(\d{2})/.exec(t);
+  if (!mm) return null;
+  const y = Number(mm[1]);
+  const m = Number(mm[2]);
+  const d = Number(mm[3]);
+  if (
+    !Number.isFinite(y) ||
+    !Number.isFinite(m) ||
+    !Number.isFinite(d) ||
+    m < 1 ||
+    m > 12 ||
+    d < 1 ||
+    d > 31
+  ) {
+    return null;
+  }
+  return { y, m, d };
+}
+
+function civilDaysInMonth(y: number, m: number): number {
+  return new Date(y, m, 0).getDate();
+}
+
+/** Civil calendar: today + `deltaMonths` (alineado a edad completada tipo servidor). */
+function addMonthsCivil(
+  y: number,
+  m: number,
+  d: number,
+  deltaMonths: number,
+): { y: number; m: number; d: number } {
+  const total = y * 12 + (m - 1) + deltaMonths;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
+  const dim = civilDaysInMonth(ny, nm);
+  const nd = Math.min(d, dim);
+  return { y: ny, m: nm, d: nd };
+}
+
+/** Edad en años cumplidos (misma idea que `age_completed_years` en la API). */
+function ageCompletedYearsCivil(
+  today: { y: number; m: number; d: number },
+  birth: { y: number; m: number; d: number },
+): number {
+  const tb = birth.y * 10000 + birth.m * 100 + birth.d;
+  const tt = today.y * 10000 + today.m * 100 + today.d;
+  if (birth.y > today.y) return 0;
+  if (tb > tt) return 0;
+  let years = today.y - birth.y;
+  if (
+    today.m < birth.m ||
+    (today.m === birth.m && today.d < birth.d)
+  ) {
+    years -= 1;
+  }
+  return years;
+}
+
+/** Año civil en el eje (modo fechas); mismo calendario que la ancla + meses. */
+function formatProjectionAxisYear(civil: { y: number; m: number; d: number }): string {
+  const dt = new Date(civil.y, civil.m - 1, civil.d);
+  return new Intl.DateTimeFormat(DISPLAY_NUMBER_LOCALE, {
+    year: "numeric",
+  }).format(dt);
+}
+
+/**
+ * Índices de mes para marcas del eje X: respeta `maxTicks` según ancho en px y alinea a años si el horizonte es largo.
+ */
+function buildProjectionMonthTickIndices(
+  mc: number,
+  maxTicks: number,
+): number[] {
+  if (mc <= 0) {
+    return [0];
+  }
+  const cap = Math.max(4, Math.min(maxTicks, 22));
+  const roughStep = Math.ceil(mc / Math.max(1, cap - 1));
+  let step = roughStep;
+  if (mc > 36) {
+    const annual = [12, 24, 36, 48, 60, 120, 240];
+    const yAligned = Math.max(12, Math.ceil(roughStep / 12) * 12);
+    step = annual.find((s) => s >= yAligned) ?? yAligned;
+  } else {
+    const shortSteps = [1, 2, 3, 6, 12];
+    step = shortSteps.find((s) => s >= roughStep) ?? roughStep;
+  }
+  const ticks: number[] = [0];
+  for (let m = step; m < mc; m += step) {
+    ticks.push(m);
+  }
+  if (ticks[ticks.length - 1] !== mc) {
+    ticks.push(mc);
+  }
+  return ticks;
+}
+
+/** Una marca por año civil al menos (modo fechas); mantiene el último mes del horizonte. */
+function thinProjectionTicksUniqueYears(
+  ticks: number[],
+  anchor: { y: number; m: number; d: number },
+  monthEnd: number,
+): number[] {
+  const sorted = [...new Set(ticks)].sort((a, b) => a - b);
+  const out: number[] = [];
+  let prevY: number | null = null;
+  for (const m of sorted) {
+    const y = addMonthsCivil(anchor.y, anchor.m, anchor.d, m).y;
+    if (prevY === null || y !== prevY) {
+      out.push(m);
+      prevY = y;
+    }
+  }
+  if (out[out.length - 1] !== monthEnd) {
+    const yEnd = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthEnd).y;
+    const yLast = addMonthsCivil(
+      anchor.y,
+      anchor.m,
+      anchor.d,
+      out[out.length - 1],
+    ).y;
+    if (yEnd !== yLast) {
+      out.push(monthEnd);
+    } else {
+      out[out.length - 1] = monthEnd;
+    }
+  }
+  return out;
+}
+
+function projectionXTickLabel(
+  monthIndex: number,
+  monthCount: number,
+  opts?: {
+    ageUiMode: "dates" | "ages";
+    birthDateIso?: string | null;
+    /** Fecha civil del mes 0 (YYYY-MM-DD), p. ej. desde GET /v1/projection/series. */
+    anchorDateYmd?: string | null;
+    calendarTz: string;
+  },
+): string {
+  const mc = Number(monthCount);
+  const safeMc = Number.isFinite(mc) && mc >= 0 ? mc : 0;
+  const relativeFallback =
+    monthIndex === 0
+      ? "Hoy"
+      : safeMc <= 48
+        ? `${monthIndex} m`
+        : `${Math.round(monthIndex / 12)} a`;
+
+  if (!opts) {
+    return `Mes ${monthIndex}`;
+  }
+
+  const anchorStr =
+    opts.anchorDateYmd != null && opts.anchorDateYmd.trim() !== ""
+      ? opts.anchorDateYmd.trim()
+      : todayYmdInTimeZone(opts.calendarTz);
+  const anchor = parseYmdComponents(anchorStr);
+
+  if (opts.ageUiMode === "ages") {
+    const birth = parseYmdComponents(opts.birthDateIso);
+    if (!birth || !anchor) {
+      return relativeFallback;
+    }
+    const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthIndex);
+    const age = ageCompletedYearsCivil(at, birth);
+    return `${age} a`;
+  }
+
+  // Modo fechas: solo año civil en el eje.
+  if (!anchor) {
+    return `Mes ${monthIndex}`;
+  }
+  const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthIndex);
+  return formatProjectionAxisYear(at);
+}
+
+function projectionHoverTitle(
+  monthIndex: number,
+  ageUiMode: "dates" | "ages",
+  userBirthDate: string | null,
+  calendarTz: string,
+  anchorDateYmd?: string | null,
+): string {
+  const anchorStr =
+    anchorDateYmd != null && anchorDateYmd.trim() !== ""
+      ? anchorDateYmd.trim()
+      : todayYmdInTimeZone(calendarTz);
+  const anchor = parseYmdComponents(anchorStr);
+
+  if (ageUiMode !== "ages") {
+    if (!anchor) {
+      return `Mes ${monthIndex}`;
+    }
+    const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthIndex);
+    const label = formatProjectionAxisYear(at);
+    return `${label} · mes ${monthIndex}`;
+  }
+
+  const birth = parseYmdComponents(userBirthDate);
+  if (!birth || !anchor) {
+    return `Mes ${monthIndex}`;
+  }
+  const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthIndex);
+  const age = ageCompletedYearsCivil(at, birth);
+  return `${age} años · mes ${monthIndex}`;
+}
+
+function projectionXTicks(
+  monthCount: number,
+  opts?: {
+    ageUiMode: "dates" | "ages";
+    birthDateIso?: string | null;
+    anchorDateYmd?: string | null;
+    calendarTz: string;
+  },
+  density?: { plotWidthPx: number },
+): { monthIndex: number; label: string }[] {
+  const mcRaw = Number(monthCount);
+  const mc = Number.isFinite(mcRaw) && mcRaw >= 0 ? mcRaw : 0;
+  const pw = density?.plotWidthPx ?? 600;
+  const minPx =
+    opts?.ageUiMode === "dates"
+      ? 34
+      : 28;
+  const maxTicks = Math.max(5, Math.min(18, Math.floor(Math.max(120, pw) / minPx)));
+
+  let ticks = buildProjectionMonthTickIndices(mc, maxTicks);
+
+  if (opts?.ageUiMode === "dates") {
+    const anchorStr =
+      opts.anchorDateYmd != null && opts.anchorDateYmd.trim() !== ""
+        ? opts.anchorDateYmd.trim()
+        : todayYmdInTimeZone(opts.calendarTz);
+    const anchor = parseYmdComponents(anchorStr);
+    if (anchor) {
+      ticks = thinProjectionTicksUniqueYears(ticks, anchor, mc);
+    }
+  }
+
+  return ticks.map((m) => ({
+    monthIndex: m,
+    label: projectionXTickLabel(m, mc, opts),
+  }));
+}
+
+/** Geometría del SVG en unidades de usuario: depende del ancho CSS real del contenedor. */
+function buildProjectionChartLayout(containerCssWidth: number) {
+  const W = Math.max(300, Math.round(containerCssWidth));
+  const aspect = 460 / 1040;
+  let H = Math.round(W * aspect);
+  H = Math.max(260, Math.min(H, 620));
+
+  const narrow = W < 560;
+  const ml = narrow
+    ? Math.round(42 + W * 0.035)
+    : Math.round(68 + Math.min(36, (W - 560) * 0.045));
+  const mr = narrow ? 12 : Math.round(26 + Math.min(30, (W - 560) * 0.022));
+  let mt = narrow ? 94 : 88;
+  const mb = narrow ? 42 : 52;
+
+  let pw = W - ml - mr;
+  const legendOnRight = pw >= 280;
+  if (!legendOnRight) {
+    mt = narrow ? 122 : 112;
+    if (pw < 440) {
+      mt += 12;
+    }
+  }
+
+  pw = W - ml - mr;
+  const ph = H - mt - mb;
+
+  const legend = legendOnRight
+    ? {
+        x: ml + Math.max(0, pw - Math.min(210, Math.round(pw * 0.42))),
+        y: 16,
+      }
+    : { x: ml, y: narrow ? 92 : 82 };
+
+  return {
+    W,
+    H,
+    ml,
+    mr,
+    mt,
+    mb,
+    pw,
+    ph,
+    narrow,
+    legendOnRight,
+    legend,
+  };
+}
+
+function niceYTicks(minV: number, maxV: number, tickCount: number): number[] {
+  if (!Number.isFinite(minV) || !Number.isFinite(maxV)) return [0];
+  if (minV === maxV) {
+    const pad = Math.abs(minV) < 1 ? 1 : Math.abs(minV) * 0.05;
+    return niceYTicks(minV - pad, maxV + pad, tickCount);
+  }
+  const span = maxV - minV;
+  const rough = span / Math.max(2, tickCount - 1);
+  const exp = Math.floor(Math.log10(rough));
+  const frac = rough / 10 ** exp;
+  const niceFrac = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 5 ? 5 : 10;
+  const step = niceFrac * 10 ** exp;
+  const lo = Math.floor(minV / step) * step;
+  const hi = Math.ceil(maxV / step) * step;
+  const out: number[] = [];
+  for (let x = lo; x <= hi + step * 0.01; x += step) {
+    out.push(Math.round(x / step) * step);
+  }
+  const dedup = [...new Set(out.map((v) => Number(v.toPrecision(12))))];
+  return dedup.length > 8 ? dedup.filter((_, i) => i % 2 === 0) : dedup;
+}
+
+/** Porcentaje en pantalla: un decimal y « %» detrás (no usar como sufijo duplicado). */
+function formatPercentDisplay(n: number): string {
+  return `${new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(n)} %`;
+}
+
+/** Igual que formatPercentDisplay pero con «+» explícito en positivos (retornos). */
+function formatPercentDisplaySigned(n: number): string {
+  return `${new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+    signDisplay: "exceptZero",
+  }).format(n)} %`;
+}
+
+/** Tasas en % ya como número API (ej. TAE 3.25 → «3,3 %»). */
 function formatPercentAmount(s: string): string {
   const n = parseDisplayDecimal(s);
   if (n === null) return s;
-  return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 4,
-  }).format(n);
+  return formatPercentDisplay(n);
 }
 
 /** Retorno acumulado (valor/compra − 1); no es TAE. Paridad MVP con «retorno implícito» del Mac cuando hay precio de compra. */
@@ -448,10 +887,7 @@ function assetImplicitTotalReturnLabel(
   if (cur === null || pur === null || pur <= 0) return null;
   const pct = (cur / pur - 1) * 100;
   if (!Number.isFinite(pct)) return null;
-  const sign = pct >= 0 ? "+" : "";
-  return `${sign}${pct.toLocaleString(DISPLAY_NUMBER_LOCALE, {
-    maximumFractionDigits: 2,
-  })} %`;
+  return formatPercentDisplaySigned(pct);
 }
 
 function liabilityDerivedPrincipalPreview(
@@ -475,9 +911,7 @@ function formatDebtToAssetsPct(ratio: string | null | undefined): string {
   if (ratio == null || ratio === "") return METRIC_DASH;
   const r = Number(String(ratio).replace(",", "."));
   if (!Number.isFinite(r)) return METRIC_DASH;
-  return `${(r * 100).toLocaleString(DISPLAY_NUMBER_LOCALE, {
-    maximumFractionDigits: 2,
-  })} %`;
+  return formatPercentDisplay(r * 100);
 }
 
 /** Decimal fraction (e.g. 0.25) shown as percent */
@@ -485,9 +919,7 @@ function formatFractionAsPercent(ratio: string | null | undefined): string {
   if (ratio == null || ratio === "") return METRIC_DASH;
   const r = Number(String(ratio).replace(",", "."));
   if (!Number.isFinite(r)) return METRIC_DASH;
-  return `${(r * 100).toLocaleString(DISPLAY_NUMBER_LOCALE, {
-    maximumFractionDigits: 1,
-  })} %`;
+  return formatPercentDisplay(r * 100);
 }
 
 function formatMonthsRough(s: string | null | undefined): string {
@@ -509,9 +941,7 @@ function breakdownPercentOfTotal(part: string, whole: string): number | null {
 function formatBreakdownPct(part: string, whole: string): string {
   const pct = breakdownPercentOfTotal(part, whole);
   if (pct === null) return METRIC_DASH;
-  return `${pct.toLocaleString(DISPLAY_NUMBER_LOCALE, {
-    maximumFractionDigits: 1,
-  })} %`;
+  return formatPercentDisplay(pct);
 }
 
 function budgetCategoryMap(
@@ -533,7 +963,7 @@ function sortBudgetEntriesMacStyle(
   categoryById: Map<string, CategoryRow>,
 ): BudgetEntryApiRow[] {
   const monthlyEq = (e: BudgetEntryApiRow) =>
-    Number(e.monthly_equivalent.replace(",", "."));
+    Number(String(e.amount).replace(",", "."));
   const byCatTotal = new Map<string, number>();
   for (const e of entries) {
     const k = e.category_id;
@@ -552,7 +982,7 @@ function sortBudgetEntriesMacStyle(
     const ea = monthlyEq(a);
     const eb = monthlyEq(b);
     if (eb !== ea) return eb - ea;
-    return (a.label ?? "").localeCompare(b.label ?? "", "es");
+    return a.id.localeCompare(b.id, "es");
   });
 }
 
@@ -773,6 +1203,8 @@ export default function App() {
   const [assetFormLiquid, setAssetFormLiquid] = useState(true);
   const [assetFormExpectedReturn, setAssetFormExpectedReturn] = useState("");
   const [assetFormMonthlyFixed, setAssetFormMonthlyFixed] = useState("");
+  const [assetFormContributionFrequency, setAssetFormContributionFrequency] =
+    useState<AssetContributionFreq>("monthly");
   const [assetFormRemainderWeight, setAssetFormRemainderWeight] =
     useState("");
   const [assetFormNotes, setAssetFormNotes] = useState("");
@@ -829,11 +1261,7 @@ export default function App() {
   const [budgetFormScope, setBudgetFormScope] =
     useState<BudgetScopeToggle>("expense");
   const [budgetFormCategoryId, setBudgetFormCategoryId] = useState("");
-  const [budgetFormLabel, setBudgetFormLabel] = useState("");
   const [budgetFormAmount, setBudgetFormAmount] = useState("");
-  const [budgetFormFrequency, setBudgetFormFrequency] = useState<
-    "monthly" | "weekly"
-  >("monthly");
   const [budgetFormNotes, setBudgetFormNotes] = useState("");
 
   const [planningFlows, setPlanningFlows] = useState<PlanningFlowApiRow[]>([]);
@@ -871,13 +1299,10 @@ export default function App() {
   const [projectionBusy, setProjectionBusy] = useState(false);
   const [projectionError, setProjectionError] = useState<string | null>(null);
 
-  const [persons, setPersons] = useState<PersonApiRow[]>([]);
-  const [personsBusy, setPersonsBusy] = useState(false);
-  const [personsError, setPersonsError] = useState<string | null>(null);
-  const [personSaving, setPersonSaving] = useState(false);
-  const [newPersonName, setNewPersonName] = useState("");
-  const [newPersonBirth, setNewPersonBirth] = useState("");
-  const [newPersonPrimary, setNewPersonPrimary] = useState(false);
+  const [userProfileOpen, setUserProfileOpen] = useState(false);
+  const [userBirthDraft, setUserBirthDraft] = useState("");
+  const [userProfileSaving, setUserProfileSaving] = useState(false);
+  const [userProfileError, setUserProfileError] = useState<string | null>(null);
   const [backupZipBusy, setBackupZipBusy] = useState(false);
   const [backupZipError, setBackupZipError] = useState<string | null>(null);
 
@@ -1020,7 +1445,14 @@ export default function App() {
       } else if (!budRes.ok) {
         throw new Error(await errorMessageFromResponse(budRes));
       } else {
-        setBudgetSnapshot((await budRes.json()) as BudgetSnapshotApi);
+        const raw = (await budRes.json()) as BudgetSnapshotApi;
+        setBudgetSnapshot({
+          ...raw,
+          entries: Array.isArray(raw.entries) ? raw.entries : [],
+          derived_from_liabilities: Array.isArray(raw.derived_from_liabilities)
+            ? raw.derived_from_liabilities
+            : [],
+        });
       }
 
       if (incRes.status === 403 || incRes.status === 404) {
@@ -1156,9 +1588,7 @@ export default function App() {
     setProjectionError(null);
     try {
       const qs =
-        ledgerPersonScope === "mine"
-          ? "?view=mine&months=120"
-          : "?months=120";
+        ledgerPersonScope === "mine" ? "?view=mine" : "";
       const res = await fetch(
         `/v1/projection/series${qs}`,
         defaultFetchInit,
@@ -1178,27 +1608,6 @@ export default function App() {
       setProjectionBusy(false);
     }
   }, [ledgerPersonScope]);
-
-  const loadPersonsPage = useCallback(async () => {
-    setPersonsBusy(true);
-    setPersonsError(null);
-    try {
-      const res = await fetch("/v1/persons", defaultFetchInit);
-      if (res.status === 403 || res.status === 404) {
-        setPersons([]);
-        return;
-      }
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
-      }
-      setPersons((await res.json()) as PersonApiRow[]);
-    } catch (e: unknown) {
-      setPersons([]);
-      setPersonsError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPersonsBusy(false);
-    }
-  }, []);
 
   const loadCategories = useCallback(async () => {
     setCategoriesBusy(true);
@@ -1392,13 +1801,6 @@ export default function App() {
   }, [user, hasMembership, activeTab, loadProjectionSeriesPage]);
 
   useEffect(() => {
-    if (!user || !hasMembership || activeTab !== "settings") {
-      return;
-    }
-    void loadPersonsPage();
-  }, [user, hasMembership, activeTab, loadPersonsPage]);
-
-  useEffect(() => {
     if (activeTab !== "assets" || assetFormCategoryId || assetCategories.length === 0) {
       return;
     }
@@ -1454,9 +1856,7 @@ export default function App() {
       setEditingBudgetEntryId(null);
       setBudgetFormScope("expense");
       setBudgetFormCategoryId("");
-      setBudgetFormLabel("");
       setBudgetFormAmount("");
-      setBudgetFormFrequency("monthly");
       setBudgetFormNotes("");
       setPlanningFlows([]);
       setPlanningIncomeCategories([]);
@@ -1479,11 +1879,6 @@ export default function App() {
       setFireError(null);
       setProjectionSeries(null);
       setProjectionError(null);
-      setPersons([]);
-      setPersonsError(null);
-      setNewPersonName("");
-      setNewPersonBirth("");
-      setNewPersonPrimary(false);
       setBackupZipError(null);
     }
   }, [user]);
@@ -1853,6 +2248,7 @@ export default function App() {
     setAssetFormLiquid(true);
     setAssetFormExpectedReturn("");
     setAssetFormMonthlyFixed("");
+    setAssetFormContributionFrequency("monthly");
     setAssetFormRemainderWeight("");
     setAssetFormNotes("");
   }
@@ -1881,6 +2277,7 @@ export default function App() {
       }
       const mf = assetFormMonthlyFixed.trim().replace(",", ".");
       base.monthly_contribution_fixed = mf === "" ? "0" : mf;
+      base.contribution_frequency = assetFormContributionFrequency;
       const rw = assetFormRemainderWeight.trim().replace(",", ".");
       base.contribution_remainder_weight = rw === "" ? "0" : rw;
       const pp = assetFormPurchase.trim();
@@ -1958,6 +2355,9 @@ export default function App() {
     setAssetFormLiquid(a.is_liquid);
     setAssetFormExpectedReturn(a.expected_annual_return_percent ?? "");
     setAssetFormMonthlyFixed(a.monthly_contribution_fixed ?? "0");
+    setAssetFormContributionFrequency(
+      a.contribution_frequency === "weekly" ? "weekly" : "monthly",
+    );
     setAssetFormRemainderWeight(a.contribution_remainder_weight ?? "0");
     setAssetFormNotes(a.notes ?? "");
   }
@@ -2104,16 +2504,19 @@ export default function App() {
     setLiabilityFormDerivePrincipal(row.principal_derived_from_plan ?? false);
   }
 
-  function resetBudgetForm() {
+  function resetBudgetForm(overrideScope?: BudgetScopeToggle) {
     setEditingBudgetEntryId(null);
+    const scope =
+      overrideScope !== undefined ? overrideScope : budgetFormScope;
+    if (overrideScope !== undefined) {
+      setBudgetFormScope(overrideScope);
+    }
     const cats =
-      budgetFormScope === "income"
+      scope === "income"
         ? budgetIncomeCategories
         : budgetExpenseCategories;
     setBudgetFormCategoryId(cats[0]?.id ?? "");
-    setBudgetFormLabel("");
     setBudgetFormAmount("");
-    setBudgetFormFrequency("monthly");
     setBudgetFormNotes("");
   }
 
@@ -2129,12 +2532,7 @@ export default function App() {
       const base: Record<string, unknown> = {
         category_id: budgetFormCategoryId,
         amount: amt,
-        frequency: budgetFormFrequency,
       };
-      const lb = budgetFormLabel.trim();
-      if (lb) {
-        base.label = lb;
-      }
       const nt = budgetFormNotes.trim();
       if (nt) {
         base.notes = nt;
@@ -2143,9 +2541,7 @@ export default function App() {
       if (editingBudgetEntryId) {
         const patchBody = {
           category_id: budgetFormCategoryId,
-          label: budgetFormLabel.trim(),
           amount: amt,
-          frequency: budgetFormFrequency,
           notes: budgetFormNotes.trim(),
         };
         const res = await fetch(
@@ -2208,9 +2604,7 @@ export default function App() {
     setEditingBudgetEntryId(row.id);
     setBudgetFormScope(row.scope);
     setBudgetFormCategoryId(row.category_id);
-    setBudgetFormLabel(row.label ?? "");
     setBudgetFormAmount(row.amount);
-    setBudgetFormFrequency(row.frequency);
     setBudgetFormNotes(row.notes ?? "");
   }
 
@@ -2314,81 +2708,30 @@ export default function App() {
     }
   }
 
-  async function submitNewPerson(ev: FormEvent) {
+  async function saveUserBirthProfile(ev: FormEvent) {
     ev.preventDefault();
-    const name = newPersonName.trim();
-    if (!name) {
-      setPersonsError("El nombre es obligatorio.");
-      return;
-    }
-    setPersonSaving(true);
-    setPersonsError(null);
+    setUserProfileSaving(true);
+    setUserProfileError(null);
+    const trimmed = userBirthDraft.trim();
     try {
-      const body: Record<string, unknown> = {
-        display_name: name,
-        is_primary: newPersonPrimary,
-      };
-      const bd = newPersonBirth.trim();
-      if (bd) {
-        body.birth_date = bd;
-      }
-      const res = await fetch("/v1/persons", {
-        ...defaultFetchInit,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
-      }
-      setNewPersonName("");
-      setNewPersonBirth("");
-      setNewPersonPrimary(false);
-      await loadPersonsPage();
-    } catch (e: unknown) {
-      setPersonsError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPersonSaving(false);
-    }
-  }
-
-  async function deletePersonRow(id: string) {
-    setPersonSaving(true);
-    setPersonsError(null);
-    try {
-      const res = await fetch(`/v1/persons/${encodeURIComponent(id)}`, {
-        ...defaultFetchInit,
-        method: "DELETE",
-      });
-      if (!res.ok && res.status !== 204) {
-        throw new Error(await errorMessageFromResponse(res));
-      }
-      await loadPersonsPage();
-    } catch (e: unknown) {
-      setPersonsError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPersonSaving(false);
-    }
-  }
-
-  async function promotePersonPrimary(id: string) {
-    setPersonSaving(true);
-    setPersonsError(null);
-    try {
-      const res = await fetch(`/v1/persons/${encodeURIComponent(id)}`, {
+      const res = await fetch("/v1/auth/me", {
         ...defaultFetchInit,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ is_primary: true }),
+        body: JSON.stringify({
+          birth_date: trimmed === "" ? null : trimmed,
+        }),
       });
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      await loadPersonsPage();
+      const body = (await res.json()) as UserResponse;
+      setUser(body);
+      setUserProfileOpen(false);
     } catch (e: unknown) {
-      setPersonsError(e instanceof Error ? e.message : String(e));
+      setUserProfileError(e instanceof Error ? e.message : String(e));
     } finally {
-      setPersonSaving(false);
+      setUserProfileSaving(false);
     }
   }
 
@@ -2546,7 +2889,19 @@ export default function App() {
                   : "Comprobando…"
             }
           />
-          <span className="user-chip">{user.username}</span>
+          <button
+            type="button"
+            className="user-chip user-chip-btn"
+            title="Configuración de cuenta"
+            disabled={authBusy}
+            onClick={() => {
+              setUserProfileError(null);
+              setUserBirthDraft(user.birth_date?.trim() ?? "");
+              setUserProfileOpen(true);
+            }}
+          >
+            {user.username}
+          </button>
           <button
             type="button"
             className="btn ghost text"
@@ -2557,6 +2912,57 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      <Modal
+        title="Tu cuenta"
+        open={userProfileOpen}
+        onClose={() => {
+          setUserProfileOpen(false);
+          setUserProfileError(null);
+        }}
+      >
+        <form className="asset-form stack" onSubmit={(e) => void saveUserBirthProfile(e)}>
+          {userProfileError ? (
+            <ModalFormError message={userProfileError} />
+          ) : null}
+          <p className="muted tight">
+            Usuario: <strong>{user.username}</strong>
+          </p>
+          <label className="field">
+            <span>Fecha de nacimiento (opcional)</span>
+            <input
+              type="date"
+              value={userBirthDraft}
+              onChange={(e) => setUserBirthDraft(e.target.value)}
+              max={new Date().toISOString().slice(0, 10)}
+              autoComplete="bday"
+            />
+            <span className="hint">
+              Guardada en tu perfil. Vacía el campo y guarda para borrarla.
+            </span>
+          </label>
+          <div className="asset-form-actions">
+            <button
+              type="submit"
+              className="btn primary"
+              disabled={userProfileSaving}
+            >
+              Guardar
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={userProfileSaving}
+              onClick={() => {
+                setUserProfileOpen(false);
+                setUserProfileError(null);
+              }}
+            >
+              Cerrar
+            </button>
+          </div>
+        </form>
+      </Modal>
 
       {installationGate === "loading" ? (
         <div className="app-loading">
@@ -2600,7 +3006,7 @@ export default function App() {
             </div>
             <p className="muted tight">
               Pídele al propietario del hogar que inicie sesión en FutureFin,
-              abra <strong>Ajustes → Aprobar acceso</strong> y te conceda
+              abra <strong>Ajustes → Acceso</strong> y te conceda
               entrada ahí.
             </p>
           </div>
@@ -2667,7 +3073,13 @@ export default function App() {
             </select>
           </div>
 
-          <main className="app-main">
+          <main
+            className={
+              activeTab === "projection" || activeTab === "budget"
+                ? "app-main app-main--projection-fullbleed"
+                : "app-main"
+            }
+          >
         <div
           className="app-global-errors"
           role="region"
@@ -2753,6 +3165,8 @@ export default function App() {
             setAssetFormExpectedReturn={setAssetFormExpectedReturn}
             assetFormMonthlyFixed={assetFormMonthlyFixed}
             setAssetFormMonthlyFixed={setAssetFormMonthlyFixed}
+            assetFormContributionFrequency={assetFormContributionFrequency}
+            setAssetFormContributionFrequency={setAssetFormContributionFrequency}
             assetFormRemainderWeight={assetFormRemainderWeight}
             setAssetFormRemainderWeight={setAssetFormRemainderWeight}
             assetFormNotes={assetFormNotes}
@@ -2826,8 +3240,8 @@ export default function App() {
               resetBudgetForm();
               setBudgetModalOpen(false);
             }}
-            openNewBudgetModal={() => {
-              resetBudgetForm();
+            openNewBudgetModal={(scope) => {
+              resetBudgetForm(scope);
               setBudgetModalOpen(true);
             }}
             budgetSnapshot={budgetSnapshot}
@@ -2839,12 +3253,8 @@ export default function App() {
             setBudgetFormScope={setBudgetFormScope}
             budgetFormCategoryId={budgetFormCategoryId}
             setBudgetFormCategoryId={setBudgetFormCategoryId}
-            budgetFormLabel={budgetFormLabel}
-            setBudgetFormLabel={setBudgetFormLabel}
             budgetFormAmount={budgetFormAmount}
             setBudgetFormAmount={setBudgetFormAmount}
-            budgetFormFrequency={budgetFormFrequency}
-            setBudgetFormFrequency={setBudgetFormFrequency}
             budgetFormNotes={budgetFormNotes}
             setBudgetFormNotes={setBudgetFormNotes}
             editingBudgetEntryId={editingBudgetEntryId}
@@ -2916,6 +3326,8 @@ export default function App() {
             projectionSeries={projectionSeries}
             projectionBusy={projectionBusy}
             projectionError={projectionError}
+            userBirthDate={user?.birth_date ?? null}
+            calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
@@ -2995,19 +3407,6 @@ export default function App() {
             editCategoryName={editCategoryName}
             setEditCategoryName={setEditCategoryName}
             saveCategoryEdit={(id) => void saveCategoryEdit(id)}
-            persons={persons}
-            personsBusy={personsBusy}
-            personsError={personsError}
-            personSaving={personSaving}
-            newPersonName={newPersonName}
-            setNewPersonName={setNewPersonName}
-            newPersonBirth={newPersonBirth}
-            setNewPersonBirth={setNewPersonBirth}
-            newPersonPrimary={newPersonPrimary}
-            setNewPersonPrimary={setNewPersonPrimary}
-            submitNewPerson={(e) => void submitNewPerson(e)}
-            deletePersonRow={(id) => void deletePersonRow(id)}
-            promotePersonPrimary={(id) => void promotePersonPrimary(id)}
             backupZipBusy={backupZipBusy}
             backupZipError={backupZipError}
             exportBackupZip={() => void exportBackupZipFile()}
@@ -3053,6 +3452,8 @@ function AssetsView({
   setAssetFormExpectedReturn,
   assetFormMonthlyFixed,
   setAssetFormMonthlyFixed,
+  assetFormContributionFrequency,
+  setAssetFormContributionFrequency,
   assetFormRemainderWeight,
   setAssetFormRemainderWeight,
   assetFormNotes,
@@ -3088,6 +3489,10 @@ function AssetsView({
   setAssetFormExpectedReturn: Dispatch<SetStateAction<string>>;
   assetFormMonthlyFixed: string;
   setAssetFormMonthlyFixed: Dispatch<SetStateAction<string>>;
+  assetFormContributionFrequency: AssetContributionFreq;
+  setAssetFormContributionFrequency: Dispatch<
+    SetStateAction<AssetContributionFreq>
+  >;
   assetFormRemainderWeight: string;
   setAssetFormRemainderWeight: Dispatch<SetStateAction<string>>;
   assetFormNotes: string;
@@ -3111,7 +3516,7 @@ function AssetsView({
             ? "Cargando instalación…"
             : !hasMembership
               ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : `Valores en moneda de la instalación (${currency}). Las categorías deben ser del ámbito Activos.`}
+              : `Valores en moneda de la instalación (${currency}). Las categorías deben ser del ámbito Activos. La aportación automática (cuota fija y peso sobre el remanente del presupuesto tras las fijas) alimenta la proyección de patrimonio como en el cliente macOS.`}
         </p>
       </div>
 
@@ -3208,30 +3613,64 @@ function AssetsView({
                   autoComplete="off"
                 />
               </label>
-              <label className="field">
-                <span>Aportación fija mensual</span>
-                <input
-                  value={assetFormMonthlyFixed}
-                  onChange={(e) =>
-                    setAssetFormMonthlyFixed(e.target.value)
-                  }
-                  inputMode="decimal"
-                  placeholder="0"
-                  autoComplete="off"
-                />
-              </label>
-              <label className="field">
-                <span>Peso remanente % presupuesto</span>
-                <input
-                  value={assetFormRemainderWeight}
-                  onChange={(e) =>
-                    setAssetFormRemainderWeight(e.target.value)
-                  }
-                  inputMode="decimal"
-                  placeholder="0"
-                  autoComplete="off"
-                />
-              </label>
+            </div>
+            <div className="asset-auto-contrib-section">
+              <h4 className="asset-auto-contrib-heading">
+                Aportación automática
+              </h4>
+              <p className="muted tight asset-auto-contrib-help">
+                En la proyección mensual se aplican primero las cuotas fijas
+                (recortadas si no hay ahorro suficiente), luego el sobrante del
+                presupuesto se reparte entre activos según el peso (normalizado
+                si la suma supera 100&nbsp;%). Los ingresos próximos positivos
+                sin fecha refuerzan el margen disponible, igual que en macOS.
+              </p>
+              <div className="asset-form-grid">
+                <label className="field">
+                  <span>Frecuencia cuota fija</span>
+                  <select
+                    value={assetFormContributionFrequency}
+                    onChange={(e) =>
+                      setAssetFormContributionFrequency(
+                        e.target.value as AssetContributionFreq,
+                      )
+                    }
+                  >
+                    <option value="monthly">Mensual</option>
+                    <option value="weekly">Semanal (×52÷12 en proyección)</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>
+                    Importe cuota fija (
+                    {assetFormContributionFrequency === "weekly"
+                      ? "por semana"
+                      : "por mes"}
+                    )
+                  </span>
+                  <input
+                    value={assetFormMonthlyFixed}
+                    onChange={(e) =>
+                      setAssetFormMonthlyFixed(e.target.value)
+                    }
+                    inputMode="decimal"
+                    placeholder="0"
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="field">
+                  <span>Peso sobre remanente (%)</span>
+                  <input
+                    value={assetFormRemainderWeight}
+                    onChange={(e) =>
+                      setAssetFormRemainderWeight(e.target.value)
+                    }
+                    inputMode="decimal"
+                    placeholder="0"
+                    autoComplete="off"
+                  />
+                </label>
+              </div>
             </div>
             <label className="field">
               <span>Notas (opc.)</span>
@@ -3301,8 +3740,12 @@ function AssetsView({
                   <th className="num" title="Rentabilidad anual esperada (proyección)">
                     Rent. % a.a.
                   </th>
-                  <th className="num">Aport. fija</th>
-                  <th className="num">Peso rem.</th>
+                  <th
+                    className="num"
+                    title="Estimación mes 1 del motor: suma nominal de cuota fija (escalada si el ahorro no alcanza) y del reparto del remanente según pesos; sin caja positiva, —."
+                  >
+                    Aporte
+                  </th>
                   <th>Notas</th>
                   {canEdit ? <th /> : null}
                 </tr>
@@ -3328,16 +3771,12 @@ function AssetsView({
                     <td className="num muted">
                       {a.expected_annual_return_percent != null &&
                       a.expected_annual_return_percent !== ""
-                        ? `${a.expected_annual_return_percent}%`
+                        ? formatPercentAmount(a.expected_annual_return_percent)
                         : METRIC_DASH}
                     </td>
-                    <td className="num">
-                      {formatCurrencyAmount(
-                        a.monthly_contribution_fixed,
-                        currencyIso,
-                      )}
+                    <td className="num muted tight">
+                      {formatAssetContributionNominalCell(a, currencyIso)}
                     </td>
-                    <td className="num muted">{a.contribution_remainder_weight}</td>
                     <td className="asset-notes-cell">
                       {a.notes ?? METRIC_DASH}
                     </td>
@@ -3725,7 +4164,7 @@ function LiabilitiesView({
                     </td>
                     <td className="num">
                       {row.apr_percent != null && String(row.apr_percent).trim() !== ""
-                        ? `${formatPercentAmount(row.apr_percent)} %`
+                        ? formatPercentAmount(row.apr_percent)
                         : METRIC_DASH}
                     </td>
                     <td className="num">
@@ -3785,6 +4224,44 @@ function budgetDerivedCatLabel(categories: CategoryRow[], id: string): string {
   return categories.find((x) => x.id === id)?.name ?? id.slice(0, 8);
 }
 
+function BudgetRowEditIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
+  );
+}
+
+function BudgetRowTrashIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
+
 function BudgetView({
   installation,
   installationBusy,
@@ -3803,12 +4280,8 @@ function BudgetView({
   setBudgetFormScope,
   budgetFormCategoryId,
   setBudgetFormCategoryId,
-  budgetFormLabel,
-  setBudgetFormLabel,
   budgetFormAmount,
   setBudgetFormAmount,
-  budgetFormFrequency,
-  setBudgetFormFrequency,
   budgetFormNotes,
   setBudgetFormNotes,
   editingBudgetEntryId,
@@ -3824,7 +4297,7 @@ function BudgetView({
   formError: string | null;
   budgetModalOpen: boolean;
   closeBudgetModal: () => void;
-  openNewBudgetModal: () => void;
+  openNewBudgetModal: (scope?: BudgetScopeToggle) => void;
   budgetSnapshot: BudgetSnapshotApi | null;
   budgetLoading: boolean;
   budgetIncomeCategories: CategoryRow[];
@@ -3834,14 +4307,8 @@ function BudgetView({
   setBudgetFormScope: Dispatch<SetStateAction<BudgetScopeToggle>>;
   budgetFormCategoryId: string;
   setBudgetFormCategoryId: Dispatch<SetStateAction<string>>;
-  budgetFormLabel: string;
-  setBudgetFormLabel: Dispatch<SetStateAction<string>>;
   budgetFormAmount: string;
   setBudgetFormAmount: Dispatch<SetStateAction<string>>;
-  budgetFormFrequency: "monthly" | "weekly";
-  setBudgetFormFrequency: Dispatch<
-    SetStateAction<"monthly" | "weekly">
-  >;
   budgetFormNotes: string;
   setBudgetFormNotes: Dispatch<SetStateAction<string>>;
   editingBudgetEntryId: string | null;
@@ -3859,10 +4326,16 @@ function BudgetView({
     budgetExpenseCategories,
   );
 
+  const budgetEntriesRaw = Array.isArray(budgetSnapshot?.entries)
+    ? budgetSnapshot.entries
+    : [];
+
   const sortedEntries =
     budgetSnapshot && !budgetLoading
-      ? sortBudgetEntriesMacStyle(budgetSnapshot.entries, categoryMapForSort)
+      ? sortBudgetEntriesMacStyle(budgetEntriesRaw, categoryMapForSort)
       : [];
+
+  const derivedLines = budgetSnapshot?.derived_from_liabilities ?? [];
 
   const formCats =
     budgetFormScope === "income"
@@ -3874,93 +4347,78 @@ function BudgetView({
       ? budgetSnapshot
       : null;
 
-  const incM = snap
-    ? formatCurrencyAmount(snap.totals.income_monthly_equivalent, currencyIso)
-    : METRIC_DASH;
-  const expReg = snap
-    ? formatCurrencyAmount(
-        snap.totals.expense_regular_monthly_equivalent,
-        currencyIso,
-      )
-    : METRIC_DASH;
-  const expDer = snap
-    ? formatCurrencyAmount(
-        snap.totals.expense_derived_monthly_equivalent,
-        currencyIso,
-      )
+  const incTot = snap
+    ? formatCurrencyOrDash(snap.totals?.income_monthly_equivalent, currencyIso)
     : METRIC_DASH;
   const expTot = snap
-    ? formatCurrencyAmount(
-        snap.totals.expense_total_monthly_equivalent,
+    ? formatCurrencyOrDash(
+        snap.totals?.expense_total_monthly_equivalent,
         currencyIso,
       )
     : METRIC_DASH;
   const netM = snap
-    ? formatCurrencyAmount(snap.totals.net_monthly_equivalent, currencyIso)
+    ? formatCurrencyOrDash(snap.totals?.net_monthly_equivalent, currencyIso)
     : METRIC_DASH;
 
+  const incomeEntries = sortedEntries.filter((e) => e.scope === "income");
+  const expenseEntries = sortedEntries.filter((e) => e.scope === "expense");
+
   return (
-    <div className="workspace">
-      <div className="workspace-header">
-        <h2 className="workspace-title">Presupuesto</h2>
-        <p className="workspace-sub">
-          {installationBusy
-            ? "Cargando instalación…"
-            : !hasMembership
-              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : budgetLoading
-                ? "Cargando presupuesto y categorías…"
-                : `Totales en equivalencia mensual (${currency}). Las cuotas de pasivos con plan activo aparecen como líneas derivadas (solo lectura), alineadas al cliente Mac.`}
-        </p>
-      </div>
-
-      {!installationBusy && !hasMembership ? (
-        <div className="banner info-banner">
-          Cuando tengas acceso podrás ver y editar el presupuesto aquí.
+    <div className="budget-page">
+      <section className="budget-summary-band" aria-label="Resumen del presupuesto">
+        <div className="workspace-header">
+          <h2 className="workspace-title">Presupuesto</h2>
+          <p className="workspace-sub">
+            {installationBusy
+              ? "Cargando instalación…"
+              : !hasMembership
+                ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
+                : budgetLoading
+                  ? "Cargando presupuesto y categorías…"
+                  : `Importes mensuales (${currency}). Las cuotas de pasivos con plan activo aparecen como líneas derivadas (solo lectura).`}
+          </p>
         </div>
-      ) : null}
 
-      {hasMembership &&
-      budgetIncomeCategories.length === 0 &&
-      budgetExpenseCategories.length === 0 &&
-      !budgetLoading ? (
-        <div className="banner info-banner">
-          Aún no hay categorías de <strong>Ingresos</strong> ni{" "}
-          <strong>Gastos</strong>. Créalas en <strong>Ajustes → Categorías</strong>.
+        {!installationBusy && !hasMembership ? (
+          <div className="banner info-banner">
+            Cuando tengas acceso podrás ver y editar el presupuesto aquí.
+          </div>
+        ) : null}
+
+        {hasMembership &&
+        budgetIncomeCategories.length === 0 &&
+        budgetExpenseCategories.length === 0 &&
+        !budgetLoading ? (
+          <div className="banner info-banner">
+            Aún no hay categorías de <strong>Ingresos</strong> ni{" "}
+            <strong>Gastos</strong>. Créalas en <strong>Ajustes → Categorías</strong>.
+          </div>
+        ) : null}
+
+        <div className="metric-grid metric-grid--budget-summary">
+          <MetricCard
+            label="Ingresos totales"
+            value={incTot}
+            hint="Equiv. mensual: entradas recurrentes en presupuesto."
+          />
+          <MetricCard
+            label="Gastos totales"
+            value={expTot}
+            hint="Equiv. mensual: gastos recurrentes y cuotas derivadas de pasivos."
+          />
+          <MetricCard
+            label="Neto"
+            value={netM}
+            hint="Ingresos totales − gastos totales (equiv. mensual)."
+          />
         </div>
-      ) : null}
 
-      <div className="metric-grid">
-        <MetricCard
-          label="Ingresos (equiv. mensual)"
-          value={incM}
-          hint="Entradas recurrentes guardadas en presupuesto."
-        />
-        <MetricCard
-          label="Gastos recurrentes"
-          value={expReg}
-        />
-        <MetricCard
-          label="Gastos derivados (pasivos)"
-          value={expDer}
-          hint="Cuotas de planes activos en Pasivos."
-        />
-        <MetricCard
-          label="Gastos totales"
-          value={expTot}
-        />
-        <MetricCard
-          label="Neto mensual"
-          value={netM}
-          hint="Ingresos − gastos totales."
-        />
-      </div>
-
-      {!canEdit && hasMembership ? (
-        <p className="muted tight">
-          Solo lectura: tu rol no permite crear ni editar líneas de presupuesto.
-        </p>
-      ) : null}
+        {!canEdit && hasMembership ? (
+          <p className="muted tight">
+            Solo lectura: tu rol no permite crear ni editar líneas de presupuesto.
+          </p>
+        ) : null}
+      </section>
 
       {canEdit &&
       hasMembership &&
@@ -4014,17 +4472,7 @@ function BudgetView({
                 </select>
               </label>
               <label className="field">
-                <span>Etiqueta (opc.)</span>
-                <input
-                  value={budgetFormLabel}
-                  onChange={(e) => setBudgetFormLabel(e.target.value)}
-                  maxLength={200}
-                  placeholder="Detalle opcional"
-                  autoComplete="off"
-                />
-              </label>
-              <label className="field">
-                <span>Importe</span>
+                <span>Importe mensual</span>
                 <input
                   value={budgetFormAmount}
                   onChange={(e) => setBudgetFormAmount(e.target.value)}
@@ -4032,20 +4480,6 @@ function BudgetView({
                   inputMode="decimal"
                   autoComplete="off"
                 />
-              </label>
-              <label className="field">
-                <span>Frecuencia</span>
-                <select
-                  value={budgetFormFrequency}
-                  onChange={(e) =>
-                    setBudgetFormFrequency(
-                      e.target.value as "monthly" | "weekly",
-                    )
-                  }
-                >
-                  <option value="monthly">Mensual</option>
-                  <option value="weekly">Semanal</option>
-                </select>
               </label>
             </div>
             <label className="field">
@@ -4078,144 +4512,218 @@ function BudgetView({
         </Modal>
       ) : null}
 
-      <section className="panel">
-        <div className="panel-head-row">
-          <h3 className="panel-title">Líneas guardadas</h3>
-          {canEdit &&
-          hasMembership &&
-          (budgetIncomeCategories.length > 0 ||
-            budgetExpenseCategories.length > 0) ? (
-            <button
-              type="button"
-              className="btn primary"
-              onClick={() => openNewBudgetModal()}
-            >
-              Nueva línea
-            </button>
-          ) : null}
-        </div>
-        {budgetLoading ? (
-          <p className="muted bordered-top">Cargando…</p>
-        ) : sortedEntries.length === 0 ? (
-          <p className="muted bordered-top">
-            No hay líneas de presupuesto guardadas.
-          </p>
-        ) : (
-          <div className="table-scroll bordered-top">
-            <table className="assets-table">
-              <thead>
-                <tr>
-                  <th>Ámbito</th>
-                  <th>Categoría</th>
-                  <th>Etiqueta</th>
-                  <th className="num">Importe</th>
-                  <th>Frec.</th>
-                  <th className="num">Equiv. mensual</th>
-                  <th>Notas</th>
-                  {canEdit ? <th /> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedEntries.map((row) => (
-                  <tr key={row.id}>
-                    <td>{BUDGET_SCOPE_LABEL[row.scope]}</td>
-                    <td>
-                      {categoryMapForSort.get(row.category_id)?.name ??
-                        row.category_id.slice(0, 8)}
-                    </td>
-                    <td>{row.label ?? METRIC_DASH}</td>
-                    <td className="num">
-                      {formatCurrencyAmount(row.amount, currencyIso)}
-                    </td>
-                    <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
-                    <td className="num">
-                      {formatCurrencyAmount(row.monthly_equivalent, currencyIso)}
-                    </td>
-                    <td className="asset-notes-cell">
-                      {row.notes ?? METRIC_DASH}
-                    </td>
-                    {canEdit ? (
-                      <td className="asset-actions-cell">
-                        <button
-                          type="button"
-                          className="btn ghost"
-                          disabled={budgetSaving}
-                          onClick={() => beginEditBudgetEntry(row)}
-                        >
-                          Editar
-                        </button>
-                        <button
-                          type="button"
-                          className="btn ghost danger"
-                          disabled={budgetSaving}
-                          onClick={() => deleteBudgetEntryRow(row.id)}
-                        >
-                          Eliminar
-                        </button>
-                      </td>
-                    ) : null}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+      {budgetLoading ? (
+        <p className="muted">Cargando líneas de presupuesto…</p>
+      ) : (
+        <div className="budget-two-col">
+          <section className="panel budget-col">
+            <div className="panel-head-row">
+              <h3 className="panel-title">Ingresos</h3>
+              {canEdit &&
+              hasMembership &&
+              budgetIncomeCategories.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={() => openNewBudgetModal("income")}
+                >
+                  Nueva línea
+                </button>
+              ) : null}
+            </div>
+            {incomeEntries.length === 0 ? (
+              <p className="muted bordered-top">
+                No hay líneas de ingreso en el presupuesto.
+              </p>
+            ) : (
+              <div className="table-scroll table-scroll--budget-lines bordered-top">
+                <table className="assets-table assets-table--budget-lines">
+                  <thead>
+                    <tr>
+                      <th>Categoría</th>
+                      <th className="num">Importe mensual</th>
+                      <th className="budget-table-notes-header">Notas</th>
+                      {canEdit ? (
+                        <th className="asset-actions-cell">
+                          <span className="sr-only">Acciones</span>
+                        </th>
+                      ) : null}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {incomeEntries.map((row) => (
+                      <tr key={row.id}>
+                        <td>
+                          {categoryMapForSort.get(row.category_id)?.name ??
+                            row.category_id.slice(0, 8)}
+                        </td>
+                        <td className="num">
+                          {formatCurrencyAmount(row.amount, currencyIso)}
+                        </td>
+                        <td className="asset-notes-cell budget-table-notes">
+                          {row.notes ?? METRIC_DASH}
+                        </td>
+                        {canEdit ? (
+                          <td className="asset-actions-cell budget-row-actions">
+                            <button
+                              type="button"
+                              className="btn ghost icon-btn"
+                              aria-label="Editar línea"
+                              disabled={budgetSaving}
+                              onClick={() => beginEditBudgetEntry(row)}
+                            >
+                              <BudgetRowEditIcon />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost danger icon-btn"
+                              aria-label="Eliminar línea"
+                              disabled={budgetSaving}
+                              onClick={() => deleteBudgetEntryRow(row.id)}
+                            >
+                              <BudgetRowTrashIcon />
+                            </button>
+                          </td>
+                        ) : null}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
 
-      <section className="panel">
-        <h3 className="panel-title panel-title-with-hint">
-          <span>Derivado de pasivos (solo lectura)</span>
-          <InlineHint title="Filas calculadas desde planes de pago de pasivos; visibles en presupuesto pero el motor projectNetWorthSeries del Mac no las trata como líneas persistidas de budget." />
-        </h3>
-        <p className="muted tight">
-          Cuotas de pasivos con plan completo y fecha fin posterior a hoy en la
-          zona civil de la instalación.
-        </p>
-        {budgetLoading ? (
-          <p className="muted bordered-top">Cargando…</p>
-        ) : !budgetSnapshot ||
-          budgetSnapshot.derived_from_liabilities.length === 0 ? (
-          <p className="muted bordered-top">
-            No hay cuotas derivadas en este momento.
-          </p>
-        ) : (
-          <div className="table-scroll bordered-top">
-            <table className="assets-table">
-              <thead>
-                <tr>
-                  <th>Concepto</th>
-                  <th>Categoría pasivo</th>
-                  <th className="num">Cuota</th>
-                  <th>Frec.</th>
-                  <th className="num">Equiv. mensual</th>
-                  <th>Notas</th>
-                </tr>
-              </thead>
-              <tbody>
-                {budgetSnapshot.derived_from_liabilities.map((row) => (
-                  <tr key={row.liability_id}>
-                    <td>{row.label}</td>
-                    <td>
-                      {budgetDerivedCatLabel(
-                        budgetLiabilityCategories,
-                        row.category_id,
-                      )}
-                    </td>
-                    <td className="num">
-                      {formatCurrencyAmount(row.amount, currencyIso)}
-                    </td>
-                    <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
-                    <td className="num">
-                      {formatCurrencyAmount(row.monthly_equivalent, currencyIso)}
-                    </td>
-                    <td className="asset-notes-cell">{row.notes}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+          <section className="panel budget-col">
+            <div className="panel-head-row">
+              <h3 className="panel-title">Gastos</h3>
+              {canEdit &&
+              hasMembership &&
+              budgetExpenseCategories.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={() => openNewBudgetModal("expense")}
+                >
+                  Nueva línea
+                </button>
+              ) : null}
+            </div>
+            {expenseEntries.length === 0 ? (
+              <p className="muted bordered-top">
+                No hay líneas de gasto recurrentes en el presupuesto.
+              </p>
+            ) : (
+              <div className="table-scroll table-scroll--budget-lines bordered-top">
+                <table className="assets-table assets-table--budget-lines">
+                  <thead>
+                    <tr>
+                      <th>Categoría</th>
+                      <th className="num">Importe mensual</th>
+                      <th className="budget-table-notes-header">Notas</th>
+                      {canEdit ? (
+                        <th className="asset-actions-cell">
+                          <span className="sr-only">Acciones</span>
+                        </th>
+                      ) : null}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {expenseEntries.map((row) => (
+                      <tr key={row.id}>
+                        <td>
+                          {categoryMapForSort.get(row.category_id)?.name ??
+                            row.category_id.slice(0, 8)}
+                        </td>
+                        <td className="num">
+                          {formatCurrencyAmount(row.amount, currencyIso)}
+                        </td>
+                        <td className="asset-notes-cell budget-table-notes">
+                          {row.notes ?? METRIC_DASH}
+                        </td>
+                        {canEdit ? (
+                          <td className="asset-actions-cell budget-row-actions">
+                            <button
+                              type="button"
+                              className="btn ghost icon-btn"
+                              aria-label="Editar línea"
+                              disabled={budgetSaving}
+                              onClick={() => beginEditBudgetEntry(row)}
+                            >
+                              <BudgetRowEditIcon />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost danger icon-btn"
+                              aria-label="Eliminar línea"
+                              disabled={budgetSaving}
+                              onClick={() => deleteBudgetEntryRow(row.id)}
+                            >
+                              <BudgetRowTrashIcon />
+                            </button>
+                          </td>
+                        ) : null}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <h3 className="panel-title panel-title-with-hint budget-derived-heading">
+              <span>Derivado de pasivos (solo lectura)</span>
+              <InlineHint title="Filas calculadas desde planes de pago de pasivos; visibles en presupuesto pero el motor projectNetWorthSeries del Mac no las trata como líneas persistidas de budget." />
+            </h3>
+            <p className="muted tight">
+              Cuotas de pasivos con plan completo y fecha fin posterior a hoy en
+              la zona civil de la instalación.
+            </p>
+            {derivedLines.length === 0 ? (
+              <p className="muted bordered-top">
+                No hay cuotas derivadas en este momento.
+              </p>
+            ) : (
+              <div className="table-scroll bordered-top">
+                <table className="assets-table">
+                  <thead>
+                    <tr>
+                      <th>Concepto</th>
+                      <th>Categoría pasivo</th>
+                      <th className="num">Cuota</th>
+                      <th>Frec.</th>
+                      <th className="num">Equiv. mensual</th>
+                      <th>Notas</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {derivedLines.map((row) => (
+                      <tr key={row.liability_id}>
+                        <td>{row.label}</td>
+                        <td>
+                          {budgetDerivedCatLabel(
+                            budgetLiabilityCategories,
+                            row.category_id,
+                          )}
+                        </td>
+                        <td className="num">
+                          {formatCurrencyAmount(row.amount, currencyIso)}
+                        </td>
+                        <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
+                        <td className="num">
+                          {formatCurrencyAmount(
+                            row.monthly_equivalent,
+                            currencyIso,
+                          )}
+                        </td>
+                        <td className="asset-notes-cell">{row.notes}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -4863,7 +5371,8 @@ function SummaryView({
           </h3>
           <p className="muted tight">
             La instalación guarda inflación de proyección, edad objetivo y modo
-            fechas/edades (editable en <strong>Ajustes → Proyección</strong>).
+            fechas/edades (editable en <strong>Ajustes</strong>, subpestaña{" "}
+            <strong>Proyección</strong>).
             Para objetivos y gap heurísticos abre{" "}
             <strong>Jubilación (FIRE)</strong>.
           </p>
@@ -5252,19 +5761,6 @@ function SettingsView({
   editCategoryName,
   setEditCategoryName,
   saveCategoryEdit,
-  persons,
-  personsBusy,
-  personsError,
-  personSaving,
-  newPersonName,
-  setNewPersonName,
-  newPersonBirth,
-  setNewPersonBirth,
-  newPersonPrimary,
-  setNewPersonPrimary,
-  submitNewPerson,
-  deletePersonRow,
-  promotePersonPrimary,
   backupZipBusy,
   backupZipError,
   exportBackupZip,
@@ -5328,19 +5824,6 @@ function SettingsView({
   editCategoryName: string;
   setEditCategoryName: Dispatch<SetStateAction<string>>;
   saveCategoryEdit: (id: string) => void;
-  persons: PersonApiRow[];
-  personsBusy: boolean;
-  personsError: string | null;
-  personSaving: boolean;
-  newPersonName: string;
-  setNewPersonName: Dispatch<SetStateAction<string>>;
-  newPersonBirth: string;
-  setNewPersonBirth: Dispatch<SetStateAction<string>>;
-  newPersonPrimary: boolean;
-  setNewPersonPrimary: Dispatch<SetStateAction<boolean>>;
-  submitNewPerson: (e: FormEvent) => void;
-  deletePersonRow: (id: string) => void;
-  promotePersonPrimary: (id: string) => void;
   backupZipBusy: boolean;
   backupZipError: string | null;
   exportBackupZip: () => void;
@@ -5355,17 +5838,57 @@ function SettingsView({
       ? categories
       : categories.filter((c) => c.scope === categoryScopeFilter);
 
+  const settingsSubTabs = useMemo(() => {
+    const out: { id: SettingsSubTabId; label: string }[] = [];
+    if (isOwner) {
+      out.push({ id: "access", label: "Acceso" });
+    }
+    if (hasMembership) {
+      out.push({ id: "calendar", label: "Calendario" });
+      out.push({ id: "projection", label: "Proyección" });
+      out.push({ id: "categories", label: "Categorías" });
+    }
+    out.push({ id: "data", label: "Datos y sistema" });
+    return out;
+  }, [isOwner, hasMembership]);
+
+  const [settingsSubTab, setSettingsSubTab] =
+    useState<SettingsSubTabId>("calendar");
+
+  useEffect(() => {
+    if (!settingsSubTabs.some((t) => t.id === settingsSubTab)) {
+      setSettingsSubTab(settingsSubTabs[0]?.id ?? "data");
+    }
+  }, [settingsSubTabs, settingsSubTab]);
+
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Ajustes</h2>
         <p className="workspace-sub">
-          Los usuarios se registran en la pantalla de acceso. El propietario
-          concede acceso aquí; los visores solo leen.
+          Acceso al hogar, calendario civil, supuestos de proyección, categorías
+          y exportación. Tu fecha de nacimiento va en tu cuenta (clic en tu
+          usuario arriba).
         </p>
       </div>
 
-      {isOwner ? (
+      <nav
+        className="tab-bar settings-subtab-bar"
+        aria-label="Subsecciones de ajustes"
+      >
+        {settingsSubTabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            className={`tab-btn ${settingsSubTab === t.id ? "active" : ""}`}
+            onClick={() => setSettingsSubTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      {settingsSubTab === "access" && isOwner ? (
         <section className="panel">
           <h3 className="panel-title">Aprobar acceso</h3>
           <p className="muted tight">
@@ -5413,7 +5936,7 @@ function SettingsView({
         </section>
       ) : null}
 
-      {hasMembership ? (
+      {settingsSubTab === "calendar" && hasMembership ? (
         <section className="panel">
           <h3 className="panel-title">Zona horaria del calendario</h3>
           <p className="muted tight">
@@ -5453,7 +5976,8 @@ function SettingsView({
         </section>
       ) : null}
 
-      {hasMembership && isOwner ? (
+      {settingsSubTab === "projection" && hasMembership ? (
+        isOwner ? (
         <section className="panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
           <p className="muted tight">
@@ -5527,142 +6051,19 @@ function SettingsView({
             </button>
           </form>
         </section>
-      ) : hasMembership ? (
+        ) : (
         <section className="panel muted-panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
           <p className="muted tight">
             Solo el propietario puede cambiar inflación de proyección, edad
-            objetivo y modo fechas/edades. Los valores actuales aparecen en{" "}
-            <strong>Instalación</strong> más abajo.
+            objetivo y modo fechas/edades. Los valores actuales aparecen en la
+            subpestaña <strong>Datos y sistema</strong> (resumen de instalación).
           </p>
         </section>
+        )
       ) : null}
 
-      {hasMembership ? (
-        <section className="panel">
-          <h3 className="panel-title">Personas del hogar</h3>
-          <p className="muted tight">
-            Nombre, titular primaria y fecha de nacimiento (paridad checklist).
-          </p>
-          {personsError ? (
-            <p className="error compact bordered-top">{personsError}</p>
-          ) : null}
-          {personsBusy ? (
-            <p className="muted bordered-top">Cargando personas…</p>
-          ) : (
-            <>
-              <ul className="persons-list bordered-top">
-                {persons.map((p) => (
-                  <li key={p.id} className="person-row">
-                    <div className="person-row-main">
-                      <span className="person-name">{p.display_name}</span>
-                      {p.is_primary ? (
-                        <span className="chip muted person-primary-chip">
-                          Titular
-                        </span>
-                      ) : null}
-                    </div>
-                    <span className="muted person-birth">
-                      {p.birth_date?.trim() ? p.birth_date : METRIC_DASH}
-                    </span>
-                    {canEditCategories ? (
-                      <div className="person-row-actions">
-                        {!p.is_primary ? (
-                          <button
-                            type="button"
-                            className="btn ghost"
-                            disabled={personSaving}
-                            onClick={() => promotePersonPrimary(p.id)}
-                          >
-                            Marcar titular
-                          </button>
-                        ) : null}
-                        <button
-                          type="button"
-                          className="btn ghost danger"
-                          disabled={personSaving}
-                          onClick={() => deletePersonRow(p.id)}
-                        >
-                          Eliminar
-                        </button>
-                      </div>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-              {canEditCategories ? (
-                <form
-                  className="stack bordered-top"
-                  onSubmit={(e) => submitNewPerson(e)}
-                >
-                  <label className="field">
-                    <span>Nombre</span>
-                    <input
-                      value={newPersonName}
-                      onChange={(e) => setNewPersonName(e.target.value)}
-                      maxLength={128}
-                      autoComplete="name"
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Fecha de nacimiento (opcional)</span>
-                    <input
-                      type="date"
-                      value={newPersonBirth}
-                      onChange={(e) => setNewPersonBirth(e.target.value)}
-                    />
-                  </label>
-                  <label className="field checkbox-field">
-                    <input
-                      type="checkbox"
-                      checked={newPersonPrimary}
-                      onChange={(e) => setNewPersonPrimary(e.target.checked)}
-                    />
-                    <span>Marcar como titular primaria</span>
-                  </label>
-                  <button
-                    type="submit"
-                    className="btn primary"
-                    disabled={personSaving}
-                  >
-                    Añadir persona
-                  </button>
-                </form>
-              ) : (
-                <p className="muted bordered-top">
-                  Solo lectura: tu rol no puede editar personas.
-                </p>
-              )}
-            </>
-          )}
-        </section>
-      ) : null}
-
-      {hasMembership && isOwner ? (
-        <section className="panel">
-          <h3 className="panel-title">Copia CSV (ZIP)</h3>
-          <p className="muted tight">
-            Paquete MVP según{" "}
-            <code>BACKUP_AND_CSV_SPEC.md</code>. Solo el propietario puede
-            exportar.
-          </p>
-          {backupZipError ? (
-            <p className="error compact bordered-top">{backupZipError}</p>
-          ) : null}
-          <div className="bordered-top">
-            <button
-              type="button"
-              className="btn primary"
-              disabled={backupZipBusy}
-              onClick={() => exportBackupZip()}
-            >
-              {backupZipBusy ? "Generando…" : "Descargar ZIP"}
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {hasMembership ? (
+      {settingsSubTab === "categories" && hasMembership ? (
         <section className="panel">
           <div className="panel-head-row">
             <h3 className="panel-title">Categorías</h3>
@@ -5701,187 +6102,11 @@ function SettingsView({
               </select>
             </label>
           </div>
-          {canEditCategories ? (
-            <>
-            <Modal
-              title="Nueva categoría"
-              open={categoryModalOpen}
-              onClose={closeCategoryModal}
-            >
-              <form className="asset-form stack" onSubmit={createCategory}>
-                <ModalFormError message={categoriesError} />
-                <label className="field">
-                  <span>Ámbito</span>
-                  <select
-                    value={newCatScope}
-                    onChange={(e) =>
-                      setNewCatScope(e.target.value as CategoryScope)
-                    }
-                  >
-                    {CATEGORY_SCOPES.map((s) => (
-                      <option key={s} value={s}>
-                        {CATEGORY_SCOPE_LABEL[s]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Nombre</span>
-                  <input
-                    value={newCatName}
-                    onChange={(e) => setNewCatName(e.target.value)}
-                    maxLength={200}
-                    placeholder="p. ej. Efectivo"
-                    autoComplete="off"
-                  />
-                </label>
-                <div className="asset-form-actions">
-                  <button
-                    type="submit"
-                    className="btn primary"
-                    disabled={categorySaving}
-                  >
-                    Añadir
-                  </button>
-                  <button
-                    type="button"
-                    className="btn ghost"
-                    disabled={categorySaving}
-                    onClick={() => closeCategoryModal()}
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
-            </Modal>
-            <Modal
-              title="Renombrar categoría"
-              open={categoryRenameModalOpen && editingCategoryId !== null}
-              onClose={closeRenameCategoryModal}
-            >
-              {renamingCat ? (
-                <form
-                  className="asset-form stack"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (editingCategoryId) {
-                      void saveCategoryEdit(editingCategoryId);
-                    }
-                  }}
-                >
-                  <ModalFormError message={categoriesError} />
-                  <p className="muted tight">
-                    Ámbito:{" "}
-                    <strong>{CATEGORY_SCOPE_LABEL[renamingCat.scope]}</strong>
-                  </p>
-                  <label className="field">
-                    <span>Nombre</span>
-                    <input
-                      value={editCategoryName}
-                      onChange={(e) => setEditCategoryName(e.target.value)}
-                      maxLength={200}
-                      aria-label="Nuevo nombre"
-                      autoComplete="off"
-                    />
-                  </label>
-                  <div className="asset-form-actions">
-                    <button
-                      type="submit"
-                      className="btn primary"
-                      disabled={categorySaving || !editCategoryName.trim()}
-                    >
-                      Guardar
-                    </button>
-                    <button
-                      type="button"
-                      className="btn ghost"
-                      disabled={categorySaving}
-                      onClick={() => closeRenameCategoryModal()}
-                    >
-                      Cancelar
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                <p className="muted tight">Categoría no encontrada.</p>
-              )}
-            </Modal>
-            <Modal
-              title="Eliminar categoría"
-              open={categoryDeleteModalOpen && categoryDeletePending !== null}
-              onClose={closeCategoryDeleteModal}
-            >
-              {categoryDeletePending ? (
-                <div className="stack">
-                  <ModalFormError message={categoriesError} />
-                  <p className="muted tight">
-                    Se eliminará{" "}
-                    <strong>{categoryDeletePending.name}</strong> (
-                    {CATEGORY_SCOPE_LABEL[categoryDeletePending.scope]}).
-                  </p>
-                  {(() => {
-                    const siblings = categories.filter(
-                      (x) =>
-                        x.scope === categoryDeletePending.scope &&
-                        x.id !== categoryDeletePending.id,
-                    );
-                    if (siblings.length === 0) {
-                      return (
-                        <p className="hint">
-                          No hay otra categoría en este ámbito. Si esta categoría
-                          está en uso (activos, pasivos, presupuesto o próximos),
-                          crea primero una categoría sustituta y vuelve a intentar.
-                        </p>
-                      );
-                    }
-                    return (
-                      <label className="field">
-                        <span>
-                          Mover ítems existentes a (obligatorio si sigue en uso)
-                        </span>
-                        <select
-                          value={categoryRemapToId}
-                          onChange={(e) => setCategoryRemapToId(e.target.value)}
-                          aria-label="Categoría destino para remap"
-                        >
-                          {siblings.map((s) => (
-                            <option key={s.id} value={s.id}>
-                              {s.name}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    );
-                  })()}
-                  <div className="asset-form-actions">
-                    <button
-                      type="button"
-                      className="btn ghost danger"
-                      disabled={categorySaving}
-                      onClick={() => confirmDeleteCategory()}
-                    >
-                      Eliminar
-                    </button>
-                    <button
-                      type="button"
-                      className="btn ghost"
-                      disabled={categorySaving}
-                      onClick={() => closeCategoryDeleteModal()}
-                    >
-                      Cancelar
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <p className="muted tight">Nada seleccionado.</p>
-              )}
-            </Modal>
-            </>
-          ) : (
+          {!canEditCategories ? (
             <p className="muted bordered-top">
               Solo lectura: tu rol no permite crear ni editar categorías.
             </p>
-          )}
+          ) : null}
           {categoriesBusy ? (
             <p className="muted bordered-top">Cargando categorías…</p>
           ) : (
@@ -5924,74 +6149,305 @@ function SettingsView({
         </section>
       ) : null}
 
-      <section className="panel">
-        <h3 className="panel-title">Instalación</h3>
-        {installationBusy ? (
-          <p className="muted">Cargando…</p>
-        ) : installation ? (
-          <dl className="settings-meta-dl">
-            <div>
-              <dt>Moneda base</dt>
-              <dd>{installation.installation.base_currency}</dd>
-            </div>
-            <div>
-              <dt>Tu rol</dt>
-              <dd>{installation.role}</dd>
-            </div>
-            <div>
-              <dt>Modo edad (UI)</dt>
-              <dd>{installation.installation.show_age_mode}</dd>
-            </div>
-            <div>
-              <dt>Inflación en proyección</dt>
-              <dd>
-                {installation.installation.projection_includes_inflation
-                  ? "sí"
-                  : "no"}
-              </dd>
-            </div>
-            <div>
-              <dt>Edad objetivo horizonte</dt>
-              <dd>
-                {installation.installation.projection_target_age != null
-                  ? String(installation.installation.projection_target_age)
-                  : "—"}
-              </dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="muted tight">
-            Sin acceso — revisa la sección de acceso arriba si necesitas
-            recuperar la instalación.
-          </p>
-        )}
-      </section>
+      {settingsSubTab === "data" ? (
+        <>
+          {hasMembership && isOwner ? (
+            <section className="panel">
+              <h3 className="panel-title">Copia CSV (ZIP)</h3>
+              <p className="muted tight">
+                Paquete MVP según{" "}
+                <code>BACKUP_AND_CSV_SPEC.md</code>. Solo el propietario puede
+                exportar.
+              </p>
+              {backupZipError ? (
+                <p className="error compact bordered-top">{backupZipError}</p>
+              ) : null}
+              <div className="bordered-top">
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={backupZipBusy}
+                  onClick={() => exportBackupZip()}
+                >
+                  {backupZipBusy ? "Generando…" : "Descargar ZIP"}
+                </button>
+              </div>
+            </section>
+          ) : null}
 
-      <section className="panel dev-panel">
-        <h3 className="panel-title">Estado del sistema</h3>
-        {healthError ? (
-          <p className="error compact">
-            <code>/v1/health</code>: {healthError}
-          </p>
-        ) : health ? (
-          <dl className="health-dl">
-            <div>
-              <dt>Servicio</dt>
-              <dd>{health.service}</dd>
-            </div>
-            <div>
-              <dt>Versión API</dt>
-              <dd>{health.version}</dd>
-            </div>
-            <div>
-              <dt>Estado</dt>
-              <dd>{health.status}</dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="muted">Comprobando…</p>
-        )}
-      </section>
+          <section className="panel">
+            <h3 className="panel-title">Instalación</h3>
+            {installationBusy ? (
+              <p className="muted">Cargando…</p>
+            ) : installation ? (
+              <dl className="settings-meta-dl">
+                <div>
+                  <dt>Moneda base</dt>
+                  <dd>{installation.installation.base_currency}</dd>
+                </div>
+                <div>
+                  <dt>Tu rol</dt>
+                  <dd>{installation.role}</dd>
+                </div>
+                <div>
+                  <dt>Zona horaria (IANA)</dt>
+                  <dd>
+                    {installation.installation.calendar_tz?.trim()
+                      ? installation.installation.calendar_tz.trim()
+                      : "UTC"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Modo edad (UI)</dt>
+                  <dd>{installation.installation.show_age_mode}</dd>
+                </div>
+                <div>
+                  <dt>Inflación en proyección</dt>
+                  <dd>
+                    {installation.installation.projection_includes_inflation
+                      ? "sí"
+                      : "no"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Supuesto inflación anual</dt>
+                  <dd>
+                    {installation.installation.annual_inflation_assumption_percent !=
+                    null &&
+                    String(
+                      installation.installation.annual_inflation_assumption_percent,
+                    ).trim() !== ""
+                      ? formatPercentAmount(
+                          String(
+                            installation.installation
+                              .annual_inflation_assumption_percent,
+                          ),
+                        )
+                      : "—"}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Edad objetivo horizonte</dt>
+                  <dd>
+                    {installation.installation.projection_target_age != null
+                      ? String(installation.installation.projection_target_age)
+                      : "—"}
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="muted tight">
+                Sin acceso — revisa la subpestaña <strong>Acceso</strong> si
+                necesitas recuperar la instalación.
+              </p>
+            )}
+          </section>
+
+          <section className="panel dev-panel">
+            <h3 className="panel-title">Estado del sistema</h3>
+            {healthError ? (
+              <p className="error compact">
+                <code>/v1/health</code>: {healthError}
+              </p>
+            ) : health ? (
+              <dl className="health-dl">
+                <div>
+                  <dt>Servicio</dt>
+                  <dd>{health.service}</dd>
+                </div>
+                <div>
+                  <dt>Versión API</dt>
+                  <dd>{health.version}</dd>
+                </div>
+                <div>
+                  <dt>Estado</dt>
+                  <dd>{health.status}</dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="muted">Comprobando…</p>
+            )}
+          </section>
+        </>
+      ) : null}
+
+      {canEditCategories ? (
+        <>
+          <Modal
+            title="Nueva categoría"
+            open={categoryModalOpen}
+            onClose={closeCategoryModal}
+          >
+            <form className="asset-form stack" onSubmit={createCategory}>
+              <ModalFormError message={categoriesError} />
+              <label className="field">
+                <span>Ámbito</span>
+                <select
+                  value={newCatScope}
+                  onChange={(e) =>
+                    setNewCatScope(e.target.value as CategoryScope)
+                  }
+                >
+                  {CATEGORY_SCOPES.map((s) => (
+                    <option key={s} value={s}>
+                      {CATEGORY_SCOPE_LABEL[s]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Nombre</span>
+                <input
+                  value={newCatName}
+                  onChange={(e) => setNewCatName(e.target.value)}
+                  maxLength={200}
+                  placeholder="p. ej. Efectivo"
+                  autoComplete="off"
+                />
+              </label>
+              <div className="asset-form-actions">
+                <button
+                  type="submit"
+                  className="btn primary"
+                  disabled={categorySaving}
+                >
+                  Añadir
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  disabled={categorySaving}
+                  onClick={() => closeCategoryModal()}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </Modal>
+          <Modal
+            title="Renombrar categoría"
+            open={categoryRenameModalOpen && editingCategoryId !== null}
+            onClose={closeRenameCategoryModal}
+          >
+            {renamingCat ? (
+              <form
+                className="asset-form stack"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (editingCategoryId) {
+                    void saveCategoryEdit(editingCategoryId);
+                  }
+                }}
+              >
+                <ModalFormError message={categoriesError} />
+                <p className="muted tight">
+                  Ámbito:{" "}
+                  <strong>{CATEGORY_SCOPE_LABEL[renamingCat.scope]}</strong>
+                </p>
+                <label className="field">
+                  <span>Nombre</span>
+                  <input
+                    value={editCategoryName}
+                    onChange={(e) => setEditCategoryName(e.target.value)}
+                    maxLength={200}
+                    aria-label="Nuevo nombre"
+                    autoComplete="off"
+                  />
+                </label>
+                <div className="asset-form-actions">
+                  <button
+                    type="submit"
+                    className="btn primary"
+                    disabled={categorySaving || !editCategoryName.trim()}
+                  >
+                    Guardar
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={categorySaving}
+                    onClick={() => closeRenameCategoryModal()}
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <p className="muted tight">Categoría no encontrada.</p>
+            )}
+          </Modal>
+          <Modal
+            title="Eliminar categoría"
+            open={categoryDeleteModalOpen && categoryDeletePending !== null}
+            onClose={closeCategoryDeleteModal}
+          >
+            {categoryDeletePending ? (
+              <div className="stack">
+                <ModalFormError message={categoriesError} />
+                <p className="muted tight">
+                  Se eliminará{" "}
+                  <strong>{categoryDeletePending.name}</strong> (
+                  {CATEGORY_SCOPE_LABEL[categoryDeletePending.scope]}).
+                </p>
+                {(() => {
+                  const siblings = categories.filter(
+                    (x) =>
+                      x.scope === categoryDeletePending.scope &&
+                      x.id !== categoryDeletePending.id,
+                  );
+                  if (siblings.length === 0) {
+                    return (
+                      <p className="hint">
+                        No hay otra categoría en este ámbito. Si esta categoría
+                        está en uso (activos, pasivos, presupuesto o próximos),
+                        crea primero una categoría sustituta y vuelve a intentar.
+                      </p>
+                    );
+                  }
+                  return (
+                    <label className="field">
+                      <span>
+                        Mover ítems existentes a (obligatorio si sigue en uso)
+                      </span>
+                      <select
+                        value={categoryRemapToId}
+                        onChange={(e) => setCategoryRemapToId(e.target.value)}
+                        aria-label="Categoría destino para remap"
+                      >
+                        {siblings.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })()}
+                <div className="asset-form-actions">
+                  <button
+                    type="button"
+                    className="btn ghost danger"
+                    disabled={categorySaving}
+                    onClick={() => confirmDeleteCategory()}
+                  >
+                    Eliminar
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={categorySaving}
+                    onClick={() => closeCategoryDeleteModal()}
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="muted tight">Nada seleccionado.</p>
+            )}
+          </Modal>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -6068,11 +6524,17 @@ function RetirementView({
             />
             <MetricCard
               label="Objetivo cartera (25× gasto)"
-              value={formatMoneyAmountOrDash(fireSnapshot.portfolio_target_25x)}
+              value={formatCurrencyOrDash(
+                fireSnapshot.portfolio_target_25x,
+                currencyIso,
+              )}
             />
             <MetricCard
               label="Gap vs objetivo 25×"
-              value={formatMoneyAmountOrDash(fireSnapshot.gap_to_target_25x)}
+              value={formatCurrencyOrDash(
+                fireSnapshot.gap_to_target_25x,
+                currencyIso,
+              )}
             />
             <MetricCard
               label="Gastos anuales / patrimonio"
@@ -6097,7 +6559,10 @@ function RetirementView({
             />
             <MetricCard
               label="Objetivo cartera (motor)"
-              value={formatMoneyAmountOrDash(fireSnapshot.engine_portfolio_target)}
+              value={formatCurrencyOrDash(
+                fireSnapshot.engine_portfolio_target,
+                currencyIso,
+              )}
               hint="Gasto regular anualizado, tasa retirada y CGT en fire_settings (JSON instalación)."
             />
             <MetricCard
@@ -6130,7 +6595,7 @@ function RetirementView({
             <strong>{horizonAge != null ? `${horizonAge} años` : METRIC_DASH}</strong>
             ; inflación en proyección{" "}
             <strong>{inflation ? "activada" : "desactivada"}</strong> —{" "}
-            <strong>Ajustes → Proyección</strong>.
+            <strong>Ajustes</strong> (subpestaña <strong>Proyección</strong>).
           </p>
         ) : null}
         {hasMembership && installation && inflation ? (
@@ -6152,8 +6617,9 @@ function RetirementView({
       <section className="panel muted-panel">
         <h3 className="panel-title">Pensiones e IRPF</h3>
         <p className="muted tight">
-          Pensiones por persona y tramos IRPF — CRUD de personas en Ajustes;
-          motor fiscal en servidor pendiente.
+          Pensiones por persona y tramos IRPF — fecha de nacimiento en{" "}
+          <strong>Tu cuenta</strong> (clic en tu usuario); motor fiscal en servidor
+          pendiente.
         </p>
       </section>
     </div>
@@ -6163,65 +6629,397 @@ function RetirementView({
 function ProjectionNetWorthChart({
   series,
   currencyIso,
+  ledgerPersonScope,
+  inflationActive,
+  inflationPctDisplay,
+  ageUiMode,
+  userBirthDate,
+  anchorDateYmd,
+  calendarTz,
 }: {
   series: ProjectionSeriesApi;
   currencyIso: string;
+  ledgerPersonScope: LedgerPersonScope;
+  inflationActive: boolean;
+  inflationPctDisplay: string | null;
+  ageUiMode: "dates" | "ages";
+  userBirthDate: string | null;
+  /** Mes 0 del motor (YYYY-MM-DD); prioridad sobre reloj cliente. */
+  anchorDateYmd: string | null;
+  calendarTz: string;
 }) {
   const pts = series.points;
-  if (pts.length < 2) {
+  const gid = useId().replace(/:/g, "");
+  const svgRef = useRef<SVGSVGElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [hover, setHover] = useState<number | null>(null);
+  const [tipOffset, setTipOffset] = useState({ x: 0, y: 0 });
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  useLayoutEffect(() => {
+    const node = wrapRef.current;
+    if (!node) return;
+    const measure = () => {
+      const w = node.getBoundingClientRect().width;
+      if (w > 0) setContainerWidth(w);
+    };
+    measure();
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (w != null && w > 0) setContainerWidth(w);
+    });
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, []);
+
+  const layoutDims = useMemo(
+    () =>
+      buildProjectionChartLayout(containerWidth > 0 ? containerWidth : 1040),
+    [containerWidth],
+  );
+
+  const model = useMemo(() => {
+    if (pts.length < 2) return null;
+    const nw = pts.map((p) => parseDisplayDecimal(p.net_worth) ?? 0);
+    const cc = pts.map((p) => parseDisplayDecimal(p.contributed_capital) ?? 0);
+    const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
+    const startNw =
+      startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
+    const allowNegativeAxis = startNw < 0;
+
+    const dataMin = Math.min(...nw, ...cc);
+    const dataMax = Math.max(...nw, ...cc);
+    const rawSpan = dataMax - dataMin;
+    const padY =
+      rawSpan > 0
+        ? rawSpan * 0.07
+        : Math.max(Math.abs(dataMax) * 0.06, 1);
+
+    let plotMin = dataMin - padY;
+    let plotMax = dataMax + padY;
+    if (!allowNegativeAxis) {
+      plotMin = Math.max(0, plotMin);
+    }
+
+    let yTicksRaw = niceYTicks(plotMin, plotMax, 6);
+    let yTicks = allowNegativeAxis
+      ? yTicksRaw
+      : yTicksRaw.filter((t) => t >= 0);
+    if (!allowNegativeAxis && yTicks.length < 2) {
+      yTicks = niceYTicks(Math.max(0, plotMin), plotMax, 6);
+    }
+    let yMin = yTicks[0] ?? (allowNegativeAxis ? plotMin : Math.max(0, plotMin));
+    let yMax = yTicks[yTicks.length - 1] ?? plotMax;
+    if (!allowNegativeAxis && yMin < 0) {
+      yMin = 0;
+    }
+    const spanY = yMax - yMin || 1;
+    const xTicks = projectionXTicks(
+      series.months,
+      {
+        ageUiMode,
+        birthDateIso: userBirthDate,
+        anchorDateYmd,
+        calendarTz,
+      },
+      { plotWidthPx: layoutDims.pw },
+    );
+
+    const tickSpanPx =
+      xTicks.length > 1 ? layoutDims.pw / (xTicks.length - 1) : layoutDims.pw;
+    const rotateXLabels =
+      xTicks.length > 11 || (xTicks.length > 5 && tickSpanPx < 46);
+    const xAxisExtraBottom = rotateXLabels ? 38 : 0;
+    const viewHeight = layoutDims.H + xAxisExtraBottom;
+
+    const { W, H, ml, mr, mt, mb, pw, ph } = layoutDims;
+
+    const xScale = (i: number) => ml + (i / Math.max(1, pts.length - 1)) * pw;
+    const yScale = (v: number) => mt + ph - ((v - yMin) / spanY) * ph;
+
+    const nwPoints = nw
+      .map((v, i) => `${xScale(i).toFixed(2)},${yScale(v).toFixed(2)}`)
+      .join(" ");
+    const ccPoints = cc
+      .map((v, i) => `${xScale(i).toFixed(2)},${yScale(v).toFixed(2)}`)
+      .join(" ");
+
+    let areaD = "";
+    if (nw.length > 0) {
+      const parts: string[] = [];
+      nw.forEach((v, i) => {
+        parts.push(`${i === 0 ? "M" : "L"} ${xScale(i).toFixed(2)} ${yScale(v).toFixed(2)}`);
+      });
+      const xLast = xScale(nw.length - 1);
+      const x0 = xScale(0);
+      const yBase = mt + ph;
+      parts.push(`L ${xLast.toFixed(2)} ${yBase.toFixed(2)}`);
+      parts.push(`L ${x0.toFixed(2)} ${yBase.toFixed(2)} Z`);
+      areaD = parts.join(" ");
+    }
+
+    return {
+      nw,
+      cc,
+      yTicks,
+      xTicks,
+      xScale,
+      yScale,
+      nwPoints,
+      ccPoints,
+      areaD,
+      pw,
+      ph,
+      ml,
+      mr,
+      mt,
+      mb,
+      W,
+      H,
+      rotateXLabels,
+      viewHeight,
+    };
+  }, [
+    pts,
+    series.months,
+    series.starting_net_worth,
+    layoutDims,
+    ageUiMode,
+    userBirthDate,
+    anchorDateYmd,
+    calendarTz,
+  ]);
+
+  if (!model) {
     return null;
   }
-  const values = pts.map((p) => parseDisplayDecimal(p.net_worth) ?? 0);
-  let min = Math.min(...values);
-  let max = Math.max(...values);
-  if (min === max) {
-    min -= 1;
-    max += 1;
+
+  const {
+    nw,
+    cc,
+    yTicks,
+    xTicks,
+    xScale,
+    yScale,
+    nwPoints,
+    ccPoints,
+    areaD,
+    pw,
+    ph,
+    ml,
+    mr,
+    mt,
+    W,
+    H,
+    rotateXLabels,
+    viewHeight,
+  } = model;
+
+  function pointerToIndex(clientX: number): number {
+    const svg = svgRef.current;
+    if (!svg) return 0;
+    const rect = svg.getBoundingClientRect();
+    const vb = svg.viewBox.baseVal;
+    const xSvg = ((clientX - rect.left) / Math.max(rect.width, 1)) * vb.width;
+    const local = xSvg - ml;
+    const idx = Math.round((local / pw) * (pts.length - 1));
+    return Math.max(0, Math.min(pts.length - 1, idx));
   }
-  const w = 400;
-  const h = 160;
-  const pad = 12;
-  const innerW = w - pad * 2;
-  const innerH = h - pad * 2;
-  const coords = values
-    .map((v, i) => {
-      const x = pad + (i / Math.max(1, values.length - 1)) * innerW;
-      const y = pad + innerH - ((v - min) / (max - min)) * innerH;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
+
+  function onPointerMove(e: PointerEvent<SVGSVGElement>) {
+    const i = pointerToIndex(e.clientX);
+    setHover(i);
+    const wrap = wrapRef.current;
+    if (wrap) {
+      const r = wrap.getBoundingClientRect();
+      setTipOffset({ x: e.clientX - r.left, y: e.clientY - r.top });
+    }
+  }
+
+  function onPointerLeave() {
+    setHover(null);
+  }
+
+  const horizonLine = projectionHorizonBadge(series.horizon_basis, series.horizon_years);
+  const deltaStr = formatCurrencyAmount(series.monthly_delta_assumption, currencyIso);
+  const scopeShort = ledgerPersonScope === "mine" ? "Mi vista" : "Hogar";
+  const inflationShort = inflationActive
+    ? inflationPctDisplay != null && inflationPctDisplay.length > 0
+      ? `Dinero de hoy (~${inflationPctDisplay} anual)`
+      : "Dinero de hoy (inflación activa)"
+    : "Serie nominal";
 
   return (
-    <div className="projection-chart-wrap bordered-top">
+    <div
+      ref={wrapRef}
+      className="projection-chart-root projection-chart-root--fullbleed bordered-top"
+    >
       <svg
-        viewBox={`0 0 ${w} ${h}`}
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${viewHeight}`}
+        preserveAspectRatio="xMidYMid meet"
         className="projection-chart-svg"
-        role="img"
-        aria-label="Serie de patrimonio neto proyectado"
+        style={{
+          aspectRatio: `${W} / ${viewHeight}`,
+        }}
+        role="application"
+        aria-label="Proyección de patrimonio neto y capital aportado acumulado"
+        onPointerMove={onPointerMove}
+        onPointerLeave={onPointerLeave}
       >
-        <title>Patrimonio neto por mes</title>
-        <polyline
-          fill="none"
-          strokeWidth="2.5"
-          className="projection-chart-line"
-          points={coords}
+        <title>Patrimonio neto y capital aportado en el tiempo</title>
+        <defs>
+          <linearGradient id={`nwFill-${gid}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#0ea5e9" stopOpacity="0.33" />
+            <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0.03" />
+          </linearGradient>
+        </defs>
+
+        <text x={ml} y={34} className="projection-chart-headline">
+          {scopeShort}
+        </text>
+        <text x={ml} y={56} className="projection-chart-meta">
+          {horizonLine}
+        </text>
+        <text x={ml} y={74} className="projection-chart-meta">
+          {inflationShort} · Δ regular presup. {deltaStr}/mes
+        </text>
+
+        <g
+          transform={`translate(${layoutDims.legend.x}, ${layoutDims.legend.y})`}
+          className={`projection-chart-legend${layoutDims.legendOnRight ? "" : " projection-chart-legend--stacked"}`}
+        >
+          <line x1={0} y1={7} x2={26} y2={7} stroke="#0284c7" strokeWidth={3} strokeLinecap="round" />
+          <text x={34} y={11}>Patrimonio neto</text>
+          <line x1={0} y1={29} x2={26} y2={29} stroke="#7c3aed" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
+          <text x={34} y={33}>Capital aportado</text>
+        </g>
+
+        {yTicks.map((yt) => (
+          <g key={`gy-${yt}`}>
+            <line
+              x1={ml}
+              y1={yScale(yt)}
+              x2={ml + pw}
+              y2={yScale(yt)}
+              className="projection-chart-grid"
+            />
+            <text
+              x={ml - 10}
+              y={yScale(yt)}
+              textAnchor="end"
+              dominantBaseline="middle"
+              className="projection-chart-tick"
+            >
+              {formatAxisMoney(yt, currencyIso)}
+            </text>
+          </g>
+        ))}
+
+        {xTicks.map(({ monthIndex, label }) => {
+          const cx = xScale(monthIndex);
+          const tickY =
+            mt + ph + (layoutDims.narrow ? 22 : 26) + (rotateXLabels ? 10 : 0);
+          return (
+            <text
+              key={`gx-${monthIndex}`}
+              transform={
+                rotateXLabels
+                  ? `rotate(-38 ${cx.toFixed(2)} ${tickY.toFixed(2)})`
+                  : undefined
+              }
+              x={cx}
+              y={tickY}
+              textAnchor={rotateXLabels ? "end" : "middle"}
+              dominantBaseline={rotateXLabels ? "middle" : "auto"}
+              className={`projection-chart-tick${rotateXLabels ? " projection-chart-tick--xrot" : ""}`}
+            >
+              {label}
+            </text>
+          );
+        })}
+
+        <rect
+          x={ml}
+          y={mt}
+          width={pw}
+          height={ph}
+          fill="#ffffff"
+          fillOpacity={0.35}
+          rx={6}
+          className="projection-chart-plot-bg"
         />
+
+        <path d={areaD} fill={`url(#nwFill-${gid})`} stroke="none" />
+        <polyline
+          points={nwPoints}
+          fill="none"
+          stroke="#0369a1"
+          strokeWidth={2.85}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <polyline
+          points={ccPoints}
+          fill="none"
+          stroke="#6d28d9"
+          strokeWidth={2.1}
+          strokeDasharray="7 5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity={0.92}
+        />
+
+        {hover !== null ? (
+          <line
+            x1={xScale(hover)}
+            x2={xScale(hover)}
+            y1={mt}
+            y2={mt + ph}
+            className="projection-chart-crosshair"
+          />
+        ) : null}
+        {hover !== null ? (
+          <>
+            <circle cx={xScale(hover)} cy={yScale(nw[hover])} r={6} className="projection-chart-dot-nw" />
+            <circle cx={xScale(hover)} cy={yScale(cc[hover])} r={5} className="projection-chart-dot-cc" />
+          </>
+        ) : null}
+
+        <text
+          transform={`translate(${Math.min(30, ml * 0.32)}, ${mt + ph / 2}) rotate(-90)`}
+          textAnchor="middle"
+          className="projection-chart-axis-caption"
+        >
+          {normalizeCurrencyIso(currencyIso) ?? "Importe"}
+        </text>
       </svg>
-      <p className="muted tight">
-        Mes 0: {formatCurrencyAmount(series.starting_net_worth, currencyIso)} · Δ
-        mensual asumido:{" "}
-        {formatCurrencyAmount(series.monthly_delta_assumption, currencyIso)} · Mes{" "}
-        {series.months}:{" "}
-        {formatCurrencyAmount(
-          pts[pts.length - 1]?.net_worth ?? series.starting_net_worth,
-          currencyIso,
-        )}{" "}
-        · Capital aportado acum. mes {series.months}:{" "}
-        {formatCurrencyAmount(
-          pts[pts.length - 1]?.contributed_capital ?? "0",
-          currencyIso,
-        )}
-      </p>
+
+      {hover !== null ? (
+        <div
+          className="projection-chart-tooltip"
+          style={{
+            left: tipOffset.x,
+            top: tipOffset.y,
+          }}
+        >
+          <div className="projection-chart-tooltip-title">
+            {projectionHoverTitle(
+              hover,
+              ageUiMode,
+              userBirthDate,
+              calendarTz,
+              anchorDateYmd,
+            )}
+          </div>
+          <div>
+            Patrimonio neto — {formatCurrencyNumber(nw[hover], currencyIso)}
+          </div>
+          <div>
+            Capital aportado — {formatCurrencyNumber(cc[hover], currencyIso)}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -6234,6 +7032,8 @@ function ProjectionView({
   projectionSeries,
   projectionBusy,
   projectionError,
+  userBirthDate,
+  calendarTz,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -6242,18 +7042,38 @@ function ProjectionView({
   projectionSeries: ProjectionSeriesApi | null;
   projectionBusy: boolean;
   projectionError: string | null;
+  userBirthDate: string | null;
+  calendarTz: string;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
-  const inflation = installation?.installation.projection_includes_inflation;
-  const scopeNote =
-    ledgerPersonScope === "mine"
-      ? "Serie en vista titular (filtro «Yo»)."
-      : "Serie en vista hogar completa.";
+  const inflationPctRaw =
+    installation?.installation.annual_inflation_assumption_percent;
+  const inflationPctDisplay =
+    inflationPctRaw != null && String(inflationPctRaw).trim() !== ""
+      ? formatPercentAmount(String(inflationPctRaw))
+      : null;
+
+  const axisAgeMode = projectionSeries
+    ? resolveProjectionAxisAgeMode(projectionSeries, installation)
+    : "dates";
+  const axisBirth = (() => {
+    const fromApi = projectionSeries?.viewer_birth_date?.trim();
+    const fromUser = userBirthDate?.trim();
+    const pick =
+      fromApi && fromApi.length > 0
+        ? fromApi
+        : fromUser && fromUser.length > 0
+          ? fromUser
+          : null;
+    return pick;
+  })();
+  const axisAnchor =
+    projectionSeries?.anchor_date_ymd?.trim() || null;
 
   return (
-    <div className="workspace">
+    <div className="workspace workspace--projection-fullwidth">
       <div className="workspace-header">
         <h2 className="workspace-title">Proyección</h2>
         <p className="workspace-sub">
@@ -6261,7 +7081,7 @@ function ProjectionView({
             ? "Cargando instalación…"
             : !hasMembership
               ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : `Serie de patrimonio neto (motor mensual; inflación según instalación y supuesto %). Moneda ${currency}.`}
+              : `Patrimonio neto proyectado con el motor mensual alineado al cliente macOS (presupuesto sin cuotas derivadas, deuda, próximos, aportaciones). Inflación opcional según Ajustes. Moneda ${currency}.`}
         </p>
       </div>
 
@@ -6282,27 +7102,24 @@ function ProjectionView({
       {hasMembership && !projectionBusy && projectionSeries ? (
         <section className="panel">
           <h3 className="panel-title panel-title-with-hint">
-            <span>Serie mensual (MVP)</span>
-            <InlineHint title="Lineal NW₀ + t × neto mensual del presupuesto. No sustituye projectNetWorthSeries ni ORACLE_TESTS." />
+            <span>Trayectoria proyectada</span>
+            <InlineHint title={projectionSeries.model_note} />
           </h3>
-          <p className="muted tight">{scopeNote}</p>
           <ProjectionNetWorthChart
             series={projectionSeries}
             currencyIso={currencyIso}
+            ledgerPersonScope={ledgerPersonScope}
+            inflationActive={
+              installation?.installation.projection_includes_inflation ?? false
+            }
+            inflationPctDisplay={inflationPctDisplay}
+            ageUiMode={axisAgeMode}
+            userBirthDate={axisBirth}
+            anchorDateYmd={axisAnchor}
+            calendarTz={calendarTz}
           />
-          <p className="hint bordered-top tight">
-            {projectionSeries.model_note}
-          </p>
         </section>
       ) : null}
-
-      <section className="panel muted-panel">
-        <h3 className="panel-title">Motor completo</h3>
-        <p className="muted tight">
-          Zoom, capital aportado acumulado, hitos y baseline tipo Mac — pendientes
-          de API <code>projectNetWorthSeries</code>.
-        </p>
-      </section>
     </div>
   );
 }

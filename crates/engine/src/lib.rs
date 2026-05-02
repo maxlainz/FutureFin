@@ -11,6 +11,6 @@ pub use fire::{
     TaxBand,
 };
 pub use projection::{
-    project_net_worth_series, EngineError, ProjectionFlowInput, ProjectionInput,
-    ProjectionLiabilityInput, ProjectionOutput, SimAsset,
+    first_month_per_asset_contribution_nominals, project_net_worth_series, EngineError,
+    ProjectionFlowInput, ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
 };

@@ -230,6 +230,7 @@ async fn build_assets(pool: &PgPool, iid: Uuid) -> Result<String, ApiError> {
         bool,
         Option<Decimal>,
         Decimal,
+        String,
         Decimal,
         Option<String>,
         i32,
@@ -237,7 +238,7 @@ async fn build_assets(pool: &PgPool, iid: Uuid) -> Result<String, ApiError> {
     )> = sqlx::query_as(
         r#"SELECT id, category_id, name, current_value, purchase_price, is_liquid,
                   expected_annual_return_percent,
-                  monthly_contribution_fixed, contribution_remainder_weight,
+                  monthly_contribution_fixed, contribution_frequency, contribution_remainder_weight,
                   notes, sort_index, owner_user_id
            FROM assets WHERE installation_id = $1
            ORDER BY sort_index ASC, name ASC"#,
@@ -257,12 +258,13 @@ async fn build_assets(pool: &PgPool, iid: Uuid) -> Result<String, ApiError> {
         "is_liquid".into(),
         "expected_annual_return_percent".into(),
         "monthly_contribution_fixed".into(),
+        "contribution_frequency".into(),
         "contribution_remainder_weight".into(),
         "notes".into(),
         "sort_index".into(),
         "owner_user_id".into(),
     ]));
-    for (id, cid, name, cv, pp, liq, ear, mcf, crw, notes, si, owner) in rows {
+    for (id, cid, name, cv, pp, liq, ear, mcf, cfreq, crw, notes, si, owner) in rows {
         out.push_str(&csv_line([
             csv_cell(&id.to_string()),
             csv_cell(&iid.to_string()),
@@ -273,6 +275,7 @@ async fn build_assets(pool: &PgPool, iid: Uuid) -> Result<String, ApiError> {
             csv_cell(&liq.to_string()),
             csv_cell(&opt_dec(ear)),
             csv_cell(&mcf.to_string()),
+            csv_cell(&cfreq),
             csv_cell(&crw.to_string()),
             csv_cell(&notes.unwrap_or_default()),
             csv_cell(&si.to_string()),
@@ -362,9 +365,9 @@ async fn build_liabilities(pool: &PgPool, iid: Uuid) -> Result<String, ApiError>
 }
 
 async fn build_budget(pool: &PgPool, iid: Uuid) -> Result<String, ApiError> {
-    let rows: Vec<(Uuid, Uuid, String, Option<String>, Decimal, String, Option<String>, i32, Option<Uuid>)> =
+    let rows: Vec<(Uuid, Uuid, String, Decimal, Option<String>, i32, Option<Uuid>)> =
         sqlx::query_as(
-            r#"SELECT be.id, be.category_id, c.scope, be.label, be.amount, be.frequency,
+            r#"SELECT be.id, be.category_id, c.scope, be.amount,
                       be.notes, be.sort_index, be.owner_user_id
                FROM budget_entries be
                JOIN categories c ON c.id = be.category_id
@@ -381,22 +384,18 @@ async fn build_budget(pool: &PgPool, iid: Uuid) -> Result<String, ApiError> {
         "installation_id".into(),
         "category_id".into(),
         "category_scope".into(),
-        "label".into(),
-        "amount".into(),
-        "frequency".into(),
+        "amount_monthly".into(),
         "notes".into(),
         "sort_index".into(),
         "owner_user_id".into(),
     ]));
-    for (id, cid, scope, label, amt, freq, notes, si, owner) in rows {
+    for (id, cid, scope, amt, notes, si, owner) in rows {
         out.push_str(&csv_line([
             csv_cell(&id.to_string()),
             csv_cell(&iid.to_string()),
             csv_cell(&cid.to_string()),
             csv_cell(&scope),
-            csv_cell(&label.unwrap_or_default()),
             csv_cell(&amt.to_string()),
-            csv_cell(&freq),
             csv_cell(&notes.unwrap_or_default()),
             csv_cell(&si.to_string()),
             csv_cell(&opt_uuid(owner)),

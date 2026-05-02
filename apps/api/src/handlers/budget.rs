@@ -31,15 +31,10 @@ pub struct BudgetEntryResponse {
     #[schema(value_type = String, format = "uuid")]
     pub category_id: Uuid,
     pub scope: BudgetCategoryScope,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    /// Importe mensual (el presupuesto persistido es solo mensual).
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub amount: Decimal,
-    pub frequency: PaymentFrequency,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub monthly_equivalent: Decimal,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
@@ -92,12 +87,9 @@ pub struct BudgetSnapshotResponse {
 pub struct CreateBudgetEntryBody {
     #[schema(value_type = String, format = "uuid")]
     pub category_id: Uuid,
-    #[serde(default)]
-    pub label: Option<String>,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub amount: Decimal,
-    pub frequency: PaymentFrequency,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -109,13 +101,13 @@ pub struct PatchBudgetEntryBody {
     #[serde(default)]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub category_id: Option<Uuid>,
-    pub label: Option<String>,
     #[serde(default)]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub amount: Option<Decimal>,
-    pub frequency: Option<PaymentFrequency>,
+    #[serde(default)]
     pub notes: Option<String>,
+    #[serde(default)]
     pub sort_index: Option<i32>,
 }
 
@@ -124,9 +116,7 @@ pub(crate) struct BudgetEntryJoinRow {
     id: Uuid,
     category_id: Uuid,
     scope: String,
-    label: Option<String>,
     amount: Decimal,
-    frequency: String,
     notes: Option<String>,
     sort_index: i32,
     owner_user_id: Option<Uuid>,
@@ -160,37 +150,14 @@ fn scope_to_budget_enum(scope: &str) -> Result<BudgetCategoryScope, ApiError> {
 
 fn row_to_entry_response(r: BudgetEntryJoinRow) -> Result<BudgetEntryResponse, ApiError> {
     let scope = scope_to_budget_enum(&r.scope)?;
-    let pf = PaymentFrequency::parse(&r.frequency)?;
-    let monthly_equivalent = monthly_equivalent(r.amount, &r.frequency);
     Ok(BudgetEntryResponse {
         id: r.id,
         category_id: r.category_id,
         scope,
-        label: r.label,
         amount: r.amount,
-        frequency: pf,
-        monthly_equivalent,
         notes: r.notes,
         sort_index: r.sort_index,
     })
-}
-
-fn normalize_optional_label(raw: &Option<String>) -> Result<Option<String>, ApiError> {
-    match raw {
-        None => Ok(None),
-        Some(s) => {
-            let t = s.trim();
-            if t.is_empty() {
-                Ok(None)
-            } else if t.len() > 200 {
-                Err(ApiError::BadRequest(
-                    "label must be at most 200 characters".into(),
-                ))
-            } else {
-                Ok(Some(t.into()))
-            }
-        }
-    }
 }
 
 fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
@@ -250,12 +217,12 @@ async fn fetch_budget_rows_and_derived_liabilities(
     let rows: Vec<BudgetEntryJoinRow> = match view {
         LedgerView::Household => {
             sqlx::query_as(
-                r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                          b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
+                r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
+                          b.notes, b.sort_index, b.owner_user_id
                    FROM budget_entries b
                    JOIN categories c ON c.id = b.category_id
                    WHERE b.installation_id = $1
-                   ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
+                   ORDER BY b.sort_index ASC, b.id ASC"#,
             )
             .bind(iid)
             .fetch_all(pool)
@@ -263,12 +230,12 @@ async fn fetch_budget_rows_and_derived_liabilities(
         }
         LedgerView::Mine => {
             sqlx::query_as(
-                r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                          b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
+                r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
+                          b.notes, b.sort_index, b.owner_user_id
                    FROM budget_entries b
                    JOIN categories c ON c.id = b.category_id
                    WHERE b.installation_id = $1 AND b.owner_user_id = $2
-                   ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
+                   ORDER BY b.sort_index ASC, b.id ASC"#,
             )
             .bind(iid)
             .bind(session_user_id)
@@ -325,7 +292,7 @@ pub(crate) fn ledger_budget_totals_from_parts(
     let mut expense_reg = Decimal::ZERO;
 
     for r in rows {
-        let me = monthly_equivalent(r.amount, &r.frequency);
+        let me = r.amount;
         match r.scope.as_str() {
             "income" => income_m += me,
             "expense" => expense_reg += me,
@@ -378,7 +345,7 @@ pub(crate) async fn ledger_regular_monthly_income_and_expense(
     let mut income_m = Decimal::ZERO;
     let mut expense_reg = Decimal::ZERO;
     for r in rows {
-        let me = monthly_equivalent(r.amount, &r.frequency);
+        let me = r.amount;
         match r.scope.as_str() {
             "income" => income_m += me,
             "expense" => expense_reg += me,
@@ -484,24 +451,20 @@ pub async fn create_budget_entry(
         ));
     }
 
-    let label = normalize_optional_label(&body.label)?;
     let notes = normalize_notes(&body.notes)?;
-    let freq_str = body.frequency.as_str().to_string();
     let sort_index = body.sort_index.unwrap_or(0);
 
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO budget_entries (
-               installation_id, category_id, label, amount, frequency, notes, sort_index,
+               installation_id, category_id, amount, notes, sort_index,
                owner_user_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           VALUES ($1, $2, $3, $4, $5, $6)
            RETURNING id"#,
     )
     .bind(iid)
     .bind(body.category_id)
-    .bind(&label)
     .bind(body.amount)
-    .bind(&freq_str)
     .bind(&notes)
     .bind(sort_index)
     .bind(user.id.0)
@@ -509,8 +472,8 @@ pub async fn create_budget_entry(
     .await?;
 
     let row: BudgetEntryJoinRow = sqlx::query_as(
-        r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                  b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
+        r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
+                  b.notes, b.sort_index, b.owner_user_id
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1"#,
@@ -554,9 +517,7 @@ pub async fn patch_budget_entry(
     }
 
     if body.category_id.is_none()
-        && body.label.is_none()
         && body.amount.is_none()
-        && body.frequency.is_none()
         && body.notes.is_none()
         && body.sort_index.is_none()
     {
@@ -566,8 +527,8 @@ pub async fn patch_budget_entry(
     }
 
     let row: Option<BudgetEntryJoinRow> = sqlx::query_as(
-        r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                  b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
+        r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
+                  b.notes, b.sort_index, b.owner_user_id
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1 AND b.installation_id = $2"#,
@@ -586,11 +547,6 @@ pub async fn patch_budget_entry(
         assert_budget_category(&state.pool, iid, new_cat).await?;
     }
 
-    let new_label = match &body.label {
-        Some(_) => normalize_optional_label(&body.label)?,
-        None => current.label.clone(),
-    };
-
     let new_amount = match body.amount {
         Some(a) => {
             if a <= Decimal::ZERO {
@@ -603,13 +559,6 @@ pub async fn patch_budget_entry(
         None => current.amount,
     };
 
-    let new_freq_str = body
-        .frequency
-        .map(|f| f.as_str().to_string())
-        .unwrap_or_else(|| current.frequency.clone());
-
-    let _ = PaymentFrequency::parse(&new_freq_str)?;
-
     let new_notes = match &body.notes {
         Some(_) => normalize_notes(&body.notes)?,
         None => current.notes.clone(),
@@ -620,13 +569,11 @@ pub async fn patch_budget_entry(
     let updated: BudgetEntryJoinRow = sqlx::query_as(
         r#"UPDATE budget_entries
            SET category_id = $1,
-               label = $2,
-               amount = $3,
-               frequency = $4,
-               notes = $5,
-               sort_index = $6,
+               amount = $2,
+               notes = $3,
+               sort_index = $4,
                updated_at = now()
-           WHERE id = $7 AND installation_id = $8
+           WHERE id = $5 AND installation_id = $6
            RETURNING budget_entries.id,
                      budget_entries.category_id,
                      (
@@ -634,17 +581,13 @@ pub async fn patch_budget_entry(
                          FROM categories c
                          WHERE c.id = budget_entries.category_id
                      ) AS scope,
-                     budget_entries.label,
                      budget_entries.amount,
-                     budget_entries.frequency,
                      budget_entries.notes,
                      budget_entries.sort_index,
                      budget_entries.owner_user_id"#,
     )
     .bind(new_cat)
-    .bind(&new_label)
     .bind(new_amount)
-    .bind(&new_freq_str)
     .bind(&new_notes)
     .bind(new_sort)
     .bind(id)

@@ -8,7 +8,9 @@ FROM node:22.14-bookworm-slim@sha256:1c18d9ab3af4585870b92e4dbc5cac5a0dc77dd13df
 WORKDIR /build
 COPY package.json package-lock.json ./
 COPY apps/web ./apps/web
-RUN npm ci && npm run build:web
+RUN npm ci && npm run build:web \
+    && test -f apps/web/dist/index.html \
+    && test -n "$(ls -A apps/web/dist/assets)"
 
 # --- API (Rust): imagen `rust:bookworm` (stable); digest fija la snapshot exacta del toolchain ---
 FROM rust:bookworm@sha256:adab7941580c74513aa3347f2d2a1f975498280743d29ec62978ba12e3540d3a AS rust-builder
@@ -26,10 +28,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=rust-builder --chown=nobody:nogroup /src/target/release/futurefin-api /app/futurefin-api
+COPY --from=rust-builder --chown=root:root /src/target/release/futurefin-api /app/futurefin-api
+COPY apps/api/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod 0555 /docker-entrypoint.sh /app/futurefin-api
 COPY --from=web --chown=nobody:nogroup /build/apps/web/dist /app/web
 ENV PORT=8080
 ENV WEB_STATIC_ROOT=/app/web
 USER nobody:nogroup
 EXPOSE 8080
-ENTRYPOINT ["/app/futurefin-api"]
+ENTRYPOINT ["/docker-entrypoint.sh"]

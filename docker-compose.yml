@@ -1,4 +1,12 @@
 # Proyecto Compose (nombre visible en `docker compose ls`).
+#
+# Si `docker compose up` falla con «No such container», usa un arranque limpio:
+#   make docker-up          o   ./scripts/docker-stack-up.sh
+#   make docker-rebuild     o   ./scripts/docker-stack-up.sh --build
+#
+# `docker compose watch`: si :8080 muestra página en blanco, fuerza rebuild del stage web:
+#   docker compose build --no-cache futurefin-api && docker compose up -d futurefin-api
+# (el sync host dist→contenedor se eliminó: un dist vacío borraba la UI embebida).
 name: futurefin
 
 # Imagen de aplicación: etiqueta local `dev`; en Docker Hub usar p.ej. futurefin/futurefin-api:1.0.0
@@ -27,9 +35,8 @@ services:
       dockerfile: apps/api/Dockerfile
     develop:
       watch:
-        - action: sync
-          path: ./apps/web/dist
-          target: /app/web
+        # No sincronizar ./apps/web/dist → /app/web: si dist no existe o está vacío en
+        # el host, se borra la UI embebida en la imagen y :8080 queda en blanco.
         - action: rebuild
           path: ./apps/api
         - action: rebuild
@@ -48,6 +55,16 @@ services:
         - action: rebuild
           path: ./package-lock.json
     container_name: futurefin-api
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'test -f /app/web/index.html && test -n "$(ls -A /app/web/assets 2>/dev/null)"',
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     ports:
       - "8080:8080"
     environment:

@@ -1,5 +1,5 @@
 use crate::handlers::assets::assets_router;
-use crate::handlers::auth::{login, logout, me, register};
+use crate::handlers::auth::{login, logout, me, patch_me, register};
 use crate::handlers::backup::export_backup_zip;
 use crate::handlers::budget::budget_router;
 use crate::handlers::categories::categories_router;
@@ -30,7 +30,7 @@ pub fn app_router() -> Router {
                 .route("/register", post(register))
                 .route("/login", post(login))
                 .route("/logout", post(logout))
-                .route("/me", get(me)),
+                .route("/me", get(me).patch(patch_me)),
         )
         .route(
             "/installation/session-context",

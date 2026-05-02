@@ -7,6 +7,7 @@ use crate::state::AppState;
 use axum::extract::{Extension, Path};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::NaiveDate;
 use futurefin_domain::UserId;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -39,6 +40,7 @@ pub struct ApprovePendingUserBody {
 struct PendingUserRow {
     id: Uuid,
     username: String,
+    birth_date: Option<NaiveDate>,
 }
 
 fn insert_conflict(err: sqlx::Error) -> ApiError {
@@ -74,7 +76,7 @@ pub async fn list_pending_users(
     }
 
     let rows: Vec<PendingUserRow> = sqlx::query_as(
-        r#"SELECT u.id, u.username
+        r#"SELECT u.id, u.username, u.birth_date
            FROM users u
            WHERE NOT EXISTS (
                SELECT 1
@@ -94,6 +96,7 @@ pub async fn list_pending_users(
             .map(|r| UserResponse {
                 id: UserId(r.id),
                 username: r.username,
+                birth_date: r.birth_date,
             })
             .collect(),
     ))

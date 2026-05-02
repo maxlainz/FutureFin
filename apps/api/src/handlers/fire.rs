@@ -5,7 +5,7 @@ use crate::error::ApiError;
 use crate::handlers::budget::{
     ledger_budget_totals_for_summary, ledger_regular_monthly_income_and_expense,
 };
-use crate::handlers::projection::compute_installation_projection;
+use crate::handlers::projection::{compute_installation_projection, mac_projection_horizon_months};
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::liabilities::purge_expired_liabilities;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
@@ -15,6 +15,7 @@ use axum::extract::{Extension, Query};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
+use chrono::NaiveDate;
 use futurefin_engine::{
     fire_milestone_month, portfolio_target_for_net_annual_need, FireMilestoneInput,
     FireMilestoneOutput, TaxBand,
@@ -32,6 +33,7 @@ const MVP_NOTE: &str = "MVP heurístico (25× gasto anual total incl. deuda deri
 #[derive(Debug, FromRow)]
 struct FireInstallationRow {
     projection_includes_inflation: bool,
+    annual_inflation_assumption_percent: Option<Decimal>,
     projection_target_age: Option<i16>,
     show_age_mode: String,
     fire_settings: sqlx::types::Json<serde_json::Value>,
@@ -127,7 +129,8 @@ pub async fn get_fire_snapshot(
     let view = q.resolve();
 
     let inst_row: Option<FireInstallationRow> = sqlx::query_as(
-        r#"SELECT projection_includes_inflation, projection_target_age, show_age_mode, fire_settings
+        r#"SELECT projection_includes_inflation, annual_inflation_assumption_percent,
+                  projection_target_age, show_age_mode, fire_settings
            FROM installation WHERE id = $1"#,
     )
     .bind(iid)
@@ -237,7 +240,25 @@ pub async fn get_fire_snapshot(
         None
     };
 
-    let fire_horizon_months: u32 = 360;
+    let inflation_annual_percent =
+        if inst.projection_includes_inflation && inst.annual_inflation_assumption_percent.is_some() {
+            inst.annual_inflation_assumption_percent
+        } else {
+            None
+        };
+
+    let session_birth: Option<NaiveDate> = sqlx::query_scalar(
+        r#"SELECT birth_date FROM users WHERE id = $1"#,
+    )
+    .bind(user.id.0)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let birth_dates: Vec<Option<NaiveDate>> = vec![session_birth];
+
+    let (fire_horizon_months, _) =
+        mac_projection_horizon_months(today, inst.projection_target_age, &birth_dates);
+
     let (proj_out, _) = compute_installation_projection(
         &state.pool,
         iid,
@@ -245,6 +266,7 @@ pub async fn get_fire_snapshot(
         view,
         today,
         fire_horizon_months,
+        inflation_annual_percent,
     )
     .await?;
 

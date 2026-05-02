@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (see .env.example)");
     let pool = db::connect(&database_url).await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    db::run_migrations(&pool).await?;
 
     let cookie_secure = parse_bool_env("COOKIE_SECURE").unwrap_or(false);
     let session_ttl_days = std::env::var("SESSION_TTL_DAYS")

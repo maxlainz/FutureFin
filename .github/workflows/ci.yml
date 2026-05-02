@@ -28,3 +28,29 @@ jobs:
           npm install
           npm run typecheck:web
           npm run build:web
+
+  # Imagen API + Compose: detecta Dockerfile roto, entrypoint faltante y arranque contra Postgres.
+  docker-stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API image (same path as local Dockerfile)
+        run: docker compose build futurefin-api
+      - name: Start Postgres + API
+        run: docker compose up -d
+      - name: Wait for /v1/health
+        run: |
+          set -e
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8080/v1/health; then
+              echo "health ok"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps -a
+          docker compose logs --tail=100 futurefin-api || true
+          exit 1
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v --remove-orphans

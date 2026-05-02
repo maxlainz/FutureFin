@@ -1,6 +1,8 @@
 use crate::error::{ErrorBody, ErrorCode};
 #[allow(unused_imports)]
-use crate::handlers::auth::{__path_login, __path_logout, __path_me, __path_register};
+use crate::handlers::auth::{
+    __path_login, __path_logout, __path_me, __path_patch_me, __path_register,
+};
 #[allow(unused_imports)]
 use crate::handlers::backup::__path_export_backup_zip;
 #[allow(unused_imports)]
@@ -58,6 +60,7 @@ use utoipa::OpenApi;
         login,
         logout,
         me,
+        patch_me,
         get_my_installation,
         patch_my_installation,
         setup_installation,
@@ -96,6 +99,7 @@ use utoipa::OpenApi;
         crate::handlers::health::HealthBody,
         crate::handlers::auth::RegisterBody,
         crate::handlers::auth::LoginBody,
+        crate::handlers::auth::PatchMeBody,
         crate::handlers::auth::UserResponse,
         crate::handlers::installation::InstallationSnapshot,
         crate::handlers::installation::InstallationAccess,
@@ -169,7 +173,7 @@ use utoipa::OpenApi;
         ),
         (
             name = "budget",
-            description = "Persisted income/expense budget lines (weekly→monthly ×52/12); liability-derived debt payments included in snapshot only (parity BudgetTabView)"
+            description = "Persisted monthly income/expense budget lines; liability-derived debt payments included in snapshot only"
         ),
         (
             name = "planning",

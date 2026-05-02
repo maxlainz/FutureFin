@@ -5,6 +5,9 @@
     "apps/web"
   ],
   "scripts": {
+    "docker:up": "bash scripts/docker-stack-up.sh",
+    "docker:up:build": "bash scripts/docker-stack-up.sh --build",
+    "docker:down": "docker compose down --remove-orphans",
     "dev:web": "npm run dev --workspace futurefin-web",
     "build:web": "npm run build --workspace futurefin-web",
     "lint:web": "npm run lint --workspace futurefin-web",
