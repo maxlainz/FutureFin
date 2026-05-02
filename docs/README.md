@@ -6,6 +6,11 @@ Este directorio materializa el **dossier de producto** para la refactorización 
 
 Instrucciones paso a paso para crear **FutureFin** en GitHub y subir `main` y `dev`: [GITHUB_SETUP.md](./GITHUB_SETUP.md).
 
+## Plan Cursor y contexto de conversación
+
+- Copia archivada del dossier (YAML frontmatter + contenido): [plan/PRODUCT_DOSSIER_PLAN.md](plan/PRODUCT_DOSSIER_PLAN.md)
+- Resumen de decisiones y sesión para continuar en otra ventana: [plan/CURSOR_SESSION_CONTEXT.md](plan/CURSOR_SESSION_CONTEXT.md)
+
 ## Índice de documentos
 
 | Documento | Contenido |
