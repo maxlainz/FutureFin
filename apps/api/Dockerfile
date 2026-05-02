@@ -1,8 +1,10 @@
 # syntax=docker/dockerfile:1
 
 FROM rust:1-bookworm AS builder
+ENV PATH=/usr/local/cargo/bin:$PATH
 WORKDIR /src
 COPY Cargo.toml ./
+COPY crates/domain ./crates/domain
 COPY apps/api ./apps/api
 RUN cargo build --release -p futurefin-api
 

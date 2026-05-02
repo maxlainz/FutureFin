@@ -1,74 +1,76 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Json, Router,
-};
-use serde::Serialize;
-use std::{net::SocketAddr, sync::Arc};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+mod auth;
+mod db;
+mod error;
+mod handlers;
+mod openapi;
+mod routes;
+mod state;
+
+use crate::state::AppState;
+use axum::extract::Extension;
+use axum::Router;
+use http::header::{ACCEPT, CONTENT_TYPE};
+use http::Method;
+use std::sync::Arc;
+use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[derive(Clone)]
-struct AppState {
-    version: &'static str,
-}
-
-#[derive(Serialize)]
-struct HealthBody {
-    status: &'static str,
-    service: &'static str,
-    version: &'static str,
-}
-
-async fn health(State(state): State<Arc<AppState>>) -> Json<HealthBody> {
-    Json(HealthBody {
-        status: "ok",
-        service: "futurefin-api",
-        version: state.version,
-    })
-}
-
-async fn readiness(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Placeholder: extend with DB ping when persistence lands.
-    Json(HealthBody {
-        status: "ok",
-        service: "futurefin-api",
-        version: state.version,
-    })
-}
-
-async fn not_found() -> (StatusCode, &'static str) {
-    (StatusCode::NOT_FOUND, "not found")
-}
-
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    load_env();
+
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
-            |_| tracing_subscriber::EnvFilter::new("futurefin_api=info,tower_http=info"),
-        ))
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            tracing_subscriber::EnvFilter::new(
+                "futurefin_api=info,tower_http=info,sqlx=warn",
+            )
+        }))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (see .env.example)");
+    let pool = db::connect(&database_url).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
+
+    let cookie_secure = parse_bool_env("COOKIE_SECURE").unwrap_or(false);
+    let session_ttl_days = std::env::var("SESSION_TTL_DAYS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&d| (1..=400).contains(&d))
+        .unwrap_or(30);
+
     let state = Arc::new(AppState {
         version: env!("CARGO_PKG_VERSION"),
+        pool,
+        cookie_secure,
+        session_ttl_days,
     });
 
     let app = Router::new()
-        .route("/health", get(health))
-        .route("/v1/health", get(health))
-        .route("/v1/ready", get(readiness))
-        .fallback(not_found)
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .merge(routes::app_router())
+        .layer(Extension(state))
+        .layer(cors_layer())
+        .layer(TraceLayer::new_for_http());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port()));
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port()));
     tracing::info!("listening on http://{}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
-    axum::serve(listener, app).await.expect("serve");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn load_env() {
+    let repo_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
+    let _ = dotenvy::from_filename(repo_env).ok();
+    let _ = dotenvy::dotenv().ok();
+}
+
+fn parse_bool_env(key: &str) -> Option<bool> {
+    std::env::var(key)
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn port() -> u16 {
@@ -76,4 +78,33 @@ fn port() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080)
+}
+
+fn cors_layer() -> CorsLayer {
+    let raw = std::env::var("CORS_ORIGINS").unwrap_or_else(|_| {
+        "http://127.0.0.1:5173,http://localhost:5173".into()
+    });
+    let origins: Vec<http::HeaderValue> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<http::HeaderValue>()
+                .unwrap_or_else(|_| panic!("invalid CORS_ORIGINS entry: {s}"))
+        })
+        .collect();
+    if origins.is_empty() {
+        panic!("CORS_ORIGINS resolved empty — set at least one origin when credentials are used");
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_credentials(true)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([CONTENT_TYPE, ACCEPT])
 }

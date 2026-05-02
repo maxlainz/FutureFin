@@ -1,0 +1,11 @@
+[package]
+name = "futurefin-domain"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared domain types (money, identifiers) for FutureFin"
+
+[dependencies]
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["serde", "v4"] }

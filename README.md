@@ -14,9 +14,13 @@ La especificación MVP (paridad de capacidades respecto al cliente Swift de refe
 ## Stack de implementación (rama `dev`)
 
 - **API:** Rust (`futurefin-api`, Axum), prefijo HTTP `/v1` para contratos estables.
+- **Contrato:** OpenAPI generado en Rust (`utoipa`), expuesto en `GET /openapi.json`.
+- **Persistencia:** PostgreSQL + **SQLx** (consultas parametrizadas; migraciones en `apps/api/migrations`).
+- **Dinero / dominio:** crate `futurefin-domain` con `Decimal` para cantidades (sin `f64` en el modelo financiero).
+- **Auth MVP:** usuario + contraseña (**sin email**), Argon2id (crate `argon2`), sesión en cookie `HttpOnly` (`ff_session`). Traits OAuth/OIDC reservados en `apps/api/src/auth/oauth.rs`.
 - **Web:** React + TypeScript + Vite (`apps/web`).
-- **Monorepo:** raíz con workspace Cargo + npm workspaces.
-- **Datos:** PostgreSQL vía Docker Compose (servicio `postgres`); la API aún no persiste — siguiente iteración.
+- **Monorepo:** workspace Cargo + npm workspaces.
+- **Ramas:** desarrollo en **`dev`**; `git push origin dev` (evitar subir código nuevo solo a `main` hasta merge explícito).
 
 ### Desarrollo local
 
@@ -24,17 +28,17 @@ La especificación MVP (paridad de capacidades respecto al cliente Swift de refe
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres   # opcional: solo base de datos
+docker compose up -d postgres   # base de datos (requerida para arrancar la API)
 
-# Terminal 1 — API (puerto 8080 por defecto)
+# Terminal 1 — API (puerto 8080; migra la BD al iniciar). Carga `.env` de la raíz del repo automáticamente.
 cd apps/api && cargo run
 
-# Terminal 2 — web (puerto 5173; proxy a la API en /v1 y /health)
+# Terminal 2 — web (puerto 5173; proxy a la API en /v1, /health y /openapi.json)
 npm install
 npm run dev:web
 ```
 
-Comprueba la API: `curl -s http://127.0.0.1:8080/v1/health`
+Comprueba la API: `curl -s http://127.0.0.1:8080/v1/health` · OpenAPI: `curl -s http://127.0.0.1:8080/openapi.json | head`
 
 **Todo el stack con Compose (API + Postgres):**
 

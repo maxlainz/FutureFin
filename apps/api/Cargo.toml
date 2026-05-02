@@ -6,10 +6,30 @@ description = "FutureFin HTTP API (self-hosted)"
 publish = false
 
 [dependencies]
-axum = "0.8"
+argon2 = "0.5"
+async-trait = "0.1"
+rand_core = { version = "0.6", features = ["std"] }
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+cookie = "0.18"
+dotenvy = "0.15"
+futurefin-domain = { path = "../../crates/domain" }
+http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "postgres",
+    "migrate",
+    "macros",
+    "uuid",
+    "chrono",
+] }
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+utoipa = { version = "5", features = ["chrono", "uuid"] }
+uuid = { version = "1", features = ["serde", "v4"] }

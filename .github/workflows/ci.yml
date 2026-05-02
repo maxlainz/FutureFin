@@ -14,7 +14,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo build (futurefin-api)
-        run: cargo build -p futurefin-api
+        run: cargo build -p futurefin-api --locked
 
   web:
     runs-on: ubuntu-latest
