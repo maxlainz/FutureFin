@@ -1,0 +1,9 @@
+.git
+.github
+target
+node_modules
+apps/web/dist
+dist
+*.log
+.env
+.env.*

@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: futurefin
+      POSTGRES_PASSWORD: futurefin
+      POSTGRES_DB: futurefin
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U futurefin -d futurefin"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://futurefin:futurefin@postgres:5432/futurefin
+      RUST_LOG: futurefin_api=info,tower_http=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

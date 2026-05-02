@@ -6,3 +6,9 @@ dist/
 build/
 node_modules/
 *.log
+
+# Rust
+/target/
+
+# Vitest / Vite
+apps/web/.vite
