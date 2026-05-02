@@ -1,8 +1,10 @@
 use crate::handlers::assets::assets_router;
 use crate::handlers::auth::{login, logout, me, register};
+use crate::handlers::backup::export_backup_zip;
 use crate::handlers::budget::budget_router;
 use crate::handlers::categories::categories_router;
 use crate::handlers::fallback;
+use crate::handlers::fire::fire_router;
 use crate::handlers::health::{health_check, ready_check};
 use crate::handlers::installation::{
     get_installation_session_context, get_my_installation, patch_my_installation,
@@ -10,7 +12,9 @@ use crate::handlers::installation::{
 };
 use crate::handlers::liabilities::liabilities_router;
 use crate::handlers::pending_users::pending_users_router;
+use crate::handlers::persons::persons_router;
 use crate::handlers::planning::planning_router;
+use crate::handlers::projection::projection_router;
 use crate::handlers::summary::summary_router;
 use crate::openapi::openapi_json;
 use axum::routing::{get, post};
@@ -44,6 +48,10 @@ pub fn app_router() -> Router {
         .nest("/summary", summary_router())
         .nest("/budget", budget_router())
         .nest("/planning", planning_router())
+        .nest("/fire", fire_router())
+        .nest("/projection", projection_router())
+        .nest("/persons", persons_router())
+        .route("/backup/export.zip", get(export_backup_zip))
         .fallback(fallback::v1_not_found);
 
     Router::new()

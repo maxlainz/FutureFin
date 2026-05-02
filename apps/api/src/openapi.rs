@@ -2,6 +2,8 @@ use crate::error::{ErrorBody, ErrorCode};
 #[allow(unused_imports)]
 use crate::handlers::auth::{__path_login, __path_logout, __path_me, __path_register};
 #[allow(unused_imports)]
+use crate::handlers::backup::__path_export_backup_zip;
+#[allow(unused_imports)]
 use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
 use crate::handlers::installation::{
@@ -36,6 +38,14 @@ use crate::handlers::categories::{
     __path_create_category, __path_delete_category, __path_list_categories,
     __path_patch_category,
 };
+#[allow(unused_imports)]
+use crate::handlers::fire::__path_get_fire_snapshot;
+#[allow(unused_imports)]
+use crate::handlers::persons::{
+    __path_create_person, __path_delete_person, __path_list_persons, __path_patch_person,
+};
+#[allow(unused_imports)]
+use crate::handlers::projection::__path_get_projection_series;
 use axum::Json;
 use utoipa::OpenApi;
 
@@ -74,6 +84,13 @@ use utoipa::OpenApi;
         create_planning_flow,
         patch_planning_flow,
         delete_planning_flow,
+        get_fire_snapshot,
+        get_projection_series,
+        list_persons,
+        create_person,
+        patch_person,
+        delete_person,
+        export_backup_zip,
     ),
     components(schemas(
         crate::handlers::health::HealthBody,
@@ -92,6 +109,7 @@ use utoipa::OpenApi;
         crate::handlers::categories::CategoryResponse,
         crate::handlers::categories::CreateCategoryBody,
         crate::handlers::categories::PatchCategoryBody,
+        crate::handlers::categories::DeleteCategoryQuery,
         crate::handlers::assets::AssetResponse,
         crate::handlers::assets::CreateAssetBody,
         crate::handlers::assets::PatchAssetBody,
@@ -101,6 +119,8 @@ use utoipa::OpenApi;
         crate::handlers::liabilities::PaymentFrequency,
         crate::handlers::summary::SummaryResponse,
         crate::handlers::summary::FinancialHealthMetrics,
+        crate::handlers::summary::CategoryBreakdownLine,
+        crate::handlers::summary::TypeTagBreakdownLine,
         crate::handlers::budget::BudgetSnapshotResponse,
         crate::handlers::budget::BudgetEntryResponse,
         crate::handlers::budget::DerivedBudgetLineResponse,
@@ -112,6 +132,12 @@ use utoipa::OpenApi;
         crate::handlers::planning::PlanningFlowDirection,
         crate::handlers::planning::CreatePlanningFlowBody,
         crate::handlers::planning::PatchPlanningFlowBody,
+        crate::handlers::fire::FireSnapshotResponse,
+        crate::handlers::projection::ProjectionSeriesResponse,
+        crate::handlers::projection::ProjectionPoint,
+        crate::handlers::persons::PersonResponse,
+        crate::handlers::persons::CreatePersonBody,
+        crate::handlers::persons::PatchPersonBody,
         ErrorBody,
         ErrorCode,
     )),
@@ -148,6 +174,22 @@ use utoipa::OpenApi;
         (
             name = "planning",
             description = "Upcoming / planned cash flows (income or expense categories); parity PlanningTabView list CRUD"
+        ),
+        (
+            name = "fire",
+            description = "MVP FIRE KPIs (25× heurístico); no sustituye fireMilestone ni ORACLE_TESTS"
+        ),
+        (
+            name = "projection",
+            description = "MVP serie lineal de patrimonio; no sustituye projectNetWorthSeries Swift"
+        ),
+        (
+            name = "persons",
+            description = "Miembros del hogar (nombre, titular primaria, fecha de nacimiento)"
+        ),
+        (
+            name = "backup",
+            description = "Export CSV en ZIP (MVP sin cifrado); solo propietario"
         ),
     ),
 )]

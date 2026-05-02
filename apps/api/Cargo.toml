@@ -17,6 +17,7 @@ chrono-tz = "0.10"
 cookie = "0.18"
 dotenvy = "0.15"
 futurefin-domain = { path = "../../crates/domain" }
+futurefin-engine = { path = "../../crates/engine" }
 http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -36,3 +37,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5", features = ["chrono", "uuid"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

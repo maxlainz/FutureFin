@@ -9,6 +9,7 @@ use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -119,7 +120,7 @@ pub struct PatchBudgetEntryBody {
 }
 
 #[derive(Debug, FromRow)]
-struct BudgetEntryJoinRow {
+pub(crate) struct BudgetEntryJoinRow {
     id: Uuid,
     category_id: Uuid,
     scope: String,
@@ -132,7 +133,7 @@ struct BudgetEntryJoinRow {
 }
 
 #[derive(Debug, FromRow)]
-struct LiabilityDerivedRow {
+pub(crate) struct LiabilityDerivedRow {
     id: Uuid,
     category_id: Uuid,
     label: String,
@@ -140,7 +141,7 @@ struct LiabilityDerivedRow {
     payment_frequency: String,
 }
 
-fn monthly_equivalent(amount: Decimal, frequency: &str) -> Decimal {
+pub(crate) fn monthly_equivalent(amount: Decimal, frequency: &str) -> Decimal {
     match frequency.trim() {
         "weekly" => (amount * Decimal::from(52u32)) / Decimal::from(12u32),
         _ => amount,
@@ -239,6 +240,154 @@ pub(crate) async fn assert_budget_category(
     Ok(s)
 }
 
+async fn fetch_budget_rows_and_derived_liabilities(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    session_user_id: Uuid,
+    view: LedgerView,
+    today: NaiveDate,
+) -> Result<(Vec<BudgetEntryJoinRow>, Vec<LiabilityDerivedRow>), ApiError> {
+    let rows: Vec<BudgetEntryJoinRow> = match view {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
+                          b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
+                   FROM budget_entries b
+                   JOIN categories c ON c.id = b.category_id
+                   WHERE b.installation_id = $1
+                   ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
+            )
+            .bind(iid)
+            .fetch_all(pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
+                          b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
+                   FROM budget_entries b
+                   JOIN categories c ON c.id = b.category_id
+                   WHERE b.installation_id = $1 AND b.owner_user_id = $2
+                   ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
+            )
+            .bind(iid)
+            .bind(session_user_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    let derived_raw: Vec<LiabilityDerivedRow> = match view {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT id, category_id, label, payment_amount, payment_frequency
+                   FROM liabilities
+                   WHERE
+                       installation_id = $1
+                       AND payment_amount IS NOT NULL
+                       AND payment_frequency IS NOT NULL
+                       AND payment_end_date IS NOT NULL
+                       AND payment_end_date > $2"#,
+            )
+            .bind(iid)
+            .bind(today)
+            .fetch_all(pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT id, category_id, label, payment_amount, payment_frequency
+                   FROM liabilities
+                   WHERE
+                       installation_id = $1
+                       AND owner_user_id = $3
+                       AND payment_amount IS NOT NULL
+                       AND payment_frequency IS NOT NULL
+                       AND payment_end_date IS NOT NULL
+                       AND payment_end_date > $2"#,
+            )
+            .bind(iid)
+            .bind(today)
+            .bind(session_user_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    Ok((rows, derived_raw))
+}
+
+pub(crate) fn ledger_budget_totals_from_parts(
+    rows: &[BudgetEntryJoinRow],
+    derived_raw: &[LiabilityDerivedRow],
+) -> Result<BudgetTotalsResponse, ApiError> {
+    let mut income_m = Decimal::ZERO;
+    let mut expense_reg = Decimal::ZERO;
+
+    for r in rows {
+        let me = monthly_equivalent(r.amount, &r.frequency);
+        match r.scope.as_str() {
+            "income" => income_m += me,
+            "expense" => expense_reg += me,
+            _ => {}
+        }
+    }
+
+    let mut expense_der = Decimal::ZERO;
+    for d in derived_raw {
+        PaymentFrequency::parse(&d.payment_frequency)?;
+        let me = monthly_equivalent(d.payment_amount, &d.payment_frequency);
+        expense_der += me;
+    }
+
+    let expense_tot = expense_reg + expense_der;
+    let net = income_m - expense_tot;
+
+    Ok(BudgetTotalsResponse {
+        income_monthly_equivalent: income_m,
+        expense_regular_monthly_equivalent: expense_reg,
+        expense_derived_monthly_equivalent: expense_der,
+        expense_total_monthly_equivalent: expense_tot,
+        net_monthly_equivalent: net,
+    })
+}
+
+/// Same totals as `GET /v1/budget` (persisted entries + liability-derived lines with plan end after today).
+pub(crate) async fn ledger_budget_totals_for_summary(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    session_user_id: Uuid,
+    view: LedgerView,
+    today: NaiveDate,
+) -> Result<BudgetTotalsResponse, ApiError> {
+    let (rows, derived_raw) =
+        fetch_budget_rows_and_derived_liabilities(pool, iid, session_user_id, view, today).await?;
+    ledger_budget_totals_from_parts(&rows, &derived_raw)
+}
+
+/// Persisted budget rows only (no liability-derived lines), for projection / FIRE expense bases.
+pub(crate) async fn ledger_regular_monthly_income_and_expense(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    session_user_id: Uuid,
+    view: LedgerView,
+    today: NaiveDate,
+) -> Result<(Decimal, Decimal), ApiError> {
+    let (rows, _) =
+        fetch_budget_rows_and_derived_liabilities(pool, iid, session_user_id, view, today).await?;
+    let mut income_m = Decimal::ZERO;
+    let mut expense_reg = Decimal::ZERO;
+    for r in rows {
+        let me = monthly_equivalent(r.amount, &r.frequency);
+        match r.scope.as_str() {
+            "income" => income_m += me,
+            "expense" => expense_reg += me,
+            _ => {}
+        }
+    }
+    Ok((income_m, expense_reg))
+}
+
 #[utoipa::path(
     get,
     path = "/v1/budget",
@@ -264,94 +413,27 @@ pub async fn get_budget_snapshot(
     let today = installation_naive_today(&state.pool, iid).await?;
     purge_expired_liabilities(&state.pool, iid).await?;
 
-    let rows: Vec<BudgetEntryJoinRow> = match q.resolve() {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                          b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
-                   FROM budget_entries b
-                   JOIN categories c ON c.id = b.category_id
-                   WHERE b.installation_id = $1
-                   ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT b.id, b.category_id, c.scope AS scope, b.label, b.amount,
-                          b.frequency AS frequency, b.notes, b.sort_index, b.owner_user_id
-                   FROM budget_entries b
-                   JOIN categories c ON c.id = b.category_id
-                   WHERE b.installation_id = $1 AND b.owner_user_id = $2
-                   ORDER BY b.sort_index ASC, b.label ASC NULLS LAST, b.id ASC"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let view = q.resolve();
+    let (rows, derived_raw) = fetch_budget_rows_and_derived_liabilities(
+        &state.pool,
+        iid,
+        user.id.0,
+        view,
+        today,
+    )
+    .await?;
+
+    let totals = ledger_budget_totals_from_parts(&rows, &derived_raw)?;
 
     let mut entries = Vec::with_capacity(rows.len());
-    let mut income_m = Decimal::ZERO;
-    let mut expense_reg = Decimal::ZERO;
-
     for r in rows {
-        let me = monthly_equivalent(r.amount, &r.frequency);
-        match r.scope.as_str() {
-            "income" => income_m += me,
-            "expense" => expense_reg += me,
-            _ => {}
-        }
         entries.push(row_to_entry_response(r)?);
     }
 
-    let derived_raw: Vec<LiabilityDerivedRow> = match q.resolve() {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT id, category_id, label, payment_amount, payment_frequency
-                   FROM liabilities
-                   WHERE
-                       installation_id = $1
-                       AND payment_amount IS NOT NULL
-                       AND payment_frequency IS NOT NULL
-                       AND payment_end_date IS NOT NULL
-                       AND payment_end_date > $2"#,
-            )
-            .bind(iid)
-            .bind(today)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT id, category_id, label, payment_amount, payment_frequency
-                   FROM liabilities
-                   WHERE
-                       installation_id = $1
-                       AND owner_user_id = $3
-                       AND payment_amount IS NOT NULL
-                       AND payment_frequency IS NOT NULL
-                       AND payment_end_date IS NOT NULL
-                       AND payment_end_date > $2"#,
-            )
-            .bind(iid)
-            .bind(today)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
-
     let mut derived_from_liabilities = Vec::with_capacity(derived_raw.len());
-    let mut expense_der = Decimal::ZERO;
-
     for d in derived_raw {
         let pf = PaymentFrequency::parse(&d.payment_frequency)?;
         let me = monthly_equivalent(d.payment_amount, &d.payment_frequency);
-        expense_der += me;
         derived_from_liabilities.push(DerivedBudgetLineResponse {
             liability_id: d.id,
             category_id: d.category_id,
@@ -363,19 +445,10 @@ pub async fn get_budget_snapshot(
         });
     }
 
-    let expense_tot = expense_reg + expense_der;
-    let net = income_m - expense_tot;
-
     Ok(Json(BudgetSnapshotResponse {
         entries,
         derived_from_liabilities,
-        totals: BudgetTotalsResponse {
-            income_monthly_equivalent: income_m,
-            expense_regular_monthly_equivalent: expense_reg,
-            expense_derived_monthly_equivalent: expense_der,
-            expense_total_monthly_equivalent: expense_tot,
-            net_monthly_equivalent: net,
-        },
+        totals,
     }))
 }
 

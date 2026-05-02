@@ -71,6 +71,52 @@ pub struct ListCategoriesQuery {
     pub scope: Option<String>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DeleteCategoryQuery {
+    /// Required when the category is still referenced by assets, liabilities, budget or planning flows (same scope as source).
+    #[serde(default)]
+    pub remap_to: Option<Uuid>,
+}
+
+async fn category_reference_count(
+    pool: &sqlx::PgPool,
+    installation_id: Uuid,
+    category_id: Uuid,
+) -> Result<i64, ApiError> {
+    let n: Option<i64> = sqlx::query_scalar(
+        r#"SELECT (
+               COALESCE((SELECT COUNT(*)::bigint FROM assets
+                         WHERE installation_id = $1 AND category_id = $2), 0)
+             + COALESCE((SELECT COUNT(*)::bigint FROM liabilities
+                         WHERE installation_id = $1 AND category_id = $2), 0)
+             + COALESCE((SELECT COUNT(*)::bigint FROM budget_entries
+                         WHERE installation_id = $1 AND category_id = $2), 0)
+             + COALESCE((SELECT COUNT(*)::bigint FROM planning_flows
+                         WHERE installation_id = $1 AND category_id = $2), 0)
+            )"#,
+    )
+    .bind(installation_id)
+    .bind(category_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(n.unwrap_or(0))
+}
+
+async fn category_scope_row(
+    pool: &sqlx::PgPool,
+    installation_id: Uuid,
+    category_id: Uuid,
+) -> Result<Option<String>, ApiError> {
+    let s: Option<String> = sqlx::query_scalar(
+        r#"SELECT scope FROM categories WHERE id = $1 AND installation_id = $2"#,
+    )
+    .bind(category_id)
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(s)
+}
+
 #[derive(Debug, FromRow)]
 struct CategoryRow {
     id: Uuid,
@@ -296,9 +342,11 @@ pub async fn patch_category(
     tag = "categories",
     params(
         ("id" = Uuid, Path, description = "Category id"),
+        ("remap_to" = Option<Uuid>, Query, description = "Target category id (same scope) when rows still reference the deleted category"),
     ),
     responses(
         (status = 204, description = "Deleted"),
+        (status = 400, description = "Invalid remap or category still in use without remap_to"),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
         (status = 404, description = "Category missing"),
@@ -308,11 +356,97 @@ pub async fn delete_category(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
     Path(id): Path<Uuid>,
+    Query(q): Query<DeleteCategoryQuery>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
+    }
+
+    let Some(scope_src) = category_scope_row(&state.pool, iid, id).await? else {
+        return Err(ApiError::NotFound);
+    };
+
+    let refs = category_reference_count(&state.pool, iid, id).await?;
+
+    if refs > 0 {
+        let Some(target) = q.remap_to else {
+            return Err(ApiError::BadRequest(
+                "category is in use; pass remap_to query parameter with another category id of the same scope"
+                    .into(),
+            ));
+        };
+        if target == id {
+            return Err(ApiError::BadRequest(
+                "remap_to must differ from the category being deleted".into(),
+            ));
+        }
+        let Some(scope_tgt) = category_scope_row(&state.pool, iid, target).await? else {
+            return Err(ApiError::BadRequest(
+                "remap_to category was not found in this installation".into(),
+            ));
+        };
+        if scope_src != scope_tgt {
+            return Err(ApiError::BadRequest(
+                "remap_to category must have the same scope as the deleted category".into(),
+            ));
+        }
+
+        let mut tx = state.pool.begin().await?;
+
+        sqlx::query(
+            r#"UPDATE assets SET category_id = $1, updated_at = now()
+               WHERE installation_id = $2 AND category_id = $3"#,
+        )
+        .bind(target)
+        .bind(iid)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"UPDATE liabilities SET category_id = $1, updated_at = now()
+               WHERE installation_id = $2 AND category_id = $3"#,
+        )
+        .bind(target)
+        .bind(iid)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"UPDATE budget_entries SET category_id = $1, updated_at = now()
+               WHERE installation_id = $2 AND category_id = $3"#,
+        )
+        .bind(target)
+        .bind(iid)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"UPDATE planning_flows SET category_id = $1, updated_at = now()
+               WHERE installation_id = $2 AND category_id = $3"#,
+        )
+        .bind(target)
+        .bind(iid)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        let del = sqlx::query(r#"DELETE FROM categories WHERE id = $1 AND installation_id = $2"#)
+            .bind(id)
+            .bind(iid)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        if del.rows_affected() == 0 {
+            return Err(ApiError::NotFound);
+        }
+        return Ok(axum::http::StatusCode::NO_CONTENT);
     }
 
     let res = sqlx::query(r#"DELETE FROM categories WHERE id = $1 AND installation_id = $2"#)

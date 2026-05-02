@@ -1,0 +1,13 @@
+[package]
+name = "futurefin-engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Projection and FIRE simulation (parity targets vs Swift SummaryService)"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+rust_decimal = { version = "1.41", features = ["maths"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }

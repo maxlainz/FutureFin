@@ -27,6 +27,8 @@ type InstallationSnapshot = {
   /** IANA TZ for civil "today" (liability derive, etc.) */
   calendar_tz?: string;
   projection_includes_inflation: boolean;
+  /** Supuesto anual % cuando inflación está activa (API como decimal string). */
+  annual_inflation_assumption_percent?: string | null;
   projection_target_age: number | null;
   show_age_mode: string;
 };
@@ -64,6 +66,9 @@ type AssetApiRow = {
   current_value: string;
   purchase_price: string | null;
   is_liquid: boolean;
+  expected_annual_return_percent?: string | null;
+  monthly_contribution_fixed: string;
+  contribution_remainder_weight: string;
   notes: string | null;
   sort_index: number;
 };
@@ -84,12 +89,26 @@ type FinancialHealthMetrics = {
   upcoming_coverage_ratio: string | null;
 };
 
+type CategoryBreakdownLineApi = {
+  category_id: string;
+  category_name: string;
+  total: string;
+};
+
+type TypeTagBreakdownLineApi = {
+  type_tag: string;
+  total: string;
+};
+
 type SummaryResponse = {
   total_assets: string;
   total_liabilities: string;
   net_worth: string;
   debt_to_assets_ratio: string | null;
   financial_health: FinancialHealthMetrics;
+  assets_by_category: CategoryBreakdownLineApi[];
+  liabilities_by_category: CategoryBreakdownLineApi[];
+  liabilities_by_type_tag: TypeTagBreakdownLineApi[];
 };
 
 type BudgetTotalsApi = {
@@ -140,6 +159,49 @@ type PlanningFlowApiRow = {
   expected_amount: string;
   due_date: string | null;
   notes: string | null;
+  sort_index: number;
+};
+
+type FireSnapshotApi = {
+  net_worth: string;
+  total_assets: string;
+  total_liabilities: string;
+  income_monthly_equivalent: string;
+  expense_total_monthly_equivalent: string;
+  net_monthly_equivalent: string;
+  annual_expenses_estimate: string;
+  portfolio_target_25x?: string;
+  gap_to_target_25x?: string;
+  implied_withdrawal_rate_vs_networth?: string;
+  estimated_months_to_25x_linear?: string;
+  projection_includes_inflation: boolean;
+  projection_target_age: number | null;
+  show_age_mode: string;
+  mvp_model_note: string;
+  engine_portfolio_target?: string;
+  engine_fire_reached: boolean;
+  engine_fire_reach_month_index?: number | null;
+};
+
+type ProjectionPointApi = {
+  month_index: number;
+  net_worth: string;
+  contributed_capital: string;
+};
+
+type ProjectionSeriesApi = {
+  points: ProjectionPointApi[];
+  months: number;
+  starting_net_worth: string;
+  monthly_delta_assumption: string;
+  model_note: string;
+};
+
+type PersonApiRow = {
+  id: string;
+  display_name: string;
+  is_primary: boolean;
+  birth_date?: string | null;
   sort_index: number;
 };
 
@@ -373,6 +435,25 @@ function formatPercentAmount(s: string): string {
   }).format(n);
 }
 
+/** Retorno acumulado (valor/compra − 1); no es TAE. Paridad MVP con «retorno implícito» del Mac cuando hay precio de compra. */
+function assetImplicitTotalReturnLabel(
+  currentValueStr: string,
+  purchasePriceStr: string | null | undefined,
+): string | null {
+  if (purchasePriceStr == null || String(purchasePriceStr).trim() === "") {
+    return null;
+  }
+  const cur = parseDisplayDecimal(currentValueStr);
+  const pur = parseDisplayDecimal(String(purchasePriceStr));
+  if (cur === null || pur === null || pur <= 0) return null;
+  const pct = (cur / pur - 1) * 100;
+  if (!Number.isFinite(pct)) return null;
+  const sign = pct >= 0 ? "+" : "";
+  return `${sign}${pct.toLocaleString(DISPLAY_NUMBER_LOCALE, {
+    maximumFractionDigits: 2,
+  })} %`;
+}
+
 function liabilityDerivedPrincipalPreview(
   amountStr: string,
   freq: LiabilityPaymentFreq,
@@ -416,6 +497,21 @@ function formatMonthsRough(s: string | null | undefined): string {
   return `${r.toLocaleString(DISPLAY_NUMBER_LOCALE, {
     maximumFractionDigits: 1,
   })} meses`;
+}
+
+function breakdownPercentOfTotal(part: string, whole: string): number | null {
+  const p = parseDisplayDecimal(part);
+  const w = parseDisplayDecimal(whole);
+  if (p === null || w === null || w <= 0) return null;
+  return Math.min(100, (p / w) * 100);
+}
+
+function formatBreakdownPct(part: string, whole: string): string {
+  const pct = breakdownPercentOfTotal(part, whole);
+  if (pct === null) return METRIC_DASH;
+  return `${pct.toLocaleString(DISPLAY_NUMBER_LOCALE, {
+    maximumFractionDigits: 1,
+  })} %`;
 }
 
 function budgetCategoryMap(
@@ -470,6 +566,20 @@ function ModalFormError({
     <p className="error compact modal-form-error" role="alert">
       {message}
     </p>
+  );
+}
+
+/** MVP equivalente a InlineHelpIcon del Mac: tooltip nativo al pasar el cursor o foco. */
+function InlineHint({ title }: { title: string }) {
+  return (
+    <span
+      className="inline-hint-icon"
+      title={title}
+      role="img"
+      aria-label={title}
+    >
+      i
+    </span>
   );
 }
 
@@ -557,6 +667,7 @@ async function errorMessageFromResponse(res: Response): Promise<string> {
 }
 
 export default function App() {
+  const ledgerScopeSelectId = useId();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
 
@@ -611,6 +722,8 @@ export default function App() {
   const [calendarTzSaving, setCalendarTzSaving] = useState(false);
   const [projectionInflationDraft, setProjectionInflationDraft] =
     useState(false);
+  const [projectionInflationPctDraft, setProjectionInflationPctDraft] =
+    useState("");
   const [projectionTargetAgeDraft, setProjectionTargetAgeDraft] =
     useState("");
   const [showAgeModeDraft, setShowAgeModeDraft] = useState<"dates" | "ages">(
@@ -644,6 +757,10 @@ export default function App() {
     null,
   );
   const [editCategoryName, setEditCategoryName] = useState("");
+  const [categoryDeleteModalOpen, setCategoryDeleteModalOpen] = useState(false);
+  const [categoryDeletePending, setCategoryDeletePending] =
+    useState<CategoryRow | null>(null);
+  const [categoryRemapToId, setCategoryRemapToId] = useState("");
 
   const [assets, setAssets] = useState<AssetApiRow[]>([]);
   const [assetsBusy, setAssetsBusy] = useState(false);
@@ -654,6 +771,10 @@ export default function App() {
   const [assetFormValue, setAssetFormValue] = useState("");
   const [assetFormPurchase, setAssetFormPurchase] = useState("");
   const [assetFormLiquid, setAssetFormLiquid] = useState(true);
+  const [assetFormExpectedReturn, setAssetFormExpectedReturn] = useState("");
+  const [assetFormMonthlyFixed, setAssetFormMonthlyFixed] = useState("");
+  const [assetFormRemainderWeight, setAssetFormRemainderWeight] =
+    useState("");
   const [assetFormNotes, setAssetFormNotes] = useState("");
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
   const [assetSaving, setAssetSaving] = useState(false);
@@ -740,6 +861,25 @@ export default function App() {
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+
+  const [fireSnapshot, setFireSnapshot] = useState<FireSnapshotApi | null>(null);
+  const [fireBusy, setFireBusy] = useState(false);
+  const [fireError, setFireError] = useState<string | null>(null);
+
+  const [projectionSeries, setProjectionSeries] =
+    useState<ProjectionSeriesApi | null>(null);
+  const [projectionBusy, setProjectionBusy] = useState(false);
+  const [projectionError, setProjectionError] = useState<string | null>(null);
+
+  const [persons, setPersons] = useState<PersonApiRow[]>([]);
+  const [personsBusy, setPersonsBusy] = useState(false);
+  const [personsError, setPersonsError] = useState<string | null>(null);
+  const [personSaving, setPersonSaving] = useState(false);
+  const [newPersonName, setNewPersonName] = useState("");
+  const [newPersonBirth, setNewPersonBirth] = useState("");
+  const [newPersonPrimary, setNewPersonPrimary] = useState(false);
+  const [backupZipBusy, setBackupZipBusy] = useState(false);
+  const [backupZipError, setBackupZipError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<TabId>("summary");
 
@@ -987,6 +1127,79 @@ export default function App() {
     }
   }, [ledgerPersonScope]);
 
+  const loadFireSnapshotPage = useCallback(async () => {
+    setFireBusy(true);
+    setFireError(null);
+    try {
+      const res = await fetch(
+        `/v1/fire/snapshot${ledgerViewQs(ledgerPersonScope)}`,
+        defaultFetchInit,
+      );
+      if (res.status === 403 || res.status === 404) {
+        setFireSnapshot(null);
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setFireSnapshot((await res.json()) as FireSnapshotApi);
+    } catch (e: unknown) {
+      setFireSnapshot(null);
+      setFireError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFireBusy(false);
+    }
+  }, [ledgerPersonScope]);
+
+  const loadProjectionSeriesPage = useCallback(async () => {
+    setProjectionBusy(true);
+    setProjectionError(null);
+    try {
+      const qs =
+        ledgerPersonScope === "mine"
+          ? "?view=mine&months=120"
+          : "?months=120";
+      const res = await fetch(
+        `/v1/projection/series${qs}`,
+        defaultFetchInit,
+      );
+      if (res.status === 403 || res.status === 404) {
+        setProjectionSeries(null);
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setProjectionSeries((await res.json()) as ProjectionSeriesApi);
+    } catch (e: unknown) {
+      setProjectionSeries(null);
+      setProjectionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjectionBusy(false);
+    }
+  }, [ledgerPersonScope]);
+
+  const loadPersonsPage = useCallback(async () => {
+    setPersonsBusy(true);
+    setPersonsError(null);
+    try {
+      const res = await fetch("/v1/persons", defaultFetchInit);
+      if (res.status === 403 || res.status === 404) {
+        setPersons([]);
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setPersons((await res.json()) as PersonApiRow[]);
+    } catch (e: unknown) {
+      setPersons([]);
+      setPersonsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPersonsBusy(false);
+    }
+  }, []);
+
   const loadCategories = useCallback(async () => {
     setCategoriesBusy(true);
     setCategoriesError(null);
@@ -1095,12 +1308,16 @@ export default function App() {
   useEffect(() => {
     if (!installation) {
       setProjectionInflationDraft(false);
+      setProjectionInflationPctDraft("");
       setProjectionTargetAgeDraft("");
       setShowAgeModeDraft("dates");
       return;
     }
     const inst = installation.installation;
     setProjectionInflationDraft(inst.projection_includes_inflation);
+    setProjectionInflationPctDraft(
+      inst.annual_inflation_assumption_percent ?? "",
+    );
     setProjectionTargetAgeDraft(
       inst.projection_target_age != null
         ? String(inst.projection_target_age)
@@ -1159,6 +1376,27 @@ export default function App() {
     }
     void loadSummaryPage();
   }, [user, hasMembership, activeTab, loadSummaryPage]);
+
+  useEffect(() => {
+    if (!user || !hasMembership || activeTab !== "retirement") {
+      return;
+    }
+    void loadFireSnapshotPage();
+  }, [user, hasMembership, activeTab, loadFireSnapshotPage]);
+
+  useEffect(() => {
+    if (!user || !hasMembership || activeTab !== "projection") {
+      return;
+    }
+    void loadProjectionSeriesPage();
+  }, [user, hasMembership, activeTab, loadProjectionSeriesPage]);
+
+  useEffect(() => {
+    if (!user || !hasMembership || activeTab !== "settings") {
+      return;
+    }
+    void loadPersonsPage();
+  }, [user, hasMembership, activeTab, loadPersonsPage]);
 
   useEffect(() => {
     if (activeTab !== "assets" || assetFormCategoryId || assetCategories.length === 0) {
@@ -1237,6 +1475,16 @@ export default function App() {
       setPlanningModalOpen(false);
       setCategoryModalOpen(false);
       setCategoryRenameModalOpen(false);
+      setFireSnapshot(null);
+      setFireError(null);
+      setProjectionSeries(null);
+      setProjectionError(null);
+      setPersons([]);
+      setPersonsError(null);
+      setNewPersonName("");
+      setNewPersonBirth("");
+      setNewPersonPrimary(false);
+      setBackupZipError(null);
     }
   }, [user]);
 
@@ -1420,6 +1668,16 @@ export default function App() {
       }
       projection_target_age = n;
     }
+    const pctTrim = projectionInflationPctDraft.trim().replace(",", ".");
+    if (pctTrim !== "") {
+      const n = Number(pctTrim);
+      if (!Number.isFinite(n) || n < 0 || n > 50) {
+        setInstallationError(
+          "Supuesto de inflación anual: número entre 0 y 50, o vacío para borrar.",
+        );
+        return;
+      }
+    }
     setInstallationProjectionSaving(true);
     setInstallationError(null);
     try {
@@ -1431,6 +1689,8 @@ export default function App() {
           projection_includes_inflation: projectionInflationDraft,
           projection_target_age,
           show_age_mode: showAgeModeDraft,
+          annual_inflation_assumption_percent:
+            pctTrim === "" ? null : pctTrim,
         }),
       });
       if (!res.ok) {
@@ -1501,22 +1761,51 @@ export default function App() {
     }
   }
 
-  async function deleteCategory(id: string) {
+  function openCategoryDeleteModal(row: CategoryRow) {
+    setCategoryDeletePending(row);
+    const siblings = categories.filter(
+      (x) => x.scope === row.scope && x.id !== row.id,
+    );
+    setCategoryRemapToId(siblings[0]?.id ?? "");
+    setCategoriesError(null);
+    setCategoryDeleteModalOpen(true);
+  }
+
+  function closeCategoryDeleteModal() {
+    setCategoryDeleteModalOpen(false);
+    setCategoryDeletePending(null);
+    setCategoryRemapToId("");
+  }
+
+  async function confirmDeleteCategory() {
+    const row = categoryDeletePending;
+    if (!row) return;
+    const siblings = categories.filter(
+      (x) => x.scope === row.scope && x.id !== row.id,
+    );
+    const qs =
+      siblings.length > 0 && categoryRemapToId.trim().length > 0
+        ? `?remap_to=${encodeURIComponent(categoryRemapToId.trim())}`
+        : "";
     setCategorySaving(true);
     setCategoriesError(null);
     try {
-      const res = await fetch(`/v1/categories/${encodeURIComponent(id)}`, {
-        ...defaultFetchInit,
-        method: "DELETE",
-      });
+      const res = await fetch(
+        `/v1/categories/${encodeURIComponent(row.id)}${qs}`,
+        {
+          ...defaultFetchInit,
+          method: "DELETE",
+        },
+      );
       if (!res.ok && res.status !== 204) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      if (editingCategoryId === id) {
+      if (editingCategoryId === row.id) {
         setEditingCategoryId(null);
         setEditCategoryName("");
         setCategoryRenameModalOpen(false);
       }
+      closeCategoryDeleteModal();
       await loadCategories();
     } catch (e: unknown) {
       setCategoriesError(e instanceof Error ? e.message : String(e));
@@ -1562,6 +1851,9 @@ export default function App() {
     setAssetFormValue("");
     setAssetFormPurchase("");
     setAssetFormLiquid(true);
+    setAssetFormExpectedReturn("");
+    setAssetFormMonthlyFixed("");
+    setAssetFormRemainderWeight("");
     setAssetFormNotes("");
   }
 
@@ -1583,6 +1875,14 @@ export default function App() {
         current_value: assetFormValue.trim(),
         is_liquid: assetFormLiquid,
       };
+      const er = assetFormExpectedReturn.trim().replace(",", ".");
+      if (er) {
+        base.expected_annual_return_percent = er;
+      }
+      const mf = assetFormMonthlyFixed.trim().replace(",", ".");
+      base.monthly_contribution_fixed = mf === "" ? "0" : mf;
+      const rw = assetFormRemainderWeight.trim().replace(",", ".");
+      base.contribution_remainder_weight = rw === "" ? "0" : rw;
       const pp = assetFormPurchase.trim();
       if (pp) {
         base.purchase_price = pp;
@@ -1656,6 +1956,9 @@ export default function App() {
     setAssetFormValue(a.current_value);
     setAssetFormPurchase(a.purchase_price ?? "");
     setAssetFormLiquid(a.is_liquid);
+    setAssetFormExpectedReturn(a.expected_annual_return_percent ?? "");
+    setAssetFormMonthlyFixed(a.monthly_contribution_fixed ?? "0");
+    setAssetFormRemainderWeight(a.contribution_remainder_weight ?? "0");
     setAssetFormNotes(a.notes ?? "");
   }
 
@@ -2011,6 +2314,109 @@ export default function App() {
     }
   }
 
+  async function submitNewPerson(ev: FormEvent) {
+    ev.preventDefault();
+    const name = newPersonName.trim();
+    if (!name) {
+      setPersonsError("El nombre es obligatorio.");
+      return;
+    }
+    setPersonSaving(true);
+    setPersonsError(null);
+    try {
+      const body: Record<string, unknown> = {
+        display_name: name,
+        is_primary: newPersonPrimary,
+      };
+      const bd = newPersonBirth.trim();
+      if (bd) {
+        body.birth_date = bd;
+      }
+      const res = await fetch("/v1/persons", {
+        ...defaultFetchInit,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setNewPersonName("");
+      setNewPersonBirth("");
+      setNewPersonPrimary(false);
+      await loadPersonsPage();
+    } catch (e: unknown) {
+      setPersonsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPersonSaving(false);
+    }
+  }
+
+  async function deletePersonRow(id: string) {
+    setPersonSaving(true);
+    setPersonsError(null);
+    try {
+      const res = await fetch(`/v1/persons/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "DELETE",
+      });
+      if (!res.ok && res.status !== 204) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      await loadPersonsPage();
+    } catch (e: unknown) {
+      setPersonsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPersonSaving(false);
+    }
+  }
+
+  async function promotePersonPrimary(id: string) {
+    setPersonSaving(true);
+    setPersonsError(null);
+    try {
+      const res = await fetch(`/v1/persons/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_primary: true }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      await loadPersonsPage();
+    } catch (e: unknown) {
+      setPersonsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPersonSaving(false);
+    }
+  }
+
+  async function exportBackupZipFile() {
+    setBackupZipBusy(true);
+    setBackupZipError(null);
+    try {
+      const res = await fetch("/v1/backup/export.zip", defaultFetchInit);
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "futurefin-export.zip";
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setBackupZipError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBackupZipBusy(false);
+    }
+  }
+
   function beginEditPlanningFlow(row: PlanningFlowApiRow) {
     setEditingPlanningFlowId(row.id);
     const scope: BudgetScopeToggle =
@@ -2237,35 +2643,28 @@ export default function App() {
             ))}
           </nav>
 
-          <div
-            className="person-filter-bar"
-            role="toolbar"
-            aria-label="Ámbito de datos (hogar o usuario actual)"
-          >
-            <span className="person-filter-label">Ver datos:</span>
-            <div className="segmented person-filter-segmented">
-              <button
-                type="button"
-                className={ledgerPersonScope === "household" ? "active" : ""}
-                aria-pressed={ledgerPersonScope === "household"}
-                onClick={() => setLedgerPersonScope("household")}
-              >
-                Hogar (todo)
-              </button>
-              <button
-                type="button"
-                className={ledgerPersonScope === "mine" ? "active" : ""}
-                aria-pressed={ledgerPersonScope === "mine"}
-                onClick={() => setLedgerPersonScope("mine")}
-              >
-                {user.username}
-              </button>
-            </div>
-            <span className="person-filter-hint muted tight">
-              Misma instalación compartida; solo filtra listas y totales (activos,
-              pasivos, presupuesto, próximos, resumen). No depende de cuántos
-              usuarios haya.
-            </span>
+          <div className="person-filter-bar person-filter-bar--discrete">
+            <label
+              htmlFor={ledgerScopeSelectId}
+              className="person-filter-bar-label"
+            >
+              Vista
+            </label>
+            <select
+              id={ledgerScopeSelectId}
+              className="ledger-view-select"
+              value={ledgerPersonScope}
+              onChange={(e) =>
+                setLedgerPersonScope(
+                  e.target.value === "mine" ? "mine" : "household",
+                )
+              }
+              aria-label="Ámbito de datos: hogar o solo tus registros"
+              title="Misma instalación compartida. Hogar: todos los registros. Solo tus filas: ítems con tu usuario como titular (owner_user_id). Afecta activos, pasivos, presupuesto, próximos, resumen, FIRE y proyección."
+            >
+              <option value="household">Todo el hogar</option>
+              <option value="mine">{user.username}</option>
+            </select>
           </div>
 
           <main className="app-main">
@@ -2350,6 +2749,12 @@ export default function App() {
             setAssetFormPurchase={setAssetFormPurchase}
             assetFormLiquid={assetFormLiquid}
             setAssetFormLiquid={setAssetFormLiquid}
+            assetFormExpectedReturn={assetFormExpectedReturn}
+            setAssetFormExpectedReturn={setAssetFormExpectedReturn}
+            assetFormMonthlyFixed={assetFormMonthlyFixed}
+            setAssetFormMonthlyFixed={setAssetFormMonthlyFixed}
+            assetFormRemainderWeight={assetFormRemainderWeight}
+            setAssetFormRemainderWeight={setAssetFormRemainderWeight}
             assetFormNotes={assetFormNotes}
             setAssetFormNotes={setAssetFormNotes}
             editingAssetId={editingAssetId}
@@ -2497,12 +2902,20 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
+            fireSnapshot={fireSnapshot}
+            fireBusy={fireBusy}
+            fireError={fireError}
           />
         ) : activeTab === "projection" ? (
           <ProjectionView
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
+            projectionSeries={projectionSeries}
+            projectionBusy={projectionBusy}
+            projectionError={projectionError}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
@@ -2541,6 +2954,8 @@ export default function App() {
             }
             projectionInflationDraft={projectionInflationDraft}
             setProjectionInflationDraft={setProjectionInflationDraft}
+            projectionInflationPctDraft={projectionInflationPctDraft}
+            setProjectionInflationPctDraft={setProjectionInflationPctDraft}
             projectionTargetAgeDraft={projectionTargetAgeDraft}
             setProjectionTargetAgeDraft={setProjectionTargetAgeDraft}
             showAgeModeDraft={showAgeModeDraft}
@@ -2569,11 +2984,33 @@ export default function App() {
             setNewCatName={setNewCatName}
             categorySaving={categorySaving}
             createCategory={(e) => void createCategory(e)}
-            deleteCategory={(id) => void deleteCategory(id)}
+            openCategoryDeleteModal={(row) => openCategoryDeleteModal(row)}
+            categoryDeleteModalOpen={categoryDeleteModalOpen}
+            categoryDeletePending={categoryDeletePending}
+            categoryRemapToId={categoryRemapToId}
+            setCategoryRemapToId={setCategoryRemapToId}
+            closeCategoryDeleteModal={closeCategoryDeleteModal}
+            confirmDeleteCategory={() => void confirmDeleteCategory()}
             editingCategoryId={editingCategoryId}
             editCategoryName={editCategoryName}
             setEditCategoryName={setEditCategoryName}
             saveCategoryEdit={(id) => void saveCategoryEdit(id)}
+            persons={persons}
+            personsBusy={personsBusy}
+            personsError={personsError}
+            personSaving={personSaving}
+            newPersonName={newPersonName}
+            setNewPersonName={setNewPersonName}
+            newPersonBirth={newPersonBirth}
+            setNewPersonBirth={setNewPersonBirth}
+            newPersonPrimary={newPersonPrimary}
+            setNewPersonPrimary={setNewPersonPrimary}
+            submitNewPerson={(e) => void submitNewPerson(e)}
+            deletePersonRow={(id) => void deletePersonRow(id)}
+            promotePersonPrimary={(id) => void promotePersonPrimary(id)}
+            backupZipBusy={backupZipBusy}
+            backupZipError={backupZipError}
+            exportBackupZip={() => void exportBackupZipFile()}
           />
         ) : (
           <PlaceholderTab tabLabel={TABS.find((x) => x.id === activeTab)?.label ?? ""} />
@@ -2612,6 +3049,12 @@ function AssetsView({
   setAssetFormPurchase,
   assetFormLiquid,
   setAssetFormLiquid,
+  assetFormExpectedReturn,
+  setAssetFormExpectedReturn,
+  assetFormMonthlyFixed,
+  setAssetFormMonthlyFixed,
+  assetFormRemainderWeight,
+  setAssetFormRemainderWeight,
   assetFormNotes,
   setAssetFormNotes,
   editingAssetId,
@@ -2641,6 +3084,12 @@ function AssetsView({
   setAssetFormPurchase: Dispatch<SetStateAction<string>>;
   assetFormLiquid: boolean;
   setAssetFormLiquid: Dispatch<SetStateAction<boolean>>;
+  assetFormExpectedReturn: string;
+  setAssetFormExpectedReturn: Dispatch<SetStateAction<string>>;
+  assetFormMonthlyFixed: string;
+  setAssetFormMonthlyFixed: Dispatch<SetStateAction<string>>;
+  assetFormRemainderWeight: string;
+  setAssetFormRemainderWeight: Dispatch<SetStateAction<string>>;
   assetFormNotes: string;
   setAssetFormNotes: Dispatch<SetStateAction<string>>;
   editingAssetId: string | null;
@@ -2747,6 +3196,42 @@ function AssetsView({
                 />
                 <span>Líquido</span>
               </label>
+              <label className="field">
+                <span>Rentab. anual esperada % (opc.)</span>
+                <input
+                  value={assetFormExpectedReturn}
+                  onChange={(e) =>
+                    setAssetFormExpectedReturn(e.target.value)
+                  }
+                  inputMode="decimal"
+                  placeholder="—"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>Aportación fija mensual</span>
+                <input
+                  value={assetFormMonthlyFixed}
+                  onChange={(e) =>
+                    setAssetFormMonthlyFixed(e.target.value)
+                  }
+                  inputMode="decimal"
+                  placeholder="0"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>Peso remanente % presupuesto</span>
+                <input
+                  value={assetFormRemainderWeight}
+                  onChange={(e) =>
+                    setAssetFormRemainderWeight(e.target.value)
+                  }
+                  inputMode="decimal"
+                  placeholder="0"
+                  autoComplete="off"
+                />
+              </label>
             </div>
             <label className="field">
               <span>Notas (opc.)</span>
@@ -2806,7 +3291,18 @@ function AssetsView({
                   <th>Categoría</th>
                   <th className="num">Valor</th>
                   <th className="num">Compra</th>
+                  <th
+                    className="num"
+                    title="Variación acumulada vs precio de compra (no anualizada ni TAE)"
+                  >
+                    Δ compra
+                  </th>
                   <th>Líquido</th>
+                  <th className="num" title="Rentabilidad anual esperada (proyección)">
+                    Rent. % a.a.
+                  </th>
+                  <th className="num">Aport. fija</th>
+                  <th className="num">Peso rem.</th>
                   <th>Notas</th>
                   {canEdit ? <th /> : null}
                 </tr>
@@ -2822,7 +3318,26 @@ function AssetsView({
                     <td className="num">
                       {formatCurrencyOrDash(a.purchase_price, currencyIso)}
                     </td>
+                    <td className="num muted">
+                      {assetImplicitTotalReturnLabel(
+                        a.current_value,
+                        a.purchase_price,
+                      ) ?? METRIC_DASH}
+                    </td>
                     <td>{a.is_liquid ? "Sí" : "No"}</td>
+                    <td className="num muted">
+                      {a.expected_annual_return_percent != null &&
+                      a.expected_annual_return_percent !== ""
+                        ? `${a.expected_annual_return_percent}%`
+                        : METRIC_DASH}
+                    </td>
+                    <td className="num">
+                      {formatCurrencyAmount(
+                        a.monthly_contribution_fixed,
+                        currencyIso,
+                      )}
+                    </td>
+                    <td className="num muted">{a.contribution_remainder_weight}</td>
                     <td className="asset-notes-cell">
                       {a.notes ?? METRIC_DASH}
                     </td>
@@ -3046,9 +3561,10 @@ function LiabilitiesView({
                   }
                   style={{ marginTop: "0.2rem" }}
                 />
-                <span>
+                <span className="checkbox-label-with-hint">
                   Derivar principal desde el plan (cuota × intervalos hasta la
                   fecha fin; mismo criterio que el cliente Mac)
+                  <InlineHint title="Intervalos desde el día civil «hoy» de la instalación (zona en Ajustes). Mensual por meses calendario; semanal ≈ días/7 hacia arriba." />
                 </span>
               </label>
               <label className="field">
@@ -3647,7 +4163,10 @@ function BudgetView({
       </section>
 
       <section className="panel">
-        <h3 className="panel-title">Derivado de pasivos (solo lectura)</h3>
+        <h3 className="panel-title panel-title-with-hint">
+          <span>Derivado de pasivos (solo lectura)</span>
+          <InlineHint title="Filas calculadas desde planes de pago de pasivos; visibles en presupuesto pero el motor projectNetWorthSeries del Mac no las trata como líneas persistidas de budget." />
+        </h3>
         <p className="muted tight">
           Cuotas de pasivos con plan completo y fecha fin posterior a hoy en la
           zona civil de la instalación.
@@ -3697,6 +4216,45 @@ function BudgetView({
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+function PlanningDirectionChart({
+  inflow,
+  outflow,
+}: {
+  inflow: number;
+  outflow: number;
+}) {
+  const sum = inflow + outflow;
+  if (!(sum > 0) || !(Number.isFinite(inflow) && Number.isFinite(outflow))) {
+    return null;
+  }
+  const wi = (inflow / sum) * 100;
+  const wo = (outflow / sum) * 100;
+  return (
+    <div className="planning-dir-chart bordered-top">
+      <p className="muted tight planning-dir-chart-lead">
+        Barras proporcionales al volumen de entradas y salidas (magnitudes absolutas).
+      </p>
+      <svg
+        viewBox="0 0 100 12"
+        preserveAspectRatio="none"
+        className="planning-dir-svg"
+        role="img"
+        aria-label="Comparación entradas y salidas planificadas"
+      >
+        <title>Entradas y salidas</title>
+        <rect x="0" y="0" width={wi} height="12" className="planning-dir-bar-in" />
+        <rect
+          x={wi}
+          y="0"
+          width={wo}
+          height="12"
+          className="planning-dir-bar-out"
+        />
+      </svg>
     </div>
   );
 }
@@ -3773,6 +4331,13 @@ function UpcomingView({
       ? planningIncomeCategories
       : planningExpenseCategories;
 
+  const planningInflowSum = planningFlows
+    .filter((f) => f.direction === "inflow")
+    .reduce((acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0), 0);
+  const planningOutflowSum = planningFlows
+    .filter((f) => f.direction === "outflow")
+    .reduce((acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0), 0);
+
   return (
     <div className="workspace">
       <div className="workspace-header">
@@ -3784,9 +4349,66 @@ function UpcomingView({
               ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
               : planningLoading
                 ? "Cargando flujos planificados…"
-                : "Flujos de caja esperados (entradas y salidas) con categorías de ingreso o gasto. Importes en moneda de la instalación con símbolo. Gráfico direccional del Mac vendrá después."}
+                : "Flujos de caja esperados (entradas y salidas). Importes en moneda de la instalación. Gráfico tipo PlanningTabView del Mac puede añadirse después."}
         </p>
       </div>
+
+      {hasMembership && !planningLoading ? (
+        <section className="panel">
+          <h3 className="panel-title panel-title-with-hint">
+            <span>Resumen direccional</span>
+            <InlineHint title="Suma de importes esperados por dirección; misma convención que «Próximos» en Resumen. Gráfico direccional tipo PlanningTabView pendiente." />
+          </h3>
+          <p className="muted tight">
+            Sumas de <code>expected_amount</code> por dirección (misma convención que
+            «Próximos» en Resumen); no mensualizado.
+          </p>
+          <div className="metric-grid planning-direction-strip bordered-top">
+            <MetricCard
+              label="Entradas (suma)"
+              value={formatCurrencyNumber(
+                planningFlows
+                  .filter((f) => f.direction === "inflow")
+                  .reduce(
+                    (acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0),
+                    0,
+                  ),
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Salidas (suma)"
+              value={formatCurrencyNumber(
+                planningFlows
+                  .filter((f) => f.direction === "outflow")
+                  .reduce(
+                    (acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0),
+                    0,
+                  ),
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Neto planificado"
+              value={formatCurrencyNumber(
+                planningFlows.reduce((acc, f) => {
+                  const amt = parseDisplayDecimal(f.expected_amount) ?? 0;
+                  return (
+                    acc +
+                    (f.direction === "inflow" ? amt : f.direction === "outflow" ? -amt : 0)
+                  );
+                }, 0),
+                currencyIso,
+              )}
+              hint="Entradas − salidas."
+            />
+          </div>
+          <PlanningDirectionChart
+            inflow={planningInflowSum}
+            outflow={planningOutflowSum}
+          />
+        </section>
+      ) : null}
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">
@@ -4002,6 +4624,146 @@ function UpcomingView({
   );
 }
 
+function summaryDonutGradient(
+  rows: { total: string }[],
+  totalWhole: string,
+): string | null {
+  const tw = parseDisplayDecimal(totalWhole) ?? 0;
+  if (tw <= 0 || rows.length === 0) {
+    return null;
+  }
+  let accPct = 0;
+  const stops: string[] = [];
+  rows.forEach((r, i) => {
+    const v = parseDisplayDecimal(r.total) ?? 0;
+    if (v <= 0) {
+      return;
+    }
+    const pct = Math.min(100 - accPct, (v / tw) * 100);
+    const hue = (i * 53) % 360;
+    const c = `hsl(${hue} 52% 42%)`;
+    const start = accPct;
+    accPct += pct;
+    stops.push(`${c} ${start}% ${accPct}%`);
+  });
+  if (stops.length === 0) {
+    return null;
+  }
+  return `conic-gradient(${stops.join(", ")})`;
+}
+
+function SummaryDonutChart({
+  title,
+  rows,
+  totalWhole,
+  currencyIso,
+}: {
+  title: string;
+  rows: { key: string; label: string; total: string }[];
+  totalWhole: string;
+  currencyIso: string;
+}) {
+  const filtered = rows.filter((r) => (parseDisplayDecimal(r.total) ?? 0) > 0);
+  const g = summaryDonutGradient(filtered, totalWhole);
+  if (!g || filtered.length === 0) {
+    return (
+      <div className="summary-donut-card">
+        <h4 className="subsection-title">{title}</h4>
+        <p className="muted tight">Sin datos para donut.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="summary-donut-card">
+      <h4 className="subsection-title">{title}</h4>
+      <div className="summary-donut-inner">
+        <div
+          className="summary-donut-ring"
+          style={{ background: g }}
+          role="img"
+          aria-label={title}
+        />
+        <ul className="summary-donut-legend">
+          {filtered.map((r) => (
+            <li key={r.key}>
+              <span className="summary-donut-legend-label">{r.label}</span>
+              <span className="summary-donut-legend-val">
+                {formatCurrencyAmount(r.total, currencyIso)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function SummaryBreakdownBlock({
+  title,
+  rows,
+  totalWhole,
+  currencyIso,
+  labelColumn,
+}: {
+  title: string;
+  rows: { key: string; label: string; total: string }[];
+  totalWhole: string;
+  currencyIso: string;
+  labelColumn: string;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="breakdown-block">
+        <h4 className="subsection-title">{title}</h4>
+        <p className="muted tight">Sin datos.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="breakdown-block">
+      <h4 className="subsection-title">{title}</h4>
+      <div className="breakdown-table-wrap bordered-top">
+        <table className="breakdown-table">
+          <thead>
+            <tr>
+              <th>{labelColumn}</th>
+              <th className="num">Importe</th>
+              <th className="num">%</th>
+              <th className="breakdown-bar-col" aria-hidden />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const pct = breakdownPercentOfTotal(row.total, totalWhole);
+              return (
+                <tr key={row.key}>
+                  <td>{row.label}</td>
+                  <td className="num">
+                    {formatCurrencyAmount(row.total, currencyIso)}
+                  </td>
+                  <td className="num muted">
+                    {formatBreakdownPct(row.total, totalWhole)}
+                  </td>
+                  <td className="breakdown-bar-cell">
+                    <div className="breakdown-bar-track">
+                      <div
+                        className="breakdown-bar-fill"
+                        style={{
+                          width: pct !== null ? `${pct}%` : "0%",
+                        }}
+                      />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function SummaryView({
   installation,
   loading,
@@ -4095,14 +4857,15 @@ function SummaryView({
 
       {hasMembership && installation ? (
         <section className="panel">
-          <h3 className="panel-title">
-            FIRE / horizonte (solo configuración por ahora)
+          <h3 className="panel-title panel-title-with-hint">
+            <span>FIRE / horizonte</span>
+            <InlineHint title="KPIs numéricos MVP (25×, gap, etc.) en la pestaña Jubilación vía GET /v1/fire/snapshot. ETA tipo SummaryFireRow y fireMilestone Swift siguen en roadmap." />
           </h3>
           <p className="muted tight">
-            Paridad con <strong>SummaryFireRow</strong> del Mac: ETA y objetivos
-            cuando exista el motor en API. Los valores siguientes ya persisten en
-            la instalación y se editan en{" "}
-            <strong>Ajustes → Proyección</strong>.
+            La instalación guarda inflación de proyección, edad objetivo y modo
+            fechas/edades (editable en <strong>Ajustes → Proyección</strong>).
+            Para objetivos y gap heurísticos abre{" "}
+            <strong>Jubilación (FIRE)</strong>.
           </p>
           <dl className="settings-meta-dl bordered-top">
             <div>
@@ -4243,12 +5006,88 @@ function SummaryView({
         )}
       </section>
 
-      <section className="panel muted-panel">
+      <section className="panel">
         <h3 className="panel-title">Desglose</h3>
         <p className="muted tight">
-          Donut / categorías como en el cliente Mac: usa las pestañas Activos y
-          Pasivos por ahora; gráficos enlazados aquí vendrán después.
+          Agregados desde la misma vista hogar / mío que los KPI superiores.
+          Donuts MVP (gradiente cónico + leyenda); hover interactivo tipo Mac puede
+          añadirse después.
         </p>
+        {showMetrics && summary ? (
+          <div className="summary-donuts-row bordered-top">
+            <SummaryDonutChart
+              title="Activos por categoría"
+              currencyIso={currencyIso}
+              totalWhole={summary.total_assets}
+              rows={summary.assets_by_category.map((r) => ({
+                key: r.category_id,
+                label: r.category_name,
+                total: r.total,
+              }))}
+            />
+            <SummaryDonutChart
+              title="Pasivos por categoría"
+              currencyIso={currencyIso}
+              totalWhole={summary.total_liabilities}
+              rows={summary.liabilities_by_category.map((r) => ({
+                key: r.category_id,
+                label: r.category_name,
+                total: r.total,
+              }))}
+            />
+            <SummaryDonutChart
+              title="Pasivos por etiqueta"
+              currencyIso={currencyIso}
+              totalWhole={summary.total_liabilities}
+              rows={summary.liabilities_by_type_tag.map((r) => ({
+                key: r.type_tag,
+                label: r.type_tag,
+                total: r.total,
+              }))}
+            />
+          </div>
+        ) : null}
+        {showMetrics && summary ? (
+          <div className="breakdown-grid">
+            <SummaryBreakdownBlock
+              title="Activos por categoría"
+              labelColumn="Categoría"
+              totalWhole={summary.total_assets}
+              currencyIso={currencyIso}
+              rows={summary.assets_by_category.map((r) => ({
+                key: r.category_id,
+                label: r.category_name,
+                total: r.total,
+              }))}
+            />
+            <SummaryBreakdownBlock
+              title="Pasivos por categoría"
+              labelColumn="Categoría"
+              totalWhole={summary.total_liabilities}
+              currencyIso={currencyIso}
+              rows={summary.liabilities_by_category.map((r) => ({
+                key: r.category_id,
+                label: r.category_name,
+                total: r.total,
+              }))}
+            />
+            <SummaryBreakdownBlock
+              title="Pasivos por etiqueta de tipo"
+              labelColumn="Etiqueta"
+              totalWhole={summary.total_liabilities}
+              currencyIso={currencyIso}
+              rows={summary.liabilities_by_type_tag.map((r) => ({
+                key: r.type_tag,
+                label: r.type_tag,
+                total: r.total,
+              }))}
+            />
+          </div>
+        ) : (
+          <p className="muted bordered-top">
+            Con membresía activa verás el desglose aquí.
+          </p>
+        )}
       </section>
     </div>
   );
@@ -4372,6 +5211,8 @@ function SettingsView({
   saveInstallationCalendarTz,
   projectionInflationDraft,
   setProjectionInflationDraft,
+  projectionInflationPctDraft,
+  setProjectionInflationPctDraft,
   projectionTargetAgeDraft,
   setProjectionTargetAgeDraft,
   showAgeModeDraft,
@@ -4400,11 +5241,33 @@ function SettingsView({
   setNewCatName,
   categorySaving,
   createCategory,
-  deleteCategory,
+  openCategoryDeleteModal,
+  categoryDeleteModalOpen,
+  categoryDeletePending,
+  categoryRemapToId,
+  setCategoryRemapToId,
+  closeCategoryDeleteModal,
+  confirmDeleteCategory,
   editingCategoryId,
   editCategoryName,
   setEditCategoryName,
   saveCategoryEdit,
+  persons,
+  personsBusy,
+  personsError,
+  personSaving,
+  newPersonName,
+  setNewPersonName,
+  newPersonBirth,
+  setNewPersonBirth,
+  newPersonPrimary,
+  setNewPersonPrimary,
+  submitNewPerson,
+  deletePersonRow,
+  promotePersonPrimary,
+  backupZipBusy,
+  backupZipError,
+  exportBackupZip,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -4420,6 +5283,8 @@ function SettingsView({
   saveInstallationCalendarTz: (e: FormEvent) => void;
   projectionInflationDraft: boolean;
   setProjectionInflationDraft: Dispatch<SetStateAction<boolean>>;
+  projectionInflationPctDraft: string;
+  setProjectionInflationPctDraft: Dispatch<SetStateAction<string>>;
   projectionTargetAgeDraft: string;
   setProjectionTargetAgeDraft: Dispatch<SetStateAction<string>>;
   showAgeModeDraft: "dates" | "ages";
@@ -4452,11 +5317,33 @@ function SettingsView({
   setNewCatName: Dispatch<SetStateAction<string>>;
   categorySaving: boolean;
   createCategory: (e: FormEvent) => void;
-  deleteCategory: (id: string) => void;
+  openCategoryDeleteModal: (row: CategoryRow) => void;
+  categoryDeleteModalOpen: boolean;
+  categoryDeletePending: CategoryRow | null;
+  categoryRemapToId: string;
+  setCategoryRemapToId: Dispatch<SetStateAction<string>>;
+  closeCategoryDeleteModal: () => void;
+  confirmDeleteCategory: () => void;
   editingCategoryId: string | null;
   editCategoryName: string;
   setEditCategoryName: Dispatch<SetStateAction<string>>;
   saveCategoryEdit: (id: string) => void;
+  persons: PersonApiRow[];
+  personsBusy: boolean;
+  personsError: string | null;
+  personSaving: boolean;
+  newPersonName: string;
+  setNewPersonName: Dispatch<SetStateAction<string>>;
+  newPersonBirth: string;
+  setNewPersonBirth: Dispatch<SetStateAction<string>>;
+  newPersonPrimary: boolean;
+  setNewPersonPrimary: Dispatch<SetStateAction<boolean>>;
+  submitNewPerson: (e: FormEvent) => void;
+  deletePersonRow: (id: string) => void;
+  promotePersonPrimary: (id: string) => void;
+  backupZipBusy: boolean;
+  backupZipError: string | null;
+  exportBackupZip: () => void;
 }) {
   const renamingCat =
     editingCategoryId === null
@@ -4589,6 +5476,22 @@ function SettingsView({
               <span>Incluir inflación en la proyección de patrimonio</span>
             </label>
             <label className="field">
+              <span>Supuesto inflación anual % (opc.)</span>
+              <input
+                value={projectionInflationPctDraft}
+                onChange={(e) =>
+                  setProjectionInflationPctDraft(e.target.value)
+                }
+                inputMode="decimal"
+                placeholder="p. ej. 2.5 — vacío borra"
+                autoComplete="off"
+              />
+              <span className="hint">
+                Usado en modo «dinero de hoy» cuando la casilla de inflación
+                está activa (0–50).
+              </span>
+            </label>
+            <label className="field">
               <span>Edad objetivo del horizonte (opc.)</span>
               <input
                 value={projectionTargetAgeDraft}
@@ -4637,6 +5540,130 @@ function SettingsView({
 
       {hasMembership ? (
         <section className="panel">
+          <h3 className="panel-title">Personas del hogar</h3>
+          <p className="muted tight">
+            Nombre, titular primaria y fecha de nacimiento (paridad checklist).
+          </p>
+          {personsError ? (
+            <p className="error compact bordered-top">{personsError}</p>
+          ) : null}
+          {personsBusy ? (
+            <p className="muted bordered-top">Cargando personas…</p>
+          ) : (
+            <>
+              <ul className="persons-list bordered-top">
+                {persons.map((p) => (
+                  <li key={p.id} className="person-row">
+                    <div className="person-row-main">
+                      <span className="person-name">{p.display_name}</span>
+                      {p.is_primary ? (
+                        <span className="chip muted person-primary-chip">
+                          Titular
+                        </span>
+                      ) : null}
+                    </div>
+                    <span className="muted person-birth">
+                      {p.birth_date?.trim() ? p.birth_date : METRIC_DASH}
+                    </span>
+                    {canEditCategories ? (
+                      <div className="person-row-actions">
+                        {!p.is_primary ? (
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            disabled={personSaving}
+                            onClick={() => promotePersonPrimary(p.id)}
+                          >
+                            Marcar titular
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="btn ghost danger"
+                          disabled={personSaving}
+                          onClick={() => deletePersonRow(p.id)}
+                        >
+                          Eliminar
+                        </button>
+                      </div>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+              {canEditCategories ? (
+                <form
+                  className="stack bordered-top"
+                  onSubmit={(e) => submitNewPerson(e)}
+                >
+                  <label className="field">
+                    <span>Nombre</span>
+                    <input
+                      value={newPersonName}
+                      onChange={(e) => setNewPersonName(e.target.value)}
+                      maxLength={128}
+                      autoComplete="name"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Fecha de nacimiento (opcional)</span>
+                    <input
+                      type="date"
+                      value={newPersonBirth}
+                      onChange={(e) => setNewPersonBirth(e.target.value)}
+                    />
+                  </label>
+                  <label className="field checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={newPersonPrimary}
+                      onChange={(e) => setNewPersonPrimary(e.target.checked)}
+                    />
+                    <span>Marcar como titular primaria</span>
+                  </label>
+                  <button
+                    type="submit"
+                    className="btn primary"
+                    disabled={personSaving}
+                  >
+                    Añadir persona
+                  </button>
+                </form>
+              ) : (
+                <p className="muted bordered-top">
+                  Solo lectura: tu rol no puede editar personas.
+                </p>
+              )}
+            </>
+          )}
+        </section>
+      ) : null}
+
+      {hasMembership && isOwner ? (
+        <section className="panel">
+          <h3 className="panel-title">Copia CSV (ZIP)</h3>
+          <p className="muted tight">
+            Paquete MVP según{" "}
+            <code>BACKUP_AND_CSV_SPEC.md</code>. Solo el propietario puede
+            exportar.
+          </p>
+          {backupZipError ? (
+            <p className="error compact bordered-top">{backupZipError}</p>
+          ) : null}
+          <div className="bordered-top">
+            <button
+              type="button"
+              className="btn primary"
+              disabled={backupZipBusy}
+              onClick={() => exportBackupZip()}
+            >
+              {backupZipBusy ? "Generando…" : "Descargar ZIP"}
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {hasMembership ? (
+        <section className="panel">
           <div className="panel-head-row">
             <h3 className="panel-title">Categorías</h3>
             {canEditCategories ? (
@@ -4675,6 +5702,7 @@ function SettingsView({
             </label>
           </div>
           {canEditCategories ? (
+            <>
             <Modal
               title="Nueva categoría"
               open={categoryModalOpen}
@@ -4778,6 +5806,77 @@ function SettingsView({
                 <p className="muted tight">Categoría no encontrada.</p>
               )}
             </Modal>
+            <Modal
+              title="Eliminar categoría"
+              open={categoryDeleteModalOpen && categoryDeletePending !== null}
+              onClose={closeCategoryDeleteModal}
+            >
+              {categoryDeletePending ? (
+                <div className="stack">
+                  <ModalFormError message={categoriesError} />
+                  <p className="muted tight">
+                    Se eliminará{" "}
+                    <strong>{categoryDeletePending.name}</strong> (
+                    {CATEGORY_SCOPE_LABEL[categoryDeletePending.scope]}).
+                  </p>
+                  {(() => {
+                    const siblings = categories.filter(
+                      (x) =>
+                        x.scope === categoryDeletePending.scope &&
+                        x.id !== categoryDeletePending.id,
+                    );
+                    if (siblings.length === 0) {
+                      return (
+                        <p className="hint">
+                          No hay otra categoría en este ámbito. Si esta categoría
+                          está en uso (activos, pasivos, presupuesto o próximos),
+                          crea primero una categoría sustituta y vuelve a intentar.
+                        </p>
+                      );
+                    }
+                    return (
+                      <label className="field">
+                        <span>
+                          Mover ítems existentes a (obligatorio si sigue en uso)
+                        </span>
+                        <select
+                          value={categoryRemapToId}
+                          onChange={(e) => setCategoryRemapToId(e.target.value)}
+                          aria-label="Categoría destino para remap"
+                        >
+                          {siblings.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    );
+                  })()}
+                  <div className="asset-form-actions">
+                    <button
+                      type="button"
+                      className="btn ghost danger"
+                      disabled={categorySaving}
+                      onClick={() => confirmDeleteCategory()}
+                    >
+                      Eliminar
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      disabled={categorySaving}
+                      onClick={() => closeCategoryDeleteModal()}
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <p className="muted tight">Nada seleccionado.</p>
+              )}
+            </Modal>
+            </>
           ) : (
             <p className="muted bordered-top">
               Solo lectura: tu rol no permite crear ni editar categorías.
@@ -4807,7 +5906,7 @@ function SettingsView({
                         type="button"
                         className="btn ghost danger"
                         disabled={categorySaving}
-                        onClick={() => deleteCategory(c.id)}
+                        onClick={() => openCategoryDeleteModal(c)}
                       >
                         Eliminar
                       </button>
@@ -4901,15 +6000,28 @@ function RetirementView({
   installation,
   installationBusy,
   hasMembership,
+  ledgerPersonScope,
+  fireSnapshot,
+  fireBusy,
+  fireError,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
+  ledgerPersonScope: LedgerPersonScope;
+  fireSnapshot: FireSnapshotApi | null;
+  fireBusy: boolean;
+  fireError: string | null;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
+  const currencyIso = installation?.installation.base_currency ?? "";
   const horizonAge = installation?.installation.projection_target_age;
   const inflation = installation?.installation.projection_includes_inflation;
+  const scopeNote =
+    ledgerPersonScope === "mine"
+      ? "Vista titular: mismos agregados que Resumen / Presupuesto con «Yo»."
+      : "Vista hogar: todos los registros de la instalación.";
 
   return (
     <div className="workspace">
@@ -4920,7 +6032,7 @@ function RetirementView({
             ? "Cargando instalación…"
             : !hasMembership
               ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : `Paridad con pestaña Retirement del Mac: KPIs FIRE, modos de gasto y pensiones. Moneda base ${currency}. Oráculos numéricos: docs/spec/ORACLE_TESTS.md.`}
+              : `KPIs FIRE (MVP 25× + motor objetivo cartera / hito). Moneda ${currency}.`}
         </p>
       </div>
 
@@ -4930,24 +6042,101 @@ function RetirementView({
         </div>
       ) : null}
 
+      {fireError ? (
+        <div className="banner error-banner">{fireError}</div>
+      ) : null}
+
+      {hasMembership && fireBusy ? (
+        <p className="muted tight">Cargando KPIs FIRE…</p>
+      ) : null}
+
+      {hasMembership && !fireBusy && fireSnapshot ? (
+        <section className="panel">
+          <h3 className="panel-title">KPIs FIRE</h3>
+          <p className="muted tight">{scopeNote}</p>
+          <div className="metric-grid bordered-top">
+            <MetricCard
+              label="Patrimonio neto"
+              value={formatCurrencyAmount(fireSnapshot.net_worth, currencyIso)}
+            />
+            <MetricCard
+              label="Gasto anual estimado (equiv. ×12)"
+              value={formatCurrencyAmount(
+                fireSnapshot.annual_expenses_estimate,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Objetivo cartera (25× gasto)"
+              value={formatMoneyAmountOrDash(fireSnapshot.portfolio_target_25x)}
+            />
+            <MetricCard
+              label="Gap vs objetivo 25×"
+              value={formatMoneyAmountOrDash(fireSnapshot.gap_to_target_25x)}
+            />
+            <MetricCard
+              label="Gastos anuales / patrimonio"
+              value={formatFractionAsPercent(
+                fireSnapshot.implied_withdrawal_rate_vs_networth,
+              )}
+              hint="Tasa implícita cuando hay patrimonio y gasto."
+            />
+            <MetricCard
+              label="Meses hasta 25× (lineal)"
+              value={formatMonthsRough(
+                fireSnapshot.estimated_months_to_25x_linear,
+              )}
+              hint="Con ahorro mensual neto del presupuesto constante."
+            />
+            <MetricCard
+              label="Ahorro mensual neto (presupuesto)"
+              value={formatCurrencyAmount(
+                fireSnapshot.net_monthly_equivalent,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Objetivo cartera (motor)"
+              value={formatMoneyAmountOrDash(fireSnapshot.engine_portfolio_target)}
+              hint="Gasto regular anualizado, tasa retirada y CGT en fire_settings (JSON instalación)."
+            />
+            <MetricCard
+              label="Hito motor alcanzado"
+              value={
+                fireSnapshot.engine_fire_reached
+                  ? fireSnapshot.engine_fire_reach_month_index != null
+                    ? `Sí (mes ${fireSnapshot.engine_fire_reach_month_index})`
+                    : "Sí"
+                  : "No"
+              }
+              hint="Primera coincidencia serie proyectada vs objetivo (360 meses)."
+            />
+          </div>
+          <p className="hint bordered-top tight">
+            {fireSnapshot.mvp_model_note}
+          </p>
+        </section>
+      ) : null}
+
       <section className="panel">
-        <h3 className="panel-title">KPIs y objetivos</h3>
+        <h3 className="panel-title">Horizonte e inflación (instalación)</h3>
         <p className="muted tight">
-          Objetivo de cartera, gasto anual objetivo, ETA FIRE, gap y fases —
-          pendiente de motor <code>fireMilestone</code> en API (
-          <code>SummaryFireRow</code> en Mac).
+          Pensiones por fases y tramos impositivos completos: extendemos el motor;
+          ya hay hito vs objetivo en la rejilla superior.
         </p>
-        <div className="placeholder-chips bordered-top">
-          <span className="chip muted">ETA / gap → backend</span>
-          <span className="chip muted">Modo fecha vs edad → ya en instalación</span>
-        </div>
         {hasMembership && installation ? (
           <p className="muted bordered-top tight">
-            Horizonte configurado: edad objetivo{" "}
+            Edad objetivo{" "}
             <strong>{horizonAge != null ? `${horizonAge} años` : METRIC_DASH}</strong>
             ; inflación en proyección{" "}
-            <strong>{inflation ? "activada" : "desactivada"}</strong> (editar en{" "}
-            <strong>Ajustes → Proyección</strong>).
+            <strong>{inflation ? "activada" : "desactivada"}</strong> —{" "}
+            <strong>Ajustes → Proyección</strong>.
+          </p>
+        ) : null}
+        {hasMembership && installation && inflation ? (
+          <p className="hint bordered-top tight">
+            Con inflación activa y supuesto % en Ajustes, la serie de proyección
+            puede mostrar patrimonio deflactado («dinero de hoy»).
           </p>
         ) : null}
       </section>
@@ -4956,19 +6145,83 @@ function RetirementView({
         <h3 className="panel-title">Gasto en jubilación y retiradas</h3>
         <p className="muted tight">
           Modos <code>FireRetirementExpenseMode</code> y{" "}
-          <code>FireWithdrawalMode</code> (fijo vs auto, tasa, colchón) —
-          contratos en checklist; UI editable cuando exponga la API.
+          <code>FireWithdrawalMode</code> — pendientes de API (checklist).
         </p>
       </section>
 
       <section className="panel muted-panel">
         <h3 className="panel-title">Pensiones e IRPF</h3>
         <p className="muted tight">
-          Pensiones por persona y tramos ganancias capital / renta pensión (defaults
-          España opcional en Mac) — sin datos locales hasta CRUD de personas y
-          motor fiscal en servidor.
+          Pensiones por persona y tramos IRPF — CRUD de personas en Ajustes;
+          motor fiscal en servidor pendiente.
         </p>
       </section>
+    </div>
+  );
+}
+
+function ProjectionNetWorthChart({
+  series,
+  currencyIso,
+}: {
+  series: ProjectionSeriesApi;
+  currencyIso: string;
+}) {
+  const pts = series.points;
+  if (pts.length < 2) {
+    return null;
+  }
+  const values = pts.map((p) => parseDisplayDecimal(p.net_worth) ?? 0);
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    min -= 1;
+    max += 1;
+  }
+  const w = 400;
+  const h = 160;
+  const pad = 12;
+  const innerW = w - pad * 2;
+  const innerH = h - pad * 2;
+  const coords = values
+    .map((v, i) => {
+      const x = pad + (i / Math.max(1, values.length - 1)) * innerW;
+      const y = pad + innerH - ((v - min) / (max - min)) * innerH;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <div className="projection-chart-wrap bordered-top">
+      <svg
+        viewBox={`0 0 ${w} ${h}`}
+        className="projection-chart-svg"
+        role="img"
+        aria-label="Serie de patrimonio neto proyectado"
+      >
+        <title>Patrimonio neto por mes</title>
+        <polyline
+          fill="none"
+          strokeWidth="2.5"
+          className="projection-chart-line"
+          points={coords}
+        />
+      </svg>
+      <p className="muted tight">
+        Mes 0: {formatCurrencyAmount(series.starting_net_worth, currencyIso)} · Δ
+        mensual asumido:{" "}
+        {formatCurrencyAmount(series.monthly_delta_assumption, currencyIso)} · Mes{" "}
+        {series.months}:{" "}
+        {formatCurrencyAmount(
+          pts[pts.length - 1]?.net_worth ?? series.starting_net_worth,
+          currencyIso,
+        )}{" "}
+        · Capital aportado acum. mes {series.months}:{" "}
+        {formatCurrencyAmount(
+          pts[pts.length - 1]?.contributed_capital ?? "0",
+          currencyIso,
+        )}
+      </p>
     </div>
   );
 }
@@ -4977,14 +6230,27 @@ function ProjectionView({
   installation,
   installationBusy,
   hasMembership,
+  ledgerPersonScope,
+  projectionSeries,
+  projectionBusy,
+  projectionError,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
+  ledgerPersonScope: LedgerPersonScope;
+  projectionSeries: ProjectionSeriesApi | null;
+  projectionBusy: boolean;
+  projectionError: string | null;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
+  const currencyIso = installation?.installation.base_currency ?? "";
   const inflation = installation?.installation.projection_includes_inflation;
+  const scopeNote =
+    ledgerPersonScope === "mine"
+      ? "Serie en vista titular (filtro «Yo»)."
+      : "Serie en vista hogar completa.";
 
   return (
     <div className="workspace">
@@ -4995,34 +6261,46 @@ function ProjectionView({
             ? "Cargando instalación…"
             : !hasMembership
               ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : `Serie mensual de patrimonio neto y capital aportado; modo inflación acorde al hogar (${inflation ? "inflación incluida en modelo objetivo" : "sin ajuste inflacionario en modelo objetivo"}). Moneda ${currency}.`}
+              : `Serie de patrimonio neto (motor mensual; inflación según instalación y supuesto %). Moneda ${currency}.`}
         </p>
       </div>
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">
-          Cuando tengas acceso, aquí irá el gráfico interactivo tipo Mac.
+          Cuando tengas acceso, verás la serie proyectada aquí.
         </div>
       ) : null}
 
-      <section className="panel">
-        <h3 className="panel-title">Serie y motor</h3>
-        <p className="muted tight">
-          Contrato <code>projectNetWorthSeries</code>: puntos mensuales, línea de
-          capital aportado, baseline de hitos con lógica tipo{" "}
-          <code>upcomingNetForMilestoneBaseline</code>.
-        </p>
-        <div className="placeholder-chips bordered-top">
-          <span className="chip muted">Zoom / pan / marcadores</span>
-          <span className="chip muted">Sin botón «calcular» global</span>
-        </div>
-      </section>
+      {projectionError ? (
+        <div className="banner error-banner">{projectionError}</div>
+      ) : null}
+
+      {hasMembership && projectionBusy ? (
+        <p className="muted tight">Cargando serie…</p>
+      ) : null}
+
+      {hasMembership && !projectionBusy && projectionSeries ? (
+        <section className="panel">
+          <h3 className="panel-title panel-title-with-hint">
+            <span>Serie mensual (MVP)</span>
+            <InlineHint title="Lineal NW₀ + t × neto mensual del presupuesto. No sustituye projectNetWorthSeries ni ORACLE_TESTS." />
+          </h3>
+          <p className="muted tight">{scopeNote}</p>
+          <ProjectionNetWorthChart
+            series={projectionSeries}
+            currencyIso={currencyIso}
+          />
+          <p className="hint bordered-top tight">
+            {projectionSeries.model_note}
+          </p>
+        </section>
+      ) : null}
 
       <section className="panel muted-panel">
-        <h3 className="panel-title">Visualización</h3>
+        <h3 className="panel-title">Motor completo</h3>
         <p className="muted tight">
-          Gráfico de líneas (canvas/SVG) enlazado al mismo dataset que el Mac;
-          esta web mostrará datos cuando el endpoint de proyección exista.
+          Zoom, capital aportado acumulado, hitos y baseline tipo Mac — pendientes
+          de API <code>projectNetWorthSeries</code>.
         </p>
       </section>
     </div>

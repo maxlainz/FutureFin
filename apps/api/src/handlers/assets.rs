@@ -30,6 +30,16 @@ pub struct AssetResponse {
     pub purchase_price: Option<Decimal>,
     pub is_liquid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub expected_annual_return_percent: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub monthly_contribution_fixed: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub contribution_remainder_weight: Decimal,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
 }
@@ -48,6 +58,18 @@ pub struct CreateAssetBody {
     pub purchase_price: Option<Decimal>,
     #[serde(default)]
     pub is_liquid: Option<bool>,
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub expected_annual_return_percent: Option<Decimal>,
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub monthly_contribution_fixed: Option<Decimal>,
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub contribution_remainder_weight: Option<Decimal>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -69,6 +91,18 @@ pub struct PatchAssetBody {
     #[schema(value_type = Option<String>)]
     pub purchase_price: Option<Decimal>,
     pub is_liquid: Option<bool>,
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub expected_annual_return_percent: Option<Decimal>,
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub monthly_contribution_fixed: Option<Decimal>,
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub contribution_remainder_weight: Option<Decimal>,
     pub notes: Option<String>,
     pub sort_index: Option<i32>,
 }
@@ -81,6 +115,9 @@ struct AssetRow {
     current_value: Decimal,
     purchase_price: Option<Decimal>,
     is_liquid: bool,
+    expected_annual_return_percent: Option<Decimal>,
+    monthly_contribution_fixed: Decimal,
+    contribution_remainder_weight: Decimal,
     notes: Option<String>,
     sort_index: i32,
     owner_user_id: Option<Uuid>,
@@ -161,6 +198,9 @@ fn row_to_response(r: AssetRow) -> AssetResponse {
         current_value: r.current_value,
         purchase_price: r.purchase_price,
         is_liquid: r.is_liquid,
+        expected_annual_return_percent: r.expected_annual_return_percent,
+        monthly_contribution_fixed: r.monthly_contribution_fixed,
+        contribution_remainder_weight: r.contribution_remainder_weight,
         notes: r.notes,
         sort_index: r.sort_index,
     }
@@ -192,7 +232,9 @@ pub async fn list_assets(
         LedgerView::Household => {
             sqlx::query_as(
                 r#"SELECT id, category_id, name, current_value, purchase_price,
-                          is_liquid, notes, sort_index, owner_user_id
+                          is_liquid, expected_annual_return_percent,
+                          monthly_contribution_fixed, contribution_remainder_weight,
+                          notes, sort_index, owner_user_id
                    FROM assets
                    WHERE installation_id = $1
                    ORDER BY sort_index ASC, name ASC"#,
@@ -204,7 +246,9 @@ pub async fn list_assets(
         LedgerView::Mine => {
             sqlx::query_as(
                 r#"SELECT id, category_id, name, current_value, purchase_price,
-                          is_liquid, notes, sort_index, owner_user_id
+                          is_liquid, expected_annual_return_percent,
+                          monthly_contribution_fixed, contribution_remainder_weight,
+                          notes, sort_index, owner_user_id
                    FROM assets
                    WHERE installation_id = $1 AND owner_user_id = $2
                    ORDER BY sort_index ASC, name ASC"#,
@@ -253,15 +297,24 @@ pub async fn create_asset(
     let notes = normalize_notes(&body.notes)?;
     let is_liquid = body.is_liquid.unwrap_or(true);
     let sort_index = body.sort_index.unwrap_or(0);
+    let monthly_fixed = body.monthly_contribution_fixed.unwrap_or(Decimal::ZERO);
+    let remainder_w = body.contribution_remainder_weight.unwrap_or(Decimal::ZERO);
+    assert_non_negative(monthly_fixed, "monthly_contribution_fixed")?;
+    assert_non_negative(remainder_w, "contribution_remainder_weight")?;
 
     let row: AssetRow = sqlx::query_as(
         r#"INSERT INTO assets (
                installation_id, category_id, name, current_value,
-               purchase_price, is_liquid, notes, sort_index, owner_user_id
+               purchase_price, is_liquid,
+               expected_annual_return_percent,
+               monthly_contribution_fixed, contribution_remainder_weight,
+               notes, sort_index, owner_user_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            RETURNING id, category_id, name, current_value, purchase_price,
-                     is_liquid, notes, sort_index, owner_user_id"#,
+                     is_liquid, expected_annual_return_percent,
+                     monthly_contribution_fixed, contribution_remainder_weight,
+                     notes, sort_index, owner_user_id"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -269,6 +322,9 @@ pub async fn create_asset(
     .bind(body.current_value)
     .bind(body.purchase_price)
     .bind(is_liquid)
+    .bind(body.expected_annual_return_percent)
+    .bind(monthly_fixed)
+    .bind(remainder_w)
     .bind(&notes)
     .bind(sort_index)
     .bind(user.id.0)
@@ -311,6 +367,9 @@ pub async fn patch_asset(
         && body.current_value.is_none()
         && body.purchase_price.is_none()
         && body.is_liquid.is_none()
+        && body.expected_annual_return_percent.is_none()
+        && body.monthly_contribution_fixed.is_none()
+        && body.contribution_remainder_weight.is_none()
         && body.notes.is_none()
         && body.sort_index.is_none()
     {
@@ -321,7 +380,9 @@ pub async fn patch_asset(
 
     let row: Option<AssetRow> = sqlx::query_as(
         r#"SELECT id, category_id, name, current_value, purchase_price,
-                  is_liquid, notes, sort_index, owner_user_id
+                  is_liquid, expected_annual_return_percent,
+                  monthly_contribution_fixed, contribution_remainder_weight,
+                  notes, sort_index, owner_user_id
            FROM assets
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -362,6 +423,28 @@ pub async fn patch_asset(
 
     let new_liquid = body.is_liquid.unwrap_or(current.is_liquid);
 
+    let new_exp = if body.expected_annual_return_percent.is_some() {
+        body.expected_annual_return_percent
+    } else {
+        current.expected_annual_return_percent
+    };
+
+    let new_monthly_fixed = match body.monthly_contribution_fixed {
+        Some(v) => {
+            assert_non_negative(v, "monthly_contribution_fixed")?;
+            v
+        }
+        None => current.monthly_contribution_fixed,
+    };
+
+    let new_remainder_w = match body.contribution_remainder_weight {
+        Some(v) => {
+            assert_non_negative(v, "contribution_remainder_weight")?;
+            v
+        }
+        None => current.contribution_remainder_weight,
+    };
+
     let new_notes = match &body.notes {
         Some(_) => normalize_notes(&body.notes)?,
         None => current.notes.clone(),
@@ -376,18 +459,26 @@ pub async fn patch_asset(
                current_value = $3,
                purchase_price = $4,
                is_liquid = $5,
-               notes = $6,
-               sort_index = $7,
+               expected_annual_return_percent = $6,
+               monthly_contribution_fixed = $7,
+               contribution_remainder_weight = $8,
+               notes = $9,
+               sort_index = $10,
                updated_at = now()
-           WHERE id = $8 AND installation_id = $9
+           WHERE id = $11 AND installation_id = $12
            RETURNING id, category_id, name, current_value, purchase_price,
-                     is_liquid, notes, sort_index, owner_user_id"#,
+                     is_liquid, expected_annual_return_percent,
+                     monthly_contribution_fixed, contribution_remainder_weight,
+                     notes, sort_index, owner_user_id"#,
     )
     .bind(new_cat)
     .bind(&new_name)
     .bind(new_val)
     .bind(new_pp)
     .bind(new_liquid)
+    .bind(new_exp)
+    .bind(new_monthly_fixed)
+    .bind(new_remainder_w)
     .bind(&new_notes)
     .bind(new_sort)
     .bind(id)
