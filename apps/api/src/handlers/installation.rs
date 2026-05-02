@@ -5,6 +5,8 @@ use crate::state::AppState;
 use axum::extract::Extension;
 use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
+use chrono::{NaiveDate, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
@@ -16,6 +18,8 @@ pub struct InstallationSnapshot {
     #[schema(value_type = String, format = "uuid")]
     pub id: Uuid,
     pub base_currency: String,
+    /// IANA time zone id (e.g. `Europe/Madrid`, `UTC`) for civil calendar operations such as liability derive-principal "today".
+    pub calendar_tz: String,
     pub projection_includes_inflation: bool,
     pub projection_target_age: Option<i16>,
     pub show_age_mode: String,
@@ -31,6 +35,8 @@ pub struct InstallationAccess {
 pub struct SetupInstallationBody {
     /// ISO 4217 alphabetic code; MVP allows EUR, USD, GBP.
     pub base_currency: String,
+    #[serde(default = "default_calendar_tz")]
+    pub calendar_tz: String,
     #[serde(default)]
     pub projection_includes_inflation: bool,
     pub projection_target_age: Option<i16>,
@@ -42,10 +48,20 @@ fn default_show_age_mode() -> String {
     "dates".into()
 }
 
+fn default_calendar_tz() -> String {
+    "UTC".into()
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PatchInstallationBody {
+    pub calendar_tz: String,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct InstallationMemberRow {
     id: Uuid,
     base_currency: String,
+    calendar_tz: String,
     projection_includes_inflation: bool,
     projection_target_age: Option<i16>,
     show_age_mode: String,
@@ -87,6 +103,45 @@ fn validate_target_age(age: Option<i16>) -> Result<(), ApiError> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn normalize_calendar_tz(raw: &str) -> Result<String, ApiError> {
+    let t = raw.trim();
+    if !(3..=64).contains(&t.len()) {
+        return Err(ApiError::BadRequest(
+            "calendar_tz must be between 3 and 64 characters".into(),
+        ));
+    }
+    let _: Tz = t.parse().map_err(|_| {
+        ApiError::BadRequest(
+            "calendar_tz must be a valid IANA time zone name (e.g. Europe/Madrid, America/New_York, UTC)"
+                .into(),
+        )
+    })?;
+    Ok(t.into())
+}
+
+/// Today's date in the installation civil calendar (IANA `calendar_tz`).
+pub(crate) async fn installation_naive_today(
+    pool: &PgPool,
+    installation_id: Uuid,
+) -> Result<NaiveDate, ApiError> {
+    let tz_str: String =
+        sqlx::query_scalar(r#"SELECT calendar_tz FROM installation WHERE id = $1"#)
+            .bind(installation_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    naive_date_in_calendar_tz(&tz_str)
+}
+
+pub(crate) fn naive_date_in_calendar_tz(tz_name: &str) -> Result<NaiveDate, ApiError> {
+    let tz: Tz = tz_name.trim().parse().map_err(|_| {
+        ApiError::BadRequest(
+            "installation calendar_tz is invalid; update it via PATCH /v1/installation".into(),
+        )
+    })?;
+    Ok(Utc::now().with_timezone(&tz).date_naive())
 }
 
 fn is_unique_violation(err: &sqlx::Error) -> bool {
@@ -172,7 +227,7 @@ pub async fn get_my_installation(
 ) -> Result<Json<Option<InstallationAccess>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let row: Option<InstallationMemberRow> = sqlx::query_as(
-        r#"SELECT i.id, i.base_currency, i.projection_includes_inflation,
+        r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.projection_target_age, i.show_age_mode, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
@@ -193,12 +248,70 @@ pub async fn get_my_installation(
         installation: InstallationSnapshot {
             id: r.id,
             base_currency: r.base_currency,
+            calendar_tz: r.calendar_tz,
             projection_includes_inflation: r.projection_includes_inflation,
             projection_target_age: r.projection_target_age,
             show_age_mode: r.show_age_mode,
         },
         role,
     })))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/installation",
+    tag = "installation",
+    request_body = PatchInstallationBody,
+    responses(
+        (status = 200, description = "Updated", body = InstallationAccess),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Not installation owner"),
+        (status = 404, description = "Installation missing"),
+    )
+)]
+pub async fn patch_my_installation(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Json(body): Json<PatchInstallationBody>,
+) -> Result<Json<InstallationAccess>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
+    if role != MembershipRole::Owner {
+        return Err(ApiError::Forbidden);
+    }
+
+    let tz = normalize_calendar_tz(&body.calendar_tz)?;
+    sqlx::query(r#"UPDATE installation SET calendar_tz = $1 WHERE id = $2"#)
+        .bind(&tz)
+        .bind(iid)
+        .execute(&state.pool)
+        .await?;
+
+    let row: InstallationMemberRow = sqlx::query_as(
+        r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
+                  i.projection_target_age, i.show_age_mode, m.role
+           FROM installation_memberships m
+           JOIN installation i ON i.id = m.installation_id
+           WHERE m.user_id = $1 AND i.id = $2"#,
+    )
+    .bind(user.id.0)
+    .bind(iid)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let role_out = MembershipRole::parse(&row.role)?;
+    Ok(Json(InstallationAccess {
+        installation: InstallationSnapshot {
+            id: row.id,
+            base_currency: row.base_currency,
+            calendar_tz: row.calendar_tz,
+            projection_includes_inflation: row.projection_includes_inflation,
+            projection_target_age: row.projection_target_age,
+            show_age_mode: row.show_age_mode,
+        },
+        role: role_out,
+    }))
 }
 
 #[utoipa::path(
@@ -220,6 +333,7 @@ pub async fn setup_installation(
 ) -> Result<(axum::http::StatusCode, Json<InstallationAccess>), ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let currency = normalize_currency(&body.base_currency)?;
+    let calendar_tz = normalize_calendar_tz(&body.calendar_tz)?;
     validate_show_age_mode(&body.show_age_mode)?;
     validate_target_age(body.projection_target_age)?;
 
@@ -247,15 +361,17 @@ pub async fn setup_installation(
                base_currency,
                projection_includes_inflation,
                projection_target_age,
-               show_age_mode
+               show_age_mode,
+               calendar_tz
            )
-           VALUES ($1, $2, $3, $4)
+           VALUES ($1, $2, $3, $4, $5)
            RETURNING id"#,
     )
     .bind(&currency)
     .bind(body.projection_includes_inflation)
     .bind(body.projection_target_age)
     .bind(&body.show_age_mode)
+    .bind(&calendar_tz)
     .fetch_one(&mut *tx)
     .await;
 
@@ -285,6 +401,7 @@ pub async fn setup_installation(
             installation: InstallationSnapshot {
                 id: iid,
                 base_currency: currency,
+                calendar_tz,
                 projection_includes_inflation: body.projection_includes_inflation,
                 projection_target_age: body.projection_target_age,
                 show_age_mode: body.show_age_mode,

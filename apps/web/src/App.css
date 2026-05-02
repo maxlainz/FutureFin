@@ -732,6 +732,69 @@
   font-size: 0.95rem;
 }
 
+.asset-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.65rem 1rem;
+  align-items: flex-end;
+}
+
+.asset-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  margin-top: 0.35rem;
+}
+
+.assets-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.assets-table th,
+.assets-table td {
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: top;
+}
+
+.assets-table th {
+  font-weight: 600;
+  color: #475569;
+  white-space: nowrap;
+}
+
+.assets-table tbody tr:hover {
+  background: #fafbfc;
+}
+
+.assets-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.asset-notes-cell {
+  max-width: 14rem;
+  word-break: break-word;
+  font-size: 0.85rem;
+  color: #64748b;
+}
+
+.asset-actions-cell {
+  white-space: nowrap;
+}
+
+.asset-actions-cell .btn {
+  margin-right: 0.25rem;
+}
+
 .btn.ghost.danger {
   color: #b91c1c;
 }

@@ -22,6 +22,8 @@ type UserResponse = {
 type InstallationSnapshot = {
   id: string;
   base_currency: string;
+  /** IANA TZ for civil "today" (liability derive, etc.) */
+  calendar_tz?: string;
   projection_includes_inflation: boolean;
   projection_target_age: number | null;
   show_age_mode: string;
@@ -39,6 +41,133 @@ type CategoryRow = {
   scope: CategoryScope;
   name: string;
   sort_index: number;
+};
+
+type AssetApiRow = {
+  id: string;
+  category_id: string;
+  name: string;
+  current_value: string;
+  purchase_price: string | null;
+  is_liquid: boolean;
+  notes: string | null;
+  sort_index: number;
+};
+
+type SummaryResponse = {
+  total_assets: string;
+  total_liabilities: string;
+  net_worth: string;
+  debt_to_assets_ratio: string | null;
+};
+
+type LiabilityApiRow = {
+  id: string;
+  category_id: string;
+  label: string;
+  type_tag: string | null;
+  principal_derived_from_plan?: boolean;
+  principal: string;
+  apr_percent: string | null;
+  payment_amount: string | null;
+  payment_frequency: "monthly" | "weekly" | null;
+  payment_end_date: string | null;
+  notes: string | null;
+  sort_index: number;
+};
+
+type LiabilityPaymentFreq = "" | "monthly" | "weekly";
+
+/** Fallback civil date when a TZ string is invalid. */
+function utcTodayYmd(): string {
+  const d = new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Today's calendar date in an IANA zone (matches server derive-principal "today"). */
+function todayYmdInTimeZone(tz: string): string {
+  const trimmed = tz.trim() || "UTC";
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: trimmed,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const parts = fmt.formatToParts(new Date());
+    const y = parts.find((p) => p.type === "year")?.value;
+    const m = parts.find((p) => p.type === "month")?.value;
+    const d = parts.find((p) => p.type === "day")?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {
+    /* unknown time zone */
+  }
+  return utcTodayYmd();
+}
+
+function parseYmdUtc(ymd: string): Date {
+  const [ys, ms, ds] = ymd.split("-").map((x) => Number(x));
+  return new Date(Date.UTC(ys, ms - 1, ds));
+}
+
+function addOneMonthUtc(d: Date): Date {
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth();
+  const day = d.getUTCDate();
+  const dim = new Date(Date.UTC(y, m + 2, 0)).getUTCDate();
+  const next = new Date(Date.UTC(y, m + 1, 1));
+  next.setUTCDate(Math.min(day, dim));
+  return next;
+}
+
+function paymentIntervalCountUtc(
+  freq: "monthly" | "weekly",
+  startYmd: string,
+  endYmd: string,
+): number | null {
+  const start = parseYmdUtc(startYmd);
+  const end = parseYmdUtc(endYmd);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return null;
+  }
+  if (end.getTime() < start.getTime()) return null;
+  if (freq === "monthly") {
+    let n = 0;
+    let cur = new Date(start.getTime());
+    while (cur.getTime() <= end.getTime()) {
+      n += 1;
+      if (n > 1200) return null;
+      cur = addOneMonthUtc(cur);
+    }
+    return n;
+  }
+  const days = Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
+  const di = Math.max(1, days);
+  return Math.ceil(di / 7);
+}
+
+function liabilityDerivedPrincipalPreview(
+  amountStr: string,
+  freq: LiabilityPaymentFreq,
+  endYmd: string,
+  installationCalendarTz: string,
+): string | null {
+  if (!freq || !endYmd.trim()) return null;
+  const startYmd = todayYmdInTimeZone(installationCalendarTz);
+  const n = paymentIntervalCountUtc(freq, startYmd, endYmd.trim());
+  if (n === null || n <= 0) return null;
+  const amount = Number(amountStr.trim().replace(",", "."));
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const total = amount * n;
+  return total.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+const PAYMENT_FREQ_LABEL: Record<"monthly" | "weekly", string> = {
+  monthly: "Mensual",
+  weekly: "Semanal",
 };
 
 const CATEGORY_SCOPE_LABEL: Record<CategoryScope, string> = {
@@ -82,6 +211,19 @@ const defaultFetchInit: RequestInit = {
 
 const METRIC_DASH = "—";
 
+function formatSummaryAmount(s: string): string {
+  const n = Number(s.replace(",", "."));
+  if (!Number.isFinite(n)) return s;
+  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function formatDebtToAssetsPct(ratio: string | null | undefined): string {
+  if (ratio == null || ratio === "") return METRIC_DASH;
+  const r = Number(String(ratio).replace(",", "."));
+  if (!Number.isFinite(r)) return METRIC_DASH;
+  return `${(r * 100).toLocaleString(undefined, { maximumFractionDigits: 2 })} %`;
+}
+
 async function errorMessageFromResponse(res: Response): Promise<string> {
   const ct = res.headers.get("content-type") ?? "";
   if (ct.includes("application/json")) {
@@ -120,6 +262,9 @@ export default function App() {
   const [setupCurrency, setSetupCurrency] = useState<"EUR" | "USD" | "GBP">(
     "EUR",
   );
+  const [setupCalendarTz, setSetupCalendarTz] = useState("UTC");
+  const [calendarTzDraft, setCalendarTzDraft] = useState("UTC");
+  const [calendarTzSaving, setCalendarTzSaving] = useState(false);
 
   const [pendingUsers, setPendingUsers] = useState<UserResponse[]>([]);
   const [pendingUsersBusy, setPendingUsersBusy] = useState(false);
@@ -144,6 +289,49 @@ export default function App() {
     null,
   );
   const [editCategoryName, setEditCategoryName] = useState("");
+
+  const [assets, setAssets] = useState<AssetApiRow[]>([]);
+  const [assetsBusy, setAssetsBusy] = useState(false);
+  const [assetsError, setAssetsError] = useState<string | null>(null);
+  const [assetCategories, setAssetCategories] = useState<CategoryRow[]>([]);
+  const [assetFormCategoryId, setAssetFormCategoryId] = useState("");
+  const [assetFormName, setAssetFormName] = useState("");
+  const [assetFormValue, setAssetFormValue] = useState("");
+  const [assetFormPurchase, setAssetFormPurchase] = useState("");
+  const [assetFormLiquid, setAssetFormLiquid] = useState(true);
+  const [assetFormNotes, setAssetFormNotes] = useState("");
+  const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
+  const [assetSaving, setAssetSaving] = useState(false);
+
+  const [liabilities, setLiabilities] = useState<LiabilityApiRow[]>([]);
+  const [liabilitiesBusy, setLiabilitiesBusy] = useState(false);
+  const [liabilitiesError, setLiabilitiesError] = useState<string | null>(
+    null,
+  );
+  const [liabilityCategories, setLiabilityCategories] = useState<
+    CategoryRow[]
+  >([]);
+  const [liabilityFormCategoryId, setLiabilityFormCategoryId] = useState("");
+  const [liabilityFormLabel, setLiabilityFormLabel] = useState("");
+  const [liabilityFormTypeTag, setLiabilityFormTypeTag] = useState("");
+  const [liabilityFormPrincipal, setLiabilityFormPrincipal] = useState("");
+  const [liabilityFormApr, setLiabilityFormApr] = useState("");
+  const [liabilityFormPaymentAmount, setLiabilityFormPaymentAmount] =
+    useState("");
+  const [liabilityFormPaymentFrequency, setLiabilityFormPaymentFrequency] =
+    useState<LiabilityPaymentFreq>("");
+  const [liabilityFormPaymentEnd, setLiabilityFormPaymentEnd] = useState("");
+  const [liabilityFormNotes, setLiabilityFormNotes] = useState("");
+  const [liabilityFormDerivePrincipal, setLiabilityFormDerivePrincipal] =
+    useState(false);
+  const [editingLiabilityId, setEditingLiabilityId] = useState<string | null>(
+    null,
+  );
+  const [liabilitySaving, setLiabilitySaving] = useState(false);
+
+  const [summary, setSummary] = useState<SummaryResponse | null>(null);
+  const [summaryBusy, setSummaryBusy] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<TabId>("summary");
 
@@ -186,6 +374,89 @@ export default function App() {
       setInstallationError(e instanceof Error ? e.message : String(e));
     } finally {
       setInstallationBusy(false);
+    }
+  }, []);
+
+  const loadAssetsPage = useCallback(async () => {
+    setAssetsBusy(true);
+    setAssetsError(null);
+    try {
+      const [catRes, astRes] = await Promise.all([
+        fetch("/v1/categories?scope=asset", defaultFetchInit),
+        fetch("/v1/assets", defaultFetchInit),
+      ]);
+      if (catRes.status === 403 || catRes.status === 404) {
+        setAssetCategories([]);
+      } else if (!catRes.ok) {
+        throw new Error(await errorMessageFromResponse(catRes));
+      } else {
+        setAssetCategories((await catRes.json()) as CategoryRow[]);
+      }
+      if (astRes.status === 403 || astRes.status === 404) {
+        setAssets([]);
+      } else if (!astRes.ok) {
+        throw new Error(await errorMessageFromResponse(astRes));
+      } else {
+        setAssets((await astRes.json()) as AssetApiRow[]);
+      }
+    } catch (e: unknown) {
+      setAssets([]);
+      setAssetCategories([]);
+      setAssetsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAssetsBusy(false);
+    }
+  }, []);
+
+  const loadLiabilitiesPage = useCallback(async () => {
+    setLiabilitiesBusy(true);
+    setLiabilitiesError(null);
+    try {
+      const [catRes, libRes] = await Promise.all([
+        fetch("/v1/categories?scope=liability", defaultFetchInit),
+        fetch("/v1/liabilities", defaultFetchInit),
+      ]);
+      if (catRes.status === 403 || catRes.status === 404) {
+        setLiabilityCategories([]);
+      } else if (!catRes.ok) {
+        throw new Error(await errorMessageFromResponse(catRes));
+      } else {
+        setLiabilityCategories((await catRes.json()) as CategoryRow[]);
+      }
+      if (libRes.status === 403 || libRes.status === 404) {
+        setLiabilities([]);
+      } else if (!libRes.ok) {
+        throw new Error(await errorMessageFromResponse(libRes));
+      } else {
+        setLiabilities((await libRes.json()) as LiabilityApiRow[]);
+      }
+    } catch (e: unknown) {
+      setLiabilities([]);
+      setLiabilityCategories([]);
+      setLiabilitiesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLiabilitiesBusy(false);
+    }
+  }, []);
+
+  const loadSummaryPage = useCallback(async () => {
+    setSummaryBusy(true);
+    setSummaryError(null);
+    try {
+      const res = await fetch("/v1/summary", defaultFetchInit);
+      if (res.status === 403 || res.status === 404) {
+        setSummary(null);
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setSummary((await res.json()) as SummaryResponse);
+    } catch (e: unknown) {
+      setSummary(null);
+      setSummaryError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSummaryBusy(false);
     }
   }, []);
 
@@ -281,8 +552,17 @@ export default function App() {
       setInstallationError(null);
       setPendingUsers([]);
       setPendingUsersError(null);
+      setSummary(null);
+      setSummaryError(null);
     }
   }, [user, loadInstallation]);
+
+  useEffect(() => {
+    const tz = installation?.installation.calendar_tz;
+    if (typeof tz === "string" && tz.trim().length >= 3) {
+      setCalendarTzDraft(tz.trim());
+    }
+  }, [installation?.installation.calendar_tz]);
 
   useEffect(() => {
     if (!user || installation?.role !== "owner") {
@@ -301,12 +581,74 @@ export default function App() {
   }, [user, hasMembership, activeTab, loadCategories]);
 
   useEffect(() => {
+    if (!user || !hasMembership || activeTab !== "assets") {
+      return;
+    }
+    void loadAssetsPage();
+  }, [user, hasMembership, activeTab, loadAssetsPage]);
+
+  useEffect(() => {
+    if (!user || !hasMembership || activeTab !== "liabilities") {
+      return;
+    }
+    void loadLiabilitiesPage();
+  }, [user, hasMembership, activeTab, loadLiabilitiesPage]);
+
+  useEffect(() => {
+    if (!user || !hasMembership || activeTab !== "summary") {
+      return;
+    }
+    void loadSummaryPage();
+  }, [user, hasMembership, activeTab, loadSummaryPage]);
+
+  useEffect(() => {
+    if (activeTab !== "assets" || assetFormCategoryId || assetCategories.length === 0) {
+      return;
+    }
+    setAssetFormCategoryId(assetCategories[0].id);
+  }, [activeTab, assetFormCategoryId, assetCategories]);
+
+  useEffect(() => {
+    if (
+      activeTab !== "liabilities" ||
+      liabilityFormCategoryId ||
+      liabilityCategories.length === 0
+    ) {
+      return;
+    }
+    setLiabilityFormCategoryId(liabilityCategories[0].id);
+  }, [activeTab, liabilityFormCategoryId, liabilityCategories]);
+
+  useEffect(() => {
     if (!user) {
       setCategories([]);
       setCategoriesError(null);
       setEditingCategoryId(null);
       setEditCategoryName("");
       setNewCatName("");
+      setAssets([]);
+      setAssetCategories([]);
+      setAssetsError(null);
+      setEditingAssetId(null);
+      setAssetFormCategoryId("");
+      setAssetFormName("");
+      setAssetFormValue("");
+      setAssetFormPurchase("");
+      setAssetFormLiquid(true);
+      setAssetFormNotes("");
+      setLiabilities([]);
+      setLiabilityCategories([]);
+      setLiabilitiesError(null);
+      setEditingLiabilityId(null);
+      setLiabilityFormCategoryId("");
+      setLiabilityFormLabel("");
+      setLiabilityFormTypeTag("");
+      setLiabilityFormPrincipal("");
+      setLiabilityFormApr("");
+      setLiabilityFormPaymentAmount("");
+      setLiabilityFormPaymentFrequency("");
+      setLiabilityFormPaymentEnd("");
+      setLiabilityFormNotes("");
     }
   }, [user]);
 
@@ -376,6 +718,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           base_currency: setupCurrency,
+          calendar_tz: setupCalendarTz.trim(),
           projection_includes_inflation: false,
           projection_target_age: null,
           show_age_mode: "dates",
@@ -389,6 +732,30 @@ export default function App() {
       setInstallationError(e instanceof Error ? e.message : String(e));
     } finally {
       setInstallationBusy(false);
+    }
+  }
+
+  async function saveInstallationCalendarTz(ev: FormEvent) {
+    ev.preventDefault();
+    setCalendarTzSaving(true);
+    setInstallationError(null);
+    try {
+      const res = await fetch("/v1/installation", {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          calendar_tz: calendarTzDraft.trim(),
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      await loadInstallation();
+    } catch (e: unknown) {
+      setInstallationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCalendarTzSaving(false);
     }
   }
 
@@ -496,6 +863,250 @@ export default function App() {
     } finally {
       setCategorySaving(false);
     }
+  }
+
+  function resetAssetForm() {
+    setEditingAssetId(null);
+    setAssetFormCategoryId(
+      assetCategories[0]?.id ?? "",
+    );
+    setAssetFormName("");
+    setAssetFormValue("");
+    setAssetFormPurchase("");
+    setAssetFormLiquid(true);
+    setAssetFormNotes("");
+  }
+
+  async function submitAssetForm(ev: FormEvent) {
+    ev.preventDefault();
+    if (
+      !assetFormCategoryId ||
+      !assetFormName.trim() ||
+      !assetFormValue.trim()
+    ) {
+      return;
+    }
+    setAssetSaving(true);
+    setAssetsError(null);
+    try {
+      const base: Record<string, unknown> = {
+        category_id: assetFormCategoryId,
+        name: assetFormName.trim(),
+        current_value: assetFormValue.trim(),
+        is_liquid: assetFormLiquid,
+      };
+      const pp = assetFormPurchase.trim();
+      if (pp) {
+        base.purchase_price = pp;
+      }
+      const nt = assetFormNotes.trim();
+      if (nt) {
+        base.notes = nt;
+      }
+
+      if (editingAssetId) {
+        const res = await fetch(
+          `/v1/assets/${encodeURIComponent(editingAssetId)}`,
+          {
+            ...defaultFetchInit,
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(base),
+          },
+        );
+        if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        }
+      } else {
+        const res = await fetch("/v1/assets", {
+          ...defaultFetchInit,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(base),
+        });
+        if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        }
+      }
+      resetAssetForm();
+      await loadAssetsPage();
+    } catch (e: unknown) {
+      setAssetsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAssetSaving(false);
+    }
+  }
+
+  async function deleteAssetRow(id: string) {
+    setAssetSaving(true);
+    setAssetsError(null);
+    try {
+      const res = await fetch(`/v1/assets/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "DELETE",
+      });
+      if (!res.ok && res.status !== 204) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      if (editingAssetId === id) {
+        resetAssetForm();
+      }
+      await loadAssetsPage();
+    } catch (e: unknown) {
+      setAssetsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAssetSaving(false);
+    }
+  }
+
+  function beginEditAsset(a: AssetApiRow) {
+    setEditingAssetId(a.id);
+    setAssetFormCategoryId(a.category_id);
+    setAssetFormName(a.name);
+    setAssetFormValue(a.current_value);
+    setAssetFormPurchase(a.purchase_price ?? "");
+    setAssetFormLiquid(a.is_liquid);
+    setAssetFormNotes(a.notes ?? "");
+  }
+
+  function resetLiabilityForm() {
+    setEditingLiabilityId(null);
+    setLiabilityFormCategoryId(liabilityCategories[0]?.id ?? "");
+    setLiabilityFormLabel("");
+    setLiabilityFormTypeTag("");
+    setLiabilityFormPrincipal("");
+    setLiabilityFormApr("");
+    setLiabilityFormPaymentAmount("");
+    setLiabilityFormPaymentFrequency("");
+    setLiabilityFormPaymentEnd("");
+    setLiabilityFormNotes("");
+    setLiabilityFormDerivePrincipal(false);
+  }
+
+  async function submitLiabilityForm(ev: FormEvent) {
+    ev.preventDefault();
+    if (!liabilityFormCategoryId || !liabilityFormLabel.trim()) {
+      return;
+    }
+    const payAmt = liabilityFormPaymentAmount.trim();
+    const payFreq = liabilityFormPaymentFrequency;
+    const pend = liabilityFormPaymentEnd.trim();
+
+    if (liabilityFormDerivePrincipal) {
+      if (!payAmt || !payFreq || !pend) {
+        setLiabilitiesError(
+          "Derivar principal: indica cuota, frecuencia (mensual/semanal) y fecha fin del plan.",
+        );
+        return;
+      }
+    } else if (!liabilityFormPrincipal.trim()) {
+      return;
+    }
+
+    if ((payAmt && !payFreq) || (!payAmt && payFreq)) {
+      setLiabilitiesError(
+        "Plan de pago: indica importe y frecuencia (mensual/semanal), u omite ambos.",
+      );
+      return;
+    }
+    setLiabilitySaving(true);
+    setLiabilitiesError(null);
+    try {
+      const base: Record<string, unknown> = {
+        category_id: liabilityFormCategoryId,
+        label: liabilityFormLabel.trim(),
+      };
+      base.derive_principal_from_plan = liabilityFormDerivePrincipal;
+      if (!liabilityFormDerivePrincipal) {
+        base.principal = liabilityFormPrincipal.trim();
+      }
+      const tt = liabilityFormTypeTag.trim();
+      if (tt) {
+        base.type_tag = tt;
+      }
+      const apr = liabilityFormApr.trim();
+      if (apr) {
+        base.apr_percent = apr;
+      }
+      if (payAmt && payFreq) {
+        base.payment_amount = payAmt;
+        base.payment_frequency = payFreq;
+      }
+      if (pend) {
+        base.payment_end_date = pend;
+      }
+      const nt = liabilityFormNotes.trim();
+      if (nt) {
+        base.notes = nt;
+      }
+
+      if (editingLiabilityId) {
+        const res = await fetch(
+          `/v1/liabilities/${encodeURIComponent(editingLiabilityId)}`,
+          {
+            ...defaultFetchInit,
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(base),
+          },
+        );
+        if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        }
+      } else {
+        const res = await fetch("/v1/liabilities", {
+          ...defaultFetchInit,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(base),
+        });
+        if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        }
+      }
+      resetLiabilityForm();
+      await loadLiabilitiesPage();
+    } catch (e: unknown) {
+      setLiabilitiesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLiabilitySaving(false);
+    }
+  }
+
+  async function deleteLiabilityRow(id: string) {
+    setLiabilitySaving(true);
+    setLiabilitiesError(null);
+    try {
+      const res = await fetch(`/v1/liabilities/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "DELETE",
+      });
+      if (!res.ok && res.status !== 204) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      if (editingLiabilityId === id) {
+        resetLiabilityForm();
+      }
+      await loadLiabilitiesPage();
+    } catch (e: unknown) {
+      setLiabilitiesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLiabilitySaving(false);
+    }
+  }
+
+  function beginEditLiability(row: LiabilityApiRow) {
+    setEditingLiabilityId(row.id);
+    setLiabilityFormCategoryId(row.category_id);
+    setLiabilityFormLabel(row.label);
+    setLiabilityFormTypeTag(row.type_tag ?? "");
+    setLiabilityFormPrincipal(row.principal);
+    setLiabilityFormApr(row.apr_percent ?? "");
+    setLiabilityFormPaymentAmount(row.payment_amount ?? "");
+    setLiabilityFormPaymentFrequency(row.payment_frequency ?? "");
+    setLiabilityFormPaymentEnd(row.payment_end_date ?? "");
+    setLiabilityFormNotes(row.notes ?? "");
+    setLiabilityFormDerivePrincipal(row.principal_derived_from_plan ?? false);
   }
 
   if (sessionBusy) {
@@ -656,6 +1267,18 @@ export default function App() {
           <div className="banner error-banner">{categoriesError}</div>
         ) : null}
 
+        {assetsError ? (
+          <div className="banner error-banner">{assetsError}</div>
+        ) : null}
+
+        {liabilitiesError ? (
+          <div className="banner error-banner">{liabilitiesError}</div>
+        ) : null}
+
+        {summaryError ? (
+          <div className="banner error-banner">{summaryError}</div>
+        ) : null}
+
         {!installationBusy &&
         user &&
         !hasMembership &&
@@ -672,6 +1295,72 @@ export default function App() {
             installation={installation}
             loading={installationBusy}
             hasMembership={hasMembership}
+            summary={summary}
+            summaryBusy={summaryBusy}
+          />
+        ) : activeTab === "assets" ? (
+          <AssetsView
+            installation={installation}
+            installationBusy={installationBusy}
+            hasMembership={hasMembership}
+            canEdit={installation?.role !== "viewer"}
+            assets={assets}
+            assetsBusy={assetsBusy}
+            assetCategories={assetCategories}
+            assetFormCategoryId={assetFormCategoryId}
+            setAssetFormCategoryId={setAssetFormCategoryId}
+            assetFormName={assetFormName}
+            setAssetFormName={setAssetFormName}
+            assetFormValue={assetFormValue}
+            setAssetFormValue={setAssetFormValue}
+            assetFormPurchase={assetFormPurchase}
+            setAssetFormPurchase={setAssetFormPurchase}
+            assetFormLiquid={assetFormLiquid}
+            setAssetFormLiquid={setAssetFormLiquid}
+            assetFormNotes={assetFormNotes}
+            setAssetFormNotes={setAssetFormNotes}
+            editingAssetId={editingAssetId}
+            assetSaving={assetSaving}
+            submitAssetForm={(e) => void submitAssetForm(e)}
+            deleteAssetRow={(id) => void deleteAssetRow(id)}
+            beginEditAsset={beginEditAsset}
+            resetAssetForm={resetAssetForm}
+          />
+        ) : activeTab === "liabilities" ? (
+          <LiabilitiesView
+            installation={installation}
+            installationBusy={installationBusy}
+            hasMembership={hasMembership}
+            canEdit={installation?.role !== "viewer"}
+            liabilities={liabilities}
+            liabilitiesBusy={liabilitiesBusy}
+            liabilityCategories={liabilityCategories}
+            liabilityFormCategoryId={liabilityFormCategoryId}
+            setLiabilityFormCategoryId={setLiabilityFormCategoryId}
+            liabilityFormLabel={liabilityFormLabel}
+            setLiabilityFormLabel={setLiabilityFormLabel}
+            liabilityFormTypeTag={liabilityFormTypeTag}
+            setLiabilityFormTypeTag={setLiabilityFormTypeTag}
+            liabilityFormPrincipal={liabilityFormPrincipal}
+            setLiabilityFormPrincipal={setLiabilityFormPrincipal}
+            liabilityFormApr={liabilityFormApr}
+            setLiabilityFormApr={setLiabilityFormApr}
+            liabilityFormPaymentAmount={liabilityFormPaymentAmount}
+            setLiabilityFormPaymentAmount={setLiabilityFormPaymentAmount}
+            liabilityFormPaymentFrequency={liabilityFormPaymentFrequency}
+            setLiabilityFormPaymentFrequency={setLiabilityFormPaymentFrequency}
+            liabilityFormPaymentEnd={liabilityFormPaymentEnd}
+            setLiabilityFormPaymentEnd={setLiabilityFormPaymentEnd}
+            liabilityFormNotes={liabilityFormNotes}
+            setLiabilityFormNotes={setLiabilityFormNotes}
+            liabilityFormDerivePrincipal={liabilityFormDerivePrincipal}
+            setLiabilityFormDerivePrincipal={setLiabilityFormDerivePrincipal}
+            editingLiabilityId={editingLiabilityId}
+            liabilitySaving={liabilitySaving}
+            submitLiabilityForm={(e) => void submitLiabilityForm(e)}
+            deleteLiabilityRow={(id) => void deleteLiabilityRow(id)}
+            beginEditLiability={beginEditLiability}
+            resetLiabilityForm={resetLiabilityForm}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
@@ -679,7 +1368,15 @@ export default function App() {
             installationBusy={installationBusy}
             setupCurrency={setupCurrency}
             setSetupCurrency={setSetupCurrency}
+            setupCalendarTz={setupCalendarTz}
+            setSetupCalendarTz={setSetupCalendarTz}
             setupInstallation={(e) => void setupInstallation(e)}
+            calendarTzDraft={calendarTzDraft}
+            setCalendarTzDraft={setCalendarTzDraft}
+            calendarTzSaving={calendarTzSaving}
+            saveInstallationCalendarTz={(e) =>
+              void saveInstallationCalendarTz(e)
+            }
             health={health}
             healthError={healthError}
             hasMembership={hasMembership}
@@ -716,17 +1413,657 @@ export default function App() {
   );
 }
 
+function assetCategoryLabel(categories: CategoryRow[], id: string): string {
+  const c = categories.find((x) => x.id === id);
+  return c?.name ?? id.slice(0, 8);
+}
+
+function AssetsView({
+  installation,
+  installationBusy,
+  hasMembership,
+  canEdit,
+  assets,
+  assetsBusy,
+  assetCategories,
+  assetFormCategoryId,
+  setAssetFormCategoryId,
+  assetFormName,
+  setAssetFormName,
+  assetFormValue,
+  setAssetFormValue,
+  assetFormPurchase,
+  setAssetFormPurchase,
+  assetFormLiquid,
+  setAssetFormLiquid,
+  assetFormNotes,
+  setAssetFormNotes,
+  editingAssetId,
+  assetSaving,
+  submitAssetForm,
+  deleteAssetRow,
+  beginEditAsset,
+  resetAssetForm,
+}: {
+  installation: InstallationAccess | null;
+  installationBusy: boolean;
+  hasMembership: boolean;
+  canEdit: boolean;
+  assets: AssetApiRow[];
+  assetsBusy: boolean;
+  assetCategories: CategoryRow[];
+  assetFormCategoryId: string;
+  setAssetFormCategoryId: Dispatch<SetStateAction<string>>;
+  assetFormName: string;
+  setAssetFormName: Dispatch<SetStateAction<string>>;
+  assetFormValue: string;
+  setAssetFormValue: Dispatch<SetStateAction<string>>;
+  assetFormPurchase: string;
+  setAssetFormPurchase: Dispatch<SetStateAction<string>>;
+  assetFormLiquid: boolean;
+  setAssetFormLiquid: Dispatch<SetStateAction<boolean>>;
+  assetFormNotes: string;
+  setAssetFormNotes: Dispatch<SetStateAction<string>>;
+  editingAssetId: string | null;
+  assetSaving: boolean;
+  submitAssetForm: (e: FormEvent) => void;
+  deleteAssetRow: (id: string) => void;
+  beginEditAsset: (a: AssetApiRow) => void;
+  resetAssetForm: () => void;
+}) {
+  const currency =
+    installation?.installation.base_currency ?? METRIC_DASH;
+
+  return (
+    <div className="workspace">
+      <div className="workspace-header">
+        <h2 className="workspace-title">Activos</h2>
+        <p className="workspace-sub">
+          {installationBusy
+            ? "Cargando instalación…"
+            : !hasMembership
+              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
+              : `Valores en moneda de la instalación (${currency}). Las categorías deben ser del ámbito Activos.`}
+        </p>
+      </div>
+
+      {!installationBusy && !hasMembership ? (
+        <div className="banner info-banner">
+          Cuando tengas acceso podrás registrar activos aquí.
+        </div>
+      ) : null}
+
+      {hasMembership && assetCategories.length === 0 && !assetsBusy ? (
+        <div className="banner info-banner">
+          Aún no hay categorías de <strong>Activos</strong>. Créalas en{" "}
+          <strong>Ajustes → Categorías</strong> antes de registrar posiciones.
+        </div>
+      ) : null}
+
+      {canEdit && hasMembership && assetCategories.length > 0 ? (
+        <section className="panel">
+          <h3 className="panel-title">
+            {editingAssetId ? "Editar activo" : "Nuevo activo"}
+          </h3>
+          <form className="asset-form stack bordered-top" onSubmit={submitAssetForm}>
+            <div className="asset-form-grid">
+              <label className="field">
+                <span>Categoría</span>
+                <select
+                  value={assetFormCategoryId}
+                  onChange={(e) => setAssetFormCategoryId(e.target.value)}
+                  required
+                >
+                  {assetCategories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Nombre</span>
+                <input
+                  value={assetFormName}
+                  onChange={(e) => setAssetFormName(e.target.value)}
+                  required
+                  maxLength={200}
+                  placeholder="p. ej. Fondo índice"
+                />
+              </label>
+              <label className="field">
+                <span>Valor actual</span>
+                <input
+                  value={assetFormValue}
+                  onChange={(e) => setAssetFormValue(e.target.value)}
+                  required
+                  inputMode="decimal"
+                  placeholder="0"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>Precio compra (opc.)</span>
+                <input
+                  value={assetFormPurchase}
+                  onChange={(e) => setAssetFormPurchase(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="—"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={assetFormLiquid}
+                  onChange={(e) => setAssetFormLiquid(e.target.checked)}
+                />
+                <span>Líquido</span>
+              </label>
+            </div>
+            <label className="field">
+              <span>Notas (opc.)</span>
+              <textarea
+                value={assetFormNotes}
+                onChange={(e) => setAssetFormNotes(e.target.value)}
+                rows={2}
+                maxLength={4000}
+              />
+            </label>
+            <div className="asset-form-actions">
+              <button
+                type="submit"
+                className="btn primary"
+                disabled={assetSaving}
+              >
+                {editingAssetId ? "Guardar cambios" : "Añadir activo"}
+              </button>
+              {editingAssetId ? (
+                <button
+                  type="button"
+                  className="btn ghost"
+                  disabled={assetSaving}
+                  onClick={() => resetAssetForm()}
+                >
+                  Cancelar edición
+                </button>
+              ) : null}
+            </div>
+          </form>
+        </section>
+      ) : !canEdit && hasMembership ? (
+        <p className="muted tight">
+          Solo lectura: tu rol no permite crear ni editar activos.
+        </p>
+      ) : null}
+
+      <section className="panel">
+        <h3 className="panel-title">Posiciones</h3>
+        {assetsBusy ? (
+          <p className="muted bordered-top">Cargando…</p>
+        ) : assets.length === 0 ? (
+          <p className="muted bordered-top">
+            No hay activos registrados en esta instalación.
+          </p>
+        ) : (
+          <div className="table-scroll bordered-top">
+            <table className="assets-table">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Categoría</th>
+                  <th className="num">
+                    Valor ({currency})
+                  </th>
+                  <th className="num">Compra</th>
+                  <th>Líquido</th>
+                  <th>Notas</th>
+                  {canEdit ? <th /> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {assets.map((a) => (
+                  <tr key={a.id}>
+                    <td>{a.name}</td>
+                    <td>{assetCategoryLabel(assetCategories, a.category_id)}</td>
+                    <td className="num">{a.current_value}</td>
+                    <td className="num">
+                      {a.purchase_price ?? METRIC_DASH}
+                    </td>
+                    <td>{a.is_liquid ? "Sí" : "No"}</td>
+                    <td className="asset-notes-cell">
+                      {a.notes ?? METRIC_DASH}
+                    </td>
+                    {canEdit ? (
+                      <td className="asset-actions-cell">
+                        <button
+                          type="button"
+                          className="btn ghost"
+                          disabled={assetSaving}
+                          onClick={() => beginEditAsset(a)}
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost danger"
+                          disabled={assetSaving}
+                          onClick={() => deleteAssetRow(a.id)}
+                        >
+                          Eliminar
+                        </button>
+                      </td>
+                    ) : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function liabilityCatLabel(categories: CategoryRow[], id: string): string {
+  return categories.find((x) => x.id === id)?.name ?? id.slice(0, 8);
+}
+
+function LiabilitiesView({
+  installation,
+  installationBusy,
+  hasMembership,
+  canEdit,
+  liabilities,
+  liabilitiesBusy,
+  liabilityCategories,
+  liabilityFormCategoryId,
+  setLiabilityFormCategoryId,
+  liabilityFormLabel,
+  setLiabilityFormLabel,
+  liabilityFormTypeTag,
+  setLiabilityFormTypeTag,
+  liabilityFormPrincipal,
+  setLiabilityFormPrincipal,
+  liabilityFormApr,
+  setLiabilityFormApr,
+  liabilityFormPaymentAmount,
+  setLiabilityFormPaymentAmount,
+  liabilityFormPaymentFrequency,
+  setLiabilityFormPaymentFrequency,
+  liabilityFormPaymentEnd,
+  setLiabilityFormPaymentEnd,
+  liabilityFormNotes,
+  setLiabilityFormNotes,
+  liabilityFormDerivePrincipal,
+  setLiabilityFormDerivePrincipal,
+  editingLiabilityId,
+  liabilitySaving,
+  submitLiabilityForm,
+  deleteLiabilityRow,
+  beginEditLiability,
+  resetLiabilityForm,
+}: {
+  installation: InstallationAccess | null;
+  installationBusy: boolean;
+  hasMembership: boolean;
+  canEdit: boolean;
+  liabilities: LiabilityApiRow[];
+  liabilitiesBusy: boolean;
+  liabilityCategories: CategoryRow[];
+  liabilityFormCategoryId: string;
+  setLiabilityFormCategoryId: Dispatch<SetStateAction<string>>;
+  liabilityFormLabel: string;
+  setLiabilityFormLabel: Dispatch<SetStateAction<string>>;
+  liabilityFormTypeTag: string;
+  setLiabilityFormTypeTag: Dispatch<SetStateAction<string>>;
+  liabilityFormPrincipal: string;
+  setLiabilityFormPrincipal: Dispatch<SetStateAction<string>>;
+  liabilityFormApr: string;
+  setLiabilityFormApr: Dispatch<SetStateAction<string>>;
+  liabilityFormPaymentAmount: string;
+  setLiabilityFormPaymentAmount: Dispatch<SetStateAction<string>>;
+  liabilityFormPaymentFrequency: LiabilityPaymentFreq;
+  setLiabilityFormPaymentFrequency: Dispatch<
+    SetStateAction<LiabilityPaymentFreq>
+  >;
+  liabilityFormPaymentEnd: string;
+  setLiabilityFormPaymentEnd: Dispatch<SetStateAction<string>>;
+  liabilityFormNotes: string;
+  setLiabilityFormNotes: Dispatch<SetStateAction<string>>;
+  liabilityFormDerivePrincipal: boolean;
+  setLiabilityFormDerivePrincipal: Dispatch<SetStateAction<boolean>>;
+  editingLiabilityId: string | null;
+  liabilitySaving: boolean;
+  submitLiabilityForm: (e: FormEvent) => void;
+  deleteLiabilityRow: (id: string) => void;
+  beginEditLiability: (row: LiabilityApiRow) => void;
+  resetLiabilityForm: () => void;
+}) {
+  const currency =
+    installation?.installation.base_currency ?? METRIC_DASH;
+
+  const derivePreview = liabilityDerivedPrincipalPreview(
+    liabilityFormPaymentAmount,
+    liabilityFormPaymentFrequency,
+    liabilityFormPaymentEnd,
+    installation?.installation.calendar_tz ?? "UTC",
+  );
+
+  return (
+    <div className="workspace">
+      <div className="workspace-header">
+        <h2 className="workspace-title">Pasivos</h2>
+        <p className="workspace-sub">
+          {installationBusy
+            ? "Cargando instalación…"
+            : !hasMembership
+              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
+              : `Principal y planes de pago en ${currency}. Puedes derivar el principal desde la cuota y la fecha fin (como en el cliente Mac). Las categorías deben ser del ámbito Pasivos. Al cargar la lista, los planes con fecha fin pasada se eliminan (tipo arranque Mac).`}
+        </p>
+      </div>
+
+      {!installationBusy && !hasMembership ? (
+        <div className="banner info-banner">
+          Cuando tengas acceso podrás registrar pasivos aquí.
+        </div>
+      ) : null}
+
+      {hasMembership && liabilityCategories.length === 0 && !liabilitiesBusy ? (
+        <div className="banner info-banner">
+          Aún no hay categorías de <strong>Pasivos</strong>. Créalas en{" "}
+          <strong>Ajustes → Categorías</strong>.
+        </div>
+      ) : null}
+
+      {canEdit && hasMembership && liabilityCategories.length > 0 ? (
+        <section className="panel">
+          <h3 className="panel-title">
+            {editingLiabilityId ? "Editar pasivo" : "Nuevo pasivo"}
+          </h3>
+          <form
+            className="asset-form stack bordered-top"
+            onSubmit={submitLiabilityForm}
+          >
+            <div className="asset-form-grid">
+              <label className="field">
+                <span>Categoría</span>
+                <select
+                  value={liabilityFormCategoryId}
+                  onChange={(e) =>
+                    setLiabilityFormCategoryId(e.target.value)
+                  }
+                  required
+                >
+                  {liabilityCategories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Etiqueta</span>
+                <input
+                  value={liabilityFormLabel}
+                  onChange={(e) => setLiabilityFormLabel(e.target.value)}
+                  required
+                  maxLength={200}
+                  placeholder="p. ej. Préstamo coche"
+                />
+              </label>
+              <label className="field">
+                <span>Tipo (opc.)</span>
+                <input
+                  value={liabilityFormTypeTag}
+                  onChange={(e) => setLiabilityFormTypeTag(e.target.value)}
+                  maxLength={120}
+                  placeholder="Etiqueta libre"
+                />
+              </label>
+              <label
+                className="field"
+                style={{
+                  gridColumn: "1 / -1",
+                  flexDirection: "row",
+                  alignItems: "flex-start",
+                  gap: "0.5rem",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={liabilityFormDerivePrincipal}
+                  onChange={(e) =>
+                    setLiabilityFormDerivePrincipal(e.target.checked)
+                  }
+                  style={{ marginTop: "0.2rem" }}
+                />
+                <span>
+                  Derivar principal desde el plan (cuota × intervalos hasta la
+                  fecha fin; mismo criterio que el cliente Mac)
+                </span>
+              </label>
+              <label className="field">
+                <span>
+                  Principal
+                  {liabilityFormDerivePrincipal ? " (calculado al guardar)" : ""}
+                </span>
+                <input
+                  value={liabilityFormPrincipal}
+                  onChange={(e) => setLiabilityFormPrincipal(e.target.value)}
+                  required={!liabilityFormDerivePrincipal}
+                  disabled={liabilityFormDerivePrincipal}
+                  inputMode="decimal"
+                  autoComplete="off"
+                />
+                {liabilityFormDerivePrincipal && derivePreview ? (
+                  <span className="muted tight">
+                    Vista previa ~{derivePreview} {currency} (hoy en{" "}
+                    {installation?.installation.calendar_tz ?? "UTC"})
+                  </span>
+                ) : null}
+              </label>
+              <label className="field">
+                <span>TAE % (opc.)</span>
+                <input
+                  value={liabilityFormApr}
+                  onChange={(e) => setLiabilityFormApr(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="—"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>
+                  Cuota plan
+                  {liabilityFormDerivePrincipal ? "" : " (opc.)"}
+                </span>
+                <input
+                  value={liabilityFormPaymentAmount}
+                  onChange={(e) =>
+                    setLiabilityFormPaymentAmount(e.target.value)
+                  }
+                  inputMode="decimal"
+                  autoComplete="off"
+                />
+              </label>
+              <label className="field">
+                <span>Frecuencia</span>
+                <select
+                  value={liabilityFormPaymentFrequency}
+                  onChange={(e) =>
+                    setLiabilityFormPaymentFrequency(
+                      e.target.value as LiabilityPaymentFreq,
+                    )
+                  }
+                >
+                  <option value="">Sin plan</option>
+                  <option value="monthly">Mensual</option>
+                  <option value="weekly">Semanal</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>
+                  Fin plan
+                  {liabilityFormDerivePrincipal ? "" : " (opc.)"}
+                </span>
+                <input
+                  type="date"
+                  value={liabilityFormPaymentEnd}
+                  onChange={(e) =>
+                    setLiabilityFormPaymentEnd(e.target.value)
+                  }
+                />
+              </label>
+            </div>
+            <label className="field">
+              <span>Notas (opc.)</span>
+              <textarea
+                value={liabilityFormNotes}
+                onChange={(e) => setLiabilityFormNotes(e.target.value)}
+                rows={2}
+                maxLength={4000}
+              />
+            </label>
+            <div className="asset-form-actions">
+              <button
+                type="submit"
+                className="btn primary"
+                disabled={liabilitySaving}
+              >
+                {editingLiabilityId ? "Guardar cambios" : "Añadir pasivo"}
+              </button>
+              {editingLiabilityId ? (
+                <button
+                  type="button"
+                  className="btn ghost"
+                  disabled={liabilitySaving}
+                  onClick={() => resetLiabilityForm()}
+                >
+                  Cancelar edición
+                </button>
+              ) : null}
+            </div>
+          </form>
+        </section>
+      ) : !canEdit && hasMembership ? (
+        <p className="muted tight">
+          Solo lectura: tu rol no permite crear ni editar pasivos.
+        </p>
+      ) : null}
+
+      <section className="panel">
+        <h3 className="panel-title">Lista</h3>
+        {liabilitiesBusy ? (
+          <p className="muted bordered-top">Cargando…</p>
+        ) : liabilities.length === 0 ? (
+          <p className="muted bordered-top">
+            No hay pasivos en esta instalación.
+          </p>
+        ) : (
+          <div className="table-scroll bordered-top">
+            <table className="assets-table">
+              <thead>
+                <tr>
+                  <th>Etiqueta</th>
+                  <th>Categoría</th>
+                  <th>Tipo</th>
+                  <th className="num">Principal</th>
+                  <th className="num">TAE %</th>
+                  <th className="num">Cuota</th>
+                  <th>Frec.</th>
+                  <th>Fin plan</th>
+                  <th>Notas</th>
+                  {canEdit ? <th /> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {liabilities.map((row) => (
+                  <tr key={row.id}>
+                    <td>{row.label}</td>
+                    <td>
+                      {liabilityCatLabel(liabilityCategories, row.category_id)}
+                    </td>
+                    <td>{row.type_tag ?? METRIC_DASH}</td>
+                    <td className="num">
+                      {row.principal}
+                      {row.principal_derived_from_plan ? (
+                        <span className="muted" title="Principal derivado del plan">
+                          {" "}
+                          deriv.
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="num">{row.apr_percent ?? METRIC_DASH}</td>
+                    <td className="num">
+                      {row.payment_amount ?? METRIC_DASH}
+                    </td>
+                    <td>
+                      {row.payment_frequency
+                        ? PAYMENT_FREQ_LABEL[row.payment_frequency]
+                        : METRIC_DASH}
+                    </td>
+                    <td>{row.payment_end_date ?? METRIC_DASH}</td>
+                    <td className="asset-notes-cell">
+                      {row.notes ?? METRIC_DASH}
+                    </td>
+                    {canEdit ? (
+                      <td className="asset-actions-cell">
+                        <button
+                          type="button"
+                          className="btn ghost"
+                          disabled={liabilitySaving}
+                          onClick={() => beginEditLiability(row)}
+                        >
+                          Editar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn ghost danger"
+                          disabled={liabilitySaving}
+                          onClick={() => deleteLiabilityRow(row.id)}
+                        >
+                          Eliminar
+                        </button>
+                      </td>
+                    ) : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function SummaryView({
   installation,
   loading,
   hasMembership,
+  summary,
+  summaryBusy,
 }: {
   installation: InstallationAccess | null;
   loading: boolean;
   hasMembership: boolean;
+  summary: SummaryResponse | null;
+  summaryBusy: boolean;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
+
+  const showMetrics =
+    hasMembership && !loading && !summaryBusy && summary !== null;
+  const nw = showMetrics ? formatSummaryAmount(summary.net_worth) : METRIC_DASH;
+  const ta = showMetrics ? formatSummaryAmount(summary.total_assets) : METRIC_DASH;
+  const tl = showMetrics
+    ? formatSummaryAmount(summary.total_liabilities)
+    : METRIC_DASH;
+  const dta = showMetrics
+    ? formatDebtToAssetsPct(summary.debt_to_assets_ratio)
+    : METRIC_DASH;
 
   return (
     <div className="workspace">
@@ -741,10 +2078,16 @@ function SummaryView({
               tu usuario en <strong>Ajustes</strong>, verás datos aquí. Para
               recuperar una base vacía, usa la inicialización en Ajustes.
             </>
+          ) : summaryBusy ? (
+            <>
+              Actualizando métricas desde activos y pasivos… Moneda base{" "}
+              <strong>{currency}</strong>.
+            </>
           ) : (
             <>
-              Moneda base <strong>{currency}</strong>. Métricas en vivo cuando
-              el backend exponga activos y pasivos.
+              Moneda base <strong>{currency}</strong>. Totales alineados al
+              checklist Summary (purga de pasivos con plan vencido antes de
+              sumar, igual que la lista de pasivos).
             </>
           )}
         </p>
@@ -753,32 +2096,32 @@ function SummaryView({
       <div className="metric-grid">
         <MetricCard
           label="Patrimonio neto"
-          value={METRIC_DASH}
+          value={nw}
           suffix={currency}
-          hint="Conectará con activos y pasivos cuando la API exponga totales."
+          hint="Activos − pasivos (principal registrado)."
         />
         <MetricCard
           label="Activos totales"
-          value={METRIC_DASH}
+          value={ta}
           suffix={currency}
         />
         <MetricCard
           label="Pasivos totales"
-          value={METRIC_DASH}
+          value={tl}
           suffix={currency}
         />
         <MetricCard
           label="Ratio deuda / activos"
-          value={METRIC_DASH}
-          hint="Se calculará con los mismos criterios que el cliente de referencia."
+          value={dta}
+          hint="Pasivos ÷ activos; vacío si activos = 0."
         />
       </div>
 
       <section className="panel">
         <h3 className="panel-title">Salud financiera</h3>
         <p className="muted tight">
-          Aquí irán ingresos, gastos, ahorro, runway y coberturas — datos en
-          vivo enlazados a esta instalación (pendiente de backend).
+          Pendiente de paridad completa: ingresos/gastos recurrentes, tasa de
+          ahorro, runway y cobertura próxima (presupuesto y planeación).
         </p>
         <div className="placeholder-chips">
           <span className="chip">Ingresos recurrentes</span>
@@ -791,8 +2134,8 @@ function SummaryView({
       <section className="panel muted-panel">
         <h3 className="panel-title">Desglose</h3>
         <p className="muted tight">
-          Gráficos donut y reparto por categoría (activos / pasivos) — mismo
-          papel que en la app de escritorio.
+          Donut / categorías como en el cliente Mac: usa las pestañas Activos y
+          Pasivos por ahora; gráficos enlazados aquí vendrán después.
         </p>
       </section>
     </div>
@@ -829,7 +2172,13 @@ function SettingsView({
   installationBusy,
   setupCurrency,
   setSetupCurrency,
+  setupCalendarTz,
+  setSetupCalendarTz,
   setupInstallation,
+  calendarTzDraft,
+  setCalendarTzDraft,
+  calendarTzSaving,
+  saveInstallationCalendarTz,
   health,
   healthError,
   hasMembership,
@@ -862,7 +2211,13 @@ function SettingsView({
   installationBusy: boolean;
   setupCurrency: "EUR" | "USD" | "GBP";
   setSetupCurrency: (v: "EUR" | "USD" | "GBP") => void;
+  setupCalendarTz: string;
+  setSetupCalendarTz: Dispatch<SetStateAction<string>>;
   setupInstallation: (e: FormEvent) => void;
+  calendarTzDraft: string;
+  setCalendarTzDraft: Dispatch<SetStateAction<string>>;
+  calendarTzSaving: boolean;
+  saveInstallationCalendarTz: (e: FormEvent) => void;
   health: HealthResponse | null;
   healthError: string | null;
   hasMembership: boolean;
@@ -936,6 +2291,44 @@ function SettingsView({
                 <option value="GBP">GBP</option>
               </select>
             </label>
+            <label className="field">
+              <span>Zona horaria (IANA)</span>
+              <select
+                value={
+                  [
+                    "UTC",
+                    "Europe/Madrid",
+                    "Europe/London",
+                    "America/New_York",
+                    "America/Los_Angeles",
+                  ].includes(setupCalendarTz)
+                    ? setupCalendarTz
+                    : "__custom__"
+                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__custom__") return;
+                  setSetupCalendarTz(v);
+                }}
+              >
+                <option value="UTC">UTC</option>
+                <option value="Europe/Madrid">Europe/Madrid</option>
+                <option value="Europe/London">Europe/London</option>
+                <option value="America/New_York">America/New_York</option>
+                <option value="America/Los_Angeles">America/Los_Angeles</option>
+                <option value="__custom__">Otra (editar abajo)</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>IANA exacta (opcional)</span>
+              <input
+                value={setupCalendarTz}
+                onChange={(e) => setSetupCalendarTz(e.target.value)}
+                placeholder="Europe/Madrid"
+                maxLength={64}
+                autoComplete="off"
+              />
+            </label>
             <button
               type="submit"
               className="btn primary"
@@ -991,6 +2384,46 @@ function SettingsView({
                 </li>
               ))}
             </ul>
+          )}
+        </section>
+      ) : null}
+
+      {hasMembership ? (
+        <section className="panel">
+          <h3 className="panel-title">Zona horaria del calendario</h3>
+          <p className="muted tight">
+            Define el día civil «hoy» para derivar principal en pasivos (paridad
+            con calendario local tipo Mac). Debe ser un identificador IANA válido.
+          </p>
+          {isOwner ? (
+            <form
+              className="stack bordered-top"
+              onSubmit={saveInstallationCalendarTz}
+            >
+              <label className="field">
+                <span>IANA (p. ej. Europe/Madrid)</span>
+                <input
+                  value={calendarTzDraft}
+                  onChange={(e) => setCalendarTzDraft(e.target.value)}
+                  maxLength={64}
+                  placeholder="Europe/Madrid"
+                  autoComplete="off"
+                />
+              </label>
+              <button
+                type="submit"
+                className="btn primary"
+                disabled={calendarTzSaving}
+              >
+                Guardar zona horaria
+              </button>
+            </form>
+          ) : (
+            <p className="muted bordered-top">
+              Actual:{" "}
+              <strong>{installation?.installation.calendar_tz ?? "UTC"}</strong>
+              . Solo el propietario puede cambiarla.
+            </p>
           )}
         </section>
       ) : null}

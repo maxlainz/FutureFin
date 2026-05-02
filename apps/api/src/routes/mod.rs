@@ -1,9 +1,14 @@
+use crate::handlers::assets::assets_router;
 use crate::handlers::auth::{login, logout, me, register};
 use crate::handlers::categories::categories_router;
 use crate::handlers::fallback;
 use crate::handlers::health::{health_check, ready_check};
-use crate::handlers::installation::{get_my_installation, setup_installation};
+use crate::handlers::installation::{
+    get_my_installation, patch_my_installation, setup_installation,
+};
+use crate::handlers::liabilities::liabilities_router;
 use crate::handlers::pending_users::pending_users_router;
+use crate::handlers::summary::summary_router;
 use crate::openapi::openapi_json;
 use axum::routing::{get, post};
 use axum::Router;
@@ -20,10 +25,16 @@ pub fn app_router() -> Router {
                 .route("/logout", post(logout))
                 .route("/me", get(me)),
         )
-        .route("/installation", get(get_my_installation))
+        .route(
+            "/installation",
+            get(get_my_installation).patch(patch_my_installation),
+        )
         .route("/installation/setup", post(setup_installation))
         .nest("/installation/pending-users", pending_users_router())
         .nest("/categories", categories_router())
+        .nest("/assets", assets_router())
+        .nest("/liabilities", liabilities_router())
+        .nest("/summary", summary_router())
         .fallback(fallback::v1_not_found);
 
     Router::new()

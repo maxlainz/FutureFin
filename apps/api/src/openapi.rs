@@ -4,9 +4,22 @@ use crate::handlers::auth::{__path_login, __path_logout, __path_me, __path_regis
 #[allow(unused_imports)]
 use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
-use crate::handlers::installation::{__path_get_my_installation, __path_setup_installation};
+use crate::handlers::installation::{
+    __path_get_my_installation, __path_patch_my_installation, __path_setup_installation,
+};
 #[allow(unused_imports)]
 use crate::handlers::pending_users::{__path_approve_pending_user, __path_list_pending_users};
+#[allow(unused_imports)]
+use crate::handlers::summary::__path_get_summary;
+#[allow(unused_imports)]
+use crate::handlers::assets::{
+    __path_create_asset, __path_delete_asset, __path_list_assets, __path_patch_asset,
+};
+#[allow(unused_imports)]
+use crate::handlers::liabilities::{
+    __path_create_liability, __path_delete_liability, __path_list_liabilities,
+    __path_patch_liability,
+};
 #[allow(unused_imports)]
 use crate::handlers::categories::{
     __path_create_category, __path_delete_category, __path_list_categories,
@@ -25,6 +38,7 @@ use utoipa::OpenApi;
         logout,
         me,
         get_my_installation,
+        patch_my_installation,
         setup_installation,
         list_pending_users,
         approve_pending_user,
@@ -32,6 +46,15 @@ use utoipa::OpenApi;
         create_category,
         patch_category,
         delete_category,
+        list_assets,
+        create_asset,
+        patch_asset,
+        delete_asset,
+        list_liabilities,
+        create_liability,
+        patch_liability,
+        delete_liability,
+        get_summary,
     ),
     components(schemas(
         crate::handlers::health::HealthBody,
@@ -41,6 +64,7 @@ use utoipa::OpenApi;
         crate::handlers::installation::InstallationSnapshot,
         crate::handlers::installation::InstallationAccess,
         crate::handlers::installation::SetupInstallationBody,
+        crate::handlers::installation::PatchInstallationBody,
         crate::handlers::membership::MembershipRole,
         crate::handlers::pending_users::ApprovePendingUserBody,
         crate::handlers::pending_users::ApproveMemberRole,
@@ -48,6 +72,14 @@ use utoipa::OpenApi;
         crate::handlers::categories::CategoryResponse,
         crate::handlers::categories::CreateCategoryBody,
         crate::handlers::categories::PatchCategoryBody,
+        crate::handlers::assets::AssetResponse,
+        crate::handlers::assets::CreateAssetBody,
+        crate::handlers::assets::PatchAssetBody,
+        crate::handlers::liabilities::LiabilityResponse,
+        crate::handlers::liabilities::CreateLiabilityBody,
+        crate::handlers::liabilities::PatchLiabilityBody,
+        crate::handlers::liabilities::PaymentFrequency,
+        crate::handlers::summary::SummaryResponse,
         ErrorBody,
         ErrorCode,
     )),
@@ -64,6 +96,18 @@ use utoipa::OpenApi;
         (
             name = "categories",
             description = "Installation-scoped categories (asset, liability, income, expense); see parity checklist Settings — Categories"
+        ),
+        (
+            name = "assets",
+            description = "Installation asset ledger (category must be asset scope)"
+        ),
+        (
+            name = "liabilities",
+            description = "Installation liabilities, optional APR and payment plan; optional derive_principal_from_plan (principal = payment × intervals from installation calendar_tz through payment_end_date); expired payment-end rows purged on GET list"
+        ),
+        (
+            name = "summary",
+            description = "Installation-wide KPI aggregates (purges expired liabilities before totals; parity SummaryMetricGrid basics)"
         ),
     ),
 )]

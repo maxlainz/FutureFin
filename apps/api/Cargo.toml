@@ -9,9 +9,11 @@ publish = false
 argon2 = "0.5"
 async-trait = "0.1"
 rand_core = { version = "0.6", features = ["std"] }
+rust_decimal = { version = "1.41", features = ["serde-with-str"] }
 axum = { version = "0.8", features = ["macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono-tz = "0.10"
 cookie = "0.18"
 dotenvy = "0.15"
 futurefin-domain = { path = "../../crates/domain" }
@@ -25,6 +27,7 @@ sqlx = { version = "0.8", features = [
     "macros",
     "uuid",
     "chrono",
+    "rust_decimal",
 ] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
