@@ -16,6 +16,7 @@ ENV PATH=/usr/local/cargo/bin:$PATH
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/domain ./crates/domain
+COPY crates/engine ./crates/engine
 COPY apps/api ./apps/api
 RUN cargo build --release -p futurefin-api --locked
 
