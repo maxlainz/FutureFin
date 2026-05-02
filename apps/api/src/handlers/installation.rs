@@ -31,6 +31,14 @@ pub struct InstallationAccess {
     pub role: MembershipRole,
 }
 
+/// Distinguishes first-time setup (no installation row), pending approval (installation exists but no membership), and active membership.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InstallationSessionContext {
+    /// True when at least one row exists in `installation`.
+    pub installation_initialized: bool,
+    pub access: Option<InstallationAccess>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SetupInstallationBody {
     /// ISO 4217 alphabetic code; MVP allows EUR, USD, GBP.
@@ -77,6 +85,21 @@ struct InstallationMemberRow {
     projection_target_age: Option<i16>,
     show_age_mode: String,
     role: String,
+}
+
+fn installation_access_from_row(r: InstallationMemberRow) -> Result<InstallationAccess, ApiError> {
+    let role = MembershipRole::parse(&r.role)?;
+    Ok(InstallationAccess {
+        installation: InstallationSnapshot {
+            id: r.id,
+            base_currency: r.base_currency,
+            calendar_tz: r.calendar_tz,
+            projection_includes_inflation: r.projection_includes_inflation,
+            projection_target_age: r.projection_target_age,
+            show_age_mode: r.show_age_mode,
+        },
+        role,
+    })
 }
 
 fn normalize_currency(code: &str) -> Result<String, ApiError> {
@@ -229,6 +252,50 @@ pub(crate) async fn bootstrap_installation_as_owner_if_empty(
 
 #[utoipa::path(
     get,
+    path = "/v1/installation/session-context",
+    tag = "installation",
+    responses(
+        (status = 200, description = "Whether an installation exists and the caller's membership, if any",
+            body = InstallationSessionContext),
+        (status = 401, description = "No valid session"),
+    )
+)]
+pub async fn get_installation_session_context(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+) -> Result<Json<InstallationSessionContext>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let installation_initialized: bool =
+        sqlx::query_scalar(r#"SELECT EXISTS(SELECT 1 FROM installation)"#)
+            .fetch_one(&state.pool)
+            .await?;
+
+    let row: Option<InstallationMemberRow> = sqlx::query_as(
+        r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
+                  i.projection_target_age, i.show_age_mode, m.role
+           FROM installation_memberships m
+           JOIN installation i ON i.id = m.installation_id
+           WHERE m.user_id = $1
+           ORDER BY i.created_at ASC
+           LIMIT 1"#,
+    )
+    .bind(user.id.0)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let access = match row {
+        Some(r) => Some(installation_access_from_row(r)?),
+        None => None,
+    };
+
+    Ok(Json(InstallationSessionContext {
+        installation_initialized,
+        access,
+    }))
+}
+
+#[utoipa::path(
+    get,
     path = "/v1/installation",
     tag = "installation",
     responses(
@@ -258,18 +325,7 @@ pub async fn get_my_installation(
         return Ok(Json(None));
     };
 
-    let role = MembershipRole::parse(&r.role)?;
-    Ok(Json(Some(InstallationAccess {
-        installation: InstallationSnapshot {
-            id: r.id,
-            base_currency: r.base_currency,
-            calendar_tz: r.calendar_tz,
-            projection_includes_inflation: r.projection_includes_inflation,
-            projection_target_age: r.projection_target_age,
-            show_age_mode: r.show_age_mode,
-        },
-        role,
-    })))
+    Ok(Json(Some(installation_access_from_row(r)?)))
 }
 
 #[utoipa::path(

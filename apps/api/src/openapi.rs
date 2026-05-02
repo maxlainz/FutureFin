@@ -5,7 +5,8 @@ use crate::handlers::auth::{__path_login, __path_logout, __path_me, __path_regis
 use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
 use crate::handlers::installation::{
-    __path_get_my_installation, __path_patch_my_installation, __path_setup_installation,
+    __path_get_installation_session_context, __path_get_my_installation,
+    __path_patch_my_installation, __path_setup_installation,
 };
 #[allow(unused_imports)]
 use crate::handlers::pending_users::{__path_approve_pending_user, __path_list_pending_users};
@@ -81,6 +82,7 @@ use utoipa::OpenApi;
         crate::handlers::auth::UserResponse,
         crate::handlers::installation::InstallationSnapshot,
         crate::handlers::installation::InstallationAccess,
+        crate::handlers::installation::InstallationSessionContext,
         crate::handlers::installation::SetupInstallationBody,
         crate::handlers::installation::PatchInstallationBody,
         crate::handlers::membership::MembershipRole,
@@ -98,6 +100,7 @@ use utoipa::OpenApi;
         crate::handlers::liabilities::PatchLiabilityBody,
         crate::handlers::liabilities::PaymentFrequency,
         crate::handlers::summary::SummaryResponse,
+        crate::handlers::summary::FinancialHealthMetrics,
         crate::handlers::budget::BudgetSnapshotResponse,
         crate::handlers::budget::BudgetEntryResponse,
         crate::handlers::budget::DerivedBudgetLineResponse,

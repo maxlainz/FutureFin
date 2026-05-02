@@ -803,6 +803,7 @@
   padding: 0.5rem 1rem;
   border-bottom: 1px solid #e2e8f0;
   background: #f8fafc;
+  flex-shrink: 0;
 }
 
 .person-filter-label {

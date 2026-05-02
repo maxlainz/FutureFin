@@ -36,6 +36,18 @@ type InstallationAccess = {
   role: "owner" | "member" | "viewer";
 };
 
+type InstallationSessionContext = {
+  installation_initialized: boolean;
+  access: InstallationAccess | null;
+};
+
+type InstallationGate =
+  | "loading"
+  | "fetch_failed"
+  | "member"
+  | "pending"
+  | "bootstrap";
+
 type CategoryScope = "asset" | "liability" | "income" | "expense";
 
 type CategoryRow = {
@@ -56,11 +68,28 @@ type AssetApiRow = {
   sort_index: number;
 };
 
+type FinancialHealthMetrics = {
+  income_monthly_equivalent: string;
+  expense_regular_monthly_equivalent: string;
+  expense_derived_monthly_equivalent: string;
+  expense_total_monthly_equivalent: string;
+  net_monthly_equivalent: string;
+  savings_rate: string | null;
+  monthly_net_excluding_derived_debt: string;
+  savings_rate_excluding_derived_debt: string | null;
+  liquid_assets_total: string;
+  runway_months: string | null;
+  upcoming_inflows_total: string;
+  upcoming_outflows_total: string;
+  upcoming_coverage_ratio: string | null;
+};
+
 type SummaryResponse = {
   total_assets: string;
   total_liabilities: string;
   net_worth: string;
   debt_to_assets_ratio: string | null;
+  financial_health: FinancialHealthMetrics;
 };
 
 type BudgetTotalsApi = {
@@ -370,6 +399,25 @@ function formatDebtToAssetsPct(ratio: string | null | undefined): string {
   })} %`;
 }
 
+/** Decimal fraction (e.g. 0.25) shown as percent */
+function formatFractionAsPercent(ratio: string | null | undefined): string {
+  if (ratio == null || ratio === "") return METRIC_DASH;
+  const r = Number(String(ratio).replace(",", "."));
+  if (!Number.isFinite(r)) return METRIC_DASH;
+  return `${(r * 100).toLocaleString(DISPLAY_NUMBER_LOCALE, {
+    maximumFractionDigits: 1,
+  })} %`;
+}
+
+function formatMonthsRough(s: string | null | undefined): string {
+  if (s == null || s === "") return METRIC_DASH;
+  const r = Number(String(s).replace(",", "."));
+  if (!Number.isFinite(r)) return METRIC_DASH;
+  return `${r.toLocaleString(DISPLAY_NUMBER_LOCALE, {
+    maximumFractionDigits: 1,
+  })} meses`;
+}
+
 function budgetCategoryMap(
   incomeCats: CategoryRow[],
   expenseCats: CategoryRow[],
@@ -553,6 +601,8 @@ export default function App() {
     null,
   );
   const [installationBusy, setInstallationBusy] = useState(false);
+  const [installationGate, setInstallationGate] =
+    useState<InstallationGate>("loading");
   const [setupCurrency, setSetupCurrency] = useState<"EUR" | "USD" | "GBP">(
     "EUR",
   );
@@ -717,19 +767,33 @@ export default function App() {
     }
   }, []);
 
-  const loadInstallation = useCallback(async () => {
+  const loadInstallation = useCallback(async (opts?: { preserveGate?: boolean }) => {
+    const preserveGate = opts?.preserveGate ?? false;
     setInstallationBusy(true);
     setInstallationError(null);
+    if (!preserveGate) {
+      setInstallationGate("loading");
+    }
     try {
-      const res = await fetch("/v1/installation", defaultFetchInit);
+      const res = await fetch("/v1/installation/session-context", defaultFetchInit);
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      const body = (await res.json()) as InstallationAccess | null;
-      setInstallation(body);
+      const ctx = (await res.json()) as InstallationSessionContext;
+      if (ctx.access) {
+        setInstallation(ctx.access);
+        setInstallationGate("member");
+      } else if (!ctx.installation_initialized) {
+        setInstallation(null);
+        setInstallationGate("bootstrap");
+      } else {
+        setInstallation(null);
+        setInstallationGate("pending");
+      }
     } catch (e: unknown) {
       setInstallation(null);
       setInstallationError(e instanceof Error ? e.message : String(e));
+      setInstallationGate("fetch_failed");
     } finally {
       setInstallationBusy(false);
     }
@@ -1012,6 +1076,7 @@ export default function App() {
       void loadInstallation();
     } else {
       setInstallation(null);
+      setInstallationGate("loading");
       setInstallationError(null);
       setPendingUsers([]);
       setPendingUsersError(null);
@@ -1276,6 +1341,7 @@ export default function App() {
       });
       setUser(null);
       setInstallation(null);
+      setInstallationGate("loading");
       setPendingUsers([]);
       setPendingUsersError(null);
       setActiveTab("summary");
@@ -1306,7 +1372,7 @@ export default function App() {
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      await loadInstallation();
+      await loadInstallation({ preserveGate: true });
     } catch (e: unknown) {
       setInstallationError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1330,7 +1396,7 @@ export default function App() {
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      await loadInstallation();
+      await loadInstallation({ preserveGate: true });
     } catch (e: unknown) {
       setInstallationError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1370,7 +1436,7 @@ export default function App() {
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
-      await loadInstallation();
+      await loadInstallation({ preserveGate: true });
     } catch (e: unknown) {
       setInstallationError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2047,7 +2113,8 @@ export default function App() {
             </p>
           </div>
           <footer className="auth-footer muted">
-            Tras entrar verás el escritorio con pestañas (Resumen, Activos…).
+            Cuando tengas acceso al hogar verás el escritorio con pestañas (Resumen,
+            Activos…).
           </footer>
         </div>
       </div>
@@ -2085,52 +2152,123 @@ export default function App() {
         </div>
       </header>
 
-      <nav className="tab-bar" aria-label="Secciones">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={`tab-btn ${activeTab === t.id ? "active" : ""}`}
-            onClick={() => setActiveTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
-
-      {user && hasMembership ? (
-        <div
-          className="person-filter-bar"
-          role="toolbar"
-          aria-label="Ámbito de datos (hogar o usuario actual)"
-        >
-          <span className="person-filter-label">Ver datos:</span>
-          <div className="segmented person-filter-segmented">
+      {installationGate === "loading" ? (
+        <div className="app-loading">
+          <div className="app-loading-inner">
+            <span className="spinner" aria-hidden />
+            <p>Cargando acceso al hogar…</p>
+          </div>
+        </div>
+      ) : installationGate === "fetch_failed" ? (
+        <main className="app-main">
+          <div className="workspace">
+            <div className="workspace-header">
+              <h2 className="workspace-title">No se pudo cargar el acceso</h2>
+              <p className="workspace-sub muted">
+                Comprueba la conexión con la API e inténtalo de nuevo.
+              </p>
+            </div>
+            {installationError ? (
+              <div className="banner error-banner">{installationError}</div>
+            ) : null}
             <button
               type="button"
-              className={ledgerPersonScope === "household" ? "active" : ""}
-              aria-pressed={ledgerPersonScope === "household"}
-              onClick={() => setLedgerPersonScope("household")}
+              className="btn primary"
+              disabled={installationBusy}
+              onClick={() => void loadInstallation()}
             >
-              Hogar (todo)
-            </button>
-            <button
-              type="button"
-              className={ledgerPersonScope === "mine" ? "active" : ""}
-              aria-pressed={ledgerPersonScope === "mine"}
-              onClick={() => setLedgerPersonScope("mine")}
-            >
-              {user.username}
+              Reintentar
             </button>
           </div>
-          <span className="person-filter-hint muted tight">
-            Misma instalación compartida; solo filtra listas y totales (activos,
-            pasivos, presupuesto, próximos, resumen).
-          </span>
-        </div>
-      ) : null}
+        </main>
+      ) : installationGate === "pending" ? (
+        <main className="app-main">
+          <div className="workspace">
+            <div className="workspace-header">
+              <h2 className="workspace-title">Acceso pendiente</h2>
+              <p className="workspace-sub">
+                Tu cuenta está registrada; el propietario del hogar debe aprobarte
+                antes de que puedas usar FutureFin. No hay nada más que hacer aquí
+                hasta entonces.
+              </p>
+            </div>
+            <p className="muted tight">
+              Pídele al propietario del hogar que inicie sesión en FutureFin,
+              abra <strong>Ajustes → Aprobar acceso</strong> y te conceda
+              entrada ahí.
+            </p>
+          </div>
+        </main>
+      ) : installationGate === "bootstrap" ? (
+        <main className="app-main">
+          <div className="workspace">
+            <div className="workspace-header">
+              <h2 className="workspace-title">Crear el hogar</h2>
+              <p className="workspace-sub">
+                Aún no hay instalación en esta base. Define moneda y zona horaria
+                para inicializarla; quedarás como propietario.
+              </p>
+            </div>
+            {installationError ? (
+              <div className="banner error-banner">{installationError}</div>
+            ) : null}
+            <BootstrapInstallationPanel
+              installationBusy={installationBusy}
+              setupCurrency={setupCurrency}
+              setSetupCurrency={setSetupCurrency}
+              setupCalendarTz={setupCalendarTz}
+              setSetupCalendarTz={setSetupCalendarTz}
+              setupInstallation={(e) => void setupInstallation(e)}
+            />
+          </div>
+        </main>
+      ) : (
+        <>
+          <nav className="tab-bar" aria-label="Secciones">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={`tab-btn ${activeTab === t.id ? "active" : ""}`}
+                onClick={() => setActiveTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
 
-      <main className="app-main">
+          <div
+            className="person-filter-bar"
+            role="toolbar"
+            aria-label="Ámbito de datos (hogar o usuario actual)"
+          >
+            <span className="person-filter-label">Ver datos:</span>
+            <div className="segmented person-filter-segmented">
+              <button
+                type="button"
+                className={ledgerPersonScope === "household" ? "active" : ""}
+                aria-pressed={ledgerPersonScope === "household"}
+                onClick={() => setLedgerPersonScope("household")}
+              >
+                Hogar (todo)
+              </button>
+              <button
+                type="button"
+                className={ledgerPersonScope === "mine" ? "active" : ""}
+                aria-pressed={ledgerPersonScope === "mine"}
+                onClick={() => setLedgerPersonScope("mine")}
+              >
+                {user.username}
+              </button>
+            </div>
+            <span className="person-filter-hint muted tight">
+              Misma instalación compartida; solo filtra listas y totales (activos,
+              pasivos, presupuesto, próximos, resumen). No depende de cuántos
+              usuarios haya.
+            </span>
+          </div>
+
+          <main className="app-main">
         <div
           className="app-global-errors"
           role="region"
@@ -2173,17 +2311,6 @@ export default function App() {
             <div className="banner error-banner">{summaryError}</div>
           ) : null}
         </div>
-
-        {!installationBusy &&
-        user &&
-        !hasMembership &&
-        activeTab !== "settings" ? (
-          <div className="banner info-banner">
-            Tu cuenta está registrada pero el propietario aún no ha aprobado tu
-            acceso. Avísale para que te conceda entrada en{" "}
-            <strong>Ajustes</strong>.
-          </div>
-        ) : null}
 
         {activeTab === "summary" ? (
           <SummaryView
@@ -2406,11 +2533,6 @@ export default function App() {
               setEditCategoryName(row.name);
               setCategoryRenameModalOpen(true);
             }}
-            setupCurrency={setupCurrency}
-            setSetupCurrency={setSetupCurrency}
-            setupCalendarTz={setupCalendarTz}
-            setSetupCalendarTz={setSetupCalendarTz}
-            setupInstallation={(e) => void setupInstallation(e)}
             calendarTzDraft={calendarTzDraft}
             setCalendarTzDraft={setCalendarTzDraft}
             calendarTzSaving={calendarTzSaving}
@@ -2457,6 +2579,8 @@ export default function App() {
           <PlaceholderTab tabLabel={TABS.find((x) => x.id === activeTab)?.label ?? ""} />
         )}
       </main>
+        </>
+      )}
     </div>
   );
 }
@@ -4012,19 +4136,111 @@ function SummaryView({
       ) : null}
 
       <section className="panel">
-        <h3 className="panel-title">Salud financiera</h3>
+        <h3 className="panel-title">Salud financiera (MVP)</h3>
         <p className="muted tight">
-          Ingresos y gastos recurrentes viven en la pestaña{" "}
-          <strong>Presupuesto</strong>. Aquí faltará paridad cuando calculemos
-          KPIs agregados: tasa de ahorro, runway y cobertura próxima enlazados a
-          planeación.
+          Equivalentes mensuales alineados con <strong>GET /v1/budget</strong>{" "}
+          (entradas persistidas + cuotas derivadas de pasivos con plan activo).
+          Runway usa solo activos <strong>líquidos</strong>. Los importes de{" "}
+          <strong>Próximos</strong> son sumas de <code>expected_amount</code> en
+          planeación (no anualizados; paridad fina con el Mac en{" "}
+          <code>ORACLE_TESTS.md</code>).
         </p>
-        <div className="placeholder-chips">
-          <span className="chip muted">Ingresos / gastos → Presupuesto</span>
-          <span className="chip">Tasa de ahorro</span>
-          <span className="chip">Runway</span>
-          <span className="chip">Cobertura próxima</span>
-        </div>
+        {showMetrics ? (
+          <div className="metric-grid bordered-top">
+            <MetricCard
+              label="Ingresos mensuales (equiv.)"
+              value={formatCurrencyAmount(
+                summary.financial_health.income_monthly_equivalent,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Gastos recurrentes (equiv.)"
+              value={formatCurrencyAmount(
+                summary.financial_health.expense_regular_monthly_equivalent,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Cuotas deuda en presupuesto (equiv.)"
+              value={formatCurrencyAmount(
+                summary.financial_health.expense_derived_monthly_equivalent,
+                currencyIso,
+              )}
+              hint="Derivadas de planes de pago de pasivos."
+            />
+            <MetricCard
+              label="Gastos totales (equiv.)"
+              value={formatCurrencyAmount(
+                summary.financial_health.expense_total_monthly_equivalent,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Ahorro mensual neto"
+              value={formatCurrencyAmount(
+                summary.financial_health.net_monthly_equivalent,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Tasa de ahorro"
+              value={formatFractionAsPercent(summary.financial_health.savings_rate)}
+              hint="Neto dividido por ingresos cuando hay ingresos."
+            />
+            <MetricCard
+              label="Neto sin cuotas deuda derivadas"
+              value={formatCurrencyAmount(
+                summary.financial_health.monthly_net_excluding_derived_debt,
+                currencyIso,
+              )}
+              hint="Ingresos − gastos recurrentes (KPI alternativo tipo Mac)."
+            />
+            <MetricCard
+              label="Tasa de ahorro (sin cuotas derivadas)"
+              value={formatFractionAsPercent(
+                summary.financial_health.savings_rate_excluding_derived_debt,
+              )}
+            />
+            <MetricCard
+              label="Activos líquidos"
+              value={formatCurrencyAmount(
+                summary.financial_health.liquid_assets_total,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Runway"
+              value={formatMonthsRough(summary.financial_health.runway_months)}
+              hint="Líquidos ÷ gastos totales mensuales (con derivadas)."
+            />
+            <MetricCard
+              label="Próximos — entradas (suma)"
+              value={formatCurrencyAmount(
+                summary.financial_health.upcoming_inflows_total,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Próximos — salidas (suma)"
+              value={formatCurrencyAmount(
+                summary.financial_health.upcoming_outflows_total,
+                currencyIso,
+              )}
+            />
+            <MetricCard
+              label="Cobertura próximos"
+              value={formatFractionAsPercent(
+                summary.financial_health.upcoming_coverage_ratio,
+              )}
+              hint="Entradas ÷ salidas cuando hay salidas."
+            />
+          </div>
+        ) : (
+          <p className="muted bordered-top">
+            Activa la membresía del hogar para ver estas métricas.
+          </p>
+        )}
       </section>
 
       <section className="panel muted-panel">
@@ -4063,6 +4279,84 @@ function MetricCard({
   );
 }
 
+function BootstrapInstallationPanel({
+  installationBusy,
+  setupCurrency,
+  setSetupCurrency,
+  setupCalendarTz,
+  setSetupCalendarTz,
+  setupInstallation,
+}: {
+  installationBusy: boolean;
+  setupCurrency: "EUR" | "USD" | "GBP";
+  setSetupCurrency: (v: "EUR" | "USD" | "GBP") => void;
+  setupCalendarTz: string;
+  setSetupCalendarTz: Dispatch<SetStateAction<string>>;
+  setupInstallation: (e: FormEvent) => void;
+}) {
+  return (
+    <section className="panel">
+      <h3 className="panel-title">Inicializar instalación</h3>
+      <form className="stack bordered-top" onSubmit={setupInstallation}>
+        <label className="field">
+          <span>Moneda base</span>
+          <select
+            value={setupCurrency}
+            onChange={(e) =>
+              setSetupCurrency(e.target.value as "EUR" | "USD" | "GBP")
+            }
+          >
+            <option value="EUR">EUR</option>
+            <option value="USD">USD</option>
+            <option value="GBP">GBP</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Zona horaria (IANA)</span>
+          <select
+            value={
+              [
+                "UTC",
+                "Europe/Madrid",
+                "Europe/London",
+                "America/New_York",
+                "America/Los_Angeles",
+              ].includes(setupCalendarTz)
+                ? setupCalendarTz
+                : "__custom__"
+            }
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "__custom__") return;
+              setSetupCalendarTz(v);
+            }}
+          >
+            <option value="UTC">UTC</option>
+            <option value="Europe/Madrid">Europe/Madrid</option>
+            <option value="Europe/London">Europe/London</option>
+            <option value="America/New_York">America/New_York</option>
+            <option value="America/Los_Angeles">America/Los_Angeles</option>
+            <option value="__custom__">Otra (editar abajo)</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>IANA exacta (opcional)</span>
+          <input
+            value={setupCalendarTz}
+            onChange={(e) => setSetupCalendarTz(e.target.value)}
+            placeholder="Europe/Madrid"
+            maxLength={64}
+            autoComplete="off"
+          />
+        </label>
+        <button type="submit" className="btn primary" disabled={installationBusy}>
+          Crear instalación
+        </button>
+      </form>
+    </section>
+  );
+}
+
 function SettingsView({
   installation,
   installationBusy,
@@ -4072,11 +4366,6 @@ function SettingsView({
   openNewCategoryModal,
   closeRenameCategoryModal,
   openRenameCategoryModal,
-  setupCurrency,
-  setSetupCurrency,
-  setupCalendarTz,
-  setSetupCalendarTz,
-  setupInstallation,
   calendarTzDraft,
   setCalendarTzDraft,
   calendarTzSaving,
@@ -4125,11 +4414,6 @@ function SettingsView({
   openNewCategoryModal: () => void;
   closeRenameCategoryModal: () => void;
   openRenameCategoryModal: (row: CategoryRow) => void;
-  setupCurrency: "EUR" | "USD" | "GBP";
-  setSetupCurrency: (v: "EUR" | "USD" | "GBP") => void;
-  setupCalendarTz: string;
-  setSetupCalendarTz: Dispatch<SetStateAction<string>>;
-  setupInstallation: (e: FormEvent) => void;
   calendarTzDraft: string;
   setCalendarTzDraft: Dispatch<SetStateAction<string>>;
   calendarTzSaving: boolean;
@@ -4193,81 +4477,6 @@ function SettingsView({
           concede acceso aquí; los visores solo leen.
         </p>
       </div>
-
-      {!installationBusy && !hasMembership ? (
-        <section className="panel">
-          <h3 className="panel-title">Acceso</h3>
-          <p className="muted tight">
-            Ya tienes cuenta pero el propietario debe aprobarte en esta
-            instalación.
-          </p>
-          <p className="hint bordered-top">
-            Recuperación: si la base no tiene instalación inicializada pero sí
-            usuarios, puedes crearla aquí (solo cuando la tabla está vacía).
-          </p>
-          <form className="stack bordered-top" onSubmit={setupInstallation}>
-            <h4 className="subsection-title">Inicializar instalación</h4>
-            <label className="field">
-              <span>Moneda base</span>
-              <select
-                value={setupCurrency}
-                onChange={(e) =>
-                  setSetupCurrency(e.target.value as "EUR" | "USD" | "GBP")
-                }
-              >
-                <option value="EUR">EUR</option>
-                <option value="USD">USD</option>
-                <option value="GBP">GBP</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Zona horaria (IANA)</span>
-              <select
-                value={
-                  [
-                    "UTC",
-                    "Europe/Madrid",
-                    "Europe/London",
-                    "America/New_York",
-                    "America/Los_Angeles",
-                  ].includes(setupCalendarTz)
-                    ? setupCalendarTz
-                    : "__custom__"
-                }
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === "__custom__") return;
-                  setSetupCalendarTz(v);
-                }}
-              >
-                <option value="UTC">UTC</option>
-                <option value="Europe/Madrid">Europe/Madrid</option>
-                <option value="Europe/London">Europe/London</option>
-                <option value="America/New_York">America/New_York</option>
-                <option value="America/Los_Angeles">America/Los_Angeles</option>
-                <option value="__custom__">Otra (editar abajo)</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>IANA exacta (opcional)</span>
-              <input
-                value={setupCalendarTz}
-                onChange={(e) => setSetupCalendarTz(e.target.value)}
-                placeholder="Europe/Madrid"
-                maxLength={64}
-                autoComplete="off"
-              />
-            </label>
-            <button
-              type="submit"
-              className="btn primary"
-              disabled={installationBusy}
-            >
-              Crear instalación
-            </button>
-          </form>
-        </section>
-      ) : null}
 
       {isOwner ? (
         <section className="panel">

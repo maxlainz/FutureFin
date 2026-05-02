@@ -5,7 +5,8 @@ use crate::handlers::categories::categories_router;
 use crate::handlers::fallback;
 use crate::handlers::health::{health_check, ready_check};
 use crate::handlers::installation::{
-    get_my_installation, patch_my_installation, setup_installation,
+    get_installation_session_context, get_my_installation, patch_my_installation,
+    setup_installation,
 };
 use crate::handlers::liabilities::liabilities_router;
 use crate::handlers::pending_users::pending_users_router;
@@ -26,6 +27,10 @@ pub fn app_router() -> Router {
                 .route("/login", post(login))
                 .route("/logout", post(logout))
                 .route("/me", get(me)),
+        )
+        .route(
+            "/installation/session-context",
+            get(get_installation_session_context),
         )
         .route(
             "/installation",
