@@ -323,15 +323,7 @@
   box-sizing: border-box;
 }
 
-.budget-summary-band {
-  display: block;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-}
-
-.budget-summary-band .workspace-sub {
+.budget-page .workspace-sub {
   max-width: none;
 }
 
@@ -428,17 +420,18 @@
 
 .workspace-title {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: 1.625rem;
   font-weight: 700;
   letter-spacing: -0.02em;
+  color: #0f172a;
 }
 
 .workspace-sub {
   margin: 0.35rem 0 0;
-  color: #64748b;
-  font-size: 0.95rem;
+  color: #94a3b8;
+  font-size: 0.8125rem;
   max-width: 42rem;
-  line-height: 1.45;
+  line-height: 1.4;
 }
 
 .role-pill {
@@ -463,6 +456,37 @@
   margin-bottom: 1.25rem;
 }
 
+/* Banda de KPIs: una sola fila; si no cabe, scroll horizontal */
+.metric-grid.workspace-kpi-strip {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 1rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+}
+
+.metric-grid.workspace-kpi-strip > .metric-card {
+  flex: 1 1 0;
+  min-width: 10.75rem;
+  box-sizing: border-box;
+}
+
+/* Banda de KPIs tipo Resumen: tarjetas algo más elevadas que el fondo */
+.workspace-kpi-strip .metric-card {
+  border-radius: 1rem;
+  padding: 1rem 1.15rem;
+  box-shadow:
+    0 4px 6px -1px rgb(15 23 42 / 8%),
+    0 10px 24px -8px rgb(15 23 42 / 12%);
+}
+
+.workspace-kpi-strip .metric-value-row {
+  flex-wrap: nowrap;
+}
+
 .metric-card {
   background: #fff;
   border: 1px solid #e2e8f0;
@@ -482,6 +506,7 @@
   display: flex;
   align-items: baseline;
   gap: 0.35rem;
+  flex-wrap: wrap;
 }
 
 .metric-value {
@@ -491,17 +516,18 @@
   letter-spacing: -0.02em;
 }
 
+.metric-value-parenthetical {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .metric-suffix {
   font-size: 0.9rem;
   color: #94a3b8;
   font-weight: 500;
-}
-
-.metric-hint {
-  margin: 0.5rem 0 0;
-  font-size: 0.75rem;
-  color: #94a3b8;
-  line-height: 1.4;
 }
 
 .panel {
@@ -615,6 +641,7 @@
 
 .placeholder-hero {
   border-style: dashed;
+  min-height: 5rem;
 }
 
 .dev-panel {
@@ -1005,13 +1032,6 @@
   margin-bottom: 0;
 }
 
-.panel-title-with-hint {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-}
-
 .inline-hint-icon {
   display: inline-flex;
   align-items: center;
@@ -1057,10 +1077,6 @@
   .breakdown-grid {
     grid-template-columns: 1fr 1fr;
   }
-
-  .breakdown-grid .breakdown-block:nth-child(3) {
-    grid-column: 1 / -1;
-  }
 }
 
 .summary-donuts-row {
@@ -1071,9 +1087,45 @@
 
 @media (min-width: 900px) {
   .summary-donuts-row {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     align-items: start;
   }
+}
+
+.ledger-by-category-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 0.35rem;
+}
+
+.ledger-category-block {
+  padding: 0.65rem 0.5rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.45rem;
+  background: #fafbfc;
+}
+
+.ledger-category-block .subsection-title {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #475569;
+}
+
+.ledger-category-block-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+}
+
+.ledger-category-total {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #334155;
+  white-space: nowrap;
 }
 
 .summary-donut-card {
@@ -1117,10 +1169,28 @@
 
 .summary-donut-legend li {
   display: flex;
-  justify-content: space-between;
-  gap: 0.5rem;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.45rem;
   padding: 0.12rem 0;
   border-bottom: 1px solid #f1f5f9;
+}
+
+.summary-donut-legend-swatch {
+  flex-shrink: 0;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px rgb(15 23 42 / 12%);
+}
+
+.summary-donut-legend li .summary-donut-legend-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.summary-donut-legend li .summary-donut-legend-val {
+  flex-shrink: 0;
 }
 
 .summary-donut-legend li:last-child {
@@ -1272,13 +1342,13 @@
 
 .projection-chart-dot-nw {
   fill: #ffffff;
-  stroke: #0369a1;
+  stroke: #047857;
   stroke-width: 2.25;
 }
 
 .projection-chart-dot-cc {
   fill: #ffffff;
-  stroke: #6d28d9;
+  stroke: #b45309;
   stroke-width: 2;
 }
 
@@ -1333,10 +1403,6 @@
   margin-top: 0.65rem;
 }
 
-.planning-dir-chart-lead {
-  margin: 0 0 0.35rem;
-}
-
 .planning-dir-svg {
   display: block;
   width: 100%;
@@ -1347,11 +1413,11 @@
 }
 
 .planning-dir-bar-in {
-  fill: #059669;
+  fill: #0f766e;
 }
 
 .planning-dir-bar-out {
-  fill: #e11d48;
+  fill: #c2410c;
 }
 
 .breakdown-table-wrap {
@@ -1429,13 +1495,6 @@
   text-transform: uppercase;
 }
 
-.asset-auto-contrib-help {
-  margin: 0 0 0.65rem;
-  font-size: 0.8rem;
-  line-height: 1.4;
-  max-width: 42rem;
-}
-
 .asset-form-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1490,6 +1549,10 @@
 
 .asset-actions-cell .btn {
   margin-right: 0.25rem;
+}
+
+.asset-actions-cell.budget-row-actions .btn {
+  margin-right: 0;
 }
 
 .btn.ghost.danger {

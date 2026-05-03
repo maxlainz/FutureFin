@@ -1,5 +1,5 @@
-//! Monthly projection via `futurefin-engine`: regular budget, liability payments / principals,
-//! planning flows (dated + undated 90-day window), asset contributions / drain / growth.
+//! Monthly projection via `futurefin-engine`: presupuesto regular, cuotas de pasivos activos,
+//! aportaciones a activos / drenaje / crecimiento. Los «Próximos» no forman parte de la caja mensual del motor.
 
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
@@ -15,7 +15,7 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{Datelike, NaiveDate};
 use futurefin_engine::{
     first_month_per_asset_contribution_nominals, project_net_worth_series, EngineError,
-    ProjectionFlowInput, ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
+    ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -96,13 +96,6 @@ struct LiabEngineRow {
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
     payment_end_date: Option<NaiveDate>,
-}
-
-#[derive(Debug, FromRow)]
-struct FlowEngineRow {
-    expected_amount: Decimal,
-    due_date: Option<NaiveDate>,
-    scope: String,
 }
 
 fn liability_monthly_payment(row: &LiabEngineRow) -> Decimal {
@@ -246,32 +239,6 @@ pub(crate) async fn build_installation_projection_input(
         }
     };
 
-    let flows_rows: Vec<FlowEngineRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT pf.expected_amount, pf.due_date, c.scope AS scope
-                   FROM planning_flows pf
-                   JOIN categories c ON c.id = pf.category_id AND c.installation_id = pf.installation_id
-                   WHERE pf.installation_id = $1"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT pf.expected_amount, pf.due_date, c.scope AS scope
-                   FROM planning_flows pf
-                   JOIN categories c ON c.id = pf.category_id AND c.installation_id = pf.installation_id
-                   WHERE pf.installation_id = $1 AND pf.owner_user_id = $2"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
-
     let assets: Vec<SimAsset> = assets_rows
         .into_iter()
         .map(|r| SimAsset {
@@ -297,22 +264,6 @@ pub(crate) async fn build_installation_projection_input(
         })
         .collect();
 
-    let flows: Vec<ProjectionFlowInput> = flows_rows
-        .into_iter()
-        .filter_map(|r| {
-            let is_inflow = match r.scope.as_str() {
-                "income" => true,
-                "expense" => false,
-                _ => return None,
-            };
-            Some(ProjectionFlowInput {
-                is_inflow,
-                amount: r.expected_amount.max(Decimal::ZERO),
-                due_date: r.due_date,
-            })
-        })
-        .collect();
-
     let input = ProjectionInput {
         ref_date: today,
         horizon_months,
@@ -320,7 +271,6 @@ pub(crate) async fn build_installation_projection_input(
         expense_regular_monthly: expense_reg,
         assets,
         liabilities,
-        flows,
         inflation_annual_percent,
     };
 
@@ -545,7 +495,7 @@ pub async fn get_projection_series(
         starting_net_worth,
         monthly_delta_assumption,
         model_note:
-            "Motor mensual tipo Mac: presupuesto regular sin cuotas derivadas de pasivos, servicio deuda activa por mes, próximos fechados por mes y sin fecha repartidos linealmente en 90 días (refuerzo positivo a aportaciones), drenaje líquidos primero y menor rentabilidad esperada, aportaciones fijas escaladas y remanente por pesos, crecimiento compuesto por activo, serie nominal o deflactada si inflación está activa."
+            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, aportaciones solo desde ese superávit recurrente (los Próximos no cuentan), drenaje líquidos primero y menor rentabilidad esperada, cuotas fijas escaladas y remanente por pesos, crecimiento compuesto por activo, serie nominal o deflactada si hay inflación."
                 .into(),
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         show_age_mode: inst_row.3.clone(),

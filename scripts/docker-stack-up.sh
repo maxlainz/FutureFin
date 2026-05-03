@@ -38,6 +38,11 @@ fi
 if [[ "$BUILD" -eq 1 ]]; then
   echo "docker compose build futurefin-api"
   docker compose build futurefin-api
+elif [[ -z "$(docker images -q futurefin/futurefin-api:dev 2>/dev/null)" ]]; then
+  # Sin imagen local, algunos Compose intentan pull de Docker Hub (repo inexistente) y fallan
+  # antes de hacer build; forzamos build explícito.
+  echo "Imagen futurefin/futurefin-api:dev ausente; docker compose build futurefin-api"
+  docker compose build futurefin-api
 fi
 
 echo "docker compose up -d"

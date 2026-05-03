@@ -132,7 +132,6 @@ struct AssetRow {
     contribution_remainder_weight: Decimal,
     notes: Option<String>,
     sort_index: i32,
-    owner_user_id: Option<Uuid>,
 }
 
 fn normalize_name(raw: &str) -> Result<String, ApiError> {
@@ -297,7 +296,7 @@ pub async fn list_assets(
                           is_liquid, expected_annual_return_percent,
                           monthly_contribution_fixed, contribution_frequency,
                           contribution_remainder_weight,
-                          notes, sort_index, owner_user_id
+                          notes, sort_index
                    FROM assets
                    WHERE installation_id = $1
                    ORDER BY sort_index ASC, name ASC"#,
@@ -312,7 +311,7 @@ pub async fn list_assets(
                           is_liquid, expected_annual_return_percent,
                           monthly_contribution_fixed, contribution_frequency,
                           contribution_remainder_weight,
-                          notes, sort_index, owner_user_id
+                          notes, sort_index
                    FROM assets
                    WHERE installation_id = $1 AND owner_user_id = $2
                    ORDER BY sort_index ASC, name ASC"#,
@@ -387,7 +386,7 @@ pub async fn create_asset(
            RETURNING id, category_id, name, current_value, purchase_price,
                      is_liquid, expected_annual_return_percent,
                      monthly_contribution_fixed, contribution_frequency, contribution_remainder_weight,
-                     notes, sort_index, owner_user_id"#,
+                     notes, sort_index"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -469,7 +468,7 @@ pub async fn patch_asset(
         r#"SELECT id, category_id, name, current_value, purchase_price,
                   is_liquid, expected_annual_return_percent,
                   monthly_contribution_fixed, contribution_frequency, contribution_remainder_weight,
-                  notes, sort_index, owner_user_id
+                  notes, sort_index
            FROM assets
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -556,7 +555,7 @@ pub async fn patch_asset(
            RETURNING id, category_id, name, current_value, purchase_price,
                      is_liquid, expected_annual_return_percent,
                      monthly_contribution_fixed, contribution_frequency, contribution_remainder_weight,
-                     notes, sort_index, owner_user_id"#,
+                     notes, sort_index"#,
     )
     .bind(new_cat)
     .bind(&new_name)

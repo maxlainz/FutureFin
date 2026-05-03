@@ -1,8 +1,8 @@
 //! Monthly projection: regular budget (no derived liability rows) + active debt service +
-//! planning flows (dated month bucket + undated 90-day linear) + asset contributions / drain /
-//! compound growth. See PRODUCT_DOSSIER_PLAN.md.
+//! asset contributions / drain / compound growth. Planning («Próximos») no entra en la caja
+//! mensual del motor: solo presupuesto recurrente menos cuotas de pasivos activas.
 
-use chrono::{Datelike, Days, Months, NaiveDate};
+use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
 use serde::{Deserialize, Serialize};
@@ -37,22 +37,14 @@ pub struct ProjectionLiabilityInput {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProjectionFlowInput {
-    pub is_inflow: bool,
-    pub amount: Decimal,
-    pub due_date: Option<NaiveDate>,
-}
-
-#[derive(Debug, Clone)]
 pub struct ProjectionInput {
-    /// Civil "today" (installation calendar); undated upcoming uses [ref_date, ref_date+90).
+    /// Civil "today" de la instalación (inicio del mes simulado para el índice 1).
     pub ref_date: NaiveDate,
     pub horizon_months: u32,
     pub income_regular_monthly: Decimal,
     pub expense_regular_monthly: Decimal,
     pub assets: Vec<SimAsset>,
     pub liabilities: Vec<ProjectionLiabilityInput>,
-    pub flows: Vec<ProjectionFlowInput>,
     /// Annual inflation % for deflating nominal NW to “money of today”; None → nominal series.
     pub inflation_annual_percent: Option<Decimal>,
 }
@@ -78,15 +70,6 @@ fn month_window(month_first: NaiveDate) -> (NaiveDate, NaiveDate) {
     let next_first = add_months(month_first, 1);
     let end = next_first.pred_opt().unwrap_or(start);
     (start, end)
-}
-
-fn days_inclusive_overlap(a0: NaiveDate, a1: NaiveDate, b0: NaiveDate, b1: NaiveDate) -> u32 {
-    let s = a0.max(b0);
-    let e = a1.min(b1);
-    if e < s {
-        return 0;
-    }
-    e.signed_duration_since(s).num_days() as u32 + 1
 }
 
 fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
@@ -135,29 +118,9 @@ fn drain_from_assets(
     need
 }
 
-/// Split undated flows into total signed daily rate and positive-inflow daily boost (for contributions).
-fn undated_daily_rates(flows: &[ProjectionFlowInput]) -> (Decimal, Decimal) {
-    let ninety = Decimal::from(90);
-    let mut signed_total = Decimal::ZERO;
-    let mut pos_inflow = Decimal::ZERO;
-    for f in flows {
-        if f.due_date.is_some() {
-            continue;
-        }
-        let mag = f.amount;
-        if f.is_inflow {
-            signed_total += mag;
-            pos_inflow += mag;
-        } else {
-            signed_total -= mag;
-        }
-    }
-    (signed_total / ninety, pos_inflow / ninety)
-}
-
-/// Nominal contributions routed to each asset in the **first simulated month** (calendar month of
-/// `ref_date`): scaled fixed amounts plus remainder split by weights — same rules as the first
-/// iteration inside [`project_net_worth_series`]. Zero when `net_cash_month <= 0` (drain path).
+/// Nominal contributions routed to each asset in the **first simulated month** (calendar month de
+/// `ref_date`): cuotas fijas escaladas más remanente por pesos — mismas reglas que la primera
+/// iteración de [`project_net_worth_series`]. Cero si el superávit recurrente del mes es ≤ 0.
 pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> Vec<Decimal> {
     let n = input.assets.len();
     let mut out = vec![Decimal::ZERO; n];
@@ -182,14 +145,9 @@ pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> V
         .map(|l| l.principal.max(Decimal::ZERO))
         .collect();
 
-    let (undated_daily_net, undated_daily_boost) = undated_daily_rates(&input.flows);
-    let undated_inclusive_last = input
-        .ref_date
-        .checked_add_days(Days::new(89))
-        .unwrap_or(input.ref_date);
     let start_month_first = month_first_calendar(input.ref_date);
     let month_first = add_months(start_month_first, 0);
-    let (m_start, m_end) = month_window(month_first);
+    let (m_start, _m_end) = month_window(month_first);
 
     let mut debt_service = Decimal::ZERO;
     for (i, liab) in input.liabilities.iter().enumerate() {
@@ -209,27 +167,7 @@ pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> V
     let scheduled_savings =
         input.income_regular_monthly - input.expense_regular_monthly - debt_service;
 
-    let overlap_days =
-        days_inclusive_overlap(m_start, m_end, input.ref_date, undated_inclusive_last);
-    let undated_net_month = undated_daily_net * Decimal::from(overlap_days);
-    let undated_boost_month = undated_daily_boost * Decimal::from(overlap_days);
-
-    let mut dated_net = Decimal::ZERO;
-    for f in &input.flows {
-        let Some(due) = f.due_date else {
-            continue;
-        };
-        if due >= m_start && due <= m_end {
-            let mag = f.amount;
-            if f.is_inflow {
-                dated_net += mag;
-            } else {
-                dated_net -= mag;
-            }
-        }
-    }
-
-    let net_cash_month = scheduled_savings + undated_net_month + dated_net;
+    let net_cash_month = scheduled_savings;
     if net_cash_month <= Decimal::ZERO {
         return out;
     }
@@ -248,7 +186,7 @@ pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> V
     }
 
     let applied: Decimal = out.iter().copied().sum();
-    let remainder_pool = pool - applied + undated_boost_month;
+    let remainder_pool = pool - applied;
     if remainder_pool <= Decimal::ZERO {
         return out;
     }
@@ -295,14 +233,6 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         .map(|l| l.principal.max(Decimal::ZERO))
         .collect();
 
-    let (undated_daily_net, undated_daily_boost) = undated_daily_rates(&input.flows);
-
-    // Last calendar day inside half-open window [ref_date, ref_date + 90 days).
-    let undated_inclusive_last = input
-        .ref_date
-        .checked_add_days(Days::new(89))
-        .unwrap_or(input.ref_date);
-
     let start_month_first = month_first_calendar(input.ref_date);
 
     let mut net_series = Vec::with_capacity(input.horizon_months as usize + 1);
@@ -337,7 +267,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
     for k in 1..=input.horizon_months {
         let month_first = add_months(start_month_first, k - 1);
-        let (m_start, m_end) = month_window(month_first);
+        let (m_start, _m_end) = month_window(month_first);
 
         let mut debt_service = Decimal::ZERO;
         for (i, liab) in input.liabilities.iter().enumerate() {
@@ -357,27 +287,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         let scheduled_savings =
             input.income_regular_monthly - input.expense_regular_monthly - debt_service;
 
-        let overlap_days =
-            days_inclusive_overlap(m_start, m_end, input.ref_date, undated_inclusive_last);
-        let undated_net_month = undated_daily_net * Decimal::from(overlap_days);
-        let undated_boost_month = undated_daily_boost * Decimal::from(overlap_days);
-
-        let mut dated_net = Decimal::ZERO;
-        for f in &input.flows {
-            let Some(due) = f.due_date else {
-                continue;
-            };
-            if due >= m_start && due <= m_end {
-                let mag = f.amount;
-                if f.is_inflow {
-                    dated_net += mag;
-                } else {
-                    dated_net -= mag;
-                }
-            }
-        }
-
-        let net_cash_month = scheduled_savings + undated_net_month + dated_net;
+        let net_cash_month = scheduled_savings;
 
         if net_cash_month <= Decimal::ZERO {
             let mut need = -net_cash_month;
@@ -403,7 +313,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
                 contributed_cumulative += add;
                 applied += add;
             }
-            let remainder_pool = pool - applied + undated_boost_month;
+            let remainder_pool = pool - applied;
             if remainder_pool > Decimal::ZERO {
                 let wsum: Decimal = weights.iter().copied().sum();
                 if wsum > Decimal::ZERO {
@@ -491,7 +401,6 @@ mod tests {
             expense_regular_monthly: Decimal::from(1000),
             assets: vec![a],
             liabilities: vec![],
-            flows: vec![],
             inflation_annual_percent: None,
         };
         let out = project_net_worth_series(&inp).unwrap();
@@ -531,13 +440,38 @@ mod tests {
             expense_regular_monthly: Decimal::from(3000),
             assets: vec![a, b],
             liabilities: vec![],
-            flows: vec![],
             inflation_annual_percent: None,
         };
         let nom = first_month_per_asset_contribution_nominals(&inp);
         assert_eq!(nom.len(), 2);
         assert_eq!(nom[0], Decimal::from(500));
         assert_eq!(nom[1], Decimal::from(500));
+    }
+
+    #[test]
+    fn planning_flows_do_not_affect_monthly_contribution_nominals() {
+        let id_a = Uuid::from_u128(1);
+        let a = SimAsset {
+            id: id_a,
+            value: Decimal::ZERO,
+            purchase_price: None,
+            is_liquid: true,
+            expected_annual_return_percent: None,
+            monthly_contribution_fixed: Decimal::ZERO,
+            contribution_remainder_weight: Decimal::ONE,
+        };
+        let inp = ProjectionInput {
+            ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            horizon_months: 1,
+            income_regular_monthly: Decimal::from(1000),
+            expense_regular_monthly: Decimal::ZERO,
+            assets: vec![a],
+            liabilities: vec![],
+            inflation_annual_percent: None,
+        };
+        let nom = first_month_per_asset_contribution_nominals(&inp);
+        assert_eq!(nom.len(), 1);
+        assert_eq!(nom[0], Decimal::from(1000));
     }
 
     #[test]
@@ -557,7 +491,6 @@ mod tests {
                 contribution_remainder_weight: Decimal::ZERO,
             }],
             liabilities: vec![],
-            flows: vec![],
             inflation_annual_percent: None,
         };
         let out = project_net_worth_series(&inp).unwrap();

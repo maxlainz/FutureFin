@@ -143,7 +143,6 @@ struct LiabilityRow {
     notes: Option<String>,
     sort_index: i32,
     principal_derived_from_plan: bool,
-    owner_user_id: Option<Uuid>,
 }
 
 fn normalize_label(raw: &str) -> Result<String, ApiError> {
@@ -379,7 +378,7 @@ pub async fn list_liabilities(
             sqlx::query_as(
                 r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
                           payment_amount, payment_frequency, payment_end_date, notes,
-                          sort_index, principal_derived_from_plan, owner_user_id
+                          sort_index, principal_derived_from_plan
                    FROM liabilities
                    WHERE installation_id = $1
                    ORDER BY sort_index ASC, label ASC"#,
@@ -392,7 +391,7 @@ pub async fn list_liabilities(
             sqlx::query_as(
                 r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
                           payment_amount, payment_frequency, payment_end_date, notes,
-                          sort_index, principal_derived_from_plan, owner_user_id
+                          sort_index, principal_derived_from_plan
                    FROM liabilities
                    WHERE installation_id = $1 AND owner_user_id = $2
                    ORDER BY sort_index ASC, label ASC"#,
@@ -493,7 +492,7 @@ pub async fn create_liability(
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            RETURNING id, category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan, owner_user_id"#,
+                     sort_index, principal_derived_from_plan"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -565,7 +564,7 @@ pub async fn patch_liability(
     let row: Option<LiabilityRow> = sqlx::query_as(
         r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan, owner_user_id
+                  sort_index, principal_derived_from_plan
            FROM liabilities
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -670,7 +669,7 @@ pub async fn patch_liability(
            WHERE id = $12 AND installation_id = $13
            RETURNING id, category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan, owner_user_id"#,
+                     sort_index, principal_derived_from_plan"#,
     )
     .bind(new_cat)
     .bind(&new_label)

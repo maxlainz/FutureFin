@@ -119,7 +119,6 @@ pub(crate) struct BudgetEntryJoinRow {
     amount: Decimal,
     notes: Option<String>,
     sort_index: i32,
-    owner_user_id: Option<Uuid>,
 }
 
 #[derive(Debug, FromRow)]
@@ -218,7 +217,7 @@ async fn fetch_budget_rows_and_derived_liabilities(
         LedgerView::Household => {
             sqlx::query_as(
                 r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                          b.notes, b.sort_index, b.owner_user_id
+                          b.notes, b.sort_index
                    FROM budget_entries b
                    JOIN categories c ON c.id = b.category_id
                    WHERE b.installation_id = $1
@@ -231,7 +230,7 @@ async fn fetch_budget_rows_and_derived_liabilities(
         LedgerView::Mine => {
             sqlx::query_as(
                 r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                          b.notes, b.sort_index, b.owner_user_id
+                          b.notes, b.sort_index
                    FROM budget_entries b
                    JOIN categories c ON c.id = b.category_id
                    WHERE b.installation_id = $1 AND b.owner_user_id = $2
@@ -473,7 +472,7 @@ pub async fn create_budget_entry(
 
     let row: BudgetEntryJoinRow = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                  b.notes, b.sort_index, b.owner_user_id
+                  b.notes, b.sort_index
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1"#,
@@ -528,7 +527,7 @@ pub async fn patch_budget_entry(
 
     let row: Option<BudgetEntryJoinRow> = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                  b.notes, b.sort_index, b.owner_user_id
+                  b.notes, b.sort_index
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1 AND b.installation_id = $2"#,
@@ -583,8 +582,7 @@ pub async fn patch_budget_entry(
                      ) AS scope,
                      budget_entries.amount,
                      budget_entries.notes,
-                     budget_entries.sort_index,
-                     budget_entries.owner_user_id"#,
+                     budget_entries.sort_index"#,
     )
     .bind(new_cat)
     .bind(new_amount)

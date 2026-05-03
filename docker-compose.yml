@@ -4,7 +4,8 @@
 #   make docker-up          o   ./scripts/docker-stack-up.sh
 #   make docker-rebuild     o   ./scripts/docker-stack-up.sh --build
 #
-# `docker compose watch`: si :8080 muestra página en blanco, fuerza rebuild del stage web:
+# Compose Watch (rebuild automático): usa también `docker-compose.watch.yml` — véase ese archivo.
+# Si :8080 muestra página en blanco, fuerza rebuild del stage web:
 #   docker compose build --no-cache futurefin-api && docker compose up -d futurefin-api
 # (el sync host dist→contenedor se eliminó: un dist vacío borraba la UI embebida).
 name: futurefin
@@ -33,27 +34,6 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
-    develop:
-      watch:
-        # No sincronizar ./apps/web/dist → /app/web: si dist no existe o está vacío en
-        # el host, se borra la UI embebida en la imagen y :8080 queda en blanco.
-        - action: rebuild
-          path: ./apps/api
-        - action: rebuild
-          path: ./crates/domain
-        - action: rebuild
-          path: ./apps/web
-          ignore:
-            - "**/node_modules/**"
-            - "**/dist/**"
-        - action: rebuild
-          path: ./Cargo.toml
-        - action: rebuild
-          path: ./Cargo.lock
-        - action: rebuild
-          path: ./package.json
-        - action: rebuild
-          path: ./package-lock.json
     container_name: futurefin-api
     healthcheck:
       test:

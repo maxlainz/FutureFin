@@ -8,7 +8,6 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub struct SessionUser {
     pub id: UserId,
-    pub username: String,
 }
 
 pub async fn require_session_user(jar: &CookieJar, pool: &PgPool) -> Result<SessionUser, ApiError> {
@@ -16,8 +15,8 @@ pub async fn require_session_user(jar: &CookieJar, pool: &PgPool) -> Result<Sess
         return Err(ApiError::Unauthorized);
     };
     let sid = Uuid::parse_str(c.value()).map_err(|_| ApiError::Unauthorized)?;
-    let row: Option<(Uuid, String)> = sqlx::query_as(
-        r#"SELECT u.id, u.username
+    let row: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT u.id
            FROM sessions s
            JOIN users u ON u.id = s.user_id
            WHERE s.id = $1 AND s.expires_at > now()"#,
@@ -25,11 +24,10 @@ pub async fn require_session_user(jar: &CookieJar, pool: &PgPool) -> Result<Sess
     .bind(sid)
     .fetch_optional(pool)
     .await?;
-    let Some((id, username)) = row else {
+    let Some(id) = row else {
         return Err(ApiError::Unauthorized);
     };
     Ok(SessionUser {
         id: UserId(id),
-        username,
     })
 }

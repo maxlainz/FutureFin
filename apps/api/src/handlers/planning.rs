@@ -88,7 +88,6 @@ struct PlanningFlowJoinRow {
     due_date: Option<NaiveDate>,
     notes: Option<String>,
     sort_index: i32,
-    owner_user_id: Option<Uuid>,
 }
 
 fn scope_to_direction(scope: &str) -> Result<PlanningFlowDirection, ApiError> {
@@ -189,8 +188,7 @@ pub async fn list_planning_flows(
         LedgerView::Household => {
             sqlx::query_as(
                 r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                          p.expected_amount, p.due_date, p.notes, p.sort_index,
-                          p.owner_user_id
+                          p.expected_amount, p.due_date, p.notes, p.sort_index
                    FROM planning_flows p
                    JOIN categories c ON c.id = p.category_id
                    WHERE p.installation_id = $1
@@ -203,8 +201,7 @@ pub async fn list_planning_flows(
         LedgerView::Mine => {
             sqlx::query_as(
                 r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                          p.expected_amount, p.due_date, p.notes, p.sort_index,
-                          p.owner_user_id
+                          p.expected_amount, p.due_date, p.notes, p.sort_index
                    FROM planning_flows p
                    JOIN categories c ON c.id = p.category_id
                    WHERE p.installation_id = $1 AND p.owner_user_id = $2
@@ -282,7 +279,7 @@ pub async fn create_planning_flow(
 
     let row: PlanningFlowJoinRow = sqlx::query_as(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                  p.expected_amount, p.due_date, p.notes, p.sort_index, p.owner_user_id
+                  p.expected_amount, p.due_date, p.notes, p.sort_index
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1"#,
@@ -339,7 +336,7 @@ pub async fn patch_planning_flow(
 
     let row: Option<PlanningFlowJoinRow> = sqlx::query_as(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                  p.expected_amount, p.due_date, p.notes, p.sort_index, p.owner_user_id
+                  p.expected_amount, p.due_date, p.notes, p.sort_index
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1 AND p.installation_id = $2"#,
@@ -408,8 +405,7 @@ pub async fn patch_planning_flow(
                      planning_flows.expected_amount,
                      planning_flows.due_date,
                      planning_flows.notes,
-                     planning_flows.sort_index,
-                     planning_flows.owner_user_id"#,
+                     planning_flows.sort_index"#,
     )
     .bind(new_cat)
     .bind(&new_title)

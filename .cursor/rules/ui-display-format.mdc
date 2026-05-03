@@ -11,4 +11,8 @@ Al mostrar métricas en `apps/web` (principalmente `App.tsx`):
 
 2. **Porcentajes**: exactamente **un decimal** y el símbolo **` %`** detrás (p. ej. `3,5 %`, retornos positivos `+12,4 %`). Usar `formatPercentAmount` (string API), `formatPercentDisplay` / `formatPercentDisplaySigned` (número), `formatFractionAsPercent`, `formatDebtToAssetsPct`, `formatBreakdownPct`. No concatenar `%` crudo a valores sin formatear; `formatPercentAmount` ya incluye el sufijo ` %`.
 
+3. **Tiles `MetricCard` en `App.tsx`**: la información **adicional del mismo KPI** (segundo importe, segunda tasa, % sobre total, etc.) va siempre en la prop **`parenthetical`**, que la UI muestra **entre paréntesis** con estilo secundario (`.metric-value-parenthetical`). No usar `suffix` con punto medio ni otro patrón paralelo para ese tipo de dato.
+
+4. **Copy mínimo**: priorizar títulos, KPI y acciones; reducir `workspace-sub`, banners, hints bajo campos y párrafos explicativos. Estados vacíos/error en pocas palabras (`Sin datos.`, `Sin acceso.`, etc.). No añadir bloques `hint` en `MetricCard` salvo excepción acordada.
+
 Al añadir vistas nuevas, reutilizar estas funciones en lugar de `toLocaleString` ad hoc para dinero o %.

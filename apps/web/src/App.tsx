@@ -104,11 +104,6 @@ type CategoryBreakdownLineApi = {
   total: string;
 };
 
-type TypeTagBreakdownLineApi = {
-  type_tag: string;
-  total: string;
-};
-
 type SummaryResponse = {
   total_assets: string;
   total_liabilities: string;
@@ -117,7 +112,6 @@ type SummaryResponse = {
   financial_health: FinancialHealthMetrics;
   assets_by_category: CategoryBreakdownLineApi[];
   liabilities_by_category: CategoryBreakdownLineApi[];
-  liabilities_by_type_tag: TypeTagBreakdownLineApi[];
 };
 
 type BudgetTotalsApi = {
@@ -167,27 +161,6 @@ type PlanningFlowApiRow = {
   due_date: string | null;
   notes: string | null;
   sort_index: number;
-};
-
-type FireSnapshotApi = {
-  net_worth: string;
-  total_assets: string;
-  total_liabilities: string;
-  income_monthly_equivalent: string;
-  expense_total_monthly_equivalent: string;
-  net_monthly_equivalent: string;
-  annual_expenses_estimate: string;
-  portfolio_target_25x?: string;
-  gap_to_target_25x?: string;
-  implied_withdrawal_rate_vs_networth?: string;
-  estimated_months_to_25x_linear?: string;
-  projection_includes_inflation: boolean;
-  projection_target_age: number | null;
-  show_age_mode: string;
-  mvp_model_note: string;
-  engine_portfolio_target?: string;
-  engine_fire_reached: boolean;
-  engine_fire_reach_month_index?: number | null;
 };
 
 type ProjectionPointApi = {
@@ -321,13 +294,69 @@ const CATEGORY_SCOPES: CategoryScope[] = [
   "expense",
 ];
 
+/**
+ * Paletas por ámbito: cada entrada es un color bien diferenciado dentro de la misma
+ * familia (fríos = activos, cálidos = pasivos). Se cicla si hay más categorías.
+ */
+/** Activos: saltos amplios en matiz + L/S alternados para que segmentos vecinos no parezcan gemelos. */
+const SUMMARY_CHART_PALETTE_ASSET: readonly [number, number, number][] = [
+  [205, 52, 37],
+  [118, 62, 33],
+  [178, 48, 44],
+  [138, 68, 36],
+  [218, 46, 42],
+  [158, 70, 34],
+  [192, 42, 47],
+  [128, 56, 39],
+];
+
+const SUMMARY_CHART_PALETTE_LIABILITY: readonly [number, number, number][] = [
+  [14, 64, 41],
+  [32, 58, 44],
+  [44, 56, 42],
+  [22, 62, 39],
+  [8, 66, 40],
+  [38, 54, 46],
+  [26, 60, 43],
+  [354, 58, 41],
+];
+
+function summaryChartSliceParts(
+  scope: "asset" | "liability",
+  sliceIndex: number,
+): { h: number; s: number; l: number } {
+  const pal =
+    scope === "asset"
+      ? SUMMARY_CHART_PALETTE_ASSET
+      : SUMMARY_CHART_PALETTE_LIABILITY;
+  const [h, s, l] = pal[sliceIndex % pal.length]!;
+  return { h, s, l };
+}
+
+function summaryChartSliceColor(
+  scope: "asset" | "liability",
+  sliceIndex: number,
+): string {
+  const { h, s, l } = summaryChartSliceParts(scope, sliceIndex);
+  return `hsl(${h} ${s}% ${l}%)`;
+}
+
+function summaryBreakdownBarGradient(
+  scope: "asset" | "liability",
+  sliceIndex: number,
+): string {
+  const { h, s, l } = summaryChartSliceParts(scope, sliceIndex);
+  const lo = `hsl(${h} ${s}% ${l}%)`;
+  const hi = `hsl(${h} ${Math.max(s - 8, 36)}% ${Math.min(l + 12, 56)}%)`;
+  return `linear-gradient(90deg, ${lo}, ${hi})`;
+}
+
 type TabId =
   | "summary"
   | "assets"
   | "liabilities"
   | "budget"
   | "upcoming"
-  | "retirement"
   | "projection"
   | "settings";
 
@@ -344,7 +373,6 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "liabilities", label: "Pasivos" },
   { id: "budget", label: "Presupuesto" },
   { id: "upcoming", label: "Próximos" },
-  { id: "retirement", label: "Jubilación" },
   { id: "projection", label: "Proyección" },
   { id: "settings", label: "Ajustes" },
 ];
@@ -375,6 +403,19 @@ function parseDisplayDecimal(s: string): number | null {
   if (!t) return null;
   const n = Number(t.replace(",", "."));
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Valores numéricos devueltos por la API (p. ej. `2.500000`) compactados para `<input>`
+ * (`2.5`). Si no parsea a número finito, devuelve el texto recortado sin cambiar.
+ */
+function formatEditableDecimalString(raw: string | null | undefined): string {
+  if (raw == null) return "";
+  const t = String(raw).trim();
+  if (!t) return "";
+  const n = parseDisplayDecimal(t);
+  if (n === null || !Number.isFinite(n)) return t;
+  return JSON.stringify(n);
 }
 
 /**
@@ -455,7 +496,7 @@ function assetFixedMonthlyEquivalentNum(a: AssetApiRow): number {
   return fixed;
 }
 
-/** Importe nominal mensual (primer mes del motor): cuota fija escalada + parte del remanente. */
+/** Importe nominal mensual (primer mes del motor): cuota fija escalada + remanente; solo presupuesto recurrente (sin Próximos). */
 function formatAssetContributionNominalCell(
   a: AssetApiRow,
   currencyIso: string,
@@ -470,6 +511,88 @@ function formatAssetContributionNominalCell(
   }
   const eq = assetFixedMonthlyEquivalentNum(a);
   return eq > 0 ? formatCurrencyNumber(eq, currencyIso) : METRIC_DASH;
+}
+
+/** Misma lógica que la celda «Aporte»: número mensual estimado por activo. */
+function assetContributionMonthlyEstimateNum(a: AssetApiRow): number {
+  const raw = a.contribution_nominal_monthly;
+  if (raw != null && String(raw).trim() !== "") {
+    const n = parseDisplayDecimal(String(raw).trim());
+    if (n !== null && n > 0) return n;
+  }
+  return assetFixedMonthlyEquivalentNum(a);
+}
+
+/** Suma valor actual y coste solo en posiciones con compra válida (> 0). */
+function assetPortfolioCostTotals(
+  assets: AssetApiRow[],
+): { cost: number; currentOnCost: number } | null {
+  let cost = 0;
+  let currentOnCost = 0;
+  for (const a of assets) {
+    const pur = parseDisplayDecimal(String(a.purchase_price ?? "").trim());
+    const cur = parseDisplayDecimal(a.current_value);
+    if (pur === null || pur <= 0 || cur === null) continue;
+    cost += pur;
+    currentOnCost += cur;
+  }
+  if (cost <= 0) return null;
+  return { cost, currentOnCost };
+}
+
+/** Cuota mensual equivalente (mensual o semanal ×52/12). */
+function liabilityPaymentMonthlyEquivalentNum(
+  row: LiabilityApiRow,
+): number {
+  const amt = parseDisplayDecimal(String(row.payment_amount ?? "").trim());
+  if (amt === null || amt <= 0) return 0;
+  if (row.payment_frequency === "weekly") return (amt * 52) / 12;
+  if (row.payment_frequency === "monthly") return amt;
+  return 0;
+}
+
+/** TAE % media ponderada por principal (solo pasivos con TAE informada). */
+function liabilitiesWeightedAprPercent(
+  liabilities: LiabilityApiRow[],
+): number | null {
+  let num = 0;
+  let den = 0;
+  for (const row of liabilities) {
+    const p = parseDisplayDecimal(row.principal);
+    const apr = parseDisplayDecimal(String(row.apr_percent ?? "").trim());
+    if (p === null || p <= 0 || apr === null || !Number.isFinite(apr)) {
+      continue;
+    }
+    num += p * apr;
+    den += p;
+  }
+  if (den <= 0) return null;
+  return num / den;
+}
+
+/**
+ * Suma aproximada de interés mensual (saldo × TAE ÷ 12 por pasivo).
+ * No modela amortización; sirve como orden de magnitud.
+ */
+function liabilitiesApproxMonthlyInterestSum(
+  liabilities: LiabilityApiRow[],
+): number {
+  let sum = 0;
+  for (const row of liabilities) {
+    const p = parseDisplayDecimal(row.principal);
+    const apr = parseDisplayDecimal(String(row.apr_percent ?? "").trim());
+    if (
+      p === null ||
+      p <= 0 ||
+      apr === null ||
+      !Number.isFinite(apr) ||
+      apr <= 0
+    ) {
+      continue;
+    }
+    sum += (p * (apr / 100)) / 12;
+  }
+  return sum;
 }
 
 /** Etiquetas de eje Y: compactas si el importe es muy grande. */
@@ -968,6 +1091,20 @@ function formatFractionAsPercent(ratio: string | null | undefined): string {
   return formatPercentDisplay(r * 100);
 }
 
+/** Ocultar KPI de importe cuando falta dato o es exactamente 0. */
+function isZeroMoneyMetric(s: string | null | undefined): boolean {
+  if (s == null || String(s).trim() === "") return true;
+  const n = parseDisplayDecimal(String(s));
+  return n === null || n === 0;
+}
+
+/** Ocultar KPI de fracción (tasa, ratio 0–1) cuando falta o es 0. */
+function isZeroFractionMetric(ratio: string | null | undefined): boolean {
+  if (ratio == null || String(ratio).trim() === "") return true;
+  const r = Number(String(ratio).replace(",", "."));
+  return !Number.isFinite(r) || r === 0;
+}
+
 function formatMonthsRough(s: string | null | undefined): string {
   if (s == null || s === "") return METRIC_DASH;
   const r = Number(String(s).replace(",", "."));
@@ -1336,10 +1473,6 @@ export default function App() {
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
 
-  const [fireSnapshot, setFireSnapshot] = useState<FireSnapshotApi | null>(null);
-  const [fireBusy, setFireBusy] = useState(false);
-  const [fireError, setFireError] = useState<string | null>(null);
-
   const [projectionSeries, setProjectionSeries] =
     useState<ProjectionSeriesApi | null>(null);
   const [projectionBusy, setProjectionBusy] = useState(false);
@@ -1605,30 +1738,6 @@ export default function App() {
     }
   }, [ledgerPersonScope]);
 
-  const loadFireSnapshotPage = useCallback(async () => {
-    setFireBusy(true);
-    setFireError(null);
-    try {
-      const res = await fetch(
-        `/v1/fire/snapshot${ledgerViewQs(ledgerPersonScope)}`,
-        defaultFetchInit,
-      );
-      if (res.status === 403 || res.status === 404) {
-        setFireSnapshot(null);
-        return;
-      }
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
-      }
-      setFireSnapshot((await res.json()) as FireSnapshotApi);
-    } catch (e: unknown) {
-      setFireSnapshot(null);
-      setFireError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setFireBusy(false);
-    }
-  }, [ledgerPersonScope]);
-
   const loadProjectionSeriesPage = useCallback(async () => {
     setProjectionBusy(true);
     setProjectionError(null);
@@ -1771,7 +1880,7 @@ export default function App() {
     const inst = installation.installation;
     setProjectionInflationDraft(inst.projection_includes_inflation);
     setProjectionInflationPctDraft(
-      inst.annual_inflation_assumption_percent ?? "",
+      formatEditableDecimalString(inst.annual_inflation_assumption_percent),
     );
     setProjectionTargetAgeDraft(
       inst.projection_target_age != null
@@ -1831,13 +1940,6 @@ export default function App() {
     }
     void loadSummaryPage();
   }, [user, hasMembership, activeTab, loadSummaryPage]);
-
-  useEffect(() => {
-    if (!user || !hasMembership || activeTab !== "retirement") {
-      return;
-    }
-    void loadFireSnapshotPage();
-  }, [user, hasMembership, activeTab, loadFireSnapshotPage]);
 
   useEffect(() => {
     if (!user || !hasMembership || activeTab !== "projection") {
@@ -1921,8 +2023,6 @@ export default function App() {
       setPlanningModalOpen(false);
       setCategoryModalOpen(false);
       setCategoryRenameModalOpen(false);
-      setFireSnapshot(null);
-      setFireError(null);
       setProjectionSeries(null);
       setProjectionError(null);
       setBackupZipError(null);
@@ -2399,15 +2499,21 @@ export default function App() {
     setEditingAssetId(a.id);
     setAssetFormCategoryId(a.category_id);
     setAssetFormName(a.name);
-    setAssetFormValue(a.current_value);
-    setAssetFormPurchase(a.purchase_price ?? "");
+    setAssetFormValue(formatEditableDecimalString(a.current_value));
+    setAssetFormPurchase(formatEditableDecimalString(a.purchase_price ?? ""));
     setAssetFormLiquid(a.is_liquid);
-    setAssetFormExpectedReturn(a.expected_annual_return_percent ?? "");
-    setAssetFormMonthlyFixed(a.monthly_contribution_fixed ?? "0");
+    setAssetFormExpectedReturn(
+      formatEditableDecimalString(a.expected_annual_return_percent ?? ""),
+    );
+    setAssetFormMonthlyFixed(
+      formatEditableDecimalString(a.monthly_contribution_fixed ?? "0"),
+    );
     setAssetFormContributionFrequency(
       a.contribution_frequency === "weekly" ? "weekly" : "monthly",
     );
-    setAssetFormRemainderWeight(a.contribution_remainder_weight ?? "0");
+    setAssetFormRemainderWeight(
+      formatEditableDecimalString(a.contribution_remainder_weight ?? "0"),
+    );
     setAssetFormNotes(a.notes ?? "");
   }
 
@@ -2544,9 +2650,11 @@ export default function App() {
     setLiabilityFormCategoryId(row.category_id);
     setLiabilityFormLabel(row.label);
     setLiabilityFormTypeTag(row.type_tag ?? "");
-    setLiabilityFormPrincipal(row.principal);
-    setLiabilityFormApr(row.apr_percent ?? "");
-    setLiabilityFormPaymentAmount(row.payment_amount ?? "");
+    setLiabilityFormPrincipal(formatEditableDecimalString(row.principal));
+    setLiabilityFormApr(formatEditableDecimalString(row.apr_percent ?? ""));
+    setLiabilityFormPaymentAmount(
+      formatEditableDecimalString(row.payment_amount ?? ""),
+    );
     setLiabilityFormPaymentFrequency(row.payment_frequency ?? "");
     setLiabilityFormPaymentEnd(row.payment_end_date ?? "");
     setLiabilityFormNotes(row.notes ?? "");
@@ -2653,7 +2761,7 @@ export default function App() {
     setEditingBudgetEntryId(row.id);
     setBudgetFormScope(row.scope);
     setBudgetFormCategoryId(row.category_id);
-    setBudgetFormAmount(row.amount);
+    setBudgetFormAmount(formatEditableDecimalString(row.amount));
     setBudgetFormNotes(row.notes ?? "");
   }
 
@@ -2816,7 +2924,7 @@ export default function App() {
     setPlanningFormScope(scope);
     setPlanningFormCategoryId(row.category_id);
     setPlanningFormTitle(row.title);
-    setPlanningFormAmount(row.expected_amount);
+    setPlanningFormAmount(formatEditableDecimalString(row.expected_amount));
     setPlanningFormDue(row.due_date ?? "");
     setPlanningFormNotes(row.notes ?? "");
   }
@@ -2839,10 +2947,6 @@ export default function App() {
           <div className="auth-brand-inner">
             <span className="logo-mark">FF</span>
             <h1>FutureFin</h1>
-            <p>
-              Patrimonio, presupuesto, planificación y FIRE — mismo modelo que
-              el cliente de referencia, en el navegador.
-            </p>
           </div>
         </div>
         <div className="auth-panel-wrap">
@@ -2903,17 +3007,7 @@ export default function App() {
             {sessionError ? (
               <p className="error compact">{sessionError}</p>
             ) : null}
-            <p className="hint">
-              Usuario 3–64 caracteres (<code>.</code> <code>_</code>{" "}
-              <code>-</code>). Contraseña ≥ 12 caracteres. Cada usuario se crea
-              aquí; el propietario de la instalación debe aprobar el acceso en{" "}
-              <strong>Ajustes</strong>.
-            </p>
           </div>
-          <footer className="auth-footer muted">
-            Cuando tengas acceso al hogar verás el escritorio con pestañas (Resumen,
-            Activos…).
-          </footer>
         </div>
       </div>
     );
@@ -2974,9 +3068,6 @@ export default function App() {
           {userProfileError ? (
             <ModalFormError message={userProfileError} />
           ) : null}
-          <p className="muted tight">
-            Usuario: <strong>{user.username}</strong>
-          </p>
           <label className="field">
             <span>Fecha de nacimiento (opcional)</span>
             <input
@@ -2986,9 +3077,6 @@ export default function App() {
               max={new Date().toISOString().slice(0, 10)}
               autoComplete="bday"
             />
-            <span className="hint">
-              Guardada en tu perfil. Vacía el campo y guarda para borrarla.
-            </span>
           </label>
           <div className="asset-form-actions">
             <button
@@ -3025,9 +3113,7 @@ export default function App() {
           <div className="workspace">
             <div className="workspace-header">
               <h2 className="workspace-title">No se pudo cargar el acceso</h2>
-              <p className="workspace-sub muted">
-                Comprueba la conexión con la API e inténtalo de nuevo.
-              </p>
+              <p className="workspace-sub muted">Revisa la conexión.</p>
             </div>
             {installationError ? (
               <div className="banner error-banner">{installationError}</div>
@@ -3048,16 +3134,9 @@ export default function App() {
             <div className="workspace-header">
               <h2 className="workspace-title">Acceso pendiente</h2>
               <p className="workspace-sub">
-                Tu cuenta está registrada; el propietario del hogar debe aprobarte
-                antes de que puedas usar FutureFin. No hay nada más que hacer aquí
-                hasta entonces.
+                <strong>Ajustes → Acceso</strong>
               </p>
             </div>
-            <p className="muted tight">
-              Pídele al propietario del hogar que inicie sesión en FutureFin,
-              abra <strong>Ajustes → Acceso</strong> y te conceda
-              entrada ahí.
-            </p>
           </div>
         </main>
       ) : installationGate === "bootstrap" ? (
@@ -3065,10 +3144,6 @@ export default function App() {
           <div className="workspace">
             <div className="workspace-header">
               <h2 className="workspace-title">Crear el hogar</h2>
-              <p className="workspace-sub">
-                Aún no hay instalación en esta base. Define moneda y zona horaria
-                para inicializarla; quedarás como propietario.
-              </p>
             </div>
             {installationError ? (
               <div className="banner error-banner">{installationError}</div>
@@ -3115,7 +3190,7 @@ export default function App() {
                 )
               }
               aria-label="Ámbito de datos: hogar o solo tus registros"
-              title="Misma instalación compartida. Hogar: todos los registros. Solo tus filas: ítems con tu usuario como titular (owner_user_id). Afecta activos, pasivos, presupuesto, próximos, resumen, FIRE y proyección."
+              title="Hogar: todos los datos. Tu usuario: solo filas donde eres titular."
             >
               <option value="household">Todo el hogar</option>
               <option value="mine">{user.username}</option>
@@ -3186,6 +3261,7 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
             canEdit={installation?.role !== "viewer"}
             formError={assetsError}
             assetModalOpen={assetModalOpen}
@@ -3234,6 +3310,7 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
             canEdit={installation?.role !== "viewer"}
             formError={liabilitiesError}
             liabilityModalOpen={liabilityModalOpen}
@@ -3282,6 +3359,7 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
             canEdit={installation?.role !== "viewer"}
             formError={budgetError}
             budgetModalOpen={budgetModalOpen}
@@ -3320,6 +3398,7 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
             canEdit={installation?.role !== "viewer"}
             formError={planningError}
             planningModalOpen={planningModalOpen}
@@ -3355,16 +3434,6 @@ export default function App() {
               beginEditPlanningFlow(row);
               setPlanningModalOpen(true);
             }}
-          />
-        ) : activeTab === "retirement" ? (
-          <RetirementView
-            installation={installation}
-            installationBusy={installationBusy}
-            hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
-            fireSnapshot={fireSnapshot}
-            fireBusy={fireBusy}
-            fireError={fireError}
           />
         ) : activeTab === "projection" ? (
           <ProjectionView
@@ -3470,15 +3539,81 @@ export default function App() {
   );
 }
 
-function assetCategoryLabel(categories: CategoryRow[], id: string): string {
-  const c = categories.find((x) => x.id === id);
-  return c?.name ?? id.slice(0, 8);
+/** Filas agrupadas por categoría, en el orden de `categories`; al final, IDs huérfanos. */
+function groupRowsByCategoryOrdered<T extends { category_id: string }>(
+  rows: T[],
+  categories: CategoryRow[],
+): { categoryId: string; label: string; items: T[] }[] {
+  const byCat = new Map<string, T[]>();
+  for (const row of rows) {
+    const prev = byCat.get(row.category_id);
+    if (prev) prev.push(row);
+    else byCat.set(row.category_id, [row]);
+  }
+  const out: { categoryId: string; label: string; items: T[] }[] = [];
+  const seen = new Set<string>();
+  for (const c of categories) {
+    const items = byCat.get(c.id);
+    if (items?.length) {
+      out.push({ categoryId: c.id, label: c.name, items });
+      seen.add(c.id);
+    }
+  }
+  for (const [id, items] of byCat) {
+    if (!seen.has(id) && items.length > 0) {
+      out.push({
+        categoryId: id,
+        label: categories.find((x) => x.id === id)?.name ?? id.slice(0, 8),
+        items,
+      });
+    }
+  }
+  return out;
+}
+
+function RowEditIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+    </svg>
+  );
+}
+
+function RowTrashIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
 }
 
 function AssetsView({
   installation,
   installationBusy,
   hasMembership,
+  ledgerPersonScope,
   canEdit,
   formError,
   assetModalOpen,
@@ -3516,6 +3651,7 @@ function AssetsView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
+  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   assetModalOpen: boolean;
@@ -3556,35 +3692,118 @@ function AssetsView({
     installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
 
+  const assetMetricsReady = hasMembership && !assetsBusy;
+  const assetsTotalVal = assetMetricsReady
+    ? assets.reduce(
+        (acc, a) => acc + (parseDisplayDecimal(a.current_value) ?? 0),
+        0,
+      )
+    : null;
+  const assetsLiquidVal = assetMetricsReady
+    ? assets.reduce((acc, a) => {
+        if (!a.is_liquid) return acc;
+        return acc + (parseDisplayDecimal(a.current_value) ?? 0);
+      }, 0)
+    : null;
+  const liquidPctParen =
+    assetMetricsReady &&
+    assetsTotalVal !== null &&
+    assetsLiquidVal !== null &&
+    assetsTotalVal > 0
+      ? formatPercentDisplay((assetsLiquidVal / assetsTotalVal) * 100)
+      : undefined;
+
+  const assetCostTotals = assetMetricsReady
+    ? assetPortfolioCostTotals(assets)
+    : null;
+  const assetPnlMoney =
+    assetCostTotals !== null
+      ? assetCostTotals.currentOnCost - assetCostTotals.cost
+      : null;
+  const assetPnlPctSigned =
+    assetCostTotals !== null && assetCostTotals.cost > 0
+      ? (assetCostTotals.currentOnCost / assetCostTotals.cost - 1) * 100
+      : null;
+
+  const assetsMonthlyContributionSum = assetMetricsReady
+    ? assets.reduce((acc, a) => acc + assetContributionMonthlyEstimateNum(a), 0)
+    : null;
+
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Activos</h2>
         <p className="workspace-sub">
           {installationBusy
-            ? "Cargando instalación…"
+            ? "Cargando…"
             : !hasMembership
-              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : `Valores en moneda de la instalación (${currency}). Las categorías deben ser del ámbito Activos. La aportación automática (cuota fija y peso sobre el remanente del presupuesto tras las fijas) alimenta la proyección de patrimonio como en el cliente macOS.`}
+              ? "Sin acceso hasta aprobación."
+              : `Moneda ${currency}`}
         </p>
       </div>
 
+      {hasMembership && ledgerPersonScope === "mine" ? (
+        <div className="banner info-banner tight-banner">
+          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
+        </div>
+      ) : null}
+
       {!installationBusy && !hasMembership ? (
-        <div className="banner info-banner">
-          Cuando tengas acceso podrás registrar activos aquí.
+        <div className="banner info-banner">Sin acceso al hogar.</div>
+      ) : null}
+
+      {hasMembership ? (
+        <div className="metric-grid workspace-kpi-strip">
+          <MetricCard
+            label="Valor total"
+            value={
+              assetMetricsReady && assetsTotalVal !== null
+                ? formatCurrencyNumber(assetsTotalVal, currencyIso)
+                : METRIC_DASH
+            }
+          />
+          <MetricCard
+            label="Valor líquido"
+            value={
+              assetMetricsReady && assetsLiquidVal !== null
+                ? formatCurrencyNumber(assetsLiquidVal, currencyIso)
+                : METRIC_DASH
+            }
+            parenthetical={liquidPctParen}
+          />
+          <MetricCard
+            label="PnL vs compra"
+            value={
+              assetMetricsReady && assetPnlMoney !== null
+                ? formatCurrencyNumber(assetPnlMoney, currencyIso)
+                : METRIC_DASH
+            }
+            parenthetical={
+              assetPnlPctSigned !== null && Number.isFinite(assetPnlPctSigned)
+                ? formatPercentDisplaySigned(assetPnlPctSigned)
+                : undefined
+            }
+          />
+          <MetricCard
+            label="Aporte mensual (est.)"
+            value={
+              assetMetricsReady && assetsMonthlyContributionSum !== null
+                ? formatCurrencyNumber(assetsMonthlyContributionSum, currencyIso)
+                : METRIC_DASH
+            }
+          />
         </div>
       ) : null}
 
       {hasMembership && assetCategories.length === 0 && !assetsBusy ? (
         <div className="banner info-banner">
-          Aún no hay categorías de <strong>Activos</strong>. Créalas en{" "}
-          <strong>Ajustes → Categorías</strong> antes de registrar posiciones.
+          <strong>Activos</strong> · <strong>Ajustes → Categorías</strong>
         </div>
       ) : null}
 
       {!canEdit && hasMembership ? (
         <p className="muted tight">
-          Solo lectura: tu rol no permite crear ni editar activos.
+          Solo lectura.
         </p>
       ) : null}
 
@@ -3667,13 +3886,6 @@ function AssetsView({
               <h4 className="asset-auto-contrib-heading">
                 Aportación automática
               </h4>
-              <p className="muted tight asset-auto-contrib-help">
-                En la proyección mensual se aplican primero las cuotas fijas
-                (recortadas si no hay ahorro suficiente), luego el sobrante del
-                presupuesto se reparte entre activos según el peso (normalizado
-                si la suma supera 100&nbsp;%). Los ingresos próximos positivos
-                sin fecha refuerzan el margen disponible, igual que en macOS.
-              </p>
               <div className="asset-form-grid">
                 <label className="field">
                   <span>Frecuencia cuota fija</span>
@@ -3771,88 +3983,124 @@ function AssetsView({
             No hay activos registrados en esta instalación.
           </p>
         ) : (
-          <div className="table-scroll bordered-top">
-            <table className="assets-table">
-              <thead>
-                <tr>
-                  <th>Nombre</th>
-                  <th>Categoría</th>
-                  <th className="num">Valor</th>
-                  <th className="num">Compra</th>
-                  <th
-                    className="num"
-                    title="Variación acumulada vs precio de compra (no anualizada ni TAE)"
-                  >
-                    Δ compra
-                  </th>
-                  <th>Líquido</th>
-                  <th className="num" title="Rentabilidad anual esperada (proyección)">
-                    Rent. % a.a.
-                  </th>
-                  <th
-                    className="num"
-                    title="Estimación mes 1 del motor: suma nominal de cuota fija (escalada si el ahorro no alcanza) y del reparto del remanente según pesos; sin caja positiva, —."
-                  >
-                    Aporte
-                  </th>
-                  <th>Notas</th>
-                  {canEdit ? <th /> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {assets.map((a) => (
-                  <tr key={a.id}>
-                    <td>{a.name}</td>
-                    <td>{assetCategoryLabel(assetCategories, a.category_id)}</td>
-                    <td className="num">
-                      {formatCurrencyAmount(a.current_value, currencyIso)}
-                    </td>
-                    <td className="num">
-                      {formatCurrencyOrDash(a.purchase_price, currencyIso)}
-                    </td>
-                    <td className="num muted">
-                      {assetImplicitTotalReturnLabel(
-                        a.current_value,
-                        a.purchase_price,
-                      ) ?? METRIC_DASH}
-                    </td>
-                    <td>{a.is_liquid ? "Sí" : "No"}</td>
-                    <td className="num muted">
-                      {a.expected_annual_return_percent != null &&
-                      a.expected_annual_return_percent !== ""
-                        ? formatPercentAmount(a.expected_annual_return_percent)
-                        : METRIC_DASH}
-                    </td>
-                    <td className="num muted tight">
-                      {formatAssetContributionNominalCell(a, currencyIso)}
-                    </td>
-                    <td className="asset-notes-cell">
-                      {a.notes ?? METRIC_DASH}
-                    </td>
-                    {canEdit ? (
-                      <td className="asset-actions-cell">
-                        <button
-                          type="button"
-                          className="btn ghost"
-                          disabled={assetSaving}
-                          onClick={() => beginEditAsset(a)}
-                        >
-                          Editar
-                        </button>
-                        <button
-                          type="button"
-                          className="btn ghost danger"
-                          disabled={assetSaving}
-                          onClick={() => deleteAssetRow(a.id)}
-                        >
-                          Eliminar
-                        </button>
-                      </td>
-                    ) : null}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="ledger-by-category-stack bordered-top">
+            {groupRowsByCategoryOrdered(assets, assetCategories).map((g) => {
+              const catTotalVal = g.items.reduce(
+                (acc, a) => acc + (parseDisplayDecimal(a.current_value) ?? 0),
+                0,
+              );
+              return (
+                <div key={g.categoryId} className="ledger-category-block">
+                  <div className="ledger-category-block-head">
+                    <h4 className="subsection-title">{g.label}</h4>
+                    <span className="ledger-category-total">
+                      {formatCurrencyNumber(catTotalVal, currencyIso)}
+                    </span>
+                  </div>
+                  <div className="table-scroll bordered-top">
+                    <table className="assets-table">
+                      <thead>
+                        <tr>
+                          <th>Nombre</th>
+                          <th className="num">Valor</th>
+                          <th className="num">Compra</th>
+                          <th
+                            className="num"
+                            title="Variación vs precio de compra (no anualizada)"
+                          >
+                            Δ compra
+                          </th>
+                          <th>Líquido</th>
+                          <th
+                            className="num"
+                            title="Rentabilidad anual esperada (proyección)"
+                          >
+                            Rent. % a.a.
+                          </th>
+                          <th
+                            className="num"
+                            title="Aporte estimado mes 1 (cuota fija + remanente por pesos)"
+                          >
+                            Aporte
+                          </th>
+                          <th>Notas</th>
+                          {canEdit ? (
+                            <th className="asset-actions-cell">
+                              <span className="sr-only">Acciones</span>
+                            </th>
+                          ) : null}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.items.map((a) => (
+                          <tr key={a.id}>
+                            <td>{a.name}</td>
+                            <td className="num">
+                              {formatCurrencyAmount(
+                                a.current_value,
+                                currencyIso,
+                              )}
+                            </td>
+                            <td className="num">
+                              {formatCurrencyOrDash(
+                                a.purchase_price,
+                                currencyIso,
+                              )}
+                            </td>
+                            <td className="num muted">
+                              {assetImplicitTotalReturnLabel(
+                                a.current_value,
+                                a.purchase_price,
+                              ) ?? METRIC_DASH}
+                            </td>
+                            <td>{a.is_liquid ? "Sí" : "No"}</td>
+                            <td className="num muted">
+                              {a.expected_annual_return_percent != null &&
+                              a.expected_annual_return_percent !== ""
+                                ? formatPercentAmount(
+                                    a.expected_annual_return_percent,
+                                  )
+                                : METRIC_DASH}
+                            </td>
+                            <td className="num muted tight">
+                              {formatAssetContributionNominalCell(
+                                a,
+                                currencyIso,
+                              )}
+                            </td>
+                            <td className="asset-notes-cell">
+                              {a.notes ?? METRIC_DASH}
+                            </td>
+                            {canEdit ? (
+                              <td className="asset-actions-cell budget-row-actions">
+                                <button
+                                  type="button"
+                                  className="btn ghost icon-btn"
+                                  aria-label="Editar activo"
+                                  disabled={assetSaving}
+                                  onClick={() => beginEditAsset(a)}
+                                >
+                                  <RowEditIcon />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn ghost danger icon-btn"
+                                  aria-label="Eliminar activo"
+                                  disabled={assetSaving}
+                                  onClick={() => deleteAssetRow(a.id)}
+                                >
+                                  <RowTrashIcon />
+                                </button>
+                              </td>
+                            ) : null}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
@@ -3860,14 +4108,11 @@ function AssetsView({
   );
 }
 
-function liabilityCatLabel(categories: CategoryRow[], id: string): string {
-  return categories.find((x) => x.id === id)?.name ?? id.slice(0, 8);
-}
-
 function LiabilitiesView({
   installation,
   installationBusy,
   hasMembership,
+  ledgerPersonScope,
   canEdit,
   formError,
   liabilityModalOpen,
@@ -3905,6 +4150,7 @@ function LiabilitiesView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
+  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   liabilityModalOpen: boolean;
@@ -3953,35 +4199,103 @@ function LiabilitiesView({
     currencyIso,
   );
 
+  const liabilityMetricsReady = hasMembership && !liabilitiesBusy;
+  const liabilityPrincipalSum = liabilityMetricsReady
+    ? liabilities.reduce(
+        (acc, r) => acc + (parseDisplayDecimal(r.principal) ?? 0),
+        0,
+      )
+    : null;
+  const liabilitiesMonthlyServiceSum = liabilityMetricsReady
+    ? liabilities.reduce(
+        (acc, r) => acc + liabilityPaymentMonthlyEquivalentNum(r),
+        0,
+      )
+    : null;
+
+  const liabilitiesWeightedApr = liabilityMetricsReady
+    ? liabilitiesWeightedAprPercent(liabilities)
+    : null;
+
+  const liabilitiesApproxMonthlyInterest = liabilityMetricsReady
+    ? liabilitiesApproxMonthlyInterestSum(liabilities)
+    : null;
+
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Pasivos</h2>
         <p className="workspace-sub">
           {installationBusy
-            ? "Cargando instalación…"
+            ? "Cargando…"
             : !hasMembership
-              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : `Principal y planes de pago en ${currency}. Puedes derivar el principal desde la cuota y la fecha fin (como en el cliente Mac). Las categorías deben ser del ámbito Pasivos. Al cargar la lista, los planes con fecha fin pasada se eliminan (tipo arranque Mac).`}
+              ? "Sin acceso hasta aprobación."
+              : `Moneda ${currency}`}
         </p>
       </div>
 
+      {hasMembership && ledgerPersonScope === "mine" ? (
+        <div className="banner info-banner tight-banner">
+          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
+        </div>
+      ) : null}
+
       {!installationBusy && !hasMembership ? (
-        <div className="banner info-banner">
-          Cuando tengas acceso podrás registrar pasivos aquí.
+        <div className="banner info-banner">Sin acceso al hogar.</div>
+      ) : null}
+
+      {hasMembership ? (
+        <div className="metric-grid workspace-kpi-strip">
+          <MetricCard
+            label="Principal total"
+            value={
+              liabilityMetricsReady && liabilityPrincipalSum !== null
+                ? formatCurrencyNumber(liabilityPrincipalSum, currencyIso)
+                : METRIC_DASH
+            }
+          />
+          <MetricCard
+            label="Servicio mensual equivalente"
+            value={
+              liabilityMetricsReady && liabilitiesMonthlyServiceSum !== null
+                ? formatCurrencyNumber(
+                    liabilitiesMonthlyServiceSum,
+                    currencyIso,
+                  )
+                : METRIC_DASH
+            }
+          />
+          <MetricCard
+            label="TAE media ponderada"
+            value={
+              liabilityMetricsReady && liabilitiesWeightedApr !== null
+                ? formatPercentDisplay(liabilitiesWeightedApr)
+                : METRIC_DASH
+            }
+          />
+          <MetricCard
+            label="Interés mensual aprox."
+            value={
+              liabilityMetricsReady && liabilitiesApproxMonthlyInterest !== null
+                ? formatCurrencyNumber(
+                    liabilitiesApproxMonthlyInterest,
+                    currencyIso,
+                  )
+                : METRIC_DASH
+            }
+          />
         </div>
       ) : null}
 
       {hasMembership && liabilityCategories.length === 0 && !liabilitiesBusy ? (
         <div className="banner info-banner">
-          Aún no hay categorías de <strong>Pasivos</strong>. Créalas en{" "}
-          <strong>Ajustes → Categorías</strong>.
+          <strong>Pasivos</strong> · <strong>Ajustes → Categorías</strong>
         </div>
       ) : null}
 
       {!canEdit && hasMembership ? (
         <p className="muted tight">
-          Solo lectura: tu rol no permite crear ni editar pasivos.
+          Solo lectura.
         </p>
       ) : null}
 
@@ -4050,9 +4364,8 @@ function LiabilitiesView({
                   style={{ marginTop: "0.2rem" }}
                 />
                 <span className="checkbox-label-with-hint">
-                  Derivar principal desde el plan (cuota × intervalos hasta la
-                  fecha fin; mismo criterio que el cliente Mac)
-                  <InlineHint title="Intervalos desde el día civil «hoy» de la instalación (zona en Ajustes). Mensual por meses calendario; semanal ≈ días/7 hacia arriba." />
+                  Derivar principal desde el plan
+                  <InlineHint title="Hoy civil = zona Calendario. Semanal ≈ días÷7." />
                 </span>
               </label>
               <label className="field">
@@ -4178,80 +4491,111 @@ function LiabilitiesView({
             No hay pasivos en esta instalación.
           </p>
         ) : (
-          <div className="table-scroll bordered-top">
-            <table className="assets-table">
-              <thead>
-                <tr>
-                  <th>Etiqueta</th>
-                  <th>Categoría</th>
-                  <th>Tipo</th>
-                  <th className="num">Principal</th>
-                  <th className="num">TAE %</th>
-                  <th className="num">Cuota</th>
-                  <th>Frec.</th>
-                  <th>Fin plan</th>
-                  <th>Notas</th>
-                  {canEdit ? <th /> : null}
-                </tr>
-              </thead>
-              <tbody>
-                {liabilities.map((row) => (
-                  <tr key={row.id}>
-                    <td>{row.label}</td>
-                    <td>
-                      {liabilityCatLabel(liabilityCategories, row.category_id)}
-                    </td>
-                    <td>{row.type_tag ?? METRIC_DASH}</td>
-                    <td className="num">
-                      {formatCurrencyAmount(row.principal, currencyIso)}
-                      {row.principal_derived_from_plan ? (
-                        <span className="muted" title="Principal derivado del plan">
-                          {" "}
-                          deriv.
-                        </span>
-                      ) : null}
-                    </td>
-                    <td className="num">
-                      {row.apr_percent != null && String(row.apr_percent).trim() !== ""
-                        ? formatPercentAmount(row.apr_percent)
-                        : METRIC_DASH}
-                    </td>
-                    <td className="num">
-                      {formatCurrencyOrDash(row.payment_amount, currencyIso)}
-                    </td>
-                    <td>
-                      {row.payment_frequency
-                        ? PAYMENT_FREQ_LABEL[row.payment_frequency]
-                        : METRIC_DASH}
-                    </td>
-                    <td>{row.payment_end_date ?? METRIC_DASH}</td>
-                    <td className="asset-notes-cell">
-                      {row.notes ?? METRIC_DASH}
-                    </td>
-                    {canEdit ? (
-                      <td className="asset-actions-cell">
-                        <button
-                          type="button"
-                          className="btn ghost"
-                          disabled={liabilitySaving}
-                          onClick={() => beginEditLiability(row)}
-                        >
-                          Editar
-                        </button>
-                        <button
-                          type="button"
-                          className="btn ghost danger"
-                          disabled={liabilitySaving}
-                          onClick={() => deleteLiabilityRow(row.id)}
-                        >
-                          Eliminar
-                        </button>
-                      </td>
-                    ) : null}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="ledger-by-category-stack bordered-top">
+            {groupRowsByCategoryOrdered(
+              liabilities,
+              liabilityCategories,
+            ).map((g) => {
+              const catPrincipal = g.items.reduce(
+                (acc, row) =>
+                  acc + (parseDisplayDecimal(row.principal) ?? 0),
+                0,
+              );
+              return (
+                <div key={g.categoryId} className="ledger-category-block">
+                  <div className="ledger-category-block-head">
+                    <h4 className="subsection-title">{g.label}</h4>
+                    <span className="ledger-category-total">
+                      {formatCurrencyNumber(catPrincipal, currencyIso)}
+                    </span>
+                  </div>
+                  <div className="table-scroll bordered-top">
+                    <table className="assets-table">
+                      <thead>
+                        <tr>
+                          <th>Etiqueta</th>
+                          <th>Tipo</th>
+                          <th className="num">Principal</th>
+                          <th className="num">TAE %</th>
+                          <th className="num">Cuota</th>
+                          <th>Frec.</th>
+                          <th>Fin plan</th>
+                          <th>Notas</th>
+                          {canEdit ? (
+                            <th className="asset-actions-cell">
+                              <span className="sr-only">Acciones</span>
+                            </th>
+                          ) : null}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.items.map((row) => (
+                          <tr key={row.id}>
+                            <td>{row.label}</td>
+                            <td>{row.type_tag ?? METRIC_DASH}</td>
+                            <td className="num">
+                              {formatCurrencyAmount(row.principal, currencyIso)}
+                              {row.principal_derived_from_plan ? (
+                                <span
+                                  className="muted"
+                                  title="Principal derivado del plan"
+                                >
+                                  {" "}
+                                  deriv.
+                                </span>
+                              ) : null}
+                            </td>
+                            <td className="num">
+                              {row.apr_percent != null &&
+                              String(row.apr_percent).trim() !== ""
+                                ? formatPercentAmount(row.apr_percent)
+                                : METRIC_DASH}
+                            </td>
+                            <td className="num">
+                              {formatCurrencyOrDash(
+                                row.payment_amount,
+                                currencyIso,
+                              )}
+                            </td>
+                            <td>
+                              {row.payment_frequency
+                                ? PAYMENT_FREQ_LABEL[row.payment_frequency]
+                                : METRIC_DASH}
+                            </td>
+                            <td>{row.payment_end_date ?? METRIC_DASH}</td>
+                            <td className="asset-notes-cell">
+                              {row.notes ?? METRIC_DASH}
+                            </td>
+                            {canEdit ? (
+                              <td className="asset-actions-cell budget-row-actions">
+                                <button
+                                  type="button"
+                                  className="btn ghost icon-btn"
+                                  aria-label="Editar pasivo"
+                                  disabled={liabilitySaving}
+                                  onClick={() => beginEditLiability(row)}
+                                >
+                                  <RowEditIcon />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn ghost danger icon-btn"
+                                  aria-label="Eliminar pasivo"
+                                  disabled={liabilitySaving}
+                                  onClick={() => deleteLiabilityRow(row.id)}
+                                >
+                                  <RowTrashIcon />
+                                </button>
+                              </td>
+                            ) : null}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </section>
@@ -4273,48 +4617,11 @@ function budgetDerivedCatLabel(categories: CategoryRow[], id: string): string {
   return categories.find((x) => x.id === id)?.name ?? id.slice(0, 8);
 }
 
-function BudgetRowEditIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-    </svg>
-  );
-}
-
-function BudgetRowTrashIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <polyline points="3 6 5 6 21 6" />
-      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-      <line x1="10" y1="11" x2="10" y2="17" />
-      <line x1="14" y1="11" x2="14" y2="17" />
-    </svg>
-  );
-}
-
 function BudgetView({
   installation,
   installationBusy,
   hasMembership,
+  ledgerPersonScope,
   canEdit,
   formError,
   budgetModalOpen,
@@ -4342,6 +4649,7 @@ function BudgetView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
+  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   budgetModalOpen: boolean;
@@ -4413,61 +4721,56 @@ function BudgetView({
   const expenseEntries = sortedEntries.filter((e) => e.scope === "expense");
 
   return (
-    <div className="budget-page">
-      <section className="budget-summary-band" aria-label="Resumen del presupuesto">
-        <div className="workspace-header">
-          <h2 className="workspace-title">Presupuesto</h2>
-          <p className="workspace-sub">
-            {installationBusy
-              ? "Cargando instalación…"
-              : !hasMembership
-                ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-                : budgetLoading
-                  ? "Cargando presupuesto y categorías…"
-                  : `Importes mensuales (${currency}). Las cuotas de pasivos con plan activo aparecen como líneas derivadas (solo lectura).`}
-          </p>
+    <div className="workspace budget-page">
+      <div className="workspace-header">
+        <h2 className="workspace-title">Presupuesto</h2>
+        <p className="workspace-sub">
+          {installationBusy
+            ? "Cargando…"
+            : !hasMembership
+              ? "Sin acceso hasta aprobación."
+              : budgetLoading
+                ? "Cargando…"
+                : `Mensual · ${currency}`}
+        </p>
+      </div>
+
+      {hasMembership && ledgerPersonScope === "mine" ? (
+        <div className="banner info-banner tight-banner">
+          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
         </div>
+      ) : null}
 
-        {!installationBusy && !hasMembership ? (
-          <div className="banner info-banner">
-            Cuando tengas acceso podrás ver y editar el presupuesto aquí.
-          </div>
-        ) : null}
+      {!installationBusy && !hasMembership ? (
+        <div className="banner info-banner">Sin acceso al hogar.</div>
+      ) : null}
 
-        {hasMembership &&
-        budgetIncomeCategories.length === 0 &&
-        budgetExpenseCategories.length === 0 &&
-        !budgetLoading ? (
-          <div className="banner info-banner">
-            Aún no hay categorías de <strong>Ingresos</strong> ni{" "}
-            <strong>Gastos</strong>. Créalas en <strong>Ajustes → Categorías</strong>.
-          </div>
-        ) : null}
-
-        <div className="metric-grid metric-grid--budget-summary">
-          <MetricCard
-            label="Ingresos totales"
-            value={incTot}
-            hint="Equiv. mensual: entradas recurrentes en presupuesto."
-          />
-          <MetricCard
-            label="Gastos totales"
-            value={expTot}
-            hint="Equiv. mensual: gastos recurrentes y cuotas derivadas de pasivos."
-          />
-          <MetricCard
-            label="Neto"
-            value={netM}
-            hint="Ingresos totales − gastos totales (equiv. mensual)."
-          />
+      {hasMembership &&
+      budgetIncomeCategories.length === 0 &&
+      budgetExpenseCategories.length === 0 &&
+      !budgetLoading ? (
+        <div className="banner info-banner">
+          <strong>Ingresos/Gastos</strong> ·{" "}
+          <strong>Ajustes → Categorías</strong>
         </div>
+      ) : null}
 
-        {!canEdit && hasMembership ? (
-          <p className="muted tight">
-            Solo lectura: tu rol no permite crear ni editar líneas de presupuesto.
-          </p>
-        ) : null}
-      </section>
+      {hasMembership ? (
+        <div
+          className="metric-grid workspace-kpi-strip metric-grid--budget-summary"
+          aria-label="Resumen del presupuesto"
+        >
+          <MetricCard label="Ingresos totales" value={incTot} />
+          <MetricCard label="Gastos totales" value={expTot} />
+          <MetricCard label="Neto" value={netM} />
+        </div>
+      ) : null}
+
+      {!canEdit && hasMembership ? (
+        <p className="muted tight">
+          Solo lectura.
+        </p>
+      ) : null}
 
       {canEdit &&
       hasMembership &&
@@ -4562,7 +4865,12 @@ function BudgetView({
       ) : null}
 
       {budgetLoading ? (
-        <p className="muted">Cargando líneas de presupuesto…</p>
+        <section className="panel">
+          <h3 className="panel-title">Detalle</h3>
+          <p className="muted bordered-top">
+            Cargando líneas de presupuesto…
+          </p>
+        </section>
       ) : (
         <div className="budget-two-col">
           <section className="panel budget-col">
@@ -4621,7 +4929,7 @@ function BudgetView({
                               disabled={budgetSaving}
                               onClick={() => beginEditBudgetEntry(row)}
                             >
-                              <BudgetRowEditIcon />
+                              <RowEditIcon />
                             </button>
                             <button
                               type="button"
@@ -4630,7 +4938,7 @@ function BudgetView({
                               disabled={budgetSaving}
                               onClick={() => deleteBudgetEntryRow(row.id)}
                             >
-                              <BudgetRowTrashIcon />
+                              <RowTrashIcon />
                             </button>
                           </td>
                         ) : null}
@@ -4698,7 +5006,7 @@ function BudgetView({
                               disabled={budgetSaving}
                               onClick={() => beginEditBudgetEntry(row)}
                             >
-                              <BudgetRowEditIcon />
+                              <RowEditIcon />
                             </button>
                             <button
                               type="button"
@@ -4707,7 +5015,7 @@ function BudgetView({
                               disabled={budgetSaving}
                               onClick={() => deleteBudgetEntryRow(row.id)}
                             >
-                              <BudgetRowTrashIcon />
+                              <RowTrashIcon />
                             </button>
                           </td>
                         ) : null}
@@ -4718,14 +5026,9 @@ function BudgetView({
               </div>
             )}
 
-            <h3 className="panel-title panel-title-with-hint budget-derived-heading">
-              <span>Derivado de pasivos (solo lectura)</span>
-              <InlineHint title="Filas calculadas desde planes de pago de pasivos; visibles en presupuesto pero el motor projectNetWorthSeries del Mac no las trata como líneas persistidas de budget." />
+            <h3 className="panel-title budget-derived-heading">
+              Derivado de pasivos
             </h3>
-            <p className="muted tight">
-              Cuotas de pasivos con plan completo y fecha fin posterior a hoy en
-              la zona civil de la instalación.
-            </p>
             {derivedLines.length === 0 ? (
               <p className="muted bordered-top">
                 No hay cuotas derivadas en este momento.
@@ -4792,9 +5095,6 @@ function PlanningDirectionChart({
   const wo = (outflow / sum) * 100;
   return (
     <div className="planning-dir-chart bordered-top">
-      <p className="muted tight planning-dir-chart-lead">
-        Barras proporcionales al volumen de entradas y salidas (magnitudes absolutas).
-      </p>
       <svg
         viewBox="0 0 100 12"
         preserveAspectRatio="none"
@@ -4820,6 +5120,7 @@ function UpcomingView({
   installation,
   installationBusy,
   hasMembership,
+  ledgerPersonScope,
   canEdit,
   formError,
   planningModalOpen,
@@ -4850,6 +5151,7 @@ function UpcomingView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
+  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   planningModalOpen: boolean;
@@ -4878,6 +5180,8 @@ function UpcomingView({
   beginEditPlanningFlow: (row: PlanningFlowApiRow) => void;
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
+  const currency =
+    installation?.installation.base_currency ?? METRIC_DASH;
   const categoryById = budgetCategoryMap(
     planningIncomeCategories,
     planningExpenseCategories,
@@ -4895,82 +5199,90 @@ function UpcomingView({
     .filter((f) => f.direction === "outflow")
     .reduce((acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0), 0);
 
+  const planningWorkspaceSub = installationBusy
+    ? "Cargando…"
+    : !hasMembership
+      ? "Sin acceso hasta aprobación."
+      : planningLoading
+        ? "Cargando…"
+        : `Importes · ${currency}`;
+
+  const flowsNetTotal = !planningLoading
+    ? planningFlows.reduce((acc, f) => {
+        const amt = parseDisplayDecimal(f.expected_amount) ?? 0;
+        return (
+          acc +
+          (f.direction === "inflow"
+            ? amt
+            : f.direction === "outflow"
+              ? -amt
+              : 0)
+        );
+      }, 0)
+    : null;
+
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Próximos</h2>
-        <p className="workspace-sub">
-          {installationBusy
-            ? "Cargando instalación…"
-            : !hasMembership
-              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : planningLoading
-                ? "Cargando flujos planificados…"
-                : "Flujos de caja esperados (entradas y salidas). Importes en moneda de la instalación. Gráfico tipo PlanningTabView del Mac puede añadirse después."}
-        </p>
+        <p className="workspace-sub">{planningWorkspaceSub}</p>
       </div>
 
-      {hasMembership && !planningLoading ? (
-        <section className="panel">
-          <h3 className="panel-title panel-title-with-hint">
-            <span>Resumen direccional</span>
-            <InlineHint title="Suma de importes esperados por dirección; misma convención que «Próximos» en Resumen. Gráfico direccional tipo PlanningTabView pendiente." />
-          </h3>
-          <p className="muted tight">
-            Sumas de <code>expected_amount</code> por dirección (misma convención que
-            «Próximos» en Resumen); no mensualizado.
-          </p>
-          <div className="metric-grid planning-direction-strip bordered-top">
-            <MetricCard
-              label="Entradas (suma)"
-              value={formatCurrencyNumber(
-                planningFlows
-                  .filter((f) => f.direction === "inflow")
-                  .reduce(
-                    (acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0),
-                    0,
-                  ),
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Salidas (suma)"
-              value={formatCurrencyNumber(
-                planningFlows
-                  .filter((f) => f.direction === "outflow")
-                  .reduce(
-                    (acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0),
-                    0,
-                  ),
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Neto planificado"
-              value={formatCurrencyNumber(
-                planningFlows.reduce((acc, f) => {
-                  const amt = parseDisplayDecimal(f.expected_amount) ?? 0;
-                  return (
-                    acc +
-                    (f.direction === "inflow" ? amt : f.direction === "outflow" ? -amt : 0)
-                  );
-                }, 0),
-                currencyIso,
-              )}
-              hint="Entradas − salidas."
-            />
-          </div>
-          <PlanningDirectionChart
-            inflow={planningInflowSum}
-            outflow={planningOutflowSum}
+      {hasMembership && ledgerPersonScope === "mine" ? (
+        <div className="banner info-banner tight-banner">
+          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
+        </div>
+      ) : null}
+
+      {hasMembership ? (
+        <div className="metric-grid workspace-kpi-strip planning-direction-strip">
+          <MetricCard
+            label="Entradas (suma)"
+            value={
+              !planningLoading
+                ? formatCurrencyNumber(planningInflowSum, currencyIso)
+                : METRIC_DASH
+            }
           />
+          <MetricCard
+            label="Salidas (suma)"
+            value={
+              !planningLoading
+                ? formatCurrencyNumber(planningOutflowSum, currencyIso)
+                : METRIC_DASH
+            }
+          />
+          <MetricCard
+            label="Neto planificado"
+            value={
+              flowsNetTotal !== null
+                ? formatCurrencyNumber(flowsNetTotal, currencyIso)
+                : METRIC_DASH
+            }
+          />
+        </div>
+      ) : null}
+
+      {hasMembership ? (
+        <section className="panel">
+          <h3 className="panel-title">Panorama</h3>
+          {planningLoading ? (
+            <p className="muted bordered-top">Cargando…</p>
+          ) : planningFlows.length === 0 ? (
+            <p className="muted bordered-top">Sin datos.</p>
+          ) : planningInflowSum + planningOutflowSum > 0 ? (
+            <PlanningDirectionChart
+              inflow={planningInflowSum}
+              outflow={planningOutflowSum}
+            />
+          ) : (
+            <p className="muted bordered-top">Sin proporción.</p>
+          )}
         </section>
       ) : null}
 
       {!installationBusy && !hasMembership ? (
-        <div className="banner info-banner">
-          Cuando tengas acceso podrás registrar flujos aquí.
-        </div>
+        <div className="banner info-banner">Sin acceso al hogar.</div>
       ) : null}
 
       {hasMembership &&
@@ -4978,14 +5290,14 @@ function UpcomingView({
       planningExpenseCategories.length === 0 &&
       !planningLoading ? (
         <div className="banner info-banner">
-          Aún no hay categorías de <strong>Ingresos</strong> ni{" "}
-          <strong>Gastos</strong>. Créalas en <strong>Ajustes → Categorías</strong>.
+          <strong>Ingresos/Gastos</strong> ·{" "}
+          <strong>Ajustes → Categorías</strong>
         </div>
       ) : null}
 
       {!canEdit && hasMembership ? (
         <p className="muted tight">
-          Solo lectura: tu rol no permite crear ni editar flujos planificados.
+          Solo lectura.
         </p>
       ) : null}
 
@@ -5131,7 +5443,11 @@ function UpcomingView({
                   <th className="num">Importe</th>
                   <th>Fecha prevista</th>
                   <th>Notas</th>
-                  {canEdit ? <th /> : null}
+                  {canEdit ? (
+                    <th className="asset-actions-cell">
+                      <span className="sr-only">Acciones</span>
+                    </th>
+                  ) : null}
                 </tr>
               </thead>
               <tbody>
@@ -5151,22 +5467,24 @@ function UpcomingView({
                       {row.notes ?? METRIC_DASH}
                     </td>
                     {canEdit ? (
-                      <td className="asset-actions-cell">
+                      <td className="asset-actions-cell budget-row-actions">
                         <button
                           type="button"
-                          className="btn ghost"
+                          className="btn ghost icon-btn"
+                          aria-label="Editar flujo planificado"
                           disabled={planningSaving}
                           onClick={() => beginEditPlanningFlow(row)}
                         >
-                          Editar
+                          <RowEditIcon />
                         </button>
                         <button
                           type="button"
-                          className="btn ghost danger"
+                          className="btn ghost danger icon-btn"
+                          aria-label="Eliminar flujo planificado"
                           disabled={planningSaving}
                           onClick={() => deletePlanningFlowRow(row.id)}
                         >
-                          Eliminar
+                          <RowTrashIcon />
                         </button>
                       </td>
                     ) : null}
@@ -5184,6 +5502,7 @@ function UpcomingView({
 function summaryDonutGradient(
   rows: { total: string }[],
   totalWhole: string,
+  scope: "asset" | "liability",
 ): string | null {
   const tw = parseDisplayDecimal(totalWhole) ?? 0;
   if (tw <= 0 || rows.length === 0) {
@@ -5191,14 +5510,13 @@ function summaryDonutGradient(
   }
   let accPct = 0;
   const stops: string[] = [];
-  rows.forEach((r, i) => {
+  rows.forEach((r, rowIndex) => {
     const v = parseDisplayDecimal(r.total) ?? 0;
     if (v <= 0) {
       return;
     }
     const pct = Math.min(100 - accPct, (v / tw) * 100);
-    const hue = (i * 53) % 360;
-    const c = `hsl(${hue} 52% 42%)`;
+    const c = summaryChartSliceColor(scope, rowIndex);
     const start = accPct;
     accPct += pct;
     stops.push(`${c} ${start}% ${accPct}%`);
@@ -5214,19 +5532,21 @@ function SummaryDonutChart({
   rows,
   totalWhole,
   currencyIso,
+  chartScope,
 }: {
   title: string;
   rows: { key: string; label: string; total: string }[];
   totalWhole: string;
   currencyIso: string;
+  chartScope: "asset" | "liability";
 }) {
   const filtered = rows.filter((r) => (parseDisplayDecimal(r.total) ?? 0) > 0);
-  const g = summaryDonutGradient(filtered, totalWhole);
+  const g = summaryDonutGradient(rows, totalWhole, chartScope);
   if (!g || filtered.length === 0) {
     return (
       <div className="summary-donut-card">
         <h4 className="subsection-title">{title}</h4>
-        <p className="muted tight">Sin datos para donut.</p>
+        <p className="muted tight">Sin datos.</p>
       </div>
     );
   }
@@ -5241,14 +5561,25 @@ function SummaryDonutChart({
           aria-label={title}
         />
         <ul className="summary-donut-legend">
-          {filtered.map((r) => (
-            <li key={r.key}>
-              <span className="summary-donut-legend-label">{r.label}</span>
-              <span className="summary-donut-legend-val">
-                {formatCurrencyAmount(r.total, currencyIso)}
-              </span>
-            </li>
-          ))}
+          {rows.map((r, rowIndex) => {
+            if ((parseDisplayDecimal(r.total) ?? 0) <= 0) {
+              return null;
+            }
+            const sw = summaryChartSliceColor(chartScope, rowIndex);
+            return (
+              <li key={r.key}>
+                <span
+                  className="summary-donut-legend-swatch"
+                  style={{ background: sw }}
+                  aria-hidden
+                />
+                <span className="summary-donut-legend-label">{r.label}</span>
+                <span className="summary-donut-legend-val">
+                  {formatCurrencyAmount(r.total, currencyIso)}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       </div>
     </div>
@@ -5261,12 +5592,14 @@ function SummaryBreakdownBlock({
   totalWhole,
   currencyIso,
   labelColumn,
+  chartScope,
 }: {
   title: string;
   rows: { key: string; label: string; total: string }[];
   totalWhole: string;
   currencyIso: string;
   labelColumn: string;
+  chartScope: "asset" | "liability";
 }) {
   if (rows.length === 0) {
     return (
@@ -5290,7 +5623,7 @@ function SummaryBreakdownBlock({
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => {
+            {rows.map((row, idx) => {
               const pct = breakdownPercentOfTotal(row.total, totalWhole);
               return (
                 <tr key={row.key}>
@@ -5307,6 +5640,7 @@ function SummaryBreakdownBlock({
                         className="breakdown-bar-fill"
                         style={{
                           width: pct !== null ? `${pct}%` : "0%",
+                          background: summaryBreakdownBarGradient(chartScope, idx),
                         }}
                       />
                     </div>
@@ -5356,226 +5690,178 @@ function SummaryView({
     ? formatDebtToAssetsPct(summary.debt_to_assets_ratio)
     : METRIC_DASH;
 
+  const fh = summary?.financial_health;
+  const savingsMoneyParen =
+    showMetrics && fh
+      ? formatCurrencyAmount(fh.monthly_net_excluding_derived_debt, currencyIso)
+      : "";
+  const savingsMoneyPrimary =
+    showMetrics && fh
+      ? formatCurrencyAmount(fh.net_monthly_equivalent, currencyIso)
+      : METRIC_DASH;
+  const showSavingsMoneyTile =
+    showMetrics &&
+    fh &&
+    (!isZeroMoneyMetric(fh.net_monthly_equivalent) ||
+      !isZeroMoneyMetric(fh.monthly_net_excluding_derived_debt));
+  const savingsMoneyParenthetical =
+    showSavingsMoneyTile &&
+    savingsMoneyPrimary !== savingsMoneyParen &&
+    savingsMoneyParen !== ""
+      ? savingsMoneyParen
+      : undefined;
+
+  let savingsRatePrimary = METRIC_DASH;
+  let savingsRateParenthetical: string | undefined;
+  if (showMetrics && fh) {
+    const sr = formatFractionAsPercent(fh.savings_rate);
+    const srx = formatFractionAsPercent(fh.savings_rate_excluding_derived_debt);
+    const showPctTile =
+      !isZeroFractionMetric(fh.savings_rate) ||
+      !isZeroFractionMetric(fh.savings_rate_excluding_derived_debt);
+    if (showPctTile) {
+      if (sr !== METRIC_DASH) {
+        savingsRatePrimary = sr;
+        savingsRateParenthetical =
+          srx !== METRIC_DASH && srx !== sr ? srx : undefined;
+      } else {
+        savingsRatePrimary = srx;
+      }
+    }
+  }
+  const showSavingsRateTile =
+    showMetrics && fh && savingsRatePrimary !== METRIC_DASH;
+
+  const financialHealthHasAnyTile =
+    showMetrics &&
+    fh &&
+    (showSavingsMoneyTile ||
+      showSavingsRateTile ||
+      !isZeroMoneyMetric(fh.liquid_assets_total) ||
+      !isZeroMoneyMetric(fh.runway_months) ||
+      !isZeroFractionMetric(fh.upcoming_coverage_ratio));
+
+  const liquidAssetsPctOfTotalAssets =
+    showMetrics && summary && fh
+      ? (() => {
+          const liq = parseDisplayDecimal(fh.liquid_assets_total);
+          const tot = parseDisplayDecimal(summary.total_assets);
+          if (liq === null || tot === null || tot <= 0) return null;
+          return formatPercentDisplay((liq / tot) * 100);
+        })()
+      : null;
+
   return (
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Resumen</h2>
         <p className="workspace-sub">
-          {loading ? (
-            "Cargando datos de la instalación…"
-          ) : !hasMembership ? (
-            <>
-              Regístrate en la pantalla de acceso; cuando el propietario apruebe
-              tu usuario en <strong>Ajustes</strong>, verás datos aquí. Para
-              recuperar una base vacía, usa la inicialización en Ajustes.
-            </>
-          ) : summaryBusy ? (
-            <>
-              Actualizando métricas desde activos y pasivos… Moneda base{" "}
-              <strong>{currency}</strong>.
-            </>
-          ) : (
-            <>
-              Moneda base <strong>{currency}</strong>. Totales alineados al
-              checklist Summary (purga de pasivos con plan vencido antes de
-              sumar, igual que la lista de pasivos).
-            </>
-          )}
+          {loading
+            ? "Cargando…"
+            : !hasMembership
+              ? "Sin acceso hasta aprobación."
+              : `Moneda ${currency}`}
         </p>
       </div>
 
       {hasMembership && ledgerPersonScope === "mine" ? (
         <div className="banner info-banner tight-banner">
-          Estás viendo solo registros atribuidos a tu usuario. Las filas antiguas
-          sin titular aparecen solo en <strong>Hogar (todo)</strong>.
+          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
         </div>
       ) : null}
 
-      <div className="metric-grid">
-        <MetricCard
-          label="Patrimonio neto"
-          value={nw}
-          hint="Activos − pasivos (principal registrado)."
-        />
-        <MetricCard
-          label="Activos totales"
-          value={ta}
-        />
-        <MetricCard
-          label="Pasivos totales"
-          value={tl}
-        />
-        <MetricCard
-          label="Ratio deuda / activos"
-          value={dta}
-          hint="Pasivos ÷ activos; vacío si activos = 0."
-        />
+      <div className="metric-grid workspace-kpi-strip">
+        {!showMetrics ? (
+          <>
+            <MetricCard label="Patrimonio neto" value={nw} />
+            <MetricCard label="Activos totales" value={ta} />
+            <MetricCard label="Pasivos totales" value={tl} />
+            <MetricCard label="Ratio deuda / activos" value={dta} />
+          </>
+        ) : (
+          <>
+            {!isZeroMoneyMetric(summary.net_worth) ? (
+              <MetricCard label="Patrimonio neto" value={nw} />
+            ) : null}
+            {!isZeroMoneyMetric(summary.total_assets) ? (
+              <MetricCard label="Activos totales" value={ta} />
+            ) : null}
+            {!isZeroMoneyMetric(summary.total_liabilities) ? (
+              <MetricCard label="Pasivos totales" value={tl} />
+            ) : null}
+            {!isZeroFractionMetric(summary.debt_to_assets_ratio) ? (
+              <MetricCard label="Ratio deuda / activos" value={dta} />
+            ) : null}
+          </>
+        )}
       </div>
 
-      {hasMembership && installation ? (
-        <section className="panel">
-          <h3 className="panel-title panel-title-with-hint">
-            <span>FIRE / horizonte</span>
-            <InlineHint title="KPIs numéricos MVP (25×, gap, etc.) en la pestaña Jubilación vía GET /v1/fire/snapshot. ETA tipo SummaryFireRow y fireMilestone Swift siguen en roadmap." />
-          </h3>
-          <p className="muted tight">
-            La instalación guarda inflación de proyección, edad objetivo y modo
-            fechas/edades (editable en <strong>Ajustes</strong>, subpestaña{" "}
-            <strong>Proyección</strong>).
-            Para objetivos y gap heurísticos abre{" "}
-            <strong>Jubilación (FIRE)</strong>.
-          </p>
-          <dl className="settings-meta-dl bordered-top">
-            <div>
-              <dt>Inflación en proyección</dt>
-              <dd>
-                {installation.installation.projection_includes_inflation
-                  ? "Incluida"
-                  : "No incluida"}
-              </dd>
-            </div>
-            <div>
-              <dt>Edad objetivo horizonte</dt>
-              <dd>
-                {installation.installation.projection_target_age != null
-                  ? `${installation.installation.projection_target_age} años`
-                  : METRIC_DASH}
-              </dd>
-            </div>
-            <div>
-              <dt>Modo edad en UI</dt>
-              <dd>
-                {installation.installation.show_age_mode === "ages"
-                  ? "Edades"
-                  : installation.installation.show_age_mode === "dates"
-                    ? "Fechas"
-                    : installation.installation.show_age_mode}
-              </dd>
-            </div>
-          </dl>
-        </section>
-      ) : null}
-
       <section className="panel">
-        <h3 className="panel-title">Salud financiera (MVP)</h3>
-        <p className="muted tight">
-          Equivalentes mensuales alineados con <strong>GET /v1/budget</strong>{" "}
-          (entradas persistidas + cuotas derivadas de pasivos con plan activo).
-          Runway usa solo activos <strong>líquidos</strong>. Los importes de{" "}
-          <strong>Próximos</strong> son sumas de <code>expected_amount</code> en
-          planeación (no anualizados; paridad fina con el Mac en{" "}
-          <code>ORACLE_TESTS.md</code>).
-        </p>
+        <h3 className="panel-title">Salud financiera</h3>
         {showMetrics ? (
-          <div className="metric-grid bordered-top">
-            <MetricCard
-              label="Ingresos mensuales (equiv.)"
-              value={formatCurrencyAmount(
-                summary.financial_health.income_monthly_equivalent,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Gastos recurrentes (equiv.)"
-              value={formatCurrencyAmount(
-                summary.financial_health.expense_regular_monthly_equivalent,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Cuotas deuda en presupuesto (equiv.)"
-              value={formatCurrencyAmount(
-                summary.financial_health.expense_derived_monthly_equivalent,
-                currencyIso,
-              )}
-              hint="Derivadas de planes de pago de pasivos."
-            />
-            <MetricCard
-              label="Gastos totales (equiv.)"
-              value={formatCurrencyAmount(
-                summary.financial_health.expense_total_monthly_equivalent,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Ahorro mensual neto"
-              value={formatCurrencyAmount(
-                summary.financial_health.net_monthly_equivalent,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Tasa de ahorro"
-              value={formatFractionAsPercent(summary.financial_health.savings_rate)}
-              hint="Neto dividido por ingresos cuando hay ingresos."
-            />
-            <MetricCard
-              label="Neto sin cuotas deuda derivadas"
-              value={formatCurrencyAmount(
-                summary.financial_health.monthly_net_excluding_derived_debt,
-                currencyIso,
-              )}
-              hint="Ingresos − gastos recurrentes (KPI alternativo tipo Mac)."
-            />
-            <MetricCard
-              label="Tasa de ahorro (sin cuotas derivadas)"
-              value={formatFractionAsPercent(
-                summary.financial_health.savings_rate_excluding_derived_debt,
-              )}
-            />
-            <MetricCard
-              label="Activos líquidos"
-              value={formatCurrencyAmount(
-                summary.financial_health.liquid_assets_total,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Runway"
-              value={formatMonthsRough(summary.financial_health.runway_months)}
-              hint="Líquidos ÷ gastos totales mensuales (con derivadas)."
-            />
-            <MetricCard
-              label="Próximos — entradas (suma)"
-              value={formatCurrencyAmount(
-                summary.financial_health.upcoming_inflows_total,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Próximos — salidas (suma)"
-              value={formatCurrencyAmount(
-                summary.financial_health.upcoming_outflows_total,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Cobertura próximos"
-              value={formatFractionAsPercent(
+          financialHealthHasAnyTile ? (
+            <div className="metric-grid bordered-top">
+              {showSavingsMoneyTile ? (
+                <MetricCard
+                  label="Ahorro mensual neto"
+                  value={savingsMoneyPrimary}
+                  parenthetical={savingsMoneyParenthetical}
+                />
+              ) : null}
+              {showSavingsRateTile ? (
+                <MetricCard
+                  label="Tasa de ahorro"
+                  value={savingsRatePrimary}
+                  parenthetical={savingsRateParenthetical}
+                />
+              ) : null}
+              {!isZeroMoneyMetric(summary.financial_health.liquid_assets_total) ? (
+                <MetricCard
+                  label="Activos líquidos"
+                  value={formatCurrencyAmount(
+                    summary.financial_health.liquid_assets_total,
+                    currencyIso,
+                  )}
+                  parenthetical={
+                    liquidAssetsPctOfTotalAssets ?? undefined
+                  }
+                />
+              ) : null}
+              {!isZeroMoneyMetric(summary.financial_health.runway_months) ? (
+                <MetricCard
+                  label="Runway"
+                  value={formatMonthsRough(
+                    summary.financial_health.runway_months,
+                  )}
+                />
+              ) : null}
+              {!isZeroFractionMetric(
                 summary.financial_health.upcoming_coverage_ratio,
-              )}
-              hint="Entradas ÷ salidas cuando hay salidas."
-            />
-          </div>
+              ) ? (
+                <MetricCard
+                  label="Cobertura próximos"
+                  value={formatFractionAsPercent(
+                    summary.financial_health.upcoming_coverage_ratio,
+                  )}
+                />
+              ) : null}
+            </div>
+          ) : (
+            <p className="muted bordered-top">Sin datos.</p>
+          )
         ) : (
-          <p className="muted bordered-top">
-            Activa la membresía del hogar para ver estas métricas.
-          </p>
+          <p className="muted bordered-top">Sin acceso.</p>
         )}
       </section>
 
       <section className="panel">
         <h3 className="panel-title">Desglose</h3>
-        <p className="muted tight">
-          Agregados desde la misma vista hogar / mío que los KPI superiores.
-          Donuts MVP (gradiente cónico + leyenda); hover interactivo tipo Mac puede
-          añadirse después.
-        </p>
         {showMetrics && summary ? (
           <div className="summary-donuts-row bordered-top">
             <SummaryDonutChart
               title="Activos por categoría"
               currencyIso={currencyIso}
+              chartScope="asset"
               totalWhole={summary.total_assets}
               rows={summary.assets_by_category.map((r) => ({
                 key: r.category_id,
@@ -5586,20 +5872,11 @@ function SummaryView({
             <SummaryDonutChart
               title="Pasivos por categoría"
               currencyIso={currencyIso}
+              chartScope="liability"
               totalWhole={summary.total_liabilities}
               rows={summary.liabilities_by_category.map((r) => ({
                 key: r.category_id,
                 label: r.category_name,
-                total: r.total,
-              }))}
-            />
-            <SummaryDonutChart
-              title="Pasivos por etiqueta"
-              currencyIso={currencyIso}
-              totalWhole={summary.total_liabilities}
-              rows={summary.liabilities_by_type_tag.map((r) => ({
-                key: r.type_tag,
-                label: r.type_tag,
                 total: r.total,
               }))}
             />
@@ -5610,6 +5887,7 @@ function SummaryView({
             <SummaryBreakdownBlock
               title="Activos por categoría"
               labelColumn="Categoría"
+              chartScope="asset"
               totalWhole={summary.total_assets}
               currencyIso={currencyIso}
               rows={summary.assets_by_category.map((r) => ({
@@ -5621,6 +5899,7 @@ function SummaryView({
             <SummaryBreakdownBlock
               title="Pasivos por categoría"
               labelColumn="Categoría"
+              chartScope="liability"
               totalWhole={summary.total_liabilities}
               currencyIso={currencyIso}
               rows={summary.liabilities_by_category.map((r) => ({
@@ -5629,22 +5908,9 @@ function SummaryView({
                 total: r.total,
               }))}
             />
-            <SummaryBreakdownBlock
-              title="Pasivos por etiqueta de tipo"
-              labelColumn="Etiqueta"
-              totalWhole={summary.total_liabilities}
-              currencyIso={currencyIso}
-              rows={summary.liabilities_by_type_tag.map((r) => ({
-                key: r.type_tag,
-                label: r.type_tag,
-                total: r.total,
-              }))}
-            />
           </div>
         ) : (
-          <p className="muted bordered-top">
-            Con membresía activa verás el desglose aquí.
-          </p>
+          <p className="muted bordered-top">Sin acceso.</p>
         )}
       </section>
     </div>
@@ -5655,23 +5921,28 @@ function MetricCard({
   label,
   value,
   suffix,
-  hint,
+  parenthetical,
 }: {
   label: string;
   value: string;
   suffix?: string;
-  hint?: string;
+  /** Detalle del mismo KPI entre paréntesis (`.metric-value-parenthetical`). */
+  parenthetical?: string;
 }) {
   return (
     <article className="metric-card">
       <div className="metric-label">{label}</div>
       <div className="metric-value-row">
         <span className="metric-value">{value}</span>
+        {parenthetical != null && parenthetical !== "" ? (
+          <span className="metric-value-parenthetical">
+            ({parenthetical})
+          </span>
+        ) : null}
         {suffix && suffix !== METRIC_DASH ? (
           <span className="metric-suffix">{suffix}</span>
         ) : null}
       </div>
-      {hint ? <p className="metric-hint">{hint}</p> : null}
     </article>
   );
 }
@@ -5914,11 +6185,6 @@ function SettingsView({
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Ajustes</h2>
-        <p className="workspace-sub">
-          Acceso al hogar, calendario civil, supuestos de proyección, categorías
-          y exportación. Tu fecha de nacimiento va en tu cuenta (clic en tu
-          usuario arriba).
-        </p>
       </div>
 
       <nav
@@ -5940,10 +6206,6 @@ function SettingsView({
       {settingsSubTab === "access" && isOwner ? (
         <section className="panel">
           <h3 className="panel-title">Aprobar acceso</h3>
-          <p className="muted tight">
-            Usuarios registrados que aún no tienen acceso a esta instalación.
-            Elige rol y aprueba.
-          </p>
           {pendingUsersBusy ? (
             <p className="muted bordered-top">Cargando…</p>
           ) : pendingUsers.length === 0 ? (
@@ -5988,10 +6250,6 @@ function SettingsView({
       {settingsSubTab === "calendar" && hasMembership ? (
         <section className="panel">
           <h3 className="panel-title">Zona horaria del calendario</h3>
-          <p className="muted tight">
-            Define el día civil «hoy» para derivar principal en pasivos (paridad
-            con calendario local tipo Mac). Debe ser un identificador IANA válido.
-          </p>
           {isOwner ? (
             <form
               className="stack bordered-top"
@@ -6017,9 +6275,8 @@ function SettingsView({
             </form>
           ) : (
             <p className="muted bordered-top">
-              Actual:{" "}
-              <strong>{installation?.installation.calendar_tz ?? "UTC"}</strong>
-              . Solo el propietario puede cambiarla.
+              <strong>{installation?.installation.calendar_tz ?? "UTC"}</strong>{" "}
+              · solo lectura
             </p>
           )}
         </section>
@@ -6029,11 +6286,6 @@ function SettingsView({
         isOwner ? (
         <section className="panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
-          <p className="muted tight">
-            Alineado a <strong>Settings — Installation</strong> del checklist:
-            inflación en series proyectadas, edad objetivo del horizonte (65–105
-            o vacío) y cómo mostrar el tiempo en la UI (fechas vs edades).
-          </p>
           <form
             className="stack bordered-top"
             onSubmit={saveInstallationProjection}
@@ -6056,13 +6308,9 @@ function SettingsView({
                   setProjectionInflationPctDraft(e.target.value)
                 }
                 inputMode="decimal"
-                placeholder="p. ej. 2.5 — vacío borra"
+                placeholder="2,5"
                 autoComplete="off"
               />
-              <span className="hint">
-                Usado en modo «dinero de hoy» cuando la casilla de inflación
-                está activa (0–50).
-              </span>
             </label>
             <label className="field">
               <span>Edad objetivo del horizonte (opc.)</span>
@@ -6070,12 +6318,9 @@ function SettingsView({
                 value={projectionTargetAgeDraft}
                 onChange={(e) => setProjectionTargetAgeDraft(e.target.value)}
                 inputMode="numeric"
-                placeholder="Vacío = sin edad fija"
+                placeholder="—"
                 autoComplete="off"
               />
-              <span className="hint">
-                Entero 65–105; deja vacío para borrar el valor guardado.
-              </span>
             </label>
             <label className="field">
               <span>Modo edad en la interfaz</span>
@@ -6087,8 +6332,8 @@ function SettingsView({
                   )
                 }
               >
-                <option value="dates">Fechas (referencia Mac: dates)</option>
-                <option value="ages">Edades (referencia Mac: ages)</option>
+                <option value="dates">Fechas</option>
+                <option value="ages">Edades</option>
               </select>
             </label>
             <button
@@ -6103,11 +6348,7 @@ function SettingsView({
         ) : (
         <section className="panel muted-panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
-          <p className="muted tight">
-            Solo el propietario puede cambiar inflación de proyección, edad
-            objetivo y modo fechas/edades. Los valores actuales aparecen en la
-            subpestaña <strong>Datos y sistema</strong> (resumen de instalación).
-          </p>
+          <p className="muted tight">Solo lectura.</p>
         </section>
         )
       ) : null}
@@ -6126,10 +6367,6 @@ function SettingsView({
               </button>
             ) : null}
           </div>
-          <p className="muted tight">
-            Ámbitos alineados al cliente de referencia. No hay categorías por
-            defecto: créalas aquí o al importar datos.
-          </p>
           <div className="category-toolbar bordered-top">
             <label className="field inline-role">
               <span className="sr-only">Filtrar por ámbito</span>
@@ -6153,7 +6390,7 @@ function SettingsView({
           </div>
           {!canEditCategories ? (
             <p className="muted bordered-top">
-              Solo lectura: tu rol no permite crear ni editar categorías.
+              Solo lectura.
             </p>
           ) : null}
           {categoriesBusy ? (
@@ -6167,22 +6404,24 @@ function SettingsView({
                   </span>
                   <span className="category-name">{c.name}</span>
                   {canEditCategories ? (
-                    <div className="category-row-actions">
+                    <div className="category-row-actions budget-row-actions">
                       <button
                         type="button"
-                        className="btn ghost"
+                        className="btn ghost icon-btn"
+                        aria-label="Renombrar categoría"
                         disabled={categorySaving}
                         onClick={() => openRenameCategoryModal(c)}
                       >
-                        Renombrar
+                        <RowEditIcon />
                       </button>
                       <button
                         type="button"
-                        className="btn ghost danger"
+                        className="btn ghost danger icon-btn"
+                        aria-label="Eliminar categoría"
                         disabled={categorySaving}
                         onClick={() => openCategoryDeleteModal(c)}
                       >
-                        Eliminar
+                        <RowTrashIcon />
                       </button>
                     </div>
                   ) : null}
@@ -6191,9 +6430,7 @@ function SettingsView({
             </ul>
           )}
           {!categoriesBusy && filteredCategories.length === 0 ? (
-            <p className="muted bordered-top">
-              No hay categorías en este filtro.
-            </p>
+            <p className="muted bordered-top">Vacío.</p>
           ) : null}
         </section>
       ) : null}
@@ -6203,11 +6440,6 @@ function SettingsView({
           {hasMembership && isOwner ? (
             <section className="panel">
               <h3 className="panel-title">Copia CSV (ZIP)</h3>
-              <p className="muted tight">
-                Paquete MVP según{" "}
-                <code>BACKUP_AND_CSV_SPEC.md</code>. Solo el propietario puede
-                exportar.
-              </p>
               {backupZipError ? (
                 <p className="error compact bordered-top">{backupZipError}</p>
               ) : null}
@@ -6285,10 +6517,7 @@ function SettingsView({
                 </div>
               </dl>
             ) : (
-              <p className="muted tight">
-                Sin acceso — revisa la subpestaña <strong>Acceso</strong> si
-                necesitas recuperar la instalación.
-              </p>
+              <p className="muted tight">Sin acceso.</p>
             )}
           </section>
 
@@ -6446,18 +6675,12 @@ function SettingsView({
                   );
                   if (siblings.length === 0) {
                     return (
-                      <p className="hint">
-                        No hay otra categoría en este ámbito. Si esta categoría
-                        está en uso (activos, pasivos, presupuesto o próximos),
-                        crea primero una categoría sustituta y vuelve a intentar.
-                      </p>
+                      <p className="hint">Sin categoría sustituta en el ámbito.</p>
                     );
                   }
                   return (
                     <label className="field">
-                      <span>
-                        Mover ítems existentes a (obligatorio si sigue en uso)
-                      </span>
+                      <span>Reasignar a</span>
                       <select
                         value={categoryRemapToId}
                         onChange={(e) => setCategoryRemapToId(e.target.value)}
@@ -6497,180 +6720,6 @@ function SettingsView({
           </Modal>
         </>
       ) : null}
-    </div>
-  );
-}
-
-function RetirementView({
-  installation,
-  installationBusy,
-  hasMembership,
-  ledgerPersonScope,
-  fireSnapshot,
-  fireBusy,
-  fireError,
-}: {
-  installation: InstallationAccess | null;
-  installationBusy: boolean;
-  hasMembership: boolean;
-  ledgerPersonScope: LedgerPersonScope;
-  fireSnapshot: FireSnapshotApi | null;
-  fireBusy: boolean;
-  fireError: string | null;
-}) {
-  const currency =
-    installation?.installation.base_currency ?? METRIC_DASH;
-  const currencyIso = installation?.installation.base_currency ?? "";
-  const horizonAge = installation?.installation.projection_target_age;
-  const inflation = installation?.installation.projection_includes_inflation;
-  const scopeNote =
-    ledgerPersonScope === "mine"
-      ? "Vista titular: mismos agregados que Resumen / Presupuesto con «Yo»."
-      : "Vista hogar: todos los registros de la instalación.";
-
-  return (
-    <div className="workspace">
-      <div className="workspace-header">
-        <h2 className="workspace-title">Jubilación (FIRE)</h2>
-        <p className="workspace-sub">
-          {installationBusy
-            ? "Cargando instalación…"
-            : !hasMembership
-              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : `KPIs FIRE (MVP 25× + motor objetivo cartera / hito). Moneda ${currency}.`}
-        </p>
-      </div>
-
-      {!installationBusy && !hasMembership ? (
-        <div className="banner info-banner">
-          Cuando tengas acceso, aquí verás el panel FIRE completo.
-        </div>
-      ) : null}
-
-      {fireError ? (
-        <div className="banner error-banner">{fireError}</div>
-      ) : null}
-
-      {hasMembership && fireBusy ? (
-        <p className="muted tight">Cargando KPIs FIRE…</p>
-      ) : null}
-
-      {hasMembership && !fireBusy && fireSnapshot ? (
-        <section className="panel">
-          <h3 className="panel-title">KPIs FIRE</h3>
-          <p className="muted tight">{scopeNote}</p>
-          <div className="metric-grid bordered-top">
-            <MetricCard
-              label="Patrimonio neto"
-              value={formatCurrencyAmount(fireSnapshot.net_worth, currencyIso)}
-            />
-            <MetricCard
-              label="Gasto anual estimado (equiv. ×12)"
-              value={formatCurrencyAmount(
-                fireSnapshot.annual_expenses_estimate,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Objetivo cartera (25× gasto)"
-              value={formatCurrencyOrDash(
-                fireSnapshot.portfolio_target_25x,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Gap vs objetivo 25×"
-              value={formatCurrencyOrDash(
-                fireSnapshot.gap_to_target_25x,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Gastos anuales / patrimonio"
-              value={formatFractionAsPercent(
-                fireSnapshot.implied_withdrawal_rate_vs_networth,
-              )}
-              hint="Tasa implícita cuando hay patrimonio y gasto."
-            />
-            <MetricCard
-              label="Meses hasta 25× (lineal)"
-              value={formatMonthsRough(
-                fireSnapshot.estimated_months_to_25x_linear,
-              )}
-              hint="Con ahorro mensual neto del presupuesto constante."
-            />
-            <MetricCard
-              label="Ahorro mensual neto (presupuesto)"
-              value={formatCurrencyAmount(
-                fireSnapshot.net_monthly_equivalent,
-                currencyIso,
-              )}
-            />
-            <MetricCard
-              label="Objetivo cartera (motor)"
-              value={formatCurrencyOrDash(
-                fireSnapshot.engine_portfolio_target,
-                currencyIso,
-              )}
-              hint="Gasto regular anualizado, tasa retirada y CGT en fire_settings (JSON instalación)."
-            />
-            <MetricCard
-              label="Hito motor alcanzado"
-              value={
-                fireSnapshot.engine_fire_reached
-                  ? fireSnapshot.engine_fire_reach_month_index != null
-                    ? `Sí (mes ${fireSnapshot.engine_fire_reach_month_index})`
-                    : "Sí"
-                  : "No"
-              }
-              hint="Primera coincidencia serie proyectada vs objetivo (360 meses)."
-            />
-          </div>
-          <p className="hint bordered-top tight">
-            {fireSnapshot.mvp_model_note}
-          </p>
-        </section>
-      ) : null}
-
-      <section className="panel">
-        <h3 className="panel-title">Horizonte e inflación (instalación)</h3>
-        <p className="muted tight">
-          Pensiones por fases y tramos impositivos completos: extendemos el motor;
-          ya hay hito vs objetivo en la rejilla superior.
-        </p>
-        {hasMembership && installation ? (
-          <p className="muted bordered-top tight">
-            Edad objetivo{" "}
-            <strong>{horizonAge != null ? `${horizonAge} años` : METRIC_DASH}</strong>
-            ; inflación en proyección{" "}
-            <strong>{inflation ? "activada" : "desactivada"}</strong> —{" "}
-            <strong>Ajustes</strong> (subpestaña <strong>Proyección</strong>).
-          </p>
-        ) : null}
-        {hasMembership && installation && inflation ? (
-          <p className="hint bordered-top tight">
-            Con inflación activa y supuesto % en Ajustes, la serie de proyección
-            puede mostrar patrimonio deflactado («dinero de hoy»).
-          </p>
-        ) : null}
-      </section>
-
-      <section className="panel muted-panel">
-        <h3 className="panel-title">Gasto en jubilación y retiradas</h3>
-        <p className="muted tight">
-          Modos <code>FireRetirementExpenseMode</code> y{" "}
-          <code>FireWithdrawalMode</code> — pendientes de API (checklist).
-        </p>
-      </section>
-
-      <section className="panel muted-panel">
-        <h3 className="panel-title">Pensiones e IRPF</h3>
-        <p className="muted tight">
-          Pensiones por persona y tramos IRPF — fecha de nacimiento en{" "}
-          <strong>Tu cuenta</strong> (clic en tu usuario); motor fiscal en servidor
-          pendiente.
-        </p>
-      </section>
     </div>
   );
 }
@@ -6922,8 +6971,8 @@ function ProjectionNetWorthChart({
         <title>Patrimonio neto y capital aportado en el tiempo</title>
         <defs>
           <linearGradient id={`nwFill-${gid}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#0ea5e9" stopOpacity="0.33" />
-            <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0.03" />
+            <stop offset="0%" stopColor="#10b981" stopOpacity="0.3" />
+            <stop offset="100%" stopColor="#10b981" stopOpacity="0.03" />
           </linearGradient>
         </defs>
 
@@ -6941,9 +6990,9 @@ function ProjectionNetWorthChart({
           transform={`translate(${layoutDims.legend.x}, ${layoutDims.legend.y})`}
           className={`projection-chart-legend${layoutDims.legendOnRight ? "" : " projection-chart-legend--stacked"}`}
         >
-          <line x1={0} y1={7} x2={26} y2={7} stroke="#0284c7" strokeWidth={3} strokeLinecap="round" />
+          <line x1={0} y1={7} x2={26} y2={7} stroke="#047857" strokeWidth={3} strokeLinecap="round" />
           <text x={34} y={11}>Patrimonio neto</text>
-          <line x1={0} y1={29} x2={26} y2={29} stroke="#7c3aed" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
+          <line x1={0} y1={29} x2={26} y2={29} stroke="#b45309" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
           <text x={34} y={33}>Capital aportado</text>
         </g>
 
@@ -7006,7 +7055,7 @@ function ProjectionNetWorthChart({
         <polyline
           points={nwPoints}
           fill="none"
-          stroke="#0369a1"
+          stroke="#047857"
           strokeWidth={2.85}
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -7014,7 +7063,7 @@ function ProjectionNetWorthChart({
         <polyline
           points={ccPoints}
           fill="none"
-          stroke="#6d28d9"
+          stroke="#b45309"
           strokeWidth={2.1}
           strokeDasharray="7 5"
           strokeLinecap="round"
@@ -7135,17 +7184,15 @@ function ProjectionView({
         <h2 className="workspace-title">Proyección</h2>
         <p className="workspace-sub">
           {installationBusy
-            ? "Cargando instalación…"
+            ? "Cargando…"
             : !hasMembership
-              ? "Sin acceso a datos hasta que un propietario apruebe tu cuenta."
-              : `Patrimonio neto proyectado con el motor mensual alineado al cliente macOS (presupuesto sin cuotas derivadas, deuda, próximos, aportaciones). Inflación opcional según Ajustes. Moneda ${currency}.`}
+              ? "Sin acceso hasta aprobación."
+              : `Moneda ${currency}`}
         </p>
       </div>
 
       {!installationBusy && !hasMembership ? (
-        <div className="banner info-banner">
-          Cuando tengas acceso, verás la serie proyectada aquí.
-        </div>
+        <div className="banner info-banner">Sin acceso al hogar.</div>
       ) : null}
 
       {projectionError ? (
@@ -7158,10 +7205,7 @@ function ProjectionView({
 
       {hasMembership && !projectionBusy && projectionSeries ? (
         <section className="panel">
-          <h3 className="panel-title panel-title-with-hint">
-            <span>Trayectoria proyectada</span>
-            <InlineHint title={projectionSeries.model_note} />
-          </h3>
+          <h3 className="panel-title">Trayectoria proyectada</h3>
           <ProjectionNetWorthChart
             series={projectionSeries}
             currencyIso={currencyIso}
@@ -7189,19 +7233,12 @@ function PlaceholderTab({ tabLabel }: { tabLabel: string }) {
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">{tabLabel}</h2>
-        <p className="workspace-sub">
-          Pendiente de backend y UI alineados al cliente de referencia (ver{" "}
-          <code>docs/spec/PARITY_CHECKLIST.md</code>). Las pestañas ya enlazadas
-          —Activos, Pasivos, Presupuesto— sirven de modelo para las que restan.
-        </p>
+        <p className="workspace-sub">Próximamente.</p>
       </div>
-      <div className="panel placeholder-hero">
-        <p className="muted tight">
-          Aquí irá la vista completa de <strong>{tabLabel}</strong> — tablas,
-          filtros y KPIs reactivos al editar campos (sin botón global
-          «calcular»).
-        </p>
-      </div>
+      <div
+        className="panel placeholder-hero"
+        aria-label={`${tabLabel}: pendiente`}
+      />
     </div>
   );
 }

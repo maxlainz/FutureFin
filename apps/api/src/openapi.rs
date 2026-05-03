@@ -41,11 +41,6 @@ use crate::handlers::categories::{
     __path_patch_category,
 };
 #[allow(unused_imports)]
-use crate::handlers::fire::__path_get_fire_snapshot;
-#[allow(unused_imports)]
-use crate::handlers::persons::{
-    __path_create_person, __path_delete_person, __path_list_persons, __path_patch_person,
-};
 #[allow(unused_imports)]
 use crate::handlers::projection::__path_get_projection_series;
 use axum::Json;
@@ -87,12 +82,7 @@ use utoipa::OpenApi;
         create_planning_flow,
         patch_planning_flow,
         delete_planning_flow,
-        get_fire_snapshot,
         get_projection_series,
-        list_persons,
-        create_person,
-        patch_person,
-        delete_person,
         export_backup_zip,
     ),
     components(schemas(
@@ -136,12 +126,8 @@ use utoipa::OpenApi;
         crate::handlers::planning::PlanningFlowDirection,
         crate::handlers::planning::CreatePlanningFlowBody,
         crate::handlers::planning::PatchPlanningFlowBody,
-        crate::handlers::fire::FireSnapshotResponse,
         crate::handlers::projection::ProjectionSeriesResponse,
         crate::handlers::projection::ProjectionPoint,
-        crate::handlers::persons::PersonResponse,
-        crate::handlers::persons::CreatePersonBody,
-        crate::handlers::persons::PatchPersonBody,
         ErrorBody,
         ErrorCode,
     )),
@@ -149,7 +135,7 @@ use utoipa::OpenApi;
         (name = "health", description = "Liveness and readiness probes"),
         (
             name = "auth",
-            description = "Username/password sessions (OAuth/OIDC traits reserved in `crate::auth::oauth`)"
+            description = "Username/password sessions"
         ),
         (
             name = "installation",
@@ -180,16 +166,8 @@ use utoipa::OpenApi;
             description = "Upcoming / planned cash flows (income or expense categories); parity PlanningTabView list CRUD"
         ),
         (
-            name = "fire",
-            description = "MVP FIRE KPIs (25× heurístico); no sustituye fireMilestone ni ORACLE_TESTS"
-        ),
-        (
             name = "projection",
             description = "MVP serie lineal de patrimonio; no sustituye projectNetWorthSeries Swift"
-        ),
-        (
-            name = "persons",
-            description = "Miembros del hogar (nombre, titular primaria, fecha de nacimiento)"
         ),
         (
             name = "backup",
