@@ -3199,7 +3199,7 @@ export default function App() {
 
           <main
             className={
-              activeTab === "projection" || activeTab === "budget"
+              activeTab === "projection"
                 ? "app-main app-main--projection-fullbleed"
                 : "app-main"
             }
@@ -3539,10 +3539,21 @@ export default function App() {
   );
 }
 
-/** Filas agrupadas por categoría, en el orden de `categories`; al final, IDs huérfanos. */
+/**
+ * Filas agrupadas por categoría (orden de ajustes + IDs huérfanos al reunirlos).
+ * `sortRowsDescending`: dentro de cada categoría, filas de mayor a menor `value`; empates con `tieBreak`.
+ * `categoryTotalDescending`: bloques de categoría de mayor a menor total; empates por nombre de categoría.
+ */
 function groupRowsByCategoryOrdered<T extends { category_id: string }>(
   rows: T[],
   categories: CategoryRow[],
+  opts?: {
+    categoryTotalDescending?: (items: T[]) => number;
+    sortRowsDescending?: {
+      value: (row: T) => number;
+      tieBreak: (a: T, b: T) => number;
+    };
+  },
 ): { categoryId: string; label: string; items: T[] }[] {
   const byCat = new Map<string, T[]>();
   for (const row of rows) {
@@ -3567,6 +3578,24 @@ function groupRowsByCategoryOrdered<T extends { category_id: string }>(
         items,
       });
     }
+  }
+  const rs = opts?.sortRowsDescending;
+  if (rs) {
+    for (const g of out) {
+      g.items.sort((a, b) => {
+        const diff = rs.value(b) - rs.value(a);
+        if (diff !== 0) return diff;
+        return rs.tieBreak(a, b);
+      });
+    }
+  }
+  const rank = opts?.categoryTotalDescending;
+  if (rank) {
+    out.sort((a, b) => {
+      const diff = rank(b.items) - rank(a.items);
+      if (diff !== 0) return diff;
+      return a.label.localeCompare(b.label, "es");
+    });
   }
   return out;
 }
@@ -4006,7 +4035,18 @@ function AssetsView({
         </div>
         {!assetsBusy && assets.length > 0 ? (
           <div className="ledger-by-category-stack">
-            {groupRowsByCategoryOrdered(assets, assetCategories).map((g) => {
+            {groupRowsByCategoryOrdered(assets, assetCategories, {
+              sortRowsDescending: {
+                value: (a) => parseDisplayDecimal(a.current_value) ?? 0,
+                tieBreak: (a, b) => a.name.localeCompare(b.name, "es"),
+              },
+              categoryTotalDescending: (items) =>
+                items.reduce(
+                  (acc, a) =>
+                    acc + (parseDisplayDecimal(a.current_value) ?? 0),
+                  0,
+                ),
+            }).map((g) => {
               const catTotalVal = g.items.reduce(
                 (acc, a) => acc + (parseDisplayDecimal(a.current_value) ?? 0),
                 0,
@@ -4045,7 +4085,6 @@ function AssetsView({
                           >
                             Aporte
                           </th>
-                          <th>Notas</th>
                           {canEdit ? (
                             <th className="asset-actions-cell">
                               <span className="sr-only">Acciones</span>
@@ -4089,9 +4128,6 @@ function AssetsView({
                                 a,
                                 currencyIso,
                               )}
-                            </td>
-                            <td className="asset-notes-cell">
-                              {a.notes ?? METRIC_DASH}
                             </td>
                             {canEdit ? (
                               <td className="asset-actions-cell budget-row-actions">
@@ -4516,10 +4552,18 @@ function LiabilitiesView({
         </div>
         {!liabilitiesBusy && liabilities.length > 0 ? (
           <div className="ledger-by-category-stack">
-            {groupRowsByCategoryOrdered(
-              liabilities,
-              liabilityCategories,
-            ).map((g) => {
+            {groupRowsByCategoryOrdered(liabilities, liabilityCategories, {
+              sortRowsDescending: {
+                value: (row) => parseDisplayDecimal(row.principal) ?? 0,
+                tieBreak: (a, b) => a.label.localeCompare(b.label, "es"),
+              },
+              categoryTotalDescending: (items) =>
+                items.reduce(
+                  (acc, row) =>
+                    acc + (parseDisplayDecimal(row.principal) ?? 0),
+                  0,
+                ),
+            }).map((g) => {
               const catPrincipal = g.items.reduce(
                 (acc, row) =>
                   acc + (parseDisplayDecimal(row.principal) ?? 0),
@@ -4544,7 +4588,6 @@ function LiabilitiesView({
                           <th className="num">Cuota</th>
                           <th>Frec.</th>
                           <th>Fin plan</th>
-                          <th>Notas</th>
                           {canEdit ? (
                             <th className="asset-actions-cell">
                               <span className="sr-only">Acciones</span>
@@ -4587,9 +4630,6 @@ function LiabilitiesView({
                                 : METRIC_DASH}
                             </td>
                             <td>{row.payment_end_date ?? METRIC_DASH}</td>
-                            <td className="asset-notes-cell">
-                              {row.notes ?? METRIC_DASH}
-                            </td>
                             {canEdit ? (
                               <td className="asset-actions-cell budget-row-actions">
                                 <button
@@ -4923,7 +4963,6 @@ function BudgetView({
                     <tr>
                       <th>Categoría</th>
                       <th className="num">Importe mensual</th>
-                      <th className="budget-table-notes-header">Notas</th>
                       {canEdit ? (
                         <th className="asset-actions-cell">
                           <span className="sr-only">Acciones</span>
@@ -4940,9 +4979,6 @@ function BudgetView({
                         </td>
                         <td className="num">
                           {formatCurrencyAmount(row.amount, currencyIso)}
-                        </td>
-                        <td className="asset-notes-cell budget-table-notes">
-                          {row.notes ?? METRIC_DASH}
                         </td>
                         {canEdit ? (
                           <td className="asset-actions-cell budget-row-actions">
@@ -5000,7 +5036,6 @@ function BudgetView({
                     <tr>
                       <th>Categoría</th>
                       <th className="num">Importe mensual</th>
-                      <th className="budget-table-notes-header">Notas</th>
                       {canEdit ? (
                         <th className="asset-actions-cell">
                           <span className="sr-only">Acciones</span>
@@ -5017,9 +5052,6 @@ function BudgetView({
                         </td>
                         <td className="num">
                           {formatCurrencyAmount(row.amount, currencyIso)}
-                        </td>
-                        <td className="asset-notes-cell budget-table-notes">
-                          {row.notes ?? METRIC_DASH}
                         </td>
                         {canEdit ? (
                           <td className="asset-actions-cell budget-row-actions">
@@ -5067,7 +5099,6 @@ function BudgetView({
                       <th className="num">Cuota</th>
                       <th>Frec.</th>
                       <th className="num">Equiv. mensual</th>
-                      <th>Notas</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -5090,7 +5121,6 @@ function BudgetView({
                             currencyIso,
                           )}
                         </td>
-                        <td className="asset-notes-cell">{row.notes}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -5466,7 +5496,6 @@ function UpcomingView({
                   <th>Título</th>
                   <th className="num">Importe</th>
                   <th>Fecha prevista</th>
-                  <th>Notas</th>
                   {canEdit ? (
                     <th className="asset-actions-cell">
                       <span className="sr-only">Acciones</span>
@@ -5487,9 +5516,6 @@ function UpcomingView({
                       {formatCurrencyAmount(row.expected_amount, currencyIso)}
                     </td>
                     <td>{row.due_date ?? METRIC_DASH}</td>
-                    <td className="asset-notes-cell">
-                      {row.notes ?? METRIC_DASH}
-                    </td>
                     {canEdit ? (
                       <td className="asset-actions-cell budget-row-actions">
                         <button

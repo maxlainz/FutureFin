@@ -300,7 +300,7 @@
   box-sizing: border-box;
 }
 
-/* Proyección / Presupuesto: sin tope max-width; el contenido respeta siempre padding horizontal. */
+/* Proyección: sin tope max-width; el contenido respeta siempre padding horizontal. */
 .app-main--projection-fullbleed {
   max-width: none;
   min-width: 0;
@@ -312,7 +312,7 @@
   max-width: min(44rem, 100%);
 }
 
-/* Presupuesto: ocupa el ancho útil del main fullbleed; nada debe desbordar el padding del main. */
+/* Presupuesto: mismo ancho que el resto del workspace (main acotado); evita desbordes en tablas. */
 .budget-page {
   display: flex;
   flex-direction: column;
@@ -321,10 +321,6 @@
   max-width: 100%;
   min-width: 0;
   box-sizing: border-box;
-}
-
-.budget-page .workspace-sub {
-  max-width: none;
 }
 
 .metric-grid.metric-grid--budget-summary {
@@ -379,14 +375,6 @@
   max-width: 100%;
   /* auto evita que porcentajes + columnas en rem desborden el ancho útil en rejillas estrechas */
   table-layout: auto;
-}
-
-.assets-table.assets-table--budget-lines .budget-table-notes-header,
-.assets-table.assets-table--budget-lines .budget-table-notes {
-  max-width: none;
-  min-width: 8rem;
-  overflow-wrap: anywhere;
-  word-break: break-word;
 }
 
 .assets-table.assets-table--budget-lines .asset-actions-cell {
