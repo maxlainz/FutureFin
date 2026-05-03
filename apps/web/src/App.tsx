@@ -5010,124 +5010,126 @@ function BudgetView({
             )}
           </section>
 
-          <section className="panel budget-col">
-            <div className="panel-head-row">
-              <h3 className="panel-title">Gastos</h3>
-              {canEdit &&
-              hasMembership &&
-              budgetExpenseCategories.length > 0 ? (
-                <button
-                  type="button"
-                  className="btn primary"
-                  onClick={() => openNewBudgetModal("expense")}
-                >
-                  Nueva línea
-                </button>
-              ) : null}
-            </div>
-            {expenseEntries.length === 0 ? (
-              <p className="muted bordered-top">
-                No hay líneas de gasto recurrentes en el presupuesto.
-              </p>
-            ) : (
-              <div className="table-scroll table-scroll--budget-lines bordered-top">
-                <table className="assets-table assets-table--budget-lines">
-                  <thead>
-                    <tr>
-                      <th>Categoría</th>
-                      <th className="num">Importe mensual</th>
-                      {canEdit ? (
-                        <th className="asset-actions-cell">
-                          <span className="sr-only">Acciones</span>
-                        </th>
-                      ) : null}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {expenseEntries.map((row) => (
-                      <tr key={row.id}>
-                        <td>
-                          {categoryMapForSort.get(row.category_id)?.name ??
-                            row.category_id.slice(0, 8)}
-                        </td>
-                        <td className="num">
-                          {formatCurrencyAmount(row.amount, currencyIso)}
-                        </td>
+          <div className="budget-expenses-column">
+            <section className="panel budget-col">
+              <div className="panel-head-row">
+                <h3 className="panel-title">Gastos</h3>
+                {canEdit &&
+                hasMembership &&
+                budgetExpenseCategories.length > 0 ? (
+                  <button
+                    type="button"
+                    className="btn primary"
+                    onClick={() => openNewBudgetModal("expense")}
+                  >
+                    Nueva línea
+                  </button>
+                ) : null}
+              </div>
+              {expenseEntries.length === 0 ? (
+                <p className="muted bordered-top">
+                  No hay líneas de gasto recurrentes en el presupuesto.
+                </p>
+              ) : (
+                <div className="table-scroll table-scroll--budget-lines bordered-top">
+                  <table className="assets-table assets-table--budget-lines">
+                    <thead>
+                      <tr>
+                        <th>Categoría</th>
+                        <th className="num">Importe mensual</th>
                         {canEdit ? (
-                          <td className="asset-actions-cell budget-row-actions">
-                            <button
-                              type="button"
-                              className="btn ghost icon-btn"
-                              aria-label="Editar línea"
-                              disabled={budgetSaving}
-                              onClick={() => beginEditBudgetEntry(row)}
-                            >
-                              <RowEditIcon />
-                            </button>
-                            <button
-                              type="button"
-                              className="btn ghost danger icon-btn"
-                              aria-label="Eliminar línea"
-                              disabled={budgetSaving}
-                              onClick={() => deleteBudgetEntryRow(row.id)}
-                            >
-                              <RowTrashIcon />
-                            </button>
-                          </td>
+                          <th className="asset-actions-cell">
+                            <span className="sr-only">Acciones</span>
+                          </th>
                         ) : null}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                    </thead>
+                    <tbody>
+                      {expenseEntries.map((row) => (
+                        <tr key={row.id}>
+                          <td>
+                            {categoryMapForSort.get(row.category_id)?.name ??
+                              row.category_id.slice(0, 8)}
+                          </td>
+                          <td className="num">
+                            {formatCurrencyAmount(row.amount, currencyIso)}
+                          </td>
+                          {canEdit ? (
+                            <td className="asset-actions-cell budget-row-actions">
+                              <button
+                                type="button"
+                                className="btn ghost icon-btn"
+                                aria-label="Editar línea"
+                                disabled={budgetSaving}
+                                onClick={() => beginEditBudgetEntry(row)}
+                              >
+                                <RowEditIcon />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn ghost danger icon-btn"
+                                aria-label="Eliminar línea"
+                                disabled={budgetSaving}
+                                onClick={() => deleteBudgetEntryRow(row.id)}
+                              >
+                                <RowTrashIcon />
+                              </button>
+                            </td>
+                          ) : null}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
 
-            <h3 className="panel-title budget-derived-heading">
-              Derivado de pasivos
-            </h3>
-            {derivedLines.length === 0 ? (
-              <p className="muted bordered-top">
-                No hay cuotas derivadas en este momento.
-              </p>
-            ) : (
-              <div className="table-scroll bordered-top">
-                <table className="assets-table">
-                  <thead>
-                    <tr>
-                      <th>Concepto</th>
-                      <th>Categoría pasivo</th>
-                      <th className="num">Cuota</th>
-                      <th>Frec.</th>
-                      <th className="num">Equiv. mensual</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {derivedLines.map((row) => (
-                      <tr key={row.liability_id}>
-                        <td>{row.label}</td>
-                        <td>
-                          {budgetDerivedCatLabel(
-                            budgetLiabilityCategories,
-                            row.category_id,
-                          )}
-                        </td>
-                        <td className="num">
-                          {formatCurrencyAmount(row.amount, currencyIso)}
-                        </td>
-                        <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
-                        <td className="num">
-                          {formatCurrencyAmount(
-                            row.monthly_equivalent,
-                            currencyIso,
-                          )}
-                        </td>
+            <section className="panel budget-col">
+              <h3 className="panel-title">Derivado de pasivos</h3>
+              {derivedLines.length === 0 ? (
+                <p className="muted bordered-top">
+                  No hay cuotas derivadas en este momento.
+                </p>
+              ) : (
+                <div className="table-scroll bordered-top">
+                  <table className="assets-table">
+                    <thead>
+                      <tr>
+                        <th>Concepto</th>
+                        <th>Categoría pasivo</th>
+                        <th className="num">Cuota</th>
+                        <th>Frec.</th>
+                        <th className="num">Equiv. mensual</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
+                    </thead>
+                    <tbody>
+                      {derivedLines.map((row) => (
+                        <tr key={row.liability_id}>
+                          <td>{row.label}</td>
+                          <td>
+                            {budgetDerivedCatLabel(
+                              budgetLiabilityCategories,
+                              row.category_id,
+                            )}
+                          </td>
+                          <td className="num">
+                            {formatCurrencyAmount(row.amount, currencyIso)}
+                          </td>
+                          <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
+                          <td className="num">
+                            {formatCurrencyAmount(
+                              row.monthly_equivalent,
+                              currencyIso,
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          </div>
         </div>
       )}
     </div>

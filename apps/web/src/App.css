@@ -351,8 +351,13 @@
   }
 }
 
-.budget-derived-heading {
-  margin-top: 1.25rem;
+/* Columna derecha del presupuesto: Gastos + Derivado apilados (misma anchura que antes). */
+.budget-expenses-column {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+  width: 100%;
 }
 
 .budget-two-col .panel.budget-col {
