@@ -428,6 +428,13 @@ a.tab-btn {
   height: 1rem;
 }
 
+.workspace {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
 .workspace-header {
   margin-bottom: 1.25rem;
 }
@@ -470,21 +477,25 @@ a.tab-btn {
   margin-bottom: 1.25rem;
 }
 
-/* Banda de KPIs: una sola fila; si no cabe, scroll horizontal */
+/* Banda de KPIs: una sola fila; si no cabe, scroll horizontal (sin gutter extra vs paneles/tablas) */
 .metric-grid.workspace-kpi-strip {
   display: flex;
   flex-wrap: nowrap;
   gap: 1rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
-  scrollbar-gutter: stable;
 }
 
 .metric-grid.workspace-kpi-strip > .metric-card {
   flex: 1 1 0;
   min-width: 10.75rem;
+  max-width: none;
   box-sizing: border-box;
 }
 
