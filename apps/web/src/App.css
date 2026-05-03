@@ -275,6 +275,18 @@
   outline-offset: 2px;
 }
 
+a.tab-btn {
+  text-decoration: none;
+}
+
+.tab-bar a.tab-btn:visited {
+  color: #64748b;
+}
+
+.tab-bar a.tab-btn.active:visited {
+  color: #0f172a;
+}
+
 .settings-subtab-bar {
   margin-bottom: 1.25rem;
   padding-left: 0.35rem;

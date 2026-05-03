@@ -377,6 +377,57 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "settings", label: "Ajustes" },
 ];
 
+/** Ruta canónica por pestaña (español, sin acentos en la URL salvo donde ya es habitual). */
+const TAB_PATH: Record<TabId, string> = {
+  summary: "/resumen",
+  assets: "/activos",
+  liabilities: "/pasivos",
+  budget: "/presupuesto",
+  upcoming: "/proximos",
+  projection: "/proyeccion",
+  settings: "/ajustes",
+};
+
+function normalizeAppPath(pathname: string): string {
+  const p = pathname.replace(/\/+$/, "") || "/";
+  return p;
+}
+
+function tabFromPathname(pathname: string): TabId | null {
+  const p = normalizeAppPath(pathname);
+  const ids = Object.keys(TAB_PATH) as TabId[];
+  for (const id of ids) {
+    if (TAB_PATH[id] === p) return id;
+  }
+  return null;
+}
+
+function useAppPathNavigation(): [
+  pathname: string,
+  navigate: (path: string, replace?: boolean) => void,
+] {
+  const [pathname, setPathname] = useState(() =>
+    typeof window !== "undefined"
+      ? window.location.pathname
+      : TAB_PATH.summary,
+  );
+
+  useEffect(() => {
+    const onPop = () => setPathname(window.location.pathname);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const navigate = useCallback((path: string, replace = false) => {
+    const url = path.startsWith("/") ? path : `/${path}`;
+    if (replace) window.history.replaceState(null, "", url);
+    else window.history.pushState(null, "", url);
+    setPathname(window.location.pathname);
+  }, []);
+
+  return [pathname, navigate];
+}
+
 const defaultFetchInit: RequestInit = {
   credentials: "include",
 };
@@ -1485,9 +1536,25 @@ export default function App() {
   const [backupZipBusy, setBackupZipBusy] = useState(false);
   const [backupZipError, setBackupZipError] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<TabId>("summary");
+  const [pathname, navigate] = useAppPathNavigation();
+  const activeTab = useMemo(
+    () => tabFromPathname(pathname) ?? "summary",
+    [pathname],
+  );
 
   const hasMembership = installation !== null;
+
+  useLayoutEffect(() => {
+    if (!user) return;
+    const p = normalizeAppPath(pathname);
+    if (p === "/") {
+      navigate("/resumen", true);
+      return;
+    }
+    if (tabFromPathname(pathname) === null) {
+      navigate("/resumen", true);
+    }
+  }, [user, pathname, navigate]);
 
   const refreshSession = useCallback(async () => {
     setSessionBusy(true);
@@ -2133,7 +2200,7 @@ export default function App() {
       setInstallationGate("loading");
       setPendingUsers([]);
       setPendingUsersError(null);
-      setActiveTab("summary");
+      navigate("/resumen", true);
     } catch (e: unknown) {
       setSessionError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -3162,14 +3229,27 @@ export default function App() {
         <>
           <nav className="tab-bar" aria-label="Secciones">
             {TABS.map((t) => (
-              <button
+              <a
                 key={t.id}
-                type="button"
+                href={TAB_PATH[t.id]}
                 className={`tab-btn ${activeTab === t.id ? "active" : ""}`}
-                onClick={() => setActiveTab(t.id)}
+                aria-current={activeTab === t.id ? "page" : undefined}
+                onClick={(e) => {
+                  if (
+                    e.button !== 0 ||
+                    e.metaKey ||
+                    e.altKey ||
+                    e.ctrlKey ||
+                    e.shiftKey
+                  ) {
+                    return;
+                  }
+                  e.preventDefault();
+                  navigate(TAB_PATH[t.id]);
+                }}
               >
                 {t.label}
-              </button>
+              </a>
             ))}
           </nav>
 
