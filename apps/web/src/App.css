@@ -414,6 +414,15 @@
   height: 1.1rem;
 }
 
+.btn.primary.icon-btn.ledger-toolbar-add {
+  padding: 0.28rem;
+}
+
+.btn.primary.icon-btn.ledger-toolbar-add svg {
+  width: 1rem;
+  height: 1rem;
+}
+
 .workspace-header {
   margin-bottom: 1.25rem;
 }

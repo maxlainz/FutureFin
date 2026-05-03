@@ -3571,6 +3571,24 @@ function groupRowsByCategoryOrdered<T extends { category_id: string }>(
   return out;
 }
 
+function PlusIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
 function RowEditIcon() {
   return (
     <svg
@@ -3970,10 +3988,11 @@ function AssetsView({
             {canEdit && hasMembership && assetCategories.length > 0 ? (
               <button
                 type="button"
-                className="btn primary"
+                className="btn primary icon-btn ledger-toolbar-add"
+                aria-label="Nuevo activo"
                 onClick={() => openNewAssetModal()}
               >
-                Nuevo activo
+                <PlusIcon />
               </button>
             ) : null}
           </div>
@@ -4481,10 +4500,11 @@ function LiabilitiesView({
             {canEdit && hasMembership && liabilityCategories.length > 0 ? (
               <button
                 type="button"
-                className="btn primary"
+                className="btn primary icon-btn ledger-toolbar-add"
+                aria-label="Nuevo pasivo"
                 onClick={() => openNewLiabilityModal()}
               >
-                Nuevo pasivo
+                <PlusIcon />
               </button>
             ) : null}
           </div>
