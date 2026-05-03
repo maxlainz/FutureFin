@@ -3963,36 +3963,39 @@ function AssetsView({
         </Modal>
       ) : null}
 
-      <section className="panel">
-        <div className="panel-head-row">
-          <h3 className="panel-title">Posiciones</h3>
-          {canEdit && hasMembership && assetCategories.length > 0 ? (
-            <button
-              type="button"
-              className="btn primary"
-              onClick={() => openNewAssetModal()}
-            >
-              Nuevo activo
-            </button>
+      <div className="ledger-list-section">
+        <div className="ledger-list-toolbar">
+          <div className="panel-head-row">
+            <h3 className="panel-title">Posiciones</h3>
+            {canEdit && hasMembership && assetCategories.length > 0 ? (
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => openNewAssetModal()}
+              >
+                Nuevo activo
+              </button>
+            ) : null}
+          </div>
+          {assetsBusy ? (
+            <p className="muted">Cargando…</p>
+          ) : assets.length === 0 ? (
+            <p className="muted">
+              No hay activos registrados en esta instalación.
+            </p>
           ) : null}
         </div>
-        {assetsBusy ? (
-          <p className="muted bordered-top">Cargando…</p>
-        ) : assets.length === 0 ? (
-          <p className="muted bordered-top">
-            No hay activos registrados en esta instalación.
-          </p>
-        ) : (
-          <div className="ledger-by-category-stack bordered-top">
+        {!assetsBusy && assets.length > 0 ? (
+          <div className="ledger-by-category-stack">
             {groupRowsByCategoryOrdered(assets, assetCategories).map((g) => {
               const catTotalVal = g.items.reduce(
                 (acc, a) => acc + (parseDisplayDecimal(a.current_value) ?? 0),
                 0,
               );
               return (
-                <div key={g.categoryId} className="ledger-category-block">
-                  <div className="ledger-category-block-head">
-                    <h4 className="subsection-title">{g.label}</h4>
+                <section key={g.categoryId} className="panel ledger-category-panel">
+                  <div className="panel-head-row">
+                    <h3 className="panel-title">{g.label}</h3>
                     <span className="ledger-category-total">
                       {formatCurrencyNumber(catTotalVal, currencyIso)}
                     </span>
@@ -4098,12 +4101,12 @@ function AssetsView({
                       </tbody>
                     </table>
                   </div>
-                </div>
+                </section>
               );
             })}
           </div>
-        )}
-      </section>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -4471,27 +4474,28 @@ function LiabilitiesView({
         </Modal>
       ) : null}
 
-      <section className="panel">
-        <div className="panel-head-row">
-          <h3 className="panel-title">Lista</h3>
-          {canEdit && hasMembership && liabilityCategories.length > 0 ? (
-            <button
-              type="button"
-              className="btn primary"
-              onClick={() => openNewLiabilityModal()}
-            >
-              Nuevo pasivo
-            </button>
+      <div className="ledger-list-section">
+        <div className="ledger-list-toolbar">
+          <div className="panel-head-row">
+            <h3 className="panel-title">Lista</h3>
+            {canEdit && hasMembership && liabilityCategories.length > 0 ? (
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => openNewLiabilityModal()}
+              >
+                Nuevo pasivo
+              </button>
+            ) : null}
+          </div>
+          {liabilitiesBusy ? (
+            <p className="muted">Cargando…</p>
+          ) : liabilities.length === 0 ? (
+            <p className="muted">No hay pasivos en esta instalación.</p>
           ) : null}
         </div>
-        {liabilitiesBusy ? (
-          <p className="muted bordered-top">Cargando…</p>
-        ) : liabilities.length === 0 ? (
-          <p className="muted bordered-top">
-            No hay pasivos en esta instalación.
-          </p>
-        ) : (
-          <div className="ledger-by-category-stack bordered-top">
+        {!liabilitiesBusy && liabilities.length > 0 ? (
+          <div className="ledger-by-category-stack">
             {groupRowsByCategoryOrdered(
               liabilities,
               liabilityCategories,
@@ -4502,9 +4506,9 @@ function LiabilitiesView({
                 0,
               );
               return (
-                <div key={g.categoryId} className="ledger-category-block">
-                  <div className="ledger-category-block-head">
-                    <h4 className="subsection-title">{g.label}</h4>
+                <section key={g.categoryId} className="panel ledger-category-panel">
+                  <div className="panel-head-row">
+                    <h3 className="panel-title">{g.label}</h3>
                     <span className="ledger-category-total">
                       {formatCurrencyNumber(catPrincipal, currencyIso)}
                     </span>
@@ -4593,12 +4597,12 @@ function LiabilitiesView({
                       </tbody>
                     </table>
                   </div>
-                </div>
+                </section>
               );
             })}
           </div>
-        )}
-      </section>
+        ) : null}
+      </div>
     </div>
   );
 }
