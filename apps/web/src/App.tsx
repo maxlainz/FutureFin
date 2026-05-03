@@ -3984,7 +3984,7 @@ function AssetsView({
       <div className="ledger-list-section">
         <div className="ledger-list-toolbar">
           <div className="panel-head-row">
-            <h3 className="panel-title">Posiciones</h3>
+            <h3 className="panel-title">Activos por categoría</h3>
             {canEdit && hasMembership && assetCategories.length > 0 ? (
               <button
                 type="button"
@@ -4496,7 +4496,7 @@ function LiabilitiesView({
       <div className="ledger-list-section">
         <div className="ledger-list-toolbar">
           <div className="panel-head-row">
-            <h3 className="panel-title">Lista</h3>
+            <h3 className="panel-title">Pasivos por categoría</h3>
             {canEdit && hasMembership && liabilityCategories.length > 0 ? (
               <button
                 type="button"
