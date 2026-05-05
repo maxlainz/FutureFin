@@ -48,7 +48,7 @@ pub struct ProjectionInput {
     pub expense_regular_monthly: Decimal,
     pub assets: Vec<SimAsset>,
     pub liabilities: Vec<ProjectionLiabilityInput>,
-    /// Annual inflation % for deflating nominal NW to “money of today”; None → nominal series.
+    /// Annual inflation % for deflating nominal series to “money of today”; None → nominal.
     pub inflation_annual_percent: Option<Decimal>,
     /// Signed cash from planning flows per simulated month (`len == horizon_months`): index `i`
     /// pairs with month `i+1` (calendar month `add_months(month_first_calendar(ref_date), i)`).
@@ -59,6 +59,7 @@ pub struct ProjectionInput {
 pub struct ProjectionOutput {
     /// Month index 0..=horizon_months inclusive.
     pub net_worth: Vec<Decimal>,
+    /// Cumulative contributed basis, deflated when inflation assumption is active.
     pub contributed_capital: Vec<Decimal>,
 }
 
@@ -383,6 +384,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             undrained_cumulative,
             surplus_cash,
         );
+        let mut contributed_display = contributed_cumulative;
         if let Some(inf) = input.inflation_annual_percent {
             if inf > Decimal::ZERO {
                 let months_k = Decimal::from(k);
@@ -390,11 +392,12 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
                     .powd(months_k / Decimal::from(12));
                 if denom > Decimal::ZERO {
                     nw /= denom;
+                    contributed_display /= denom;
                 }
             }
         }
         net_series.push(nw);
-        contrib_series.push(contributed_cumulative);
+        contrib_series.push(contributed_display);
     }
 
     Ok(ProjectionOutput {
@@ -527,5 +530,30 @@ mod tests {
         assert_eq!(out.contributed_capital[0], Decimal::from(80_000));
         assert_eq!(out.contributed_capital[1], Decimal::from(80_000));
         assert_eq!(out.contributed_capital[2], Decimal::from(80_000));
+    }
+
+    #[test]
+    fn contributed_capital_is_deflated_when_inflation_is_active() {
+        let inp = ProjectionInput {
+            ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            horizon_months: 1,
+            income_regular_monthly: Decimal::from(1000),
+            expense_regular_monthly: Decimal::ZERO,
+            assets: vec![SimAsset {
+                id: Uuid::from_u128(11),
+                value: Decimal::ZERO,
+                purchase_price: Some(Decimal::from(1200)),
+                is_liquid: true,
+                expected_annual_return_percent: None,
+                monthly_contribution_fixed: Decimal::ZERO,
+                contribution_remainder_weight: Decimal::ONE,
+            }],
+            liabilities: vec![],
+            inflation_annual_percent: Some(Decimal::from(12)),
+            planning_monthly_cash_adjustment: vec![Decimal::ZERO],
+        };
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.contributed_capital[0], Decimal::from(1200));
+        assert!(out.contributed_capital[1] < Decimal::from(2200));
     }
 }

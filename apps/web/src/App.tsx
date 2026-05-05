@@ -170,8 +170,16 @@ type ProjectionPointApi = {
   contributed_capital: string;
 };
 
+type ProjectionMilestoneApi = {
+  target: string;
+  reached_month_index: number;
+  reached_date_ymd: string;
+};
+
 type ProjectionSeriesApi = {
   points: ProjectionPointApi[];
+  milestones: ProjectionMilestoneApi[];
+  compound_outpaces_true_savings_month_index?: number | null;
   months: number;
   horizon_years: number;
   horizon_basis: string;
@@ -665,6 +673,30 @@ function formatAxisMoney(n: number, currencyIso: string): string {
   } catch {
     return formatCurrencyNumber(n, currencyIso);
   }
+}
+
+function formatProjectionMilestoneCompactLabel(target: string): string {
+  const value = parseDisplayDecimal(target);
+  if (value === null || !Number.isFinite(value)) return METRIC_DASH;
+  const abs = Math.abs(value);
+  const units: Array<{ scale: number; suffix: string }> = [
+    { scale: 1_000_000_000_000, suffix: "T" },
+    { scale: 1_000_000_000, suffix: "B" },
+    { scale: 1_000_000, suffix: "M" },
+    { scale: 1_000, suffix: "K" },
+  ];
+  for (const u of units) {
+    if (abs >= u.scale) {
+      const scaled = value / u.scale;
+      const rounded = Math.round(scaled * 10) / 10;
+      const txt =
+        Math.abs(rounded - Math.trunc(rounded)) < 1e-9
+          ? String(Math.trunc(rounded))
+          : rounded.toFixed(1);
+      return `${txt}${u.suffix}`;
+    }
+  }
+  return formatMoneyAmount(String(value));
 }
 
 function normalizeAgeUiMode(raw: string | null | undefined): "dates" | "ages" {
@@ -5987,16 +6019,6 @@ function SummaryView({
                   )}
                 />
               ) : null}
-              {!isZeroFractionMetric(
-                summary.financial_health.upcoming_coverage_ratio,
-              ) ? (
-                <MetricCard
-                  label="Cobertura próximos"
-                  value={formatFractionAsPercent(
-                    summary.financial_health.upcoming_coverage_ratio,
-                  )}
-                />
-              ) : null}
             </div>
           ) : (
             <p className="muted bordered-top">Sin datos.</p>
@@ -6878,6 +6900,7 @@ function SettingsView({
 
 function ProjectionNetWorthChart({
   series,
+  milestones,
   currencyIso,
   ledgerPersonScope,
   inflationActive,
@@ -6889,6 +6912,7 @@ function ProjectionNetWorthChart({
   projectionTargetAge,
 }: {
   series: ProjectionSeriesApi;
+  milestones: ProjectionMilestoneApi[];
   currencyIso: string;
   ledgerPersonScope: LedgerPersonScope;
   inflationActive: boolean;
@@ -7064,6 +7088,16 @@ function ProjectionNetWorthChart({
       const local = i - visibleStart;
       return ml + (local / Math.max(1, visibleCount - 1)) * pw;
     };
+    const compoundOutpaceMonth =
+      series.compound_outpaces_true_savings_month_index ?? null;
+    const visibleMilestones = milestones.filter(
+      (m) =>
+        m.reached_month_index >= visibleStart && m.reached_month_index <= visibleEnd,
+    );
+    const showCompoundOutpaceMarker =
+      compoundOutpaceMonth != null &&
+      compoundOutpaceMonth >= visibleStart &&
+      compoundOutpaceMonth <= visibleEnd;
     return {
       nw,
       cc,
@@ -7074,6 +7108,9 @@ function ProjectionNetWorthChart({
       targetYMax: yMax,
       xTicks,
       xScale,
+      compoundOutpaceMonth,
+      showCompoundOutpaceMarker,
+      visibleMilestones,
       pw,
       ph,
       ml,
@@ -7097,6 +7134,7 @@ function ProjectionNetWorthChart({
     userBirthDate,
     anchorDateYmd,
     calendarTz,
+    milestones,
     viewWindow.count,
     viewWindow.start,
   ]);
@@ -7115,6 +7153,9 @@ function ProjectionNetWorthChart({
     targetYMax,
     xTicks,
     xScale,
+    compoundOutpaceMonth,
+    showCompoundOutpaceMarker,
+    visibleMilestones,
     pw,
     ph,
     ml,
@@ -7402,6 +7443,62 @@ function ProjectionNetWorthChart({
             strokeLinejoin="round"
             opacity={0.92}
           />
+          {visibleMilestones.map((m) => {
+            const x = xScale(m.reached_month_index);
+            const y0 = mt + ph;
+            const nwAtMilestone = nw[m.reached_month_index] ?? null;
+            const nwY =
+              nwAtMilestone != null && Number.isFinite(nwAtMilestone)
+                ? yScale(nwAtMilestone)
+                : null;
+            // Mantiene la marca siempre por encima de la curva de patrimonio neto.
+            const y1Floor = mt + 12;
+            const y1FromNetWorth = nwY != null ? nwY - 12 : y0 - Math.min(44, ph * 0.22);
+            const y1 = Math.max(y1Floor, Math.min(y0 - 8, y1FromNetWorth));
+            const targetNum = parseDisplayDecimal(m.target);
+            const label =
+              targetNum != null
+                ? formatCurrencyNumber(targetNum, currencyIso)
+                : formatProjectionMilestoneCompactLabel(m.target);
+            return (
+              <g key={`ms-${m.target}-${m.reached_month_index}`}>
+                <line
+                  x1={x}
+                  x2={x}
+                  y1={y0}
+                  y2={y1}
+                  className="projection-chart-milestone-line"
+                />
+                <text
+                  x={x}
+                  y={y1 - 6}
+                  textAnchor="middle"
+                  className="projection-chart-milestone-label"
+                >
+                  {label}
+                </text>
+              </g>
+            );
+          })}
+          {showCompoundOutpaceMarker && compoundOutpaceMonth != null ? (
+            <g>
+              <line
+                x1={xScale(compoundOutpaceMonth)}
+                x2={xScale(compoundOutpaceMonth)}
+                y1={mt + 2}
+                y2={mt + ph}
+                className="projection-chart-compound-marker"
+              />
+              <text
+                x={xScale(compoundOutpaceMonth)}
+                y={mt + 14}
+                textAnchor="middle"
+                className="projection-chart-compound-label"
+              >
+                Interés &gt; ahorro
+              </text>
+            </g>
+          ) : null}
 
           {hover !== null && hover >= visibleStart && hover <= visibleEnd ? (
             <line
@@ -7510,6 +7607,9 @@ function ProjectionView({
   })();
   const axisAnchor =
     projectionSeries?.anchor_date_ymd?.trim() || null;
+  const nextMilestones = projectionSeries?.milestones ?? [];
+  const compoundOutpaceMonth =
+    projectionSeries?.compound_outpaces_true_savings_month_index ?? null;
 
   return (
     <div className="workspace workspace--projection-fullwidth">
@@ -7539,8 +7639,46 @@ function ProjectionView({
       {hasMembership && !projectionBusy && projectionSeries ? (
         <section className="panel">
           <h3 className="panel-title">Trayectoria proyectada</h3>
+          {nextMilestones.length > 0 || compoundOutpaceMonth != null ? (
+            <div className="metric-grid workspace-kpi-strip">
+              {nextMilestones.map((m) => (
+                <MetricCard
+                  key={`${m.target}-${m.reached_month_index}`}
+                  label="Milestone"
+                  value={formatProjectionMilestoneCompactLabel(m.target)}
+                  parenthetical={`~${projectionXTickLabel(
+                    m.reached_month_index,
+                    projectionSeries.months,
+                    {
+                      ageUiMode: axisAgeMode,
+                      birthDateIso: axisBirth,
+                      anchorDateYmd: axisAnchor,
+                      calendarTz,
+                    },
+                  )}`}
+                />
+              ))}
+              {compoundOutpaceMonth != null ? (
+                <MetricCard
+                  label="Interés compuesto"
+                  value="Supera al ahorro"
+                  parenthetical={`~${projectionXTickLabel(
+                    compoundOutpaceMonth,
+                    projectionSeries.months,
+                    {
+                      ageUiMode: axisAgeMode,
+                      birthDateIso: axisBirth,
+                      anchorDateYmd: axisAnchor,
+                      calendarTz,
+                    },
+                  )}`}
+                />
+              ) : null}
+            </div>
+          ) : null}
           <ProjectionNetWorthChart
             series={projectionSeries}
+            milestones={nextMilestones}
             currencyIso={currencyIso}
             ledgerPersonScope={ledgerPersonScope}
             inflationActive={

@@ -1366,6 +1366,32 @@ a.tab-btn {
   stroke-width: 1;
 }
 
+.projection-chart-milestone-line {
+  stroke: #cbd5e1;
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.9;
+}
+
+.projection-chart-milestone-label {
+  fill: #cbd5e1;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.projection-chart-compound-marker {
+  stroke: #cbd5e1;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  opacity: 0.8;
+}
+
+.projection-chart-compound-label {
+  fill: #94a3b8;
+  font-size: 10px;
+  font-weight: 600;
+}
+
 .projection-chart-tick {
   fill: #64748b;
   font-size: 11px;

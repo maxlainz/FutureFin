@@ -18,6 +18,8 @@ use futurefin_engine::{
     first_month_per_asset_contribution_nominals, project_net_worth_series, EngineError,
     ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
 };
+use rust_decimal::MathematicalOps;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -77,6 +79,20 @@ pub struct ProjectionSeriesResponse {
     /// DOB usada para años cumplidos en el eje (perfil y/o personas del hogar).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewer_birth_date: Option<String>,
+    /// Próximos hitos de patrimonio (paridad Mac): umbrales 1/2.5/5*10^n, deduplicados por año.
+    pub milestones: Vec<ProjectionMilestone>,
+    /// Primer mes en que el componente de interés/mercado supera el ahorro mensual base (sin Próximos ni plan de pagos de deudas).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound_outpaces_true_savings_month_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ProjectionMilestone {
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub target: Decimal,
+    pub reached_month_index: u32,
+    pub reached_date_ymd: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -108,6 +124,9 @@ struct PlanningFlowProjRow {
 
 /// Días civiles: reparto equitativo del total entre `ref_date` y `ref_date + 89` (90 días inclusive).
 const PLANNING_UNDATED_SPREAD_DAYS: i64 = 90;
+const PROJECTION_MILESTONE_MINIMUM: i64 = 1_000;
+const PROJECTION_MILESTONE_SEARCH_COUNT: usize = 64;
+const PROJECTION_MILESTONE_LIMIT: usize = 3;
 
 fn proj_month_first(d: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap_or(d)
@@ -190,6 +209,145 @@ fn planning_monthly_cash_adjustments_from_flows(
         }
     }
     adj
+}
+
+fn planning_upcoming_net_for_milestone_baseline(
+    ref_date: NaiveDate,
+    flows: &[PlanningFlowProjRow],
+) -> Decimal {
+    let window_last = ref_date
+        .checked_add_signed(Duration::days(PLANNING_UNDATED_SPREAD_DAYS - 1))
+        .unwrap_or(ref_date);
+    let mut baseline = Decimal::ZERO;
+    for flow in flows {
+        let signed = match flow.scope.as_str() {
+            "income" => flow.expected_amount,
+            "expense" => -flow.expected_amount,
+            _ => continue,
+        };
+        match flow.due_date {
+            Some(due) => {
+                if due >= ref_date && due <= window_last {
+                    baseline += signed;
+                }
+            }
+            None => baseline += signed,
+        }
+    }
+    baseline
+}
+
+fn projection_next_milestone(after: Decimal) -> Decimal {
+    let steps = [Decimal::ONE, Decimal::new(25, 1), Decimal::from(5i64)];
+    let minimum = Decimal::from(PROJECTION_MILESTONE_MINIMUM);
+    let safe_value = after.max(minimum);
+    let safe_f64 = safe_value.to_f64().unwrap_or(PROJECTION_MILESTONE_MINIMUM as f64);
+    let power = safe_f64.log10().floor() as i32;
+    let magnitude = Decimal::from(10i64).powi(power.into());
+    for step in steps {
+        let candidate = step * magnitude;
+        if candidate > safe_value {
+            return candidate;
+        }
+    }
+    Decimal::from(10i64).powi((power + 1).into())
+}
+
+fn projection_next_milestones(from: Decimal, count: usize) -> Vec<Decimal> {
+    let mut out = Vec::with_capacity(count);
+    let mut current = from;
+    for _ in 0..count {
+        let next = projection_next_milestone(current);
+        out.push(next);
+        current = next;
+    }
+    out
+}
+
+fn projection_unique_reached_milestones(
+    points: &[ProjectionPoint],
+    anchor_date: NaiveDate,
+    baseline_adjustment: Decimal,
+    limit: usize,
+    search_count: usize,
+) -> Vec<ProjectionMilestone> {
+    if points.is_empty() || limit == 0 {
+        return vec![];
+    }
+    let baseline = points[0].net_worth + baseline_adjustment;
+    let generated = projection_next_milestones(baseline, search_count.max(limit));
+    let mut events: Vec<ProjectionMilestone> = Vec::with_capacity(limit);
+    let mut last_year: Option<i32> = None;
+
+    for milestone in generated {
+        let Some(reached_idx) = points.iter().position(|p| p.net_worth >= milestone) else {
+            break;
+        };
+        let reached_month_index = points[reached_idx].month_index;
+        let reached_date = proj_add_months(proj_month_first(anchor_date), reached_month_index);
+        let event = ProjectionMilestone {
+            target: milestone,
+            reached_month_index,
+            reached_date_ymd: reached_date.format("%Y-%m-%d").to_string(),
+        };
+
+        if let Some(prev_year) = last_year {
+            if prev_year == reached_date.year() {
+                let replace_index = events.len() - 1;
+                events[replace_index] = event;
+            } else {
+                events.push(event);
+                last_year = Some(reached_date.year());
+            }
+        } else {
+            events.push(event);
+            last_year = Some(reached_date.year());
+        }
+
+        if events.len() >= limit {
+            break;
+        }
+    }
+
+    events
+}
+
+fn compound_outpaces_true_savings_month(
+    input: &ProjectionInput,
+    monthly_delta_assumption: Decimal,
+) -> Result<Option<u32>, EngineError> {
+    if monthly_delta_assumption <= Decimal::ZERO {
+        return Ok(None);
+    }
+    let mut neutral = input.clone();
+    neutral.planning_monthly_cash_adjustment =
+        vec![Decimal::ZERO; input.horizon_months as usize];
+    // El hito se evalúa en términos nominales para aislar el cruce real entre aportación e interés.
+    neutral.inflation_annual_percent = None;
+    for liab in neutral.liabilities.iter_mut() {
+        liab.monthly_payment = Decimal::ZERO;
+    }
+    let out = project_net_worth_series(&neutral)?;
+    let mut consecutive = 0u32;
+    const REQUIRED_CONSECUTIVE_MONTHS: u32 = 3;
+    for k in 1..out.net_worth.len() {
+        let nw_delta = out.net_worth[k] - out.net_worth[k - 1];
+        let savings_delta = out.contributed_capital[k] - out.contributed_capital[k - 1];
+        if savings_delta <= Decimal::ZERO {
+            consecutive = 0;
+            continue;
+        }
+        let market_delta = nw_delta - savings_delta;
+        if market_delta > savings_delta {
+            consecutive += 1;
+            if consecutive >= REQUIRED_CONSECUTIVE_MONTHS {
+                return Ok(Some(k as u32 + 1 - REQUIRED_CONSECUTIVE_MONTHS));
+            }
+        } else {
+            consecutive = 0;
+        }
+    }
+    Ok(None)
 }
 
 fn liability_monthly_payment(row: &LiabEngineRow) -> Decimal {
@@ -485,7 +643,7 @@ pub(crate) async fn compute_installation_projection(
     today: NaiveDate,
     horizon_months: u32,
     inflation_annual_percent: Option<Decimal>,
-) -> Result<(ProjectionOutput, Decimal), ApiError> {
+) -> Result<(ProjectionOutput, Decimal, ProjectionInput), ApiError> {
     let (input, monthly_net_regular) = build_installation_projection_input(
         pool,
         iid,
@@ -497,7 +655,7 @@ pub(crate) async fn compute_installation_projection(
     )
     .await?;
     let out = project_net_worth_series(&input).map_err(map_engine_err)?;
-    Ok((out, monthly_net_regular))
+    Ok((out, monthly_net_regular, input))
 }
 
 #[utoipa::path(
@@ -579,7 +737,7 @@ pub async fn get_projection_series(
 
     let horizon_years = months / 12;
 
-    let (mut output, monthly_delta_assumption) = compute_installation_projection(
+    let (mut output, monthly_delta_assumption, projection_input) = compute_installation_projection(
         &state.pool,
         iid,
         user.id.0,
@@ -589,6 +747,9 @@ pub async fn get_projection_series(
         inflation_annual_percent,
     )
     .await?;
+    let compound_outpaces_true_savings_month_index =
+        compound_outpaces_true_savings_month(&projection_input, monthly_delta_assumption)
+            .map_err(map_engine_err)?;
 
     let purchase_basis = sum_assets_purchase_basis(&state.pool, iid, user.id.0, view).await?;
     bump_contributed_series_with_purchase_basis(&mut output.contributed_capital, purchase_basis);
@@ -611,6 +772,39 @@ pub async fn get_projection_series(
         })
         .collect();
 
+    let planning_rows: Vec<PlanningFlowProjRow> = match view {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
+                   FROM planning_flows p
+                   JOIN categories c ON c.id = p.category_id
+                   WHERE p.installation_id = $1"#,
+            )
+            .bind(iid)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
+                   FROM planning_flows p
+                   JOIN categories c ON c.id = p.category_id
+                   WHERE p.installation_id = $1 AND p.owner_user_id = $2"#,
+            )
+            .bind(iid)
+            .bind(user.id.0)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
+    let milestones = projection_unique_reached_milestones(
+        &points,
+        today,
+        planning_upcoming_net_for_milestone_baseline(today, &planning_rows),
+        PROJECTION_MILESTONE_LIMIT,
+        PROJECTION_MILESTONE_SEARCH_COUNT,
+    );
+
     Ok(Json(ProjectionSeriesResponse {
         points,
         months,
@@ -627,6 +821,8 @@ pub async fn get_projection_series(
             && resolved_birth_for_demographics.is_some(),
         viewer_birth_date: resolved_birth_for_demographics
             .map(|d| d.format("%Y-%m-%d").to_string()),
+        milestones,
+        compound_outpaces_true_savings_month_index,
     }))
 }
 
@@ -711,5 +907,132 @@ mod planning_distribution_tests {
         assert_eq!(adj[0], Decimal::from(-310));
         assert_eq!(adj[1], Decimal::from(-280));
         assert_eq!(adj[2], Decimal::from(-310));
+    }
+}
+
+#[cfg(test)]
+mod milestone_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn baseline_adjustment_uses_dated_ninety_days_and_all_undated() {
+        let ref_d = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let flows = vec![
+            PlanningFlowProjRow {
+                scope: "income".into(),
+                expected_amount: Decimal::from(1200),
+                due_date: Some(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()),
+            },
+            PlanningFlowProjRow {
+                scope: "expense".into(),
+                expected_amount: Decimal::from(300),
+                due_date: Some(NaiveDate::from_ymd_opt(2026, 4, 5).unwrap()),
+            },
+            PlanningFlowProjRow {
+                scope: "expense".into(),
+                expected_amount: Decimal::from(100),
+                due_date: None,
+            },
+        ];
+        // 1200 (dated within 90d) -100 (undated expense); April expense fuera ventana.
+        assert_eq!(
+            planning_upcoming_net_for_milestone_baseline(ref_d, &flows),
+            Decimal::from(1100)
+        );
+    }
+
+    #[test]
+    fn milestones_deduplicate_by_year_keeping_highest_target() {
+        let points = vec![
+            ProjectionPoint {
+                month_index: 0,
+                net_worth: Decimal::from(900),
+                contributed_capital: Decimal::ZERO,
+            },
+            ProjectionPoint {
+                month_index: 1,
+                net_worth: Decimal::from(1200),
+                contributed_capital: Decimal::ZERO,
+            },
+            ProjectionPoint {
+                month_index: 3,
+                net_worth: Decimal::from(2700),
+                contributed_capital: Decimal::ZERO,
+            },
+            ProjectionPoint {
+                month_index: 9,
+                net_worth: Decimal::from(6000),
+                contributed_capital: Decimal::ZERO,
+            },
+            ProjectionPoint {
+                month_index: 15,
+                net_worth: Decimal::from(11000),
+                contributed_capital: Decimal::ZERO,
+            },
+        ];
+        let out = projection_unique_reached_milestones(
+            &points,
+            NaiveDate::from_ymd_opt(2026, 1, 10).unwrap(),
+            Decimal::ZERO,
+            3,
+            16,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].target, Decimal::from(5000));
+        assert_eq!(out[1].target, Decimal::from(10_000));
+    }
+
+    #[test]
+    fn compound_marker_ignores_planning_and_liability_payments() {
+        let input = ProjectionInput {
+            ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            horizon_months: 24,
+            income_regular_monthly: Decimal::from(3000),
+            expense_regular_monthly: Decimal::from(2500),
+            assets: vec![SimAsset {
+                id: Uuid::from_u128(1),
+                value: Decimal::from(10_000),
+                purchase_price: Some(Decimal::from(10_000)),
+                is_liquid: true,
+                expected_annual_return_percent: Some(Decimal::from(6)),
+                monthly_contribution_fixed: Decimal::ZERO,
+                contribution_remainder_weight: Decimal::ONE,
+            }],
+            liabilities: vec![ProjectionLiabilityInput {
+                principal: Decimal::from(50_000),
+                monthly_payment: Decimal::from(1200),
+                payment_end: None,
+            }],
+            inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
+        };
+        let month = compound_outpaces_true_savings_month(&input, Decimal::from(500)).unwrap();
+        assert!(month.is_none());
+    }
+
+    #[test]
+    fn compound_marker_requires_persistent_crossover() {
+        let input = ProjectionInput {
+            ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            horizon_months: 24,
+            income_regular_monthly: Decimal::from(1200),
+            expense_regular_monthly: Decimal::from(1000),
+            assets: vec![SimAsset {
+                id: Uuid::from_u128(2),
+                value: Decimal::from(50_000),
+                purchase_price: Some(Decimal::from(50_000)),
+                is_liquid: true,
+                expected_annual_return_percent: Some(Decimal::from(18)),
+                monthly_contribution_fixed: Decimal::ZERO,
+                contribution_remainder_weight: Decimal::ONE,
+            }],
+            liabilities: vec![],
+            inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::ZERO; 24],
+        };
+        let month = compound_outpaces_true_savings_month(&input, Decimal::from(200)).unwrap();
+        assert!(month.is_some());
+        assert!(month.unwrap() >= 1);
     }
 }
