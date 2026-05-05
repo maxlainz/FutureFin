@@ -11,9 +11,184 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::types::Json as SqlxJson;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+/// Modo de cálculo del FIRE number (presupuesto regular sin cuotas derivadas de pasivos × 12 como base en modos automáticos).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FireNumberMode {
+    Manual,
+    #[default]
+    AnnualExpense,
+    AnnualExpenseAdjusted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TaxBracket {
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub up_to: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub pct: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct FireSettings {
+    pub fire_number_mode: FireNumberMode,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub fire_number_manual_amount: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub fire_number_expense_adjustment_pct: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub swr_pct: Decimal,
+    pub taxes_enabled: bool,
+    pub tax_brackets: Vec<TaxBracket>,
+}
+
+impl Default for FireSettings {
+    fn default() -> Self {
+        default_fire_settings()
+    }
+}
+
+pub(crate) fn default_fire_settings() -> FireSettings {
+    FireSettings {
+        fire_number_mode: FireNumberMode::AnnualExpense,
+        fire_number_manual_amount: None,
+        fire_number_expense_adjustment_pct: None,
+        swr_pct: Decimal::new(35, 1),
+        taxes_enabled: true,
+        tax_brackets: default_es_tax_brackets(),
+    }
+}
+
+fn default_es_tax_brackets() -> Vec<TaxBracket> {
+    vec![
+        TaxBracket {
+            up_to: Some(Decimal::from(6_000u32)),
+            pct: Decimal::from(19u32),
+        },
+        TaxBracket {
+            up_to: Some(Decimal::from(50_000u32)),
+            pct: Decimal::from(21u32),
+        },
+        TaxBracket {
+            up_to: Some(Decimal::from(200_000u32)),
+            pct: Decimal::from(23u32),
+        },
+        TaxBracket {
+            up_to: Some(Decimal::from(300_000u32)),
+            pct: Decimal::from(27u32),
+        },
+        TaxBracket {
+            up_to: None,
+            pct: Decimal::from(30u32),
+        },
+    ]
+}
+
+fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSettings {
+    match stored {
+        None => default_fire_settings(),
+        Some(fs) => fs,
+    }
+}
+
+pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> {
+    if fs.swr_pct < Decimal::ZERO || fs.swr_pct > Decimal::from(4u32) {
+        return Err(ApiError::BadRequest(
+            "swr_pct must be between 0 and 4 (percent)".into(),
+        ));
+    }
+    match fs.fire_number_mode {
+        FireNumberMode::Manual => {
+            let Some(amt) = fs.fire_number_manual_amount else {
+                return Err(ApiError::BadRequest(
+                    "fire_number_manual_amount is required when fire_number_mode is manual".into(),
+                ));
+            };
+            if amt <= Decimal::ZERO {
+                return Err(ApiError::BadRequest(
+                    "fire_number_manual_amount must be > 0".into(),
+                ));
+            }
+        }
+        FireNumberMode::AnnualExpense => {}
+        FireNumberMode::AnnualExpenseAdjusted => {
+            let Some(pct) = fs.fire_number_expense_adjustment_pct else {
+                return Err(ApiError::BadRequest(
+                    "fire_number_expense_adjustment_pct is required when fire_number_mode is annual_expense_adjusted"
+                        .into(),
+                ));
+            };
+            if pct < Decimal::from(-99) || pct > Decimal::from(400) {
+                return Err(ApiError::BadRequest(
+                    "fire_number_expense_adjustment_pct must be between -99 and 400".into(),
+                ));
+            }
+        }
+    }
+    if fs.taxes_enabled {
+        validate_tax_brackets(&fs.tax_brackets)?;
+    }
+    Ok(())
+}
+
+fn validate_tax_brackets(brackets: &[TaxBracket]) -> Result<(), ApiError> {
+    if brackets.is_empty() {
+        return Err(ApiError::BadRequest(
+            "tax_brackets must be non-empty when taxes_enabled is true".into(),
+        ));
+    }
+    let last = brackets.len().saturating_sub(1);
+    for (i, b) in brackets.iter().enumerate() {
+        if b.pct < Decimal::ZERO || b.pct > Decimal::from(99u32) {
+            return Err(ApiError::BadRequest(
+                "tax bracket pct must be between 0 and 99".into(),
+            ));
+        }
+        let is_last = i == last;
+        match (&b.up_to, is_last) {
+            (None, true) => {}
+            (Some(_), true) => {
+                return Err(ApiError::BadRequest(
+                    "last tax bracket must have up_to null (open-ended)".into(),
+                ));
+            }
+            (None, false) => {
+                return Err(ApiError::BadRequest(
+                    "only the last tax bracket may have up_to null".into(),
+                ));
+            }
+            (Some(th), false) => {
+                if *th <= Decimal::ZERO {
+                    return Err(ApiError::BadRequest(
+                        "tax bracket up_to must be > 0 when set".into(),
+                    ));
+                }
+                if i > 0 {
+                    let prev = brackets[i - 1].up_to.as_ref().ok_or_else(|| {
+                        ApiError::BadRequest("invalid tax_brackets ordering".into())
+                    })?;
+                    if *th <= *prev {
+                        return Err(ApiError::BadRequest(
+                            "tax bracket up_to values must be strictly increasing".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct InstallationSnapshot {
@@ -30,6 +205,7 @@ pub struct InstallationSnapshot {
     pub annual_inflation_assumption_percent: Option<Decimal>,
     pub projection_target_age: Option<i16>,
     pub show_age_mode: String,
+    pub fire_settings: FireSettings,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -84,6 +260,9 @@ pub struct PatchInstallationBody {
     /// Omit = unchanged; JSON `null` clears; string percent (e.g. `"2.5"`) when inflation is on.
     #[serde(default)]
     pub annual_inflation_assumption_percent: Option<Option<String>>,
+    /// Omit = unchanged; JSON `null` clears stored JSON (defaults apply on read).
+    #[serde(default)]
+    pub fire_settings: Option<Option<FireSettings>>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -95,6 +274,7 @@ struct InstallationMemberRow {
     annual_inflation_assumption_percent: Option<Decimal>,
     projection_target_age: Option<i16>,
     show_age_mode: String,
+    fire_settings: Option<SqlxJson<FireSettings>>,
     role: String,
 }
 
@@ -109,6 +289,7 @@ fn installation_access_from_row(r: InstallationMemberRow) -> Result<Installation
             annual_inflation_assumption_percent: r.annual_inflation_assumption_percent,
             projection_target_age: r.projection_target_age,
             show_age_mode: r.show_age_mode,
+            fire_settings: resolve_fire_settings(r.fire_settings.map(|j| j.0)),
         },
         role,
     })
@@ -294,7 +475,7 @@ pub async fn get_installation_session_context(
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.annual_inflation_assumption_percent,
-                  i.projection_target_age, i.show_age_mode, m.role
+                  i.projection_target_age, i.show_age_mode, i.fire_settings, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -333,7 +514,7 @@ pub async fn get_my_installation(
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.annual_inflation_assumption_percent,
-                  i.projection_target_age, i.show_age_mode, m.role
+                  i.projection_target_age, i.show_age_mode, i.fire_settings, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -380,16 +561,17 @@ pub async fn patch_my_installation(
         && body.projection_target_age.is_none()
         && body.show_age_mode.is_none()
         && body.annual_inflation_assumption_percent.is_none()
+        && body.fire_settings.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one of calendar_tz, projection_includes_inflation, projection_target_age, show_age_mode, annual_inflation_assumption_percent".into(),
+            "provide at least one of calendar_tz, projection_includes_inflation, projection_target_age, show_age_mode, annual_inflation_assumption_percent, fire_settings".into(),
         ));
     }
 
     let row_before: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.annual_inflation_assumption_percent,
-                  i.projection_target_age, i.show_age_mode, m.role
+                  i.projection_target_age, i.show_age_mode, i.fire_settings, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -444,19 +626,30 @@ pub async fn patch_my_installation(
         }
     };
 
+    let new_fire_settings_json: Option<SqlxJson<FireSettings>> = match &body.fire_settings {
+        None => row_before.fire_settings.clone(),
+        Some(None) => None,
+        Some(Some(fs)) => {
+            validate_fire_settings(fs)?;
+            Some(SqlxJson(fs.clone()))
+        }
+    };
+
     sqlx::query(
         r#"UPDATE installation SET calendar_tz = $1,
                projection_includes_inflation = $2,
                projection_target_age = $3,
                show_age_mode = $4,
-               annual_inflation_assumption_percent = $5
-           WHERE id = $6"#,
+               annual_inflation_assumption_percent = $5,
+               fire_settings = $6
+           WHERE id = $7"#,
     )
     .bind(&new_tz)
     .bind(new_inflation)
     .bind(new_target_age)
     .bind(&new_show_age)
     .bind(new_ann_inf)
+    .bind(new_fire_settings_json)
     .bind(iid)
     .execute(&state.pool)
     .await?;
@@ -464,7 +657,7 @@ pub async fn patch_my_installation(
     let row: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.annual_inflation_assumption_percent,
-                  i.projection_target_age, i.show_age_mode, m.role
+                  i.projection_target_age, i.show_age_mode, i.fire_settings, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -474,19 +667,7 @@ pub async fn patch_my_installation(
     .fetch_one(&state.pool)
     .await?;
 
-    let role_out = MembershipRole::parse(&row.role)?;
-    Ok(Json(InstallationAccess {
-        installation: InstallationSnapshot {
-            id: row.id,
-            base_currency: row.base_currency,
-            calendar_tz: row.calendar_tz,
-            projection_includes_inflation: row.projection_includes_inflation,
-            annual_inflation_assumption_percent: row.annual_inflation_assumption_percent,
-            projection_target_age: row.projection_target_age,
-            show_age_mode: row.show_age_mode,
-        },
-        role: role_out,
-    }))
+    Ok(Json(installation_access_from_row(row)?))
 }
 
 #[utoipa::path(
@@ -581,6 +762,7 @@ pub async fn setup_installation(
                 annual_inflation_assumption_percent: None,
                 projection_target_age: body.projection_target_age,
                 show_age_mode: body.show_age_mode,
+                fire_settings: default_fire_settings(),
             },
             role: MembershipRole::Owner,
         }),

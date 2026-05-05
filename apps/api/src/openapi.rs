@@ -1,7 +1,8 @@
 use crate::error::{ErrorBody, ErrorCode};
 #[allow(unused_imports)]
 use crate::handlers::auth::{
-    __path_login, __path_logout, __path_me, __path_patch_me, __path_register,
+    __path_login, __path_logout, __path_me, __path_patch_me, __path_patch_me_pension,
+    __path_register,
 };
 #[allow(unused_imports)]
 use crate::handlers::backup::__path_export_backup_zip;
@@ -56,6 +57,7 @@ use utoipa::OpenApi;
         logout,
         me,
         patch_me,
+        patch_me_pension,
         get_my_installation,
         patch_my_installation,
         setup_installation,
@@ -90,7 +92,11 @@ use utoipa::OpenApi;
         crate::handlers::auth::RegisterBody,
         crate::handlers::auth::LoginBody,
         crate::handlers::auth::PatchMeBody,
+        crate::handlers::auth::PatchPensionBody,
         crate::handlers::auth::UserResponse,
+        crate::handlers::installation::FireNumberMode,
+        crate::handlers::installation::FireSettings,
+        crate::handlers::installation::TaxBracket,
         crate::handlers::installation::InstallationSnapshot,
         crate::handlers::installation::InstallationAccess,
         crate::handlers::installation::InstallationSessionContext,

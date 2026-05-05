@@ -9,6 +9,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::NaiveDate;
 use futurefin_domain::UserId;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::sync::Arc;
@@ -41,6 +42,9 @@ struct PendingUserRow {
     id: Uuid,
     username: String,
     birth_date: Option<NaiveDate>,
+    pension_enabled: bool,
+    pension_start_age: Option<i16>,
+    pension_annual_net: Option<Decimal>,
 }
 
 fn insert_conflict(err: sqlx::Error) -> ApiError {
@@ -76,7 +80,7 @@ pub async fn list_pending_users(
     }
 
     let rows: Vec<PendingUserRow> = sqlx::query_as(
-        r#"SELECT u.id, u.username, u.birth_date
+        r#"SELECT u.id, u.username, u.birth_date, u.pension_enabled, u.pension_start_age, u.pension_annual_net
            FROM users u
            WHERE NOT EXISTS (
                SELECT 1
@@ -97,6 +101,9 @@ pub async fn list_pending_users(
                 id: UserId(r.id),
                 username: r.username,
                 birth_date: r.birth_date,
+                pension_enabled: r.pension_enabled,
+                pension_start_age: r.pension_start_age,
+                pension_annual_net: r.pension_annual_net,
             })
             .collect(),
     ))
