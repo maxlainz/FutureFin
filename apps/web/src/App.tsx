@@ -26,15 +26,12 @@ type UserResponse = {
   username: string;
   /** YYYY-MM-DD desde la API; ausente en clientes antiguos. */
   birth_date?: string | null;
-  pension_enabled?: boolean;
-  pension_start_age?: number | null;
-  pension_annual_net?: string | null;
 };
 
 type FireNumberModeApi =
   | "manual"
   | "annual_expense"
-  | "annual_expense_adjusted";
+  | "current_income";
 
 type TaxBracketApi = {
   up_to: string | null;
@@ -408,8 +405,8 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "liabilities", label: "Pasivos" },
   { id: "budget", label: "Presupuesto" },
   { id: "upcoming", label: "Próximos" },
-  { id: "projection", label: "Proyección" },
   { id: "retirement", label: "Jubilación" },
+  { id: "projection", label: "Proyección" },
   { id: "settings", label: "Ajustes" },
 ];
 
@@ -1021,12 +1018,16 @@ function normalizeInstallationFireSettings(
   if (!raw || typeof raw !== "object") return defaultFireSettingsApi();
   const base = defaultFireSettingsApi();
   return {
-    fire_number_mode:
-      raw.fire_number_mode === "manual" ||
-      raw.fire_number_mode === "annual_expense" ||
-      raw.fire_number_mode === "annual_expense_adjusted"
-        ? raw.fire_number_mode
-        : base.fire_number_mode,
+    fire_number_mode: (() => {
+      const m = raw.fire_number_mode as
+        | FireNumberModeApi
+        | "annual_expense_adjusted";
+      if (m === "manual" || m === "annual_expense" || m === "current_income") {
+        return m;
+      }
+      if (m === "annual_expense_adjusted") return "annual_expense";
+      return base.fire_number_mode;
+    })(),
     fire_number_manual_amount:
       raw.fire_number_manual_amount != null
         ? String(raw.fire_number_manual_amount)
@@ -1128,28 +1129,27 @@ function formatYearsEsFromMonths(months: number): string {
 function computeFireAnnualNeedNetEur(
   fire: FireSettingsApi,
   expenseRegularMonthlyEquivalent: string | null | undefined,
+  incomeMonthlyEquivalent: string | null | undefined,
 ): number | null {
-  const baseM = parseDisplayDecimal(
+  const expenseM = parseDisplayDecimal(
     String(expenseRegularMonthlyEquivalent ?? ""),
   );
-  if (baseM === null) return null;
-  const baseAnnual = baseM * 12;
+  const incomeM = parseDisplayDecimal(String(incomeMonthlyEquivalent ?? ""));
   switch (fire.fire_number_mode) {
     case "manual": {
       const m = parseDisplayDecimal(String(fire.fire_number_manual_amount ?? ""));
       return m !== null && m > 0 ? m : null;
     }
-    case "annual_expense":
-      return baseAnnual;
-    case "annual_expense_adjusted": {
-      const adj = parseDisplayDecimal(
-        String(fire.fire_number_expense_adjustment_pct ?? "0"),
-      );
-      if (adj === null) return null;
-      return baseAnnual * (1 + adj / 100);
+    case "annual_expense": {
+      if (expenseM === null) return null;
+      return expenseM * 12;
+    }
+    case "current_income": {
+      if (incomeM === null) return null;
+      return incomeM * 12;
     }
     default:
-      return baseAnnual;
+      return expenseM !== null ? expenseM * 12 : null;
   }
 }
 
@@ -2087,46 +2087,56 @@ export default function App() {
     }
   }, [ledgerPersonScope]);
 
-  const loadRetirementPage = useCallback(async () => {
-    setRetirementBusy(true);
-    setRetirementError(null);
-    setProjectionError(null);
-    try {
-      const qs =
-        ledgerPersonScope === "mine" ? "?view=mine" : "";
-      const [budRes, projRes] = await Promise.all([
-        fetch(`/v1/budget${qs}`, defaultFetchInit),
-        fetch(`/v1/projection/series${qs}`, defaultFetchInit),
-      ]);
-      if (budRes.status === 403 || budRes.status === 404) {
-        setRetirementBudgetSnapshot(null);
-      } else if (!budRes.ok) {
-        throw new Error(await errorMessageFromResponse(budRes));
-      } else {
-        const raw = (await budRes.json()) as BudgetSnapshotApi;
-        setRetirementBudgetSnapshot({
-          ...raw,
-          entries: Array.isArray(raw.entries) ? raw.entries : [],
-          derived_from_liabilities: Array.isArray(raw.derived_from_liabilities)
-            ? raw.derived_from_liabilities
-            : [],
-        });
+  const loadRetirementPage = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const silent = opts?.silent === true;
+      if (!silent) {
+        setRetirementBusy(true);
+        setRetirementError(null);
+        setProjectionError(null);
       }
-      if (projRes.status === 403 || projRes.status === 404) {
-        setProjectionSeries(null);
-      } else if (!projRes.ok) {
-        throw new Error(await errorMessageFromResponse(projRes));
-      } else {
-        setProjectionSeries((await projRes.json()) as ProjectionSeriesApi);
+      try {
+        const qs =
+          ledgerPersonScope === "mine" ? "?view=mine" : "";
+        const [budRes, projRes] = await Promise.all([
+          fetch(`/v1/budget${qs}`, defaultFetchInit),
+          fetch(`/v1/projection/series${qs}`, defaultFetchInit),
+        ]);
+        if (budRes.status === 403 || budRes.status === 404) {
+          setRetirementBudgetSnapshot(null);
+        } else if (!budRes.ok) {
+          throw new Error(await errorMessageFromResponse(budRes));
+        } else {
+          const raw = (await budRes.json()) as BudgetSnapshotApi;
+          setRetirementBudgetSnapshot({
+            ...raw,
+            entries: Array.isArray(raw.entries) ? raw.entries : [],
+            derived_from_liabilities: Array.isArray(raw.derived_from_liabilities)
+              ? raw.derived_from_liabilities
+              : [],
+          });
+        }
+        if (projRes.status === 403 || projRes.status === 404) {
+          setProjectionSeries(null);
+        } else if (!projRes.ok) {
+          throw new Error(await errorMessageFromResponse(projRes));
+        } else {
+          setProjectionSeries((await projRes.json()) as ProjectionSeriesApi);
+        }
+      } catch (e: unknown) {
+        if (!silent) {
+          setRetirementBudgetSnapshot(null);
+          setProjectionSeries(null);
+          setRetirementError(e instanceof Error ? e.message : String(e));
+        }
+      } finally {
+        if (!silent) {
+          setRetirementBusy(false);
+        }
       }
-    } catch (e: unknown) {
-      setRetirementBudgetSnapshot(null);
-      setProjectionSeries(null);
-      setRetirementError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRetirementBusy(false);
-    }
-  }, [ledgerPersonScope]);
+    },
+    [ledgerPersonScope],
+  );
 
   const loadCategories = useCallback(async () => {
     setCategoriesBusy(true);
@@ -2317,7 +2327,9 @@ export default function App() {
       return;
     }
     void loadRetirementPage();
-  }, [user, hasMembership, activeTab, loadRetirementPage]);
+    // Solo recargar bloqueante al cambiar sesión / pestaña / vista; no cuando `user` muta tras PATCH pensión.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, hasMembership, activeTab, loadRetirementPage]);
 
   useEffect(() => {
     if (activeTab !== "assets" || assetFormCategoryId || assetCategories.length === 0) {
@@ -2633,38 +2645,6 @@ export default function App() {
       setInstallation(updated);
     } catch (e: unknown) {
       setInstallationError(e instanceof Error ? e.message : String(e));
-      throw e;
-    }
-  }
-
-  async function savePensionPatch(body: {
-    pension_enabled: boolean;
-    pension_start_age: number | null;
-    pension_annual_net: string;
-  }) {
-    setSessionError(null);
-    try {
-      const res = await fetch("/v1/users/me/pension", {
-        ...defaultFetchInit,
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          body.pension_enabled
-            ? {
-                pension_enabled: true,
-                pension_start_age: body.pension_start_age,
-                pension_annual_net: body.pension_annual_net,
-              }
-            : { pension_enabled: false },
-        ),
-      });
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
-      }
-      const updated = (await res.json()) as UserResponse;
-      setUser(updated);
-    } catch (e: unknown) {
-      setSessionError(e instanceof Error ? e.message : String(e));
       throw e;
     }
   }
@@ -3878,18 +3858,6 @@ export default function App() {
               setPlanningModalOpen(true);
             }}
           />
-        ) : activeTab === "projection" ? (
-          <ProjectionView
-            installation={installation}
-            installationBusy={installationBusy}
-            hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
-            projectionSeries={projectionSeries}
-            projectionBusy={projectionBusy}
-            projectionError={projectionError}
-            userBirthDate={user?.birth_date ?? null}
-            calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
-          />
         ) : activeTab === "retirement" ? (
           <RetirementView
             installation={installation}
@@ -3905,8 +3873,19 @@ export default function App() {
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
             canEditFire={installation?.role === "owner"}
             onSaveFire={saveFireSettingsPatch}
-            onSavePension={savePensionPatch}
             navigate={navigate}
+          />
+        ) : activeTab === "projection" ? (
+          <ProjectionView
+            installation={installation}
+            installationBusy={installationBusy}
+            hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
+            projectionSeries={projectionSeries}
+            projectionBusy={projectionBusy}
+            projectionError={projectionError}
+            userBirthDate={user?.birth_date ?? null}
+            calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
@@ -6674,7 +6653,7 @@ function SettingsView({
     if (hasMembership) {
       out.push({ id: "calendar", label: "Calendario" });
       out.push({ id: "projection", label: "Proyección" });
-      out.push({ id: "retirement", label: "FIRE" });
+      out.push({ id: "retirement", label: "Jubilación" });
       out.push({ id: "categories", label: "Categorías" });
     }
     out.push({ id: "data", label: "Datos y sistema" });
@@ -6904,7 +6883,7 @@ function SettingsView({
       {settingsSubTab === "retirement" && hasMembership ? (
         isOwner ? (
           <section className="panel">
-            <h3 className="panel-title">Fiscalidad FIRE (IRPF ahorro)</h3>
+            <h3 className="panel-title">Fiscalidad (IRPF ahorro)</h3>
             <p className="muted tight">
               {fireTaxSaving ? "Guardando…" : "Guardado automático."}
             </p>
@@ -6998,7 +6977,7 @@ function SettingsView({
           </section>
         ) : (
           <section className="panel muted-panel">
-            <h3 className="panel-title">Fiscalidad FIRE (IRPF ahorro)</h3>
+            <h3 className="panel-title">Fiscalidad (IRPF ahorro)</h3>
             <p className="muted tight">Solo lectura.</p>
           </section>
         )
@@ -8055,137 +8034,6 @@ function ProjectionNetWorthChart({
   );
 }
 
-/** Borrador pensión: localStorage sobrevive al cierre de pestaña; también se escribe sessionStorage (no sobrevive al cierre). */
-const RETIREMENT_PENSION_LS_PREFIX = "futurefin:retirement-pension-draft:v1:";
-const RETIREMENT_PENSION_LS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-
-type PensionDraftLsV1 = {
-  savedAt: number;
-  penEnabled: boolean;
-  penAge: string;
-  penNet: string;
-};
-
-type PensionPatchPayload = {
-  pension_enabled: boolean;
-  pension_start_age: number | null;
-  pension_annual_net: string;
-};
-
-function buildPensionPatchPayload(
-  enabled: boolean,
-  penAge: string,
-  penNet: string,
-): PensionPatchPayload | undefined {
-  if (!enabled) {
-    return {
-      pension_enabled: false,
-      pension_start_age: null,
-      pension_annual_net: "",
-    };
-  }
-  const ageN = Number(String(penAge).trim());
-  const netTrim = penNet.trim().replace(",", ".");
-  if (
-    !Number.isFinite(ageN) ||
-    !Number.isInteger(ageN) ||
-    ageN < 50 ||
-    ageN > 90 ||
-    netTrim === ""
-  ) {
-    return undefined;
-  }
-  return {
-    pension_enabled: true,
-    pension_start_age: ageN,
-    pension_annual_net: netTrim,
-  };
-}
-
-function pensionUiTupleFromUser(user: UserResponse): {
-  penEnabled: boolean;
-  penAge: string;
-  penNet: string;
-} {
-  return {
-    penEnabled: user.pension_enabled === true,
-    penAge:
-      user.pension_start_age != null ? String(user.pension_start_age) : "",
-    penNet:
-      user.pension_annual_net != null &&
-      String(user.pension_annual_net).trim() !== ""
-        ? formatEditableDecimalString(user.pension_annual_net)
-        : "",
-  };
-}
-
-function pensionServerPayloadJson(user: UserResponse): string {
-  const serverPayload =
-    user.pension_enabled === true
-      ? {
-          pension_enabled: true,
-          pension_start_age: user.pension_start_age ?? null,
-          pension_annual_net: String(user.pension_annual_net ?? ""),
-        }
-      : {
-          pension_enabled: false,
-          pension_start_age: null,
-          pension_annual_net: "",
-        };
-  return JSON.stringify(serverPayload);
-}
-
-function readPensionDraftLs(userId: string): PensionDraftLsV1 | null {
-  try {
-    const raw = localStorage.getItem(RETIREMENT_PENSION_LS_PREFIX + userId);
-    if (!raw) return null;
-    const d = JSON.parse(raw) as PensionDraftLsV1;
-    if (
-      typeof d.savedAt !== "number" ||
-      typeof d.penEnabled !== "boolean" ||
-      typeof d.penAge !== "string" ||
-      typeof d.penNet !== "string"
-    ) {
-      return null;
-    }
-    if (Date.now() - d.savedAt > RETIREMENT_PENSION_LS_MAX_AGE_MS) {
-      localStorage.removeItem(RETIREMENT_PENSION_LS_PREFIX + userId);
-      try {
-        sessionStorage.removeItem(RETIREMENT_PENSION_LS_PREFIX + userId);
-      } catch {
-        /* noop */
-      }
-      return null;
-    }
-    return d;
-  } catch {
-    return null;
-  }
-}
-
-function writePensionDraftLs(
-  userId: string,
-  draft: { penEnabled: boolean; penAge: string; penNet: string },
-): void {
-  const payload: PensionDraftLsV1 = {
-    savedAt: Date.now(),
-    penEnabled: draft.penEnabled,
-    penAge: draft.penAge,
-    penNet: draft.penNet,
-  };
-  const encoded = JSON.stringify(payload);
-  try {
-    localStorage.setItem(RETIREMENT_PENSION_LS_PREFIX + userId, encoded);
-  } catch {
-    /* quota / private mode */
-  }
-  try {
-    sessionStorage.setItem(RETIREMENT_PENSION_LS_PREFIX + userId, encoded);
-  } catch {
-    /* noop */
-  }
-}
-
 function RetirementView({
   installation,
   installationBusy,
@@ -8200,7 +8048,6 @@ function RetirementView({
   calendarTz,
   canEditFire,
   onSaveFire,
-  onSavePension,
   navigate,
 }: {
   installation: InstallationAccess | null;
@@ -8216,13 +8063,9 @@ function RetirementView({
   calendarTz: string;
   canEditFire: boolean;
   onSaveFire: (fs: FireSettingsApi) => Promise<void>;
-  onSavePension: (b: {
-    pension_enabled: boolean;
-    pension_start_age: number | null;
-    pension_annual_net: string;
-  }) => Promise<void>;
   navigate: (path: string, replace?: boolean) => void;
 }) {
+  const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
   const inflationOff =
     !installation?.installation.projection_includes_inflation;
@@ -8232,12 +8075,7 @@ function RetirementView({
   );
   const lastSavedFirePayloadRef = useRef<string>("");
   const fireSaveTimerRef = useRef(0);
-
-  const [penEnabled, setPenEnabled] = useState(false);
-  const [penAge, setPenAge] = useState("");
-  const [penNet, setPenNet] = useState("");
-  const lastSavedPensionPayloadRef = useRef<string>("");
-  const pensionSaveTimerRef = useRef(0);
+  const fireSaveSeqRef = useRef(0);
 
   useEffect(() => {
     setFireDraft(
@@ -8250,48 +8088,6 @@ function RetirementView({
     );
     lastSavedFirePayloadRef.current = JSON.stringify(serverFs);
   }, [installation?.installation.id]);
-
-  useEffect(() => {
-    const uid = user?.id;
-    if (!uid || user == null) return;
-
-    setPenEnabled(user.pension_enabled === true);
-    setPenAge(
-      user.pension_start_age != null ? String(user.pension_start_age) : "",
-    );
-    setPenNet(
-      user.pension_annual_net != null &&
-        String(user.pension_annual_net).trim() !== ""
-        ? formatEditableDecimalString(user.pension_annual_net)
-        : "",
-    );
-    lastSavedPensionPayloadRef.current = pensionServerPayloadJson(user);
-
-    const ls = readPensionDraftLs(uid);
-    if (ls) {
-      const srv = pensionUiTupleFromUser(user);
-      if (
-        ls.penEnabled !== srv.penEnabled ||
-        ls.penAge !== srv.penAge ||
-        ls.penNet !== srv.penNet
-      ) {
-        setPenEnabled(ls.penEnabled);
-        setPenAge(ls.penAge);
-        setPenNet(ls.penNet);
-      }
-    }
-    // Solo hidratar al fijar sesión (id); no al PATCH del mismo usuario.
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
-  }, [user?.id]);
-
-  useEffect(() => {
-    if (!hasMembership || user?.id == null) return;
-    const uid = user.id;
-    const timer = window.setTimeout(() => {
-      writePensionDraftLs(uid, { penEnabled, penAge, penNet });
-    }, 400);
-    return () => window.clearTimeout(timer);
-  }, [hasMembership, user?.id, penEnabled, penAge, penNet]);
 
   const axisAgeMode = projectionSeries
     ? resolveProjectionAxisAgeMode(projectionSeries, installation)
@@ -8309,120 +8105,96 @@ function RetirementView({
   })();
   const axisAnchor = projectionSeries?.anchor_date_ymd?.trim() || null;
 
-  const busy = projectionBusy || retirementBusy;
-
-  /** Fuente única para KPI «con pensión»: borrador válido; si no, último valor guardado en servidor. */
-  const pensionAnnualNetForKpis = useMemo(() => {
-    if (!penEnabled) return null;
-    const ageN = Number(String(penAge).trim());
-    const netTrim = penNet.trim().replace(",", ".");
-    const draftAgeOk =
-      Number.isFinite(ageN) &&
-      Number.isInteger(ageN) &&
-      ageN >= 50 &&
-      ageN <= 90;
-    const draftNet =
-      netTrim !== "" ? parseDisplayDecimal(netTrim) : null;
-    if (draftAgeOk && draftNet !== null && draftNet >= 0) {
-      return draftNet;
-    }
-    if (user?.pension_enabled === true) {
-      const fromUser = parseDisplayDecimal(
-        String(user.pension_annual_net ?? ""),
-      );
-      return fromUser !== null && fromUser >= 0 ? fromUser : null;
-    }
-    return null;
-  }, [
-    penEnabled,
-    penAge,
-    penNet,
-    user?.pension_enabled,
-    user?.pension_annual_net,
-  ]);
+  const retirementMetricsReady =
+    hasMembership &&
+    !projectionBusy &&
+    !retirementBusy &&
+    projectionSeries != null &&
+    retirementBudgetSnapshot != null;
 
   const fireKpis = useMemo(() => {
     const expenseM =
       retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent;
-    const needAnnual = computeFireAnnualNeedNetEur(fireDraft, expenseM);
+    const incomeM =
+      retirementBudgetSnapshot?.totals.income_monthly_equivalent;
+    const needAnnual = computeFireAnnualNeedNetEur(
+      fireDraft,
+      expenseM,
+      incomeM,
+    );
     const swrN = parseDisplayDecimal(fireDraft.swr_pct);
     const brackets = fireDraft.tax_brackets;
     const taxOn = fireDraft.taxes_enabled;
 
     let targetNoPen: number | null = null;
-    let targetWithPen: number | null = null;
     let grossNoPen: number | null = null;
-    let grossWithPen: number | null = null;
 
     if (needAnnual !== null && needAnnual > 0 && swrN !== null && swrN > 0) {
       grossNoPen = grossUpNetAnnualFire(needAnnual, brackets, taxOn);
       targetNoPen = grossNoPen / (swrN / 100);
     }
 
-    const pensionNetAnnual = pensionAnnualNetForKpis;
-    if (
-      needAnnual !== null &&
-      penEnabled &&
-      pensionNetAnnual !== null &&
-      pensionNetAnnual >= 0 &&
-      swrN !== null &&
-      swrN > 0
-    ) {
-      const portfolioNeed = Math.max(0, needAnnual - pensionNetAnnual);
-      if (portfolioNeed <= 0) {
-        targetWithPen = 0;
-        grossWithPen = 0;
-      } else {
-        grossWithPen = grossUpNetAnnualFire(portfolioNeed, brackets, taxOn);
-        targetWithPen = grossWithPen / (swrN / 100);
-      }
-    }
-
     const pts = projectionSeries?.points ?? [];
     const mc = projectionSeries?.months ?? 0;
 
     let miNo: number | null = null;
-    let miPen: number | null = null;
     if (targetNoPen !== null && targetNoPen > 0) {
       miNo = findFirstMonthNetWorthAtLeast(pts, targetNoPen);
-    }
-    if (
-      targetWithPen !== null &&
-      targetWithPen > 0 &&
-      penEnabled &&
-      pensionNetAnnual !== null
-    ) {
-      miPen = findFirstMonthNetWorthAtLeast(pts, targetWithPen);
     }
 
     return {
       needAnnual,
       swrN,
       targetNoPen,
-      targetWithPen,
       miNo,
-      miPen,
       mc,
     };
   }, [
     fireDraft,
     retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent,
+    retirementBudgetSnapshot?.totals.income_monthly_equivalent,
     projectionSeries?.points,
     projectionSeries?.months,
-    penEnabled,
-    pensionAnnualNetForKpis,
   ]);
 
+  const retirementObjectiveManualAnnualDisplay = useMemo(() => {
+    const m = parseDisplayDecimal(
+      String(fireDraft.fire_number_manual_amount ?? ""),
+    );
+    return m !== null && m > 0
+      ? formatCurrencyNumber(m, currencyIso)
+      : METRIC_DASH;
+  }, [fireDraft.fire_number_manual_amount, currencyIso]);
+
+  const retirementObjectiveExpenseAnnualDisplay = useMemo(() => {
+    const baseM = parseDisplayDecimal(
+      String(
+        retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent ??
+          "",
+      ),
+    );
+    return baseM !== null && baseM >= 0
+      ? formatCurrencyNumber(baseM * 12, currencyIso)
+      : METRIC_DASH;
+  }, [
+    retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent,
+    currencyIso,
+  ]);
+
+  const retirementObjectiveIncomeAnnualDisplay = useMemo(() => {
+    const incM = parseDisplayDecimal(
+      String(retirementBudgetSnapshot?.totals.income_monthly_equivalent ?? ""),
+    );
+    return incM !== null && incM >= 0
+      ? formatCurrencyNumber(incM * 12, currencyIso)
+      : METRIC_DASH;
+  }, [retirementBudgetSnapshot?.totals.income_monthly_equivalent, currencyIso]);
+
   const skipFireAutosaveRef = useRef(true);
-  const skipPensionAutosaveRef = useRef(true);
 
   useEffect(() => {
     skipFireAutosaveRef.current = true;
   }, [installation?.installation.id]);
-
-  useEffect(() => {
-    skipPensionAutosaveRef.current = true;
-  }, [user?.id]);
 
   const runFireSave = useCallback(() => {
     if (!hasMembership || !canEditFire) return;
@@ -8437,18 +8209,15 @@ function RetirementView({
     ) {
       return;
     }
-    if (
-      fireDraft.fire_number_mode === "annual_expense_adjusted" &&
-      (fireDraft.fire_number_expense_adjustment_pct == null ||
-        String(fireDraft.fire_number_expense_adjustment_pct).trim() === "")
-    ) {
-      return;
-    }
     const payloadJson = JSON.stringify(fireDraft);
     if (payloadJson === lastSavedFirePayloadRef.current) return;
-    void onSaveFire(fireDraft).finally(() => {
-      lastSavedFirePayloadRef.current = payloadJson;
-    });
+    const seq = ++fireSaveSeqRef.current;
+    void onSaveFire(fireDraft)
+      .then(() => {
+        if (seq !== fireSaveSeqRef.current) return;
+        lastSavedFirePayloadRef.current = payloadJson;
+      })
+      .catch(() => {});
   }, [fireDraft, hasMembership, canEditFire, onSaveFire]);
 
   const queueFireSave = useCallback(
@@ -8474,51 +8243,15 @@ function RetirementView({
     };
   }, [fireDraft, hasMembership, canEditFire, queueFireSave]);
 
-  const runPensionSave = useCallback(() => {
-    if (!hasMembership || user?.id == null) return;
-    const payload = buildPensionPatchPayload(penEnabled, penAge, penNet);
-    if (!payload) return;
-    const payloadJson = JSON.stringify(payload);
-    if (payloadJson === lastSavedPensionPayloadRef.current) return;
-    void onSavePension(payload).finally(() => {
-      lastSavedPensionPayloadRef.current = payloadJson;
-    });
-  }, [hasMembership, user?.id, penEnabled, penAge, penNet, onSavePension]);
-
-  const queuePensionSave = useCallback(
-    (delayMs: number) => {
-      window.clearTimeout(pensionSaveTimerRef.current);
-      pensionSaveTimerRef.current = window.setTimeout(() => {
-        pensionSaveTimerRef.current = 0;
-        runPensionSave();
-      }, delayMs);
-    },
-    [runPensionSave],
-  );
-
-  useEffect(() => {
-    if (!hasMembership || user?.id == null) return;
-    if (skipPensionAutosaveRef.current) {
-      skipPensionAutosaveRef.current = false;
-      return;
-    }
-    queuePensionSave(950);
-    return () => {
-      window.clearTimeout(pensionSaveTimerRef.current);
-    };
-  }, [hasMembership, user?.id, penEnabled, penAge, penNet, queuePensionSave]);
-
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState !== "hidden") return;
       window.clearTimeout(fireSaveTimerRef.current);
-      window.clearTimeout(pensionSaveTimerRef.current);
       runFireSave();
-      runPensionSave();
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
-  }, [runFireSave, runPensionSave]);
+  }, [runFireSave]);
 
   const lblOpts = {
     birthDateIso: axisBirth,
@@ -8529,8 +8262,21 @@ function RetirementView({
   return (
     <div className="workspace">
       <div className="workspace-header">
-        <h2 className="workspace-title">Jubilación (FIRE)</h2>
+        <h2 className="workspace-title">Jubilación</h2>
+        <p className="workspace-sub">
+          {installationBusy
+            ? "Cargando…"
+            : !hasMembership
+              ? "Sin acceso hasta aprobación."
+              : `Moneda ${currency}`}
+        </p>
       </div>
+
+      {hasMembership && ledgerPersonScope === "mine" ? (
+        <div className="banner info-banner tight-banner">
+          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
+        </div>
+      ) : null}
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
@@ -8542,7 +8288,7 @@ function RetirementView({
 
       {inflationOff ? (
         <div className="banner info-banner">
-          Inflación desactivada en la instalación: la fecha de FIRE puede ser optimista.{" "}
+          Inflación desactivada en la instalación: la fecha objetivo puede ser optimista.{" "}
           <a
             href={TAB_PATH.settings}
             onClick={(e) => {
@@ -8558,44 +8304,25 @@ function RetirementView({
         </div>
       ) : null}
 
-      {hasMembership && retirementBusy ? (
-        <p className="muted tight">Cargando datos…</p>
-      ) : null}
-
-      {hasMembership && !busy && projectionSeries && retirementBudgetSnapshot ? (
-        <section className="panel">
-          <h3 className="panel-title">Key metrics</h3>
-          <p className="muted tight workspace-sub">
-            Vista: {ledgerPersonScope === "mine" ? "Solo titular" : "Todo el hogar"}.
-            Cálculo determinista (sin Monte Carlo).
-          </p>
+      {hasMembership ? (
+        <>
           <div className="metric-grid workspace-kpi-strip">
             <MetricCard
-              label="Patrimonio objetivo (FIRE)"
+              label="Patrimonio objetivo"
               value={
-                fireKpis.targetNoPen !== null && fireKpis.targetNoPen > 0
+                retirementMetricsReady &&
+                fireKpis.targetNoPen !== null &&
+                fireKpis.targetNoPen > 0
                   ? formatCurrencyNumber(fireKpis.targetNoPen, currencyIso)
                   : METRIC_DASH
               }
-              parenthetical={
-                penEnabled &&
-                pensionAnnualNetForKpis !== null &&
-                fireKpis.targetWithPen !== null &&
-                fireKpis.swrN !== null &&
-                fireKpis.swrN > 0
-                  ? fireKpis.targetWithPen <= 0
-                    ? "con pensión: cubierto"
-                    : `con pensión: ${formatCurrencyNumber(
-                        fireKpis.targetWithPen,
-                        currencyIso,
-                      )}`
-                  : ""
-              }
             />
             <MetricCard
-              label="Primer cruce (sin pensión)"
+              label="Primer cruce"
               value={
-                fireKpis.miNo !== null && fireKpis.mc > 0
+                retirementMetricsReady &&
+                fireKpis.miNo !== null &&
+                fireKpis.mc > 0
                   ? `~${projectionXTickLabel(fireKpis.miNo, fireKpis.mc, {
                       ageUiMode: axisAgeMode,
                       birthDateIso: axisBirth,
@@ -8605,7 +8332,9 @@ function RetirementView({
                   : METRIC_DASH
               }
               parenthetical={
-                fireKpis.miNo !== null && fireKpis.mc > 0
+                retirementMetricsReady &&
+                fireKpis.miNo !== null &&
+                fireKpis.mc > 0
                   ? complementaryProjectionTickLabel(
                       fireKpis.miNo,
                       fireKpis.mc,
@@ -8615,43 +8344,15 @@ function RetirementView({
                   : ""
               }
             />
-            {penEnabled && pensionAnnualNetForKpis !== null ? (
-              <MetricCard
-                label="Primer cruce (con pensión)"
-                value={
-                  fireKpis.targetWithPen !== null && fireKpis.targetWithPen <= 0
-                    ? METRIC_DASH
-                    : fireKpis.miPen !== null && fireKpis.mc > 0
-                      ? `~${projectionXTickLabel(fireKpis.miPen, fireKpis.mc, {
-                          ageUiMode: axisAgeMode,
-                          birthDateIso: axisBirth,
-                          anchorDateYmd: axisAnchor,
-                          calendarTz,
-                        })}`
-                      : METRIC_DASH
-                }
-                parenthetical={
-                  fireKpis.targetWithPen !== null && fireKpis.targetWithPen <= 0
-                    ? "La pensión cubre el gasto; sin objetivo de portfolio."
-                    : fireKpis.miPen !== null && fireKpis.mc > 0
-                      ? complementaryProjectionTickLabel(
-                          fireKpis.miPen,
-                          fireKpis.mc,
-                          axisAgeMode,
-                          lblOpts,
-                        )
-                      : ""
-                }
-              />
-            ) : null}
             <MetricCard
-              label="Años hasta el cruce (sin pensión)"
+              label="Años hasta el cruce"
               value={
-                fireKpis.miNo !== null
+                retirementMetricsReady && fireKpis.miNo !== null
                   ? formatYearsEsFromMonths(fireKpis.miNo)
                   : METRIC_DASH
               }
               parenthetical={
+                retirementMetricsReady &&
                 fireKpis.miNo !== null &&
                 fireKpis.mc > 0 &&
                 fireKpis.miNo > fireKpis.mc
@@ -8660,207 +8361,156 @@ function RetirementView({
               }
             />
           </div>
-          {fireKpis.swrN !== null && fireKpis.swrN <= 0 ? (
+          {retirementMetricsReady &&
+          fireKpis.swrN !== null &&
+          fireKpis.swrN <= 0 ? (
             <p className="muted tight">
               SWR 0 %: no se calcula fecha de cruce.
             </p>
           ) : null}
-          {penEnabled && pensionAnnualNetForKpis !== null ? (
-            <p className="muted tight">
-              Con pensión: el objetivo reducido es para vivir del portfolio tras la pensión; antes suele hacer falta un «puente» hasta esa edad.
-            </p>
-          ) : null}
-        </section>
+        </>
+      ) : null}
+
+      {!canEditFire ? (
+        <p className="muted tight">
+          Solo el propietario puede editar esta configuración.
+        </p>
       ) : null}
 
       <section className="panel">
-        <h3 className="panel-title">Configuración</h3>
-        {!canEditFire ? (
-          <p className="muted tight">Solo el propietario puede editar FIRE.</p>
-        ) : (
-          <p className="muted tight">Los cambios se guardan solos.</p>
-        )}
+        <h3 className="panel-title">Objetivo anual</h3>
         <div className="stack bordered-top retirement-config-stack">
           <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
-            <section className="retirement-config-card">
-              <h4 className="retirement-config-title">Objetivo anual</h4>
-              <div className="retirement-mode-grid" role="radiogroup" aria-label="Modo objetivo anual">
-                <label
-                  className={`retirement-mode-card ${
-                    fireDraft.fire_number_mode === "manual" ? "is-active" : ""
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="fire_mode"
-                    className="sr-only"
-                    checked={fireDraft.fire_number_mode === "manual"}
-                    onChange={() =>
-                      setFireDraft((p) => ({ ...p, fire_number_mode: "manual" }))
-                    }
-                  />
-                  <span className="retirement-mode-name">Manual</span>
-                  <span className="retirement-mode-sub">Importe fijo anual</span>
-                </label>
-                <label
-                  className={`retirement-mode-card ${
-                    fireDraft.fire_number_mode === "annual_expense" ? "is-active" : ""
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="fire_mode"
-                    className="sr-only"
-                    checked={fireDraft.fire_number_mode === "annual_expense"}
-                    onChange={() =>
-                      setFireDraft((p) => ({
-                        ...p,
-                        fire_number_mode: "annual_expense",
-                      }))
-                    }
-                  />
-                  <span className="retirement-mode-name">Gasto actual</span>
-                  <span className="retirement-mode-sub">Presupuesto mensual x 12</span>
-                </label>
-                <label
-                  className={`retirement-mode-card ${
-                    fireDraft.fire_number_mode === "annual_expense_adjusted"
-                      ? "is-active"
-                      : ""
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="fire_mode"
-                    className="sr-only"
-                    checked={fireDraft.fire_number_mode === "annual_expense_adjusted"}
-                    onChange={() =>
-                      setFireDraft((p) => ({
-                        ...p,
-                        fire_number_mode: "annual_expense_adjusted",
-                      }))
-                    }
-                  />
-                  <span className="retirement-mode-name">Gasto ajustado</span>
-                  <span className="retirement-mode-sub">Aplicar un +/- %</span>
-                </label>
-              </div>
-
-              {fireDraft.fire_number_mode === "manual" ? (
-                <label className="field">
-                  <span>Gasto anual neto objetivo</span>
-                  <input
-                    inputMode="decimal"
-                    value={fireDraft.fire_number_manual_amount ?? ""}
-                    onChange={(e) =>
-                      setFireDraft((p) => ({
-                        ...p,
-                        fire_number_manual_amount:
-                          e.target.value.trim() === ""
-                            ? null
-                            : e.target.value.replace(",", "."),
-                      }))
-                    }
-                    onBlur={() => queueFireSave(0)}
-                  />
-                </label>
-              ) : null}
-
-              {fireDraft.fire_number_mode === "annual_expense_adjusted" ? (
-                <label className="field">
-                  <span>Ajuste sobre gasto anual (%)</span>
-                  <input
-                    inputMode="decimal"
-                    value={fireDraft.fire_number_expense_adjustment_pct ?? ""}
-                    onChange={(e) =>
-                      setFireDraft((p) => ({
-                        ...p,
-                        fire_number_expense_adjustment_pct:
-                          e.target.value.trim() === ""
-                            ? null
-                            : e.target.value.replace(",", "."),
-                      }))
-                    }
-                    onBlur={() => queueFireSave(0)}
-                  />
-                </label>
-              ) : null}
-            </section>
-
-            <section className="retirement-config-card">
-              <h4 className="retirement-config-title">Retirada</h4>
-              <label className="field">
-                <span>Retirada anual (SWR)</span>
+            <div className="retirement-mode-grid" role="radiogroup" aria-label="Modo objetivo anual">
+              <label
+                className={`retirement-mode-card ${
+                  fireDraft.fire_number_mode === "manual" ? "is-active" : ""
+                }`}
+              >
                 <input
-                  type="range"
-                  min={0}
-                  max={40}
-                  step={1}
-                  value={Math.round(
-                    (parseDisplayDecimal(fireDraft.swr_pct) ?? 0) * 10,
-                  )}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    setFireDraft((p) => ({
-                      ...p,
-                      swr_pct: String(v / 10),
-                    }));
-                  }}
-                  onBlur={() => queueFireSave(0)}
+                  type="radio"
+                  name="fire_mode"
+                  className="sr-only"
+                  checked={fireDraft.fire_number_mode === "manual"}
+                  onChange={() =>
+                    setFireDraft((p) => ({ ...p, fire_number_mode: "manual" }))
+                  }
                 />
-                <span className="muted tight">
-                  {formatPercentAmount(fireDraft.swr_pct)}
+                <span className="retirement-mode-name">Manual</span>
+                <span className="retirement-mode-sub retirement-mode-amount">
+                  {retirementObjectiveManualAnnualDisplay}
                 </span>
               </label>
-              <p className="muted tight">IRPF FIRE en Ajustes → FIRE.</p>
-            </section>
+              <label
+                className={`retirement-mode-card ${
+                  fireDraft.fire_number_mode === "annual_expense" ? "is-active" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="fire_mode"
+                  className="sr-only"
+                  checked={fireDraft.fire_number_mode === "annual_expense"}
+                  onChange={() =>
+                    setFireDraft((p) => ({
+                      ...p,
+                      fire_number_mode: "annual_expense",
+                    }))
+                  }
+                />
+                <span className="retirement-mode-name">Gasto actual</span>
+                <span className="retirement-mode-sub retirement-mode-amount">
+                  {retirementObjectiveExpenseAnnualDisplay}
+                </span>
+              </label>
+              <label
+                className={`retirement-mode-card ${
+                  fireDraft.fire_number_mode === "current_income" ? "is-active" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="fire_mode"
+                  className="sr-only"
+                  checked={fireDraft.fire_number_mode === "current_income"}
+                  onChange={() =>
+                    setFireDraft((p) => ({
+                      ...p,
+                      fire_number_mode: "current_income",
+                    }))
+                  }
+                />
+                <span className="retirement-mode-name">Ingresos actuales</span>
+                <span className="retirement-mode-sub retirement-mode-amount">
+                  {retirementObjectiveIncomeAnnualDisplay}
+                </span>
+              </label>
+            </div>
+
+            {fireDraft.fire_number_mode === "manual" ? (
+              <label className="field">
+                <span>Gasto anual neto objetivo</span>
+                <input
+                  inputMode="decimal"
+                  value={fireDraft.fire_number_manual_amount ?? ""}
+                  onChange={(e) =>
+                    setFireDraft((p) => ({
+                      ...p,
+                      fire_number_manual_amount:
+                        e.target.value.trim() === ""
+                          ? null
+                          : e.target.value.replace(",", "."),
+                    }))
+                  }
+                  onBlur={() => queueFireSave(0)}
+                />
+              </label>
+            ) : null}
           </fieldset>
         </div>
       </section>
 
       <section className="panel">
-        <h3 className="panel-title">Pensión pública (tu usuario)</h3>
+        <h3 className="panel-title">Retirada</h3>
         <div className="stack bordered-top retirement-config-stack">
-          <p className="muted tight">Los cambios se guardan solos.</p>
-          <label className="field checkbox-field">
-            <input
-              type="checkbox"
-              checked={penEnabled}
-              onChange={(e) => setPenEnabled(e.target.checked)}
-            />
-            <span>Incluir pensión pública</span>
-          </label>
-          {penEnabled ? (
-            <div className="retirement-pension-grid">
-              <label className="field">
-                <span>Edad de inicio</span>
-                <input
-                  inputMode="numeric"
-                  value={penAge}
-                  onChange={(e) => setPenAge(e.target.value)}
-                  onBlur={() => queuePensionSave(0)}
-                />
-              </label>
-              <label className="field">
-                <span>Cuantía neta anual</span>
-                <input
-                  inputMode="decimal"
-                  value={penNet}
-                  onChange={(e) => setPenNet(e.target.value)}
-                  onBlur={() => queuePensionSave(0)}
-                />
-              </label>
-            </div>
-          ) : null}
+          <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
+            <label className="field">
+              <span>Retirada anual (SWR)</span>
+              <input
+                type="range"
+                min={0}
+                max={40}
+                step={1}
+                value={Math.round(
+                  (parseDisplayDecimal(fireDraft.swr_pct) ?? 0) * 10,
+                )}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setFireDraft((p) => ({
+                    ...p,
+                    swr_pct: String(v / 10),
+                  }));
+                }}
+                onBlur={() => queueFireSave(0)}
+              />
+              <span className="muted tight">
+                {formatPercentAmount(fireDraft.swr_pct)}
+              </span>
+            </label>
+          </fieldset>
         </div>
       </section>
 
-      {hasMembership && !busy && (!projectionSeries || !retirementBudgetSnapshot) ? (
+      {hasMembership &&
+      !projectionBusy &&
+      !retirementBusy &&
+      (!projectionSeries || !retirementBudgetSnapshot) ? (
         <div className="banner info-banner">Sin datos.</div>
       ) : null}
     </div>
   );
 }
+
 
 function ProjectionView({
   installation,
