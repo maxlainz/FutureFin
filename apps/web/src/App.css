@@ -136,6 +136,12 @@
   background: #f1f5f9;
 }
 
+.app-root--projection-viewport {
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
 .app-header {
   display: flex;
   align-items: center;
@@ -317,11 +323,33 @@ a.tab-btn {
   max-width: none;
   min-width: 0;
   padding-inline: clamp(1rem, 4vw, 2rem);
+  padding-block: 0.5rem 0.75rem;
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .workspace--projection-fullwidth .workspace-sub {
   max-width: min(44rem, 100%);
+}
+
+.workspace--projection-fullwidth {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace--projection-fullwidth > .panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  margin-bottom: 0;
 }
 
 /* Presupuesto: mismo ancho que el resto del workspace (main acotado); evita desbordes en tablas. */
@@ -1285,17 +1313,22 @@ a.tab-btn {
   width: 100%;
   max-width: 960px;
   touch-action: none;
+  overflow: hidden;
 }
 
 .projection-chart-root--fullbleed {
   max-width: none;
+  display: flex;
+  flex: 1;
+  min-height: 0;
 }
 
 .projection-chart-svg {
   display: block;
   width: 100%;
   max-width: 100%;
-  height: auto;
+  height: 100%;
+  min-height: 22rem;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   background: linear-gradient(165deg, #f8fafc 0%, #ffffff 42%, #f1f5f9 100%);
   border: 1px solid #cbd5e1;

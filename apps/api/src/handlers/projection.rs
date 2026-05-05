@@ -1,5 +1,6 @@
 //! Monthly projection via `futurefin-engine`: presupuesto regular, cuotas de pasivos activos,
-//! aportaciones a activos / drenaje / crecimiento. Los «Próximos» no forman parte de la caja mensual del motor.
+//! aportaciones a activos / drenaje / crecimiento. Los «Próximos» ajustan la caja por mes (fechas
+//! explícitas en su mes civil; sin fecha repartidas en 90 días desde la fecha de referencia).
 
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
@@ -12,7 +13,7 @@ use axum::extract::{Extension, Query};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
     first_month_per_asset_contribution_nominals, project_net_worth_series, EngineError,
     ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
@@ -96,6 +97,99 @@ struct LiabEngineRow {
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
     payment_end_date: Option<NaiveDate>,
+}
+
+#[derive(Debug, FromRow)]
+struct PlanningFlowProjRow {
+    scope: String,
+    expected_amount: Decimal,
+    due_date: Option<NaiveDate>,
+}
+
+/// Días civiles: reparto equitativo del total entre `ref_date` y `ref_date + 89` (90 días inclusive).
+const PLANNING_UNDATED_SPREAD_DAYS: i64 = 90;
+
+fn proj_month_first(d: NaiveDate) -> NaiveDate {
+    NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap_or(d)
+}
+
+fn proj_add_months(d: NaiveDate, n: u32) -> NaiveDate {
+    d.checked_add_months(Months::new(n)).unwrap_or(d)
+}
+
+fn proj_month_last(m_first: NaiveDate) -> NaiveDate {
+    proj_add_months(m_first, 1)
+        .pred_opt()
+        .unwrap_or(m_first)
+}
+
+fn overlap_inclusive_days(
+    a_start: NaiveDate,
+    a_end: NaiveDate,
+    b_start: NaiveDate,
+    b_end: NaiveDate,
+) -> i64 {
+    let start = a_start.max(b_start);
+    let end = a_end.min(b_end);
+    if start > end {
+        return 0;
+    }
+    end.signed_duration_since(start).num_days() + 1
+}
+
+fn planning_monthly_cash_adjustments_from_flows(
+    ref_date: NaiveDate,
+    horizon_months: u32,
+    flows: &[PlanningFlowProjRow],
+) -> Vec<Decimal> {
+    let mut adj = vec![Decimal::ZERO; horizon_months as usize];
+    let anchor_month_first = proj_month_first(ref_date);
+
+    let undated_win_first = ref_date;
+    let undated_win_last = ref_date
+        .checked_add_signed(Duration::days(PLANNING_UNDATED_SPREAD_DAYS - 1))
+        .unwrap_or(ref_date);
+
+    for flow in flows {
+        let signed = match flow.scope.as_str() {
+            "income" => flow.expected_amount,
+            "expense" => -flow.expected_amount,
+            _ => continue,
+        };
+
+        match flow.due_date {
+            Some(due) => {
+                if due < anchor_month_first {
+                    continue;
+                }
+                for idx in 0..horizon_months as usize {
+                    let m_first = proj_add_months(anchor_month_first, idx as u32);
+                    let m_last = proj_month_last(m_first);
+                    if due >= m_first && due <= m_last {
+                        adj[idx] += signed;
+                        break;
+                    }
+                }
+            }
+            None => {
+                let daily = signed / Decimal::from(PLANNING_UNDATED_SPREAD_DAYS);
+                for idx in 0..horizon_months as usize {
+                    let m_first = proj_add_months(anchor_month_first, idx as u32);
+                    let m_last = proj_month_last(m_first);
+                    let days = overlap_inclusive_days(
+                        m_first,
+                        m_last,
+                        undated_win_first,
+                        undated_win_last,
+                    );
+                    if days > 0 {
+                        adj[idx] += daily * Decimal::from(days);
+                    }
+                }
+            }
+        }
+    }
+    adj
 }
 
 fn liability_monthly_payment(row: &LiabEngineRow) -> Decimal {
@@ -239,6 +333,35 @@ pub(crate) async fn build_installation_projection_input(
         }
     };
 
+    let planning_rows: Vec<PlanningFlowProjRow> = match view {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
+                   FROM planning_flows p
+                   JOIN categories c ON c.id = p.category_id
+                   WHERE p.installation_id = $1"#,
+            )
+            .bind(iid)
+            .fetch_all(pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
+                   FROM planning_flows p
+                   JOIN categories c ON c.id = p.category_id
+                   WHERE p.installation_id = $1 AND p.owner_user_id = $2"#,
+            )
+            .bind(iid)
+            .bind(session_user_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    let planning_monthly_cash_adjustment =
+        planning_monthly_cash_adjustments_from_flows(today, horizon_months, &planning_rows);
+
     let assets: Vec<SimAsset> = assets_rows
         .into_iter()
         .map(|r| SimAsset {
@@ -272,6 +395,7 @@ pub(crate) async fn build_installation_projection_input(
         assets,
         liabilities,
         inflation_annual_percent,
+        planning_monthly_cash_adjustment,
     };
 
     Ok((input, monthly_net_regular))
@@ -288,7 +412,7 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
     let (input, _) =
         build_installation_projection_input(pool, iid, session_user_id, view, today, 1, None)
             .await?;
-    let nominals = first_month_per_asset_contribution_nominals(&input);
+    let nominals = first_month_per_asset_contribution_nominals(&input).map_err(map_engine_err)?;
     Ok(input
         .assets
         .iter()
@@ -495,7 +619,7 @@ pub async fn get_projection_series(
         starting_net_worth,
         monthly_delta_assumption,
         model_note:
-            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, aportaciones solo desde ese superávit recurrente (los Próximos no cuentan), drenaje líquidos primero y menor rentabilidad esperada, cuotas fijas escaladas y remanente por pesos, crecimiento compuesto por activo, serie nominal o deflactada si hay inflación."
+            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos (fecha explícita en su mes civil; sin fecha repartidos en 90 días desde la fecha de referencia), caja mensual consolidada → superávit reparte a activos o déficit drena según las mismas reglas (líquidos primero, menor rentabilidad esperada después), cuotas fijas escaladas y remanente por pesos, crecimiento compuesto por activo, serie nominal o deflactada si hay inflación."
                 .into(),
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         show_age_mode: inst_row.3.clone(),
@@ -542,5 +666,50 @@ mod horizon_tests {
         let (m, basis) = mac_projection_horizon_months(today, Some(65), &bd);
         assert_eq!(basis, "mac_target_age");
         assert_eq!(m, 5 * 12);
+    }
+}
+
+#[cfg(test)]
+mod planning_distribution_tests {
+    use super::*;
+
+    #[test]
+    fn dated_planning_hits_single_calendar_month() {
+        let ref_d = NaiveDate::from_ymd_opt(2026, 3, 20).unwrap();
+        let flows = vec![PlanningFlowProjRow {
+            scope: "expense".into(),
+            expected_amount: Decimal::from(500),
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 5, 2).unwrap()),
+        }];
+        let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 4, &flows);
+        assert_eq!(adj[2], Decimal::from(-500));
+        assert_eq!(adj[0] + adj[1] + adj[3], Decimal::ZERO);
+    }
+
+    #[test]
+    fn dated_before_anchor_month_is_ignored() {
+        let ref_d = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
+        let flows = vec![PlanningFlowProjRow {
+            scope: "income".into(),
+            expected_amount: Decimal::from(9999),
+            due_date: Some(NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()),
+        }];
+        let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 3, &flows);
+        assert!(adj.iter().all(|x| *x == Decimal::ZERO));
+    }
+
+    #[test]
+    fn undated_splits_over_ninety_days_from_ref_date() {
+        let ref_d = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let flows = vec![PlanningFlowProjRow {
+            scope: "expense".into(),
+            expected_amount: Decimal::from(900),
+            due_date: None,
+        }];
+        let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 3, &flows);
+        assert_eq!(adj.iter().sum::<Decimal>(), Decimal::from(-900));
+        assert_eq!(adj[0], Decimal::from(-310));
+        assert_eq!(adj[1], Decimal::from(-280));
+        assert_eq!(adj[2], Decimal::from(-310));
     }
 }

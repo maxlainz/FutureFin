@@ -9,6 +9,7 @@ import {
   type Dispatch,
   type FormEvent,
   type PointerEvent,
+  type WheelEvent,
   type ReactNode,
   type SetStateAction,
 } from "react";
@@ -547,7 +548,7 @@ function assetFixedMonthlyEquivalentNum(a: AssetApiRow): number {
   return fixed;
 }
 
-/** Importe nominal mensual (primer mes del motor): cuota fija escalada + remanente; solo presupuesto recurrente (sin Próximos). */
+/** Importe nominal mensual (primer mes del motor): cuota fija escalada + remanente; incluye ajuste del primer mes por Próximos (fecha o reparto 90 días). */
 function formatAssetContributionNominalCell(
   a: AssetApiRow,
   currencyIso: string,
@@ -1000,11 +1001,21 @@ function projectionXTicks(
 }
 
 /** Geometría del SVG en unidades de usuario: depende del ancho CSS real del contenedor. */
-function buildProjectionChartLayout(containerCssWidth: number) {
+function buildProjectionChartLayout(
+  containerCssWidth: number,
+  containerCssHeight?: number,
+) {
   const W = Math.max(300, Math.round(containerCssWidth));
   const aspect = 460 / 1040;
   let H = Math.round(W * aspect);
-  H = Math.max(260, Math.min(H, 620));
+  if (
+    containerCssHeight != null &&
+    Number.isFinite(containerCssHeight) &&
+    containerCssHeight > 0
+  ) {
+    H = Math.round(containerCssHeight);
+  }
+  H = Math.max(260, Math.min(H, 980));
 
   const narrow = W < 560;
   const ml = narrow
@@ -3081,7 +3092,13 @@ export default function App() {
   }
 
   return (
-    <div className="app-root">
+    <div
+      className={
+        activeTab === "projection"
+          ? "app-root app-root--projection-viewport"
+          : "app-root"
+      }
+    >
       <header className="app-header">
         <div className="app-header-left">
           <span className="logo-mark small">FF</span>
@@ -5025,10 +5042,11 @@ function BudgetView({
               budgetIncomeCategories.length > 0 ? (
                 <button
                   type="button"
-                  className="btn primary"
+                  className="btn primary icon-btn ledger-toolbar-add"
+                  aria-label="Nueva línea de ingreso"
                   onClick={() => openNewBudgetModal("income")}
                 >
-                  Nueva línea
+                  <PlusIcon />
                 </button>
               ) : null}
             </div>
@@ -5099,10 +5117,11 @@ function BudgetView({
                 budgetExpenseCategories.length > 0 ? (
                   <button
                     type="button"
-                    className="btn primary"
+                    className="btn primary icon-btn ledger-toolbar-add"
+                    aria-label="Nueva línea de gasto"
                     onClick={() => openNewBudgetModal("expense")}
                   >
-                    Nueva línea
+                    <PlusIcon />
                   </button>
                 ) : null}
               </div>
@@ -5555,10 +5574,11 @@ function UpcomingView({
             planningExpenseCategories.length > 0) ? (
             <button
               type="button"
-              className="btn primary"
+              className="btn primary icon-btn ledger-toolbar-add"
+              aria-label="Nuevo flujo planificado"
               onClick={() => openNewPlanningModal()}
             >
-              Nuevo flujo
+              <PlusIcon />
             </button>
           ) : null}
         </div>
@@ -6885,43 +6905,92 @@ function ProjectionNetWorthChart({
   const gid = useId().replace(/:/g, "");
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const yAxisAnimRef = useRef<number | null>(null);
   const [hover, setHover] = useState<number | null>(null);
   const [tipOffset, setTipOffset] = useState({ x: 0, y: 0 });
-  const [containerWidth, setContainerWidth] = useState(0);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const [viewWindow, setViewWindow] = useState({ start: 0, count: pts.length });
+  const [animatedYDomain, setAnimatedYDomain] = useState<{
+    min: number;
+    max: number;
+  } | null>(null);
+  const animatedYDomainRef = useRef<{ min: number; max: number } | null>(null);
 
   useLayoutEffect(() => {
     const node = wrapRef.current;
     if (!node) return;
     const measure = () => {
-      const w = node.getBoundingClientRect().width;
-      if (w > 0) setContainerWidth(w);
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 0) {
+        setContainerSize((prev) => {
+          const nextW = Math.round(rect.width);
+          const nextH = Math.max(0, Math.round(rect.height));
+          return prev.width === nextW && prev.height === nextH
+            ? prev
+            : { width: nextW, height: nextH };
+        });
+      }
     };
     measure();
     const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width;
-      if (w != null && w > 0) setContainerWidth(w);
+      const rect = entries[0]?.contentRect;
+      if (rect && rect.width > 0) {
+        setContainerSize((prev) => {
+          const nextW = Math.round(rect.width);
+          const nextH = Math.max(0, Math.round(rect.height));
+          return prev.width === nextW && prev.height === nextH
+            ? prev
+            : { width: nextW, height: nextH };
+        });
+      }
     });
     ro.observe(node);
     return () => ro.disconnect();
   }, []);
 
+  useEffect(() => {
+    setViewWindow((prev) => {
+      if (pts.length <= 0) return { start: 0, count: 0 };
+      if (prev.start === 0 && prev.count === pts.length) {
+        return prev;
+      }
+      return { start: 0, count: pts.length };
+    });
+  }, [pts.length]);
+
   const layoutDims = useMemo(
     () =>
-      buildProjectionChartLayout(containerWidth > 0 ? containerWidth : 1040),
-    [containerWidth],
+      buildProjectionChartLayout(
+        containerSize.width > 0 ? containerSize.width : 1040,
+        containerSize.height > 0 ? containerSize.height : undefined,
+      ),
+    [containerSize.height, containerSize.width],
   );
 
   const model = useMemo(() => {
     if (pts.length < 2) return null;
     const nw = pts.map((p) => parseDisplayDecimal(p.net_worth) ?? 0);
     const cc = pts.map((p) => parseDisplayDecimal(p.contributed_capital) ?? 0);
+    const minVisiblePoints = Math.min(pts.length, 12);
+    const visibleCount = Math.max(
+      minVisiblePoints,
+      Math.min(pts.length, Math.round(viewWindow.count)),
+    );
+    const maxStart = Math.max(0, pts.length - visibleCount);
+    const visibleStart = Math.max(
+      0,
+      Math.min(maxStart, Math.round(viewWindow.start)),
+    );
+    const visibleEnd = visibleStart + visibleCount - 1;
+    const nwVisible = nw.slice(visibleStart, visibleEnd + 1);
+    const ccVisible = cc.slice(visibleStart, visibleEnd + 1);
     const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
     const startNw =
       startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
     const allowNegativeAxis = startNw < 0;
 
-    const dataMin = Math.min(...nw, ...cc);
-    const dataMax = Math.max(...nw, ...cc);
+    const dataMin = Math.min(...nwVisible, ...ccVisible);
+    const dataMax = Math.max(...nwVisible, ...ccVisible);
     const rawSpan = dataMax - dataMin;
     const padY =
       rawSpan > 0
@@ -6946,8 +7015,7 @@ function ProjectionNetWorthChart({
     if (!allowNegativeAxis && yMin < 0) {
       yMin = 0;
     }
-    const spanY = yMax - yMin || 1;
-    const xTicks = projectionXTicks(
+    const xTicksAll = projectionXTicks(
       series.months,
       {
         ageUiMode,
@@ -6957,6 +7025,31 @@ function ProjectionNetWorthChart({
       },
       { plotWidthPx: layoutDims.pw },
     );
+    const xTicks = xTicksAll.filter(
+      (tick) => tick.monthIndex >= visibleStart && tick.monthIndex <= visibleEnd,
+    );
+    if (xTicks.length === 0) {
+      xTicks.push({
+        monthIndex: visibleStart,
+        label: projectionXTickLabel(visibleStart, series.months, {
+          ageUiMode,
+          birthDateIso: userBirthDate,
+          anchorDateYmd,
+          calendarTz,
+        }),
+      });
+      if (visibleEnd !== visibleStart) {
+        xTicks.push({
+          monthIndex: visibleEnd,
+          label: projectionXTickLabel(visibleEnd, series.months, {
+            ageUiMode,
+            birthDateIso: userBirthDate,
+            anchorDateYmd,
+            calendarTz,
+          }),
+        });
+      }
+    }
 
     const tickSpanPx =
       xTicks.length > 1 ? layoutDims.pw / (xTicks.length - 1) : layoutDims.pw;
@@ -6967,40 +7060,20 @@ function ProjectionNetWorthChart({
 
     const { W, H, ml, mr, mt, mb, pw, ph } = layoutDims;
 
-    const xScale = (i: number) => ml + (i / Math.max(1, pts.length - 1)) * pw;
-    const yScale = (v: number) => mt + ph - ((v - yMin) / spanY) * ph;
-
-    const nwPoints = nw
-      .map((v, i) => `${xScale(i).toFixed(2)},${yScale(v).toFixed(2)}`)
-      .join(" ");
-    const ccPoints = cc
-      .map((v, i) => `${xScale(i).toFixed(2)},${yScale(v).toFixed(2)}`)
-      .join(" ");
-
-    let areaD = "";
-    if (nw.length > 0) {
-      const parts: string[] = [];
-      nw.forEach((v, i) => {
-        parts.push(`${i === 0 ? "M" : "L"} ${xScale(i).toFixed(2)} ${yScale(v).toFixed(2)}`);
-      });
-      const xLast = xScale(nw.length - 1);
-      const x0 = xScale(0);
-      const yBase = mt + ph;
-      parts.push(`L ${xLast.toFixed(2)} ${yBase.toFixed(2)}`);
-      parts.push(`L ${x0.toFixed(2)} ${yBase.toFixed(2)} Z`);
-      areaD = parts.join(" ");
-    }
-
+    const xScale = (i: number) => {
+      const local = i - visibleStart;
+      return ml + (local / Math.max(1, visibleCount - 1)) * pw;
+    };
     return {
       nw,
       cc,
-      yTicks,
+      nwVisible,
+      ccVisible,
+      allowNegativeAxis,
+      targetYMin: yMin,
+      targetYMax: yMax,
       xTicks,
       xScale,
-      yScale,
-      nwPoints,
-      ccPoints,
-      areaD,
       pw,
       ph,
       ml,
@@ -7011,6 +7084,9 @@ function ProjectionNetWorthChart({
       H,
       rotateXLabels,
       viewHeight,
+      visibleStart,
+      visibleEnd,
+      visibleCount,
     };
   }, [
     pts,
@@ -7021,6 +7097,8 @@ function ProjectionNetWorthChart({
     userBirthDate,
     anchorDateYmd,
     calendarTz,
+    viewWindow.count,
+    viewWindow.start,
   ]);
 
   if (!model) {
@@ -7030,13 +7108,13 @@ function ProjectionNetWorthChart({
   const {
     nw,
     cc,
-    yTicks,
+    nwVisible,
+    ccVisible,
+    allowNegativeAxis,
+    targetYMin,
+    targetYMax,
     xTicks,
     xScale,
-    yScale,
-    nwPoints,
-    ccPoints,
-    areaD,
     pw,
     ph,
     ml,
@@ -7046,7 +7124,86 @@ function ProjectionNetWorthChart({
     H,
     rotateXLabels,
     viewHeight,
+    visibleStart,
+    visibleEnd,
+    visibleCount,
   } = model;
+
+  useEffect(() => {
+    animatedYDomainRef.current = animatedYDomain;
+  }, [animatedYDomain]);
+
+  useEffect(() => {
+    if (targetYMax <= targetYMin) {
+      setAnimatedYDomain({ min: targetYMin, max: targetYMax + 1 });
+      return;
+    }
+    if (yAxisAnimRef.current != null) {
+      cancelAnimationFrame(yAxisAnimRef.current);
+      yAxisAnimRef.current = null;
+    }
+    const from = animatedYDomainRef.current ?? { min: targetYMin, max: targetYMax };
+    const to = { min: targetYMin, max: targetYMax };
+    const start = performance.now();
+    const durationMs = 170;
+    const easeOutCubic = (t: number) => 1 - (1 - t) ** 3;
+    const tick = (now: number) => {
+      const t = Math.max(0, Math.min(1, (now - start) / durationMs));
+      const eased = easeOutCubic(t);
+      setAnimatedYDomain({
+        min: from.min + (to.min - from.min) * eased,
+        max: from.max + (to.max - from.max) * eased,
+      });
+      if (t < 1) {
+        yAxisAnimRef.current = requestAnimationFrame(tick);
+      } else {
+        yAxisAnimRef.current = null;
+      }
+    };
+    yAxisAnimRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (yAxisAnimRef.current != null) {
+        cancelAnimationFrame(yAxisAnimRef.current);
+        yAxisAnimRef.current = null;
+      }
+    };
+  }, [targetYMax, targetYMin]);
+
+  const yMin = animatedYDomain?.min ?? targetYMin;
+  const yMax = animatedYDomain?.max ?? targetYMax;
+  const spanY = Math.max(1, yMax - yMin);
+  const yScale = (v: number) => mt + ph - ((v - yMin) / spanY) * ph;
+  const yTicksRaw = niceYTicks(yMin, yMax, 6);
+  let yTicks = allowNegativeAxis ? yTicksRaw : yTicksRaw.filter((t) => t >= 0);
+  if (!allowNegativeAxis && yTicks.length < 2) {
+    yTicks = niceYTicks(Math.max(0, yMin), yMax, 6);
+  }
+  const nwPoints = nwVisible
+    .map((v, i) =>
+      `${xScale(visibleStart + i)},${yScale(v)}`,
+    )
+    .join(" ");
+  const ccPoints = ccVisible
+    .map((v, i) =>
+      `${xScale(visibleStart + i)},${yScale(v)}`,
+    )
+    .join(" ");
+  let areaD = "";
+  if (nwVisible.length > 0) {
+    const parts: string[] = [];
+    nwVisible.forEach((v, i) => {
+      const globalIndex = visibleStart + i;
+      parts.push(
+        `${i === 0 ? "M" : "L"} ${xScale(globalIndex)} ${yScale(v)}`,
+      );
+    });
+    const xLast = xScale(visibleEnd);
+    const x0 = xScale(visibleStart);
+    const yBase = mt + ph;
+    parts.push(`L ${xLast} ${yBase}`);
+    parts.push(`L ${x0} ${yBase} Z`);
+    areaD = parts.join(" ");
+  }
 
   function pointerToIndex(clientX: number): number {
     const svg = svgRef.current;
@@ -7055,7 +7212,7 @@ function ProjectionNetWorthChart({
     const vb = svg.viewBox.baseVal;
     const xSvg = ((clientX - rect.left) / Math.max(rect.width, 1)) * vb.width;
     const local = xSvg - ml;
-    const idx = Math.round((local / pw) * (pts.length - 1));
+    const idx = Math.round((local / pw) * Math.max(1, visibleCount - 1)) + visibleStart;
     return Math.max(0, Math.min(pts.length - 1, idx));
   }
 
@@ -7071,6 +7228,44 @@ function ProjectionNetWorthChart({
 
   function onPointerLeave() {
     setHover(null);
+  }
+
+  function onWheel(e: WheelEvent<SVGSVGElement>) {
+    e.preventDefault();
+    if (pts.length < 2) return;
+    const panInput = e.shiftKey ? e.deltaY : e.deltaX;
+    const isPan = Math.abs(panInput) > Math.abs(e.deltaY) || e.shiftKey;
+    const minVisiblePoints = Math.min(pts.length, 12);
+    if (isPan && visibleCount < pts.length) {
+      const step = Math.max(1, Math.round(visibleCount * 0.08));
+      const direction = panInput > 0 ? 1 : -1;
+      const maxStart = Math.max(0, pts.length - visibleCount);
+      const nextStart = Math.max(
+        0,
+        Math.min(maxStart, visibleStart + direction * step),
+      );
+      if (nextStart !== visibleStart) {
+        setViewWindow({ start: nextStart, count: visibleCount });
+      }
+      return;
+    }
+    if (e.deltaY === 0) return;
+    const zoomFactor = e.deltaY < 0 ? 0.88 : 1.14;
+    const nextCountRaw = Math.round(visibleCount * zoomFactor);
+    const nextCount = Math.max(
+      minVisiblePoints,
+      Math.min(pts.length, nextCountRaw),
+    );
+    if (nextCount === visibleCount) return;
+    const anchorIndex = pointerToIndex(e.clientX);
+    const ratioWithinWindow =
+      (anchorIndex - visibleStart) / Math.max(1, visibleCount - 1);
+    const nextStartRaw = Math.round(
+      anchorIndex - ratioWithinWindow * (nextCount - 1),
+    );
+    const maxStart = Math.max(0, pts.length - nextCount);
+    const nextStart = Math.max(0, Math.min(maxStart, nextStartRaw));
+    setViewWindow({ start: nextStart, count: nextCount });
   }
 
   const horizonLine = formatProjectionChartHorizonLine(series, projectionTargetAge);
@@ -7099,6 +7294,7 @@ function ProjectionNetWorthChart({
         aria-label="Proyección de patrimonio neto y capital aportado acumulado"
         onPointerMove={onPointerMove}
         onPointerLeave={onPointerLeave}
+        onWheel={onWheel}
       >
         <title>Patrimonio neto y capital aportado en el tiempo</title>
         <defs>
@@ -7106,6 +7302,9 @@ function ProjectionNetWorthChart({
             <stop offset="0%" stopColor="#10b981" stopOpacity="0.3" />
             <stop offset="100%" stopColor="#10b981" stopOpacity="0.03" />
           </linearGradient>
+          <clipPath id={`projectionPlotClip-${gid}`}>
+            <rect x={ml} y={mt} width={pw} height={ph} rx={6} />
+          </clipPath>
         </defs>
 
         <text x={ml} y={34} className="projection-chart-headline">
@@ -7183,41 +7382,43 @@ function ProjectionNetWorthChart({
           className="projection-chart-plot-bg"
         />
 
-        <path d={areaD} fill={`url(#nwFill-${gid})`} stroke="none" />
-        <polyline
-          points={nwPoints}
-          fill="none"
-          stroke="#047857"
-          strokeWidth={2.85}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        <polyline
-          points={ccPoints}
-          fill="none"
-          stroke="#b45309"
-          strokeWidth={2.1}
-          strokeDasharray="7 5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          opacity={0.92}
-        />
-
-        {hover !== null ? (
-          <line
-            x1={xScale(hover)}
-            x2={xScale(hover)}
-            y1={mt}
-            y2={mt + ph}
-            className="projection-chart-crosshair"
+        <g clipPath={`url(#projectionPlotClip-${gid})`}>
+          <path d={areaD} fill={`url(#nwFill-${gid})`} stroke="none" />
+          <polyline
+            points={nwPoints}
+            fill="none"
+            stroke="#047857"
+            strokeWidth={2.85}
+            strokeLinecap="round"
+            strokeLinejoin="round"
           />
-        ) : null}
-        {hover !== null ? (
-          <>
-            <circle cx={xScale(hover)} cy={yScale(nw[hover])} r={6} className="projection-chart-dot-nw" />
-            <circle cx={xScale(hover)} cy={yScale(cc[hover])} r={5} className="projection-chart-dot-cc" />
-          </>
-        ) : null}
+          <polyline
+            points={ccPoints}
+            fill="none"
+            stroke="#b45309"
+            strokeWidth={2.1}
+            strokeDasharray="7 5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            opacity={0.92}
+          />
+
+          {hover !== null && hover >= visibleStart && hover <= visibleEnd ? (
+            <line
+              x1={xScale(hover)}
+              x2={xScale(hover)}
+              y1={mt}
+              y2={mt + ph}
+              className="projection-chart-crosshair"
+            />
+          ) : null}
+          {hover !== null && hover >= visibleStart && hover <= visibleEnd ? (
+            <>
+              <circle cx={xScale(hover)} cy={yScale(nw[hover])} r={6} className="projection-chart-dot-nw" />
+              <circle cx={xScale(hover)} cy={yScale(cc[hover])} r={5} className="projection-chart-dot-cc" />
+            </>
+          ) : null}
+        </g>
 
         <text
           transform={`translate(${Math.min(30, ml * 0.32)}, ${mt + ph / 2}) rotate(-90)`}
@@ -7228,7 +7429,7 @@ function ProjectionNetWorthChart({
         </text>
       </svg>
 
-      {hover !== null ? (
+      {hover !== null && hover >= visibleStart && hover <= visibleEnd ? (
         <div
           className="projection-chart-tooltip"
           style={{

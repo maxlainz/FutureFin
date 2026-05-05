@@ -1,6 +1,7 @@
 //! Monthly projection: regular budget (no derived liability rows) + active debt service +
-//! asset contributions / drain / compound growth. Planning («Próximos») no entra en la caja
-//! mensual del motor: solo presupuesto recurrente menos cuotas de pasivos activas.
+//! asset contributions / drain / compound growth. Ajustes opcionales por mes desde «Próximos»
+//! (`planning_monthly_cash_adjustment`) suman al flujo de caja recurrente del mes (ingreso (+)
+//! / gasto (−)) antes del reparto a activos o el drenaje.
 
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
@@ -14,6 +15,8 @@ use uuid::Uuid;
 pub enum EngineError {
     #[error("horizon_months must be >= 1")]
     InvalidHorizon,
+    #[error("planning_monthly_cash_adjustment must have length horizon_months")]
+    InvalidPlanningAdjustments,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +50,9 @@ pub struct ProjectionInput {
     pub liabilities: Vec<ProjectionLiabilityInput>,
     /// Annual inflation % for deflating nominal NW to “money of today”; None → nominal series.
     pub inflation_annual_percent: Option<Decimal>,
+    /// Signed cash from planning flows per simulated month (`len == horizon_months`): index `i`
+    /// pairs with month `i+1` (calendar month `add_months(month_first_calendar(ref_date), i)`).
+    pub planning_monthly_cash_adjustment: Vec<Decimal>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,11 +127,20 @@ fn drain_from_assets(
 /// Nominal contributions routed to each asset in the **first simulated month** (calendar month de
 /// `ref_date`): cuotas fijas escaladas más remanente por pesos — mismas reglas que la primera
 /// iteración de [`project_net_worth_series`]. Cero si el superávit recurrente del mes es ≤ 0.
-pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> Vec<Decimal> {
+pub fn first_month_per_asset_contribution_nominals(
+    input: &ProjectionInput,
+) -> Result<Vec<Decimal>, EngineError> {
+    if input.horizon_months < 1 {
+        return Err(EngineError::InvalidHorizon);
+    }
+    if input.planning_monthly_cash_adjustment.len() != input.horizon_months as usize {
+        return Err(EngineError::InvalidPlanningAdjustments);
+    }
+
     let n = input.assets.len();
     let mut out = vec![Decimal::ZERO; n];
     if n == 0 {
-        return out;
+        return Ok(out);
     }
 
     let fixed: Vec<Decimal> = input
@@ -164,12 +179,16 @@ pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> V
         debt_service += pay;
     }
 
-    let scheduled_savings =
-        input.income_regular_monthly - input.expense_regular_monthly - debt_service;
+    let planning_adj = input.planning_monthly_cash_adjustment[0];
+
+    let scheduled_savings = input.income_regular_monthly
+        - input.expense_regular_monthly
+        - debt_service
+        + planning_adj;
 
     let net_cash_month = scheduled_savings;
     if net_cash_month <= Decimal::ZERO {
-        return out;
+        return Ok(out);
     }
 
     let pool = net_cash_month;
@@ -188,12 +207,12 @@ pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> V
     let applied: Decimal = out.iter().copied().sum();
     let remainder_pool = pool - applied;
     if remainder_pool <= Decimal::ZERO {
-        return out;
+        return Ok(out);
     }
 
     let wsum: Decimal = weights.iter().copied().sum();
     if wsum <= Decimal::ZERO {
-        return out;
+        return Ok(out);
     }
 
     for (i, w) in weights.iter().enumerate() {
@@ -201,12 +220,15 @@ pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> V
         out[i] += share;
     }
 
-    out
+    Ok(out)
 }
 
 pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOutput, EngineError> {
     if input.horizon_months < 1 {
         return Err(EngineError::InvalidHorizon);
+    }
+    if input.planning_monthly_cash_adjustment.len() != input.horizon_months as usize {
+        return Err(EngineError::InvalidPlanningAdjustments);
     }
 
     let mut values: Vec<Decimal> = input.assets.iter().map(|a| a.value).collect();
@@ -284,8 +306,12 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             debt_service += pay;
         }
 
-        let scheduled_savings =
-            input.income_regular_monthly - input.expense_regular_monthly - debt_service;
+        let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
+
+        let scheduled_savings = input.income_regular_monthly
+            - input.expense_regular_monthly
+            - debt_service
+            + planning_adj;
 
         let net_cash_month = scheduled_savings;
 
@@ -402,6 +428,7 @@ mod tests {
             assets: vec![a],
             liabilities: vec![],
             inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::ZERO; 3],
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth.len(), 4);
@@ -441,15 +468,16 @@ mod tests {
             assets: vec![a, b],
             liabilities: vec![],
             inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::ZERO; 3],
         };
-        let nom = first_month_per_asset_contribution_nominals(&inp);
+        let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom.len(), 2);
         assert_eq!(nom[0], Decimal::from(500));
         assert_eq!(nom[1], Decimal::from(500));
     }
 
     #[test]
-    fn planning_flows_do_not_affect_monthly_contribution_nominals() {
+    fn planning_adjustment_boosts_first_month_contribution_nominals() {
         let id_a = Uuid::from_u128(1);
         let a = SimAsset {
             id: id_a,
@@ -468,10 +496,11 @@ mod tests {
             assets: vec![a],
             liabilities: vec![],
             inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::from(250)],
         };
-        let nom = first_month_per_asset_contribution_nominals(&inp);
+        let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom.len(), 1);
-        assert_eq!(nom[0], Decimal::from(1000));
+        assert_eq!(nom[0], Decimal::from(1250));
     }
 
     #[test]
@@ -492,6 +521,7 @@ mod tests {
             }],
             liabilities: vec![],
             inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::ZERO; 2],
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.contributed_capital[0], Decimal::from(80_000));
