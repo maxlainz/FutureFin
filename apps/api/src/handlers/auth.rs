@@ -9,11 +9,9 @@ use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use cookie::{SameSite, time::Duration as CookieDuration};
 use futurefin_domain::UserId;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
-use std::str::FromStr;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -40,13 +38,6 @@ pub struct UserResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "date")]
     pub birth_date: Option<NaiveDate>,
-    pub pension_enabled: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pension_start_age: Option<i16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub pension_annual_net: Option<Decimal>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -55,16 +46,6 @@ pub struct PatchMeBody {
     #[serde(default)]
     #[schema(nullable = true, value_type = Object)]
     pub birth_date: Option<Value>,
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct PatchPensionBody {
-    pub pension_enabled: bool,
-    #[serde(default)]
-    pub pension_start_age: Option<i16>,
-    /// Importe anual neto en la divisa base de la instalación.
-    #[serde(default)]
-    pub pension_annual_net: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -80,9 +61,6 @@ struct UserRow {
     id: Uuid,
     username: String,
     birth_date: Option<NaiveDate>,
-    pension_enabled: bool,
-    pension_start_age: Option<i16>,
-    pension_annual_net: Option<Decimal>,
 }
 
 pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
@@ -150,44 +128,7 @@ fn user_row_to_response(row: UserRow) -> UserResponse {
         id: UserId(row.id),
         username: row.username,
         birth_date: row.birth_date,
-        pension_enabled: row.pension_enabled,
-        pension_start_age: row.pension_start_age,
-        pension_annual_net: row.pension_annual_net,
     }
-}
-
-fn validate_pension_patch(
-    enabled: bool,
-    age: Option<i16>,
-    net_raw: &Option<String>,
-) -> Result<Option<Decimal>, ApiError> {
-    if !enabled {
-        return Ok(None);
-    }
-    let Some(a) = age else {
-        return Err(ApiError::BadRequest(
-            "pension_start_age is required when pension_enabled is true".into(),
-        ));
-    };
-    if !(50..=90).contains(&a) {
-        return Err(ApiError::BadRequest(
-            "pension_start_age must be between 50 and 90".into(),
-        ));
-    }
-    let Some(raw) = net_raw.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) else {
-        return Err(ApiError::BadRequest(
-            "pension_annual_net is required when pension_enabled is true".into(),
-        ));
-    };
-    let net = Decimal::from_str(raw).map_err(|_| {
-        ApiError::BadRequest("pension_annual_net must be a decimal number".into())
-    })?;
-    if net < Decimal::ZERO {
-        return Err(ApiError::BadRequest(
-            "pension_annual_net must be >= 0".into(),
-        ));
-    }
-    Ok(Some(net))
 }
 
 #[utoipa::path(
@@ -211,7 +152,7 @@ pub async fn register(
     let row: UserRow = sqlx::query_as(
         r#"INSERT INTO users (username, password_hash)
            VALUES ($1, $2)
-           RETURNING id, username, birth_date, pension_enabled, pension_start_age, pension_annual_net"#,
+           RETURNING id, username, birth_date"#,
     )
     .bind(&body.username)
     .bind(&hash)
@@ -279,8 +220,7 @@ pub async fn login(
         .build();
     let jar = jar.add(cookie);
     let row: UserRow = sqlx::query_as(
-        r#"SELECT id, username, birth_date, pension_enabled, pension_start_age, pension_annual_net
-           FROM users WHERE id = $1"#,
+        r#"SELECT id, username, birth_date FROM users WHERE id = $1"#,
     )
     .bind(user.id)
     .fetch_one(&state.pool)
@@ -331,54 +271,7 @@ pub async fn me(
 ) -> Result<Json<UserResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let row: UserRow = sqlx::query_as(
-        r#"SELECT id, username, birth_date, pension_enabled, pension_start_age, pension_annual_net FROM users WHERE id = $1"#,
-    )
-    .bind(user.id.0)
-    .fetch_one(&state.pool)
-    .await?;
-    Ok(Json(user_row_to_response(row)))
-}
-
-#[utoipa::path(
-    patch,
-    path = "/v1/users/me/pension",
-    tag = "auth",
-    request_body = PatchPensionBody,
-    responses(
-        (status = 200, description = "Pensión actualizada", body = UserResponse),
-        (status = 400, description = "Validation error"),
-        (status = 401, description = "No valid session"),
-    )
-)]
-pub async fn patch_me_pension(
-    Extension(state): Extension<Arc<AppState>>,
-    jar: CookieJar,
-    Json(body): Json<PatchPensionBody>,
-) -> Result<Json<UserResponse>, ApiError> {
-    let user = require_session_user(&jar, &state.pool).await?;
-    let net_dec = validate_pension_patch(
-        body.pension_enabled,
-        body.pension_start_age,
-        &body.pension_annual_net,
-    )?;
-    sqlx::query(
-        r#"UPDATE users SET pension_enabled = $1,
-               pension_start_age = $2,
-               pension_annual_net = $3
-           WHERE id = $4"#,
-    )
-    .bind(body.pension_enabled)
-    .bind(if body.pension_enabled {
-        body.pension_start_age
-    } else {
-        None
-    })
-    .bind(if body.pension_enabled { net_dec } else { None })
-    .bind(user.id.0)
-    .execute(&state.pool)
-    .await?;
-    let row: UserRow = sqlx::query_as(
-        r#"SELECT id, username, birth_date, pension_enabled, pension_start_age, pension_annual_net FROM users WHERE id = $1"#,
+        r#"SELECT id, username, birth_date FROM users WHERE id = $1"#,
     )
     .bind(user.id.0)
     .fetch_one(&state.pool)
@@ -419,7 +312,7 @@ pub async fn patch_me(
     }
 
     let row: UserRow = sqlx::query_as(
-        r#"SELECT id, username, birth_date, pension_enabled, pension_start_age, pension_annual_net FROM users WHERE id = $1"#,
+        r#"SELECT id, username, birth_date FROM users WHERE id = $1"#,
     )
     .bind(user.id.0)
     .fetch_one(&state.pool)

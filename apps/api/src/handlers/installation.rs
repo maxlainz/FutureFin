@@ -8,7 +8,7 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{NaiveDate, Utc};
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::str::FromStr;
 use sqlx::{PgPool, Postgres, Transaction};
 use sqlx::types::Json as SqlxJson;
@@ -17,13 +17,30 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Modo de cálculo del FIRE number (presupuesto regular sin cuotas derivadas de pasivos × 12 como base en modos automáticos).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FireNumberMode {
     Manual,
     #[default]
     AnnualExpense,
-    AnnualExpenseAdjusted,
+    CurrentIncome,
+}
+
+impl<'de> Deserialize<'de> for FireNumberMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "manual" => Self::Manual,
+            "annual_expense" => Self::AnnualExpense,
+            // Migración: ya no expuesto en API/UI.
+            "annual_expense_adjusted" => Self::AnnualExpense,
+            "current_income" => Self::CurrentIncome,
+            _ => Self::AnnualExpense,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -121,20 +138,7 @@ pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> 
                 ));
             }
         }
-        FireNumberMode::AnnualExpense => {}
-        FireNumberMode::AnnualExpenseAdjusted => {
-            let Some(pct) = fs.fire_number_expense_adjustment_pct else {
-                return Err(ApiError::BadRequest(
-                    "fire_number_expense_adjustment_pct is required when fire_number_mode is annual_expense_adjusted"
-                        .into(),
-                ));
-            };
-            if pct < Decimal::from(-99) || pct > Decimal::from(400) {
-                return Err(ApiError::BadRequest(
-                    "fire_number_expense_adjustment_pct must be between -99 and 400".into(),
-                ));
-            }
-        }
+        FireNumberMode::AnnualExpense | FireNumberMode::CurrentIncome => {}
     }
     if fs.taxes_enabled {
         validate_tax_brackets(&fs.tax_brackets)?;
