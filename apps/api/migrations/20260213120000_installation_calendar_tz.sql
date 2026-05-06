@@ -1,4 +1,4 @@
--- Civil calendar for derive-principal and UI parity with Mac "start of day" in local TZ.
+-- Civil calendar for derive-principal and UI "start of day" in local TZ.
 
 ALTER TABLE installation
 ADD COLUMN calendar_tz TEXT NOT NULL DEFAULT 'UTC'

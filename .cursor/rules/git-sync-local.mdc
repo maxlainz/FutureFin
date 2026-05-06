@@ -11,7 +11,7 @@ alwaysApply: true
 - Tras **push**: otro `git pull --ff-only` por si hubo commits paralelos.
 - Si no hay fast-forward, avisa al usuario; no reescribas historia sin orden explícita.
 
-## App en Docker local (`futurefin-api`, etc.)
+## App en Docker local (`futurefin`, etc.)
 
 Cuando cambien **código, Dockerfile o assets web** que afecten al stack Compose:
 

@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build API image (same path as local Dockerfile)
-        run: docker compose build futurefin-api
+        run: docker compose build futurefin
       - name: Start Postgres + API
         run: docker compose up -d
       - name: Wait for /v1/health
@@ -49,7 +49,7 @@ jobs:
             sleep 2
           done
           docker compose ps -a
-          docker compose logs --tail=100 futurefin-api || true
+          docker compose logs --tail=100 futurefin || true
           exit 1
       - name: Stop stack
         if: always()

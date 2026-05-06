@@ -1,15 +1,15 @@
 # FutureFin
 
-Aplicación de **finanzas personales** pensada para **self-hosting** (Docker): hogar compartido, presupuesto mensual, flujos próximos, proyección de patrimonio neto y planificación **FIRE / jubilación**. Es la **línea principal** del producto; sustituye el prototipo macOS histórico.
+Aplicación de **finanzas personales** pensada para **self-hosting** (Docker): hogar compartido, presupuesto mensual, flujos próximos, proyección de patrimonio neto y planificación **FIRE / jubilación**.
 
 ## Estado del repositorio
 
 - Rama `main`: **releases** (estable). La imagen publicada se consume como `:latest` o `:vX.Y.Z`.
-- Rama `dev`: desarrollo activo. Publica imagen `:dev` (no recomendada para producción).
+- Rama `dev`: desarrollo activo. Se usa para test local (builds), no para publicar imágenes en GHCR.
 
 ## Documentación de producto
 
-La especificación MVP (paridad de capacidades respecto al cliente Swift de referencia, modelo multi-usuario, backups, oráculos de tests) vive en `[docs/README.md](docs/README.md)`.
+La especificación MVP (modelo multi-usuario, backups, criterios de alcance) vive en `[docs/README.md](docs/README.md)`.
 
 ## Stack de implementación (rama `dev`)
 
@@ -32,20 +32,18 @@ Convención al publicar en un registro (Docker Hub u otro):
 
 | Artefacto                          | Ejemplo de nombre publicado                                  |
 | ---------------------------------- | ------------------------------------------------------------ |
-| API + UI estática embebida         | `futurefin/futurefin-api:1.0.0`                              |
+| API + UI estática embebida         | `futurefin/futurefin:1.0.0`                              |
 | (solo referencia) Postgres oficial | `postgres:16.4-alpine@sha256:…` — ya referenciado en Compose |
 
-Notas de tags (GHCR/Docker Hub):
+Notas de tags:
 
 - Releases (rama `main` + tags `vX.Y.Z`): `:latest` y `:vX.Y.Z`
-- Desarrollo (rama `dev`): `:dev`
 
-Importante al hacer merges:
+Importante:
 
-- Mantener **`publish-image.yml`** con comportamiento **distinto por rama** (`main` publica `latest`/`vX.Y.Z`; `dev` publica `dev`). No “unificar” tags de producción y desarrollo.
+- La aplicación se publica en GHCR solo desde `main` (y tags `vX.Y.Z`).
 
-
-La aplicación construida en Compose usa `**image: futurefin/futurefin-api:dev**` junto con `build:` para etiquetar la imagen local de forma reconocible antes de `docker push` (en producción se recomienda `:latest` o `:vX.Y.Z` desde el registry).
+La aplicación construida en Compose usa una etiqueta local `:dev` (en `docker-compose.yml`); en producción se recomienda `:latest` o `:vX.Y.Z` desde el registry.
 
 ### Desarrollo local
 
@@ -74,7 +72,7 @@ Si `**8080**` está ocupado, Vite intentará el siguiente puerto libre; añade e
 
 **Solo API local** (sin Vite): pon `**PORT=8080`** en `.env` y ejecuta `cargo run`; las rutas quedan en `http://127.0.0.1:8080`.
 
-**Todo el stack con Compose:** el proyecto se llama `futurefin`; los contenedores aparecen como `**futurefin-database`** (PostgreSQL) y `**futurefin-api`** (API Rust **y** interfaz web en el mismo puerto **8080**).
+**Todo el stack con Compose:** el proyecto se llama `futurefin`; los contenedores aparecen como `**futurefin-database`** (PostgreSQL) y `**futurefin`** (API Rust **y** interfaz web en el mismo puerto **8080**).
 
 ```bash
 docker compose up -d --build
@@ -94,16 +92,14 @@ La app en producción se despliega con 2 piezas:
 ### 1) Preparar configuración
 
 1. Copia `.env.prod.example` a `.env.prod` y ajusta:
-   - `FUTUREFIN_API_IMAGE` (ej. `ghcr.io/<TU_GITHUB_USERNAME>/futurefin-api`)
-   - `FUTUREFIN_API_TAG` (ej. `latest` o `vX.Y.Z`)
+   - `FUTUREFIN_IMAGE` (ej. `ghcr.io/<TU_GITHUB_USERNAME>/futurefin`)
+   - `FUTUREFIN_TAG` (ej. `latest` o `vX.Y.Z`)
    - `FUTUREFIN_DOMAIN`, `CADDY_EMAIL`
    - `POSTGRES_PASSWORD`
 
-2. En el NAS, inicia sesión para poder hacer `pull` a GHCR privado:
-
-```bash
-docker login ghcr.io -u <TU_GITHUB_USERNAME>
-```
+2. Asegúrate de que el repo y el paquete de GHCR estén configurados como **públicos**.
+   Si lo son, no hace falta `docker login`.
+   Si están privados, necesitarás `docker login` antes del `pull`.
 
 ### 2) Levantar el stack
 
@@ -124,7 +120,7 @@ curl -sS "https://$FUTUREFIN_DOMAIN/v1/health"
 
 ### 4) Actualizar (upgrade) y rollback
 
-Para actualizar, cambia `FUTUREFIN_API_TAG` en `.env.prod` (por ejemplo a una nueva `vX.Y.Z`), y ejecuta:
+Para actualizar, cambia `FUTUREFIN_TAG` en `.env.prod` (por ejemplo a una nueva `vX.Y.Z`), y ejecuta:
 
 ```bash
 docker compose --env-file .env.prod \
@@ -136,7 +132,7 @@ docker compose --env-file .env.prod \
   up -d
 ```
 
-Rollback: vuelve `FUTUREFIN_API_TAG` a un tag anterior (`vX.Y.Z` o `sha-...`) y repite el comando de `up -d`.
+Rollback: vuelve `FUTUREFIN_TAG` a un tag anterior (`vX.Y.Z` o `sha-...`) y repite el comando de `up -d`.
 
 ### 5) Backups y retención
 
@@ -148,7 +144,7 @@ Backup básico (Postgres, con `pg_dump` + `gzip`):
 
 Retención: el script conserva los últimos `KEEP_BACKUPS` (por defecto `30`) en `./backups`.
 
-Imágenes en GHCR: existe un workflow programado `[.github/workflows/cleanup-ghcr.yml](.github/workflows/cleanup-ghcr.yml)` que borra versiones antiguas de tags no-release (`dev`, `sha-*`) manteniendo releases `vX.Y.Z` y `latest`. Es un proceso "best-effort" (si faltan permisos, no rompe el pipeline).
+Imágenes en GHCR: existe un workflow programado `[.github/workflows/cleanup-ghcr.yml](.github/workflows/cleanup-ghcr.yml)` que borra versiones antiguas de tags no-release (`sha-*`) manteniendo releases `vX.Y.Z` y `latest`. Es un proceso "best-effort" (si faltan permisos, no rompe el pipeline).
 
 ## Publicar en GitHub
 

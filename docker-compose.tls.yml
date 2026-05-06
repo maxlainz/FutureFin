@@ -4,7 +4,7 @@ services:
     container_name: futurefin-caddy
     restart: unless-stopped
     depends_on:
-      - futurefin-api
+      - futurefin
     environment:
       FUTUREFIN_DOMAIN: ${FUTUREFIN_DOMAIN}
       CADDY_EMAIL: ${CADDY_EMAIL}

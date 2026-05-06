@@ -32,7 +32,7 @@ use uuid::Uuid;
 pub struct ProjectionSeriesQuery {
     #[serde(default)]
     pub view: Option<String>,
-    /// Meses a proyectar (12–840). Si se omite: horizonte tipo cliente macOS (véase `horizon_basis`).
+    /// Meses a proyectar (12–840). Si se omite: horizonte derivado de la instalación (véase `horizon_basis`).
     pub months: Option<u32>,
 }
 
@@ -79,7 +79,7 @@ pub struct ProjectionSeriesResponse {
     /// DOB usada para años cumplidos en el eje (perfil y/o personas del hogar).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewer_birth_date: Option<String>,
-    /// Próximos hitos de patrimonio (paridad Mac): umbrales 1/2.5/5*10^n, deduplicados por año.
+    /// Próximos hitos de patrimonio: umbrales 1/2.5/5*10^n, deduplicados por año.
     pub milestones: Vec<ProjectionMilestone>,
     /// Primer mes en que el componente de interés/mercado supera el ahorro mensual base (sin Próximos ni plan de pagos de deudas).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -367,7 +367,7 @@ fn asset_fixed_monthly_equivalent(fixed: Decimal, contribution_frequency: &str) 
     }
 }
 
-/// Completed calendar age in years (`today` inclusive), Mac-style for horizon.
+/// Completed calendar age in years (`today` inclusive), used for horizon.
 fn age_completed_years(today: NaiveDate, birth: NaiveDate) -> i32 {
     if birth > today {
         return 0;
@@ -383,9 +383,9 @@ fn age_completed_years(today: NaiveDate, birth: NaiveDate) -> i32 {
     y
 }
 
-/// `PRODUCT_DOSSIER_PLAN.md`: máximo años hasta `projection_target_age` por fecha de nacimiento
-/// (perfil de usuario), acotado [5, 70]; sin edad objetivo o sin DOB → 30 años.
-pub(crate) fn mac_projection_horizon_months(
+/// Máximo años hasta `projection_target_age` por fecha de nacimiento (perfil de usuario),
+/// acotado [5, 70]; sin edad objetivo o sin DOB → 30 años.
+pub(crate) fn projection_horizon_months(
     today: NaiveDate,
     projection_target_age: Option<i16>,
     birth_dates: &[Option<NaiveDate>],
@@ -395,7 +395,7 @@ pub(crate) fn mac_projection_horizon_months(
     const FALLBACK_YEARS: u32 = 30;
 
     let Some(target) = projection_target_age.map(|a| a as i32) else {
-        return (FALLBACK_YEARS * 12, "mac_fallback_no_demographics");
+        return (FALLBACK_YEARS * 12, "fallback_no_demographics");
     };
 
     let mut max_remaining: Option<i32> = None;
@@ -411,12 +411,12 @@ pub(crate) fn mac_projection_horizon_months(
     }
 
     if !any_birth {
-        return (FALLBACK_YEARS * 12, "mac_fallback_no_demographics");
+        return (FALLBACK_YEARS * 12, "fallback_no_demographics");
     }
 
     let years_raw = max_remaining.unwrap_or(0).max(0) as u32;
     let clamped_years = years_raw.clamp(MIN_YEARS, MAX_YEARS);
-    (clamped_years * 12, "mac_target_age")
+    (clamped_years * 12, "target_age")
 }
 
 fn map_engine_err(e: EngineError) -> ApiError {
@@ -664,7 +664,7 @@ pub(crate) async fn compute_installation_projection(
     tag = "projection",
     params(
         ("view" = Option<String>, Query, description = "`mine` = vista titular"),
-        ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840); omitir = edad objetivo + DOB (Mac), 5–70 años o fallback 30"),
+        ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840); omitir = edad objetivo + DOB, 5–70 años o fallback 30"),
     ),
     responses(
         (status = 200, description = "Serie mensual motor dossier", body = ProjectionSeriesResponse),
@@ -730,7 +730,7 @@ pub async fn get_projection_series(
     let (months, horizon_basis): (u32, String) = match q.months {
         Some(m) => (m.clamp(12, 840), "months_override".into()),
         None => {
-            let (m, b) = mac_projection_horizon_months(today, inst_row.2, &birth_dates);
+            let (m, b) = projection_horizon_months(today, inst_row.2, &birth_dates);
             (m, b.into())
         }
     };
@@ -834,33 +834,33 @@ pub fn projection_router() -> Router {
 mod horizon_tests {
     use super::*;
     #[test]
-    fn mac_horizon_fallback_without_target_age() {
+    fn horizon_fallback_without_target_age() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
         let bd = vec![Some(NaiveDate::from_ymd_opt(1990, 1, 1).unwrap())];
-        let (m, basis) = mac_projection_horizon_months(today, None, &bd);
+        let (m, basis) = projection_horizon_months(today, None, &bd);
         assert_eq!(m, 30 * 12);
-        assert_eq!(basis, "mac_fallback_no_demographics");
+        assert_eq!(basis, "fallback_no_demographics");
     }
 
     #[test]
-    fn mac_horizon_uses_max_years_to_target_clamped() {
+    fn horizon_uses_max_years_to_target_clamped() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
         let bd = vec![
             Some(NaiveDate::from_ymd_opt(1990, 1, 1).unwrap()),
             Some(NaiveDate::from_ymd_opt(1985, 1, 1).unwrap()),
         ];
-        let (m, basis) = mac_projection_horizon_months(today, Some(65), &bd);
+        let (m, basis) = projection_horizon_months(today, Some(65), &bd);
         // ages 36 and 41 → 29 y 24 años hasta 65 → máximo 29
-        assert_eq!(basis, "mac_target_age");
+        assert_eq!(basis, "target_age");
         assert_eq!(m, 29 * 12);
     }
 
     #[test]
-    fn mac_horizon_minimum_five_years_when_already_near_target() {
+    fn horizon_minimum_five_years_when_already_near_target() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
         let bd = vec![Some(NaiveDate::from_ymd_opt(1965, 1, 1).unwrap())];
-        let (m, basis) = mac_projection_horizon_months(today, Some(65), &bd);
-        assert_eq!(basis, "mac_target_age");
+        let (m, basis) = projection_horizon_months(today, Some(65), &bd);
+        assert_eq!(basis, "target_age");
         assert_eq!(m, 5 * 12);
     }
 }

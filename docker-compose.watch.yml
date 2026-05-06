@@ -1,7 +1,7 @@
 # Opcional — Compose Watch (rebuild al cambiar código). Requiere Docker Compose con soporte `develop`.
 # Uso: docker compose -f docker-compose.yml -f docker-compose.watch.yml watch
 services:
-  futurefin-api:
+  futurefin:
     develop:
       watch:
         - action: rebuild

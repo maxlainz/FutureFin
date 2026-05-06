@@ -1,5 +1,5 @@
 -- Liability ledger; category must be scope `liability` (API-enforced).
--- Rows with payment_end_date before today are purged on list when the caller may write (parity Mac startup purge).
+-- Rows with payment_end_date before today are purged on list when the caller may write.
 
 CREATE TABLE liabilities (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

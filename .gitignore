@@ -7,9 +7,15 @@ dist/
 build/
 node_modules/
 *.log
+backups/
+.direnv/
+.envrc
+.vscode/
 
 # Rust
 /target/
 
 # Vitest / Vite
 apps/web/.vite
+apps/web/dist/
+apps/web/node_modules/

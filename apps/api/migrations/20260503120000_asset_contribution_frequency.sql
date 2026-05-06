@@ -1,4 +1,4 @@
--- Mac parity: recurring asset contributions may be weekly (×52/12 monthly equivalent in projection).
+-- Recurring asset contributions may be weekly (×52/12 monthly equivalent in projection).
 
 ALTER TABLE assets
 ADD COLUMN contribution_frequency TEXT NOT NULL DEFAULT 'monthly';

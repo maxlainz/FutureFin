@@ -19,10 +19,10 @@ services:
     networks:
       - futurefin-net
 
-  futurefin-api:
+  futurefin:
     # API + UI estática embebida en la misma imagen.
-    image: ${FUTUREFIN_API_IMAGE}:${FUTUREFIN_API_TAG}
-    container_name: futurefin-api
+    image: ${FUTUREFIN_IMAGE}:${FUTUREFIN_TAG}
+    container_name: futurefin
     restart: unless-stopped
     environment:
       PORT: "8080"

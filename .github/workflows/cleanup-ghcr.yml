@@ -17,11 +17,11 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
           PACKAGE_TYPE: container
-          PACKAGE_NAME: futurefin-api
-          KEEP_LATEST_DEV: "5"
+          PACKAGE_NAME: futurefin
+          KEEP_LATEST_DEV: "0"
           KEEP_SHA_DAYS: "30"
           KEEP_OTHER_DAYS: "60"
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail

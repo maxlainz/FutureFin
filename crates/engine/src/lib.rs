@@ -1,4 +1,4 @@
-//! Monthly net-worth projection aligned to `docs/plan/PRODUCT_DOSSIER_PLAN.md`.
+//! Monthly net-worth projection.
 
 mod projection;
 

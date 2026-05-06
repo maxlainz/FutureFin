@@ -1345,7 +1345,7 @@ function formatPercentAmount(s: string): string {
   return formatPercentDisplay(n);
 }
 
-/** Retorno acumulado (valor/compra − 1); no es TAE. Paridad MVP con «retorno implícito» del Mac cuando hay precio de compra. */
+/** Retorno acumulado (valor/compra − 1); no es TAE. */
 function assetImplicitTotalReturnLabel(
   currentValueStr: string,
   purchasePriceStr: string | null | undefined,
@@ -1484,7 +1484,7 @@ function ModalFormError({
   );
 }
 
-/** MVP equivalente a InlineHelpIcon del Mac: tooltip nativo al pasar el cursor o foco. */
+/** Tooltip nativo al pasar el cursor o foco. */
 function InlineHint({ title }: { title: string }) {
   return (
     <span

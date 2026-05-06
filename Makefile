@@ -12,7 +12,7 @@ docker-rebuild:
 	@bash scripts/docker-stack-up.sh --build
 
 docker-logs:
-	docker compose logs -f futurefin-api
+	docker compose logs -f futurefin
 
 docker-smoke:
 	@curl -sf http://127.0.0.1:8080/v1/health && echo

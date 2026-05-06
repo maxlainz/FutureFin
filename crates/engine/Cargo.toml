@@ -3,7 +3,7 @@ name = "futurefin-engine"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Projection and FIRE simulation (parity targets vs Swift SummaryService)"
+description = "Projection and FIRE simulation"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }

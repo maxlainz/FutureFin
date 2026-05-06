@@ -170,7 +170,7 @@ use utoipa::OpenApi;
         ),
         (
             name = "projection",
-            description = "MVP serie lineal de patrimonio; no sustituye projectNetWorthSeries Swift"
+            description = "MVP serie lineal de patrimonio; no sustituye el motor completo"
         ),
         (
             name = "backup",

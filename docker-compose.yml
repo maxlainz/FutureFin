@@ -6,11 +6,11 @@
 #
 # Compose Watch (rebuild automático): usa también `docker-compose.watch.yml` — véase ese archivo.
 # Si :8080 muestra página en blanco, fuerza rebuild del stage web:
-#   docker compose build --no-cache futurefin-api && docker compose up -d futurefin-api
+#   docker compose build --no-cache futurefin && docker compose up -d futurefin
 # (el sync host dist→contenedor se eliminó: un dist vacío borraba la UI embebida).
 name: futurefin
 
-# Imagen de aplicación: etiqueta local `dev`; en Docker Hub usar p.ej. futurefin/futurefin-api:1.0.0
+# Imagen de aplicación: etiqueta local `dev`; en Docker Hub usar p.ej. futurefin/futurefin:1.0.0
 services:
   futurefin-database:
     image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
@@ -29,12 +29,12 @@ services:
       timeout: 5s
       retries: 5
 
-  futurefin-api:
-    image: futurefin/futurefin-api:dev
+  futurefin:
+    image: futurefin/futurefin:dev
     build:
       context: .
       dockerfile: apps/api/Dockerfile
-    container_name: futurefin-api
+    container_name: futurefin
     healthcheck:
       test:
         [

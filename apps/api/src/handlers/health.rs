@@ -25,7 +25,7 @@ pub struct HealthBody {
 pub async fn health_check(Extension(state): Extension<Arc<AppState>>) -> Json<HealthBody> {
     Json(HealthBody {
         status: "ok",
-        service: "futurefin-api",
+        service: "futurefin",
         version: state.version,
     })
 }
@@ -57,7 +57,7 @@ pub async fn ready_check(
     }
     Ok(Json(HealthBody {
         status: "ok",
-        service: "futurefin-api",
+        service: "futurefin",
         version: state.version,
     }))
 }

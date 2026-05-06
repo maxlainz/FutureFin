@@ -4,6 +4,6 @@
 }
 
 {$FUTUREFIN_DOMAIN} {
-	reverse_proxy futurefin-api:8080
+	reverse_proxy futurefin:8080
 }
 

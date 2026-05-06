@@ -1,8 +1,8 @@
-name: Publish API image (GHCR)
+name: Publish FutureFin image (GHCR)
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
     tags: ["v*.*.*"]
   workflow_dispatch: {}
 
@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           short_sha="${GITHUB_SHA::7}"
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/futurefin-api"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/futurefin"
 
           echo "ref_type=${GITHUB_REF_TYPE}"
           echo "ref_name=${GITHUB_REF_NAME}"
@@ -42,13 +42,6 @@ jobs:
               echo "${image}:sha-${short_sha}"
               echo "EOF"
             } >> "${GITHUB_OUTPUT}"
-          else
-            {
-              echo "tags<<EOF"
-              echo "${image}:dev"
-              echo "${image}:sha-${short_sha}"
-              echo "EOF"
-            } >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Set up QEMU
@@ -62,7 +55,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
       - name: Build and push
         uses: docker/build-push-action@v6

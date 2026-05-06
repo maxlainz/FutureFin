@@ -1,5 +1,5 @@
 //! Optional query `view=mine` scopes ledger reads to rows attributed to the signed-in user.
-//! Omitting `view` or any other value means **household** (full installation), matching the Mac PersonFilterBar.
+//! Omitting `view` or any other value means **household** (full installation).
 
 use serde::Deserialize;
 

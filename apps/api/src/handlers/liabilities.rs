@@ -225,7 +225,7 @@ fn validate_payment_pair(
     }
 }
 
-/// Mac parity (`PRODUCT_DOSSIER_PLAN`): principal = payment × intervals from **today**
+/// Principal = payment × intervals from **today**
 /// (installation `calendar_tz` civil date) through `payment_end_date` inclusive — monthly steps one
 /// calendar month at a time; weekly uses ceil(inclusive_days / 7).
 fn payment_interval_count(

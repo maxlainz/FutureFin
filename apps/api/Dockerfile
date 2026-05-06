@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Imagen publicable (convención Docker Hub): futurefin/futurefin-api:<tag>
+# Imagen publicable (convención Docker Hub): futurefin/futurefin:<tag>
 # Bases de terceros fijadas por digest — actualizar solo de forma deliberada (véase README).
 
 # --- Frontend (Vite) ---

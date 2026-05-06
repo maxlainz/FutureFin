@@ -1,4 +1,4 @@
--- Attribution for PersonFilterBar-style views: household (all rows) vs mine (owner_user_id = session user).
+-- Attribution for user-scoped views: household (all rows) vs mine (owner_user_id = session user).
 -- Legacy rows keep owner_user_id NULL (visible only in household aggregate lists).
 
 ALTER TABLE assets

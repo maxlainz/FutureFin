@@ -16,7 +16,8 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-/// MVP aggregates aligned to Mac **financialHealthMetrics** (budget ↔ summary): monthly equivalents from budget entries + liability-derived lines, runway on liquid assets, raw sums for upcoming flows. Not yet oracle-golden vs Swift.
+/// MVP aggregates (budget ↔ summary): monthly equivalents from budget entries + liability-derived lines,
+/// runway on liquid assets, raw sums for upcoming flows.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str")]
@@ -274,7 +275,7 @@ pub struct SummaryResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub net_worth: Decimal,
-    /// Liabilities ÷ assets when assets > 0; omitted otherwise (same quotient as Mac debt/assets).
+    /// Liabilities ÷ assets when assets > 0; omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
@@ -283,7 +284,7 @@ pub struct SummaryResponse {
     /// Activos por categoría (solo filas con total positivo).
     pub assets_by_category: Vec<CategoryBreakdownLine>,
     pub liabilities_by_category: Vec<CategoryBreakdownLine>,
-    /// Pasivos agrupados por `type_tag` (Mac `liabilityBreakdownByLabel` aprox.).
+    /// Pasivos agrupados por `type_tag`.
     pub liabilities_by_type_tag: Vec<TypeTagBreakdownLine>,
 }
 
