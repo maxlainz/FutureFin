@@ -1,6 +1,6 @@
 # FutureFin Server — Modelo multi-usuario (MVP)
 
-Este documento fija el **contrato de identidad y autorización** para la línea self-hosted (Docker). El cliente macOS legacy era **monousuario / monoinstalación** con filtro por persona solo en UI; el servidor modela **cuentas** (`User`), **una instalación de producto por despliegue** y **membresías con alta controlada por el owner**. Cada cuenta que debe acceder al dato compartido se da de alta **registrándose en la pantalla de acceso**; no hay invitaciones por correo ni entidad separada de «persona cliente» para alta de miembros.
+Este documento fija el **contrato de identidad y autorización** para la línea self-hosted (Docker). El servidor modela **cuentas** (`User`), **una instalación de producto por despliegue** y **membresías con alta controlada por el owner**. Cada cuenta que debe acceder al dato compartido se da de alta **registrándose en la pantalla de acceso**; no hay invitaciones por correo ni entidad separada de «persona cliente» para alta de miembros.
 
 ## Alcance por instalación
 
@@ -26,7 +26,7 @@ Este documento fija el **contrato de identidad y autorización** para la línea 
 - Solo existe **un** `installation_id` válido para datos de producto; todos los miembros apuntan a esa instalación.
 - **Alta de miembros:** cualquiera puede **registrarse** (cuenta `User`). Un usuario **no** obtiene acceso a la instalación hasta que el **`owner`** lo **apruebe** y le asigne rol (`member` o `viewer`). Los usuarios registrados sin fila en `installation_memberships` son «pendientes». Hasta la aprobación, no deben ver datos de la instalación.
 
-### Persona en datos financieros (paridad Mac, fuera del contrato de alta)
+### Persona en datos financieros (fuera del contrato de alta)
 
 - El cliente de referencia filtra y etiqueta por «persona» en activos, presupuesto, etc. Esa atribución de dominio se alineará cuando el backend exponga el modelo financiero completo; **no** debe confundirse con el alta de miembros: quien inicia sesión es siempre un `User`.
 
@@ -34,9 +34,9 @@ Este documento fija el **contrato de identidad y autorización** para la línea 
 
 - Los datos financieros son **un solo conjunto** persistido en el servidor para esa instalación.
 - La interfaz ofrece **exactamente dos** modos de visualización (filtros de cliente, no muros de autorización entre cónyuges en MVP):
-  - **Hogar (todo):** todo el ámbito agregado de la instalación (equivalente a vista conjunta en el Mac).
+  - **Hogar (todo):** todo el ámbito agregado de la instalación.
   - **Usuario actual:** métricas y listas acotadas a filas atribuidas al **`User` con sesión activa** vía columna `owner_user_id` en activos, pasivos, líneas de presupuesto persistidas, flujos de planeación y sus sumarios (`GET ?view=mine`). Las filas legacy sin titular solo aparecen en vista hogar.
-- Replica la idea del **PersonFilterBar** del cliente de referencia con estas dos opciones únicas.
+- Replica la idea de un selector “Hogar / Yo” con estas dos opciones únicas.
 
 ## Visibilidad y privacidad entre miembros
 
@@ -48,7 +48,7 @@ Este documento fija el **contrato de identidad y autorización** para la línea 
 | Rol      | Descripción                                                                                                                                 |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `owner`  | **Aprobar** altas de otros usuarios (pendientes tras registro), quitar miembros (salvo reglas de último owner), backups/export completos, CRUD financiero. |
-| `member` | CRUD financiero completo (equivalente al uso compartido del Mac).                                                                           |
+| `member` | CRUD financiero completo.                                                                                                                   |
 | `viewer` | Solo lectura de vistas y métricas (opcional si se prioriza solo owner/member en v1).                                                      |
 
 **Decisión MVP:** al menos `owner` y `member`; `viewer` recomendado si el esfuerzo es bajo.

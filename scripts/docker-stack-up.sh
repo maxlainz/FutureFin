@@ -36,13 +36,13 @@ if [[ "$NO_DOWN" -eq 0 ]]; then
 fi
 
 if [[ "$BUILD" -eq 1 ]]; then
-  echo "docker compose build futurefin-api"
-  docker compose build futurefin-api
-elif [[ -z "$(docker images -q futurefin/futurefin-api:dev 2>/dev/null)" ]]; then
+  echo "docker compose build futurefin"
+  docker compose build futurefin
+elif [[ -z "$(docker images -q futurefin/futurefin:dev 2>/dev/null)" ]]; then
   # Sin imagen local, algunos Compose intentan pull de Docker Hub (repo inexistente) y fallan
   # antes de hacer build; forzamos build explícito.
-  echo "Imagen futurefin/futurefin-api:dev ausente; docker compose build futurefin-api"
-  docker compose build futurefin-api
+  echo "Imagen futurefin/futurefin:dev ausente; docker compose build futurefin"
+  docker compose build futurefin
 fi
 
 echo "docker compose up -d"
@@ -60,5 +60,5 @@ for i in $(seq 1 120); do
 done
 
 echo "Timeout waiting for API. Recent logs:" >&2
-docker compose logs --tail=60 futurefin-api >&2 || true
+docker compose logs --tail=60 futurefin >&2 || true
 exit 1

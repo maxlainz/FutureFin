@@ -1,6 +1,6 @@
 # Especificación — Backup monofichero y paquete CSV (MVP)
 
-Objetivo: reproducir las **capacidades** del cliente macOS (`BackupArchiveService`, `CSVService`, pestaña Backups en `SettingsView`) con formatos **propios** del servidor self-hosted. **No** leer `.ffbackup` del Mac ni migrar desde él.
+Objetivo: proveer **backup/restore** y **export/import** con formatos **propios** del servidor self-hosted.
 
 ## 1. Backup monofichero cifrado
 
@@ -8,18 +8,15 @@ Objetivo: reproducir las **capacidades** del cliente macOS (`BackupArchiveServic
 
 - Un único archivo descargable que permite **restaurar** el estado completo necesario para un hogar (o para la instalación — ver alcance).
 - Protección por **contraseña** (usuario introduce passphrase en export e import).
-- Incluye como mínimo lo que el Mac empaqueta en `BackupPayload` (`BackupArchiveService.swift`):
+- Incluye como mínimo:
   - `schemaVersion` (entero, evolución del contenido lógico).
   - `createdAt` (timestamp UTC).
   - **Snapshot** de dominio: tabla `installation` (singleton), `persons`, `categories`, `assets`, `liabilities`, `budgetEntries`, `plannedCashFlows` (misma forma conceptual que `SQLiteStore.Snapshot`).
-  - **FIRE settings:** mapa `installation_id → JSON` en servidor (equivalente conceptual a `fireSettingsByHouseholdID` en Mac legacy).
+  - **FIRE settings:** mapa `installation_id → JSON` en servidor.
 
-### Diseño criptográfico (referencia Swift actual)
+### Diseño criptográfico
 
-El Mac usa **AES-GCM** sobre JSON serializado, con **salt + nonce**, KDF **PBKDF2-HMAC-SHA256** (~120 000 iteraciones) derivando clave desde passphrase (`BackupArchiveService`). El nuevo formato puede:
-
-- Reutilizar el mismo esquema **conceptual** (envelope con `formatVersion`, salt, nonce, ciphertext, tag) con **nuevo `formatVersion`** y extensión de fichero propia (ej. `.futurefinbak`), **o**
-- Sustituir por libs estándar del stack (ej. age, gpg) siempre que el contrato de producto (password + restore íntegro) se mantenga.
+El formato debe usar cifrado autenticado (AEAD) y un KDF estándar para derivar clave desde la passphrase. La elección concreta queda al stack, manteniendo el contrato de producto (password + restore íntegro).
 
 ### Versionado
 
@@ -32,7 +29,7 @@ El Mac usa **AES-GCM** sobre JSON serializado, con **salt + nonce**, KDF **PBKDF
 
 ### Restore
 
-- Operación **destructiva** en el hogar destino (sobrescribe datos como `importOfficialBackup` en Mac).
+- Operación **destructiva** en el hogar destino (sobrescribe datos).
 - Tras restore, recalcular vistas; sin datos demo.
 
 ---
@@ -41,7 +38,7 @@ El Mac usa **AES-GCM** sobre JSON serializado, con **salt + nonce**, KDF **PBKDF
 
 ### Nombres de archivo obligatorios en el ZIP
 
-Alineados con `AppState.importExportCSVFilenames` / `exportBackupCSV`:
+Alineados con el contrato de API/UI del producto:
 
 
 | Archivo                 | Contenido                     |
@@ -57,15 +54,15 @@ Alineados con `AppState.importExportCSVFilenames` / `exportBackupCSV`:
 
 ### Headers y columnas
 
-**Fuente normativa:** métodos `export`* y `import*WithDiagnostics` en `CSVService.swift`. La nueva implementación debe:
+La implementación debe:
 
-- Emitir CSV compatibles con los **exports actuales**.
-- Aceptar imports con las mismas reglas de **tolerancia** (p. ej. assets legacy con columna `kind`, ausencia de columnas de contribución, etc.).
+- Emitir CSV compatibles con los **exports actuales del servidor**.
+- Aceptar imports con tolerancia razonable (campos opcionales, columnas nuevas/antiguas).
 
 ### Import
 
 - Validación previa opcional; diagnósticos por `(section, lineNumber, reason, rawLine)` como `CSVImportDiagnostic`.
-- Import completo del ZIP puede **reemplazar** el hogar actual tras confirmación explícita del usuario (equivalente al diálogo destructivo del Mac).
+- Import completo del ZIP puede **reemplazar** el hogar actual tras confirmación explícita del usuario.
 - Si `categories.csv` está vacío o ausente: **no** inventar categorías por defecto automáticamente salvo que el producto documente una regla explícita distinta del MVP acordado (por defecto: **fallar** o exigir categorías en otros archivos).
 
 ### Export
@@ -74,7 +71,7 @@ Alineados con `AppState.importExportCSVFilenames` / `exportBackupCSV`:
 
 ### Nota sobre campos de hogar
 
-Si el modelo Swift añade campos (ej. `show_age_mode`) no presentes en el CSV histórico del Mac, el servidor debe **extender** `summary_household.csv` de forma versionada o persistir esos campos fuera del CSV; documentar en changelog del esquema CSV.
+Si el modelo añade campos nuevos (ej. `show_age_mode`) no presentes en CSV antiguos, el servidor debe **extender** `summary_household.csv` de forma versionada o persistir esos campos fuera del CSV; documentar en changelog del esquema CSV.
 
 ---
 
