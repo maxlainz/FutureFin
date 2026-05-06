@@ -1,0 +1,57 @@
+name: futurefin
+
+services:
+  futurefin-database:
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    container_name: futurefin-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - futurefin-net
+
+  futurefin-api:
+    # API + UI estática embebida en la misma imagen.
+    image: ${FUTUREFIN_API_IMAGE}:${FUTUREFIN_API_TAG}
+    container_name: futurefin-api
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      WEB_STATIC_ROOT: /app/web
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@futurefin-database:5432/${POSTGRES_DB}
+      RUST_LOG: futurefin_api=info,tower_http=info
+      COOKIE_SECURE: "${COOKIE_SECURE}"
+      SESSION_TTL_DAYS: "${SESSION_TTL_DAYS}"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    depends_on:
+      futurefin-database:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'test -f /app/web/index.html && test -n "$(ls -A /app/web/assets 2>/dev/null)"',
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # En producción se recomienda exponer solo el reverse proxy (TLS).
+    networks:
+      - futurefin-net
+
+volumes:
+  pgdata:
+
+networks:
+  futurefin-net:
+

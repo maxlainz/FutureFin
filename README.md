@@ -4,8 +4,8 @@ Aplicación de **finanzas personales** pensada para **self-hosting** (Docker): h
 
 ## Estado del repositorio
 
-- Rama `main`: base estable y documentación de producto.
-- Rama `dev`: desarrollo activo del servidor y del cliente web.
+- Rama `main`: **releases** (estable). La imagen publicada se consume como `:latest` o `:vX.Y.Z`.
+- Rama `dev`: desarrollo activo. Publica imagen `:dev` (no recomendada para producción).
 
 ## Documentación de producto
 
@@ -35,8 +35,17 @@ Convención al publicar en un registro (Docker Hub u otro):
 | API + UI estática embebida         | `futurefin/futurefin-api:1.0.0`                              |
 | (solo referencia) Postgres oficial | `postgres:16.4-alpine@sha256:…` — ya referenciado en Compose |
 
+Notas de tags (GHCR/Docker Hub):
 
-La aplicación construida en Compose usa `**image: futurefin/futurefin-api:dev**` junto con `build:` para etiquetar la imagen local de forma reconocible antes de `docker push`.
+- Releases (rama `main` + tags `vX.Y.Z`): `:latest` y `:vX.Y.Z`
+- Desarrollo (rama `dev`): `:dev`
+
+Importante al hacer merges:
+
+- Mantener **`publish-image.yml`** con comportamiento **distinto por rama** (`main` publica `latest`/`vX.Y.Z`; `dev` publica `dev`). No “unificar” tags de producción y desarrollo.
+
+
+La aplicación construida en Compose usa `**image: futurefin/futurefin-api:dev**` junto con `build:` para etiquetar la imagen local de forma reconocible antes de `docker push` (en producción se recomienda `:latest` o `:vX.Y.Z` desde el registry).
 
 ### Desarrollo local
 
@@ -74,6 +83,72 @@ docker compose up -d --build
 Abre `**http://127.0.0.1:8080**` para la UI embebida en la imagen; la API sigue en las mismas rutas (`/v1/…`, `/openapi.json`). Sin `WEB_STATIC_ROOT`, `cargo run` sirve solo la API (útil junto a Vite).
 
 Reverse proxy con TLS sigue recomendado para entornos expuestos.
+
+## Despliegue en NAS (Compose + GHCR + TLS)
+
+La app en producción se despliega con 2 piezas:
+
+- `[docker-compose.prod.yml](docker-compose.prod.yml)` (API + UI embebida + Postgres)
+- `[docker-compose.tls.yml](docker-compose.tls.yml)` (reverse proxy HTTPS con Caddy)
+
+### 1) Preparar configuración
+
+1. Copia `.env.prod.example` a `.env.prod` y ajusta:
+   - `FUTUREFIN_API_IMAGE` (ej. `ghcr.io/<TU_GITHUB_USERNAME>/futurefin-api`)
+   - `FUTUREFIN_API_TAG` (ej. `latest` o `vX.Y.Z`)
+   - `FUTUREFIN_DOMAIN`, `CADDY_EMAIL`
+   - `POSTGRES_PASSWORD`
+
+2. En el NAS, inicia sesión para poder hacer `pull` a GHCR privado:
+
+```bash
+docker login ghcr.io -u <TU_GITHUB_USERNAME>
+```
+
+### 2) Levantar el stack
+
+Desde la raíz del repo:
+
+```bash
+docker compose --env-file .env.prod \
+  -f docker-compose.prod.yml \
+  -f docker-compose.tls.yml \
+  up -d
+```
+
+### 3) Verificar
+
+```bash
+curl -sS "https://$FUTUREFIN_DOMAIN/v1/health"
+```
+
+### 4) Actualizar (upgrade) y rollback
+
+Para actualizar, cambia `FUTUREFIN_API_TAG` en `.env.prod` (por ejemplo a una nueva `vX.Y.Z`), y ejecuta:
+
+```bash
+docker compose --env-file .env.prod \
+  -f docker-compose.prod.yml \
+  -f docker-compose.tls.yml \
+  pull && docker compose --env-file .env.prod \
+  -f docker-compose.prod.yml \
+  -f docker-compose.tls.yml \
+  up -d
+```
+
+Rollback: vuelve `FUTUREFIN_API_TAG` a un tag anterior (`vX.Y.Z` o `sha-...`) y repite el comando de `up -d`.
+
+### 5) Backups y retención
+
+Backup básico (Postgres, con `pg_dump` + `gzip`):
+
+```bash
+./scripts/backup-postgres.sh
+```
+
+Retención: el script conserva los últimos `KEEP_BACKUPS` (por defecto `30`) en `./backups`.
+
+Imágenes en GHCR: existe un workflow programado `[.github/workflows/cleanup-ghcr.yml](.github/workflows/cleanup-ghcr.yml)` que borra versiones antiguas de tags no-release (`dev`, `sha-*`) manteniendo releases `vX.Y.Z` y `latest`. Es un proceso "best-effort" (si faltan permisos, no rompe el pipeline).
 
 ## Publicar en GitHub
 

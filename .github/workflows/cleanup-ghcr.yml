@@ -1,0 +1,149 @@
+name: Cleanup GHCR (keep releases)
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup old container package versions
+        env:
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE_TYPE: container
+          PACKAGE_NAME: futurefin-api
+          KEEP_LATEST_DEV: "5"
+          KEEP_SHA_DAYS: "30"
+          KEEP_OTHER_DAYS: "60"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          api="https://api.github.com"
+          per_page=100
+
+          # Intenta primero como organización; si falla, prueba como usuario.
+          list_org_url="${api}/orgs/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions?per_page=${per_page}&page=1"
+          list_user_url="${api}/users/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions?per_page=${per_page}&page=1"
+
+          tmp_json="$(mktemp)"
+          scope=""
+
+          http_code="$(curl -sS -L \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -o "${tmp_json}" \
+            -w "%{http_code}" \
+            "${list_org_url}" || true)"
+
+          if [[ "${http_code}" == "200" ]]; then
+            scope="org"
+            versions_json="$(cat "${tmp_json}")"
+          else
+            rm -f "${tmp_json}"
+            tmp_json="$(mktemp)"
+            http_code="$(curl -sS -L \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -o "${tmp_json}" \
+              -w "%{http_code}" \
+              "${list_user_url}" || true)"
+            if [[ "${http_code}" != "200" ]]; then
+              echo "No se pudo listar versiones en GHCR (HTTP ${http_code}). Saliendo sin error."
+              exit 0
+            fi
+            scope="user"
+            versions_json="$(cat "${tmp_json}")"
+          fi
+
+          now_s="$(date -u +%s)"
+
+          # Calcula qué IDs borrar. Mantiene:
+          # - Cualquier versión con tag vX.Y.Z o tag latest
+          # - Las últimas KEEP_LATEST_DEV versiones con tag dev
+          # Borra:
+          # - sha-* si es más vieja que KEEP_SHA_DAYS y no tiene release/stable
+          # - lo demás si es más vieja que KEEP_OTHER_DAYS
+          ids_to_delete="$(
+            echo "${versions_json}" | jq -r --arg keepDev "${KEEP_LATEST_DEV}" --arg keepShaDays "${KEEP_SHA_DAYS}" --arg keepOtherDays "${KEEP_OTHER_DAYS}" --argjson now "${now_s}" '
+              def is_release_tag:
+                any(.metadata.container.tags[]?; test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"));
+              def is_latest_tag:
+                any(.metadata.container.tags[]?; . == "latest");
+              def has_tag(t):
+                any(.metadata.container.tags[]?; . == t);
+              def has_sha_tag:
+                any(.metadata.container.tags[]?; test("^sha-[0-9a-f]+$"));
+
+              # Precomputar releases a mantener
+              [ .[] | select(is_release_tag or is_latest_tag) | .id ] as $release_ids
+              |
+              # Dev entries: {id, created_at}
+              [ .[] | select(has_tag("dev")) | {id: .id, created_at: .created_at} ]
+              | sort_by(.created_at) | reverse
+              | ( .[0: ( ($keepDev|tonumber) )] | .[].id ) as $dev_keep_ids
+              |
+              # Flatten de todos y filtrado
+              (
+                [ .[] | {
+                    id: .id,
+                    created_at: .created_at,
+                    tags: (.metadata.container.tags // [])
+                  } ]
+              ) as $all
+              |
+              $all
+              | map(select( (.id | IN($release_ids)) | not
+                             and ( .id | IN($dev_keep_ids)) | not ))
+              | .[]
+              | . as $item
+              | (
+                  ($item.created_at | fromdateiso8601) as $created
+                  | ($now - $created) / 86400 | floor as $age_days
+                  | {
+                      id: $item.id,
+                      tags: $item.tags,
+                      age_days: $age_days
+                    }
+                )
+              | select(
+                  (any(.tags[]?; test("^sha-")) and (.age_days|tonumber) > ($keepShaDays|tonumber))
+                  or
+                  ((all(.tags[]?; test("^sha-")|not) ) and (.age_days|tonumber) > ($keepOtherDays|tonumber))
+                )
+              | .id
+            ' 2>/dev/null || true
+          )"
+
+          if [[ -z "${ids_to_delete}" ]]; then
+            echo "No hay versiones candidatas para borrar."
+            exit 0
+          fi
+
+          echo "Borrando IDs: ${ids_to_delete//$'\n'/, }"
+
+          # Borrar cada versión.
+          # Si una eliminación falla (permisos/admin), continuamos.
+          while IFS= read -r vid; do
+            [[ -z "${vid}" ]] && continue
+            if [[ "${scope}" == "org" ]]; then
+              del_url="${api}/orgs/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions/${vid}"
+            else
+              del_url="${api}/users/${OWNER}/packages/${PACKAGE_TYPE}/${PACKAGE_NAME}/versions/${vid}"
+            fi
+
+            curl -sS -L -X DELETE \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${del_url}" >/dev/null || true
+          done <<< "${ids_to_delete}"
+
+          echo "Cleanup GHCR completado (best-effort)."
+
