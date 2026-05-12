@@ -43,6 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.ref.outputs.ref }}
+          persist-credentials: false
 
       - name: Resolve image list
         id: images

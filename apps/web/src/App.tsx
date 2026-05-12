@@ -516,11 +516,6 @@ function formatMoneyAmount(s: string): string {
   }).format(n);
 }
 
-function formatMoneyAmountOrDash(s: string | null | undefined): string {
-  if (s == null || String(s).trim() === "") return METRIC_DASH;
-  return formatMoneyAmount(String(s));
-}
-
 /** ISO 4217 code from installation (EUR, USD, GBP); invalid → no symbol formatting. */
 function normalizeCurrencyIso(code: string | undefined | null): string | null {
   const c = String(code ?? "").trim().toUpperCase();
@@ -7633,10 +7628,8 @@ function ProjectionNetWorthChart({
     pw,
     ph,
     ml,
-    mr,
     mt,
     W,
-    H,
     rotateXLabels,
     viewHeight,
     visibleStart,
@@ -8533,8 +8526,6 @@ function ProjectionView({
   userBirthDate: string | null;
   calendarTz: string;
 }) {
-  const currency =
-    installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
   const inflationPctRaw =
     installation?.installation.annual_inflation_assumption_percent;
