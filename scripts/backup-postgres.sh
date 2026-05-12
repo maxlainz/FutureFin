@@ -41,7 +41,7 @@ echo "Creando backup PostgreSQL -> $outfile"
 
 # -T: no asigna TTY (evita errores en CI / pipes)
 # pg_dump existe en la imagen oficial de postgres.
-docker compose --env-file "$ENV_FILE" -f docker-compose.prod.yml exec -T futurefin-database \
+docker compose --env-file "$ENV_FILE" exec -T futurefin-database \
   pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" | gzip -9 > "$outfile"
 
 echo "Backup OK"

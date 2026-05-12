@@ -31,5 +31,5 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - PostgreSQL + SQLx migrations (auto-run on startup)
 - React + TypeScript + Vite SPA embedded in the Docker image
 - Docker image: multi-arch (`linux/amd64`, `linux/arm64`), published to GHCR on `vX.Y.Z` tags
-- NAS deploy: `docker-compose.prod.yml` + Caddy TLS (`docker-compose.tls.yml`)
+- NAS deploy: `docker-compose.yml`, imagen desde Docker Hub
 - Backup: `GET /v1/backup/export.zip` (CSV ZIP, owner only)

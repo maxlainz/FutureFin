@@ -27,8 +27,6 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
     steps:
       - name: Resolve ref
@@ -49,9 +47,7 @@ jobs:
         id: images
         run: |
           images="ghcr.io/${{ github.repository_owner }}/futurefin"
-          if [[ -n "$DOCKERHUB_USERNAME" ]]; then
-            images="${images}"$'\n'"${DOCKERHUB_USERNAME}/futurefin"
-          fi
+          images="${images}"$'\n'"maxlainz/futurefin"
           {
             echo "list<<EOF"
             echo "$images"
@@ -81,7 +77,6 @@ jobs:
           password: ${{ github.token }}
 
       - name: Login to Docker Hub
-        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}

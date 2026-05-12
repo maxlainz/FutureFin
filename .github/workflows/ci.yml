@@ -42,10 +42,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Build API image (same path as local Dockerfile)
-        run: docker compose build futurefin
+      - name: Build API image
+        run: docker build -t futurefin-ci:latest -f apps/api/Dockerfile .
       - name: Start Postgres + API
-        run: docker compose up -d
+        run: |
+          FUTUREFIN_IMAGE=futurefin-ci FUTUREFIN_TAG=latest \
+          POSTGRES_PASSWORD=ci-test \
+          docker compose up -d
       - name: Wait for /v1/health
         run: |
           set -e
@@ -56,9 +59,9 @@ jobs:
             fi
             sleep 2
           done
-          docker compose ps -a
-          docker compose logs --tail=100 futurefin || true
+          POSTGRES_PASSWORD=ci-test docker compose ps -a
+          POSTGRES_PASSWORD=ci-test docker compose logs --tail=100 futurefin || true
           exit 1
       - name: Stop stack
         if: always()
-        run: docker compose down -v --remove-orphans
+        run: POSTGRES_PASSWORD=ci-test docker compose down -v --remove-orphans
