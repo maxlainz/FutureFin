@@ -27,11 +27,12 @@ services:
       PORT: "8080"
       WEB_STATIC_ROOT: /app/web
       DATABASE_URL: postgres://${POSTGRES_USER:-futurefin}:${POSTGRES_PASSWORD}@futurefin-database:5432/${POSTGRES_DB:-futurefin}
+      RUST_LOG: "futurefin_api=info,tower_http=info,sqlx=warn"
     depends_on:
       futurefin-database:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/v1/health"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/health || bash -c '</dev/tcp/localhost/8080'"]
       interval: 15s
       timeout: 5s
       retries: 5

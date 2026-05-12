@@ -32,10 +32,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "futurefin starting");
+
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (see .env.example)");
     let pool = db::connect(&database_url).await?;
+    tracing::info!("database connected");
     db::run_migrations(&pool).await?;
+    tracing::info!("migrations applied");
 
     let cookie_secure = parse_bool_env("COOKIE_SECURE").unwrap_or(false);
     let session_ttl_days = std::env::var("SESSION_TTL_DAYS")
@@ -50,6 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cookie_secure,
         session_ttl_days,
     });
+
+    tracing::info!(port = port(), session_ttl_days, cookie_secure, "server config");
 
     let api = Router::new()
         .merge(routes::app_router())
