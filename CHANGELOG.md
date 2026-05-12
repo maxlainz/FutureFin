@@ -4,6 +4,15 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] — 2026-05-12
+
+### Fixed
+- Docker healthcheck changed from `CMD` (exec form) to `CMD-SHELL` so `curl` resolves correctly via shell PATH; bash `/dev/tcp` fallback for images without `curl`
+- `RUST_LOG` added to `docker-compose.yml` so container logs are visible by default
+
+### Improved
+- Startup log milestones: version, database connected, migrations applied, server config (port, session TTL, cookie_secure)
+
 ## [1.0.1] — 2026-05-12
 
 ### Infrastructure
