@@ -1,152 +1,257 @@
 # FutureFin
 
-Aplicación de **finanzas personales** pensada para **self-hosting** (Docker): hogar compartido, presupuesto mensual, flujos próximos, proyección de patrimonio neto y planificación **FIRE / jubilación**.
+Self-hosted personal finance app: shared household budget, upcoming cash flows, net-worth projection, and FIRE / retirement planning.
 
-## Estado del repositorio
+- **API:** Rust + Axum — all endpoints under `/v1/`
+- **UI:** React 19 + TypeScript + Vite — embedded in the Docker image
+- **DB:** PostgreSQL — migrations run automatically on startup
+- **Auth:** username + password (Argon2id), `HttpOnly` session cookie, no email required
+- **Multi-user:** one installation per deployment; new users wait for owner approval
 
-- Rama `main`: **releases** (estable). La imagen publicada se consume como `:latest` o `:vX.Y.Z`.
-- Rama `dev`: desarrollo activo. Se usa para test local (builds), no para publicar imágenes en GHCR.
+---
 
-## Documentación de producto
-
-La especificación MVP (modelo multi-usuario, backups, criterios de alcance) vive en `[docs/README.md](docs/README.md)`.
-
-## Stack de implementación
-
-- **API:** Rust (`futurefin-api`, Axum), prefijo HTTP `/v1` para contratos estables.
-- **Contrato:** OpenAPI generado en Rust (`utoipa`), expuesto en `GET /openapi.json`.
-- **Persistencia:** PostgreSQL + **SQLx** (consultas parametrizadas; migraciones en `apps/api/migrations`).
-- **Dinero / dominio:** crate `futurefin-domain` con `Decimal` para cantidades (sin `f64` en el modelo financiero).
-- **Auth MVP:** usuario + contraseña (**sin email**), Argon2id (crate `argon2`), sesión en cookie `HttpOnly` (`ff_session`).
-- **Una instalación por despliegue:** un único contexto de datos por base de datos; nuevos usuarios entran solo tras **invitación aprobada por el owner**. Contrato en `[docs/spec/AUTH_MODEL.md](docs/spec/AUTH_MODEL.md)`.
-- **Web:** React + TypeScript + Vite (`apps/web`).
-- **Monorepo:** workspace Cargo + npm workspaces.
-- **Ramas:** desarrollo activo en `dev`; releases y publicación de imagen en `main` (tags `vX.Y.Z`).
-
-### Docker: versiones e imágenes de terceros
-
-Las etiquetas `**latest`** no se usan para servicios críticos: en `docker-compose.yml` y en `apps/api/Dockerfile` las bases (**PostgreSQL**, **Node**, **Rust**, **Debian**) van **fijadas por etiqueta acotada + digest** para que un pull arbitrario no rompa instalaciones self-hosted. La imagen de compilación Rust usa `rust:bookworm` (cadena **stable** oficial) con digest concreto — al subir de versión de dependencias que eleven el MSRV, hay que **regenerar `Cargo.lock`** con ese toolchain y, si hace falta, actualizar el digest del builder en el Dockerfile.
-
-Convención al publicar en un registro (Docker Hub u otro):
-
-
-| Artefacto                          | Ejemplo de nombre publicado                                  |
-| ---------------------------------- | ------------------------------------------------------------ |
-| API + UI estática embebida         | `futurefin/futurefin:1.0.0`                              |
-| (solo referencia) Postgres oficial | `postgres:16.4-alpine@sha256:…` — ya referenciado en Compose |
-
-Notas de tags:
-
-- Un tag `vX.Y.Z` en `main` publica: `:X.Y.Z`, `:X.Y`, `:X` y `:latest` en GHCR. Si se configuran los secrets `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`, también en Docker Hub.
-- No se publican tags `sha-*` automáticos — el control de versiones es estrictamente semántico.
-
-La aplicación construida en Compose local usa una etiqueta local `:dev` (en `docker-compose.yml`); en producción se recomienda `:latest` o `:vX.Y.Z` desde el registry.
-
-### Desarrollo local
-
-**Requisitos:** Rust (stable), Node.js 20+, npm 10+, Docker opcional para Postgres.
-
-Convención **split-dev** (interfaz con hot reload): **Vite en `8080`**, **API en `8081`** para no pisarse (`.env.example` ya trae `PORT=8081` y el proxy de Vite apunta a ese puerto).
+## Quick start (Docker)
 
 ```bash
-cp .env.example .env
-# Contenedor de BD con nombre fijo `futurefin-database` (véase `docker ps`).
-docker compose up -d futurefin-database
-
-# Terminal 1 — API en :8081 (migra la BD al iniciar). Carga `.env` de la raíz del repo automáticamente.
-cd apps/api && cargo run
-
-# Terminal 2 — interfaz en :8080; proxy a la API en /v1, /health y /openapi.json
-npm install
-npm run dev:web
+# Pull and run with the bundled compose file
+curl -fsSL https://raw.githubusercontent.com/maxlainz/FutureFin/main/docker-compose.prod.yml -o docker-compose.prod.yml
+curl -fsSL https://raw.githubusercontent.com/maxlainz/FutureFin/main/.env.prod.example -o .env.prod
 ```
 
-Abre `**http://127.0.0.1:8080**` para la UI en desarrollo.
+Edit `.env.prod`:
 
-Comprueba la API: `curl -s http://127.0.0.1:8081/v1/health` · OpenAPI: `curl -s http://127.0.0.1:8081/openapi.json | head`
+```env
+FUTUREFIN_IMAGE=ghcr.io/maxlainz/futurefin
+FUTUREFIN_TAG=latest          # or a specific version: v1.0.0
 
-Si `**8080**` está ocupado, Vite intentará el siguiente puerto libre; añade ese origen (p. ej. `http://127.0.0.1:5173`) a `**CORS_ORIGINS**` en `.env`. Si `**8081**` está ocupado, cambia `**PORT**` en `.env` y `**FUTUREFIN_API_PORT**` al mismo valor.
+FUTUREFIN_DOMAIN=finance.example.com
+CADDY_EMAIL=you@example.com
 
-**Solo API local** (sin Vite): pon `**PORT=8080`** en `.env` y ejecuta `cargo run`; las rutas quedan en `http://127.0.0.1:8080`.
+COOKIE_SECURE=1
+SESSION_TTL_DAYS=30
+CORS_ORIGINS=https://finance.example.com
 
-**Todo el stack con Compose:** el proyecto se llama `futurefin`; los contenedores aparecen como `**futurefin-database`** (PostgreSQL) y `**futurefin`** (API Rust **y** interfaz web en el mismo puerto **8080**).
-
-```bash
-docker compose up -d --build
+POSTGRES_USER=futurefin
+POSTGRES_DB=futurefin
+POSTGRES_PASSWORD=change_me_strong_password
 ```
 
-Abre `**http://127.0.0.1:8080**` para la UI embebida en la imagen; la API sigue en las mismas rutas (`/v1/…`, `/openapi.json`). Sin `WEB_STATIC_ROOT`, `cargo run` sirve solo la API (útil junto a Vite).
-
-Reverse proxy con TLS sigue recomendado para entornos expuestos.
-
-## Despliegue en NAS (Compose + GHCR + TLS)
-
-La app en producción se despliega con 2 piezas:
-
-- `[docker-compose.prod.yml](docker-compose.prod.yml)` (API + UI embebida + Postgres)
-- `[docker-compose.tls.yml](docker-compose.tls.yml)` (reverse proxy HTTPS con Caddy)
-
-### 1) Preparar configuración
-
-1. Copia `.env.prod.example` a `.env.prod` y ajusta:
-   - `FUTUREFIN_IMAGE` (ej. `ghcr.io/<TU_GITHUB_USERNAME>/futurefin`)
-   - `FUTUREFIN_TAG` (ej. `latest` o `vX.Y.Z`)
-   - `FUTUREFIN_DOMAIN`, `CADDY_EMAIL`
-   - `POSTGRES_PASSWORD`
-
-2. Asegúrate de que el repo y el paquete de GHCR estén configurados como **públicos**.
-   Si lo son, no hace falta `docker login`.
-   Si están privados, necesitarás `docker login` antes del `pull`.
-
-### 2) Levantar el stack
-
-Desde la raíz del repo:
+Then start the stack:
 
 ```bash
 docker compose --env-file .env.prod \
   -f docker-compose.prod.yml \
   -f docker-compose.tls.yml \
   up -d
+
+# Verify
+curl -sS https://finance.example.com/v1/health
 ```
 
-### 3) Verificar
+The first user to register becomes the installation owner automatically.
 
-```bash
-curl -sS "https://$FUTUREFIN_DOMAIN/v1/health"
+---
+
+## Compose files reference
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.yml` | Local development (builds image locally, hardcoded dev credentials) |
+| `docker-compose.prod.yml` | Production — pulls image from registry |
+| `docker-compose.tls.yml` | Caddy reverse proxy overlay (HTTPS + automatic TLS via Let's Encrypt) |
+
+### `docker-compose.prod.yml`
+
+```yaml
+name: futurefin
+
+services:
+  futurefin-database:
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    container_name: futurefin-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - futurefin-net
+
+  futurefin:
+    image: ${FUTUREFIN_IMAGE}:${FUTUREFIN_TAG}
+    container_name: futurefin
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      WEB_STATIC_ROOT: /app/web
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@futurefin-database:5432/${POSTGRES_DB}
+      RUST_LOG: futurefin_api=info,tower_http=info
+      COOKIE_SECURE: "${COOKIE_SECURE}"
+      SESSION_TTL_DAYS: "${SESSION_TTL_DAYS}"
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    depends_on:
+      futurefin-database:
+        condition: service_healthy
+    networks:
+      - futurefin-net
+
+volumes:
+  pgdata:
+
+networks:
+  futurefin-net:
 ```
 
-### 4) Actualizar (upgrade) y rollback
+### `docker-compose.tls.yml` (Caddy overlay)
 
-Para actualizar, cambia `FUTUREFIN_TAG` en `.env.prod` (por ejemplo a una nueva `vX.Y.Z`), y ejecuta:
+```yaml
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: futurefin-caddy
+    restart: unless-stopped
+    depends_on:
+      - futurefin
+    environment:
+      FUTUREFIN_DOMAIN: ${FUTUREFIN_DOMAIN}
+      CADDY_EMAIL: ${CADDY_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - futurefin-net
+
+volumes:
+  caddy_data:
+  caddy_config:
+```
+
+`deploy/Caddyfile`:
+
+```caddyfile
+{
+  email {$CADDY_EMAIL}
+}
+
+{$FUTUREFIN_DOMAIN} {
+  reverse_proxy futurefin:8080
+}
+```
+
+---
+
+## Update & rollback
+
+Change `FUTUREFIN_TAG` in `.env.prod` and re-run:
 
 ```bash
 docker compose --env-file .env.prod \
   -f docker-compose.prod.yml \
   -f docker-compose.tls.yml \
-  pull && docker compose --env-file .env.prod \
+  pull
+
+docker compose --env-file .env.prod \
   -f docker-compose.prod.yml \
   -f docker-compose.tls.yml \
   up -d
 ```
 
-Rollback: vuelve `FUTUREFIN_TAG` a un tag anterior (`vX.Y.Z` o `sha-...`) y repite el comando de `up -d`.
+Rollback: set `FUTUREFIN_TAG` to a previous `vX.Y.Z` and run the same `pull + up -d`.
 
-### 5) Backups y retención
+---
 
-Backup básico (Postgres, con `pg_dump` + `gzip`):
+## Backups
 
 ```bash
 ./scripts/backup-postgres.sh
 ```
 
-Retención: el script conserva los últimos `KEEP_BACKUPS` (por defecto `30`) en `./backups`.
+Creates a gzip'd `pg_dump` in `./backups/`. Keeps the last `KEEP_BACKUPS` (default 30) dumps.
 
-Imágenes en GHCR: existe un workflow programado `[.github/workflows/cleanup-ghcr.yml](.github/workflows/cleanup-ghcr.yml)` que borra versiones antiguas de tags no-release (`sha-*`) manteniendo releases `vX.Y.Z` y `latest`. Es un proceso "best-effort" (si faltan permisos, no rompe el pipeline).
+The API also exposes `GET /v1/backup/export.zip` (owner only) — CSV ZIP of all installation data.
 
-## Publicar en GitHub
+---
 
-Si aún no has enlazado el remoto, sigue [docs/GITHUB_SETUP.md](docs/GITHUB_SETUP.md).
+## Environment variables
 
-## Licencia
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `PORT` | No | Default `8080` |
+| `WEB_STATIC_ROOT` | No | Path to Vite `dist/`. Docker sets `/app/web`. Omit for API-only mode. |
+| `CORS_ORIGINS` | Yes | Comma-separated. Panics on startup if empty. |
+| `COOKIE_SECURE` | No | Set to `1` behind HTTPS |
+| `SESSION_TTL_DAYS` | No | Default `30`, max `400` |
+| `RUST_LOG` | No | e.g. `futurefin_api=info,tower_http=info` |
 
-Por definir.
+---
+
+## Development
+
+**Requirements:** Rust (stable), Node.js 20+, npm 10+, Docker (for Postgres).
+
+```bash
+cp .env.example .env
+docker compose up -d futurefin-database   # Postgres only
+
+# Terminal 1 — API at :8081 (auto-migrates on startup)
+cd apps/api && cargo run
+
+# Terminal 2 — UI at :8080 with proxy to the API
+npm install
+npm run dev:web
+```
+
+Open `http://127.0.0.1:8080`. The Vite proxy routes `/v1`, `/health`, and `/openapi.json` to the API port.
+
+**Full stack via Docker Compose (local build):**
+
+```bash
+docker compose up -d --build
+```
+
+Serves the UI + API together at `http://127.0.0.1:8080`.
+
+---
+
+## Docker image versioning
+
+Images are published to GHCR on every `vX.Y.Z` tag pushed to `main`:
+
+| Tag pushed | Images published |
+|------------|-----------------|
+| `v1.2.3` | `:1.2.3`, `:1.2`, `:1`, `:latest` |
+
+No `sha-*` or branch-based tags are published — versioning is strictly semver.
+
+To publish to Docker Hub in addition to GHCR, add `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` as GitHub Actions secrets.
+
+---
+
+## Stack
+
+- **API:** Rust (`apps/api` — Axum, SQLx, utoipa)
+- **Domain:** `crates/domain` — shared `UserId`, `Decimal` re-exports; no `f64` in financial code
+- **Engine:** `crates/engine` — pure projection math, no I/O
+- **UI:** React 19 + TypeScript + Vite (`apps/web`)
+- **DB:** PostgreSQL 16 with pinned digest in Compose files
+- **Build:** Cargo workspace + npm workspaces
+
+OpenAPI spec available at `GET /openapi.json`.
+
+---
+
+## License
+
+To be defined.

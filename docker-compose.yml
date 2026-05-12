@@ -1,16 +1,9 @@
-# Proyecto Compose (nombre visible en `docker compose ls`).
-#
-# Si `docker compose up` falla con «No such container», usa un arranque limpio:
-#   make docker-up          o   ./scripts/docker-stack-up.sh
-#   make docker-rebuild     o   ./scripts/docker-stack-up.sh --build
-#
-# Compose Watch (rebuild automático): usa también `docker-compose.watch.yml` — véase ese archivo.
-# Si :8080 muestra página en blanco, fuerza rebuild del stage web:
-#   docker compose build --no-cache futurefin && docker compose up -d futurefin
-# (el sync host dist→contenedor se eliminó: un dist vacío borraba la UI embebida).
+# Local development stack. Builds the image locally with tag `dev`.
+# For a clean start: make docker-rebuild  (or docker compose up -d --build)
+# If :8080 shows a blank page: docker compose build --no-cache futurefin && docker compose up -d futurefin
 name: futurefin
 
-# Imagen de aplicación: etiqueta local `dev`; en Docker Hub usar p.ej. futurefin/futurefin:1.0.0
+# Local build only — in production use docker-compose.prod.yml with a registry image.
 services:
   futurefin-database:
     image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
