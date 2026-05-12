@@ -117,8 +117,16 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 
 ## Git workflow
 
-- Active development on `dev` branch; `main` is releases only.
-- To release: merge `dev` → `main`, push a tag `vX.Y.Z` → GitHub Action publishes the image automatically.
-- Tags published: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. No `sha-*` auto-tags — versioning is strictly semver.
-- Images published to Docker Hub (`maxlainz/futurefin`) and GHCR. Requires `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` secrets in GitHub repo.
-- Before resuming work: `git pull --ff-only`. After push: pull again.
+**Branches:**
+- `dev` — desarrollo activo. Contiene todo: CLAUDE.md, .claude/, .github/, workflows de CI.
+- `main` — rama de usuario final. Solo archivos que el usuario necesita (docker-compose.yml, README, .env.example, Cargo/package files). CLAUDE.md, .claude/ y .github/ están en .gitignore de main y no se deben subir allí.
+
+**Releases:**
+1. Desarrollar en `dev`, hacer commit y push.
+2. Bumpar versión en `apps/api/Cargo.toml` y añadir entrada en `CHANGELOG.md`.
+3. Actualizar archivos de usuario en `main` (docker-compose.yml, README, .env.example, CHANGELOG.md) copiando los cambios relevantes — **no hacer merge completo de dev a main**.
+4. Push tag `vX.Y.Z` desde `dev` → el workflow `publish-image.yml` (que vive en `dev`) publica la imagen.
+
+Tags published: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere secrets `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` en GitHub repo.
+
+Before resuming work: `git pull --ff-only`. After push: pull again.
