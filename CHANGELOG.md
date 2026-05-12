@@ -4,6 +4,14 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] — 2026-05-12
+
+### Infrastructure
+- Single `docker-compose.yml` for production (Docker Hub image, no TLS overlay)
+- Only `POSTGRES_PASSWORD` is required; all other vars have sane defaults
+- `apps/api/Dockerfile` runtime stage now includes `curl` (required for healthcheck)
+- Dev tooling (`CLAUDE.md`, `.claude/`, `.github/`) removed from `main` branch
+
 ## [1.0.0] — 2026-05-12
 
 ### First public release
