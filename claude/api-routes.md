@@ -1,0 +1,73 @@
+# API Route Map
+
+All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid session cookie `ff_session` unless noted.
+
+## Top-level (no auth required)
+| Method | Path | Handler |
+|--------|------|---------|
+| GET | `/health` | `health::health_check` |
+| GET | `/openapi.json` | `openapi::openapi_json` |
+
+## /v1 routes
+
+### Health
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/v1/health` | No auth |
+| GET | `/v1/ready` | DB ping |
+
+### Auth (`/v1/auth/`)
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/v1/auth/register` | No prior session needed. First user auto-becomes installation owner. |
+| POST | `/v1/auth/login` | Sets `ff_session` cookie |
+| POST | `/v1/auth/logout` | Clears cookie + DB session |
+| GET | `/v1/auth/me` | Current user info |
+| PATCH | `/v1/auth/me` | Update `birth_date` |
+
+### Installation
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/v1/installation/session-context` | Returns `{installation_initialized, access}` — used for routing the UI gate |
+| GET | `/v1/installation` | Own membership + installation snapshot |
+| PATCH | `/v1/installation` | Owner only. Updates tz, inflation, target_age, show_age_mode, fire_settings |
+| POST | `/v1/installation/setup` | Creates singleton installation (409 if exists) |
+
+### Pending users (`/v1/installation/pending-users/`)
+Owner-only management of users awaiting approval.
+
+### Categories (`/v1/categories/`)
+Scopes: `asset`, `liability`, `income`, `expense`. Per-installation.
+
+### Assets (`/v1/assets/`)
+Accepts `?view=mine` to filter by `owner_user_id`.
+
+### Liabilities (`/v1/liabilities/`)
+Accepts `?view=mine`. `principal_derived_from_plan` flag indicates auto-derived principal from planning flows.
+
+### Summary (`/v1/summary/`)
+Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=mine`.
+
+### Budget (`/v1/budget/`)
+Income/expense entries + derived lines from liabilities. Accepts `?view=mine`.
+
+### Planning (`/v1/planning/`)
+Upcoming cash flows (one-off inflows/outflows) with due dates.
+
+### Projection (`/v1/projection/`)
+Net-worth series via `futurefin-engine`. Accepts `?view=mine` and `?months=N` (12–840).
+
+### Backup
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/v1/backup/export.zip` | ZIP with CSV exports. Owner+ only. |
+
+## Auth pattern in handlers
+
+Every protected handler calls:
+```rust
+let user = require_session_user(&jar, &state.pool).await?;
+let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
+// For write ops:
+if !role_can_write(role.as_str()) { return Err(ApiError::Forbidden); }
+```

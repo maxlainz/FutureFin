@@ -11,17 +11,17 @@ Aplicación de **finanzas personales** pensada para **self-hosting** (Docker): h
 
 La especificación MVP (modelo multi-usuario, backups, criterios de alcance) vive en `[docs/README.md](docs/README.md)`.
 
-## Stack de implementación (rama `dev`)
+## Stack de implementación
 
 - **API:** Rust (`futurefin-api`, Axum), prefijo HTTP `/v1` para contratos estables.
 - **Contrato:** OpenAPI generado en Rust (`utoipa`), expuesto en `GET /openapi.json`.
 - **Persistencia:** PostgreSQL + **SQLx** (consultas parametrizadas; migraciones en `apps/api/migrations`).
 - **Dinero / dominio:** crate `futurefin-domain` con `Decimal` para cantidades (sin `f64` en el modelo financiero).
-- **Auth MVP:** usuario + contraseña (**sin email**), Argon2id (crate `argon2`), sesión en cookie `HttpOnly` (`ff_session`). Traits OAuth/OIDC reservados en `apps/api/src/auth/oauth.rs`.
+- **Auth MVP:** usuario + contraseña (**sin email**), Argon2id (crate `argon2`), sesión en cookie `HttpOnly` (`ff_session`).
 - **Una instalación por despliegue:** un único contexto de datos por base de datos; nuevos usuarios entran solo tras **invitación aprobada por el owner**. Contrato en `[docs/spec/AUTH_MODEL.md](docs/spec/AUTH_MODEL.md)`.
 - **Web:** React + TypeScript + Vite (`apps/web`).
 - **Monorepo:** workspace Cargo + npm workspaces.
-- **Ramas:** desarrollo en `**dev`**; `git push origin dev` (evitar subir código nuevo solo a `main` hasta merge explícito).
+- **Ramas:** desarrollo activo en `dev`; releases y publicación de imagen en `main` (tags `vX.Y.Z`).
 
 ### Docker: versiones e imágenes de terceros
 
@@ -37,13 +37,10 @@ Convención al publicar en un registro (Docker Hub u otro):
 
 Notas de tags:
 
-- Releases (rama `main` + tags `vX.Y.Z`): `:latest` y `:vX.Y.Z`
+- Un tag `vX.Y.Z` en `main` publica: `:X.Y.Z`, `:X.Y`, `:X` y `:latest` en GHCR. Si se configuran los secrets `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`, también en Docker Hub.
+- No se publican tags `sha-*` automáticos — el control de versiones es estrictamente semántico.
 
-Importante:
-
-- La aplicación se publica en GHCR solo desde `main` (y tags `vX.Y.Z`).
-
-La aplicación construida en Compose usa una etiqueta local `:dev` (en `docker-compose.yml`); en producción se recomienda `:latest` o `:vX.Y.Z` desde el registry.
+La aplicación construida en Compose local usa una etiqueta local `:dev` (en `docker-compose.yml`); en producción se recomienda `:latest` o `:vX.Y.Z` desde el registry.
 
 ### Desarrollo local
 

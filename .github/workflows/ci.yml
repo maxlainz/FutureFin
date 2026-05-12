@@ -13,8 +13,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo build (futurefin-api)
+      - name: cargo build
         run: cargo build -p futurefin-api --locked
+      - name: cargo test (engine — no DB required)
+        run: cargo test -p futurefin-engine --locked
 
   web:
     runs-on: ubuntu-latest

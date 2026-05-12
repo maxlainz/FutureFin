@@ -41,7 +41,6 @@ use crate::handlers::categories::{
     __path_patch_category,
 };
 #[allow(unused_imports)]
-#[allow(unused_imports)]
 use crate::handlers::projection::__path_get_projection_series;
 use axum::Json;
 use utoipa::OpenApi;
@@ -56,6 +55,7 @@ use utoipa::OpenApi;
         logout,
         me,
         patch_me,
+        get_installation_session_context,
         get_my_installation,
         patch_my_installation,
         setup_installation,
