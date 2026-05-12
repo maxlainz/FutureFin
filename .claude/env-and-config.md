@@ -39,6 +39,5 @@ Env vars already set in the environment take precedence over `.env` files.
 | File | Purpose |
 |------|---------|
 | `docker-compose.yml` | Local dev stack (DB + app, `--build` local image) |
-| `docker-compose.watch.yml` | Hot-reload compose watch variant |
 | `docker-compose.prod.yml` | Production: pulls from GHCR |
 | `docker-compose.tls.yml` | Caddy reverse proxy + TLS (overlay for prod) |

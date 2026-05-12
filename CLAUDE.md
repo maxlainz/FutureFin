@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Reference docs (`.claude/`)
+
+Extended reference — read these before working on the relevant area:
+
+| File | Contents |
+|------|----------|
+| [`.claude/api-routes.md`](.claude/api-routes.md) | Full route map with auth patterns |
+| [`.claude/data-model.md`](.claude/data-model.md) | DB schema, table invariants, FIRE JSONB shape |
+| [`.claude/engine.md`](.claude/engine.md) | Projection engine public API and simulation loop |
+| [`.claude/auth-and-membership.md`](.claude/auth-and-membership.md) | Auth flow, roles, cookie, pending users |
+| [`.claude/env-and-config.md`](.claude/env-and-config.md) | All env vars, `.env` loading order, Vite config |
+| [`.claude/adding-handler.md`](.claude/adding-handler.md) | Step-by-step pattern for adding a new API handler |
+
+**Keep these files up to date** whenever the corresponding area changes (routes, schema, env vars, etc.).
+
 ## Commands
 
 ### Development (split-dev: API + Vite hot reload)

@@ -19,3 +19,6 @@ backups/
 apps/web/.vite
 apps/web/dist/
 apps/web/node_modules/
+
+# Claude local settings (personal, not project docs)
+.claude/settings.local.json
