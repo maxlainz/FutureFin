@@ -22,6 +22,7 @@ Extended reference — read these before working on the relevant area:
 ### Development (split-dev: API + Vite hot reload)
 ```bash
 cp .env.example .env
+# Uncomment the dev vars in .env (PORT, DATABASE_URL, RUST_LOG)
 docker compose up -d futurefin-database   # Postgres only
 
 # Terminal 1 — API at :8081 (auto-migrates DB on start)
@@ -36,13 +37,12 @@ Open `http://127.0.0.1:8080`. The Vite proxy routes `/v1`, `/health`, `/openapi.
 ### API only (no Vite)
 Set `PORT=8080` in `.env`, then `cd apps/api && cargo run`.
 
-### Full stack via Docker Compose
+### Production stack (maintenance)
 ```bash
-make docker-rebuild    # build + up (preferred to avoid stale containers)
-make docker-up         # up without rebuild
-make docker-smoke      # curl /v1/health
+docker compose logs -f futurefin          # logs
+docker compose down --remove-orphans      # stop
+curl -sf http://127.0.0.1:8080/v1/health  # smoke test
 ```
-Or directly: `docker compose up -d --build`
 
 ### Rust
 ```bash
@@ -59,12 +59,9 @@ npm run lint:web        # eslint
 npm run build:web       # Vite production build → apps/web/dist/
 ```
 
-### Production deploy (NAS)
+### Production deploy
 ```bash
-docker compose --env-file .env.prod \
-  -f docker-compose.prod.yml \
-  -f docker-compose.tls.yml \
-  up -d
+docker compose --env-file .env up -d
 ```
 
 ## Architecture
@@ -106,24 +103,22 @@ npm workspace:   apps/web (futurefin-web)
 
 **OpenAPI**: generated via `utoipa`, served at `GET /openapi.json`. All handler structs annotated with `#[utoipa::path]`.
 
-**CORS**: `CORS_ORIGINS` env var (comma-separated). Required — panics if empty. Default includes `:5173` (Vite fallback port) and `:8080`.
+**CORS**: `CORS_ORIGINS` env var (comma-separated). Not required — defaults to localhost origins. Set explicitly only for cross-origin API access.
 
 ### Migrations
 SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup via `db::run_migrations`. Filenames: `YYYYMMDDHHMMSS_description.sql`. The migration runner has a checksum-repair loop for versions listed in `IDEMPOTENT_MIGRATION_REPAIR_VERSIONS` in `db.rs`.
 
-## UI conventions (from Cursor rules)
+## UI conventions
 
 - **Monetary amounts**: no decimals, currency symbol after the number (`1.234 €`). Use `formatCurrencyAmount` / `formatCurrencyNumber` — never `toString()` or manual concatenation.
 - **Percentages**: exactly one decimal, suffix ` %` (`3,5 %`). Use `formatPercentAmount` / `formatPercentDisplay`. The function already includes the suffix.
 - **MetricCard additional info**: always goes in the `parenthetical` prop, not `suffix`.
 - **Copy**: minimal — prefer short labels, empty states in a few words (`Sin datos.`).
 
-## Git / Docker workflow
+## Git workflow
 
 - Active development on `dev` branch; `main` is releases only.
 - To release: merge `dev` → `main`, push a tag `vX.Y.Z` → GitHub Action publishes the image automatically.
 - Tags published: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. No `sha-*` auto-tags — versioning is strictly semver.
-- Docker Hub: add `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` secrets to the repo to publish there in addition to GHCR.
+- Images published to Docker Hub (`maxlainz/futurefin`) and GHCR. Requires `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` secrets in GitHub repo.
 - Before resuming work: `git pull --ff-only`. After push: pull again.
-- After changing code, Dockerfile, or web assets: `make docker-rebuild` (or `docker compose up -d --build`) from repo root. Changes on the host do not enter a running container.
-- `make docker-down` before `make docker-up` if containers were deleted manually to avoid orphan state.

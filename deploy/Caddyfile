@@ -1,9 +1,0 @@
-{
-	# ACME / Let's Encrypt
-	email {$CADDY_EMAIL}
-}
-
-{$FUTUREFIN_DOMAIN} {
-	reverse_proxy futurefin:8080
-}
-

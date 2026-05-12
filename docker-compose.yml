@@ -1,56 +1,41 @@
-# Local development stack. Builds the image locally with tag `dev`.
-# For a clean start: make docker-rebuild  (or docker compose up -d --build)
-# If :8080 shows a blank page: docker compose build --no-cache futurefin && docker compose up -d futurefin
 name: futurefin
 
-# Local build only — in production use docker-compose.prod.yml with a registry image.
 services:
   futurefin-database:
     image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
     container_name: futurefin-database
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: futurefin
-      POSTGRES_PASSWORD: futurefin
-      POSTGRES_DB: futurefin
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-futurefin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-futurefin}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U futurefin -d futurefin"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-futurefin} -d ${POSTGRES_DB:-futurefin}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   futurefin:
-    image: futurefin/futurefin:dev
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
+    image: ${FUTUREFIN_IMAGE:-maxlainz/futurefin}:${FUTUREFIN_TAG:-latest}
     container_name: futurefin
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'test -f /app/web/index.html && test -n "$(ls -A /app/web/assets 2>/dev/null)"',
-        ]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+    restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${APP_PORT:-8080}:8080"
     environment:
       PORT: "8080"
       WEB_STATIC_ROOT: /app/web
-      DATABASE_URL: postgres://futurefin:futurefin@futurefin-database:5432/futurefin
-      RUST_LOG: futurefin_api=info,tower_http=info
-      COOKIE_SECURE: "0"
-      SESSION_TTL_DAYS: "30"
-      CORS_ORIGINS: http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-futurefin}:${POSTGRES_PASSWORD}@futurefin-database:5432/${POSTGRES_DB:-futurefin}
     depends_on:
       futurefin-database:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   pgdata:

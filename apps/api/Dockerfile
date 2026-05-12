@@ -25,7 +25,7 @@ RUN cargo build --release -p futurefin-api --locked
 # --- Runtime ---
 FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252 AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=rust-builder --chown=root:root /src/target/release/futurefin-api /app/futurefin-api
