@@ -562,7 +562,7 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "futurefin-api"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "argon2",
  "axum",
@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "futurefin-domain"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rust_decimal",
  "serde",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "futurefin-engine"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "rust_decimal",

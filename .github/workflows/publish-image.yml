@@ -1,10 +1,24 @@
-name: Publish FutureFin image (GHCR)
+name: Publish Docker image
+
+# Publishes on explicit semver tags (v1.0.0, v1.2.3, …).
+# GHCR always; Docker Hub if DOCKERHUB_USERNAME + DOCKERHUB_TOKEN secrets are set.
+#
+# Tags published per registry:
+#   vX.Y.Z  →  :1.0.0  :1.0  :1  :latest
+#
+# Required secrets:
+#   (none)              — GHCR uses GITHUB_TOKEN automatically
+#   DOCKERHUB_USERNAME  — Docker Hub user or org (optional)
+#   DOCKERHUB_TOKEN     — Docker Hub access token  (optional)
 
 on:
   push:
-    branches: [main]
-    tags: ["v*.*.*"]
-  workflow_dispatch: {}
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to build (e.g. v1.0.0)"
+        required: true
 
 permissions:
   contents: read
@@ -13,42 +27,50 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Prepare image tags
-        id: meta
-        shell: bash
+      - name: Resolve ref
+        id: ref
         run: |
-          set -euo pipefail
-          short_sha="${GITHUB_SHA::7}"
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/futurefin"
-
-          echo "ref_type=${GITHUB_REF_TYPE}"
-          echo "ref_name=${GITHUB_REF_NAME}"
-
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            {
-              echo "tags<<EOF"
-              echo "${image}:${GITHUB_REF_NAME}"
-              echo "${image}:sha-${short_sha}"
-              echo "${image}:latest"
-              echo "EOF"
-            } >> "${GITHUB_OUTPUT}"
-          elif [[ "${GITHUB_REF_TYPE}" == "branch" && "${GITHUB_REF_NAME}" == "main" ]]; then
-            {
-              echo "tags<<EOF"
-              echo "${image}:latest"
-              echo "${image}:sha-${short_sha}"
-              echo "EOF"
-            } >> "${GITHUB_OUTPUT}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "ref=refs/tags/${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Resolve image list
+        id: images
+        run: |
+          images="ghcr.io/${{ github.repository_owner }}/futurefin"
+          if [[ -n "$DOCKERHUB_USERNAME" ]]; then
+            images="${images}"$'\n'"${DOCKERHUB_USERNAME}/futurefin"
+          fi
+          {
+            echo "list<<EOF"
+            echo "$images"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.list }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -57,13 +79,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Login to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: apps/api/Dockerfile
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
