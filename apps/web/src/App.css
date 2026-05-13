@@ -1475,6 +1475,19 @@ a.tab-btn {
   font-weight: 500;
 }
 
+.projection-chart-jubilacion-line {
+  stroke: #f59e0b;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.9;
+}
+
+.projection-chart-jubilacion-label {
+  fill: #f59e0b;
+  font-size: 10px;
+  font-weight: 600;
+}
+
 .projection-chart-compound-marker {
   stroke: #cbd5e1;
   stroke-width: 1;

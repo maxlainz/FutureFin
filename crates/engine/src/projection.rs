@@ -64,6 +64,9 @@ pub struct ProjectionInput {
     /// The handler typically passes `0` — income reduction via `income_retirement_monthly`
     /// is the primary drain mechanism in the new model.
     pub retirement_monthly_withdrawal: Decimal,
+    /// When set, new contributions stop as soon as net worth reaches or exceeds this threshold
+    /// (even if `retirement_start_month` has not been reached yet).
+    pub fire_target_net_worth: Option<Decimal>,
 }
 
 #[derive(Debug, Clone)]
@@ -335,7 +338,12 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
 
-        let in_retirement = input.retirement_start_month.map_or(false, |s| k >= s);
+        let nw_prev = nw_fn(&values, &principals, undrained_cumulative, surplus_cash);
+        let fire_reached = input
+            .fire_target_net_worth
+            .map_or(false, |t| t > Decimal::ZERO && nw_prev >= t);
+        let in_retirement =
+            fire_reached || input.retirement_start_month.map_or(false, |s| k >= s);
         let income = if in_retirement {
             input.income_retirement_monthly
         } else {
@@ -374,6 +382,9 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
                 let und = drain_from_assets(&mut values, &liquid, &rates, need);
                 undrained_cumulative += und;
             }
+        } else if in_retirement {
+            // In retirement any surplus stays as cash buffer; no new contributions are made.
+            surplus_cash += net_cash_month;
         } else {
             let pool = net_cash_month;
             let sum_fixed: Decimal = fixed.iter().copied().sum();
@@ -484,6 +495,7 @@ mod tests {
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
+                fire_target_net_worth: None,
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth.len(), 4);
@@ -527,6 +539,7 @@ mod tests {
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
+                fire_target_net_worth: None,
         };
         let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom.len(), 2);
@@ -558,6 +571,7 @@ mod tests {
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
+                fire_target_net_worth: None,
         };
         let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom.len(), 1);
@@ -586,6 +600,7 @@ mod tests {
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
+                fire_target_net_worth: None,
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.contributed_capital[0], Decimal::from(80_000));
@@ -615,6 +630,7 @@ mod tests {
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
+                fire_target_net_worth: None,
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.contributed_capital[0], Decimal::from(1200));
@@ -645,6 +661,7 @@ mod tests {
             retirement_start_month: Some(3),
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::from(1_000),
+            fire_target_net_worth: None,
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth[0], Decimal::from(12_000));
@@ -679,6 +696,7 @@ mod tests {
             retirement_start_month: Some(2),
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::from(600),
+            fire_target_net_worth: None,
         };
         let out = project_net_worth_series(&inp).unwrap();
         // Month 0: 1000 (starting asset)
@@ -720,6 +738,7 @@ mod tests {
                 retirement_start_month: Some(1),
                 income_retirement_monthly: Decimal::ZERO,
                 retirement_monthly_withdrawal: base_w,
+                fire_target_net_worth: None,
             }
         };
         let no_inf = project_net_worth_series(&mk_inp(None)).unwrap();
@@ -762,6 +781,7 @@ mod tests {
             retirement_start_month: Some(3),
             income_retirement_monthly: Decimal::from(500),
             retirement_monthly_withdrawal: Decimal::ZERO,
+                fire_target_net_worth: None,
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth[0], Decimal::from(10_000));
