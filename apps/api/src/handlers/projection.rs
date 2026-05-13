@@ -5,7 +5,8 @@
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
 use crate::handlers::installation::{
-    installation_naive_today, require_installation_member,
+    installation_naive_today, require_installation_member, resolve_fire_settings, FireNumberMode,
+    FireSettings, TaxBracket,
 };
 use crate::handlers::liabilities::purge_expired_liabilities;
 use crate::handlers::person_view::LedgerView;
@@ -36,6 +37,77 @@ pub struct ProjectionSeriesQuery {
     pub view: Option<String>,
     /// Meses a proyectar (12–840). Si se omite: horizonte derivado de la instalación (véase `horizon_basis`).
     pub months: Option<u32>,
+}
+
+fn tax_on_gross_capital_annual(gross: Decimal, brackets: &[TaxBracket]) -> Decimal {
+    if gross <= Decimal::ZERO || brackets.is_empty() {
+        return Decimal::ZERO;
+    }
+    let mut prev_ceiling = Decimal::ZERO;
+    let mut tax = Decimal::ZERO;
+    for b in brackets {
+        let r = b.pct / Decimal::from(100u32);
+        match b.up_to {
+            None => {
+                let taxable = (gross - prev_ceiling).max(Decimal::ZERO);
+                tax += taxable * r;
+                break;
+            }
+            Some(ceiling) => {
+                let slice_end = gross.min(ceiling);
+                let taxable = (slice_end - prev_ceiling).max(Decimal::ZERO);
+                tax += taxable * r;
+                prev_ceiling = ceiling;
+                if gross <= ceiling {
+                    break;
+                }
+            }
+        }
+    }
+    tax
+}
+
+fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBracket], taxes_enabled: bool) -> Decimal {
+    if !taxes_enabled || net_annual <= Decimal::ZERO {
+        return net_annual.max(Decimal::ZERO);
+    }
+    let mut lo = net_annual;
+    let mut hi = (net_annual * Decimal::from(4u32)).max(net_annual + Decimal::from(200_000u32));
+    for _ in 0..90 {
+        let mid = (lo + hi) / Decimal::from(2u32);
+        let after = mid - tax_on_gross_capital_annual(mid, brackets);
+        if after < net_annual { lo = mid; } else { hi = mid; }
+    }
+    hi
+}
+
+fn compute_fire_target_nw(
+    fire: &FireSettings,
+    income_monthly: Decimal,
+    income_retirement_monthly: Decimal,
+    expense_monthly: Decimal,
+) -> Option<Decimal> {
+    let need_annual = match fire.fire_number_mode {
+        FireNumberMode::Manual => {
+            let amt = fire.fire_number_manual_amount?;
+            if amt <= Decimal::ZERO { return None; }
+            amt
+        }
+        FireNumberMode::AnnualExpense => {
+            let net = expense_monthly - income_retirement_monthly;
+            if net <= Decimal::ZERO { return None; }
+            net * Decimal::from(12u32)
+        }
+        FireNumberMode::CurrentIncome => {
+            let net = income_monthly - income_retirement_monthly;
+            if net <= Decimal::ZERO { return None; }
+            net * Decimal::from(12u32)
+        }
+    };
+    let swr = fire.swr_pct;
+    if swr <= Decimal::ZERO { return None; }
+    let gross = gross_up_net_annual_fire(need_annual, &fire.tax_brackets, fire.taxes_enabled);
+    Some(gross / (swr / Decimal::from(100u32)))
 }
 
 fn resolve_ledger_view(q: &ProjectionSeriesQuery) -> LedgerView {
@@ -462,10 +534,15 @@ pub(crate) async fn build_installation_projection_input(
     horizon_months: u32,
     inflation_annual_percent: Option<Decimal>,
     retirement: Option<&RetirementInput>,
+    fire_settings: Option<&FireSettings>,
 ) -> Result<(ProjectionInput, Decimal), ApiError> {
     let (income_reg, income_retirement, expense_reg) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
     let monthly_net_regular = income_reg - expense_reg;
+
+    let fire_target_net_worth = fire_settings.and_then(|fs| {
+        compute_fire_target_nw(fs, income_reg, income_retirement, expense_reg)
+    });
 
     let retirement_start_month = match retirement {
         None => None,
@@ -593,6 +670,7 @@ pub(crate) async fn build_installation_projection_input(
         retirement_start_month,
         income_retirement_monthly: income_retirement,
         retirement_monthly_withdrawal: Decimal::ZERO,
+        fire_target_net_worth,
     };
 
     Ok((input, monthly_net_regular))
@@ -607,7 +685,7 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
     today: NaiveDate,
 ) -> Result<HashMap<Uuid, Decimal>, ApiError> {
     let (input, _) =
-        build_installation_projection_input(pool, iid, session_user_id, view, today, 1, None, None)
+        build_installation_projection_input(pool, iid, session_user_id, view, today, 1, None, None, None)
             .await?;
     let nominals = first_month_per_asset_contribution_nominals(&input).map_err(map_engine_err)?;
     Ok(input
@@ -683,6 +761,7 @@ pub(crate) async fn compute_installation_projection(
     horizon_months: u32,
     inflation_annual_percent: Option<Decimal>,
     retirement: Option<&RetirementInput>,
+    fire_settings: Option<&FireSettings>,
 ) -> Result<(ProjectionOutput, Decimal, ProjectionInput), ApiError> {
     let (input, monthly_net_regular) = build_installation_projection_input(
         pool,
@@ -693,6 +772,7 @@ pub(crate) async fn compute_installation_projection(
         horizon_months,
         inflation_annual_percent,
         retirement,
+        fire_settings,
     )
     .await?;
     let out = project_net_worth_series(&input).map_err(map_engine_err)?;
@@ -730,9 +810,10 @@ pub async fn get_projection_series(
         Option<Decimal>,
         Option<i16>,
         String,
+        Option<sqlx::types::Json<FireSettings>>,
     ) = sqlx::query_as(
         r#"SELECT projection_includes_inflation, annual_inflation_assumption_percent,
-                  projection_target_age, show_age_mode
+                  projection_target_age, show_age_mode, fire_settings
            FROM installation WHERE id = $1"#,
     )
     .bind(iid)
@@ -745,6 +826,8 @@ pub async fn get_projection_series(
         } else {
             None
         };
+
+    let fire_settings = resolve_fire_settings(inst_row.4.map(|j| j.0));
 
     let session_birth: Option<NaiveDate> = sqlx::query_scalar(
         r#"SELECT birth_date FROM users WHERE id = $1"#,
@@ -793,6 +876,7 @@ pub async fn get_projection_series(
         months,
         inflation_annual_percent,
         Some(&retirement),
+        Some(&fire_settings),
     )
     .await?;
     let compound_outpaces_true_savings_month_index =
