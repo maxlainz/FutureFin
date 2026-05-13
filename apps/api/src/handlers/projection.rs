@@ -158,6 +158,12 @@ pub struct ProjectionSeriesResponse {
     /// Primer mes en que el componente de interés/mercado supera el ahorro mensual base (sin Próximos ni plan de pagos de deudas).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compound_outpaces_true_savings_month_index: Option<u32>,
+    /// Primer mes en que el patrimonio neto ≥ objetivo FIRE (jubilación). `null` si no hay objetivo o no se alcanza en el horizonte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jubilacion_month_index: Option<u32>,
+    /// Objetivo FIRE bruto (patrimonio necesario, gross-up aplicado). Decimal serializado como string. `null` si no configurado.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jubilacion_target_net_worth: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -937,6 +943,12 @@ pub async fn get_projection_series(
         PROJECTION_MILESTONE_SEARCH_COUNT,
     );
 
+    let fire_target = projection_input.fire_target_net_worth.filter(|t| *t > Decimal::ZERO);
+    let jubilacion_month_index: Option<u32> = fire_target.and_then(|target| {
+        points.iter().find(|p| p.net_worth >= target).map(|p| p.month_index)
+    });
+    let jubilacion_target_net_worth: Option<String> = fire_target.map(|t| t.to_string());
+
     Ok(Json(ProjectionSeriesResponse {
         points,
         months,
@@ -955,6 +967,8 @@ pub async fn get_projection_series(
             .map(|d| d.format("%Y-%m-%d").to_string()),
         milestones,
         compound_outpaces_true_savings_month_index,
+        jubilacion_month_index,
+        jubilacion_target_net_worth,
     }))
 }
 
