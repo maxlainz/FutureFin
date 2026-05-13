@@ -215,6 +215,10 @@ type ProjectionSeriesApi = {
   /** Decisión del servidor: eje en años cumplidos (no inferir solo desde instalación en cliente). */
   use_age_on_x_axis?: boolean;
   viewer_birth_date?: string | null;
+  /** Primer mes en que el patrimonio neto ≥ objetivo FIRE. `null` si no alcanzado. */
+  jubilacion_month_index?: number | null;
+  /** Objetivo FIRE bruto (patrimonio necesario). Decimal serializado como string. `null` si no configurado. */
+  jubilacion_target_net_worth?: string | null;
 };
 
 type LiabilityApiRow = {
@@ -3938,7 +3942,6 @@ export default function App() {
             projectionError={projectionError}
             userBirthDate={user?.birth_date ?? null}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
-            retirementBudgetSnapshot={retirementBudgetSnapshot}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
@@ -8608,7 +8611,6 @@ function ProjectionView({
   projectionError,
   userBirthDate,
   calendarTz,
-  retirementBudgetSnapshot,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -8619,7 +8621,6 @@ function ProjectionView({
   projectionError: string | null;
   userBirthDate: string | null;
   calendarTz: string;
-  retirementBudgetSnapshot: BudgetSnapshotApi | null;
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
   const inflationPctRaw =
@@ -8645,34 +8646,18 @@ function ProjectionView({
   })();
   const axisAnchor =
     projectionSeries?.anchor_date_ymd?.trim() || null;
-  const jubilacionKpis = useMemo(() => {
-    const fireSettings = normalizeInstallationFireSettings(
-      installation?.installation.fire_settings,
-    );
-    const expenseM = retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent;
-    const incomeM = retirementBudgetSnapshot?.totals.income_monthly_equivalent;
-    const incomeRetM = retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent;
-    const needAnnual = computeFireAnnualNeedNetEur(fireSettings, expenseM, incomeM, incomeRetM);
-    const swrN = parseDisplayDecimal(fireSettings.swr_pct);
-    if (needAnnual === null || needAnnual <= 0 || swrN === null || swrN <= 0) {
-      return { miNo: null, targetNoPen: null };
-    }
-    const grossNoPen = grossUpNetAnnualFire(needAnnual, fireSettings.tax_brackets, fireSettings.taxes_enabled);
-    const targetNoPen = grossNoPen / (swrN / 100);
-    const pts = projectionSeries?.points ?? [];
-    return { miNo: findFirstMonthNetWorthAtLeast(pts, targetNoPen), targetNoPen };
-  }, [
-    installation?.installation.fire_settings,
-    retirementBudgetSnapshot,
-    projectionSeries?.points,
-  ]);
+  const jubilacionMiNo = projectionSeries?.jubilacion_month_index ?? null;
+  const jubilacionTargetNoPen =
+    projectionSeries?.jubilacion_target_net_worth != null
+      ? parseDisplayDecimal(projectionSeries.jubilacion_target_net_worth)
+      : null;
 
   const nextMilestones: ProjectionMilestoneApi[] = (() => {
     const base = projectionSeries?.milestones ?? [];
-    if (jubilacionKpis.miNo !== null) {
+    if (jubilacionMiNo !== null) {
       return [
         ...base,
-        { target: "jubilacion", reached_month_index: jubilacionKpis.miNo, reached_date_ymd: "" },
+        { target: "jubilacion", reached_month_index: jubilacionMiNo, reached_date_ymd: "" },
       ];
     }
     return base;
@@ -8745,8 +8730,8 @@ function ProjectionView({
                     label={isJubilacion ? "Jubilación" : "Milestone"}
                     value={
                       isJubilacion
-                        ? (jubilacionKpis.targetNoPen !== null
-                            ? formatCurrencyNumber(jubilacionKpis.targetNoPen, currencyIso)
+                        ? (jubilacionTargetNoPen !== null
+                            ? formatCurrencyNumber(jubilacionTargetNoPen, currencyIso)
                             : METRIC_DASH)
                         : formatProjectionMilestoneCompactLabel(m.target)
                     }
