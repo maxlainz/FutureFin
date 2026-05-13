@@ -428,6 +428,15 @@ a.tab-btn {
   white-space: nowrap;
 }
 
+.assets-table .budget-persists-col {
+  width: 5rem;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+  font-size: 0.78em;
+  color: #94a3b8;
+}
+
 .budget-row-actions {
   display: flex;
   flex-wrap: nowrap;
@@ -828,6 +837,23 @@ a.tab-btn {
 .field span {
   color: #334155;
   font-weight: 500;
+}
+
+.field.field--checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.field.field--checkbox input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.2rem;
+  cursor: pointer;
+  accent-color: #2563eb;
 }
 
 .field input,

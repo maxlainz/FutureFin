@@ -5471,7 +5471,7 @@ function BudgetView({
                     <tr>
                       <th>Categoría</th>
                       <th className="num">Importe mensual</th>
-                      <th title="Persiste tras jubilación" style={{ whiteSpace: "nowrap", fontSize: "0.75em", color: "var(--color-muted, #888)" }}>Tras jub.</th>
+                      <th className="budget-persists-col" title="Persiste tras jubilación">Tras jub.</th>
                       {canEdit ? (
                         <th className="asset-actions-cell">
                           <span className="sr-only">Acciones</span>
@@ -5489,7 +5489,7 @@ function BudgetView({
                         <td className="num">
                           {formatCurrencyAmount(row.amount, currencyIso)}
                         </td>
-                        <td style={{ textAlign: "center" }}>
+                        <td className="budget-persists-col">
                           {canEdit ? (
                             <input
                               type="checkbox"
