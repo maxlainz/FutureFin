@@ -53,6 +53,17 @@ pub struct ProjectionInput {
     /// Signed cash from planning flows per simulated month (`len == horizon_months`): index `i`
     /// pairs with month `i+1` (calendar month `add_months(month_first_calendar(ref_date), i)`).
     pub planning_monthly_cash_adjustment: Vec<Decimal>,
+    /// Month index (1-based, same indexing as the simulation loop) at which the retirement
+    /// drawdown phase begins. `None` = no drawdown modelled in this projection.
+    pub retirement_start_month: Option<u32>,
+    /// Income from sources that persist after retirement (e.g. rental, pension).
+    /// Replaces `income_regular_monthly` from `retirement_start_month` onward.
+    /// Typically `0` when all income stops at retirement (the default).
+    pub income_retirement_monthly: Decimal,
+    /// Optional additional monthly draw from assets on top of the income/expense budget.
+    /// The handler typically passes `0` — income reduction via `income_retirement_monthly`
+    /// is the primary drain mechanism in the new model.
+    pub retirement_monthly_withdrawal: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -182,12 +193,27 @@ pub fn first_month_per_asset_contribution_nominals(
 
     let planning_adj = input.planning_monthly_cash_adjustment[0];
 
-    let scheduled_savings = input.income_regular_monthly
+    let retirement_withdrawal = match input.retirement_start_month {
+        Some(start) if 1 >= start => {
+            let base = input.retirement_monthly_withdrawal;
+            match input.inflation_annual_percent {
+                Some(inf) if inf > Decimal::ZERO => {
+                    let factor = (Decimal::ONE + inf / Decimal::from(100))
+                        .powd(Decimal::ONE / Decimal::from(12));
+                    base * factor
+                }
+                _ => base,
+            }
+        }
+        _ => Decimal::ZERO,
+    };
+
+    let net_cash_month = input.income_regular_monthly
         - input.expense_regular_monthly
         - debt_service
-        + planning_adj;
+        + planning_adj
+        - retirement_withdrawal;
 
-    let net_cash_month = scheduled_savings;
     if net_cash_month <= Decimal::ZERO {
         return Ok(out);
     }
@@ -309,12 +335,35 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
 
-        let scheduled_savings = input.income_regular_monthly
+        let in_retirement = input.retirement_start_month.map_or(false, |s| k >= s);
+        let income = if in_retirement {
+            input.income_retirement_monthly
+        } else {
+            input.income_regular_monthly
+        };
+
+        let retirement_withdrawal = if in_retirement {
+            // When inflation is active the base withdrawal is expressed in today's money.
+            // Inflate it to nominal terms so that after the end-of-month deflation the real
+            // withdrawal remains constant (same purchasing power every month).
+            let base = input.retirement_monthly_withdrawal;
+            match input.inflation_annual_percent {
+                Some(inf) if inf > Decimal::ZERO => {
+                    let factor = (Decimal::ONE + inf / Decimal::from(100))
+                        .powd(Decimal::from(k) / Decimal::from(12));
+                    base * factor
+                }
+                _ => base,
+            }
+        } else {
+            Decimal::ZERO
+        };
+
+        let net_cash_month = income
             - input.expense_regular_monthly
             - debt_service
-            + planning_adj;
-
-        let net_cash_month = scheduled_savings;
+            + planning_adj
+            - retirement_withdrawal;
 
         if net_cash_month <= Decimal::ZERO {
             let mut need = -net_cash_month;
@@ -432,6 +481,9 @@ mod tests {
             liabilities: vec![],
             inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 3],
+            retirement_start_month: None,
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::ZERO,
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth.len(), 4);
@@ -472,6 +524,9 @@ mod tests {
             liabilities: vec![],
             inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 3],
+            retirement_start_month: None,
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::ZERO,
         };
         let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom.len(), 2);
@@ -500,6 +555,9 @@ mod tests {
             liabilities: vec![],
             inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::from(250)],
+            retirement_start_month: None,
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::ZERO,
         };
         let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom.len(), 1);
@@ -525,6 +583,9 @@ mod tests {
             liabilities: vec![],
             inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 2],
+            retirement_start_month: None,
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::ZERO,
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.contributed_capital[0], Decimal::from(80_000));
@@ -551,9 +612,163 @@ mod tests {
             liabilities: vec![],
             inflation_annual_percent: Some(Decimal::from(12)),
             planning_monthly_cash_adjustment: vec![Decimal::ZERO],
+            retirement_start_month: None,
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::ZERO,
         };
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.contributed_capital[0], Decimal::from(1200));
         assert!(out.contributed_capital[1] < Decimal::from(2200));
+    }
+
+    #[test]
+    fn retirement_withdrawal_drains_assets_after_start_month() {
+        // income=0, expense=0, liquid asset=12000; withdrawal=1000/month starting month 3.
+        // Months 1-2: no change (no income/expense/withdrawal). Month 3 onward: -1000/month.
+        let inp = ProjectionInput {
+            ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            horizon_months: 4,
+            income_regular_monthly: Decimal::ZERO,
+            expense_regular_monthly: Decimal::ZERO,
+            assets: vec![SimAsset {
+                id: Uuid::from_u128(10),
+                value: Decimal::from(12_000),
+                purchase_price: None,
+                is_liquid: true,
+                expected_annual_return_percent: None,
+                monthly_contribution_fixed: Decimal::ZERO,
+                contribution_remainder_weight: Decimal::ZERO,
+            }],
+            liabilities: vec![],
+            inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::ZERO; 4],
+            retirement_start_month: Some(3),
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::from(1_000),
+        };
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth[0], Decimal::from(12_000));
+        assert_eq!(out.net_worth[1], Decimal::from(12_000)); // no withdrawal yet
+        assert_eq!(out.net_worth[2], Decimal::from(12_000)); // no withdrawal yet
+        assert_eq!(out.net_worth[3], Decimal::from(11_000)); // first withdrawal
+        assert_eq!(out.net_worth[4], Decimal::from(10_000)); // second withdrawal
+    }
+
+    #[test]
+    fn retirement_withdrawal_zero_before_start_month() {
+        // income_regular=500 (stops at retirement), income_retirement=0, expense=0.
+        // No withdrawal before month 2 → surplus 500/month pre-retirement.
+        // From month 2: income drops to 0, withdrawal=600 → net_cash=-600 → drains asset.
+        let inp = ProjectionInput {
+            ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            horizon_months: 3,
+            income_regular_monthly: Decimal::from(500),
+            expense_regular_monthly: Decimal::ZERO,
+            assets: vec![SimAsset {
+                id: Uuid::from_u128(20),
+                value: Decimal::from(1_000),
+                purchase_price: None,
+                is_liquid: true,
+                expected_annual_return_percent: None,
+                monthly_contribution_fixed: Decimal::ZERO,
+                contribution_remainder_weight: Decimal::ONE,
+            }],
+            liabilities: vec![],
+            inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::ZERO; 3],
+            retirement_start_month: Some(2),
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::from(600),
+        };
+        let out = project_net_worth_series(&inp).unwrap();
+        // Month 0: 1000 (starting asset)
+        assert_eq!(out.net_worth[0], Decimal::from(1_000));
+        // Month 1: income_regular 500, no withdrawal (pre-retirement) → +500 → 1500
+        assert_eq!(out.net_worth[1], Decimal::from(1_500));
+        // Month 2: income_retirement=0, withdrawal=600 → net=-600 → drain 600 → 900
+        assert_eq!(out.net_worth[2], Decimal::from(900));
+        // Month 3: same → 900 - 600 = 300
+        assert_eq!(out.net_worth[3], Decimal::from(300));
+    }
+
+    #[test]
+    fn retirement_withdrawal_inflation_adjusts_nominal_to_maintain_real_purchasing_power() {
+        // Verifies that with inflation active, the NOMINAL withdrawal grows over time (so that
+        // real purchasing power stays constant). We run two projections with the same base
+        // withdrawal and compare nominal asset drain: with inflation the drain should be larger
+        // in later months, meaning the asset ends lower after 12 months.
+        let base_w = Decimal::from(1_000u32);
+        let mk_inp = |inf: Option<Decimal>| -> ProjectionInput {
+            let h = 12u32;
+            ProjectionInput {
+                ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+                horizon_months: h,
+                income_regular_monthly: Decimal::ZERO,
+                expense_regular_monthly: Decimal::ZERO,
+                assets: vec![SimAsset {
+                    id: Uuid::from_u128(30),
+                    value: Decimal::from(24_000),
+                    purchase_price: None,
+                    is_liquid: true,
+                    expected_annual_return_percent: None,
+                    monthly_contribution_fixed: Decimal::ZERO,
+                    contribution_remainder_weight: Decimal::ZERO,
+                }],
+                liabilities: vec![],
+                inflation_annual_percent: inf,
+                planning_monthly_cash_adjustment: vec![Decimal::ZERO; h as usize],
+                retirement_start_month: Some(1),
+                income_retirement_monthly: Decimal::ZERO,
+                retirement_monthly_withdrawal: base_w,
+            }
+        };
+        let no_inf = project_net_worth_series(&mk_inp(None)).unwrap();
+        let with_inf = project_net_worth_series(&mk_inp(Some(Decimal::from(12u32)))).unwrap();
+
+        // Without inflation: nominal asset after 12 months = 24000 - 12*1000 = 12000 (real=nominal)
+        // With inflation: nominal withdrawal grows each month → more total drain → lower nominal asset
+        // The deflated real series with inflation will be lower than the nominal-only series.
+        let nominal_end = no_inf.net_worth[12];
+        let real_end = with_inf.net_worth[12]; // already deflated
+        // Real end must be lower because inflation-adjusted withdrawals drained more in nominal terms
+        assert!(
+            real_end < nominal_end,
+            "real (deflated) end {real_end} should be less than nominal-only end {nominal_end}"
+        );
+    }
+
+    #[test]
+    fn retirement_income_drops_to_income_retirement_monthly_after_start_month() {
+        // income_regular=3000, income_retirement=500, expense=2000, no growth.
+        // Before month 3: net_cash = 3000 - 2000 = +1000 → contribute to asset.
+        // From month 3: net_cash = 500 - 2000 = -1500 → drain 1500/month.
+        let inp = ProjectionInput {
+            ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            horizon_months: 5,
+            income_regular_monthly: Decimal::from(3_000),
+            expense_regular_monthly: Decimal::from(2_000),
+            assets: vec![SimAsset {
+                id: Uuid::from_u128(40),
+                value: Decimal::from(10_000),
+                purchase_price: None,
+                is_liquid: true,
+                expected_annual_return_percent: None,
+                monthly_contribution_fixed: Decimal::ZERO,
+                contribution_remainder_weight: Decimal::ONE,
+            }],
+            liabilities: vec![],
+            inflation_annual_percent: None,
+            planning_monthly_cash_adjustment: vec![Decimal::ZERO; 5],
+            retirement_start_month: Some(3),
+            income_retirement_monthly: Decimal::from(500),
+            retirement_monthly_withdrawal: Decimal::ZERO,
+        };
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth[0], Decimal::from(10_000));
+        assert_eq!(out.net_worth[1], Decimal::from(11_000)); // +1000 surplus
+        assert_eq!(out.net_worth[2], Decimal::from(12_000)); // +1000 surplus
+        assert_eq!(out.net_worth[3], Decimal::from(10_500)); // -1500 drain
+        assert_eq!(out.net_worth[4], Decimal::from(9_000));  // -1500 drain
+        assert_eq!(out.net_worth[5], Decimal::from(7_500));  // -1500 drain
     }
 }

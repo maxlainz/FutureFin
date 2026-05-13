@@ -25,7 +25,7 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
 
 **liabilities**: `id`, `installation_id`, `owner_user_id`, `category_id`, `label`, `type_tag`, `principal (decimal)`, `apr_percent (decimal nullable)`, `payment_amount (decimal nullable)`, `payment_frequency ('monthly'|'weekly' nullable)`, `payment_end_date (date nullable)`, `principal_derived_from_plan (bool)`, `notes`, `sort_index`
 
-**budget_entries**: `id`, `installation_id`, `owner_user_id`, `category_id`, `scope ('income'|'expense')`, `amount (decimal, monthly)`, `notes`, `sort_index`
+**budget_entries**: `id`, `installation_id`, `owner_user_id`, `category_id`, `scope ('income'|'expense')`, `amount (decimal, monthly)`, `notes`, `sort_index`, `persists_after_retirement (bool, default false)` — income entries only: whether this income continues after `projection_target_age` (used to compute `income_retirement_monthly` in projection)
 
 **planning_flows**: `id`, `installation_id`, `owner_user_id`, `category_id`, `direction ('inflow'|'outflow')`, `title`, `expected_amount (decimal)`, `due_date (date nullable)`, `notes`, `sort_index`
 
@@ -38,12 +38,16 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
   "swr_pct": "3.5",
   "taxes_enabled": true,
   "tax_brackets": [
-    { "up_to": "6000", "pct": "19" },
-    { "up_to": null, "pct": "30" }
+    { "up_to": "6000",   "pct": "19" },
+    { "up_to": "50000",  "pct": "21" },
+    { "up_to": "200000", "pct": "23" },
+    { "up_to": "300000", "pct": "27" },
+    { "up_to": null,     "pct": "30" }
   ]
 }
 ```
-Defaults (Spain): SWR 3.5%, tax brackets for capital gains (Spanish IRPF schedule). Last bracket must have `up_to: null`.
+Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF). Last bracket must have `up_to: null`.
+`fire_settings` is nullable; when null, defaults apply on read (handler calls `resolve_fire_settings`).
 
 ## Key invariants
 - `Decimal` for all monetary/percentage columns — never `f64` in schema or Rust code

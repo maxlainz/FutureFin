@@ -57,6 +57,14 @@ Upcoming cash flows (one-off inflows/outflows) with due dates.
 ### Projection (`/v1/projection/`)
 Net-worth series via `futurefin-engine`. Accepts `?view=mine` and `?months=N` (12–840).
 
+Response (`ProjectionSeriesResponse`) includes:
+- `points[]` — `{month_index, net_worth, contributed_capital}` for months 0..=N
+- `months`, `horizon_years`, `horizon_basis` — effective horizon (`mac_target_age` | `mac_fallback_no_demographics` | `months_override`)
+- `starting_net_worth`, `monthly_delta_assumption` — snapshot values at month 0
+- `anchor_date_ymd`, `show_age_mode`, `use_age_on_x_axis`, `viewer_birth_date` — UI axis helpers
+- `milestones[]` — next 3 net-worth milestones (1/2.5/5×10ⁿ thresholds), each with `target`, `reached_month_index`, `reached_date_ymd`
+- `compound_outpaces_true_savings_month_index` — first month where compound return > base monthly savings (optional)
+
 ### Backup
 | Method | Path | Notes |
 |--------|------|-------|

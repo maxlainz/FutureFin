@@ -4,7 +4,9 @@
 
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
-use crate::handlers::installation::{installation_naive_today, require_installation_member};
+use crate::handlers::installation::{
+    installation_naive_today, require_installation_member,
+};
 use crate::handlers::liabilities::purge_expired_liabilities;
 use crate::handlers::person_view::LedgerView;
 use crate::handlers::session::require_session_user;
@@ -423,6 +425,34 @@ fn map_engine_err(e: EngineError) -> ApiError {
     ApiError::BadRequest(e.to_string())
 }
 
+/// Inputs required to model the retirement drawdown phase. Passed to
+/// `build_installation_projection_input`, which resolves these into concrete engine fields
+/// once `income_reg` / `expense_reg` are known.
+pub(crate) struct RetirementInput {
+    pub target_age: Option<i16>,
+    pub birth: Option<NaiveDate>,
+    pub horizon_months: u32,
+}
+
+/// Returns the 1-based month index at which the user reaches `target_age`, relative to `today`.
+/// Returns `None` if the retirement date falls outside the projection horizon or cannot be computed.
+fn retirement_start_month_from_age(
+    today: NaiveDate,
+    target_age: Option<i16>,
+    birth: Option<NaiveDate>,
+    horizon_months: u32,
+) -> Option<u32> {
+    let target = target_age? as i32;
+    let birth = birth?;
+    let age_now = age_completed_years(today, birth);
+    let months_to_retirement = ((target - age_now) * 12).max(0) as u32;
+    if months_to_retirement == 0 || months_to_retirement > horizon_months {
+        None
+    } else {
+        Some(months_to_retirement)
+    }
+}
+
 pub(crate) async fn build_installation_projection_input(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -431,10 +461,16 @@ pub(crate) async fn build_installation_projection_input(
     today: NaiveDate,
     horizon_months: u32,
     inflation_annual_percent: Option<Decimal>,
+    retirement: Option<&RetirementInput>,
 ) -> Result<(ProjectionInput, Decimal), ApiError> {
-    let (income_reg, expense_reg) =
+    let (income_reg, income_retirement, expense_reg) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
     let monthly_net_regular = income_reg - expense_reg;
+
+    let retirement_start_month = match retirement {
+        None => None,
+        Some(ri) => retirement_start_month_from_age(today, ri.target_age, ri.birth, ri.horizon_months),
+    };
 
     let assets_rows: Vec<AssetEngineRow> = match view {
         LedgerView::Household => {
@@ -554,6 +590,9 @@ pub(crate) async fn build_installation_projection_input(
         liabilities,
         inflation_annual_percent,
         planning_monthly_cash_adjustment,
+        retirement_start_month,
+        income_retirement_monthly: income_retirement,
+        retirement_monthly_withdrawal: Decimal::ZERO,
     };
 
     Ok((input, monthly_net_regular))
@@ -568,7 +607,7 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
     today: NaiveDate,
 ) -> Result<HashMap<Uuid, Decimal>, ApiError> {
     let (input, _) =
-        build_installation_projection_input(pool, iid, session_user_id, view, today, 1, None)
+        build_installation_projection_input(pool, iid, session_user_id, view, today, 1, None, None)
             .await?;
     let nominals = first_month_per_asset_contribution_nominals(&input).map_err(map_engine_err)?;
     Ok(input
@@ -643,6 +682,7 @@ pub(crate) async fn compute_installation_projection(
     today: NaiveDate,
     horizon_months: u32,
     inflation_annual_percent: Option<Decimal>,
+    retirement: Option<&RetirementInput>,
 ) -> Result<(ProjectionOutput, Decimal, ProjectionInput), ApiError> {
     let (input, monthly_net_regular) = build_installation_projection_input(
         pool,
@@ -652,6 +692,7 @@ pub(crate) async fn compute_installation_projection(
         today,
         horizon_months,
         inflation_annual_percent,
+        retirement,
     )
     .await?;
     let out = project_net_worth_series(&input).map_err(map_engine_err)?;
@@ -737,6 +778,12 @@ pub async fn get_projection_series(
 
     let horizon_years = months / 12;
 
+    let retirement = RetirementInput {
+        target_age: inst_row.2,
+        birth: resolved_birth_for_demographics,
+        horizon_months: months,
+    };
+
     let (mut output, monthly_delta_assumption, projection_input) = compute_installation_projection(
         &state.pool,
         iid,
@@ -745,6 +792,7 @@ pub async fn get_projection_series(
         today,
         months,
         inflation_annual_percent,
+        Some(&retirement),
     )
     .await?;
     let compound_outpaces_true_savings_month_index =
@@ -1006,6 +1054,9 @@ mod milestone_tests {
             }],
             inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
+            retirement_start_month: None,
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::ZERO,
         };
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(500)).unwrap();
         assert!(month.is_none());
@@ -1030,6 +1081,9 @@ mod milestone_tests {
             liabilities: vec![],
             inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 24],
+            retirement_start_month: None,
+            income_retirement_monthly: Decimal::ZERO,
+            retirement_monthly_withdrawal: Decimal::ZERO,
         };
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(200)).unwrap();
         assert!(month.is_some());
