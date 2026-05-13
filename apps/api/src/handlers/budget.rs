@@ -38,6 +38,9 @@ pub struct BudgetEntryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
+    /// Whether this income entry continues contributing after the retirement start month.
+    /// Always `false` for expense entries.
+    pub persists_after_retirement: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -62,6 +65,10 @@ pub struct BudgetTotalsResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub income_monthly_equivalent: Decimal,
+    /// Sum of income entries with `persists_after_retirement = true`.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub income_retirement_monthly_equivalent: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_regular_monthly_equivalent: Decimal,
@@ -94,6 +101,8 @@ pub struct CreateBudgetEntryBody {
     pub notes: Option<String>,
     #[serde(default)]
     pub sort_index: Option<i32>,
+    #[serde(default)]
+    pub persists_after_retirement: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -109,6 +118,8 @@ pub struct PatchBudgetEntryBody {
     pub notes: Option<String>,
     #[serde(default)]
     pub sort_index: Option<i32>,
+    #[serde(default)]
+    pub persists_after_retirement: Option<bool>,
 }
 
 #[derive(Debug, FromRow)]
@@ -119,6 +130,7 @@ pub(crate) struct BudgetEntryJoinRow {
     amount: Decimal,
     notes: Option<String>,
     sort_index: i32,
+    persists_after_retirement: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -156,6 +168,7 @@ fn row_to_entry_response(r: BudgetEntryJoinRow) -> Result<BudgetEntryResponse, A
         amount: r.amount,
         notes: r.notes,
         sort_index: r.sort_index,
+        persists_after_retirement: r.persists_after_retirement,
     })
 }
 
@@ -217,7 +230,7 @@ async fn fetch_budget_rows_and_derived_liabilities(
         LedgerView::Household => {
             sqlx::query_as(
                 r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                          b.notes, b.sort_index
+                          b.notes, b.sort_index, b.persists_after_retirement
                    FROM budget_entries b
                    JOIN categories c ON c.id = b.category_id
                    WHERE b.installation_id = $1
@@ -230,7 +243,7 @@ async fn fetch_budget_rows_and_derived_liabilities(
         LedgerView::Mine => {
             sqlx::query_as(
                 r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                          b.notes, b.sort_index
+                          b.notes, b.sort_index, b.persists_after_retirement
                    FROM budget_entries b
                    JOIN categories c ON c.id = b.category_id
                    WHERE b.installation_id = $1 AND b.owner_user_id = $2
@@ -288,12 +301,18 @@ pub(crate) fn ledger_budget_totals_from_parts(
     derived_raw: &[LiabilityDerivedRow],
 ) -> Result<BudgetTotalsResponse, ApiError> {
     let mut income_m = Decimal::ZERO;
+    let mut income_retirement_m = Decimal::ZERO;
     let mut expense_reg = Decimal::ZERO;
 
     for r in rows {
         let me = r.amount;
         match r.scope.as_str() {
-            "income" => income_m += me,
+            "income" => {
+                income_m += me;
+                if r.persists_after_retirement {
+                    income_retirement_m += me;
+                }
+            }
             "expense" => expense_reg += me,
             _ => {}
         }
@@ -311,6 +330,7 @@ pub(crate) fn ledger_budget_totals_from_parts(
 
     Ok(BudgetTotalsResponse {
         income_monthly_equivalent: income_m,
+        income_retirement_monthly_equivalent: income_retirement_m,
         expense_regular_monthly_equivalent: expense_reg,
         expense_derived_monthly_equivalent: expense_der,
         expense_total_monthly_equivalent: expense_tot,
@@ -332,26 +352,34 @@ pub(crate) async fn ledger_budget_totals_for_summary(
 }
 
 /// Persisted budget rows only (no liability-derived lines), for projection / FIRE expense bases.
+/// Returns `(income_reg, income_retirement, expense_reg)` where `income_retirement` is the sum
+/// of income entries with `persists_after_retirement = true`.
 pub(crate) async fn ledger_regular_monthly_income_and_expense(
     pool: &sqlx::PgPool,
     iid: Uuid,
     session_user_id: Uuid,
     view: LedgerView,
     today: NaiveDate,
-) -> Result<(Decimal, Decimal), ApiError> {
+) -> Result<(Decimal, Decimal, Decimal), ApiError> {
     let (rows, _) =
         fetch_budget_rows_and_derived_liabilities(pool, iid, session_user_id, view, today).await?;
     let mut income_m = Decimal::ZERO;
+    let mut income_retirement_m = Decimal::ZERO;
     let mut expense_reg = Decimal::ZERO;
     for r in rows {
         let me = r.amount;
         match r.scope.as_str() {
-            "income" => income_m += me,
+            "income" => {
+                income_m += me;
+                if r.persists_after_retirement {
+                    income_retirement_m += me;
+                }
+            }
             "expense" => expense_reg += me,
             _ => {}
         }
     }
-    Ok((income_m, expense_reg))
+    Ok((income_m, income_retirement_m, expense_reg))
 }
 
 #[utoipa::path(
@@ -456,9 +484,9 @@ pub async fn create_budget_entry(
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO budget_entries (
                installation_id, category_id, amount, notes, sort_index,
-               owner_user_id
+               owner_user_id, persists_after_retirement
            )
-           VALUES ($1, $2, $3, $4, $5, $6)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id"#,
     )
     .bind(iid)
@@ -467,12 +495,13 @@ pub async fn create_budget_entry(
     .bind(&notes)
     .bind(sort_index)
     .bind(user.id.0)
+    .bind(body.persists_after_retirement)
     .fetch_one(&state.pool)
     .await?;
 
     let row: BudgetEntryJoinRow = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                  b.notes, b.sort_index
+                  b.notes, b.sort_index, b.persists_after_retirement
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1"#,
@@ -519,6 +548,7 @@ pub async fn patch_budget_entry(
         && body.amount.is_none()
         && body.notes.is_none()
         && body.sort_index.is_none()
+        && body.persists_after_retirement.is_none()
     {
         return Err(ApiError::BadRequest(
             "provide at least one field to update".into(),
@@ -527,7 +557,7 @@ pub async fn patch_budget_entry(
 
     let row: Option<BudgetEntryJoinRow> = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                  b.notes, b.sort_index
+                  b.notes, b.sort_index, b.persists_after_retirement
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1 AND b.installation_id = $2"#,
@@ -564,6 +594,7 @@ pub async fn patch_budget_entry(
     };
 
     let new_sort = body.sort_index.unwrap_or(current.sort_index);
+    let new_persists = body.persists_after_retirement.unwrap_or(current.persists_after_retirement);
 
     let updated: BudgetEntryJoinRow = sqlx::query_as(
         r#"UPDATE budget_entries
@@ -571,8 +602,9 @@ pub async fn patch_budget_entry(
                amount = $2,
                notes = $3,
                sort_index = $4,
+               persists_after_retirement = $5,
                updated_at = now()
-           WHERE id = $5 AND installation_id = $6
+           WHERE id = $6 AND installation_id = $7
            RETURNING budget_entries.id,
                      budget_entries.category_id,
                      (
@@ -582,12 +614,14 @@ pub async fn patch_budget_entry(
                      ) AS scope,
                      budget_entries.amount,
                      budget_entries.notes,
-                     budget_entries.sort_index"#,
+                     budget_entries.sort_index,
+                     budget_entries.persists_after_retirement"#,
     )
     .bind(new_cat)
     .bind(new_amount)
     .bind(&new_notes)
     .bind(new_sort)
+    .bind(new_persists)
     .bind(id)
     .bind(iid)
     .fetch_one(&state.pool)

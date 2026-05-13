@@ -112,7 +112,7 @@ fn default_es_tax_brackets() -> Vec<TaxBracket> {
     ]
 }
 
-fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSettings {
+pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSettings {
     match stored {
         None => default_fire_settings(),
         Some(fs) => fs,

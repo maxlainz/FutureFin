@@ -37,6 +37,33 @@ Open `http://127.0.0.1:8080`. The Vite proxy routes `/v1`, `/health`, `/openapi.
 ### API only (no Vite)
 Set `PORT=8080` in `.env`, then `cd apps/api && cargo run`.
 
+### Test local con Docker Desktop (sin publicar imagen)
+Útil para validar el stack completo (API + frontend + DB) exactamente como en producción, sin esperar a que CI publique una imagen.
+
+```bash
+# 1. Construir la imagen localmente (tarda la primera vez; usa caché en rebuilds)
+#    --load es obligatorio con BuildKit para que quede en el store local de Docker
+docker build --load -f apps/api/Dockerfile -t futurefin-local:dev .
+
+# 2. Asegúrate de que .env tiene:
+#      FUTUREFIN_IMAGE=futurefin-local
+#      FUTUREFIN_TAG=dev
+#      POSTGRES_PASSWORD=<lo que sea>
+
+# 3. Arrancar el stack con el override local (evita que Compose haga pull de la imagen local)
+docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d
+
+# 4. Smoke test
+curl -sf http://127.0.0.1:8080/v1/health
+
+# 5. Rebuild tras cambios (la caché de Docker reutiliza las capas sin cambios)
+docker build --load -f apps/api/Dockerfile -t futurefin-local:dev . \
+  && docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env \
+     up -d --no-deps futurefin
+```
+
+> `docker-compose.local.yml` añade `pull_policy: never` al servicio `futurefin` para que Compose no intente hacer pull de una imagen que solo existe en local.
+
 ### Production stack (maintenance)
 ```bash
 docker compose logs -f futurefin          # logs

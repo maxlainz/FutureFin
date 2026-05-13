@@ -138,6 +138,7 @@ type SummaryResponse = {
 
 type BudgetTotalsApi = {
   income_monthly_equivalent: string;
+  income_retirement_monthly_equivalent: string;
   expense_regular_monthly_equivalent: string;
   expense_derived_monthly_equivalent: string;
   expense_total_monthly_equivalent: string;
@@ -152,6 +153,7 @@ type BudgetEntryApiRow = {
   amount: string;
   notes: string | null;
   sort_index: number;
+  persists_after_retirement: boolean;
 };
 
 type DerivedBudgetLineApi = {
@@ -1125,11 +1127,13 @@ function computeFireAnnualNeedNetEur(
   fire: FireSettingsApi,
   expenseRegularMonthlyEquivalent: string | null | undefined,
   incomeMonthlyEquivalent: string | null | undefined,
+  incomeRetirementMonthlyEquivalent: string | null | undefined,
 ): number | null {
   const expenseM = parseDisplayDecimal(
     String(expenseRegularMonthlyEquivalent ?? ""),
   );
   const incomeM = parseDisplayDecimal(String(incomeMonthlyEquivalent ?? ""));
+  const incomeRetM = parseDisplayDecimal(String(incomeRetirementMonthlyEquivalent ?? "")) ?? 0;
   switch (fire.fire_number_mode) {
     case "manual": {
       const m = parseDisplayDecimal(String(fire.fire_number_manual_amount ?? ""));
@@ -1137,11 +1141,13 @@ function computeFireAnnualNeedNetEur(
     }
     case "annual_expense": {
       if (expenseM === null) return null;
-      return expenseM * 12;
+      const net = expenseM - incomeRetM;
+      return net > 0 ? net * 12 : null;
     }
     case "current_income": {
       if (incomeM === null) return null;
-      return incomeM * 12;
+      const net = incomeM - incomeRetM;
+      return net > 0 ? net * 12 : null;
     }
     default:
       return expenseM !== null ? expenseM * 12 : null;
@@ -1613,6 +1619,7 @@ export default function App() {
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [registerBirthDate, setRegisterBirthDate] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
 
   const [installation, setInstallation] = useState<InstallationAccess | null>(
@@ -1743,6 +1750,7 @@ export default function App() {
   const [budgetFormCategoryId, setBudgetFormCategoryId] = useState("");
   const [budgetFormAmount, setBudgetFormAmount] = useState("");
   const [budgetFormNotes, setBudgetFormNotes] = useState("");
+  const [budgetFormPersistsAfterRetirement, setBudgetFormPersistsAfterRetirement] = useState(false);
 
   const [planningFlows, setPlanningFlows] = useState<PlanningFlowApiRow[]>([]);
   const [planningIncomeCategories, setPlanningIncomeCategories] = useState<
@@ -2473,7 +2481,11 @@ export default function App() {
           ...defaultFetchInit,
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, password }),
+          body: JSON.stringify({
+            username,
+            password,
+            birth_date: registerBirthDate.trim(),
+          }),
         });
         if (!reg.ok) {
           throw new Error(await errorMessageFromResponse(reg));
@@ -3074,6 +3086,7 @@ export default function App() {
     setBudgetFormCategoryId(cats[0]?.id ?? "");
     setBudgetFormAmount("");
     setBudgetFormNotes("");
+    setBudgetFormPersistsAfterRetirement(false);
   }
 
   async function submitBudgetForm(ev: FormEvent) {
@@ -3099,6 +3112,7 @@ export default function App() {
           category_id: budgetFormCategoryId,
           amount: amt,
           notes: budgetFormNotes.trim(),
+          persists_after_retirement: budgetFormScope === "income" ? budgetFormPersistsAfterRetirement : false,
         };
         const res = await fetch(
           `/v1/budget/entries/${encodeURIComponent(editingBudgetEntryId)}`,
@@ -3113,6 +3127,9 @@ export default function App() {
           throw new Error(await errorMessageFromResponse(res));
         }
       } else {
+        if (budgetFormScope === "income") {
+          base.persists_after_retirement = budgetFormPersistsAfterRetirement;
+        }
         const res = await fetch("/v1/budget/entries", {
           ...defaultFetchInit,
           method: "POST",
@@ -3156,12 +3173,34 @@ export default function App() {
     }
   }
 
+  async function toggleBudgetEntryPersists(id: string, currentValue: boolean) {
+    setBudgetSaving(true);
+    setBudgetError(null);
+    try {
+      const res = await fetch(`/v1/budget/entries/${encodeURIComponent(id)}`, {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ persists_after_retirement: !currentValue }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      await loadBudgetPage();
+    } catch (e: unknown) {
+      setBudgetError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBudgetSaving(false);
+    }
+  }
+
   function beginEditBudgetEntry(row: BudgetEntryApiRow) {
     setEditingBudgetEntryId(row.id);
     setBudgetFormScope(row.scope);
     setBudgetFormCategoryId(row.category_id);
     setBudgetFormAmount(formatEditableDecimalString(row.amount));
     setBudgetFormNotes(row.notes ?? "");
+    setBudgetFormPersistsAfterRetirement(row.persists_after_retirement);
   }
 
   function resetPlanningFlowForm() {
@@ -3275,7 +3314,7 @@ export default function App() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          birth_date: trimmed === "" ? null : trimmed,
+          birth_date: trimmed,
         }),
       });
       if (!res.ok) {
@@ -3399,6 +3438,19 @@ export default function App() {
                   maxLength={256}
                 />
               </label>
+              {authMode === "register" && (
+                <label className="field">
+                  <span>Fecha de nacimiento</span>
+                  <input
+                    type="date"
+                    autoComplete="bday"
+                    value={registerBirthDate}
+                    onChange={(e) => setRegisterBirthDate(e.target.value)}
+                    max={new Date().toISOString().slice(0, 10)}
+                    required
+                  />
+                </label>
+              )}
               <button type="submit" className="btn primary wide" disabled={authBusy}>
                 {authMode === "register" ? "Registrarse y entrar" : "Entrar"}
               </button>
@@ -3474,13 +3526,14 @@ export default function App() {
             <ModalFormError message={userProfileError} />
           ) : null}
           <label className="field">
-            <span>Fecha de nacimiento (opcional)</span>
+            <span>Fecha de nacimiento</span>
             <input
               type="date"
               value={userBirthDraft}
               onChange={(e) => setUserBirthDraft(e.target.value)}
               max={new Date().toISOString().slice(0, 10)}
               autoComplete="bday"
+              required
             />
           </label>
           <div className="asset-form-actions">
@@ -3802,10 +3855,13 @@ export default function App() {
             setBudgetFormAmount={setBudgetFormAmount}
             budgetFormNotes={budgetFormNotes}
             setBudgetFormNotes={setBudgetFormNotes}
+            budgetFormPersistsAfterRetirement={budgetFormPersistsAfterRetirement}
+            setBudgetFormPersistsAfterRetirement={setBudgetFormPersistsAfterRetirement}
             editingBudgetEntryId={editingBudgetEntryId}
             budgetSaving={budgetSaving}
             submitBudgetForm={(e) => void submitBudgetForm(e)}
             deleteBudgetEntryRow={(id) => void deleteBudgetEntryRow(id)}
+            toggleBudgetEntryPersists={(id, val) => void toggleBudgetEntryPersists(id, val)}
             beginEditBudgetEntry={(row) => {
               beginEditBudgetEntry(row);
               setBudgetModalOpen(true);
@@ -5139,10 +5195,13 @@ function BudgetView({
   setBudgetFormAmount,
   budgetFormNotes,
   setBudgetFormNotes,
+  budgetFormPersistsAfterRetirement,
+  setBudgetFormPersistsAfterRetirement,
   editingBudgetEntryId,
   budgetSaving,
   submitBudgetForm,
   deleteBudgetEntryRow,
+  toggleBudgetEntryPersists,
   beginEditBudgetEntry,
 }: {
   installation: InstallationAccess | null;
@@ -5167,10 +5226,13 @@ function BudgetView({
   setBudgetFormAmount: Dispatch<SetStateAction<string>>;
   budgetFormNotes: string;
   setBudgetFormNotes: Dispatch<SetStateAction<string>>;
+  budgetFormPersistsAfterRetirement: boolean;
+  setBudgetFormPersistsAfterRetirement: Dispatch<SetStateAction<boolean>>;
   editingBudgetEntryId: string | null;
   budgetSaving: boolean;
   submitBudgetForm: (e: FormEvent) => void;
   deleteBudgetEntryRow: (id: string) => void;
+  toggleBudgetEntryPersists: (id: string, currentValue: boolean) => void;
   beginEditBudgetEntry: (row: BudgetEntryApiRow) => void;
 }) {
   const currency =
@@ -5342,6 +5404,16 @@ function BudgetView({
                 maxLength={4000}
               />
             </label>
+            {budgetFormScope === "income" ? (
+              <label className="field field--checkbox">
+                <input
+                  type="checkbox"
+                  checked={budgetFormPersistsAfterRetirement}
+                  onChange={(e) => setBudgetFormPersistsAfterRetirement(e.target.checked)}
+                />
+                <span>Persiste tras jubilación</span>
+              </label>
+            ) : null}
             <div className="asset-form-actions">
               <button
                 type="submit"
@@ -5399,6 +5471,7 @@ function BudgetView({
                     <tr>
                       <th>Categoría</th>
                       <th className="num">Importe mensual</th>
+                      <th title="Persiste tras jubilación" style={{ whiteSpace: "nowrap", fontSize: "0.75em", color: "var(--color-muted, #888)" }}>Tras jub.</th>
                       {canEdit ? (
                         <th className="asset-actions-cell">
                           <span className="sr-only">Acciones</span>
@@ -5415,6 +5488,19 @@ function BudgetView({
                         </td>
                         <td className="num">
                           {formatCurrencyAmount(row.amount, currencyIso)}
+                        </td>
+                        <td style={{ textAlign: "center" }}>
+                          {canEdit ? (
+                            <input
+                              type="checkbox"
+                              checked={row.persists_after_retirement}
+                              disabled={budgetSaving}
+                              title="Persiste tras jubilación"
+                              onChange={() => toggleBudgetEntryPersists(row.id, row.persists_after_retirement)}
+                            />
+                          ) : (
+                            <span>{row.persists_after_retirement ? "✓" : "—"}</span>
+                          )}
                         </td>
                         {canEdit ? (
                           <td className="asset-actions-cell budget-row-actions">
@@ -8110,10 +8196,13 @@ function RetirementView({
       retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent;
     const incomeM =
       retirementBudgetSnapshot?.totals.income_monthly_equivalent;
+    const incomeRetM =
+      retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent;
     const needAnnual = computeFireAnnualNeedNetEur(
       fireDraft,
       expenseM,
       incomeM,
+      incomeRetM,
     );
     const swrN = parseDisplayDecimal(fireDraft.swr_pct);
     const brackets = fireDraft.tax_brackets;
@@ -8146,6 +8235,7 @@ function RetirementView({
     fireDraft,
     retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent,
     retirementBudgetSnapshot?.totals.income_monthly_equivalent,
+    retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent,
     projectionSeries?.points,
     projectionSeries?.months,
   ]);

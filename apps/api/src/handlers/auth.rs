@@ -22,6 +22,9 @@ pub const SESSION_COOKIE: &str = "ff_session";
 pub struct RegisterBody {
     pub username: String,
     pub password: String,
+    /// Fecha de nacimiento obligatoria (`YYYY-MM-DD`).
+    #[schema(value_type = String, format = "date")]
+    pub birth_date: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -147,15 +150,22 @@ pub async fn register(
     Json(body): Json<RegisterBody>,
 ) -> Result<(axum::http::StatusCode, Json<UserResponse>), ApiError> {
     validate_username(&body.username)?;
+    let birth_date = {
+        let d = NaiveDate::parse_from_str(body.birth_date.trim(), "%Y-%m-%d")
+            .map_err(|_| ApiError::BadRequest("birth_date must be YYYY-MM-DD".into()))?;
+        validate_birth_date(d)?;
+        d
+    };
     let hash = password::hash_password(&body.password)?;
     let mut tx = state.pool.begin().await?;
     let row: UserRow = sqlx::query_as(
-        r#"INSERT INTO users (username, password_hash)
-           VALUES ($1, $2)
+        r#"INSERT INTO users (username, password_hash, birth_date)
+           VALUES ($1, $2, $3)
            RETURNING id, username, birth_date"#,
     )
     .bind(&body.username)
     .bind(&hash)
+    .bind(birth_date)
     .fetch_one(&mut *tx)
     .await
     .map_err(map_unique_violation)?;

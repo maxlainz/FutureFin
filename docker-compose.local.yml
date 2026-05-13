@@ -1,0 +1,5 @@
+# Override para desarrollo local: usa imagen construida localmente sin intentar pull.
+# Uso: docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d
+services:
+  futurefin:
+    pull_policy: never
