@@ -291,6 +291,28 @@ fn planning_monthly_cash_adjustments_from_flows(
     adj
 }
 
+fn expense_end_date_monthly_adjustments(
+    today: NaiveDate,
+    horizon_months: u32,
+    entries: &[(Decimal, NaiveDate)],
+) -> Vec<Decimal> {
+    let mut adj = vec![Decimal::ZERO; horizon_months as usize];
+    let anchor = proj_month_first(today);
+    for (amount, end_date) in entries {
+        for idx in 0..horizon_months as usize {
+            let m_first = proj_add_months(anchor, idx as u32);
+            if m_first > *end_date {
+                // Cancel the expense from this month onwards (base rate already deducts it).
+                for i in idx..horizon_months as usize {
+                    adj[i] += amount;
+                }
+                break;
+            }
+        }
+    }
+    adj
+}
+
 fn planning_upcoming_net_for_milestone_baseline(
     ref_date: NaiveDate,
     flows: &[PlanningFlowProjRow],
@@ -508,12 +530,12 @@ pub(crate) async fn build_installation_projection_input(
     inflation_annual_percent: Option<Decimal>,
     fire_settings: Option<&FireSettings>,
 ) -> Result<(ProjectionInput, Decimal), ApiError> {
-    let (income_reg, income_retirement, expense_reg) =
+    let (income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
     let monthly_net_regular = income_reg - expense_reg;
 
     let fire_target_net_worth = fire_settings.and_then(|fs| {
-        compute_fire_target_nw(fs, income_reg, income_retirement, expense_reg)
+        compute_fire_target_nw(fs, income_reg, income_retirement, expense_retirement)
     });
 
     let assets_rows: Vec<AssetEngineRow> = match view {
@@ -597,8 +619,14 @@ pub(crate) async fn build_installation_projection_input(
         }
     };
 
-    let planning_monthly_cash_adjustment =
+    let flow_adj =
         planning_monthly_cash_adjustments_from_flows(today, horizon_months, &planning_rows);
+    let end_adj = expense_end_date_monthly_adjustments(today, horizon_months, &expense_end_entries);
+    let planning_monthly_cash_adjustment: Vec<Decimal> = flow_adj
+        .iter()
+        .zip(end_adj.iter())
+        .map(|(a, b)| a + b)
+        .collect();
 
     let assets: Vec<SimAsset> = assets_rows
         .into_iter()
@@ -636,6 +664,7 @@ pub(crate) async fn build_installation_projection_input(
         planning_monthly_cash_adjustment,
         retirement_start_month: None,
         income_retirement_monthly: income_retirement,
+        expense_retirement_monthly: expense_retirement,
         retirement_monthly_withdrawal: Decimal::ZERO,
         fire_target_net_worth,
     };
@@ -1104,6 +1133,7 @@ mod milestone_tests {
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::from(2500),
             retirement_monthly_withdrawal: Decimal::ZERO,
             fire_target_net_worth: None,
         };
@@ -1132,6 +1162,7 @@ mod milestone_tests {
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 24],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::from(1000),
             retirement_monthly_withdrawal: Decimal::ZERO,
             fire_target_net_worth: None,
         };

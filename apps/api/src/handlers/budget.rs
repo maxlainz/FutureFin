@@ -39,8 +39,13 @@ pub struct BudgetEntryResponse {
     pub notes: Option<String>,
     pub sort_index: i32,
     /// Whether this income entry continues contributing after the retirement start month.
-    /// Always `false` for expense entries.
     pub persists_after_retirement: bool,
+    /// Whether this expense entry stops at the retirement start month (always `false` for income).
+    pub ends_at_retirement: bool,
+    /// The date on which this expense entry stops counting (exclusive of the month that starts after this date).
+    /// `null` when the expense has no explicit end date. Always `null` for income entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expense_end_date: Option<NaiveDate>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -72,6 +77,10 @@ pub struct BudgetTotalsResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_regular_monthly_equivalent: Decimal,
+    /// Sum of expense entries that continue after retirement (`ends_at_retirement = false`).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub expense_retirement_monthly_equivalent: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_derived_monthly_equivalent: Decimal,
@@ -103,6 +112,10 @@ pub struct CreateBudgetEntryBody {
     pub sort_index: Option<i32>,
     #[serde(default)]
     pub persists_after_retirement: bool,
+    #[serde(default)]
+    pub ends_at_retirement: bool,
+    #[serde(default)]
+    pub expense_end_date: Option<NaiveDate>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -120,6 +133,13 @@ pub struct PatchBudgetEntryBody {
     pub sort_index: Option<i32>,
     #[serde(default)]
     pub persists_after_retirement: Option<bool>,
+    #[serde(default)]
+    pub ends_at_retirement: Option<bool>,
+    #[serde(default)]
+    pub expense_end_date: Option<NaiveDate>,
+    /// Set to `true` to explicitly clear `expense_end_date` to NULL.
+    #[serde(default)]
+    pub clear_expense_end_date: Option<bool>,
 }
 
 #[derive(Debug, FromRow)]
@@ -131,6 +151,8 @@ pub(crate) struct BudgetEntryJoinRow {
     notes: Option<String>,
     sort_index: i32,
     persists_after_retirement: bool,
+    ends_at_retirement: bool,
+    expense_end_date: Option<NaiveDate>,
 }
 
 #[derive(Debug, FromRow)]
@@ -169,6 +191,8 @@ fn row_to_entry_response(r: BudgetEntryJoinRow) -> Result<BudgetEntryResponse, A
         notes: r.notes,
         sort_index: r.sort_index,
         persists_after_retirement: r.persists_after_retirement,
+        ends_at_retirement: r.ends_at_retirement,
+        expense_end_date: r.expense_end_date,
     })
 }
 
@@ -230,7 +254,8 @@ async fn fetch_budget_rows_and_derived_liabilities(
         LedgerView::Household => {
             sqlx::query_as(
                 r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                          b.notes, b.sort_index, b.persists_after_retirement
+                          b.notes, b.sort_index, b.persists_after_retirement,
+                          b.ends_at_retirement, b.expense_end_date
                    FROM budget_entries b
                    JOIN categories c ON c.id = b.category_id
                    WHERE b.installation_id = $1
@@ -243,7 +268,8 @@ async fn fetch_budget_rows_and_derived_liabilities(
         LedgerView::Mine => {
             sqlx::query_as(
                 r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                          b.notes, b.sort_index, b.persists_after_retirement
+                          b.notes, b.sort_index, b.persists_after_retirement,
+                          b.ends_at_retirement, b.expense_end_date
                    FROM budget_entries b
                    JOIN categories c ON c.id = b.category_id
                    WHERE b.installation_id = $1 AND b.owner_user_id = $2
@@ -303,6 +329,7 @@ pub(crate) fn ledger_budget_totals_from_parts(
     let mut income_m = Decimal::ZERO;
     let mut income_retirement_m = Decimal::ZERO;
     let mut expense_reg = Decimal::ZERO;
+    let mut expense_retirement_m = Decimal::ZERO;
 
     for r in rows {
         let me = r.amount;
@@ -313,7 +340,12 @@ pub(crate) fn ledger_budget_totals_from_parts(
                     income_retirement_m += me;
                 }
             }
-            "expense" => expense_reg += me,
+            "expense" => {
+                expense_reg += me;
+                if !r.ends_at_retirement {
+                    expense_retirement_m += me;
+                }
+            }
             _ => {}
         }
     }
@@ -332,6 +364,7 @@ pub(crate) fn ledger_budget_totals_from_parts(
         income_monthly_equivalent: income_m,
         income_retirement_monthly_equivalent: income_retirement_m,
         expense_regular_monthly_equivalent: expense_reg,
+        expense_retirement_monthly_equivalent: expense_retirement_m,
         expense_derived_monthly_equivalent: expense_der,
         expense_total_monthly_equivalent: expense_tot,
         net_monthly_equivalent: net,
@@ -352,20 +385,25 @@ pub(crate) async fn ledger_budget_totals_for_summary(
 }
 
 /// Persisted budget rows only (no liability-derived lines), for projection / FIRE expense bases.
-/// Returns `(income_reg, income_retirement, expense_reg)` where `income_retirement` is the sum
-/// of income entries with `persists_after_retirement = true`.
+///
+/// Returns `(income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries)`:
+/// - `income_retirement`: sum of income entries with `persists_after_retirement = true`.
+/// - `expense_retirement`: sum of expense entries with `ends_at_retirement = false` (continue after retirement).
+/// - `expense_end_entries`: `(amount, end_date)` pairs for expense entries with an explicit `expense_end_date`.
 pub(crate) async fn ledger_regular_monthly_income_and_expense(
     pool: &sqlx::PgPool,
     iid: Uuid,
     session_user_id: Uuid,
     view: LedgerView,
     today: NaiveDate,
-) -> Result<(Decimal, Decimal, Decimal), ApiError> {
+) -> Result<(Decimal, Decimal, Decimal, Decimal, Vec<(Decimal, NaiveDate)>), ApiError> {
     let (rows, _) =
         fetch_budget_rows_and_derived_liabilities(pool, iid, session_user_id, view, today).await?;
     let mut income_m = Decimal::ZERO;
     let mut income_retirement_m = Decimal::ZERO;
     let mut expense_reg = Decimal::ZERO;
+    let mut expense_retirement_m = Decimal::ZERO;
+    let mut expense_end_entries: Vec<(Decimal, NaiveDate)> = Vec::new();
     for r in rows {
         let me = r.amount;
         match r.scope.as_str() {
@@ -375,11 +413,19 @@ pub(crate) async fn ledger_regular_monthly_income_and_expense(
                     income_retirement_m += me;
                 }
             }
-            "expense" => expense_reg += me,
+            "expense" => {
+                expense_reg += me;
+                if !r.ends_at_retirement {
+                    expense_retirement_m += me;
+                }
+                if let Some(end_date) = r.expense_end_date {
+                    expense_end_entries.push((me, end_date));
+                }
+            }
             _ => {}
         }
     }
-    Ok((income_m, income_retirement_m, expense_reg))
+    Ok((income_m, income_retirement_m, expense_reg, expense_retirement_m, expense_end_entries))
 }
 
 #[utoipa::path(
@@ -478,15 +524,22 @@ pub async fn create_budget_entry(
         ));
     }
 
+    if body.ends_at_retirement && body.expense_end_date.is_some() {
+        return Err(ApiError::BadRequest(
+            "ends_at_retirement and expense_end_date are mutually exclusive".into(),
+        ));
+    }
+
     let notes = normalize_notes(&body.notes)?;
     let sort_index = body.sort_index.unwrap_or(0);
 
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO budget_entries (
                installation_id, category_id, amount, notes, sort_index,
-               owner_user_id, persists_after_retirement
+               owner_user_id, persists_after_retirement,
+               ends_at_retirement, expense_end_date
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING id"#,
     )
     .bind(iid)
@@ -496,12 +549,15 @@ pub async fn create_budget_entry(
     .bind(sort_index)
     .bind(user.id.0)
     .bind(body.persists_after_retirement)
+    .bind(body.ends_at_retirement)
+    .bind(body.expense_end_date)
     .fetch_one(&state.pool)
     .await?;
 
     let row: BudgetEntryJoinRow = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                  b.notes, b.sort_index, b.persists_after_retirement
+                  b.notes, b.sort_index, b.persists_after_retirement,
+                  b.ends_at_retirement, b.expense_end_date
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1"#,
@@ -549,6 +605,9 @@ pub async fn patch_budget_entry(
         && body.notes.is_none()
         && body.sort_index.is_none()
         && body.persists_after_retirement.is_none()
+        && body.ends_at_retirement.is_none()
+        && body.expense_end_date.is_none()
+        && body.clear_expense_end_date.is_none()
     {
         return Err(ApiError::BadRequest(
             "provide at least one field to update".into(),
@@ -557,7 +616,8 @@ pub async fn patch_budget_entry(
 
     let row: Option<BudgetEntryJoinRow> = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                  b.notes, b.sort_index, b.persists_after_retirement
+                  b.notes, b.sort_index, b.persists_after_retirement,
+                  b.ends_at_retirement, b.expense_end_date
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1 AND b.installation_id = $2"#,
@@ -595,6 +655,18 @@ pub async fn patch_budget_entry(
 
     let new_sort = body.sort_index.unwrap_or(current.sort_index);
     let new_persists = body.persists_after_retirement.unwrap_or(current.persists_after_retirement);
+    let new_ends = body.ends_at_retirement.unwrap_or(current.ends_at_retirement);
+    let new_expense_end_date = if body.clear_expense_end_date == Some(true) {
+        None
+    } else {
+        body.expense_end_date.or(current.expense_end_date)
+    };
+
+    if new_ends && new_expense_end_date.is_some() {
+        return Err(ApiError::BadRequest(
+            "ends_at_retirement and expense_end_date are mutually exclusive".into(),
+        ));
+    }
 
     let updated: BudgetEntryJoinRow = sqlx::query_as(
         r#"UPDATE budget_entries
@@ -603,8 +675,10 @@ pub async fn patch_budget_entry(
                notes = $3,
                sort_index = $4,
                persists_after_retirement = $5,
+               ends_at_retirement = $6,
+               expense_end_date = $7,
                updated_at = now()
-           WHERE id = $6 AND installation_id = $7
+           WHERE id = $8 AND installation_id = $9
            RETURNING budget_entries.id,
                      budget_entries.category_id,
                      (
@@ -615,13 +689,17 @@ pub async fn patch_budget_entry(
                      budget_entries.amount,
                      budget_entries.notes,
                      budget_entries.sort_index,
-                     budget_entries.persists_after_retirement"#,
+                     budget_entries.persists_after_retirement,
+                     budget_entries.ends_at_retirement,
+                     budget_entries.expense_end_date"#,
     )
     .bind(new_cat)
     .bind(new_amount)
     .bind(&new_notes)
     .bind(new_sort)
     .bind(new_persists)
+    .bind(new_ends)
+    .bind(new_expense_end_date)
     .bind(id)
     .bind(iid)
     .fetch_one(&state.pool)

@@ -60,6 +60,11 @@ pub struct ProjectionInput {
     /// Replaces `income_regular_monthly` from `retirement_start_month` onward.
     /// Typically `0` when all income stops at retirement (the default).
     pub income_retirement_monthly: Decimal,
+    /// Expenses from sources that continue after retirement (i.e. entries where
+    /// `ends_at_retirement = false`). Replaces `expense_regular_monthly` from
+    /// `retirement_start_month` onward. Equal to `expense_regular_monthly` when
+    /// no expense ends at retirement.
+    pub expense_retirement_monthly: Decimal,
     /// Optional additional monthly draw from assets on top of the income/expense budget.
     /// The handler typically passes `0` — income reduction via `income_retirement_monthly`
     /// is the primary drain mechanism in the new model.
@@ -349,6 +354,11 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         } else {
             input.income_regular_monthly
         };
+        let expense = if in_retirement {
+            input.expense_retirement_monthly
+        } else {
+            input.expense_regular_monthly
+        };
 
         let retirement_withdrawal = if in_retirement {
             // When inflation is active the base withdrawal is expressed in today's money.
@@ -368,7 +378,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         };
 
         let net_cash_month = income
-            - input.expense_regular_monthly
+            - expense
             - debt_service
             + planning_adj
             - retirement_withdrawal;
@@ -494,6 +504,7 @@ mod tests {
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 3],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::from(1000),
             retirement_monthly_withdrawal: Decimal::ZERO,
                 fire_target_net_worth: None,
         };
@@ -538,6 +549,7 @@ mod tests {
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 3],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::from(3000),
             retirement_monthly_withdrawal: Decimal::ZERO,
                 fire_target_net_worth: None,
         };
@@ -570,6 +582,7 @@ mod tests {
             planning_monthly_cash_adjustment: vec![Decimal::from(250)],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
                 fire_target_net_worth: None,
         };
@@ -599,6 +612,7 @@ mod tests {
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 2],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
                 fire_target_net_worth: None,
         };
@@ -629,6 +643,7 @@ mod tests {
             planning_monthly_cash_adjustment: vec![Decimal::ZERO],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
                 fire_target_net_worth: None,
         };
@@ -660,6 +675,7 @@ mod tests {
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 4],
             retirement_start_month: Some(3),
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::from(1_000),
             fire_target_net_worth: None,
         };
@@ -695,6 +711,7 @@ mod tests {
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 3],
             retirement_start_month: Some(2),
             income_retirement_monthly: Decimal::ZERO,
+            expense_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::from(600),
             fire_target_net_worth: None,
         };
@@ -737,6 +754,7 @@ mod tests {
                 planning_monthly_cash_adjustment: vec![Decimal::ZERO; h as usize],
                 retirement_start_month: Some(1),
                 income_retirement_monthly: Decimal::ZERO,
+                expense_retirement_monthly: Decimal::ZERO,
                 retirement_monthly_withdrawal: base_w,
                 fire_target_net_worth: None,
             }
@@ -780,6 +798,7 @@ mod tests {
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 5],
             retirement_start_month: Some(3),
             income_retirement_monthly: Decimal::from(500),
+            expense_retirement_monthly: Decimal::from(2_000),
             retirement_monthly_withdrawal: Decimal::ZERO,
                 fire_target_net_worth: None,
         };
