@@ -153,6 +153,8 @@ type BudgetEntryApiRow = {
   notes: string | null;
   sort_index: number;
   persists_after_retirement: boolean;
+  ends_at_retirement: boolean;
+  expense_end_date: string | null;
 };
 
 type DerivedBudgetLineApi = {
@@ -1740,6 +1742,8 @@ export default function App() {
   const [budgetFormAmount, setBudgetFormAmount] = useState("");
   const [budgetFormNotes, setBudgetFormNotes] = useState("");
   const [budgetFormPersistsAfterRetirement, setBudgetFormPersistsAfterRetirement] = useState(false);
+  const [budgetFormExpenseEndType, setBudgetFormExpenseEndType] = useState<"never" | "retirement" | "date">("never");
+  const [budgetFormExpenseEndDate, setBudgetFormExpenseEndDate] = useState("");
 
   const [planningFlows, setPlanningFlows] = useState<PlanningFlowApiRow[]>([]);
   const [planningIncomeCategories, setPlanningIncomeCategories] = useState<
@@ -3075,12 +3079,20 @@ export default function App() {
       }
 
       if (editingBudgetEntryId) {
-        const patchBody = {
+        const patchBody: Record<string, unknown> = {
           category_id: budgetFormCategoryId,
           amount: amt,
           notes: budgetFormNotes.trim(),
           persists_after_retirement: budgetFormScope === "income" ? budgetFormPersistsAfterRetirement : false,
         };
+        if (budgetFormScope === "expense") {
+          patchBody.ends_at_retirement = budgetFormExpenseEndType === "retirement";
+          if (budgetFormExpenseEndType === "date") {
+            patchBody.expense_end_date = budgetFormExpenseEndDate;
+          } else {
+            patchBody.clear_expense_end_date = true;
+          }
+        }
         const res = await fetch(
           `/v1/budget/entries/${encodeURIComponent(editingBudgetEntryId)}`,
           {
@@ -3096,6 +3108,12 @@ export default function App() {
       } else {
         if (budgetFormScope === "income") {
           base.persists_after_retirement = budgetFormPersistsAfterRetirement;
+        }
+        if (budgetFormScope === "expense") {
+          base.ends_at_retirement = budgetFormExpenseEndType === "retirement";
+          if (budgetFormExpenseEndType === "date") {
+            base.expense_end_date = budgetFormExpenseEndDate;
+          }
         }
         const res = await fetch("/v1/budget/entries", {
           ...defaultFetchInit,
@@ -3168,6 +3186,9 @@ export default function App() {
     setBudgetFormAmount(formatEditableDecimalString(row.amount));
     setBudgetFormNotes(row.notes ?? "");
     setBudgetFormPersistsAfterRetirement(row.persists_after_retirement);
+    const endType = row.ends_at_retirement ? "retirement" : row.expense_end_date ? "date" : "never";
+    setBudgetFormExpenseEndType(endType);
+    setBudgetFormExpenseEndDate(row.expense_end_date ?? "");
   }
 
   function resetPlanningFlowForm() {
@@ -3824,6 +3845,10 @@ export default function App() {
             setBudgetFormNotes={setBudgetFormNotes}
             budgetFormPersistsAfterRetirement={budgetFormPersistsAfterRetirement}
             setBudgetFormPersistsAfterRetirement={setBudgetFormPersistsAfterRetirement}
+            budgetFormExpenseEndType={budgetFormExpenseEndType}
+            setBudgetFormExpenseEndType={setBudgetFormExpenseEndType}
+            budgetFormExpenseEndDate={budgetFormExpenseEndDate}
+            setBudgetFormExpenseEndDate={setBudgetFormExpenseEndDate}
             editingBudgetEntryId={editingBudgetEntryId}
             budgetSaving={budgetSaving}
             submitBudgetForm={(e) => void submitBudgetForm(e)}
@@ -5162,6 +5187,10 @@ function BudgetView({
   setBudgetFormNotes,
   budgetFormPersistsAfterRetirement,
   setBudgetFormPersistsAfterRetirement,
+  budgetFormExpenseEndType,
+  setBudgetFormExpenseEndType,
+  budgetFormExpenseEndDate,
+  setBudgetFormExpenseEndDate,
   editingBudgetEntryId,
   budgetSaving,
   submitBudgetForm,
@@ -5193,6 +5222,10 @@ function BudgetView({
   setBudgetFormNotes: Dispatch<SetStateAction<string>>;
   budgetFormPersistsAfterRetirement: boolean;
   setBudgetFormPersistsAfterRetirement: Dispatch<SetStateAction<boolean>>;
+  budgetFormExpenseEndType: "never" | "retirement" | "date";
+  setBudgetFormExpenseEndType: Dispatch<SetStateAction<"never" | "retirement" | "date">>;
+  budgetFormExpenseEndDate: string;
+  setBudgetFormExpenseEndDate: Dispatch<SetStateAction<string>>;
   editingBudgetEntryId: string | null;
   budgetSaving: boolean;
   submitBudgetForm: (e: FormEvent) => void;
@@ -5378,7 +5411,36 @@ function BudgetView({
                 />
                 <span>Persiste tras jubilación</span>
               </label>
-            ) : null}
+            ) : (
+              <>
+                <label className="field">
+                  <span>Fin del gasto</span>
+                  <select
+                    value={budgetFormExpenseEndType}
+                    onChange={(e) =>
+                      setBudgetFormExpenseEndType(
+                        e.target.value as "never" | "retirement" | "date"
+                      )
+                    }
+                  >
+                    <option value="never">Sin fecha de fin</option>
+                    <option value="retirement">Al jubilarse</option>
+                    <option value="date">Hasta la fecha…</option>
+                  </select>
+                </label>
+                {budgetFormExpenseEndType === "date" && (
+                  <label className="field">
+                    <span>Fecha de fin</span>
+                    <input
+                      type="date"
+                      value={budgetFormExpenseEndDate}
+                      onChange={(e) => setBudgetFormExpenseEndDate(e.target.value)}
+                      required
+                    />
+                  </label>
+                )}
+              </>
+            )}
             <div className="asset-form-actions">
               <button
                 type="submit"
@@ -5525,6 +5587,7 @@ function BudgetView({
                       <tr>
                         <th>Categoría</th>
                         <th className="num">Importe mensual</th>
+                        <th className="budget-persists-col" title="Fin del gasto">Fin</th>
                         {canEdit ? (
                           <th className="asset-actions-cell">
                             <span className="sr-only">Acciones</span>
@@ -5541,6 +5604,13 @@ function BudgetView({
                           </td>
                           <td className="num">
                             {formatCurrencyAmount(row.amount, currencyIso)}
+                          </td>
+                          <td className="budget-persists-col">
+                            {row.ends_at_retirement
+                              ? "Jub."
+                              : row.expense_end_date
+                              ? row.expense_end_date.slice(0, 7)
+                              : "—"}
                           </td>
                           {canEdit ? (
                             <td className="asset-actions-cell budget-row-actions">
