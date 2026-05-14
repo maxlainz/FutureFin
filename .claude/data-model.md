@@ -55,3 +55,12 @@ Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF). Last bracke
 - `base_currency` validated as 3-letter code, MVP supports EUR/USD/GBP only
 - `swr_pct` bounded 0–4 (percent, not ratio)
 - `projection_target_age` bounded 65–105 when set
+
+## Per-user `.ffbackup`
+The `/v1/backup/user-export` endpoint serializes a single user's slice into a versioned, encrypted binary file (see [`backup_user/schema.rs`](../apps/api/src/handlers/backup_user/schema.rs) and [`backup_user/crypto.rs`](../apps/api/src/handlers/backup_user/crypto.rs)).
+
+- **Scope**: only rows with `owner_user_id = caller.id` are exported. Household rows (`owner_user_id IS NULL`) are excluded by design. Categories are denormalized to `(scope, name)` pairs for portability across installations.
+- **Crypto**: Argon2id KDF (m=19456, t=2, p=1) → AES-256-GCM with random 16-byte salt and 12-byte nonce per export. AAD binds `schema_version`, original `user_id`, and `exported_at` to prevent manifest swap.
+- **Framing**: `"FFBK"` magic + format_version (`u8`) + manifest_len (`u32` LE) + manifest JSON + ciphertext. The manifest stays in cleartext so future versions can refuse unsupported schemas without trying to decrypt.
+- **Forward compat**: each payload variant lives behind `BackupPayloadVN` + a `migrate_to_current` chain. Backups with `schema_version > CURRENT_SCHEMA_VERSION` are rejected with `409` and a clear error.
+- **Import semantics**: replace-only. All four user-scoped tables are wiped (`WHERE installation_id = $1 AND owner_user_id = $2`) then reinserted with fresh UUIDs in the same transaction. `users.birth_date` is updated if the backup differs.

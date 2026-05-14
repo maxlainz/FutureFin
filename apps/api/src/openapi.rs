@@ -4,7 +4,11 @@ use crate::handlers::auth::{
     __path_login, __path_logout, __path_me, __path_patch_me, __path_register,
 };
 #[allow(unused_imports)]
-use crate::handlers::backup::__path_export_backup_zip;
+use crate::handlers::backup_user::export::__path_export_user_backup;
+#[allow(unused_imports)]
+use crate::handlers::backup_user::import::{
+    __path_import_user_backup_apply, __path_import_user_backup_preview,
+};
 #[allow(unused_imports)]
 use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
@@ -83,7 +87,9 @@ use utoipa::OpenApi;
         patch_planning_flow,
         delete_planning_flow,
         get_projection_series,
-        export_backup_zip,
+        export_user_backup,
+        import_user_backup_preview,
+        import_user_backup_apply,
     ),
     components(schemas(
         crate::handlers::health::HealthBody,
@@ -131,6 +137,12 @@ use utoipa::OpenApi;
         crate::handlers::planning::PatchPlanningFlowBody,
         crate::handlers::projection::ProjectionSeriesResponse,
         crate::handlers::projection::ProjectionPoint,
+        crate::handlers::backup_user::ExportRequest,
+        crate::handlers::backup_user::ImportRequest,
+        crate::handlers::backup_user::ImportPreviewResponse,
+        crate::handlers::backup_user::ImportApplyResponse,
+        crate::handlers::backup_user::ImportCounts,
+        crate::handlers::backup_user::schema::UiPreferences,
         ErrorBody,
         ErrorCode,
     )),
@@ -174,7 +186,7 @@ use utoipa::OpenApi;
         ),
         (
             name = "backup",
-            description = "Export CSV en ZIP (MVP sin cifrado); solo propietario"
+            description = "Backup `.ffbackup` por usuario: formato propio cifrado (AES-256-GCM, KDF Argon2id derivado de la contraseña de cuenta). Solo datos del usuario actual; portable entre instalaciones."
         ),
     ),
 )]

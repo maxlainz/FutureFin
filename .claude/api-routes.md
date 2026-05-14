@@ -68,7 +68,11 @@ Response (`ProjectionSeriesResponse`) includes:
 ### Backup
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/v1/backup/export.zip` | ZIP with CSV exports. Owner+ only. |
+| POST | `/v1/backup/user-export` | Returns `.ffbackup` binary for the **current user only**. Body: `{password, ui_preferences?}`. Encrypted with the user's account password (Argon2id KDF → AES-256-GCM). Any role. |
+| POST | `/v1/backup/user-import/preview` | Body: `{file_b64, password}`. Returns counts of what would be imported. Write role required. |
+| POST | `/v1/backup/user-import` | Body: `{file_b64, password, confirm_replace: true}`. **Destructive**: replaces all `owner_user_id = current_user` rows in `assets/liabilities/budget_entries/planning_flows` in a transaction. Write role required. |
+
+The `.ffbackup` format is a versioned, encrypted binary container — see [`backup_user/crypto.rs`](../apps/api/src/handlers/backup_user/crypto.rs) for the frame layout and [`backup_user/schema.rs`](../apps/api/src/handlers/backup_user/schema.rs) for the payload schema + migration layer (`schema_version`).
 
 ## Auth pattern in handlers
 

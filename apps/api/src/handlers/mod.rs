@@ -1,6 +1,6 @@
 pub mod assets;
 pub mod auth;
-pub mod backup;
+pub mod backup_user;
 pub mod budget;
 pub mod categories;
 pub mod fallback;

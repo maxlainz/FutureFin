@@ -186,6 +186,7 @@ type PlanningFlowApiRow = {
   due_date: string | null;
   notes: string | null;
   sort_index: number;
+  show_in_chart: boolean;
 };
 
 type ProjectionPointApi = {
@@ -198,6 +199,12 @@ type ProjectionMilestoneApi = {
   target: string;
   reached_month_index: number;
   reached_date_ymd: string;
+};
+
+type AssetSeriesApi = {
+  asset_id: string;
+  asset_name: string;
+  values: string[];
 };
 
 type ProjectionSeriesApi = {
@@ -220,6 +227,7 @@ type ProjectionSeriesApi = {
   jubilacion_month_index?: number | null;
   /** Objetivo FIRE bruto (patrimonio necesario). Decimal serializado como string. `null` si no configurado. */
   jubilacion_target_net_worth?: string | null;
+  asset_series?: AssetSeriesApi[];
 };
 
 type LiabilityApiRow = {
@@ -429,6 +437,25 @@ const TAB_PATH: Record<TabId, string> = {
   settings: "/ajustes",
 };
 
+/** Slug por subsección de ajustes — la URL completa es `/ajustes/<slug>`. */
+const SETTINGS_SUBTAB_SLUG: Record<SettingsSubTabId, string> = {
+  access: "acceso",
+  calendar: "calendario",
+  projection: "proyeccion",
+  retirement: "jubilacion",
+  categories: "categorias",
+  data: "datos",
+};
+
+const SETTINGS_SUBTAB_LABEL: Record<SettingsSubTabId, string> = {
+  access: "Acceso",
+  calendar: "Calendario",
+  projection: "Proyección",
+  retirement: "Jubilación",
+  categories: "Categorías",
+  data: "Datos y sistema",
+};
+
 function normalizeAppPath(pathname: string): string {
   const p = pathname.replace(/\/+$/, "") || "/";
   return p;
@@ -436,11 +463,33 @@ function normalizeAppPath(pathname: string): string {
 
 function tabFromPathname(pathname: string): TabId | null {
   const p = normalizeAppPath(pathname);
+  if (p === TAB_PATH.settings || p.startsWith(`${TAB_PATH.settings}/`)) {
+    return "settings";
+  }
   const ids = Object.keys(TAB_PATH) as TabId[];
   for (const id of ids) {
     if (TAB_PATH[id] === p) return id;
   }
   return null;
+}
+
+function settingsSubTabFromPathname(pathname: string): SettingsSubTabId | null {
+  const p = normalizeAppPath(pathname);
+  const prefix = `${TAB_PATH.settings}/`;
+  if (!p.startsWith(prefix)) return null;
+  const slug = p.slice(prefix.length);
+  const entries = Object.entries(SETTINGS_SUBTAB_SLUG) as [
+    SettingsSubTabId,
+    string,
+  ][];
+  for (const [id, s] of entries) {
+    if (s === slug) return id;
+  }
+  return null;
+}
+
+function settingsSubTabPath(id: SettingsSubTabId): string {
+  return `${TAB_PATH.settings}/${SETTINGS_SUBTAB_SLUG[id]}`;
 }
 
 function useAppPathNavigation(): [
@@ -480,6 +529,34 @@ type LedgerPersonScope = "household" | "mine";
 
 const LEDGER_PERSON_SCOPE_STORAGE_KEY = "futurefin-ledger-person-scope";
 const PROJECTION_FOCUS_STORAGE_KEY = "futurefin-projection-focus";
+
+type FfbackupImportCounts = {
+  assets: number;
+  liabilities: number;
+  budget_entries: number;
+  planning_flows: number;
+  categories_in_backup: number;
+  categories_already_present: number;
+  categories_to_create: number;
+};
+
+type FfbackupImportPreviewResponse = {
+  schema_version: number;
+  app_version: string;
+  exported_at: string;
+  username_original: string;
+  counts: FfbackupImportCounts;
+  birth_date_will_change: boolean;
+  ui_preferences_present: boolean;
+};
+
+type FfbackupImportApplyResponse = {
+  imported: FfbackupImportCounts;
+  ui_preferences: {
+    person_scope?: string | null;
+    projection_focus?: string | null;
+  };
+};
 
 function ledgerViewQs(scope: LedgerPersonScope): string {
   return scope === "mine" ? "?view=mine" : "";
@@ -1766,6 +1843,7 @@ export default function App() {
   const [planningFormAmount, setPlanningFormAmount] = useState("");
   const [planningFormDue, setPlanningFormDue] = useState("");
   const [planningFormNotes, setPlanningFormNotes] = useState("");
+  const [planningFormShowInChart, setPlanningFormShowInChart] = useState(false);
 
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
@@ -1785,8 +1863,27 @@ export default function App() {
   const [userBirthDraft, setUserBirthDraft] = useState("");
   const [userProfileSaving, setUserProfileSaving] = useState(false);
   const [userProfileError, setUserProfileError] = useState<string | null>(null);
-  const [backupZipBusy, setBackupZipBusy] = useState(false);
-  const [backupZipError, setBackupZipError] = useState<string | null>(null);
+  const [ffbackupExportModalOpen, setFfbackupExportModalOpen] = useState(false);
+  const [ffbackupExportPassword, setFfbackupExportPassword] = useState("");
+  const [ffbackupExportBusy, setFfbackupExportBusy] = useState(false);
+  const [ffbackupExportError, setFfbackupExportError] = useState<string | null>(
+    null,
+  );
+
+  const [ffbackupImportModalOpen, setFfbackupImportModalOpen] = useState(false);
+  const [ffbackupImportFile, setFfbackupImportFile] = useState<File | null>(
+    null,
+  );
+  const [ffbackupImportPassword, setFfbackupImportPassword] = useState("");
+  const [ffbackupImportBusy, setFfbackupImportBusy] = useState(false);
+  const [ffbackupImportError, setFfbackupImportError] = useState<string | null>(
+    null,
+  );
+  const [ffbackupImportPreview, setFfbackupImportPreview] =
+    useState<FfbackupImportPreviewResponse | null>(null);
+  const [ffbackupImportDone, setFfbackupImportDone] = useState<string | null>(
+    null,
+  );
 
   const [pathname, navigate] = useAppPathNavigation();
   const activeTab = useMemo(
@@ -1795,6 +1892,35 @@ export default function App() {
   );
 
   const hasMembership = installation !== null;
+  const isInstallationOwner = installation?.role === "owner";
+
+  const visibleSettingsSubTabs = useMemo<SettingsSubTabId[]>(() => {
+    const out: SettingsSubTabId[] = [];
+    if (isInstallationOwner) out.push("access");
+    if (hasMembership) {
+      out.push("calendar", "projection", "retirement", "categories");
+    }
+    out.push("data");
+    return out;
+  }, [isInstallationOwner, hasMembership]);
+
+  const defaultSettingsSubTab: SettingsSubTabId =
+    visibleSettingsSubTabs[0] ?? "data";
+
+  const urlSettingsSubTab = useMemo(
+    () => settingsSubTabFromPathname(pathname),
+    [pathname],
+  );
+  const settingsSubTab: SettingsSubTabId =
+    urlSettingsSubTab && visibleSettingsSubTabs.includes(urlSettingsSubTab)
+      ? urlSettingsSubTab
+      : defaultSettingsSubTab;
+  const navigateSettingsSubTab = useCallback(
+    (id: SettingsSubTabId) => {
+      navigate(settingsSubTabPath(id));
+    },
+    [navigate],
+  );
 
   useLayoutEffect(() => {
     if (!user) return;
@@ -1805,8 +1931,22 @@ export default function App() {
     }
     if (tabFromPathname(pathname) === null) {
       navigate("/resumen", true);
+      return;
     }
-  }, [user, pathname, navigate]);
+    if (activeTab === "settings") {
+      const sub = settingsSubTabFromPathname(pathname);
+      if (!sub || !visibleSettingsSubTabs.includes(sub)) {
+        navigate(settingsSubTabPath(defaultSettingsSubTab), true);
+      }
+    }
+  }, [
+    user,
+    pathname,
+    navigate,
+    activeTab,
+    visibleSettingsSubTabs,
+    defaultSettingsSubTab,
+  ]);
 
   const refreshSession = useCallback(async () => {
     setSessionBusy(true);
@@ -2390,6 +2530,7 @@ export default function App() {
       setPlanningFormAmount("");
       setPlanningFormDue("");
       setPlanningFormNotes("");
+      setPlanningFormShowInChart(false);
       setAssetModalOpen(false);
       setLiabilityModalOpen(false);
       setBudgetModalOpen(false);
@@ -2398,7 +2539,6 @@ export default function App() {
       setCategoryRenameModalOpen(false);
       setProjectionSeries(null);
       setProjectionError(null);
-      setBackupZipError(null);
     }
   }, [user]);
 
@@ -3202,6 +3342,7 @@ export default function App() {
     setPlanningFormAmount("");
     setPlanningFormDue("");
     setPlanningFormNotes("");
+    setPlanningFormShowInChart(false);
   }
 
   async function submitPlanningFlowForm(ev: FormEvent) {
@@ -3215,6 +3356,7 @@ export default function App() {
     setPlanningError(null);
     try {
       const dueTrim = planningFormDue.trim();
+      const showInChart = dueTrim !== "" && planningFormShowInChart;
       if (editingPlanningFlowId) {
         const patchBody: Record<string, unknown> = {
           category_id: planningFormCategoryId,
@@ -3222,6 +3364,7 @@ export default function App() {
           expected_amount: amt,
           due_date: dueTrim === "" ? null : dueTrim,
           notes: planningFormNotes.trim(),
+          show_in_chart: showInChart,
         };
         const res = await fetch(
           `/v1/planning/flows/${encodeURIComponent(editingPlanningFlowId)}`,
@@ -3247,6 +3390,9 @@ export default function App() {
         const nt = planningFormNotes.trim();
         if (nt) {
           base.notes = nt;
+        }
+        if (showInChart) {
+          base.show_in_chart = true;
         }
         const res = await fetch("/v1/planning/flows", {
           ...defaultFetchInit,
@@ -3318,11 +3464,52 @@ export default function App() {
     }
   }
 
-  async function exportBackupZipFile() {
-    setBackupZipBusy(true);
-    setBackupZipError(null);
+  function readUiPreferencesFromStorage() {
+    if (typeof window === "undefined") return {};
+    let person_scope: string | undefined;
+    let projection_focus: string | undefined;
     try {
-      const res = await fetch("/v1/backup/export.zip", defaultFetchInit);
+      const ps = window.localStorage.getItem(LEDGER_PERSON_SCOPE_STORAGE_KEY);
+      if (ps === "mine" || ps === "household") person_scope = ps;
+      const pf = window.localStorage.getItem(PROJECTION_FOCUS_STORAGE_KEY);
+      if (pf === "0" || pf === "1") projection_focus = pf;
+    } catch {
+      /* ignore */
+    }
+    return { person_scope, projection_focus };
+  }
+
+  function openFfbackupExportModal() {
+    setFfbackupExportError(null);
+    setFfbackupExportPassword("");
+    setFfbackupExportModalOpen(true);
+  }
+
+  function closeFfbackupExportModal() {
+    if (ffbackupExportBusy) return;
+    setFfbackupExportModalOpen(false);
+    setFfbackupExportPassword("");
+    setFfbackupExportError(null);
+  }
+
+  async function runFfbackupExport(e: FormEvent) {
+    e.preventDefault();
+    if (!ffbackupExportPassword) {
+      setFfbackupExportError("Introduce tu contraseña de cuenta.");
+      return;
+    }
+    setFfbackupExportBusy(true);
+    setFfbackupExportError(null);
+    try {
+      const res = await fetch("/v1/backup/user-export", {
+        ...defaultFetchInit,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          password: ffbackupExportPassword,
+          ui_preferences: readUiPreferencesFromStorage(),
+        }),
+      });
       if (!res.ok) {
         throw new Error(await errorMessageFromResponse(res));
       }
@@ -3330,16 +3517,155 @@ export default function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "futurefin-export.zip";
+      const filenameHeader = res.headers.get("content-disposition") ?? "";
+      const match = filenameHeader.match(/filename="?([^";]+)"?/);
+      a.download = match ? match[1] : "futurefin-backup.ffbackup";
       a.rel = "noopener";
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-    } catch (e: unknown) {
-      setBackupZipError(e instanceof Error ? e.message : String(e));
+      setFfbackupExportModalOpen(false);
+      setFfbackupExportPassword("");
+    } catch (err: unknown) {
+      setFfbackupExportError(
+        err instanceof Error ? err.message : String(err),
+      );
     } finally {
-      setBackupZipBusy(false);
+      setFfbackupExportBusy(false);
+    }
+  }
+
+  function openFfbackupImportModal() {
+    setFfbackupImportError(null);
+    setFfbackupImportPreview(null);
+    setFfbackupImportFile(null);
+    setFfbackupImportPassword("");
+    setFfbackupImportDone(null);
+    setFfbackupImportModalOpen(true);
+  }
+
+  function closeFfbackupImportModal() {
+    if (ffbackupImportBusy) return;
+    setFfbackupImportModalOpen(false);
+    setFfbackupImportError(null);
+    setFfbackupImportPreview(null);
+    setFfbackupImportFile(null);
+    setFfbackupImportPassword("");
+  }
+
+  async function readFileAsBase64(file: File): Promise<string> {
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(
+        ...bytes.subarray(i, Math.min(i + chunk, bytes.length)),
+      );
+    }
+    return window.btoa(binary);
+  }
+
+  async function runFfbackupImportPreview(e: FormEvent) {
+    e.preventDefault();
+    if (!ffbackupImportFile) {
+      setFfbackupImportError("Selecciona un archivo .ffbackup.");
+      return;
+    }
+    if (!ffbackupImportPassword) {
+      setFfbackupImportError(
+        "Introduce la contraseña con la que se generó el backup.",
+      );
+      return;
+    }
+    setFfbackupImportBusy(true);
+    setFfbackupImportError(null);
+    try {
+      const fileB64 = await readFileAsBase64(ffbackupImportFile);
+      const res = await fetch("/v1/backup/user-import/preview", {
+        ...defaultFetchInit,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          file_b64: fileB64,
+          password: ffbackupImportPassword,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      const preview = (await res.json()) as FfbackupImportPreviewResponse;
+      setFfbackupImportPreview(preview);
+    } catch (err: unknown) {
+      setFfbackupImportError(
+        err instanceof Error ? err.message : String(err),
+      );
+    } finally {
+      setFfbackupImportBusy(false);
+    }
+  }
+
+  async function runFfbackupImportApply() {
+    if (!ffbackupImportFile || !ffbackupImportPassword) return;
+    setFfbackupImportBusy(true);
+    setFfbackupImportError(null);
+    try {
+      const fileB64 = await readFileAsBase64(ffbackupImportFile);
+      const res = await fetch("/v1/backup/user-import", {
+        ...defaultFetchInit,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          file_b64: fileB64,
+          password: ffbackupImportPassword,
+          confirm_replace: true,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      const body = (await res.json()) as FfbackupImportApplyResponse;
+      const ui = body.ui_preferences ?? {};
+      try {
+        if (ui.person_scope === "mine" || ui.person_scope === "household") {
+          window.localStorage.setItem(
+            LEDGER_PERSON_SCOPE_STORAGE_KEY,
+            ui.person_scope,
+          );
+          setLedgerPersonScopeInner(ui.person_scope);
+        }
+        if (ui.projection_focus === "0" || ui.projection_focus === "1") {
+          window.localStorage.setItem(
+            PROJECTION_FOCUS_STORAGE_KEY,
+            ui.projection_focus,
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+      const c = body.imported;
+      setFfbackupImportDone(
+        `Importado: ${c.assets} activos, ${c.liabilities} pasivos, ${c.budget_entries} entradas de presupuesto, ${c.planning_flows} flujos.`,
+      );
+      setFfbackupImportPreview(null);
+      setFfbackupImportFile(null);
+      setFfbackupImportPassword("");
+      await Promise.all([
+        loadAssetsPage(),
+        loadLiabilitiesPage(),
+        loadBudgetPage(),
+        loadPlanningPage(),
+        loadSummaryPage(),
+        loadProjectionSeriesPage(),
+        refreshSession(),
+      ]);
+    } catch (err: unknown) {
+      setFfbackupImportError(
+        err instanceof Error ? err.message : String(err),
+      );
+    } finally {
+      setFfbackupImportBusy(false);
     }
   }
 
@@ -3353,6 +3679,7 @@ export default function App() {
     setPlanningFormAmount(formatEditableDecimalString(row.expected_amount));
     setPlanningFormDue(row.due_date ?? "");
     setPlanningFormNotes(row.notes ?? "");
+    setPlanningFormShowInChart(row.show_in_chart);
   }
 
   if (sessionBusy) {
@@ -3892,6 +4219,8 @@ export default function App() {
             setPlanningFormDue={setPlanningFormDue}
             planningFormNotes={planningFormNotes}
             setPlanningFormNotes={setPlanningFormNotes}
+            planningFormShowInChart={planningFormShowInChart}
+            setPlanningFormShowInChart={setPlanningFormShowInChart}
             editingPlanningFlowId={editingPlanningFlowId}
             planningSaving={planningSaving}
             submitPlanningFlowForm={(e) => void submitPlanningFlowForm(e)}
@@ -3929,6 +4258,7 @@ export default function App() {
             projectionError={projectionError}
             userBirthDate={user?.birth_date ?? null}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
+            planningFlows={planningFlows}
           />
         ) : activeTab === "settings" ? (
           <SettingsView
@@ -3980,6 +4310,9 @@ export default function App() {
             hasMembership={hasMembership}
             canEditCategories={installation?.role !== "viewer"}
             isOwner={installation?.role === "owner"}
+            settingsSubTab={settingsSubTab}
+            navigateSettingsSubTab={navigateSettingsSubTab}
+            visibleSettingsSubTabs={visibleSettingsSubTabs}
             pendingUsers={pendingUsers}
             pendingUsersBusy={pendingUsersBusy}
             approveRoles={approveRoles}
@@ -4007,9 +4340,27 @@ export default function App() {
             editCategoryName={editCategoryName}
             setEditCategoryName={setEditCategoryName}
             saveCategoryEdit={(id) => void saveCategoryEdit(id)}
-            backupZipBusy={backupZipBusy}
-            backupZipError={backupZipError}
-            exportBackupZip={() => void exportBackupZipFile()}
+            ffbackupExportModalOpen={ffbackupExportModalOpen}
+            ffbackupExportPassword={ffbackupExportPassword}
+            setFfbackupExportPassword={setFfbackupExportPassword}
+            ffbackupExportBusy={ffbackupExportBusy}
+            ffbackupExportError={ffbackupExportError}
+            openFfbackupExportModal={openFfbackupExportModal}
+            closeFfbackupExportModal={closeFfbackupExportModal}
+            runFfbackupExport={runFfbackupExport}
+            ffbackupImportModalOpen={ffbackupImportModalOpen}
+            ffbackupImportFile={ffbackupImportFile}
+            setFfbackupImportFile={setFfbackupImportFile}
+            ffbackupImportPassword={ffbackupImportPassword}
+            setFfbackupImportPassword={setFfbackupImportPassword}
+            ffbackupImportBusy={ffbackupImportBusy}
+            ffbackupImportError={ffbackupImportError}
+            ffbackupImportPreview={ffbackupImportPreview}
+            ffbackupImportDone={ffbackupImportDone}
+            openFfbackupImportModal={openFfbackupImportModal}
+            closeFfbackupImportModal={closeFfbackupImportModal}
+            runFfbackupImportPreview={runFfbackupImportPreview}
+            runFfbackupImportApply={() => void runFfbackupImportApply()}
           />
         ) : (
           <PlaceholderTab tabLabel={TABS.find((x) => x.id === activeTab)?.label ?? ""} />
@@ -5756,6 +6107,8 @@ function UpcomingView({
   setPlanningFormDue,
   planningFormNotes,
   setPlanningFormNotes,
+  planningFormShowInChart,
+  setPlanningFormShowInChart,
   editingPlanningFlowId,
   planningSaving,
   submitPlanningFlowForm,
@@ -5787,6 +6140,8 @@ function UpcomingView({
   setPlanningFormDue: Dispatch<SetStateAction<string>>;
   planningFormNotes: string;
   setPlanningFormNotes: Dispatch<SetStateAction<string>>;
+  planningFormShowInChart: boolean;
+  setPlanningFormShowInChart: Dispatch<SetStateAction<boolean>>;
   editingPlanningFlowId: string | null;
   planningSaving: boolean;
   submitPlanningFlowForm: (e: FormEvent) => void;
@@ -5990,9 +6345,26 @@ function UpcomingView({
                 <input
                   type="date"
                   value={planningFormDue}
-                  onChange={(e) => setPlanningFormDue(e.target.value)}
+                  onChange={(e) => {
+                    setPlanningFormDue(e.target.value);
+                    if (e.target.value.trim() === "") {
+                      setPlanningFormShowInChart(false);
+                    }
+                  }}
                 />
               </label>
+              {planningFormDue.trim() !== "" ? (
+                <label className="field checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={planningFormShowInChart}
+                    onChange={(e) =>
+                      setPlanningFormShowInChart(e.target.checked)
+                    }
+                  />
+                  <span>Mostrar en la gráfica</span>
+                </label>
+              ) : null}
             </div>
             <label className="field">
               <span>Notas (opc.)</span>
@@ -6654,6 +7026,9 @@ function SettingsView({
   hasMembership,
   canEditCategories,
   isOwner,
+  settingsSubTab,
+  navigateSettingsSubTab,
+  visibleSettingsSubTabs,
   pendingUsers,
   pendingUsersBusy,
   approveRoles,
@@ -6681,9 +7056,27 @@ function SettingsView({
   editCategoryName,
   setEditCategoryName,
   saveCategoryEdit,
-  backupZipBusy,
-  backupZipError,
-  exportBackupZip,
+  ffbackupExportModalOpen,
+  ffbackupExportPassword,
+  setFfbackupExportPassword,
+  ffbackupExportBusy,
+  ffbackupExportError,
+  openFfbackupExportModal,
+  closeFfbackupExportModal,
+  runFfbackupExport,
+  ffbackupImportModalOpen,
+  ffbackupImportFile,
+  setFfbackupImportFile,
+  ffbackupImportPassword,
+  setFfbackupImportPassword,
+  ffbackupImportBusy,
+  ffbackupImportError,
+  ffbackupImportPreview,
+  ffbackupImportDone,
+  openFfbackupImportModal,
+  closeFfbackupImportModal,
+  runFfbackupImportPreview,
+  runFfbackupImportApply,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -6712,6 +7105,9 @@ function SettingsView({
   hasMembership: boolean;
   canEditCategories: boolean;
   isOwner: boolean;
+  settingsSubTab: SettingsSubTabId;
+  navigateSettingsSubTab: (id: SettingsSubTabId) => void;
+  visibleSettingsSubTabs: SettingsSubTabId[];
   pendingUsers: UserResponse[];
   pendingUsersBusy: boolean;
   approveRoles: Record<string, "member" | "viewer">;
@@ -6743,9 +7139,27 @@ function SettingsView({
   editCategoryName: string;
   setEditCategoryName: Dispatch<SetStateAction<string>>;
   saveCategoryEdit: (id: string) => void;
-  backupZipBusy: boolean;
-  backupZipError: string | null;
-  exportBackupZip: () => void;
+  ffbackupExportModalOpen: boolean;
+  ffbackupExportPassword: string;
+  setFfbackupExportPassword: Dispatch<SetStateAction<string>>;
+  ffbackupExportBusy: boolean;
+  ffbackupExportError: string | null;
+  openFfbackupExportModal: () => void;
+  closeFfbackupExportModal: () => void;
+  runFfbackupExport: (e: FormEvent) => void;
+  ffbackupImportModalOpen: boolean;
+  ffbackupImportFile: File | null;
+  setFfbackupImportFile: Dispatch<SetStateAction<File | null>>;
+  ffbackupImportPassword: string;
+  setFfbackupImportPassword: Dispatch<SetStateAction<string>>;
+  ffbackupImportBusy: boolean;
+  ffbackupImportError: string | null;
+  ffbackupImportPreview: FfbackupImportPreviewResponse | null;
+  ffbackupImportDone: string | null;
+  openFfbackupImportModal: () => void;
+  closeFfbackupImportModal: () => void;
+  runFfbackupImportPreview: (e: FormEvent) => void;
+  runFfbackupImportApply: () => void;
 }) {
   const renamingCat =
     editingCategoryId === null
@@ -6757,23 +7171,15 @@ function SettingsView({
       ? categories
       : categories.filter((c) => c.scope === categoryScopeFilter);
 
-  const settingsSubTabs = useMemo(() => {
-    const out: { id: SettingsSubTabId; label: string }[] = [];
-    if (isOwner) {
-      out.push({ id: "access", label: "Acceso" });
-    }
-    if (hasMembership) {
-      out.push({ id: "calendar", label: "Calendario" });
-      out.push({ id: "projection", label: "Proyección" });
-      out.push({ id: "retirement", label: "Jubilación" });
-      out.push({ id: "categories", label: "Categorías" });
-    }
-    out.push({ id: "data", label: "Datos y sistema" });
-    return out;
-  }, [isOwner, hasMembership]);
+  const settingsSubTabs = useMemo(
+    () =>
+      visibleSettingsSubTabs.map((id) => ({
+        id,
+        label: SETTINGS_SUBTAB_LABEL[id],
+      })),
+    [visibleSettingsSubTabs],
+  );
 
-  const [settingsSubTab, setSettingsSubTab] =
-    useState<SettingsSubTabId>("calendar");
   const [fireTaxDraft, setFireTaxDraft] = useState<FireSettingsApi>(() =>
     normalizeInstallationFireSettings(installation?.installation.fire_settings),
   );
@@ -6814,12 +7220,6 @@ function SettingsView({
     };
   }, [fireTaxDraft, hasMembership, isOwner, onSaveFire]);
 
-  useEffect(() => {
-    if (!settingsSubTabs.some((t) => t.id === settingsSubTab)) {
-      setSettingsSubTab(settingsSubTabs[0]?.id ?? "data");
-    }
-  }, [settingsSubTabs, settingsSubTab]);
-
   return (
     <div className="workspace">
       <div className="workspace-header">
@@ -6835,7 +7235,7 @@ function SettingsView({
             key={t.id}
             type="button"
             className={`tab-btn ${settingsSubTab === t.id ? "active" : ""}`}
-            onClick={() => setSettingsSubTab(t.id)}
+            onClick={() => navigateSettingsSubTab(t.id)}
           >
             {t.label}
           </button>
@@ -7169,20 +7569,34 @@ function SettingsView({
 
       {settingsSubTab === "data" ? (
         <>
-          {hasMembership && isOwner ? (
+          {hasMembership ? (
             <section className="panel">
-              <h3 className="panel-title">Copia CSV (ZIP)</h3>
-              {backupZipError ? (
-                <p className="error compact bordered-top">{backupZipError}</p>
+              <h3 className="panel-title">Backup personal (.ffbackup)</h3>
+              <p className="muted compact bordered-top">
+                Exporta o restaura un archivo cifrado con tu contraseña que
+                contiene solo tus datos: activos, pasivos, presupuesto,
+                planificación, categorías usadas, fecha de nacimiento y
+                preferencias UI. El archivo es portable entre instalaciones.
+              </p>
+              {ffbackupImportDone ? (
+                <p className="muted compact bordered-top">
+                  {ffbackupImportDone}
+                </p>
               ) : null}
-              <div className="bordered-top">
+              <div className="bordered-top settings-backup-actions">
                 <button
                   type="button"
                   className="btn primary"
-                  disabled={backupZipBusy}
-                  onClick={() => exportBackupZip()}
+                  onClick={() => openFfbackupExportModal()}
                 >
-                  {backupZipBusy ? "Generando…" : "Descargar ZIP"}
+                  Exportar mis datos (.ffbackup)
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => openFfbackupImportModal()}
+                >
+                  Importar backup (.ffbackup)
                 </button>
               </div>
             </section>
@@ -7201,43 +7615,6 @@ function SettingsView({
                 <div>
                   <dt>Tu rol</dt>
                   <dd>{installation.role}</dd>
-                </div>
-                <div>
-                  <dt>Zona horaria (IANA)</dt>
-                  <dd>
-                    {installation.installation.calendar_tz?.trim()
-                      ? installation.installation.calendar_tz.trim()
-                      : "UTC"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Modo edad (UI)</dt>
-                  <dd>{installation.installation.show_age_mode}</dd>
-                </div>
-                <div>
-                  <dt>Inflación en proyección</dt>
-                  <dd>
-                    {installation.installation.projection_includes_inflation
-                      ? "sí"
-                      : "no"}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Supuesto inflación anual</dt>
-                  <dd>
-                    {installation.installation.annual_inflation_assumption_percent !=
-                    null &&
-                    String(
-                      installation.installation.annual_inflation_assumption_percent,
-                    ).trim() !== ""
-                      ? formatPercentAmount(
-                          String(
-                            installation.installation
-                              .annual_inflation_assumption_percent,
-                          ),
-                        )
-                      : "—"}
-                  </dd>
                 </div>
               </dl>
             ) : (
@@ -7444,9 +7821,183 @@ function SettingsView({
           </Modal>
         </>
       ) : null}
+
+      <Modal
+        title="Exportar backup personal"
+        open={ffbackupExportModalOpen}
+        onClose={closeFfbackupExportModal}
+      >
+        <form className="stack" onSubmit={runFfbackupExport}>
+          <ModalFormError message={ffbackupExportError} />
+          <p className="muted tight">
+            El archivo .ffbackup quedará cifrado con tu contraseña actual.
+            Guárdalo en un sitio seguro y recuerda la contraseña — sin ella
+            no se puede restaurar.
+          </p>
+          <label className="field">
+            <span>Tu contraseña</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={ffbackupExportPassword}
+              onChange={(e) => setFfbackupExportPassword(e.target.value)}
+              disabled={ffbackupExportBusy}
+              required
+            />
+          </label>
+          <div className="asset-form-actions">
+            <button
+              type="submit"
+              className="btn primary"
+              disabled={ffbackupExportBusy}
+            >
+              {ffbackupExportBusy ? "Generando…" : "Descargar .ffbackup"}
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={ffbackupExportBusy}
+              onClick={() => closeFfbackupExportModal()}
+            >
+              Cancelar
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        title="Importar backup personal"
+        open={ffbackupImportModalOpen}
+        onClose={closeFfbackupImportModal}
+      >
+        <div className="stack">
+          <ModalFormError message={ffbackupImportError} />
+          {ffbackupImportPreview === null ? (
+            <form className="stack" onSubmit={runFfbackupImportPreview}>
+              <p className="muted tight">
+                Sube un archivo .ffbackup y la contraseña con la que se
+                generó. Verás un resumen antes de aplicar nada.
+              </p>
+              <label className="field">
+                <span>Archivo .ffbackup</span>
+                <input
+                  type="file"
+                  accept=".ffbackup"
+                  disabled={ffbackupImportBusy}
+                  onChange={(e) => {
+                    const f = e.target.files && e.target.files[0];
+                    setFfbackupImportFile(f ?? null);
+                  }}
+                />
+              </label>
+              <label className="field">
+                <span>Contraseña del backup</span>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={ffbackupImportPassword}
+                  onChange={(e) =>
+                    setFfbackupImportPassword(e.target.value)
+                  }
+                  disabled={ffbackupImportBusy}
+                  required
+                />
+              </label>
+              <div className="asset-form-actions">
+                <button
+                  type="submit"
+                  className="btn primary"
+                  disabled={ffbackupImportBusy || !ffbackupImportFile}
+                >
+                  {ffbackupImportBusy ? "Leyendo…" : "Previsualizar"}
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  disabled={ffbackupImportBusy}
+                  onClick={() => closeFfbackupImportModal()}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="stack">
+              <p className="muted tight">
+                Backup de <strong>{ffbackupImportPreview.username_original}</strong>{" "}
+                exportado el {ffbackupImportPreview.exported_at} (app{" "}
+                {ffbackupImportPreview.app_version}, schema v
+                {ffbackupImportPreview.schema_version}).
+              </p>
+              <ul className="muted tight" style={{ paddingLeft: "1.2em" }}>
+                <li>{ffbackupImportPreview.counts.assets} activos</li>
+                <li>{ffbackupImportPreview.counts.liabilities} pasivos</li>
+                <li>
+                  {ffbackupImportPreview.counts.budget_entries} entradas de
+                  presupuesto
+                </li>
+                <li>
+                  {ffbackupImportPreview.counts.planning_flows} flujos
+                  planificados
+                </li>
+                <li>
+                  Categorías:{" "}
+                  {ffbackupImportPreview.counts.categories_in_backup} (
+                  {ffbackupImportPreview.counts.categories_already_present} ya
+                  existen,{" "}
+                  {ffbackupImportPreview.counts.categories_to_create} se
+                  crearán)
+                </li>
+                {ffbackupImportPreview.birth_date_will_change ? (
+                  <li>Tu fecha de nacimiento se actualizará.</li>
+                ) : null}
+                {ffbackupImportPreview.ui_preferences_present ? (
+                  <li>Se restaurarán tus preferencias UI.</li>
+                ) : null}
+              </ul>
+              <p className="error compact">
+                Al continuar se eliminarán todos tus activos, pasivos,
+                presupuesto y planificación actuales y serán reemplazados por
+                los del backup. Operación atómica e irreversible.
+              </p>
+              <div className="asset-form-actions">
+                <button
+                  type="button"
+                  className="btn ghost danger"
+                  disabled={ffbackupImportBusy}
+                  onClick={() => runFfbackupImportApply()}
+                >
+                  {ffbackupImportBusy
+                    ? "Importando…"
+                    : "Confirmar reemplazo"}
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  disabled={ffbackupImportBusy}
+                  onClick={() => closeFfbackupImportModal()}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }
+
+const ASSET_LINE_COLORS = [
+  "#2563eb",
+  "#7c3aed",
+  "#db2777",
+  "#0891b2",
+  "#ea580c",
+  "#65a30d",
+  "#9333ea",
+  "#0f766e",
+];
 
 function ProjectionNetWorthChart({
   series,
@@ -7460,6 +8011,7 @@ function ProjectionNetWorthChart({
   userBirthDate,
   anchorDateYmd,
   calendarTz,
+  planningFlows,
 }: {
   series: ProjectionSeriesApi;
   milestones: ProjectionMilestoneApi[];
@@ -7473,6 +8025,7 @@ function ProjectionNetWorthChart({
   /** Mes 0 del motor (YYYY-MM-DD); prioridad sobre reloj cliente. */
   anchorDateYmd: string | null;
   calendarTz: string;
+  planningFlows: PlanningFlowApiRow[];
 }) {
   const pts = series.points;
   const gid = useId().replace(/:/g, "");
@@ -7559,6 +8112,34 @@ function ProjectionNetWorthChart({
     if (pts.length < 2) return null;
     const nw = pts.map((p) => parseDisplayDecimal(p.net_worth) ?? 0);
     const cc = pts.map((p) => parseDisplayDecimal(p.contributed_capital) ?? 0);
+    const assetSeries = (series.asset_series ?? []).map((as) => ({
+      id: as.asset_id,
+      name: as.asset_name,
+      values: as.values.map((v) => parseDisplayDecimal(v) ?? 0),
+    }));
+    const monthCount = pts.length;
+    const assetSums: number[] = new Array(monthCount).fill(0);
+    for (let k = 0; k < monthCount; k++) {
+      let s = 0;
+      for (const as of assetSeries) s += Math.max(0, as.values[k] ?? 0);
+      assetSums[k] = s;
+    }
+    const assetStacks = assetSeries.map(() => ({
+      bottoms: new Array(monthCount).fill(0),
+      tops: new Array(monthCount).fill(0),
+    }));
+    for (let k = 0; k < monthCount; k++) {
+      const baseTotal = Math.max(0, nw[k] ?? 0);
+      const sum = assetSums[k];
+      let cursor = 0;
+      for (let i = 0; i < assetSeries.length; i++) {
+        const v = Math.max(0, assetSeries[i].values[k] ?? 0);
+        const height = sum > 0 ? baseTotal * (v / sum) : 0;
+        assetStacks[i].bottoms[k] = cursor;
+        cursor += height;
+        assetStacks[i].tops[k] = cursor;
+      }
+    }
     const minVisiblePoints = Math.min(pts.length, 12);
     const visibleCount = Math.max(
       minVisiblePoints,
@@ -7572,13 +8153,16 @@ function ProjectionNetWorthChart({
     const visibleEnd = visibleStart + visibleCount - 1;
     const nwVisible = nw.slice(visibleStart, visibleEnd + 1);
     const ccVisible = cc.slice(visibleStart, visibleEnd + 1);
+    const assetVisibleValues = assetSeries.flatMap((as) =>
+      as.values.slice(visibleStart, visibleEnd + 1),
+    );
     const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
     const startNw =
       startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
     const allowNegativeAxis = startNw < 0;
 
-    const dataMin = Math.min(...nwVisible, ...ccVisible);
-    const dataMax = Math.max(...nwVisible, ...ccVisible);
+    const dataMin = Math.min(...nwVisible, ...ccVisible, ...assetVisibleValues);
+    const dataMax = Math.max(...nwVisible, ...ccVisible, ...assetVisibleValues);
     const rawSpan = dataMax - dataMin;
     const padY =
       rawSpan > 0
@@ -7662,9 +8246,30 @@ function ProjectionNetWorthChart({
       compoundOutpaceMonth != null &&
       compoundOutpaceMonth >= visibleStart &&
       compoundOutpaceMonth <= visibleEnd;
+    const chartPlanningMarkers = (() => {
+      const anchor = anchorDateYmd ? parseYmdComponents(anchorDateYmd) : null;
+      if (!anchor) return [];
+      const out: Array<{
+        id: string;
+        mi: number;
+        title: string;
+        direction: PlanningFlowDirectionApi;
+      }> = [];
+      for (const f of planningFlows) {
+        if (!f.show_in_chart || !f.due_date) continue;
+        const d = parseYmdComponents(f.due_date);
+        if (!d) continue;
+        const mi = (d.y - anchor.y) * 12 + (d.m - anchor.m);
+        if (mi < visibleStart || mi > visibleEnd) continue;
+        out.push({ id: f.id, mi, title: f.title, direction: f.direction });
+      }
+      return out;
+    })();
     return {
       nw,
       cc,
+      assetSeries,
+      assetStacks,
       nwVisible,
       ccVisible,
       allowNegativeAxis,
@@ -7675,6 +8280,7 @@ function ProjectionNetWorthChart({
       compoundOutpaceMonth,
       showCompoundOutpaceMarker,
       visibleMilestones,
+      chartPlanningMarkers,
       pw,
       ph,
       ml,
@@ -7693,6 +8299,7 @@ function ProjectionNetWorthChart({
     pts,
     series.months,
     series.starting_net_worth,
+    series.asset_series,
     layoutDims,
     ageUiMode,
     userBirthDate,
@@ -7702,6 +8309,7 @@ function ProjectionNetWorthChart({
     focusMode,
     viewWindow.count,
     viewWindow.start,
+    planningFlows,
   ]);
 
   if (!model) {
@@ -7711,6 +8319,8 @@ function ProjectionNetWorthChart({
   const {
     nw,
     cc,
+    assetSeries,
+    assetStacks,
     nwVisible,
     ccVisible,
     allowNegativeAxis,
@@ -7721,6 +8331,7 @@ function ProjectionNetWorthChart({
     compoundOutpaceMonth,
     showCompoundOutpaceMarker,
     visibleMilestones,
+    chartPlanningMarkers,
     pw,
     ph,
     ml,
@@ -7929,6 +8540,27 @@ function ProjectionNetWorthChart({
           <text x={34} y={11}>Patrimonio neto</text>
           <line x1={0} y1={29} x2={26} y2={29} stroke="#b45309" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
           <text x={34} y={33}>Capital aportado</text>
+          {assetSeries.map((as, idx) => {
+            const color = ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length];
+            const yOff = 51 + idx * 22;
+            return (
+              <g key={as.id}>
+                <rect
+                  x={0}
+                  y={yOff + 2}
+                  width={20}
+                  height={11}
+                  rx={2}
+                  fill={color}
+                  fillOpacity={0.18}
+                  stroke={color}
+                  strokeOpacity={0.23}
+                  strokeWidth={0.6}
+                />
+                <text x={28} y={yOff + 11}>{as.name}</text>
+              </g>
+            );
+          })}
         </g>
 
         {yTicks.map((yt) => (
@@ -7987,7 +8619,34 @@ function ProjectionNetWorthChart({
         />
 
         <g clipPath={`url(#projectionPlotClip-${gid})`}>
-          <path d={areaD} fill={`url(#nwFill-${gid})`} stroke="none" />
+          {assetSeries.length === 0 ? (
+            <path d={areaD} fill={`url(#nwFill-${gid})`} stroke="none" />
+          ) : (
+            assetSeries.map((as, idx) => {
+              const color = ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length];
+              const stack = assetStacks[idx];
+              const topParts: string[] = [];
+              const botParts: string[] = [];
+              for (let k = visibleStart; k <= visibleEnd; k++) {
+                topParts.push(`${xScale(k)},${yScale(stack.tops[k])}`);
+              }
+              for (let k = visibleEnd; k >= visibleStart; k--) {
+                botParts.push(`${xScale(k)},${yScale(stack.bottoms[k])}`);
+              }
+              const d = `M ${topParts.join(" L ")} L ${botParts.join(" L ")} Z`;
+              return (
+                <path
+                  key={as.id}
+                  d={d}
+                  fill={color}
+                  fillOpacity={0.18}
+                  stroke={color}
+                  strokeWidth={0.6}
+                  strokeOpacity={0.23}
+                />
+              );
+            })
+          )}
           <polyline
             points={nwPoints}
             fill="none"
@@ -8038,6 +8697,47 @@ function ProjectionNetWorthChart({
                   y={y1 - 6}
                   textAnchor="middle"
                   className={isJubilacion ? "projection-chart-jubilacion-label" : "projection-chart-milestone-label"}
+                >
+                  {label}
+                </text>
+              </g>
+            );
+          })}
+          {chartPlanningMarkers.map((m) => {
+            const x = xScale(m.mi);
+            const y0 = mt + ph;
+            const nwAtMi = nw[m.mi] ?? null;
+            const nwY =
+              nwAtMi != null && Number.isFinite(nwAtMi) ? yScale(nwAtMi) : null;
+            const y1Floor = mt + 12;
+            const y1FromNetWorth =
+              nwY != null ? nwY - 12 : y0 - Math.min(44, ph * 0.22);
+            const y1 = Math.max(y1Floor, Math.min(y0 - 8, y1FromNetWorth));
+            const isInflow = m.direction === "inflow";
+            const label =
+              m.title.length > 18 ? m.title.slice(0, 17) + "…" : m.title;
+            return (
+              <g key={`pf-${m.id}`}>
+                <line
+                  x1={x}
+                  x2={x}
+                  y1={y0}
+                  y2={y1}
+                  className={
+                    isInflow
+                      ? "projection-chart-planning-inflow-line"
+                      : "projection-chart-planning-outflow-line"
+                  }
+                />
+                <text
+                  x={x}
+                  y={y1 - 6}
+                  textAnchor="middle"
+                  className={
+                    isInflow
+                      ? "projection-chart-planning-inflow-label"
+                      : "projection-chart-planning-outflow-label"
+                  }
                 >
                   {label}
                 </text>
@@ -8118,6 +8818,15 @@ function ProjectionNetWorthChart({
               currencyIso,
             )}
           </div>
+          {assetSeries.map((as) => (
+            <div key={as.id}>
+              {as.name} —{" "}
+              {formatCurrencyOrDash(
+                series.asset_series?.find((s) => s.asset_id === as.id)?.values[hover] ?? undefined,
+                currencyIso,
+              )}
+            </div>
+          ))}
         </div>
       ) : null}
     </div>
@@ -8616,6 +9325,7 @@ function ProjectionView({
   projectionError,
   userBirthDate,
   calendarTz,
+  planningFlows,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -8626,6 +9336,7 @@ function ProjectionView({
   projectionError: string | null;
   userBirthDate: string | null;
   calendarTz: string;
+  planningFlows: PlanningFlowApiRow[];
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
   const inflationPctRaw =
@@ -8785,6 +9496,7 @@ function ProjectionView({
             userBirthDate={axisBirth}
             anchorDateYmd={axisAnchor}
             calendarTz={calendarTz}
+            planningFlows={planningFlows}
           />
         </section>
       ) : null}

@@ -80,6 +80,10 @@ pub struct ProjectionOutput {
     pub net_worth: Vec<Decimal>,
     /// Cumulative contributed basis, deflated when inflation assumption is active.
     pub contributed_capital: Vec<Decimal>,
+    /// Per-asset value series: `per_asset_series[asset_index][month_index]`.
+    /// Length == `assets.len()`; inner length == `horizon_months + 1` (months 0..=horizon).
+    /// Values are deflated by the same factor applied to `net_worth` when inflation is active.
+    pub per_asset_series: Vec<Vec<Decimal>>,
 }
 
 fn month_first_calendar(d: NaiveDate) -> NaiveDate {
@@ -294,6 +298,11 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
     let mut net_series = Vec::with_capacity(input.horizon_months as usize + 1);
     let mut contrib_series = Vec::with_capacity(input.horizon_months as usize + 1);
+    let mut per_asset_series: Vec<Vec<Decimal>> = input
+        .assets
+        .iter()
+        .map(|_| Vec::with_capacity(input.horizon_months as usize + 1))
+        .collect();
 
     // Coste histórico ya invertido (precio de compra) antes del primer mes simulado.
     let initial_contributed_basis: Decimal = input
@@ -321,6 +330,9 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         surplus_cash,
     ));
     contrib_series.push(contributed_cumulative);
+    for (i, s) in per_asset_series.iter_mut().enumerate() {
+        s.push(values[i]);
+    }
 
     for k in 1..=input.horizon_months {
         let month_first = add_months(start_month_first, k - 1);
@@ -455,24 +467,34 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             surplus_cash,
         );
         let mut contributed_display = contributed_cumulative;
+        let mut deflation_denom = Decimal::ONE;
         if let Some(inf) = input.inflation_annual_percent {
             if inf > Decimal::ZERO {
                 let months_k = Decimal::from(k);
-                let denom = (Decimal::ONE + inf / Decimal::from(100))
+                deflation_denom = (Decimal::ONE + inf / Decimal::from(100))
                     .powd(months_k / Decimal::from(12));
-                if denom > Decimal::ZERO {
-                    nw /= denom;
-                    contributed_display /= denom;
+                if deflation_denom > Decimal::ZERO {
+                    nw /= deflation_denom;
+                    contributed_display /= deflation_denom;
                 }
             }
         }
         net_series.push(nw);
         contrib_series.push(contributed_display);
+        for (i, s) in per_asset_series.iter_mut().enumerate() {
+            let v = if deflation_denom > Decimal::ZERO {
+                values[i] / deflation_denom
+            } else {
+                values[i]
+            };
+            s.push(v);
+        }
     }
 
     Ok(ProjectionOutput {
         net_worth: net_series,
         contributed_capital: contrib_series,
+        per_asset_series,
     })
 }
 

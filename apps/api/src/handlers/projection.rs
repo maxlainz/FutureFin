@@ -129,6 +129,14 @@ pub struct ProjectionPoint {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct AssetSeries {
+    pub asset_id: Uuid,
+    pub asset_name: String,
+    /// Decimal values serialized as strings, one per month (parallel to `points`).
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProjectionSeriesResponse {
     pub points: Vec<ProjectionPoint>,
     pub months: u32,
@@ -164,6 +172,8 @@ pub struct ProjectionSeriesResponse {
     /// Objetivo FIRE bruto (patrimonio necesario, gross-up aplicado). Decimal serializado como string. `null` si no configurado.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jubilacion_target_net_worth: Option<String>,
+    /// Valor de cada activo mes a mes (paralelo a `points`). Un elemento por activo, en el mismo orden que la consulta de activos.
+    pub asset_series: Vec<AssetSeries>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -890,6 +900,36 @@ pub async fn get_projection_series(
         })
         .collect();
 
+    #[derive(sqlx::FromRow)]
+    struct AssetNameRow {
+        id: Uuid,
+        name: String,
+    }
+    let asset_name_rows: Vec<AssetNameRow> = match view {
+        LedgerView::Household => {
+            sqlx::query_as("SELECT id, name FROM assets WHERE installation_id = $1 ORDER BY sort_index ASC, name ASC")
+                .bind(iid)
+                .fetch_all(&state.pool)
+                .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as("SELECT id, name FROM assets WHERE installation_id = $1 AND owner_user_id = $2 ORDER BY sort_index ASC, name ASC")
+                .bind(iid)
+                .bind(user.id.0)
+                .fetch_all(&state.pool)
+                .await?
+        }
+    };
+    let asset_series: Vec<AssetSeries> = asset_name_rows
+        .iter()
+        .zip(output.per_asset_series.iter())
+        .map(|(row, series)| AssetSeries {
+            asset_id: row.id,
+            asset_name: row.name.clone(),
+            values: series.iter().map(|v| v.to_string()).collect(),
+        })
+        .collect();
+
     let planning_rows: Vec<PlanningFlowProjRow> = match view {
         LedgerView::Household => {
             sqlx::query_as(
@@ -949,6 +989,7 @@ pub async fn get_projection_series(
         compound_outpaces_true_savings_month_index,
         jubilacion_month_index,
         jubilacion_target_net_worth,
+        asset_series,
     }))
 }
 
