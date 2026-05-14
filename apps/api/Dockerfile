@@ -4,7 +4,7 @@
 # Bases de terceros fijadas por digest — actualizar solo de forma deliberada (véase README).
 
 # --- Frontend (Vite) ---
-FROM node:22.14-bookworm-slim@sha256:1c18d9ab3af4585870b92e4dbc5cac5a0dc77dd13df1a5905cea89fc720eb05b AS web
+FROM node:24.15-bookworm-slim@sha256:24dc26ef1e3c3690f27ebc4136c9c186c3133b25563ae4d7f0692e4d1fe5db0e AS web
 WORKDIR /build
 COPY package.json package-lock.json ./
 COPY apps/web ./apps/web
