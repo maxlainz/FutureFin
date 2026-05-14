@@ -1,6 +1,8 @@
 use crate::handlers::assets::assets_router;
 use crate::handlers::auth::{login, logout, me, patch_me, register};
-use crate::handlers::backup::export_backup_zip;
+use crate::handlers::backup_user::{
+    export_user_backup, import_user_backup_apply, import_user_backup_preview,
+};
 use crate::handlers::budget::budget_router;
 use crate::handlers::categories::categories_router;
 use crate::handlers::fallback;
@@ -47,7 +49,9 @@ pub fn app_router() -> Router {
         .nest("/budget", budget_router())
         .nest("/planning", planning_router())
         .nest("/projection", projection_router())
-        .route("/backup/export.zip", get(export_backup_zip))
+        .route("/backup/user-export", post(export_user_backup))
+        .route("/backup/user-import/preview", post(import_user_backup_preview))
+        .route("/backup/user-import", post(import_user_backup_apply))
         .fallback(fallback::v1_not_found);
 
     Router::new()

@@ -1,12 +1,15 @@
 [package]
 name = "futurefin-api"
-version = "1.0.8"
+version = "1.0.9"
 edition = "2021"
 description = "FutureFin HTTP API (self-hosted)"
 publish = false
 
 [dependencies]
+aes-gcm = "0.10"
 argon2 = "0.5"
+base64 = "0.22"
+flate2 = "1.0"
 rand_core = { version = "0.6", features = ["std"] }
 rust_decimal = { version = "1.41", features = ["serde-with-str"] }
 axum = { version = "0.8", features = ["macros"] }
@@ -36,4 +39,3 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 utoipa = { version = "5", features = ["chrono", "uuid"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

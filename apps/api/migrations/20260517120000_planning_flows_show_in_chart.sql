@@ -1,0 +1,2 @@
+ALTER TABLE planning_flows
+ADD COLUMN show_in_chart BOOLEAN NOT NULL DEFAULT FALSE;

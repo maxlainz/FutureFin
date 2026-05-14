@@ -42,6 +42,7 @@ pub struct PlanningFlowResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
+    pub show_in_chart: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -58,6 +59,8 @@ pub struct CreatePlanningFlowBody {
     pub notes: Option<String>,
     #[serde(default)]
     pub sort_index: Option<i32>,
+    #[serde(default)]
+    pub show_in_chart: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -76,6 +79,8 @@ pub struct PatchPlanningFlowBody {
     pub due_date: Option<Value>,
     pub notes: Option<String>,
     pub sort_index: Option<i32>,
+    #[serde(default)]
+    pub show_in_chart: Option<bool>,
 }
 
 #[derive(Debug, FromRow)]
@@ -88,6 +93,7 @@ struct PlanningFlowJoinRow {
     due_date: Option<NaiveDate>,
     notes: Option<String>,
     sort_index: i32,
+    show_in_chart: bool,
 }
 
 fn scope_to_direction(scope: &str) -> Result<PlanningFlowDirection, ApiError> {
@@ -159,6 +165,7 @@ fn row_to_response(r: PlanningFlowJoinRow) -> Result<PlanningFlowResponse, ApiEr
         due_date: r.due_date,
         notes: r.notes,
         sort_index: r.sort_index,
+        show_in_chart: r.show_in_chart,
     })
 }
 
@@ -188,7 +195,8 @@ pub async fn list_planning_flows(
         LedgerView::Household => {
             sqlx::query_as(
                 r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                          p.expected_amount, p.due_date, p.notes, p.sort_index
+                          p.expected_amount, p.due_date, p.notes, p.sort_index,
+                          p.show_in_chart
                    FROM planning_flows p
                    JOIN categories c ON c.id = p.category_id
                    WHERE p.installation_id = $1
@@ -201,7 +209,8 @@ pub async fn list_planning_flows(
         LedgerView::Mine => {
             sqlx::query_as(
                 r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                          p.expected_amount, p.due_date, p.notes, p.sort_index
+                          p.expected_amount, p.due_date, p.notes, p.sort_index,
+                          p.show_in_chart
                    FROM planning_flows p
                    JOIN categories c ON c.id = p.category_id
                    WHERE p.installation_id = $1 AND p.owner_user_id = $2
@@ -258,12 +267,14 @@ pub async fn create_planning_flow(
     let notes = normalize_notes(&body.notes)?;
     let sort_index = body.sort_index.unwrap_or(0);
 
+    let show_in_chart = body.show_in_chart.unwrap_or(false) && body.due_date.is_some();
+
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO planning_flows (
                installation_id, category_id, title, expected_amount, due_date, notes,
-               sort_index, owner_user_id
+               sort_index, owner_user_id, show_in_chart
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING id"#,
     )
     .bind(iid)
@@ -274,12 +285,14 @@ pub async fn create_planning_flow(
     .bind(&notes)
     .bind(sort_index)
     .bind(user.id.0)
+    .bind(show_in_chart)
     .fetch_one(&state.pool)
     .await?;
 
     let row: PlanningFlowJoinRow = sqlx::query_as(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                  p.expected_amount, p.due_date, p.notes, p.sort_index
+                  p.expected_amount, p.due_date, p.notes, p.sort_index,
+                  p.show_in_chart
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1"#,
@@ -328,6 +341,7 @@ pub async fn patch_planning_flow(
         && body.due_date.is_none()
         && body.notes.is_none()
         && body.sort_index.is_none()
+        && body.show_in_chart.is_none()
     {
         return Err(ApiError::BadRequest(
             "provide at least one field to update".into(),
@@ -336,7 +350,8 @@ pub async fn patch_planning_flow(
 
     let row: Option<PlanningFlowJoinRow> = sqlx::query_as(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                  p.expected_amount, p.due_date, p.notes, p.sort_index
+                  p.expected_amount, p.due_date, p.notes, p.sort_index,
+                  p.show_in_chart
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1 AND p.installation_id = $2"#,
@@ -384,6 +399,10 @@ pub async fn patch_planning_flow(
 
     let new_sort = body.sort_index.unwrap_or(current.sort_index);
 
+    let new_show_in_chart_raw = body.show_in_chart.unwrap_or(current.show_in_chart);
+    // Invariante: solo se puede marcar si hay due_date tras el patch.
+    let new_show_in_chart = new_show_in_chart_raw && new_due.is_some();
+
     let updated: PlanningFlowJoinRow = sqlx::query_as(
         r#"UPDATE planning_flows
            SET category_id = $1,
@@ -392,8 +411,9 @@ pub async fn patch_planning_flow(
                due_date = $4,
                notes = $5,
                sort_index = $6,
+               show_in_chart = $7,
                updated_at = now()
-           WHERE id = $7 AND installation_id = $8
+           WHERE id = $8 AND installation_id = $9
            RETURNING planning_flows.id,
                      planning_flows.category_id,
                      (
@@ -405,7 +425,8 @@ pub async fn patch_planning_flow(
                      planning_flows.expected_amount,
                      planning_flows.due_date,
                      planning_flows.notes,
-                     planning_flows.sort_index"#,
+                     planning_flows.sort_index,
+                     planning_flows.show_in_chart"#,
     )
     .bind(new_cat)
     .bind(&new_title)
@@ -413,6 +434,7 @@ pub async fn patch_planning_flow(
     .bind(new_due)
     .bind(&new_notes)
     .bind(new_sort)
+    .bind(new_show_in_chart)
     .bind(id)
     .bind(iid)
     .fetch_one(&state.pool)
