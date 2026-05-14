@@ -55,7 +55,6 @@ type InstallationSnapshot = {
   projection_includes_inflation: boolean;
   /** Supuesto anual % cuando inflación está activa (API como decimal string). */
   annual_inflation_assumption_percent?: string | null;
-  projection_target_age: number | null;
   show_age_mode: string;
   /** Ausente en clientes antiguos; usar `defaultFireSettingsApi`. */
   fire_settings?: FireSettingsApi;
@@ -753,10 +752,7 @@ function resolveProjectionAxisAgeMode(
  * una edad (es la duración en años de la vista). Preferimos edad objetivo + año de fin
  * de serie cuando procede.
  */
-function formatProjectionChartHorizonLine(
-  series: ProjectionSeriesApi,
-  projectionTargetAge: number | null,
-): string {
+function formatProjectionChartHorizonLine(series: ProjectionSeriesApi): string {
   const basis = series.horizon_basis;
   const spanYears = series.horizon_years;
   const anchorStr = series.anchor_date_ymd?.trim();
@@ -770,26 +766,16 @@ function formatProjectionChartHorizonLine(
   const endYearStr = endCivil ? formatProjectionAxisYear(endCivil) : null;
 
   switch (basis) {
-    case "mac_target_age": {
-      const parts: string[] = [];
-      if (projectionTargetAge != null) {
-        parts.push(`Edad objetivo ${projectionTargetAge} años`);
-      }
+    case "lifespan_90":
       if (endYearStr != null) {
-        parts.push(`fin de serie ${endYearStr}`);
+        return `Horizonte 90 años · fin ${endYearStr}`;
       }
-      if (parts.length > 0) {
-        return parts.join(" · ");
-      }
-      return `Horizonte ${spanYears} años`;
-    }
-    case "mac_fallback_no_demographics": {
-      const tail = "sin DOB / sin edad objetivo fija";
+      return `Horizonte 90 años`;
+    case "fallback_no_demographics":
       if (endYearStr != null) {
-        return `Fin de serie ${endYearStr} · ${tail}`;
+        return `${spanYears} años de vista · fin ${endYearStr}`;
       }
-      return `Horizonte ${spanYears} años · ${tail}`;
-    }
+      return `${spanYears} años de vista · sin fecha de nacimiento`;
     case "months_override":
       if (endYearStr != null) {
         return `${spanYears} años de vista · fin ${endYearStr}`;
@@ -1646,8 +1632,6 @@ export default function App() {
     useState(false);
   const [projectionInflationPctDraft, setProjectionInflationPctDraft] =
     useState("");
-  const [projectionTargetAgeDraft, setProjectionTargetAgeDraft] =
-    useState("");
   const [showAgeModeDraft, setShowAgeModeDraft] = useState<"dates" | "ages">(
     "dates",
   );
@@ -2255,7 +2239,6 @@ export default function App() {
     if (!installation) {
       setProjectionInflationDraft(false);
       setProjectionInflationPctDraft("");
-      setProjectionTargetAgeDraft("");
       setShowAgeModeDraft("dates");
       return;
     }
@@ -2263,11 +2246,6 @@ export default function App() {
     setProjectionInflationDraft(inst.projection_includes_inflation);
     setProjectionInflationPctDraft(
       formatEditableDecimalString(inst.annual_inflation_assumption_percent),
-    );
-    setProjectionTargetAgeDraft(
-      inst.projection_target_age != null
-        ? String(inst.projection_target_age)
-        : "",
     );
     setShowAgeModeDraft(inst.show_age_mode === "ages" ? "ages" : "dates");
   }, [installation]);
@@ -2549,7 +2527,6 @@ export default function App() {
           base_currency: setupCurrency,
           calendar_tz: setupCalendarTz.trim(),
           projection_includes_inflation: false,
-          projection_target_age: null,
           show_age_mode: "dates",
         }),
       });
@@ -2590,20 +2567,6 @@ export default function App() {
 
   async function saveInstallationProjection(ev: FormEvent) {
     ev.preventDefault();
-    const ageTrim = projectionTargetAgeDraft.trim();
-    let projection_target_age: number | null;
-    if (ageTrim === "") {
-      projection_target_age = null;
-    } else {
-      const n = Number(ageTrim);
-      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 65 || n > 105) {
-        setInstallationError(
-          "Edad objetivo de horizonte: entero entre 65 y 105, o vacío para limpiar.",
-        );
-        return;
-      }
-      projection_target_age = n;
-    }
     const pctTrim = projectionInflationPctDraft.trim().replace(",", ".");
     if (pctTrim !== "") {
       const n = Number(pctTrim);
@@ -2623,7 +2586,6 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           projection_includes_inflation: projectionInflationDraft,
-          projection_target_age,
           show_age_mode: showAgeModeDraft,
           annual_inflation_assumption_percent:
             pctTrim === "" ? null : pctTrim,
@@ -3982,8 +3944,6 @@ export default function App() {
             setProjectionInflationDraft={setProjectionInflationDraft}
             projectionInflationPctDraft={projectionInflationPctDraft}
             setProjectionInflationPctDraft={setProjectionInflationPctDraft}
-            projectionTargetAgeDraft={projectionTargetAgeDraft}
-            setProjectionTargetAgeDraft={setProjectionTargetAgeDraft}
             showAgeModeDraft={showAgeModeDraft}
             setShowAgeModeDraft={setShowAgeModeDraft}
             installationProjectionSaving={installationProjectionSaving}
@@ -6613,8 +6573,6 @@ function SettingsView({
   setProjectionInflationDraft,
   projectionInflationPctDraft,
   setProjectionInflationPctDraft,
-  projectionTargetAgeDraft,
-  setProjectionTargetAgeDraft,
   showAgeModeDraft,
   setShowAgeModeDraft,
   installationProjectionSaving,
@@ -6673,8 +6631,6 @@ function SettingsView({
   setProjectionInflationDraft: Dispatch<SetStateAction<boolean>>;
   projectionInflationPctDraft: string;
   setProjectionInflationPctDraft: Dispatch<SetStateAction<string>>;
-  projectionTargetAgeDraft: string;
-  setProjectionTargetAgeDraft: Dispatch<SetStateAction<string>>;
   showAgeModeDraft: "dates" | "ages";
   setShowAgeModeDraft: Dispatch<SetStateAction<"dates" | "ages">>;
   installationProjectionSaving: boolean;
@@ -6922,16 +6878,6 @@ function SettingsView({
                 }
                 inputMode="decimal"
                 placeholder="2,5"
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              <span>Edad objetivo del horizonte (opc.)</span>
-              <input
-                value={projectionTargetAgeDraft}
-                onChange={(e) => setProjectionTargetAgeDraft(e.target.value)}
-                inputMode="numeric"
-                placeholder="—"
                 autoComplete="off"
               />
             </label>
@@ -7223,14 +7169,6 @@ function SettingsView({
                       : "—"}
                   </dd>
                 </div>
-                <div>
-                  <dt>Edad objetivo horizonte</dt>
-                  <dd>
-                    {installation.installation.projection_target_age != null
-                      ? String(installation.installation.projection_target_age)
-                      : "—"}
-                  </dd>
-                </div>
               </dl>
             ) : (
               <p className="muted tight">Sin acceso.</p>
@@ -7452,7 +7390,6 @@ function ProjectionNetWorthChart({
   userBirthDate,
   anchorDateYmd,
   calendarTz,
-  projectionTargetAge,
 }: {
   series: ProjectionSeriesApi;
   milestones: ProjectionMilestoneApi[];
@@ -7466,8 +7403,6 @@ function ProjectionNetWorthChart({
   /** Mes 0 del motor (YYYY-MM-DD); prioridad sobre reloj cliente. */
   anchorDateYmd: string | null;
   calendarTz: string;
-  /** Edad objetivo de instalación (no confundir con la duración del horizonte en años). */
-  projectionTargetAge: number | null;
 }) {
   const pts = series.points;
   const gid = useId().replace(/:/g, "");
@@ -7867,7 +7802,7 @@ function ProjectionNetWorthChart({
     setViewWindow({ start: nextStart, count: nextCount });
   }
 
-  const horizonLine = formatProjectionChartHorizonLine(series, projectionTargetAge);
+  const horizonLine = formatProjectionChartHorizonLine(series);
   const deltaStr = formatCurrencyAmount(series.monthly_delta_assumption, currencyIso);
   const scopeShort = ledgerPersonScope === "mine" ? "Mi vista" : "Hogar";
   const inflationShort = inflationActive
@@ -8780,9 +8715,6 @@ function ProjectionView({
             userBirthDate={axisBirth}
             anchorDateYmd={axisAnchor}
             calendarTz={calendarTz}
-            projectionTargetAge={
-              installation?.installation.projection_target_age ?? null
-            }
           />
         </section>
       ) : null}

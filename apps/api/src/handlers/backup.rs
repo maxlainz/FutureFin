@@ -128,9 +128,9 @@ async fn build_csv_zip(pool: &PgPool, iid: Uuid) -> Result<Vec<u8>, ApiError> {
 }
 
 async fn build_summary_household(pool: &PgPool, iid: Uuid) -> Result<String, ApiError> {
-    let row: Option<(Uuid, String, String, bool, Option<i16>, String)> = sqlx::query_as(
+    let row: Option<(Uuid, String, String, bool, String)> = sqlx::query_as(
         r#"SELECT id, base_currency, calendar_tz, projection_includes_inflation,
-                  projection_target_age, show_age_mode
+                  show_age_mode
            FROM installation WHERE id = $1"#,
     )
     .bind(iid)
@@ -143,16 +143,14 @@ async fn build_summary_household(pool: &PgPool, iid: Uuid) -> Result<String, Api
         "base_currency".into(),
         "calendar_tz".into(),
         "projection_includes_inflation".into(),
-        "projection_target_age".into(),
         "show_age_mode".into(),
     ]));
-    if let Some((id, cur, tz, infl, age, mode)) = row {
+    if let Some((id, cur, tz, infl, mode)) = row {
         out.push_str(&csv_line([
             csv_cell(&id.to_string()),
             csv_cell(&cur),
             csv_cell(&tz),
             csv_cell(&infl.to_string()),
-            csv_cell(&age.map(|a| a.to_string()).unwrap_or_default()),
             csv_cell(&mode),
         ]));
     }

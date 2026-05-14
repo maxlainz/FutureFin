@@ -463,20 +463,15 @@ fn age_completed_years(today: NaiveDate, birth: NaiveDate) -> i32 {
     y
 }
 
-/// Máximo años hasta `projection_target_age` por fecha de nacimiento (perfil de usuario),
-/// acotado [5, 70]; sin edad objetivo o sin DOB → 30 años.
+/// Máximo años hasta los 90 años de edad por fecha de nacimiento; acotado [5, 70]; sin DOB → 30 años.
 pub(crate) fn projection_horizon_months(
     today: NaiveDate,
-    projection_target_age: Option<i16>,
     birth_dates: &[Option<NaiveDate>],
 ) -> (u32, &'static str) {
+    const LIFESPAN_AGE: i32 = 90;
     const MIN_YEARS: u32 = 5;
     const MAX_YEARS: u32 = 70;
     const FALLBACK_YEARS: u32 = 30;
-
-    let Some(target) = projection_target_age.map(|a| a as i32) else {
-        return (FALLBACK_YEARS * 12, "fallback_no_demographics");
-    };
 
     let mut max_remaining: Option<i32> = None;
     let mut any_birth = false;
@@ -486,7 +481,7 @@ pub(crate) fn projection_horizon_months(
         };
         any_birth = true;
         let age = age_completed_years(today, birth);
-        let rem = (target - age).max(0);
+        let rem = (LIFESPAN_AGE - age).max(0);
         max_remaining = Some(max_remaining.map_or(rem, |m| m.max(rem)));
     }
 
@@ -496,39 +491,11 @@ pub(crate) fn projection_horizon_months(
 
     let years_raw = max_remaining.unwrap_or(0).max(0) as u32;
     let clamped_years = years_raw.clamp(MIN_YEARS, MAX_YEARS);
-    (clamped_years * 12, "target_age")
+    (clamped_years * 12, "lifespan_90")
 }
 
 fn map_engine_err(e: EngineError) -> ApiError {
     ApiError::BadRequest(e.to_string())
-}
-
-/// Inputs required to model the retirement drawdown phase. Passed to
-/// `build_installation_projection_input`, which resolves these into concrete engine fields
-/// once `income_reg` / `expense_reg` are known.
-pub(crate) struct RetirementInput {
-    pub target_age: Option<i16>,
-    pub birth: Option<NaiveDate>,
-    pub horizon_months: u32,
-}
-
-/// Returns the 1-based month index at which the user reaches `target_age`, relative to `today`.
-/// Returns `None` if the retirement date falls outside the projection horizon or cannot be computed.
-fn retirement_start_month_from_age(
-    today: NaiveDate,
-    target_age: Option<i16>,
-    birth: Option<NaiveDate>,
-    horizon_months: u32,
-) -> Option<u32> {
-    let target = target_age? as i32;
-    let birth = birth?;
-    let age_now = age_completed_years(today, birth);
-    let months_to_retirement = ((target - age_now) * 12).max(0) as u32;
-    if months_to_retirement == 0 || months_to_retirement > horizon_months {
-        None
-    } else {
-        Some(months_to_retirement)
-    }
 }
 
 pub(crate) async fn build_installation_projection_input(
@@ -539,7 +506,6 @@ pub(crate) async fn build_installation_projection_input(
     today: NaiveDate,
     horizon_months: u32,
     inflation_annual_percent: Option<Decimal>,
-    retirement: Option<&RetirementInput>,
     fire_settings: Option<&FireSettings>,
 ) -> Result<(ProjectionInput, Decimal), ApiError> {
     let (income_reg, income_retirement, expense_reg) =
@@ -549,11 +515,6 @@ pub(crate) async fn build_installation_projection_input(
     let fire_target_net_worth = fire_settings.and_then(|fs| {
         compute_fire_target_nw(fs, income_reg, income_retirement, expense_reg)
     });
-
-    let retirement_start_month = match retirement {
-        None => None,
-        Some(ri) => retirement_start_month_from_age(today, ri.target_age, ri.birth, ri.horizon_months),
-    };
 
     let assets_rows: Vec<AssetEngineRow> = match view {
         LedgerView::Household => {
@@ -673,7 +634,7 @@ pub(crate) async fn build_installation_projection_input(
         liabilities,
         inflation_annual_percent,
         planning_monthly_cash_adjustment,
-        retirement_start_month,
+        retirement_start_month: None,
         income_retirement_monthly: income_retirement,
         retirement_monthly_withdrawal: Decimal::ZERO,
         fire_target_net_worth,
@@ -691,7 +652,7 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
     today: NaiveDate,
 ) -> Result<HashMap<Uuid, Decimal>, ApiError> {
     let (input, _) =
-        build_installation_projection_input(pool, iid, session_user_id, view, today, 1, None, None, None)
+        build_installation_projection_input(pool, iid, session_user_id, view, today, 1, None, None)
             .await?;
     let nominals = first_month_per_asset_contribution_nominals(&input).map_err(map_engine_err)?;
     Ok(input
@@ -766,7 +727,6 @@ pub(crate) async fn compute_installation_projection(
     today: NaiveDate,
     horizon_months: u32,
     inflation_annual_percent: Option<Decimal>,
-    retirement: Option<&RetirementInput>,
     fire_settings: Option<&FireSettings>,
 ) -> Result<(ProjectionOutput, Decimal, ProjectionInput), ApiError> {
     let (input, monthly_net_regular) = build_installation_projection_input(
@@ -777,7 +737,6 @@ pub(crate) async fn compute_installation_projection(
         today,
         horizon_months,
         inflation_annual_percent,
-        retirement,
         fire_settings,
     )
     .await?;
@@ -814,12 +773,11 @@ pub async fn get_projection_series(
     let inst_row: (
         bool,
         Option<Decimal>,
-        Option<i16>,
         String,
         Option<sqlx::types::Json<FireSettings>>,
     ) = sqlx::query_as(
         r#"SELECT projection_includes_inflation, annual_inflation_assumption_percent,
-                  projection_target_age, show_age_mode, fire_settings
+                  show_age_mode, fire_settings
            FROM installation WHERE id = $1"#,
     )
     .bind(iid)
@@ -833,7 +791,7 @@ pub async fn get_projection_series(
             None
         };
 
-    let fire_settings = resolve_fire_settings(inst_row.4.map(|j| j.0));
+    let fire_settings = resolve_fire_settings(inst_row.3.map(|j| j.0));
 
     let session_birth: Option<NaiveDate> = sqlx::query_scalar(
         r#"SELECT birth_date FROM users WHERE id = $1"#,
@@ -860,18 +818,12 @@ pub async fn get_projection_series(
     let (months, horizon_basis): (u32, String) = match q.months {
         Some(m) => (m.clamp(12, 840), "months_override".into()),
         None => {
-            let (m, b) = projection_horizon_months(today, inst_row.2, &birth_dates);
+            let (m, b) = projection_horizon_months(today, &birth_dates);
             (m, b.into())
         }
     };
 
     let horizon_years = months / 12;
-
-    let retirement = RetirementInput {
-        target_age: inst_row.2,
-        birth: resolved_birth_for_demographics,
-        horizon_months: months,
-    };
 
     let (mut output, monthly_delta_assumption, projection_input) = compute_installation_projection(
         &state.pool,
@@ -881,7 +833,6 @@ pub async fn get_projection_series(
         today,
         months,
         inflation_annual_percent,
-        Some(&retirement),
         Some(&fire_settings),
     )
     .await?;
@@ -960,8 +911,8 @@ pub async fn get_projection_series(
             "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos (fecha explícita en su mes civil; sin fecha repartidos en 90 días desde la fecha de referencia), caja mensual consolidada → superávit reparte a activos o déficit drena según las mismas reglas (líquidos primero, menor rentabilidad esperada después), cuotas fijas escaladas y remanente por pesos, crecimiento compuesto por activo, serie nominal o deflactada si hay inflación."
                 .into(),
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
-        show_age_mode: inst_row.3.clone(),
-        use_age_on_x_axis: inst_row.3.trim() == "ages"
+        show_age_mode: inst_row.2.clone(),
+        use_age_on_x_axis: inst_row.2.trim() == "ages"
             && resolved_birth_for_demographics.is_some(),
         viewer_birth_date: resolved_birth_for_demographics
             .map(|d| d.format("%Y-%m-%d").to_string()),
@@ -979,34 +930,33 @@ pub fn projection_router() -> Router {
 #[cfg(test)]
 mod horizon_tests {
     use super::*;
+
     #[test]
-    fn horizon_fallback_without_target_age() {
+    fn horizon_fallback_without_birth_dates() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
-        let bd = vec![Some(NaiveDate::from_ymd_opt(1990, 1, 1).unwrap())];
-        let (m, basis) = projection_horizon_months(today, None, &bd);
+        let (m, basis) = projection_horizon_months(today, &[None]);
         assert_eq!(m, 30 * 12);
         assert_eq!(basis, "fallback_no_demographics");
     }
 
     #[test]
-    fn horizon_uses_max_years_to_target_clamped() {
+    fn horizon_uses_lifespan_90_from_birth_date() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
         let bd = vec![
-            Some(NaiveDate::from_ymd_opt(1990, 1, 1).unwrap()),
-            Some(NaiveDate::from_ymd_opt(1985, 1, 1).unwrap()),
+            Some(NaiveDate::from_ymd_opt(1990, 1, 1).unwrap()), // age 36 → 54y to 90
+            Some(NaiveDate::from_ymd_opt(1985, 1, 1).unwrap()), // age 41 → 49y to 90
         ];
-        let (m, basis) = projection_horizon_months(today, Some(65), &bd);
-        // ages 36 and 41 → 29 y 24 años hasta 65 → máximo 29
-        assert_eq!(basis, "target_age");
-        assert_eq!(m, 29 * 12);
+        let (m, basis) = projection_horizon_months(today, &bd);
+        assert_eq!(m, 54 * 12); // max of 54 and 49, not clamped (54 < 70)
+        assert_eq!(basis, "lifespan_90");
     }
 
     #[test]
-    fn horizon_minimum_five_years_when_already_near_target() {
+    fn horizon_minimum_five_years_when_already_near_lifespan() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
-        let bd = vec![Some(NaiveDate::from_ymd_opt(1965, 1, 1).unwrap())];
-        let (m, basis) = projection_horizon_months(today, Some(65), &bd);
-        assert_eq!(basis, "target_age");
+        let bd = vec![Some(NaiveDate::from_ymd_opt(1940, 1, 1).unwrap())]; // age 86 → 4y to 90, clamped to 5
+        let (m, basis) = projection_horizon_months(today, &bd);
+        assert_eq!(basis, "lifespan_90");
         assert_eq!(m, 5 * 12);
     }
 }
@@ -1155,6 +1105,7 @@ mod milestone_tests {
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
+            fire_target_net_worth: None,
         };
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(500)).unwrap();
         assert!(month.is_none());
@@ -1182,6 +1133,7 @@ mod milestone_tests {
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             retirement_monthly_withdrawal: Decimal::ZERO,
+            fire_target_net_worth: None,
         };
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(200)).unwrap();
         assert!(month.is_some());

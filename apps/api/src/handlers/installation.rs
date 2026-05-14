@@ -207,7 +207,6 @@ pub struct InstallationSnapshot {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub annual_inflation_assumption_percent: Option<Decimal>,
-    pub projection_target_age: Option<i16>,
     pub show_age_mode: String,
     pub fire_settings: FireSettings,
 }
@@ -234,7 +233,6 @@ pub struct SetupInstallationBody {
     pub calendar_tz: String,
     #[serde(default)]
     pub projection_includes_inflation: bool,
-    pub projection_target_age: Option<i16>,
     #[serde(default = "default_show_age_mode")]
     pub show_age_mode: String,
 }
@@ -255,9 +253,6 @@ pub struct PatchInstallationBody {
     /// When omitted, `projection_includes_inflation` is left unchanged.
     #[serde(default)]
     pub projection_includes_inflation: Option<bool>,
-    /// When omitted, `projection_target_age` is left unchanged. JSON `null` clears the horizon age.
-    #[serde(default)]
-    pub projection_target_age: Option<Option<i16>>,
     /// When omitted, `show_age_mode` is left unchanged (`dates` or `ages`).
     #[serde(default)]
     pub show_age_mode: Option<String>,
@@ -276,7 +271,6 @@ struct InstallationMemberRow {
     calendar_tz: String,
     projection_includes_inflation: bool,
     annual_inflation_assumption_percent: Option<Decimal>,
-    projection_target_age: Option<i16>,
     show_age_mode: String,
     fire_settings: Option<SqlxJson<FireSettings>>,
     role: String,
@@ -291,7 +285,6 @@ fn installation_access_from_row(r: InstallationMemberRow) -> Result<Installation
             calendar_tz: r.calendar_tz,
             projection_includes_inflation: r.projection_includes_inflation,
             annual_inflation_assumption_percent: r.annual_inflation_assumption_percent,
-            projection_target_age: r.projection_target_age,
             show_age_mode: r.show_age_mode,
             fire_settings: resolve_fire_settings(r.fire_settings.map(|j| j.0)),
         },
@@ -325,26 +318,11 @@ fn validate_show_age_mode(mode: &str) -> Result<(), ApiError> {
     }
 }
 
-fn validate_target_age(age: Option<i16>) -> Result<(), ApiError> {
-    validate_projection_horizon_age(age)
-}
-
 fn validate_annual_inflation_assumption(pct: Decimal) -> Result<(), ApiError> {
     if pct.is_sign_negative() || pct > Decimal::from(50) {
         return Err(ApiError::BadRequest(
             "annual_inflation_assumption_percent must be between 0 and 50".into(),
         ));
-    }
-    Ok(())
-}
-
-fn validate_projection_horizon_age(age: Option<i16>) -> Result<(), ApiError> {
-    if let Some(a) = age {
-        if !(65..=105).contains(&a) {
-            return Err(ApiError::BadRequest(
-                "projection_target_age must be between 65 and 105 when set".into(),
-            ));
-        }
     }
     Ok(())
 }
@@ -426,10 +404,9 @@ pub(crate) async fn bootstrap_installation_as_owner_if_empty(
         r#"INSERT INTO installation (
                base_currency,
                projection_includes_inflation,
-               projection_target_age,
                show_age_mode
            )
-           VALUES ('EUR', false, NULL, 'dates')
+           VALUES ('EUR', false, 'dates')
            RETURNING id"#,
     )
     .fetch_one(&mut **tx)
@@ -479,7 +456,7 @@ pub async fn get_installation_session_context(
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.annual_inflation_assumption_percent,
-                  i.projection_target_age, i.show_age_mode, i.fire_settings, m.role
+                  i.show_age_mode, i.fire_settings, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -518,7 +495,7 @@ pub async fn get_my_installation(
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.annual_inflation_assumption_percent,
-                  i.projection_target_age, i.show_age_mode, i.fire_settings, m.role
+                  i.show_age_mode, i.fire_settings, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -562,20 +539,19 @@ pub async fn patch_my_installation(
 
     if body.calendar_tz.is_none()
         && body.projection_includes_inflation.is_none()
-        && body.projection_target_age.is_none()
         && body.show_age_mode.is_none()
         && body.annual_inflation_assumption_percent.is_none()
         && body.fire_settings.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one of calendar_tz, projection_includes_inflation, projection_target_age, show_age_mode, annual_inflation_assumption_percent, fire_settings".into(),
+            "provide at least one of calendar_tz, projection_includes_inflation, show_age_mode, annual_inflation_assumption_percent, fire_settings".into(),
         ));
     }
 
     let row_before: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.annual_inflation_assumption_percent,
-                  i.projection_target_age, i.show_age_mode, i.fire_settings, m.role
+                  i.show_age_mode, i.fire_settings, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -594,14 +570,6 @@ pub async fn patch_my_installation(
     let new_inflation = body
         .projection_includes_inflation
         .unwrap_or(row_before.projection_includes_inflation);
-
-    let new_target_age = match body.projection_target_age {
-        None => row_before.projection_target_age,
-        Some(inner) => {
-            validate_projection_horizon_age(inner)?;
-            inner
-        }
-    };
 
     let new_show_age = if let Some(ref raw) = body.show_age_mode {
         let trimmed = raw.trim();
@@ -642,15 +610,13 @@ pub async fn patch_my_installation(
     sqlx::query(
         r#"UPDATE installation SET calendar_tz = $1,
                projection_includes_inflation = $2,
-               projection_target_age = $3,
-               show_age_mode = $4,
-               annual_inflation_assumption_percent = $5,
-               fire_settings = $6
-           WHERE id = $7"#,
+               show_age_mode = $3,
+               annual_inflation_assumption_percent = $4,
+               fire_settings = $5
+           WHERE id = $6"#,
     )
     .bind(&new_tz)
     .bind(new_inflation)
-    .bind(new_target_age)
     .bind(&new_show_age)
     .bind(new_ann_inf)
     .bind(new_fire_settings_json)
@@ -661,7 +627,7 @@ pub async fn patch_my_installation(
     let row: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz, i.projection_includes_inflation,
                   i.annual_inflation_assumption_percent,
-                  i.projection_target_age, i.show_age_mode, i.fire_settings, m.role
+                  i.show_age_mode, i.fire_settings, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -695,7 +661,6 @@ pub async fn setup_installation(
     let currency = normalize_currency(&body.base_currency)?;
     let calendar_tz = normalize_calendar_tz(&body.calendar_tz)?;
     validate_show_age_mode(&body.show_age_mode)?;
-    validate_target_age(body.projection_target_age)?;
 
     let mut tx = state.pool.begin().await?;
 
@@ -720,16 +685,14 @@ pub async fn setup_installation(
         r#"INSERT INTO installation (
                base_currency,
                projection_includes_inflation,
-               projection_target_age,
                show_age_mode,
                calendar_tz
            )
-           VALUES ($1, $2, $3, $4, $5)
+           VALUES ($1, $2, $3, $4)
            RETURNING id"#,
     )
     .bind(&currency)
     .bind(body.projection_includes_inflation)
-    .bind(body.projection_target_age)
     .bind(&body.show_age_mode)
     .bind(&calendar_tz)
     .fetch_one(&mut *tx)
@@ -764,7 +727,6 @@ pub async fn setup_installation(
                 calendar_tz,
                 projection_includes_inflation: body.projection_includes_inflation,
                 annual_inflation_assumption_percent: None,
-                projection_target_age: body.projection_target_age,
                 show_age_mode: body.show_age_mode,
                 fire_settings: default_fire_settings(),
             },
