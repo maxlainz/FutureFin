@@ -270,16 +270,14 @@ async fn fetch_budget_entries(
     let rows: Vec<(
         String,
         String,
-        Option<String>,
         Decimal,
-        String,
         bool,
         bool,
         Option<NaiveDate>,
         Option<String>,
         i32,
     )> = sqlx::query_as(
-        r#"SELECT c.scope, c.name AS cat_name, b.label, b.amount, b.frequency,
+        r#"SELECT c.scope, c.name AS cat_name, b.amount,
                   b.persists_after_retirement, b.ends_at_retirement, b.expense_end_date,
                   b.notes, b.sort_index
            FROM budget_entries b
@@ -296,14 +294,12 @@ async fn fetch_budget_entries(
         .into_iter()
         .map(|r| BackupBudgetEntry {
             category_ref: CategoryRef { scope: r.0, name: r.1 },
-            label: r.2,
-            amount: r.3,
-            frequency: r.4,
-            persists_after_retirement: r.5,
-            ends_at_retirement: r.6,
-            expense_end_date: r.7,
-            notes: r.8,
-            sort_index: r.9,
+            amount: r.2,
+            persists_after_retirement: r.3,
+            ends_at_retirement: r.4,
+            expense_end_date: r.5,
+            notes: r.6,
+            sort_index: r.7,
         })
         .collect())
 }
