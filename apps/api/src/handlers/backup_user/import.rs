@@ -377,18 +377,16 @@ async fn insert_payload(
         let cid = resolve_category(cat_map, &b.category_ref.scope, &b.category_ref.name)?;
         sqlx::query(
             r#"INSERT INTO budget_entries (
-                   id, installation_id, owner_user_id, category_id, label, amount, frequency,
+                   id, installation_id, owner_user_id, category_id, amount,
                    persists_after_retirement, ends_at_retirement, expense_end_date,
                    notes, sort_index
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
         )
         .bind(Uuid::new_v4())
         .bind(iid)
         .bind(user_id)
         .bind(cid)
-        .bind(b.label.as_deref())
         .bind(b.amount)
-        .bind(&b.frequency)
         .bind(b.persists_after_retirement)
         .bind(b.ends_at_retirement)
         .bind(b.expense_end_date)

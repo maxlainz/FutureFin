@@ -76,11 +76,8 @@ pub struct BackupLiability {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackupBudgetEntry {
     pub category_ref: CategoryRef,
-    #[serde(default)]
-    pub label: Option<String>,
     #[serde(with = "rust_decimal::serde::str")]
     pub amount: Decimal,
-    pub frequency: String,
     pub persists_after_retirement: bool,
     pub ends_at_retirement: bool,
     #[serde(default)]
