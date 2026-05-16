@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::crypto::{decrypt_payload, parse_frame};
 use super::schema::{
-    migrate_to_current, parse_payload, BackupPayloadV1, UiPreferences, CURRENT_SCHEMA_VERSION,
+    migrate_to_current, parse_payload, BackupPayload, UiPreferences, CURRENT_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -134,7 +134,16 @@ pub async fn import_user_backup_apply(
 
     let mut tx = state.pool.begin().await?;
 
-    // 1. Drop existing user-scoped rows in dependency order.
+    // 1. Drop existing user-scoped rows in dependency order. allocation_rules first
+    //    because it FKs into assets (ON DELETE CASCADE would also handle this, but being
+    //    explicit keeps the order deterministic).
+    sqlx::query(
+        r#"DELETE FROM allocation_rules WHERE installation_id = $1 AND owner_user_id = $2"#,
+    )
+    .bind(iid)
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         r#"DELETE FROM assets WHERE installation_id = $1 AND owner_user_id = $2"#,
     )
@@ -185,7 +194,7 @@ pub async fn import_user_backup_apply(
     }))
 }
 
-fn decode_request(body: &ImportRequest) -> Result<(super::crypto::Manifest, BackupPayloadV1), ApiError> {
+fn decode_request(body: &ImportRequest) -> Result<(super::crypto::Manifest, BackupPayload), ApiError> {
     let bytes = B64
         .decode(body.file_b64.as_bytes())
         .map_err(|_| ApiError::BadRequest("file_b64 is not valid base64".into()))?;
@@ -214,7 +223,7 @@ fn map_crypto_to_api(e: super::crypto::CryptoError) -> ApiError {
 async fn compute_counts(
     pool: &PgPool,
     iid: Uuid,
-    payload: &BackupPayloadV1,
+    payload: &BackupPayload,
 ) -> Result<ImportCounts, ApiError> {
     let mut already_present = 0u32;
     for c in &payload.categories_used {
@@ -248,7 +257,7 @@ async fn compute_counts(
 async fn compute_birth_date_change(
     pool: &PgPool,
     user_id: Uuid,
-    payload: &BackupPayloadV1,
+    payload: &BackupPayload,
 ) -> Result<bool, ApiError> {
     let current: Option<chrono::NaiveDate> =
         sqlx::query_scalar(r#"SELECT birth_date FROM users WHERE id = $1"#)
@@ -261,7 +270,7 @@ async fn compute_birth_date_change(
 async fn ensure_categories(
     tx: &mut Transaction<'_, Postgres>,
     iid: Uuid,
-    payload: &BackupPayloadV1,
+    payload: &BackupPayload,
 ) -> Result<HashMap<(String, String), Uuid>, ApiError> {
     let mut map = HashMap::new();
     for c in &payload.categories_used {
@@ -310,21 +319,24 @@ async fn insert_payload(
     tx: &mut Transaction<'_, Postgres>,
     iid: Uuid,
     user_id: Uuid,
-    payload: &BackupPayloadV1,
+    payload: &BackupPayload,
     cat_map: &HashMap<(String, String), Uuid>,
 ) -> Result<ImportCounts, ApiError> {
+    // Insert assets and remember each freshly-minted UUID at the same index as the backup,
+    // so allocation_rules.target_asset_index can be resolved below.
+    let mut new_asset_ids: Vec<Uuid> = Vec::with_capacity(payload.assets.len());
     let mut assets = 0u32;
     for a in &payload.assets {
         let cid = resolve_category(cat_map, &a.category_ref.scope, &a.category_ref.name)?;
+        let new_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO assets (
                    id, installation_id, owner_user_id, category_id, name, current_value,
                    purchase_price, is_liquid, expected_annual_return_percent,
-                   monthly_contribution_fixed, contribution_frequency,
-                   contribution_remainder_weight, notes, sort_index
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+                   notes, sort_index
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
         )
-        .bind(Uuid::new_v4())
+        .bind(new_id)
         .bind(iid)
         .bind(user_id)
         .bind(cid)
@@ -333,14 +345,42 @@ async fn insert_payload(
         .bind(a.purchase_price)
         .bind(a.is_liquid)
         .bind(a.expected_annual_return_percent)
-        .bind(a.monthly_contribution_fixed)
-        .bind(&a.contribution_frequency)
-        .bind(a.contribution_remainder_weight)
         .bind(a.notes.as_deref())
         .bind(a.sort_index)
         .execute(&mut **tx)
         .await?;
+        new_asset_ids.push(new_id);
         assets += 1;
+    }
+
+    // Insert allocation_rules pointing at the freshly-minted asset UUIDs.
+    for r in &payload.allocation_rules {
+        let Some(&target_id) = new_asset_ids.get(r.target_asset_index) else {
+            return Err(ApiError::BadRequest(format!(
+                "allocation_rule.target_asset_index {} is out of bounds (assets={})",
+                r.target_asset_index,
+                new_asset_ids.len(),
+            )));
+        };
+        sqlx::query(
+            r#"INSERT INTO allocation_rules (
+                   id, installation_id, owner_user_id, target_asset_id, priority,
+                   kind, amount, cap_kind, cap_value, enabled, notes
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(iid)
+        .bind(user_id)
+        .bind(target_id)
+        .bind(r.priority)
+        .bind(&r.kind)
+        .bind(r.amount)
+        .bind(r.cap_kind.as_deref())
+        .bind(r.cap_value)
+        .bind(r.enabled)
+        .bind(r.notes.as_deref())
+        .execute(&mut **tx)
+        .await?;
     }
 
     let mut liabilities = 0u32;

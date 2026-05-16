@@ -40,7 +40,28 @@ Owner-only management of users awaiting approval.
 Scopes: `asset`, `liability`, `income`, `expense`. Per-installation.
 
 ### Assets (`/v1/assets/`)
-Accepts `?view=mine` to filter by `owner_user_id`.
+Accepts `?view=mine` to filter by `owner_user_id`. The asset record no longer carries contribution fields — those live in `/v1/allocation-rules/`.
+
+### Allocation rules (`/v1/allocation-rules/`)
+Cascade rules that route the monthly surplus (`income − expense − debt_service`) into assets, in priority order. Accepts `?view=mine` to scope by `owner_user_id`.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/v1/allocation-rules` | List ordered by `priority ASC`. |
+| POST | `/v1/allocation-rules` | Body: `{target_asset_id, kind, amount?, cap_kind?, cap_value?, notes?, enabled?}`. Auto-assigns the next `priority` in the scope. |
+| PATCH | `/v1/allocation-rules/{id}` | Updates fields. `amount` accepts a string, number, or `null` (only for `remainder`). `cap` accepts `{kind, value}` or `null`. Does **not** change `priority`. Rejects with 400 + `remainder_required` if it would orphan the scope. |
+| DELETE | `/v1/allocation-rules/{id}` | Returns 400 `remainder_required` if deleting the last `remainder` rule in scope. |
+| POST | `/v1/allocation-rules/reorder` | Body: `{ids: [uuid,...]}`. Must list exactly the rules in the current scope; reassigns `priority` 1..N in the given order in one transaction. |
+
+Rule kinds:
+- `fixed` — €/mes; `amount` required, ≥ 0.
+- `percent` — `amount` ∈ [0, 100], applied to the **surplus remaining at this step** (cascade pure).
+- `remainder` — `amount` ignored (must be NULL). At least one per scope is enforced server-side.
+
+Cap kinds (all optional; `cap_kind`/`cap_value` are paired):
+- `amount` — absolute € target value for the destination asset.
+- `months_expense` — N × (monthly expense + debt service); evaluated per-month against current state.
+- `income_multiple` — N × monthly income.
 
 ### Liabilities (`/v1/liabilities/`)
 Accepts `?view=mine`. `principal_derived_from_plan` flag indicates auto-derived principal from planning flows.

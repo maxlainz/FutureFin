@@ -21,7 +21,9 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
 
 **categories**: `id`, `installation_id`, `scope ('asset'|'liability'|'income'|'expense')`, `name`, `sort_index`
 
-**assets**: `id`, `installation_id`, `owner_user_id`, `category_id`, `name`, `current_value (decimal)`, `purchase_price (decimal nullable)`, `is_liquid (bool)`, `expected_annual_return_percent (decimal nullable)`, `monthly_contribution_fixed (decimal)`, `contribution_remainder_weight (decimal)`, `contribution_frequency ('monthly'|'weekly')`, `notes`, `sort_index`
+**assets**: `id`, `installation_id`, `owner_user_id`, `category_id`, `name`, `current_value (decimal)`, `purchase_price (decimal nullable)`, `is_liquid (bool)`, `expected_annual_return_percent (decimal nullable)`, `notes`, `sort_index`. **Contribuciones automáticas viven en `allocation_rules`, no en este registro.**
+
+**allocation_rules**: `id`, `installation_id`, `owner_user_id`, `target_asset_id (FK assets ON DELETE CASCADE)`, `priority (int)`, `kind ('fixed'|'percent'|'remainder')`, `amount (decimal nullable; NULL para 'remainder')`, `cap_kind ('amount'|'months_expense'|'income_multiple' nullable)`, `cap_value (decimal nullable)`, `enabled (bool)`, `notes`, `created_at`. Cascade rules: el engine evalúa las reglas en orden ascendente de `priority` sobre el sobrante mensual (income − expense − debt_service). Cada regla aporta a su `target_asset_id` hasta su `cap` opcional; lo que queda fluye a la siguiente. Constraints: `kind='remainder'` ⇒ `amount IS NULL`; `cap_kind`/`cap_value` ambos NULL o ambos NOT NULL.
 
 **liabilities**: `id`, `installation_id`, `owner_user_id`, `category_id`, `label`, `type_tag`, `principal (decimal)`, `apr_percent (decimal nullable)`, `payment_amount (decimal nullable)`, `payment_frequency ('monthly'|'weekly' nullable)`, `payment_end_date (date nullable)`, `principal_derived_from_plan (bool)`, `notes`, `sort_index`
 

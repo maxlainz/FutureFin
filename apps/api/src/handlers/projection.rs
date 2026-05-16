@@ -18,8 +18,9 @@ use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
-    first_month_per_asset_contribution_nominals, project_net_worth_series, EngineError,
-    ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
+    first_month_per_asset_contribution_nominals, project_net_worth_series, AllocationCap,
+    AllocationKind, AllocationRule, EngineError, ProjectionInput, ProjectionLiabilityInput,
+    ProjectionOutput, SimAsset,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -192,9 +193,15 @@ struct AssetEngineRow {
     purchase_price: Option<Decimal>,
     is_liquid: bool,
     expected_annual_return_percent: Option<Decimal>,
-    monthly_contribution_fixed: Decimal,
-    contribution_frequency: String,
-    contribution_remainder_weight: Decimal,
+}
+
+#[derive(Debug, FromRow)]
+struct AllocationRuleEngineRow {
+    target_asset_id: Uuid,
+    kind: String,
+    amount: Option<Decimal>,
+    cap_kind: Option<String>,
+    cap_value: Option<Decimal>,
 }
 
 #[derive(Debug, FromRow)]
@@ -472,13 +479,6 @@ fn liability_monthly_payment(row: &LiabEngineRow) -> Decimal {
     }
 }
 
-fn asset_fixed_monthly_equivalent(fixed: Decimal, contribution_frequency: &str) -> Decimal {
-    match contribution_frequency {
-        "weekly" => (fixed * Decimal::from(52u32)) / Decimal::from(12u32),
-        _ => fixed,
-    }
-}
-
 /// Completed calendar age in years (`today` inclusive), used for horizon.
 fn age_completed_years(today: NaiveDate, birth: NaiveDate) -> i32 {
     if birth > today {
@@ -552,9 +552,7 @@ pub(crate) async fn build_installation_projection_input(
         LedgerView::Household => {
             sqlx::query_as(
                 r#"SELECT id, current_value, purchase_price, is_liquid,
-                          expected_annual_return_percent,
-                          monthly_contribution_fixed, contribution_frequency,
-                          contribution_remainder_weight
+                          expected_annual_return_percent
                    FROM assets
                    WHERE installation_id = $1
                    ORDER BY sort_index ASC, name ASC"#,
@@ -566,12 +564,36 @@ pub(crate) async fn build_installation_projection_input(
         LedgerView::Mine => {
             sqlx::query_as(
                 r#"SELECT id, current_value, purchase_price, is_liquid,
-                          expected_annual_return_percent,
-                          monthly_contribution_fixed, contribution_frequency,
-                          contribution_remainder_weight
+                          expected_annual_return_percent
                    FROM assets
                    WHERE installation_id = $1 AND owner_user_id = $2
                    ORDER BY sort_index ASC, name ASC"#,
+            )
+            .bind(iid)
+            .bind(session_user_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    let alloc_rows: Vec<AllocationRuleEngineRow> = match view {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT target_asset_id, kind, amount, cap_kind, cap_value
+                   FROM allocation_rules
+                   WHERE installation_id = $1 AND enabled = true
+                   ORDER BY priority ASC, id ASC"#,
+            )
+            .bind(iid)
+            .fetch_all(pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT target_asset_id, kind, amount, cap_kind, cap_value
+                   FROM allocation_rules
+                   WHERE installation_id = $1 AND owner_user_id = $2 AND enabled = true
+                   ORDER BY priority ASC, id ASC"#,
             )
             .bind(iid)
             .bind(session_user_id)
@@ -646,11 +668,42 @@ pub(crate) async fn build_installation_projection_input(
             purchase_price: r.purchase_price,
             is_liquid: r.is_liquid,
             expected_annual_return_percent: r.expected_annual_return_percent,
-            monthly_contribution_fixed: asset_fixed_monthly_equivalent(
-                r.monthly_contribution_fixed.max(Decimal::ZERO),
-                r.contribution_frequency.as_str(),
-            ),
-            contribution_remainder_weight: r.contribution_remainder_weight.max(Decimal::ZERO),
+        })
+        .collect();
+
+    // Build allocation rules in priority order; resolve target_asset_id → index in assets[].
+    let asset_index_by_id: HashMap<Uuid, usize> = assets
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.id, i))
+        .collect();
+    let allocation_rules: Vec<AllocationRule> = alloc_rows
+        .into_iter()
+        .filter_map(|r| {
+            let target_index = *asset_index_by_id.get(&r.target_asset_id)?;
+            let kind = match r.kind.as_str() {
+                "fixed" => AllocationKind::Fixed,
+                "percent" => AllocationKind::Percent,
+                "remainder" => AllocationKind::Remainder,
+                _ => return None,
+            };
+            let amount = r.amount;
+            let cap = match (r.cap_kind.as_deref(), r.cap_value) {
+                (Some("amount"), Some(v)) => Some(AllocationCap::Amount(v.max(Decimal::ZERO))),
+                (Some("months_expense"), Some(v)) => {
+                    Some(AllocationCap::MonthsExpense(v.max(Decimal::ZERO)))
+                }
+                (Some("income_multiple"), Some(v)) => {
+                    Some(AllocationCap::IncomeMultiple(v.max(Decimal::ZERO)))
+                }
+                _ => None,
+            };
+            Some(AllocationRule {
+                target_index,
+                kind,
+                amount,
+                cap,
+            })
         })
         .collect();
 
@@ -669,6 +722,7 @@ pub(crate) async fn build_installation_projection_input(
         income_regular_monthly: income_reg,
         expense_regular_monthly: expense_reg,
         assets,
+        allocation_rules,
         liabilities,
         inflation_annual_percent,
         planning_monthly_cash_adjustment,
@@ -680,6 +734,52 @@ pub(crate) async fn build_installation_projection_input(
     };
 
     Ok((input, monthly_net_regular))
+}
+
+/// Monthly cash baseline for a view: `(income, expense, debt_service)`. Used by other handlers
+/// (e.g. `assets.rs`) to resolve allocation-rule caps expressed in `months_expense` /
+/// `income_multiple` into absolute €.
+pub(crate) async fn monthly_income_expense_debt_for_view(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    session_user_id: Uuid,
+    view: LedgerView,
+    today: NaiveDate,
+) -> Result<(Decimal, Decimal, Decimal), ApiError> {
+    let (income_reg, _income_retirement, expense_reg, _expense_retirement, _expense_end_entries) =
+        ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
+
+    let liabs: Vec<LiabEngineRow> = match view {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
+                   FROM liabilities WHERE installation_id = $1"#,
+            )
+            .bind(iid)
+            .fetch_all(pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
+                   FROM liabilities
+                   WHERE installation_id = $1 AND owner_user_id = $2"#,
+            )
+            .bind(iid)
+            .bind(session_user_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    let debt_service: Decimal = liabs
+        .iter()
+        .filter(|r| r.payment_end_date.map_or(true, |d| d >= today))
+        .map(liability_monthly_payment)
+        .filter(|p| *p > Decimal::ZERO)
+        .sum();
+
+    Ok((income_reg, expense_reg, debt_service))
 }
 
 /// Map asset id → nominal € routed in month 1 (fixed escalado + parte del remanente). Vista alineada al listado de activos / proyección.
@@ -1162,8 +1262,12 @@ mod milestone_tests {
                 purchase_price: Some(Decimal::from(10_000)),
                 is_liquid: true,
                 expected_annual_return_percent: Some(Decimal::from(6)),
-                monthly_contribution_fixed: Decimal::ZERO,
-                contribution_remainder_weight: Decimal::ONE,
+            }],
+            allocation_rules: vec![AllocationRule {
+                target_index: 0,
+                kind: AllocationKind::Remainder,
+                amount: None,
+                cap: None,
             }],
             liabilities: vec![ProjectionLiabilityInput {
                 principal: Decimal::from(50_000),
@@ -1195,8 +1299,12 @@ mod milestone_tests {
                 purchase_price: Some(Decimal::from(50_000)),
                 is_liquid: true,
                 expected_annual_return_percent: Some(Decimal::from(18)),
-                monthly_contribution_fixed: Decimal::ZERO,
-                contribution_remainder_weight: Decimal::ONE,
+            }],
+            allocation_rules: vec![AllocationRule {
+                target_index: 0,
+                kind: AllocationKind::Remainder,
+                amount: None,
+                cap: None,
             }],
             liabilities: vec![],
             inflation_annual_percent: None,

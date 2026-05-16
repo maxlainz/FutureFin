@@ -25,6 +25,11 @@ use crate::handlers::assets::{
     __path_create_asset, __path_delete_asset, __path_list_assets, __path_patch_asset,
 };
 #[allow(unused_imports)]
+use crate::handlers::allocation_rules::{
+    __path_create_allocation_rule, __path_delete_allocation_rule, __path_list_allocation_rules,
+    __path_patch_allocation_rule, __path_reorder_allocation_rules,
+};
+#[allow(unused_imports)]
 use crate::handlers::liabilities::{
     __path_create_liability, __path_delete_liability, __path_list_liabilities,
     __path_patch_liability,
@@ -73,6 +78,11 @@ use utoipa::OpenApi;
         create_asset,
         patch_asset,
         delete_asset,
+        list_allocation_rules,
+        create_allocation_rule,
+        patch_allocation_rule,
+        delete_allocation_rule,
+        reorder_allocation_rules,
         list_liabilities,
         create_liability,
         patch_liability,
@@ -116,6 +126,10 @@ use utoipa::OpenApi;
         crate::handlers::assets::AssetResponse,
         crate::handlers::assets::CreateAssetBody,
         crate::handlers::assets::PatchAssetBody,
+        crate::handlers::allocation_rules::AllocationRuleResponse,
+        crate::handlers::allocation_rules::CreateAllocationRuleBody,
+        crate::handlers::allocation_rules::PatchAllocationRuleBody,
+        crate::handlers::allocation_rules::ReorderBody,
         crate::handlers::liabilities::LiabilityResponse,
         crate::handlers::liabilities::CreateLiabilityBody,
         crate::handlers::liabilities::PatchLiabilityBody,
@@ -163,6 +177,10 @@ use utoipa::OpenApi;
         (
             name = "assets",
             description = "Installation asset ledger (category must be asset scope)"
+        ),
+        (
+            name = "allocation-rules",
+            description = "Cascade rules that route the monthly surplus into assets, in priority order. See projection engine docs for evaluation semantics."
         ),
         (
             name = "liabilities",

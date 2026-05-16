@@ -19,9 +19,9 @@ use uuid::Uuid;
 
 use super::crypto::{encrypt_payload, frame_file};
 use super::schema::{
-    BackupAsset, BackupBudgetEntry, BackupCategory, BackupLiability, BackupPayloadV1,
-    BackupPlanningFlow, BackupUser, CategoryRef, InstallationSnapshotInformative, UiPreferences,
-    CURRENT_SCHEMA_VERSION,
+    BackupAllocationRule, BackupAsset, BackupBudgetEntry, BackupCategory, BackupLiability,
+    BackupPayload, BackupPlanningFlow, BackupUser, CategoryRef, InstallationSnapshotInformative,
+    UiPreferences, CURRENT_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -141,18 +141,20 @@ async fn build_payload(
     user_id: Uuid,
     user: BackupUser,
     ui_preferences: UiPreferences,
-) -> Result<BackupPayloadV1, ApiError> {
-    let assets = fetch_assets(pool, iid, user_id).await?;
+) -> Result<BackupPayload, ApiError> {
+    let (assets, asset_id_to_index) = fetch_assets(pool, iid, user_id).await?;
+    let allocation_rules = fetch_allocation_rules(pool, iid, user_id, &asset_id_to_index).await?;
     let liabilities = fetch_liabilities(pool, iid, user_id).await?;
     let budget_entries = fetch_budget_entries(pool, iid, user_id).await?;
     let planning_flows = fetch_planning_flows(pool, iid, user_id).await?;
     let categories_used = fetch_categories_used(pool, iid, user_id).await?;
     let snapshot = fetch_installation_snapshot(pool, iid).await?;
 
-    Ok(BackupPayloadV1 {
+    Ok(BackupPayload {
         user,
         categories_used,
         assets,
+        allocation_rules,
         liabilities,
         budget_entries,
         planning_flows,
@@ -161,12 +163,15 @@ async fn build_payload(
     })
 }
 
+/// Returns the exportable assets plus a map `(asset_id) → index in the vec` so we can
+/// serialize `allocation_rules.target_asset_index` against the same ordering.
 async fn fetch_assets(
     pool: &PgPool,
     iid: Uuid,
     user_id: Uuid,
-) -> Result<Vec<BackupAsset>, ApiError> {
+) -> Result<(Vec<BackupAsset>, std::collections::HashMap<Uuid, usize>), ApiError> {
     let rows: Vec<(
+        Uuid,
         String,
         String,
         String,
@@ -174,15 +179,11 @@ async fn fetch_assets(
         Option<Decimal>,
         bool,
         Option<Decimal>,
-        Decimal,
-        String,
-        Decimal,
         Option<String>,
         i32,
     )> = sqlx::query_as(
-        r#"SELECT c.scope, c.name AS cat_name, a.name, a.current_value, a.purchase_price,
-                  a.is_liquid, a.expected_annual_return_percent, a.monthly_contribution_fixed,
-                  a.contribution_frequency, a.contribution_remainder_weight,
+        r#"SELECT a.id, c.scope, c.name AS cat_name, a.name, a.current_value, a.purchase_price,
+                  a.is_liquid, a.expected_annual_return_percent,
                   a.notes, a.sort_index
            FROM assets a
            JOIN categories c ON c.id = a.category_id
@@ -194,20 +195,67 @@ async fn fetch_assets(
     .fetch_all(pool)
     .await?;
 
+    let mut id_to_index = std::collections::HashMap::with_capacity(rows.len());
+    let assets: Vec<BackupAsset> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            id_to_index.insert(r.0, i);
+            BackupAsset {
+                category_ref: CategoryRef { scope: r.1, name: r.2 },
+                name: r.3,
+                current_value: r.4,
+                purchase_price: r.5,
+                is_liquid: r.6,
+                expected_annual_return_percent: r.7,
+                notes: r.8,
+                sort_index: r.9,
+            }
+        })
+        .collect();
+    Ok((assets, id_to_index))
+}
+
+async fn fetch_allocation_rules(
+    pool: &PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    asset_id_to_index: &std::collections::HashMap<Uuid, usize>,
+) -> Result<Vec<BackupAllocationRule>, ApiError> {
+    let rows: Vec<(
+        Uuid,
+        i32,
+        String,
+        Option<Decimal>,
+        Option<String>,
+        Option<Decimal>,
+        bool,
+        Option<String>,
+    )> = sqlx::query_as(
+        r#"SELECT target_asset_id, priority, kind, amount, cap_kind, cap_value, enabled, notes
+           FROM allocation_rules
+           WHERE installation_id = $1 AND owner_user_id = $2
+           ORDER BY priority ASC, id ASC"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
     Ok(rows
         .into_iter()
-        .map(|r| BackupAsset {
-            category_ref: CategoryRef { scope: r.0, name: r.1 },
-            name: r.2,
-            current_value: r.3,
-            purchase_price: r.4,
-            is_liquid: r.5,
-            expected_annual_return_percent: r.6,
-            monthly_contribution_fixed: r.7,
-            contribution_frequency: r.8,
-            contribution_remainder_weight: r.9,
-            notes: r.10,
-            sort_index: r.11,
+        .filter_map(|r| {
+            let idx = *asset_id_to_index.get(&r.0)?;
+            Some(BackupAllocationRule {
+                target_asset_index: idx,
+                priority: r.1,
+                kind: r.2,
+                amount: r.3,
+                cap_kind: r.4,
+                cap_value: r.5,
+                enabled: r.6,
+                notes: r.7,
+            })
         })
         .collect())
 }
