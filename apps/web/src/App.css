@@ -1494,10 +1494,6 @@ a.tab-btn {
   font-weight: 500;
 }
 
-.projection-chart-legend--stacked text {
-  font-size: 11px;
-}
-
 .projection-chart-grid {
   stroke: #e2e8f0;
   stroke-width: 1;
@@ -1553,19 +1549,6 @@ a.tab-btn {
   fill: #dc2626;
   font-size: 10px;
   font-weight: 500;
-}
-
-.projection-chart-compound-marker {
-  stroke: #cbd5e1;
-  stroke-width: 1;
-  stroke-dasharray: 4 4;
-  opacity: 0.8;
-}
-
-.projection-chart-compound-label {
-  fill: #94a3b8;
-  font-size: 10px;
-  font-weight: 600;
 }
 
 .projection-chart-tick {
@@ -1661,8 +1644,7 @@ a.tab-btn {
 .planning-dir-svg {
   display: block;
   width: 100%;
-  max-width: 28rem;
-  height: auto;
+  height: 14px;
   border-radius: 0.25rem;
   overflow: hidden;
 }
@@ -1925,6 +1907,12 @@ fieldset.retirement-config-stack {
   font-weight: 600;
   color: #334155;
   font-variant-numeric: tabular-nums;
+}
+
+.retirement-mode-monthly {
+  color: #94a3b8;
+  font-size: 0.78em;
+  font-weight: normal;
 }
 
 @media (max-width: 900px) {

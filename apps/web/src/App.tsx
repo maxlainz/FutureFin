@@ -1330,7 +1330,8 @@ function projectionXTicks(
 /** Geometría del SVG en unidades de usuario: depende del ancho CSS real del contenedor. */
 function buildProjectionChartLayout(
   containerCssWidth: number,
-  containerCssHeight?: number,
+  containerCssHeight: number | undefined,
+  legendLabels: string[],
 ) {
   const W = Math.max(300, Math.round(containerCssWidth));
   const aspect = 460 / 1040;
@@ -1349,27 +1350,79 @@ function buildProjectionChartLayout(
     ? Math.round(42 + W * 0.035)
     : Math.round(68 + Math.min(36, (W - 560) * 0.045));
   const mr = narrow ? 12 : Math.round(26 + Math.min(30, (W - 560) * 0.022));
-  let mt = narrow ? 94 : 88;
-  const mb = narrow ? 42 : 52;
+  const mb = narrow ? 32 : 38;
 
-  let pw = W - ml - mr;
-  const legendOnRight = pw >= 280;
-  if (!legendOnRight) {
-    mt = narrow ? 122 : 112;
-    if (pw < 440) {
-      mt += 12;
+  const pw = W - ml - mr;
+
+  // Empaquetado horizontal de la leyenda en filas, justificada a la derecha
+  // del contenedor. Ancho aproximado por item: swatch (24px) + gap (6px)
+  // + ancho de texto estimado (6.5px por carácter).
+  const legendRowHeight = 22;
+  const legendItemGap = 14;
+  const legendCharPx = 6.5;
+  const legendSwatchPx = 24 + 6;
+  // Borde derecho de referencia: el borde derecho del plot (ml + pw),
+  // nunca más a la derecha. Así la leyenda no sobresale del eje.
+  const legendRightAnchor = ml + pw;
+  // Espacio horizontal disponible para la leyenda: limitado para no chocar
+  // con los headlines (a la izquierda) — ~60% del ancho del plot.
+  const legendBudgetWidth = Math.max(160, Math.round(pw * 0.6));
+  const itemWidths = legendLabels.map(
+    (label) => legendSwatchPx + label.length * legendCharPx,
+  );
+  const rows: number[][] = [];
+  {
+    let currentRow: number[] = [];
+    let currentRowWidth = 0;
+    for (let i = 0; i < legendLabels.length; i++) {
+      const itemW = itemWidths[i];
+      const widthIfAdded =
+        currentRow.length === 0
+          ? itemW
+          : currentRowWidth + legendItemGap + itemW;
+      if (currentRow.length > 0 && widthIfAdded > legendBudgetWidth) {
+        rows.push(currentRow);
+        currentRow = [i];
+        currentRowWidth = itemW;
+      } else {
+        currentRow.push(i);
+        currentRowWidth = widthIfAdded;
+      }
     }
+    if (currentRow.length > 0) rows.push(currentRow);
   }
+  const rowsNeeded = Math.max(1, rows.length);
+  const placements: Array<{ x: number; y: number }> = new Array(
+    legendLabels.length,
+  );
+  rows.forEach((row, rowIdx) => {
+    const rowTotal = row.reduce(
+      (sum, itemIdx, idx) =>
+        sum + itemWidths[itemIdx] + (idx > 0 ? legendItemGap : 0),
+      0,
+    );
+    let cursor = legendRightAnchor - rowTotal;
+    for (const itemIdx of row) {
+      placements[itemIdx] = { x: cursor, y: rowIdx * legendRowHeight };
+      cursor += itemWidths[itemIdx] + legendItemGap;
+    }
+  });
 
-  pw = W - ml - mr;
+  // Headlines fijos a la izquierda (y=34/56/74) y legend a la derecha.
+  // mt acomoda lo más alto de los dos bloques con padding.
+  const legendBlockHeight = rowsNeeded * legendRowHeight;
+  const legendVerticalPad = 18;
+  const headlineBlockTopY = 34;
+  const headlineBlockBottom = headlineBlockTopY + 40 + 14;
+  const mt = Math.max(
+    legendBlockHeight + legendVerticalPad * 2,
+    headlineBlockBottom,
+  );
+  // Centra verticalmente la leyenda en el margen superior.
+  const legendY = Math.round((mt - legendBlockHeight) / 2);
   const ph = H - mt - mb;
 
-  const legend = legendOnRight
-    ? {
-        x: ml + Math.max(0, pw - Math.min(210, Math.round(pw * 0.42))),
-        y: 16,
-      }
-    : { x: ml, y: narrow ? 92 : 82 };
+  const legend = { x: 0, y: legendY };
 
   return {
     W,
@@ -1381,8 +1434,10 @@ function buildProjectionChartLayout(
     pw,
     ph,
     narrow,
-    legendOnRight,
     legend,
+    legendPlacements: placements,
+    legendRows: rowsNeeded,
+    headlineBlockTopY,
   };
 }
 
@@ -4193,6 +4248,9 @@ export default function App() {
             ledgerPersonScope={ledgerPersonScope}
             canEdit={installation?.role !== "viewer"}
             formError={assetsError}
+            projectionSeries={projectionSeries}
+            anchorDateYmd={projectionSeries?.anchor_date_ymd ?? null}
+            calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
             assetModalOpen={assetModalOpen}
             closeAssetModal={() => {
               resetAssetForm();
@@ -4685,6 +4743,9 @@ function AssetsView({
   ledgerPersonScope,
   canEdit,
   formError,
+  projectionSeries,
+  anchorDateYmd,
+  calendarTz,
   assetModalOpen,
   closeAssetModal,
   openNewAssetModal,
@@ -4717,6 +4778,9 @@ function AssetsView({
   ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
+  projectionSeries: ProjectionSeriesApi | null;
+  anchorDateYmd: string | null;
+  calendarTz: string;
   assetModalOpen: boolean;
   closeAssetModal: () => void;
   openNewAssetModal: () => void;
@@ -4778,6 +4842,46 @@ function AssetsView({
     assetCostTotals !== null && assetCostTotals.cost > 0
       ? (assetCostTotals.currentOnCost / assetCostTotals.cost - 1) * 100
       : null;
+
+  const assetTargetReachMap = useMemo<Map<string, string | null>>(() => {
+    const out = new Map<string, string | null>();
+    const seriesList = projectionSeries?.asset_series ?? [];
+    if (seriesList.length === 0) return out;
+    const anchorStr =
+      anchorDateYmd != null && anchorDateYmd.trim() !== ""
+        ? anchorDateYmd.trim()
+        : todayYmdInTimeZone(calendarTz);
+    const anchor = parseYmdComponents(anchorStr);
+    if (!anchor) return out;
+    for (const a of assets) {
+      const target = parseDisplayDecimal(
+        String(a.contribution_target_amount ?? ""),
+      );
+      if (target == null || target <= 0) continue;
+      const series = seriesList.find((s) => s.asset_id === a.id);
+      if (!series) continue;
+      let reachedIndex: number | null = null;
+      for (let i = 0; i < series.values.length; i++) {
+        const v = parseDisplayDecimal(String(series.values[i] ?? ""));
+        if (v != null && v >= target) {
+          reachedIndex = i;
+          break;
+        }
+      }
+      if (reachedIndex == null) {
+        out.set(a.id, null);
+        continue;
+      }
+      const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, reachedIndex);
+      out.set(a.id, formatProjectionHoverMonthYear(at));
+    }
+    return out;
+  }, [
+    projectionSeries?.asset_series,
+    assets,
+    anchorDateYmd,
+    calendarTz,
+  ]);
 
   return (
     <div className="workspace">
@@ -5063,22 +5167,36 @@ function AssetsView({
                           const target = parseDisplayDecimal(
                             String(a.contribution_target_amount ?? ""),
                           );
+                          const currentVal = parseDisplayDecimal(a.current_value);
+                          const targetMet =
+                            target != null &&
+                            currentVal != null &&
+                            currentVal >= target;
                           const targetCompact =
-                            target != null && target > 0
+                            target != null && target > 0 && !targetMet
                               ? formatProjectionMilestoneCompactLabel(
                                   String(roundUpToHundred(target)),
                                 )
                               : null;
+                          const targetReachLabel =
+                            assetTargetReachMap.get(a.id) ?? null;
                           return (
                           <tr key={a.id}>
                             <td>{a.name}</td>
                             <td className="num">
-                              {formatCurrencyAmount(a.current_value, currencyIso)}
                               {targetCompact ? (
-                                <span className="asset-target-tag">
-                                  {" "}(Obj. {targetCompact})
+                                <span
+                                  className="asset-target-tag"
+                                  title={
+                                    targetReachLabel
+                                      ? `Objetivo alcanzado en ${targetReachLabel}`
+                                      : undefined
+                                  }
+                                >
+                                  (Obj. {targetCompact}){" "}
                                 </span>
                               ) : null}
+                              {formatCurrencyAmount(a.current_value, currencyIso)}
                             </td>
                             {showPurchase ? (
                               <td className="num">
@@ -6290,7 +6408,6 @@ function BudgetView({
                       <tr>
                         <th>Categoría</th>
                         <th className="num">Importe mensual</th>
-                        <th className="budget-persists-col" title="Fin del gasto">Fin</th>
                         {canEdit ? (
                           <th className="asset-actions-cell">
                             <span className="sr-only">Acciones</span>
@@ -6307,13 +6424,6 @@ function BudgetView({
                           </td>
                           <td className="num">
                             {formatCurrencyAmount(row.amount, currencyIso)}
-                          </td>
-                          <td className="budget-persists-col">
-                            {row.ends_at_retirement
-                              ? "Jub."
-                              : row.expense_end_date
-                              ? row.expense_end_date.slice(0, 7)
-                              : "—"}
                           </td>
                           {canEdit ? (
                             <td className="asset-actions-cell">
@@ -6588,7 +6698,7 @@ function UpcomingView({
 
       {hasMembership ? (
         <section className="panel">
-          <h3 className="panel-title">Panorama</h3>
+          <h3 className="panel-title">Distribución</h3>
           {planningLoading ? (
             <p className="muted bordered-top">Cargando…</p>
           ) : planningFlows.length === 0 ? (
@@ -8352,13 +8462,13 @@ function SettingsView({
 
 const ASSET_LINE_COLORS = [
   "#2563eb",
-  "#7c3aed",
-  "#db2777",
   "#0891b2",
-  "#ea580c",
-  "#65a30d",
-  "#9333ea",
+  "#059669",
+  "#7c3aed",
   "#0f766e",
+  "#1d4ed8",
+  "#15803d",
+  "#0ea5e9",
 ];
 
 function ProjectionNetWorthChart({
@@ -8461,24 +8571,39 @@ function ProjectionNetWorthChart({
     });
   }, [focusMode, focusWindow, pts.length]);
 
+  const legendLabels = useMemo(() => {
+    const assetNames = (series.asset_series ?? []).map((as) => as.asset_name);
+    return ["Patrimonio neto", "Capital aportado", ...assetNames];
+  }, [series.asset_series]);
+
   const layoutDims = useMemo(
     () =>
       buildProjectionChartLayout(
         containerSize.width > 0 ? containerSize.width : 1040,
         containerSize.height > 0 ? containerSize.height : undefined,
+        legendLabels,
       ),
-    [containerSize.height, containerSize.width],
+    [containerSize.height, containerSize.width, legendLabels],
   );
 
   const model = useMemo(() => {
     if (pts.length < 2) return null;
     const nw = pts.map((p) => parseDisplayDecimal(p.net_worth) ?? 0);
     const cc = pts.map((p) => parseDisplayDecimal(p.contributed_capital) ?? 0);
-    const assetSeries = (series.asset_series ?? []).map((as) => ({
-      id: as.asset_id,
-      name: as.asset_name,
-      values: as.values.map((v) => parseDisplayDecimal(v) ?? 0),
-    }));
+    const assetSeries = (series.asset_series ?? [])
+      .map((as) => {
+        const values = as.values.map((v) => parseDisplayDecimal(v) ?? 0);
+        return {
+          id: as.asset_id,
+          name: as.asset_name,
+          values,
+          peak: values.length > 0 ? Math.max(0, ...values) : 0,
+        };
+      })
+      .sort((a, b) => {
+        if (a.peak !== b.peak) return a.peak - b.peak;
+        return a.name.localeCompare(b.name);
+      });
     const monthCount = pts.length;
     const assetSums: number[] = new Array(monthCount).fill(0);
     for (let k = 0; k < monthCount; k++) {
@@ -8873,45 +8998,63 @@ function ProjectionNetWorthChart({
           </clipPath>
         </defs>
 
-        <text x={ml} y={34} className="projection-chart-headline">
+        <text x={ml} y={layoutDims.headlineBlockTopY} className="projection-chart-headline">
           {scopeShort}
         </text>
-        <text x={ml} y={56} className="projection-chart-meta">
+        <text x={ml} y={layoutDims.headlineBlockTopY + 22} className="projection-chart-meta">
           {horizonLine}
         </text>
-        <text x={ml} y={74} className="projection-chart-meta">
+        <text x={ml} y={layoutDims.headlineBlockTopY + 40} className="projection-chart-meta">
           {inflationShort} · Δ regular presup. {deltaStr}/mes
         </text>
 
         <g
           transform={`translate(${layoutDims.legend.x}, ${layoutDims.legend.y})`}
-          className={`projection-chart-legend${layoutDims.legendOnRight ? "" : " projection-chart-legend--stacked"}`}
+          className="projection-chart-legend"
         >
-          <line x1={0} y1={7} x2={26} y2={7} stroke="#047857" strokeWidth={3} strokeLinecap="round" />
-          <text x={34} y={11}>Patrimonio neto</text>
-          <line x1={0} y1={29} x2={26} y2={29} stroke="#b45309" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
-          <text x={34} y={33}>Capital aportado</text>
-          {assetSeries.map((as, idx) => {
-            const color = ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length];
-            const yOff = 51 + idx * 22;
-            return (
-              <g key={as.id}>
-                <rect
-                  x={0}
-                  y={yOff + 2}
-                  width={20}
-                  height={11}
-                  rx={2}
-                  fill={color}
-                  fillOpacity={0.18}
-                  stroke={color}
-                  strokeOpacity={0.23}
-                  strokeWidth={0.6}
-                />
-                <text x={28} y={yOff + 11}>{as.name}</text>
-              </g>
-            );
-          })}
+          {(() => {
+            const p = layoutDims.legendPlacements;
+            const items: ReactNode[] = [];
+            if (p[0]) {
+              items.push(
+                <g key="legend-nw" transform={`translate(${p[0].x}, ${p[0].y})`}>
+                  <line x1={0} y1={11} x2={22} y2={11} stroke="#047857" strokeWidth={3} strokeLinecap="round" />
+                  <text x={28} y={15}>Patrimonio neto</text>
+                </g>,
+              );
+            }
+            if (p[1]) {
+              items.push(
+                <g key="legend-cc" transform={`translate(${p[1].x}, ${p[1].y})`}>
+                  <line x1={0} y1={11} x2={22} y2={11} stroke="#b45309" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
+                  <text x={28} y={15}>Capital aportado</text>
+                </g>,
+              );
+            }
+            assetSeries.forEach((as, idx) => {
+              const pos = p[2 + idx];
+              if (!pos) return;
+              const color = ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length];
+              items.push(
+                <g key={`legend-${as.id}`} transform={`translate(${pos.x}, ${pos.y})`}>
+                  <rect
+                    x={0}
+                    y={6}
+                    width={20}
+                    height={11}
+                    rx={2}
+                    fill={color}
+                    fillOpacity={0.14}
+                    stroke={color}
+                    strokeOpacity={0.4}
+                    strokeWidth={0.8}
+                  />
+                  <text x={26} y={15}>{as.name}</text>
+                </g>,
+              );
+            });
+            return items;
+          })()}
         </g>
 
         {yTicks.map((yt) => (
@@ -8938,7 +9081,7 @@ function ProjectionNetWorthChart({
         {xTicks.map(({ monthIndex, label }) => {
           const cx = xScale(monthIndex);
           const tickY =
-            mt + ph + (layoutDims.narrow ? 22 : 26) + (rotateXLabels ? 10 : 0);
+            mt + ph + (layoutDims.narrow ? 12 : 14) + (rotateXLabels ? 8 : 0);
           return (
             <text
               key={`gx-${monthIndex}`}
@@ -8990,10 +9133,10 @@ function ProjectionNetWorthChart({
                   key={as.id}
                   d={d}
                   fill={color}
-                  fillOpacity={0.18}
+                  fillOpacity={0.14}
                   stroke={color}
-                  strokeWidth={0.6}
-                  strokeOpacity={0.23}
+                  strokeWidth={0.8}
+                  strokeOpacity={0.4}
                 />
               );
             })
@@ -9095,25 +9238,40 @@ function ProjectionNetWorthChart({
               </g>
             );
           })}
-          {showCompoundOutpaceMarker && compoundOutpaceMonth != null ? (
-            <g>
-              <line
-                x1={xScale(compoundOutpaceMonth)}
-                x2={xScale(compoundOutpaceMonth)}
-                y1={mt + 2}
-                y2={mt + ph}
-                className="projection-chart-compound-marker"
-              />
-              <text
-                x={xScale(compoundOutpaceMonth)}
-                y={mt + 14}
-                textAnchor="middle"
-                className="projection-chart-compound-label"
-              >
-                Interés &gt; ahorro
-              </text>
-            </g>
-          ) : null}
+          {showCompoundOutpaceMarker && compoundOutpaceMonth != null
+            ? (() => {
+                const x = xScale(compoundOutpaceMonth);
+                const y0 = mt + ph;
+                const nwAtMs = nw[compoundOutpaceMonth] ?? null;
+                const nwY =
+                  nwAtMs != null && Number.isFinite(nwAtMs)
+                    ? yScale(nwAtMs)
+                    : null;
+                const y1Floor = mt + 12;
+                const y1FromNetWorth =
+                  nwY != null ? nwY - 12 : y0 - Math.min(44, ph * 0.22);
+                const y1 = Math.max(y1Floor, Math.min(y0 - 8, y1FromNetWorth));
+                return (
+                  <g>
+                    <line
+                      x1={x}
+                      x2={x}
+                      y1={y0}
+                      y2={y1}
+                      className="projection-chart-milestone-line"
+                    />
+                    <text
+                      x={x}
+                      y={y1 - 6}
+                      textAnchor="middle"
+                      className="projection-chart-milestone-label"
+                    >
+                      Interés &gt; ahorro
+                    </text>
+                  </g>
+                );
+              })()
+            : null}
 
           {hover !== null && hover >= visibleStart && hover <= visibleEnd ? (
             <line
@@ -9311,38 +9469,50 @@ function RetirementView({
     projectionSeries?.months,
   ]);
 
-  const retirementObjectiveManualAnnualDisplay = useMemo(() => {
+  const renderRetirementAmount = useCallback(
+    (annual: number, monthly: number): ReactNode => (
+      <>
+        {formatCurrencyNumber(annual, currencyIso)}{" "}
+        <span className="retirement-mode-monthly">
+          ({formatCurrencyNumber(monthly, currencyIso)}/mes)
+        </span>
+      </>
+    ),
+    [currencyIso],
+  );
+
+  const retirementObjectiveManualAnnualDisplay = useMemo<ReactNode>(() => {
     const m = parseDisplayDecimal(
       String(fireDraft.fire_number_manual_amount ?? ""),
     );
-    return m !== null && m > 0
-      ? formatCurrencyNumber(m, currencyIso)
-      : METRIC_DASH;
-  }, [fireDraft.fire_number_manual_amount, currencyIso]);
+    if (!(m !== null && m > 0)) return METRIC_DASH;
+    return renderRetirementAmount(m, m / 12);
+  }, [fireDraft.fire_number_manual_amount, renderRetirementAmount]);
 
-  const retirementObjectiveExpenseAnnualDisplay = useMemo(() => {
+  const retirementObjectiveExpenseAnnualDisplay = useMemo<ReactNode>(() => {
     const baseM = parseDisplayDecimal(
       String(
         retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent ??
           "",
       ),
     );
-    return baseM !== null && baseM >= 0
-      ? formatCurrencyNumber(baseM * 12, currencyIso)
-      : METRIC_DASH;
+    if (!(baseM !== null && baseM >= 0)) return METRIC_DASH;
+    return renderRetirementAmount(baseM * 12, baseM);
   }, [
     retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent,
-    currencyIso,
+    renderRetirementAmount,
   ]);
 
-  const retirementObjectiveIncomeAnnualDisplay = useMemo(() => {
+  const retirementObjectiveIncomeAnnualDisplay = useMemo<ReactNode>(() => {
     const incM = parseDisplayDecimal(
       String(retirementBudgetSnapshot?.totals.income_monthly_equivalent ?? ""),
     );
-    return incM !== null && incM >= 0
-      ? formatCurrencyNumber(incM * 12, currencyIso)
-      : METRIC_DASH;
-  }, [retirementBudgetSnapshot?.totals.income_monthly_equivalent, currencyIso]);
+    if (!(incM !== null && incM >= 0)) return METRIC_DASH;
+    return renderRetirementAmount(incM * 12, incM);
+  }, [
+    retirementBudgetSnapshot?.totals.income_monthly_equivalent,
+    renderRetirementAmount,
+  ]);
 
   const skipFireAutosaveRef = useRef(true);
 
@@ -9729,8 +9899,6 @@ function ProjectionView({
     }
     return base;
   })();
-  const compoundOutpaceMonth =
-    projectionSeries?.compound_outpaces_true_savings_month_index ?? null;
   const [focusMode, setFocusMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     try {
@@ -9787,7 +9955,7 @@ function ProjectionView({
       {hasMembership && !projectionBusy && projectionSeries ? (
         <section className="panel">
           <h3 className="panel-title">Trayectoria proyectada</h3>
-          {nextMilestones.length > 0 || compoundOutpaceMonth != null ? (
+          {nextMilestones.length > 0 ? (
             <div className="metric-grid workspace-kpi-strip">
               {nextMilestones.map((m) => {
                 const isJubilacion = m.target === "jubilacion";
@@ -9815,22 +9983,6 @@ function ProjectionView({
                   />
                 );
               })}
-              {compoundOutpaceMonth != null ? (
-                <MetricCard
-                  label="Interés compuesto"
-                  value="Supera al ahorro"
-                  parenthetical={`~${projectionXTickLabel(
-                    compoundOutpaceMonth,
-                    projectionSeries.months,
-                    {
-                      ageUiMode: axisAgeMode,
-                      birthDateIso: axisBirth,
-                      anchorDateYmd: axisAnchor,
-                      calendarTz,
-                    },
-                  )}`}
-                />
-              ) : null}
             </div>
           ) : null}
           <ProjectionNetWorthChart
