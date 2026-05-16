@@ -94,13 +94,28 @@ type AssetApiRow = {
   purchase_price: string | null;
   is_liquid: boolean;
   expected_annual_return_percent?: string | null;
-  monthly_contribution_fixed: string;
-  contribution_remainder_weight: string;
-  contribution_frequency?: AssetContributionFreq;
-  /** Primer mes motor: fija escalada + remanente nominal (API); ausente en clientes antiguos. */
+  /** Aporte estimado mes 1 derivado de las reglas de asignación del sobrante. */
   contribution_nominal_monthly?: string;
+  /** Tope absoluto en € si una regla apunta a este activo con cap_kind='amount'. */
+  contribution_target_amount?: string | null;
   notes: string | null;
   sort_index: number;
+};
+
+type AllocationRuleKind = "fixed" | "percent" | "remainder";
+type AllocationRuleCapKind = "amount" | "months_expense" | "income_multiple";
+
+type AllocationRuleApiRow = {
+  id: string;
+  target_asset_id: string;
+  priority: number;
+  kind: AllocationRuleKind;
+  amount?: string | null;
+  cap_kind?: AllocationRuleCapKind | null;
+  cap_value?: string | null;
+  enabled: boolean;
+  notes?: string | null;
+  owner_user_id?: string | null;
 };
 
 type FinancialHealthMetrics = {
@@ -246,8 +261,6 @@ type LiabilityApiRow = {
 };
 
 type LiabilityPaymentFreq = "" | "monthly" | "weekly";
-
-type AssetContributionFreq = "monthly" | "weekly";
 
 /** Fallback civil date when a TZ string is invalid. */
 function utcTodayYmd(): string {
@@ -649,43 +662,20 @@ function formatCurrencyNumber(n: number, currencyIso: string): string {
   }
 }
 
-/** Equivalente mensual nominal de la cuota fija (semanal ×52/12, mismo criterio que el motor). */
-function assetFixedMonthlyEquivalentNum(a: AssetApiRow): number {
-  const fixed = parseDisplayDecimal(
-    String(a.monthly_contribution_fixed ?? "0").trim(),
-  );
-  if (fixed === null || fixed <= 0) return 0;
-  if (a.contribution_frequency === "weekly") {
-    return (fixed * 52) / 12;
-  }
-  return fixed;
+/** Aporte mensual estimado (primer mes motor) leído de `contribution_nominal_monthly`. */
+function assetContributionMonthlyEstimateNum(a: AssetApiRow): number {
+  const raw = a.contribution_nominal_monthly;
+  if (raw == null) return 0;
+  const n = parseDisplayDecimal(String(raw).trim());
+  return n != null && n > 0 ? n : 0;
 }
 
-/** Importe nominal mensual (primer mes del motor): cuota fija escalada + remanente; incluye ajuste del primer mes por Próximos (fecha o reparto 90 días). */
 function formatAssetContributionNominalCell(
   a: AssetApiRow,
   currencyIso: string,
 ): string {
-  const raw = a.contribution_nominal_monthly;
-  if (raw != null && String(raw).trim() !== "") {
-    const n = parseDisplayDecimal(String(raw).trim());
-    if (n !== null && n > 0) {
-      return formatCurrencyAmount(String(raw).trim(), currencyIso);
-    }
-    return METRIC_DASH;
-  }
-  const eq = assetFixedMonthlyEquivalentNum(a);
-  return eq > 0 ? formatCurrencyNumber(eq, currencyIso) : METRIC_DASH;
-}
-
-/** Misma lógica que la celda «Aporte»: número mensual estimado por activo. */
-function assetContributionMonthlyEstimateNum(a: AssetApiRow): number {
-  const raw = a.contribution_nominal_monthly;
-  if (raw != null && String(raw).trim() !== "") {
-    const n = parseDisplayDecimal(String(raw).trim());
-    if (n !== null && n > 0) return n;
-  }
-  return assetFixedMonthlyEquivalentNum(a);
+  const n = assetContributionMonthlyEstimateNum(a);
+  return n > 0 ? formatCurrencyNumber(n, currencyIso) : METRIC_DASH;
 }
 
 /** Suma valor actual y coste solo en posiciones con compra válida (> 0). */
@@ -778,6 +768,11 @@ function formatAxisMoney(n: number, currencyIso: string): string {
   } catch {
     return formatCurrencyNumber(n, currencyIso);
   }
+}
+
+/** Redondeo hacia arriba al siguiente múltiplo de 100. */
+function roundUpToHundred(n: number): number {
+  return Math.ceil(n / 100) * 100;
 }
 
 function formatProjectionMilestoneCompactLabel(target: string): string {
@@ -976,34 +971,46 @@ function buildProjectionMonthTickIndices(
   return ticks;
 }
 
-/** Una marca por año civil al menos (modo fechas); mantiene el último mes del horizonte. */
-function thinProjectionTicksUniqueYears(
-  ticks: number[],
+/**
+ * Marcas del eje X (modo fechas): primer mes (enero) de cada año civil que
+ * cae estrictamente dentro de [anchor, anchor+monthEnd]. Excluye el año del
+ * ancla para evitar apilar un label en el borde izquierdo del plot.
+ */
+function buildProjectionTicksFirstMonthOfYear(
   anchor: { y: number; m: number; d: number },
   monthEnd: number,
 ): number[] {
-  const sorted = [...new Set(ticks)].sort((a, b) => a - b);
+  if (monthEnd < 1) return [];
+  const end = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthEnd);
   const out: number[] = [];
-  let prevY: number | null = null;
-  for (const m of sorted) {
-    const y = addMonthsCivil(anchor.y, anchor.m, anchor.d, m).y;
-    if (prevY === null || y !== prevY) {
-      out.push(m);
-      prevY = y;
-    }
+  for (let y = anchor.y + 1; y <= end.y; y++) {
+    const mi = (y - anchor.y) * 12 + (1 - anchor.m);
+    if (mi < 1 || mi > monthEnd) continue;
+    out.push(mi);
   }
-  if (out[out.length - 1] !== monthEnd) {
-    const yEnd = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthEnd).y;
-    const yLast = addMonthsCivil(
-      anchor.y,
-      anchor.m,
-      anchor.d,
-      out[out.length - 1],
-    ).y;
-    if (yEnd !== yLast) {
-      out.push(monthEnd);
-    } else {
-      out[out.length - 1] = monthEnd;
+  return out;
+}
+
+/**
+ * Marcas del eje X (modo edades): mes en el que se cumplen los años (la edad
+ * completada se incrementa). Itera mes a mes y detecta transiciones usando la
+ * misma lógica que `projectionXTickLabel` (`ageCompletedYearsCivil`), de modo
+ * que la posición coincida exactamente con el label. Excluye el ancla.
+ */
+function buildProjectionTicksFirstMonthOfAge(
+  anchor: { y: number; m: number; d: number },
+  birth: { y: number; m: number; d: number },
+  monthEnd: number,
+): number[] {
+  if (monthEnd < 1) return [];
+  const out: number[] = [];
+  let prevAge = ageCompletedYearsCivil(anchor, birth);
+  for (let i = 1; i <= monthEnd; i++) {
+    const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, i);
+    const age = ageCompletedYearsCivil(at, birth);
+    if (age !== prevAge) {
+      out.push(i);
+      prevAge = age;
     }
   }
   return out;
@@ -1292,17 +1299,26 @@ function projectionXTicks(
       : 28;
   const maxTicks = Math.max(5, Math.min(18, Math.floor(Math.max(120, pw) / minPx)));
 
-  let ticks = buildProjectionMonthTickIndices(mc, maxTicks);
+  let ticks: number[] | null = null;
 
-  if (opts?.ageUiMode === "dates") {
+  if (opts) {
     const anchorStr =
       opts.anchorDateYmd != null && opts.anchorDateYmd.trim() !== ""
         ? opts.anchorDateYmd.trim()
         : todayYmdInTimeZone(opts.calendarTz);
     const anchor = parseYmdComponents(anchorStr);
-    if (anchor) {
-      ticks = thinProjectionTicksUniqueYears(ticks, anchor, mc);
+    if (opts.ageUiMode === "dates" && anchor) {
+      ticks = buildProjectionTicksFirstMonthOfYear(anchor, mc);
+    } else if (opts.ageUiMode === "ages" && anchor) {
+      const birth = parseYmdComponents(opts.birthDateIso);
+      if (birth) {
+        ticks = buildProjectionTicksFirstMonthOfAge(anchor, birth, mc);
+      }
     }
+  }
+
+  if (!ticks) {
+    ticks = buildProjectionMonthTickIndices(mc, maxTicks);
   }
 
   return ticks.map((m) => ({
@@ -1574,11 +1590,13 @@ function Modal({
   open,
   onClose,
   children,
+  wide = false,
 }: {
   title: string;
   open: boolean;
   onClose: () => void;
   children: ReactNode;
+  wide?: boolean;
 }) {
   const titleId = useId();
 
@@ -1613,7 +1631,9 @@ function Modal({
       }}
     >
       <div
-        className="modal-dialog card-elevated"
+        className={
+          wide ? "modal-dialog modal-dialog--wide card-elevated" : "modal-dialog card-elevated"
+        }
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -1751,17 +1771,24 @@ export default function App() {
   const [assetsBusy, setAssetsBusy] = useState(false);
   const [assetsError, setAssetsError] = useState<string | null>(null);
   const [assetCategories, setAssetCategories] = useState<CategoryRow[]>([]);
+  const [allocationRules, setAllocationRules] = useState<AllocationRuleApiRow[]>([]);
+  const [allocationRulesBusy, setAllocationRulesBusy] = useState(false);
+  const [allocationRulesError, setAllocationRulesError] = useState<string | null>(null);
+  const [allocationPanelOpen, setAllocationPanelOpen] = useState(false);
+  const [ruleModalOpen, setRuleModalOpen] = useState(false);
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+  const [ruleFormTargetAsset, setRuleFormTargetAsset] = useState("");
+  const [ruleFormKind, setRuleFormKind] = useState<AllocationRuleKind>("remainder");
+  const [ruleFormAmount, setRuleFormAmount] = useState("");
+  const [ruleFormCapKind, setRuleFormCapKind] = useState<"none" | AllocationRuleCapKind>("none");
+  const [ruleFormCapValue, setRuleFormCapValue] = useState("");
+  const [ruleSaving, setRuleSaving] = useState(false);
   const [assetFormCategoryId, setAssetFormCategoryId] = useState("");
   const [assetFormName, setAssetFormName] = useState("");
   const [assetFormValue, setAssetFormValue] = useState("");
   const [assetFormPurchase, setAssetFormPurchase] = useState("");
   const [assetFormLiquid, setAssetFormLiquid] = useState(true);
   const [assetFormExpectedReturn, setAssetFormExpectedReturn] = useState("");
-  const [assetFormMonthlyFixed, setAssetFormMonthlyFixed] = useState("");
-  const [assetFormContributionFrequency, setAssetFormContributionFrequency] =
-    useState<AssetContributionFreq>("monthly");
-  const [assetFormRemainderWeight, setAssetFormRemainderWeight] =
-    useState("");
   const [assetFormNotes, setAssetFormNotes] = useState("");
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
   const [assetSaving, setAssetSaving] = useState(false);
@@ -2032,6 +2059,155 @@ export default function App() {
       setAssetsBusy(false);
     }
   }, [ledgerPersonScope]);
+
+  const loadAllocationRules = useCallback(async () => {
+    setAllocationRulesBusy(true);
+    setAllocationRulesError(null);
+    try {
+      const res = await fetch(
+        `/v1/allocation-rules${ledgerViewQs(ledgerPersonScope)}`,
+        defaultFetchInit,
+      );
+      if (res.status === 403 || res.status === 404) {
+        setAllocationRules([]);
+      } else if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      } else {
+        setAllocationRules((await res.json()) as AllocationRuleApiRow[]);
+      }
+    } catch (e: unknown) {
+      setAllocationRules([]);
+      setAllocationRulesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAllocationRulesBusy(false);
+    }
+  }, [ledgerPersonScope]);
+
+  function resetRuleForm() {
+    setEditingRuleId(null);
+    setRuleFormTargetAsset(assets[0]?.id ?? "");
+    setRuleFormKind("remainder");
+    setRuleFormAmount("");
+    setRuleFormCapKind("none");
+    setRuleFormCapValue("");
+  }
+
+  function beginEditRule(r: AllocationRuleApiRow) {
+    setEditingRuleId(r.id);
+    setRuleFormTargetAsset(r.target_asset_id);
+    setRuleFormKind(r.kind);
+    setRuleFormAmount(
+      r.amount != null ? formatEditableDecimalString(String(r.amount)) : "",
+    );
+    if (r.cap_kind && r.cap_value != null) {
+      setRuleFormCapKind(r.cap_kind);
+      setRuleFormCapValue(formatEditableDecimalString(String(r.cap_value)));
+    } else {
+      setRuleFormCapKind("none");
+      setRuleFormCapValue("");
+    }
+  }
+
+  async function submitRuleForm(ev: FormEvent) {
+    ev.preventDefault();
+    if (!ruleFormTargetAsset) return;
+    setRuleSaving(true);
+    setAllocationRulesError(null);
+    try {
+      type RulePayload = {
+        target_asset_id?: string;
+        kind?: AllocationRuleKind;
+        amount?: string | null;
+        cap_kind?: AllocationRuleCapKind | null;
+        cap_value?: string | null;
+        cap?: { kind: AllocationRuleCapKind; value: string } | null;
+      };
+      const base: RulePayload = {};
+      const capRaw = ruleFormCapValue.trim().replace(",", ".");
+      const amountRaw = ruleFormAmount.trim().replace(",", ".");
+
+      if (editingRuleId) {
+        base.target_asset_id = ruleFormTargetAsset;
+        base.kind = ruleFormKind;
+        base.amount =
+          ruleFormKind === "remainder" ? null : (amountRaw === "" ? "0" : amountRaw);
+        base.cap =
+          ruleFormCapKind === "none"
+            ? null
+            : { kind: ruleFormCapKind, value: capRaw === "" ? "0" : capRaw };
+      } else {
+        base.target_asset_id = ruleFormTargetAsset;
+        base.kind = ruleFormKind;
+        if (ruleFormKind !== "remainder") {
+          base.amount = amountRaw === "" ? "0" : amountRaw;
+        }
+        if (ruleFormCapKind !== "none") {
+          base.cap_kind = ruleFormCapKind;
+          base.cap_value = capRaw === "" ? "0" : capRaw;
+        }
+      }
+
+      const url = editingRuleId
+        ? `/v1/allocation-rules/${encodeURIComponent(editingRuleId)}`
+        : "/v1/allocation-rules";
+      const method = editingRuleId ? "PATCH" : "POST";
+      const res = await fetch(url, {
+        ...defaultFetchInit,
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(base),
+      });
+      if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+      setRuleModalOpen(false);
+      resetRuleForm();
+      await loadAllocationRules();
+    } catch (e: unknown) {
+      setAllocationRulesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRuleSaving(false);
+    }
+  }
+
+  async function deleteRule(id: string) {
+    if (!confirm("¿Eliminar esta regla de asignación?")) return;
+    setAllocationRulesError(null);
+    try {
+      const res = await fetch(
+        `/v1/allocation-rules/${encodeURIComponent(id)}`,
+        { ...defaultFetchInit, method: "DELETE" },
+      );
+      if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+      await loadAllocationRules();
+    } catch (e: unknown) {
+      setAllocationRulesError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function moveRule(id: string, direction: "up" | "down") {
+    const idx = allocationRules.findIndex((r) => r.id === id);
+    if (idx < 0) return;
+    const swapWith = direction === "up" ? idx - 1 : idx + 1;
+    if (swapWith < 0 || swapWith >= allocationRules.length) return;
+    const reordered = [...allocationRules];
+    const [moved] = reordered.splice(idx, 1);
+    reordered.splice(swapWith, 0, moved);
+    setAllocationRulesError(null);
+    try {
+      const res = await fetch(
+        `/v1/allocation-rules/reorder${ledgerViewQs(ledgerPersonScope)}`,
+        {
+          ...defaultFetchInit,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: reordered.map((r) => r.id) }),
+        },
+      );
+      if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+      await loadAllocationRules();
+    } catch (e: unknown) {
+      setAllocationRulesError(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   const loadLiabilitiesPage = useCallback(async () => {
     setLiabilitiesBusy(true);
@@ -2429,7 +2605,11 @@ export default function App() {
       return;
     }
     void loadBudgetPage();
-  }, [user, hasMembership, activeTab, loadBudgetPage]);
+    // Allocation rules viven en la pestaña Presupuesto y necesitan la lista de
+    // activos para el selector de destino — ambas cargas se disparan a la vez.
+    void loadAssetsPage();
+    void loadAllocationRules();
+  }, [user, hasMembership, activeTab, loadBudgetPage, loadAssetsPage, loadAllocationRules]);
 
   useEffect(() => {
     if (!user || !hasMembership || activeTab !== "upcoming") {
@@ -2915,9 +3095,6 @@ export default function App() {
     setAssetFormPurchase("");
     setAssetFormLiquid(true);
     setAssetFormExpectedReturn("");
-    setAssetFormMonthlyFixed("");
-    setAssetFormContributionFrequency("monthly");
-    setAssetFormRemainderWeight("");
     setAssetFormNotes("");
   }
 
@@ -2943,11 +3120,7 @@ export default function App() {
       if (er) {
         base.expected_annual_return_percent = er;
       }
-      const mf = assetFormMonthlyFixed.trim().replace(",", ".");
-      base.monthly_contribution_fixed = mf === "" ? "0" : mf;
-      base.contribution_frequency = assetFormContributionFrequency;
-      const rw = assetFormRemainderWeight.trim().replace(",", ".");
-      base.contribution_remainder_weight = rw === "" ? "0" : rw;
+
       const ppTrim = assetFormPurchase.trim().replace(",", ".");
       if (editingAssetId) {
         // PATCH: siempre enviar precio de compra — omisión antes podía dejar ambigüedad con el servidor.
@@ -3026,15 +3199,6 @@ export default function App() {
     setAssetFormLiquid(a.is_liquid);
     setAssetFormExpectedReturn(
       formatEditableDecimalString(a.expected_annual_return_percent ?? ""),
-    );
-    setAssetFormMonthlyFixed(
-      formatEditableDecimalString(a.monthly_contribution_fixed ?? "0"),
-    );
-    setAssetFormContributionFrequency(
-      a.contribution_frequency === "weekly" ? "weekly" : "monthly",
-    );
-    setAssetFormRemainderWeight(
-      formatEditableDecimalString(a.contribution_remainder_weight ?? "0"),
     );
     setAssetFormNotes(a.notes ?? "");
   }
@@ -3289,27 +3453,6 @@ export default function App() {
       if (editingBudgetEntryId === id) {
         resetBudgetForm();
         setBudgetModalOpen(false);
-      }
-      await loadBudgetPage();
-    } catch (e: unknown) {
-      setBudgetError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBudgetSaving(false);
-    }
-  }
-
-  async function toggleBudgetEntryPersists(id: string, currentValue: boolean) {
-    setBudgetSaving(true);
-    setBudgetError(null);
-    try {
-      const res = await fetch(`/v1/budget/entries/${encodeURIComponent(id)}`, {
-        ...defaultFetchInit,
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ persists_after_retirement: !currentValue }),
-      });
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
       }
       await loadBudgetPage();
     } catch (e: unknown) {
@@ -4074,12 +4217,6 @@ export default function App() {
             setAssetFormLiquid={setAssetFormLiquid}
             assetFormExpectedReturn={assetFormExpectedReturn}
             setAssetFormExpectedReturn={setAssetFormExpectedReturn}
-            assetFormMonthlyFixed={assetFormMonthlyFixed}
-            setAssetFormMonthlyFixed={setAssetFormMonthlyFixed}
-            assetFormContributionFrequency={assetFormContributionFrequency}
-            setAssetFormContributionFrequency={setAssetFormContributionFrequency}
-            assetFormRemainderWeight={assetFormRemainderWeight}
-            setAssetFormRemainderWeight={setAssetFormRemainderWeight}
             assetFormNotes={assetFormNotes}
             setAssetFormNotes={setAssetFormNotes}
             editingAssetId={editingAssetId}
@@ -4180,10 +4317,44 @@ export default function App() {
             budgetSaving={budgetSaving}
             submitBudgetForm={(e) => void submitBudgetForm(e)}
             deleteBudgetEntryRow={(id) => void deleteBudgetEntryRow(id)}
-            toggleBudgetEntryPersists={(id, val) => void toggleBudgetEntryPersists(id, val)}
             beginEditBudgetEntry={(row) => {
               beginEditBudgetEntry(row);
               setBudgetModalOpen(true);
+            }}
+            assets={assets}
+            allocationRules={allocationRules}
+            allocationRulesBusy={allocationRulesBusy}
+            allocationRulesError={allocationRulesError}
+            allocationPanelOpen={allocationPanelOpen}
+            openAllocationPanel={() => setAllocationPanelOpen(true)}
+            closeAllocationPanel={() => setAllocationPanelOpen(false)}
+            ruleModalOpen={ruleModalOpen}
+            openNewRuleModal={() => {
+              resetRuleForm();
+              setRuleModalOpen(true);
+            }}
+            closeRuleModal={() => {
+              resetRuleForm();
+              setRuleModalOpen(false);
+            }}
+            ruleFormTargetAsset={ruleFormTargetAsset}
+            setRuleFormTargetAsset={setRuleFormTargetAsset}
+            ruleFormKind={ruleFormKind}
+            setRuleFormKind={setRuleFormKind}
+            ruleFormAmount={ruleFormAmount}
+            setRuleFormAmount={setRuleFormAmount}
+            ruleFormCapKind={ruleFormCapKind}
+            setRuleFormCapKind={setRuleFormCapKind}
+            ruleFormCapValue={ruleFormCapValue}
+            setRuleFormCapValue={setRuleFormCapValue}
+            editingRuleId={editingRuleId}
+            ruleSaving={ruleSaving}
+            submitRuleForm={(e) => void submitRuleForm(e)}
+            deleteRule={(id) => void deleteRule(id)}
+            moveRule={(id, dir) => void moveRule(id, dir)}
+            beginEditRule={(r) => {
+              beginEditRule(r);
+              setRuleModalOpen(true);
             }}
           />
         ) : activeTab === "upcoming" ? (
@@ -4489,6 +4660,24 @@ function RowTrashIcon() {
   );
 }
 
+function GearIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
 function AssetsView({
   installation,
   installationBusy,
@@ -4514,12 +4703,6 @@ function AssetsView({
   setAssetFormLiquid,
   assetFormExpectedReturn,
   setAssetFormExpectedReturn,
-  assetFormMonthlyFixed,
-  setAssetFormMonthlyFixed,
-  assetFormContributionFrequency,
-  setAssetFormContributionFrequency,
-  assetFormRemainderWeight,
-  setAssetFormRemainderWeight,
   assetFormNotes,
   setAssetFormNotes,
   editingAssetId,
@@ -4552,14 +4735,6 @@ function AssetsView({
   setAssetFormLiquid: Dispatch<SetStateAction<boolean>>;
   assetFormExpectedReturn: string;
   setAssetFormExpectedReturn: Dispatch<SetStateAction<string>>;
-  assetFormMonthlyFixed: string;
-  setAssetFormMonthlyFixed: Dispatch<SetStateAction<string>>;
-  assetFormContributionFrequency: AssetContributionFreq;
-  setAssetFormContributionFrequency: Dispatch<
-    SetStateAction<AssetContributionFreq>
-  >;
-  assetFormRemainderWeight: string;
-  setAssetFormRemainderWeight: Dispatch<SetStateAction<string>>;
   assetFormNotes: string;
   setAssetFormNotes: Dispatch<SetStateAction<string>>;
   editingAssetId: string | null;
@@ -4603,10 +4778,6 @@ function AssetsView({
     assetCostTotals !== null && assetCostTotals.cost > 0
       ? (assetCostTotals.currentOnCost / assetCostTotals.cost - 1) * 100
       : null;
-
-  const assetsMonthlyContributionSum = assetMetricsReady
-    ? assets.reduce((acc, a) => acc + assetContributionMonthlyEstimateNum(a), 0)
-    : null;
 
   return (
     <div className="workspace">
@@ -4661,14 +4832,6 @@ function AssetsView({
               assetPnlPctSigned !== null && Number.isFinite(assetPnlPctSigned)
                 ? formatPercentDisplaySigned(assetPnlPctSigned)
                 : undefined
-            }
-          />
-          <MetricCard
-            label="Aporte mensual (est.)"
-            value={
-              assetMetricsReady && assetsMonthlyContributionSum !== null
-                ? formatCurrencyNumber(assetsMonthlyContributionSum, currencyIso)
-                : METRIC_DASH
             }
           />
         </div>
@@ -4761,57 +4924,6 @@ function AssetsView({
                 />
               </label>
             </div>
-            <div className="asset-auto-contrib-section">
-              <h4 className="asset-auto-contrib-heading">
-                Aportación automática
-              </h4>
-              <div className="asset-form-grid">
-                <label className="field">
-                  <span>Frecuencia cuota fija</span>
-                  <select
-                    value={assetFormContributionFrequency}
-                    onChange={(e) =>
-                      setAssetFormContributionFrequency(
-                        e.target.value as AssetContributionFreq,
-                      )
-                    }
-                  >
-                    <option value="monthly">Mensual</option>
-                    <option value="weekly">Semanal (×52÷12 en proyección)</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span>
-                    Importe cuota fija (
-                    {assetFormContributionFrequency === "weekly"
-                      ? "por semana"
-                      : "por mes"}
-                    )
-                  </span>
-                  <input
-                    value={assetFormMonthlyFixed}
-                    onChange={(e) =>
-                      setAssetFormMonthlyFixed(e.target.value)
-                    }
-                    inputMode="decimal"
-                    placeholder="0"
-                    autoComplete="off"
-                  />
-                </label>
-                <label className="field">
-                  <span>Peso sobre remanente (%)</span>
-                  <input
-                    value={assetFormRemainderWeight}
-                    onChange={(e) =>
-                      setAssetFormRemainderWeight(e.target.value)
-                    }
-                    inputMode="decimal"
-                    placeholder="0"
-                    autoComplete="off"
-                  />
-                </label>
-              </div>
-            </div>
             <label className="field">
               <span>Notas (opc.)</span>
               <textarea
@@ -4883,6 +4995,18 @@ function AssetsView({
                 (acc, a) => acc + (parseDisplayDecimal(a.current_value) ?? 0),
                 0,
               );
+              const showPurchase = g.items.some((a) => {
+                const v = parseDisplayDecimal(String(a.purchase_price ?? ""));
+                return v != null && v > 0;
+              });
+              const showReturn = g.items.some(
+                (a) =>
+                  a.expected_annual_return_percent != null &&
+                  String(a.expected_annual_return_percent).trim() !== "",
+              );
+              const showContribution = g.items.some(
+                (a) => assetContributionMonthlyEstimateNum(a) > 0,
+              );
               return (
                 <section key={g.categoryId} className="panel ledger-category-panel">
                   <div className="panel-head-row">
@@ -4896,27 +5020,37 @@ function AssetsView({
                       <thead>
                         <tr>
                           <th>Nombre</th>
-                          <th className="num">Valor</th>
-                          <th className="num">Compra</th>
                           <th
                             className="num"
-                            title="Variación vs precio de compra (no anualizada)"
+                            title="Valor actual. Cuando una regla de asignación apunta a este activo con un tope en € concreto, se muestra como Actual / Target."
                           >
-                            Δ compra
+                            Valor
                           </th>
-                          <th>Líquido</th>
-                          <th
-                            className="num"
-                            title="Rentabilidad anual esperada (proyección)"
-                          >
-                            Rent. % a.a.
-                          </th>
-                          <th
-                            className="num"
-                            title="Aporte estimado mes 1 (cuota fija + remanente por pesos)"
-                          >
-                            Aporte
-                          </th>
+                          {showPurchase ? <th className="num">Compra</th> : null}
+                          {showPurchase ? (
+                            <th
+                              className="num"
+                              title="Variación vs precio de compra (no anualizada)"
+                            >
+                              Δ compra
+                            </th>
+                          ) : null}
+                          {showReturn ? (
+                            <th
+                              className="num"
+                              title="Rentabilidad anual esperada (proyección)"
+                            >
+                              Rent. % a.a.
+                            </th>
+                          ) : null}
+                          {showContribution ? (
+                            <th
+                              className="num"
+                              title="Aporte estimado del primer mes (suma de reglas de Presupuesto → Asignación del sobrante que apuntan a este activo). Incluye flujos puntuales de Próximos. Cero si todas las reglas anteriores agotan el sobrante antes de llegar a este activo."
+                            >
+                              Aporte
+                            </th>
+                          ) : null}
                           {canEdit ? (
                             <th className="asset-actions-cell">
                               <span className="sr-only">Acciones</span>
@@ -4925,66 +5059,88 @@ function AssetsView({
                         </tr>
                       </thead>
                       <tbody>
-                        {g.items.map((a) => (
+                        {g.items.map((a) => {
+                          const target = parseDisplayDecimal(
+                            String(a.contribution_target_amount ?? ""),
+                          );
+                          const targetCompact =
+                            target != null && target > 0
+                              ? formatProjectionMilestoneCompactLabel(
+                                  String(roundUpToHundred(target)),
+                                )
+                              : null;
+                          return (
                           <tr key={a.id}>
                             <td>{a.name}</td>
                             <td className="num">
-                              {formatCurrencyAmount(
-                                a.current_value,
-                                currencyIso,
-                              )}
+                              {formatCurrencyAmount(a.current_value, currencyIso)}
+                              {targetCompact ? (
+                                <span className="asset-target-tag">
+                                  {" "}(Obj. {targetCompact})
+                                </span>
+                              ) : null}
                             </td>
-                            <td className="num">
-                              {formatCurrencyOrDash(
-                                a.purchase_price,
-                                currencyIso,
-                              )}
-                            </td>
-                            <td className="num muted">
-                              {assetImplicitTotalReturnLabel(
-                                a.current_value,
-                                a.purchase_price,
-                              ) ?? METRIC_DASH}
-                            </td>
-                            <td>{a.is_liquid ? "Sí" : "No"}</td>
-                            <td className="num muted">
-                              {a.expected_annual_return_percent != null &&
-                              a.expected_annual_return_percent !== ""
-                                ? formatPercentAmount(
-                                    a.expected_annual_return_percent,
-                                  )
-                                : METRIC_DASH}
-                            </td>
-                            <td className="num muted tight">
-                              {formatAssetContributionNominalCell(
-                                a,
-                                currencyIso,
-                              )}
-                            </td>
+                            {showPurchase ? (
+                              <td className="num">
+                                {formatCurrencyOrDash(
+                                  a.purchase_price,
+                                  currencyIso,
+                                )}
+                              </td>
+                            ) : null}
+                            {showPurchase ? (
+                              <td className="num muted">
+                                {assetImplicitTotalReturnLabel(
+                                  a.current_value,
+                                  a.purchase_price,
+                                ) ?? METRIC_DASH}
+                              </td>
+                            ) : null}
+                            {showReturn ? (
+                              <td className="num muted">
+                                {a.expected_annual_return_percent != null &&
+                                a.expected_annual_return_percent !== ""
+                                  ? formatPercentAmount(
+                                      a.expected_annual_return_percent,
+                                    )
+                                  : METRIC_DASH}
+                              </td>
+                            ) : null}
+                            {showContribution ? (
+                              <td className="num muted tight">
+                                {formatAssetContributionNominalCell(
+                                  a,
+                                  currencyIso,
+                                )}
+                              </td>
+                            ) : null}
                             {canEdit ? (
-                              <td className="asset-actions-cell budget-row-actions">
-                                <button
-                                  type="button"
-                                  className="btn ghost icon-btn"
-                                  aria-label="Editar activo"
-                                  disabled={assetSaving}
-                                  onClick={() => beginEditAsset(a)}
-                                >
-                                  <RowEditIcon />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn ghost danger icon-btn"
-                                  aria-label="Eliminar activo"
-                                  disabled={assetSaving}
-                                  onClick={() => deleteAssetRow(a.id)}
-                                >
-                                  <RowTrashIcon />
-                                </button>
+                              <td className="asset-actions-cell">
+                                <div className="budget-row-actions">
+                                  <button
+                                    type="button"
+                                    className="btn ghost icon-btn"
+                                    aria-label="Editar activo"
+                                    disabled={assetSaving}
+                                    onClick={() => beginEditAsset(a)}
+                                  >
+                                    <RowEditIcon />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn ghost danger icon-btn"
+                                    aria-label="Eliminar activo"
+                                    disabled={assetSaving}
+                                    onClick={() => deleteAssetRow(a.id)}
+                                  >
+                                    <RowTrashIcon />
+                                  </button>
+                                </div>
                               </td>
                             ) : null}
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -5463,25 +5619,27 @@ function LiabilitiesView({
                             </td>
                             <td>{row.payment_end_date ?? METRIC_DASH}</td>
                             {canEdit ? (
-                              <td className="asset-actions-cell budget-row-actions">
-                                <button
-                                  type="button"
-                                  className="btn ghost icon-btn"
-                                  aria-label="Editar pasivo"
-                                  disabled={liabilitySaving}
-                                  onClick={() => beginEditLiability(row)}
-                                >
-                                  <RowEditIcon />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn ghost danger icon-btn"
-                                  aria-label="Eliminar pasivo"
-                                  disabled={liabilitySaving}
-                                  onClick={() => deleteLiabilityRow(row.id)}
-                                >
-                                  <RowTrashIcon />
-                                </button>
+                              <td className="asset-actions-cell">
+                                <div className="budget-row-actions">
+                                  <button
+                                    type="button"
+                                    className="btn ghost icon-btn"
+                                    aria-label="Editar pasivo"
+                                    disabled={liabilitySaving}
+                                    onClick={() => beginEditLiability(row)}
+                                  >
+                                    <RowEditIcon />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn ghost danger icon-btn"
+                                    aria-label="Eliminar pasivo"
+                                    disabled={liabilitySaving}
+                                    onClick={() => deleteLiabilityRow(row.id)}
+                                  >
+                                    <RowTrashIcon />
+                                  </button>
+                                </div>
                               </td>
                             ) : null}
                           </tr>
@@ -5546,8 +5704,33 @@ function BudgetView({
   budgetSaving,
   submitBudgetForm,
   deleteBudgetEntryRow,
-  toggleBudgetEntryPersists,
   beginEditBudgetEntry,
+  assets,
+  allocationRules,
+  allocationRulesBusy,
+  allocationRulesError,
+  allocationPanelOpen,
+  openAllocationPanel,
+  closeAllocationPanel,
+  ruleModalOpen,
+  openNewRuleModal,
+  closeRuleModal,
+  ruleFormTargetAsset,
+  setRuleFormTargetAsset,
+  ruleFormKind,
+  setRuleFormKind,
+  ruleFormAmount,
+  setRuleFormAmount,
+  ruleFormCapKind,
+  setRuleFormCapKind,
+  ruleFormCapValue,
+  setRuleFormCapValue,
+  editingRuleId,
+  ruleSaving,
+  submitRuleForm,
+  deleteRule,
+  moveRule,
+  beginEditRule,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -5581,8 +5764,33 @@ function BudgetView({
   budgetSaving: boolean;
   submitBudgetForm: (e: FormEvent) => void;
   deleteBudgetEntryRow: (id: string) => void;
-  toggleBudgetEntryPersists: (id: string, currentValue: boolean) => void;
   beginEditBudgetEntry: (row: BudgetEntryApiRow) => void;
+  assets: AssetApiRow[];
+  allocationRules: AllocationRuleApiRow[];
+  allocationRulesBusy: boolean;
+  allocationRulesError: string | null;
+  allocationPanelOpen: boolean;
+  openAllocationPanel: () => void;
+  closeAllocationPanel: () => void;
+  ruleModalOpen: boolean;
+  openNewRuleModal: () => void;
+  closeRuleModal: () => void;
+  ruleFormTargetAsset: string;
+  setRuleFormTargetAsset: Dispatch<SetStateAction<string>>;
+  ruleFormKind: AllocationRuleKind;
+  setRuleFormKind: Dispatch<SetStateAction<AllocationRuleKind>>;
+  ruleFormAmount: string;
+  setRuleFormAmount: Dispatch<SetStateAction<string>>;
+  ruleFormCapKind: "none" | AllocationRuleCapKind;
+  setRuleFormCapKind: Dispatch<SetStateAction<"none" | AllocationRuleCapKind>>;
+  ruleFormCapValue: string;
+  setRuleFormCapValue: Dispatch<SetStateAction<string>>;
+  editingRuleId: string | null;
+  ruleSaving: boolean;
+  submitRuleForm: (e: FormEvent) => void;
+  deleteRule: (id: string) => void;
+  moveRule: (id: string, dir: "up" | "down") => void;
+  beginEditRule: (r: AllocationRuleApiRow) => void;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
@@ -5672,8 +5880,164 @@ function BudgetView({
         >
           <MetricCard label="Ingresos totales" value={incTot} />
           <MetricCard label="Gastos totales" value={expTot} />
-          <MetricCard label="Neto" value={netM} />
+          <MetricCard
+            label="Neto"
+            value={netM}
+            action={
+              <button
+                type="button"
+                className="btn ghost icon-btn metric-card__action-btn"
+                onClick={openAllocationPanel}
+                aria-label="Asignación del sobrante"
+                title={`Asignación del sobrante · ${allocationRules.length} ${allocationRules.length === 1 ? "regla" : "reglas"}`}
+              >
+                <GearIcon />
+              </button>
+            }
+          />
         </div>
+      ) : null}
+
+      {hasMembership ? (
+        <Modal
+          title="Asignación del sobrante"
+          open={allocationPanelOpen}
+          onClose={closeAllocationPanel}
+          wide
+        >
+          <AllocationRulesPanel
+            assets={assets}
+            rules={allocationRules}
+            busy={allocationRulesBusy}
+            error={allocationRulesError}
+            canEdit={canEdit}
+            currencyIso={currencyIso}
+            openNewRuleModal={openNewRuleModal}
+            beginEditRule={beginEditRule}
+            deleteRule={deleteRule}
+            moveRule={moveRule}
+            embedded
+          />
+        </Modal>
+      ) : null}
+
+      {canEdit && hasMembership ? (
+        <Modal
+          title={editingRuleId ? "Editar regla" : "Nueva regla de asignación"}
+          open={ruleModalOpen}
+          onClose={closeRuleModal}
+        >
+          <form className="asset-form stack" onSubmit={submitRuleForm}>
+            <ModalFormError message={allocationRulesError} />
+            <label className="field">
+              <span>Destino (activo)</span>
+              <select
+                value={ruleFormTargetAsset}
+                onChange={(e) => setRuleFormTargetAsset(e.target.value)}
+                required
+                disabled={assets.length === 0}
+              >
+                {assets.length === 0 ? (
+                  <option value="">— Sin activos —</option>
+                ) : null}
+                {assets.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="asset-form-grid">
+              <label className="field">
+                <span>Tipo</span>
+                <select
+                  value={ruleFormKind}
+                  onChange={(e) =>
+                    setRuleFormKind(e.target.value as AllocationRuleKind)
+                  }
+                >
+                  <option value="fixed">Cantidad fija €/mes</option>
+                  <option value="percent">% del sobrante restante</option>
+                  <option value="remainder">Resto (lo que quede)</option>
+                </select>
+              </label>
+              {ruleFormKind !== "remainder" ? (
+                <label className="field">
+                  <span>
+                    {ruleFormKind === "fixed" ? "Importe €/mes" : "Porcentaje"}
+                  </span>
+                  <input
+                    value={ruleFormAmount}
+                    onChange={(e) => setRuleFormAmount(e.target.value)}
+                    inputMode="decimal"
+                    placeholder="0"
+                    required
+                    autoComplete="off"
+                  />
+                </label>
+              ) : null}
+            </div>
+            <div className="asset-form-grid">
+              <label className="field">
+                <span>Tope opcional</span>
+                <select
+                  value={ruleFormCapKind}
+                  onChange={(e) =>
+                    setRuleFormCapKind(
+                      e.target.value as "none" | AllocationRuleCapKind,
+                    )
+                  }
+                >
+                  <option value="none">Sin tope</option>
+                  <option value="amount">Cantidad fija €</option>
+                  <option value="months_expense">N × gasto mensual</option>
+                  <option value="income_multiple">N × ingreso mensual</option>
+                </select>
+              </label>
+              {ruleFormCapKind !== "none" ? (
+                <label className="field">
+                  <span>
+                    {ruleFormCapKind === "amount"
+                      ? "Tope en €"
+                      : ruleFormCapKind === "months_expense"
+                        ? "N meses de gasto"
+                        : "N múltiplo de ingreso"}
+                  </span>
+                  <input
+                    value={ruleFormCapValue}
+                    onChange={(e) => setRuleFormCapValue(e.target.value)}
+                    inputMode="decimal"
+                    placeholder="0"
+                    required
+                    autoComplete="off"
+                  />
+                </label>
+              ) : null}
+            </div>
+            <p className="muted tight">
+              {ruleFormKind === "remainder" && ruleFormCapKind === "none"
+                ? "Esta regla absorberá todo lo que quede del sobrante. Se coloca automáticamente al final del orden; solo puede haber una por usuario."
+                : ruleFormKind === "remainder"
+                  ? "Esta regla absorbe lo que quede hasta su tope. Se inserta antes del resto sin tope."
+                  : ruleFormKind === "fixed"
+                    ? "Se aporta esta cantidad fija mensual antes de seguir la cascada. Se inserta antes del resto sin tope."
+                    : "Se aporta este % sobre lo que quede del sobrante en este paso de la cascada (no del sobrante total)."}
+            </p>
+            <div className="asset-form-actions">
+              <button type="submit" className="btn primary" disabled={ruleSaving}>
+                {editingRuleId ? "Guardar cambios" : "Añadir regla"}
+              </button>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={closeRuleModal}
+                disabled={ruleSaving}
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
+        </Modal>
       ) : null}
 
       {!canEdit && hasMembership ? (
@@ -5849,7 +6213,6 @@ function BudgetView({
                     <tr>
                       <th>Categoría</th>
                       <th className="num">Importe mensual</th>
-                      <th className="budget-persists-col" title="Persiste tras jubilación">Tras jub.</th>
                       {canEdit ? (
                         <th className="asset-actions-cell">
                           <span className="sr-only">Acciones</span>
@@ -5867,39 +6230,28 @@ function BudgetView({
                         <td className="num">
                           {formatCurrencyAmount(row.amount, currencyIso)}
                         </td>
-                        <td className="budget-persists-col">
-                          {canEdit ? (
-                            <input
-                              type="checkbox"
-                              checked={row.persists_after_retirement}
-                              disabled={budgetSaving}
-                              title="Persiste tras jubilación"
-                              onChange={() => toggleBudgetEntryPersists(row.id, row.persists_after_retirement)}
-                            />
-                          ) : (
-                            <span>{row.persists_after_retirement ? "✓" : "—"}</span>
-                          )}
-                        </td>
                         {canEdit ? (
-                          <td className="asset-actions-cell budget-row-actions">
-                            <button
-                              type="button"
-                              className="btn ghost icon-btn"
-                              aria-label="Editar línea"
-                              disabled={budgetSaving}
-                              onClick={() => beginEditBudgetEntry(row)}
-                            >
-                              <RowEditIcon />
-                            </button>
-                            <button
-                              type="button"
-                              className="btn ghost danger icon-btn"
-                              aria-label="Eliminar línea"
-                              disabled={budgetSaving}
-                              onClick={() => deleteBudgetEntryRow(row.id)}
-                            >
-                              <RowTrashIcon />
-                            </button>
+                          <td className="asset-actions-cell">
+                            <div className="budget-row-actions">
+                              <button
+                                type="button"
+                                className="btn ghost icon-btn"
+                                aria-label="Editar línea"
+                                disabled={budgetSaving}
+                                onClick={() => beginEditBudgetEntry(row)}
+                              >
+                                <RowEditIcon />
+                              </button>
+                              <button
+                                type="button"
+                                className="btn ghost danger icon-btn"
+                                aria-label="Eliminar línea"
+                                disabled={budgetSaving}
+                                onClick={() => deleteBudgetEntryRow(row.id)}
+                              >
+                                <RowTrashIcon />
+                              </button>
+                            </div>
                           </td>
                         ) : null}
                       </tr>
@@ -5964,25 +6316,27 @@ function BudgetView({
                               : "—"}
                           </td>
                           {canEdit ? (
-                            <td className="asset-actions-cell budget-row-actions">
-                              <button
-                                type="button"
-                                className="btn ghost icon-btn"
-                                aria-label="Editar línea"
-                                disabled={budgetSaving}
-                                onClick={() => beginEditBudgetEntry(row)}
-                              >
-                                <RowEditIcon />
-                              </button>
-                              <button
-                                type="button"
-                                className="btn ghost danger icon-btn"
-                                aria-label="Eliminar línea"
-                                disabled={budgetSaving}
-                                onClick={() => deleteBudgetEntryRow(row.id)}
-                              >
-                                <RowTrashIcon />
-                              </button>
+                            <td className="asset-actions-cell">
+                              <div className="budget-row-actions">
+                                <button
+                                  type="button"
+                                  className="btn ghost icon-btn"
+                                  aria-label="Editar línea"
+                                  disabled={budgetSaving}
+                                  onClick={() => beginEditBudgetEntry(row)}
+                                >
+                                  <RowEditIcon />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn ghost danger icon-btn"
+                                  aria-label="Eliminar línea"
+                                  disabled={budgetSaving}
+                                  onClick={() => deleteBudgetEntryRow(row.id)}
+                                >
+                                  <RowTrashIcon />
+                                </button>
+                              </div>
                             </td>
                           ) : null}
                         </tr>
@@ -6450,25 +6804,27 @@ function UpcomingView({
                     </td>
                     <td>{row.due_date ?? METRIC_DASH}</td>
                     {canEdit ? (
-                      <td className="asset-actions-cell budget-row-actions">
-                        <button
-                          type="button"
-                          className="btn ghost icon-btn"
-                          aria-label="Editar flujo planificado"
-                          disabled={planningSaving}
-                          onClick={() => beginEditPlanningFlow(row)}
-                        >
-                          <RowEditIcon />
-                        </button>
-                        <button
-                          type="button"
-                          className="btn ghost danger icon-btn"
-                          aria-label="Eliminar flujo planificado"
-                          disabled={planningSaving}
-                          onClick={() => deletePlanningFlowRow(row.id)}
-                        >
-                          <RowTrashIcon />
-                        </button>
+                      <td className="asset-actions-cell">
+                        <div className="budget-row-actions">
+                          <button
+                            type="button"
+                            className="btn ghost icon-btn"
+                            aria-label="Editar flujo planificado"
+                            disabled={planningSaving}
+                            onClick={() => beginEditPlanningFlow(row)}
+                          >
+                            <RowEditIcon />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost danger icon-btn"
+                            aria-label="Eliminar flujo planificado"
+                            disabled={planningSaving}
+                            onClick={() => deletePlanningFlowRow(row.id)}
+                          >
+                            <RowTrashIcon />
+                          </button>
+                        </div>
                       </td>
                     ) : null}
                   </tr>
@@ -6895,16 +7251,22 @@ function MetricCard({
   value,
   suffix,
   parenthetical,
+  action,
 }: {
   label: string;
   value: string;
   suffix?: string;
   /** Detalle del mismo KPI entre paréntesis (`.metric-value-parenthetical`). */
   parenthetical?: string;
+  /** Botón/icono opcional en la esquina superior derecha (p.ej. engranaje de config). */
+  action?: ReactNode;
 }) {
   return (
     <article className="metric-card">
-      <div className="metric-label">{label}</div>
+      <div className="metric-card__header">
+        <div className="metric-label">{label}</div>
+        {action ? <div className="metric-card__action">{action}</div> : null}
+      </div>
       <div className="metric-value-row">
         <span className="metric-value">{value}</span>
         {parenthetical != null && parenthetical !== "" ? (
@@ -8200,27 +8562,16 @@ function ProjectionNetWorthChart({
     const xTicks = xTicksAll.filter(
       (tick) => tick.monthIndex >= visibleStart && tick.monthIndex <= visibleEnd,
     );
-    if (xTicks.length === 0) {
+    if (xTicks.length === 0 && visibleEnd > visibleStart) {
       xTicks.push({
-        monthIndex: visibleStart,
-        label: projectionXTickLabel(visibleStart, series.months, {
+        monthIndex: visibleEnd,
+        label: projectionXTickLabel(visibleEnd, series.months, {
           ageUiMode,
           birthDateIso: userBirthDate,
           anchorDateYmd,
           calendarTz,
         }),
       });
-      if (visibleEnd !== visibleStart) {
-        xTicks.push({
-          monthIndex: visibleEnd,
-          label: projectionXTickLabel(visibleEnd, series.months, {
-            ageUiMode,
-            birthDateIso: userBirthDate,
-            anchorDateYmd,
-            calendarTz,
-          }),
-        });
-      }
     }
 
     const tickSpanPx =
@@ -8593,12 +8944,12 @@ function ProjectionNetWorthChart({
               key={`gx-${monthIndex}`}
               transform={
                 rotateXLabels
-                  ? `rotate(-38 ${cx.toFixed(2)} ${tickY.toFixed(2)})`
+                  ? `rotate(38 ${cx.toFixed(2)} ${tickY.toFixed(2)})`
                   : undefined
               }
               x={cx}
               y={tickY}
-              textAnchor={rotateXLabels ? "end" : "middle"}
+              textAnchor="start"
               dominantBaseline={rotateXLabels ? "middle" : "auto"}
               className={`projection-chart-tick${rotateXLabels ? " projection-chart-tick--xrot" : ""}`}
             >
@@ -9501,6 +9852,239 @@ function ProjectionView({
         </section>
       ) : null}
     </div>
+  );
+}
+
+function formatAllocationCap(
+  capKind: AllocationRuleCapKind | null | undefined,
+  capValue: string | null | undefined,
+  currencyIso: string,
+): string {
+  if (!capKind || capValue == null) return "—";
+  const n = parseDisplayDecimal(String(capValue));
+  if (n == null) return "—";
+  switch (capKind) {
+    case "amount":
+      return formatCurrencyNumber(n, currencyIso);
+    case "months_expense":
+      return `${formatPercentAmount(n.toString()).replace(" %", "")} × gasto`;
+    case "income_multiple":
+      return `${formatPercentAmount(n.toString()).replace(" %", "")} × ingreso`;
+    default:
+      return "—";
+  }
+}
+
+function formatAllocationAmount(
+  kind: AllocationRuleKind,
+  amount: string | null | undefined,
+  currencyIso: string,
+): string {
+  if (kind === "remainder") return "Resto";
+  if (amount == null) return "—";
+  const n = parseDisplayDecimal(String(amount));
+  if (n == null) return "—";
+  if (kind === "fixed") return formatCurrencyNumber(n, currencyIso);
+  if (kind === "percent") return formatPercentDisplay(n);
+  return "—";
+}
+
+function AllocationRulesPanel({
+  assets,
+  rules,
+  busy,
+  error,
+  canEdit,
+  currencyIso,
+  openNewRuleModal,
+  beginEditRule,
+  deleteRule,
+  moveRule,
+  embedded = false,
+}: {
+  assets: AssetApiRow[];
+  rules: AllocationRuleApiRow[];
+  busy: boolean;
+  error: string | null;
+  canEdit: boolean;
+  currencyIso: string;
+  openNewRuleModal: () => void;
+  beginEditRule: (r: AllocationRuleApiRow) => void;
+  deleteRule: (id: string) => void;
+  moveRule: (id: string, dir: "up" | "down") => void;
+  embedded?: boolean;
+}) {
+  const assetById = new Map(assets.map((a) => [a.id, a.name]));
+  const sinkIndex = rules.findIndex(
+    (r) => r.kind === "remainder" && !r.cap_kind,
+  );
+  const hasSink = sinkIndex >= 0;
+
+  return (
+    <section
+      className={
+        embedded
+          ? "allocation-rules-panel allocation-rules-panel--embedded"
+          : "panel allocation-rules-panel"
+      }
+    >
+      {embedded ? (
+        canEdit ? (
+          <div className="panel-head-row">
+            <span />
+            <button
+              type="button"
+              className="btn primary icon-btn"
+              aria-label="Nueva regla"
+              onClick={openNewRuleModal}
+              disabled={assets.length === 0}
+            >
+              <PlusIcon />
+            </button>
+          </div>
+        ) : null
+      ) : (
+        <div className="panel-head-row">
+          <h3 className="panel-title">Asignación del sobrante</h3>
+          {canEdit ? (
+            <button
+              type="button"
+              className="btn primary icon-btn"
+              aria-label="Nueva regla"
+              onClick={openNewRuleModal}
+              disabled={assets.length === 0}
+            >
+              <PlusIcon />
+            </button>
+          ) : null}
+        </div>
+      )}
+      <p className="muted tight">
+        Cascada en orden ascendente. Cada mes, sobre el sobrante (ingresos −
+        gastos − cuotas de deuda + flujos puntuales de Próximos), cada regla
+        coge su parte y lo que queda baja a la siguiente:
+      </p>
+      <ul className="muted tight allocation-rules-help">
+        <li>
+          <strong>Fija (€)</strong>: aporta exactamente esa cantidad si hay
+          sobrante disponible.
+        </li>
+        <li>
+          <strong>%</strong>: aporta ese porcentaje del sobrante que queda
+          <em> en ese paso de la cascada</em> (no del sobrante total inicial).
+        </li>
+        <li>
+          <strong>Resto</strong>: absorbe lo que quede después de las anteriores.
+          La regla resto <em>sin tope</em> es única por usuario y siempre va al
+          final. Puedes poner varias reglas resto <em>con tope</em> antes (p.ej.
+          "fondo emergencia hasta 3 meses de gasto") y la cascada saltará la
+          regla cuando se llene.
+        </li>
+      </ul>
+      {error ? <p className="form-error">{error}</p> : null}
+      {assets.length === 0 ? (
+        <p className="muted">Crea activos primero para poder asignar reglas.</p>
+      ) : busy ? (
+        <p className="muted">Cargando…</p>
+      ) : rules.length === 0 ? (
+        <p className="muted">
+          Sin reglas. El sobrante mensual quedará como efectivo.
+        </p>
+      ) : (
+        <>
+          {!hasSink ? (
+            <div className="banner info-banner">
+              Falta una regla <strong>Resto sin tope</strong> al final: el
+              sobrante no asignado quedará como efectivo.
+            </div>
+          ) : hasSink && sinkIndex !== rules.length - 1 ? (
+            <div className="banner info-banner">
+              La regla <strong>Resto sin tope</strong> debe ser la última. Las
+              reglas posteriores (#{sinkIndex + 2}…) recibirán 0&nbsp;€.
+            </div>
+          ) : null}
+          <div className="table-scroll bordered-top">
+            <table className="assets-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Destino</th>
+                  <th>Tipo</th>
+                  <th className="num">Cantidad</th>
+                  <th className="num">Tope</th>
+                  {canEdit ? (
+                    <th className="asset-actions-cell">
+                      <span className="sr-only">Acciones</span>
+                    </th>
+                  ) : null}
+                </tr>
+              </thead>
+              <tbody>
+                {rules.map((r, i) => (
+                  <tr key={r.id}>
+                    <td>{i + 1}</td>
+                    <td>{assetById.get(r.target_asset_id) ?? "—"}</td>
+                    <td>
+                      {r.kind === "fixed"
+                        ? "Fija"
+                        : r.kind === "percent"
+                          ? "Porcentaje"
+                          : "Resto"}
+                    </td>
+                    <td className="num">
+                      {formatAllocationAmount(r.kind, r.amount, currencyIso)}
+                    </td>
+                    <td className="num muted">
+                      {formatAllocationCap(r.cap_kind, r.cap_value, currencyIso)}
+                    </td>
+                    {canEdit ? (
+                      <td className="asset-actions-cell">
+                        <div className="budget-row-actions">
+                          <button
+                            type="button"
+                            className="btn ghost icon-btn"
+                            aria-label="Subir prioridad"
+                            disabled={i === 0}
+                            onClick={() => moveRule(r.id, "up")}
+                          >
+                            ▲
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost icon-btn"
+                            aria-label="Bajar prioridad"
+                            disabled={i === rules.length - 1}
+                            onClick={() => moveRule(r.id, "down")}
+                          >
+                            ▼
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost icon-btn"
+                            aria-label="Editar regla"
+                            onClick={() => beginEditRule(r)}
+                          >
+                            <RowEditIcon />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost danger icon-btn"
+                            aria-label="Eliminar regla"
+                            onClick={() => deleteRule(r.id)}
+                          >
+                            <RowTrashIcon />
+                          </button>
+                        </div>
+                      </td>
+                    ) : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 

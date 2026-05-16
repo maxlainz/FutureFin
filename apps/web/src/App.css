@@ -424,7 +424,7 @@ a.tab-btn {
 
 .assets-table.assets-table--budget-lines .asset-actions-cell {
   width: 1%;
-  vertical-align: top;
+  vertical-align: middle;
   white-space: nowrap;
 }
 
@@ -437,10 +437,13 @@ a.tab-btn {
   color: #94a3b8;
 }
 
+/* Wrapper interno (<div>) dentro de la celda de acciones (<td>): nunca aplicar
+ * `display` custom directamente al <td> porque rompe el modelo de tabla. */
 .budget-row-actions {
-  display: flex;
+  display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.15rem;
 }
 
@@ -654,6 +657,44 @@ a.tab-btn {
   flex-direction: column;
   padding: 0;
   overflow: hidden;
+}
+
+.modal-dialog.modal-dialog--wide {
+  max-width: min(56rem, 100%);
+}
+
+.metric-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.metric-card__action {
+  flex: 0 0 auto;
+  margin-top: -0.15rem;
+  margin-right: -0.25rem;
+}
+
+.metric-card__action .metric-card__action-btn {
+  padding: 0.2rem;
+  color: #94a3b8;
+}
+
+.metric-card__action .metric-card__action-btn:hover {
+  color: #475569;
+}
+
+.asset-target-tag {
+  color: #94a3b8;
+  font-size: 0.78em;
+  margin-left: 0.15rem;
+  white-space: nowrap;
+}
+
+.allocation-rules-panel--embedded {
+  padding: 1rem 1.1rem 1.25rem;
+  overflow-y: auto;
 }
 
 .modal-header {
@@ -1759,6 +1800,10 @@ a.tab-btn {
 
 .asset-actions-cell {
   white-space: nowrap;
+  width: 1%;
+  text-align: right;
+  vertical-align: middle;
+  padding-left: 1rem;
 }
 
 .asset-actions-cell .btn {

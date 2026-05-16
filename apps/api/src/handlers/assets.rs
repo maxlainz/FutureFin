@@ -3,7 +3,9 @@ use crate::handlers::installation::{installation_naive_today, require_installati
 use crate::handlers::liabilities::purge_expired_liabilities;
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::first_month_asset_contribution_nominals_map;
+use crate::handlers::projection::{
+    first_month_asset_contribution_nominals_map, monthly_income_expense_debt_for_view,
+};
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -35,18 +37,18 @@ pub struct AssetResponse {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub expected_annual_return_percent: Option<Decimal>,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub monthly_contribution_fixed: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub contribution_remainder_weight: Decimal,
-    /// `monthly` (default) or `weekly` (cuota ×52/12 en motor de proyección).
-    pub contribution_frequency: String,
-    /// Primer mes del motor: cuota fija (escalada si hace falta) + parte nominal del remanente.
+    /// Aporte estimado del primer mes derivado de las reglas de asignación del sobrante.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub contribution_nominal_monthly: Decimal,
+    /// Tope absoluto en € si alguna regla de asignación apunta a este activo con
+    /// `cap_kind='amount'` (el más restrictivo si hay varias). Solo se devuelve cuando es
+    /// un tope concreto en euros — los topes relativos (`months_expense`, `income_multiple`)
+    /// no aparecen aquí porque varían con el presupuesto.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub contribution_target_amount: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
@@ -70,16 +72,6 @@ pub struct CreateAssetBody {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub expected_annual_return_percent: Option<Decimal>,
-    #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub monthly_contribution_fixed: Option<Decimal>,
-    #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub contribution_remainder_weight: Option<Decimal>,
-    #[serde(default)]
-    pub contribution_frequency: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -105,15 +97,6 @@ pub struct PatchAssetBody {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub expected_annual_return_percent: Option<Decimal>,
-    #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub monthly_contribution_fixed: Option<Decimal>,
-    #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub contribution_remainder_weight: Option<Decimal>,
-    pub contribution_frequency: Option<String>,
     pub notes: Option<String>,
     pub sort_index: Option<i32>,
 }
@@ -127,9 +110,6 @@ struct AssetRow {
     purchase_price: Option<Decimal>,
     is_liquid: bool,
     expected_annual_return_percent: Option<Decimal>,
-    monthly_contribution_fixed: Decimal,
-    contribution_frequency: String,
-    contribution_remainder_weight: Decimal,
     notes: Option<String>,
     sort_index: i32,
 }
@@ -201,16 +181,6 @@ fn merge_optional_decimal_patch(
     }
 }
 
-fn normalize_asset_contribution_frequency(raw: Option<&str>) -> Result<String, ApiError> {
-    match raw.map(str::trim).filter(|s| !s.is_empty()) {
-        None | Some("monthly") => Ok("monthly".into()),
-        Some("weekly") => Ok("weekly".into()),
-        Some(other) => Err(ApiError::BadRequest(format!(
-            "contribution_frequency must be \"monthly\" or \"weekly\", got {other:?}"
-        ))),
-    }
-}
-
 async fn assert_asset_category(
     pool: &sqlx::PgPool,
     installation_id: Uuid,
@@ -238,7 +208,11 @@ async fn assert_asset_category(
     Ok(())
 }
 
-fn row_to_response(r: AssetRow, contribution_nominal_monthly: Decimal) -> AssetResponse {
+fn row_to_response(
+    r: AssetRow,
+    contribution_nominal_monthly: Decimal,
+    contribution_target_amount: Option<Decimal>,
+) -> AssetResponse {
     AssetResponse {
         id: r.id,
         category_id: r.category_id,
@@ -247,13 +221,67 @@ fn row_to_response(r: AssetRow, contribution_nominal_monthly: Decimal) -> AssetR
         purchase_price: r.purchase_price,
         is_liquid: r.is_liquid,
         expected_annual_return_percent: r.expected_annual_return_percent,
-        monthly_contribution_fixed: r.monthly_contribution_fixed,
-        contribution_remainder_weight: r.contribution_remainder_weight,
-        contribution_frequency: r.contribution_frequency,
         contribution_nominal_monthly,
+        contribution_target_amount,
         notes: r.notes,
         sort_index: r.sort_index,
     }
+}
+
+/// Build `asset_id → target_€` from the **first** allocation rule (lowest `priority`) that
+/// targets each asset and has a cap. Caps in `months_expense` / `income_multiple` are resolved
+/// to absolute € using the scope's monthly income / expense + debt_service baseline.
+async fn fetch_asset_resolved_targets(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    view: LedgerView,
+    session_user_id: Uuid,
+    income_monthly: Decimal,
+    expense_with_debt: Decimal,
+) -> Result<std::collections::HashMap<Uuid, Decimal>, ApiError> {
+    let rows: Vec<(Uuid, String, Decimal)> = match view {
+        LedgerView::Household => {
+            sqlx::query_as(
+                r#"SELECT DISTINCT ON (target_asset_id)
+                          target_asset_id, cap_kind, cap_value
+                   FROM allocation_rules
+                   WHERE installation_id = $1
+                     AND cap_kind IS NOT NULL AND cap_value IS NOT NULL
+                   ORDER BY target_asset_id, priority ASC, id ASC"#,
+            )
+            .bind(iid)
+            .fetch_all(pool)
+            .await?
+        }
+        LedgerView::Mine => {
+            sqlx::query_as(
+                r#"SELECT DISTINCT ON (target_asset_id)
+                          target_asset_id, cap_kind, cap_value
+                   FROM allocation_rules
+                   WHERE installation_id = $1 AND owner_user_id = $2
+                     AND cap_kind IS NOT NULL AND cap_value IS NOT NULL
+                   ORDER BY target_asset_id, priority ASC, id ASC"#,
+            )
+            .bind(iid)
+            .bind(session_user_id)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    let mut out = std::collections::HashMap::with_capacity(rows.len());
+    for (asset_id, cap_kind, cap_value) in rows {
+        let resolved = match cap_kind.as_str() {
+            "amount" => cap_value.max(Decimal::ZERO),
+            "months_expense" => (cap_value.max(Decimal::ZERO)) * expense_with_debt,
+            "income_multiple" => (cap_value.max(Decimal::ZERO)) * income_monthly,
+            _ => continue,
+        };
+        if resolved > Decimal::ZERO {
+            out.insert(asset_id, resolved);
+        }
+    }
+    Ok(out)
 }
 
 #[utoipa::path(
@@ -288,14 +316,29 @@ pub async fn list_assets(
         today,
     )
     .await?;
+    let (income_m, expense_m, debt_m) = monthly_income_expense_debt_for_view(
+        &state.pool,
+        iid,
+        user.id.0,
+        q.resolve(),
+        today,
+    )
+    .await?;
+    let targets = fetch_asset_resolved_targets(
+        &state.pool,
+        iid,
+        q.resolve(),
+        user.id.0,
+        income_m,
+        expense_m + debt_m,
+    )
+    .await?;
 
     let rows: Vec<AssetRow> = match q.resolve() {
         LedgerView::Household => {
             sqlx::query_as(
                 r#"SELECT id, category_id, name, current_value, purchase_price,
                           is_liquid, expected_annual_return_percent,
-                          monthly_contribution_fixed, contribution_frequency,
-                          contribution_remainder_weight,
                           notes, sort_index
                    FROM assets
                    WHERE installation_id = $1
@@ -309,8 +352,6 @@ pub async fn list_assets(
             sqlx::query_as(
                 r#"SELECT id, category_id, name, current_value, purchase_price,
                           is_liquid, expected_annual_return_percent,
-                          monthly_contribution_fixed, contribution_frequency,
-                          contribution_remainder_weight,
                           notes, sort_index
                    FROM assets
                    WHERE installation_id = $1 AND owner_user_id = $2
@@ -327,7 +368,8 @@ pub async fn list_assets(
         rows.into_iter()
             .map(|r| {
                 let n = nominals.get(&r.id).copied().unwrap_or(Decimal::ZERO);
-                row_to_response(r, n)
+                let t = targets.get(&r.id).copied();
+                row_to_response(r, n, t)
             })
             .collect(),
     ))
@@ -367,25 +409,17 @@ pub async fn create_asset(
     let notes = normalize_notes(&body.notes)?;
     let is_liquid = body.is_liquid.unwrap_or(true);
     let sort_index = body.sort_index.unwrap_or(0);
-    let monthly_fixed = body.monthly_contribution_fixed.unwrap_or(Decimal::ZERO);
-    let remainder_w = body.contribution_remainder_weight.unwrap_or(Decimal::ZERO);
-    assert_non_negative(monthly_fixed, "monthly_contribution_fixed")?;
-    assert_non_negative(remainder_w, "contribution_remainder_weight")?;
-    let contrib_freq =
-        normalize_asset_contribution_frequency(body.contribution_frequency.as_deref())?;
 
     let row: AssetRow = sqlx::query_as(
         r#"INSERT INTO assets (
                installation_id, category_id, name, current_value,
                purchase_price, is_liquid,
                expected_annual_return_percent,
-               monthly_contribution_fixed, contribution_frequency, contribution_remainder_weight,
                notes, sort_index, owner_user_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING id, category_id, name, current_value, purchase_price,
                      is_liquid, expected_annual_return_percent,
-                     monthly_contribution_fixed, contribution_frequency, contribution_remainder_weight,
                      notes, sort_index"#,
     )
     .bind(iid)
@@ -395,9 +429,6 @@ pub async fn create_asset(
     .bind(body.purchase_price)
     .bind(is_liquid)
     .bind(body.expected_annual_return_percent)
-    .bind(monthly_fixed)
-    .bind(&contrib_freq)
-    .bind(remainder_w)
     .bind(&notes)
     .bind(sort_index)
     .bind(user.id.0)
@@ -415,8 +446,26 @@ pub async fn create_asset(
     )
     .await?;
     let n = nominals.get(&row.id).copied().unwrap_or(Decimal::ZERO);
+    let (income_m, expense_m, debt_m) = monthly_income_expense_debt_for_view(
+        &state.pool,
+        iid,
+        user.id.0,
+        LedgerView::Household,
+        today,
+    )
+    .await?;
+    let targets = fetch_asset_resolved_targets(
+        &state.pool,
+        iid,
+        LedgerView::Household,
+        user.id.0,
+        income_m,
+        expense_m + debt_m,
+    )
+    .await?;
+    let t = targets.get(&row.id).copied();
 
-    Ok((axum::http::StatusCode::CREATED, Json(row_to_response(row, n))))
+    Ok((axum::http::StatusCode::CREATED, Json(row_to_response(row, n, t))))
 }
 
 #[utoipa::path(
@@ -453,9 +502,6 @@ pub async fn patch_asset(
         && body.purchase_price.is_none()
         && body.is_liquid.is_none()
         && body.expected_annual_return_percent.is_none()
-        && body.monthly_contribution_fixed.is_none()
-        && body.contribution_remainder_weight.is_none()
-        && body.contribution_frequency.is_none()
         && body.notes.is_none()
         && body.sort_index.is_none()
     {
@@ -467,7 +513,6 @@ pub async fn patch_asset(
     let row: Option<AssetRow> = sqlx::query_as(
         r#"SELECT id, category_id, name, current_value, purchase_price,
                   is_liquid, expected_annual_return_percent,
-                  monthly_contribution_fixed, contribution_frequency, contribution_remainder_weight,
                   notes, sort_index
            FROM assets
            WHERE id = $1 AND installation_id = $2"#,
@@ -509,27 +554,6 @@ pub async fn patch_asset(
         current.expected_annual_return_percent
     };
 
-    let new_monthly_fixed = match body.monthly_contribution_fixed {
-        Some(v) => {
-            assert_non_negative(v, "monthly_contribution_fixed")?;
-            v
-        }
-        None => current.monthly_contribution_fixed,
-    };
-
-    let new_remainder_w = match body.contribution_remainder_weight {
-        Some(v) => {
-            assert_non_negative(v, "contribution_remainder_weight")?;
-            v
-        }
-        None => current.contribution_remainder_weight,
-    };
-
-    let new_contrib_freq = match &body.contribution_frequency {
-        Some(s) => normalize_asset_contribution_frequency(Some(s.as_str()))?,
-        None => current.contribution_frequency.clone(),
-    };
-
     let new_notes = match &body.notes {
         Some(_) => normalize_notes(&body.notes)?,
         None => current.notes.clone(),
@@ -545,16 +569,12 @@ pub async fn patch_asset(
                purchase_price = $4,
                is_liquid = $5,
                expected_annual_return_percent = $6,
-               monthly_contribution_fixed = $7,
-               contribution_frequency = $8,
-               contribution_remainder_weight = $9,
-               notes = $10,
-               sort_index = $11,
+               notes = $7,
+               sort_index = $8,
                updated_at = now()
-           WHERE id = $12 AND installation_id = $13
+           WHERE id = $9 AND installation_id = $10
            RETURNING id, category_id, name, current_value, purchase_price,
                      is_liquid, expected_annual_return_percent,
-                     monthly_contribution_fixed, contribution_frequency, contribution_remainder_weight,
                      notes, sort_index"#,
     )
     .bind(new_cat)
@@ -563,9 +583,6 @@ pub async fn patch_asset(
     .bind(new_pp)
     .bind(new_liquid)
     .bind(new_exp)
-    .bind(new_monthly_fixed)
-    .bind(&new_contrib_freq)
-    .bind(new_remainder_w)
     .bind(&new_notes)
     .bind(new_sort)
     .bind(id)
@@ -584,8 +601,26 @@ pub async fn patch_asset(
     )
     .await?;
     let n = nominals.get(&updated.id).copied().unwrap_or(Decimal::ZERO);
+    let (income_m, expense_m, debt_m) = monthly_income_expense_debt_for_view(
+        &state.pool,
+        iid,
+        user.id.0,
+        LedgerView::Household,
+        today,
+    )
+    .await?;
+    let targets = fetch_asset_resolved_targets(
+        &state.pool,
+        iid,
+        LedgerView::Household,
+        user.id.0,
+        income_m,
+        expense_m + debt_m,
+    )
+    .await?;
+    let t = targets.get(&updated.id).copied();
 
-    Ok(Json(row_to_response(updated, n)))
+    Ok(Json(row_to_response(updated, n, t)))
 }
 
 #[utoipa::path(

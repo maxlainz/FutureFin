@@ -1,3 +1,4 @@
+use crate::handlers::allocation_rules::allocation_rules_router;
 use crate::handlers::assets::assets_router;
 use crate::handlers::auth::{login, logout, me, patch_me, register};
 use crate::handlers::backup_user::{
@@ -44,6 +45,7 @@ pub fn app_router() -> Router {
         .nest("/installation/pending-users", pending_users_router())
         .nest("/categories", categories_router())
         .nest("/assets", assets_router())
+        .nest("/allocation-rules", allocation_rules_router())
         .nest("/liabilities", liabilities_router())
         .nest("/summary", summary_router())
         .nest("/budget", budget_router())
