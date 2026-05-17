@@ -52,9 +52,8 @@ type InstallationSnapshot = {
   base_currency: string;
   /** IANA TZ for civil "today" (liability derive, etc.) */
   calendar_tz?: string;
-  projection_includes_inflation: boolean;
-  /** Supuesto anual % cuando inflación está activa (API como decimal string). */
-  annual_inflation_assumption_percent?: string | null;
+  /** Tasa de inflación anual %. `0` = target FIRE plano; > 0 = target móvil que crece con la inflación. */
+  annual_inflation_assumption_percent: string;
   show_age_mode: string;
   /** Ausente en clientes antiguos; usar `defaultFireSettingsApi`. */
   fire_settings?: FireSettingsApi;
@@ -238,10 +237,12 @@ type ProjectionSeriesApi = {
   /** Decisión del servidor: eje en años cumplidos (no inferir solo desde instalación en cliente). */
   use_age_on_x_axis?: boolean;
   viewer_birth_date?: string | null;
-  /** Primer mes en que el patrimonio neto ≥ objetivo FIRE. `null` si no alcanzado. */
+  /** Primer mes en que el patrimonio neto ≥ objetivo FIRE móvil del mes en curso. `null` si no alcanzado. */
   jubilacion_month_index?: number | null;
-  /** Objetivo FIRE bruto (patrimonio necesario). Decimal serializado como string. `null` si no configurado. */
+  /** Objetivo FIRE base en euros de hoy. El target real de cada mes crece con la inflación (ver `fire_target_series`). */
   jubilacion_target_net_worth?: string | null;
+  /** Serie del target FIRE ajustado por inflación, paralela a `points`. Vacío cuando no hay FIRE configurado. */
+  fire_target_series?: string[];
   asset_series?: AssetSeriesApi[];
 };
 
@@ -542,6 +543,8 @@ type LedgerPersonScope = "household" | "mine";
 
 const LEDGER_PERSON_SCOPE_STORAGE_KEY = "futurefin-ledger-person-scope";
 const PROJECTION_FOCUS_STORAGE_KEY = "futurefin-projection-focus";
+const PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY =
+  "futurefin-projection-inflation-adjusted";
 
 type FfbackupImportCounts = {
   assets: number;
@@ -1181,13 +1184,19 @@ function grossUpNetAnnualFire(
   return hi;
 }
 
-function findFirstMonthNetWorthAtLeast(
+/** Devuelve el primer índice donde `nw[i] >= target_base × (1 + inflation/100)^(month_index/12)`. */
+function findFirstMonthNetWorthAtLeastInflated(
   points: ProjectionPointApi[],
-  target: number,
+  baseTarget: number,
+  annualInflationPct: number,
 ): number | null {
+  if (!(baseTarget > 0)) return null;
+  const inflFactor = 1 + Math.max(0, annualInflationPct) / 100;
   for (const p of points) {
     const nw = parseDisplayDecimal(String(p.net_worth));
-    if (nw !== null && nw >= target) return p.month_index;
+    if (nw === null) continue;
+    const target = baseTarget * Math.pow(inflFactor, p.month_index / 12);
+    if (nw >= target) return p.month_index;
   }
   return null;
 }
@@ -1782,8 +1791,6 @@ export default function App() {
   const [setupCalendarTz, setSetupCalendarTz] = useState("UTC");
   const [calendarTzDraft, setCalendarTzDraft] = useState("UTC");
   const [calendarTzSaving, setCalendarTzSaving] = useState(false);
-  const [projectionInflationDraft, setProjectionInflationDraft] =
-    useState(false);
   const [projectionInflationPctDraft, setProjectionInflationPctDraft] =
     useState("");
   const [showAgeModeDraft, setShowAgeModeDraft] = useState<"dates" | "ages">(
@@ -2612,13 +2619,11 @@ export default function App() {
 
   useEffect(() => {
     if (!installation) {
-      setProjectionInflationDraft(false);
       setProjectionInflationPctDraft("");
       setShowAgeModeDraft("dates");
       return;
     }
     const inst = installation.installation;
-    setProjectionInflationDraft(inst.projection_includes_inflation);
     setProjectionInflationPctDraft(
       formatEditableDecimalString(inst.annual_inflation_assumption_percent),
     );
@@ -2905,7 +2910,6 @@ export default function App() {
         body: JSON.stringify({
           base_currency: setupCurrency,
           calendar_tz: setupCalendarTz.trim(),
-          projection_includes_inflation: false,
           show_age_mode: "dates",
         }),
       });
@@ -2947,14 +2951,13 @@ export default function App() {
   async function saveInstallationProjection(ev: FormEvent) {
     ev.preventDefault();
     const pctTrim = projectionInflationPctDraft.trim().replace(",", ".");
-    if (pctTrim !== "") {
-      const n = Number(pctTrim);
-      if (!Number.isFinite(n) || n < 0 || n > 50) {
-        setInstallationError(
-          "Supuesto de inflación anual: número entre 0 y 50, o vacío para borrar.",
-        );
-        return;
-      }
+    const pctToSend = pctTrim === "" ? "0" : pctTrim;
+    const n = Number(pctToSend);
+    if (!Number.isFinite(n) || n < 0 || n > 50) {
+      setInstallationError(
+        "Supuesto de inflación anual: número entre 0 y 50 (0 = sin inflación).",
+      );
+      return;
     }
     setInstallationProjectionSaving(true);
     setInstallationError(null);
@@ -2964,10 +2967,8 @@ export default function App() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          projection_includes_inflation: projectionInflationDraft,
           show_age_mode: showAgeModeDraft,
-          annual_inflation_assumption_percent:
-            pctTrim === "" ? null : pctTrim,
+          annual_inflation_assumption_percent: pctToSend,
         }),
       });
       if (!res.ok) {
@@ -4524,8 +4525,6 @@ export default function App() {
             saveInstallationCalendarTz={(e) =>
               void saveInstallationCalendarTz(e)
             }
-            projectionInflationDraft={projectionInflationDraft}
-            setProjectionInflationDraft={setProjectionInflationDraft}
             projectionInflationPctDraft={projectionInflationPctDraft}
             setProjectionInflationPctDraft={setProjectionInflationPctDraft}
             showAgeModeDraft={showAgeModeDraft}
@@ -7483,8 +7482,6 @@ function SettingsView({
   setCalendarTzDraft,
   calendarTzSaving,
   saveInstallationCalendarTz,
-  projectionInflationDraft,
-  setProjectionInflationDraft,
   projectionInflationPctDraft,
   setProjectionInflationPctDraft,
   showAgeModeDraft,
@@ -7562,8 +7559,6 @@ function SettingsView({
   setCalendarTzDraft: Dispatch<SetStateAction<string>>;
   calendarTzSaving: boolean;
   saveInstallationCalendarTz: (e: FormEvent) => void;
-  projectionInflationDraft: boolean;
-  setProjectionInflationDraft: Dispatch<SetStateAction<boolean>>;
   projectionInflationPctDraft: string;
   setProjectionInflationPctDraft: Dispatch<SetStateAction<string>>;
   showAgeModeDraft: "dates" | "ages";
@@ -7801,18 +7796,8 @@ function SettingsView({
             className="stack bordered-top"
             onSubmit={saveInstallationProjection}
           >
-            <label className="field checkbox-field">
-              <input
-                type="checkbox"
-                checked={projectionInflationDraft}
-                onChange={(e) =>
-                  setProjectionInflationDraft(e.target.checked)
-                }
-              />
-              <span>Incluir inflación en la proyección de patrimonio</span>
-            </label>
             <label className="field">
-              <span>Supuesto inflación anual % (opc.)</span>
+              <span>Inflación anual %</span>
               <input
                 value={projectionInflationPctDraft}
                 onChange={(e) =>
@@ -7822,6 +7807,12 @@ function SettingsView({
                 placeholder="2,5"
                 autoComplete="off"
               />
+              <small className="muted">
+                Se aplica al target FIRE para preservar tu poder adquisitivo. Los
+                ingresos, gastos y aportaciones se mantienen constantes en euros
+                — refleja «hacer lo que haces ahora». Usa <code>0</code> para
+                desactivar.
+              </small>
             </label>
             <label className="field">
               <span>Modo edad en la interfaz</span>
@@ -8475,9 +8466,10 @@ function ProjectionNetWorthChart({
   series,
   milestones,
   focusMode,
+  inflationAdjusted,
+  installationInflationPct,
   currencyIso,
   ledgerPersonScope,
-  inflationActive,
   inflationPctDisplay,
   ageUiMode,
   userBirthDate,
@@ -8488,9 +8480,12 @@ function ProjectionNetWorthChart({
   series: ProjectionSeriesApi;
   milestones: ProjectionMilestoneApi[];
   focusMode: boolean;
+  /** Cuando true (default), las series del chart se deflactan visualmente — la matemática del
+   *  motor sigue siendo nominal, pero el eje Y muestra "dinero de hoy" y el target FIRE base es plano. */
+  inflationAdjusted: boolean;
+  installationInflationPct: number;
   currencyIso: string;
   ledgerPersonScope: LedgerPersonScope;
-  inflationActive: boolean;
   inflationPctDisplay: string | null;
   ageUiMode: "dates" | "ages";
   userBirthDate: string | null;
@@ -8571,10 +8566,18 @@ function ProjectionNetWorthChart({
     });
   }, [focusMode, focusWindow, pts.length]);
 
+  const hasFireTargetSeries = useMemo(() => {
+    const f = series.fire_target_series;
+    return Array.isArray(f) && f.length === series.points.length && f.length > 0;
+  }, [series.fire_target_series, series.points.length]);
+
   const legendLabels = useMemo(() => {
     const assetNames = (series.asset_series ?? []).map((as) => as.asset_name);
-    return ["Patrimonio neto", "Capital aportado", ...assetNames];
-  }, [series.asset_series]);
+    const labels: string[] = ["Patrimonio neto", "Capital aportado"];
+    if (hasFireTargetSeries) labels.push("Target FIRE");
+    labels.push(...assetNames);
+    return labels;
+  }, [series.asset_series, hasFireTargetSeries]);
 
   const layoutDims = useMemo(
     () =>
@@ -8588,11 +8591,27 @@ function ProjectionNetWorthChart({
 
   const model = useMemo(() => {
     if (pts.length < 2) return null;
-    const nw = pts.map((p) => parseDisplayDecimal(p.net_worth) ?? 0);
-    const cc = pts.map((p) => parseDisplayDecimal(p.contributed_capital) ?? 0);
+    const deflate = inflationAdjusted && installationInflationPct > 0;
+    const deflator = (monthIndex: number) =>
+      deflate
+        ? 1 / Math.pow(1 + installationInflationPct / 100, monthIndex / 12)
+        : 1;
+    const nw = pts.map(
+      (p, i) => (parseDisplayDecimal(p.net_worth) ?? 0) * deflator(i),
+    );
+    const cc = pts.map(
+      (p, i) => (parseDisplayDecimal(p.contributed_capital) ?? 0) * deflator(i),
+    );
+    const fireRaw = series.fire_target_series;
+    const fireTarget =
+      Array.isArray(fireRaw) && fireRaw.length === pts.length
+        ? fireRaw.map((v, i) => (parseDisplayDecimal(v) ?? 0) * deflator(i))
+        : null;
     const assetSeries = (series.asset_series ?? [])
       .map((as) => {
-        const values = as.values.map((v) => parseDisplayDecimal(v) ?? 0);
+        const values = as.values.map(
+          (v, i) => (parseDisplayDecimal(v) ?? 0) * deflator(i),
+        );
         return {
           id: as.asset_id,
           name: as.asset_name,
@@ -8640,6 +8659,9 @@ function ProjectionNetWorthChart({
     const visibleEnd = visibleStart + visibleCount - 1;
     const nwVisible = nw.slice(visibleStart, visibleEnd + 1);
     const ccVisible = cc.slice(visibleStart, visibleEnd + 1);
+    const fireTargetVisible = fireTarget
+      ? fireTarget.slice(visibleStart, visibleEnd + 1)
+      : null;
     const assetVisibleValues = assetSeries.flatMap((as) =>
       as.values.slice(visibleStart, visibleEnd + 1),
     );
@@ -8648,6 +8670,9 @@ function ProjectionNetWorthChart({
       startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
     const allowNegativeAxis = startNw < 0;
 
+    // El target FIRE inflado puede crecer muy por encima del patrimonio en horizontes largos;
+    // dejarlo fuera del rango del eje Y para no aplastar la curva del patrimonio. La línea se
+    // recorta visualmente por el clipPath del plot si excede.
     const dataMin = Math.min(...nwVisible, ...ccVisible, ...assetVisibleValues);
     const dataMax = Math.max(...nwVisible, ...ccVisible, ...assetVisibleValues);
     const rawSpan = dataMax - dataMin;
@@ -8744,6 +8769,7 @@ function ProjectionNetWorthChart({
     return {
       nw,
       cc,
+      fireTargetVisible,
       assetSeries,
       assetStacks,
       nwVisible,
@@ -8776,6 +8802,7 @@ function ProjectionNetWorthChart({
     series.months,
     series.starting_net_worth,
     series.asset_series,
+    series.fire_target_series,
     layoutDims,
     ageUiMode,
     userBirthDate,
@@ -8783,6 +8810,8 @@ function ProjectionNetWorthChart({
     calendarTz,
     milestones,
     focusMode,
+    inflationAdjusted,
+    installationInflationPct,
     viewWindow.count,
     viewWindow.start,
     planningFlows,
@@ -8795,6 +8824,7 @@ function ProjectionNetWorthChart({
   const {
     nw,
     cc,
+    fireTargetVisible,
     assetSeries,
     assetStacks,
     nwVisible,
@@ -8879,6 +8909,11 @@ function ProjectionNetWorthChart({
       `${xScale(visibleStart + i)},${yScale(v)}`,
     )
     .join(" ");
+  const firePoints = fireTargetVisible
+    ? fireTargetVisible
+        .map((v, i) => `${xScale(visibleStart + i)},${yScale(v)}`)
+        .join(" ")
+    : null;
   let areaD = "";
   if (nwVisible.length > 0) {
     const parts: string[] = [];
@@ -8962,11 +8997,12 @@ function ProjectionNetWorthChart({
   const horizonLine = formatProjectionChartHorizonLine(series);
   const deltaStr = formatCurrencyAmount(series.monthly_delta_assumption, currencyIso);
   const scopeShort = ledgerPersonScope === "mine" ? "Mi vista" : "Hogar";
-  const inflationShort = inflationActive
-    ? inflationPctDisplay != null && inflationPctDisplay.length > 0
-      ? `Dinero de hoy (~${inflationPctDisplay} anual)`
-      : "Dinero de hoy (inflación activa)"
-    : "Serie nominal";
+  const inflationShort =
+    installationInflationPct > 0
+      ? inflationAdjusted
+        ? `Dinero de hoy (deflactado ~${inflationPctDisplay ?? `${installationInflationPct}%`} anual)`
+        : `Patrimonio nominal · target FIRE +${inflationPctDisplay ?? `${installationInflationPct}%`} anual`
+      : "Sin inflación · target FIRE plano";
 
   return (
     <div
@@ -9031,8 +9067,17 @@ function ProjectionNetWorthChart({
                 </g>,
               );
             }
+            const fireOffset = hasFireTargetSeries ? 1 : 0;
+            if (hasFireTargetSeries && p[2]) {
+              items.push(
+                <g key="legend-fire" transform={`translate(${p[2].x}, ${p[2].y})`}>
+                  <line x1={0} y1={11} x2={22} y2={11} stroke="#7c3aed" strokeWidth={1.5} strokeDasharray="3 4" strokeLinecap="round" opacity={0.5} />
+                  <text x={28} y={15}>Target FIRE</text>
+                </g>,
+              );
+            }
             assetSeries.forEach((as, idx) => {
-              const pos = p[2 + idx];
+              const pos = p[2 + fireOffset + idx];
               if (!pos) return;
               const color = ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length];
               items.push(
@@ -9159,6 +9204,18 @@ function ProjectionNetWorthChart({
             strokeLinejoin="round"
             opacity={0.92}
           />
+          {firePoints ? (
+            <polyline
+              points={firePoints}
+              fill="none"
+              stroke="#7c3aed"
+              strokeWidth={1.2}
+              strokeDasharray="3 4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={0.225}
+            />
+          ) : null}
           {visibleMilestones.map((m) => {
             const x = xScale(m.reached_month_index);
             const y0 = mt + ph;
@@ -9375,8 +9432,6 @@ function RetirementView({
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
-  const inflationOff =
-    !installation?.installation.projection_includes_inflation;
 
   const [fireDraft, setFireDraft] = useState<FireSettingsApi>(() =>
     defaultFireSettingsApi(),
@@ -9420,6 +9475,13 @@ function RetirementView({
     projectionSeries != null &&
     retirementBudgetSnapshot != null;
 
+  const installationInflationPct = useMemo(() => {
+    const raw = installation?.installation.annual_inflation_assumption_percent;
+    if (raw == null) return 0;
+    const n = parseDisplayDecimal(String(raw));
+    return n != null && n > 0 ? n : 0;
+  }, [installation?.installation.annual_inflation_assumption_percent]);
+
   const fireKpis = useMemo(() => {
     const expenseM =
       retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent;
@@ -9450,18 +9512,35 @@ function RetirementView({
 
     let miNo: number | null = null;
     if (targetNoPen !== null && targetNoPen > 0) {
-      miNo = findFirstMonthNetWorthAtLeast(pts, targetNoPen);
+      miNo = findFirstMonthNetWorthAtLeastInflated(
+        pts,
+        targetNoPen,
+        installationInflationPct,
+      );
+    }
+
+    let targetAtCross: number | null = null;
+    if (
+      targetNoPen !== null &&
+      targetNoPen > 0 &&
+      miNo !== null &&
+      installationInflationPct > 0
+    ) {
+      targetAtCross =
+        targetNoPen * Math.pow(1 + installationInflationPct / 100, miNo / 12);
     }
 
     return {
       needAnnual,
       swrN,
       targetNoPen,
+      targetAtCross,
       miNo,
       mc,
     };
   }, [
     fireDraft,
+    installationInflationPct,
     retirementBudgetSnapshot?.totals.expense_regular_monthly_equivalent,
     retirementBudgetSnapshot?.totals.income_monthly_equivalent,
     retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent,
@@ -9610,9 +9689,9 @@ function RetirementView({
         <div className="banner error-banner">{retirementError}</div>
       ) : null}
 
-      {inflationOff ? (
+      {installationInflationPct <= 0 ? (
         <div className="banner info-banner">
-          Inflación desactivada en la instalación: la fecha objetivo puede ser optimista.{" "}
+          Inflación a 0%: el target FIRE queda plano en euros de hoy. La fecha objetivo puede ser optimista respecto a tu poder adquisitivo real.{" "}
           <a
             href={TAB_PATH.settings}
             onClick={(e) => {
@@ -9632,13 +9711,20 @@ function RetirementView({
         <>
           <div className="metric-grid workspace-kpi-strip">
             <MetricCard
-              label="Patrimonio objetivo"
+              label="Patrimonio objetivo (Actual + Inf. Adj.)"
               value={
                 retirementMetricsReady &&
                 fireKpis.targetNoPen !== null &&
                 fireKpis.targetNoPen > 0
                   ? formatCurrencyNumber(fireKpis.targetNoPen, currencyIso)
                   : METRIC_DASH
+              }
+              parenthetical={
+                retirementMetricsReady &&
+                fireKpis.targetAtCross !== null &&
+                fireKpis.targetAtCross > 0
+                  ? formatCurrencyNumber(fireKpis.targetAtCross, currencyIso)
+                  : undefined
               }
             />
             <MetricCard
@@ -9702,7 +9788,7 @@ function RetirementView({
       ) : null}
 
       <section className="panel">
-        <h3 className="panel-title">Objetivo anual</h3>
+        <h3 className="panel-title">Objetivo anual <span className="muted">(en dinero de hoy)</span></h3>
         <div className="stack bordered-top retirement-config-stack">
           <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
             <div className="retirement-mode-grid" role="radiogroup" aria-label="Modo objetivo anual">
@@ -9919,6 +10005,36 @@ function ProjectionView({
     }
   }, [focusMode]);
 
+  const [inflationAdjusted, setInflationAdjusted] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const v = window.localStorage.getItem(
+        PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
+      );
+      return v == null ? true : v === "1";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
+        inflationAdjusted ? "1" : "0",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [inflationAdjusted]);
+
+  const projectionInflationPct = useMemo(() => {
+    const raw = installation?.installation.annual_inflation_assumption_percent;
+    if (raw == null) return 0;
+    const n = parseDisplayDecimal(String(raw));
+    return n != null && n > 0 ? n : 0;
+  }, [installation?.installation.annual_inflation_assumption_percent]);
+
   return (
     <div className="workspace workspace--projection-fullwidth">
       <div className="workspace-header">
@@ -9932,6 +10048,19 @@ function ProjectionView({
               checked={focusMode}
               onChange={(e) => setFocusMode(e.target.checked)}
               aria-label="Activar focus en la proyección"
+            />
+            <span className="projection-focus-toggle-track" aria-hidden="true">
+              <span className="projection-focus-toggle-thumb" />
+            </span>
+          </label>
+          <label className="projection-focus-toggle">
+            <span className="projection-focus-toggle-label">Inflation Adjusted</span>
+            <input
+              type="checkbox"
+              role="switch"
+              checked={inflationAdjusted}
+              onChange={(e) => setInflationAdjusted(e.target.checked)}
+              aria-label="Mostrar la proyección ajustada a inflación (en dinero de hoy)"
             />
             <span className="projection-focus-toggle-track" aria-hidden="true">
               <span className="projection-focus-toggle-thumb" />
@@ -9989,11 +10118,10 @@ function ProjectionView({
             series={projectionSeries}
             milestones={nextMilestones}
             focusMode={focusMode}
+            inflationAdjusted={inflationAdjusted}
+            installationInflationPct={projectionInflationPct}
             currencyIso={currencyIso}
             ledgerPersonScope={ledgerPersonScope}
-            inflationActive={
-              installation?.installation.projection_includes_inflation ?? false
-            }
             inflationPctDisplay={inflationPctDisplay}
             ageUiMode={axisAgeMode}
             userBirthDate={axisBirth}

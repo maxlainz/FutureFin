@@ -19,8 +19,8 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
     first_month_per_asset_contribution_nominals, project_net_worth_series, AllocationCap,
-    AllocationKind, AllocationRule, EngineError, ProjectionInput, ProjectionLiabilityInput,
-    ProjectionOutput, SimAsset,
+    AllocationKind, AllocationRule, EngineError, FireTarget, ProjectionInput,
+    ProjectionLiabilityInput, ProjectionOutput, SimAsset,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -167,12 +167,17 @@ pub struct ProjectionSeriesResponse {
     /// Primer mes en que el componente de interés/mercado supera el ahorro mensual base (sin Próximos ni plan de pagos de deudas).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compound_outpaces_true_savings_month_index: Option<u32>,
-    /// Primer mes en que el patrimonio neto ≥ objetivo FIRE (jubilación). `null` si no hay objetivo o no se alcanza en el horizonte.
+    /// Primer mes en que el patrimonio neto ≥ objetivo FIRE móvil del mes en curso. `null` si no hay objetivo o no se alcanza.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jubilacion_month_index: Option<u32>,
-    /// Objetivo FIRE bruto (patrimonio necesario, gross-up aplicado). Decimal serializado como string. `null` si no configurado.
+    /// Objetivo FIRE base en euros de hoy (gross-up de impuestos aplicado). Sirve como referencia
+    /// y como anclaje del target móvil — el target en cada mes es este valor × `(1 + inflación%)^(meses/12)`.
+    /// `null` cuando no hay configuración FIRE válida.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jubilacion_target_net_worth: Option<String>,
+    /// Serie mensual del target FIRE ajustado por inflación, paralela a `points`. Cada valor =
+    /// `target_base × (1 + inflación%)^(month_index/12)`. Vacío cuando no hay FIRE configurado.
+    pub fire_target_series: Vec<String>,
     /// Valor de cada activo mes a mes (paralelo a `points`). Un elemento por activo, en el mismo orden que la consulta de activos.
     pub asset_series: Vec<AssetSeries>,
 }
@@ -441,8 +446,6 @@ fn compound_outpaces_true_savings_month(
     let mut neutral = input.clone();
     neutral.planning_monthly_cash_adjustment =
         vec![Decimal::ZERO; input.horizon_months as usize];
-    // El hito se evalúa en términos nominales para aislar el cruce real entre aportación e interés.
-    neutral.inflation_annual_percent = None;
     for liab in neutral.liabilities.iter_mut() {
         liab.monthly_payment = Decimal::ZERO;
     }
@@ -537,15 +540,19 @@ pub(crate) async fn build_installation_projection_input(
     view: LedgerView,
     today: NaiveDate,
     horizon_months: u32,
-    inflation_annual_percent: Option<Decimal>,
+    inflation_annual_percent: Decimal,
     fire_settings: Option<&FireSettings>,
 ) -> Result<(ProjectionInput, Decimal), ApiError> {
     let (income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
     let monthly_net_regular = income_reg - expense_reg;
 
-    let fire_target_net_worth = fire_settings.and_then(|fs| {
+    let fire_target_base = fire_settings.and_then(|fs| {
         compute_fire_target_nw(fs, income_reg, income_retirement, expense_retirement)
+    });
+    let fire_target = fire_target_base.map(|base_amount| FireTarget {
+        base_amount,
+        annual_inflation_percent: inflation_annual_percent.max(Decimal::ZERO),
     });
 
     let assets_rows: Vec<AssetEngineRow> = match view {
@@ -724,13 +731,12 @@ pub(crate) async fn build_installation_projection_input(
         assets,
         allocation_rules,
         liabilities,
-        inflation_annual_percent,
         planning_monthly_cash_adjustment,
         retirement_start_month: None,
         income_retirement_monthly: income_retirement,
         expense_retirement_monthly: expense_retirement,
         retirement_monthly_withdrawal: Decimal::ZERO,
-        fire_target_net_worth,
+        fire_target,
     };
 
     Ok((input, monthly_net_regular))
@@ -790,9 +796,17 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
     view: LedgerView,
     today: NaiveDate,
 ) -> Result<HashMap<Uuid, Decimal>, ApiError> {
-    let (input, _) =
-        build_installation_projection_input(pool, iid, session_user_id, view, today, 1, None, None)
-            .await?;
+    let (input, _) = build_installation_projection_input(
+        pool,
+        iid,
+        session_user_id,
+        view,
+        today,
+        1,
+        Decimal::ZERO,
+        None,
+    )
+    .await?;
     let nominals = first_month_per_asset_contribution_nominals(&input).map_err(map_engine_err)?;
     Ok(input
         .assets
@@ -865,7 +879,7 @@ pub(crate) async fn compute_installation_projection(
     view: LedgerView,
     today: NaiveDate,
     horizon_months: u32,
-    inflation_annual_percent: Option<Decimal>,
+    inflation_annual_percent: Decimal,
     fire_settings: Option<&FireSettings>,
 ) -> Result<(ProjectionOutput, Decimal, ProjectionInput), ApiError> {
     let (input, monthly_net_regular) = build_installation_projection_input(
@@ -910,27 +924,20 @@ pub async fn get_projection_series(
     let view = resolve_ledger_view(&q);
 
     let inst_row: (
-        bool,
-        Option<Decimal>,
+        Decimal,
         String,
         Option<sqlx::types::Json<FireSettings>>,
     ) = sqlx::query_as(
-        r#"SELECT projection_includes_inflation, annual_inflation_assumption_percent,
-                  show_age_mode, fire_settings
+        r#"SELECT annual_inflation_assumption_percent, show_age_mode, fire_settings
            FROM installation WHERE id = $1"#,
     )
     .bind(iid)
     .fetch_one(&state.pool)
     .await?;
 
-    let inflation_annual_percent =
-        if inst_row.0 && inst_row.1.is_some() {
-            inst_row.1
-        } else {
-            None
-        };
-
-    let fire_settings = resolve_fire_settings(inst_row.3.map(|j| j.0));
+    let inflation_annual_percent = inst_row.0.max(Decimal::ZERO);
+    let show_age_mode = inst_row.1;
+    let fire_settings = resolve_fire_settings(inst_row.2.map(|j| j.0));
 
     let session_birth: Option<NaiveDate> = sqlx::query_scalar(
         r#"SELECT birth_date FROM users WHERE id = $1"#,
@@ -1063,11 +1070,27 @@ pub async fn get_projection_series(
         PROJECTION_MILESTONE_SEARCH_COUNT,
     );
 
-    let fire_target = projection_input.fire_target_net_worth.filter(|t| *t > Decimal::ZERO);
-    let jubilacion_month_index: Option<u32> = fire_target.and_then(|target| {
-        points.iter().find(|p| p.net_worth >= target).map(|p| p.month_index)
-    });
-    let jubilacion_target_net_worth: Option<String> = fire_target.map(|t| t.to_string());
+    let fire_target_ref = projection_input.fire_target.as_ref();
+    let (fire_target_series, jubilacion_month_index, jubilacion_target_net_worth) =
+        match fire_target_ref {
+            Some(ft) if ft.base_amount > Decimal::ZERO => {
+                let inf_factor =
+                    Decimal::ONE + (ft.annual_inflation_percent.max(Decimal::ZERO) / Decimal::from(100u32));
+                let mut series = Vec::with_capacity(points.len());
+                let mut crossed_at: Option<u32> = None;
+                for p in &points {
+                    let years =
+                        Decimal::from(p.month_index) / Decimal::from(12u32);
+                    let target = ft.base_amount * inf_factor.powd(years);
+                    if crossed_at.is_none() && target > Decimal::ZERO && p.net_worth >= target {
+                        crossed_at = Some(p.month_index);
+                    }
+                    series.push(target.to_string());
+                }
+                (series, crossed_at, Some(ft.base_amount.to_string()))
+            }
+            _ => (Vec::new(), None, None),
+        };
 
     Ok(Json(ProjectionSeriesResponse {
         points,
@@ -1077,11 +1100,11 @@ pub async fn get_projection_series(
         starting_net_worth,
         monthly_delta_assumption,
         model_note:
-            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos (fecha explícita en su mes civil; sin fecha repartidos en 90 días desde la fecha de referencia), caja mensual consolidada → superávit reparte a activos o déficit drena según las mismas reglas (líquidos primero, menor rentabilidad esperada después), cuotas fijas escaladas y remanente por pesos, crecimiento compuesto por activo, serie nominal o deflactada si hay inflación."
+            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos, caja mensual consolidada (ingresos/gastos/aportaciones constantes en euros nominales), crecimiento compuesto por activo en términos nominales. El target FIRE se evalúa mes a mes ajustado por inflación para preservar el poder adquisitivo del usuario."
                 .into(),
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
-        show_age_mode: inst_row.2.clone(),
-        use_age_on_x_axis: inst_row.2.trim() == "ages"
+        show_age_mode: show_age_mode.clone(),
+        use_age_on_x_axis: show_age_mode.trim() == "ages"
             && resolved_birth_for_demographics.is_some(),
         viewer_birth_date: resolved_birth_for_demographics
             .map(|d| d.format("%Y-%m-%d").to_string()),
@@ -1089,6 +1112,7 @@ pub async fn get_projection_series(
         compound_outpaces_true_savings_month_index,
         jubilacion_month_index,
         jubilacion_target_net_worth,
+        fire_target_series,
         asset_series,
     }))
 }
@@ -1274,13 +1298,12 @@ mod milestone_tests {
                 monthly_payment: Decimal::from(1200),
                 payment_end: None,
             }],
-            inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             expense_retirement_monthly: Decimal::from(2500),
             retirement_monthly_withdrawal: Decimal::ZERO,
-            fire_target_net_worth: None,
+            fire_target: None,
         };
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(500)).unwrap();
         assert!(month.is_none());
@@ -1307,13 +1330,12 @@ mod milestone_tests {
                 cap: None,
             }],
             liabilities: vec![],
-            inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 24],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             expense_retirement_monthly: Decimal::from(1000),
             retirement_monthly_withdrawal: Decimal::ZERO,
-            fire_target_net_worth: None,
+            fire_target: None,
         };
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(200)).unwrap();
         assert!(month.is_some());

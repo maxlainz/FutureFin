@@ -184,7 +184,6 @@ pub struct InstallationSnapshotInformative {
     pub calendar_tz: String,
     #[serde(default, with = "rust_decimal::serde::str_option")]
     pub annual_inflation_assumption_percent: Option<Decimal>,
-    pub projection_includes_inflation: bool,
     pub show_age_mode: String,
     pub fire_settings: FireSettings,
 }
@@ -366,7 +365,6 @@ mod tests {
             "installation_snapshot_informative": {
                 "base_currency": "EUR",
                 "calendar_tz": "UTC",
-                "projection_includes_inflation": false,
                 "show_age_mode": "dates",
                 "fire_settings": {
                     "fire_number_mode": "annual_expense",
@@ -414,7 +412,6 @@ mod tests {
             "installation_snapshot_informative": {
                 "base_currency": "EUR",
                 "calendar_tz": "UTC",
-                "projection_includes_inflation": false,
                 "show_age_mode": "dates",
                 "fire_settings": {
                     "fire_number_mode": "annual_expense",

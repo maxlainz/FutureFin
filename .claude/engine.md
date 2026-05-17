@@ -22,18 +22,28 @@ pub struct ProjectionInput {
     pub assets: Vec<SimAsset>,
     pub allocation_rules: Vec<AllocationRule>,   // cascade, in priority order
     pub liabilities: Vec<ProjectionLiabilityInput>,
-    pub inflation_annual_percent: Option<Decimal>,
     pub planning_monthly_cash_adjustment: Vec<Decimal>,
     pub retirement_start_month: Option<u32>,
     pub income_retirement_monthly: Decimal,
     pub expense_retirement_monthly: Decimal,
     pub retirement_monthly_withdrawal: Decimal,
-    pub fire_target_net_worth: Option<Decimal>,
+    pub fire_target: Option<FireTarget>,
+}
+
+pub struct FireTarget {
+    pub base_amount: Decimal,             // FIRE en euros de hoy (gross-up de impuestos aplicado)
+    pub annual_inflation_percent: Decimal, // 0 = target plano; > 0 = target móvil
 }
 ```
 
+## Inflación y target FIRE móvil
+- Ingresos, gastos y aportaciones se mantienen **constantes en euros nominales** a lo largo de la simulación (filosofía «haciendo lo que hago ahora, ¿qué tal voy?»). No se inflan.
+- El rendimiento de activos (`expected_annual_return_percent`) es **nominal**, sin deflactar.
+- El **target FIRE crece con la inflación cada mes**: `target(k) = base_amount × (1 + annual_inflation_percent/100)^((k-1)/12)`. Esto preserva el poder adquisitivo del usuario en el momento de jubilarse.
+- `annual_inflation_percent = 0` degenera a un target plano (equivalente a tratar el FIRE como un escalar de euros de hoy).
+
 ## SimAsset fields
-- `expected_annual_return_percent`: **nominal** compound growth rate (7 = 7%/year). Engine subtracts inflation internally when `inflation_annual_percent > 0`. None = no compound growth.
+- `expected_annual_return_percent`: **nominal** compound growth rate (7 = 7%/year). None = no compound growth.
 - `is_liquid`: liquid assets are drained first when cash is negative; sorted by growth rate (lowest first).
 - `purchase_price`: optional cost basis; included in `contributed_capital[0]`.
 
@@ -53,23 +63,24 @@ Rules are evaluated **in vector order** (caller passes them sorted by priority A
 - `take = min(intent, cap_room?, remaining)` is added to `alloc[target]` and subtracted from `remaining`.
 
 ## Simulation loop (per month)
-All monetary state is in € of `ref_date` throughout; no end-of-month deflation is applied.
+All monetary state is **nominal** throughout (euros del momento). El ajuste por inflación se aplica
+únicamente al target FIRE, que crece cada mes para mantener el poder adquisitivo del usuario.
 
 1. Compute `debt_service` = sum of active liability payments (capped by remaining principal).
-2. Determine `in_retirement = fire_reached || k >= retirement_start_month`. `fire_reached` compares `nw_prev` against `fire_target_net_worth` directly (both in real terms). When `in_retirement` is true, use `income_retirement_monthly` / `expense_retirement_monthly`; otherwise the regular variants.
+2. Determine `in_retirement = fire_reached || k >= retirement_start_month`. `fire_reached` compara `nw_prev` contra el target FIRE del mes `k`, que es `base × (1 + inflation/100)^((k-1)/12)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares.
 3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
 5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW).
 6. If `net_cash <= 0` (deficit): drain `surplus_cash` first, then drain liquid assets (lowest-return first).
-7. Apply compound growth (`× monthly_multiplier(rate, inflation_annual_percent)`) to each asset value.
+7. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar.
 8. Reduce liability principals by payments made.
 
 ## Output
 ```rust
 pub struct ProjectionOutput {
-    pub net_worth: Vec<Decimal>,         // index 0..=horizon_months, all in € of `ref_date`
-    pub contributed_capital: Vec<Decimal>, // cumulative cost basis in € of `ref_date`
-    pub per_asset_series: Vec<Vec<Decimal>>, // value per asset per month, in € of `ref_date`
+    pub net_worth: Vec<Decimal>,         // nominal, euros del momento, index 0..=horizon_months
+    pub contributed_capital: Vec<Decimal>, // cumulative cost basis (nominal)
+    pub per_asset_series: Vec<Vec<Decimal>>, // value per asset per month (nominal)
 }
 ```
 
