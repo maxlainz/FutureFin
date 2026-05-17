@@ -9,7 +9,7 @@ Migrations in `apps/api/migrations/`. SQLx embeds and runs them on startup.
 - `sessions`: `id (uuid PK)`, `user_id (FK users)`, `expires_at`, `created_at`
 
 ### Installation (singleton)
-- `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `projection_includes_inflation (bool)`, `annual_inflation_assumption_percent (decimal nullable)`, `projection_target_age (smallint nullable)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `created_at`
+- `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `annual_inflation_assumption_percent (decimal NOT NULL DEFAULT 0; 0 = target FIRE plano, >0 = target móvil que crece con la inflación)`, `projection_target_age (smallint nullable)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `created_at`
   - Singleton: only one row ever exists. First user auto-creates it on register.
   
 - `installation_memberships`: `installation_id (FK)`, `user_id (FK)`, `role (text: 'owner'|'member'|'viewer')`, `created_at`

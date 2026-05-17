@@ -427,12 +427,11 @@ async fn fetch_installation_snapshot(
     let row: (
         String,
         String,
-        bool,
-        Option<Decimal>,
+        Decimal,
         String,
         Option<SqlxJson<FireSettings>>,
     ) = sqlx::query_as(
-        r#"SELECT base_currency, calendar_tz, projection_includes_inflation,
+        r#"SELECT base_currency, calendar_tz,
                   annual_inflation_assumption_percent, show_age_mode, fire_settings
            FROM installation WHERE id = $1"#,
     )
@@ -443,9 +442,8 @@ async fn fetch_installation_snapshot(
     Ok(InstallationSnapshotInformative {
         base_currency: row.0,
         calendar_tz: row.1,
-        projection_includes_inflation: row.2,
-        annual_inflation_assumption_percent: row.3,
-        show_age_mode: row.4,
-        fire_settings: resolve_fire_settings(row.5.map(|j| j.0)),
+        annual_inflation_assumption_percent: Some(row.2),
+        show_age_mode: row.3,
+        fire_settings: resolve_fire_settings(row.4.map(|j| j.0)),
     })
 }

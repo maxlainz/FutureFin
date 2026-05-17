@@ -75,6 +75,17 @@ pub struct ProjectionLiabilityInput {
     pub payment_end: Option<NaiveDate>,
 }
 
+/// Target FIRE evaluado mes a mes. `base_amount` es el patrimonio necesario en euros de hoy
+/// (gross-up de impuestos ya aplicado); el target del mes `k` es
+/// `base_amount × (1 + annual_inflation_percent/100)^((k-1)/12)`, lo que preserva el poder
+/// adquisitivo del usuario en el momento de la jubilación. `annual_inflation_percent = 0`
+/// degenera a un target plano (mismo valor en todos los meses).
+#[derive(Debug, Clone)]
+pub struct FireTarget {
+    pub base_amount: Decimal,
+    pub annual_inflation_percent: Decimal,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectionInput {
     /// Civil "today" de la instalación (inicio del mes simulado para el índice 1).
@@ -86,8 +97,6 @@ pub struct ProjectionInput {
     /// Cascada de reglas, en orden ascendente de prioridad (índice 0 = primera).
     pub allocation_rules: Vec<AllocationRule>,
     pub liabilities: Vec<ProjectionLiabilityInput>,
-    /// Annual inflation % for deflating nominal series to “money of today”; None → nominal.
-    pub inflation_annual_percent: Option<Decimal>,
     /// Signed cash from planning flows per simulated month (`len == horizon_months`): index `i`
     /// pairs with month `i+1` (calendar month `add_months(month_first_calendar(ref_date), i)`).
     pub planning_monthly_cash_adjustment: Vec<Decimal>,
@@ -107,20 +116,22 @@ pub struct ProjectionInput {
     /// The handler typically passes `0` — income reduction via `income_retirement_monthly`
     /// is the primary drain mechanism in the new model.
     pub retirement_monthly_withdrawal: Decimal,
-    /// When set, new contributions stop as soon as net worth reaches or exceeds this threshold
-    /// (even if `retirement_start_month` has not been reached yet).
-    pub fire_target_net_worth: Option<Decimal>,
+    /// Target FIRE móvil. Cuando está presente, las aportaciones se detienen en el primer mes
+    /// donde el patrimonio cruza el target inflado correspondiente al mes en curso.
+    pub fire_target: Option<FireTarget>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProjectionOutput {
-    /// Month index 0..=horizon_months inclusive.
+    /// Month index 0..=horizon_months inclusive. Serie nominal: el patrimonio se expresa en euros
+    /// del momento. La comparación con la inflación se hace contra el target FIRE móvil
+    /// (`FireTarget`), no deflactando esta serie.
     pub net_worth: Vec<Decimal>,
-    /// Cumulative contributed basis, deflated when inflation assumption is active.
+    /// Cumulative contributed basis (nominal).
     pub contributed_capital: Vec<Decimal>,
     /// Per-asset value series: `per_asset_series[asset_index][month_index]`.
     /// Length == `assets.len()`; inner length == `horizon_months + 1` (months 0..=horizon).
-    /// Values are deflated by the same factor applied to `net_worth` when inflation is active.
+    /// Nominal, igual que `net_worth`.
     pub per_asset_series: Vec<Vec<Decimal>>,
 }
 
@@ -140,26 +151,29 @@ fn month_window(month_first: NaiveDate) -> (NaiveDate, NaiveDate) {
     (start, end)
 }
 
-fn monthly_multiplier(
-    annual_percent: Option<Decimal>,
-    inflation_annual_percent: Option<Decimal>,
-) -> Decimal {
+fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
     let Some(p) = annual_percent else {
         return Decimal::ONE;
     };
     if p <= Decimal::ZERO {
         return Decimal::ONE;
     }
-    let nominal_monthly = (Decimal::ONE + p / Decimal::from(100))
-        .powd(Decimal::ONE / Decimal::from(12));
-    match inflation_annual_percent {
-        Some(inf) if inf > Decimal::ZERO => {
-            let inf_monthly = (Decimal::ONE + inf / Decimal::from(100))
-                .powd(Decimal::ONE / Decimal::from(12));
-            nominal_monthly / inf_monthly
-        }
-        _ => nominal_monthly,
+    (Decimal::ONE + p / Decimal::from(100)).powd(Decimal::ONE / Decimal::from(12))
+}
+
+/// Target FIRE evaluado al inicio del mes `k` (1-based), considerando la inflación acumulada
+/// desde el mes 0 al mes `k-1`. Devuelve `None` cuando no hay target o su base es ≤ 0.
+fn fire_target_at_month(ft: Option<&FireTarget>, k: u32) -> Option<Decimal> {
+    let ft = ft?;
+    if ft.base_amount <= Decimal::ZERO {
+        return None;
     }
+    if ft.annual_inflation_percent <= Decimal::ZERO || k <= 1 {
+        return Some(ft.base_amount);
+    }
+    let years = Decimal::from(k - 1) / Decimal::from(12u32);
+    let factor = (Decimal::ONE + ft.annual_inflation_percent / Decimal::from(100u32)).powd(years);
+    Some(ft.base_amount * factor)
 }
 
 fn drain_from_assets(
@@ -454,9 +468,8 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
 
         let nw_prev = nw_fn(&values, &principals, undrained_cumulative, surplus_cash);
-        let fire_reached = input
-            .fire_target_net_worth
-            .map_or(false, |t| t > Decimal::ZERO && nw_prev >= t);
+        let fire_reached = fire_target_at_month(input.fire_target.as_ref(), k)
+            .map_or(false, |t| nw_prev >= t);
         let in_retirement =
             fire_reached || input.retirement_start_month.map_or(false, |s| k >= s);
         let income = if in_retirement {
@@ -513,7 +526,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         }
 
         for i in 0..values.len() {
-            let m = monthly_multiplier(rates[i], input.inflation_annual_percent);
+            let m = monthly_multiplier(rates[i]);
             values[i] *= m;
         }
 
@@ -611,13 +624,12 @@ mod tests {
             assets,
             allocation_rules: rules,
             liabilities: vec![],
-            inflation_annual_percent: None,
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; horizon as usize],
             retirement_start_month: None,
             income_retirement_monthly: Decimal::ZERO,
             expense_retirement_monthly: expense,
             retirement_monthly_withdrawal: Decimal::ZERO,
-            fire_target_net_worth: None,
+            fire_target: None,
         }
     }
 
@@ -888,8 +900,8 @@ mod tests {
     }
 
     #[test]
-    fn contributed_capital_in_real_terms_matches_input_basis() {
-        let mut inp = base_input(
+    fn contributed_capital_tracks_purchase_basis_plus_routed_surplus() {
+        let inp = base_input(
             1,
             Decimal::from(1000),
             Decimal::ZERO,
@@ -902,7 +914,6 @@ mod tests {
             }],
             vec![rule_remainder(0)],
         );
-        inp.inflation_annual_percent = Some(Decimal::from(12));
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.contributed_capital[0], Decimal::from(1200));
         assert_eq!(out.contributed_capital[1], Decimal::from(2200));
@@ -976,19 +987,26 @@ mod tests {
             vec![rule_remainder(0)],
         );
         inp.planning_monthly_cash_adjustment = vec![Decimal::ZERO; 240];
-        inp.inflation_annual_percent = Some(Decimal::from(10));
-        inp.fire_target_net_worth = Some(Decimal::from(50_000));
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from(50_000),
+            annual_inflation_percent: Decimal::from(10),
+        });
         let out = project_net_worth_series(&inp).unwrap();
-        let target = Decimal::from(50_000);
         let cross_idx = out
             .net_worth
             .iter()
-            .position(|v| *v >= target)
-            .expect("debe cruzar el target en 20 años");
+            .enumerate()
+            .find(|(k, v)| {
+                let target = fire_target_at_month(inp.fire_target.as_ref(), *k as u32)
+                    .unwrap_or(Decimal::ZERO);
+                **v >= target && target > Decimal::ZERO
+            })
+            .map(|(k, _)| k)
+            .expect("debe cruzar el target móvil en el horizonte");
         for i in 1..=cross_idx {
             assert!(
                 out.net_worth[i] >= out.net_worth[i - 1] - Decimal::new(1, 2),
-                "serie real cayó en mes {i} (prev={}, curr={}) — fire_reached prematuro",
+                "serie cayó en mes {i} (prev={}, curr={}) — fire_reached prematuro",
                 out.net_worth[i - 1],
                 out.net_worth[i]
             );
@@ -996,8 +1014,8 @@ mod tests {
     }
 
     #[test]
-    fn asset_growth_uses_real_rate_when_inflation_active() {
-        let mut inp = base_input(
+    fn asset_growth_is_nominal_independent_of_currency_value() {
+        let inp = base_input(
             12,
             Decimal::ZERO,
             Decimal::ZERO,
@@ -1010,9 +1028,8 @@ mod tests {
             }],
             vec![],
         );
-        inp.inflation_annual_percent = Some(Decimal::from(3));
         let out = project_net_worth_series(&inp).unwrap();
-        let expected = Decimal::new(5097087, 2); // 50970.87
+        let expected = Decimal::from(52_500);
         let diff = (out.net_worth[12] - expected).abs();
         assert!(
             diff < Decimal::new(50, 2),
@@ -1022,30 +1039,42 @@ mod tests {
     }
 
     #[test]
-    fn series_match_without_inflation_when_zero_inflation() {
-        let mk_inp = |inf: Option<Decimal>| -> ProjectionInput {
-            let mut inp = base_input(
-                24,
-                Decimal::from(2_000),
-                Decimal::from(1_500),
-                vec![SimAsset {
-                    id: Uuid::from_u128(50),
-                    value: Decimal::from(10_000),
-                    purchase_price: Some(Decimal::from(8_000)),
-                    is_liquid: true,
-                    expected_annual_return_percent: Some(Decimal::from(6)),
-                }],
-                vec![rule_remainder(0)],
-            );
-            inp.inflation_annual_percent = inf;
-            inp
+    fn fire_target_grows_with_inflation_each_month() {
+        let ft = FireTarget {
+            base_amount: Decimal::from(750_000),
+            annual_inflation_percent: Decimal::from(3),
         };
-        let none = project_net_worth_series(&mk_inp(None)).unwrap();
-        let zero = project_net_worth_series(&mk_inp(Some(Decimal::ZERO))).unwrap();
-        assert_eq!(none.net_worth, zero.net_worth);
-        assert_eq!(none.contributed_capital, zero.contributed_capital);
-        for i in 0..none.per_asset_series.len() {
-            assert_eq!(none.per_asset_series[i], zero.per_asset_series[i]);
-        }
+        let t0 = fire_target_at_month(Some(&ft), 1).unwrap();
+        assert_eq!(t0, Decimal::from(750_000));
+        let t20y = fire_target_at_month(Some(&ft), 241).unwrap();
+        // 750_000 × 1.03^20 ≈ 1_354_583. Comprobamos con tolerancia ≤ 1€.
+        let factor = (Decimal::ONE + Decimal::from(3) / Decimal::from(100u32))
+            .powd(Decimal::from(20u32));
+        let expected = Decimal::from(750_000) * factor;
+        let diff = (t20y - expected).abs();
+        assert!(
+            diff < Decimal::ONE,
+            "esperado ≈ {expected}, obtenido {t20y} (diff {diff})"
+        );
+        // El target a 10 años está estrictamente entre el base y el de 20 años.
+        let t10y = fire_target_at_month(Some(&ft), 121).unwrap();
+        assert!(t10y > Decimal::from(750_000));
+        assert!(t10y < t20y);
+    }
+
+    #[test]
+    fn fire_target_with_zero_inflation_is_flat() {
+        let ft = FireTarget {
+            base_amount: Decimal::from(500_000),
+            annual_inflation_percent: Decimal::ZERO,
+        };
+        assert_eq!(
+            fire_target_at_month(Some(&ft), 1).unwrap(),
+            Decimal::from(500_000)
+        );
+        assert_eq!(
+            fire_target_at_month(Some(&ft), 600).unwrap(),
+            Decimal::from(500_000)
+        );
     }
 }
