@@ -1,0 +1,149 @@
+/**
+ * FutureFin design tokens.
+ *
+ * Base monocromática (zinc) + único acento periwinkle. Verde/rojo solo
+ * para color de cifras delta. No usar nunca pos/neg en chrome decorativo.
+ *
+ * El tema se aplica con `data-theme="dark"` en <html>; ver lib/theme.ts.
+ */
+
+:root {
+  /* ---------- Base monocromática ---------- */
+  --ff-bg: #f4f4f5;          /* zinc-100, fondo de la app */
+  --ff-paper: #fafafa;       /* zinc-50, paneles / KPIs */
+  --ff-frame: #ffffff;       /* blanco puro, cabecera / modales */
+  --ff-ink: #0a0a0a;         /* casi negro, texto principal */
+  --ff-ink-soft: #404040;    /* gris oscuro, labels / meta */
+  --ff-muted: #737373;       /* gris medio, hints / ticks */
+  --ff-line: #0a0a0a;        /* trazo principal (raro) */
+  --ff-line-soft: #e4e4e7;   /* zinc-200, bordes habituales */
+  --ff-pill: rgba(10, 10, 10, 0.06);
+  --ff-hatch: rgba(10, 10, 10, 0.06);
+
+  /* ---------- Único acento ---------- */
+  --ff-accent: oklch(0.56 0.13 250);
+  --ff-accent-fg: #ffffff;
+
+  /* Pos/neg: SOLO color de cifras delta. Nunca en fondos/bordes/iconos. */
+  --ff-pos: oklch(0.50 0.14 165);
+  --ff-neg: oklch(0.55 0.18 25);
+
+  /* ---------- Radii ---------- */
+  --ff-radius-frame: 12px;
+  --ff-radius-panel: 14px;
+  --ff-radius-kpi: 12px;
+  --ff-radius-pill: 999px;
+  --ff-radius-input: 10px;
+
+  /* ---------- Sombras ---------- */
+  --ff-shadow-elev:
+    0 4px 6px -1px rgba(10, 10, 10, 0.06),
+    0 10px 24px -8px rgba(10, 10, 10, 0.08);
+  --ff-shadow-flat: 0 1px 2px rgba(10, 10, 10, 0.04);
+
+  /* ============================================================
+     Chart de proyección — tokens.
+     ProjectionNetWorthChart.tsx usa estas vars en vez de hex
+     hardcoded para soportar oscuro sin tocar JSX.
+     Diferenciación entre series por luminancia + estilo
+     (sólida vs. discontinua), no por paleta colorida.
+     ============================================================ */
+  --proj-nw: #0a0a0a;
+  --proj-cc: #737373;
+  --proj-fire: var(--ff-accent);
+  --proj-jub: var(--ff-accent);
+  --proj-pos: var(--ff-pos);
+  --proj-neg: var(--ff-neg);
+  --proj-grid: #e4e4e7;
+  --proj-plot-bg: #ffffff;
+  --proj-area-fill: rgba(10, 10, 10, 0.08);
+  --proj-area-stroke: rgba(10, 10, 10, 0.18);
+  --proj-crosshair: #737373;
+  --proj-tick: #737373;
+  --proj-meta: #404040;
+  --proj-axis: #737373;
+  --proj-milestone: #a3a3a3;
+
+  /* Paleta funcional de las áreas/series del chart. Tonos medios sobre
+     claro; en oscuro se sustituyen por pasteles más claros (más abajo). */
+  --proj-area-1: #2563eb;
+  --proj-area-2: #0d9488;
+  --proj-area-3: #7c3aed;
+  --proj-area-4: #db2777;
+  --proj-area-5: #ea580c;
+  --proj-area-6: #65a30d;
+  --proj-area-7: #0891b2;
+  --proj-area-8: #c026d3;
+  --proj-area-9: #ca8a04;
+  --proj-area-10: #475569;
+}
+
+[data-theme="dark"] {
+  --ff-bg: #0a0a0a;
+  --ff-paper: #18181b;
+  --ff-frame: #27272a;
+  --ff-ink: #fafafa;
+  --ff-ink-soft: #d4d4d8;
+  --ff-muted: #a1a1aa;
+  --ff-line: #fafafa;
+  --ff-line-soft: #3f3f46;
+  --ff-pill: rgba(250, 250, 250, 0.08);
+  --ff-hatch: rgba(250, 250, 250, 0.06);
+
+  --ff-accent: oklch(0.74 0.11 250);
+  --ff-accent-fg: oklch(0.18 0.04 250);
+
+  --ff-pos: oklch(0.78 0.12 165);
+  --ff-neg: oklch(0.78 0.15 25);
+
+  --ff-shadow-elev:
+    0 4px 6px -1px rgba(0, 0, 0, 0.4),
+    0 10px 24px -8px rgba(0, 0, 0, 0.5);
+  --ff-shadow-flat: 0 1px 2px rgba(0, 0, 0, 0.3);
+
+  --proj-nw: #fafafa;
+  --proj-cc: #a1a1aa;
+  --proj-fire: var(--ff-accent);
+  --proj-jub: var(--ff-accent);
+  --proj-pos: var(--ff-pos);
+  --proj-neg: var(--ff-neg);
+  --proj-grid: #3f3f46;
+  --proj-plot-bg: #18181b;
+  --proj-area-fill: rgba(250, 250, 250, 0.06);
+  --proj-area-stroke: rgba(250, 250, 250, 0.16);
+  --proj-crosshair: #a1a1aa;
+  --proj-tick: #a1a1aa;
+  --proj-meta: #d4d4d8;
+  --proj-axis: #a1a1aa;
+  --proj-milestone: #525252;
+
+  /* Paleta funcional aclarada para modo oscuro: cada color sube ~25 puntos
+     de luminosidad respecto al claro para conservar contraste sobre el
+     fondo zinc-900. */
+  --proj-area-1: #93c5fd;  /* azul claro */
+  --proj-area-2: #5eead4;  /* teal claro */
+  --proj-area-3: #c4b5fd;  /* violeta claro */
+  --proj-area-4: #f9a8d4;  /* rosa claro */
+  --proj-area-5: #fdba74;  /* naranja claro */
+  --proj-area-6: #bef264;  /* lima clara */
+  --proj-area-7: #67e8f9;  /* cian claro */
+  --proj-area-8: #f0abfc;  /* magenta claro */
+  --proj-area-9: #fde047;  /* ámbar claro */
+  --proj-area-10: #cbd5e1; /* gris claro */
+}
+
+/* Reset global de color + fondo, aplicado al body para que los modos
+   funcionen en cualquier surface que no sobreescriba colores. */
+html {
+  background: var(--ff-bg);
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--ff-bg);
+  color: var(--ff-ink);
+}

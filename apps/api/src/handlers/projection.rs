@@ -10,7 +10,7 @@ use crate::handlers::installation::{
 };
 use crate::handlers::person_view::LedgerView;
 use crate::handlers::session::require_session_user;
-use crate::state::AppState;
+use crate::state::{AppState, Density, ProjectionCacheKey};
 use axum::extract::{Extension, Query};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -37,6 +37,34 @@ pub struct ProjectionSeriesQuery {
     pub view: Option<String>,
     /// Meses a proyectar (12–840). Si se omite: horizonte derivado de la instalación (véase `horizon_basis`).
     pub months: Option<u32>,
+    /// `monthly` (default) o `hybrid` (mes 0..12 mensual + anual desde 24). Reduce el JSON ~5× con `hybrid`.
+    #[serde(default)]
+    pub density: Option<String>,
+}
+
+fn resolve_density(q: &ProjectionSeriesQuery) -> Density {
+    match q.density.as_deref().map(str::trim) {
+        Some("hybrid") => Density::Hybrid,
+        _ => Density::Monthly,
+    }
+}
+
+/// Indices a incluir en el response según la densidad. Para `Hybrid`: mes 0..12
+/// mensual + mes 24, 36, ..., months.
+fn density_month_indices(density: Density, months: u32) -> Vec<u32> {
+    match density {
+        Density::Monthly => (0..months).collect(),
+        Density::Hybrid => {
+            let cap = months.saturating_sub(1);
+            let mut v: Vec<u32> = (0..=12u32.min(cap)).collect();
+            let mut k = 24u32;
+            while k <= cap {
+                v.push(k);
+                k += 12;
+            }
+            v
+        }
+    }
 }
 
 #[cfg(test)]
@@ -142,26 +170,34 @@ fn resolve_ledger_view(q: &ProjectionSeriesQuery) -> LedgerView {
     }
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+/// Serializa un Decimal como f64 (~15 dígitos de precisión, suficiente para
+/// display de horizontes de 70 años). Reduce ~30 KB JSON y elimina ~5.000
+/// llamadas a parseDisplayDecimal en el cliente. Los KPIs/totales escalares
+/// que requieren precisión decimal siguen usando `rust_decimal::serde::str`.
+fn serialize_decimal_as_f64<S: serde::Serializer>(d: &Decimal, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(d.to_f64().unwrap_or(0.0))
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ProjectionPoint {
     pub month_index: u32,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
     pub net_worth: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
     pub contributed_capital: Decimal,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AssetSeries {
     pub asset_id: Uuid,
     pub asset_name: String,
-    /// Decimal values serialized as strings, one per month (parallel to `points`).
-    pub values: Vec<String>,
+    /// Decimal values serializados como f64 (paralelo a `points`).
+    pub values: Vec<f64>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ProjectionSeriesResponse {
     pub points: Vec<ProjectionPoint>,
     pub months: u32,
@@ -201,9 +237,12 @@ pub struct ProjectionSeriesResponse {
     pub jubilacion_target_net_worth: Option<String>,
     /// Serie mensual del target FIRE ajustado por inflación, paralela a `points`. Cada valor =
     /// `target_base × (1 + inflación%)^(month_index/12)`. Vacío cuando no hay FIRE configurado.
-    pub fire_target_series: Vec<String>,
+    /// Serializado como f64 (ver `serialize_decimal_as_f64`).
+    pub fire_target_series: Vec<f64>,
     /// Valor de cada activo mes a mes (paralelo a `points`). Un elemento por activo, en el mismo orden que la consulta de activos.
     pub asset_series: Vec<AssetSeries>,
+    /// Densidad de los puntos serializados: `monthly` (default) o `hybrid`.
+    pub density: String,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -816,7 +855,62 @@ pub async fn get_projection_series(
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
     let view = resolve_ledger_view(&q);
+    let density = resolve_density(&q);
 
+    // Cache hot path: solo aplica cuando no hay `months_override` (caso por
+    // defecto y 99% del tráfico). Si el cliente pide un horizonte custom,
+    // recomputamos directamente sin cachear.
+    if q.months.is_none() {
+        let key = ProjectionCacheKey {
+            installation_id: iid,
+            view,
+            owner_user_id: if matches!(view, LedgerView::Mine) {
+                Some(user.id.0)
+            } else {
+                None
+            },
+            density,
+        };
+        if let Some(cached) = state.projection_cache_get(&key).await {
+            tracing::info!(installation_id = %iid, view = ?view, density = ?density, "projection cache HIT");
+            return Ok(Json((*cached).clone()));
+        }
+        tracing::info!(installation_id = %iid, view = ?view, density = ?density, "projection cache MISS, computing");
+        let t0 = std::time::Instant::now();
+        let response =
+            compute_projection_series_response(&state, user.id.0, iid, view, None, density)
+                .await?;
+        tracing::info!(
+            installation_id = %iid,
+            density = ?density,
+            ms = t0.elapsed().as_millis() as u64,
+            "projection compute done, inserting in cache"
+        );
+        state
+            .projection_cache_insert(key, Arc::new(response.clone()))
+            .await;
+        return Ok(Json(response));
+    }
+
+    let response =
+        compute_projection_series_response(&state, user.id.0, iid, view, q.months, density)
+            .await?;
+    Ok(Json(response))
+}
+
+/// Calcula la respuesta de proyección sin tocar el cache. Es la unidad de
+/// recompute reusada por: (a) cache miss en el handler, (b) warm-up post-login,
+/// (c) warm-up post-mutación. `density` solo afecta a la serialización (qué
+/// puntos incluir en `points`/`fire_target_series`/`asset_series.values`);
+/// el compute interno del engine siempre es el horizonte mensual completo.
+pub async fn compute_projection_series_response(
+    state: &AppState,
+    user_id: Uuid,
+    iid: Uuid,
+    view: LedgerView,
+    months_override: Option<u32>,
+    density: Density,
+) -> Result<ProjectionSeriesResponse, ApiError> {
     // 1 query consolidada (calendar_tz + inflación + show_age_mode + fire_settings) en lugar
     // de dos round-trips a `installation`. Las DOB del usuario y del primer miembro del hogar
     // se piden en paralelo con `try_join!`.
@@ -838,7 +932,7 @@ pub async fn get_projection_series(
     let session_birth_q = sqlx::query_scalar::<_, Option<NaiveDate>>(
         r#"SELECT birth_date FROM users WHERE id = $1"#,
     )
-    .bind(user.id.0)
+    .bind(user_id)
     .fetch_one(&state.pool);
     let household_birth_q = sqlx::query_scalar::<_, NaiveDate>(
         r#"SELECT birth_date FROM persons
@@ -861,7 +955,7 @@ pub async fn get_projection_series(
 
     let birth_dates: Vec<Option<NaiveDate>> = vec![resolved_birth_for_demographics];
 
-    let (months, horizon_basis): (u32, String) = match q.months {
+    let (months, horizon_basis): (u32, String) = match months_override {
         Some(m) => (m.clamp(12, 840), "months_override".into()),
         None => {
             let (m, b) = projection_horizon_months(today, &birth_dates);
@@ -874,7 +968,7 @@ pub async fn get_projection_series(
     let built = build_installation_projection_input(
         &state.pool,
         iid,
-        user.id.0,
+        user_id,
         view,
         today,
         months,
@@ -914,7 +1008,28 @@ pub async fn get_projection_series(
         .copied()
         .unwrap_or(Decimal::ZERO);
 
-    let points: Vec<ProjectionPoint> = output
+    // Indices a serializar según la densidad solicitada. Para `Hybrid`
+    // (mes 0..12 mensual + anual desde 24) el JSON pesa ~5× menos.
+    let kept_indices = density_month_indices(density, output.net_worth.len() as u32);
+
+    let points: Vec<ProjectionPoint> = kept_indices
+        .iter()
+        .filter_map(|&i| {
+            let idx = i as usize;
+            let nw = output.net_worth.get(idx)?;
+            let cc = output.contributed_capital.get(idx)?;
+            Some(ProjectionPoint {
+                month_index: i,
+                net_worth: *nw,
+                contributed_capital: *cc,
+            })
+        })
+        .collect();
+
+    // Milestones se computan sobre TODOS los meses (no sobre los serializados),
+    // si no, con `density=hybrid` se perderían milestones que caen entre dos
+    // puntos anuales.
+    let points_full: Vec<ProjectionPoint> = output
         .net_worth
         .iter()
         .zip(output.contributed_capital.iter())
@@ -934,12 +1049,16 @@ pub async fn get_projection_series(
         .map(|((id, name), series)| AssetSeries {
             asset_id: *id,
             asset_name: name.clone(),
-            values: series.iter().map(|v| v.to_string()).collect(),
+            values: kept_indices
+                .iter()
+                .filter_map(|&i| series.get(i as usize))
+                .map(|v| v.to_f64().unwrap_or(0.0))
+                .collect(),
         })
         .collect();
 
     let milestones = projection_unique_reached_milestones(
-        &points,
+        &points_full,
         today,
         planning_upcoming_net_for_milestone_baseline(today, &planning_rows),
         PROJECTION_MILESTONE_LIMIT,
@@ -950,22 +1069,34 @@ pub async fn get_projection_series(
     let (fire_target_series, jubilacion_month_index, jubilacion_target_net_worth) =
         match fire_target_ref {
             Some(ft) if ft.base_amount > Decimal::ZERO => {
-                let mut series = Vec::with_capacity(points.len());
+                // Detectar el crossover sobre TODOS los meses (no solo los
+                // serializados) para no perder precisión por la decimación.
                 let mut crossed_at: Option<u32> = None;
-                for p in &points {
-                    let target = fire_target_at_month_index(Some(ft), p.month_index)
-                        .unwrap_or(Decimal::ZERO);
-                    if crossed_at.is_none() && target > Decimal::ZERO && p.net_worth >= target {
-                        crossed_at = Some(p.month_index);
+                for (i, nw) in output.net_worth.iter().enumerate() {
+                    let target =
+                        fire_target_at_month_index(Some(ft), i as u32).unwrap_or(Decimal::ZERO);
+                    if target > Decimal::ZERO && *nw >= target {
+                        crossed_at = Some(i as u32);
+                        break;
                     }
-                    series.push(target.to_string());
                 }
+                // Serializar el target solo en los puntos retenidos por la
+                // densidad. Paralelo a `points`.
+                let series: Vec<f64> = kept_indices
+                    .iter()
+                    .map(|&i| {
+                        fire_target_at_month_index(Some(ft), i)
+                            .unwrap_or(Decimal::ZERO)
+                            .to_f64()
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
                 (series, crossed_at, Some(ft.base_amount.to_string()))
             }
             _ => (Vec::new(), None, None),
         };
 
-    Ok(Json(ProjectionSeriesResponse {
+    Ok(ProjectionSeriesResponse {
         points,
         months,
         horizon_years,
@@ -987,11 +1118,79 @@ pub async fn get_projection_series(
         jubilacion_target_net_worth,
         fire_target_series,
         asset_series,
-    }))
+        density: match density {
+            Density::Monthly => "monthly".into(),
+            Density::Hybrid => "hybrid".into(),
+        },
+    })
 }
 
 pub fn projection_router() -> Router {
     Router::new().route("/series", get(get_projection_series))
+}
+
+/// Recompute de la proyección `view=household` (ambas densidades) y guardado
+/// en cache. Pensado para `tokio::spawn` tras login. Si falla, no propaga el
+/// error: solo deja el cache vacío para que el próximo GET haga el compute
+/// sincronamente.
+pub async fn warm_up_household_projection(
+    state: Arc<AppState>,
+    installation_id: Uuid,
+    user_id: Uuid,
+) {
+    for density in [Density::Hybrid, Density::Monthly] {
+        tracing::info!(installation_id = %installation_id, density = ?density, "warm-up household projection start");
+        let t0 = std::time::Instant::now();
+        let key = ProjectionCacheKey {
+            installation_id,
+            view: LedgerView::Household,
+            owner_user_id: None,
+            density,
+        };
+        match compute_projection_series_response(
+            &state,
+            user_id,
+            installation_id,
+            LedgerView::Household,
+            None,
+            density,
+        )
+        .await
+        {
+            Ok(response) => {
+                state.projection_cache_insert(key, Arc::new(response)).await;
+                tracing::info!(
+                    installation_id = %installation_id,
+                    density = ?density,
+                    ms = t0.elapsed().as_millis() as u64,
+                    "warm-up done"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(installation_id = %installation_id, density = ?density, error = ?e, "warm-up failed");
+            }
+        }
+    }
+}
+
+/// Helper para handlers de mutación. Invalida todas las entries del
+/// installation. **No** dispara warm-up tras mutación para evitar una race
+/// condition: dos mutaciones consecutivas (M1, M2) podrían generar dos
+/// warm-ups concurrentes y el de M1 (con datos pre-M2) puede terminar
+/// después del de M2, dejando el cache stale. El próximo GET (cache miss)
+/// hace compute on-demand — paga ~500 ms una vez tras una mutación, luego
+/// cache. El warm-up proactivo se mantiene solo en login (sin
+/// invalidaciones concurrentes).
+pub fn refresh_projection_after_mutation(
+    state: Arc<AppState>,
+    installation_id: Uuid,
+    _user_id: Uuid,
+) {
+    tokio::spawn(async move {
+        state
+            .invalidate_projection_by_installation(installation_id)
+            .await;
+    });
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ use http::header::{ACCEPT, CONTENT_TYPE};
 use http::Method;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -42,12 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|&d| (1..=400).contains(&d))
         .unwrap_or(30);
 
-    let state = Arc::new(AppState {
-        version: env!("CARGO_PKG_VERSION"),
+    let state = Arc::new(AppState::new(
+        env!("CARGO_PKG_VERSION"),
         pool,
         cookie_secure,
         session_ttl_days,
-    });
+    ));
 
     tracing::info!(port = port(), session_ttl_days, cookie_secure, "server config");
 
@@ -55,6 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(routes::app_router())
         .layer(Extension(state))
         .layer(cors_layer())
+        // gzip para responses >1 KB. Reduce ~10× el JSON de /v1/projection/series
+        // (260 KB → 30 KB). El cliente lo descomprime sin cambios.
+        .layer(CompressionLayer::new().gzip(true))
         .layer(TraceLayer::new_for_http());
 
     let app = match web_static_root() {

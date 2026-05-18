@@ -192,8 +192,10 @@ export type PlanningFlowApiRow = {
 
 export type ProjectionPointApi = {
   month_index: number;
-  net_worth: string;
-  contributed_capital: string;
+  /** f64 (serializado como número, no Decimal-as-string como los KPIs escalares). */
+  net_worth: number;
+  /** f64. */
+  contributed_capital: number;
 };
 
 export type ProjectionMilestoneApi = {
@@ -205,7 +207,8 @@ export type ProjectionMilestoneApi = {
 export type AssetSeriesApi = {
   asset_id: string;
   asset_name: string;
-  values: string[];
+  /** f64[] (paralelo a points). */
+  values: number[];
 };
 
 export type ProjectionSeriesApi = {
@@ -228,9 +231,11 @@ export type ProjectionSeriesApi = {
   jubilacion_month_index?: number | null;
   /** Objetivo FIRE base en euros de hoy. El target real de cada mes crece con la inflación. */
   jubilacion_target_net_worth?: string | null;
-  /** Serie del target FIRE ajustado por inflación, paralela a `points`. Vacío cuando no hay FIRE configurado. */
-  fire_target_series?: string[];
+  /** Serie del target FIRE ajustado por inflación, paralela a `points`. f64[] (vacío cuando no hay FIRE). */
+  fire_target_series?: number[];
   asset_series?: AssetSeriesApi[];
+  /** Densidad de los puntos serializados. Default `monthly`. Con `hybrid` el cliente recibe ~82 puntos en lugar de ~841. */
+  density?: "monthly" | "hybrid";
 };
 
 export type FfbackupImportCounts = {

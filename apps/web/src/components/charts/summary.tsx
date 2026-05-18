@@ -1,8 +1,10 @@
 /**
- * Donut + breakdown table del resumen. Paletas y helpers de color encapsulados aquí.
- * Activos en familia fría, pasivos en cálida, ciclando si hay más categorías que entradas.
+ * Donut + breakdown table del resumen. Activos en familia fría, pasivos en
+ * cálida. Las gráficas son la única zona donde la app usa varios colores
+ * funcionales (el resto sigue la regla "B/N + único acento periwinkle").
  */
 
+import { useMemo } from "react";
 import {
   breakdownPercentOfTotal,
   formatBreakdownPct,
@@ -14,24 +16,24 @@ type ChartScope = "asset" | "liability";
 
 const SUMMARY_CHART_PALETTE_ASSET: readonly [number, number, number][] = [
   [205, 52, 37],
-  [118, 62, 33],
-  [178, 48, 44],
-  [138, 68, 36],
   [218, 46, 42],
-  [158, 70, 34],
   [192, 42, 47],
-  [128, 56, 39],
+  [178, 48, 44],
+  [240, 36, 46],
+  [160, 36, 40],
+  [200, 52, 50],
+  [222, 40, 38],
 ];
 
 const SUMMARY_CHART_PALETTE_LIABILITY: readonly [number, number, number][] = [
   [14, 64, 41],
   [32, 58, 44],
-  [44, 56, 42],
+  [354, 58, 41],
   [22, 62, 39],
   [8, 66, 40],
   [38, 54, 46],
   [26, 60, 43],
-  [354, 58, 41],
+  [320, 50, 42],
 ];
 
 function summaryChartSliceParts(
@@ -99,8 +101,14 @@ export function SummaryDonutChart({
   currencyIso: string;
   chartScope: ChartScope;
 }) {
-  const filtered = rows.filter((r) => (parseDisplayDecimal(r.total) ?? 0) > 0);
-  const g = summaryDonutGradient(rows, totalWhole, chartScope);
+  const filtered = useMemo(
+    () => rows.filter((r) => (parseDisplayDecimal(r.total) ?? 0) > 0),
+    [rows],
+  );
+  const g = useMemo(
+    () => summaryDonutGradient(rows, totalWhole, chartScope),
+    [rows, totalWhole, chartScope],
+  );
   if (!g || filtered.length === 0) {
     return (
       <div className="summary-donut-card">

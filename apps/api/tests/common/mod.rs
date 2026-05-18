@@ -71,6 +71,7 @@ pub struct TestApp {
     pub router: Router,
     pub pool: PgPool,
     pub schema: String,
+    pub state: Arc<AppState>,
 }
 
 /// Owner ya autenticado con cookie de sesión válida. Útil para los tests que necesitan
@@ -139,19 +140,20 @@ impl TestApp {
 impl TestApp {
     pub async fn spawn() -> Self {
         let (pool, schema) = isolated_pool().await;
-        let state = Arc::new(AppState {
-            version: env!("CARGO_PKG_VERSION"),
-            pool: pool.clone(),
-            cookie_secure: false,
-            session_ttl_days: 30,
-        });
+        let state = Arc::new(AppState::new(
+            env!("CARGO_PKG_VERSION"),
+            pool.clone(),
+            false,
+            30,
+        ));
         let router = Router::new()
             .merge(routes::app_router())
-            .layer(Extension(state));
+            .layer(Extension(state.clone()));
         Self {
             router,
             pool,
             schema,
+            state,
         }
     }
 

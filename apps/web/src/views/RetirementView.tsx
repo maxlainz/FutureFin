@@ -15,6 +15,10 @@ import type {
 } from "../api/types";
 import { MetricCard } from "../components/MetricCard";
 import {
+  MiniProjection,
+  MiniProjectionLegend,
+} from "../components/charts/MiniProjection";
+import {
   METRIC_DASH,
   formatCurrencyNumber,
   formatPercentAmount,
@@ -422,6 +426,125 @@ export function RetirementView({
         <p className="muted tight">
           Solo el propietario puede editar esta configuración.
         </p>
+      ) : null}
+
+      {hasMembership &&
+      projectionSeries &&
+      projectionSeries.points.length > 0 ? (
+        (() => {
+          const pts = projectionSeries.points;
+          const horizon = projectionSeries.horizon_years;
+          const lastIdx = pts.length - 1;
+          const firstNwLabel = pts[0]
+            ? formatCurrencyNumber(pts[0].net_worth, currencyIso)
+            : null;
+          const lastNwLabel = pts[lastIdx]
+            ? formatCurrencyNumber(pts[lastIdx].net_worth, currencyIso)
+            : null;
+          const jubMi =
+            typeof projectionSeries.jubilacion_month_index === "number"
+              ? projectionSeries.jubilacion_month_index
+              : null;
+          const jubLabel =
+            jubMi != null
+              ? projectionXTickLabel(jubMi, pts.length, {
+                  ageUiMode: axisAgeMode,
+                  birthDateIso: axisBirth,
+                  anchorDateYmd: axisAnchor,
+                  calendarTz,
+                })
+              : null;
+          const hasFire =
+            !!projectionSeries.fire_target_series &&
+            projectionSeries.fire_target_series.length > 0;
+          // Si hay jubilación, recortamos la serie a jub+12 (un año después
+          // del cruce). El eje Y se zoom-ajusta entre NW(hoy) y NW(fin).
+          const clampToMonth = jubMi != null ? jubMi + 12 : null;
+          const lastVisibleIdx =
+            clampToMonth != null
+              ? Math.min(clampToMonth, lastIdx)
+              : lastIdx;
+          const lastVisibleLabel = pts[lastVisibleIdx]
+            ? formatCurrencyNumber(pts[lastVisibleIdx].net_worth, currencyIso)
+            : lastNwLabel;
+          return (
+            <section className="panel">
+              <div className="panel-head-row">
+                <h3 className="panel-title">Patrimonio vs. objetivo FIRE</h3>
+                <span
+                  className="muted"
+                  style={{
+                    fontSize: "0.78rem",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {firstNwLabel && lastVisibleLabel
+                    ? `${firstNwLabel} → ${lastVisibleLabel}${jubMi != null ? " · cruce + 1 a" : ` · ${horizon} a`}`
+                    : `${horizon} a`}
+                </span>
+              </div>
+              <MiniProjection
+                series={projectionSeries}
+                height={240}
+                showFire={hasFire}
+                showJub={true}
+                showAreas={false}
+                zoomY
+                clampToMonth={clampToMonth}
+                xAxis={{
+                  ageUiMode: axisAgeMode,
+                  birthDateIso: axisBirth,
+                  anchorDateYmd: axisAnchor,
+                  calendarTz,
+                }}
+              />
+              <MiniProjectionLegend
+                items={[
+                  { label: "Patrimonio neto", color: "var(--proj-nw)" },
+                  ...(hasFire
+                    ? ([
+                        {
+                          label: "Target FIRE",
+                          color: "var(--proj-fire)",
+                          dash: true,
+                        },
+                      ] as const)
+                    : []),
+                  ...(jubMi != null
+                    ? ([
+                        {
+                          label: `Primer cruce · ${jubLabel ?? ""}`.trim(),
+                          color: "var(--ff-accent)",
+                        },
+                      ] as const)
+                    : []),
+                ]}
+              />
+              {!hasFire ? (
+                <p
+                  className="muted tight"
+                  style={{ marginTop: "0.6rem", fontSize: "0.78rem" }}
+                >
+                  Configura el objetivo FIRE más abajo para ver la línea de
+                  target sobre el gráfico.
+                </p>
+              ) : jubMi == null ? (
+                <p
+                  className="muted tight"
+                  style={{ marginTop: "0.6rem", fontSize: "0.78rem" }}
+                >
+                  Sin cruce en el horizonte ({horizon} a). Aumenta el horizonte
+                  o ajusta el aporte mensual.
+                </p>
+              ) : null}
+            </section>
+          );
+        })()
+      ) : hasMembership ? (
+        <section className="panel">
+          <h3 className="panel-title">Patrimonio vs. objetivo FIRE</h3>
+          <div className="ff-chart-skeleton ff-chart-skeleton--mini" aria-hidden style={{ minHeight: 240 }} />
+        </section>
       ) : null}
 
       <section className="panel">

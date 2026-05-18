@@ -1,78 +1,244 @@
 /**
- * Iconos SVG inline (Feather-style). Cada uno hereda `stroke="currentColor"`, así que el color
- * lo controla la clase CSS del padre.
+ * Iconos SVG inline — set consistente del rediseño V1.
+ *
+ * - viewBox 16×16
+ * - stroke="currentColor", strokeWidth=1.5, linecap/linejoin="round"
+ * - El color lo controla la clase CSS del padre.
+ * - El tamaño visible lo controla CSS (los SVG no traen width/height fijos).
  */
 
-export function PlusIcon() {
+import type { SVGProps } from "react";
+
+type IconProps = SVGProps<SVGSVGElement>;
+
+function IconBase({ children, ...rest }: { children: React.ReactNode } & IconProps) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
+      viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
-      strokeWidth="2"
+      strokeWidth={1.5}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden
+      {...rest}
     >
-      <line x1="12" y1="5" x2="12" y2="19" />
-      <line x1="5" y1="12" x2="19" y2="12" />
+      {children}
     </svg>
   );
 }
 
-export function RowEditIcon() {
+export function PlusIcon(props: IconProps) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-    </svg>
+    <IconBase {...props}>
+      <path d="M8 3v10M3 8h10" />
+    </IconBase>
   );
 }
 
-export function RowTrashIcon() {
+export function RowEditIcon(props: IconProps) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <polyline points="3 6 5 6 21 6" />
-      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-      <line x1="10" y1="11" x2="10" y2="17" />
-      <line x1="14" y1="11" x2="14" y2="17" />
-    </svg>
+    <IconBase {...props}>
+      <path d="M11.2 2.6l2.2 2.2-8 8H3.2v-2.2l8-8z" />
+    </IconBase>
   );
 }
 
-export function GearIcon() {
+export function RowTrashIcon(props: IconProps) {
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
+    <IconBase {...props}>
+      <path d="M3 4.5h10" />
+      <path d="M5.5 4.5V3a1 1 0 011-1h3a1 1 0 011 1v1.5" />
+      <path d="M4.5 4.5l.8 8.5a1 1 0 001 .9h3.4a1 1 0 001-.9l.8-8.5" />
+    </IconBase>
+  );
+}
+
+export function GearIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx={8} cy={8} r={1.8} />
+      <path d="M13.4 9.6a1 1 0 00.2 1.1l.04.04a1.2 1.2 0 11-1.7 1.7l-.04-.04a1 1 0 00-1.1-.2 1 1 0 00-.6.9V13a1.2 1.2 0 11-2.4 0v-.05a1 1 0 00-.6-.9 1 1 0 00-1.1.2l-.04.04a1.2 1.2 0 11-1.7-1.7l.04-.04a1 1 0 00.2-1.1 1 1 0 00-.9-.6H3a1.2 1.2 0 110-2.4h.05a1 1 0 00.9-.6 1 1 0 00-.2-1.1l-.04-.04a1.2 1.2 0 111.7-1.7l.04.04a1 1 0 001.1.2h.05a1 1 0 00.6-.9V3a1.2 1.2 0 112.4 0v.05a1 1 0 00.6.9 1 1 0 001.1-.2l.04-.04a1.2 1.2 0 111.7 1.7l-.04.04a1 1 0 00-.2 1.1v.05a1 1 0 00.9.6H13a1.2 1.2 0 110 2.4h-.05a1 1 0 00-.9.6z" />
+    </IconBase>
+  );
+}
+
+/* ───────────────── Set extendido del rediseño ───────────────── */
+
+export function XIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />
+    </IconBase>
+  );
+}
+
+export function CheckIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 8.4l3.2 3.1L13 4.6" />
+    </IconBase>
+  );
+}
+
+export function MoreIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx={3.5} cy={8} r={1.1} fill="currentColor" stroke="none" />
+      <circle cx={8} cy={8} r={1.1} fill="currentColor" stroke="none" />
+      <circle cx={12.5} cy={8} r={1.1} fill="currentColor" stroke="none" />
+    </IconBase>
+  );
+}
+
+export function ChevronIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M6 3.5L10.5 8 6 12.5" />
+    </IconBase>
+  );
+}
+
+export function ChevronLeftIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M10 3.5L5.5 8 10 12.5" />
+    </IconBase>
+  );
+}
+
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3.5 6L8 10.5 12.5 6" />
+    </IconBase>
+  );
+}
+
+export function MenuIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 5h10M3 8h10M3 11h10" />
+    </IconBase>
+  );
+}
+
+export function UserIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx={8} cy={6} r={2.4} />
+      <path d="M3 13c1-2.4 3-3.4 5-3.4s4 1 5 3.4" />
+    </IconBase>
+  );
+}
+
+export function DragIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx={6} cy={4} r={0.9} fill="currentColor" stroke="none" />
+      <circle cx={10} cy={4} r={0.9} fill="currentColor" stroke="none" />
+      <circle cx={6} cy={8} r={0.9} fill="currentColor" stroke="none" />
+      <circle cx={10} cy={8} r={0.9} fill="currentColor" stroke="none" />
+      <circle cx={6} cy={12} r={0.9} fill="currentColor" stroke="none" />
+      <circle cx={10} cy={12} r={0.9} fill="currentColor" stroke="none" />
+    </IconBase>
+  );
+}
+
+export function DownloadIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M8 2.5v7.6m0 0l-2.8-2.8m2.8 2.8l2.8-2.8M3 13.5h10" />
+    </IconBase>
+  );
+}
+
+export function CalendarIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x={2.5} y={3.5} width={11} height={10} rx={1.5} />
+      <path d="M5 2v3M11 2v3M2.5 6.5h11" />
+    </IconBase>
+  );
+}
+
+export function FilterIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M2.5 4h11M5 8h6M7 12h2" />
+    </IconBase>
+  );
+}
+
+export function SortIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M5 3v9m0 0l-2-2m2 2l2-2M11 13V4m0 0l-2 2m2-2l2 2" />
+    </IconBase>
+  );
+}
+
+export function LinkIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M7 9l2-2" />
+      <path d="M9.5 6.5l1-1a2.1 2.1 0 013 3l-1.5 1.5" />
+      <path d="M6.5 9.5l-1 1a2.1 2.1 0 01-3-3L4 6" />
+    </IconBase>
+  );
+}
+
+export function RefreshIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 8a5 5 0 018.5-3.5L13 6" />
+      <path d="M13 2.5V6h-3.5" />
+      <path d="M13 8a5 5 0 01-8.5 3.5L3 10" />
+      <path d="M3 13.5V10h3.5" />
+    </IconBase>
+  );
+}
+
+export function EyeIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z" />
+      <circle cx={8} cy={8} r={1.8} />
+    </IconBase>
+  );
+}
+
+export function SearchIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx={7} cy={7} r={3.6} />
+      <path d="M9.7 9.7l3 3" />
+    </IconBase>
+  );
+}
+
+export function ArrowUpIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M8 13V3m-3 3l3-3 3 3" />
+    </IconBase>
+  );
+}
+
+export function ArrowDownIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M8 3v10m-3-3l3 3 3-3" />
+    </IconBase>
+  );
+}
+
+export function DuplicateIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x={3} y={5} width={7} height={8} rx={1.2} />
+      <path d="M5.5 5V4a1 1 0 011-1h5a1 1 0 011 1v6a1 1 0 01-1 1H10" />
+    </IconBase>
   );
 }

@@ -3,6 +3,7 @@ use crate::handlers::budget::assert_budget_category;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::LedgerViewQuery;
+use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -285,6 +286,7 @@ pub async fn create_planning_flow(
     .fetch_one(&state.pool)
     .await?;
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok((
         axum::http::StatusCode::CREATED,
         Json(row_to_response(row)?),
@@ -424,6 +426,7 @@ pub async fn patch_planning_flow(
     .fetch_one(&state.pool)
     .await?;
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok(Json(row_to_response(updated)?))
 }
 
@@ -463,6 +466,7 @@ pub async fn delete_planning_flow(
         return Err(ApiError::NotFound);
     }
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

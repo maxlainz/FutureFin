@@ -15,6 +15,7 @@ Extended reference — read these before working on the relevant area:
 | [`.claude/env-and-config.md`](.claude/env-and-config.md) | All env vars, `.env` loading order, Vite config |
 | [`.claude/adding-handler.md`](.claude/adding-handler.md) | Step-by-step pattern for adding a new API handler |
 | [`.claude/frontend-structure.md`](.claude/frontend-structure.md) | SPA layout post-refactor (lib/, api/, components/, views/, auth/) and where to put what |
+| [`.claude/design-system.md`](.claude/design-system.md) | V1 redesign — tokens, paleta, reglas para añadir UI nueva (LEE ANTES de tocar estilos) |
 | [`.claude/tests.md`](.claude/tests.md) | How to run + write backend integration tests (Postgres schemas) and frontend Vitest tests |
 
 **Keep these files up to date** whenever the corresponding area changes (routes, schema, env vars, etc.).
@@ -153,8 +154,12 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 
 - **Monetary amounts**: no decimals, currency symbol after the number (`1.234 €`). Use `formatCurrencyAmount` / `formatCurrencyNumber` — never `toString()` or manual concatenation.
 - **Percentages**: exactly one decimal, suffix ` %` (`3,5 %`). Use `formatPercentAmount` / `formatPercentDisplay`. The function already includes the suffix.
-- **MetricCard additional info**: always goes in the `parenthetical` prop, not `suffix`.
+- **MetricCard additional info**: always goes in the `parenthetical` prop, not `suffix`. El paren-slot se reserva siempre (con `&nbsp;` cuando está vacío) para que las KPIs en la misma fila tengan baseline alineada.
 - **Copy**: minimal — prefer short labels, empty states in a few words (`Sin datos.`).
+- **Palette (V1 redesign)**: base monocromática (zinc) + único acento periwinkle. Verde/rojo **solo en cifras delta**, nunca en chrome decorativo. Las gráficas son la única zona donde se aceptan varios colores funcionales. **Nunca uses hex hardcoded en `App.css` o componentes — consume `var(--ff-*)`** definidos en [`apps/web/src/styles/theme.css`](apps/web/src/styles/theme.css). Detalles completos: [`.claude/design-system.md`](.claude/design-system.md).
+- **Tema**: claro / oscuro / auto, controlado por `<html data-theme>`. Estado en `App.tsx` (`themePref`), helpers en [`apps/web/src/lib/theme.ts`](apps/web/src/lib/theme.ts), toggle en `Ajustes → Datos y sistema → Apariencia`. **Verifica claro y oscuro antes de mergear cualquier cambio visual.**
+- **Iconografía**: set unificado en [`apps/web/src/components/icons.tsx`](apps/web/src/components/icons.tsx) — viewBox 16×16, `stroke="currentColor"`, `strokeWidth=1.5`. No introduzcas SVG nuevo fuera de ese archivo.
+- **Charts pequeños**: usa [`MiniProjection`](apps/web/src/components/charts/MiniProjection.tsx) en lugar de SVG custom — comparte tokens con el chart grande y soporta `zoomY`, `clampToMonth`, `xAxis`, áreas escaladas al NW.
 
 ## Git workflow
 

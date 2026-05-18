@@ -4,9 +4,13 @@ Post-refactor (May 2026). Before: one `App.tsx` of 10.384 LOC owning everything.
 
 ```
 src/
-├── App.tsx                       # composition root: auth gate + global state + route → view dispatch (~3.000 LOC)
-├── App.css                       # global styles
-├── main.tsx                      # ReactDOM.createRoot entry
+├── App.tsx                       # composition root: auth gate + global state + route → view dispatch
+├── App.css                       # global styles (consume --ff-* tokens; no hardcoded hex)
+├── index.css                     # minimal reset, font-family
+├── main.tsx                      # ReactDOM.createRoot entry — imports styles/theme.css before index.css
+│
+├── styles/
+│   └── theme.css                 # design tokens (--ff-*, --proj-*) con variantes claro/[data-theme=dark]
 │
 ├── api/
 │   ├── client.ts                 # fetch wrappers: apiGet/Post/Patch/Delete + defaultFetchInit + errorMessageFromResponse
@@ -25,33 +29,41 @@ src/
 │   │                             #   defaultFireSettingsApi, normalizeInstallationFireSettings, taxOnGrossCapitalAnnual,
 │   │                             #   grossUpNetAnnualFire, computeFireAnnualNeedNetEur, findFirstMonthNetWorthAtLeastInflated
 │   ├── projection-chart.ts       # chart helpers: tick builders, SVG layout, niceYTicks, axis age/dates mode,
-│   │                             #   PROJECTION_FOCUS_STORAGE_KEY, ASSET_LINE_COLORS, complementaryProjectionTickLabel,
+│   │                             #   PROJECTION_FOCUS_STORAGE_KEY, ASSET_LINE_COLORS (CSS vars), complementaryProjectionTickLabel,
 │   │                             #   projectionHoverTitle, formatYearsEsFromMonths, formatProjectionChartHorizonLine
-│   └── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH, SETTINGS_SUBTAB_*, tabFromPathname, settingsSubTabPath
+│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH, SETTINGS_SUBTAB_*, tabFromPathname, settingsSubTabPath
+│   └── theme.ts                  # ThemePref ("auto"|"light"|"dark") + apply/load/save + subscribeSystemThemeChanges
 │
 ├── components/                   # generic UI primitives (no domain knowledge)
+│   ├── TopBar.tsx                # cabecera única: marca + nav pills + extras + hamburguesa
+│   ├── MobileNavDrawer.tsx       # drawer derecho ≤720px
+│   ├── AccountCard.tsx           # tarjeta de cuenta en Ajustes (sustituye user-chip + Salir del header antiguo)
+│   ├── ThemeToggle.tsx           # segmented Auto/Claro/Oscuro (usado en Ajustes → Datos)
 │   ├── Modal.tsx                 # Modal + ModalFormError + InlineHint
-│   ├── MetricCard.tsx
-│   ├── icons.tsx                 # PlusIcon, RowEditIcon, RowTrashIcon, GearIcon
+│   ├── MetricCard.tsx            # KPI con paren-slot siempre presente + tone hero/accent/accent-2
+│   ├── icons.tsx                 # set unificado 16×16 stroke 1.5 (~25 iconos)
 │   └── charts/
-│       ├── summary.tsx           # SummaryDonutChart + SummaryBreakdownBlock (palettes inline)
-│       └── PlanningDirectionChart.tsx
+│       ├── summary.tsx           # SummaryDonutChart + SummaryBreakdownBlock (palette fría=activos / cálida=pasivos)
+│       ├── PlanningDirectionChart.tsx   # barra inflow/outflow — usada en Upcoming Y Budget
+│       └── MiniProjection.tsx    # SVG compacto reusado en Resumen y Jubilación
 │
 ├── views/                        # one file per tab — receives props from App.tsx, owns local UI state
-│   ├── SummaryView.tsx           # 271 LOC
-│   ├── AssetsView.tsx            # 552
-│   ├── LiabilitiesView.tsx       # 512
-│   ├── BudgetView.tsx            # 752  (exports BudgetScopeToggle type)
-│   ├── UpcomingView.tsx          # 424  (Planning)
-│   ├── RetirementView.tsx        # 559
-│   ├── ProjectionView.tsx        # 246  (wraps ProjectionNetWorthChart)
-│   ├── ProjectionNetWorthChart.tsx  # 976 — large SVG chart, drag/zoom/hover
-│   ├── SettingsView.tsx          # 1.019 — sub-tabs (Acceso / Calendario / Proyección / Jubilación / Categorías / Datos)
-│   └── AllocationRulesPanel.tsx  # 246 — used embedded inside BudgetView modal
+│   ├── SummaryView.tsx           # KPIs → Salud financiera → Proyección 12m (zoomY) → Desglose
+│   ├── AssetsView.tsx
+│   ├── LiabilitiesView.tsx       # tabla sin columna Tipo
+│   ├── BudgetView.tsx            # KPIs + Distribución (PlanningDirectionChart) + columnas Ingresos/Gastos
+│   ├── UpcomingView.tsx          # Planning
+│   ├── RetirementView.tsx        # KPIs + MiniProjection (zoomY, clampToMonth=jub+12, xAxis) + FIRE config
+│   ├── ProjectionView.tsx        # wraps ProjectionNetWorthChart
+│   ├── ProjectionNetWorthChart.tsx  # gran SVG chart, drag/zoom/hover, colores vía --proj-* tokens
+│   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills + ThemeToggle en "Datos y sistema"
+│   └── AllocationRulesPanel.tsx  # used embedded inside BudgetView modal
 │
 └── auth/
     └── BootstrapInstallationPanel.tsx  # first-user setup form (currency + IANA tz)
 ```
+
+> Para los **tokens, paleta y reglas visuales** del rediseño V1 consulta [`design-system.md`](design-system.md).
 
 ## Import conventions
 
@@ -68,9 +80,11 @@ src/
 | New API type returned by the backend | `api/types.ts` (export it) |
 | New fetch endpoint wrapper | `api/client.ts` if reusable, otherwise inline in `App.tsx` next to existing handlers |
 | New pure formatter / parser | `lib/format.ts` (with a Vitest in `lib/format.test.ts`) |
-| New shared chart/SVG widget | `components/charts/` |
-| New full tab/page | `views/NewView.tsx` + add to `TABS` / `TAB_PATH` in `lib/navigation.ts` + render branch in `App.tsx` |
-| New Settings sub-tab | add to `SETTINGS_SUBTAB_SLUG`/`_LABEL` in `lib/navigation.ts` + render branch inside `SettingsView` |
+| New design token (color/radius/shadow) | `styles/theme.css` con variantes claro **y** `[data-theme="dark"]`. Nunca hardcoded en App.css/componentes. |
+| New icon | extender el set en `components/icons.tsx` (viewBox 16×16, stroke 1.5). No crear SVG sueltos en views. |
+| New shared chart/SVG widget | `components/charts/` — si es una proyección compacta, considera reusar `MiniProjection` con props |
+| New full tab/page | `views/NewView.tsx` + add to `TABS` / `TAB_PATH` in `lib/navigation.ts` + render branch in `App.tsx` + add pill al `TopBar` (automático vía `TABS`) |
+| New Settings sub-tab | add to `SETTINGS_SUBTAB_SLUG`/`_LABEL` in `lib/navigation.ts` + render branch inside `SettingsView` (sub-tabs son `ff-nav-pill` ya, no tab-bar) |
 | New auth/setup flow | `auth/` |
 
 ## Why this layout
@@ -80,6 +94,42 @@ src/
 - **Views are self-contained**: each one can be opened and understood without scrolling 10K lines.
 - **Tests live next to code**: `format.test.ts` sits beside `format.ts`. The pattern scales — add helpers + tests together.
 - **No circular deps**: `views/` import `lib/`, `lib/` doesn't import `views/`. Linter would catch it.
+
+## Prefetching de views lazy
+
+Tras autenticarse, confirmar `hasMembership` y **esperar a que termine la pestaña actual** (vía `currentTabBusy` derivado del `*Busy` correspondiente al `activeTab`), `App.tsx` ejecuta `prefetchOtherViews` dentro de un `requestIdleCallback` (con `setTimeout` de fallback). La función:
+
+1. Itera una lista ordenada de tareas (`projection > assets > liabilities > budget > retirement > upcoming > settings`) **en serie con `await`**, no en paralelo, para no saturar ancho de banda ni CPU del API al inicio.
+2. Por cada tarea: `await t.importChunk()` (calienta el chunk de Vite) → `await t.loadData?.()` (hidrata estado).
+3. Excluye la pestaña actual (sus datos ya están en estado) y `summary` (su loader ya pre-fetcha `/v1/projection/series` en su propio `Promise.all`).
+4. Recibe un `AbortSignal`: si el usuario hace logout durante el prefetch, se cancela. Un `prefetchedRef` evita que se vuelva a disparar tras navegar entre pestañas.
+
+Los `useEffect[activeTab === "xxx"]` se mantienen como refresh-on-navigation tras mutaciones (no se eliminan). Si el prefetch ya pobló el estado, la navegación es instantánea y el refresh subsiguiente ocurre en background.
+
+> No usamos `<link rel="modulepreload">` en `index.html` porque queremos que el prefetch ocurra **solo post-login**, no en la landing pre-auth.
+
+### Chart grande aislado en su propio chunk
+
+[ProjectionNetWorthChart](views/ProjectionNetWorthChart.tsx) está cargado con `React.lazy` **dentro** de [ProjectionView](views/ProjectionView.tsx). El `<Suspense fallback>` muestra `.ff-chart-skeleton` (placeholder con la altura del chart, sin animación) mientras se descarga el chunk y se calcula el `useMemo` inicial. El shell (subtítulo + milestones) aparece antes que el chart, sin layout shift.
+
+`prefetchOtherViews` calienta ambos chunks (`ProjectionView` + `ProjectionNetWorthChart`) tras login, así que la primera entrada a la pestaña es instantánea.
+
+En `App.tsx`, los tres setters que reciben `ProjectionSeriesApi` (`loadSummaryPage`, `loadProjectionSeriesPage`, `loadRetirementPage`) envuelven `setProjectionSeries(data)` en `startTransition()`. React marca el re-render del chart como de baja prioridad, dejando la UI responsiva a clics e inputs mientras reconcilia el SVG pesado.
+
+## Debug del chart de Proyección (perf)
+
+[apps/web/src/lib/perf.ts](apps/web/src/lib/perf.ts) expone `chartPerf` con `mark`/`measure`/`report`. Está apagado por defecto (early-return) y se activa de dos formas:
+
+- **Por URL**: añadir `?perf=1` (p. ej. `http://127.0.0.1:8080/proyeccion?perf=1`). Solo dura mientras esté la query.
+- **Persistente**: en la consola del navegador, `localStorage.setItem("debug:chart-perf","1")` + recarga. Para desactivar, `localStorage.removeItem("debug:chart-perf")`.
+
+Cuando activo:
+1. `App.tsx` marca `fetch-start` / `fetch-response` / `fetch-end` en cada loader que dispara `/v1/projection/series`.
+2. `ProjectionNetWorthChart.tsx` marca `render-start`, los tres sub-memos (`baseSeries`, `xTicks`, `model`) y `first-commit` (post-render).
+3. Tras el commit, un `useEffect` vuelca a la consola un `console.table` con las measures y `[chart:perf] total ≈ Xms`. Limpia las marks/measures después.
+4. `main.tsx` registra un `PerformanceObserver({entryTypes:["longtask"]})` que avisa si algún task >50 ms bloquea el main thread.
+
+Útil para responder "¿el cuello es el fetch, el JSON.parse, el memo o el paint?" sin tener que abrir el flame chart de Performance. Se mantiene en código como herramienta de diagnóstico — no añadir telemetría externa.
 
 ## What is NOT extracted (intentional)
 

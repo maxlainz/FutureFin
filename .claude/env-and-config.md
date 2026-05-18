@@ -41,4 +41,6 @@ Env vars already set in the environment take precedence over `.env` files.
 
 | File | Purpose |
 |------|---------|
-| `docker-compose.yml` | Producción: pulls from Docker Hub (`maxlainz/futurefin`), exposes `:8080` |
+| `docker-compose.yml` | Producción: pulls from Docker Hub (`maxlainz/futurefin`), exposes `:8080`. La DB no mapea puerto al host. |
+| `docker-compose.local.yml` | Override para usar imagen construida localmente (`futurefin-local:dev`). `pull_policy: never` en el servicio `futurefin`. Ver el bloque "Test local con Docker Desktop" del CLAUDE.md. |
+| `docker-compose.split-dev.yml` | Override para split-dev (`cargo run` + `vite`). Solo expone Postgres en `127.0.0.1:5432` para que la API local pueda conectarse. Usar así: `docker compose -f docker-compose.yml -f docker-compose.split-dev.yml up -d futurefin-database`. **No usar en producción.** |

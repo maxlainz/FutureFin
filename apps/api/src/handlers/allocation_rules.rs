@@ -7,6 +7,7 @@ use crate::error::ApiError;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
+use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -455,6 +456,7 @@ pub async fn create_allocation_rule(
     .await?;
     tx.commit().await?;
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok((StatusCode::CREATED, Json(row_to_response(row))))
 }
 
@@ -605,6 +607,7 @@ pub async fn patch_allocation_rule(
     .fetch_one(&state.pool)
     .await?;
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok(Json(row_to_response(updated)))
 }
 
@@ -662,6 +665,7 @@ pub async fn delete_allocation_rule(
         .execute(&state.pool)
         .await?;
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -756,6 +760,7 @@ pub async fn reorder_allocation_rules(
         .fetch_all(&state.pool)
         .await?;
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok(Json(rows.into_iter().map(row_to_response).collect()))
 }
 

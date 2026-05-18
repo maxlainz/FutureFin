@@ -1,9 +1,17 @@
-import type { InstallationAccess, SummaryResponse } from "../api/types";
+import type {
+  InstallationAccess,
+  ProjectionSeriesApi,
+  SummaryResponse,
+} from "../api/types";
 import { MetricCard } from "../components/MetricCard";
 import {
   SummaryBreakdownBlock,
   SummaryDonutChart,
 } from "../components/charts/summary";
+import {
+  MiniProjection,
+  MiniProjectionLegend,
+} from "../components/charts/MiniProjection";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
@@ -25,6 +33,7 @@ export function SummaryView({
   ledgerPersonScope,
   summary,
   summaryBusy,
+  projectionSeries,
 }: {
   installation: InstallationAccess | null;
   loading: boolean;
@@ -32,6 +41,7 @@ export function SummaryView({
   ledgerPersonScope: LedgerPersonScope;
   summary: SummaryResponse | null;
   summaryBusy: boolean;
+  projectionSeries: ProjectionSeriesApi | null;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
@@ -207,6 +217,37 @@ export function SummaryView({
         )}
       </section>
 
+      {hasMembership ? (
+        <section className="panel">
+          <div className="panel-head-row">
+            <h3 className="panel-title">Proyección · 12 meses</h3>
+          </div>
+          {projectionSeries && projectionSeries.points.length > 0 ? (
+            <>
+              <MiniProjection
+                series={projectionSeries}
+                months={12}
+                height={170}
+                showFire={false}
+                showAreas={true}
+                zoomY
+              />
+              <MiniProjectionLegend
+                items={[
+                  { label: "Patrimonio neto", color: "var(--proj-nw)" },
+                  {
+                    label: "Composición por activo",
+                    color: "var(--ff-ink-soft)",
+                  },
+                ]}
+              />
+            </>
+          ) : (
+            <div className="ff-chart-skeleton ff-chart-skeleton--mini" aria-hidden />
+          )}
+        </section>
+      ) : null}
+
       <section className="panel">
         <h3 className="panel-title">Desglose</h3>
         {showMetrics && summary ? (
@@ -233,6 +274,11 @@ export function SummaryView({
                 total: r.total,
               }))}
             />
+          </div>
+        ) : hasMembership ? (
+          <div className="summary-donuts-row bordered-top">
+            <div className="ff-chart-skeleton ff-chart-skeleton--donut" aria-hidden />
+            <div className="ff-chart-skeleton ff-chart-skeleton--donut" aria-hidden />
           </div>
         ) : null}
         {showMetrics && summary ? (

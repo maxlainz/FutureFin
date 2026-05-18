@@ -22,6 +22,7 @@ import {
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
 } from "../lib/projection-chart";
+
 import { ProjectionNetWorthChart } from "./ProjectionNetWorthChart";
 
 export function ProjectionView({
@@ -184,8 +185,11 @@ export function ProjectionView({
         <div className="banner error-banner">{projectionError}</div>
       ) : null}
 
-      {hasMembership && projectionBusy ? (
-        <p className="muted tight">Cargando serie…</p>
+      {hasMembership && (projectionBusy || !projectionSeries) ? (
+        <section className="panel">
+          <h3 className="panel-title">Trayectoria proyectada</h3>
+          <div className="ff-chart-skeleton" aria-hidden />
+        </section>
       ) : null}
 
       {hasMembership && !projectionBusy && projectionSeries ? (
