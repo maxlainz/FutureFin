@@ -161,17 +161,22 @@ fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
     (Decimal::ONE + p / Decimal::from(100)).powd(Decimal::ONE / Decimal::from(12))
 }
 
-/// Target FIRE evaluado al inicio del mes `k` (1-based), considerando la inflación acumulada
-/// desde el mes 0 al mes `k-1`. Devuelve `None` cuando no hay target o su base es ≤ 0.
-fn fire_target_at_month(ft: Option<&FireTarget>, k: u32) -> Option<Decimal> {
+/// Target FIRE en el `month_index` indicado (0 = punto de partida, 12 = un año después, etc.),
+/// con inflación anual compuesta capitalizada en pasos de 1/12 de año. `month_index = 0` devuelve
+/// el `base_amount`. Devuelve `None` cuando no hay target o su base es ≤ 0.
+///
+/// Es la **única fuente de verdad**: tanto el motor (para decidir `fire_reached`) como el
+/// handler de la API (para construir `fire_target_series`) la consumen, evitando off-by-one
+/// entre la serie y el cruce.
+pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal> {
     let ft = ft?;
     if ft.base_amount <= Decimal::ZERO {
         return None;
     }
-    if ft.annual_inflation_percent <= Decimal::ZERO || k <= 1 {
+    if ft.annual_inflation_percent <= Decimal::ZERO || month_index == 0 {
         return Some(ft.base_amount);
     }
-    let years = Decimal::from(k - 1) / Decimal::from(12u32);
+    let years = Decimal::from(month_index) / Decimal::from(12u32);
     let factor = (Decimal::ONE + ft.annual_inflation_percent / Decimal::from(100u32)).powd(years);
     Some(ft.base_amount * factor)
 }
@@ -468,7 +473,9 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
 
         let nw_prev = nw_fn(&values, &principals, undrained_cumulative, surplus_cash);
-        let fire_reached = fire_target_at_month(input.fire_target.as_ref(), k)
+        // `nw_prev` es el patrimonio al cierre del mes k-1; lo comparamos contra el target
+        // correspondiente a ese mismo punto del eje temporal.
+        let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), k - 1)
             .map_or(false, |t| nw_prev >= t);
         let in_retirement =
             fire_reached || input.retirement_start_month.map_or(false, |s| k >= s);
@@ -997,7 +1004,7 @@ mod tests {
             .iter()
             .enumerate()
             .find(|(k, v)| {
-                let target = fire_target_at_month(inp.fire_target.as_ref(), *k as u32)
+                let target = fire_target_at_month_index(inp.fire_target.as_ref(), *k as u32)
                     .unwrap_or(Decimal::ZERO);
                 **v >= target && target > Decimal::ZERO
             })
@@ -1044,9 +1051,9 @@ mod tests {
             base_amount: Decimal::from(750_000),
             annual_inflation_percent: Decimal::from(3),
         };
-        let t0 = fire_target_at_month(Some(&ft), 1).unwrap();
+        let t0 = fire_target_at_month_index(Some(&ft), 0).unwrap();
         assert_eq!(t0, Decimal::from(750_000));
-        let t20y = fire_target_at_month(Some(&ft), 241).unwrap();
+        let t20y = fire_target_at_month_index(Some(&ft), 240).unwrap();
         // 750_000 × 1.03^20 ≈ 1_354_583. Comprobamos con tolerancia ≤ 1€.
         let factor = (Decimal::ONE + Decimal::from(3) / Decimal::from(100u32))
             .powd(Decimal::from(20u32));
@@ -1057,7 +1064,7 @@ mod tests {
             "esperado ≈ {expected}, obtenido {t20y} (diff {diff})"
         );
         // El target a 10 años está estrictamente entre el base y el de 20 años.
-        let t10y = fire_target_at_month(Some(&ft), 121).unwrap();
+        let t10y = fire_target_at_month_index(Some(&ft), 120).unwrap();
         assert!(t10y > Decimal::from(750_000));
         assert!(t10y < t20y);
     }
@@ -1069,12 +1076,39 @@ mod tests {
             annual_inflation_percent: Decimal::ZERO,
         };
         assert_eq!(
-            fire_target_at_month(Some(&ft), 1).unwrap(),
+            fire_target_at_month_index(Some(&ft), 0).unwrap(),
             Decimal::from(500_000)
         );
         assert_eq!(
-            fire_target_at_month(Some(&ft), 600).unwrap(),
+            fire_target_at_month_index(Some(&ft), 600).unwrap(),
             Decimal::from(500_000)
+        );
+    }
+
+    /// Regresión Fase 1.5: con el helper nuevo, el target en month_index=12 corresponde a 1 año
+    /// completo de inflación. Antes, el handler usaba `month_index/12` y el motor `(k-1)/12` —
+    /// había una diferencia de un mes entre la serie que se devolvía al cliente y el cruce que
+    /// disparaba `fire_reached`. Ahora ambos consumen `fire_target_at_month_index`.
+    #[test]
+    fn fire_target_helper_matches_compound_factor_at_year_boundaries() {
+        let ft = FireTarget {
+            base_amount: Decimal::from(100_000),
+            annual_inflation_percent: Decimal::from(5),
+        };
+        let r = Decimal::ONE + Decimal::from(5) / Decimal::from(100u32);
+
+        let t1y = fire_target_at_month_index(Some(&ft), 12).unwrap();
+        let expected_1y = Decimal::from(100_000) * r;
+        assert!(
+            (t1y - expected_1y).abs() < Decimal::new(1, 4),
+            "month_index=12 → 1 año compuesto"
+        );
+
+        let t5y = fire_target_at_month_index(Some(&ft), 60).unwrap();
+        let expected_5y = Decimal::from(100_000) * r.powd(Decimal::from(5u32));
+        assert!(
+            (t5y - expected_5y).abs() < Decimal::new(1, 4),
+            "month_index=60 → 5 años compuesto"
         );
     }
 }

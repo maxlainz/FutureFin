@@ -1,0 +1,184 @@
+import { describe, expect, it } from "vitest";
+import {
+  METRIC_DASH,
+  assetImplicitTotalReturnLabel,
+  breakdownPercentOfTotal,
+  formatBreakdownPct,
+  formatCurrencyAmount,
+  formatCurrencyNumber,
+  formatCurrencyOrDash,
+  formatDebtToAssetsPct,
+  formatEditableDecimalString,
+  formatFractionAsPercent,
+  formatMoneyAmount,
+  formatMonthsRough,
+  formatPercentAmount,
+  formatPercentDisplay,
+  formatPercentDisplaySigned,
+  isZeroFractionMetric,
+  isZeroMoneyMetric,
+  normalizeCurrencyIso,
+  parseDisplayDecimal,
+} from "./format";
+
+describe("parseDisplayDecimal", () => {
+  it("parses dot and comma decimals", () => {
+    expect(parseDisplayDecimal("1.5")).toBe(1.5);
+    expect(parseDisplayDecimal("1,5")).toBe(1.5);
+    expect(parseDisplayDecimal("  3.14  ")).toBe(3.14);
+  });
+  it("returns null on empty/invalid", () => {
+    expect(parseDisplayDecimal("")).toBeNull();
+    expect(parseDisplayDecimal("   ")).toBeNull();
+    expect(parseDisplayDecimal("abc")).toBeNull();
+  });
+  it("handles zero and negatives", () => {
+    expect(parseDisplayDecimal("0")).toBe(0);
+    expect(parseDisplayDecimal("-7.25")).toBe(-7.25);
+  });
+});
+
+describe("formatEditableDecimalString", () => {
+  it("collapses trailing zeros from API decimals", () => {
+    expect(formatEditableDecimalString("2.500000")).toBe("2.5");
+    expect(formatEditableDecimalString("100.0000")).toBe("100");
+  });
+  it("returns empty on null/undefined/empty", () => {
+    expect(formatEditableDecimalString(null)).toBe("");
+    expect(formatEditableDecimalString(undefined)).toBe("");
+    expect(formatEditableDecimalString("")).toBe("");
+  });
+  it("passes through non-parseable strings", () => {
+    expect(formatEditableDecimalString("abc")).toBe("abc");
+  });
+});
+
+describe("formatMoneyAmount", () => {
+  it("formats integers with es-ES thousand separators", () => {
+    expect(formatMoneyAmount("1234.56")).toBe("1235");
+    expect(formatMoneyAmount("12345.67")).toBe("12.346");
+    expect(formatMoneyAmount("1000000")).toBe("1.000.000");
+  });
+  it("passes through unparseable input", () => {
+    expect(formatMoneyAmount("not a number")).toBe("not a number");
+  });
+});
+
+describe("normalizeCurrencyIso", () => {
+  it("uppercases valid 3-letter codes", () => {
+    expect(normalizeCurrencyIso("eur")).toBe("EUR");
+    expect(normalizeCurrencyIso(" usd ")).toBe("USD");
+  });
+  it("rejects invalid codes", () => {
+    expect(normalizeCurrencyIso("EU")).toBeNull();
+    expect(normalizeCurrencyIso("EURO")).toBeNull();
+    expect(normalizeCurrencyIso("123")).toBeNull();
+    expect(normalizeCurrencyIso(null)).toBeNull();
+  });
+});
+
+describe("formatCurrencyAmount + formatCurrencyNumber", () => {
+  it("appends currency symbol (EUR) with thousand separators on big numbers", () => {
+    const out = formatCurrencyAmount("12345", "EUR");
+    expect(out).toMatch(/€/);
+    expect(out).toMatch(/12\.345/);
+  });
+  it("falls back to plain money when ISO invalid", () => {
+    expect(formatCurrencyAmount("12345", "EU")).toBe("12.345");
+  });
+  it("formatCurrencyNumber works with native numbers", () => {
+    const out = formatCurrencyNumber(50000, "EUR");
+    expect(out).toMatch(/50\.000/);
+    expect(out).toMatch(/€/);
+  });
+});
+
+describe("formatCurrencyOrDash", () => {
+  it("returns dash for empty/null", () => {
+    expect(formatCurrencyOrDash(null, "EUR")).toBe(METRIC_DASH);
+    expect(formatCurrencyOrDash("", "EUR")).toBe(METRIC_DASH);
+    expect(formatCurrencyOrDash("   ", "EUR")).toBe(METRIC_DASH);
+  });
+  it("formats non-empty values", () => {
+    expect(formatCurrencyOrDash("100", "EUR")).toMatch(/€/);
+  });
+});
+
+describe("formatPercentDisplay + formatPercentAmount + formatPercentDisplaySigned", () => {
+  it("uses one decimal with ' %' suffix and comma separator", () => {
+    expect(formatPercentDisplay(3.456)).toBe("3,5 %");
+    expect(formatPercentDisplay(0)).toBe("0,0 %");
+  });
+  it("formatPercentAmount parses string input", () => {
+    expect(formatPercentAmount("3.25")).toBe("3,3 %");
+    expect(formatPercentAmount("not a number")).toBe("not a number");
+  });
+  it("signed adds explicit + for positives", () => {
+    expect(formatPercentDisplaySigned(5.5)).toBe("+5,5 %");
+    expect(formatPercentDisplaySigned(-2.1)).toBe("-2,1 %");
+    expect(formatPercentDisplaySigned(0)).toBe("0,0 %");
+  });
+});
+
+describe("assetImplicitTotalReturnLabel", () => {
+  it("computes signed pct from current/purchase", () => {
+    expect(assetImplicitTotalReturnLabel("1100", "1000")).toBe("+10,0 %");
+    expect(assetImplicitTotalReturnLabel("900", "1000")).toBe("-10,0 %");
+  });
+  it("returns null when purchase missing/invalid", () => {
+    expect(assetImplicitTotalReturnLabel("1100", null)).toBeNull();
+    expect(assetImplicitTotalReturnLabel("1100", "")).toBeNull();
+    expect(assetImplicitTotalReturnLabel("1100", "0")).toBeNull();
+  });
+});
+
+describe("formatDebtToAssetsPct + formatFractionAsPercent", () => {
+  it("multiplies fraction by 100 and formats", () => {
+    expect(formatDebtToAssetsPct("0.25")).toBe("25,0 %");
+    expect(formatFractionAsPercent("0.05")).toBe("5,0 %");
+  });
+  it("returns dash for null/empty/invalid", () => {
+    expect(formatDebtToAssetsPct(null)).toBe(METRIC_DASH);
+    expect(formatFractionAsPercent("")).toBe(METRIC_DASH);
+    expect(formatDebtToAssetsPct("abc")).toBe(METRIC_DASH);
+  });
+});
+
+describe("isZeroMoneyMetric + isZeroFractionMetric", () => {
+  it("treats null/empty/zero as 'zero'", () => {
+    expect(isZeroMoneyMetric(null)).toBe(true);
+    expect(isZeroMoneyMetric("")).toBe(true);
+    expect(isZeroMoneyMetric("0")).toBe(true);
+    expect(isZeroMoneyMetric("0,00")).toBe(true);
+  });
+  it("returns false for nonzero amounts", () => {
+    expect(isZeroMoneyMetric("100")).toBe(false);
+    expect(isZeroFractionMetric("0.05")).toBe(false);
+  });
+});
+
+describe("formatMonthsRough", () => {
+  it("appends ' meses' with one-decimal rounding", () => {
+    expect(formatMonthsRough("3.45")).toBe("3,5 meses");
+    expect(formatMonthsRough("12")).toBe("12 meses");
+  });
+  it("returns dash on missing data", () => {
+    expect(formatMonthsRough(null)).toBe(METRIC_DASH);
+    expect(formatMonthsRough("abc")).toBe(METRIC_DASH);
+  });
+});
+
+describe("breakdownPercentOfTotal + formatBreakdownPct", () => {
+  it("caps pct at 100", () => {
+    expect(breakdownPercentOfTotal("200", "100")).toBe(100);
+    expect(formatBreakdownPct("200", "100")).toBe("100,0 %");
+  });
+  it("returns null when whole ≤ 0", () => {
+    expect(breakdownPercentOfTotal("50", "0")).toBeNull();
+    expect(formatBreakdownPct("50", "0")).toBe(METRIC_DASH);
+  });
+  it("computes ratio correctly", () => {
+    expect(breakdownPercentOfTotal("25", "100")).toBe(25);
+    expect(formatBreakdownPct("25", "100")).toBe("25,0 %");
+  });
+});

@@ -149,15 +149,6 @@ fn row_to_response(r: CategoryRow) -> Result<CategoryResponse, ApiError> {
     })
 }
 
-fn db_conflict(err: sqlx::Error) -> ApiError {
-    if let sqlx::Error::Database(ref db) = err {
-        if db.code().as_deref() == Some("23505") {
-            return ApiError::Conflict;
-        }
-    }
-    ApiError::Db(err)
-}
-
 #[utoipa::path(
     get,
     path = "/v1/categories",
@@ -255,8 +246,7 @@ pub async fn create_category(
     .bind(&name)
     .bind(sort_index)
     .fetch_one(&state.pool)
-    .await
-    .map_err(db_conflict)?;
+    .await?;
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -330,8 +320,7 @@ pub async fn patch_category(
     .bind(id)
     .bind(iid)
     .fetch_one(&state.pool)
-    .await
-    .map_err(db_conflict)?;
+    .await?;
 
     Ok(Json(row_to_response(updated)?))
 }

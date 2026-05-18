@@ -32,14 +32,32 @@ pub enum ApiError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
-    #[error("username already exists")]
+    #[error("resource conflict")]
     Conflict,
     #[error("database error")]
-    Db(#[from] sqlx::Error),
+    Db(sqlx::Error),
     #[error("service unavailable")]
     Unavailable,
     #[error("not found")]
     NotFound,
+}
+
+/// Mapea automáticamente los SQLSTATE más comunes a respuestas HTTP coherentes, evitando que
+/// cada handler tenga que distinguir entre violación de unique, FK rota y otros errores. Códigos
+/// menos comunes caen al `Db(_)` genérico → 500.
+impl From<sqlx::Error> for ApiError {
+    fn from(err: sqlx::Error) -> Self {
+        if let sqlx::Error::Database(ref db) = err {
+            match db.code().as_deref() {
+                Some("23505") => return ApiError::Conflict,
+                Some("23503") => {
+                    return ApiError::BadRequest("referenced record missing".into());
+                }
+                _ => {}
+            }
+        }
+        ApiError::Db(err)
+    }
 }
 
 impl ApiError {

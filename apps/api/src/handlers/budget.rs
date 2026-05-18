@@ -1,6 +1,6 @@
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
-use crate::handlers::liabilities::{purge_expired_liabilities, PaymentFrequency};
+use crate::handlers::liabilities::PaymentFrequency;
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
@@ -250,74 +250,37 @@ async fn fetch_budget_rows_and_derived_liabilities(
     view: LedgerView,
     today: NaiveDate,
 ) -> Result<(Vec<BudgetEntryJoinRow>, Vec<LiabilityDerivedRow>), ApiError> {
-    let rows: Vec<BudgetEntryJoinRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                          b.notes, b.sort_index, b.persists_after_retirement,
-                          b.ends_at_retirement, b.expense_end_date
-                   FROM budget_entries b
-                   JOIN categories c ON c.id = b.category_id
-                   WHERE b.installation_id = $1
-                   ORDER BY b.sort_index ASC, b.id ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
-                          b.notes, b.sort_index, b.persists_after_retirement,
-                          b.ends_at_retirement, b.expense_end_date
-                   FROM budget_entries b
-                   JOIN categories c ON c.id = b.category_id
-                   WHERE b.installation_id = $1 AND b.owner_user_id = $2
-                   ORDER BY b.sort_index ASC, b.id ASC"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let entries_scope = view.scope_where("b");
+    let entries_sql = format!(
+        r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
+                  b.notes, b.sort_index, b.persists_after_retirement,
+                  b.ends_at_retirement, b.expense_end_date
+           FROM budget_entries b
+           JOIN categories c ON c.id = b.category_id
+           WHERE {entries_scope}
+           ORDER BY b.sort_index ASC, b.id ASC"#
+    );
+    let rows: Vec<BudgetEntryJoinRow> = view
+        .bind_scope_as(sqlx::query_as(&entries_sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
-    let derived_raw: Vec<LiabilityDerivedRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT id, category_id, label, payment_amount, payment_frequency
-                   FROM liabilities
-                   WHERE
-                       installation_id = $1
-                       AND payment_amount IS NOT NULL
-                       AND payment_frequency IS NOT NULL
-                       AND payment_end_date IS NOT NULL
-                       AND payment_end_date > $2"#,
-            )
-            .bind(iid)
-            .bind(today)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT id, category_id, label, payment_amount, payment_frequency
-                   FROM liabilities
-                   WHERE
-                       installation_id = $1
-                       AND owner_user_id = $3
-                       AND payment_amount IS NOT NULL
-                       AND payment_frequency IS NOT NULL
-                       AND payment_end_date IS NOT NULL
-                       AND payment_end_date > $2"#,
-            )
-            .bind(iid)
-            .bind(today)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let derived_scope = view.scope_where("");
+    let today_ph = view.next_arg_index();
+    let derived_sql = format!(
+        r#"SELECT id, category_id, label, payment_amount, payment_frequency
+           FROM liabilities
+           WHERE {derived_scope}
+             AND payment_amount IS NOT NULL
+             AND payment_frequency IS NOT NULL
+             AND payment_end_date IS NOT NULL
+             AND payment_end_date > ${today_ph}"#
+    );
+    let derived_raw: Vec<LiabilityDerivedRow> = view
+        .bind_scope_as(sqlx::query_as(&derived_sql), iid, session_user_id)
+        .bind(today)
+        .fetch_all(pool)
+        .await?;
 
     Ok((rows, derived_raw))
 }
@@ -451,7 +414,6 @@ pub async fn get_budget_snapshot(
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
     let today = installation_naive_today(&state.pool, iid).await?;
-    purge_expired_liabilities(&state.pool, iid).await?;
 
     let view = q.resolve();
     let (rows, derived_raw) = fetch_budget_rows_and_derived_liabilities(

@@ -3,7 +3,7 @@
 mod projection;
 
 pub use projection::{
-    first_month_per_asset_contribution_nominals, project_net_worth_series, AllocationCap,
-    AllocationKind, AllocationRule, EngineError, FireTarget, ProjectionInput,
-    ProjectionLiabilityInput, ProjectionOutput, SimAsset,
+    fire_target_at_month_index, first_month_per_asset_contribution_nominals,
+    project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
+    FireTarget, ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
 };

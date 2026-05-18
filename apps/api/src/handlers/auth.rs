@@ -90,15 +90,6 @@ pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn map_unique_violation(err: sqlx::Error) -> ApiError {
-    if let sqlx::Error::Database(ref db) = err {
-        if db.code().as_deref() == Some("23505") {
-            return ApiError::Conflict;
-        }
-    }
-    ApiError::Db(err)
-}
-
 fn parse_me_birth_patch(v: &Value) -> Result<Option<NaiveDate>, ApiError> {
     match v {
         Value::Null => Ok(None),
@@ -167,8 +158,7 @@ pub async fn register(
     .bind(&hash)
     .bind(birth_date)
     .fetch_one(&mut *tx)
-    .await
-    .map_err(map_unique_violation)?;
+    .await?;
 
     match bootstrap_installation_as_owner_if_empty(&mut tx, &row.id).await
     {
