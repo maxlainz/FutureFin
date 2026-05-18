@@ -4,6 +4,7 @@ use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::projection::{
     first_month_asset_contribution_nominals_map, monthly_income_expense_debt_for_view,
+    refresh_projection_after_mutation,
 };
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
@@ -431,6 +432,7 @@ pub async fn create_asset(
     .await?;
     let t = targets.get(&row.id).copied();
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok((axum::http::StatusCode::CREATED, Json(row_to_response(row, n, t))))
 }
 
@@ -585,6 +587,7 @@ pub async fn patch_asset(
     .await?;
     let t = targets.get(&updated.id).copied();
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok(Json(row_to_response(updated, n, t)))
 }
 
@@ -624,6 +627,7 @@ pub async fn delete_asset(
         return Err(ApiError::NotFound);
     }
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

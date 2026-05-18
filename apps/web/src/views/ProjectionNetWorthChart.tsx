@@ -19,7 +19,7 @@ import { parseYmdComponents } from "../lib/dates";
 import {
   formatCurrencyAmount,
   formatCurrencyNumber,
-  formatCurrencyOrDash,
+  formatCurrencyOrDashNumber,
   normalizeCurrencyIso,
   parseDisplayDecimal,
 } from "../lib/format";
@@ -37,6 +37,7 @@ import {
   formatProjectionMilestoneCompactLabel,
   type LedgerPersonScope,
 } from "../lib/ledger";
+import { chartPerf } from "../lib/perf";
 
 export function ProjectionNetWorthChart({
   series,
@@ -70,6 +71,11 @@ export function ProjectionNetWorthChart({
   calendarTz: string;
   planningFlows: PlanningFlowApiRow[];
 }) {
+  // `mount-start` se mide en el primer render (cuando el chart aparece en
+  // pantalla), separado de `fetch-start` que ocurre cuando llega la serie.
+  // Esto distingue el tiempo de cómputo del chart del delay entre fetch y
+  // navegación (que puede ser "tiempo del usuario", no del sistema).
+  chartPerf.mark("mount-start");
   const pts = series.points;
   const gid = useId().replace(/:/g, "");
   const svgRef = useRef<SVGSVGElement>(null);
@@ -78,7 +84,15 @@ export function ProjectionNetWorthChart({
   const [hover, setHover] = useState<number | null>(null);
   const [tipOffset, setTipOffset] = useState({ x: 0, y: 0 });
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
-  const [viewWindow, setViewWindow] = useState({ start: 0, count: pts.length });
+  // viewWindow está en **meses reales** (no en índices de array). Soporta
+  // densidades mixtas: con `density=monthly` los puntos van 0..months con paso
+  // 1; con `density=hybrid` van 0..12 con paso 1 y luego 24, 36, ... La
+  // ventana se mueve siempre sobre el horizonte temporal completo
+  // (`series.months`), independiente de cuántos puntos haya serializados.
+  const [viewWindow, setViewWindow] = useState({
+    startMonth: 0,
+    monthSpan: series.months,
+  });
   const [animatedYDomain, setAnimatedYDomain] = useState<{
     min: number;
     max: number;
@@ -125,22 +139,22 @@ export function ProjectionNetWorthChart({
       .slice(0, 3);
     const focusEnd = nextMonetaryMilestones.at(-1)?.reached_month_index;
     if (focusEnd == null) return null;
-    const clampedEnd = Math.max(0, Math.min(pts.length - 1, focusEnd));
-    return { start: 0, count: clampedEnd + 1 };
-  }, [milestones, pts.length]);
+    const clampedEnd = Math.max(0, Math.min(series.months - 1, focusEnd));
+    return { startMonth: 0, monthSpan: clampedEnd + 1 };
+  }, [milestones, pts.length, series.months]);
 
   useEffect(() => {
     setViewWindow((prev) => {
-      if (pts.length <= 0) return { start: 0, count: 0 };
+      if (pts.length <= 0) return { startMonth: 0, monthSpan: 0 };
       const next = focusMode && focusWindow
         ? focusWindow
-        : { start: 0, count: pts.length };
-      if (prev.start === next.start && prev.count === next.count) {
+        : { startMonth: 0, monthSpan: series.months };
+      if (prev.startMonth === next.startMonth && prev.monthSpan === next.monthSpan) {
         return prev;
       }
       return next;
     });
-  }, [focusMode, focusWindow, pts.length]);
+  }, [focusMode, focusWindow, pts.length, series.months]);
 
   const hasFireTargetSeries = useMemo(() => {
     const f = series.fire_target_series;
@@ -165,29 +179,29 @@ export function ProjectionNetWorthChart({
     [containerSize.height, containerSize.width, legendLabels],
   );
 
-  const model = useMemo(() => {
-    if (pts.length < 2) return null;
+  // Series base: deflactación, orden de activos, stacking acumulado completo.
+  // No depende de viewWindow → pan/zoom no recalculan este bloque.
+  const baseSeries = useMemo(() => {
+    chartPerf.mark("baseSeries-start");
+    if (pts.length < 2) {
+      chartPerf.mark("baseSeries-end");
+      return null;
+    }
     const deflate = inflationAdjusted && installationInflationPct > 0;
     const deflator = (monthIndex: number) =>
       deflate
         ? 1 / Math.pow(1 + installationInflationPct / 100, monthIndex / 12)
         : 1;
-    const nw = pts.map(
-      (p, i) => (parseDisplayDecimal(p.net_worth) ?? 0) * deflator(i),
-    );
-    const cc = pts.map(
-      (p, i) => (parseDisplayDecimal(p.contributed_capital) ?? 0) * deflator(i),
-    );
+    const nw = pts.map((p, i) => p.net_worth * deflator(i));
+    const cc = pts.map((p, i) => p.contributed_capital * deflator(i));
     const fireRaw = series.fire_target_series;
     const fireTarget =
       Array.isArray(fireRaw) && fireRaw.length === pts.length
-        ? fireRaw.map((v, i) => (parseDisplayDecimal(v) ?? 0) * deflator(i))
+        ? fireRaw.map((v, i) => v * deflator(i))
         : null;
     const assetSeries = (series.asset_series ?? [])
       .map((as) => {
-        const values = as.values.map(
-          (v, i) => (parseDisplayDecimal(v) ?? 0) * deflator(i),
-        );
+        const values = as.values.map((v, i) => v * deflator(i));
         return {
           id: as.asset_id,
           name: as.asset_name,
@@ -222,29 +236,75 @@ export function ProjectionNetWorthChart({
         assetStacks[i].tops[k] = cursor;
       }
     }
-    const minVisiblePoints = Math.min(pts.length, 12);
-    const visibleCount = Math.max(
-      minVisiblePoints,
-      Math.min(pts.length, Math.round(viewWindow.count)),
+    const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
+    const startNw = startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
+    const allowNegativeAxis = startNw < 0;
+    chartPerf.mark("baseSeries-end");
+    return { nw, cc, fireTarget, assetSeries, assetStacks, allowNegativeAxis };
+  }, [
+    pts,
+    series.starting_net_worth,
+    series.asset_series,
+    series.fire_target_series,
+    inflationAdjusted,
+    installationInflationPct,
+  ]);
+
+  // xTicks completos del horizonte. No dependen de viewWindow.
+  const xTicksAll = useMemo(() => {
+    chartPerf.mark("xTicks-start");
+    const t = projectionXTicks(
+      series.months,
+      { ageUiMode, birthDateIso: userBirthDate, anchorDateYmd, calendarTz },
+      { plotWidthPx: layoutDims.pw },
     );
-    const maxStart = Math.max(0, pts.length - visibleCount);
-    const visibleStart = Math.max(
+    chartPerf.mark("xTicks-end");
+    return t;
+  }, [series.months, ageUiMode, userBirthDate, anchorDateYmd, calendarTz, layoutDims.pw]);
+
+  // Modelo dependiente de viewWindow: slicing visible (por month_index, no por
+  // índice de array — soporta densidades mixtas), yTicks, ticks X visibles y
+  // markers. Pan/zoom solo recalculan esto.
+  const model = useMemo(() => {
+    chartPerf.mark("model-start");
+    if (!baseSeries) {
+      chartPerf.mark("model-end");
+      return null;
+    }
+    const { nw, cc, fireTarget, assetSeries, assetStacks, allowNegativeAxis } =
+      baseSeries;
+    const totalMonths = series.months;
+    const minMonthSpan = Math.min(totalMonths, 12);
+    const monthSpan = Math.max(
+      minMonthSpan,
+      Math.min(totalMonths, Math.round(viewWindow.monthSpan)),
+    );
+    const maxStartMonth = Math.max(0, totalMonths - monthSpan);
+    const visibleMonthStart = Math.max(
       0,
-      Math.min(maxStart, Math.round(viewWindow.start)),
+      Math.min(maxStartMonth, Math.round(viewWindow.startMonth)),
     );
-    const visibleEnd = visibleStart + visibleCount - 1;
-    const nwVisible = nw.slice(visibleStart, visibleEnd + 1);
-    const ccVisible = cc.slice(visibleStart, visibleEnd + 1);
+    const visibleMonthEnd = visibleMonthStart + monthSpan - 1;
+
+    // Indices del array `pts` cuyos month_index caen dentro de la ventana
+    // visible. Soporta puntos no equidistantes (densidad hybrid: mes 0..12
+    // mensual + mes 24, 36, ..., 840 anual).
+    const visibleIndices: number[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const mi = pts[i].month_index;
+      if (mi >= visibleMonthStart && mi <= visibleMonthEnd) {
+        visibleIndices.push(i);
+      }
+    }
+
+    const nwVisible = visibleIndices.map((i) => nw[i] ?? 0);
+    const ccVisible = visibleIndices.map((i) => cc[i] ?? 0);
     const fireTargetVisible = fireTarget
-      ? fireTarget.slice(visibleStart, visibleEnd + 1)
+      ? visibleIndices.map((i) => fireTarget[i] ?? 0)
       : null;
     const assetVisibleValues = assetSeries.flatMap((as) =>
-      as.values.slice(visibleStart, visibleEnd + 1),
+      visibleIndices.map((i) => as.values[i] ?? 0),
     );
-    const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
-    const startNw =
-      startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
-    const allowNegativeAxis = startNw < 0;
 
     // El target FIRE inflado puede crecer muy por encima del patrimonio en horizontes largos;
     // dejarlo fuera del rango del eje Y para no aplastar la curva del patrimonio. La línea se
@@ -253,15 +313,11 @@ export function ProjectionNetWorthChart({
     const dataMax = Math.max(...nwVisible, ...ccVisible, ...assetVisibleValues);
     const rawSpan = dataMax - dataMin;
     const padY =
-      rawSpan > 0
-        ? rawSpan * 0.07
-        : Math.max(Math.abs(dataMax) * 0.06, 1);
+      rawSpan > 0 ? rawSpan * 0.07 : Math.max(Math.abs(dataMax) * 0.06, 1);
 
     let plotMin = dataMin - padY;
     let plotMax = dataMax + padY;
-    if (!allowNegativeAxis) {
-      plotMin = Math.max(0, plotMin);
-    }
+    if (!allowNegativeAxis) plotMin = Math.max(0, plotMin);
 
     let yTicksRaw = niceYTicks(plotMin, plotMax, 6);
     let yTicks = allowNegativeAxis
@@ -272,26 +328,16 @@ export function ProjectionNetWorthChart({
     }
     let yMin = yTicks[0] ?? (allowNegativeAxis ? plotMin : Math.max(0, plotMin));
     let yMax = yTicks[yTicks.length - 1] ?? plotMax;
-    if (!allowNegativeAxis && yMin < 0) {
-      yMin = 0;
-    }
-    const xTicksAll = projectionXTicks(
-      series.months,
-      {
-        ageUiMode,
-        birthDateIso: userBirthDate,
-        anchorDateYmd,
-        calendarTz,
-      },
-      { plotWidthPx: layoutDims.pw },
-    );
+    if (!allowNegativeAxis && yMin < 0) yMin = 0;
+
     const xTicks = xTicksAll.filter(
-      (tick) => tick.monthIndex >= visibleStart && tick.monthIndex <= visibleEnd,
+      (tick) =>
+        tick.monthIndex >= visibleMonthStart && tick.monthIndex <= visibleMonthEnd,
     );
-    if (xTicks.length === 0 && visibleEnd > visibleStart) {
+    if (xTicks.length === 0 && visibleMonthEnd > visibleMonthStart) {
       xTicks.push({
-        monthIndex: visibleEnd,
-        label: projectionXTickLabel(visibleEnd, series.months, {
+        monthIndex: visibleMonthEnd,
+        label: projectionXTickLabel(visibleMonthEnd, series.months, {
           ageUiMode,
           birthDateIso: userBirthDate,
           anchorDateYmd,
@@ -309,20 +355,24 @@ export function ProjectionNetWorthChart({
 
     const { W, H, ml, mr, mt, mb, pw, ph } = layoutDims;
 
-    const xScale = (i: number) => {
-      const local = i - visibleStart;
-      return ml + (local / Math.max(1, visibleCount - 1)) * pw;
+    // xScale toma un `monthIndex` real (mes desde el inicio del horizonte),
+    // no un índice de array. Esto desacopla el render de la densidad de
+    // puntos serializados.
+    const xScale = (monthIndex: number) => {
+      const local = monthIndex - visibleMonthStart;
+      return ml + (local / Math.max(1, monthSpan - 1)) * pw;
     };
     const compoundOutpaceMonth =
       series.compound_outpaces_true_savings_month_index ?? null;
     const visibleMilestones = milestones.filter(
       (m) =>
-        m.reached_month_index >= visibleStart && m.reached_month_index <= visibleEnd,
+        m.reached_month_index >= visibleMonthStart &&
+        m.reached_month_index <= visibleMonthEnd,
     );
     const showCompoundOutpaceMarker =
       compoundOutpaceMonth != null &&
-      compoundOutpaceMonth >= visibleStart &&
-      compoundOutpaceMonth <= visibleEnd;
+      compoundOutpaceMonth >= visibleMonthStart &&
+      compoundOutpaceMonth <= visibleMonthEnd;
     const chartPlanningMarkers = (() => {
       const anchor = anchorDateYmd ? parseYmdComponents(anchorDateYmd) : null;
       if (!anchor) return [];
@@ -337,11 +387,12 @@ export function ProjectionNetWorthChart({
         const d = parseYmdComponents(f.due_date);
         if (!d) continue;
         const mi = (d.y - anchor.y) * 12 + (d.m - anchor.m);
-        if (mi < visibleStart || mi > visibleEnd) continue;
+        if (mi < visibleMonthStart || mi > visibleMonthEnd) continue;
         out.push({ id: f.id, mi, title: f.title, direction: f.direction });
       }
       return out;
     })();
+    chartPerf.mark("model-end");
     return {
       nw,
       cc,
@@ -369,29 +420,49 @@ export function ProjectionNetWorthChart({
       H,
       rotateXLabels,
       viewHeight,
-      visibleStart,
-      visibleEnd,
-      visibleCount,
+      visibleMonthStart,
+      visibleMonthEnd,
+      monthSpan,
+      visibleIndices,
     };
   }, [
+    baseSeries,
+    xTicksAll,
     pts,
     series.months,
-    series.starting_net_worth,
-    series.asset_series,
-    series.fire_target_series,
+    series.compound_outpaces_true_savings_month_index,
     layoutDims,
     ageUiMode,
     userBirthDate,
     anchorDateYmd,
     calendarTz,
     milestones,
-    focusMode,
-    inflationAdjusted,
-    installationInflationPct,
-    viewWindow.count,
-    viewWindow.start,
     planningFlows,
+    viewWindow.monthSpan,
+    viewWindow.startMonth,
   ]);
+
+  // Captura el commit (post-render) y vuelca measures a consola. Solo cuando
+  // cambia la serie (mount inicial o nueva data) — no en pan/zoom para no
+  // ahogar la consola.
+  useEffect(() => {
+    if (!chartPerf.enabled) return;
+    chartPerf.mark("first-commit");
+    chartPerf.measure("fetch+network", "fetch-start", "fetch-response");
+    chartPerf.measure("json-parse", "fetch-response", "fetch-end");
+    chartPerf.measure("baseSeries-memo", "baseSeries-start", "baseSeries-end");
+    chartPerf.measure("xTicks-memo", "xTicks-start", "xTicks-end");
+    chartPerf.measure("model-memo", "model-start", "model-end");
+    // mount-to-commit: el coste real del chart desde el primer render hasta
+    // el commit post-paint. Esto es lo que importa optimizar.
+    chartPerf.measure("mount-to-commit", "mount-start", "first-commit");
+    // fetch-to-mount: delay entre que llegó la data y el chart empezó a
+    // renderizar. Si es grande, suele ser tiempo del usuario navegando,
+    // no del sistema (la medida `total-from-fetch` del plan v4 daba falsos
+    // positivos por esto).
+    chartPerf.measure("fetch-to-mount", "fetch-end", "mount-start");
+    chartPerf.report();
+  }, [series]);
 
   if (!model) {
     return null;
@@ -421,10 +492,31 @@ export function ProjectionNetWorthChart({
     W,
     rotateXLabels,
     viewHeight,
-    visibleStart,
-    visibleEnd,
-    visibleCount,
+    visibleMonthStart,
+    visibleMonthEnd,
+    monthSpan,
+    visibleIndices,
   } = model;
+
+  /** Devuelve el valor del array `values` correspondiente al `month` dado.
+   * Como `pts` puede ser no equidistante (densidad hybrid), busca el index
+   * cuyo `month_index` coincide; si no hay coincidencia exacta, devuelve el
+   * más cercano. Para milestones / compound markers / hover en zonas sin
+   * punto exacto. */
+  const valueAtMonth = (month: number, values: number[]): number | null => {
+    if (pts.length === 0) return null;
+    let bestIdx = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.abs(pts[i].month_index - month);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+        if (d === 0) break;
+      }
+    }
+    return values[bestIdx] ?? null;
+  };
 
   useEffect(() => {
     animatedYDomainRef.current = animatedYDomain;
@@ -475,47 +567,66 @@ export function ProjectionNetWorthChart({
   if (!allowNegativeAxis && yTicks.length < 2) {
     yTicks = niceYTicks(Math.max(0, yMin), yMax, 6);
   }
+  // Cada punto visible se posiciona en X según su `month_index` real (no por
+  // índice del array). Esto soporta puntos no equidistantes (hybrid).
   const nwPoints = nwVisible
-    .map((v, i) =>
-      `${xScale(visibleStart + i)},${yScale(v)}`,
-    )
+    .map((v, j) => `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`)
     .join(" ");
   const ccPoints = ccVisible
-    .map((v, i) =>
-      `${xScale(visibleStart + i)},${yScale(v)}`,
-    )
+    .map((v, j) => `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`)
     .join(" ");
   const firePoints = fireTargetVisible
     ? fireTargetVisible
-        .map((v, i) => `${xScale(visibleStart + i)},${yScale(v)}`)
+        .map((v, j) => `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`)
         .join(" ")
     : null;
   let areaD = "";
   if (nwVisible.length > 0) {
     const parts: string[] = [];
-    nwVisible.forEach((v, i) => {
-      const globalIndex = visibleStart + i;
-      parts.push(
-        `${i === 0 ? "M" : "L"} ${xScale(globalIndex)} ${yScale(v)}`,
-      );
+    nwVisible.forEach((v, j) => {
+      const mi = pts[visibleIndices[j]!]!.month_index;
+      parts.push(`${j === 0 ? "M" : "L"} ${xScale(mi)} ${yScale(v)}`);
     });
-    const xLast = xScale(visibleEnd);
-    const x0 = xScale(visibleStart);
+    const xLast = xScale(visibleMonthEnd);
+    const x0 = xScale(visibleMonthStart);
     const yBase = mt + ph;
     parts.push(`L ${xLast} ${yBase}`);
     parts.push(`L ${x0} ${yBase} Z`);
     areaD = parts.join(" ");
   }
 
-  function pointerToIndex(clientX: number): number {
+  /** Convierte px clientX → mes real, clamped al rango visible. */
+  function pointerToMonth(clientX: number): number {
     const svg = svgRef.current;
-    if (!svg) return 0;
+    if (!svg) return visibleMonthStart;
     const rect = svg.getBoundingClientRect();
     const vb = svg.viewBox.baseVal;
-    const xSvg = ((clientX - rect.left) / Math.max(rect.width, 1)) * vb.width;
+    if (!vb || rect.width === 0) return visibleMonthStart;
+    const xSvg = ((clientX - rect.left) / rect.width) * vb.width;
     const local = xSvg - ml;
-    const idx = Math.round((local / pw) * Math.max(1, visibleCount - 1)) + visibleStart;
-    return Math.max(0, Math.min(pts.length - 1, idx));
+    const t = local / Math.max(1, pw);
+    const mi = visibleMonthStart + t * Math.max(1, monthSpan - 1);
+    return Math.max(
+      visibleMonthStart,
+      Math.min(visibleMonthEnd, Math.round(mi)),
+    );
+  }
+
+  /** Devuelve el índice del array `pts` cuyo `month_index` está más cerca
+   * del clientX. Usado por el hover (que necesita acceder a `nw[i]`/`cc[i]`). */
+  function pointerToIndex(clientX: number): number {
+    const month = pointerToMonth(clientX);
+    let best = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.abs(pts[i].month_index - month);
+      if (d < bestDist) {
+        bestDist = d;
+        best = i;
+        if (d === 0) break;
+      }
+    }
+    return best;
   }
 
   function onPointerMove(e: PointerEvent<SVGSVGElement>) {
@@ -537,37 +648,32 @@ export function ProjectionNetWorthChart({
     if (pts.length < 2) return;
     const panInput = e.shiftKey ? e.deltaY : e.deltaX;
     const isPan = Math.abs(panInput) > Math.abs(e.deltaY) || e.shiftKey;
-    const minVisiblePoints = Math.min(pts.length, 12);
-    if (isPan && visibleCount < pts.length) {
-      const step = Math.max(1, Math.round(visibleCount * 0.08));
+    const totalMonths = series.months;
+    const minSpan = Math.min(totalMonths, 12);
+    if (isPan && monthSpan < totalMonths) {
+      const step = Math.max(1, Math.round(monthSpan * 0.08));
       const direction = panInput > 0 ? 1 : -1;
-      const maxStart = Math.max(0, pts.length - visibleCount);
+      const maxStart = Math.max(0, totalMonths - monthSpan);
       const nextStart = Math.max(
         0,
-        Math.min(maxStart, visibleStart + direction * step),
+        Math.min(maxStart, visibleMonthStart + direction * step),
       );
-      if (nextStart !== visibleStart) {
-        setViewWindow({ start: nextStart, count: visibleCount });
+      if (nextStart !== visibleMonthStart) {
+        setViewWindow({ startMonth: nextStart, monthSpan });
       }
       return;
     }
     if (e.deltaY === 0) return;
     const zoomFactor = e.deltaY < 0 ? 0.88 : 1.14;
-    const nextCountRaw = Math.round(visibleCount * zoomFactor);
-    const nextCount = Math.max(
-      minVisiblePoints,
-      Math.min(pts.length, nextCountRaw),
-    );
-    if (nextCount === visibleCount) return;
-    const anchorIndex = pointerToIndex(e.clientX);
-    const ratioWithinWindow =
-      (anchorIndex - visibleStart) / Math.max(1, visibleCount - 1);
-    const nextStartRaw = Math.round(
-      anchorIndex - ratioWithinWindow * (nextCount - 1),
-    );
-    const maxStart = Math.max(0, pts.length - nextCount);
+    const nextSpanRaw = Math.round(monthSpan * zoomFactor);
+    const nextSpan = Math.max(minSpan, Math.min(totalMonths, nextSpanRaw));
+    if (nextSpan === monthSpan) return;
+    const anchorMonth = pointerToMonth(e.clientX);
+    const ratio = (anchorMonth - visibleMonthStart) / Math.max(1, monthSpan - 1);
+    const nextStartRaw = Math.round(anchorMonth - ratio * (nextSpan - 1));
+    const maxStart = Math.max(0, totalMonths - nextSpan);
     const nextStart = Math.max(0, Math.min(maxStart, nextStartRaw));
-    setViewWindow({ start: nextStart, count: nextCount });
+    setViewWindow({ startMonth: nextStart, monthSpan: nextSpan });
   }
 
   const horizonLine = formatProjectionChartHorizonLine(series);
@@ -602,8 +708,8 @@ export function ProjectionNetWorthChart({
         <title>Patrimonio neto y capital aportado en el tiempo</title>
         <defs>
           <linearGradient id={`nwFill-${gid}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#10b981" stopOpacity="0.3" />
-            <stop offset="100%" stopColor="#10b981" stopOpacity="0.03" />
+            <stop offset="0%" stopColor="var(--proj-nw)" stopOpacity="0.18" />
+            <stop offset="100%" stopColor="var(--proj-nw)" stopOpacity="0.02" />
           </linearGradient>
           <clipPath id={`projectionPlotClip-${gid}`}>
             <rect x={ml} y={mt} width={pw} height={ph} rx={6} />
@@ -630,7 +736,7 @@ export function ProjectionNetWorthChart({
             if (p[0]) {
               items.push(
                 <g key="legend-nw" transform={`translate(${p[0].x}, ${p[0].y})`}>
-                  <line x1={0} y1={11} x2={22} y2={11} stroke="#047857" strokeWidth={3} strokeLinecap="round" />
+                  <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-nw)" strokeWidth={3} strokeLinecap="round" />
                   <text x={28} y={15}>Patrimonio neto</text>
                 </g>,
               );
@@ -638,7 +744,7 @@ export function ProjectionNetWorthChart({
             if (p[1]) {
               items.push(
                 <g key="legend-cc" transform={`translate(${p[1].x}, ${p[1].y})`}>
-                  <line x1={0} y1={11} x2={22} y2={11} stroke="#b45309" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
+                  <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-cc)" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
                   <text x={28} y={15}>Capital aportado</text>
                 </g>,
               );
@@ -647,7 +753,7 @@ export function ProjectionNetWorthChart({
             if (hasFireTargetSeries && p[2]) {
               items.push(
                 <g key="legend-fire" transform={`translate(${p[2].x}, ${p[2].y})`}>
-                  <line x1={0} y1={11} x2={22} y2={11} stroke="#7c3aed" strokeWidth={1.5} strokeDasharray="3 4" strokeLinecap="round" opacity={0.5} />
+                  <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-fire)" strokeWidth={1.5} strokeDasharray="3 4" strokeLinecap="round" opacity={0.5} />
                   <text x={28} y={15}>Target FIRE</text>
                 </g>,
               );
@@ -727,7 +833,6 @@ export function ProjectionNetWorthChart({
           y={mt}
           width={pw}
           height={ph}
-          fill="#ffffff"
           fillOpacity={0.35}
           rx={6}
           className="projection-chart-plot-bg"
@@ -742,11 +847,14 @@ export function ProjectionNetWorthChart({
               const stack = assetStacks[idx];
               const topParts: string[] = [];
               const botParts: string[] = [];
-              for (let k = visibleStart; k <= visibleEnd; k++) {
-                topParts.push(`${xScale(k)},${yScale(stack.tops[k])}`);
+              for (const k of visibleIndices) {
+                const mi = pts[k]!.month_index;
+                topParts.push(`${xScale(mi)},${yScale(stack.tops[k] ?? 0)}`);
               }
-              for (let k = visibleEnd; k >= visibleStart; k--) {
-                botParts.push(`${xScale(k)},${yScale(stack.bottoms[k])}`);
+              for (let j = visibleIndices.length - 1; j >= 0; j--) {
+                const k = visibleIndices[j]!;
+                const mi = pts[k]!.month_index;
+                botParts.push(`${xScale(mi)},${yScale(stack.bottoms[k] ?? 0)}`);
               }
               const d = `M ${topParts.join(" L ")} L ${botParts.join(" L ")} Z`;
               return (
@@ -765,7 +873,7 @@ export function ProjectionNetWorthChart({
           <polyline
             points={nwPoints}
             fill="none"
-            stroke="#047857"
+            stroke="var(--proj-nw)"
             strokeWidth={2.85}
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -773,7 +881,7 @@ export function ProjectionNetWorthChart({
           <polyline
             points={ccPoints}
             fill="none"
-            stroke="#b45309"
+            stroke="var(--proj-cc)"
             strokeWidth={2.1}
             strokeDasharray="7 5"
             strokeLinecap="round"
@@ -784,7 +892,7 @@ export function ProjectionNetWorthChart({
             <polyline
               points={firePoints}
               fill="none"
-              stroke="#7c3aed"
+              stroke="var(--proj-fire)"
               strokeWidth={1.2}
               strokeDasharray="3 4"
               strokeLinecap="round"
@@ -792,44 +900,101 @@ export function ProjectionNetWorthChart({
               opacity={0.225}
             />
           ) : null}
-          {visibleMilestones.map((m) => {
-            const x = xScale(m.reached_month_index);
-            const y0 = mt + ph;
-            const nwAtMilestone = nw[m.reached_month_index] ?? null;
-            const nwY =
-              nwAtMilestone != null && Number.isFinite(nwAtMilestone)
-                ? yScale(nwAtMilestone)
-                : null;
-            // Mantiene la marca siempre por encima de la curva de patrimonio neto.
+          {(() => {
+            // Calcula la posición inicial (siguiendo la curva NW) y luego
+            // empuja hacia arriba los milestones que se solapan horizontalmente
+            // colocándolos en "carriles" sucesivos. La línea punteada se
+            // estira para acompañar la nueva y2, manteniendo continuidad.
+            type MS = {
+              m: typeof visibleMilestones[number];
+              x: number;
+              y0: number;
+              y1Base: number;
+              y1: number;
+              label: string;
+              halfW: number;
+              isJubilacion: boolean;
+            };
             const y1Floor = mt + 12;
-            const y1FromNetWorth = nwY != null ? nwY - 12 : y0 - Math.min(44, ph * 0.22);
-            const y1 = Math.max(y1Floor, Math.min(y0 - 8, y1FromNetWorth));
-            const isJubilacion = m.target === "jubilacion";
-            const targetNum = parseDisplayDecimal(m.target);
-            const label =
-              targetNum != null
-                ? formatCurrencyNumber(targetNum, currencyIso)
-                : formatProjectionMilestoneCompactLabel(m.target);
-            return (
-              <g key={`ms-${m.target}-${m.reached_month_index}`}>
+            const items: MS[] = visibleMilestones
+              .map((m) => {
+                const x = xScale(m.reached_month_index);
+                const y0 = mt + ph;
+                const nwAtMilestone = valueAtMonth(m.reached_month_index, nw);
+                const nwY =
+                  nwAtMilestone != null && Number.isFinite(nwAtMilestone)
+                    ? yScale(nwAtMilestone)
+                    : null;
+                const y1FromNetWorth =
+                  nwY != null ? nwY - 12 : y0 - Math.min(44, ph * 0.22);
+                const y1Base = Math.max(
+                  y1Floor,
+                  Math.min(y0 - 8, y1FromNetWorth),
+                );
+                const isJubilacion = m.target === "jubilacion";
+                const targetNum = parseDisplayDecimal(m.target);
+                const label =
+                  targetNum != null
+                    ? formatCurrencyNumber(targetNum, currencyIso)
+                    : formatProjectionMilestoneCompactLabel(m.target);
+                // 5.5px por carácter aprox. + 4 de padding por lado.
+                const halfW = (label.length * 5.5) / 2 + 4;
+                return {
+                  m,
+                  x,
+                  y0,
+                  y1Base,
+                  y1: y1Base,
+                  label,
+                  halfW,
+                  isJubilacion,
+                };
+              })
+              .sort((a, b) => a.x - b.x);
+
+            type LaneSlot = { right: number };
+            const lanes: LaneSlot[] = [];
+            const rowHeight = 14;
+            for (const it of items) {
+              const left = it.x - it.halfW;
+              let lane = 0;
+              while (lane < lanes.length && lanes[lane]!.right > left) lane++;
+              if (lane === lanes.length) {
+                lanes.push({ right: it.x + it.halfW });
+              } else {
+                lanes[lane] = { right: it.x + it.halfW };
+              }
+              it.y1 = Math.max(y1Floor - 4, it.y1Base - lane * rowHeight);
+            }
+
+            return items.map((it) => (
+              <g key={`ms-${it.m.target}-${it.m.reached_month_index}`}>
                 <line
-                  x1={x}
-                  x2={x}
-                  y1={y0}
-                  y2={y1}
-                  className={isJubilacion ? "projection-chart-jubilacion-line" : "projection-chart-milestone-line"}
+                  x1={it.x}
+                  x2={it.x}
+                  y1={it.y0}
+                  y2={it.y1}
+                  className={
+                    it.isJubilacion
+                      ? "projection-chart-jubilacion-line"
+                      : "projection-chart-milestone-line"
+                  }
                 />
                 <text
-                  x={x}
-                  y={y1 - 6}
+                  x={it.x}
+                  y={it.y1 - 6}
                   textAnchor="middle"
-                  className={isJubilacion ? "projection-chart-jubilacion-label" : "projection-chart-milestone-label"}
+                  className={
+                    it.isJubilacion
+                      ? "projection-chart-jubilacion-label"
+                      : "projection-chart-milestone-label"
+                  }
                 >
-                  {label}
+                  {it.label}
                 </text>
               </g>
-            );
-          })}
+            ));
+          })()}
           {chartPlanningMarkers.map((m) => {
             const x = xScale(m.mi);
             const y0 = mt + ph;
@@ -875,7 +1040,7 @@ export function ProjectionNetWorthChart({
             ? (() => {
                 const x = xScale(compoundOutpaceMonth);
                 const y0 = mt + ph;
-                const nwAtMs = nw[compoundOutpaceMonth] ?? null;
+                const nwAtMs = valueAtMonth(compoundOutpaceMonth, nw);
                 const nwY =
                   nwAtMs != null && Number.isFinite(nwAtMs)
                     ? yScale(nwAtMs)
@@ -906,19 +1071,25 @@ export function ProjectionNetWorthChart({
               })()
             : null}
 
-          {hover !== null && hover >= visibleStart && hover <= visibleEnd ? (
+          {hover !== null &&
+          pts[hover] != null &&
+          pts[hover]!.month_index >= visibleMonthStart &&
+          pts[hover]!.month_index <= visibleMonthEnd ? (
             <line
-              x1={xScale(hover)}
-              x2={xScale(hover)}
+              x1={xScale(pts[hover]!.month_index)}
+              x2={xScale(pts[hover]!.month_index)}
               y1={mt}
               y2={mt + ph}
               className="projection-chart-crosshair"
             />
           ) : null}
-          {hover !== null && hover >= visibleStart && hover <= visibleEnd ? (
+          {hover !== null &&
+          pts[hover] != null &&
+          pts[hover]!.month_index >= visibleMonthStart &&
+          pts[hover]!.month_index <= visibleMonthEnd ? (
             <>
-              <circle cx={xScale(hover)} cy={yScale(nw[hover])} r={6} className="projection-chart-dot-nw" />
-              <circle cx={xScale(hover)} cy={yScale(cc[hover])} r={5} className="projection-chart-dot-cc" />
+              <circle cx={xScale(pts[hover]!.month_index)} cy={yScale(nw[hover] ?? 0)} r={6} className="projection-chart-dot-nw" />
+              <circle cx={xScale(pts[hover]!.month_index)} cy={yScale(cc[hover] ?? 0)} r={5} className="projection-chart-dot-cc" />
             </>
           ) : null}
         </g>
@@ -932,7 +1103,10 @@ export function ProjectionNetWorthChart({
         </text>
       </svg>
 
-      {hover !== null && hover >= visibleStart && hover <= visibleEnd ? (
+      {hover !== null &&
+      pts[hover] != null &&
+      pts[hover]!.month_index >= visibleMonthStart &&
+      pts[hover]!.month_index <= visibleMonthEnd ? (
         <div
           className="projection-chart-tooltip"
           style={{
@@ -951,11 +1125,11 @@ export function ProjectionNetWorthChart({
           </div>
           <div>
             Patrimonio neto —{" "}
-            {formatCurrencyOrDash(pts[hover]?.net_worth, currencyIso)}
+            {formatCurrencyOrDashNumber(pts[hover]?.net_worth, currencyIso)}
           </div>
           <div>
             Capital aportado —{" "}
-            {formatCurrencyOrDash(
+            {formatCurrencyOrDashNumber(
               pts[hover]?.contributed_capital,
               currencyIso,
             )}
@@ -963,8 +1137,8 @@ export function ProjectionNetWorthChart({
           {assetSeries.map((as) => (
             <div key={as.id}>
               {as.name} —{" "}
-              {formatCurrencyOrDash(
-                series.asset_series?.find((s) => s.asset_id === as.id)?.values[hover] ?? undefined,
+              {formatCurrencyOrDashNumber(
+                series.asset_series?.find((s) => s.asset_id === as.id)?.values[hover],
                 currencyIso,
               )}
             </div>

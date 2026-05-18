@@ -424,7 +424,6 @@ export function LiabilitiesView({
                       <thead>
                         <tr>
                           <th>Etiqueta</th>
-                          <th>Tipo</th>
                           <th className="num">Principal</th>
                           <th className="num">TAE %</th>
                           <th className="num">Cuota</th>
@@ -441,7 +440,6 @@ export function LiabilitiesView({
                         {g.items.map((row) => (
                           <tr key={row.id}>
                             <td>{row.label}</td>
-                            <td>{row.type_tag ?? METRIC_DASH}</td>
                             <td className="num">
                               {formatCurrencyAmount(row.principal, currencyIso)}
                               {row.principal_derived_from_plan ? (

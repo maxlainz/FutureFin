@@ -13,7 +13,7 @@ pub struct LedgerViewQuery {
     pub view: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LedgerView {
     Household,
     Mine,

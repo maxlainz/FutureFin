@@ -1,6 +1,9 @@
 use crate::auth::password;
 use crate::error::ApiError;
-use crate::handlers::installation::bootstrap_installation_as_owner_if_empty;
+use crate::handlers::installation::{
+    bootstrap_installation_as_owner_if_empty, require_installation_member,
+};
+use crate::handlers::projection::warm_up_household_projection;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::Extension;
@@ -225,6 +228,18 @@ pub async fn login(
     .bind(user.id)
     .fetch_one(&state.pool)
     .await?;
+
+    // Warm-up del cache de proyección en background. Si el usuario no es
+    // miembro de ningún installation (caso pending), skip silencioso. El
+    // login responde inmediatamente sin esperar al recompute.
+    if let Ok((iid, _)) = require_installation_member(&state.pool, user.id).await {
+        let state_clone = state.clone();
+        let user_id = user.id;
+        tokio::spawn(async move {
+            warm_up_household_projection(state_clone, iid, user_id).await;
+        });
+    }
+
     Ok((jar, Json(user_row_to_response(row))))
 }
 
@@ -240,13 +255,25 @@ pub async fn logout(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<(CookieJar, axum::http::StatusCode), ApiError> {
+    let mut user_id_to_invalidate: Option<Uuid> = None;
     if let Some(c) = jar.get(SESSION_COOKIE) {
         if let Ok(sid) = Uuid::parse_str(c.value()) {
+            // Recupera el user_id antes de borrar la sesión para poder
+            // limpiar sus entries `view=mine` del cache de proyección.
+            user_id_to_invalidate = sqlx::query_scalar::<_, Uuid>(
+                r#"SELECT user_id FROM sessions WHERE id = $1"#,
+            )
+            .bind(sid)
+            .fetch_optional(&state.pool)
+            .await?;
             sqlx::query(r#"DELETE FROM sessions WHERE id = $1"#)
                 .bind(sid)
                 .execute(&state.pool)
                 .await?;
         }
+    }
+    if let Some(uid) = user_id_to_invalidate {
+        state.invalidate_projection_by_user(uid).await;
     }
     let jar = jar.remove(
         Cookie::build((SESSION_COOKIE, ""))
@@ -297,6 +324,7 @@ pub async fn patch_me(
 ) -> Result<Json<UserResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
 
+    let mut birth_changed = false;
     if let Some(ref raw) = body.birth_date {
         let parsed = parse_me_birth_patch(raw)?;
         if let Some(d) = parsed {
@@ -309,6 +337,7 @@ pub async fn patch_me(
         .bind(user.id.0)
         .execute(&state.pool)
         .await?;
+        birth_changed = true;
     }
 
     let row: UserRow = sqlx::query_as(
@@ -317,5 +346,17 @@ pub async fn patch_me(
     .bind(user.id.0)
     .fetch_one(&state.pool)
     .await?;
+
+    // birth_date afecta el eje de edad y horizonte de la proyección → invalida.
+    if birth_changed {
+        if let Ok((iid, _)) = require_installation_member(&state.pool, user.id.0).await {
+            crate::handlers::projection::refresh_projection_after_mutation(
+                state.clone(),
+                iid,
+                user.id.0,
+            );
+        }
+    }
+
     Ok(Json(user_row_to_response(row)))
 }

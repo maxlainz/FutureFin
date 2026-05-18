@@ -72,6 +72,15 @@ export function formatCurrencyOrDash(
   return formatCurrencyAmount(String(s), currencyIso);
 }
 
+/** Variante para los arrays de proyección que ya viajan como f64. */
+export function formatCurrencyOrDashNumber(
+  n: number | null | undefined,
+  currencyIso: string,
+): string {
+  if (n == null || !Number.isFinite(n)) return METRIC_DASH;
+  return formatCurrencyNumber(n, currencyIso);
+}
+
 export function formatCurrencyNumber(n: number, currencyIso: string): string {
   const iso = normalizeCurrencyIso(currencyIso);
   if (!iso || !Number.isFinite(n)) return formatMoneyAmount(String(n));

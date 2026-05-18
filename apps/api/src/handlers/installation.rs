@@ -1,5 +1,6 @@
 use crate::error::ApiError;
 use crate::handlers::membership::MembershipRole;
+use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::Extension;
@@ -604,6 +605,7 @@ pub async fn patch_my_installation(
     .fetch_one(&state.pool)
     .await?;
 
+    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
     Ok(Json(installation_access_from_row(row)?))
 }
 

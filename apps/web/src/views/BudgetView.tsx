@@ -12,10 +12,12 @@ import type {
 import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import { GearIcon, PlusIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
+import { PlanningDirectionChart } from "../components/charts/PlanningDirectionChart";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
   formatCurrencyOrDash,
+  parseDisplayDecimal,
 } from "../lib/format";
 import {
   PAYMENT_FREQ_LABEL,
@@ -199,6 +201,15 @@ export function BudgetView({
     ? formatCurrencyOrDash(snap.totals?.net_monthly_equivalent, currencyIso)
     : METRIC_DASH;
 
+  const incomeNum = snap
+    ? parseDisplayDecimal(snap.totals?.income_monthly_equivalent ?? "") ?? 0
+    : 0;
+  const expenseNum = snap
+    ? parseDisplayDecimal(
+        snap.totals?.expense_total_monthly_equivalent ?? "",
+      ) ?? 0
+    : 0;
+
   const incomeEntries = sortedEntries.filter((e) => e.scope === "income");
   const expenseEntries = sortedEntries.filter((e) => e.scope === "expense");
 
@@ -260,6 +271,22 @@ export function BudgetView({
             }
           />
         </div>
+      ) : null}
+
+      {hasMembership ? (
+        <section className="panel">
+          <h3 className="panel-title">Distribución</h3>
+          {budgetLoading ? (
+            <p className="muted bordered-top">Cargando…</p>
+          ) : incomeNum + expenseNum > 0 ? (
+            <PlanningDirectionChart
+              inflow={incomeNum}
+              outflow={expenseNum}
+            />
+          ) : (
+            <p className="muted bordered-top">Sin proporción.</p>
+          )}
+        </section>
       ) : null}
 
       {hasMembership ? (

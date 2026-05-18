@@ -89,7 +89,7 @@ async fn projection_series_returns_stable_compound_marker_and_starting_nw() {
     let points = body["points"].as_array().unwrap();
     assert_eq!(points.len(), 25, "horizon 24 meses → 25 puntos (índices 0..=24)");
 
-    let nw_at_12: f64 = points[12]["net_worth"].as_str().unwrap().parse().unwrap();
+    let nw_at_12: f64 = points[12]["net_worth"].as_f64().unwrap();
     // NW al mes 12 ≈ 100_000 * 1.15 + 100 * 12 ≈ 116_700 (sin compound de los aportes mensuales).
     // El motor sí compone, así que el valor exacto es ligeramente superior; tolerancia ancha.
     assert!(

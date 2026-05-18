@@ -18,17 +18,27 @@ export const PROJECTION_FOCUS_STORAGE_KEY = "futurefin-projection-focus";
 export const PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY =
   "futurefin-projection-inflation-adjusted";
 
+/**
+ * Paleta de las áreas/legend del chart de proyección. Las gráficas son la
+ * única zona donde la app rompe el principio "base B/N + único acento":
+ * para distinguir más de 2-3 series, el color es funcional. Sigue siendo
+ * una paleta sobria, no decorativa.
+ *
+ * Cada entrada es una CSS var con variante claro/oscuro definida en
+ * styles/theme.css. En oscuro las versiones son más claras para mantener
+ * contraste sobre el fondo zinc-900.
+ */
 export const ASSET_LINE_COLORS = [
-  "#3b82f6",
-  "#10b981",
-  "#f59e0b",
-  "#ef4444",
-  "#8b5cf6",
-  "#ec4899",
-  "#14b8a6",
-  "#f97316",
-  "#84cc16",
-  "#6366f1",
+  "var(--proj-area-1)",
+  "var(--proj-area-2)",
+  "var(--proj-area-3)",
+  "var(--proj-area-4)",
+  "var(--proj-area-5)",
+  "var(--proj-area-6)",
+  "var(--proj-area-7)",
+  "var(--proj-area-8)",
+  "var(--proj-area-9)",
+  "var(--proj-area-10)",
 ] as const;
 
 export function normalizeAgeUiMode(raw: string | null | undefined): "dates" | "ages" {
@@ -322,11 +332,13 @@ export function buildProjectionChartLayout(
   const pw = W - ml - mr;
 
   const legendRowHeight = 22;
-  const legendItemGap = 14;
-  const legendCharPx = 6.5;
-  const legendSwatchPx = 24 + 6;
+  const legendItemGap = 16;
+  // Estimación generosa del ancho del carácter (12px medium) — antes 6.5
+  // subestimaba y la leyenda acababa solapándose.
+  const legendCharPx = 7.6;
+  const legendSwatchPx = 24 + 8;
   const legendRightAnchor = ml + pw;
-  const legendBudgetWidth = Math.max(160, Math.round(pw * 0.6));
+  const legendBudgetWidth = Math.max(180, Math.round(pw * 0.66));
   const itemWidths = legendLabels.map(
     (label) => legendSwatchPx + label.length * legendCharPx,
   );

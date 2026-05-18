@@ -18,6 +18,9 @@ import type {
 } from "../api/types";
 import { Modal, ModalFormError } from "../components/Modal";
 import { RowEditIcon, RowTrashIcon } from "../components/icons";
+import { AccountCard } from "../components/AccountCard";
+import { ThemeToggle } from "../components/ThemeToggle";
+import type { ThemePref } from "../lib/theme";
 import {
   DEFAULT_ES_TAX_BRACKETS_API,
   normalizeInstallationFireSettings,
@@ -37,6 +40,12 @@ const CATEGORY_SCOPE_LABEL: Record<CategoryScope, string> = {
 };
 
 export function SettingsView({
+  user,
+  themePref,
+  onChangeTheme,
+  onLogout,
+  onEditAccount,
+  authBusy,
   installation,
   installationBusy,
   categoryModalOpen,
@@ -114,6 +123,12 @@ export function SettingsView({
   runFfbackupImportPreview,
   runFfbackupImportApply,
 }: {
+  user: UserResponse;
+  themePref: ThemePref;
+  onChangeTheme: (next: ThemePref) => void;
+  onLogout: () => void;
+  onEditAccount: () => void;
+  authBusy: boolean;
   installation: InstallationAccess | null;
   installationBusy: boolean;
   categoryModalOpen: boolean;
@@ -260,20 +275,37 @@ export function SettingsView({
         <h2 className="workspace-title">Ajustes</h2>
       </div>
 
+      <AccountCard
+        username={user.username}
+        role={installation?.role ?? null}
+        installationName={
+          installation?.installation.base_currency
+            ? `Moneda ${installation.installation.base_currency}`
+            : null
+        }
+        onEditAccount={onEditAccount}
+        onLogout={onLogout}
+        busy={authBusy}
+      />
+
       <nav
-        className="tab-bar settings-subtab-bar"
+        className="settings-subtab-bar"
         aria-label="Subsecciones de ajustes"
       >
-        {settingsSubTabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={`tab-btn ${settingsSubTab === t.id ? "active" : ""}`}
-            onClick={() => navigateSettingsSubTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
+        {settingsSubTabs.map((t) => {
+          const active = settingsSubTab === t.id;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              className={`ff-nav-pill ${active ? "is-active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              onClick={() => navigateSettingsSubTab(t.id)}
+            >
+              {t.label}
+            </button>
+          );
+        })}
       </nav>
 
       {settingsSubTab === "access" && isOwner ? (
@@ -599,6 +631,19 @@ export function SettingsView({
 
       {settingsSubTab === "data" ? (
         <>
+          <section className="panel">
+            <div className="panel-head-row">
+              <h3 className="panel-title">Apariencia</h3>
+            </div>
+            <p className="muted compact tight">
+              Elige el tema de la interfaz. «Auto» sigue la preferencia del
+              sistema.
+            </p>
+            <div className="bordered-top" style={{ paddingTop: "0.7rem" }}>
+              <ThemeToggle value={themePref} onChange={onChangeTheme} />
+            </div>
+          </section>
+
           {hasMembership ? (
             <section className="panel">
               <h3 className="panel-title">Backup personal (.ffbackup)</h3>

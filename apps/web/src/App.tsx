@@ -1,11 +1,13 @@
 import {
   Suspense,
   lazy,
+  startTransition,
   useCallback,
   useEffect,
   useId,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -13,21 +15,92 @@ import "./App.css";
 import { formatEditableDecimalString } from "./lib/format";
 import { defaultFetchInit, errorMessageFromResponse } from "./api/client";
 import { Modal, ModalFormError } from "./components/Modal";
+import { TopBar } from "./components/TopBar";
+import { MobileNavDrawer } from "./components/MobileNavDrawer";
 import { SummaryView } from "./views/SummaryView";
 import type { BudgetScopeToggle } from "./views/BudgetView";
 import { BootstrapInstallationPanel } from "./auth/BootstrapInstallationPanel";
 import { ledgerViewQs } from "./lib/ledger";
+import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
 import type { LedgerPersonScope } from "./lib/ledger";
 import {
   TABS,
   TAB_PATH,
   type SettingsSubTabId,
+  type TabId,
   normalizeAppPath,
   settingsSubTabFromPathname,
   settingsSubTabPath,
   tabFromPathname,
 } from "./lib/navigation";
+import {
+  applyTheme,
+  loadThemePref,
+  saveThemePref,
+  subscribeSystemThemeChanges,
+  type ThemePref,
+} from "./lib/theme";
+
+/**
+ * Two-phase fetch de `/v1/projection/series`. Primero pide `?density=hybrid`
+ * (~82 puntos, JSON ~5 KB) y dispara `onData` cuando llega; luego, en
+ * paralelo, pide la versión `monthly` (full ~841 puntos) y, al recibirla,
+ * dispara `onData` otra vez dentro de `startTransition` para que el render
+ * del SVG denso no bloquee el hilo principal.
+ *
+ * Si el cache server está warm (post-login warm-up dual), ambos GET son
+ * cache hit y llegan en <10 ms cada uno → el hybrid no añade latencia
+ * perceptible. En cold cache, el hybrid mejora el tiempo al primer paint.
+ */
+function projectionSeriesUrl(scope: LedgerPersonScope, density?: "hybrid"): string {
+  const params = new URLSearchParams();
+  if (scope === "mine") params.set("view", "mine");
+  if (density) params.set("density", density);
+  const q = params.toString();
+  return q ? `/v1/projection/series?${q}` : "/v1/projection/series";
+}
+
+async function fetchProjectionTwoPhase(
+  scope: LedgerPersonScope,
+  onData: (data: ProjectionSeriesApi) => void,
+): Promise<void> {
+  chartPerf.mark("fetch-start");
+  // Lanzamos ambos en paralelo. El hybrid suele llegar antes (menor JSON y
+  // mismo compute server con cache hit), pero si por algún motivo el monthly
+  // llega antes, useTransition garantiza coherencia (la última asignación
+  // gana).
+  const hybridPromise = fetch(
+    projectionSeriesUrl(scope, "hybrid"),
+    defaultFetchInit,
+  );
+  const monthlyPromise = fetch(
+    projectionSeriesUrl(scope),
+    defaultFetchInit,
+  );
+
+  const hybridRes = await hybridPromise;
+  chartPerf.mark("fetch-response");
+  if (hybridRes.ok) {
+    const data = (await hybridRes.json()) as ProjectionSeriesApi;
+    chartPerf.mark("fetch-end");
+    onData(data);
+  } else if (
+    hybridRes.status === 403 ||
+    hybridRes.status === 404
+  ) {
+    // Sesión inválida o sin acceso: nada que hacer; el caller resuelve.
+    throw new Error(`projection hybrid: ${hybridRes.status}`);
+  }
+
+  // Phase 2 en background: cuando llega el monthly, reemplaza con
+  // startTransition para que el re-render denso no bloquee inputs.
+  const monthlyRes = await monthlyPromise;
+  if (monthlyRes.ok) {
+    const full = (await monthlyRes.json()) as ProjectionSeriesApi;
+    startTransition(() => onData(full));
+  }
+}
 
 // Lazy-loaded views: each becomes a separate Vite chunk, only fetched when the user navigates
 // to the tab. SummaryView stays eager because it's the landing page after auth.
@@ -352,6 +425,17 @@ export default function App() {
   const [userBirthDraft, setUserBirthDraft] = useState("");
   const [userProfileSaving, setUserProfileSaving] = useState(false);
   const [userProfileError, setUserProfileError] = useState<string | null>(null);
+
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [themePref, setThemePref] = useState<ThemePref>(loadThemePref);
+  useLayoutEffect(() => {
+    applyTheme(themePref);
+    saveThemePref(themePref);
+  }, [themePref]);
+  useEffect(() => {
+    if (themePref !== "auto") return;
+    return subscribeSystemThemeChanges(() => applyTheme("auto"));
+  }, [themePref]);
   const [ffbackupExportModalOpen, setFfbackupExportModalOpen] = useState(false);
   const [ffbackupExportPassword, setFfbackupExportPassword] = useState("");
   const [ffbackupExportBusy, setFfbackupExportBusy] = useState(false);
@@ -814,45 +898,47 @@ export default function App() {
   const loadSummaryPage = useCallback(async () => {
     setSummaryBusy(true);
     setSummaryError(null);
-    try {
-      const res = await fetch(
-        `/v1/summary${ledgerViewQs(ledgerPersonScope)}`,
-        defaultFetchInit,
-      );
-      if (res.status === 403 || res.status === 404) {
+    const qs = ledgerViewQs(ledgerPersonScope);
+    // /v1/summary y /v1/projection/series en paralelo, pero con flows
+    // INDEPENDIENTES: en cuanto llega summary liberamos summaryBusy (KPIs y
+    // Salud financiera pintan ya). El MiniProjection del Resumen aparece
+    // después, cuando llegue projection-series, sin bloquear el resto.
+    const summaryFlow = (async () => {
+      try {
+        const res = await fetch(`/v1/summary${qs}`, defaultFetchInit);
+        if (res.status === 403 || res.status === 404) {
+          setSummary(null);
+        } else if (!res.ok) {
+          throw new Error(await errorMessageFromResponse(res));
+        } else {
+          setSummary((await res.json()) as SummaryResponse);
+        }
+      } catch (e: unknown) {
         setSummary(null);
-        return;
+        setSummaryError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setSummaryBusy(false);
       }
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+    })();
+    const projectionFlow = (async () => {
+      try {
+        await fetchProjectionTwoPhase(ledgerPersonScope, (data) => {
+          setProjectionSeries(data);
+        });
+      } catch {
+        setProjectionSeries(null);
       }
-      setSummary((await res.json()) as SummaryResponse);
-    } catch (e: unknown) {
-      setSummary(null);
-      setSummaryError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSummaryBusy(false);
-    }
+    })();
+    await Promise.all([summaryFlow, projectionFlow]);
   }, [ledgerPersonScope]);
 
   const loadProjectionSeriesPage = useCallback(async () => {
     setProjectionBusy(true);
     setProjectionError(null);
     try {
-      const qs =
-        ledgerPersonScope === "mine" ? "?view=mine" : "";
-      const res = await fetch(
-        `/v1/projection/series${qs}`,
-        defaultFetchInit,
-      );
-      if (res.status === 403 || res.status === 404) {
-        setProjectionSeries(null);
-        return;
-      }
-      if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
-      }
-      setProjectionSeries((await res.json()) as ProjectionSeriesApi);
+      await fetchProjectionTwoPhase(ledgerPersonScope, (data) => {
+        setProjectionSeries(data);
+      });
     } catch (e: unknown) {
       setProjectionSeries(null);
       setProjectionError(e instanceof Error ? e.message : String(e));
@@ -862,8 +948,12 @@ export default function App() {
   }, [ledgerPersonScope]);
 
   const loadRetirementPage = useCallback(
-    async (opts?: { silent?: boolean }) => {
+    async (opts?: { silent?: boolean; skipProjection?: boolean }) => {
       const silent = opts?.silent === true;
+      // skipProjection: usado por el prefetch tras login para no volver a pegar
+      // a /v1/projection/series (lo hace loadSummaryPage). Refetcheamos
+      // proyección en navegación normal (refresh tras mutaciones).
+      const skipProjection = opts?.skipProjection === true;
       if (!silent) {
         setRetirementBusy(true);
         setRetirementError(null);
@@ -872,10 +962,11 @@ export default function App() {
       try {
         const qs =
           ledgerPersonScope === "mine" ? "?view=mine" : "";
-        const [budRes, projRes] = await Promise.all([
-          fetch(`/v1/budget${qs}`, defaultFetchInit),
-          fetch(`/v1/projection/series${qs}`, defaultFetchInit),
-        ]);
+        const budPromise = fetch(`/v1/budget${qs}`, defaultFetchInit);
+        const projPromise = skipProjection
+          ? Promise.resolve(null as Response | null)
+          : fetch(`/v1/projection/series${qs}`, defaultFetchInit);
+        const [budRes, projRes] = await Promise.all([budPromise, projPromise]);
         if (budRes.status === 403 || budRes.status === 404) {
           setRetirementBudgetSnapshot(null);
         } else if (!budRes.ok) {
@@ -890,17 +981,19 @@ export default function App() {
               : [],
           });
         }
-        if (projRes.status === 403 || projRes.status === 404) {
-          setProjectionSeries(null);
-        } else if (!projRes.ok) {
-          throw new Error(await errorMessageFromResponse(projRes));
-        } else {
-          setProjectionSeries((await projRes.json()) as ProjectionSeriesApi);
+        if (projRes) {
+          if (projRes.status === 403 || projRes.status === 404) {
+            setProjectionSeries(null);
+          } else if (!projRes.ok) {
+            throw new Error(await errorMessageFromResponse(projRes));
+          } else {
+            setProjectionSeries((await projRes.json()) as ProjectionSeriesApi);
+          }
         }
       } catch (e: unknown) {
         if (!silent) {
           setRetirementBudgetSnapshot(null);
-          setProjectionSeries(null);
+          if (!skipProjection) setProjectionSeries(null);
           setRetirementError(e instanceof Error ? e.message : String(e));
         }
       } finally {
@@ -955,6 +1048,133 @@ export default function App() {
       setPendingUsersBusy(false);
     }
   }, []);
+
+  // Tras login: esperamos a que la pestaña actual termine su carga (via el
+  // useEffect[activeTab === "xxx"] correspondiente) y luego encadenamos en
+  // serie el prefetch de los chunks JS + loaders del resto. Así no saturamos
+  // ancho de banda ni CPU del API al inicio. Excluye la pestaña actual (sus
+  // datos ya están en estado) y `summary` (ya pre-fetcha projection-series en
+  // su propio Promise.all).
+  const currentTabBusy = useMemo(() => {
+    switch (activeTab) {
+      case "summary":
+        return summaryBusy;
+      case "assets":
+        return assetsBusy;
+      case "liabilities":
+        return liabilitiesBusy;
+      case "budget":
+        return budgetLoading || assetsBusy || allocationRulesBusy;
+      case "upcoming":
+        return planningLoading;
+      case "retirement":
+        return retirementBusy;
+      case "projection":
+        return projectionBusy;
+      case "settings":
+        return categoriesBusy;
+      default:
+        return false;
+    }
+  }, [
+    activeTab,
+    summaryBusy,
+    assetsBusy,
+    liabilitiesBusy,
+    budgetLoading,
+    allocationRulesBusy,
+    planningLoading,
+    retirementBusy,
+    projectionBusy,
+    categoriesBusy,
+  ]);
+
+  const prefetchOtherViews = useCallback(
+    async (currentTab: TabId, signal: AbortSignal) => {
+      // Orden por uso esperado: Proyección (con su chart grande aparte), luego
+      // las tablas y por último Ajustes.
+      type PrefetchTask = {
+        tab: TabId;
+        importChunk: () => Promise<unknown>;
+        loadData?: () => Promise<unknown>;
+      };
+      const tasks: PrefetchTask[] = [
+        {
+          tab: "projection",
+          // ProjectionNetWorthChart está incluido en el chunk de ProjectionView
+          // (import directo, no lazy interno).
+          importChunk: () => import("./views/ProjectionView"),
+          // Datos cubiertos por loadSummaryPage (Promise.all summary+projection).
+        },
+        {
+          tab: "assets",
+          importChunk: () => import("./views/AssetsView"),
+          loadData: () => loadAssetsPage(),
+        },
+        {
+          tab: "liabilities",
+          importChunk: () => import("./views/LiabilitiesView"),
+          loadData: () => loadLiabilitiesPage(),
+        },
+        {
+          tab: "budget",
+          importChunk: () => import("./views/BudgetView"),
+          loadData: async () => {
+            await Promise.all([loadBudgetPage(), loadAllocationRules()]);
+          },
+        },
+        {
+          tab: "retirement",
+          importChunk: () => import("./views/RetirementView"),
+          // skipProjection: loadSummaryPage ya cargó /v1/projection/series; un
+          // segundo fetch saturaría el endpoint pesado y dispararía re-render
+          // del chart con la misma data.
+          loadData: () =>
+            loadRetirementPage({ silent: true, skipProjection: true }),
+        },
+        {
+          tab: "upcoming",
+          importChunk: () => import("./views/UpcomingView"),
+          loadData: () => loadPlanningPage(),
+        },
+        {
+          tab: "settings",
+          importChunk: () => import("./views/SettingsView"),
+          // Categorías se cargan al entrar en Ajustes (no merece bandwidth aquí).
+        },
+      ];
+      for (const t of tasks) {
+        if (signal.aborted) return;
+        if (t.tab === currentTab) continue;
+        try {
+          await t.importChunk();
+        } catch {
+          /* chunk fetch failure: dejamos que el lazy on-demand reintente */
+        }
+        if (signal.aborted) return;
+        if (t.loadData) {
+          try {
+            await t.loadData();
+          } catch {
+            /* errores los maneja cada loader internamente */
+          }
+        }
+      }
+    },
+    [
+      loadAssetsPage,
+      loadLiabilitiesPage,
+      loadBudgetPage,
+      loadAllocationRules,
+      loadPlanningPage,
+      loadRetirementPage,
+    ],
+  );
+
+  const prefetchedRef = useRef(false);
+  useEffect(() => {
+    prefetchedRef.current = false;
+  }, [user?.id]);
 
   useEffect(() => {
     setApproveRoles((prev) => {
@@ -1100,6 +1320,33 @@ export default function App() {
     // Solo recargar bloqueante al cambiar sesión / pestaña / vista; no cuando `user` muta tras PATCH pensión.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, hasMembership, activeTab, loadRetirementPage]);
+
+  useEffect(() => {
+    if (!user || !hasMembership) return;
+    if (currentTabBusy) return;
+    if (prefetchedRef.current) return;
+    prefetchedRef.current = true;
+    const win = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const ctrl = new AbortController();
+    const run = () => {
+      void prefetchOtherViews(activeTab, ctrl.signal);
+    };
+    const supportsIdle = typeof win.requestIdleCallback === "function";
+    const handle = supportsIdle
+      ? win.requestIdleCallback!(run, { timeout: 2000 })
+      : window.setTimeout(run, 200);
+    return () => {
+      ctrl.abort();
+      if (supportsIdle) {
+        win.cancelIdleCallback?.(handle);
+      } else {
+        window.clearTimeout(handle);
+      }
+    };
+  }, [user, hasMembership, currentTabBusy, activeTab, prefetchOtherViews]);
 
   useEffect(() => {
     if (activeTab !== "assets" || assetFormCategoryId || assetCategories.length === 0) {
@@ -1397,6 +1644,11 @@ export default function App() {
       }
       const updated = (await res.json()) as InstallationAccess;
       setInstallation(updated);
+      // El target FIRE móvil es recalculado por el backend a partir de la
+      // configuración FIRE. Recargamos la serie de proyección (silencioso)
+      // para que el chart de Jubilación / Resumen / Proyección reflejen los
+      // nuevos parámetros sin esperar a un cambio de pestaña.
+      void loadProjectionSeriesPage();
     } catch (e: unknown) {
       setInstallationError(e instanceof Error ? e.message : String(e));
       throw e;
@@ -2386,46 +2638,38 @@ export default function App() {
           : "app-root"
       }
     >
-      <header className="app-header">
-        <div className="app-header-left">
-          <span className="logo-mark small">FF</span>
-          <span className="app-title">FutureFin</span>
-        </div>
-        <div className="app-header-center" aria-hidden />
-        <div className="app-header-right">
-          <span
-            className={`health-dot ${health && !healthError ? "ok" : "bad"}`}
-            title={
-              healthError
-                ? `API: ${healthError}`
-                : health
-                  ? `API ${health.service} ${health.version}`
-                  : "Comprobando…"
-            }
-          />
-          <button
-            type="button"
-            className="user-chip user-chip-btn"
-            title="Configuración de cuenta"
-            disabled={authBusy}
-            onClick={() => {
-              setUserProfileError(null);
-              setUserBirthDraft(user.birth_date?.trim() ?? "");
-              setUserProfileOpen(true);
-            }}
-          >
-            {user.username}
-          </button>
-          <button
-            type="button"
-            className="btn ghost text"
-            disabled={authBusy}
-            onClick={() => void logout()}
-          >
-            Salir
-          </button>
-        </div>
-      </header>
+      <TopBar
+        activeTab={activeTab}
+        navigate={navigate}
+        health={health}
+        healthError={healthError}
+        onMobileMenuOpen={() => setMobileNavOpen(true)}
+        extras={
+          installationGate === "member" && hasMembership ? (
+            <select
+              id={ledgerScopeSelectId}
+              className="ledger-view-select"
+              value={ledgerPersonScope}
+              onChange={(e) =>
+                setLedgerPersonScope(
+                  e.target.value === "mine" ? "mine" : "household",
+                )
+              }
+              aria-label="Ámbito de datos: hogar o solo tus registros"
+              title="Hogar: todos los datos. Tu usuario: solo filas donde eres titular."
+            >
+              <option value="household">Todo el hogar</option>
+              <option value="mine">{user.username}</option>
+            </select>
+          ) : null
+        }
+      />
+      <MobileNavDrawer
+        open={mobileNavOpen}
+        onClose={() => setMobileNavOpen(false)}
+        activeTab={activeTab}
+        navigate={navigate}
+      />
 
       <Modal
         title="Tu cuenta"
@@ -2532,56 +2776,6 @@ export default function App() {
         </main>
       ) : (
         <>
-          <nav className="tab-bar" aria-label="Secciones">
-            {TABS.map((t) => (
-              <a
-                key={t.id}
-                href={TAB_PATH[t.id]}
-                className={`tab-btn ${activeTab === t.id ? "active" : ""}`}
-                aria-current={activeTab === t.id ? "page" : undefined}
-                onClick={(e) => {
-                  if (
-                    e.button !== 0 ||
-                    e.metaKey ||
-                    e.altKey ||
-                    e.ctrlKey ||
-                    e.shiftKey
-                  ) {
-                    return;
-                  }
-                  e.preventDefault();
-                  navigate(TAB_PATH[t.id]);
-                }}
-              >
-                {t.label}
-              </a>
-            ))}
-          </nav>
-
-          <div className="person-filter-bar person-filter-bar--discrete">
-            <label
-              htmlFor={ledgerScopeSelectId}
-              className="person-filter-bar-label"
-            >
-              Vista
-            </label>
-            <select
-              id={ledgerScopeSelectId}
-              className="ledger-view-select"
-              value={ledgerPersonScope}
-              onChange={(e) =>
-                setLedgerPersonScope(
-                  e.target.value === "mine" ? "mine" : "household",
-                )
-              }
-              aria-label="Ámbito de datos: hogar o solo tus registros"
-              title="Hogar: todos los datos. Tu usuario: solo filas donde eres titular."
-            >
-              <option value="household">Todo el hogar</option>
-              <option value="mine">{user.username}</option>
-            </select>
-          </div>
-
           <main
             className={
               activeTab === "projection"
@@ -2641,6 +2835,7 @@ export default function App() {
             ledgerPersonScope={ledgerPersonScope}
             summary={summary}
             summaryBusy={summaryBusy}
+            projectionSeries={projectionSeries}
           />
         ) : activeTab === "assets" ? (
           <AssetsView
@@ -2893,6 +3088,16 @@ export default function App() {
           />
         ) : activeTab === "settings" ? (
           <SettingsView
+            user={user}
+            themePref={themePref}
+            onChangeTheme={setThemePref}
+            onLogout={() => void logout()}
+            onEditAccount={() => {
+              setUserProfileError(null);
+              setUserBirthDraft(user.birth_date?.trim() ?? "");
+              setUserProfileOpen(true);
+            }}
+            authBusy={authBusy}
             installation={installation}
             installationBusy={installationBusy}
             categoryModalOpen={categoryModalOpen}
