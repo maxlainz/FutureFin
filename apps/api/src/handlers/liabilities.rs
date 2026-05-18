@@ -1,7 +1,7 @@
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
+use crate::handlers::person_view::LedgerViewQuery;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -311,23 +311,6 @@ async fn assert_liability_category(
     Ok(())
 }
 
-pub(crate) async fn purge_expired_liabilities(
-    pool: &sqlx::PgPool,
-    installation_id: Uuid,
-) -> Result<(), ApiError> {
-    sqlx::query(
-        r#"DELETE FROM liabilities
-           WHERE
-               installation_id = $1
-               AND payment_end_date IS NOT NULL
-               AND payment_end_date < CURRENT_DATE"#,
-    )
-    .bind(installation_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
     let payment_frequency = match r.payment_frequency.as_deref() {
         None => None,
@@ -371,37 +354,25 @@ pub async fn list_liabilities(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    purge_expired_liabilities(&state.pool, iid).await?;
+    let today = installation_naive_today(&state.pool, iid).await?;
 
-    let rows: Vec<LiabilityRow> = match q.resolve() {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
-                          payment_amount, payment_frequency, payment_end_date, notes,
-                          sort_index, principal_derived_from_plan
-                   FROM liabilities
-                   WHERE installation_id = $1
-                   ORDER BY sort_index ASC, label ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
-                          payment_amount, payment_frequency, payment_end_date, notes,
-                          sort_index, principal_derived_from_plan
-                   FROM liabilities
-                   WHERE installation_id = $1 AND owner_user_id = $2
-                   ORDER BY sort_index ASC, label ASC"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let view = q.resolve();
+    let scope = view.scope_where("");
+    let today_ph = view.next_arg_index();
+    let sql = format!(
+        r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
+                  payment_amount, payment_frequency, payment_end_date, notes,
+                  sort_index, principal_derived_from_plan
+           FROM liabilities
+           WHERE {scope}
+             AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph})
+           ORDER BY sort_index ASC, label ASC"#
+    );
+    let rows: Vec<LiabilityRow> = view
+        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
+        .bind(today)
+        .fetch_all(&state.pool)
+        .await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {

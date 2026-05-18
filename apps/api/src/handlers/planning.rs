@@ -2,7 +2,7 @@ use crate::error::ApiError;
 use crate::handlers::budget::assert_budget_category;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
+use crate::handlers::person_view::LedgerViewQuery;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -191,37 +191,21 @@ pub async fn list_planning_flows(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    let rows: Vec<PlanningFlowJoinRow> = match q.resolve() {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                          p.expected_amount, p.due_date, p.notes, p.sort_index,
-                          p.show_in_chart
-                   FROM planning_flows p
-                   JOIN categories c ON c.id = p.category_id
-                   WHERE p.installation_id = $1
-                   ORDER BY p.sort_index ASC, p.due_date ASC NULLS LAST, p.title ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
-                          p.expected_amount, p.due_date, p.notes, p.sort_index,
-                          p.show_in_chart
-                   FROM planning_flows p
-                   JOIN categories c ON c.id = p.category_id
-                   WHERE p.installation_id = $1 AND p.owner_user_id = $2
-                   ORDER BY p.sort_index ASC, p.due_date ASC NULLS LAST, p.title ASC"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let view = q.resolve();
+    let scope = view.scope_where("p");
+    let sql = format!(
+        r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
+                  p.expected_amount, p.due_date, p.notes, p.sort_index,
+                  p.show_in_chart
+           FROM planning_flows p
+           JOIN categories c ON c.id = p.category_id
+           WHERE {scope}
+           ORDER BY p.sort_index ASC, p.due_date ASC NULLS LAST, p.title ASC"#
+    );
+    let rows: Vec<PlanningFlowJoinRow> = view
+        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
+        .fetch_all(&state.pool)
+        .await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {

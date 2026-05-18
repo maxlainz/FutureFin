@@ -1,13 +1,7 @@
-mod auth;
-mod db;
-mod error;
-mod handlers;
-mod openapi;
-mod routes;
-mod state;
-
-use crate::handlers::fallback;
-use crate::state::AppState;
+use futurefin_api::db;
+use futurefin_api::handlers::fallback;
+use futurefin_api::routes;
+use futurefin_api::state::AppState;
 use axum::extract::Extension;
 use axum::Router;
 use http::header::{ACCEPT, CONTENT_TYPE};

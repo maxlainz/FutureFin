@@ -66,11 +66,13 @@ Cap kinds (all optional; `cap_kind`/`cap_value` are paired):
 ### Liabilities (`/v1/liabilities/`)
 Accepts `?view=mine`. `principal_derived_from_plan` flag indicates auto-derived principal from planning flows.
 
+**Expiration filter**: rows with `payment_end_date < today` are hidden from `GET /v1/liabilities` (and from totals/breakdowns in `/summary`, derived lines in `/budget`, debt service in `/projection`). The rows are not deleted — the filter is `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)`. Use `installation.calendar_tz` to compute `today`.
+
 ### Summary (`/v1/summary/`)
-Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=mine`.
+Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=mine`. `total_liabilities` and breakdowns exclude expired rows (see Liabilities note above).
 
 ### Budget (`/v1/budget/`)
-Income/expense entries + derived lines from liabilities. Accepts `?view=mine`.
+Income/expense entries + derived lines from liabilities. Accepts `?view=mine`. Derived lines only show liabilities with `payment_end_date > today`.
 
 ### Planning (`/v1/planning/`)
 Upcoming cash flows (one-off inflows/outflows) with due dates.
@@ -104,3 +106,31 @@ let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
 // For write ops:
 if !role_can_write(role.as_str()) { return Err(ApiError::Forbidden); }
 ```
+
+## View-scoping pattern
+
+For any endpoint that accepts `?view=mine`, **do not** write two `match view { Household => sqlx::query_as("…installation_id = $1…"), Mine => sqlx::query_as("…installation_id = $1 AND owner_user_id = $2…") }` branches. Use the helpers in `handlers/person_view.rs`:
+
+```rust
+let view = q.resolve(); // Query<LedgerViewQuery>
+let scope = view.scope_where("a"); // table alias optional; "" = no prefix
+let today_ph = view.next_arg_index(); // 2 (Household) or 3 (Mine)
+let sql = format!(
+    "SELECT ... FROM assets a WHERE {scope} AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph}) ORDER BY ...",
+);
+let rows: Vec<MyRow> = view
+    .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
+    .bind(today)
+    .fetch_all(pool)
+    .await?;
+```
+
+For `sqlx::query_scalar`, use `bind_scope_scalar` instead. The helpers guarantee placeholder order ($1=iid, optional $2=owner_user_id) so the two branches can never drift.
+
+## Error mapping
+
+`impl From<sqlx::Error> for ApiError` (in `error.rs`) auto-detects:
+- `23505` (unique_violation) → `ApiError::Conflict` (409)
+- `23503` (foreign_key_violation) → `ApiError::BadRequest("referenced record missing")`
+
+Handlers should just `?` any `sqlx::Error`; never write per-call `.map_err(...)` to translate codes.

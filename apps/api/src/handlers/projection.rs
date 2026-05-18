@@ -5,10 +5,9 @@
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
 use crate::handlers::installation::{
-    installation_naive_today, require_installation_member, resolve_fire_settings, FireNumberMode,
+    naive_date_in_calendar_tz, require_installation_member, resolve_fire_settings, FireNumberMode,
     FireSettings, TaxBracket,
 };
-use crate::handlers::liabilities::purge_expired_liabilities;
 use crate::handlers::person_view::LedgerView;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
@@ -18,9 +17,9 @@ use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
-    first_month_per_asset_contribution_nominals, project_net_worth_series, AllocationCap,
-    AllocationKind, AllocationRule, EngineError, FireTarget, ProjectionInput,
-    ProjectionLiabilityInput, ProjectionOutput, SimAsset,
+    fire_target_at_month_index, first_month_per_asset_contribution_nominals,
+    project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
+    FireTarget, ProjectionInput, ProjectionLiabilityInput, SimAsset,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -40,6 +39,7 @@ pub struct ProjectionSeriesQuery {
     pub months: Option<u32>,
 }
 
+#[cfg(test)]
 fn tax_on_gross_capital_annual(gross: Decimal, brackets: &[TaxBracket]) -> Decimal {
     if gross <= Decimal::ZERO || brackets.is_empty() {
         return Decimal::ZERO;
@@ -68,18 +68,42 @@ fn tax_on_gross_capital_annual(gross: Decimal, brackets: &[TaxBracket]) -> Decim
     tax
 }
 
+/// Devuelve el `gross` tal que `gross − tax(gross) == net_annual`, sin búsqueda binaria.
+///
+/// La función `tax(·)` es lineal por tramos: dentro del tramo i con tipo `r_i` y umbral
+/// inferior `prev_i`, `after(g) = g·(1 − r_i) + (r_i·prev_i − K_i)`, donde `K_i` es el impuesto
+/// acumulado de los tramos anteriores. Despejando `g = (net − r_i·prev_i + K_i) / (1 − r_i)` se
+/// obtiene un candidato; si cae dentro del tramo (≤ `ceiling_i`), es la solución; si no, se
+/// avanza al siguiente y se actualiza `K_i`.
 fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBracket], taxes_enabled: bool) -> Decimal {
     if !taxes_enabled || net_annual <= Decimal::ZERO {
         return net_annual.max(Decimal::ZERO);
     }
-    let mut lo = net_annual;
-    let mut hi = (net_annual * Decimal::from(4u32)).max(net_annual + Decimal::from(200_000u32));
-    for _ in 0..90 {
-        let mid = (lo + hi) / Decimal::from(2u32);
-        let after = mid - tax_on_gross_capital_annual(mid, brackets);
-        if after < net_annual { lo = mid; } else { hi = mid; }
+    let hundred = Decimal::from(100u32);
+    let mut prev_ceiling = Decimal::ZERO;
+    let mut k_cumulative = Decimal::ZERO;
+    for b in brackets {
+        let r = b.pct / hundred;
+        let denom = Decimal::ONE - r;
+        if denom <= Decimal::ZERO {
+            // Tipo del 100% (o superior): imposible recuperar `net` positivo; degeneración.
+            return prev_ceiling;
+        }
+        let gross = (net_annual + k_cumulative - r * prev_ceiling) / denom;
+        match b.up_to {
+            None => return gross,
+            Some(ceiling) => {
+                if gross <= ceiling {
+                    return gross;
+                }
+                let width = ceiling - prev_ceiling;
+                k_cumulative += r * width;
+                prev_ceiling = ceiling;
+            }
+        }
     }
-    hi
+    // Inalcanzable: `validate_tax_brackets` exige que el último tramo tenga `up_to = None`.
+    net_annual
 }
 
 fn compute_fire_target_nw(
@@ -194,6 +218,7 @@ pub struct ProjectionMilestone {
 #[derive(Debug, FromRow)]
 struct AssetEngineRow {
     id: Uuid,
+    name: String,
     current_value: Decimal,
     purchase_price: Option<Decimal>,
     is_liquid: bool,
@@ -218,10 +243,10 @@ struct LiabEngineRow {
 }
 
 #[derive(Debug, FromRow)]
-struct PlanningFlowProjRow {
-    scope: String,
-    expected_amount: Decimal,
-    due_date: Option<NaiveDate>,
+pub(crate) struct PlanningFlowProjRow {
+    pub scope: String,
+    pub expected_amount: Decimal,
+    pub due_date: Option<NaiveDate>,
 }
 
 /// Días civiles: reparto equitativo del total entre `ref_date` y `ref_date + 89` (90 días inclusive).
@@ -533,6 +558,16 @@ fn map_engine_err(e: EngineError) -> ApiError {
     ApiError::BadRequest(e.to_string())
 }
 
+pub(crate) struct BuiltProjection {
+    pub input: ProjectionInput,
+    pub monthly_net_regular: Decimal,
+    /// `(id, name)` por activo en el mismo orden que `input.assets` — evita un segundo SELECT.
+    pub asset_id_name: Vec<(Uuid, String)>,
+    /// Flujos de planificación crudos (scope + amount + due_date) — los reusa el handler para
+    /// calcular el baseline de milestones sin tener que volver a la BD.
+    pub planning_rows: Vec<PlanningFlowProjRow>,
+}
+
 pub(crate) async fn build_installation_projection_input(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -542,7 +577,7 @@ pub(crate) async fn build_installation_projection_input(
     horizon_months: u32,
     inflation_annual_percent: Decimal,
     fire_settings: Option<&FireSettings>,
-) -> Result<(ProjectionInput, Decimal), ApiError> {
+) -> Result<BuiltProjection, ApiError> {
     let (income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
     let monthly_net_regular = income_reg - expense_reg;
@@ -555,108 +590,52 @@ pub(crate) async fn build_installation_projection_input(
         annual_inflation_percent: inflation_annual_percent.max(Decimal::ZERO),
     });
 
-    let assets_rows: Vec<AssetEngineRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT id, current_value, purchase_price, is_liquid,
-                          expected_annual_return_percent
-                   FROM assets
-                   WHERE installation_id = $1
-                   ORDER BY sort_index ASC, name ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT id, current_value, purchase_price, is_liquid,
-                          expected_annual_return_percent
-                   FROM assets
-                   WHERE installation_id = $1 AND owner_user_id = $2
-                   ORDER BY sort_index ASC, name ASC"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let assets_scope = view.scope_where("");
+    let assets_sql = format!(
+        r#"SELECT id, name, current_value, purchase_price, is_liquid,
+                  expected_annual_return_percent
+           FROM assets
+           WHERE {assets_scope}
+           ORDER BY sort_index ASC, name ASC"#
+    );
+    let assets_rows: Vec<AssetEngineRow> = view
+        .bind_scope_as(sqlx::query_as(&assets_sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
-    let alloc_rows: Vec<AllocationRuleEngineRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT target_asset_id, kind, amount, cap_kind, cap_value
-                   FROM allocation_rules
-                   WHERE installation_id = $1 AND enabled = true
-                   ORDER BY priority ASC, id ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT target_asset_id, kind, amount, cap_kind, cap_value
-                   FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2 AND enabled = true
-                   ORDER BY priority ASC, id ASC"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let alloc_scope = view.scope_where("");
+    let alloc_sql = format!(
+        r#"SELECT target_asset_id, kind, amount, cap_kind, cap_value
+           FROM allocation_rules
+           WHERE {alloc_scope} AND enabled = true
+           ORDER BY priority ASC, id ASC"#
+    );
+    let alloc_rows: Vec<AllocationRuleEngineRow> = view
+        .bind_scope_as(sqlx::query_as(&alloc_sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
-    let liabs: Vec<LiabEngineRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
-                   FROM liabilities WHERE installation_id = $1"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
-                   FROM liabilities
-                   WHERE installation_id = $1 AND owner_user_id = $2"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let liab_scope = view.scope_where("");
+    let liab_sql = format!(
+        r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
+           FROM liabilities WHERE {liab_scope}"#
+    );
+    let liabs: Vec<LiabEngineRow> = view
+        .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
-    let planning_rows: Vec<PlanningFlowProjRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
-                   FROM planning_flows p
-                   JOIN categories c ON c.id = p.category_id
-                   WHERE p.installation_id = $1"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
-                   FROM planning_flows p
-                   JOIN categories c ON c.id = p.category_id
-                   WHERE p.installation_id = $1 AND p.owner_user_id = $2"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let plan_scope = view.scope_where("p");
+    let plan_sql = format!(
+        r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
+           FROM planning_flows p
+           JOIN categories c ON c.id = p.category_id
+           WHERE {plan_scope}"#
+    );
+    let planning_rows: Vec<PlanningFlowProjRow> = view
+        .bind_scope_as(sqlx::query_as(&plan_sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
     let flow_adj =
         planning_monthly_cash_adjustments_from_flows(today, horizon_months, &planning_rows);
@@ -667,14 +646,18 @@ pub(crate) async fn build_installation_projection_input(
         .map(|(a, b)| a + b)
         .collect();
 
+    let mut asset_id_name: Vec<(Uuid, String)> = Vec::with_capacity(assets_rows.len());
     let assets: Vec<SimAsset> = assets_rows
         .into_iter()
-        .map(|r| SimAsset {
-            id: r.id,
-            value: r.current_value,
-            purchase_price: r.purchase_price,
-            is_liquid: r.is_liquid,
-            expected_annual_return_percent: r.expected_annual_return_percent,
+        .map(|r| {
+            asset_id_name.push((r.id, r.name));
+            SimAsset {
+                id: r.id,
+                value: r.current_value,
+                purchase_price: r.purchase_price,
+                is_liquid: r.is_liquid,
+                expected_annual_return_percent: r.expected_annual_return_percent,
+            }
         })
         .collect();
 
@@ -739,7 +722,12 @@ pub(crate) async fn build_installation_projection_input(
         fire_target,
     };
 
-    Ok((input, monthly_net_regular))
+    Ok(BuiltProjection {
+        input,
+        monthly_net_regular,
+        asset_id_name,
+        planning_rows,
+    })
 }
 
 /// Monthly cash baseline for a view: `(income, expense, debt_service)`. Used by other handlers
@@ -755,28 +743,15 @@ pub(crate) async fn monthly_income_expense_debt_for_view(
     let (income_reg, _income_retirement, expense_reg, _expense_retirement, _expense_end_entries) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
 
-    let liabs: Vec<LiabEngineRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
-                   FROM liabilities WHERE installation_id = $1"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
-                   FROM liabilities
-                   WHERE installation_id = $1 AND owner_user_id = $2"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let liab_scope = view.scope_where("");
+    let liab_sql = format!(
+        r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
+           FROM liabilities WHERE {liab_scope}"#
+    );
+    let liabs: Vec<LiabEngineRow> = view
+        .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
     let debt_service: Decimal = liabs
         .iter()
@@ -796,7 +771,7 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
     view: LedgerView,
     today: NaiveDate,
 ) -> Result<HashMap<Uuid, Decimal>, ApiError> {
-    let (input, _) = build_installation_projection_input(
+    let built = build_installation_projection_input(
         pool,
         iid,
         session_user_id,
@@ -807,94 +782,15 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
         None,
     )
     .await?;
-    let nominals = first_month_per_asset_contribution_nominals(&input).map_err(map_engine_err)?;
-    Ok(input
+    let nominals =
+        first_month_per_asset_contribution_nominals(&built.input).map_err(map_engine_err)?;
+    Ok(built
+        .input
         .assets
         .iter()
         .zip(nominals.into_iter())
         .map(|(a, n)| (a.id, n))
         .collect())
-}
-
-/// Suma de precios de compra (>0) en activos incluidos en la vista de proyección.
-async fn sum_assets_purchase_basis(
-    pool: &sqlx::PgPool,
-    iid: Uuid,
-    session_user_id: Uuid,
-    view: LedgerView,
-) -> Result<Decimal, ApiError> {
-    let v: Decimal = match view {
-        LedgerView::Household => {
-            sqlx::query_scalar(
-                r#"SELECT COALESCE(SUM(purchase_price), 0)
-                   FROM assets
-                   WHERE installation_id = $1
-                     AND purchase_price IS NOT NULL
-                     AND purchase_price > 0"#,
-            )
-            .bind(iid)
-            .fetch_one(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_scalar(
-                r#"SELECT COALESCE(SUM(purchase_price), 0)
-                   FROM assets
-                   WHERE installation_id = $1
-                     AND owner_user_id = $2
-                     AND purchase_price IS NOT NULL
-                     AND purchase_price > 0"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_one(pool)
-            .await?
-        }
-    };
-    Ok(v)
-}
-
-/// Alinea la serie de capital aportado con la base de compras en BD si el motor devolviera un mes 0 menor (p. ej. binario antiguo).
-fn bump_contributed_series_with_purchase_basis(
-    contributed: &mut Vec<Decimal>,
-    basis_sum: Decimal,
-) {
-    if contributed.is_empty() || basis_sum <= Decimal::ZERO {
-        return;
-    }
-    let first = contributed[0];
-    let delta = basis_sum - first;
-    if delta > Decimal::ZERO {
-        for cc in contributed.iter_mut() {
-            *cc += delta;
-        }
-    }
-}
-
-/// Runs the dossier-style projection for the installation ledger view.
-pub(crate) async fn compute_installation_projection(
-    pool: &sqlx::PgPool,
-    iid: Uuid,
-    session_user_id: Uuid,
-    view: LedgerView,
-    today: NaiveDate,
-    horizon_months: u32,
-    inflation_annual_percent: Decimal,
-    fire_settings: Option<&FireSettings>,
-) -> Result<(ProjectionOutput, Decimal, ProjectionInput), ApiError> {
-    let (input, monthly_net_regular) = build_installation_projection_input(
-        pool,
-        iid,
-        session_user_id,
-        view,
-        today,
-        horizon_months,
-        inflation_annual_percent,
-        fire_settings,
-    )
-    .await?;
-    let out = project_net_worth_series(&input).map_err(map_engine_err)?;
-    Ok((out, monthly_net_regular, input))
 }
 
 #[utoipa::path(
@@ -919,43 +815,47 @@ pub async fn get_projection_series(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    purge_expired_liabilities(&state.pool, iid).await?;
-    let today = installation_naive_today(&state.pool, iid).await?;
     let view = resolve_ledger_view(&q);
 
-    let inst_row: (
+    // 1 query consolidada (calendar_tz + inflación + show_age_mode + fire_settings) en lugar
+    // de dos round-trips a `installation`. Las DOB del usuario y del primer miembro del hogar
+    // se piden en paralelo con `try_join!`.
+    type InstallationRow = (
+        String, // calendar_tz
         Decimal,
         String,
         Option<sqlx::types::Json<FireSettings>>,
-    ) = sqlx::query_as(
-        r#"SELECT annual_inflation_assumption_percent, show_age_mode, fire_settings
+    );
+    let inst_q = sqlx::query_as::<_, InstallationRow>(
+        r#"SELECT calendar_tz,
+                  annual_inflation_assumption_percent,
+                  show_age_mode,
+                  fire_settings
            FROM installation WHERE id = $1"#,
     )
     .bind(iid)
-    .fetch_one(&state.pool)
-    .await?;
-
-    let inflation_annual_percent = inst_row.0.max(Decimal::ZERO);
-    let show_age_mode = inst_row.1;
-    let fire_settings = resolve_fire_settings(inst_row.2.map(|j| j.0));
-
-    let session_birth: Option<NaiveDate> = sqlx::query_scalar(
+    .fetch_one(&state.pool);
+    let session_birth_q = sqlx::query_scalar::<_, Option<NaiveDate>>(
         r#"SELECT birth_date FROM users WHERE id = $1"#,
     )
     .bind(user.id.0)
-    .fetch_one(&state.pool)
-    .await?;
-
-    // Primera DOB en personas del hogar (primario primero), si existe.
-    let household_member_birth: Option<NaiveDate> = sqlx::query_scalar(
+    .fetch_one(&state.pool);
+    let household_birth_q = sqlx::query_scalar::<_, NaiveDate>(
         r#"SELECT birth_date FROM persons
            WHERE installation_id = $1 AND birth_date IS NOT NULL
            ORDER BY is_primary DESC, sort_index ASC
            LIMIT 1"#,
     )
     .bind(iid)
-    .fetch_optional(&state.pool)
-    .await?;
+    .fetch_optional(&state.pool);
+
+    let (inst_row, session_birth, household_member_birth) =
+        tokio::try_join!(inst_q, session_birth_q, household_birth_q)?;
+
+    let today = naive_date_in_calendar_tz(&inst_row.0)?;
+    let inflation_annual_percent = inst_row.1.max(Decimal::ZERO);
+    let show_age_mode = inst_row.2;
+    let fire_settings = resolve_fire_settings(inst_row.3.map(|j| j.0));
 
     let resolved_birth_for_demographics = session_birth.or(household_member_birth);
 
@@ -971,7 +871,7 @@ pub async fn get_projection_series(
 
     let horizon_years = months / 12;
 
-    let (mut output, monthly_delta_assumption, projection_input) = compute_installation_projection(
+    let built = build_installation_projection_input(
         &state.pool,
         iid,
         user.id.0,
@@ -982,12 +882,31 @@ pub async fn get_projection_series(
         Some(&fire_settings),
     )
     .await?;
-    let compound_outpaces_true_savings_month_index =
-        compound_outpaces_true_savings_month(&projection_input, monthly_delta_assumption)
-            .map_err(map_engine_err)?;
+    let BuiltProjection {
+        input: projection_input,
+        monthly_net_regular: monthly_delta_assumption,
+        asset_id_name,
+        planning_rows,
+    } = built;
 
-    let purchase_basis = sum_assets_purchase_basis(&state.pool, iid, user.id.0, view).await?;
-    bump_contributed_series_with_purchase_basis(&mut output.contributed_capital, purchase_basis);
+    // Las dos simulaciones (principal + marker «compound supera ahorro») son CPU-bound y se
+    // ejecutan en el pool blocking de Tokio. `tokio::join!` arranca ambas en paralelo, así que
+    // un horizonte de 70 años con N activos no bloquea el reactor y aprovecha 2 cores.
+    let main_input = projection_input.clone();
+    let marker_input = projection_input.clone();
+    let assumption = monthly_delta_assumption;
+    let (main_join, marker_join) = tokio::join!(
+        tokio::task::spawn_blocking(move || project_net_worth_series(&main_input)),
+        tokio::task::spawn_blocking(move || {
+            compound_outpaces_true_savings_month(&marker_input, assumption)
+        }),
+    );
+    let output = main_join
+        .map_err(|e| ApiError::BadRequest(format!("projection task panic: {e}")))?
+        .map_err(map_engine_err)?;
+    let compound_outpaces_true_savings_month_index = marker_join
+        .map_err(|e| ApiError::BadRequest(format!("compound marker task panic: {e}")))?
+        .map_err(map_engine_err)?;
 
     let starting_net_worth = output
         .net_worth
@@ -1007,61 +926,18 @@ pub async fn get_projection_series(
         })
         .collect();
 
-    #[derive(sqlx::FromRow)]
-    struct AssetNameRow {
-        id: Uuid,
-        name: String,
-    }
-    let asset_name_rows: Vec<AssetNameRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as("SELECT id, name FROM assets WHERE installation_id = $1 ORDER BY sort_index ASC, name ASC")
-                .bind(iid)
-                .fetch_all(&state.pool)
-                .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as("SELECT id, name FROM assets WHERE installation_id = $1 AND owner_user_id = $2 ORDER BY sort_index ASC, name ASC")
-                .bind(iid)
-                .bind(user.id.0)
-                .fetch_all(&state.pool)
-                .await?
-        }
-    };
-    let asset_series: Vec<AssetSeries> = asset_name_rows
+    // `asset_id_name` y `planning_rows` se reusan de `build_installation_projection_input` —
+    // antes el handler hacía 2 SELECTs adicionales redundantes contra `assets` y `planning_flows`.
+    let asset_series: Vec<AssetSeries> = asset_id_name
         .iter()
         .zip(output.per_asset_series.iter())
-        .map(|(row, series)| AssetSeries {
-            asset_id: row.id,
-            asset_name: row.name.clone(),
+        .map(|((id, name), series)| AssetSeries {
+            asset_id: *id,
+            asset_name: name.clone(),
             values: series.iter().map(|v| v.to_string()).collect(),
         })
         .collect();
 
-    let planning_rows: Vec<PlanningFlowProjRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
-                   FROM planning_flows p
-                   JOIN categories c ON c.id = p.category_id
-                   WHERE p.installation_id = $1"#,
-            )
-            .bind(iid)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
-                   FROM planning_flows p
-                   JOIN categories c ON c.id = p.category_id
-                   WHERE p.installation_id = $1 AND p.owner_user_id = $2"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
     let milestones = projection_unique_reached_milestones(
         &points,
         today,
@@ -1074,14 +950,11 @@ pub async fn get_projection_series(
     let (fire_target_series, jubilacion_month_index, jubilacion_target_net_worth) =
         match fire_target_ref {
             Some(ft) if ft.base_amount > Decimal::ZERO => {
-                let inf_factor =
-                    Decimal::ONE + (ft.annual_inflation_percent.max(Decimal::ZERO) / Decimal::from(100u32));
                 let mut series = Vec::with_capacity(points.len());
                 let mut crossed_at: Option<u32> = None;
                 for p in &points {
-                    let years =
-                        Decimal::from(p.month_index) / Decimal::from(12u32);
-                    let target = ft.base_amount * inf_factor.powd(years);
+                    let target = fire_target_at_month_index(Some(ft), p.month_index)
+                        .unwrap_or(Decimal::ZERO);
                     if crossed_at.is_none() && target > Decimal::ZERO && p.net_worth >= target {
                         crossed_at = Some(p.month_index);
                     }
@@ -1340,5 +1213,79 @@ mod milestone_tests {
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(200)).unwrap();
         assert!(month.is_some());
         assert!(month.unwrap() >= 1);
+    }
+}
+
+#[cfg(test)]
+mod gross_up_tests {
+    use super::*;
+
+    fn es_brackets() -> Vec<TaxBracket> {
+        vec![
+            TaxBracket { up_to: Some(Decimal::from(6_000u32)),   pct: Decimal::from(19u32) },
+            TaxBracket { up_to: Some(Decimal::from(50_000u32)),  pct: Decimal::from(21u32) },
+            TaxBracket { up_to: Some(Decimal::from(200_000u32)), pct: Decimal::from(23u32) },
+            TaxBracket { up_to: Some(Decimal::from(300_000u32)), pct: Decimal::from(27u32) },
+            TaxBracket { up_to: None,                            pct: Decimal::from(30u32) },
+        ]
+    }
+
+    /// Versión binaria de referencia (la que tenía el handler antes de Fase 2.4). Sirve para
+    /// confirmar que la forma cerrada es numéricamente equivalente a ≤ 0.01 €.
+    fn gross_up_binary_reference(net_annual: Decimal, brackets: &[TaxBracket]) -> Decimal {
+        if net_annual <= Decimal::ZERO { return net_annual.max(Decimal::ZERO); }
+        let mut lo = net_annual;
+        let mut hi = (net_annual * Decimal::from(4u32))
+            .max(net_annual + Decimal::from(200_000u32));
+        for _ in 0..90 {
+            let mid = (lo + hi) / Decimal::from(2u32);
+            let after = mid - tax_on_gross_capital_annual(mid, brackets);
+            if after < net_annual { lo = mid; } else { hi = mid; }
+        }
+        hi
+    }
+
+    #[test]
+    fn closed_form_matches_binary_search_across_es_brackets() {
+        let brackets = es_brackets();
+        let nets = [
+            Decimal::from(1_000u32),
+            Decimal::from(5_000u32),
+            Decimal::from(20_000u32),
+            Decimal::from(40_000u32),
+            Decimal::from(80_000u32),
+            Decimal::from(150_000u32),
+            Decimal::from(250_000u32),
+            Decimal::from(400_000u32),
+            Decimal::from(1_000_000u32),
+        ];
+        let tol = Decimal::new(1, 2); // 0.01 €
+        for net in nets {
+            let g_closed = gross_up_net_annual_fire(net, &brackets, true);
+            let g_binary = gross_up_binary_reference(net, &brackets);
+            let diff = (g_closed - g_binary).abs();
+            assert!(
+                diff <= tol,
+                "diff {diff} excede tolerancia para net={net}: closed={g_closed}, binary={g_binary}"
+            );
+            // Y verifica que el gross resultante deja después-de-tax ≈ net.
+            let after = g_closed - tax_on_gross_capital_annual(g_closed, &brackets);
+            assert!(
+                (after - net).abs() <= tol,
+                "after-tax({g_closed}) = {after} no recupera net={net}"
+            );
+        }
+    }
+
+    #[test]
+    fn closed_form_handles_taxes_disabled_and_zero_net() {
+        let brackets = es_brackets();
+        assert_eq!(gross_up_net_annual_fire(Decimal::from(50_000u32), &brackets, false), Decimal::from(50_000u32));
+        assert_eq!(gross_up_net_annual_fire(Decimal::ZERO, &brackets, true), Decimal::ZERO);
+        assert_eq!(
+            gross_up_net_annual_fire(-Decimal::from(100u32), &brackets, true),
+            Decimal::ZERO,
+            "net negativo se clipea a 0"
+        );
     }
 }

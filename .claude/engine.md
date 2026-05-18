@@ -10,6 +10,13 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
 // Returns nominal contributions routed to each asset in the FIRST simulated month only
 pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> Result<Vec<Decimal>, EngineError>
+
+// Único helper para evaluar el target FIRE inflado en un `month_index` dado (0 = punto de
+// partida, 12 = un año después). Lo consumen tanto el motor (para `fire_reached`) como el
+// handler (para construir `fire_target_series`). Antes había una fórmula duplicada — el motor
+// usaba `years = (k-1)/12` y el handler `years = month_index/12`, lo que generaba un off-by-one
+// de un mes entre cuándo se disparaba la jubilación y la serie pintada en el chart.
+pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal>
 ```
 
 ## ProjectionInput fields
@@ -95,3 +102,10 @@ pub struct ProjectionOutput {
 - Horizon derivation: `projection_target_age` → `(target_age - user_age_years) * 12`; fallback 240 months (20 years). `horizon_basis` field reports reason: `mac_target_age` | `mac_fallback_no_demographics` | `months_override`
 - Response includes UI-layer fields computed in the handler (not in engine): `milestones` (next 3 net-worth thresholds), `compound_outpaces_true_savings_month_index`, `anchor_date_ymd`, `show_age_mode`, `use_age_on_x_axis`, `viewer_birth_date`
 - **Retirement drawdown**: `RetirementInput { target_age, birth, horizon_months }` passed to `build_installation_projection_input`. The handler computes `retirement_start_month` from `projection_target_age` + birth date. Income drops to `income_retirement_monthly` (sum of `budget_entries` where `persists_after_retirement = true`) from that month onward. `retirement_monthly_withdrawal` is always 0 — income reduction alone drives the portfolio drain. FIRE target for the UI is computed by the frontend: `max(0, expense - income_retirement) × 12 / SWR` (annual_expense mode) or `max(0, income - income_retirement) × 12 / SWR` (current_income mode).
+
+## Performance notes (handler ↔ engine boundary)
+- `project_net_worth_series` is CPU-bound (840 months × N assets × `Decimal::powd`). The handler wraps it in `tokio::task::spawn_blocking` to avoid blocking the reactor.
+- `compound_outpaces_true_savings_month` is a **second projection pass** with `planning_adj = 0` and `liability.monthly_payment = 0` so the marker compares `market_growth` against a clean `income − expense` baseline. Eliminating the double pass would change the indicator's semantics; instead the handler runs both projections in parallel with `tokio::join!(spawn_blocking, spawn_blocking)`.
+- The gross-up of net-annual FIRE through tax brackets uses a **closed-form per-bracket solver** (no binary search). `gross = (net − r·prev_ceiling + K) / (1 − r)`, advancing one bracket at a time until the candidate fits. Old code used 90 iterations of binary search on `Decimal`.
+- `build_installation_projection_input` returns a `BuiltProjection` struct that carries `input`, `monthly_net_regular`, `asset_id_name` (Vec<(Uuid, String)>) and `planning_rows`. The handler reuses those instead of issuing a second `SELECT id, name FROM assets` and a second `SELECT planning_flows` (deleted with Fase 2.3).
+- Initial queries in `get_projection_series` (installation row, user birth_date, household birth_date) run concurrently via `tokio::try_join!`.

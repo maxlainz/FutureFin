@@ -43,15 +43,6 @@ struct PendingUserRow {
     birth_date: Option<NaiveDate>,
 }
 
-fn insert_conflict(err: sqlx::Error) -> ApiError {
-    if let sqlx::Error::Database(ref db) = err {
-        if db.code().as_deref() == Some("23505") {
-            return ApiError::Conflict;
-        }
-    }
-    ApiError::Db(err)
-}
-
 #[utoipa::path(
     get,
     path = "/v1/installation/pending-users",
@@ -168,8 +159,7 @@ pub async fn approve_pending_user(
     .bind(target_user_id)
     .bind(role.as_str())
     .execute(&state.pool)
-    .await
-    .map_err(insert_conflict)?;
+    .await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

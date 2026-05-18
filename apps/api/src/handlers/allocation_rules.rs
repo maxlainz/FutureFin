@@ -334,33 +334,19 @@ pub async fn list_allocation_rules(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    let rows: Vec<RuleRow> = match q.resolve() {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
-                          cap_kind, cap_value, enabled, notes
-                   FROM allocation_rules
-                   WHERE installation_id = $1
-                   ORDER BY priority ASC, id ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
-                          cap_kind, cap_value, enabled, notes
-                   FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2
-                   ORDER BY priority ASC, id ASC"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let view = q.resolve();
+    let scope = view.scope_where("");
+    let sql = format!(
+        r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
+                  cap_kind, cap_value, enabled, notes
+           FROM allocation_rules
+           WHERE {scope}
+           ORDER BY priority ASC, id ASC"#
+    );
+    let rows: Vec<RuleRow> = view
+        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
+        .fetch_all(&state.pool)
+        .await?;
 
     Ok(Json(rows.into_iter().map(row_to_response).collect()))
 }
@@ -716,27 +702,12 @@ pub async fn reorder_allocation_rules(
 
     // Load all current rules in this scope; the request must list exactly the same set.
     let view = q.resolve();
-    let current: Vec<Uuid> = match view {
-        LedgerView::Household => {
-            sqlx::query_scalar(
-                r#"SELECT id FROM allocation_rules
-                   WHERE installation_id = $1"#,
-            )
-            .bind(iid)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_scalar(
-                r#"SELECT id FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let scope = view.scope_where("");
+    let current_sql = format!("SELECT id FROM allocation_rules WHERE {scope}");
+    let current: Vec<Uuid> = view
+        .bind_scope_scalar(sqlx::query_scalar(&current_sql), iid, user.id.0)
+        .fetch_all(&state.pool)
+        .await?;
     let current_set: std::collections::HashSet<Uuid> = current.iter().copied().collect();
     if current_set.len() != body.ids.len() || !body.ids.iter().all(|id| current_set.contains(id)) {
         return Err(ApiError::BadRequest(
@@ -773,33 +744,17 @@ pub async fn reorder_allocation_rules(
     }
     tx.commit().await?;
 
-    let rows: Vec<RuleRow> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
-                          cap_kind, cap_value, enabled, notes
-                   FROM allocation_rules
-                   WHERE installation_id = $1
-                   ORDER BY priority ASC, id ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
-                          cap_kind, cap_value, enabled, notes
-                   FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2
-                   ORDER BY priority ASC, id ASC"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let rows_sql = format!(
+        r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
+                  cap_kind, cap_value, enabled, notes
+           FROM allocation_rules
+           WHERE {scope}
+           ORDER BY priority ASC, id ASC"#
+    );
+    let rows: Vec<RuleRow> = view
+        .bind_scope_as(sqlx::query_as(&rows_sql), iid, user.id.0)
+        .fetch_all(&state.pool)
+        .await?;
 
     Ok(Json(rows.into_iter().map(row_to_response).collect()))
 }

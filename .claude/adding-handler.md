@@ -105,5 +105,27 @@ touch apps/api/migrations/$(date +%Y%m%d%H%M%S)_add_foo.sql
 ## Key patterns
 - All monetary `Decimal` fields need `#[serde(with = "rust_decimal::serde::str")]` for JSON serialization as string
 - Optional decimals: `#[serde(with = "rust_decimal::serde::str_option")]`
-- `?view=mine` support: add `Query(q): Query<LedgerViewQuery>`, then `let view = q.resolve()`, filter on `owner_user_id` in SQL
-- Never return `sqlx::Error` directly — it's covered by `impl From<sqlx::Error> for ApiError`
+- `?view=mine` support: add `Query(q): Query<LedgerViewQuery>`, then `let view = q.resolve()`, then build SQL via `view.scope_where("alias")` + bind via `view.bind_scope_as(query_as(&sql), iid, user.id.0)`. **Never** hand-write a `match view { Household => sql_a, Mine => sql_b }` block — the two branches drift (we already had a bug where the `Mine` branch had `$3` and `$2` swapped).
+- Never return `sqlx::Error` directly — `impl From<sqlx::Error> for ApiError` maps 23505 → 409 and 23503 → 400 automatically. Just `?` it.
+- For long horizons / large datasets in CPU-bound work, wrap in `tokio::task::spawn_blocking` so the Tokio runtime stays responsive.
+- Add an integration test in `apps/api/tests/{topic}.rs` using `common::TestApp::spawn()` (see [`.claude/tests.md`](tests.md)). One test per surprising behavior is plenty.
+
+## 6. Add a regression test
+Drop a file in `apps/api/tests/foo.rs` that exercises your handler end-to-end:
+```rust
+mod common;
+use common::TestApp;
+
+#[tokio::test]
+async fn create_foo_succeeds() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let resp = app.post_json_with_cookie(
+        "/v1/foo",
+        serde_json::json!({ "amount": "1234" }),
+        &owner.cookie,
+    ).await;
+    assert_eq!(resp.status, http::StatusCode::CREATED);
+}
+```
+Run with `TEST_DATABASE_URL=postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test cargo test --workspace`.

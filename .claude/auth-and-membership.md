@@ -38,7 +38,11 @@ require_installation_member(pool, user_id) -> Result<(Uuid, MembershipRole), Api
 bootstrap_installation_as_owner_if_empty(tx, user_id) -> Result<(), ApiError>
 singleton_installation_id(pool) -> Result<Option<Uuid>, ApiError>
 installation_naive_today(pool, installation_id) -> Result<NaiveDate, ApiError>
+naive_date_in_calendar_tz(tz_name) -> Result<NaiveDate, ApiError>  // standalone version of "today" — useful when you already have calendar_tz from a joined query
 
 // handlers/membership.rs
 role_can_write(role: &str) -> bool  // owner | member
 ```
+
+## Duplicate username / category / membership
+Don't write per-handler 23505 detection. `impl From<sqlx::Error> for ApiError` (`error.rs`) returns `ApiError::Conflict` (409) for any unique-violation that bubbles up from an `INSERT`. Old code had four hand-rolled mappers (`map_unique_violation`, `insert_conflict`, `is_unique_violation`, `db_conflict`) — all deleted.

@@ -25,7 +25,7 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
 
 **allocation_rules**: `id`, `installation_id`, `owner_user_id`, `target_asset_id (FK assets ON DELETE CASCADE)`, `priority (int)`, `kind ('fixed'|'percent'|'remainder')`, `amount (decimal nullable; NULL para 'remainder')`, `cap_kind ('amount'|'months_expense'|'income_multiple' nullable)`, `cap_value (decimal nullable)`, `enabled (bool)`, `notes`, `created_at`. Cascade rules: el engine evalúa las reglas en orden ascendente de `priority` sobre el sobrante mensual (income − expense − debt_service). Cada regla aporta a su `target_asset_id` hasta su `cap` opcional; lo que queda fluye a la siguiente. Constraints: `kind='remainder'` ⇒ `amount IS NULL`; `cap_kind`/`cap_value` ambos NULL o ambos NOT NULL.
 
-**liabilities**: `id`, `installation_id`, `owner_user_id`, `category_id`, `label`, `type_tag`, `principal (decimal)`, `apr_percent (decimal nullable)`, `payment_amount (decimal nullable)`, `payment_frequency ('monthly'|'weekly' nullable)`, `payment_end_date (date nullable)`, `principal_derived_from_plan (bool)`, `notes`, `sort_index`
+**liabilities**: `id`, `installation_id`, `owner_user_id`, `category_id`, `label`, `type_tag`, `principal (decimal)`, `apr_percent (decimal nullable)`, `payment_amount (decimal nullable)`, `payment_frequency ('monthly'|'weekly' nullable)`, `payment_end_date (date nullable)`, `principal_derived_from_plan (bool)`, `notes`, `sort_index`. **Expired rows persist** in the table — read endpoints filter them out via `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)`. There is no scheduled purge; if you need to recover an expired row, edit `payment_end_date` to a future date.
 
 **budget_entries**: `id`, `installation_id`, `owner_user_id`, `category_id`, `scope ('income'|'expense')`, `amount (decimal, monthly)`, `notes`, `sort_index`, `persists_after_retirement (bool, default false)` — income entries only: whether this income continues after `projection_target_age` (used to compute `income_retirement_monthly` in projection)
 
@@ -36,7 +36,6 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
 {
   "fire_number_mode": "annual_expense|current_income|manual",
   "fire_number_manual_amount": "decimal string or null",
-  "fire_number_expense_adjustment_pct": "decimal string or null",
   "swr_pct": "3.5",
   "taxes_enabled": true,
   "tax_brackets": [
@@ -50,6 +49,8 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
 ```
 Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF). Last bracket must have `up_to: null`.
 `fire_settings` is nullable; when null, defaults apply on read (handler calls `resolve_fire_settings`).
+
+**Deserialization is strict**: `fire_number_mode` only accepts `manual | annual_expense | current_income`. The legacy alias `annual_expense_adjusted` is mapped to `annual_expense` for backwards-compat with old backups, but any other value returns 422 (was silently coerced to default before May 2026). The field `fire_number_expense_adjustment_pct` was removed — it had no consumer.
 
 ## Key invariants
 - `Decimal` for all monetary/percentage columns — never `f64` in schema or Rust code

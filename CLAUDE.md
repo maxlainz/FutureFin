@@ -14,6 +14,8 @@ Extended reference — read these before working on the relevant area:
 | [`.claude/auth-and-membership.md`](.claude/auth-and-membership.md) | Auth flow, roles, cookie, pending users |
 | [`.claude/env-and-config.md`](.claude/env-and-config.md) | All env vars, `.env` loading order, Vite config |
 | [`.claude/adding-handler.md`](.claude/adding-handler.md) | Step-by-step pattern for adding a new API handler |
+| [`.claude/frontend-structure.md`](.claude/frontend-structure.md) | SPA layout post-refactor (lib/, api/, components/, views/, auth/) and where to put what |
+| [`.claude/tests.md`](.claude/tests.md) | How to run + write backend integration tests (Postgres schemas) and frontend Vitest tests |
 
 **Keep these files up to date** whenever the corresponding area changes (routes, schema, env vars, etc.).
 
@@ -74,9 +76,17 @@ curl -sf http://127.0.0.1:8080/v1/health  # smoke test
 ### Rust
 ```bash
 cd apps/api && cargo build
-cd apps/api && cargo test
-cargo test -p futurefin-engine           # engine unit tests only
+cargo test -p futurefin-engine           # engine unit tests only (no DB)
 cargo test -p futurefin-engine -- <name> # single test
+
+# Integration tests (require a running Postgres):
+# 1) Start a dedicated test DB once (port 5433 to avoid clashing with dev):
+docker run -d --name ff-test-db \
+  -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=futurefin_test \
+  -e POSTGRES_DB=futurefin_test -p 5433:5432 postgres:16.4-alpine
+# 2) Run the full workspace test suite (each test gets its own schema, see .claude/tests.md):
+TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
+  cargo test --workspace
 ```
 
 ### Frontend
@@ -84,6 +94,7 @@ cargo test -p futurefin-engine -- <name> # single test
 npm run typecheck:web   # tsc --noEmit
 npm run lint:web        # eslint
 npm run build:web       # Vite production build → apps/web/dist/
+npm test --workspace futurefin-web   # Vitest run (pure-function tests)
 ```
 
 ### Production deploy
@@ -103,18 +114,19 @@ npm workspace:   apps/web (futurefin-web)
 
 **crates/engine** — pure projection math (`project_net_worth_series`, `first_month_per_asset_contribution_nominals`). No I/O, no DB; only `Decimal` arithmetic. Has unit tests.
 
-**apps/api** — Axum HTTP server. Entry point: `main.rs`. Key modules:
-- `routes/mod.rs` — full route map; all routes under `/v1/` except `/health` and `/openapi.json`
+**apps/api** — Axum HTTP server. Entry point: `main.rs` (bin), with shared crate modules in `lib.rs`. Key modules:
+- `routes/mod.rs` — full route map; all routes under `/v1/` except `/health` and `/openapi.json`. `DefaultBodyLimit` caps requests at 1 MB globally, 16 MB on `/backup/user-import*`.
 - `state.rs` — `AppState` (pool, cookie_secure, session_ttl_days, version)
-- `error.rs` — `ApiError` → `(StatusCode, JSON {error, message})` via `IntoResponse`
+- `error.rs` — `ApiError` → `(StatusCode, JSON {error, message})` via `IntoResponse`. `impl From<sqlx::Error>` detects SQLSTATE 23505 → `Conflict` (409), 23503 → `BadRequest`; handlers can just `?` any `sqlx::Error` without manual mapping.
 - `auth/` — password hashing (Argon2id)
 - `handlers/session.rs` — `require_session_user` reads cookie `ff_session` → validates against `sessions` table
 - `handlers/installation.rs` — singleton installation, FIRE settings, `require_installation_member`
 - `handlers/membership.rs` — roles: `owner`, `member`, `viewer`; `role_can_write` used by handlers
-- `handlers/person_view.rs` — `LedgerView` enum (`Household` / `Mine`); `?view=mine` query param scopes data to `owner_user_id`
-- `db.rs` — pool setup + migration runner with checksum-repair logic for known idempotent migrations
+- `handlers/person_view.rs` — `LedgerView` enum (`Household` / `Mine`) **plus helpers** `scope_where(table_alias)`, `next_arg_index()`, `bind_scope_as`, `bind_scope_scalar`. Use them instead of duplicating `match view { Household | Mine }` blocks — they enforce consistent placeholder ordering across both branches.
+- `db.rs` — pool setup (`max=10, min=1, idle_timeout=10min, max_lifetime=30min`) + `sqlx::migrate!` runner. No more auto-repair loop; if a checksum mismatches in dev, fix manually via `DELETE FROM _sqlx_migrations WHERE version = X` and rerun.
+- **`tests/`** — integration tests against a real Postgres (schema-isolated per test). See [`.claude/tests.md`](.claude/tests.md).
 
-**apps/web** — single `App.tsx` (monolithic SPA, all types and components in one file). React 19 + TypeScript + Vite.
+**apps/web** — React 19 + TypeScript + Vite. `App.tsx` is the composition root (auth gate + global state + route → view dispatch). All views, components, helpers and types live in separate modules — see [`.claude/frontend-structure.md`](.claude/frontend-structure.md).
 
 ### Key design decisions
 
@@ -126,14 +138,16 @@ npm workspace:   apps/web (futurefin-web)
 
 **Dual-port dev**: Vite `:8080`, API `:8081` (set in `.env.example`). `vite.config.ts` reads `FUTUREFIN_API_PORT` and `WEB_DEV_PORT` from repo-root `.env`. Docker image serves both on `:8080` via `WEB_STATIC_ROOT=/app/web`.
 
-**View scoping**: all ledger endpoints accept `?view=mine` to filter by `owner_user_id = current_user`. Default is `household` (full installation scope). This is a client-side filter, not an authorization boundary.
+**View scoping**: all ledger endpoints accept `?view=mine` to filter by `owner_user_id = current_user`. Default is `household` (full installation scope). This is a client-side filter, not an authorization boundary. Handlers must use `LedgerView::scope_where` + `bind_scope_as/scalar` so the two branches stay in sync.
+
+**Reads never mutate**: liabilities with `payment_end_date < today` are **filtered** out of `GET /v1/liabilities`, `/summary`, `/budget` (derived lines), `/assets`, `/projection` via `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)`. They are **not** physically deleted. The legacy `purge_expired_liabilities` function was removed in May 2026 — GET handlers were silently issuing `DELETE` statements, violating HTTP semantics and impeding caching.
 
 **OpenAPI**: generated via `utoipa`, served at `GET /openapi.json`. All handler structs annotated with `#[utoipa::path]`.
 
 **CORS**: `CORS_ORIGINS` env var (comma-separated). Not required — defaults to localhost origins. Set explicitly only for cross-origin API access.
 
 ### Migrations
-SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup via `db::run_migrations`. Filenames: `YYYYMMDDHHMMSS_description.sql`. The migration runner has a checksum-repair loop for versions listed in `IDEMPOTENT_MIGRATION_REPAIR_VERSIONS` in `db.rs`.
+SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup via `db::run_migrations`. Filenames: `YYYYMMDDHHMMSS_description.sql`. No auto-repair: a checksum mismatch fails loud and must be resolved by hand (e.g. `psql -c "DELETE FROM _sqlx_migrations WHERE version = X"` if the change is genuinely idempotent).
 
 ## UI conventions
 

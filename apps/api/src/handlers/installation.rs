@@ -31,15 +31,19 @@ impl<'de> Deserialize<'de> for FireNumberMode {
     where
         D: Deserializer<'de>,
     {
+        use serde::de::Error;
         let s = String::deserialize(deserializer)?;
-        Ok(match s.as_str() {
-            "manual" => Self::Manual,
-            "annual_expense" => Self::AnnualExpense,
-            // Migración: ya no expuesto en API/UI.
-            "annual_expense_adjusted" => Self::AnnualExpense,
-            "current_income" => Self::CurrentIncome,
-            _ => Self::AnnualExpense,
-        })
+        match s.as_str() {
+            "manual" => Ok(Self::Manual),
+            "annual_expense" => Ok(Self::AnnualExpense),
+            // Alias preservado para importar backups antiguos cuyo schema usaba este modo.
+            "annual_expense_adjusted" => Ok(Self::AnnualExpense),
+            "current_income" => Ok(Self::CurrentIncome),
+            _ => Err(D::Error::unknown_variant(
+                &s,
+                &["manual", "annual_expense", "current_income"],
+            )),
+        }
     }
 }
 
@@ -60,9 +64,6 @@ pub struct FireSettings {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub fire_number_manual_amount: Option<Decimal>,
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub fire_number_expense_adjustment_pct: Option<Decimal>,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub swr_pct: Decimal,
@@ -80,7 +81,6 @@ pub(crate) fn default_fire_settings() -> FireSettings {
     FireSettings {
         fire_number_mode: FireNumberMode::AnnualExpense,
         fire_number_manual_amount: None,
-        fire_number_expense_adjustment_pct: None,
         swr_pct: Decimal::new(35, 1),
         taxes_enabled: true,
         tax_brackets: default_es_tax_brackets(),
@@ -357,13 +357,6 @@ pub(crate) fn naive_date_in_calendar_tz(tz_name: &str) -> Result<NaiveDate, ApiE
     Ok(Utc::now().with_timezone(&tz).date_naive())
 }
 
-fn is_unique_violation(err: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(ref db) = err {
-        return db.code().as_deref() == Some("23505");
-    }
-    false
-}
-
 /// Singleton installation row id, if one exists.
 pub async fn singleton_installation_id(pool: &PgPool) -> Result<Option<Uuid>, ApiError> {
     let id: Option<Uuid> =
@@ -391,7 +384,7 @@ pub(crate) async fn bootstrap_installation_as_owner_if_empty(
         return Ok(());
     }
 
-    let iid: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
+    let iid: Uuid = sqlx::query_scalar(
         r#"INSERT INTO installation (
                base_currency,
                show_age_mode
@@ -400,15 +393,7 @@ pub(crate) async fn bootstrap_installation_as_owner_if_empty(
            RETURNING id"#,
     )
     .fetch_one(&mut **tx)
-    .await;
-
-    let iid = match iid {
-        Ok(id) => id,
-        Err(e) if is_unique_violation(&e) => {
-            return Err(ApiError::Conflict);
-        }
-        Err(e) => return Err(ApiError::Db(e)),
-    };
+    .await?;
 
     sqlx::query(
         r#"INSERT INTO installation_memberships (installation_id, user_id, role)
@@ -663,7 +648,7 @@ pub async fn setup_installation(
         return Err(ApiError::Conflict);
     }
 
-    let iid: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
+    let iid: Uuid = sqlx::query_scalar(
         r#"INSERT INTO installation (
                base_currency,
                show_age_mode,
@@ -676,15 +661,7 @@ pub async fn setup_installation(
     .bind(&body.show_age_mode)
     .bind(&calendar_tz)
     .fetch_one(&mut *tx)
-    .await;
-
-    let iid = match iid {
-        Ok(id) => id,
-        Err(e) if is_unique_violation(&e) => {
-            return Err(ApiError::Conflict);
-        }
-        Err(e) => return Err(ApiError::Db(e)),
-    };
+    .await?;
 
     sqlx::query(
         r#"INSERT INTO installation_memberships (installation_id, user_id, role)

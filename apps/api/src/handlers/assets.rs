@@ -1,6 +1,5 @@
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
-use crate::handlers::liabilities::purge_expired_liabilities;
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::projection::{
@@ -239,35 +238,19 @@ async fn fetch_asset_resolved_targets(
     income_monthly: Decimal,
     expense_with_debt: Decimal,
 ) -> Result<std::collections::HashMap<Uuid, Decimal>, ApiError> {
-    let rows: Vec<(Uuid, String, Decimal)> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT DISTINCT ON (target_asset_id)
-                          target_asset_id, cap_kind, cap_value
-                   FROM allocation_rules
-                   WHERE installation_id = $1
-                     AND cap_kind IS NOT NULL AND cap_value IS NOT NULL
-                   ORDER BY target_asset_id, priority ASC, id ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT DISTINCT ON (target_asset_id)
-                          target_asset_id, cap_kind, cap_value
-                   FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2
-                     AND cap_kind IS NOT NULL AND cap_value IS NOT NULL
-                   ORDER BY target_asset_id, priority ASC, id ASC"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let scope = view.scope_where("");
+    let sql = format!(
+        r#"SELECT DISTINCT ON (target_asset_id)
+                  target_asset_id, cap_kind, cap_value
+           FROM allocation_rules
+           WHERE {scope}
+             AND cap_kind IS NOT NULL AND cap_value IS NOT NULL
+           ORDER BY target_asset_id, priority ASC, id ASC"#
+    );
+    let rows: Vec<(Uuid, String, Decimal)> = view
+        .bind_scope_as(sqlx::query_as(&sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
     let mut out = std::collections::HashMap::with_capacity(rows.len());
     for (asset_id, cap_kind, cap_value) in rows {
@@ -306,7 +289,6 @@ pub async fn list_assets(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    purge_expired_liabilities(&state.pool, iid).await?;
     let today = installation_naive_today(&state.pool, iid).await?;
     let nominals = first_month_asset_contribution_nominals_map(
         &state.pool,
@@ -334,35 +316,20 @@ pub async fn list_assets(
     )
     .await?;
 
-    let rows: Vec<AssetRow> = match q.resolve() {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT id, category_id, name, current_value, purchase_price,
-                          is_liquid, expected_annual_return_percent,
-                          notes, sort_index
-                   FROM assets
-                   WHERE installation_id = $1
-                   ORDER BY sort_index ASC, name ASC"#,
-            )
-            .bind(iid)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT id, category_id, name, current_value, purchase_price,
-                          is_liquid, expected_annual_return_percent,
-                          notes, sort_index
-                   FROM assets
-                   WHERE installation_id = $1 AND owner_user_id = $2
-                   ORDER BY sort_index ASC, name ASC"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let view_assets = q.resolve();
+    let assets_scope = view_assets.scope_where("");
+    let assets_sql = format!(
+        r#"SELECT id, category_id, name, current_value, purchase_price,
+                  is_liquid, expected_annual_return_percent,
+                  notes, sort_index
+           FROM assets
+           WHERE {assets_scope}
+           ORDER BY sort_index ASC, name ASC"#
+    );
+    let rows: Vec<AssetRow> = view_assets
+        .bind_scope_as(sqlx::query_as(&assets_sql), iid, user.id.0)
+        .fetch_all(&state.pool)
+        .await?;
 
     Ok(Json(
         rows.into_iter()
@@ -435,7 +402,6 @@ pub async fn create_asset(
     .fetch_one(&state.pool)
     .await?;
 
-    purge_expired_liabilities(&state.pool, iid).await?;
     let today = installation_naive_today(&state.pool, iid).await?;
     let nominals = first_month_asset_contribution_nominals_map(
         &state.pool,
@@ -590,7 +556,6 @@ pub async fn patch_asset(
     .fetch_one(&state.pool)
     .await?;
 
-    purge_expired_liabilities(&state.pool, iid).await?;
     let today = installation_naive_today(&state.pool, iid).await?;
     let nominals = first_month_asset_contribution_nominals_map(
         &state.pool,

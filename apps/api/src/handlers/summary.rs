@@ -1,7 +1,6 @@
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_budget_totals_for_summary;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
-use crate::handlers::liabilities::purge_expired_liabilities;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
@@ -9,6 +8,7 @@ use axum::extract::{Extension, Query};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::FromRow;
@@ -99,6 +99,7 @@ async fn load_breakdown_lines(
     iid: Uuid,
     session_user_id: Uuid,
     view: LedgerView,
+    today: NaiveDate,
 ) -> Result<
     (
         Vec<CategoryBreakdownLine>,
@@ -107,113 +108,60 @@ async fn load_breakdown_lines(
     ),
     ApiError,
 > {
-    let assets: Vec<CategoryBreakdownLine> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT c.id AS category_id, c.name AS category_name,
-                          COALESCE(SUM(a.current_value), 0::numeric) AS total
-                   FROM assets a
-                   INNER JOIN categories c ON c.id = a.category_id AND c.installation_id = a.installation_id
-                   WHERE a.installation_id = $1 AND c.scope = 'asset'
-                   GROUP BY c.id, c.name
-                   HAVING COALESCE(SUM(a.current_value), 0) > 0
-                   ORDER BY total DESC"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT c.id AS category_id, c.name AS category_name,
-                          COALESCE(SUM(a.current_value), 0::numeric) AS total
-                   FROM assets a
-                   INNER JOIN categories c ON c.id = a.category_id AND c.installation_id = a.installation_id
-                   WHERE a.installation_id = $1 AND c.scope = 'asset' AND a.owner_user_id = $2
-                   GROUP BY c.id, c.name
-                   HAVING COALESCE(SUM(a.current_value), 0) > 0
-                   ORDER BY total DESC"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let assets_scope = view.scope_where("a");
+    let assets_sql = format!(
+        r#"SELECT c.id AS category_id, c.name AS category_name,
+                  COALESCE(SUM(a.current_value), 0::numeric) AS total
+           FROM assets a
+           INNER JOIN categories c ON c.id = a.category_id AND c.installation_id = a.installation_id
+           WHERE {assets_scope} AND c.scope = 'asset'
+           GROUP BY c.id, c.name
+           HAVING COALESCE(SUM(a.current_value), 0) > 0
+           ORDER BY total DESC"#
+    );
+    let assets: Vec<CategoryBreakdownLine> = view
+        .bind_scope_as(sqlx::query_as(&assets_sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
-    let liabilities_cat: Vec<CategoryBreakdownLine> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT c.id AS category_id, c.name AS category_name,
-                          COALESCE(SUM(l.principal), 0::numeric) AS total
-                   FROM liabilities l
-                   INNER JOIN categories c ON c.id = l.category_id AND c.installation_id = l.installation_id
-                   WHERE l.installation_id = $1 AND c.scope = 'liability'
-                   GROUP BY c.id, c.name
-                   HAVING COALESCE(SUM(l.principal), 0) > 0
-                   ORDER BY total DESC"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT c.id AS category_id, c.name AS category_name,
-                          COALESCE(SUM(l.principal), 0::numeric) AS total
-                   FROM liabilities l
-                   INNER JOIN categories c ON c.id = l.category_id AND c.installation_id = l.installation_id
-                   WHERE l.installation_id = $1 AND c.scope = 'liability' AND l.owner_user_id = $2
-                   GROUP BY c.id, c.name
-                   HAVING COALESCE(SUM(l.principal), 0) > 0
-                   ORDER BY total DESC"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let liab_scope = view.scope_where("l");
+    let liab_today_ph = view.next_arg_index();
+    let liab_cat_sql = format!(
+        r#"SELECT c.id AS category_id, c.name AS category_name,
+                  COALESCE(SUM(l.principal), 0::numeric) AS total
+           FROM liabilities l
+           INNER JOIN categories c ON c.id = l.category_id AND c.installation_id = l.installation_id
+           WHERE {liab_scope} AND c.scope = 'liability'
+             AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${liab_today_ph})
+           GROUP BY c.id, c.name
+           HAVING COALESCE(SUM(l.principal), 0) > 0
+           ORDER BY total DESC"#
+    );
+    let liabilities_cat: Vec<CategoryBreakdownLine> = view
+        .bind_scope_as(sqlx::query_as(&liab_cat_sql), iid, session_user_id)
+        .bind(today)
+        .fetch_all(pool)
+        .await?;
 
-    let liabilities_tag: Vec<TypeTagBreakdownLine> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT
-                       CASE
-                           WHEN l.type_tag IS NULL OR trim(l.type_tag) = '' THEN '(sin etiqueta)'
-                           ELSE trim(l.type_tag)
-                       END AS type_tag,
-                       SUM(l.principal) AS total
-                   FROM liabilities l
-                   WHERE l.installation_id = $1
-                   GROUP BY 1
-                   HAVING SUM(l.principal) > 0
-                   ORDER BY total DESC"#,
-            )
-            .bind(iid)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT
-                       CASE
-                           WHEN l.type_tag IS NULL OR trim(l.type_tag) = '' THEN '(sin etiqueta)'
-                           ELSE trim(l.type_tag)
-                       END AS type_tag,
-                       SUM(l.principal) AS total
-                   FROM liabilities l
-                   WHERE l.installation_id = $1 AND l.owner_user_id = $2
-                   GROUP BY 1
-                   HAVING SUM(l.principal) > 0
-                   ORDER BY total DESC"#,
-            )
-            .bind(iid)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let liab_tag_sql = format!(
+        r#"SELECT
+               CASE
+                   WHEN l.type_tag IS NULL OR trim(l.type_tag) = '' THEN '(sin etiqueta)'
+                   ELSE trim(l.type_tag)
+               END AS type_tag,
+               SUM(l.principal) AS total
+           FROM liabilities l
+           WHERE {liab_scope}
+             AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${liab_today_ph})
+           GROUP BY 1
+           HAVING SUM(l.principal) > 0
+           ORDER BY total DESC"#
+    );
+    let liabilities_tag: Vec<TypeTagBreakdownLine> = view
+        .bind_scope_as(sqlx::query_as(&liab_tag_sql), iid, session_user_id)
+        .bind(today)
+        .fetch_all(pool)
+        .await?;
 
     Ok((assets, liabilities_cat, liabilities_tag))
 }
@@ -224,33 +172,18 @@ async fn planning_flow_totals_in_out(
     session_user_id: Uuid,
     view: LedgerView,
 ) -> Result<(Decimal, Decimal), ApiError> {
-    let rows: Vec<PlanningScopeAgg> = match view {
-        LedgerView::Household => {
-            sqlx::query_as(
-                r#"SELECT c.scope AS scope, COALESCE(SUM(p.expected_amount), 0::numeric) AS total
-                   FROM planning_flows p
-                   JOIN categories c ON c.id = p.category_id
-                   WHERE p.installation_id = $1
-                   GROUP BY c.scope"#,
-            )
-            .bind(installation_id)
-            .fetch_all(pool)
-            .await?
-        }
-        LedgerView::Mine => {
-            sqlx::query_as(
-                r#"SELECT c.scope AS scope, COALESCE(SUM(p.expected_amount), 0::numeric) AS total
-                   FROM planning_flows p
-                   JOIN categories c ON c.id = p.category_id
-                   WHERE p.installation_id = $1 AND p.owner_user_id = $2
-                   GROUP BY c.scope"#,
-            )
-            .bind(installation_id)
-            .bind(session_user_id)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let scope_where = view.scope_where("p");
+    let sql = format!(
+        r#"SELECT c.scope AS scope, COALESCE(SUM(p.expected_amount), 0::numeric) AS total
+           FROM planning_flows p
+           JOIN categories c ON c.id = p.category_id
+           WHERE {scope_where}
+           GROUP BY c.scope"#
+    );
+    let rows: Vec<PlanningScopeAgg> = view
+        .bind_scope_as(sqlx::query_as(&sql), installation_id, session_user_id)
+        .fetch_all(pool)
+        .await?;
 
     let mut inflows = Decimal::ZERO;
     let mut outflows = Decimal::ZERO;
@@ -310,63 +243,37 @@ pub async fn get_summary(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    purge_expired_liabilities(&state.pool, iid).await?;
-
     let today = installation_naive_today(&state.pool, iid).await?;
     let view = q.resolve();
 
-    let (total_assets, total_liabilities, liquid_assets): (Decimal, Decimal, Decimal) =
-        match view {
-            LedgerView::Household => {
-                let ta: Decimal = sqlx::query_scalar(
-                    r#"SELECT COALESCE(SUM(current_value), 0) FROM assets WHERE installation_id = $1"#,
-                )
-                .bind(iid)
-                .fetch_one(&state.pool)
-                .await?;
-                let tl: Decimal = sqlx::query_scalar(
-                    r#"SELECT COALESCE(SUM(principal), 0) FROM liabilities WHERE installation_id = $1"#,
-                )
-                .bind(iid)
-                .fetch_one(&state.pool)
-                .await?;
-                let liq: Decimal = sqlx::query_scalar(
-                    r#"SELECT COALESCE(SUM(current_value), 0) FROM assets
-                       WHERE installation_id = $1 AND is_liquid = true"#,
-                )
-                .bind(iid)
-                .fetch_one(&state.pool)
-                .await?;
-                (ta, tl, liq)
-            }
-            LedgerView::Mine => {
-                let ta: Decimal = sqlx::query_scalar(
-                    r#"SELECT COALESCE(SUM(current_value), 0) FROM assets
-                       WHERE installation_id = $1 AND owner_user_id = $2"#,
-                )
-                .bind(iid)
-                .bind(user.id.0)
-                .fetch_one(&state.pool)
-                .await?;
-                let tl: Decimal = sqlx::query_scalar(
-                    r#"SELECT COALESCE(SUM(principal), 0) FROM liabilities
-                       WHERE installation_id = $1 AND owner_user_id = $2"#,
-                )
-                .bind(iid)
-                .bind(user.id.0)
-                .fetch_one(&state.pool)
-                .await?;
-                let liq: Decimal = sqlx::query_scalar(
-                    r#"SELECT COALESCE(SUM(current_value), 0) FROM assets
-                       WHERE installation_id = $1 AND owner_user_id = $2 AND is_liquid = true"#,
-                )
-                .bind(iid)
-                .bind(user.id.0)
-                .fetch_one(&state.pool)
-                .await?;
-                (ta, tl, liq)
-            }
-        };
+    let asset_scope = view.scope_where("");
+    let liab_scope = view.scope_where("");
+    let liab_today_ph = view.next_arg_index();
+
+    let total_assets_sql =
+        format!("SELECT COALESCE(SUM(current_value), 0) FROM assets WHERE {asset_scope}");
+    let total_liab_sql = format!(
+        r#"SELECT COALESCE(SUM(principal), 0) FROM liabilities
+           WHERE {liab_scope}
+             AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph})"#
+    );
+    let liquid_sql = format!(
+        "SELECT COALESCE(SUM(current_value), 0) FROM assets WHERE {asset_scope} AND is_liquid = true"
+    );
+
+    let total_assets: Decimal = view
+        .bind_scope_scalar(sqlx::query_scalar(&total_assets_sql), iid, user.id.0)
+        .fetch_one(&state.pool)
+        .await?;
+    let total_liabilities: Decimal = view
+        .bind_scope_scalar(sqlx::query_scalar(&total_liab_sql), iid, user.id.0)
+        .bind(today)
+        .fetch_one(&state.pool)
+        .await?;
+    let liquid_assets: Decimal = view
+        .bind_scope_scalar(sqlx::query_scalar(&liquid_sql), iid, user.id.0)
+        .fetch_one(&state.pool)
+        .await?;
 
     let budget_totals =
         ledger_budget_totals_for_summary(&state.pool, iid, user.id.0, view, today).await?;
@@ -431,7 +338,7 @@ pub async fn get_summary(
     };
 
     let (assets_by_category, liabilities_by_category, liabilities_by_type_tag) =
-        load_breakdown_lines(&state.pool, iid, user.id.0, view).await?;
+        load_breakdown_lines(&state.pool, iid, user.id.0, view, today).await?;
 
     Ok(Json(SummaryResponse {
         total_assets,
