@@ -1125,22 +1125,16 @@ export function ProjectionNetWorthChart({
           </div>
           <div>
             Patrimonio neto —{" "}
-            {formatCurrencyOrDashNumber(pts[hover]?.net_worth, currencyIso)}
+            {formatCurrencyOrDashNumber(nw[hover], currencyIso)}
           </div>
           <div>
             Capital aportado —{" "}
-            {formatCurrencyOrDashNumber(
-              pts[hover]?.contributed_capital,
-              currencyIso,
-            )}
+            {formatCurrencyOrDashNumber(cc[hover], currencyIso)}
           </div>
           {assetSeries.map((as) => (
             <div key={as.id}>
               {as.name} —{" "}
-              {formatCurrencyOrDashNumber(
-                series.asset_series?.find((s) => s.asset_id === as.id)?.values[hover],
-                currencyIso,
-              )}
+              {formatCurrencyOrDashNumber(as.values[hover], currencyIso)}
             </div>
           ))}
         </div>

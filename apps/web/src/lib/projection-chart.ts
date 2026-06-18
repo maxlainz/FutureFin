@@ -242,22 +242,21 @@ export function projectionHoverTitle(
       ? anchorDateYmd.trim()
       : todayYmdInTimeZone(calendarTz);
   const anchor = parseYmdComponents(anchorStr);
-
-  if (ageUiMode !== "ages") {
-    if (!anchor) {
-      return METRIC_DASH;
-    }
-    const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthIndex);
-    return formatProjectionHoverMonthYear(at);
-  }
-
-  const birth = parseYmdComponents(userBirthDate);
-  if (!birth || !anchor) {
+  if (!anchor) {
     return METRIC_DASH;
   }
   const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthIndex);
-  const age = ageCompletedYearsCivil(at, birth);
-  return `${age} años`;
+  const dateLabel = formatProjectionHoverMonthYear(at);
+  const birth = parseYmdComponents(userBirthDate);
+  const ageLabel = birth ? `${ageCompletedYearsCivil(at, birth)} años` : null;
+
+  // En el hover mostramos siempre la unidad complementaria entre paréntesis:
+  // en modo edad → fecha; en modo fecha → edad (si hay fecha de nacimiento).
+  if (ageUiMode === "ages") {
+    if (!ageLabel) return METRIC_DASH;
+    return `${ageLabel} (${dateLabel})`;
+  }
+  return ageLabel ? `${dateLabel} (${ageLabel})` : dateLabel;
 }
 
 export function projectionXTicks(
