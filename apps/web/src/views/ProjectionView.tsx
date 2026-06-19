@@ -77,20 +77,6 @@ export function ProjectionView({
       ? parseDisplayDecimal(projectionSeries.jubilacion_target_net_worth)
       : null;
 
-  const nextMilestones: ProjectionMilestoneApi[] = (() => {
-    const base = projectionSeries?.milestones ?? [];
-    if (jubilacionMiNo !== null) {
-      return [
-        ...base,
-        {
-          target: "jubilacion",
-          reached_month_index: jubilacionMiNo,
-          reached_date_ymd: "",
-        },
-      ];
-    }
-    return base;
-  })();
   const [focusMode, setFocusMode] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     try {
@@ -140,6 +126,32 @@ export function ProjectionView({
     const n = parseDisplayDecimal(String(raw));
     return n != null && n > 0 ? n : 0;
   }, [installation?.installation.annual_inflation_assumption_percent]);
+
+  // Con el toggle de inflación activo (y inflación > 0), los hitos se expresan en euros de hoy: el
+  // backend ya cruza los mismos umbrales (1M, 2.5M…) sobre el patrimonio deflactado, así que el
+  // marcador del chart cae sobre la curva deflactada y la KPI muestra "1M € de hoy hacia ~año".
+  // La jubilación no se ve afectada por inflación (su mes de cruce es invariante).
+  const nextMilestones: ProjectionMilestoneApi[] = (() => {
+    const useRealMilestones =
+      inflationAdjusted &&
+      projectionInflationPct > 0 &&
+      (projectionSeries?.milestones_real?.length ?? 0) > 0;
+    const base =
+      (useRealMilestones
+        ? projectionSeries?.milestones_real
+        : projectionSeries?.milestones) ?? [];
+    if (jubilacionMiNo !== null) {
+      return [
+        ...base,
+        {
+          target: "jubilacion",
+          reached_month_index: jubilacionMiNo,
+          reached_date_ymd: "",
+        },
+      ];
+    }
+    return base;
+  })();
 
   return (
     <div className="workspace workspace--projection-fullwidth">

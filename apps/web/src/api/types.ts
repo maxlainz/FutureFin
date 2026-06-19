@@ -213,7 +213,11 @@ export type AssetSeriesApi = {
 
 export type ProjectionSeriesApi = {
   points: ProjectionPointApi[];
+  /** Hitos en euros nominales (toggle inflación apagado). */
   milestones: ProjectionMilestoneApi[];
+  /** Mismos umbrales sobre el patrimonio deflactado a euros de hoy (toggle inflación encendido).
+   *  Vacío cuando la inflación es 0 — en ese caso reusa `milestones`. */
+  milestones_real?: ProjectionMilestoneApi[];
   compound_outpaces_true_savings_month_index?: number | null;
   months: number;
   horizon_years: number;

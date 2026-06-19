@@ -222,8 +222,14 @@ pub struct ProjectionSeriesResponse {
     /// DOB usada para años cumplidos en el eje (perfil y/o personas del hogar).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewer_birth_date: Option<String>,
-    /// Próximos hitos de patrimonio: umbrales 1/2.5/5*10^n, deduplicados por año.
+    /// Próximos hitos de patrimonio en euros **nominales**: umbrales 1/2.5/5*10^n, deduplicados por año.
+    /// La web los usa cuando el toggle «Inflation Adjusted» está apagado.
     pub milestones: Vec<ProjectionMilestone>,
+    /// Mismos umbrales que `milestones` pero cruzados sobre el patrimonio **deflactado** (euros de
+    /// hoy): el hito de 1.000.000 € se alcanza cuando el patrimonio nominal vale 1.000.000 € *en
+    /// poder adquisitivo de hoy*, no en euros del futuro. La web los usa cuando el toggle
+    /// «Inflation Adjusted» está encendido. Vacío cuando la inflación es 0 (coincide con `milestones`).
+    pub milestones_real: Vec<ProjectionMilestone>,
     /// Primer mes en que el componente de interés/mercado supera el ahorro mensual base (sin Próximos ni plan de pagos de deudas).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compound_outpaces_true_savings_month_index: Option<u32>,
@@ -450,6 +456,33 @@ fn projection_next_milestones(from: Decimal, count: usize) -> Vec<Decimal> {
         current = next;
     }
     out
+}
+
+/// Deflacta una serie de puntos a euros de hoy: el patrimonio del mes `k` se divide por
+/// `(1 + inflación%)^(k/12)`. Es la versión a resolución mensual completa de la deflactación
+/// **visual** que hace el chart de la web (`ProjectionNetWorthChart.baseSeries`); calcularla aquí
+/// preserva la precisión del `reached_month_index` de los milestones bajo densidad `hybrid`, donde
+/// el cliente solo recibe puntos anuales. Con inflación 0 devuelve una copia sin cambios.
+fn deflate_points_to_today(
+    points: &[ProjectionPoint],
+    annual_inflation_percent: Decimal,
+) -> Vec<ProjectionPoint> {
+    if annual_inflation_percent <= Decimal::ZERO {
+        return points.to_vec();
+    }
+    let infl_factor = Decimal::ONE + annual_inflation_percent / Decimal::from(100u32);
+    points
+        .iter()
+        .map(|p| {
+            let years = Decimal::from(p.month_index) / Decimal::from(12u32);
+            let deflator = Decimal::ONE / infl_factor.powd(years);
+            ProjectionPoint {
+                month_index: p.month_index,
+                net_worth: p.net_worth * deflator,
+                contributed_capital: p.contributed_capital * deflator,
+            }
+        })
+        .collect()
 }
 
 fn projection_unique_reached_milestones(
@@ -1057,13 +1090,32 @@ pub async fn compute_projection_series_response(
         })
         .collect();
 
+    let milestone_baseline_adjustment =
+        planning_upcoming_net_for_milestone_baseline(today, &planning_rows);
     let milestones = projection_unique_reached_milestones(
         &points_full,
         today,
-        planning_upcoming_net_for_milestone_baseline(today, &planning_rows),
+        milestone_baseline_adjustment,
         PROJECTION_MILESTONE_LIMIT,
         PROJECTION_MILESTONE_SEARCH_COUNT,
     );
+
+    // Milestones en euros de hoy: mismos umbrales sobre el patrimonio deflactado. Con inflación 0 el
+    // deflactor es 1 y serían idénticos a `milestones`, así que dejamos el vector vacío y la web
+    // reusa `milestones`. Se computa sobre `points_full` (resolución mensual) por la misma razón
+    // que `milestones`: no perder hitos que caen entre dos puntos anuales con densidad `hybrid`.
+    let milestones_real = if inflation_annual_percent > Decimal::ZERO {
+        let points_full_real = deflate_points_to_today(&points_full, inflation_annual_percent);
+        projection_unique_reached_milestones(
+            &points_full_real,
+            today,
+            milestone_baseline_adjustment,
+            PROJECTION_MILESTONE_LIMIT,
+            PROJECTION_MILESTONE_SEARCH_COUNT,
+        )
+    } else {
+        Vec::new()
+    };
 
     let fire_target_ref = projection_input.fire_target.as_ref();
     let (fire_target_series, jubilacion_month_index, jubilacion_target_net_worth) =
@@ -1113,6 +1165,7 @@ pub async fn compute_projection_series_response(
         viewer_birth_date: resolved_birth_for_demographics
             .map(|d| d.format("%Y-%m-%d").to_string()),
         milestones,
+        milestones_real,
         compound_outpaces_true_savings_month_index,
         jubilacion_month_index,
         jubilacion_target_net_worth,
@@ -1343,6 +1396,89 @@ mod milestone_tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].target, Decimal::from(5000));
         assert_eq!(out[1].target, Decimal::from(10_000));
+    }
+
+    #[test]
+    fn deflate_points_to_today_is_identity_with_zero_inflation() {
+        let points = vec![
+            ProjectionPoint {
+                month_index: 0,
+                net_worth: Decimal::from(1000),
+                contributed_capital: Decimal::ZERO,
+            },
+            ProjectionPoint {
+                month_index: 12,
+                net_worth: Decimal::from(2000),
+                contributed_capital: Decimal::from(100),
+            },
+        ];
+        let out = deflate_points_to_today(&points, Decimal::ZERO);
+        assert_eq!(out[0].net_worth, Decimal::from(1000));
+        assert_eq!(out[1].net_worth, Decimal::from(2000));
+        assert_eq!(out[1].contributed_capital, Decimal::from(100));
+    }
+
+    #[test]
+    fn deflate_points_to_today_discounts_future_to_present() {
+        // Con 10% anual, 1.100 € dentro de un año equivalen a 1.000 € de hoy.
+        let points = vec![
+            ProjectionPoint {
+                month_index: 0,
+                net_worth: Decimal::from(1000),
+                contributed_capital: Decimal::ZERO,
+            },
+            ProjectionPoint {
+                month_index: 12,
+                net_worth: Decimal::from(1100),
+                contributed_capital: Decimal::ZERO,
+            },
+        ];
+        let out = deflate_points_to_today(&points, Decimal::from(10));
+        assert_eq!(out[0].net_worth, Decimal::from(1000)); // mes 0 intacto
+        let diff = (out[1].net_worth - Decimal::from(1000)).abs();
+        assert!(
+            diff < Decimal::new(1, 6),
+            "expected ~1000 € de hoy, got {}",
+            out[1].net_worth
+        );
+    }
+
+    #[test]
+    fn real_milestones_are_reached_later_than_nominal() {
+        // Patrimonio nominal que alcanza 10.000 € al final del horizonte. Deflactado al 8% anual,
+        // el mismo umbral en euros de hoy se cruza más tarde (o no se cruza dentro del horizonte).
+        let points: Vec<ProjectionPoint> = (0u32..=120)
+            .map(|m| ProjectionPoint {
+                month_index: m,
+                net_worth: Decimal::from(1000) + Decimal::from(75) * Decimal::from(m),
+                contributed_capital: Decimal::ZERO,
+            })
+            .collect();
+        let anchor = NaiveDate::from_ymd_opt(2026, 1, 10).unwrap();
+        let nominal = projection_unique_reached_milestones(&points, anchor, Decimal::ZERO, 3, 64);
+        let real_points = deflate_points_to_today(&points, Decimal::from(8));
+        let real = projection_unique_reached_milestones(&real_points, anchor, Decimal::ZERO, 3, 64);
+        // Para cualquier umbral común, en euros de hoy se cruza más tarde (nunca antes); al menos uno
+        // estrictamente posterior, porque el deflactor < 1 en cualquier mes > 0.
+        let mut found_strictly_later = false;
+        for n in &nominal {
+            if let Some(r) = real.iter().find(|r| r.target == n.target) {
+                assert!(
+                    r.reached_month_index >= n.reached_month_index,
+                    "umbral {} se cruzó antes en euros de hoy ({} < {})",
+                    n.target,
+                    r.reached_month_index,
+                    n.reached_month_index
+                );
+                if r.reached_month_index > n.reached_month_index {
+                    found_strictly_later = true;
+                }
+            }
+        }
+        assert!(
+            found_strictly_later,
+            "algún umbral común debería cruzarse más tarde en euros de hoy"
+        );
     }
 
     #[test]
