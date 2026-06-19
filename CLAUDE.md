@@ -164,14 +164,15 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 ## Git workflow
 
 **Branches:**
-- `dev` — desarrollo activo. Contiene todo: CLAUDE.md, .claude/, .github/, workflows de CI.
-- `main` — rama de usuario final. Solo archivos que el usuario necesita (docker-compose.yml, README, .env.example, Cargo/package files). CLAUDE.md, .claude/ y .github/ están en .gitignore de main y no se deben subir allí.
+- `main` — rama de producción y de publicación. La imagen Docker se construye y publica **desde `main`** (el workflow `publish-image.yml` vive aquí). Es la rama por defecto.
+- `dev` — desarrollo activo, **ramificada de `main`**. `main` es un **espejo completo de `dev`**: contiene exactamente lo mismo (CLAUDE.md, .claude/, .github/, workflows, código). No hay divergencia de `.gitignore` ni archivos exclusivos de una rama.
 
 **Releases:**
 1. Desarrollar en `dev`, hacer commit y push.
-2. Bumpar versión en `apps/api/Cargo.toml` y añadir entrada en `CHANGELOG.md`.
-3. Actualizar archivos de usuario en `main` (docker-compose.yml, README, .env.example, CHANGELOG.md) copiando los cambios relevantes — **no hacer merge completo de dev a main**.
-4. Push tag `vX.Y.Z` desde `dev` → el workflow `publish-image.yml` (que vive en `dev`) publica la imagen.
+2. Bumpar versión en `apps/api/Cargo.toml` (sincronizar `Cargo.lock`) y añadir entrada en `CHANGELOG.md`.
+3. **Merge completo `dev` → `main`** (`git checkout main && git merge dev`). Nunca copias parciales de archivos: `main` debe quedar idéntico a `dev`.
+4. Push tag `vX.Y.Z` **desde `main`** → el workflow `publish-image.yml` (que vive en `main`) publica la imagen.
+5. Volver a `dev` (`git checkout dev`) y seguir; mantener `dev` al día con `main`.
 
 Tags published: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere secrets `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` en GitHub repo.
 
