@@ -188,20 +188,25 @@ export function ProjectionNetWorthChart({
       return null;
     }
     const deflate = inflationAdjusted && installationInflationPct > 0;
+    // El deflactor debe usar el `month_index` real del punto, no su posición en el array: con
+    // densidad `hybrid` los puntos no son equidistantes (mes 0..12 y luego 24, 36, …), así que el
+    // índice del array subestimaría los años transcurridos y deflactaría de menos. Esto mantiene la
+    // curva alineada con los `milestones_real` del backend (calculados sobre `month_index`).
     const deflator = (monthIndex: number) =>
       deflate
         ? 1 / Math.pow(1 + installationInflationPct / 100, monthIndex / 12)
         : 1;
-    const nw = pts.map((p, i) => p.net_worth * deflator(i));
-    const cc = pts.map((p, i) => p.contributed_capital * deflator(i));
+    const miAt = (i: number) => pts[i]?.month_index ?? i;
+    const nw = pts.map((p) => p.net_worth * deflator(p.month_index));
+    const cc = pts.map((p) => p.contributed_capital * deflator(p.month_index));
     const fireRaw = series.fire_target_series;
     const fireTarget =
       Array.isArray(fireRaw) && fireRaw.length === pts.length
-        ? fireRaw.map((v, i) => v * deflator(i))
+        ? fireRaw.map((v, i) => v * deflator(miAt(i)))
         : null;
     const assetSeries = (series.asset_series ?? [])
       .map((as) => {
-        const values = as.values.map((v, i) => v * deflator(i));
+        const values = as.values.map((v, i) => v * deflator(miAt(i)));
         return {
           id: as.asset_id,
           name: as.asset_name,
