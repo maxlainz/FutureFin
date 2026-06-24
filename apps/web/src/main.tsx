@@ -12,7 +12,6 @@ if (chartPerf.enabled && "PerformanceObserver" in window) {
     new PerformanceObserver((list) => {
       for (const e of list.getEntries()) {
         if (e.duration > 50) {
-          // eslint-disable-next-line no-console
           console.warn(`[chart:perf] long task ${e.duration.toFixed(0)} ms`, e);
         }
       }
