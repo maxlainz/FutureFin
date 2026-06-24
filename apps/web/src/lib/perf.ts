@@ -48,10 +48,8 @@ export const chartPerf = {
       step: e.name.replace("chart:", ""),
       ms: Math.round(e.duration * 10) / 10,
     }));
-    // eslint-disable-next-line no-console
     console.table(summary);
     const total = summary.reduce((s, e) => s + e.ms, 0);
-    // eslint-disable-next-line no-console
     console.info(`[chart:perf] total ≈ ${total.toFixed(1)} ms`);
     performance.clearMarks();
     performance.clearMeasures();

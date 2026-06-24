@@ -321,10 +321,10 @@ export function ProjectionNetWorthChart({
       rawSpan > 0 ? rawSpan * 0.07 : Math.max(Math.abs(dataMax) * 0.06, 1);
 
     let plotMin = dataMin - padY;
-    let plotMax = dataMax + padY;
+    const plotMax = dataMax + padY;
     if (!allowNegativeAxis) plotMin = Math.max(0, plotMin);
 
-    let yTicksRaw = niceYTicks(plotMin, plotMax, 6);
+    const yTicksRaw = niceYTicks(plotMin, plotMax, 6);
     let yTicks = allowNegativeAxis
       ? yTicksRaw
       : yTicksRaw.filter((t) => t >= 0);
@@ -332,7 +332,7 @@ export function ProjectionNetWorthChart({
       yTicks = niceYTicks(Math.max(0, plotMin), plotMax, 6);
     }
     let yMin = yTicks[0] ?? (allowNegativeAxis ? plotMin : Math.max(0, plotMin));
-    let yMax = yTicks[yTicks.length - 1] ?? plotMax;
+    const yMax = yTicks[yTicks.length - 1] ?? plotMax;
     if (!allowNegativeAxis && yMin < 0) yMin = 0;
 
     const xTicks = xTicksAll.filter(
@@ -469,59 +469,11 @@ export function ProjectionNetWorthChart({
     chartPerf.report();
   }, [series]);
 
-  if (!model) {
-    return null;
-  }
-
-  const {
-    nw,
-    cc,
-    fireTargetVisible,
-    assetSeries,
-    assetStacks,
-    nwVisible,
-    ccVisible,
-    allowNegativeAxis,
-    targetYMin,
-    targetYMax,
-    xTicks,
-    xScale,
-    compoundOutpaceMonth,
-    showCompoundOutpaceMarker,
-    visibleMilestones,
-    chartPlanningMarkers,
-    pw,
-    ph,
-    ml,
-    mt,
-    W,
-    rotateXLabels,
-    viewHeight,
-    visibleMonthStart,
-    visibleMonthEnd,
-    monthSpan,
-    visibleIndices,
-  } = model;
-
-  /** Devuelve el valor del array `values` correspondiente al `month` dado.
-   * Como `pts` puede ser no equidistante (densidad hybrid), busca el index
-   * cuyo `month_index` coincide; si no hay coincidencia exacta, devuelve el
-   * más cercano. Para milestones / compound markers / hover en zonas sin
-   * punto exacto. */
-  const valueAtMonth = (month: number, values: number[]): number | null => {
-    if (pts.length === 0) return null;
-    let bestIdx = 0;
-    let bestDist = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < pts.length; i++) {
-      const d = Math.abs(pts[i].month_index - month);
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
-        if (d === 0) break;
-      }
-    }
-    return values[bestIdx] ?? null;
-  };
+  // Hoisted antes del early return para que los hooks de animación del eje Y
+  // (abajo) no queden tras un `return` condicional. Cuando `model` es null el
+  // componente no renderiza nada y estos valores caen a 0/0 de forma inocua.
+  const targetYMin = model?.targetYMin ?? 0;
+  const targetYMax = model?.targetYMax ?? 0;
 
   useEffect(() => {
     animatedYDomainRef.current = animatedYDomain;
@@ -562,6 +514,58 @@ export function ProjectionNetWorthChart({
       }
     };
   }, [targetYMax, targetYMin]);
+
+  if (!model) {
+    return null;
+  }
+
+  const {
+    nw,
+    cc,
+    fireTargetVisible,
+    assetSeries,
+    assetStacks,
+    nwVisible,
+    ccVisible,
+    allowNegativeAxis,
+    xTicks,
+    xScale,
+    compoundOutpaceMonth,
+    showCompoundOutpaceMarker,
+    visibleMilestones,
+    chartPlanningMarkers,
+    pw,
+    ph,
+    ml,
+    mt,
+    W,
+    rotateXLabels,
+    viewHeight,
+    visibleMonthStart,
+    visibleMonthEnd,
+    monthSpan,
+    visibleIndices,
+  } = model;
+
+  /** Devuelve el valor del array `values` correspondiente al `month` dado.
+   * Como `pts` puede ser no equidistante (densidad hybrid), busca el index
+   * cuyo `month_index` coincide; si no hay coincidencia exacta, devuelve el
+   * más cercano. Para milestones / compound markers / hover en zonas sin
+   * punto exacto. */
+  const valueAtMonth = (month: number, values: number[]): number | null => {
+    if (pts.length === 0) return null;
+    let bestIdx = 0;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.abs(pts[i].month_index - month);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+        if (d === 0) break;
+      }
+    }
+    return values[bestIdx] ?? null;
+  };
 
   const yMin = animatedYDomain?.min ?? targetYMin;
   const yMax = animatedYDomain?.max ?? targetYMax;

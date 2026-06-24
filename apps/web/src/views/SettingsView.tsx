@@ -243,6 +243,9 @@ export function SettingsView({
     setFireTaxDraft(serverFs);
     lastSavedFireTaxPayloadRef.current = JSON.stringify(serverFs);
     skipFireTaxAutosaveRef.current = true;
+    // Re-inicializa el draft solo al cambiar de instalación; NO en cada cambio de
+    // fire_settings, que clobbearía ediciones en curso (este draft autosalva).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installation?.installation.id]);
 
   useEffect(() => {

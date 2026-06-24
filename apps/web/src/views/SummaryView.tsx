@@ -12,9 +12,11 @@ import {
   MiniProjection,
   MiniProjectionLegend,
 } from "../components/charts/MiniProjection";
+import { ASSET_LINE_COLORS } from "../lib/projection-chart";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
+  formatCurrencyNumber,
   formatDebtToAssetsPct,
   formatFractionAsPercent,
   formatMonthsRough,
@@ -49,6 +51,20 @@ export function SummaryView({
   const showMetrics =
     hasMembership && !loading && !summaryBusy && summary !== null;
   const currencyIso = installation?.installation.base_currency ?? "";
+
+  // Valor de patrimonio al inicio y al final de la ventana de 12 meses (misma
+  // que `months={12}` de la mini-gráfica). net_worth es f64 → formatCurrencyNumber.
+  const projectionEnds =
+    projectionSeries && projectionSeries.points.length > 0
+      ? (() => {
+          const pts = projectionSeries.points;
+          const total = Math.min(12, pts.length);
+          return {
+            first: formatCurrencyNumber(pts[0]!.net_worth, currencyIso),
+            last: formatCurrencyNumber(pts[total - 1]!.net_worth, currencyIso),
+          };
+        })()
+      : null;
 
   const nw = showMetrics
     ? formatCurrencyAmount(summary.net_worth, currencyIso)
@@ -221,6 +237,17 @@ export function SummaryView({
         <section className="panel">
           <div className="panel-head-row">
             <h3 className="panel-title">Proyección · 12 meses</h3>
+            {projectionEnds ? (
+              <span
+                className="muted"
+                style={{
+                  fontSize: "0.78rem",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {projectionEnds.first} → {projectionEnds.last}
+              </span>
+            ) : null}
           </div>
           {projectionSeries && projectionSeries.points.length > 0 ? (
             <>
@@ -235,10 +262,10 @@ export function SummaryView({
               <MiniProjectionLegend
                 items={[
                   { label: "Patrimonio neto", color: "var(--proj-nw)" },
-                  {
-                    label: "Composición por activo",
-                    color: "var(--ff-ink-soft)",
-                  },
+                  ...(projectionSeries.asset_series ?? []).map((a, idx) => ({
+                    label: a.asset_name,
+                    color: ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length]!,
+                  })),
                 ]}
               />
             </>

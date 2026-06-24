@@ -91,6 +91,9 @@ export function RetirementView({
       installation?.installation.fire_settings,
     );
     lastSavedFirePayloadRef.current = JSON.stringify(serverFs);
+    // Re-inicializa el draft solo al cambiar de instalación; NO en cada cambio de
+    // fire_settings, que clobbearía ediciones en curso (este draft autosalva).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installation?.installation.id]);
 
   const axisAgeMode = projectionSeries
