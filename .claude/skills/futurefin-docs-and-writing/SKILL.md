@@ -95,8 +95,8 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 - **Skills** (`.claude/skills/*`): English, keeping Spanish project vocabulary ("sobrante",
   "Jubilación") as-is — it *is* the vocabulary.
 - Prefer commands over hard counts in docs ("`ls apps/api/migrations | wc -l`" ages better than
-  "33 migrations" — that exact number is one of the current errata). If you must state a count,
-  date-stamp it: "31 migrations as of 2026-07-02".
+  "33 migrations" — that frozen number sat wrong in tests.md until 2026-07-02). If you must
+  state a count, date-stamp it: "31 migrations as of 2026-07-02".
 
 ### 3.2 CHANGELOG entries are forensic, not just descriptive
 
@@ -226,26 +226,23 @@ rule; v1.2.0 is the precedent).
 - New recurring runbook with no home → propose a new skill dir under `.claude/skills/<name>/SKILL.md`
   with trigger-rich frontmatter, a "When NOT to use" section, and provenance — same shape as this file.
 
-## 7. STANDING ERRATA — known doc drift, verified 2026-07-02
+## 7. STANDING ERRATA — known doc drift
 
-These are facts the docs of record currently get **wrong**. Do not propagate them. Fix each one the
-next time you touch its file (fixing them is in-scope doc maintenance, not a behavior change).
-Until fixed, trust this table and the code over the named doc.
+**No known drift as of 2026-07-02.** The eight errata found during the skill-library authoring
+(stale "no CI yet" + "33 migrations" in tests.md; `projection_target_age` remnants in
+data-model.md, engine.md and api-routes.md; the stale `mac_*` `horizon_basis` doc comment in
+`projection.rs`; the dangling `docs/spec/AUTH_MODEL.md` reference; README's removed
+`GET /v1/backup/export.zip`; and the split-dev DB command missing the override in CLAUDE.md and
+README) were **all fixed in the docs-of-record on 2026-07-02** in the same change that made
+CLAUDE.md the single entry point.
+
+The rule stands: when you find a doc/code disagreement, verify against code (the code is ground
+truth), then fix the doc in the same change. If you cannot, add a row here with "verified <date>"
+— never leave a known-wrong fact unrecorded:
 
 | # | Doc & location | It says | Reality (verified in repo) |
 |---|---|---|---|
-| 1 | `.claude/tests.md` §CI | "There is no CI yet" | `.github/workflows/ci.yml` exists and runs on push/PR to `main`/`dev`: `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked`, npm typecheck + build, and a full Docker-stack build + `/v1/health` smoke test. **Still true**: the Postgres integration tests (`apps/api/tests/`) and frontend Vitest are NOT run in CI — run them locally with `TEST_DATABASE_URL`. |
-| 2 | `.claude/tests.md` §Integration tests | "applies all 33 migrations" | 31 files in `apps/api/migrations/` as of 2026-07-02. When fixing, replace the number with the command `ls apps/api/migrations \| wc -l` or date-stamp it. (Related: tests.md says "146 tests", CHANGELOG v1.3.0 says 156 — counts disagree; prefer commands over counts.) |
-| 3 | `.claude/data-model.md` §installation + §Key invariants | `installation` has `projection_target_age (smallint nullable)`; invariant "bounded 65–105"; `budget_entries.persists_after_retirement` "continues after `projection_target_age`" | Column dropped by `20260516120000_drop_projection_target_age.sql` (CHANGELOG v1.0.6); zero grep hits in `apps/api/src` + `crates`. FIRE crossover is the **sole** retirement trigger; "after retirement" means after the FIRE-crossover month. |
-| 4 | `.claude/engine.md` §Notes for the API handler | "Horizon derivation: `projection_target_age` → …; fallback 240 months"; "handler computes `retirement_start_month` from `projection_target_age` + birth date"; `RetirementInput { target_age, … }` | Horizon = years until age **90** from ONE resolved birth date — the session user's `users.birth_date`, else the first `persons` row by `is_primary DESC, sort_index ASC` (NOT the oldest member) — clamped **5–70** years; **30-year** fallback with no birth date (`projection_horizon_months` in `apps/api/src/handlers/projection.rs`). No age-based retirement input exists. |
-| 5 | `.claude/api-routes.md` §Installation + §Projection | `PATCH /v1/installation` "updates … target_age …"; `horizon_basis` values `mac_target_age \| mac_fallback_no_demographics \| months_override` | No `target_age` anywhere. Actual `horizon_basis` strings emitted: `lifespan_90`, `fallback_no_demographics`, `months_override` (the doc comment on `horizon_basis` inside `projection.rs` is stale too). |
-| 6 | `.claude/auth-and-membership.md` line 3 | "Full spec: `docs/spec/AUTH_MODEL.md`" | `docs/` does not exist in the repo. The doc itself + the code are the spec; delete the dangling reference when touching the file. |
-| 7 | `README.md` §Backups | "El API expone `GET /v1/backup/export.zip` (solo owner)" | Route removed. Current backup surface (routes/mod.rs): `POST /v1/backup/user-export`, `POST /v1/backup/user-import/preview`, `POST /v1/backup/user-import` — per-user encrypted `.ffbackup`, any role can export (see api-routes.md). |
-| 8 | `CLAUDE.md` §Development (split-dev), also mirrored in `README.md` | Dev DB start command: `docker compose up -d futurefin-database` | That command starts the DB but exposes NO host port (`docker-compose.yml` maps no `ports:` on `futurefin-database`), so the host-side `cargo run` cannot connect to `127.0.0.1:5432`. The working command adds the split-dev override: `docker compose -f docker-compose.yml -f docker-compose.split-dev.yml up -d futurefin-database` (verified 2026-07-02; see futurefin-build-and-env §2/T4). |
-
-Reporting a NEW drift: when you find one, verify against code, then add it to this table (with
-"verified <date>") if you cannot fix the doc in the same change — never leave a known-wrong fact
-unrecorded.
+| — | *(empty)* | | |
 
 ## Provenance and maintenance
 
@@ -254,13 +251,11 @@ Verified 2026-07-02 against v1.4.3 by reading: `CLAUDE.md`, all 9 `.claude/*.md`
 `apps/api/src/handlers/projection.rs`, `apps/api/migrations/`. Re-verify with:
 
 - Current version: `grep -n '^version' apps/api/Cargo.toml` (and top entry of `CHANGELOG.md`)
-- Migration count (errata #2): `ls apps/api/migrations | wc -l`
-- Errata #1 still applies?: `grep -n "no CI yet" .claude/tests.md` (empty ⇒ fixed, remove row)
-- Errata #3/#4/#5 still apply?: `grep -rn projection_target_age .claude/ apps/api/src crates`
-  (hits only under `.claude/` ⇒ docs still stale; hits in code would invalidate the errata)
-- Errata #6 still applies?: `grep -n AUTH_MODEL .claude/auth-and-membership.md; ls docs 2>&1`
-- Errata #7 still applies?: `grep -n export.zip README.md; grep -n backup apps/api/src/routes/mod.rs`
-- Errata #8 still applies?: `grep -n "up -d futurefin-database" CLAUDE.md README.md; grep -n "ports" docker-compose.yml docker-compose.split-dev.yml`
+- Migration count: `ls apps/api/migrations | wc -l`
+- Old errata stay fixed? (all must return empty/clean): `grep -n "no CI yet" .claude/tests.md`;
+  `grep -rn projection_target_age .claude/*.md apps/api/src crates` (only the historical mention
+  in data-model.md's "eliminada" note is expected); `grep -n AUTH_MODEL .claude/auth-and-membership.md`;
+  `grep -n export.zip README.md`; `grep -rn mac_target_age apps/api/src .claude/*.md`
 - CI scope claim: `cat .github/workflows/ci.yml` (integration tests/Vitest still absent?)
 - Doc inventory unchanged (9 reference docs): `ls .claude/*.md | wc -l`
 - Exemplar quotes intact: `grep -n "fix definitivo del solape" CHANGELOG.md` and

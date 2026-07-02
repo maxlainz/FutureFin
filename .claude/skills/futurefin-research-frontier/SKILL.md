@@ -389,8 +389,8 @@ Facts verified 2026-07-02 against v1.4.3. Re-verify before relying on them:
 - Backup script defaults: `sed -n '17,19p' scripts/backup-postgres.sh`
 - Migration runner (auto on startup, fails loud): `cat apps/api/src/db.rs`
 - Parity fixture + consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
-- CI covers engine tests but NOT Postgres integration tests: `grep -n 'cargo test' .github/workflows/ci.yml` (note: `.claude/tests.md` claiming "no CI yet" is stale)
+- CI covers engine tests but NOT Postgres integration tests: `grep -n 'cargo test' .github/workflows/ci.yml`
 - README still claim-free on MC/determinism: `grep -in 'monte\|stochastic\|bit-exact\|deterministic' README.md` (empty = good)
 - Currency/locale state: `grep -n 'EUR.*USD.*GBP' apps/api/src/handlers/installation.rs; grep -n DISPLAY_NUMBER_LOCALE apps/web/src/lib/format.ts`
-- Horizon basis strings (doc comment at `apps/api/src/handlers/projection.rs:206` lists stale `mac_*` names; real values): `grep -n '"lifespan_90"\|"fallback_no_demographics"\|"months_override"' apps/api/src/handlers/projection.rs`
+- Horizon basis strings: `grep -n '"lifespan_90"\|"fallback_no_demographics"\|"months_override"' apps/api/src/handlers/projection.rs`
 - Migration count: `ls apps/api/migrations | wc -l` (31 as of 2026-07-02)

@@ -273,9 +273,9 @@ ship), downgrade rules from section 2 apply.
 ### 4b. Application backup: per-user `.ffbackup`
 
 Verified against `apps/api/src/routes/mod.rs` and `apps/api/src/handlers/backup_user/` as of
-v1.4.3. **The README's `GET /v1/backup/export.zip` (owner CSV ZIP) no longer exists** — it
-was replaced in v1.0.9 by the `.ffbackup` endpoints and never re-added; the README is stale
-on this point. The real endpoints (all POST, session cookie required):
+v1.4.3. (`GET /v1/backup/export.zip` no longer exists — replaced in v1.0.9 by the `.ffbackup`
+endpoints and never re-added; the README described it until 2026-07-02, now fixed.) The real
+endpoints (all POST, session cookie required):
 
 | Endpoint | Role required | Notes |
 |---|---|---|
@@ -343,8 +343,8 @@ Verified 2026-07-02 against v1.4.3 by reading: `docker-compose.yml`, `docker-com
 `apps/api/src/handlers/backup_user/{mod.rs,crypto.rs,schema.rs,export.rs,import.rs}`,
 `.github/workflows/{publish-image.yml,cleanup-ghcr.yml}`.
 
-Known doc drift found: `README.md` "Backups" section still claims `GET /v1/backup/export.zip`
-— that route does not exist in `routes/mod.rs` (replaced by `.ffbackup` endpoints in v1.0.9).
+(README's "Backups" section used to claim the removed `GET /v1/backup/export.zip`; fixed on
+2026-07-02 to describe the `.ffbackup` endpoints + `scripts/backup-postgres.sh`.)
 
 Re-verify before trusting volatile facts:
 

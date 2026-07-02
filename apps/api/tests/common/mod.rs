@@ -1,8 +1,9 @@
 //! Infraestructura compartida por los tests de integración.
 //!
 //! Cada test obtiene su propio schema Postgres aislado (`ff_test_<uuid>`) con todas las
-//! migraciones aplicadas. Los schemas se leakean intencionalmente — `make clean-test-schemas`
-//! o el script `scripts/clean-test-schemas.sh` los borra en bloque cuando hace falta.
+//! migraciones aplicadas. Los schemas se leakean intencionalmente — bórralos en bloque con:
+//! `psql "$TEST_DATABASE_URL" -At -c "SELECT 'DROP SCHEMA '||nspname||' CASCADE;' FROM pg_namespace WHERE nspname LIKE 'ff_test_%'" | psql "$TEST_DATABASE_URL"`
+//! (o simplemente recrea el contenedor `ff-test-db`).
 //!
 //! Requiere un Postgres accesible en `TEST_DATABASE_URL` (por defecto
 //! `postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test`).

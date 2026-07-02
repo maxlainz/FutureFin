@@ -50,7 +50,7 @@ a real Postgres (Section 6); they are **not** run in CI, so running them locally
 | **API contract** | Handler request/response fields, status codes, routes | Breaking-change policy check (Section 5); update `#[utoipa::path]` annotations (OpenAPI is generated); update `.claude/api-routes.md`; integration tests covering the new/changed shape; CHANGELOG (with a "breaking" note if applicable). |
 | **DB migration** | New file in `apps/api/migrations/` | Section 3 in full (never edit shipped; data-loss sign-off; grep for query drift); integration tests — every test applies ALL migrations to a fresh schema, so a broken migration fails everything; update `.claude/data-model.md`; if exported tables change shape → check `apps/api/src/handlers/backup_user/` (Section 5) and the export SQL. |
 | **UI-visual** | Anything in `apps/web/src/` that renders | `npm run typecheck:web && npm run lint:web && npm run build:web && npm test --workspace futurefin-web`; verify **light AND dark theme** before merging (owner-mandated); tokens only, no hex (Section 2.4); icons only in `components/icons.tsx`; small charts via `MiniProjection`; update `.claude/design-system.md` / `.claude/frontend-structure.md` if conventions moved; CHANGELOG. |
-| **Docs-only** | `CLAUDE.md`, `.claude/*.md`, `README.md`, CHANGELOG wording | No test gates. Gate = accuracy: verify every command/path/claim against the code before writing it (this repo has documented doc drift — e.g. `.claude/tests.md` "no CI yet" is FALSE, and its "33 migrations" is stale; count with `ls apps/api/migrations | wc -l`). |
+| **Docs-only** | `CLAUDE.md`, `.claude/*.md`, `README.md`, CHANGELOG wording | No test gates. Gate = accuracy: verify every command/path/claim against the code before writing it (docs have drifted before — eight errata were found and fixed on 2026-07-02; prefer commands over frozen counts, e.g. `ls apps/api/migrations \| wc -l`). Record unfixable drift in futurefin-docs-and-writing §7. |
 | **Infra-release** | `Dockerfile`, `docker-compose*.yml`, `.github/workflows/*`, version bump, tag | CI green on `dev`; full local Docker-stack test (Section 4.2) before tagging; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. |
 
 CI (`.github/workflows/ci.yml`, runs on push/PR to `main` and `dev`) covers only:
@@ -261,9 +261,7 @@ Then, per change class:
 ## Provenance and maintenance
 
 Facts above verified against the repo on 2026-07-02 (v1.4.3, branch
-`claude/skill-library-handoff-rtfotl`). Known stale doc corrected here: `.claude/tests.md`
-claims "There is no CI yet" (false — `.github/workflows/ci.yml` exists) and "33 migrations"
-(31 files as of this date). Re-verify before trusting:
+`claude/skill-library-handoff-rtfotl`). Re-verify before trusting:
 
 - Current version: `grep '^version' apps/api/Cargo.toml`
 - Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations`

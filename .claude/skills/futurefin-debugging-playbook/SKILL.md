@@ -366,5 +366,5 @@ code, not by running services. Re-verify before trusting:
 - Default log filter: `grep -n "EnvFilter" apps/api/src/main.rs`
 - Parity fixture still dual-consumed: `grep -rn "fire-parity.json" apps/api/tests/ apps/web/src/`
 - Incident quotes (v1.0.2, v1.0.10, v1.0.12, v1.0.18–20, v1.2.0, v1.3.0, v1.4.0, v1.4.2): `CHANGELOG.md`
-- Stale-doc warning: `.claude/data-model.md` / `.claude/engine.md` still mention the removed
-  `projection_target_age` (dropped in v1.0.6); trust `handlers/projection.rs` instead.
+- Doc drift record: the standing-errata table lives in futurefin-docs-and-writing §7 (empty as
+  of 2026-07-02); when docs and `handlers/projection.rs` disagree, the code is ground truth.

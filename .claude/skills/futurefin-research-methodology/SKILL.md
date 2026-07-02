@@ -217,10 +217,10 @@ against each one before declaring any investigation finished.
 2. **Fixing symptoms serially without a mechanism.** The table-CSS saga shipped two fixes in
    two days before anyone asked "why only some tables?". If your second fix for the same
    symptom is being written, STOP — you skipped the negative check. Go find the mechanism.
-3. **Trusting stale docs over code.** The `.claude/*.md` reference docs have verified drift
-   (e.g. `.claude/tests.md` "there is no CI yet" is FALSE — CI exists but excludes the Postgres
-   integration tests; `.claude/data-model.md`/`engine.md` still describe the removed
-   `projection_target_age`). Full standing-errata table: futurefin-docs-and-writing §7.
+3. **Trusting stale docs over code.** The `.claude/*.md` reference docs have drifted before —
+   eight verified errata (a false "there is no CI yet", the removed `projection_target_age`
+   still documented, a dead README endpoint…) accumulated until they were fixed on 2026-07-02.
+   The standing-errata record: futurefin-docs-and-writing §7.
    Rule: docs give you the hypothesis; the code and a running test give you the fact.
 4. **Skipping the negative check.** "Does my fix explain why the OTHER cases still worked?" —
    the single question that separates v1.0.20 from v1.0.18/19, and the reason v1.4.2's fix

@@ -1,6 +1,36 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to any AI model (or human) working with code in this repository. It is the **single entry point**: everything else — reference docs, runbooks, history — is reachable from here.
+
+## Start here — route your task
+
+FutureFin is a self-hosted household finance + FIRE-planning app: Rust/Axum API (`apps/api`), pure-Decimal projection engine (`crates/engine`), React 19 SPA (`apps/web`), PostgreSQL. Money is NEVER `f64` in domain code. UI copy en español; código e identificadores en inglés.
+
+The repo carries three documentation layers. Consult them in this order:
+
+1. **This file** — commands, conventions, architecture summary, git workflow.
+2. **Skills** (`.claude/skills/*/SKILL.md`) — task-shaped runbooks with verified commands, the project's history and its discipline. **Pick by task type** (table below).
+3. **Reference docs** (`.claude/*.md`) — per-area fact sheets (routes, schema, engine, env…).
+
+### Skill routing (load BEFORE starting the matching task)
+
+| Your task looks like… | Load |
+|---|---|
+| Any change you plan to merge (gates, migration/release rules, pre-merge checklist) | [`futurefin-change-control`](.claude/skills/futurefin-change-control/SKILL.md) |
+| A symptom: wrong numbers, HTTP errors, unhealthy container, layout breakage | [`futurefin-debugging-playbook`](.claude/skills/futurefin-debugging-playbook/SKILL.md) |
+| "Why is X designed this way?" / touching cache, auth, scoping, serialization | [`futurefin-architecture-contract`](.claude/skills/futurefin-architecture-contract/SKILL.md) |
+| Understanding the FIRE/projection math (SWR, gross-up, cascade, inflación) | [`futurefin-fire-domain-reference`](.claude/skills/futurefin-fire-domain-reference/SKILL.md) |
+| About to (re)introduce an old idea — check what was already tried and rejected | [`futurefin-failure-archaeology`](.claude/skills/futurefin-failure-archaeology/SKILL.md) |
+| Env vars, compose files, query params, fire_settings axes; adding a config axis | [`futurefin-config-and-flags`](.claude/skills/futurefin-config-and-flags/SKILL.md) |
+| Setting up / building / dev-environment failures | [`futurefin-build-and-env`](.claude/skills/futurefin-build-and-env/SKILL.md) |
+| Deploy, upgrade, rollback, backups, logs, production ops | [`futurefin-run-and-operate`](.claude/skills/futurefin-run-and-operate/SKILL.md) |
+| Measuring: timings, cache hits, payload sizes, DB state (ships scripts) | [`futurefin-diagnostics-and-tooling`](.claude/skills/futurefin-diagnostics-and-tooling/SKILL.md) |
+| Running or writing tests; what evidence a change needs; fire-parity fixture | [`futurefin-validation-and-qa`](.claude/skills/futurefin-validation-and-qa/SKILL.md) |
+| Updating CHANGELOG/README/docs; doc drift; house style; templates | [`futurefin-docs-and-writing`](.claude/skills/futurefin-docs-and-writing/SKILL.md) |
+| Improving projection realism/correctness (Monte Carlo, taxes, invariants…) | [`futurefin-projection-realism-campaign`](.claude/skills/futurefin-projection-realism-campaign/SKILL.md) |
+| Numeric analysis: closed forms, index proofs, f64 safety, determinism audits | [`futurefin-proof-and-analysis-toolkit`](.claude/skills/futurefin-proof-and-analysis-toolkit/SKILL.md) |
+| "What should we build next?" / public capability claims | [`futurefin-research-frontier`](.claude/skills/futurefin-research-frontier/SKILL.md) |
+| Turning a hypothesis into an accepted change (evidence bar, predict-then-run) | [`futurefin-research-methodology`](.claude/skills/futurefin-research-methodology/SKILL.md) |
 
 ## Reference docs (`.claude/`)
 
@@ -18,7 +48,7 @@ Extended reference — read these before working on the relevant area:
 | [`.claude/design-system.md`](.claude/design-system.md) | V1 redesign — tokens, paleta, reglas para añadir UI nueva (LEE ANTES de tocar estilos) |
 | [`.claude/tests.md`](.claude/tests.md) | How to run + write backend integration tests (Postgres schemas) and frontend Vitest tests |
 
-**Keep these files up to date** whenever the corresponding area changes (routes, schema, env vars, etc.).
+**Keep these files up to date** whenever the corresponding area changes (routes, schema, env vars, etc.). The same applies to the skills: each `SKILL.md` ends with a "Provenance and maintenance" section listing one-line re-verification commands — if your change makes one of those facts stale, update the skill in the same PR. If you find a doc/code disagreement you cannot fix in the same change, record it in the standing-errata table of [`futurefin-docs-and-writing`](.claude/skills/futurefin-docs-and-writing/SKILL.md); the code is ground truth.
 
 ## Commands
 
@@ -26,7 +56,8 @@ Extended reference — read these before working on the relevant area:
 ```bash
 cp .env.example .env
 # Uncomment the dev vars in .env (PORT, DATABASE_URL, RUST_LOG)
-docker compose up -d futurefin-database   # Postgres only
+# Postgres only — el override split-dev expone 5432 al host (imprescindible para cargo run):
+docker compose -f docker-compose.yml -f docker-compose.split-dev.yml up -d futurefin-database
 
 # Terminal 1 — API at :8081 (auto-migrates DB on start)
 cd apps/api && cargo run

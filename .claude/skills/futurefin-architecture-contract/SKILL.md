@@ -216,10 +216,9 @@ first month net worth ≥ the inflation-adjusted target (`fire_reached` in
   `horizon_basis = "lifespan_90"`.
 - No birth date anywhere → **30 years** (360 months), `horizon_basis = "fallback_no_demographics"`.
 - Explicit `?months=` → clamped **12–840**, `horizon_basis = "months_override"`, uncached (D7).
-Beware three stale descriptions of the OLD target-age model: `.claude/data-model.md`,
-`.claude/engine.md` (§ horizon/retirement drawdown), and even the doc comment on
-`ProjectionSeriesResponse::horizon_basis` in `projection.rs` itself (lists `mac_target_age`,
-which is never emitted). Trust `projection_horizon_months` and its unit tests.
+(The old target-age model lingered in `.claude/data-model.md`, `.claude/engine.md` and the
+`horizon_basis` doc comment in `projection.rs` until 2026-07-02 — all fixed since. If in doubt,
+`projection_horizon_months` and its unit tests are the ground truth.)
 
 ## 3. Invariants table
 
@@ -245,8 +244,7 @@ which is never emitted). Trust `projection_horizon_months` and its unit tests.
   `/v1/health` smoke test. The `apps/api/tests/` suite (fire parity, cache, purge, body limits,
   unique violations — the tests guarding D5/D7/D8/I11) requires a local `TEST_DATABASE_URL`
   (see CLAUDE.md §Rust). A green CI does NOT mean those invariants held. Run them locally before
-  any release. (Note: `.claude/tests.md` claims "there is no CI yet" — false; CI exists, it just
-  excludes these tests.)
+  any release.
 - **W2 — `App.tsx` is still a 3229-LOC composition root** (down from 10,384 pre-v1.3.0, but still
   the single riskiest frontend file: auth gate, global state, route dispatch, two-phase projection
   loading all live there). Prefer extracting into `lib/`/`views/` per
@@ -263,11 +261,11 @@ which is never emitted). Trust `projection_horizon_months` and its unit tests.
   key pays ~500 ms recompute) and NOT multi-replica-safe — invalidation only reaches the local
   `HashMap`, so running >1 API replica behind a load balancer serves stale projections. The
   compose stack runs one replica; keep it that way or move the cache out of process first.
-- **W6 — `.claude/` reference docs have known drift** (verified 2026-07-02). The two items
-  load-bearing here: `.claude/tests.md` "no CI yet" is false (see W1), and
-  `.claude/data-model.md` + parts of `.claude/engine.md` (and the `horizon_basis` doc comment in
-  `projection.rs`) still describe `projection_target_age`, removed in v1.0.6 — see D11 for the
-  current rule. Full standing-errata table (the record): futurefin-docs-and-writing §7.
+- **W6 — reference docs can drift from code** (the eight errata found while authoring this
+  library — stale CI claim, `projection_target_age` remnants, dead README route, etc. — were all
+  fixed on 2026-07-02, but the mechanism that produced them remains: docs are hand-maintained).
+  When docs and code disagree, the code is ground truth; record unfixable drift in the
+  standing-errata table of futurefin-docs-and-writing §7.
 - **W7 — Errors in projection math are silent** (owner-identified hardest problem): wrong
   economic modeling produces plausible-looking numbers. Stochastic returns, sequence-of-returns
   risk, tax-aware withdrawal and variable SWR are all candidate directions and currently
@@ -277,7 +275,7 @@ which is never emitted). Trust `projection_horizon_months` and its unit tests.
 ## Provenance and maintenance
 
 Written 2026-07-02 against branch `claude/skill-library-handoff-rtfotl` at v1.4.3, by reading the
-files cited inline (not from memory of the docs — several docs are stale, see W6). Re-verify
+files cited inline (not from memory of the docs — docs can drift, see W6). Re-verify
 volatile claims with:
 
 - Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md`.
@@ -288,11 +286,11 @@ volatile claims with:
 - No-warm-up-after-mutation rationale: `grep -n -A6 "refresh_projection_after_mutation" apps/api/src/handlers/projection.rs`.
 - f64 exception boundary (D4/I3): `grep -rn "serialize_decimal_as_f64" apps/api/src/` and `.claude/api-routes.md` §projection.
 - Sink invariant (I1): `grep -n "sink_must_be_last" apps/api/src/handlers/allocation_rules.rs`.
-- CI coverage (W1): `cat .github/workflows/ci.yml` — check whether a job now sets `TEST_DATABASE_URL`; if so, update W1 here and fix `.claude/tests.md`.
+- CI coverage (W1): `cat .github/workflows/ci.yml` — check whether a job now sets `TEST_DATABASE_URL`; if so, update W1 here and `.claude/tests.md` §CI.
 - Session mechanics (D3): `grep -n "expires_at\|SESSION_COOKIE" apps/api/src/handlers/session.rs` and `grep -n "SESSION_TTL_DAYS" apps/api/src/main.rs`.
 - Default ES brackets (W4): `grep -n -A24 "default_es_tax_brackets" apps/api/src/handlers/installation.rs` vs `DEFAULT_ES_TAX_BRACKETS_API` in `apps/web/src/lib/fire.ts`.
 - App.tsx size (W2): `wc -l apps/web/src/App.tsx`.
-- Doc drift (W6): re-check against the standing-errata table in futurefin-docs-and-writing §7; trim W6 once the underlying docs are fixed.
+- Doc drift (W6): the standing-errata table in futurefin-docs-and-writing §7 is the record; empty as of 2026-07-02.
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the

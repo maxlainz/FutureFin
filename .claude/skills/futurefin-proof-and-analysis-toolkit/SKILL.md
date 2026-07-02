@@ -393,8 +393,8 @@ Sources: `crates/engine/src/projection.rs`; `apps/api/src/handlers/projection.rs
 `apps/web/src/lib/fire.ts`; `apps/web/src/views/ProjectionNetWorthChart.tsx` (~190–210);
 `apps/api/tests/{projection_marker.rs,fire_parity.rs,fixtures/fire-parity.json}`;
 `apps/web/src/lib/fire.test.ts`; `CHANGELOG.md` v1.2.0/v1.3.0/v1.4.0/v1.4.2; `.claude/tests.md`
-(NOTE: its "There is no CI yet" claim is stale — `.github/workflows/ci.yml` exists but runs neither
-the Postgres integration tests nor Vitest). All line numbers are ~approximate anchors as of v1.4.3.
+(reminder: `.github/workflows/ci.yml` runs neither the Postgres integration tests nor Vitest —
+run them locally). All line numbers are ~approximate anchors as of v1.4.3.
 
 Re-verify before trusting volatile facts:
 

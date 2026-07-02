@@ -6,12 +6,12 @@ Template: `.env.example` (cubre producción y desarrollo split-dev).
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `DATABASE_URL` | `postgres://futurefin:futurefin@127.0.0.1:5432/futurefin` | Required |
+| `DATABASE_URL` | — (sin default) | **Required** — `main.rs` hace panic al arrancar si falta (`DATABASE_URL must be set`). `.env.example` trae el valor típico de dev: `postgres://futurefin:futurefin@127.0.0.1:5432/futurefin`. |
 | `PORT` | `8080` | API listen port. Use `8081` in split-dev so Vite can use `8080`. |
 | `RUST_LOG` | — | e.g. `futurefin_api=info,tower_http=info,sqlx=warn` |
 | `CORS_ORIGINS` | 4 localhost entries | Comma-separated. Not required — defaults to localhost. Set only for cross-origin API access. |
 | `COOKIE_SECURE` | `false` | Bool env var parsed by `main.rs`. |
-| `SESSION_TTL_DAYS` | `30` | 1–400 |
+| `SESSION_TTL_DAYS` | `30` | Acepta 1–400; un valor fuera de rango o no numérico **cae silenciosamente al default 30** (filter-then-default, no clamp). |
 | `WEB_STATIC_ROOT` | — | Path to Vite `dist/`. Docker sets `/app/web`. Omit for API-only. |
 | `FUTUREFIN_API_PORT` | `8081` | Used by Vite proxy (`vite.config.ts`) |
 | `WEB_DEV_PORT` | `8080` | Vite dev server port |
