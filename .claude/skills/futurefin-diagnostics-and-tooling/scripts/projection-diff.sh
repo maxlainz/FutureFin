@@ -24,6 +24,9 @@ BASE="${BASE:-http://127.0.0.1:8080}"
 JAR=$(mktemp); TMPA=$(mktemp); TMPB=$(mktemp)
 trap 'rm -f "$JAR" "$TMPA" "$TMPB"' EXIT
 
+command -v python3 >/dev/null \
+  || { echo "ERROR: python3 is required (JSON comparison)." >&2; exit 1; }
+
 if ! curl -sf -o /dev/null --max-time 5 "$BASE/health"; then
   echo "ERROR: no API responding at $BASE/health" >&2
   echo "Start it: 'docker compose up -d' (:8080) or 'cargo run' + BASE=http://127.0.0.1:8081." >&2
@@ -73,6 +76,7 @@ import json, sys
 
 a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))
 la, lb = sys.argv[3], sys.argv[4]
+same_density = a.get("density") == b.get("density")
 
 def ms(doc, key):  # milestone summary "target@month, ..."
     return ", ".join(f"{m['target']}@m{m['reached_month_index']}" for m in doc.get(key, [])) or "-"
@@ -85,8 +89,11 @@ def row(name, va, vb, must_match=True):
     print(f"  {name:<42} {mark:<16} {va} | {vb}")
     return diff and must_match
 
-# Fields whose divergence is EXPECTED between densities (serialization only):
-shape_only = {"density", "points_len", "fire_target_series_len"}
+# Scalars/KPIs/milestones are computed on the FULL series server-side
+# (handlers/projection.rs) → must match regardless of density. Array shapes
+# and the LAST serialized point legitimately differ between densities:
+# monthly ends at month_index = months-1 (e.g. 839), hybrid's last kept
+# index is the last multiple of 12 ≤ months-1 (e.g. 828).
 fields = [
     ("density",                       a.get("density"), b.get("density"), False),
     ("months",                        a.get("months"), b.get("months"), True),
@@ -101,23 +108,50 @@ fields = [
                                       b.get("compound_outpaces_true_savings_month_index"), True),
     ("milestones (nominal)",          ms(a, "milestones"), ms(b, "milestones"), True),
     ("milestones_real (deflated)",    ms(a, "milestones_real"), ms(b, "milestones_real"), True),
-    ("points_len",                    len(a.get("points", [])), len(b.get("points", [])), False),
-    ("fire_target_series_len",        len(a.get("fire_target_series", [])), len(b.get("fire_target_series", [])), False),
+    ("points_len",                    len(a.get("points", [])), len(b.get("points", [])), same_density),
+    ("fire_target_series_len",        len(a.get("fire_target_series", [])), len(b.get("fire_target_series", [])), same_density),
     ("asset_series count",            len(a.get("asset_series", [])), len(b.get("asset_series", [])), True),
-    ("last point net_worth",          a["points"][-1]["net_worth"] if a.get("points") else None,
-                                      b["points"][-1]["net_worth"] if b.get("points") else None, True),
     ("last point month_index",        a["points"][-1]["month_index"] if a.get("points") else None,
-                                      b["points"][-1]["month_index"] if b.get("points") else None, True),
+                                      b["points"][-1]["month_index"] if b.get("points") else None, same_density),
 ]
 print(f"Comparing {la}  vs  {lb}")
 print(f"  {'field':<42} {'status':<16} A | B")
 bad = sum(row(*f) for f in fields)
 
-# When ONLY density differs, everything computed on the full series must match.
-if a.get("density") != b.get("density"):
-    print("\nNote: densities differ → points_len/fire_target_series_len diffs are")
-    print("expected (serialization decimation). Everything marked DIFF above is a")
-    print("real divergence: milestones/KPIs are computed on the FULL series and")
-    print("must be density-invariant (regression class of v1.4.2).")
+# Point-level check at SHARED month_index values. Hybrid indices are a strict
+# subset of monthly indices, and both densities serialize from the same
+# deterministic compute → net_worth/contributed_capital/fire_target must be
+# bit-identical (f64) at every shared index.
+def by_month(doc):
+    pts = {p["month_index"]: p for p in doc.get("points", [])}
+    ft = doc.get("fire_target_series", [])
+    ftm = {p["month_index"]: ft[i] for i, p in enumerate(doc.get("points", []))} if len(ft) == len(pts) else {}
+    return pts, ftm
+
+pa, fta = by_month(a); pb, ftb = by_month(b)
+shared = sorted(set(pa) & set(pb))
+mismatches = []
+for m in shared:
+    for field in ("net_worth", "contributed_capital"):
+        if pa[m][field] != pb[m][field]:
+            mismatches.append((m, field, pa[m][field], pb[m][field]))
+    if fta and ftb and fta.get(m) != ftb.get(m):
+        mismatches.append((m, "fire_target", fta.get(m), ftb.get(m)))
+print(f"\nShared month_index points: {len(shared)} "
+      f"(A has {len(pa)}, B has {len(pb)})")
+if mismatches:
+    bad += 1
+    print(f"  DIFF at {len(mismatches)} shared-index values (first 3):")
+    for m, field, va, vb in mismatches[:3]:
+        print(f"    month {m} {field}: {va} | {vb}")
+else:
+    print("  same: all shared-index values identical")
+
+if not same_density:
+    print("\nNote: densities differ → points_len/fire_target_series_len (and the")
+    print("last serialized month_index) diffs are expected decimation artifacts.")
+    print("Everything marked DIFF above is a real divergence: KPIs/milestones are")
+    print("computed on the FULL series server-side and must be density-invariant")
+    print("(regression class of v1.4.2).")
 sys.exit(1 if bad else 0)
 PYEOF

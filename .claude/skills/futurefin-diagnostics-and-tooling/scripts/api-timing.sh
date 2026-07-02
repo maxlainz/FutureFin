@@ -9,8 +9,11 @@
 #
 # Env vars (same convention as scripts/smoke-projection-cache.sh):
 #   BASE        API base URL (default http://127.0.0.1:8080)
-#   SMOKE_USER  existing username. If unset, registers a throwaway user —
-#   SMOKE_PASS  only works on a VIRGIN database.
+#   SMOKE_USER  existing username with installation membership. If unset,
+#   SMOKE_PASS  registers a throwaway user — only useful on a VIRGIN database
+#               (on a non-virgin DB the throwaway stays "pending" with no
+#               membership and every data endpoint would 403; the script
+#               detects this via /v1/installation/session-context and aborts).
 #
 # What it prints: wall-clock ms per endpoint (curl %{time_total}), two hits on
 # each projection density so you can see MISS→HIT, and gzip vs raw payload
@@ -57,11 +60,11 @@ if [[ -n "${SMOKE_USER:-}" && -n "${SMOKE_PASS:-}" ]]; then
   USER="$SMOKE_USER"; PASS="$SMOKE_PASS"
 else
   USER="timing_$(date +%s)_$$"; PASS="timing-pass-1234"
-  echo "  SMOKE_USER unset → registering throwaway $USER (virgin DB only)"
+  echo "  SMOKE_USER unset → registering throwaway $USER (only useful on a virgin DB)"
   curl -sf -c "$JAR" -X POST "$BASE/v1/auth/register" \
     -H "content-type: application/json" \
     -d "{\"username\":\"$USER\",\"password\":\"$PASS\",\"birth_date\":\"1990-01-01\"}" >/dev/null \
-    || { echo "ERROR: register failed — DB not virgin. Pass SMOKE_USER/SMOKE_PASS." >&2; exit 1; }
+    || { echo "ERROR: register failed (validation error or username taken)." >&2; exit 1; }
 fi
 t0=$(date +%s%N)
 curl -sf -c "$JAR" -X POST "$BASE/v1/auth/login" \
@@ -70,6 +73,17 @@ curl -sf -c "$JAR" -X POST "$BASE/v1/auth/login" \
   || { echo "ERROR: login failed (bad credentials?)." >&2; exit 1; }
 awk -v ms=$(( ($(date +%s%N) - t0) / 1000000 )) \
   'BEGIN{printf "  login: %d ms (Argon2id verify dominates; 100-500 ms is normal)\n", ms}'
+
+# Gate: a session alone is not enough — data endpoints require installation
+# membership (pending users get 403 everywhere). session-context returns
+# "access":null for pending users, "access":{...} for members.
+CTX=$(curl -sf -b "$JAR" "$BASE/v1/installation/session-context" || echo "")
+if ! printf '%s' "$CTX" | grep -q '"access":{'; then
+  echo "ERROR: user '$USER' has a session but NO installation membership" >&2
+  echo "(pending approval, or installation not set up). Every data endpoint" >&2
+  echo "would return 403. Pass SMOKE_USER/SMOKE_PASS of an approved member." >&2
+  exit 1
+fi
 echo "  waiting 1500 ms for post-login cache warm-up (tokio::spawn, household both densities)…"
 sleep 1.5
 
