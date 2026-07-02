@@ -76,8 +76,9 @@ Vocabulary used below (defined once):
   disagree; the engine entered retirement (stopping contributions) at the age trigger while the
   chart marker showed the FIRE crossover.
 - **Fix**: 542ecfa — column dropped entirely; FIRE crossover is the only trigger. Horizon became
-  a fixed 90-year lifespan from the oldest household member's birth date (clamped 5–70 years,
-  30-year fallback without birth date).
+  a fixed 90-year lifespan from ONE resolved birth date: the session user's `users.birth_date`,
+  else the first `persons` row ordered `is_primary DESC, sort_index ASC` — NOT the oldest member
+  (clamped 5–70 years, 30-year fallback without any birth date).
 - **Alternative rejected**: keeping both triggers and reconciling — inherently ambiguous.
 - **Status**: settled. **Warning**: `.claude/data-model.md` and parts of `.claude/engine.md`
   still describe the old field — verify against `apps/api/src/handlers/projection.rs` instead.
@@ -192,7 +193,7 @@ Vocabulary used below (defined once):
 
 | Old design | Specific failure mode | Replacement (current) |
 |---|---|---|
-| **Inflation model v1 "real pure"** (v1.0.12): deflate each asset's return (`r_real = (1+r_nom)/(1+inf) − 1`), simulate everything in today-€ | Predecessor mixed deflation/inflation inconsistently; v1 itself, combined with a FLAT target, made inflation toggling nearly a no-op on retirement age, and pre-v1 produced asset drain before retirement | **v2 nominal + moving target** (v1.2.0, current): everything simulated in nominal €; ONLY the FIRE target grows: `target(month k) = base × (1+inf/100)^((k−1)/12)` via `fire_target_at_month_index`. Deflation is a display-layer concern (`milestones_real`, chart toggle) |
+| **Inflation model v1 "real pure"** (v1.0.12): deflate each asset's return (`r_real = (1+r_nom)/(1+inf) − 1`), simulate everything in today-€ | Predecessor mixed deflation/inflation inconsistently; v1 itself, combined with a FLAT target, made inflation toggling nearly a no-op on retirement age, and pre-v1 produced asset drain before retirement | **v2 nominal + moving target** (v1.2.0, current): everything simulated in nominal €; ONLY the FIRE target grows: `target(month_index) = base × (1+inf/100)^(month_index/12)` via `fire_target_at_month_index` (the engine evaluates month k against the target at index k−1 — see futurefin-fire-domain-reference §4). Deflation is a display-layer concern (`milestones_real`, chart toggle) |
 | **Per-asset contributions** (`monthly_contribution_fixed` + `contribution_remainder_weight` + per-asset cap, v1.0.11) | Sum of fixed contributions could exceed surplus; weights confusing when >100 %; no explicit priority; cap-overflow redistribution needed ad-hoc fallback rules (v1.0.11's "highest-return liquid asset" patch was a symptom) | **Allocation cascade** (v1.1.0): ordered rules `fixed`/`percent`/`remainder` with optional caps (`amount`, `months_expense`, `income_multiple`); exactly one uncapped `remainder` sink, always last (server-enforced: `remainder_required`, `uncapped_remainder_exists`, `sink_must_be_last`). Clean column drop, NO data migration — owner signed off losing config; backup schema_version bumped to 3 |
 | **Migration auto-repair** (12-round checksum repair loop) | Masked genuine drift between shipped migration files and applied checksums; a silently "repaired" DB can diverge from what migrations say | Fail-loud `sqlx::migrate!().run()` (`apps/api/src/db.rs`); manual `DELETE FROM _sqlx_migrations WHERE version = X` only when the change is genuinely idempotent |
 | **GET-side purges** (`purge_expired_liabilities` called from 6 GET handlers) | GETs issued DELETEs: violates HTTP semantics, breaks caching (v1.4.0's cache would have been impossible), destroys audit data | `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)` filter in liabilities/summary/budget/assets/projection reads; rows persist |

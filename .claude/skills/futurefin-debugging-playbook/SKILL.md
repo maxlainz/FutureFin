@@ -5,7 +5,8 @@ description: >
   implausible projection/FIRE numbers, form preview disagrees with chart, HTTP 409/422/413/403/401
   responses, "VersionMismatch"/checksum error on startup, stale data after an edit, chart wrong
   only at one density or only in dark mode, broken table layout / overlapping action buttons,
-  Docker container unhealthy, login loop / session not sticking, Vite dev 404s on /v1. It maps
+  Docker container unhealthy (diagnosing WHY — for operating/restarting/rolling back the stack
+  use futurefin-run-and-operate), login loop / session not sticking, Vite dev 404s on /v1. It maps
   each symptom to a first move and a discriminating experiment, and lists the traps that already
   cost real time. Do NOT use it for deep projection-model redesign (futurefin-projection-realism-campaign),
   for writing new tests (futurefin-validation-and-qa), for environment setup from scratch
@@ -37,13 +38,10 @@ Vocabulary you need (one line each; full domain detail in
 
 1. **Reproduce before fixing.** Get the failing request/render on your screen with exact inputs.
    If you cannot reproduce, you are guessing.
-2. **Root cause before patching.** The table-CSS saga (v1.0.18 → v1.0.19 → v1.0.20, all
-   2026-05-16 in `CHANGELOG.md`) burned three releases on the same bug: overlapping action
-   buttons were "fixed" with `inline-flex`, then with `position: sticky` + shadow hacks, before
-   anyone noticed the real cause — `display: inline-flex` applied **directly to a `<td>`**,
-   which pulls the cell out of the table layout model. The real fix (wrap buttons in an inner
-   `<div>`, leave the `<td>` as default `table-cell`) also reverted both prior hacks. If your
-   second attempt at the same symptom is another CSS/behavior tweak, stop and find the mechanism.
+2. **Root cause before patching.** The table-CSS saga (v1.0.18 → v1.0.20) burned three releases
+   on one bug because two plausible "fixes" shipped before anyone found the mechanism (trap 8;
+   full chronicle: futurefin-failure-archaeology §2.3). If your second attempt at the same
+   symptom is another CSS/behavior tweak, stop and find the mechanism.
 3. **Check both scopes.** Reproduce with `?view=household` (default) AND `?view=mine`. Scope
    bugs historically came from hand-written duplicate SQL branches with inverted bind order
    (live case in `budget.rs`, fixed v1.3.0 by the `LedgerView::scope_where` helpers).
@@ -67,7 +65,7 @@ Vocabulary you need (one line each; full domain detail in
 | HTTP 409 on create/update | Identify which unique constraint fired | `From<sqlx::Error>`: SQLSTATE 23505 → 409 Conflict | Trap 3 |
 | HTTP 400 "referenced record missing" | Check the FK you sent | SQLSTATE 23503 → 400 | Trap 3 |
 | HTTP 422 | Inspect the JSON body you sent | Axum `Json<T>` deserialization rejection (e.g. unknown `fire_number_mode`) | Trap 3 |
-| HTTP 413 | Measure request size | Body limits: 1 MB global, 16 MB only on `/v1/backup/user-import*` | Trap 3 |
+| HTTP 413 | Measure request size | Body limits: 1 MiB global, 16 MiB only on `/v1/backup/user-import*` | Trap 3 |
 | HTTP 403 on every data endpoint but login works | Check `installation_memberships` for the user | Pending user (registered, not approved) | Trap 3 |
 | API refuses to start: migration `VersionMismatch` / checksum error | Read the version number in the error | Edited already-applied migration; auto-repair removed v1.3.0 | Trap 4 |
 | Edited an asset/budget line, projection chart unchanged | Grep the mutating handler for `refresh_projection_after_mutation` | Missing cache invalidation | Trap 5 |
@@ -107,14 +105,12 @@ inflation semantics, cascade, drain, FIRE trigger) is out of scope here** — ha
 
 ### 2. FIRE target: form preview vs chart disagree
 
-**Story.** FIRE math is deliberately duplicated client-side (`apps/web/src/lib/fire.ts`) for the
-instant form preview in Jubilación, and server-side (engine + `handlers/projection.rs`). Two real
-divergences shipped: (a) found during the v1.3.0 refactor (2026-05-18) — `RetirementView` passed
-`expense_regular_monthly_equivalent` where the server used
-`expense_retirement_monthly_equivalent`, so users with `ends_at_retirement` expenses saw a
-preview 2–3× off the real target; (b) an off-by-one — engine used `years=(k-1)/12`, handler
-`years=month_index/12` — fixed by making the engine's `fire_target_at_month_index` the single
-public helper both consume.
+**Story (short).** FIRE math is deliberately duplicated client-side (`apps/web/src/lib/fire.ts`,
+instant Jubilación preview) and server-side (engine + `handlers/projection.rs`). Two real
+divergences shipped: (a) v1.3.0 — `RetirementView` fed the preview `expense_regular_…` where the
+server used `expense_retirement_monthly_equivalent` (2–3× divergence); (b) a duplicated-formula
+off-by-one, fixed by the single helper `fire_target_at_month_index`. Full chronicle:
+futurefin-failure-archaeology §2.4–2.5.
 
 **Discriminating experiment.** Both sides consume one canonical fixture,
 `apps/api/tests/fixtures/fire-parity.json`. Run both suites:
@@ -142,7 +138,7 @@ All mappings live in `apps/api/src/error.rs` and `apps/api/src/routes/mod.rs`. V
 | 409 `conflict` | `impl From<sqlx::Error>`: SQLSTATE 23505 (unique violation) → `ApiError::Conflict` | Duplicate key (e.g. username taken). The DB constraint is the contract. |
 | 400 `bad_request` "referenced record missing" | SQLSTATE 23503 (FK violation) | You sent an id that doesn't exist (e.g. category_id). |
 | 422 | Axum's `Json<T>` extractor rejection (never constructed in `error.rs`) | Body failed deserialization — e.g. `fire_number_mode: "foobar"` (strict since v1.3.0; it used to silently default). |
-| 413 | `DefaultBodyLimit`: 1 MB global; 16 MB only on `POST /v1/backup/user-import` and `/preview` (base64 inflates ~33%) | Body too large. Covered by `apps/api/tests/body_limits.rs`. |
+| 413 | `DefaultBodyLimit`: 1 MiB global; 16 MiB only on `POST /v1/backup/user-import` and `/preview` (base64 inflates ~33%) | Body too large. Covered by `apps/api/tests/body_limits.rs`. |
 | 403 `forbidden` | `require_installation_member` (`handlers/installation.rs`): user has a session but no row in `installation_memberships` | **Pending user** awaiting owner approval — this is the #1 cause of "everything is 403". Also: role lacks write permission (`role_can_write`, viewer role). |
 | 401 `unauthorized` | `require_session_user` (`handlers/session.rs`): missing/expired `ff_session` cookie | See trap 10 before blaming the session table. |
 | 500 `internal` | Any other `sqlx::Error` → `ApiError::Db` | Real bug. Check logs — the v1.0.10 backup-export 500 (2026-05-15) was a SELECT still naming `b.label`/`b.frequency` after migration `20260505180000_budget_entries_monthly_only` dropped them. Lesson: after any column drop, grep handlers for the column name. |
@@ -212,14 +208,11 @@ reload in `saveFireSettingsPatch` for exactly this).
 
 ### 6. Chart wrong only with `density=hybrid` — the index vs `month_index` class
 
-**Story.** v1.4.2 (2026-06-19): `ProjectionNetWorthChart` deflated each point by its **array
-index** instead of its real `month_index`. With monthly density index == month, so the bug was
-invisible; with hybrid (points at months 0..12, then 24, 36, …) it under-deflated everything
-past month 12 — until the full monthly series arrived via two-phase loading and silently
-"fixed" the chart, making it look like a flicker. This is a *class* of bug: any `points[i]`
-arithmetic that assumes equidistant points breaks under decimation. The chart now derives all X
-coordinates and deflators from `p.month_index` (`apps/web/src/views/ProjectionNetWorthChart.tsx`,
-comment around line 191).
+**Story (short).** v1.4.2: the chart deflated points by **array index** instead of
+`month_index` — invisible at monthly density (index == month), wrong under hybrid's
+non-equidistant points. Rule: any `points[i]` arithmetic assuming equidistant points breaks
+under decimation; derive everything from `p.month_index` (chart does, see
+`ProjectionNetWorthChart.tsx` ~line 191). Full chronicle: futurefin-failure-archaeology §2.8.
 
 **Discriminating experiment.** In browser devtools → Network, the two-phase load fires both
 requests; compare rendering right after the hybrid response vs after the monthly one arrives
@@ -247,14 +240,10 @@ for dark. Verify BOTH themes before closing.
 
 ### 8. Table/CSS layout breakage — the `<td>` display saga
 
-**Story.** v1.0.18 → v1.0.20 (all 2026-05-16). Action buttons overlapped the previous column's
-content in the Ingresos table. Fix #1: change the `<td>`'s `display: flex` to `inline-flex` +
-padding + background. Still broken. Fix #2: make the cell `position: sticky; right: 0` with a
-`::before` shadow. Still broken. Fix #3 found the mechanism: `.budget-row-actions { display:
-inline-flex }` was applied **directly to the `<td>`**, overriding `display: table-cell` and
-ejecting the cell from the table layout model — the browser rendered it outside its column. Real
-fix: wrap the buttons in an inner `<div className="budget-row-actions">`; the `<td>` keeps
-default display. Both hacks were reverted. Six tables were affected.
+**Story (short).** v1.0.18 → v1.0.20: overlapping action buttons resisted two plausible fixes
+because the mechanism was `display: inline-flex` applied **directly to a `<td>`**, ejecting the
+cell from the table layout model; the real fix wraps the buttons in an inner `<div>` and leaves
+the `<td>` at default `table-cell`. Full chronicle: futurefin-failure-archaeology §2.3.
 
 **Discriminating experiment.** For any table misrendering: devtools → select the `<td>` → check
 computed `display`. Anything other than `table-cell` on a `<td>` (or non-`table-row` on `<tr>`)
@@ -364,7 +353,7 @@ Written 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). All mechanisms verifi
 code, not by running services. Re-verify before trusting:
 
 - Error mapping (23505→409, 23503→400): `grep -n "23505\|23503" apps/api/src/error.rs`
-- Body limits (1 MB / 16 MB): `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`
+- Body limits (1 MiB / 16 MiB): `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`
 - Pending-user 403: `grep -n "Forbidden" apps/api/src/handlers/installation.rs`
 - Cache TTL/key/invalidation: `grep -n "PROJECTION_CACHE_TTL\|ProjectionCacheKey\|invalidate_projection" apps/api/src/state.rs`
 - No warm-up after mutation rationale: `grep -n -B8 "refresh_projection_after_mutation" apps/api/src/handlers/projection.rs`

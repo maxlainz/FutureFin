@@ -6,12 +6,15 @@ description: >
   a closed form (gross-up, solvers), touching any month_index / array-index math (projection series,
   deflation, decimated densities), refactoring code that must not change output (cache, spawn_blocking,
   query consolidation), changing FIRE math that is duplicated Rust↔TypeScript (fire-parity.json),
-  deciding Decimal vs f64 for a new field, or auditing engine determinism/purity. Symptom triggers:
-  "numbers look plausible but slightly wrong", "chart diverges from KPI", "off by one month",
-  "target differs between preview and server", "refactor changed a value", "is f64 safe here?".
-  NOT for process/lifecycle discipline (use futurefin-research-methodology), the projection realism
-  campaign itself (futurefin-projection-realism-campaign), FIRE formula reference
-  (futurefin-fire-domain-reference), or test-harness mechanics (futurefin-validation-and-qa).
+  deciding Decimal vs f64 for a new field, or auditing engine determinism/purity. Symptom triggers
+  while doing planned numeric work (refactoring, deriving, reviewing): "refactor changed a value",
+  "is f64 safe here?", "my index math might be off by one month", "does this closed form really
+  equal the old iteration?". NOT for live-symptom triage — if you start from a bug report
+  ("numbers look wrong", "chart diverges from KPI"), load futurefin-debugging-playbook FIRST and
+  come here once you know which computation to prove. Also NOT for process/lifecycle discipline
+  (use futurefin-research-methodology), the projection realism campaign itself
+  (futurefin-projection-realism-campaign), FIRE formula reference (futurefin-fire-domain-reference),
+  or test-harness mechanics (futurefin-validation-and-qa).
 ---
 
 # FutureFin proof-and-analysis toolkit
@@ -313,7 +316,9 @@ an existing f64 shortcut is safe.
 
 **Contract:** `crates/engine` is pure — same `ProjectionInput`, same `ProjectionOutput`, bit-for-bit,
 on any machine, at any time of day. "Today" is *injected* as `ProjectionInput.ref_date` by the
-handler; the engine never asks the system for it.
+handler; the engine never asks the system for it. (Status of the claim: argued from the purity
+audit below — no test currently pins it; a replay regression test asserting two runs are
+`assert_eq!`-identical is still an unimplemented candidate, see futurefin-research-frontier item 1.)
 
 **Why it matters**
 - **Cache correctness**: the v1.4.0 projection cache serves a stored response for
@@ -364,6 +369,9 @@ liquidity+rate could drain in unspecified order. Values would still sum the same
 
 ## When NOT to use this skill
 
+- **Triaging a live symptom from scratch** ("numbers look wrong", "chart diverges from KPI",
+  HTTP errors, stale data): `.claude/skills/futurefin-debugging-playbook/SKILL.md` first; return
+  here when triage has identified which computation needs a proof.
 - **Process/lifecycle questions** — how a hunch becomes an accepted result, evidence bar,
   predict-then-run, when to abandon a line: `.claude/skills/futurefin-research-methodology/SKILL.md`.
 - **The projection-realism campaign itself** (which realism gaps to attack, decision gates, current

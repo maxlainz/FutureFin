@@ -7,8 +7,10 @@ description: >
   per-user encrypted .ffbackup layer), and knowing what data lives where. Load this skill when
   the task mentions: deploy, production, docker compose up, upgrade, rollback, downgrade,
   release image, Docker Hub, GHCR, image tags, :latest, pull, backup, restore, pg_dump,
-  .ffbackup, export/import, container unhealthy, healthcheck, /v1/health, /v1/ready, logs,
-  RUST_LOG, volume, pgdata, data loss, stop the stack. Do NOT load for: setting up a local
+  .ffbackup, export/import, container unhealthy in the operational sense (reading
+  healthcheck/probe status during deploy/upgrade, restarting, rolling back — for diagnosing WHY
+  a container is unhealthy from a symptom use futurefin-debugging-playbook), healthcheck,
+  /v1/health, /v1/ready, logs, RUST_LOG, volume, pgdata, data loss, stop the stack. Do NOT load for: setting up a local
   DEV environment or building the image locally (futurefin-build-and-env), measuring
   performance or cache behavior (futurefin-diagnostics-and-tooling), diagnosing an app-level
   bug behind a failing container (futurefin-debugging-playbook), the meaning of each env
@@ -133,10 +135,11 @@ Mechanically it is the same operation: set `FUTUREFIN_TAG` back to the previous 
 `docker compose pull && docker compose up -d`.
 
 **BUT: migrations only roll forward.** If the newer version applied a migration, the database
-schema now belongs to the newer version and the old binary may fail or misbehave against it
-(exact failure mode depends on the migration: an added column is usually harmless, a dropped
-or renamed column breaks the old queries — see the v1.0.10 incident where SQL drifted from
-schema). Before downgrading:
+schema now belongs to the newer version and the old binary will not accept it: sqlx's default
+migrator (`ignore_missing = false`) aborts startup with `VersionMissing` when
+`_sqlx_migrations` contains versions the binary does not embed — a de-facto downgrade guard.
+(Even if it did start, dropped/renamed columns would break the old queries — see the v1.0.10
+incident where SQL drifted from schema.) Before downgrading:
 
 ```bash
 # Which migrations has THIS database applied?
@@ -277,8 +280,8 @@ on this point. The real endpoints (all POST, session cookie required):
 | Endpoint | Role required | Notes |
 |---|---|---|
 | `POST /v1/backup/user-export` | any installation member | Body `{"password": "<account pw>", "ui_preferences": {...}?}`. Verifies the account password, streams a binary `.ffbackup` (`futurefin-<user>-<YYYYMMDD>.ffbackup`). |
-| `POST /v1/backup/user-import/preview` | write role (owner/member) | Body `{"file_b64": "<base64 of file>", "password": "..."}`. Decrypts and returns counts + `schema_version` without changing anything. 16 MB body limit. |
-| `POST /v1/backup/user-import` | write role | Same body **plus `"confirm_replace": true`** (400 without it). 16 MB body limit. |
+| `POST /v1/backup/user-import/preview` | write role (owner/member) | Body `{"file_b64": "<base64 of file>", "password": "..."}`. Decrypts and returns counts + `schema_version` without changing anything. 16 MiB body limit. |
+| `POST /v1/backup/user-import` | write role | Same body **plus `"confirm_replace": true`** (400 without it). 16 MiB body limit. |
 
 Semantics you must not misremember:
 

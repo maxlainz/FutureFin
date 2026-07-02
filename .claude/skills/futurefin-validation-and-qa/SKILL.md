@@ -97,7 +97,7 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
 |---|---|---|
 | `smoke.rs` | 5 | health/ready, 401 unauth, register→login→me roundtrip, first-user bootstrap → owner |
 | `liabilities_purge.rs` | 2 | expired liabilities hidden from GET/summary but **persist in DB** (reads never mutate) |
-| `body_limits.rs` | 2 | 1 MB global body cap → 413; `/backup/user-import` accepts up to 16 MB |
+| `body_limits.rs` | 2 | 1 MiB global body cap → 413; `/backup/user-import` accepts up to 16 MiB |
 | `installation_patch.rs` | 3 | unknown `fire_number_mode` rejected; legacy `annual_expense_adjusted` alias accepted; valid mode change |
 | `unique_violation.rs` | 2 | duplicate username / duplicate category name → 409 via central `From<sqlx::Error>` |
 | `projection_marker.rs` | 1 | regression capture: stable marker + starting NW across the perf refactor (the template for capture-first) |

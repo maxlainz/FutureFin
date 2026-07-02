@@ -90,7 +90,10 @@ Validation (`validate_fire_settings`, installation.rs:123-190): `swr_pct` bounde
 **last bracket must be open-ended (`up_to: null`)** — the closed-form solver in §3 relies on this.
 `swr_pct = 0` passes validation but yields no target (compute returns `None` for swr ≤ 0).
 `fire_number_mode` deserialization is strict since v1.3.0 (unknown value → 422); the legacy alias
-`annual_expense_adjusted` maps to `annual_expense` only in the web normalizer (fire.ts:54).
+`annual_expense_adjusted` maps to `annual_expense` on BOTH sides: the server's strict
+`Deserialize` accepts it (installation.rs:41, "Alias preservado para importar backups antiguos";
+pinned by the test in `apps/api/tests/installation_patch.rs`) and the web normalizer mirrors it
+(fire.ts:54). Do not "tighten" the server deserializer — old-backup imports depend on the alias.
 
 ## 3. Tax gross-up through capital-gains brackets
 
@@ -238,8 +241,11 @@ with a signed-off, no-data-migration column drop — see futurefin-change-contro
 
 ## 7. Display math: deflation, milestones, horizon
 
+All anchors in this section are in the HANDLER file `apps/api/src/handlers/projection.rs`
+(not the engine file of the same name used in §5).
+
 - **Deflate by `month_index`, never by array index.** `deflate_points_to_today`
-  (projection.rs:466-486) divides by `(1+i/100)^(month_index/12)`. v1.4.2 bug: the web chart
+  (handlers/projection.rs:466-486) divides by `(1+i/100)^(month_index/12)`. v1.4.2 bug: the web chart
   deflated by array index — invisible with `density=monthly` (indices coincide), wrong with
   `density=hybrid` (points 0..12 monthly then annual: non-equidistant). Any code touching
   decimated series must use `month_index`.

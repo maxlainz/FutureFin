@@ -67,7 +67,10 @@ Postgres 16 is the only store. The Docker image serves API + built SPA on one po
 
 `crates/engine` is **pure**: no I/O, no DB, no async, no clock reads (the civil date arrives as
 `ProjectionInput::ref_date`), no randomness, no `f64` in the math — only `rust_decimal::Decimal`.
-Same input → bit-identical output. This is not a style preference; three things depend on it:
+Same input → bit-identical output (argued from purity — see the audit greps in
+futurefin-proof-and-analysis-toolkit Recipe 6; a replay regression test pinning it is still an
+unimplemented candidate, futurefin-research-frontier item 1). This is not a style preference;
+three things depend on it:
 
 1. **Testability**: 22+ engine unit tests run with `cargo test -p futurefin-engine` — no DB, runs
    in CI (`.github/workflows/ci.yml`, job `rust`). This is currently the only simulation-math
@@ -112,7 +115,8 @@ enforced server-side beyond filtering.
 `ff_session` cookie = a UUID (HttpOnly, SameSite=Lax, Secure per `COOKIE_SECURE`); the row lives
 in `sessions` with `expires_at`; `require_session_user` (`handlers/session.rs`) joins
 `sessions → users` and checks `expires_at > now()` on every request. TTL default 30 days
-(`SESSION_TTL_DAYS`, clamped 1–400 in `main.rs`). **Why**: instant revocation (logout deletes the
+(`SESSION_TTL_DAYS`, accepted range 1–400 in `main.rs`; out-of-range or unparseable values are
+NOT clamped — they silently fall back to 30 via `.filter(...).unwrap_or(30)`). **Why**: instant revocation (logout deletes the
 row; owner can nuke sessions), zero signing-key management, and on a single-node self-host the DB
 round-trip is cheap. **Breaks if violated**: switching to stateless JWT makes logout and
 pending-user demotion non-immediate and adds key rotation surface for no benefit at this scale.
@@ -231,7 +235,7 @@ which is never emitted). Trust `projection_horizon_months` and its unit tests.
 | I8 | Engine has zero I/O/async deps (purity, §1) | `crates/engine/Cargo.toml` deps are exactly: chrono, rust_decimal, serde, thiserror, uuid | `grep -E "tokio\|sqlx\|reqwest\|axum" crates/engine/Cargo.toml` → must be empty |
 | I9 | Milestones, `milestones_real` and the FIRE crossover are computed on the FULL monthly series, never on density-decimated points | `handlers/projection.rs` (`points_full`, crossover loop over `output.net_worth`) — v1.4.2 incident: client deflated by array index instead of `month_index`, wrong under `hybrid` | `grep -n "points_full" apps/api/src/handlers/projection.rs` |
 | I10 | SQLSTATE→HTTP mapping only in `error.rs` (D9) | `impl From<sqlx::Error> for ApiError` | `grep -rn "23505\|23503" apps/api/src/ --include=*.rs` → only `error.rs` |
-| I11 | Body limits: 1 MB global, 16 MB on `/v1/backup/user-import*` | `routes/mod.rs` constants | `apps/api/tests/body_limits.rs` (local) |
+| I11 | Body limits: 1 MiB global, 16 MiB on `/v1/backup/user-import*` | `routes/mod.rs` constants | `apps/api/tests/body_limits.rs` (local) |
 | I12 | No hardcoded hex colors; tokens `var(--ff-*)` only; icons only in `components/icons.tsx` | frontend convention (CLAUDE.md, design-system.md) | `grep -rn "#[0-9a-fA-F]\{6\}" apps/web/src/App.css apps/web/src/components/ \| grep -v icons.tsx` |
 
 ## 4. Known weak points (stated plainly, as of 2026-07-02)
@@ -259,15 +263,11 @@ which is never emitted). Trust `projection_horizon_months` and its unit tests.
   key pays ~500 ms recompute) and NOT multi-replica-safe — invalidation only reaches the local
   `HashMap`, so running >1 API replica behind a load balancer serves stale projections. The
   compose stack runs one replica; keep it that way or move the cache out of process first.
-- **W6 — `.claude/` reference docs have known drift** (verified 2026-07-02). Do not propagate:
-  1. `.claude/tests.md`: "no CI yet" — false (see W1); integration tests are the part CI lacks.
-  2. `.claude/data-model.md` + parts of `.claude/engine.md` (and the `horizon_basis` doc comment
-     in `projection.rs`): still describe `projection_target_age`, removed in v1.0.6 — see D11
-     for the current rule.
-  3. `.claude/tests.md`: "applies all 33 migrations" — count is 31 files as of 2026-07-02; trust
-     `ls apps/api/migrations | wc -l`, not any hardcoded number.
-  4. `.claude/auth-and-membership.md` cites `docs/spec/AUTH_MODEL.md` — that file does not exist
-     (the `UserId` doc comment in `crates/domain` also name-drops it).
+- **W6 — `.claude/` reference docs have known drift** (verified 2026-07-02). The two items
+  load-bearing here: `.claude/tests.md` "no CI yet" is false (see W1), and
+  `.claude/data-model.md` + parts of `.claude/engine.md` (and the `horizon_basis` doc comment in
+  `projection.rs`) still describe `projection_target_age`, removed in v1.0.6 — see D11 for the
+  current rule. Full standing-errata table (the record): futurefin-docs-and-writing §7.
 - **W7 — Errors in projection math are silent** (owner-identified hardest problem): wrong
   economic modeling produces plausible-looking numbers. Stochastic returns, sequence-of-returns
   risk, tax-aware withdrawal and variable SWR are all candidate directions and currently
@@ -292,7 +292,7 @@ volatile claims with:
 - Session mechanics (D3): `grep -n "expires_at\|SESSION_COOKIE" apps/api/src/handlers/session.rs` and `grep -n "SESSION_TTL_DAYS" apps/api/src/main.rs`.
 - Default ES brackets (W4): `grep -n -A24 "default_es_tax_brackets" apps/api/src/handlers/installation.rs` vs `DEFAULT_ES_TAX_BRACKETS_API` in `apps/web/src/lib/fire.ts`.
 - App.tsx size (W2): `wc -l apps/web/src/App.tsx`.
-- Doc drift (W6): re-check the four items; delete each bullet here once the underlying doc is fixed.
+- Doc drift (W6): re-check against the standing-errata table in futurefin-docs-and-writing §7; trim W6 once the underlying docs are fixed.
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the
