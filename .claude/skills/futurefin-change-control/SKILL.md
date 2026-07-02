@@ -187,9 +187,9 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env
 curl -sf http://127.0.0.1:8080/v1/health
 ```
 
-(`docker-compose.local.yml` adds `pull_policy: never` so Compose doesn't try to pull the
-local-only image.) Then click through the app once, including migrations applying on first
-boot against a DB restored from real data if the release contains migrations.
+Full flow, traps and the rebuild loop: futurefin-build-and-env §4. Then click through the app
+once, including migrations applying on first boot against a DB restored from real data if the
+release contains migrations.
 
 ### 4.3 Visual changes: verify light AND dark
 
@@ -235,10 +235,7 @@ cargo build -p futurefin-api --locked
 cargo test -p futurefin-engine
 
 # 2. Postgres integration tests — NOT covered by CI, run them yourself.
-#    One-time test DB on port 5433 (skip if ff-test-db already runs):
-docker run -d --name ff-test-db \
-  -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=futurefin_test \
-  -e POSTGRES_DB=futurefin_test -p 5433:5432 postgres:16.4-alpine
+#    (Test DB not running? One-time ff-test-db setup: futurefin-validation-and-qa §2.)
 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
   cargo test --workspace
 

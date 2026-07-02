@@ -275,7 +275,8 @@ Every table row above is re-verifiable; run these from the repo root when auditi
 - Test DB default: `grep -n "TEST_DATABASE_URL" apps/api/tests/common/mod.rs`
 - Version stamp: `grep -n "^version" apps/api/Cargo.toml`
 
-Known stale docs on these topics (as of 2026-07-02) — do not copy from them:
+Known stale docs on these topics (as of 2026-07-02) — do not copy from them (full standing-errata
+table: futurefin-docs-and-writing §7):
 - `.claude/data-model.md` still documents `installation.projection_target_age` (dropped, v1.0.6).
 - `.claude/env-and-config.md` lists a "default" for `DATABASE_URL`; in code it is required
   (startup panic if unset) — that value is only the conventional split-dev URL.

@@ -56,10 +56,8 @@ Do this before touching anything. All commands from repo root.
 # 0a. Engine unit tests (pure, no DB, no env)
 cargo test -p futurefin-engine
 
-# 0b. Backend integration tests incl. fire-parity server side (needs a test Postgres; NOT run in CI)
-docker run -d --name ff-test-db \
-  -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=futurefin_test \
-  -e POSTGRES_DB=futurefin_test -p 5433:5432 postgres:16.4-alpine
+# 0b. Backend integration tests incl. fire-parity server side (needs a test Postgres; NOT run
+#     in CI). Test DB not running? One-time ff-test-db setup: futurefin-validation-and-qa §2.
 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
   cargo test --workspace
 

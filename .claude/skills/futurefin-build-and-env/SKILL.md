@@ -187,10 +187,15 @@ that is stale — CI exists, it just skips the integration suite.)
   versions it hasn't seen.
 - **Branch-switching implication**: "auto-migrates on start" means merely running the API mutates
   the dev DB's schema. If branch A adds migration `2026...X.sql` and you switch to branch B that
-  lacks it, B's binary starts fine (extra applied rows are tolerated) but the schema has objects
-  B's code doesn't know about — usually harmless, occasionally confusing. If branch B has a
-  *different file for the same version* you get a checksum mismatch (trap T5). When in doubt,
-  recreate the dev DB: `docker compose down` + `docker volume rm futurefin_pgdata` + restart.
+  lacks it, B's binary **fails to start**: sqlx's default migrator (`ignore_missing = false`;
+  `db.rs` passes no override) errors with `VersionMissing` ("migration X was previously applied
+  but is missing in the resolved migrations") when `_sqlx_migrations` contains versions the
+  binary doesn't embed. The same mechanism is why downgrading a production image past a
+  migration is blocked (see futurefin-run-and-operate). If branch B has a *different file for
+  the same version* you get a checksum mismatch instead (trap T5). Recovery for branch
+  switching: recreate the dev DB — `docker compose down` + `docker volume rm futurefin_pgdata` +
+  restart (or, only if branch A's migration was genuinely additive and harmless, delete its row
+  from `_sqlx_migrations` by hand).
 - There is **no auto-repair**: a checksum-repair loop existed and was deliberately removed in
   v1.3.0 because it masked drift. Mismatches now fail loud at startup and must be fixed by hand.
   Never reintroduce auto-repair.

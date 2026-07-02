@@ -74,15 +74,13 @@ shipped and failed:
 Two releases were burned because the first two mechanisms could not answer "why only the
 Ingresos table's Importe mensual column?". The third investigation started from that question.
 
-**Positive exemplar — the v1.4.2 hybrid deflation bug (CHANGELOG, commit 669307d).** Symptom:
-the inflation-adjusted chart curve disagreed with backend `milestones_real` — but only with
-`density=hybrid`, and only after month 12. Mechanism found: `ProjectionNetWorthChart` deflated
-each point by its **array index** instead of its **`month_index`**. This mechanism makes an
-asymmetric prediction that matches every observation: with `monthly` density, array index ==
-month_index, so the bug is invisible (no regression there — verified); with `hybrid`, points
-past month 12 are annual, so elapsed years are underestimated and the curve is under-deflated,
-converging back once the full monthly series replaces it. That asymmetry — "explains precisely
+**Positive exemplar — the v1.4.2 hybrid deflation bug (commit 669307d).** The mechanism (chart
+deflated by **array index**, not `month_index`) made an asymmetric prediction matching every
+observation: invisible at `monthly` density (index == month), wrong under `hybrid` only past
+month 12, converging when the full monthly series arrives. That asymmetry — "explains precisely
 why A is fine and B is wrong, and where the boundary is" — is what a good mechanism looks like.
+(Full index-math analysis: futurefin-proof-and-analysis-toolkit Recipe 2; chronicle:
+futurefin-failure-archaeology §2.8.)
 
 ### The adversarial-refutation pass (mandatory before writing the fix)
 
@@ -219,14 +217,11 @@ against each one before declaring any investigation finished.
 2. **Fixing symptoms serially without a mechanism.** The table-CSS saga shipped two fixes in
    two days before anyone asked "why only some tables?". If your second fix for the same
    symptom is being written, STOP — you skipped the negative check. Go find the mechanism.
-3. **Trusting stale docs over code.** Verified drift as of 2026-07-02: `.claude/tests.md` says
-   "there is no CI yet" (FALSE — `.github/workflows/ci.yml` exists and runs engine tests,
-   typecheck, build and a Docker smoke test; but the Postgres integration tests in
-   `apps/api/tests/` are NOT in CI and need a local `TEST_DATABASE_URL`); `.claude/data-model.md`
-   and parts of `.claude/engine.md` still describe `projection_target_age`, removed in v1.0.6;
-   `.claude/tests.md` says "33 migrations" (count with `ls apps/api/migrations | wc -l` — 31 as
-   of today); `.claude/auth-and-membership.md` cites `docs/spec/AUTH_MODEL.md`, which does not
-   exist. Rule: docs give you the hypothesis; the code and a running test give you the fact.
+3. **Trusting stale docs over code.** The `.claude/*.md` reference docs have verified drift
+   (e.g. `.claude/tests.md` "there is no CI yet" is FALSE — CI exists but excludes the Postgres
+   integration tests; `.claude/data-model.md`/`engine.md` still describe the removed
+   `projection_target_age`). Full standing-errata table: futurefin-docs-and-writing §7.
+   Rule: docs give you the hypothesis; the code and a running test give you the fact.
 4. **Skipping the negative check.** "Does my fix explain why the OTHER cases still worked?" —
    the single question that separates v1.0.20 from v1.0.18/19, and the reason v1.4.2's fix
    could promise "no regression for monthly density" before anyone ran it.
