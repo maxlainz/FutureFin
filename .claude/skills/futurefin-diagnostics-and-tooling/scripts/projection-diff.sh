@@ -91,9 +91,12 @@ def row(name, va, vb, must_match=True):
 
 # Scalars/KPIs/milestones are computed on the FULL series server-side
 # (handlers/projection.rs) → must match regardless of density. Array shapes
-# and the LAST serialized point legitimately differ between densities:
-# monthly ends at month_index = months-1 (e.g. 839), hybrid's last kept
-# index is the last multiple of 12 ≤ months-1 (e.g. 828).
+# can legitimately differ between densities. The series is months+1 points
+# long (index 0 = today, then one per month): monthly ends at month_index =
+# months (e.g. 840 at the default horizon), hybrid's last kept index is the
+# last multiple of 12 ≤ months — identical (840) at the default horizon;
+# they only diverge with a non-multiple-of-12 ?months= override
+# (e.g. months=839 → monthly last 839, hybrid last 828).
 fields = [
     ("density",                       a.get("density"), b.get("density"), False),
     ("months",                        a.get("months"), b.get("months"), True),
