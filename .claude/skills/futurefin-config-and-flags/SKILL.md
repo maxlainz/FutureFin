@@ -132,7 +132,7 @@ boundary — every member sees household data. Handlers must build the WHERE via
 
 | Param | Values | Default | Semantics |
 |---|---|---|---|
-| `months` | u32, **clamped to 12–840** (no error on out-of-range) | omitted | Horizon override. Omitted → horizon derived from demographics: years until the oldest household member turns 90, clamped 5–70 years; no birth dates at all → 30 years. `horizon_basis` in the response reports which path: `lifespan_90`, `fallback_no_demographics`, or `months_override`. (The in-code doc comment on `horizon_basis` still lists old `mac_target_age` names — trust `projection_horizon_months()`, lines ~599–627.) |
+| `months` | u32, **clamped to 12–840** (no error on out-of-range) | omitted | Horizon override. Omitted → horizon derived from demographics: years until age 90 from ONE resolved birth date (session user's `users.birth_date`, else the first `persons` row by `is_primary DESC, sort_index ASC` — NOT the oldest member), clamped 5–70 years; no birth date at all → 30 years. `horizon_basis` in the response reports which path: `lifespan_90`, `fallback_no_demographics`, or `months_override`. (The in-code doc comment on `horizon_basis` still lists old `mac_target_age` names — trust `projection_horizon_months()`, lines ~599–627.) |
 | `density` | `monthly` \| `hybrid` (trimmed; anything else → `monthly`) | `monthly` | Serialization-only decimation: `monthly` ≈ one point per month (~841 at max horizon); `hybrid` = months 0..12 monthly + 24, 36, … annually (~82 points, ~5× smaller JSON). The engine always computes the **full** series; milestones/crossover indices are computed pre-decimation, so a `reached_month_index` may not exist as a point in a hybrid response — match by `month_index`, never by array position (the v1.4.2 chart bug). |
 | `view` | as above | `household` | Also selects the cache partition. |
 
@@ -157,7 +157,8 @@ Stored on the singleton `installation` row; read back in every `InstallationSnap
 **strings** on the wire (Decimal-as-string; never floats).
 
 `PATCH /v1/installation` — **owner role only** (403 otherwise); at least one field required (400
-otherwise); a successful PATCH invalidates + warms the projection cache. Frontend surface:
+otherwise); a successful PATCH **invalidates** the projection cache (like every mutation — it does
+NOT warm it; warm-up happens only after login, see futurefin-architecture-contract D7). Frontend surface:
 `apps/web/src/views/SettingsView.tsx` (Ajustes) and `RetirementView.tsx` (FIRE settings).
 
 | Setting | Set where | Validation | Default | Meaning |
@@ -165,7 +166,7 @@ otherwise); a successful PATCH invalidates + warms the projection cache. Fronten
 | `base_currency` | **setup only** (`POST /v1/installation/setup`); not in the PATCH body → immutable afterwards without a migration | trimmed, exactly 3 ASCII letters, uppercased; MVP whitelist `EUR`/`USD`/`GBP` | `EUR` (auto-bootstrap path) | Display currency. |
 | `calendar_tz` | setup + PATCH | trimmed, length 3–64, must parse as an IANA zone via `chrono_tz` (e.g. `Europe/Madrid`, `UTC`); DB CHECK mirrors the length/trim rules | `UTC` (serde default at setup; DB column `DEFAULT 'UTC'`) | Civil "today" for the whole installation (projection anchor month, liability expiry filtering, derive-principal). |
 | `show_age_mode` | setup + PATCH | `dates` \| `ages` | `dates` | Whether the projection X axis shows calendar dates or the viewer's age. |
-| `annual_inflation_assumption_percent` | PATCH only | sent as a **string** (`"2.5"`); empty string → `0`; must parse as decimal, bounds **0–50** (negative rejected) | `0` (column `NOT NULL DEFAULT 0`) | Annual % applied to the **moving FIRE target only** — `target(month k) = base × (1+pct/100)^(k/12)`; incomes/expenses/contributions stay nominal. `0` = flat target. Semantics owned by futurefin-fire-domain-reference. |
+| `annual_inflation_assumption_percent` | PATCH only | sent as a **string** (`"2.5"`); empty string → `0`; must parse as decimal, bounds **0–50** (negative rejected) | `0` (column `NOT NULL DEFAULT 0`) | Annual % applied to the **moving FIRE target only** — `target(month_index) = base × (1+pct/100)^(month_index/12)` (`fire_target_at_month_index`; the engine evaluates month k against the target at index k−1 — see futurefin-fire-domain-reference §4); incomes/expenses/contributions stay nominal. `0` = flat target. Semantics owned by futurefin-fire-domain-reference. |
 | `fire_settings` | PATCH only | JSONB, shape below | column nullable; `NULL` → defaults applied on read (`resolve_fire_settings`) | FIRE target computation config. |
 
 ### `fire_settings` JSONB shape (as of 2026-07-02)

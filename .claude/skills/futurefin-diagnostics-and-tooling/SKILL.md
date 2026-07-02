@@ -141,9 +141,12 @@ for D in "" "?density=hybrid"; do
 done
 ```
 
-Expected: `monthly points == months` (840 for a 70-year horizon, 360 for the
-30-year no-demographics fallback); `hybrid` = 13 points (months 0–12) + one per
-year from month 24 → 81 points at months=840 (docs round to "~841 vs ~82").
+Expected: `monthly points == months + 1` — the series includes index 0 (today's
+state) plus one point per simulated month, so 841 points for the 840-month
+(70-year) horizon and 361 for the 30-year no-demographics fallback (pinned by
+`apps/api/tests/projection_marker.rs`: horizon 24 → 25 points, indices 0..=24);
+`hybrid` = 13 points (months 0–12) + one per year from month 24 (24, 36, …, 840)
+→ 82 points at months=840.
 `horizon_basis` is one of `lifespan_90 | fallback_no_demographics |
 months_override` — note `.claude/api-routes.md` is stale here (it still lists
 `mac_target_age`, removed in v1.0.6).
@@ -221,8 +224,9 @@ Or just run `db-stats.sh` (section 5) which packages the read-only queries.
 Run from the repo root. Common env: `BASE` (default `http://127.0.0.1:8080`;
 split-dev API is `:8081`), `SMOKE_USER`/`SMOKE_PASS` (same convention as
 `scripts/smoke-projection-cache.sh`). All three are read-mostly: `api-timing.sh`
-and `projection-diff.sh` never mutate ledger data (worst case they register a
-throwaway user on a virgin DB); `db-stats.sh` is SELECT-only.
+and `projection-diff.sh` never mutate ledger data (worst case `api-timing.sh`
+registers a throwaway user on a virgin DB; `projection-diff.sh` only logs in);
+`db-stats.sh` is SELECT-only.
 
 ### `scripts/api-timing.sh`
 
@@ -270,8 +274,12 @@ month_index points**. Exit 0 = no forbidden divergence; exit 1 = real DIFF.
 
 Interpretation:
 - **Densities differ (default run)**: `points_len`/`fire_target_series_len`/last
-  `month_index` differences are labeled `diff (expected)` (decimation artifacts —
-  hybrid's last kept index is the last multiple of 12, e.g. 828 vs monthly's 839).
+  `month_index` differences are labeled `diff (expected)` (decimation artifacts).
+  Note the series is `months + 1` points long (index 0 + one per month), and at
+  the default 840-month horizon BOTH densities end at `month_index = 840` (it is
+  a multiple of 12); the last kept indices only diverge with a
+  non-multiple-of-12 `?months=` override (e.g. months=839 → monthly ends at 839,
+  hybrid at 828).
   Everything else must be `same`: KPIs and milestones are computed server-side on
   the FULL series (`points_full` in `handlers/projection.rs`) and are
   density-invariant. A DIFF here is the v1.4.2 regression class (decimated series
