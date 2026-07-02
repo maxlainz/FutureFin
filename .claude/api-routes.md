@@ -30,7 +30,7 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 |--------|------|-------|
 | GET | `/v1/installation/session-context` | Returns `{installation_initialized, access}` — used for routing the UI gate |
 | GET | `/v1/installation` | Own membership + installation snapshot |
-| PATCH | `/v1/installation` | Owner only. Updates tz, inflation, target_age, show_age_mode, fire_settings |
+| PATCH | `/v1/installation` | Owner only. Updates tz, inflation, show_age_mode, fire_settings (no existe `target_age` — eliminado en v1.0.6) |
 | POST | `/v1/installation/setup` | Creates singleton installation (409 if exists) |
 
 ### Pending users (`/v1/installation/pending-users/`)
@@ -82,7 +82,7 @@ Net-worth series via `futurefin-engine`. Accepts `?view=mine` and `?months=N` (1
 
 Response (`ProjectionSeriesResponse`) includes:
 - `points[]` — `{month_index, net_worth, contributed_capital}` for months 0..=N. **`net_worth` y `contributed_capital` se serializan como `f64`** (no Decimal-as-string) por rendimiento: ~30 KB menos en JSON y evita ~5.000 `parseDisplayDecimal` cliente. Precisión <1 € en horizontes de 70 años.
-- `months`, `horizon_years`, `horizon_basis` — effective horizon (`mac_target_age` | `mac_fallback_no_demographics` | `months_override`)
+- `months`, `horizon_years`, `horizon_basis` — effective horizon (`lifespan_90` | `fallback_no_demographics` | `months_override`)
 - `starting_net_worth`, `monthly_delta_assumption` — snapshot values at month 0 (Decimal-as-string para totales)
 - `anchor_date_ymd`, `show_age_mode`, `use_age_on_x_axis`, `viewer_birth_date` — UI axis helpers
 - `milestones[]` — next 3 net-worth milestones (1/2.5/5×10ⁿ thresholds), each with `target`, `reached_month_index`, `reached_date_ymd`

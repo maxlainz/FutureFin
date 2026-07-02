@@ -37,7 +37,10 @@ Para volver a una versión anterior, cambia `FUTUREFIN_TAG` al valor deseado y r
 
 ## Backups
 
-El API expone `GET /v1/backup/export.zip` (solo owner) — ZIP CSV con todos los datos de la instalación.
+Dos capas complementarias:
+
+- **Aplicación — `.ffbackup` por usuario**: desde `Ajustes → Datos y sistema` cada usuario exporta sus propios datos (activos, pasivos, presupuesto, próximos) en un contenedor binario cifrado con su contraseña (Argon2id → AES-256-GCM). Endpoints: `POST /v1/backup/user-export`, `POST /v1/backup/user-import/preview` y `POST /v1/backup/user-import` (import = reemplazo total de tus filas, transaccional).
+- **Infraestructura — dump de Postgres**: `scripts/backup-postgres.sh` hace `pg_dump` del contenedor a `./backups/` (gzip, retención configurable). Recomendado antes de cada upgrade de versión.
 
 ---
 
@@ -66,7 +69,8 @@ El API expone `GET /v1/backup/export.zip` (solo owner) — ZIP CSV con todos los
 ```bash
 cp .env.example .env
 # Uncomment the dev vars in .env (PORT, DATABASE_URL, RUST_LOG)
-docker compose up -d futurefin-database   # Postgres only
+# Postgres only — the split-dev override exposes 5432 to the host (required for cargo run):
+docker compose -f docker-compose.yml -f docker-compose.split-dev.yml up -d futurefin-database
 
 # Terminal 1 — API at :8081 (auto-migrates on startup)
 cd apps/api && cargo run

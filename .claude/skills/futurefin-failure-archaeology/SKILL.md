@@ -66,8 +66,7 @@ Vocabulary used below (defined once):
 - **Status**: settled. **Guard**: none automatic for raw SQL — when a migration drops a column,
   grep every handler for the column name (`grep -rn '<column>' apps/api/src/handlers/`).
   Integration tests (`apps/api/tests/`) now exist and would catch this class if the endpoint is
-  covered; they run only locally with `TEST_DATABASE_URL` (NOT in CI — `.claude/tests.md` is
-  stale on this point).
+  covered; they run only locally with `TEST_DATABASE_URL` (NOT in CI).
 
 ### 2.2 projection_target_age removal — FIRE is the sole retirement trigger (v1.0.6)
 - **Symptom**: "contributed capital" line on the projection chart stopped growing years before
@@ -80,8 +79,8 @@ Vocabulary used below (defined once):
   else the first `persons` row ordered `is_primary DESC, sort_index ASC` — NOT the oldest member
   (clamped 5–70 years, 30-year fallback without any birth date).
 - **Alternative rejected**: keeping both triggers and reconciling — inherently ambiguous.
-- **Status**: settled. **Warning**: `.claude/data-model.md` and parts of `.claude/engine.md`
-  still describe the old field — verify against `apps/api/src/handlers/projection.rs` instead.
+- **Status**: settled. (The docs that still described the old field — data-model.md, engine.md,
+  api-routes.md — were fixed on 2026-07-02; `apps/api/src/handlers/projection.rs` is ground truth.)
 
 ### 2.3 The table-CSS saga — three wrong fixes before the root cause (v1.0.18 → v1.0.20)
 - **Symptom**: edit/delete action buttons visually overlapped the previous column's content
@@ -203,7 +202,7 @@ Vocabulary used below (defined once):
 
 | Temptation | Read first |
 |---|---|
-| Add a retirement age / target-age setting | §2.2 (and note `.claude/data-model.md` is stale here) |
+| Add a retirement age / target-age setting | §2.2 |
 | Put contribution config back on assets, or "simplify" the cascade | §3 row 2; engine cascade tests in `crates/engine/src/projection.rs` |
 | Deflate returns / simulate in real terms inside the engine | §3 row 1 — display-layer deflation only |
 | Make a GET delete/clean anything | §3 row 4; `apps/api/tests/liabilities_purge.rs` |
@@ -251,8 +250,8 @@ and direct code inspection. Re-verify volatile facts before relying on them:
 - Parity fixture pair: `ls apps/api/tests/fixtures/fire-parity.json apps/web/src/lib/fire.test.ts`.
 - f64 boundary: `grep -n 'serialize_decimal_as_f64' apps/api/src/handlers/projection.rs`.
 - RetirementView field: `grep -c 'expense_retirement_monthly_equivalent' apps/web/src/views/RetirementView.tsx` (expect ≥4).
-- Known stale docs (do not propagate): `.claude/data-model.md` / `.claude/engine.md` still mention
-  `projection_target_age`; `.claude/tests.md` claims "no CI" (CI exists at `.github/workflows/ci.yml`
-  but does NOT run `apps/api/tests/` Postgres integration tests) and says "33 migrations" (count them).
+- Doc drift record: the stale docs found while authoring this library (projection_target_age
+  remnants, "no CI yet", "33 migrations"…) were fixed on 2026-07-02; the standing-errata table
+  lives in futurefin-docs-and-writing §7. CI still does NOT run `apps/api/tests/`.
 - When a new incident is settled (root cause found, design rejected or removed), append it here:
   one table row in §1 plus a ≤15-line entry in §2 if it carries a lesson, citing commit + version.

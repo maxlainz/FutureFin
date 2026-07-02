@@ -1,6 +1,6 @@
 # Auth & Membership Model
 
-Full spec: `docs/spec/AUTH_MODEL.md`
+Este documento y el código (`apps/api/src/handlers/{session,installation,membership}.rs`, `apps/api/src/auth/`) son la spec completa — no existe documento externo.
 
 ## Flow
 

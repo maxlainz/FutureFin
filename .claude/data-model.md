@@ -9,7 +9,8 @@ Migrations in `apps/api/migrations/`. SQLx embeds and runs them on startup.
 - `sessions`: `id (uuid PK)`, `user_id (FK users)`, `expires_at`, `created_at`
 
 ### Installation (singleton)
-- `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `annual_inflation_assumption_percent (decimal NOT NULL DEFAULT 0; 0 = target FIRE plano, >0 = target móvil que crece con la inflación)`, `projection_target_age (smallint nullable)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `created_at`
+- `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `annual_inflation_assumption_percent (decimal NOT NULL DEFAULT 0; 0 = target FIRE plano, >0 = target móvil que crece con la inflación)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `created_at`
+  - `projection_target_age` fue **eliminada** (`20260516120000_drop_projection_target_age.sql`, v1.0.6): el cruce FIRE es el único trigger de jubilación.
   - Singleton: only one row ever exists. First user auto-creates it on register.
   
 - `installation_memberships`: `installation_id (FK)`, `user_id (FK)`, `role (text: 'owner'|'member'|'viewer')`, `created_at`
@@ -27,7 +28,7 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
 
 **liabilities**: `id`, `installation_id`, `owner_user_id`, `category_id`, `label`, `type_tag`, `principal (decimal)`, `apr_percent (decimal nullable)`, `payment_amount (decimal nullable)`, `payment_frequency ('monthly'|'weekly' nullable)`, `payment_end_date (date nullable)`, `principal_derived_from_plan (bool)`, `notes`, `sort_index`. **Expired rows persist** in the table — read endpoints filter them out via `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)`. There is no scheduled purge; if you need to recover an expired row, edit `payment_end_date` to a future date.
 
-**budget_entries**: `id`, `installation_id`, `owner_user_id`, `category_id`, `scope ('income'|'expense')`, `amount (decimal, monthly)`, `notes`, `sort_index`, `persists_after_retirement (bool, default false)` — income entries only: whether this income continues after `projection_target_age` (used to compute `income_retirement_monthly` in projection)
+**budget_entries**: `id`, `installation_id`, `owner_user_id`, `category_id`, `scope ('income'|'expense')`, `amount (decimal, monthly)`, `notes`, `sort_index`, `persists_after_retirement (bool, default false)` — income entries only: whether this income continues after the FIRE-crossover month (used to compute `income_retirement_monthly` in projection) — plus `ends_at_retirement (bool, default false)` and `expense_end_date (date nullable)` — expense entries only: stop computing the expense at the FIRE crossover or at a fixed date (`20260514120000_budget_entries_add_expense_end.sql`, v1.0.8)
 
 **planning_flows**: `id`, `installation_id`, `owner_user_id`, `category_id`, `direction ('inflow'|'outflow')`, `title`, `expected_amount (decimal)`, `due_date (date nullable)`, `notes`, `sort_index`
 
@@ -57,7 +58,6 @@ Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF). Last bracke
 - `calendar_tz` validated as IANA timezone via `chrono_tz`
 - `base_currency` validated as 3-letter code, MVP supports EUR/USD/GBP only
 - `swr_pct` bounded 0–4 (percent, not ratio)
-- `projection_target_age` bounded 65–105 when set
 
 ## Per-user `.ffbackup`
 The `/v1/backup/user-export` endpoint serializes a single user's slice into a versioned, encrypted binary file (see [`backup_user/schema.rs`](../apps/api/src/handlers/backup_user/schema.rs) and [`backup_user/crypto.rs`](../apps/api/src/handlers/backup_user/crypto.rs)).

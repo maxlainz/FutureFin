@@ -8,7 +8,7 @@ description: >
   answering "did CI cover this?" / "which tests must I run locally?". Symptom keywords: test
   fails only locally, cargo test hangs on TEST_DATABASE_URL, schema ff_test_* piling up, parity
   test fails on one side only, Decimal string "1000.0000" vs "1000" assertion mismatch, 146/156
-  test count confusion, "no CI yet" (stale claim). Do NOT use for: getting the app running or a
+  test count confusion. Do NOT use for: getting the app running or a
   dev environment (futurefin-build-and-env), measuring live behavior with curl/scripts and
   interpreting the numbers (futurefin-diagnostics-and-tooling), deciding whether a change is
   allowed at all (futurefin-change-control), or the FIRE math itself
@@ -74,7 +74,7 @@ DB" symptom. Single test: append `-- <test_fn_name>` or `--test <file_stem>`.
 2. Opens a pool (max 5 conns) with `after_connect` hook: `SET search_path TO "<schema>", public`
    on every connection — so all queries in the test hit only that schema.
 3. Runs `sqlx::migrate!("./migrations")` inside it (31 migration files as of 2026-07-02 —
-   count with `ls apps/api/migrations | wc -l`; `.claude/tests.md` saying "33" is stale).
+   count with `ls apps/api/migrations | wc -l`).
 4. Returns `(PgPool, schema_name)`. **Schemas leak intentionally** — no teardown, so a failed
    test leaves its state inspectable.
 
@@ -116,10 +116,10 @@ Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/*
 | `apps/web/src/api/client.test.ts` | 10 | fetch mocks: credentials, body serialization, 4xx propagation, 204 handling |
 | `apps/web/src/lib/fire.test.ts` | 7 | FIRE parity vs the shared fixture (1 sanity + 6 cases) |
 
-## 3. CI reality (corrects stale `.claude/tests.md`)
+## 3. CI reality
 
-`.claude/tests.md` says "There is no CI yet" — **FALSE**. `.github/workflows/ci.yml` exists
-and runs on push/PR to `main` and `dev`. Verified against the file on 2026-07-02:
+`.github/workflows/ci.yml` runs on push/PR to `main` and `dev`. Verified against the file on
+2026-07-02:
 
 **CI DOES run** (three jobs):
 - `rust`: `cargo build -p futurefin-api --locked` + `cargo test -p futurefin-engine --locked`
@@ -282,9 +282,9 @@ test pure functions only; extract logic out of components to make it testable.
 
 ## Provenance and maintenance
 
-Verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Known stale doc corrected here:
-`.claude/tests.md` claims "no CI yet" (false — `ci.yml` exists), "33 migrations" (31), and
-omits `projection_cache.rs`. Re-verify volatile facts with:
+Verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); `.claude/tests.md` was corrected
+the same day (CI claim, migration count, missing `projection_cache.rs` row). Re-verify volatile
+facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
 - Engine test count: `grep -c "#\[test\]" crates/engine/src/projection.rs` (22)

@@ -71,7 +71,7 @@ Expected observations (verify counts, don't trust memory):
 - 0b: all integration tests pass, including `fire_parity.rs`: **6 fixture cases** (5 numeric within ±1 €, 1 expecting `null` target) from `apps/api/tests/fixtures/fire-parity.json`, plus `projection_marker.rs` (marker = month 1, 25 points at `?months=24`) and `projection_cache.rs`.
 - 0c: `lib/fire.test.ts` passes the **same 6 cases** ±1 € (7 Vitest `it`s: 1 count check + 6 cases).
 
-CI note (`.claude/tests.md` is stale here): `.github/workflows/ci.yml` **exists** and runs `cargo test -p futurefin-engine` + build + Docker smoke, but the Postgres integration tests (0b) are **not** in CI — they only run when you run them locally. Never claim "CI covers it" for anything in `apps/api/tests/`.
+CI note: `.github/workflows/ci.yml` runs `cargo test -p futurefin-engine` + build + Docker smoke, but the Postgres integration tests (0b) are **not** in CI — they only run when you run them locally. Never claim "CI covers it" for anything in `apps/api/tests/`.
 
 **Gate P0**: if ANY baseline check fails → you are in a regression hunt, not a realism campaign. Pause the campaign, branch to `futurefin-debugging-playbook` (and `futurefin-failure-archaeology` if the failure smells historical). If exactly one side of fire-parity fails → the duplicated FIRE math drifted; fix drift first (see Promotion protocol).
 
@@ -95,7 +95,7 @@ The inventory below was verified line-by-line on 2026-07-02. Re-verify anchors b
 | 12 | `fire_reached` compares NW at close of month k−1 against the target at index k−1 (one shared helper, no off-by-one) | `projection.rs:475-481`; helper `fire_target_at_month_index` `projection.rs:171-182` | [CBD] — post-incident invariant, see fenced paths |
 | 13 | In retirement, contributions stop entirely; surpluses pile into 0% cash | `projection.rs:514-516` | [AS] |
 
-Doc-drift warning while you work here: `.claude/engine.md` §"Notes for the API handler" and the doc comment at `apps/api/src/handlers/projection.rs:206` still describe the removed `projection_target_age` / `RetirementInput` / `mac_target_age`. Ground truth: horizon = 90-year lifespan from the resolved birth date, clamped 5–70 years, 30-year fallback (`projection_horizon_months`, `apps/api/src/handlers/projection.rs:599-627`); `horizon_basis` values are `lifespan_90 | fallback_no_demographics | months_override`. If you touch this area, fix the doc (see `futurefin-docs-and-writing`).
+Horizon ground truth: 90-year lifespan from the resolved birth date, clamped 5–70 years, 30-year fallback (`projection_horizon_months`, `apps/api/src/handlers/projection.rs:599-627`); `horizon_basis` values are `lifespan_90 | fallback_no_demographics | months_override`. (`projection_target_age` was removed in v1.0.6; the docs that still described it were fixed on 2026-07-02.)
 
 ### Discriminating experiments (write the predicted number FIRST, then run)
 
@@ -180,4 +180,4 @@ Verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verify before tru
 - Single FIRE-target helper still sole source: `grep -rn "fire_target_at_month_index" crates/ apps/api/src/ | wc -l` (definition + engine + handler call sites only).
 - CI still excludes integration tests: `grep -n "cargo test" .github/workflows/ci.yml` (only `-p futurefin-engine`).
 - Stochastic work still unimplemented: `grep -rn "proptest\|rand\|monte" crates/engine/ apps/api/src/handlers/projection.rs` (expect no hits) — if this hits, Phase 2 items (a)/(b) have started; reconcile this file.
-- Known stale docs (do not propagate): `.claude/engine.md` handler notes (`projection_target_age`, `mac_target_age`), `apps/api/src/handlers/projection.rs:206` doc comment, `.claude/tests.md` ("no CI yet", "33 migrations" — `ls apps/api/migrations | wc -l` → 31).
+- Doc drift record (all previously stale docs on this area were fixed 2026-07-02): standing-errata table in futurefin-docs-and-writing §7; migration count via `ls apps/api/migrations | wc -l`.

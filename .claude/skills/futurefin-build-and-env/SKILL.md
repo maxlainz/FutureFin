@@ -175,8 +175,7 @@ What CI runs (as of 2026-07-02, `.github/workflows/ci.yml`): `cargo build -p fut
 --locked`, `cargo test -p futurefin-engine --locked`, `npm install` + `typecheck:web` +
 `build:web`, and the Docker-stack build + health smoke. **CI does NOT run the Postgres
 integration tests** — no `TEST_DATABASE_URL` in CI — so run `cargo test --workspace` locally
-before considering backend changes verified. (`.claude/tests.md` claims "There is no CI yet";
-that is stale — CI exists, it just skips the integration suite.)
+before considering backend changes verified.
 
 ## 6. How migrations run in dev
 
@@ -281,7 +280,7 @@ Written 2026-07-02 against v1.4.3 from: `CLAUDE.md`, `README.md`, `.env.example`
 `rust-toolchain.toml`, `package.json` + `apps/web/package.json`, `apps/api/Cargo.toml`,
 `apps/api/Dockerfile`, `apps/web/vite.config.ts`, `apps/api/src/{main.rs,db.rs}`,
 `docker-compose{,.local,.split-dev}.yml`, `.github/workflows/ci.yml`, `.claude/env-and-config.md`,
-`.claude/tests.md` (stale on "no CI"), `CHANGELOG.md` (v1.0.7 Node bump, v1.3.0 auto-repair
+`.claude/tests.md`, `CHANGELOG.md` (v1.0.7 Node bump, v1.3.0 auto-repair
 removal). Re-verify before trusting volatile facts:
 
 - Version: `grep '^version' apps/api/Cargo.toml`

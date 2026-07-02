@@ -148,8 +148,7 @@ state) plus one point per simulated month, so 841 points for the 840-month
 `hybrid` = 13 points (months 0–12) + one per year from month 24 (24, 36, …, 840)
 → 82 points at months=840.
 `horizon_basis` is one of `lifespan_90 | fallback_no_demographics |
-months_override` — note `.claude/api-routes.md` is stale here (it still lists
-`mac_target_age`, removed in v1.0.6).
+months_override`.
 
 **`?months=N`** (12–840, clamped): bypasses the cache entirely (`q.months.is_none()`
 gate in `get_projection_series`) — use it to force a true compute measurement.
@@ -335,7 +334,7 @@ Facts date-stamped 2026-07-02 (v1.4.3). Re-verify before trusting:
 - Route paths / new endpoints: `grep -n 'route(' apps/api/src/routes/mod.rs`
 - Cache TTL + key shape: `grep -n 'PROJECTION_CACHE_TTL\|pub struct ProjectionCacheKey' -A6 apps/api/src/state.rs`
 - Density pattern + months clamp + cache bypass: `grep -n 'density_month_indices\|clamp(12, 840)\|q.months.is_none' apps/api/src/handlers/projection.rs`
-- horizon_basis values: `grep -n '"months_override"\|lifespan_90\|fallback_no_demographics' apps/api/src/handlers/projection.rs` (api-routes.md is stale on this)
+- horizon_basis values: `grep -n '"months_override"\|lifespan_90\|fallback_no_demographics' apps/api/src/handlers/projection.rs`
 - Cache log messages grepped in §1: `grep -rn '"projection cache\|warm-up' apps/api/src/handlers/projection.rs apps/api/src/state.rs`
 - gzip layer: `grep -n 'CompressionLayer' apps/api/src/main.rs`
 - Default RUST_LOG: `grep -n 'futurefin_api=info' apps/api/src/main.rs docker-compose.yml`

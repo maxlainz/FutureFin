@@ -203,7 +203,7 @@ pub struct ProjectionSeriesResponse {
     pub months: u32,
     /// Años de horizonte efectivos (`months / 12`).
     pub horizon_years: u32,
-    /// `mac_target_age` | `mac_fallback_no_demographics` | `months_override`
+    /// `lifespan_90` | `fallback_no_demographics` | `months_override`
     pub horizon_basis: String,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]

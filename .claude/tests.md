@@ -1,6 +1,6 @@
 # Tests
 
-Test setup post-refactor (May 2026). Before: 22 engine unit tests, nothing else. After: **146 tests** across backend + frontend.
+Test setup post-refactor (May 2026). Before: 22 engine unit tests, nothing else. Ahora hay suites de engine (unit), API (integración contra Postgres real) y frontend (Vitest). No congeles totales en docs — cuéntalos con: `cargo test --workspace 2>/dev/null | grep "test result"` y `npm test --workspace futurefin-web 2>&1 | grep Tests`.
 
 ## TL;DR
 
@@ -24,7 +24,7 @@ npm test --workspace futurefin-web
 
 ### Integration tests (`apps/api/tests/`)
 - Each test spins up the full Axum router (`routes::app_router()`) and drives it via `tower::ServiceExt::oneshot` against a real Postgres.
-- **Schema-isolated per test**: `common::isolated_pool()` creates `ff_test_<uuid>`, sets `search_path`, applies all 33 migrations, returns the pool. Schemas are leaked intentionally — drop them with `psql -c "DROP SCHEMA ff_test_<id> CASCADE"` or wipe the test DB.
+- **Schema-isolated per test**: `common::isolated_pool()` creates `ff_test_<uuid>`, sets `search_path`, applies every migration in `apps/api/migrations/` (count them with `ls apps/api/migrations | wc -l`), returns the pool. Schemas are leaked intentionally — drop them with `psql -c "DROP SCHEMA ff_test_<id> CASCADE"` or wipe the test DB.
 
 ### Test infrastructure (`apps/api/tests/common/mod.rs`)
 - `TestApp::spawn() -> TestApp { router, pool, schema }` — fresh schema + axum router wired with cookie cookies.
@@ -45,6 +45,7 @@ npm test --workspace futurefin-web
 | `unique_violation.rs` | duplicate username + duplicate category name → 409 via central `From<sqlx::Error>` |
 | `projection_marker.rs` | `compound_outpaces_true_savings_month_index` stable across the perf refactor (regression for spawn_blocking + tokio::join) |
 | `fire_parity.rs` | **FIRE target parity** — for each case in `fixtures/fire-parity.json`, seeds installation + budget + assets and asserts `jubilacion_target_net_worth` matches the canonical expected value (± 1 €). |
+| `projection_cache.rs` | Cache de proyección: hit tras GET, invalidación tras mutación, aislamiento por vista/densidad, `?months=` bypassa el cache. |
 
 ### Writing a new integration test
 
@@ -120,12 +121,18 @@ Algunos cálculos viven duplicados a propósito (e.g. FIRE math — el cliente a
 
 ## CI
 
-There is no CI yet. Recommended GitHub Action (not committed):
-```yaml
-- run: docker run -d --name ff-test-db -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=futurefin_test -e POSTGRES_DB=futurefin_test -p 5433:5432 postgres:16.4-alpine
-- run: until docker exec ff-test-db pg_isready -U futurefin; do sleep 1; done
-- run: cargo test --workspace
-  env:
-    TEST_DATABASE_URL: postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test
-- run: npm install && npm test --workspace futurefin-web && npm run typecheck:web && npm run build:web
+CI existe: `.github/workflows/ci.yml` corre en push/PR a `main`/`dev`:
+
+| Job | Corre | NO corre |
+|---|---|---|
+| `rust` | `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked` | los tests de integración (`apps/api/tests/`) — necesitan `TEST_DATABASE_URL` |
+| `web` | `npm run typecheck:web`, `npm run build:web` | Vitest (`npm test`), `npm run lint:web` |
+| `docker-stack` | build de imagen + compose up + smoke `/v1/health` | — |
+
+**Consecuencia**: antes de mergear tienes que correr EN LOCAL lo que CI no cubre:
+```bash
+TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" cargo test --workspace
+npm test --workspace futurefin-web
+npm run lint:web
 ```
+(Checklist completo: [`.claude/skills/futurefin-change-control/SKILL.md`](skills/futurefin-change-control/SKILL.md).)

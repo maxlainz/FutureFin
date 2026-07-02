@@ -28,12 +28,11 @@ Primary sources (ground truth, in this order):
 - `apps/web/src/lib/fire.ts` — client-side duplicate for the live preview (server stays source of truth).
 - `apps/api/tests/fixtures/fire-parity.json` — canonical cases shared by both sides.
 
-Known doc drift (do not trust these on this topic): `.claude/engine.md` "Notes for the API
-handler" and `.claude/data-model.md` still mention `projection_target_age` — that column was
-**removed** in v1.0.6 (migration `20260516120000_drop_projection_target_age.sql`); FIRE
-crossover is the sole retirement trigger. Also the doc comment on `ProjectionSeriesResponse.
-horizon_basis` (projection.rs:206) lists `mac_target_age | mac_fallback_no_demographics`; the
-actual strings are `lifespan_90 | fallback_no_demographics | months_override` (projection.rs:621,626,992).
+Historical note: `projection_target_age` was **removed** in v1.0.6 (migration
+`20260516120000_drop_projection_target_age.sql`); FIRE crossover is the sole retirement trigger.
+`horizon_basis` strings are `lifespan_90 | fallback_no_demographics | months_override`
+(projection.rs:621,626,992). (The docs/comments that still described the old model were fixed on
+2026-07-02.)
 
 ## 1. Glossary (terms used everywhere in this repo)
 

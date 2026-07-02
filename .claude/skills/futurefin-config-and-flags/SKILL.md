@@ -132,7 +132,7 @@ boundary — every member sees household data. Handlers must build the WHERE via
 
 | Param | Values | Default | Semantics |
 |---|---|---|---|
-| `months` | u32, **clamped to 12–840** (no error on out-of-range) | omitted | Horizon override. Omitted → horizon derived from demographics: years until age 90 from ONE resolved birth date (session user's `users.birth_date`, else the first `persons` row by `is_primary DESC, sort_index ASC` — NOT the oldest member), clamped 5–70 years; no birth date at all → 30 years. `horizon_basis` in the response reports which path: `lifespan_90`, `fallback_no_demographics`, or `months_override`. (The in-code doc comment on `horizon_basis` still lists old `mac_target_age` names — trust `projection_horizon_months()`, lines ~599–627.) |
+| `months` | u32, **clamped to 12–840** (no error on out-of-range) | omitted | Horizon override. Omitted → horizon derived from demographics: years until age 90 from ONE resolved birth date (session user's `users.birth_date`, else the first `persons` row by `is_primary DESC, sort_index ASC` — NOT the oldest member), clamped 5–70 years; no birth date at all → 30 years. `horizon_basis` in the response reports which path: `lifespan_90`, `fallback_no_demographics`, or `months_override`. (Implementation: `projection_horizon_months()`, `handlers/projection.rs` ~599–627.) |
 | `density` | `monthly` \| `hybrid` (trimmed; anything else → `monthly`) | `monthly` | Serialization-only decimation: `monthly` ≈ one point per month (~841 at max horizon); `hybrid` = months 0..12 monthly + 24, 36, … annually (~82 points, ~5× smaller JSON). The engine always computes the **full** series; milestones/crossover indices are computed pre-decimation, so a `reached_month_index` may not exist as a point in a hybrid response — match by `month_index`, never by array position (the v1.4.2 chart bug). |
 | `view` | as above | `household` | Also selects the cache partition. |
 
@@ -203,9 +203,9 @@ Deserialization details that matter:
   JSON **`null`** = clear stored JSON (defaults apply on read), **object** = validate + replace
   wholesale (no deep merge — send the full object).
 
-Doc drift warning: `.claude/data-model.md` still lists `installation.projection_target_age`; that
-column was dropped by migration `20260516120000_drop_projection_target_age.sql` (v1.0.6). The FIRE
-crossover is the sole retirement trigger. Do not reintroduce it from the stale doc.
+Note: `installation.projection_target_age` no longer exists — dropped by migration
+`20260516120000_drop_projection_target_age.sql` (v1.0.6). The FIRE crossover is the sole
+retirement trigger; do not reintroduce an age setting.
 
 ## 6. How to add a new configuration axis
 
@@ -275,14 +275,10 @@ Every table row above is re-verifiable; run these from the repo root when auditi
 - Test DB default: `grep -n "TEST_DATABASE_URL" apps/api/tests/common/mod.rs`
 - Version stamp: `grep -n "^version" apps/api/Cargo.toml`
 
-Known stale docs on these topics (as of 2026-07-02) — do not copy from them (full standing-errata
-table: futurefin-docs-and-writing §7):
-- `.claude/data-model.md` still documents `installation.projection_target_age` (dropped, v1.0.6).
-- `.claude/env-and-config.md` lists a "default" for `DATABASE_URL`; in code it is required
-  (startup panic if unset) — that value is only the conventional split-dev URL.
-- The doc comment on `ProjectionSeriesResponse.horizon_basis` (~line 206 of
-  `handlers/projection.rs`) lists old `mac_*` basis names; the real values are `lifespan_90`,
-  `fallback_no_demographics`, `months_override`.
+(The previously stale docs on these topics — data-model.md's `projection_target_age`,
+env-and-config.md's fake `DATABASE_URL` "default", and the `mac_*` `horizon_basis` doc comment in
+`handlers/projection.rs` — were all fixed on 2026-07-02. The standing-errata record lives in
+futurefin-docs-and-writing §7.)
 
 When you change anything cataloged here, update this file in the same change, plus the matching
 doc of record (`.claude/env-and-config.md`, `.claude/data-model.md`, `README.md`).
