@@ -6,6 +6,119 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-07-06
+
+Perspectiva histórica del patrimonio: como los valores del ledger se actualizan a mano cada
+cierto tiempo (no en tiempo real), la app guarda **snapshots manuales** por usuario e
+**interpola** entre ellos para reconstruir la serie histórica de patrimonio neto, mostrada unida a
+la proyección en un único chart temporal (pasado + presente + futuro). Nada parecido existía antes
+(no había tabla de historial). Detalle de diseño: [`.claude/data-model.md`](.claude/data-model.md),
+[`.claude/api-routes.md`](.claude/api-routes.md), [`.claude/engine.md`](.claude/engine.md).
+
+### Histórico — Snapshots de patrimonio por usuario
+
+- **Captura manual** (botón «Guardar snapshot» en Activos y Pasivos): `POST /v1/history/snapshots/capture`
+  copia los items vivos del propio usuario (assets: valor actual; liabilities no expiradas: además
+  `payment_amount`/`apr_percent`/`payment_frequency`, para sobrevivir borrados). **Upsert por día
+  civil** en `calendar_tz` — capturar dos veces el mismo día reescribe el snapshot silenciosamente.
+  0 filas propias → snapshot válido con 0 items. Nuevas tablas `history_snapshots` /
+  `history_snapshot_items` (migración `20260706203746_history_snapshots.sql`).
+- **Backfill editable** en `Ajustes → Histórico` (nueva sub-pestaña): `GET /v1/history/snapshots?year=&kind=`,
+  `POST` (crear, `source='backfill'`), `PUT /{id}` (reemplazo completo de items, `kind` inmutable),
+  `DELETE /{id}`. Guardia `id+installation+owner` → 404 si no es tuyo (no revela existencia);
+  fecha ocupada → 409 (constraint de unicidad, mapeado por el `From<sqlx::Error>` central);
+  validaciones 400 con códigos estables (`snapshot_date_in_future`, `duplicate_item_id`,
+  `terms_only_for_liabilities`, `invalid_kind`…), con bounds copiados de `assets.rs`/`liabilities.rs`.
+- **Serie interpolada server-side** (`GET /v1/history/series`): la matemática vive en el engine puro
+  (`crates/engine/src/history.rs`, `evaluate_timeline`) — **lineal en días civiles** para activos y
+  **curva de amortización francesa** para pasivos, corregida por residuo para pasar **exacta por
+  ambos extremos** (`P(g)=max(theo(x)+f·(P_b−theo(N)),0)`; fallback lineal si el pago no cubre el
+  interés o faltan términos). Todo `Decimal` sin redondeo intermedio; el total suma exactamente lo
+  observado en cada fecha de snapshot. El cliente **no** interpola — recibe la serie lista para
+  pintar (no hace falta fixture de paridad; ver `.claude/skills/futurefin-validation-and-qa`).
+- **Chart unificado** (`ProjectionNetWorthChart`): se extiende a la izquierda con `month_index`
+  negativos — línea NW histórica (token `--proj-nw-past`), áreas apiladas por activo también en el
+  pasado (mismo rescale I6, `Σáreas = max(0,NW)`), marcadores de snapshot (círculo relleno = asset,
+  hueco = liability) y divisor vertical «Hoy». Zoom/pan alcanzan meses negativos; el modo focus
+  sigue arrancando en mes 0. El estado vacío (sin snapshots) renderiza **idéntico píxel a píxel** al
+  chart anterior, garantizado por la identidad por referencia de `mergeProjectionWithHistory`
+  (`apps/web/src/lib/history-merge.ts`).
+- **Inflación hacia atrás**: el toggle «ajustado a inflación» deflacta también el pasado, con el
+  mismo deflactor keyed por `month_index` real (`deflationFactorAt`); con k negativo **amplifica**
+  (`×(1+inf/100)^(−k/12)`). Nunca por posición de array (raíz del incidente v1.4.2).
+- **Modal «¿Guardar snapshot?»**: salta una vez cuando el usuario ha editado el valor de **todos**
+  sus activos líquidos propios dentro de una ventana rodante de ~1 h (tracking en memoria por
+  sesión, `lib/snapshot-tracker.ts`); tras guardar activos ofrece snapshot de pasivos si hubo
+  cambios. Componentes `SnapshotButton.tsx` + `SnapshotPromptModal.tsx` (tontos; la lógica vive en
+  `App.tsx`).
+- **Scoping**: `GET /v1/history/series?view=mine` = serie propia; `household` (default) = **suma
+  server-side** de las series interpoladas de cada usuario (agregación en Rust vía los helpers
+  `LedgerView`). Las filas compartidas (`owner_user_id IS NULL`) no se capturan — limitación
+  documentada. `AssetResponse` (`GET /v1/assets`) gana `owner_user_id: Option<Uuid>` (dato de
+  display, no frontera de seguridad) para que el trigger del modal funcione en vista household.
+- **Excepción f64 extendida y documentada**: los arrays por punto de `/v1/history/series`
+  (`net_worth`/`assets_total`/`liabilities_total`, `asset_series[].values`, `markers[].total`) se
+  serializan como `f64` (misma justificación chart-only que `/v1/projection/series`; una sola
+  definición `serialize_decimal_as_f64`, ahora `pub(crate)`). Los CRUD de snapshots siguen
+  Decimal-as-string. Actualizados D4/I3 en `futurefin-architecture-contract` y `api-routes.md`.
+- **Sin invalidación de cache por diseño**: los snapshots **no son inputs del engine** de
+  proyección, así que sus mutaciones **no** llaman a `refresh_projection_after_mutation` — la cache
+  de proyección nunca se invalida por escribir historial. Comentario explícito en el handler + test
+  de regresión `snapshot_mutations_do_not_touch_projection_cache`. La serie no tiene cache propia
+  (cómputo sub-ms).
+
+### Backups — `.ffbackup` schema v4
+
+- **`CURRENT_SCHEMA_VERSION` 3 → 4**: el export incluye ahora los snapshots del usuario
+  (`BackupPayloadV4` = V3 + `snapshots`; cadena `payload_v3_to_v4` encadenada en `migrate_to_current`).
+  v1/v2/v3 **siguen importando** (v3→v4 rellena una lista de snapshots vacía). El rechazo de
+  versiones futuras se mantiene: un `.ffbackup` v4 **no** se puede importar en un servidor ≤1.4.x
+  (rechazo limpio con «update FutureFin to import this backup», no corrupción).
+- **Mecanismo de re-enlace**: cada item de snapshot exporta `ledger_index` (posición en el array
+  assets/liabilities del propio payload) **e** `item_key` (= `source_item_id` original). Al importar,
+  si `ledger_index` está presente se reescribe `source_item_id` al UUID fresco de la fila re-creada
+  (mantiene el enlace entre snapshots y el empalme con hoy); si es null se conserva `item_key`
+  verbatim (items de filas borradas / backfill libre siguen enlazados entre sí). `ledger_index`
+  fuera de rango → 400 con rollback de la transacción. El preview reporta counts de `snapshots` y
+  `snapshot_items`.
+- **FIX (bug preexistente)**: `import_user_backup_apply` no llamaba a
+  `refresh_projection_after_mutation` tras `tx.commit()` → la proyección quedaba **stale hasta
+  60 min** después de un import. Ahora invalida la cache al terminar.
+
+### Correcciones del chart (bugs preexistentes con densidad `hybrid`)
+
+- **FIX — fecha errónea en el tooltip**: el hover pasaba el **índice de array** a
+  `projectionHoverTitle` en lugar del `month_index` real del punto. Con `density=hybrid` (puntos no
+  equidistantes) el título mostraba una fecha equivocada a partir del mes 12. Ahora usa
+  `pts[hover].month_index`.
+- **FIX — valor erróneo en los marcadores de planning**: se indexaba `nw[m.mi]` por índice de mes
+  sobre el array de puntos (que bajo `hybrid` no es 1 punto/mes), leyendo el patrimonio de otro
+  punto. Ahora resuelve el valor con `valueAtMonth` y excluye `mi < 0`. Con `density=monthly` ambos
+  fixes son idénticos al comportamiento previo (sin regresión).
+
+### Migración / compatibilidad
+
+- **Migración aditiva** `20260706203746_history_snapshots.sql`: solo crea dos tablas nuevas
+  (`history_snapshots`, `history_snapshot_items`) + índice; **sin pérdida de datos** y sin tocar
+  columnas existentes. El rollback de la app es inocuo mientras las tablas queden huérfanas (nada
+  más las lee); un downgrade real de imagen sigue las reglas de `_sqlx_migrations` (roll-forward).
+- **Sin nuevas variables de entorno ni ajustes de instalación** — el histórico es superficie
+  per-user de request/datos.
+- No breaking: endpoints nuevos, campo de respuesta opcional (`AssetResponse.owner_user_id`),
+  arrays f64 adicionales y `.ffbackup` v4 aditivo (importa v1–v3). Único límite de compatibilidad:
+  un backup v4 no es importable en versiones ≤1.4.x (rechazo limpio, por diseño).
+
+### Tests
+
+- **Engine (CI)**: `crates/engine/src/history.rs` — 14 tests (lineal, amortización con corrección
+  residual, reglas de timeline, `month_index`/`add_months_signed` negativos). Engine total 22 → 36.
+- **Integración (local)**: `history_snapshots.rs` (12), `history_series.rs` (7, números predichos
+  antes de ejecutar), `backup_user_roundtrip.rs` (8) + 4 unit tests nuevos en
+  `backup_user/schema.rs` (migración v3→v4, roundtrip v4, rechazo versión futura, cadena v1→v4).
+  Nuevo helper `register_and_approve_member` en `tests/common/mod.rs`.
+- **Vitest**: `history-merge.test.ts` (11), `projection-chart.test.ts` (10), `snapshot-tracker.test.ts`
+  (8) + casos negativos en `dates.test.ts`. Total 72 → 104.
+
 ## [1.4.4] — 2026-07-02
 
 ### Documentación — biblioteca de skills + CLAUDE.md como punto de entrada único
