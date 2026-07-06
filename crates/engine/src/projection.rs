@@ -23,6 +23,8 @@ pub enum EngineError {
     InvalidPlanningAdjustments,
     #[error("allocation_rules contains an out-of-bounds target_index")]
     InvalidAllocationRuleTarget,
+    #[error("history timeline dates must be strictly ascending")]
+    InvalidHistoryTimeline,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +137,8 @@ pub struct ProjectionOutput {
     pub per_asset_series: Vec<Vec<Decimal>>,
 }
 
-fn month_first_calendar(d: NaiveDate) -> NaiveDate {
+/// Primero-de-mes de una fecha (día 1 del mismo mes). Compartido con `history.rs`.
+pub(crate) fn month_first_calendar(d: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap_or(d)
 }
 

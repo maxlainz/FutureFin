@@ -11,7 +11,7 @@ use base64::Engine;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -51,6 +51,10 @@ pub struct ImportCounts {
     pub categories_in_backup: u32,
     pub categories_already_present: u32,
     pub categories_to_create: u32,
+    /// History snapshot headers in the backup (schema_version ≥ 4; 0 for older files).
+    pub snapshots: u32,
+    /// Total history snapshot items across all snapshots in the backup.
+    pub snapshot_items: u32,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -134,9 +138,20 @@ pub async fn import_user_backup_apply(
 
     let mut tx = state.pool.begin().await?;
 
-    // 1. Drop existing user-scoped rows in dependency order. allocation_rules first
-    //    because it FKs into assets (ON DELETE CASCADE would also handle this, but being
-    //    explicit keeps the order deterministic).
+    // 1. Drop existing user-scoped rows in dependency order.
+    //    history_snapshots first: its `source_item_id` is NOT a FK (a snapshot references
+    //    nothing and survives ledger deletes), so nothing forces this ordering — but the
+    //    snapshots belong to this user and must be cleared before their ledger churns, and
+    //    doing it first keeps the whole wipe deterministic. Items cascade via ON DELETE CASCADE.
+    sqlx::query(
+        r#"DELETE FROM history_snapshots WHERE installation_id = $1 AND owner_user_id = $2"#,
+    )
+    .bind(iid)
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
+    //    allocation_rules next because it FKs into assets (ON DELETE CASCADE would also handle
+    //    this, but being explicit keeps the order deterministic).
     sqlx::query(
         r#"DELETE FROM allocation_rules WHERE installation_id = $1 AND owner_user_id = $2"#,
     )
@@ -187,6 +202,10 @@ pub async fn import_user_backup_apply(
         .await?;
 
     tx.commit().await?;
+
+    // A full replace rewrites assets/liabilities/budget — all projection-engine inputs — so the
+    // in-memory projection cache would otherwise stay stale for up to its TTL. Invalidate it now.
+    crate::handlers::projection::refresh_projection_after_mutation(state.clone(), iid, user.id.0);
 
     Ok(Json(ImportApplyResponse {
         imported: counts,
@@ -243,6 +262,11 @@ async fn compute_counts(
         }
     }
     let in_backup = payload.categories_used.len() as u32;
+    let snapshot_items: u32 = payload
+        .snapshots
+        .iter()
+        .map(|s| s.items.len() as u32)
+        .sum();
     Ok(ImportCounts {
         assets: payload.assets.len() as u32,
         liabilities: payload.liabilities.len() as u32,
@@ -251,6 +275,8 @@ async fn compute_counts(
         categories_in_backup: in_backup,
         categories_already_present: already_present,
         categories_to_create: in_backup.saturating_sub(already_present),
+        snapshots: payload.snapshots.len() as u32,
+        snapshot_items,
     })
 }
 
@@ -383,9 +409,13 @@ async fn insert_payload(
         .await?;
     }
 
+    // Insert liabilities and remember each freshly-minted UUID at the same index as the backup,
+    // so snapshot items of kind=liability can be re-linked via their `ledger_index`.
+    let mut new_liability_ids: Vec<Uuid> = Vec::with_capacity(payload.liabilities.len());
     let mut liabilities = 0u32;
     for l in &payload.liabilities {
         let cid = resolve_category(cat_map, &l.category_ref.scope, &l.category_ref.name)?;
+        let new_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO liabilities (
                    id, installation_id, owner_user_id, category_id, label, type_tag,
@@ -393,7 +423,7 @@ async fn insert_payload(
                    payment_frequency, payment_end_date, notes, sort_index
                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
         )
-        .bind(Uuid::new_v4())
+        .bind(new_id)
         .bind(iid)
         .bind(user_id)
         .bind(cid)
@@ -409,6 +439,7 @@ async fn insert_payload(
         .bind(l.sort_index)
         .execute(&mut **tx)
         .await?;
+        new_liability_ids.push(new_id);
         liabilities += 1;
     }
 
@@ -461,6 +492,139 @@ async fn insert_payload(
         planning_flows += 1;
     }
 
+    // Insert history snapshots LAST: re-linking their items via `ledger_index` needs the
+    // freshly-minted asset AND liability UUIDs collected above. See `BackupSnapshotItem`.
+    let mut snapshots = 0u32;
+    let mut snapshot_items = 0u32;
+    for s in &payload.snapshots {
+        // Validate the header BEFORE inserting. A hand-edited/corrupted backup could carry a
+        // bad `kind` or `source` that trips the `history_snapshots` CHECK constraints
+        // (SQLSTATE 23514, unmapped → 500). Reject with 400 so the whole import rolls back.
+        let is_liability = match s.kind.as_str() {
+            "asset" => false,
+            "liability" => true,
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "snapshot_kind_invalid: kind must be 'asset' or 'liability'".into(),
+                ))
+            }
+        };
+        if !matches!(s.source.as_str(), "capture" | "backfill") {
+            return Err(ApiError::BadRequest(
+                "snapshot_source_invalid: source must be 'capture' or 'backfill'".into(),
+            ));
+        }
+
+        let snapshot_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO history_snapshots (
+                   id, installation_id, owner_user_id, kind, snapshot_date, source
+               ) VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(snapshot_id)
+        .bind(iid)
+        .bind(user_id)
+        .bind(&s.kind)
+        .bind(s.snapshot_date)
+        .bind(&s.source)
+        .execute(&mut **tx)
+        .await?;
+        snapshots += 1;
+
+        // Resolved `source_item_id`s already used in THIS snapshot. A repeat would trip the
+        // UNIQUE(snapshot_id, source_item_id) constraint (23505) → a misleading 409; reject 400.
+        let mut seen_items: HashSet<Uuid> = HashSet::with_capacity(s.items.len());
+
+        for it in &s.items {
+            // Validate each item against the `history_snapshot_items` CHECK constraints so a
+            // corrupted backup returns a 400 (naming the field) instead of a 500 (23514). Bounds
+            // mirror handlers/history.rs and the table CHECKs: label non-empty ≤ 200 chars,
+            // value ≥ 0, terms (apr/payment_*) only on liabilities, apr/payment ≥ 0, frequency
+            // ∈ {monthly, weekly}.
+            let label = it.label.trim();
+            if label.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "snapshot_label_empty: item label must not be empty".into(),
+                ));
+            }
+            if label.chars().count() > 200 {
+                return Err(ApiError::BadRequest(
+                    "snapshot_label_too_long: item label must be at most 200 characters".into(),
+                ));
+            }
+            if it.value.is_sign_negative() {
+                return Err(ApiError::BadRequest(
+                    "snapshot_value_negative: item value must be >= 0".into(),
+                ));
+            }
+            let has_terms = it.apr_percent.is_some()
+                || it.payment_amount.is_some()
+                || it.payment_frequency.is_some();
+            if has_terms && !is_liability {
+                return Err(ApiError::BadRequest(
+                    "snapshot_terms_only_for_liabilities: apr_percent/payment_amount/payment_frequency are only valid for kind 'liability'".into(),
+                ));
+            }
+            if it.apr_percent.map_or(false, |a| a.is_sign_negative()) {
+                return Err(ApiError::BadRequest(
+                    "snapshot_apr_percent_negative: apr_percent must be >= 0".into(),
+                ));
+            }
+            if it.payment_amount.map_or(false, |p| p.is_sign_negative()) {
+                return Err(ApiError::BadRequest(
+                    "snapshot_payment_amount_negative: payment_amount must be >= 0".into(),
+                ));
+            }
+            if let Some(freq) = it.payment_frequency.as_deref() {
+                if !matches!(freq, "monthly" | "weekly") {
+                    return Err(ApiError::BadRequest(
+                        "snapshot_payment_frequency_invalid: payment_frequency must be 'monthly' or 'weekly'".into(),
+                    ));
+                }
+            }
+
+            // ledger_index present → point at the fresh UUID of the re-created ledger row
+            // (asset or liability, per snapshot kind); absent → keep item_key verbatim so
+            // deleted/free-form backfill items stay linked across snapshots.
+            let source_item_id = match it.ledger_index {
+                Some(i) => {
+                    let fresh_ids = if is_liability {
+                        &new_liability_ids
+                    } else {
+                        &new_asset_ids
+                    };
+                    *fresh_ids.get(i).ok_or_else(|| {
+                        ApiError::BadRequest("snapshot_item.ledger_index out of bounds".into())
+                    })?
+                }
+                None => it.item_key,
+            };
+
+            if !seen_items.insert(source_item_id) {
+                return Err(ApiError::BadRequest(
+                    "snapshot_duplicate_item: source_item_id repeated within snapshot".into(),
+                ));
+            }
+
+            sqlx::query(
+                r#"INSERT INTO history_snapshot_items (
+                       snapshot_id, source_item_id, label, value,
+                       apr_percent, payment_amount, payment_frequency
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+            )
+            .bind(snapshot_id)
+            .bind(source_item_id)
+            .bind(&it.label)
+            .bind(it.value)
+            .bind(it.apr_percent)
+            .bind(it.payment_amount)
+            .bind(it.payment_frequency.as_deref())
+            .execute(&mut **tx)
+            .await?;
+            snapshot_items += 1;
+        }
+    }
+
     Ok(ImportCounts {
         assets,
         liabilities,
@@ -469,6 +633,8 @@ async fn insert_payload(
         categories_in_backup: payload.categories_used.len() as u32,
         categories_already_present: 0,
         categories_to_create: 0,
+        snapshots,
+        snapshot_items,
     })
 }
 

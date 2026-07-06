@@ -18,8 +18,9 @@ description: >
 
 # FutureFin configuration and flags
 
-All facts verified against the code on 2026-07-02 (v1.4.3, per `apps/api/Cargo.toml`).
-This skill is the single home for "what can be configured, where, with what bounds".
+All facts verified against the code on 2026-07-02 (v1.4.3, per `apps/api/Cargo.toml`); the
+`/v1/history/*` query params were added for v1.5.0 (2026-07-06) — no new env vars or installation
+settings. This skill is the single home for "what can be configured, where, with what bounds".
 
 Vocabulary used below:
 - **Installation** — the singleton row in table `installation`; one per deployment; all financial
@@ -142,6 +143,18 @@ Cache-key implications (`apps/api/src/state.rs`): the in-memory projection cache
 new query param that changes response content requires either joining `ProjectionCacheKey` or
 bypassing the cache — otherwise users get stale cross-contaminated responses. Every mutating
 handler invalidates the whole installation's entries (`refresh_projection_after_mutation`).
+
+### `GET /v1/history/*` — snapshot query params (`apps/api/src/handlers/history.rs`, v1.5.0)
+
+| Endpoint | Param | Values | Default | Semantics |
+|---|---|---|---|---|
+| `GET /v1/history/snapshots` | `year` | `i32`, validated **1900–3000** (out of range → 400) | omitted → all years | Filters by a civil-date range (index-friendly), always own-user (no `?view`). |
+| `GET /v1/history/snapshots` | `kind` | `asset` \| `liability` (anything else → 400 `invalid_kind`) | omitted → both | Note: **stricter than `?view`/`?density`** — an unknown `kind` here **errors 400**, it does not silently fall back. |
+| `GET /v1/history/series` | `view` | `household` \| `mine` (standard `LedgerViewQuery::resolve`) | `household` | Standard scope filter (§4.1). `mine` = own series; `household` = server-side sum of every user's interpolated series. |
+
+No new **env vars** and no new installation settings ship with the history feature — it is
+entirely per-user request/data surface. The series endpoint has **no cache** (sub-ms compute) and
+takes no `?months`/`?density`.
 
 ### Body limits (`apps/api/src/routes/mod.rs`)
 

@@ -144,7 +144,7 @@ npm workspace:   apps/web (futurefin-web)
 
 **crates/domain** — shared primitives: `UserId` (newtype over `Uuid`), re-exports `Decimal` and `Uuid`. No `f64` for monetary values anywhere in the domain.
 
-**crates/engine** — pure projection math (`project_net_worth_series`, `first_month_per_asset_contribution_nominals`). No I/O, no DB; only `Decimal` arithmetic. Has unit tests.
+**crates/engine** — pure projection math (`project_net_worth_series`, `first_month_per_asset_contribution_nominals`) plus historical-snapshot interpolation (`history.rs`: `evaluate_timeline`, linear-for-assets / French-amortization-for-liabilities, `month_index_of` / `add_months_signed`). No I/O, no DB; only `Decimal` arithmetic. Has unit tests.
 
 **apps/api** — Axum HTTP server. Entry point: `main.rs` (bin), with shared crate modules in `lib.rs`. Key modules:
 - `routes/mod.rs` — full route map; all routes under `/v1/` except `/health` and `/openapi.json`. `DefaultBodyLimit` caps requests at 1 MB globally, 16 MB on `/backup/user-import*`.
@@ -155,6 +155,7 @@ npm workspace:   apps/web (futurefin-web)
 - `handlers/installation.rs` — singleton installation, FIRE settings, `require_installation_member`
 - `handlers/membership.rs` — roles: `owner`, `member`, `viewer`; `role_can_write` used by handlers
 - `handlers/person_view.rs` — `LedgerView` enum (`Household` / `Mine`) **plus helpers** `scope_where(table_alias)`, `next_arg_index()`, `bind_scope_as`, `bind_scope_scalar`. Use them instead of duplicating `match view { Household | Mine }` blocks — they enforce consistent placeholder ordering across both branches.
+- `handlers/history.rs` — per-user net-worth **snapshots** under `/v1/history` (capture / backfill CRUD / interpolated series). Manual snapshots of the user's asset + liability items; the engine (`history.rs`) reconstructs the past series between them. Snapshots are NOT projection inputs → their mutations do **not** invalidate the projection cache.
 - `db.rs` — pool setup (`max=10, min=1, idle_timeout=10min, max_lifetime=30min`) + `sqlx::migrate!` runner. No more auto-repair loop; if a checksum mismatches in dev, fix manually via `DELETE FROM _sqlx_migrations WHERE version = X` and rerun.
 - **`tests/`** — integration tests against a real Postgres (schema-isolated per test). See [`.claude/tests.md`](.claude/tests.md).
 
@@ -173,6 +174,8 @@ npm workspace:   apps/web (futurefin-web)
 **View scoping**: all ledger endpoints accept `?view=mine` to filter by `owner_user_id = current_user`. Default is `household` (full installation scope). This is a client-side filter, not an authorization boundary. Handlers must use `LedgerView::scope_where` + `bind_scope_as/scalar` so the two branches stay in sync.
 
 **Reads never mutate**: liabilities with `payment_end_date < today` are **filtered** out of `GET /v1/liabilities`, `/summary`, `/budget` (derived lines), `/assets`, `/projection` via `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)`. They are **not** physically deleted. The legacy `purge_expired_liabilities` function was removed in May 2026 — GET handlers were silently issuing `DELETE` statements, violating HTTP semantics and impeding caching.
+
+**Histórico por snapshots**: cada usuario guarda **snapshots manuales** (per-user) de sus activos y pasivos; el servidor interpola la serie histórica de patrimonio entre ellos (lineal para activos, amortización francesa para pasivos) y la sirve lista para pintar en `GET /v1/history/series`, unida a la proyección en un único chart temporal. Los snapshots **no son inputs del engine de proyección**: sus mutaciones (`/v1/history/*`) nunca llaman a `refresh_projection_after_mutation`, así que jamás invalidan la cache de proyección (test de regresión: `snapshot_mutations_do_not_touch_projection_cache`). El household histórico es la **suma** de las series interpoladas de cada usuario; `?view=mine` devuelve solo la propia. Incluidos en `.ffbackup` v4.
 
 **OpenAPI**: generated via `utoipa`, served at `GET /openapi.json`. All handler structs annotated with `#[utoipa::path]`.
 

@@ -6,6 +6,7 @@ pub mod budget;
 pub mod categories;
 pub mod fallback;
 pub mod health;
+pub mod history;
 pub mod installation;
 pub mod liabilities;
 pub mod membership;

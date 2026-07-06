@@ -108,6 +108,13 @@ export function parseYmdComponents(
   return { y, m, d };
 }
 
+/** `YYYY-MM-DD` → `DD/MM/YYYY`; devuelve el original si no parsea. */
+export function formatDateDmy(ymd: string): string {
+  const c = parseYmdComponents(ymd);
+  if (!c) return ymd;
+  return `${String(c.d).padStart(2, "0")}/${String(c.m).padStart(2, "0")}/${c.y}`;
+}
+
 /** Número de días del mes civil `(y, m)` con `m` 1-based. */
 export function civilDaysInMonth(y: number, m: number): number {
   return new Date(y, m, 0).getDate();

@@ -78,6 +78,9 @@ export type AssetApiRow = {
   current_value: string;
   purchase_price: string | null;
   is_liquid: boolean;
+  /** Dueño de la fila (dato de display, no frontera de seguridad). Alimenta el trigger del
+   *  modal de snapshot en vista household. Ausente en clientes antiguos. */
+  owner_user_id?: string;
   expected_annual_return_percent?: string | null;
   /** Aporte estimado mes 1 derivado de las reglas de asignación del sobrante. */
   contribution_nominal_monthly?: string;
@@ -283,4 +286,75 @@ export type LiabilityApiRow = {
   payment_end_date: string | null;
   notes: string | null;
   sort_index: number;
+};
+
+// ---------------------------------------------------------------------------
+// Perspectiva histórica (snapshots de patrimonio) — v1.5.0
+// ---------------------------------------------------------------------------
+
+/** Tipo de snapshot. Singular, igual que el CHECK de DB (`kind IN ('asset','liability')`). */
+export type HistorySnapshotKindApi = "asset" | "liability";
+
+/**
+ * Un punto de la serie histórica. Todo numérico = f64 (misma excepción chart-only que
+ * `ProjectionPointApi`), no Decimal-string. `month_index ≤ 0`, contiguo e **incluye el 0**.
+ */
+export type HistoryPointApi = {
+  month_index: number;
+  net_worth: number;
+  assets_total: number;
+  liabilities_total: number;
+};
+
+/** Serie histórica por activo (paralela a `points`). `asset_id` = `source_item_id`. f64[]. */
+export type HistoryAssetSeriesApi = {
+  asset_id: string;
+  asset_name: string;
+  values: number[];
+};
+
+/** Marcador de snapshot en el eje temporal (posición x y exponente de deflación). */
+export type HistoryMarkerApi = {
+  date_ymd: string;
+  month_index: number;
+  /** `month_index + (día−1)/días_del_mes`. */
+  month_fraction: number;
+  kind: HistorySnapshotKindApi;
+  owner_user_id: string;
+  total: number;
+};
+
+/**
+ * Respuesta de `GET /v1/history/series`. 0 snapshots → arrays vacíos. Espejo exacto de §2 del
+ * plan. `anchor_date_ymd` debe coincidir con el de la proyección para poder fusionar.
+ */
+export type HistorySeriesApi = {
+  anchor_date_ymd: string;
+  anchor_month_first_ymd: string;
+  view: string;
+  points: HistoryPointApi[];
+  asset_series: HistoryAssetSeriesApi[];
+  markers: HistoryMarkerApi[];
+};
+
+/** Ítem de un snapshot (CRUD Decimal-as-string). Los términos solo aplican a pasivos. */
+export type HistorySnapshotItemApi = {
+  item_id: string;
+  label: string;
+  value: string;
+  apr_percent?: string;
+  payment_amount?: string;
+  payment_frequency?: "monthly" | "weekly";
+};
+
+/** Cabecera + ítems de un snapshot. Total derivado (Σ ítems), nunca almacenado. */
+export type HistorySnapshotApi = {
+  id: string;
+  kind: HistorySnapshotKindApi;
+  snapshot_date_ymd: string;
+  source: "capture" | "backfill";
+  total: string;
+  items: HistorySnapshotItemApi[];
+  created_at: string;
+  updated_at: string;
 };

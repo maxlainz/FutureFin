@@ -17,11 +17,13 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
 use super::crypto::{encrypt_payload, frame_file};
 use super::schema::{
     BackupAllocationRule, BackupAsset, BackupBudgetEntry, BackupCategory, BackupLiability,
-    BackupPayload, BackupPlanningFlow, BackupUser, CategoryRef, InstallationSnapshotInformative,
-    UiPreferences, CURRENT_SCHEMA_VERSION,
+    BackupPayload, BackupPlanningFlow, BackupSnapshot, BackupSnapshotItem, BackupUser, CategoryRef,
+    InstallationSnapshotInformative, UiPreferences, CURRENT_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -144,11 +146,19 @@ async fn build_payload(
 ) -> Result<BackupPayload, ApiError> {
     let (assets, asset_id_to_index) = fetch_assets(pool, iid, user_id).await?;
     let allocation_rules = fetch_allocation_rules(pool, iid, user_id, &asset_id_to_index).await?;
-    let liabilities = fetch_liabilities(pool, iid, user_id).await?;
+    let (liabilities, liability_id_to_index) = fetch_liabilities(pool, iid, user_id).await?;
     let budget_entries = fetch_budget_entries(pool, iid, user_id).await?;
     let planning_flows = fetch_planning_flows(pool, iid, user_id).await?;
     let categories_used = fetch_categories_used(pool, iid, user_id).await?;
     let snapshot = fetch_installation_snapshot(pool, iid).await?;
+    let snapshots = fetch_snapshots(
+        pool,
+        iid,
+        user_id,
+        &asset_id_to_index,
+        &liability_id_to_index,
+    )
+    .await?;
 
     Ok(BackupPayload {
         user,
@@ -160,6 +170,7 @@ async fn build_payload(
         planning_flows,
         ui_preferences,
         installation_snapshot_informative: snapshot,
+        snapshots,
     })
 }
 
@@ -260,12 +271,15 @@ async fn fetch_allocation_rules(
         .collect())
 }
 
+/// Returns the exportable liabilities plus a map `(liability_id) → index in the vec`, mirroring
+/// [`fetch_assets`], so snapshot items of `kind == "liability"` can carry a `ledger_index`.
 async fn fetch_liabilities(
     pool: &PgPool,
     iid: Uuid,
     user_id: Uuid,
-) -> Result<Vec<BackupLiability>, ApiError> {
+) -> Result<(Vec<BackupLiability>, HashMap<Uuid, usize>), ApiError> {
     let rows: Vec<(
+        Uuid,
         String,
         String,
         String,
@@ -279,7 +293,7 @@ async fn fetch_liabilities(
         Option<String>,
         i32,
     )> = sqlx::query_as(
-        r#"SELECT c.scope, c.name AS cat_name, l.label, l.type_tag, l.principal,
+        r#"SELECT l.id, c.scope, c.name AS cat_name, l.label, l.type_tag, l.principal,
                   l.principal_derived_from_plan, l.apr_percent, l.payment_amount,
                   l.payment_frequency, l.payment_end_date, l.notes, l.sort_index
            FROM liabilities l
@@ -292,22 +306,110 @@ async fn fetch_liabilities(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    let mut id_to_index = HashMap::with_capacity(rows.len());
+    let liabilities: Vec<BackupLiability> = rows
         .into_iter()
-        .map(|r| BackupLiability {
-            category_ref: CategoryRef { scope: r.0, name: r.1 },
-            label: r.2,
-            type_tag: r.3,
-            principal: r.4,
-            principal_derived_from_plan: r.5,
-            apr_percent: r.6,
-            payment_amount: r.7,
-            payment_frequency: r.8,
-            payment_end_date: r.9,
-            notes: r.10,
-            sort_index: r.11,
+        .enumerate()
+        .map(|(i, r)| {
+            id_to_index.insert(r.0, i);
+            BackupLiability {
+                category_ref: CategoryRef { scope: r.1, name: r.2 },
+                label: r.3,
+                type_tag: r.4,
+                principal: r.5,
+                principal_derived_from_plan: r.6,
+                apr_percent: r.7,
+                payment_amount: r.8,
+                payment_frequency: r.9,
+                payment_end_date: r.10,
+                notes: r.11,
+                sort_index: r.12,
+            }
         })
-        .collect())
+        .collect();
+    Ok((liabilities, id_to_index))
+}
+
+/// Serializes this user's history snapshots for the backup. For each item, `ledger_index` is
+/// the position of its `source_item_id` in the payload's `assets` (kind=asset) or `liabilities`
+/// (kind=liability) vec — `None` when the source row no longer exists (deleted / free-form
+/// backfill) — and `item_key` is the original `source_item_id`. See [`BackupSnapshotItem`].
+async fn fetch_snapshots(
+    pool: &PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    asset_id_to_index: &HashMap<Uuid, usize>,
+    liability_id_to_index: &HashMap<Uuid, usize>,
+) -> Result<Vec<BackupSnapshot>, ApiError> {
+    let headers: Vec<(Uuid, String, NaiveDate, String)> = sqlx::query_as(
+        r#"SELECT id, kind, snapshot_date, source
+           FROM history_snapshots
+           WHERE installation_id = $1 AND owner_user_id = $2
+           ORDER BY kind ASC, snapshot_date ASC"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    if headers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids: Vec<Uuid> = headers.iter().map(|h| h.0).collect();
+    let item_rows: Vec<(
+        Uuid,
+        Uuid,
+        String,
+        Decimal,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<String>,
+    )> = sqlx::query_as(
+        r#"SELECT snapshot_id, source_item_id, label, value,
+                  apr_percent, payment_amount, payment_frequency
+           FROM history_snapshot_items
+           WHERE snapshot_id = ANY($1)
+           ORDER BY label ASC"#,
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+
+    // Group items by parent, preserving the label-ASC order within each snapshot.
+    let mut by_parent: HashMap<
+        Uuid,
+        Vec<(Uuid, String, Decimal, Option<Decimal>, Option<Decimal>, Option<String>)>,
+    > = HashMap::new();
+    for r in item_rows {
+        by_parent
+            .entry(r.0)
+            .or_default()
+            .push((r.1, r.2, r.3, r.4, r.5, r.6));
+    }
+
+    let mut out = Vec::with_capacity(headers.len());
+    for (sid, kind, snapshot_date, source) in headers {
+        let rows = by_parent.remove(&sid).unwrap_or_default();
+        let idx_map = if kind == "asset" {
+            asset_id_to_index
+        } else {
+            liability_id_to_index
+        };
+        let items = rows
+            .into_iter()
+            .map(|(source_item_id, label, value, apr, pay, freq)| BackupSnapshotItem {
+                ledger_index: idx_map.get(&source_item_id).copied(),
+                item_key: source_item_id,
+                label,
+                value,
+                apr_percent: apr,
+                payment_amount: pay,
+                payment_frequency: freq,
+            })
+            .collect();
+        out.push(BackupSnapshot { kind, snapshot_date, source, items });
+    }
+    Ok(out)
 }
 
 async fn fetch_budget_entries(

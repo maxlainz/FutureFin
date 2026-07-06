@@ -10,12 +10,14 @@ import {
   type WheelEvent,
 } from "react";
 import type {
+  HistorySeriesApi,
   PlanningFlowApiRow,
   PlanningFlowDirectionApi,
   ProjectionMilestoneApi,
   ProjectionSeriesApi,
 } from "../api/types";
-import { parseYmdComponents } from "../lib/dates";
+import { mergeProjectionWithHistory } from "../lib/history-merge";
+import { formatDateDmy, parseYmdComponents } from "../lib/dates";
 import {
   formatCurrencyAmount,
   formatCurrencyNumber,
@@ -26,6 +28,7 @@ import {
 import {
   ASSET_LINE_COLORS,
   buildProjectionChartLayout,
+  deflationFactorAt,
   formatProjectionChartHorizonLine,
   niceYTicks,
   projectionHoverTitle,
@@ -41,6 +44,7 @@ import { chartPerf } from "../lib/perf";
 
 export function ProjectionNetWorthChart({
   series,
+  history,
   milestones,
   focusMode,
   inflationAdjusted,
@@ -55,6 +59,9 @@ export function ProjectionNetWorthChart({
   planningFlows,
 }: {
   series: ProjectionSeriesApi;
+  /** Serie histórica (snapshots pasados) ya validada contra el anchor de la proyección, o
+   *  `null` cuando no hay histórico usable → el merge es la identidad (render solo-futuro). */
+  history: HistorySeriesApi | null;
   milestones: ProjectionMilestoneApi[];
   focusMode: boolean;
   /** Cuando true (default), las series del chart se deflactan visualmente — la matemática del
@@ -76,7 +83,14 @@ export function ProjectionNetWorthChart({
   // Esto distingue el tiempo de cómputo del chart del delay entre fetch y
   // navegación (que puede ser "tiempo del usuario", no del sistema).
   chartPerf.mark("mount-start");
-  const pts = series.points;
+  // Fusión pasado (histórico) + futuro (proyección). Identidad por referencia cuando no hay
+  // histórico usable → `pts`/`historyStartMonth` degradan al comportamiento solo-futuro actual.
+  const merged = useMemo(
+    () => mergeProjectionWithHistory(series, history),
+    [series, history],
+  );
+  const pts = merged.pts;
+  const historyStartMonth = merged.historyStartMonth;
   const gid = useId().replace(/:/g, "");
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -90,8 +104,8 @@ export function ProjectionNetWorthChart({
   // ventana se mueve siempre sobre el horizonte temporal completo
   // (`series.months`), independiente de cuántos puntos haya serializados.
   const [viewWindow, setViewWindow] = useState({
-    startMonth: 0,
-    monthSpan: series.months,
+    startMonth: historyStartMonth,
+    monthSpan: series.months - historyStartMonth,
   });
   const [animatedYDomain, setAnimatedYDomain] = useState<{
     min: number;
@@ -140,21 +154,28 @@ export function ProjectionNetWorthChart({
     const focusEnd = nextMonetaryMilestones.at(-1)?.reached_month_index;
     if (focusEnd == null) return null;
     const clampedEnd = Math.max(0, Math.min(series.months - 1, focusEnd));
+    // Focus mantiene startMonth 0: es una lente de planificación futura; el pasado histórico
+    // queda deliberadamente oculto (no arranca en historyStartMonth).
     return { startMonth: 0, monthSpan: clampedEnd + 1 };
   }, [milestones, pts.length, series.months]);
 
   useEffect(() => {
     setViewWindow((prev) => {
       if (pts.length <= 0) return { startMonth: 0, monthSpan: 0 };
+      // La vista completa arranca en historyStartMonth (≤ 0) para incluir el pasado; focus sigue
+      // en 0 (ver focusWindow).
       const next = focusMode && focusWindow
         ? focusWindow
-        : { startMonth: 0, monthSpan: series.months };
+        : {
+            startMonth: historyStartMonth,
+            monthSpan: series.months - historyStartMonth,
+          };
       if (prev.startMonth === next.startMonth && prev.monthSpan === next.monthSpan) {
         return prev;
       }
       return next;
     });
-  }, [focusMode, focusWindow, pts.length, series.months]);
+  }, [focusMode, focusWindow, pts.length, series.months, historyStartMonth]);
 
   const hasFireTargetSeries = useMemo(() => {
     const f = series.fire_target_series;
@@ -162,12 +183,13 @@ export function ProjectionNetWorthChart({
   }, [series.fire_target_series, series.points.length]);
 
   const legendLabels = useMemo(() => {
-    const assetNames = (series.asset_series ?? []).map((as) => as.asset_name);
+    const assetNames = merged.assetSeries.map((as) => as.asset_name);
     const labels: string[] = ["Patrimonio neto", "Capital aportado"];
     if (hasFireTargetSeries) labels.push("Target FIRE");
     labels.push(...assetNames);
+    if (historyStartMonth < 0) labels.push("Histórico");
     return labels;
-  }, [series.asset_series, hasFireTargetSeries]);
+  }, [merged.assetSeries, hasFireTargetSeries, historyStartMonth]);
 
   const layoutDims = useMemo(
     () =>
@@ -187,24 +209,32 @@ export function ProjectionNetWorthChart({
       chartPerf.mark("baseSeries-end");
       return null;
     }
-    const deflate = inflationAdjusted && installationInflationPct > 0;
-    // El deflactor debe usar el `month_index` real del punto, no su posición en el array: con
-    // densidad `hybrid` los puntos no son equidistantes (mes 0..12 y luego 24, 36, …), así que el
-    // índice del array subestimaría los años transcurridos y deflactaría de menos. Esto mantiene la
-    // curva alineada con los `milestones_real` del backend (calculados sobre `month_index`).
+    // El deflactor usa el `month_index` real del punto (nunca la posición en el array): con
+    // densidad `hybrid` los puntos no son equidistantes, y con histórico los `month_index` son
+    // negativos (el deflactor los AMPLIFICA automáticamente, ×(1+inf)^(−k/12)). `deflationFactorAt`
+    // devuelve 1 cuando el pct efectivo es 0. Alineado con `milestones_real` del backend.
+    const effectivePct =
+      inflationAdjusted && installationInflationPct > 0
+        ? installationInflationPct
+        : 0;
     const deflator = (monthIndex: number) =>
-      deflate
-        ? 1 / Math.pow(1 + installationInflationPct / 100, monthIndex / 12)
-        : 1;
+      deflationFactorAt(monthIndex, effectivePct);
     const miAt = (i: number) => pts[i]?.month_index ?? i;
     const nw = pts.map((p) => p.net_worth * deflator(p.month_index));
     const cc = pts.map((p) => p.contributed_capital * deflator(p.month_index));
+    // `fire_target_series` es paralelo a `series.points` (SOLO futuro): se re-mapea a un array de
+    // longitud combinada `(number | null)[]`, null en el pasado (k < 0). Solo los vértices no-null
+    // se dibujan → la línea FIRE arranca en el mes 0.
     const fireRaw = series.fire_target_series;
-    const fireTarget =
-      Array.isArray(fireRaw) && fireRaw.length === pts.length
-        ? fireRaw.map((v, i) => v * deflator(miAt(i)))
+    const fireTarget: (number | null)[] | null =
+      Array.isArray(fireRaw) && fireRaw.length === series.points.length
+        ? pts.map((p, i) =>
+            i >= merged.futureOffset
+              ? (fireRaw[i - merged.futureOffset] ?? 0) * deflator(p.month_index)
+              : null,
+          )
         : null;
-    const assetSeries = (series.asset_series ?? [])
+    const assetSeries = merged.assetSeries
       .map((as) => {
         const values = as.values.map((v, i) => v * deflator(miAt(i)));
         return {
@@ -243,14 +273,19 @@ export function ProjectionNetWorthChart({
     }
     const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
     const startNw = startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
-    const allowNegativeAxis = startNw < 0;
+    // El histórico puede bajar el NW por debajo de 0 en el pasado: el eje debe permitir negativos
+    // aunque el patrimonio de partida (mes 0) sea positivo.
+    const allowNegativeAxis = startNw < 0 || merged.minNetWorth < 0;
     chartPerf.mark("baseSeries-end");
     return { nw, cc, fireTarget, assetSeries, assetStacks, allowNegativeAxis };
   }, [
     pts,
     series.starting_net_worth,
-    series.asset_series,
+    series.points.length,
     series.fire_target_series,
+    merged.assetSeries,
+    merged.futureOffset,
+    merged.minNetWorth,
     inflationAdjusted,
     installationInflationPct,
   ]);
@@ -262,10 +297,19 @@ export function ProjectionNetWorthChart({
       series.months,
       { ageUiMode, birthDateIso: userBirthDate, anchorDateYmd, calendarTz },
       { plotWidthPx: layoutDims.pw },
+      historyStartMonth,
     );
     chartPerf.mark("xTicks-end");
     return t;
-  }, [series.months, ageUiMode, userBirthDate, anchorDateYmd, calendarTz, layoutDims.pw]);
+  }, [
+    series.months,
+    ageUiMode,
+    userBirthDate,
+    anchorDateYmd,
+    calendarTz,
+    layoutDims.pw,
+    historyStartMonth,
+  ]);
 
   // Modelo dependiente de viewWindow: slicing visible (por month_index, no por
   // índice de array — soporta densidades mixtas), yTicks, ticks X visibles y
@@ -279,14 +323,17 @@ export function ProjectionNetWorthChart({
     const { nw, cc, fireTarget, assetSeries, assetStacks, allowNegativeAxis } =
       baseSeries;
     const totalMonths = series.months;
+    // Dominio panorámico: incluye el pasado histórico (historyStartMonth ≤ 0). Sin histórico,
+    // domainMonths === totalMonths → comportamiento idéntico al actual.
+    const domainMonths = totalMonths - historyStartMonth;
     const minMonthSpan = Math.min(totalMonths, 12);
     const monthSpan = Math.max(
       minMonthSpan,
-      Math.min(totalMonths, Math.round(viewWindow.monthSpan)),
+      Math.min(domainMonths, Math.round(viewWindow.monthSpan)),
     );
-    const maxStartMonth = Math.max(0, totalMonths - monthSpan);
+    const maxStartMonth = Math.max(historyStartMonth, totalMonths - monthSpan);
     const visibleMonthStart = Math.max(
-      0,
+      historyStartMonth,
       Math.min(maxStartMonth, Math.round(viewWindow.startMonth)),
     );
     const visibleMonthEnd = visibleMonthStart + monthSpan - 1;
@@ -303,9 +350,14 @@ export function ProjectionNetWorthChart({
     }
 
     const nwVisible = visibleIndices.map((i) => nw[i] ?? 0);
-    const ccVisible = visibleIndices.map((i) => cc[i] ?? 0);
+    // El "capital aportado" solo existe en el futuro (k ≥ 0). En el pasado el valor es un centinela
+    // 0 que NO debe dibujarse ni contar para el dominio Y.
+    const ccVisibleIndices = visibleIndices.filter(
+      (i) => pts[i]!.month_index >= 0,
+    );
+    const ccVisible = ccVisibleIndices.map((i) => cc[i] ?? 0);
     const fireTargetVisible = fireTarget
-      ? visibleIndices.map((i) => fireTarget[i] ?? 0)
+      ? visibleIndices.map((i) => fireTarget[i] ?? null)
       : null;
     const assetVisibleValues = assetSeries.flatMap((as) =>
       visibleIndices.map((i) => as.values[i] ?? 0),
@@ -392,11 +444,22 @@ export function ProjectionNetWorthChart({
         const d = parseYmdComponents(f.due_date);
         if (!d) continue;
         const mi = (d.y - anchor.y) * 12 + (d.m - anchor.m);
+        // Los flujos de planificación son siempre futuros: descarta mi < 0 para que una ventana
+        // extendida al pasado no genere marcadores fantasma.
+        if (mi < 0) continue;
         if (mi < visibleMonthStart || mi > visibleMonthEnd) continue;
         out.push({ id: f.id, mi, title: f.title, direction: f.direction });
       }
       return out;
     })();
+    // Marcadores de snapshot visibles: se posicionan por `month_index` (x), sobre el mismo vértice
+    // que la polilínea NW. `month_fraction` no se usa para posicionar (el punto k=0 caería a la
+    // derecha del divisor «Hoy», en zona futura, y el dot se despegaría de la línea).
+    const snapshotMarkers = merged.markers.filter(
+      (mk) =>
+        mk.month_index >= visibleMonthStart &&
+        mk.month_index <= visibleMonthEnd,
+    );
     chartPerf.mark("model-end");
     return {
       nw,
@@ -405,7 +468,7 @@ export function ProjectionNetWorthChart({
       assetSeries,
       assetStacks,
       nwVisible,
-      ccVisible,
+      ccVisibleIndices,
       allowNegativeAxis,
       targetYMin: yMin,
       targetYMax: yMax,
@@ -415,6 +478,7 @@ export function ProjectionNetWorthChart({
       showCompoundOutpaceMarker,
       visibleMilestones,
       chartPlanningMarkers,
+      snapshotMarkers,
       pw,
       ph,
       ml,
@@ -434,6 +498,8 @@ export function ProjectionNetWorthChart({
     baseSeries,
     xTicksAll,
     pts,
+    historyStartMonth,
+    merged.markers,
     series.months,
     series.compound_outpaces_true_savings_month_index,
     layoutDims,
@@ -526,7 +592,7 @@ export function ProjectionNetWorthChart({
     assetSeries,
     assetStacks,
     nwVisible,
-    ccVisible,
+    ccVisibleIndices,
     allowNegativeAxis,
     xTicks,
     xScale,
@@ -534,6 +600,7 @@ export function ProjectionNetWorthChart({
     showCompoundOutpaceMarker,
     visibleMilestones,
     chartPlanningMarkers,
+    snapshotMarkers,
     pw,
     ph,
     ml,
@@ -581,12 +648,27 @@ export function ProjectionNetWorthChart({
   const nwPoints = nwVisible
     .map((v, j) => `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`)
     .join(" ");
-  const ccPoints = ccVisible
-    .map((v, j) => `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`)
+  // NW partido en el mes 0: el tramo pasado (month_index ≤ 0) y el futuro (≥ 0) comparten el
+  // vértice del mes 0 para unirse sin hueco. Solo se usan cuando hay histórico (historyStartMonth < 0).
+  const nwPastPoints = visibleIndices
+    .filter((i) => pts[i]!.month_index <= 0)
+    .map((i) => `${xScale(pts[i]!.month_index)},${yScale(nw[i] ?? 0)}`)
+    .join(" ");
+  const nwFuturePoints = visibleIndices
+    .filter((i) => pts[i]!.month_index >= 0)
+    .map((i) => `${xScale(pts[i]!.month_index)},${yScale(nw[i] ?? 0)}`)
+    .join(" ");
+  const ccPoints = ccVisibleIndices
+    .map((i) => `${xScale(pts[i]!.month_index)},${yScale(cc[i] ?? 0)}`)
     .join(" ");
   const firePoints = fireTargetVisible
     ? fireTargetVisible
-        .map((v, j) => `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`)
+        .map((v, j) =>
+          v == null
+            ? null
+            : `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`,
+        )
+        .filter((s): s is string => s !== null)
         .join(" ")
     : null;
   let areaD = "";
@@ -658,13 +740,17 @@ export function ProjectionNetWorthChart({
     const panInput = e.shiftKey ? e.deltaY : e.deltaX;
     const isPan = Math.abs(panInput) > Math.abs(e.deltaY) || e.shiftKey;
     const totalMonths = series.months;
+    // El dominio panorámico incluye el pasado histórico (historyStartMonth ≤ 0): el span máximo y
+    // el borde izquierdo del pan/zoom deben respetarlo, o una sola rueda expulsaría el histórico.
+    // Espeja la aritmética del memo `model` (domainMonths / lower bound = historyStartMonth).
+    const domainMonths = totalMonths - historyStartMonth;
     const minSpan = Math.min(totalMonths, 12);
-    if (isPan && monthSpan < totalMonths) {
+    if (isPan && monthSpan < domainMonths) {
       const step = Math.max(1, Math.round(monthSpan * 0.08));
       const direction = panInput > 0 ? 1 : -1;
-      const maxStart = Math.max(0, totalMonths - monthSpan);
+      const maxStart = Math.max(historyStartMonth, totalMonths - monthSpan);
       const nextStart = Math.max(
-        0,
+        historyStartMonth,
         Math.min(maxStart, visibleMonthStart + direction * step),
       );
       if (nextStart !== visibleMonthStart) {
@@ -675,13 +761,13 @@ export function ProjectionNetWorthChart({
     if (e.deltaY === 0) return;
     const zoomFactor = e.deltaY < 0 ? 0.88 : 1.14;
     const nextSpanRaw = Math.round(monthSpan * zoomFactor);
-    const nextSpan = Math.max(minSpan, Math.min(totalMonths, nextSpanRaw));
+    const nextSpan = Math.max(minSpan, Math.min(domainMonths, nextSpanRaw));
     if (nextSpan === monthSpan) return;
     const anchorMonth = pointerToMonth(e.clientX);
     const ratio = (anchorMonth - visibleMonthStart) / Math.max(1, monthSpan - 1);
     const nextStartRaw = Math.round(anchorMonth - ratio * (nextSpan - 1));
-    const maxStart = Math.max(0, totalMonths - nextSpan);
-    const nextStart = Math.max(0, Math.min(maxStart, nextStartRaw));
+    const maxStart = Math.max(historyStartMonth, totalMonths - nextSpan);
+    const nextStart = Math.max(historyStartMonth, Math.min(maxStart, nextStartRaw));
     setViewWindow({ startMonth: nextStart, monthSpan: nextSpan });
   }
 
@@ -789,6 +875,17 @@ export function ProjectionNetWorthChart({
                 </g>,
               );
             });
+            if (historyStartMonth < 0) {
+              const histPos = p[2 + fireOffset + assetSeries.length];
+              if (histPos) {
+                items.push(
+                  <g key="legend-hist" transform={`translate(${histPos.x}, ${histPos.y})`}>
+                    <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-nw-past)" strokeWidth={2.25} strokeLinecap="round" />
+                    <text x={28} y={15}>Histórico</text>
+                  </g>,
+                );
+              }
+            }
             return items;
           })()}
         </g>
@@ -847,6 +944,41 @@ export function ProjectionNetWorthChart({
           className="projection-chart-plot-bg"
         />
 
+        {visibleMonthStart < 0 ? (
+          <rect
+            x={xScale(visibleMonthStart)}
+            y={mt}
+            width={Math.max(
+              0,
+              xScale(Math.min(0, visibleMonthEnd)) - xScale(visibleMonthStart),
+            )}
+            height={ph}
+            className="projection-chart-past-bg"
+          />
+        ) : null}
+
+        {historyStartMonth < 0 &&
+        visibleMonthStart <= 0 &&
+        visibleMonthEnd >= 0 ? (
+          <>
+            <line
+              x1={xScale(0)}
+              x2={xScale(0)}
+              y1={mt}
+              y2={mt + ph}
+              className="projection-chart-today-divider"
+            />
+            <text
+              x={xScale(0)}
+              y={mt - 5}
+              textAnchor="middle"
+              className="projection-chart-today-label"
+            >
+              Hoy
+            </text>
+          </>
+        ) : null}
+
         <g clipPath={`url(#projectionPlotClip-${gid})`}>
           {assetSeries.length === 0 ? (
             <path d={areaD} fill={`url(#nwFill-${gid})`} stroke="none" />
@@ -879,14 +1011,35 @@ export function ProjectionNetWorthChart({
               );
             })
           )}
-          <polyline
-            points={nwPoints}
-            fill="none"
-            stroke="var(--proj-nw)"
-            strokeWidth={2.85}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
+          {historyStartMonth < 0 ? (
+            <>
+              <polyline
+                points={nwPastPoints}
+                fill="none"
+                stroke="var(--proj-nw-past)"
+                strokeWidth={2.25}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <polyline
+                points={nwFuturePoints}
+                fill="none"
+                stroke="var(--proj-nw)"
+                strokeWidth={2.85}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </>
+          ) : (
+            <polyline
+              points={nwPoints}
+              fill="none"
+              stroke="var(--proj-nw)"
+              strokeWidth={2.85}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          )}
           <polyline
             points={ccPoints}
             fill="none"
@@ -909,6 +1062,24 @@ export function ProjectionNetWorthChart({
               opacity={0.225}
             />
           ) : null}
+          {historyStartMonth < 0
+            ? snapshotMarkers.map((mk, idx) => {
+                const val = valueAtMonth(mk.month_index, nw);
+                if (val == null || !Number.isFinite(val)) return null;
+                const isAsset = mk.kind === "asset";
+                return (
+                  <circle
+                    key={`snap-${mk.kind}-${mk.owner_user_id}-${mk.month_index}-${idx}`}
+                    cx={xScale(mk.month_index)}
+                    cy={yScale(val)}
+                    r={4}
+                    fill={isAsset ? "var(--proj-snapshot)" : "var(--proj-plot-bg)"}
+                    stroke={isAsset ? "var(--proj-plot-bg)" : "var(--proj-snapshot)"}
+                    strokeWidth={1.5}
+                  />
+                );
+              })
+            : null}
           {(() => {
             // Calcula la posición inicial (siguiendo la curva NW) y luego
             // empuja hacia arriba los milestones que se solapan horizontalmente
@@ -1007,7 +1178,9 @@ export function ProjectionNetWorthChart({
           {chartPlanningMarkers.map((m) => {
             const x = xScale(m.mi);
             const y0 = mt + ph;
-            const nwAtMi = nw[m.mi] ?? null;
+            // `m.mi` es un month_index real, no un índice de array: con densidad hybrid o ventana
+            // extendida al pasado, `nw[m.mi]` leería la posición equivocada. Buscar por mes.
+            const nwAtMi = valueAtMonth(m.mi, nw);
             const nwY =
               nwAtMi != null && Number.isFinite(nwAtMi) ? yScale(nwAtMi) : null;
             const y1Floor = mt + 12;
@@ -1098,7 +1271,9 @@ export function ProjectionNetWorthChart({
           pts[hover]!.month_index <= visibleMonthEnd ? (
             <>
               <circle cx={xScale(pts[hover]!.month_index)} cy={yScale(nw[hover] ?? 0)} r={6} className="projection-chart-dot-nw" />
-              <circle cx={xScale(pts[hover]!.month_index)} cy={yScale(cc[hover] ?? 0)} r={5} className="projection-chart-dot-cc" />
+              {pts[hover]!.month_index >= 0 ? (
+                <circle cx={xScale(pts[hover]!.month_index)} cy={yScale(cc[hover] ?? 0)} r={5} className="projection-chart-dot-cc" />
+              ) : null}
             </>
           ) : null}
         </g>
@@ -1124,28 +1299,45 @@ export function ProjectionNetWorthChart({
           }}
         >
           <div className="projection-chart-tooltip-title">
+            {/* Fix: el título debe usar el `month_index` real del punto, no su posición en el
+                array (con densidad hybrid o histórico difieren). */}
             {projectionHoverTitle(
-              hover,
+              pts[hover]!.month_index,
               ageUiMode,
               userBirthDate,
               calendarTz,
               anchorDateYmd,
             )}
+            {pts[hover]!.month_index < 0 ? " · histórico" : ""}
           </div>
           <div>
             Patrimonio neto —{" "}
             {formatCurrencyOrDashNumber(nw[hover], currencyIso)}
           </div>
-          <div>
-            Capital aportado —{" "}
-            {formatCurrencyOrDashNumber(cc[hover], currencyIso)}
-          </div>
+          {pts[hover]!.month_index >= 0 ? (
+            <div>
+              Capital aportado —{" "}
+              {formatCurrencyOrDashNumber(cc[hover], currencyIso)}
+            </div>
+          ) : null}
           {assetSeries.map((as) => (
             <div key={as.id}>
               {as.name} —{" "}
               {formatCurrencyOrDashNumber(as.values[hover], currencyIso)}
             </div>
           ))}
+          {pts[hover]!.month_index < 0
+            ? merged.markers
+                .filter((mk) => mk.month_index === pts[hover]!.month_index)
+                .map((mk, idx) => (
+                  <div key={`hovmk-${mk.kind}-${mk.owner_user_id}-${idx}`}>
+                    {mk.kind === "asset"
+                      ? "Snapshot activos"
+                      : "Snapshot pasivos"}{" "}
+                    — {formatDateDmy(mk.date_ymd)}
+                  </div>
+                ))
+            : null}
         </div>
       ) : null}
     </div>

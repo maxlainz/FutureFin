@@ -7,6 +7,7 @@ import type {
 } from "../api/types";
 import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
+import { SnapshotButton } from "../components/SnapshotButton";
 import { PlusIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
 import { addMonthsCivil, parseYmdComponents, todayYmdInTimeZone } from "../lib/dates";
 import {
@@ -66,6 +67,7 @@ export function AssetsView({
   submitAssetForm,
   deleteAssetRow,
   beginEditAsset,
+  onSaveSnapshot,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -101,6 +103,8 @@ export function AssetsView({
   submitAssetForm: (e: FormEvent) => void;
   deleteAssetRow: (id: string) => void;
   beginEditAsset: (a: AssetApiRow) => void;
+  /** Captura un snapshot de activos de hoy. `true` = guardado; lanza `Error` si falla. */
+  onSaveSnapshot?: () => Promise<void>;
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
@@ -348,16 +352,25 @@ export function AssetsView({
         <div className="ledger-list-toolbar">
           <div className="panel-head-row">
             <h3 className="panel-title">Activos por categoría</h3>
-            {canEdit && hasMembership && assetCategories.length > 0 ? (
-              <button
-                type="button"
-                className="btn primary icon-btn ledger-toolbar-add"
-                aria-label="Nuevo activo"
-                onClick={() => openNewAssetModal()}
-              >
-                <PlusIcon />
-              </button>
-            ) : null}
+            <div className="ledger-toolbar-actions">
+              {onSaveSnapshot && canEdit && hasMembership && assets.length > 0 ? (
+                <SnapshotButton
+                  kind="asset"
+                  disabled={assetSaving}
+                  onSave={onSaveSnapshot}
+                />
+              ) : null}
+              {canEdit && hasMembership && assetCategories.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn primary icon-btn ledger-toolbar-add"
+                  aria-label="Nuevo activo"
+                  onClick={() => openNewAssetModal()}
+                >
+                  <PlusIcon />
+                </button>
+              ) : null}
+            </div>
           </div>
           {assetsBusy ? (
             <p className="muted">Cargando…</p>

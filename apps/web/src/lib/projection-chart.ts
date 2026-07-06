@@ -104,17 +104,32 @@ export function formatProjectionChartHorizonLine(series: ProjectionSeriesApi): s
   }
 }
 
+/**
+ * Deflactor multiplicativo del chart en el mes `monthIndex` (euros nominales → euros de hoy).
+ * `annualPct ≤ 0` → 1 (sin ajuste). Keyed por `month_index` REAL, nunca por posición de array
+ * (incidente v1.4.2). Ojo: `monthIndex` negativo (pasado) devuelve un factor > 1 — amplifica.
+ */
+export function deflationFactorAt(monthIndex: number, annualPct: number): number {
+  return annualPct > 0
+    ? 1 / Math.pow(1 + annualPct / 100, monthIndex / 12)
+    : 1;
+}
+
 export function buildProjectionMonthTickIndices(
   mc: number,
   maxTicks: number,
+  startMonth = 0,
 ): number[] {
-  if (mc <= 0) {
+  // Con startMonth === 0 el comportamiento es idéntico al histórico (solo futuro).
+  if (mc <= 0 && startMonth >= 0) {
     return [0];
   }
+  const past = Math.min(0, startMonth);
+  const span = Math.max(1, mc - past);
   const cap = Math.max(4, Math.min(maxTicks, 22));
-  const roughStep = Math.ceil(mc / Math.max(1, cap - 1));
+  const roughStep = Math.ceil(span / Math.max(1, cap - 1));
   let step = roughStep;
-  if (mc > 36) {
+  if (span > 36) {
     const yAligned = Math.max(12, Math.ceil(roughStep / 12) * 12);
     step = Math.min(12, yAligned);
   } else {
@@ -125,22 +140,37 @@ export function buildProjectionMonthTickIndices(
   for (let m = step; m < mc; m += step) {
     ticks.push(m);
   }
-  if (ticks[ticks.length - 1] !== mc) {
+  if (mc > 0 && ticks[ticks.length - 1] !== mc) {
     ticks.push(mc);
   }
-  return ticks;
+  // Cobertura del pasado (month_index negativos). El 0 ya está (divisor «Hoy»).
+  for (let m = -step; m > startMonth; m -= step) {
+    ticks.push(m);
+  }
+  if (startMonth < 0 && !ticks.includes(startMonth)) {
+    ticks.push(startMonth);
+  }
+  return ticks.sort((a, b) => a - b);
 }
 
 export function buildProjectionTicksFirstMonthOfYear(
   anchor: { y: number; m: number; d: number },
   monthEnd: number,
+  startMonth = 0,
 ): number[] {
   if (monthEnd < 1) return [];
   const end = addMonthsCivil(anchor.y, anchor.m, anchor.d, monthEnd);
+  // Extiende hacia atrás solo cuando hay pasado; con startMonth === 0 arranca en anchor.y (los
+  // meses ≤ 0 quedan filtrados igual que antes → comportamiento idéntico).
+  const startCivil =
+    startMonth < 0
+      ? addMonthsCivil(anchor.y, anchor.m, anchor.d, startMonth)
+      : anchor;
   const out: number[] = [];
-  for (let y = anchor.y + 1; y <= end.y; y++) {
+  for (let y = startCivil.y; y <= end.y; y++) {
     const mi = (y - anchor.y) * 12 + (1 - anchor.m);
-    if (mi < 1 || mi > monthEnd) continue;
+    // Excluye el mes 0 (pertenece al divisor «Hoy») y lo que queda fuera del span.
+    if (mi === 0 || mi < startMonth || mi > monthEnd) continue;
     out.push(mi);
   }
   return out;
@@ -150,16 +180,19 @@ export function buildProjectionTicksFirstMonthOfAge(
   anchor: { y: number; m: number; d: number },
   birth: { y: number; m: number; d: number },
   monthEnd: number,
+  startMonth = 0,
 ): number[] {
   if (monthEnd < 1) return [];
+  const lo = startMonth < 0 ? startMonth : 1;
   const out: number[] = [];
-  let prevAge = ageCompletedYearsCivil(anchor, birth);
-  for (let i = 1; i <= monthEnd; i++) {
+  for (let i = lo; i <= monthEnd; i++) {
+    if (i === 0) continue; // el mes 0 pertenece al divisor «Hoy»
     const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, i);
+    const prev = addMonthsCivil(anchor.y, anchor.m, anchor.d, i - 1);
     const age = ageCompletedYearsCivil(at, birth);
+    const prevAge = ageCompletedYearsCivil(prev, birth);
     if (age !== prevAge) {
       out.push(i);
-      prevAge = age;
     }
   }
   return out;
@@ -268,6 +301,7 @@ export function projectionXTicks(
     calendarTz: string;
   },
   density?: { plotWidthPx: number },
+  startMonth = 0,
 ): { monthIndex: number; label: string }[] {
   const mcRaw = Number(monthCount);
   const mc = Number.isFinite(mcRaw) && mcRaw >= 0 ? mcRaw : 0;
@@ -284,17 +318,17 @@ export function projectionXTicks(
         : todayYmdInTimeZone(opts.calendarTz);
     const anchor = parseYmdComponents(anchorStr);
     if (opts.ageUiMode === "dates" && anchor) {
-      ticks = buildProjectionTicksFirstMonthOfYear(anchor, mc);
+      ticks = buildProjectionTicksFirstMonthOfYear(anchor, mc, startMonth);
     } else if (opts.ageUiMode === "ages" && anchor) {
       const birth = parseYmdComponents(opts.birthDateIso);
       if (birth) {
-        ticks = buildProjectionTicksFirstMonthOfAge(anchor, birth, mc);
+        ticks = buildProjectionTicksFirstMonthOfAge(anchor, birth, mc, startMonth);
       }
     }
   }
 
   if (!ticks) {
-    ticks = buildProjectionMonthTickIndices(mc, maxTicks);
+    ticks = buildProjectionMonthTickIndices(mc, maxTicks, startMonth);
   }
 
   return ticks.map((m) => ({

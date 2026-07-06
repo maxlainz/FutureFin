@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  HistorySeriesApi,
   InstallationAccess,
   PlanningFlowApiRow,
   ProjectionMilestoneApi,
@@ -31,6 +32,7 @@ export function ProjectionView({
   hasMembership,
   ledgerPersonScope,
   projectionSeries,
+  historySeries,
   projectionBusy,
   projectionError,
   userBirthDate,
@@ -42,6 +44,7 @@ export function ProjectionView({
   hasMembership: boolean;
   ledgerPersonScope: LedgerPersonScope;
   projectionSeries: ProjectionSeriesApi | null;
+  historySeries: HistorySeriesApi | null;
   projectionBusy: boolean;
   projectionError: string | null;
   userBirthDate: string | null;
@@ -242,6 +245,12 @@ export function ProjectionView({
           ) : null}
           <ProjectionNetWorthChart
             series={projectionSeries}
+            history={
+              historySeries &&
+              historySeries.anchor_date_ymd === projectionSeries.anchor_date_ymd
+                ? historySeries
+                : null
+            }
             milestones={nextMilestones}
             focusMode={focusMode}
             inflationAdjusted={inflationAdjusted}

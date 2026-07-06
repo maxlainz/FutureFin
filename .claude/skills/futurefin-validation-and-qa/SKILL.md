@@ -18,7 +18,8 @@ description: >
 # FutureFin — Validation & QA
 
 How to prove things in this repo: what counts as evidence, the exact test inventory and
-harness, and how to add tests. Verified against the code on 2026-07-02 (v1.4.3).
+harness, and how to add tests. Verified against the code on 2026-07-02 (v1.4.3); counts and the
+history-snapshots test files refreshed for v1.5.0 on 2026-07-06.
 
 Why this matters here: the hardest live problem in FutureFin is **projection correctness** —
 errors are silent (numbers look plausible but wrong). Eyeballing a chart is never acceptance.
@@ -39,15 +40,19 @@ withdrawn in retirement); **gross-up** = inflating a net annual need to the pre-
 amount using progressive tax brackets; **installation** = the singleton row all data belongs
 to; **cascade** = the ordered allocation-rules pipeline distributing monthly surplus to assets.
 
-## 2. Test inventory (as of 2026-07-02)
+## 2. Test inventory (as of 2026-07-06, v1.5.0)
 
 Three suites. None share infrastructure; run all three before merging.
 
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
-| Engine unit tests (22) | `crates/engine/src/projection.rs` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
-| Backend integration (21 tests, 8 files) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
-| Frontend Vitest (72) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
+| Engine unit tests (36) | `crates/engine/src/{projection.rs (22), history.rs (14)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| Backend integration (48 tests, 11 files) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
+| Frontend Vitest (104) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
+
+Plus API lib unit tests run by `cargo test --workspace` (no Postgres): notably
+`apps/api/src/handlers/backup_user/schema.rs` `mod tests` (6; 4 added in v1.5.0 for `.ffbackup` v4
+migration/round-trip).
 
 ### Backend integration — full invocation (verbatim)
 
@@ -73,7 +78,7 @@ DB" symptom. Single test: append `-- <test_fn_name>` or `--test <file_stem>`.
 1. Creates schema `ff_test_<uuid-simple>` in the test DB.
 2. Opens a pool (max 5 conns) with `after_connect` hook: `SET search_path TO "<schema>", public`
    on every connection — so all queries in the test hit only that schema.
-3. Runs `sqlx::migrate!("./migrations")` inside it (31 migration files as of 2026-07-02 —
+3. Runs `sqlx::migrate!("./migrations")` inside it (32 migration files as of 2026-07-06 —
    count with `ls apps/api/migrations | wc -l`).
 4. Returns `(PgPool, schema_name)`. **Schemas leak intentionally** — no teardown, so a failed
    test leaves its state inspectable.
@@ -91,7 +96,7 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
   | docker exec -i ff-test-db psql -U futurefin -d futurefin_test
 ```
 
-### Integration test files (all 8 — `.claude/tests.md` omits `projection_cache.rs`)
+### Integration test files (all 11)
 
 | File | Tests | Covers |
 |---|---|---|
@@ -103,8 +108,11 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
 | `projection_marker.rs` | 1 | regression capture: stable marker + starting NW across the perf refactor (the template for capture-first) |
 | `fire_parity.rs` | 1 (×6 fixture cases) | server `jubilacion_target_net_worth` matches `fire-parity.json` ± 1 € |
 | `projection_cache.rs` | 5 | cache hit faster than miss + identical body; invalidation on mutation; logout drops only `view=mine` entries; `density=hybrid` decimation (months 0–12 monthly, then 24,36,48…); monthly/hybrid cached as separate keys |
+| `history_snapshots.rs` | 12 | snapshot capture (copied terms) / same-day upsert / exclude shared+expired / backfill CRUD roundtrip with `year` filter + cascade / 400 validations (future, `duplicate_item_id`, terms-on-asset) / 409 date taken / 404 cross-user / 403 viewer on every mutation / GET never mutates / `snapshot_mutations_do_not_touch_projection_cache` (cache stays HIT — history is NOT a projection input) |
+| `history_series.rs` | 7 | `GET /v1/history/series`: empty→200, exact linear interpolation between two asset snapshots, join to live values (deleted asset→0 at k=0), amortization curve above the chord with exact endpoints, household sums two users + `?view=mine` filters, markers carry date/kind/total, single today snapshot. Numbers predicted before running |
+| `backup_user_roundtrip.rs` | 8 | `.ffbackup` v4: roundtrip with identical history series, item re-link to fresh asset UUIDs, null `ledger_index` keeps `item_key`, v3 still imports (0 snapshots), out-of-range index → 400 + rollback, import invalidates projection cache (pre-existing bug fix), preview reports snapshot/item counts, viewer 403 |
 
-### Frontend Vitest files (72 tests total)
+### Frontend Vitest files (104 tests total)
 
 Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/**/*.test.{ts,tsx}"]`,
 `globals: false` (import `describe/it/expect` from `vitest` explicitly).
@@ -112,9 +120,12 @@ Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/*
 | File | Tests | Covers |
 |---|---|---|
 | `apps/web/src/lib/format.test.ts` | 29 | es-ES Intl formatting, null/NaN/empty edges, Decimal string preservation |
-| `apps/web/src/lib/dates.test.ts` | 26 | civil calendar (leap years, day clamping, age around birthday), TZ fallback, payment intervals |
+| `apps/web/src/lib/dates.test.ts` | 29 | civil calendar (leap years, day clamping, age around birthday), TZ fallback, payment intervals, negative `addMonthsCivil` deltas (v1.5.0) |
 | `apps/web/src/api/client.test.ts` | 10 | fetch mocks: credentials, body serialization, 4xx propagation, 204 handling |
 | `apps/web/src/lib/fire.test.ts` | 7 | FIRE parity vs the shared fixture (1 sanity + 6 cases) |
+| `apps/web/src/lib/history-merge.test.ts` | 11 | `mergeProjectionWithHistory`: identity-by-reference (null/empty/anchor-mismatch → byte-identical render), drops `month_index ≥ 0`, asset-series union by id, future offset |
+| `apps/web/src/lib/projection-chart.test.ts` | 10 | `deflationFactorAt` (0 / ±12 / inflation 0) + tick-builders with `startMonth=-24` and the `startMonth=0` regression (identical to prior behavior) |
+| `apps/web/src/lib/snapshot-tracker.test.ts` | 8 | `liquidCoverageComplete` (empty→false, full coverage→true, stale after `pruneEditLog`→false, new asset within the window) |
 
 ## 3. CI reality
 
@@ -187,6 +198,21 @@ expectations: the compound-outpaces-savings marker at `month_index = 1`, 25 poin
 24-month horizon, NW at month 12 in a justified range. Copy this pattern whenever a refactor
 must preserve outputs: seed deterministic state → assert exact/current values → refactor →
 values must not move.
+
+### History series: server-computed, NOT duplicated on the client (no parity fixture — yet)
+
+Unlike the FIRE target (deliberately duplicated Rust↔TS, held by `fire-parity.json`), the
+historical net-worth interpolation lives **only** in `crates/engine/src/history.rs` and the
+`GET /v1/history/series` handler. The server returns the series **ready to paint**; the client
+(`lib/history-merge.ts`) merely splices those points onto the projection's month-0 vertex and
+does **no** interpolation of its own. Consequences for testing:
+- The interpolation math is proven by engine unit tests (`history.rs`, exact `Decimal`) plus the
+  `history_series.rs` integration tests (predict-then-measure numbers). There is **no**
+  cross-language fixture because there is no second implementation to keep in sync.
+- **Rule**: if a client-side interpolation preview is ever added (e.g. to redraw the past while a
+  snapshot save is in flight), it becomes a duplicated computation → a parity fixture of the
+  `fire-parity.json` kind (one canonical JSON both sides consume, ±1 € tolerance) becomes
+  **mandatory**, and the D8/§2.5 drift discipline applies to it.
 
 ## 5. How to add tests
 
@@ -287,9 +313,9 @@ the same day (CI claim, migration count, missing `projection_cache.rs` row). Re-
 facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
-- Engine test count: `grep -c "#\[test\]" crates/engine/src/projection.rs` (22)
-- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (21 total)
-- Migration count: `ls apps/api/migrations | wc -l` (31)
+- Engine test count: `grep -c "#\[test\]" crates/engine/src/projection.rs crates/engine/src/history.rs` (22 + 14 = 36)
+- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (48 total across 11 files)
+- Migration count: `ls apps/api/migrations | wc -l` (32)
 - CI coverage claims: read `.github/workflows/ci.yml` (jobs: rust, web, docker-stack; grep it
   for `TEST_DATABASE_URL` — absent means integration tests still not in CI; grep for
   `npm test`/`vitest` — absent means Vitest still not in CI)
