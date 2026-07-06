@@ -18,9 +18,10 @@ npm test --workspace futurefin-web
 
 ## Backend
 
-### Engine unit tests (`crates/engine/src/projection.rs`)
-- 22+ tests in `mod tests` covering cascade allocation, retirement drain, FIRE target inflation, off-by-one between `fire_target_at_month_index(k+1)` and the handler's series.
-- Pure: no Postgres, no env. `cargo test -p futurefin-engine` is enough.
+### Engine unit tests (`crates/engine/src/{projection.rs,history.rs}`)
+- `projection.rs` `mod tests`: 22 tests covering cascade allocation, retirement drain, FIRE target inflation, off-by-one between `fire_target_at_month_index(k+1)` and the handler's series.
+- `history.rs` `mod tests`: 14 tests (v1.5.0) covering linear interpolation (midpoint exact, endpoints), the French-amortization curve (matches a pure schedule when the residual is 0, residual correction passes through both endpoints, midpoint above the linear chord, fallbacks when payment ≤ interest / no terms / apr=0, clamp ≥ 0), timeline rules (item absent from an intermediate snapshot = 0 between pairs, appears/disappears when present in only one, first-month clamp, virtual-today join with a deleted item → 0), and `month_index_of` / `add_months_signed` with negative deltas across a year boundary. Engine total: **36**.
+- Pure: no Postgres, no env. `cargo test -p futurefin-engine` runs both (and they run in **CI**, unlike the integration suite).
 
 ### Integration tests (`apps/api/tests/`)
 - Each test spins up the full Axum router (`routes::app_router()`) and drives it via `tower::ServiceExt::oneshot` against a real Postgres.
@@ -30,6 +31,7 @@ npm test --workspace futurefin-web
 - `TestApp::spawn() -> TestApp { router, pool, schema }` — fresh schema + axum router wired with cookie cookies.
 - Convenience methods on `TestApp`:
   - `register_and_login_owner("alice") -> LoggedInOwner { username, cookie }` — first user becomes owner via bootstrap.
+  - `register_and_approve_member("bob") -> LoggedInOwner` (v1.5.0) — registers a second user and has the owner approve them as a writable member; used by the household-aggregation and cross-user tests (`history_series.rs`, `history_snapshots.rs`).
   - `create_category(&owner, "asset", "Bolsa") -> id`
   - `count_rows("liabilities") -> i64` — query against the test schema.
   - `get(uri)`, `get_with_cookie(uri, cookie)`, `post_json(uri, body)`, `post_json_with_cookie`, `patch_json_with_cookie`, `delete_with_cookie` — return `ResponseParts { status, headers, body: Vec<u8> }`.
@@ -46,6 +48,17 @@ npm test --workspace futurefin-web
 | `projection_marker.rs` | `compound_outpaces_true_savings_month_index` stable across the perf refactor (regression for spawn_blocking + tokio::join) |
 | `fire_parity.rs` | **FIRE target parity** — for each case in `fixtures/fire-parity.json`, seeds installation + budget + assets and asserts `jubilacion_target_net_worth` matches the canonical expected value (± 1 €). |
 | `projection_cache.rs` | Cache de proyección: hit tras GET, invalidación tras mutación, aislamiento por vista/densidad, `?months=` bypassa el cache. |
+| `history_snapshots.rs` (12) | Snapshots CRUD: captura con términos copiados, upsert mismo día reemplaza items, excluye filas compartidas/expiradas, backfill roundtrip con filtro `year` y cascade, validaciones 400 (futuro, `duplicate_item_id`, términos en asset), 409 fecha ocupada, 404 cross-user, 403 viewer en toda mutación, GET nunca muta, y `snapshot_mutations_do_not_touch_projection_cache` (la cache de proyección sigue HIT — history NO es input del engine). |
+| `history_series.rs` (7) | `GET /v1/history/series`: vacío→200, interpolación lineal exacta entre dos snapshots de asset, join a valores vivos (asset borrado→0 en k=0), curva de amortización por encima de la cuerda con extremos exactos, household suma dos usuarios + `?view=mine` filtra, markers con fecha/kind/total, snapshot único de hoy. Números predichos antes de ejecutar. |
+| `backup_user_roundtrip.rs` (8) | `.ffbackup` v4: roundtrip con serie histórica idéntica, re-link de items a los UUIDs frescos de assets, `ledger_index` null conserva `item_key`, v3 sigue importando (0 snapshots), índice fuera de rango → 400 con rollback, import invalida la cache de proyección (fix del bug preexistente), preview reporta counts de snapshots/items, viewer 403. |
+
+### API lib unit tests (run under `cargo test --workspace`)
+
+Besides the integration files above, the API crate carries `#[cfg(test)]` unit tests in library
+modules. Notably `apps/api/src/handlers/backup_user/schema.rs` `mod tests` (6 tests, 4 added in
+v1.5.0 for `.ffbackup` v4): reject a future `schema_version`, migrate v1 dropping legacy
+contribution fields, v3-with-rules round-trip, migrate v3→v4 filling empty `snapshots`, v4
+snapshot-items round-trip, and the full v1→v4 migration chain. They need no Postgres.
 
 ### Writing a new integration test
 
@@ -85,11 +98,14 @@ Rules of thumb:
 ## Frontend (Vitest)
 
 - Config: `apps/web/vitest.config.ts` — `node` environment (no jsdom). Add `happy-dom` if you ever add component render tests.
-- Pure-function tests only. We have 72 across:
+- Pure-function tests only. We have 104 across:
   - `lib/format.test.ts` (29) — Intl formatting in es-ES, edge cases (null/NaN/empty), Decimal string preservation.
-  - `lib/dates.test.ts` (26) — civil calendar (leap years, day clamping, age before/after birthday), TZ fallback, payment intervals.
+  - `lib/dates.test.ts` (29) — civil calendar (leap years, day clamping, age before/after birthday), TZ fallback, payment intervals, `addMonthsCivil` con deltas **negativos** (v1.5.0).
   - `api/client.test.ts` (10) — `fetch` mocks: credentials, body serialization, 4xx error propagation, 204 handling.
   - `lib/fire.test.ts` (7) — **FIRE target parity** vs server: loads the same `apps/api/tests/fixtures/fire-parity.json` and asserts `grossUpNetAnnualFire(computeFireAnnualNeedNetEur(...)) / (swr/100)` matches `expected_target_nw` (± 1 €).
+  - `lib/history-merge.test.ts` (11) — `mergeProjectionWithHistory`: identidad por referencia (history null/vacío/anchor distinto → render byte-idéntico), descarta puntos `month_index ≥ 0`, unión de asset series por `asset_id`, offset del futuro.
+  - `lib/projection-chart.test.ts` (10) — `deflationFactorAt` (0 / ±12 meses / inflación 0) y los tick-builders con `startMonth=-24` + regresión `startMonth=0` idéntica al comportamiento previo.
+  - `lib/snapshot-tracker.test.ts` (8) — `liquidCoverageComplete` (vacío→false, cobertura completa→true, stale tras `pruneEditLog`→false, asset nuevo dentro de la ventana).
 
 ### Writing a new frontend test
 Colocate beside the module: `lib/foo.ts` ↔ `lib/foo.test.ts`. Use `vi.mocked(globalThis.fetch)` if you need to stub fetch.

@@ -102,6 +102,15 @@ describe("addMonthsCivil", () => {
   it("handles large deltas", () => {
     expect(addMonthsCivil(2026, 1, 15, 24)).toEqual({ y: 2028, m: 1, d: 15 });
   });
+  it("handles negative deltas (Mar 15 − 6 = Sep 15 prev year)", () => {
+    expect(addMonthsCivil(2026, 3, 15, -6)).toEqual({ y: 2025, m: 9, d: 15 });
+  });
+  it("truncates day going backward into a shorter month (Mar 31 − 1 = Feb 28)", () => {
+    expect(addMonthsCivil(2026, 3, 31, -1)).toEqual({ y: 2026, m: 2, d: 28 });
+  });
+  it("crosses the year boundary backward (Jan 15 − 1 = Dec 15 prev year)", () => {
+    expect(addMonthsCivil(2026, 1, 15, -1)).toEqual({ y: 2025, m: 12, d: 15 });
+  });
 });
 
 describe("ageCompletedYearsCivil", () => {

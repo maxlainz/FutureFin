@@ -6,6 +6,7 @@ import type {
 } from "../api/types";
 import { MetricCard } from "../components/MetricCard";
 import { InlineHint, Modal, ModalFormError } from "../components/Modal";
+import { SnapshotButton } from "../components/SnapshotButton";
 import { PlusIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
 import {
   METRIC_DASH,
@@ -65,6 +66,7 @@ export function LiabilitiesView({
   submitLiabilityForm,
   deleteLiabilityRow,
   beginEditLiability,
+  onSaveSnapshot,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -103,6 +105,8 @@ export function LiabilitiesView({
   submitLiabilityForm: (e: FormEvent) => void;
   deleteLiabilityRow: (id: string) => void;
   beginEditLiability: (row: LiabilityApiRow) => void;
+  /** Captura un snapshot de pasivos de hoy. `true` = guardado; lanza `Error` si falla. */
+  onSaveSnapshot?: () => Promise<void>;
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
@@ -377,16 +381,28 @@ export function LiabilitiesView({
         <div className="ledger-list-toolbar">
           <div className="panel-head-row">
             <h3 className="panel-title">Pasivos por categoría</h3>
-            {canEdit && hasMembership && liabilityCategories.length > 0 ? (
-              <button
-                type="button"
-                className="btn primary icon-btn ledger-toolbar-add"
-                aria-label="Nuevo pasivo"
-                onClick={() => openNewLiabilityModal()}
-              >
-                <PlusIcon />
-              </button>
-            ) : null}
+            <div className="ledger-toolbar-actions">
+              {onSaveSnapshot &&
+              canEdit &&
+              hasMembership &&
+              liabilities.length > 0 ? (
+                <SnapshotButton
+                  kind="liability"
+                  disabled={liabilitySaving}
+                  onSave={onSaveSnapshot}
+                />
+              ) : null}
+              {canEdit && hasMembership && liabilityCategories.length > 0 ? (
+                <button
+                  type="button"
+                  className="btn primary icon-btn ledger-toolbar-add"
+                  aria-label="Nuevo pasivo"
+                  onClick={() => openNewLiabilityModal()}
+                >
+                  <PlusIcon />
+                </button>
+              ) : null}
+            </div>
           </div>
           {liabilitiesBusy ? (
             <p className="muted">Cargando…</p>

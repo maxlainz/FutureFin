@@ -8,6 +8,7 @@ use crate::handlers::budget::budget_router;
 use crate::handlers::categories::categories_router;
 use crate::handlers::fallback;
 use crate::handlers::health::{health_check, ready_check};
+use crate::handlers::history::history_router;
 use crate::handlers::installation::{
     get_installation_session_context, get_my_installation, patch_my_installation,
     setup_installation,
@@ -57,6 +58,7 @@ pub fn app_router() -> Router {
         .nest("/budget", budget_router())
         .nest("/planning", planning_router())
         .nest("/projection", projection_router())
+        .nest("/history", history_router())
         .route("/backup/user-export", post(export_user_backup))
         .route(
             "/backup/user-import/preview",

@@ -12,9 +12,15 @@ import {
   type FormEvent,
 } from "react";
 import "./App.css";
-import { formatEditableDecimalString } from "./lib/format";
-import { defaultFetchInit, errorMessageFromResponse } from "./api/client";
+import { formatEditableDecimalString, parseDisplayDecimal } from "./lib/format";
+import { apiGet, defaultFetchInit, errorMessageFromResponse } from "./api/client";
 import { Modal, ModalFormError } from "./components/Modal";
+import { SnapshotPromptModal } from "./components/SnapshotPromptModal";
+import {
+  liquidCoverageComplete,
+  pruneEditLog,
+  type EditLog,
+} from "./lib/snapshot-tracker";
 import { TopBar } from "./components/TopBar";
 import { MobileNavDrawer } from "./components/MobileNavDrawer";
 import { SummaryView } from "./views/SummaryView";
@@ -136,6 +142,8 @@ import type {
   CategoryScope,
   FireSettingsApi,
   HealthResponse,
+  HistorySeriesApi,
+  HistorySnapshotKindApi,
   InstallationAccess,
   InstallationGate,
   InstallationSessionContext,
@@ -416,6 +424,28 @@ export default function App() {
   const [projectionBusy, setProjectionBusy] = useState(false);
   const [projectionError, setProjectionError] = useState<string | null>(null);
 
+  // Serie histórica (snapshots pasados). Es un enhancement del chart: cualquier
+  // fallo cae a `null` en silencio (sin busy/error state) y el chart degrada a
+  // solo-futuro. Se carga junto a la proyección en la pestaña Proyección.
+  const [historySeries, setHistorySeries] = useState<HistorySeriesApi | null>(
+    null,
+  );
+
+  // Trigger del modal «¿Guardar snapshot?» (ver lib/snapshot-tracker.ts y plan §5.2). Todo el
+  // estado del disparo vive en refs (no provoca re-render); solo el paso visible del modal y su
+  // busy son estado. `liquidEditLogRef`: ediciones de valor de activos líquidos propios dentro de
+  // la ventana rodante. `snapshotPromptFiredRef`: ya se ofreció una vez (se rearma al vaciarse la
+  // ventana). `liabilityEditedAtRef` / `liabilitySnapshotSavedAtRef`: para ofrecer el paso de
+  // pasivos solo si hay cambios sin snapshotear.
+  const liquidEditLogRef = useRef<EditLog>(new Map());
+  const snapshotPromptFiredRef = useRef(false);
+  const liabilityEditedAtRef = useRef<number | null>(null);
+  const liabilitySnapshotSavedAtRef = useRef<number | null>(null);
+  const [snapshotPromptStep, setSnapshotPromptStep] = useState<
+    "closed" | "assets" | "liabilities"
+  >("closed");
+  const [snapshotPromptBusy, setSnapshotPromptBusy] = useState(false);
+
   const [retirementBudgetSnapshot, setRetirementBudgetSnapshot] =
     useState<BudgetSnapshotApi | null>(null);
   const [retirementBusy, setRetirementBusy] = useState(false);
@@ -471,7 +501,7 @@ export default function App() {
     const out: SettingsSubTabId[] = [];
     if (isInstallationOwner) out.push("access");
     if (hasMembership) {
-      out.push("calendar", "projection", "retirement", "categories");
+      out.push("calendar", "projection", "retirement", "categories", "history");
     }
     out.push("data");
     return out;
@@ -575,9 +605,13 @@ export default function App() {
     }
   }, []);
 
-  const loadAssetsPage = useCallback(async () => {
+  // Devuelve las filas recién cargadas para que los callers que necesitan el estado fresco
+  // inmediatamente (p. ej. el trigger del snapshot en `submitAssetForm`, ya que `setAssets` es
+  // asíncrono) no dependan de un re-render. Los demás callers ignoran el retorno.
+  const loadAssetsPage = useCallback(async (): Promise<AssetApiRow[]> => {
     setAssetsBusy(true);
     setAssetsError(null);
+    let loaded: AssetApiRow[] = [];
     try {
       const [catRes, astRes] = await Promise.all([
         fetch("/v1/categories?scope=asset", defaultFetchInit),
@@ -595,15 +629,18 @@ export default function App() {
       } else if (!astRes.ok) {
         throw new Error(await errorMessageFromResponse(astRes));
       } else {
-        setAssets((await astRes.json()) as AssetApiRow[]);
+        loaded = (await astRes.json()) as AssetApiRow[];
+        setAssets(loaded);
       }
     } catch (e: unknown) {
+      loaded = [];
       setAssets([]);
       setAssetCategories([]);
       setAssetsError(e instanceof Error ? e.message : String(e));
     } finally {
       setAssetsBusy(false);
     }
+    return loaded;
   }, [ledgerPersonScope]);
 
   const loadAllocationRules = useCallback(async () => {
@@ -946,6 +983,42 @@ export default function App() {
       setProjectionBusy(false);
     }
   }, [ledgerPersonScope]);
+
+  const loadHistorySeries = useCallback(async () => {
+    // Purga síncrona antes del await: en un toggle Hogar↔Mío la serie del scope anterior no debe
+    // sobrevivir la ventana de fetch (se fusionaría con la proyección del nuevo scope → empalme
+    // cruzado). Al vaciarla, el chart degrada a solo-futuro hasta que resuelva el nuevo fetch.
+    setHistorySeries(null);
+    try {
+      const data = await apiGet<HistorySeriesApi>(
+        `/v1/history/series${ledgerViewQs(ledgerPersonScope)}`,
+      );
+      setHistorySeries(data);
+    } catch {
+      // El histórico es opcional: cualquier fallo degrada al chart solo-futuro.
+      setHistorySeries(null);
+    }
+  }, [ledgerPersonScope]);
+
+  // Captura un snapshot de hoy (upsert silencioso, sin confirmación). Resuelve (void) si se guardó;
+  // **lanza** un `Error` con el mensaje de la API si falla (el llamador — SnapshotButton o los
+  // handlers del modal — decide cómo mostrarlo). Los snapshots no son inputs del engine, así que
+  // no invalidan la cache de proyección; solo refrescamos la serie histórica.
+  const saveSnapshotNow = useCallback(
+    async (kinds: HistorySnapshotKindApi[]): Promise<void> => {
+      const res = await fetch("/v1/history/snapshots/capture", {
+        ...defaultFetchInit,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kinds }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      void loadHistorySeries();
+    },
+    [loadHistorySeries],
+  );
 
   const loadRetirementPage = useCallback(
     async (opts?: { silent?: boolean; skipProjection?: boolean }) => {
@@ -1310,7 +1383,8 @@ export default function App() {
       return;
     }
     void loadProjectionSeriesPage();
-  }, [user, hasMembership, activeTab, loadProjectionSeriesPage]);
+    void loadHistorySeries();
+  }, [user, hasMembership, activeTab, loadProjectionSeriesPage, loadHistorySeries]);
 
   useEffect(() => {
     if (!user || !hasMembership || activeTab !== "retirement") {
@@ -1426,6 +1500,14 @@ export default function App() {
       setCategoryRenameModalOpen(false);
       setProjectionSeries(null);
       setProjectionError(null);
+      setHistorySeries(null);
+      // Reset del trigger de snapshot (per-sesión).
+      liquidEditLogRef.current = new Map();
+      snapshotPromptFiredRef.current = false;
+      liabilityEditedAtRef.current = null;
+      liabilitySnapshotSavedAtRef.current = null;
+      setSnapshotPromptStep("closed");
+      setSnapshotPromptBusy(false);
     }
   }, [user]);
 
@@ -1793,6 +1875,42 @@ export default function App() {
     }
   }
 
+  // ¿Es un activo líquido cuyo titular es el usuario de la sesión? Regla del plan §5.2:
+  // `owner_user_id === user.id`; si el campo está ausente (endpoint/cliente antiguo), solo cuenta
+  // en vista «mío» (donde todas las filas son propias por construcción).
+  function isOwnLiquidAsset(row: {
+    is_liquid: boolean;
+    owner_user_id?: string;
+  }): boolean {
+    if (!row.is_liquid) return false;
+    if (row.owner_user_id != null) {
+      return user != null && row.owner_user_id === user.id;
+    }
+    return ledgerPersonScope === "mine";
+  }
+
+  // Evalúa si toca ofrecer el modal de snapshot tras una edición de activo. Poda la ventana
+  // rodante; si queda vacía, rearma el disparo; si todos los activos líquidos propios (según la
+  // lista recién recargada) tienen edición reciente y aún no se ofreció, dispara el paso «assets».
+  function evaluateSnapshotPrompt(reloadedAssets: AssetApiRow[]) {
+    const now = Date.now();
+    const pruned = pruneEditLog(liquidEditLogRef.current, now);
+    liquidEditLogRef.current = pruned;
+    if (pruned.size === 0) {
+      snapshotPromptFiredRef.current = false;
+    }
+    const ownLiquidIds = reloadedAssets
+      .filter((a) => isOwnLiquidAsset(a))
+      .map((a) => a.id);
+    if (
+      !snapshotPromptFiredRef.current &&
+      liquidCoverageComplete(pruned, ownLiquidIds, now)
+    ) {
+      snapshotPromptFiredRef.current = true;
+      setSnapshotPromptStep("assets");
+    }
+  }
+
   function resetAssetForm() {
     setEditingAssetId(null);
     setAssetFormCategoryId(
@@ -1815,6 +1933,13 @@ export default function App() {
     ) {
       return;
     }
+    // Capturado ANTES de mutar/recargar (resetAssetForm limpia el formulario y editingAssetId):
+    // la fila previa (para saber si el valor cambió de verdad en una edición) y el valor enviado.
+    const editingId = editingAssetId;
+    const submittedValueNum = parseDisplayDecimal(assetFormValue.trim());
+    const previousRow = editingId
+      ? assets.find((a) => a.id === editingId) ?? null
+      : null;
     setAssetSaving(true);
     setAssetsError(null);
     try {
@@ -1841,6 +1966,7 @@ export default function App() {
         base.notes = nt;
       }
 
+      let createdAsset: AssetApiRow | null = null;
       if (editingAssetId) {
         const res = await fetch(
           `/v1/assets/${encodeURIComponent(editingAssetId)}`,
@@ -1864,10 +1990,27 @@ export default function App() {
         if (!res.ok) {
           throw new Error(await errorMessageFromResponse(res));
         }
+        // 201 → devuelve el activo creado (con id/owner_user_id); lo necesitamos para el trigger.
+        createdAsset = (await res.json()) as AssetApiRow;
       }
       resetAssetForm();
       setAssetModalOpen(false);
-      await loadAssetsPage();
+      const reloaded = await loadAssetsPage();
+
+      // Trigger del snapshot: registra la edición si el valor cambió de verdad (creaciones siempre
+      // cuentan) y la fila recargada es un activo líquido propio; luego re-evalúa la cobertura.
+      const savedId = editingId ?? createdAsset?.id ?? null;
+      if (savedId) {
+        const valueChanged =
+          editingId === null ||
+          previousRow == null ||
+          parseDisplayDecimal(previousRow.current_value) !== submittedValueNum;
+        const savedRow = reloaded.find((a) => a.id === savedId) ?? null;
+        if (valueChanged && savedRow != null && isOwnLiquidAsset(savedRow)) {
+          liquidEditLogRef.current.set(savedId, Date.now());
+        }
+        evaluateSnapshotPrompt(reloaded);
+      }
     } catch (e: unknown) {
       setAssetsError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1891,6 +2034,9 @@ export default function App() {
         setAssetModalOpen(false);
       }
       await loadAssetsPage();
+      // El borrado no dispara ni evalúa el modal; solo saca el id de la ventana de ediciones para
+      // que no bloquee la cobertura ni cuente como líquido editado.
+      liquidEditLogRef.current.delete(id);
     } catch (e: unknown) {
       setAssetsError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2009,6 +2155,8 @@ export default function App() {
       resetLiabilityForm();
       setLiabilityModalOpen(false);
       await loadLiabilitiesPage();
+      // Marca que hay cambios de pasivos sin snapshotear (para el paso «pasivos» del modal).
+      liabilityEditedAtRef.current = Date.now();
     } catch (e: unknown) {
       setLiabilitiesError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2032,6 +2180,8 @@ export default function App() {
         setLiabilityModalOpen(false);
       }
       await loadLiabilitiesPage();
+      // Un borrado también es un cambio de pasivos sin snapshotear.
+      liabilityEditedAtRef.current = Date.now();
     } catch (e: unknown) {
       setLiabilitiesError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2053,6 +2203,43 @@ export default function App() {
     setLiabilityFormPaymentEnd(row.payment_end_date ?? "");
     setLiabilityFormNotes(row.notes ?? "");
     setLiabilityFormDerivePrincipal(row.principal_derived_from_plan ?? false);
+  }
+
+  // Acciones del modal «¿Guardar snapshot?». Best-effort: si la captura falla la cerramos sin
+  // ruido (el modal es tonto, sin superficie de error; la captura casi nunca falla — el usuario ya
+  // tiene rol de escritura por haber editado). onDismiss deja `snapshotPromptFiredRef` en true, de
+  // modo que no se vuelve a ofrecer hasta que la ventana de ediciones se vacíe y se rellene.
+  async function handleSnapshotPromptSaveAssets() {
+    setSnapshotPromptBusy(true);
+    try {
+      await saveSnapshotNow(["asset"]);
+      // ¿Hay cambios de pasivos posteriores al último snapshot de pasivos? Entonces ofrece el
+      // paso 2; si no, cierra.
+      const editedAt = liabilityEditedAtRef.current;
+      const savedAt = liabilitySnapshotSavedAtRef.current;
+      if (editedAt != null && (savedAt == null || savedAt < editedAt)) {
+        setSnapshotPromptStep("liabilities");
+      } else {
+        setSnapshotPromptStep("closed");
+      }
+    } catch {
+      setSnapshotPromptStep("closed");
+    } finally {
+      setSnapshotPromptBusy(false);
+    }
+  }
+
+  async function handleSnapshotPromptSaveLiabilities() {
+    setSnapshotPromptBusy(true);
+    try {
+      await saveSnapshotNow(["liability"]);
+      liabilitySnapshotSavedAtRef.current = Date.now();
+    } catch {
+      /* best-effort: cerramos igualmente abajo */
+    } finally {
+      setSnapshotPromptBusy(false);
+      setSnapshotPromptStep("closed");
+    }
   }
 
   function resetBudgetForm(overrideScope?: BudgetScopeToggle) {
@@ -2717,6 +2904,14 @@ export default function App() {
         </form>
       </Modal>
 
+      <SnapshotPromptModal
+        step={snapshotPromptStep}
+        busy={snapshotPromptBusy}
+        onSaveAssets={() => void handleSnapshotPromptSaveAssets()}
+        onSaveLiabilities={() => void handleSnapshotPromptSaveLiabilities()}
+        onDismiss={() => setSnapshotPromptStep("closed")}
+      />
+
       {installationGate === "loading" ? (
         <div className="app-loading">
           <div className="app-loading-inner">
@@ -2882,6 +3077,14 @@ export default function App() {
               beginEditAsset(a);
               setAssetModalOpen(true);
             }}
+            onSaveSnapshot={
+              // Solo ofrece capturar si el usuario tiene ≥1 activo propio en la lista visible: la
+              // captura copia únicamente las filas del usuario de sesión, así que sin filas propias
+              // generaría un snapshot vacío (miembro en vista Hogar sin activos suyos).
+              assets.some((a) => a.owner_user_id === user.id)
+                ? () => saveSnapshotNow(["asset"])
+                : undefined
+            }
           />
         ) : activeTab === "liabilities" ? (
           <LiabilitiesView
@@ -2931,6 +3134,19 @@ export default function App() {
               beginEditLiability(row);
               setLiabilityModalOpen(true);
             }}
+            onSaveSnapshot={
+              // `LiabilityApiRow` no trae `owner_user_id`, así que no podemos comprobar propiedad
+              // fila a fila; solo ofrecemos la captura en vista «Mío» (donde toda fila es propia por
+              // construcción) para no generar snapshots de pasivos vacíos en vista Hogar.
+              ledgerPersonScope === "mine"
+                ? async () => {
+                    // Guardado manual desde la vista Pasivos: también marca el snapshot de pasivos
+                    // como realizado, para que el paso 2 del modal no lo vuelva a ofrecer.
+                    await saveSnapshotNow(["liability"]);
+                    liabilitySnapshotSavedAtRef.current = Date.now();
+                  }
+                : undefined
+            }
           />
         ) : activeTab === "budget" ? (
           <BudgetView
@@ -3080,6 +3296,7 @@ export default function App() {
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
             projectionSeries={projectionSeries}
+            historySeries={historySeries}
             projectionBusy={projectionBusy}
             projectionError={projectionError}
             userBirthDate={user?.birth_date ?? null}
@@ -3143,6 +3360,10 @@ export default function App() {
             categoriesError={categoriesError}
             hasMembership={hasMembership}
             canEditCategories={installation?.role !== "viewer"}
+            canEditHistory={installation?.role !== "viewer"}
+            currencyIso={installation?.installation.base_currency ?? ""}
+            calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
+            onHistoryMutated={() => void loadHistorySeries()}
             isOwner={installation?.role === "owner"}
             settingsSubTab={settingsSubTab}
             navigateSettingsSubTab={navigateSettingsSubTab}

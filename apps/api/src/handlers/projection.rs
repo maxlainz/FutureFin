@@ -174,7 +174,10 @@ fn resolve_ledger_view(q: &ProjectionSeriesQuery) -> LedgerView {
 /// display de horizontes de 70 años). Reduce ~30 KB JSON y elimina ~5.000
 /// llamadas a parseDisplayDecimal en el cliente. Los KPIs/totales escalares
 /// que requieren precisión decimal siguen usando `rust_decimal::serde::str`.
-fn serialize_decimal_as_f64<S: serde::Serializer>(d: &Decimal, s: S) -> Result<S::Ok, S::Error> {
+/// `pub(crate)`: la ÚNICA otra superficie autorizada a usarla son los arrays
+/// por punto de `/v1/history/series` (`handlers/history.rs`) — misma
+/// justificación chart-only (excepción D4/I3 del architecture contract).
+pub(crate) fn serialize_decimal_as_f64<S: serde::Serializer>(d: &Decimal, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_f64(d.to_f64().unwrap_or(0.0))
 }
 
@@ -569,14 +572,21 @@ fn compound_outpaces_true_savings_month(
     Ok(None)
 }
 
+/// Cuota mensual equivalente de un importe periódico: `weekly → ×52/12`, cualquier otra
+/// frecuencia (incluida `monthly`) → el importe tal cual. Fuente única de esta conversión;
+/// también la usa `history.rs` al construir [`futurefin_engine::LoanTerms`].
+pub(crate) fn monthly_payment_from(amount: Decimal, frequency: Option<&str>) -> Decimal {
+    match frequency {
+        Some("weekly") => (amount * Decimal::from(52u32)) / Decimal::from(12u32),
+        _ => amount,
+    }
+}
+
 fn liability_monthly_payment(row: &LiabEngineRow) -> Decimal {
     let Some(amt) = row.payment_amount else {
         return Decimal::ZERO;
     };
-    match row.payment_frequency.as_deref() {
-        Some("weekly") => (amt * Decimal::from(52u32)) / Decimal::from(12u32),
-        _ => amt,
-    }
+    monthly_payment_from(amt, row.payment_frequency.as_deref())
 }
 
 /// Completed calendar age in years (`today` inclusive), used for horizon.

@@ -24,8 +24,9 @@ Runbook for deploying, upgrading, backing up and operating a production FutureFi
 installation. All commands run from the directory containing `docker-compose.yml`
 (the repo root, or a server directory holding just `docker-compose.yml` + `.env`).
 
-Facts date-stamped 2026-07-02, app version **v1.4.3**, backup `schema_version` **3**,
-31 SQL migrations in `apps/api/migrations/`.
+Facts date-stamped 2026-07-02 (backup/version facts refreshed 2026-07-06 for v1.5.0),
+app version **v1.5.0**, backup `schema_version` **4**, 32 SQL migrations in
+`apps/api/migrations/`.
 
 Vocabulary (defined once):
 - **Installation** — the singleton row in the `installation` table; one per deployment.
@@ -60,7 +61,7 @@ docker compose up -d
 
 # 4. Smoke test (the container needs ~15 s to pass its start_period):
 curl -sf http://127.0.0.1:8080/v1/health
-# → {"status":"ok","service":"futurefin","version":"1.4.3"}
+# → {"status":"ok","service":"futurefin","version":"1.5.0"}
 ```
 
 What happens on first start, in order (see `apps/api/src/main.rs`):
@@ -286,9 +287,9 @@ endpoints (all POST, session cookie required):
 Semantics you must not misremember:
 
 - **Scope is one user**: export contains only rows with `owner_user_id = self` (assets,
-  allocation_rules, liabilities, budget_entries, planning_flows, categories used) plus an
-  *informative* installation snapshot (currency, tz, inflation, FIRE settings). The snapshot
-  is NOT applied on import.
+  allocation_rules, liabilities, budget_entries, planning_flows, categories used, and — since
+  v4 — the user's **history snapshots**) plus an *informative* installation snapshot (currency,
+  tz, inflation, FIRE settings). The installation snapshot is NOT applied on import.
 - **Import is replace-only and transactional**: it DELETEs all of the importing user's
   existing rows (allocation_rules first, then assets, etc., in FK dependency order) and
   inserts the backup's rows, all in one transaction. There is no merge mode. Always call
@@ -300,11 +301,15 @@ Semantics you must not misremember:
   decrypting. Wrong password ⇒ generic decrypt failure (indistinguishable from corruption,
   by design). **If the user forgets the password that was current at export time, the file is
   unrecoverable.**
-- **`schema_version` compatibility** (currently 3): v1 and v2 files still import — they are
+- **`schema_version` compatibility** (currently 4): v1, v2 and v3 files still import — they are
   migrated forward in memory (v1/v2 legacy per-asset contribution fields are **dropped**, not
-  converted to allocation rules; the user reconfigures rules after import — deliberate,
-  owner-signed-off in v1.1.0). Files with a schema_version NEWER than the server's are
-  rejected with "update FutureFin to import this backup". Format/DTO code:
+  converted to allocation rules; v3→v4 just fills an empty history-snapshot list; the user
+  reconfigures rules after import — deliberate, owner-signed-off in v1.1.0). v4 (v1.5.0) added
+  the user's history snapshots to the payload; on import each snapshot item is re-linked to the
+  freshly-created asset/liability UUIDs (`ledger_index`) or keeps its `item_key` verbatim.
+  Files with a schema_version NEWER than the server's are rejected with "update FutureFin to
+  import this backup" — so **a v4 `.ffbackup` cannot be imported into a ≤1.4.x server** (clean
+  rejection, not corruption). Format/DTO code:
   `apps/api/src/handlers/backup_user/{crypto.rs,schema.rs}`.
 
 ## 5. Data locations: stateful vs stateless

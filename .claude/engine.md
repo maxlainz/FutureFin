@@ -1,6 +1,11 @@
 # Projection Engine (crates/engine)
 
-Pure Rust crate — no I/O, no DB, no async. Only `Decimal` arithmetic.
+Pure Rust crate — no I/O, no DB, no async. Pure financial math (projection + history interpolation).
+Only `Decimal` arithmetic. Two modules:
+- `projection.rs` — monthly net-worth / FIRE simulation (this doc's main subject).
+- `history.rs` — pure interpolation of the **historical** net-worth series from manual snapshots
+  (see [History interpolation](#history-interpolation-historyrs) below). Deps unchanged
+  (`rust_decimal` feature `maths` already present for `powd`).
 
 ## Public API
 
@@ -95,6 +100,50 @@ pub struct ProjectionOutput {
 - `EngineError::InvalidHorizon` — horizon_months < 1
 - `EngineError::InvalidPlanningAdjustments` — planning vec length != horizon_months
 - `EngineError::InvalidAllocationRuleTarget` — `target_index` out of bounds of `assets[]`
+- `EngineError::InvalidHistoryTimeline` — `HistoryTimeline::dates` not strictly ascending
+
+## History interpolation (`history.rs`)
+
+Pure module (no I/O, no async, no clock, **no `f64`** — only `Decimal` + `NaiveDate`) that
+reconstructs the past net-worth series from **manual snapshots**. The API handler groups snapshots
+into per-`(owner_user_id, kind)` timelines and asks the engine to evaluate each item on a grid of
+month-first dates; the handler owns aggregation (Σ per user/household), scoping and the projection
+join. The engine only interpolates.
+
+Public API (re-exported from `lib.rs`):
+```rust
+pub fn evaluate_timeline(&HistoryTimeline, grid_dates: &[NaiveDate]) -> Result<Vec<Vec<Decimal>>, EngineError>
+pub fn amortized_segment_value(p_a: Decimal, p_b: Decimal, terms: Option<&LoanTerms>,
+                               days_from_start: i64, days_total: i64) -> Decimal
+pub fn add_months_signed(date: NaiveDate, delta: i32) -> NaiveDate  // month-first, signed (neg = past)
+pub fn month_index_of(date: NaiveDate, anchor_month_first: NaiveDate) -> i32  // (y2-y1)*12 + (m2-m1)
+// types: HistoryTimeline { dates, items }, HistoryItem { source_item_id, kind, observations },
+//        HistoryObservation { value, terms }, LoanTerms { apr_percent, monthly_payment },
+//        HistoryItemKind { Asset, Liability }
+```
+
+`HistoryTimeline.dates` are **strictly ascending** (non-ascending → `InvalidHistoryTimeline`); the
+LAST date may be a "virtual today" observation appended by the caller — the engine neither knows
+nor cares which are virtual. `HistoryItem.observations` is parallel to `dates` (`None` = item not
+present in that snapshot; a shorter vec is treated as `None` for the missing indices).
+
+Evaluation rules (per item, per grid point `g`):
+- Before the first snapshot `s_1`: `0`, **except** the grid point in `s_1`'s own month
+  (`month_first(s_1) ≤ g < s_1`) which "clamps" and evaluates at `s_1` (first visible point is the
+  observed value, not a false 0).
+- Within a segment `[s_a, s_{a+1}]`: observed at **both** ends → interpolate (**Asset** = linear in
+  civil days; **Liability** = `amortized_segment_value`); observed at **one** end only → that
+  observed value exactly at its own snapshot date, `0` elsewhere in the segment (items appear /
+  disappear without inventing ramps); **neither** → `0`.
+- Guarantees **endpoint exactness**: the value at every snapshot date equals the observed value.
+
+Liability interpolation is a **residual-corrected French amortization** curve:
+`i = apr/1200`, `u = 1+i`, `f = days_from_start/days_total`, `N = days_total / 30.436875`,
+`x = f·N`; `theo(y) = P_a·u^y − M·(u^y−1)/i` (via `Decimal::checked_powd`), `theo_c = max(theo, 0)`;
+result `= max( theo_c(x) + f·(P_b − theo_c(N)), 0 )`. The residual term makes `f=0 → P_a` and
+`f=1 → P_b` **exact** regardless of `powd` approximation. Falls back to **linear** when `terms` is
+`None`, `apr ≤ 0`, `M ≤ 0`, `M ≤ P_a·i` (payment doesn't cover interest), or any checked op fails.
+Snapshot mutations are **not** projection-engine inputs — they never touch the projection cache.
 
 ## Notes for the API handler (projection.rs)
 - Load `allocation_rules` from DB ordered by `priority ASC`, then map each `target_asset_id` → index in `assets[]` before building the engine input.

@@ -19,6 +19,7 @@ export type SettingsSubTabId =
   | "projection"
   | "retirement"
   | "categories"
+  | "history"
   | "data";
 
 export const TABS: { id: TabId; label: string }[] = [
@@ -49,6 +50,7 @@ export const SETTINGS_SUBTAB_SLUG: Record<SettingsSubTabId, string> = {
   projection: "proyeccion",
   retirement: "jubilacion",
   categories: "categorias",
+  history: "historico",
   data: "datos",
 };
 
@@ -58,6 +60,7 @@ export const SETTINGS_SUBTAB_LABEL: Record<SettingsSubTabId, string> = {
   projection: "Proyección",
   retirement: "Jubilación",
   categories: "Categorías",
+  history: "Histórico",
   data: "Datos y sistema",
 };
 

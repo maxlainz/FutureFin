@@ -12,6 +12,11 @@ use crate::handlers::backup_user::import::{
 #[allow(unused_imports)]
 use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
+use crate::handlers::history::{
+    __path_capture_snapshots, __path_create_snapshot, __path_delete_snapshot,
+    __path_get_history_series, __path_list_snapshots, __path_update_snapshot,
+};
+#[allow(unused_imports)]
 use crate::handlers::installation::{
     __path_get_installation_session_context, __path_get_my_installation,
     __path_patch_my_installation, __path_setup_installation,
@@ -97,6 +102,12 @@ use utoipa::OpenApi;
         patch_planning_flow,
         delete_planning_flow,
         get_projection_series,
+        capture_snapshots,
+        list_snapshots,
+        create_snapshot,
+        update_snapshot,
+        delete_snapshot,
+        get_history_series,
         export_user_backup,
         import_user_backup_preview,
         import_user_backup_apply,
@@ -151,6 +162,17 @@ use utoipa::OpenApi;
         crate::handlers::planning::PatchPlanningFlowBody,
         crate::handlers::projection::ProjectionSeriesResponse,
         crate::handlers::projection::ProjectionPoint,
+        crate::handlers::history::SnapshotResponse,
+        crate::handlers::history::SnapshotItemResponse,
+        crate::handlers::history::CaptureResponse,
+        crate::handlers::history::CaptureBody,
+        crate::handlers::history::CreateSnapshotBody,
+        crate::handlers::history::UpdateSnapshotBody,
+        crate::handlers::history::SnapshotItemBody,
+        crate::handlers::history::HistorySeriesResponse,
+        crate::handlers::history::HistorySeriesPoint,
+        crate::handlers::history::HistoryAssetSeries,
+        crate::handlers::history::HistoryMarker,
         crate::handlers::backup_user::ExportRequest,
         crate::handlers::backup_user::ImportRequest,
         crate::handlers::backup_user::ImportPreviewResponse,
@@ -205,6 +227,10 @@ use utoipa::OpenApi;
         (
             name = "backup",
             description = "Backup `.ffbackup` por usuario: formato propio cifrado (AES-256-GCM, KDF Argon2id derivado de la contraseña de cuenta). Solo datos del usuario actual; portable entre instalaciones."
+        ),
+        (
+            name = "history",
+            description = "Snapshots históricos manuales de patrimonio (per-user). Captura desde el ledger propio (upsert por día) o backfill editable. CRUD Decimal-as-string; no invalidan la cache de proyección."
         ),
     ),
 )]

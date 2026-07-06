@@ -15,8 +15,8 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. As of 2026-07-02: version **v1.4.3**
-(`apps/api/Cargo.toml`), **31** migration files in `apps/api/migrations/`, **8** integration-test
+How changes are classified, gated and reviewed in this repo. As of 2026-07-06: version **v1.5.0**
+(`apps/api/Cargo.toml`), **32** migration files in `apps/api/migrations/`, **11** integration-test
 files in `apps/api/tests/`. All paths below are from the repo root.
 
 Vocabulary (defined once): **installation** = the singleton row all financial data belongs to
@@ -210,12 +210,13 @@ No breaking change ships without a version bump + a CHANGELOG entry explicitly m
   documented even the removal of a consumer-less field (`fire_number_expense_adjustment_pct`)
   and the new strict 422 as the only non-bit-exact changes.
 - **`.ffbackup` schema**: any shape change to exported user data requires bumping
-  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **3**)
-  and extending the `migrate_to_current` chain so ALL older versions still import (v1 and v2
-  remain importable today; legacy per-asset contribution fields are dropped on import, user
-  reconfigures — the documented v1.1.0 pattern). `parse_payload` rejects versions newer than
-  the server supports — keep that. Never break import of an old backup; it is users' only
-  recovery path.
+  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **4** —
+  v1.5.0 added `snapshots` via `payload_v3_to_v4`, an additive change: v3 files import with an
+  empty snapshot list) and extending the `migrate_to_current` chain so ALL older versions still
+  import (v1, v2 and v3 remain importable today; legacy per-asset contribution fields are dropped
+  on import, user reconfigures — the documented v1.1.0 pattern). `parse_payload` rejects versions
+  newer than the server supports — keep that. Never break import of an old backup; it is users'
+  only recovery path.
 - **Engine input struct** (`ProjectionInput` and friends in `crates/engine`): field
   removals/replacements are breaking for the handler layer and must be noted (precedent:
   v1.2.0 replaced `inflation_annual_percent` + `fire_target_net_worth` with
@@ -261,7 +262,9 @@ Then, per change class:
 ## Provenance and maintenance
 
 Facts above verified against the repo on 2026-07-02 (v1.4.3, branch
-`claude/skill-library-handoff-rtfotl`). Re-verify before trusting:
+`claude/skill-library-handoff-rtfotl`); version/migration/test-file counts and the backup
+schema version refreshed for v1.5.0 on 2026-07-06 (history-snapshots feature). Re-verify before
+trusting:
 
 - Current version: `grep '^version' apps/api/Cargo.toml`
 - Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations`

@@ -52,6 +52,11 @@ pub struct AssetResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
+    /// Usuario dueño de la fila (`NULL` = compartida). Dato de display para la UI
+    /// (el trigger del modal de snapshot). No es una frontera de seguridad.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub owner_user_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -112,6 +117,7 @@ struct AssetRow {
     expected_annual_return_percent: Option<Decimal>,
     notes: Option<String>,
     sort_index: i32,
+    owner_user_id: Option<Uuid>,
 }
 
 fn normalize_name(raw: &str) -> Result<String, ApiError> {
@@ -225,6 +231,7 @@ fn row_to_response(
         contribution_target_amount,
         notes: r.notes,
         sort_index: r.sort_index,
+        owner_user_id: r.owner_user_id,
     }
 }
 
@@ -322,7 +329,7 @@ pub async fn list_assets(
     let assets_sql = format!(
         r#"SELECT id, category_id, name, current_value, purchase_price,
                   is_liquid, expected_annual_return_percent,
-                  notes, sort_index
+                  notes, sort_index, owner_user_id
            FROM assets
            WHERE {assets_scope}
            ORDER BY sort_index ASC, name ASC"#
@@ -388,7 +395,7 @@ pub async fn create_asset(
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING id, category_id, name, current_value, purchase_price,
                      is_liquid, expected_annual_return_percent,
-                     notes, sort_index"#,
+                     notes, sort_index, owner_user_id"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -481,7 +488,7 @@ pub async fn patch_asset(
     let row: Option<AssetRow> = sqlx::query_as(
         r#"SELECT id, category_id, name, current_value, purchase_price,
                   is_liquid, expected_annual_return_percent,
-                  notes, sort_index
+                  notes, sort_index, owner_user_id
            FROM assets
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -543,7 +550,7 @@ pub async fn patch_asset(
            WHERE id = $9 AND installation_id = $10
            RETURNING id, category_id, name, current_value, purchase_price,
                      is_liquid, expected_annual_return_percent,
-                     notes, sort_index"#,
+                     notes, sort_index, owner_user_id"#,
     )
     .bind(new_cat)
     .bind(&new_name)

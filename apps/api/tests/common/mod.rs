@@ -81,6 +81,7 @@ pub struct TestApp {
 pub struct LoggedInOwner {
     pub username: String,
     pub cookie: String,
+    pub user_id: Uuid,
 }
 
 #[allow(dead_code)]
@@ -99,6 +100,8 @@ impl TestApp {
             )
             .await;
         assert_eq!(reg.status, http::StatusCode::CREATED, "register failed: {reg:?}");
+        let user_id = Uuid::parse_str(reg.json()["id"].as_str().expect("register id is string"))
+            .expect("register id is uuid");
 
         let login = self
             .post_json(
@@ -112,6 +115,67 @@ impl TestApp {
         LoggedInOwner {
             username: username.to_string(),
             cookie,
+            user_id,
+        }
+    }
+
+    /// Registra un segundo usuario (queda pendiente), lo aprueba desde `owner` con el rol
+    /// indicado (`"member"` | `"viewer"`), hace login y devuelve su sesión + `user_id`.
+    pub async fn register_and_approve_member(
+        &self,
+        owner: &LoggedInOwner,
+        username: &str,
+        role: &str,
+    ) -> LoggedInOwner {
+        let password = "correct horse battery staple";
+        let reg = self
+            .post_json(
+                "/v1/auth/register",
+                serde_json::json!({
+                    "username": username,
+                    "password": password,
+                    "birth_date": "1992-02-02",
+                }),
+            )
+            .await;
+        assert_eq!(
+            reg.status,
+            http::StatusCode::CREATED,
+            "register member failed: {reg:?}"
+        );
+        let user_id = Uuid::parse_str(reg.json()["id"].as_str().expect("register id is string"))
+            .expect("register id is uuid");
+
+        let approve = self
+            .post_json_with_cookie(
+                &format!("/v1/installation/pending-users/{user_id}/approve"),
+                serde_json::json!({ "role": role }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(
+            approve.status,
+            http::StatusCode::NO_CONTENT,
+            "approve member failed: {approve:?}"
+        );
+
+        let login = self
+            .post_json(
+                "/v1/auth/login",
+                serde_json::json!({"username": username, "password": password}),
+            )
+            .await;
+        assert_eq!(
+            login.status,
+            http::StatusCode::OK,
+            "member login failed: {login:?}"
+        );
+        let cookie = login.session_cookie().expect("login sets ff_session");
+
+        LoggedInOwner {
+            username: username.to_string(),
+            cookie,
+            user_id,
         }
     }
 

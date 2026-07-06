@@ -64,6 +64,13 @@
   --proj-axis: #737373;
   --proj-milestone: #a3a3a3;
 
+  /* Perspectiva histórica (pasado): línea NW histórica, fondo de la región
+     pasada, divisor «Hoy» y marcadores de snapshot. */
+  --proj-nw-past: #525252;
+  --proj-past-bg: rgba(10, 10, 10, 0.03);
+  --proj-today-divider: #a3a3a3;
+  --proj-snapshot: #404040;
+
   /* Paleta funcional de las áreas/series del chart. Tonos medios sobre
      claro; en oscuro se sustituyen por pasteles más claros (más abajo). */
   --proj-area-1: #2563eb;
@@ -116,6 +123,13 @@
   --proj-meta: #d4d4d8;
   --proj-axis: #a1a1aa;
   --proj-milestone: #525252;
+
+  /* Perspectiva histórica (pasado) — aclarada para conservar contraste
+     sobre el fondo zinc-900. */
+  --proj-nw-past: #a1a1aa;
+  --proj-past-bg: rgba(250, 250, 250, 0.04);
+  --proj-today-divider: #52525b;
+  --proj-snapshot: #d4d4d8;
 
   /* Paleta funcional aclarada para modo oscuro: cada color sube ~25 puntos
      de luminosidad respecto al claro para conservar contraste sobre el

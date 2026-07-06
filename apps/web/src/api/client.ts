@@ -73,6 +73,17 @@ export async function apiPatch<T>(url: string, body: unknown): Promise<T | null>
   return parseJsonIfPresent<T>(res);
 }
 
+export async function apiPut<T>(url: string, body: unknown): Promise<T | null> {
+  const res = await fetch(url, {
+    ...defaultFetchInit,
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await ensureOk(res);
+  return parseJsonIfPresent<T>(res);
+}
+
 export async function apiDelete(url: string): Promise<void> {
   const res = await fetch(url, {
     ...defaultFetchInit,

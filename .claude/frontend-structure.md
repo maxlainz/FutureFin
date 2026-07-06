@@ -13,7 +13,7 @@ src/
 │   └── theme.css                 # design tokens (--ff-*, --proj-*) con variantes claro/[data-theme=dark]
 │
 ├── api/
-│   ├── client.ts                 # fetch wrappers: apiGet/Post/Patch/Delete + defaultFetchInit + errorMessageFromResponse
+│   ├── client.ts                 # fetch wrappers: apiGet/Post/Put/Patch/Delete + defaultFetchInit + errorMessageFromResponse
 │   ├── client.test.ts            # mocks `globalThis.fetch`, asserts credentials/Content-Type/204
 │   └── types.ts                  # all *Api / *Response / *Row types (mirror of Rust handler structs)
 │
@@ -28,10 +28,15 @@ src/
 │   ├── fire.ts                   # client-side FIRE math for the live form preview (mirror of handlers/projection.rs):
 │   │                             #   defaultFireSettingsApi, normalizeInstallationFireSettings, taxOnGrossCapitalAnnual,
 │   │                             #   grossUpNetAnnualFire, computeFireAnnualNeedNetEur, findFirstMonthNetWorthAtLeastInflated
-│   ├── projection-chart.ts       # chart helpers: tick builders, SVG layout, niceYTicks, axis age/dates mode,
+│   ├── projection-chart.ts       # chart helpers: tick builders (startMonth param → soporta meses negativos), SVG layout,
+│   │                             #   niceYTicks, axis age/dates mode, deflationFactorAt (deflactor keyed por month_index; k<0 amplifica),
 │   │                             #   PROJECTION_FOCUS_STORAGE_KEY, ASSET_LINE_COLORS (CSS vars), complementaryProjectionTickLabel,
 │   │                             #   projectionHoverTitle, formatYearsEsFromMonths, formatProjectionChartHorizonLine
-│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH, SETTINGS_SUBTAB_*, tabFromPathname, settingsSubTabPath
+│   ├── history-merge.ts          # mergeProjectionWithHistory(series, history): une la serie histórica (month_index<0) con la
+│   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto
+│   ├── snapshot-tracker.ts       # trigger del modal: EditLog (Map<assetId, epochMs>), SNAPSHOT_EDIT_WINDOW_MS, pruneEditLog,
+│   │                             #   liquidCoverageComplete (todos los activos líquidos editados dentro de la ventana rodante ~1h)
+│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH, SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath
 │   └── theme.ts                  # ThemePref ("auto"|"light"|"dark") + apply/load/save + subscribeSystemThemeChanges
 │
 ├── components/                   # generic UI primitives (no domain knowledge)
@@ -41,6 +46,8 @@ src/
 │   ├── ThemeToggle.tsx           # segmented Auto/Claro/Oscuro (usado en Ajustes → Datos)
 │   ├── Modal.tsx                 # Modal + ModalFormError + InlineHint
 │   ├── MetricCard.tsx            # KPI con paren-slot siempre presente + tone hero/accent/accent-2
+│   ├── SnapshotButton.tsx        # botón «Guardar snapshot» (idle→busy→success/error) en panel-head de Activos y Pasivos
+│   ├── SnapshotPromptModal.tsx   # modal «¿Guardar snapshot?» (paso assets → paso liabilities); tonto, lógica en App.tsx
 │   ├── icons.tsx                 # set unificado 16×16 stroke 1.5 (~25 iconos)
 │   └── charts/
 │       ├── summary.tsx           # SummaryDonutChart + SummaryBreakdownBlock (palette fría=activos / cálida=pasivos)
@@ -55,8 +62,10 @@ src/
 │   ├── UpcomingView.tsx          # Planning
 │   ├── RetirementView.tsx        # KPIs + MiniProjection (zoomY, clampToMonth=jub+12, xAxis) + FIRE config
 │   ├── ProjectionView.tsx        # wraps ProjectionNetWorthChart
-│   ├── ProjectionNetWorthChart.tsx  # gran SVG chart, drag/zoom/hover, colores vía --proj-* tokens
+│   ├── ProjectionNetWorthChart.tsx  # gran SVG chart, drag/zoom/hover, colores vía --proj-* tokens; se extiende a meses
+│   │                                #   negativos con la serie histórica (áreas + marcadores + divisor «Hoy») vía mergeProjectionWithHistory
 │   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills + ThemeToggle en "Datos y sistema"
+│   ├── HistorySettingsPanel.tsx  # Ajustes → Histórico: filtros año/kind, tabla de snapshots, modal añadir/editar, borrar (backfill)
 │   └── AllocationRulesPanel.tsx  # used embedded inside BudgetView modal
 │
 └── auth/
@@ -71,7 +80,7 @@ src/
 - **`lib/`** is pure: no React, no fetch. May import from other `lib/*` and from `api/types`.
 - **`components/`** may import from `lib/` and `api/types`. They are dumb presentational widgets.
 - **`views/`** may import from anything below (`lib/`, `api/`, `components/`, other views). They own form/UI state via `useState` and receive data + mutation callbacks from `App.tsx`.
-- **`App.tsx`** owns the long-lived state (installation, user, ledgerPersonScope, lists, busy flags) and the API mutation handlers. Dispatch to a view is a `<XxxView {...props} />` call.
+- **`App.tsx`** owns the long-lived state (installation, user, ledgerPersonScope, lists, busy flags, `projectionSeries` **and `historySeries`**) and the API mutation handlers. `historySeries` is loaded by `loadHistorySeries()` (parallel to the projection, in the projection-tab effect and after every snapshot mutation; failure → `null`, so the chart degrades to the current future-only view). `saveSnapshotNow(kinds)` POSTs a capture and reloads it. Dispatch to a view is a `<XxxView {...props} />` call.
 
 ## Where to add new code
 

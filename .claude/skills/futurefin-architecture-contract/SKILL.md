@@ -17,9 +17,10 @@ description: >
 
 # FutureFin Architecture Contract
 
-Facts date-stamped **as of 2026-07-02, v1.4.3** (`apps/api/Cargo.toml`). This is the contract a
-retiring principal engineer would make you sign: the decisions below are settled, most of them by
-a documented incident. Do not re-litigate them casually; if you must change one, go through
+Facts date-stamped **as of 2026-07-02, v1.4.3** (`apps/api/Cargo.toml`); D12 (historical
+snapshots) and the migration/backup-schema counts were added/refreshed for **v1.5.0** on
+2026-07-06. This is the contract a retiring principal engineer would make you sign: the decisions
+below are settled, most of them by a documented incident. Do not re-litigate them casually; if you must change one, go through
 `.claude/skills/futurefin-change-control/SKILL.md`.
 
 Vocabulary used throughout: **installation** = the single household deployment (one DB row owns
@@ -47,10 +48,12 @@ purchasing power.
 Cargo workspace (Cargo.toml: members = ["apps/api", "crates/domain", "crates/engine"])
 ├── crates/domain    futurefin-domain: UserId newtype over Uuid; re-exports Decimal + Uuid.
 │                    Deps: rust_decimal (serde-with-str), serde, uuid. Nothing else.
-├── crates/engine    futurefin-engine: pure projection math (projection.rs, 1114 LOC incl. tests).
+├── crates/engine    futurefin-engine: pure projection + history-interpolation math
+│                    (projection.rs, 1114 LOC incl. tests; history.rs — snapshot timelines).
 │                    Deps: chrono (no default features), rust_decimal(+maths), serde, thiserror, uuid.
 │                    Public API (crates/engine/src/lib.rs): project_net_worth_series,
 │                    first_month_per_asset_contribution_nominals, fire_target_at_month_index,
+│                    evaluate_timeline (+ history types/helpers),
 │                    plus input/output types (ProjectionInput, SimAsset, AllocationRule, FireTarget…).
 └── apps/api         futurefin-api: Axum server. lib.rs modules: auth, db, error, handlers,
                      openapi, routes, state. main.rs = bin (env loading, CORS, gzip, static SPA).
@@ -125,10 +128,13 @@ pending-user demotion non-immediate and adds key rotation surface for no benefit
 Domain/schema/engine: `rust_decimal::Decimal`, never `f64` (see `crates/domain/src/lib.rs` header).
 API serializes amounts as decimal **strings** (`rust_decimal::serde::str`); the frontend does
 arithmetic via `parseDisplayDecimal`-style helpers, never `parseFloat` on money.
-**Exception (v1.4.0)**: the large parallel arrays in `GET /v1/projection/series` —
+**Exception (v1.4.0; extended 2026-07-06)**: the large parallel arrays in `GET /v1/projection/series` —
 `points[].net_worth`, `points[].contributed_capital`, `fire_target_series`,
-`asset_series[].values` — serialize as `f64` via `serialize_decimal_as_f64`
-(`handlers/projection.rs`). Documented in `.claude/api-routes.md`: "**`net_worth` y
+`asset_series[].values` — AND the per-point arrays of `GET /v1/history/series`
+(`points[].net_worth/assets_total/liabilities_total`, `asset_series[].values`,
+`markers[].total`) serialize as `f64` via `serialize_decimal_as_f64` — ONE `pub(crate)`
+definition in `handlers/projection.rs`, consumed only by projection and history
+responses. Documented in `.claude/api-routes.md`: "**`net_worth` y
 `contributed_capital` se serializan como `f64`** (no Decimal-as-string) por rendimiento: ~30 KB
 menos en JSON y evita ~5.000 `parseDisplayDecimal` cliente. Precisión <1 € en horizontes de 70
 años." Scalars/KPIs (`starting_net_worth`, `jubilacion_target_net_worth`, milestone targets)
@@ -145,8 +151,9 @@ of looking at it. It was removed, not fixed. **Breaks if violated**: any mutatio
 reintroduces the class; `apps/api/tests/liabilities_purge.rs` guards this (local-only, see W1).
 
 ### D6. Migrations are embedded and fail loud
-`sqlx::migrate!("./migrations")` runs at startup (`db.rs::run_migrations`). 31 files in
-`apps/api/migrations/` as of 2026-07-02 (`ls apps/api/migrations | wc -l`). There is **no
+`sqlx::migrate!("./migrations")` runs at startup (`db.rs::run_migrations`). 32 files in
+`apps/api/migrations/` as of 2026-07-06 (`ls apps/api/migrations | wc -l`; v1.5.0 added
+`20260706203746_history_snapshots.sql`). There is **no
 auto-repair**: a checksum mismatch aborts startup and must be fixed by hand
 (`DELETE FROM _sqlx_migrations WHERE version = X` via psql, only if genuinely idempotent).
 **Incident**: v1.3.0 deleted the old auto-repair loop — it masked drift. Related incident
@@ -220,13 +227,36 @@ first month net worth ≥ the inflation-adjusted target (`fire_reached` in
 `horizon_basis` doc comment in `projection.rs` until 2026-07-02 — all fixed since. If in doubt,
 `projection_horizon_months` and its unit tests are the ground truth.)
 
+### D12. Historical snapshots are per-user and are NOT a projection input (v1.5.0)
+Each user manually captures net-worth **snapshots** (their asset + liability items) into
+`history_snapshots` / `history_snapshot_items`; the engine (`crates/engine/src/history.rs`,
+`evaluate_timeline`) interpolates the past net-worth series between them (linear for assets,
+French-amortization for liabilities), served by `GET /v1/history/series` and spliced onto the
+projection's month-0 vertex in the chart. Handlers live in `handlers/history.rs` under
+`/v1/history`; the series fetch uses the standard `LedgerView` helpers (household = server-side
+sum of every user's interpolated series). **Why it is a separate decision, not just another
+ledger surface**: snapshots are **display history**, never inputs to `project_net_worth_series`.
+Therefore, unlike every ledger mutation (D7), snapshot CRUD (`capture` / backfill `POST` / `PUT` /
+`DELETE`) **must NOT call `refresh_projection_after_mutation`** — invalidating the projection
+cache on a snapshot write would be pure waste (the projection does not depend on history) and was
+deliberately omitted, with an explicit comment in the handler and a regression test
+`apps/api/tests/history_snapshots.rs::snapshot_mutations_do_not_touch_projection_cache`
+(projection stays cache-HIT across a snapshot mutation). Snapshots have **no cache of their own**
+(sub-ms compute) and the series endpoint takes no `?months`/`?density`. Shared rows
+(`owner_user_id IS NULL`) are never captured — a documented limitation. Snapshots are included in
+`.ffbackup` **schema_version 4** (additive over v3; import re-links items to fresh asset/liability
+UUIDs via `ledger_index`, else keeps `item_key`). **Breaks if violated**: wiring snapshot writes
+into `refresh_projection_after_mutation` couples two independent subsystems and needlessly evicts
+a hot projection cache; conversely, ever feeding snapshot data into the engine would make past
+"observations" silently reshape the *future* projection — a category error.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
 |---|-----------|----------------|--------------|
 | I1 | Exactly one **uncapped `remainder`** allocation rule per scope, always **last** in the cascade (the "sink") | `handlers/allocation_rules.rs` create/patch/delete/reorder; API errors `remainder_required`, `uncapped_remainder_exists`, `sink_must_be_last` | `grep -n "remainder_required\|uncapped_remainder_exists\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs` |
 | I2 | `fire_target_at_month_index` is the ONLY FIRE-target formula — engine crossover and API `fire_target_series` both call it | `crates/engine/src/projection.rs` (public fn + regression test for the old off-by-one) | `grep -rn "fire_target_at_month_index" crates/ apps/api/src/` — every inflation-compounding of a FIRE target must route through it |
-| I3 | Amounts serialize as decimal strings, EXCEPT the four documented f64 arrays of `/v1/projection/series` (D4) | `serialize_decimal_as_f64` exists only in `handlers/projection.rs` | `grep -rn "serialize_decimal_as_f64" apps/api/src/` (one definition, projection-response uses only) |
+| I3 | Amounts serialize as decimal strings, EXCEPT the documented f64 arrays of `/v1/projection/series` and the per-point arrays of `/v1/history/series` (D4) | ONE `pub(crate)` definition of `serialize_decimal_as_f64` in `handlers/projection.rs`, used by the projection and history responses only | `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) |
 | I4 | All routes live under `/v1/`, except root `/health` and `/openapi.json` (plus the SPA static fallback when `WEB_STATIC_ROOT` is set) | `routes/mod.rs` (`nest("/v1", v1)`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest" apps/api/src/routes/mod.rs` |
 | I5 | Reads never mutate (D5): expired liabilities filtered, never deleted, by GETs | WHERE clauses in liabilities/summary/budget/assets/projection handlers | `TEST_DATABASE_URL=... cargo test --workspace liabilities_purge` (local; not in CI) |
 | I6 | In charts, the stacked per-asset areas sum EXACTLY to the (visible) net-worth line at every x | `MiniProjection.tsx` rescales each asset share by `visibleNw × (asset_i / Σassets)` — necessary because raw engine `net_worth = Σassets + surplus_cash − Σprincipals − undrained`, so raw `per_asset_series` does NOT sum to NW | Read the `cumulative` block in `apps/web/src/components/charts/MiniProjection.tsx` (~lines 164–190); any new stacked chart must reuse `MiniProjection`, not re-derive |
@@ -279,12 +309,12 @@ files cited inline (not from memory of the docs — docs can drift, see W6). Re-
 volatile claims with:
 
 - Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md`.
-- Migration count: `ls apps/api/migrations | wc -l` (31 on 2026-07-02).
+- Migration count: `ls apps/api/migrations | wc -l` (32 on 2026-07-06; 31 on 2026-07-02).
 - Engine purity deps (I8): `grep -E "tokio|sqlx|reqwest|axum" crates/engine/Cargo.toml` → empty.
 - Horizon rule (D11): `grep -n "LIFESPAN_AGE\|FALLBACK_YEARS\|clamp(12, 840)\|fallback_no_demographics" apps/api/src/handlers/projection.rs`.
 - Cache TTL/keys (D7): `grep -n "PROJECTION_CACHE_TTL\|ProjectionCacheKey\|invalidate_projection" apps/api/src/state.rs`.
 - No-warm-up-after-mutation rationale: `grep -n -A6 "refresh_projection_after_mutation" apps/api/src/handlers/projection.rs`.
-- f64 exception boundary (D4/I3): `grep -rn "serialize_decimal_as_f64" apps/api/src/` and `.claude/api-routes.md` §projection.
+- f64 exception boundary (D4/I3): `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) and `.claude/api-routes.md` §projection + §history series.
 - Sink invariant (I1): `grep -n "sink_must_be_last" apps/api/src/handlers/allocation_rules.rs`.
 - CI coverage (W1): `cat .github/workflows/ci.yml` — check whether a job now sets `TEST_DATABASE_URL`; if so, update W1 here and `.claude/tests.md` §CI.
 - Session mechanics (D3): `grep -n "expires_at\|SESSION_COOKIE" apps/api/src/handlers/session.rs` and `grep -n "SESSION_TTL_DAYS" apps/api/src/main.rs`.

@@ -19,6 +19,7 @@ import type {
 import { Modal, ModalFormError } from "../components/Modal";
 import { RowEditIcon, RowTrashIcon } from "../components/icons";
 import { AccountCard } from "../components/AccountCard";
+import { HistorySettingsPanel } from "./HistorySettingsPanel";
 import { ThemeToggle } from "../components/ThemeToggle";
 import type { ThemePref } from "../lib/theme";
 import {
@@ -70,6 +71,10 @@ export function SettingsView({
   categoriesError,
   hasMembership,
   canEditCategories,
+  canEditHistory,
+  currencyIso,
+  calendarTz,
+  onHistoryMutated,
   isOwner,
   settingsSubTab,
   navigateSettingsSubTab,
@@ -153,6 +158,11 @@ export function SettingsView({
   categoriesError: string | null;
   hasMembership: boolean;
   canEditCategories: boolean;
+  canEditHistory: boolean;
+  currencyIso: string;
+  /** Zona horaria (IANA) de la instalación; el panel de histórico deriva «hoy» de ella. */
+  calendarTz: string;
+  onHistoryMutated: () => void;
   isOwner: boolean;
   settingsSubTab: SettingsSubTabId;
   navigateSettingsSubTab: (id: SettingsSubTabId) => void;
@@ -630,6 +640,15 @@ export function SettingsView({
             <p className="muted bordered-top">Vacío.</p>
           ) : null}
         </section>
+      ) : null}
+
+      {settingsSubTab === "history" && hasMembership ? (
+        <HistorySettingsPanel
+          canEdit={canEditHistory}
+          currencyIso={currencyIso}
+          calendarTz={calendarTz}
+          onHistoryMutated={onHistoryMutated}
+        />
       ) : null}
 
       {settingsSubTab === "data" ? (
