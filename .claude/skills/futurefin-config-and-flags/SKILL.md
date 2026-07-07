@@ -154,16 +154,37 @@ handler invalidates the whole installation's entries (`refresh_projection_after_
 | `GET /v1/history/series` | `view` | `household` \| `mine` (standard `LedgerViewQuery::resolve`) | `household` | Standard scope filter (§4.1). `mine` = own series; `household` = server-side sum of every user's interpolated series. |
 | `GET /v1/history/snapshots/prefill` (v1.5.1) | `kind` | `asset` \| `liability` (anything else → 400 `invalid_kind`) | **required** | Which ledger side to pre-populate the backfill modal with. Always own-user (no `?view`). |
 | `GET /v1/history/snapshots/prefill` (v1.5.1) | `date` | civil date `YYYY-MM-DD`; a future date → 400 `snapshot_date_in_future` | **required** | Target date the suggested values are interpolated to (same math as `/v1/history/series`). Each item returns a `value` + `basis` ∈ `interpolated`\|`first_snapshot`\|`live`\|`not_owned`; items that didn't exist yet arrive `value:"0"`, `existed:false`. |
+| `GET /v1/history/cashflow` (v1.6.0) | `view` | standard `LedgerViewQuery::resolve` | `household` | Standard scope filter (§4.1) over transactions + snapshots. |
+| `GET /v1/history/cashflow` (v1.6.0) | `window_months` | `i64`, **clamped 1..=120** (no error) | `24` | Months of monthly aggregate + fine-grid window. |
+| `GET /v1/history/cashflow` (v1.6.0) | `resolution` | `weekly` \| `daily` (trimmed; anything else → `weekly`) | `weekly` | `daily` **requires `window_months <= 6`** → else **400 `daily_window_too_large`** (grid cost). `daily` runs in `spawn_blocking`; `weekly` inline. |
 
-No new **env vars** and no new installation settings ship with the history feature (series or
-prefill) — it is entirely per-user request/data surface. The series and prefill endpoints have
-**no cache** (sub-ms compute) and take no `?months`/`?density`.
+No new **env vars** and no new installation settings ship with the history feature (series,
+prefill or cashflow) — it is entirely per-user request/data surface. The series and prefill
+endpoints have **no cache** (sub-ms compute) and take no `?months`/`?density`; cashflow is also
+uncached.
+
+### `GET /v1/transactions/*` — histórico de gasto query params (`apps/api/src/handlers/transactions/`, v1.6.0)
+
+Most read endpoints accept `?view` (standard §4.1 scope: `GET /v1/transactions`, `/months`,
+`/summary`, `/imports`); the **rules** GET is always own-user (no `?view`), and all writes are
+`owner_user_id = session user`. Additional filters, all optional unless noted:
+
+| Endpoint | Param | Values | Default | Semantics |
+|---|---|---|---|---|
+| `GET /v1/transactions` | `month` | `YYYY-MM` (invalid → 400) | omitted → all | Filters `op_date` to that calendar month. Plus `kind` (`expense`\|`income`\|`savings`, invalid → 400), `category_id` (uuid), `import_id` (uuid). |
+| `GET /v1/transactions/summary` | `year` + `month` | `year` 1900–3000, `month` 1–12; **provided together or neither** (else 400) | omitted → last **complete** calendar month | Selected month of the comparison. |
+| `GET /v1/transactions/summary` | `avg_months` | u32, **1–24** (out of range → 400) | `6` | Historical-average window. |
+| `DELETE /v1/transactions/imports/{id}` | `confirm` | `bool` | `false` | Must be `true` or **400 `confirm_required`** (undo cascades to the batch's transactions). |
+
+None of these query params (nor any transactions mutation) touch the projection cache — transactions
+are not engine inputs (regression `transactions_projection_cache.rs`).
 
 ### Body limits (`apps/api/src/routes/mod.rs`)
 
 - Global: `DEFAULT_BODY_LIMIT_BYTES` = 1 MiB (`DefaultBodyLimit` on the outer router).
-- `POST /v1/backup/user-import` and `/v1/backup/user-import/preview`:
-  `BACKUP_IMPORT_BODY_LIMIT_BYTES` = 16 MiB (base64 `.ffbackup` payloads inflate ~33%).
+- `POST /v1/backup/user-import` and `/v1/backup/user-import/preview`, plus (v1.6.0)
+  `POST /v1/transactions/import/preview` and `/v1/transactions/import/confirm`:
+  `BACKUP_IMPORT_BODY_LIMIT_BYTES` = 16 MiB (base64 `.ffbackup`/CSV payloads inflate ~33%).
 - Symptom of hitting the limit: HTTP 413 on an otherwise valid request.
 
 ## 5. Per-installation runtime settings (`apps/api/src/handlers/installation.rs`)

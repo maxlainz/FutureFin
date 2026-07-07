@@ -6,6 +6,101 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-07-07
+
+Histórico de **gasto mensual**: una nueva pestaña «Gastos» que importa el histórico REAL de gasto
+(CSV bancarios o efectivo a mano), lo categoriza y lo compara mes a mes contra el presupuesto y el
+promedio. Nada de esto existía (el modelo solo tenía flujos recurrentes de `budget_entries` y
+snapshots de patrimonio; no había ninguna transacción datada). Además, ese cash-flow **moldea** la
+curva histórica fina del chart de patrimonio sin contradecir los snapshots (tier-2). Detalle de
+diseño: [`.claude/data-model.md`](.claude/data-model.md), [`.claude/api-routes.md`](.claude/api-routes.md),
+[`.claude/engine.md`](.claude/engine.md).
+
+### Gastos — Import CSV, categorización y comparativa mensual
+
+- **Nueva pestaña «Gastos»** (`/gastos`): vista autónoma con KPIs del mes, selector de mes (default
+  último mes **completo**, badge para el parcial en curso), comparativa por categoría Real \| Budget
+  \| Δ \| Promedio (ventana 3/6/12 meses) y tabla de movimientos con edición inline y modal completo.
+- **Import de CSV bancario** (`POST /v1/transactions/import/preview`→`/confirm`, stateless): presets
+  hardcoded MyInvestor y N26 con **autodetección por cabecera** (`source=auto`), decodificación UTF-8
+  con **fallback Windows-1252** para exports antiguos. El preview no escribe nada y devuelve un
+  `file_sha256`; el confirm reenvía el mismo archivo + sha (anti file-swap) más un `decisions[]`
+  paralelo por índice → 400 `preview_confirm_mismatch` si el sha o el nº de filas no cuadran.
+- **Dedup por huella**: `UNIQUE (installation, owner, fingerprint, fingerprint_ordinal)`; la huella se
+  computa en Rust (`source · op_date ISO · importe canónico 4dp · concepto normalizado`) y **nunca se
+  almacena** en el CSV/backup. El `ordinal` (`MAX+1` por huella) distingue ocurrencias repetidas del
+  mismo movimiento; forzar una fila `already_imported` incrementa el ordinal en vez de dar 409. Los
+  duplicados, las transferencias internas (heurística) y los movimientos en divisa ≠ EUR llegan al
+  preview **desmarcados** para que el usuario los revise.
+- **Categorización con reglas aprendidas**: al confirmar un import con categorías, se hace upsert de
+  una `categorization_rule` por patrón (derivado del concepto sin sufijos de referencia numérica);
+  el siguiente preview PRE-asigna kind+categoría. Precedencia: source-específica > agnóstica → exact
+  > prefix > substring → patrón más largo → `updated_at`. CRUD completo en `/v1/transactions/rules`.
+- **Efectivo manual**: alta individual (`POST /v1/transactions`) y multifila (`/batch`, ≤1000). El
+  usuario teclea una **magnitud** y el kind fija el signo (ingreso → +, gasto/ahorro → −, la
+  convención firmada del backend). `savings` no admite categoría (`savings_no_category`).
+- **Comparativa** (`GET /v1/transactions/summary`): mes real vs presupuesto vs promedio de N meses,
+  con magnitudes ≥0 para comparar (gasto = `−Σ`, ingreso = `+Σ`, ahorro = `−Σ`, con bloque propio y
+  excluido del consumo). Las cuotas de pasivo aparecen **solo en el lado budget** (`derived_debt_line`,
+  reutilizando `budget.rs`) — sus actuals ya viven en su categoría de gasto → **sin doble conteo**.
+- **Campos inmutables en importadas**: en una transacción con `import_id`, `op_date`/`amount`/`concept`
+  son inmutables por PATCH (protegen la huella) → 400 `immutable_field`; en manuales la huella se
+  recomputa. Borrar un lote (`DELETE /v1/transactions/imports/{id}?confirm=true`) deshace el import en
+  cascada.
+
+### Histórico — Cash-flow tier-2 y overlay fino del chart
+
+- **Nuevo endpoint** `GET /v1/history/cashflow`: dos capas independientes. (1) `months[]` — agregado
+  mensual **firmado** por kind (`expense`/`savings` ≤0, `income` ≥0, `net` = suma), Decimal-string,
+  contiguo `-window_months..=0`. (2) `fine` (opcional) — la curva fina de patrimonio (`weekly` default,
+  `daily` solo con `window_months ≤ 6` → si no, 400 `daily_window_too_large`) donde los deltas de las
+  transacciones vinculadas a un asset (pata cuenta del batch = `+amount`; pata destino de un ahorro =
+  `−amount`) **moldean** la curva **sin contradecir los snapshots**: pasa exacta por ambos extremos
+  (`v(t) = Va + C(a→t) + f·(Vb − Va − C_total)`, intervalo semiabierto `(a,t]`). Presente solo si hay
+  transacciones vinculadas Y snapshots que anclar. Sin cache; `spawn_blocking` solo en `daily`.
+- **Refactor puro de `GET /v1/history/series`**: el pipeline común (`fetch_history_scope` +
+  `accumulate_series`) se comparte; con un mapa de cash-flow vacío, la serie mensual de snapshots
+  queda **byte a byte idéntica** (test de regresión compara el JSON completo con y sin transacciones
+  sembradas; el engine garantiza P3: `cashflow` vacío ⇒ interpolación lineal textual).
+- **Overlay fino en el chart de patrimonio**: `ProjectionNetWorthChart` pinta la curva histórica fina
+  (`fine.grid` posicionado por `month_fraction` real, deflactado con el mismo deflator fraccional)
+  sobre la zona pasada; en la zona cubierta recorta la polilínea mensual y las une sin hueco. `daily`
+  se fetchea **lazy** al hacer zoom histórico reciente. Sin cash-flow o ante cualquier fallo de fetch,
+  el pasado queda exactamente como antes. La recarga está cableada a mutaciones de transacciones,
+  snapshots y cambio de scope.
+- **Sin impacto en la proyección**: ningún handler de `transactions` ni de `cashflow` llama a
+  `refresh_projection_after_mutation` — las transacciones no son inputs del engine (arranca en el mes
+  0 con el ledger vivo), así que invalidar la cache aquí solo tiraría una entrada caliente sin cambiar
+  ni un número. Regresión: `transactions_projection_cache.rs`.
+
+### Migración / compatibilidad
+
+- **Migración `20260707120000_transactions_and_rules.sql`**: crea tres tablas per-user —
+  `transaction_imports` (cabecera de un lote de CSV), `transactions` (movimiento datado y firmado) y
+  `categorization_rules` (reglas aprendidas). Semántica de FK deliberada: `import_id` ON DELETE
+  CASCADE (deshacer un import borra sus movimientos), `category_id` ON DELETE RESTRICT (categoría en
+  uso no se borra sin remap — `categories.rs` la incluye en el reference-count), `linked_asset_id`/
+  `linked_liability_id`/`account_asset_id`/`assign_category_id` ON DELETE SET NULL (el movimiento/regla
+  sobrevive al borrado de la fila de ledger/categoría).
+- **Datos**: sin pérdida de datos (tablas nuevas, aditivas). El histórico de gasto arranca vacío.
+- **Backups `.ffbackup`**: `schema_version` sube a **5** (`BackupPayloadV5` = V4 + `transaction_imports`
+  + `transactions` + `categorization_rules`). Refs por índice a los vecs del payload; la **huella se
+  recomputa al importar** (nunca se exporta), solo se lleva `fingerprint_ordinal`. Importar un backup
+  ≤v4 rellena las tres colecciones vacías (`payload_v4_to_v5`); la cadena v1→…→v5 sigue intacta.
+- **Dependencias nuevas** (`apps/api/Cargo.toml`): `csv` (parseo de los CSV bancarios), `encoding_rs`
+  (fallback Windows-1252) y `sha2` (el `file_sha256` del flujo preview→confirm).
+- **Sin breaking**: endpoints y tablas nuevos, backup retrocompatible; ningún payload ni ruta previa
+  cambia de forma.
+
+### Tests
+
+- **Integración (local)**: el módulo de transacciones añade 27 tests — `transactions_crud.rs`,
+  `transactions_import.rs`, `transactions_summary.rs`, `transactions_projection_cache.rs` (regresión
+  no-cache) — más el roundtrip v5 en `backup_user_roundtrip.rs` y fixtures anonimizados de ambos
+  bancos; el endpoint de cash-flow añade `history_cashflow.rs` (incl. el diff byte a byte de
+  `/history/series` con y sin transacciones). **Engine**: propiedades P1–P5 del anclaje de cash-flow
+  en `crates/engine/src/history.rs`. **Frontend**: Vitest de `lib/expenses.ts`.
+
 ## [1.5.1] — 2026-07-07
 
 Pequeña mejora sobre el histórico de v1.5.0: el modal de backfill deja de arrancar vacío. Ahora

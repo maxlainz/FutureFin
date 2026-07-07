@@ -46,13 +46,14 @@ Three suites. None share infrastructure; run all three before merging.
 
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
-| Engine unit tests (36) | `crates/engine/src/{projection.rs (22), history.rs (14)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
-| Backend integration (48 tests, 11 files) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
-| Frontend Vitest (104) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
+| Engine unit tests (43) | `crates/engine/src/{projection.rs (22), history.rs (21)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| Backend integration (90 tests, 16 files) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
+| Frontend Vitest (137) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
 
 Plus API lib unit tests run by `cargo test --workspace` (no Postgres): notably
-`apps/api/src/handlers/backup_user/schema.rs` `mod tests` (6; 4 added in v1.5.0 for `.ffbackup` v4
-migration/round-trip).
+`apps/api/src/handlers/backup_user/schema.rs` `mod tests` (8; 2 added in v1.6.0 for `.ffbackup` v5
+migration/round-trip) and the `handlers/transactions/` unit tests (CSV presets, fingerprint/ordinal,
+rule precedence).
 
 ### Backend integration — full invocation (verbatim)
 
@@ -108,11 +109,16 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
 | `projection_marker.rs` | 1 | regression capture: stable marker + starting NW across the perf refactor (the template for capture-first) |
 | `fire_parity.rs` | 1 (×6 fixture cases) | server `jubilacion_target_net_worth` matches `fire-parity.json` ± 1 € |
 | `projection_cache.rs` | 5 | cache hit faster than miss + identical body; invalidation on mutation; logout drops only `view=mine` entries; `density=hybrid` decimation (months 0–12 monthly, then 24,36,48…); monthly/hybrid cached as separate keys |
-| `history_snapshots.rs` | 12 | snapshot capture (copied terms) / same-day upsert / exclude shared+expired / backfill CRUD roundtrip with `year` filter + cascade / 400 validations (future, `duplicate_item_id`, terms-on-asset) / 409 date taken / 404 cross-user / 403 viewer on every mutation / GET never mutates / `snapshot_mutations_do_not_touch_projection_cache` (cache stays HIT — history is NOT a projection input) |
+| `history_snapshots.rs` | 20 | snapshot capture (copied terms) / same-day upsert / exclude shared+expired / backfill CRUD roundtrip with `year` filter + cascade / 400 validations (future, `duplicate_item_id`, terms-on-asset) / 409 date taken / 404 cross-user / 403 viewer on every mutation / GET never mutates / `snapshot_mutations_do_not_touch_projection_cache` (cache stays HIT — history is NOT a projection input) |
 | `history_series.rs` | 7 | `GET /v1/history/series`: empty→200, exact linear interpolation between two asset snapshots, join to live values (deleted asset→0 at k=0), amortization curve above the chord with exact endpoints, household sums two users + `?view=mine` filters, markers carry date/kind/total, single today snapshot. Numbers predicted before running |
-| `backup_user_roundtrip.rs` | 8 | `.ffbackup` v4: roundtrip with identical history series, item re-link to fresh asset UUIDs, null `ledger_index` keeps `item_key`, v3 still imports (0 snapshots), out-of-range index → 400 + rollback, import invalidates projection cache (pre-existing bug fix), preview reports snapshot/item counts, viewer 403 |
+| `backup_user_roundtrip.rs` | 10 | `.ffbackup` v4/v5: roundtrip with identical history series, item re-link to fresh asset UUIDs, null `ledger_index` keeps `item_key`, v3 still imports (0 snapshots), out-of-range index → 400 + rollback, import invalidates projection cache (pre-existing bug fix), preview reports snapshot/item counts, viewer 403; plus v5 (v1.6.0) transactions/imports/rules round-trip with index re-link and preserved `fingerprint_ordinal` |
+| `transactions_import.rs` | 9 | CSV import: MyInvestor/N26 header autodetection, preview flags `already_imported` (omitted by default), confirm inserts with ordinals, same-file re-confirm → 0 new, `force` appends a fresh ordinal, internal-transfer heuristic, learned rule pre-assigns on next preview, non-EUR rejected on confirm, viewer 403, preview↔confirm sha mismatch → 400 |
+| `transactions_crud.rs` | 13 | manual create/batch, `savings` requires NULL category, income/expense scope validation, immutable fingerprint fields on imported rows (400 `immutable_field`), deleting linked asset/liability SET NULLs the link keeping the row, category delete remaps transactions, viewer 403 |
+| `transactions_summary.rs` | 4 | exact Decimal per-category actual/budget/avg, 3/6/12 windows, partial month flagged, savings excluded from expense, «Sin categoría» bucket, derived-debt line budget-side only (no double count) |
+| `transactions_projection_cache.rs` | 1 | `transaction_mutations_do_not_touch_projection_cache` — projection cache stays HIT across import/create/edit/delete/rule writes (transactions are NOT engine inputs; mirror of the snapshots test) |
+| `history_cashflow.rs` | 5 | `GET /v1/history/cashflow`: exact monthly aggregates (Decimal-string, household + mine), fine series passes through snapshots, `/v1/history/series` byte-identical with and without transactions (tier-1 regression), `daily` with window >6m → 400, `fine` absent without links |
 
-### Frontend Vitest files (104 tests total)
+### Frontend Vitest files (137 tests total)
 
 Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/**/*.test.{ts,tsx}"]`,
 `globals: false` (import `describe/it/expect` from `vitest` explicitly).
@@ -313,8 +319,8 @@ the same day (CI claim, migration count, missing `projection_cache.rs` row). Re-
 facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
-- Engine test count: `grep -c "#\[test\]" crates/engine/src/projection.rs crates/engine/src/history.rs` (22 + 14 = 36)
-- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (48 total across 11 files)
+- Engine test count: `grep -c "#\[test\]" crates/engine/src/projection.rs crates/engine/src/history.rs` (22 + 21 = 43)
+- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (90 total across 16 files)
 - Migration count: `ls apps/api/migrations | wc -l` (32)
 - CI coverage claims: read `.github/workflows/ci.yml` (jobs: rust, web, docker-stack; grep it
   for `TEST_DATABASE_URL` — absent means integration tests still not in CI; grep for

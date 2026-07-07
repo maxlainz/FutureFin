@@ -18,8 +18,9 @@ description: >
 # FutureFin Architecture Contract
 
 Facts date-stamped **as of 2026-07-02, v1.4.3** (`apps/api/Cargo.toml`); D12 (historical
-snapshots) and the migration/backup-schema counts were added/refreshed for **v1.5.0** on
-2026-07-06. This is the contract a retiring principal engineer would make you sign: the decisions
+snapshots) and the migration/backup-schema counts were added/refreshed for **v1.5.0** on 2026-07-06
+and again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-07. This is the
+contract a retiring principal engineer would make you sign: the decisions
 below are settled, most of them by a documented incident. Do not re-litigate them casually; if you must change one, go through
 `.claude/skills/futurefin-change-control/SKILL.md`.
 
@@ -151,9 +152,10 @@ of looking at it. It was removed, not fixed. **Breaks if violated**: any mutatio
 reintroduces the class; `apps/api/tests/liabilities_purge.rs` guards this (local-only, see W1).
 
 ### D6. Migrations are embedded and fail loud
-`sqlx::migrate!("./migrations")` runs at startup (`db.rs::run_migrations`). 32 files in
-`apps/api/migrations/` as of 2026-07-06 (`ls apps/api/migrations | wc -l`; v1.5.0 added
-`20260706203746_history_snapshots.sql`). There is **no
+`sqlx::migrate!("./migrations")` runs at startup (`db.rs::run_migrations`). 33 files in
+`apps/api/migrations/` as of 2026-07-07 (`ls apps/api/migrations | wc -l`; v1.6.0 added
+`20260707120000_transactions_and_rules.sql`; v1.5.0 added `20260706203746_history_snapshots.sql`).
+There is **no
 auto-repair**: a checksum mismatch aborts startup and must be fixed by hand
 (`DELETE FROM _sqlx_migrations WHERE version = X` via psql, only if genuinely idempotent).
 **Incident**: v1.3.0 deleted the old auto-repair loop — it masked drift. Related incident
@@ -244,8 +246,11 @@ deliberately omitted, with an explicit comment in the handler and a regression t
 (projection stays cache-HIT across a snapshot mutation). Snapshots have **no cache of their own**
 (sub-ms compute) and the series endpoint takes no `?months`/`?density`. Shared rows
 (`owner_user_id IS NULL`) are never captured — a documented limitation. Snapshots are included in
-`.ffbackup` **schema_version 4** (additive over v3; import re-links items to fresh asset/liability
-UUIDs via `ledger_index`, else keeps `item_key`). **Breaks if violated**: wiring snapshot writes
+`.ffbackup` **schema_version 5** (snapshots additive in v4 over v3; v5 additionally carries
+`transactions`/`transaction_imports`/`categorization_rules` — v1.6.0; import re-links snapshot items
+to fresh asset/liability UUIDs via `ledger_index`, else keeps `item_key`). The same D12 no-cache
+contract covers the v1.6.0 **transactions** module (`handlers/transactions/`, guarded by
+`transactions_projection_cache.rs`). **Breaks if violated**: wiring snapshot writes
 into `refresh_projection_after_mutation` couples two independent subsystems and needlessly evicts
 a hot projection cache; conversely, ever feeding snapshot data into the engine would make past
 "observations" silently reshape the *future* projection — a category error.
@@ -309,7 +314,7 @@ files cited inline (not from memory of the docs — docs can drift, see W6). Re-
 volatile claims with:
 
 - Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md`.
-- Migration count: `ls apps/api/migrations | wc -l` (32 on 2026-07-06; 31 on 2026-07-02).
+- Migration count: `ls apps/api/migrations | wc -l` (33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
 - Engine purity deps (I8): `grep -E "tokio|sqlx|reqwest|axum" crates/engine/Cargo.toml` → empty.
 - Horizon rule (D11): `grep -n "LIFESPAN_AGE\|FALLBACK_YEARS\|clamp(12, 840)\|fallback_no_demographics" apps/api/src/handlers/projection.rs`.
 - Cache TTL/keys (D7): `grep -n "PROJECTION_CACHE_TTL\|ProjectionCacheKey\|invalidate_projection" apps/api/src/state.rs`.
