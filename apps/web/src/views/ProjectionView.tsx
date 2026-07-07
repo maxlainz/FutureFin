@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  HistoryCashflowApi,
   HistorySeriesApi,
   InstallationAccess,
   PlanningFlowApiRow,
@@ -33,6 +34,9 @@ export function ProjectionView({
   ledgerPersonScope,
   projectionSeries,
   historySeries,
+  cashflowSeries,
+  cashflowDaily,
+  onRequestDailyCashflow,
   projectionBusy,
   projectionError,
   userBirthDate,
@@ -45,6 +49,11 @@ export function ProjectionView({
   ledgerPersonScope: LedgerPersonScope;
   projectionSeries: ProjectionSeriesApi | null;
   historySeries: HistorySeriesApi | null;
+  /** Cash-flow histórico (weekly, ventana 24m) para el overlay fino del chart. Opcional. */
+  cashflowSeries: HistoryCashflowApi | null;
+  /** Detalle diario (ventana 6m), fetcheado lazy vía `onRequestDailyCashflow`. */
+  cashflowDaily: HistoryCashflowApi | null;
+  onRequestDailyCashflow?: () => void;
   projectionBusy: boolean;
   projectionError: string | null;
   userBirthDate: string | null;
@@ -251,6 +260,20 @@ export function ProjectionView({
                 ? historySeries
                 : null
             }
+            cashflow={
+              cashflowSeries &&
+              cashflowSeries.anchor_date_ymd ===
+                projectionSeries.anchor_date_ymd
+                ? cashflowSeries
+                : null
+            }
+            cashflowDaily={
+              cashflowDaily &&
+              cashflowDaily.anchor_date_ymd === projectionSeries.anchor_date_ymd
+                ? cashflowDaily
+                : null
+            }
+            onRequestDailyCashflow={onRequestDailyCashflow}
             milestones={nextMilestones}
             focusMode={focusMode}
             inflationAdjusted={inflationAdjusted}
