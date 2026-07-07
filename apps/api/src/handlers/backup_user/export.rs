@@ -21,8 +21,9 @@ use std::collections::HashMap;
 
 use super::crypto::{encrypt_payload, frame_file};
 use super::schema::{
-    BackupAllocationRule, BackupAsset, BackupBudgetEntry, BackupCategory, BackupLiability,
-    BackupPayload, BackupPlanningFlow, BackupSnapshot, BackupSnapshotItem, BackupUser, CategoryRef,
+    BackupAllocationRule, BackupAsset, BackupBudgetEntry, BackupCategorizationRule, BackupCategory,
+    BackupLiability, BackupPayload, BackupPlanningFlow, BackupSnapshot, BackupSnapshotItem,
+    BackupTransaction, BackupTransactionImport, BackupUser, CategoryRef,
     InstallationSnapshotInformative, UiPreferences, CURRENT_SCHEMA_VERSION,
 };
 
@@ -159,6 +160,18 @@ async fn build_payload(
         &liability_id_to_index,
     )
     .await?;
+    let (transaction_imports, import_id_to_index) =
+        fetch_transaction_imports(pool, iid, user_id, &asset_id_to_index).await?;
+    let transactions = fetch_transactions(
+        pool,
+        iid,
+        user_id,
+        &import_id_to_index,
+        &asset_id_to_index,
+        &liability_id_to_index,
+    )
+    .await?;
+    let categorization_rules = fetch_categorization_rules(pool, iid, user_id).await?;
 
     Ok(BackupPayload {
         user,
@@ -171,7 +184,150 @@ async fn build_payload(
         ui_preferences,
         installation_snapshot_informative: snapshot,
         snapshots,
+        transaction_imports,
+        transactions,
+        categorization_rules,
     })
+}
+
+/// CSV import batches (schema_version ≥ 5). Returns the batches plus an `import_id → index` map so
+/// transactions can carry an `import_index`.
+async fn fetch_transaction_imports(
+    pool: &PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    asset_id_to_index: &HashMap<Uuid, usize>,
+) -> Result<(Vec<BackupTransactionImport>, HashMap<Uuid, usize>), ApiError> {
+    let rows: Vec<(Uuid, String, Option<Uuid>, Option<String>)> = sqlx::query_as(
+        r#"SELECT id, source, account_asset_id, original_filename
+           FROM transaction_imports
+           WHERE installation_id = $1 AND owner_user_id = $2
+           ORDER BY created_at ASC, id ASC"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut id_to_index = HashMap::with_capacity(rows.len());
+    let imports = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, source, account_asset_id, original_filename))| {
+            id_to_index.insert(id, i);
+            BackupTransactionImport {
+                source,
+                account_asset_index: account_asset_id.and_then(|a| asset_id_to_index.get(&a).copied()),
+                original_filename,
+            }
+        })
+        .collect();
+    Ok((imports, id_to_index))
+}
+
+/// Dated transactions (schema_version ≥ 5). The fingerprint is NOT exported (recomputed on
+/// import); `fingerprint_ordinal` is. Category is denormalized to `(scope, name)`.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_transactions(
+    pool: &PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    import_id_to_index: &HashMap<Uuid, usize>,
+    asset_id_to_index: &HashMap<Uuid, usize>,
+    liability_id_to_index: &HashMap<Uuid, usize>,
+) -> Result<Vec<BackupTransaction>, ApiError> {
+    type Row = (
+        Option<Uuid>,   // import_id
+        String,         // source
+        NaiveDate,      // op_date
+        Option<NaiveDate>, // value_date
+        String,         // concept
+        Decimal,        // amount
+        String,         // currency
+        Option<String>, // kind
+        Option<String>, // cat_scope
+        Option<String>, // cat_name
+        i32,            // fingerprint_ordinal
+        Option<Uuid>,   // linked_asset_id
+        Option<Uuid>,   // linked_liability_id
+        Option<String>, // notes
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"SELECT t.import_id, t.source, t.op_date, t.value_date, t.concept, t.amount, t.currency,
+                  t.kind, c.scope AS cat_scope, c.name AS cat_name, t.fingerprint_ordinal,
+                  t.linked_asset_id, t.linked_liability_id, t.notes
+           FROM transactions t
+           LEFT JOIN categories c ON c.id = t.category_id
+           WHERE t.installation_id = $1 AND t.owner_user_id = $2
+           ORDER BY t.op_date ASC, t.created_at ASC, t.id ASC"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let category_ref = match (r.8, r.9) {
+                (Some(scope), Some(name)) => Some(CategoryRef { scope, name }),
+                _ => None,
+            };
+            BackupTransaction {
+                import_index: r.0.and_then(|id| import_id_to_index.get(&id).copied()),
+                source: r.1,
+                op_date: r.2,
+                value_date: r.3,
+                concept: r.4,
+                amount: r.5,
+                currency: r.6,
+                kind: r.7,
+                category_ref,
+                fingerprint_ordinal: r.10,
+                linked_asset_index: r.11.and_then(|a| asset_id_to_index.get(&a).copied()),
+                linked_liability_index: r.12.and_then(|l| liability_id_to_index.get(&l).copied()),
+                notes: r.13,
+            }
+        })
+        .collect())
+}
+
+/// Categorization rules (schema_version ≥ 5). `assign_category_id` is denormalized to `(scope, name)`.
+async fn fetch_categorization_rules(
+    pool: &PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+) -> Result<Vec<BackupCategorizationRule>, ApiError> {
+    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            r#"SELECT r.match_kind, r.pattern, r.source, r.assign_kind,
+                      c.scope AS cat_scope, c.name AS cat_name
+               FROM categorization_rules r
+               LEFT JOIN categories c ON c.id = r.assign_category_id
+               WHERE r.installation_id = $1 AND r.owner_user_id = $2
+               ORDER BY r.created_at ASC, r.id ASC"#,
+        )
+        .bind(iid)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(match_kind, pattern, source, assign_kind, cat_scope, cat_name)| {
+            let assign_category_ref = match (cat_scope, cat_name) {
+                (Some(scope), Some(name)) => Some(CategoryRef { scope, name }),
+                _ => None,
+            };
+            BackupCategorizationRule {
+                match_kind,
+                pattern,
+                source,
+                assign_kind,
+                assign_category_ref,
+            }
+        })
+        .collect())
 }
 
 /// Returns the exportable assets plus a map `(asset_id) → index in the vec` so we can
@@ -508,6 +664,8 @@ async fn fetch_categories_used(
                 OR EXISTS (SELECT 1 FROM liabilities l WHERE l.category_id = c.id AND l.owner_user_id = $2)
                 OR EXISTS (SELECT 1 FROM budget_entries b WHERE b.category_id = c.id AND b.owner_user_id = $2)
                 OR EXISTS (SELECT 1 FROM planning_flows p WHERE p.category_id = c.id AND p.owner_user_id = $2)
+                OR EXISTS (SELECT 1 FROM transactions t WHERE t.category_id = c.id AND t.owner_user_id = $2)
+                OR EXISTS (SELECT 1 FROM categorization_rules r WHERE r.assign_category_id = c.id AND r.owner_user_id = $2)
              )
            ORDER BY c.scope ASC, c.sort_index ASC, c.name ASC"#,
     )

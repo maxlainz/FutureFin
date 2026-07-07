@@ -1,0 +1,358 @@
+//! Integración del import de CSV bancario (`/v1/transactions/import/*`).
+//!
+//! Cubre autodetección (MyInvestor/N26), decodificación Windows-1252, sugerencias de
+//! kind/categoría/transferencia, dedup por huella + ordinales + force, reglas aprendidas,
+//! viewer 403 y sha mismatch. Los CSV son fixtures anonimizados de los bancos reales.
+
+mod common;
+
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use common::{ResponseParts, TestApp};
+use serde_json::{json, Value};
+
+fn fixture_b64(name: &str) -> String {
+    let path = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read fixture {name}: {e}"));
+    B64.encode(bytes)
+}
+
+async fn preview(app: &TestApp, cookie: &str, source: &str, file_b64: &str) -> ResponseParts {
+    app.post_json_with_cookie(
+        "/v1/transactions/import/preview",
+        json!({ "source": source, "file_b64": file_b64 }),
+        cookie,
+    )
+    .await
+}
+
+/// Construye `decisions[]` paralelo a las filas del preview: descarta las transferencias
+/// sugeridas, propaga kind/categoría sugeridos.
+fn decisions_from_preview(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .map(|r| {
+            json!({
+                "discard": r["suggested_transfer"].as_bool().unwrap_or(false),
+                "kind": r["suggested_kind"],
+                "category_id": r["suggested_category_id"],
+            })
+        })
+        .collect()
+}
+
+async fn confirm(
+    app: &TestApp,
+    cookie: &str,
+    source: &str,
+    file_b64: &str,
+    sha: &str,
+    decisions: Vec<Value>,
+    learn_rules: bool,
+) -> ResponseParts {
+    app.post_json_with_cookie(
+        "/v1/transactions/import/confirm",
+        json!({
+            "source": source,
+            "file_b64": file_b64,
+            "file_sha256": sha,
+            "decisions": decisions,
+            "learn_rules": learn_rules,
+        }),
+        cookie,
+    )
+    .await
+}
+
+fn row_by_concept<'a>(rows: &'a [Value], needle: &str) -> &'a Value {
+    rows.iter()
+        .find(|r| r["concept"].as_str().unwrap_or("").contains(needle))
+        .unwrap_or_else(|| panic!("no preview row containing '{needle}'"))
+}
+
+// ---------------------------------------------------------------------------
+// Autodetección + sugerencias (MyInvestor)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn myinvestor_autodetect_and_suggestions() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let b64 = fixture_b64("myinvestor_junio.csv");
+
+    let resp = preview(&app, &owner.cookie, "auto", &b64).await;
+    assert_eq!(resp.status, http::StatusCode::OK, "preview: {resp:?}");
+    let body = resp.json();
+    assert_eq!(body["source"], "myinvestor", "autodetección");
+    let rows = body["rows"].as_array().unwrap();
+    let n = rows.len() as u64;
+    assert!(n > 20, "esperadas >20 filas, got {n}");
+    // Primer import → todo nuevo.
+    assert_eq!(body["new_count"].as_u64(), Some(n));
+    assert_eq!(body["already_imported_count"].as_u64(), Some(0));
+
+    // Nómina (positiva, sin regla) → income.
+    assert_eq!(row_by_concept(rows, "Nomina Juny")["suggested_kind"], "income");
+    // Cargo (negativo) → expense.
+    assert_eq!(row_by_concept(rows, "NYX")["suggested_kind"], "expense");
+    // Aportación cartera → savings (heurística).
+    assert_eq!(
+        row_by_concept(rows, "Aportacion automatica cartera")["suggested_kind"],
+        "savings"
+    );
+    // Transferencias internas → sugeridas descarte.
+    assert_eq!(
+        row_by_concept(rows, "Transferencia desde MyInvestor")["suggested_transfer"],
+        true
+    );
+    assert_eq!(row_by_concept(rows, "Enviada desde N26")["suggested_transfer"], true);
+    assert_eq!(row_by_concept(rows, "estalvi")["suggested_transfer"], true);
+
+    // Confirmar descartando transferencias.
+    let decisions = decisions_from_preview(rows);
+    let discard_count = decisions.iter().filter(|d| d["discard"] == true).count() as u64;
+    let sha = body["file_sha256"].as_str().unwrap();
+    let cresp = confirm(&app, &owner.cookie, "auto", &b64, sha, decisions, true).await;
+    assert_eq!(cresp.status, http::StatusCode::OK, "confirm: {cresp:?}");
+    let cbody = cresp.json();
+    assert_eq!(cbody["imported"].as_u64(), Some(n - discard_count));
+    assert_eq!(cbody["discarded"].as_u64(), Some(discard_count));
+    assert!(cbody["import_id"].is_string(), "import_id presente");
+
+    // Re-preview del mismo archivo → todo ya importado (salvo lo descartado, que nunca entró).
+    let re = preview(&app, &owner.cookie, "auto", &b64).await;
+    let rbody = re.json();
+    let non_discarded = n - discard_count;
+    assert_eq!(
+        rbody["already_imported_count"].as_u64(),
+        Some(non_discarded),
+        "las no-descartadas deben aparecer ya importadas"
+    );
+    // Re-confirmar sin forzar → 0 nuevos.
+    let re_rows = rbody["rows"].as_array().unwrap();
+    let re_decisions = decisions_from_preview(re_rows);
+    let re_sha = rbody["file_sha256"].as_str().unwrap();
+    let re_conf = confirm(&app, &owner.cookie, "auto", &b64, re_sha, re_decisions, false).await;
+    assert_eq!(re_conf.json()["imported"].as_u64(), Some(0), "re-import: 0 nuevos");
+}
+
+// ---------------------------------------------------------------------------
+// Dedup por huella: ordinales + force
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dedup_ordinals_and_force() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // Dos filas idénticas (misma fecha/importe/concepto) → dos ocurrencias distintas.
+    let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+               10/06/2026;10/06/2026;CAFE DUPLICADO;-3;EUR\n\
+               10/06/2026;10/06/2026;CAFE DUPLICADO;-3;EUR\n";
+    let b64 = B64.encode(csv);
+
+    let p1 = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let b1 = p1.json();
+    // Sin nada en BD: ambas ocurrencias son "new".
+    assert_eq!(b1["new_count"].as_u64(), Some(2));
+    let sha = b1["file_sha256"].as_str().unwrap();
+    let decisions = decisions_from_preview(b1["rows"].as_array().unwrap());
+    let c1 = confirm(&app, &owner.cookie, "myinvestor", &b64, sha, decisions, false).await;
+    assert_eq!(c1.json()["imported"].as_u64(), Some(2), "ambas ocurrencias importadas");
+
+    // Re-preview: ahora existen 2 en BD → ambas ya importadas.
+    let p2 = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let b2 = p2.json();
+    assert_eq!(b2["already_imported_count"].as_u64(), Some(2));
+    assert_eq!(b2["new_count"].as_u64(), Some(0));
+
+    // Forzar la primera fila → nueva ocurrencia (ordinal siguiente).
+    let sha2 = b2["file_sha256"].as_str().unwrap();
+    let decisions2 = vec![
+        json!({ "force": true, "kind": "expense" }),
+        json!({ "discard": true, "kind": "expense" }),
+    ];
+    let c2 = confirm(&app, &owner.cookie, "myinvestor", &b64, sha2, decisions2, false).await;
+    let cb2 = c2.json();
+    assert_eq!(cb2["imported"].as_u64(), Some(1), "forzada → 1 importada");
+    assert_eq!(cb2["discarded"].as_u64(), Some(1));
+
+    // Ahora hay 3 transacciones CAFE DUPLICADO.
+    assert_eq!(app.count_rows("transactions").await, 3);
+}
+
+// ---------------------------------------------------------------------------
+// Transferencias internas (N26): par opuesto + "Cuenta de Ahorro"
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn n26_transfers_suggested() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let b64 = fixture_b64("n26_junio.csv");
+
+    let resp = preview(&app, &owner.cookie, "auto", &b64).await;
+    assert_eq!(resp.status, http::StatusCode::OK, "preview: {resp:?}");
+    let body = resp.json();
+    assert_eq!(body["source"], "n26");
+    let rows = body["rows"].as_array().unwrap();
+
+    // Par opuesto −26 / +26 el mismo día → ambos sugeridos transferencia.
+    let sopar = row_by_concept(rows, "Sopar");
+    assert_eq!(sopar["suggested_transfer"], true, "−26 par opuesto");
+    // "Cuenta de Ahorro" (partner) → transferencia.
+    assert_eq!(
+        row_by_concept(rows, "Cuenta de Ahorro")["suggested_transfer"],
+        true
+    );
+    // Cross-bank +600 "Transferencia desde MyInvestor" → token de transferencia.
+    assert_eq!(
+        row_by_concept(rows, "Transferencia desde MyInvestor")["suggested_transfer"],
+        true
+    );
+    assert!(body["suggested_transfer_count"].as_u64().unwrap() >= 5);
+
+    // El importe `-26.000000000` se normaliza a 4 dp: la fila conserva -26.0000.
+    let amt = sopar["amount"].as_str().unwrap();
+    assert_eq!(amt.parse::<f64>().unwrap(), -26.0);
+}
+
+// ---------------------------------------------------------------------------
+// Reglas aprendidas
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn learned_rules_precategorize() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Supermercado").await;
+    let b64 = fixture_b64("n26_junio.csv");
+
+    let p = preview(&app, &owner.cookie, "auto", &b64).await;
+    let body = p.json();
+    let rows = body["rows"].as_array().unwrap();
+
+    // Categorizar las filas CONSUM como Supermercado; el resto según sugerencia (descartando transferencias).
+    let decisions: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            if r["concept"].as_str().unwrap_or("").contains("CONSUM") {
+                json!({ "kind": "expense", "category_id": super_cat })
+            } else {
+                json!({
+                    "discard": r["suggested_transfer"].as_bool().unwrap_or(false),
+                    "kind": r["suggested_kind"],
+                    "category_id": r["suggested_category_id"],
+                })
+            }
+        })
+        .collect();
+    let sha = body["file_sha256"].as_str().unwrap();
+    let c = confirm(&app, &owner.cookie, "auto", &b64, sha, decisions, true).await;
+    assert_eq!(c.status, http::StatusCode::OK, "confirm: {c:?}");
+    assert!(c.json()["rules_learned"].as_u64().unwrap() >= 1, "≥1 regla aprendida");
+
+    // GET /rules → existe una regla que asigna Supermercado con patrón derivado de CONSUM.
+    let rules = app.get_with_cookie("/v1/transactions/rules", &owner.cookie).await;
+    let rbody = rules.json();
+    let arr = rbody.as_array().unwrap();
+    let found = arr.iter().any(|r| {
+        r["assign_category_id"] == json!(super_cat)
+            && r["pattern"].as_str().unwrap_or("").contains("CONSUM")
+            && r["source"] == "n26"
+    });
+    assert!(found, "regla CONSUM→Supermercado no encontrada: {rbody:?}");
+
+    // Re-preview → las filas CONSUM llegan pre-categorizadas por la regla.
+    let re = preview(&app, &owner.cookie, "auto", &b64).await;
+    let re_rows = re.json();
+    let consum = row_by_concept(re_rows["rows"].as_array().unwrap(), "CONSUM");
+    assert_eq!(consum["suggested_category_id"], json!(super_cat), "pre-categorizada");
+    assert!(consum["matched_rule_id"].is_string(), "matched_rule_id presente");
+}
+
+// ---------------------------------------------------------------------------
+// Windows-1252
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn windows1252_decoding() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let b64 = fixture_b64("myinvestor_win1252.csv");
+
+    let resp = preview(&app, &owner.cookie, "auto", &b64).await;
+    assert_eq!(resp.status, http::StatusCode::OK, "win1252 preview: {resp:?}");
+    let body = resp.json();
+    assert_eq!(body["source"], "myinvestor");
+    let rows = body["rows"].as_array().unwrap();
+    // Los acentos y el € se decodifican correctamente.
+    let cafe = row_by_concept(rows, "Café");
+    assert!(cafe["concept"].as_str().unwrap().contains("€"), "€ decodificado");
+    row_by_concept(rows, "Nómina");
+    // Importe español -3,50 → -3.5.
+    assert_eq!(cafe["amount"].as_str().unwrap().parse::<f64>().unwrap(), -3.5);
+}
+
+// ---------------------------------------------------------------------------
+// Guardias: viewer 403, sha mismatch
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn viewer_cannot_import_403() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let viewer = app.register_and_approve_member(&owner, "vic", "viewer").await;
+    let b64 = fixture_b64("myinvestor_junio.csv");
+
+    let p = preview(&app, &viewer.cookie, "auto", &b64).await;
+    assert_eq!(p.status, http::StatusCode::FORBIDDEN, "viewer preview 403");
+    let c = confirm(&app, &viewer.cookie, "auto", &b64, "deadbeef", vec![], true).await;
+    assert_eq!(c.status, http::StatusCode::FORBIDDEN, "viewer confirm 403");
+}
+
+#[tokio::test]
+async fn confirm_sha_mismatch_400() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let b64 = fixture_b64("myinvestor_junio.csv");
+
+    let p = preview(&app, &owner.cookie, "auto", &b64).await;
+    let rows = p.json()["rows"].as_array().unwrap().clone();
+    let decisions = decisions_from_preview(&rows);
+    // sha que no corresponde al archivo.
+    let c = confirm(&app, &owner.cookie, "auto", &b64, "0000", decisions, true).await;
+    assert_eq!(c.status, http::StatusCode::BAD_REQUEST, "sha mismatch: {c:?}");
+    assert!(c.json()["message"].as_str().unwrap().contains("preview_confirm_mismatch"));
+}
+
+#[tokio::test]
+async fn confirm_decisions_count_mismatch_400() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let b64 = fixture_b64("myinvestor_junio.csv");
+    let p = preview(&app, &owner.cookie, "auto", &b64).await;
+    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    // Solo 1 decisión para muchas filas.
+    let c = confirm(
+        &app,
+        &owner.cookie,
+        "auto",
+        &b64,
+        &sha,
+        vec![json!({ "kind": "expense" })],
+        true,
+    )
+    .await;
+    assert_eq!(c.status, http::StatusCode::BAD_REQUEST);
+    assert!(c.json()["message"].as_str().unwrap().contains("preview_confirm_mismatch"));
+}
+
+#[tokio::test]
+async fn unrecognized_source_400() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // CSV que no matchea ningún preset.
+    let b64 = B64.encode("col1,col2\nfoo,bar\n");
+    let p = preview(&app, &owner.cookie, "auto", &b64).await;
+    assert_eq!(p.status, http::StatusCode::BAD_REQUEST);
+    assert!(p.json()["message"].as_str().unwrap().contains("csv_preset_unrecognized"));
+}
