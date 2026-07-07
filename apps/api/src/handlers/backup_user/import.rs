@@ -55,6 +55,12 @@ pub struct ImportCounts {
     pub snapshots: u32,
     /// Total history snapshot items across all snapshots in the backup.
     pub snapshot_items: u32,
+    /// CSV import batches in the backup (schema_version ≥ 5; 0 for older files).
+    pub transaction_imports: u32,
+    /// Dated transactions in the backup (schema_version ≥ 5; 0 for older files).
+    pub transactions: u32,
+    /// Categorization rules in the backup (schema_version ≥ 5; 0 for older files).
+    pub categorization_rules: u32,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -145,6 +151,31 @@ pub async fn import_user_backup_apply(
     //    doing it first keeps the whole wipe deterministic. Items cascade via ON DELETE CASCADE.
     sqlx::query(
         r#"DELETE FROM history_snapshots WHERE installation_id = $1 AND owner_user_id = $2"#,
+    )
+    .bind(iid)
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
+    //    transactions + their import batches next (schema_version ≥ 5). Deleting the batch would
+    //    cascade to its transactions, but we delete both explicitly before assets/liabilities so
+    //    the SET NULL FKs (linked_asset_id/linked_liability_id) never fire mid-wipe and the whole
+    //    order stays deterministic. categorization_rules follow (their FK to categories is SET NULL).
+    sqlx::query(
+        r#"DELETE FROM transactions WHERE installation_id = $1 AND owner_user_id = $2"#,
+    )
+    .bind(iid)
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"DELETE FROM transaction_imports WHERE installation_id = $1 AND owner_user_id = $2"#,
+    )
+    .bind(iid)
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"DELETE FROM categorization_rules WHERE installation_id = $1 AND owner_user_id = $2"#,
     )
     .bind(iid)
     .bind(user.id.0)
@@ -277,6 +308,9 @@ async fn compute_counts(
         categories_to_create: in_backup.saturating_sub(already_present),
         snapshots: payload.snapshots.len() as u32,
         snapshot_items,
+        transaction_imports: payload.transaction_imports.len() as u32,
+        transactions: payload.transactions.len() as u32,
+        categorization_rules: payload.categorization_rules.len() as u32,
     })
 }
 
@@ -625,6 +659,165 @@ async fn insert_payload(
         }
     }
 
+    // Insert CSV import batches (schema_version ≥ 5): `account_asset_index` → fresh asset UUID.
+    let mut new_import_ids: Vec<Uuid> = Vec::with_capacity(payload.transaction_imports.len());
+    let mut transaction_imports = 0u32;
+    for imp in &payload.transaction_imports {
+        let account_asset_id = match imp.account_asset_index {
+            Some(i) => Some(*new_asset_ids.get(i).ok_or_else(|| {
+                ApiError::BadRequest("transaction_import.account_asset_index out of bounds".into())
+            })?),
+            None => None,
+        };
+        let new_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO transaction_imports
+                   (id, installation_id, owner_user_id, source, account_asset_id, original_filename)
+               VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(new_id)
+        .bind(iid)
+        .bind(user_id)
+        .bind(&imp.source)
+        .bind(account_asset_id)
+        .bind(imp.original_filename.as_deref())
+        .execute(&mut **tx)
+        .await?;
+        new_import_ids.push(new_id);
+        transaction_imports += 1;
+    }
+
+    // Insert transactions: all refs resolved to fresh UUIDs, fingerprint recomputed (never
+    // exported), CHECK-backed fields validated in Rust → 400 (not a 500 from the constraint).
+    let mut transactions = 0u32;
+    for t in &payload.transactions {
+        if t.currency != "EUR" {
+            return Err(ApiError::BadRequest(
+                "transaction_currency_invalid: currency must be 'EUR'".into(),
+            ));
+        }
+        if let Some(k) = t.kind.as_deref() {
+            if !matches!(k, "expense" | "income" | "savings") {
+                return Err(ApiError::BadRequest(
+                    "transaction_kind_invalid: kind must be expense, income or savings".into(),
+                ));
+            }
+        }
+        let concept = t.concept.trim();
+        if concept.is_empty() {
+            return Err(ApiError::BadRequest(
+                "transaction_concept_empty: concept must not be empty".into(),
+            ));
+        }
+        if concept.chars().count() > 500 {
+            return Err(ApiError::BadRequest(
+                "transaction_concept_too_long: concept must be at most 500 characters".into(),
+            ));
+        }
+        let import_id_ref = match t.import_index {
+            Some(i) => Some(*new_import_ids.get(i).ok_or_else(|| {
+                ApiError::BadRequest("transaction.import_index out of bounds".into())
+            })?),
+            None => None,
+        };
+        let category_id = match &t.category_ref {
+            Some(cr) => Some(resolve_category(cat_map, &cr.scope, &cr.name)?),
+            None => None,
+        };
+        let linked_asset_id = match t.linked_asset_index {
+            Some(i) => Some(*new_asset_ids.get(i).ok_or_else(|| {
+                ApiError::BadRequest("transaction.linked_asset_index out of bounds".into())
+            })?),
+            None => None,
+        };
+        let linked_liability_id = match t.linked_liability_index {
+            Some(i) => Some(*new_liability_ids.get(i).ok_or_else(|| {
+                ApiError::BadRequest("transaction.linked_liability_index out of bounds".into())
+            })?),
+            None => None,
+        };
+        let amount = t.amount.round_dp(4);
+        let fingerprint =
+            crate::handlers::transactions::schema::compute_fingerprint(&t.source, t.op_date, amount, concept);
+        sqlx::query(
+            r#"INSERT INTO transactions
+                   (id, installation_id, owner_user_id, import_id, source, op_date, value_date,
+                    concept, amount, currency, kind, category_id, fingerprint, fingerprint_ordinal,
+                    linked_asset_id, linked_liability_id, notes)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(iid)
+        .bind(user_id)
+        .bind(import_id_ref)
+        .bind(&t.source)
+        .bind(t.op_date)
+        .bind(t.value_date)
+        .bind(concept)
+        .bind(amount)
+        .bind(&t.currency)
+        .bind(t.kind.as_deref())
+        .bind(category_id)
+        .bind(&fingerprint)
+        .bind(t.fingerprint_ordinal)
+        .bind(linked_asset_id)
+        .bind(linked_liability_id)
+        .bind(t.notes.as_deref())
+        .execute(&mut **tx)
+        .await?;
+        transactions += 1;
+    }
+
+    // Insert categorization rules.
+    let mut categorization_rules = 0u32;
+    for r in &payload.categorization_rules {
+        if !matches!(r.match_kind.as_str(), "substring" | "prefix" | "exact") {
+            return Err(ApiError::BadRequest(
+                "rule_match_kind_invalid: match_kind must be substring, prefix or exact".into(),
+            ));
+        }
+        if let Some(k) = r.assign_kind.as_deref() {
+            if !matches!(k, "expense" | "income" | "savings") {
+                return Err(ApiError::BadRequest(
+                    "rule_assign_kind_invalid: assign_kind must be expense, income or savings".into(),
+                ));
+            }
+        }
+        let pattern = r.pattern.trim();
+        if pattern.is_empty() {
+            return Err(ApiError::BadRequest(
+                "rule_pattern_empty: pattern must not be empty".into(),
+            ));
+        }
+        if pattern.chars().count() > 500 {
+            return Err(ApiError::BadRequest(
+                "rule_pattern_too_long: pattern must be at most 500 characters".into(),
+            ));
+        }
+        let assign_category_id = match &r.assign_category_ref {
+            Some(cr) => Some(resolve_category(cat_map, &cr.scope, &cr.name)?),
+            None => None,
+        };
+        let source = r.source.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        sqlx::query(
+            r#"INSERT INTO categorization_rules
+                   (id, installation_id, owner_user_id, match_kind, pattern, source,
+                    assign_kind, assign_category_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(iid)
+        .bind(user_id)
+        .bind(&r.match_kind)
+        .bind(pattern)
+        .bind(source)
+        .bind(r.assign_kind.as_deref())
+        .bind(assign_category_id)
+        .execute(&mut **tx)
+        .await?;
+        categorization_rules += 1;
+    }
+
     Ok(ImportCounts {
         assets,
         liabilities,
@@ -635,6 +828,9 @@ async fn insert_payload(
         categories_to_create: 0,
         snapshots,
         snapshot_items,
+        transaction_imports,
+        transactions,
+        categorization_rules,
     })
 }
 

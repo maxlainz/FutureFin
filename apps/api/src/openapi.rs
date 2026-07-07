@@ -57,6 +57,20 @@ use crate::handlers::categories::{
 };
 #[allow(unused_imports)]
 use crate::handlers::projection::__path_get_projection_series;
+#[allow(unused_imports)]
+use crate::handlers::transactions::crud::{
+    __path_create_batch, __path_create_transaction, __path_delete_import,
+    __path_delete_transaction, __path_list_imports, __path_list_months, __path_list_transactions,
+    __path_patch_transaction,
+};
+#[allow(unused_imports)]
+use crate::handlers::transactions::import::{__path_import_confirm, __path_import_preview};
+#[allow(unused_imports)]
+use crate::handlers::transactions::rules::{
+    __path_create_rule, __path_delete_rule, __path_list_rules, __path_patch_rule,
+};
+#[allow(unused_imports)]
+use crate::handlers::transactions::summary::__path_get_transactions_summary;
 use axum::Json;
 use utoipa::OpenApi;
 
@@ -110,6 +124,21 @@ use utoipa::OpenApi;
         delete_snapshot,
         prefill_snapshot,
         get_history_series,
+        import_preview,
+        import_confirm,
+        create_transaction,
+        create_batch,
+        list_transactions,
+        list_months,
+        patch_transaction,
+        delete_transaction,
+        list_imports,
+        delete_import,
+        list_rules,
+        create_rule,
+        patch_rule,
+        delete_rule,
+        get_transactions_summary,
         export_user_backup,
         import_user_backup_preview,
         import_user_backup_apply,
@@ -177,6 +206,26 @@ use utoipa::OpenApi;
         crate::handlers::history::HistoryMarker,
         crate::handlers::history::PrefillResponse,
         crate::handlers::history::PrefillItemResponse,
+        crate::handlers::transactions::TransactionResponse,
+        crate::handlers::transactions::MonthEntry,
+        crate::handlers::transactions::ImportBatchResponse,
+        crate::handlers::transactions::CreateTransactionBody,
+        crate::handlers::transactions::BatchCreateBody,
+        crate::handlers::transactions::PatchTransactionBody,
+        crate::handlers::transactions::ImportPreviewBody,
+        crate::handlers::transactions::PreviewRow,
+        crate::handlers::transactions::ImportPreviewResponse,
+        crate::handlers::transactions::ImportDecision,
+        crate::handlers::transactions::ImportConfirmBody,
+        crate::handlers::transactions::ImportConfirmResponse,
+        crate::handlers::transactions::RuleResponse,
+        crate::handlers::transactions::CreateRuleBody,
+        crate::handlers::transactions::PatchRuleBody,
+        crate::handlers::transactions::CategoryComparisonLine,
+        crate::handlers::transactions::DerivedDebtLine,
+        crate::handlers::transactions::schema::BlockActualAvg,
+        crate::handlers::transactions::schema::SummaryTotals,
+        crate::handlers::transactions::TransactionsSummaryResponse,
         crate::handlers::backup_user::ExportRequest,
         crate::handlers::backup_user::ImportRequest,
         crate::handlers::backup_user::ImportPreviewResponse,
@@ -235,6 +284,10 @@ use utoipa::OpenApi;
         (
             name = "history",
             description = "Snapshots históricos manuales de patrimonio (per-user). Captura desde el ledger propio (upsert por día) o backfill editable. CRUD Decimal-as-string; no invalidan la cache de proyección."
+        ),
+        (
+            name = "transactions",
+            description = "Histórico de gasto mensual (per-user): import de CSV bancario (MyInvestor/N26) o efectivo a mano, categorización con reglas aprendidas, y comparativa mes real vs presupuesto vs promedio. Decimal-as-string; no invalidan la cache de proyección."
         ),
     ),
 )]
