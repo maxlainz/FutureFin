@@ -371,7 +371,9 @@ export function buildProjectionChartLayout(
   const legendCharPx = 7.6;
   const legendSwatchPx = 24 + 8;
   const legendRightAnchor = ml + pw;
-  const legendBudgetWidth = Math.max(180, Math.round(pw * 0.66));
+  // En narrow la leyenda no comparte banda con la cabecera (se coloca DEBAJO,
+  // ver mt más abajo), así que puede usar todo el ancho del plot.
+  const legendBudgetWidth = narrow ? pw : Math.max(180, Math.round(pw * 0.66));
   const itemWidths = legendLabels.map(
     (label) => legendSwatchPx + label.length * legendCharPx,
   );
@@ -406,7 +408,9 @@ export function buildProjectionChartLayout(
         sum + itemWidths[itemIdx] + (idx > 0 ? legendItemGap : 0),
       0,
     );
-    let cursor = legendRightAnchor - rowTotal;
+    // Narrow: filas alineadas a la izquierda bajo la cabecera (misma ancla que
+    // el headline). Ancho: derecha-anclada, compartiendo banda con la cabecera.
+    let cursor = narrow ? ml : legendRightAnchor - rowTotal;
     for (const itemIdx of row) {
       placements[itemIdx] = { x: cursor, y: rowIdx * legendRowHeight };
       cursor += itemWidths[itemIdx] + legendItemGap;
@@ -417,11 +421,14 @@ export function buildProjectionChartLayout(
   const legendVerticalPad = 18;
   const headlineBlockTopY = 34;
   const headlineBlockBottom = headlineBlockTopY + 40 + 14;
-  const mt = Math.max(
-    legendBlockHeight + legendVerticalPad * 2,
-    headlineBlockBottom,
-  );
-  const legendY = Math.round((mt - legendBlockHeight) / 2);
+  // Narrow: cabecera y leyenda no caben lado a lado (se solapaban a <560px,
+  // detectado en QA v1.7.0) → la leyenda baja a su propia banda bajo la cabecera.
+  const mt = narrow
+    ? headlineBlockBottom + legendBlockHeight + legendVerticalPad
+    : Math.max(legendBlockHeight + legendVerticalPad * 2, headlineBlockBottom);
+  const legendY = narrow
+    ? headlineBlockBottom - 4
+    : Math.round((mt - legendBlockHeight) / 2);
   const ph = H - mt - mb;
 
   const legend = { x: 0, y: legendY };

@@ -92,7 +92,9 @@ CSS no admite `var()` dentro de `@media`, así que la convención es un **coment
 
 **Prohibido** introducir un tercer breakpoint estructural sin actualizar este documento. Auditoría: `grep -n "bp:" apps/web/src/App.css` lista todas las media queries responsive.
 
-Excepción sancionada única: `340px` `/* bp:edge 340 */` — guarda de borde ultra-estrecho que oculta solo el título del TopBar (queda el logo). No es un eje estructural; no cuelgues más reglas de este ancho.
+Excepciones sancionadas (por componente, no ejes estructurales):
+- `340px` `/* bp:edge 340 */` — guarda de borde ultra-estrecho que oculta solo el título del TopBar (queda el logo). No cuelgues más reglas de este ancho.
+- `1000px` `/* bp:topbar 1000 */` — colapso de la nav del TopBar a hamburguesa: las 9 pills necesitan ~982px y entre 721-980px desbordaban la página entera (violación de la regla de oro detectada en QA v1.7.0). Solo reglas del TopBar pueden usar este ancho; el resto de la estructura sigue en 720.
 
 ### Táctil mínimo + carve-out
 
