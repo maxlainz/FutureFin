@@ -22,10 +22,10 @@ use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use futurefin_engine::{
-    add_months_signed, amortized_segment_value, evaluate_timeline, month_index_of, HistoryItem,
-    HistoryItemKind, HistoryObservation, HistoryTimeline, LoanTerms,
+    add_months_signed, amortized_segment_value, evaluate_timeline, month_index_of, CashFlowEntry,
+    HistoryItem, HistoryItemKind, HistoryObservation, HistoryTimeline, LoanTerms,
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -163,7 +163,7 @@ struct SnapshotHeaderRow {
     updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 struct SnapshotItemRow {
     snapshot_id: Uuid,
     source_item_id: Uuid,
@@ -849,7 +849,7 @@ pub struct HistorySeriesResponse {
     pub markers: Vec<HistoryMarker>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 struct SeriesHeaderRow {
     id: Uuid,
     owner_user_id: Uuid,
@@ -857,7 +857,7 @@ struct SeriesHeaderRow {
     snapshot_date: NaiveDate,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 struct LiveAssetRow {
     id: Uuid,
     name: String,
@@ -865,7 +865,7 @@ struct LiveAssetRow {
     owner_user_id: Uuid,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 struct LiveLiabilityRow {
     id: Uuid,
     principal: Decimal,
@@ -897,36 +897,45 @@ fn days_in_month_of(d: NaiveDate) -> i64 {
     (add_months_signed(d, 1) - add_months_signed(d, 0)).num_days()
 }
 
-#[utoipa::path(
-    get,
-    path = "/v1/history/series",
-    tag = "history",
-    params(
-        ("view" = Option<String>, Query, description = "`mine` = solo mis snapshots; omitido u otro valor → `household` (todos los usuarios de la instalación)."),
-    ),
-    responses(
-        (status = 200, description = "Serie histórica interpolada, puntos contiguos `k_min..=0`. Sin snapshots en scope → arrays vacíos.", body = HistorySeriesResponse),
-        (status = 401, description = "No valid session"),
-        (status = 403, description = "Not an installation member"),
-        (status = 404, description = "Installation missing"),
-    )
-)]
-pub async fn get_history_series(
-    Extension(state): Extension<Arc<AppState>>,
-    jar: CookieJar,
-    Query(q): Query<LedgerViewQuery>,
-) -> Result<Json<HistorySeriesResponse>, ApiError> {
-    let user = require_session_user(&jar, &state.pool).await?;
-    // Solo lectura: cualquier miembro (viewer incluido) puede pedir la serie.
-    let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = q.resolve();
-    let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
+/// Posición x fraccional de una fecha respecto a un ancla primero-de-mes:
+/// `month_index + (día − 1) / días_del_mes`. Fuente ÚNICA compartida por los `HistoryMarker`
+/// de `/v1/history/series` y por la rejilla fina de `/v1/history/cashflow` — así la escala
+/// mes→px del chart no puede divergir entre markers y overlay (disciplina anti off-by-one).
+fn month_fraction(date: NaiveDate, anchor_month_first: NaiveDate) -> f64 {
+    month_index_of(date, anchor_month_first) as f64
+        + (date.day() as f64 - 1.0) / days_in_month_of(date) as f64
+}
 
-    let today = installation_naive_today(&state.pool, iid).await?;
-    // `add_months_signed(d, 0)` devuelve el día 1 del mes de `d` → ancla del mes 0.
-    let anchor = add_months_signed(today, 0);
+// ---------------------------------------------------------------------------
+// Pipeline compartido de snapshots → serie interpolada
+// ---------------------------------------------------------------------------
+//
+// `fetch_history_scope` + `accumulate_series` extraen el pipeline común a
+// `GET /v1/history/series` (sin cash-flow, rejilla mensual) y `GET /v1/history/cashflow`
+// (con deltas de cash-flow que moldean la curva, rejilla fina). Refactor **puro**: con un mapa
+// de cash-flow vacío y la rejilla mensual, `accumulate_series` reproduce bit a bit la serie de
+// snapshots previa (el engine garantiza P3: `cashflow` vacío ⇒ interpolación lineal textual).
 
-    // ---- Fetch (4 queries, todas vía helpers LedgerView) ----------------------------------
+/// Filas crudas del scope (mismas 4 queries que la serie histórica). Vacío (`headers` vacío) sin
+/// snapshots en scope — en ese caso el resto queda vacío y no se lanzan las 3 queries restantes.
+#[derive(Clone)]
+struct HistoryScope {
+    headers: Vec<SeriesHeaderRow>,
+    items_by_snapshot: HashMap<Uuid, Vec<SnapshotItemRow>>,
+    live_assets: Vec<LiveAssetRow>,
+    live_liabs: Vec<LiveLiabilityRow>,
+}
+
+/// Ejecuta las 4 queries del scope (cabeceras, items, assets vivos, pasivos vivos no expirados),
+/// todas vía helpers `LedgerView`. Idéntico a lo que hacía `get_history_series` inline; si no hay
+/// cabeceras corta antes de lanzar las 3 restantes (como el early-return previo).
+async fn fetch_history_scope(
+    pool: &sqlx::PgPool,
+    view: LedgerView,
+    iid: Uuid,
+    session_user_id: Uuid,
+    today: NaiveDate,
+) -> Result<HistoryScope, ApiError> {
     // 1) Cabeceras de snapshot en scope. Household = TODOS los snapshots de la instalación
     //    (owner_user_id es NOT NULL en todos); mine = solo los del usuario.
     let h_scope = view.scope_where("s");
@@ -937,20 +946,19 @@ pub async fn get_history_series(
          ORDER BY s.snapshot_date ASC, s.kind ASC, s.owner_user_id ASC"
     );
     let headers: Vec<SeriesHeaderRow> = view
-        .bind_scope_as(sqlx::query_as(&headers_sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&headers_sql), iid, session_user_id)
+        .fetch_all(pool)
         .await?;
 
-    // 0 snapshots en scope → 200 con arrays vacíos.
+    // 0 snapshots en scope → no lanzamos las 3 queries restantes (mismo comportamiento que el
+    // early-return previo de get_history_series).
     if headers.is_empty() {
-        return Ok(Json(HistorySeriesResponse {
-            anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
-            anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
-            view: view_label.into(),
-            points: Vec::new(),
-            asset_series: Vec::new(),
-            markers: Vec::new(),
-        }));
+        return Ok(HistoryScope {
+            headers,
+            items_by_snapshot: HashMap::new(),
+            live_assets: Vec::new(),
+            live_liabs: Vec::new(),
+        });
     }
 
     // 2) Items de los snapshots en scope (JOIN a la cabecera para reutilizar el scope).
@@ -963,8 +971,8 @@ pub async fn get_history_series(
          WHERE {i_scope}"
     );
     let item_rows: Vec<SnapshotItemRow> = view
-        .bind_scope_as(sqlx::query_as(&items_sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&items_sql), iid, session_user_id)
+        .fetch_all(pool)
         .await?;
 
     // 3) Assets vivos del scope. Las filas compartidas (owner_user_id IS NULL) nunca
@@ -976,8 +984,8 @@ pub async fn get_history_series(
          WHERE {a_scope} AND a.owner_user_id IS NOT NULL"
     );
     let live_assets: Vec<LiveAssetRow> = view
-        .bind_scope_as(sqlx::query_as(&assets_sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&assets_sql), iid, session_user_id)
+        .fetch_all(pool)
         .await?;
 
     // 4) Pasivos vivos no expirados del scope, mismo conjunto extra.
@@ -991,60 +999,59 @@ pub async fn get_history_series(
            AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${l_today_arg})"
     );
     let live_liabs: Vec<LiveLiabilityRow> = view
-        .bind_scope_as(sqlx::query_as(&liabs_sql), iid, user.id.0)
+        .bind_scope_as(sqlx::query_as(&liabs_sql), iid, session_user_id)
         .bind(today)
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await?;
 
-    // ---- Estructuras auxiliares ------------------------------------------------------------
     let mut items_by_snapshot: HashMap<Uuid, Vec<SnapshotItemRow>> = HashMap::new();
     for r in item_rows {
         items_by_snapshot.entry(r.snapshot_id).or_default().push(r);
     }
+
+    Ok(HistoryScope {
+        headers,
+        items_by_snapshot,
+        live_assets,
+        live_liabs,
+    })
+}
+
+/// Resultado de evaluar el scope sobre una rejilla: totales por punto + serie por asset
+/// (agrupada por `source_item_id` entre usuarios) + el label más reciente de cada asset.
+struct SeriesAccumulation {
+    assets_total: Vec<Decimal>,
+    liabilities_total: Vec<Decimal>,
+    /// `source_item_id` → valores paralelos a la rejilla (suma entre usuarios).
+    asset_values: HashMap<Uuid, Vec<Decimal>>,
+    /// `source_item_id` → (fecha, label) del snapshot más reciente que lo contiene (fallback name).
+    latest_label: HashMap<Uuid, (NaiveDate, String)>,
+}
+
+/// Evalúa los timelines por `(owner_user_id, kind)` sobre `grid` y agrega los totales por punto y
+/// las series por asset. Función **pura** (sin I/O). `cashflow_by_owner_asset` moldea la curva de
+/// los assets observados en ambos extremos de un segmento (tier-2); un mapa vacío ⇒ interpolación
+/// lineal / amortización francesa idéntica al histórico previo (P3 del engine).
+fn accumulate_series(
+    scope: &HistoryScope,
+    grid: &[NaiveDate],
+    today: NaiveDate,
+    cashflow_by_owner_asset: &HashMap<(Uuid, Uuid), Vec<CashFlowEntry>>,
+) -> Result<SeriesAccumulation, ApiError> {
+    let grid_len = grid.len();
+
     let mut live_assets_by_owner: HashMap<Uuid, Vec<&LiveAssetRow>> = HashMap::new();
-    for a in &live_assets {
+    for a in &scope.live_assets {
         live_assets_by_owner.entry(a.owner_user_id).or_default().push(a);
     }
     let mut live_liabs_by_owner: HashMap<Uuid, Vec<&LiveLiabilityRow>> = HashMap::new();
-    for l in &live_liabs {
+    for l in &scope.live_liabs {
         live_liabs_by_owner.entry(l.owner_user_id).or_default().push(l);
     }
-    let live_asset_names: HashMap<Uuid, &str> =
-        live_assets.iter().map(|a| (a.id, a.name.as_str())).collect();
 
-    // ---- Markers: uno por cabecera; total = Σ items -----------------------------------------
-    let markers: Vec<HistoryMarker> = headers
-        .iter()
-        .map(|h| {
-            let total: Decimal = items_by_snapshot
-                .get(&h.id)
-                .map(|items| items.iter().map(|i| i.value).sum())
-                .unwrap_or(Decimal::ZERO);
-            let mi = month_index_of(h.snapshot_date, anchor);
-            let month_fraction = mi as f64
-                + (h.snapshot_date.day() as f64 - 1.0) / days_in_month_of(h.snapshot_date) as f64;
-            HistoryMarker {
-                date_ymd: h.snapshot_date.format("%Y-%m-%d").to_string(),
-                month_index: mi,
-                month_fraction,
-                kind: h.kind.clone(),
-                owner_user_id: h.owner_user_id,
-                total,
-            }
-        })
-        .collect();
-
-    // ---- Rejilla mensual k_min..=0 (primeros-de-mes) ----------------------------------------
-    // Las fechas de snapshot están validadas ≤ hoy, así que todo month_index ≤ 0;
-    // `.min(0)` es solo un cinturón (p. ej. cambio de calendar_tz a posteriori).
-    let k_min = markers.iter().map(|m| m.month_index).min().unwrap_or(0).min(0);
-    let grid: Vec<NaiveDate> = (k_min..=0).map(|k| add_months_signed(anchor, k)).collect();
-    let grid_len = grid.len();
-
-    // ---- Timelines por (owner_user_id, kind) ------------------------------------------------
-    // BTreeMap para iterar en orden determinista.
+    // Timelines por (owner_user_id, kind). BTreeMap para iterar en orden determinista.
     let mut groups: BTreeMap<(Uuid, String), Vec<&SeriesHeaderRow>> = BTreeMap::new();
-    for h in &headers {
+    for h in &scope.headers {
         groups
             .entry((h.owner_user_id, h.kind.clone()))
             .or_default()
@@ -1053,9 +1060,7 @@ pub async fn get_history_series(
 
     let mut assets_total = vec![Decimal::ZERO; grid_len];
     let mut liabilities_total = vec![Decimal::ZERO; grid_len];
-    // Serie por asset agrupada por source_item_id ENTRE usuarios (se suman los valores).
     let mut asset_values: HashMap<Uuid, Vec<Decimal>> = HashMap::new();
-    // Nombre fallback: label del snapshot MÁS RECIENTE que contiene el item.
     let mut latest_label: HashMap<Uuid, (NaiveDate, String)> = HashMap::new();
 
     for ((owner_id, kind_str), group_headers) in &groups {
@@ -1077,7 +1082,7 @@ pub async fn get_history_series(
 
         let mut obs_map: BTreeMap<Uuid, Vec<Option<HistoryObservation>>> = BTreeMap::new();
         for (j, h) in group_headers.iter().enumerate() {
-            let Some(items) = items_by_snapshot.get(&h.id) else {
+            let Some(items) = scope.items_by_snapshot.get(&h.id) else {
                 continue;
             };
             for it in items {
@@ -1140,17 +1145,25 @@ pub async fn get_history_series(
                     source_item_id,
                     kind,
                     observations,
-                    // Fase 1: los snapshots no llevan cash-flow; la curva anclada la usa el
-                    // endpoint /v1/history/cashflow (B2), no la serie de snapshots (tier-1).
-                    cashflow: vec![],
+                    // Solo los assets llevan cash-flow (los pasivos ya modelan el principal con
+                    // amortización francesa — inyectar la cuota duplicaría). Sin entrada en el
+                    // mapa ⇒ vacío ⇒ ruta idéntica al histórico previo (P3).
+                    cashflow: if kind == HistoryItemKind::Asset {
+                        cashflow_by_owner_asset
+                            .get(&(*owner_id, source_item_id))
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    },
                 })
                 .collect(),
         };
 
-        // Cómputo puro sub-ms (decenas de snapshots × decenas de meses): deliberadamente
-        // SIN `spawn_blocking` (no bloquea el runtime a esta escala) y SIN cache propia
-        // (recalcular es más barato que invalidar bien).
-        let evaluated = evaluate_timeline(&timeline, &grid)
+        // Cómputo puro (decenas de snapshots × decenas/centenas de puntos). En la serie mensual y
+        // en la rejilla fina weekly se ejecuta inline; solo `resolution=daily` lo envuelve en
+        // `spawn_blocking` (ver get_history_cashflow).
+        let evaluated = evaluate_timeline(&timeline, grid)
             // Inalcanzable con fechas ordenadas + únicas; señal de bug del servidor.
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
@@ -1174,27 +1187,117 @@ pub async fn get_history_series(
         }
     }
 
-    // ---- Agregación final --------------------------------------------------------------------
-    let points: Vec<HistorySeriesPoint> = (0..grid_len)
-        .map(|g| HistorySeriesPoint {
-            month_index: k_min + g as i32,
-            net_worth: assets_total[g] - liabilities_total[g],
-            assets_total: assets_total[g],
-            liabilities_total: liabilities_total[g],
+    Ok(SeriesAccumulation {
+        assets_total,
+        liabilities_total,
+        asset_values,
+        latest_label,
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/history/series",
+    tag = "history",
+    params(
+        ("view" = Option<String>, Query, description = "`mine` = solo mis snapshots; omitido u otro valor → `household` (todos los usuarios de la instalación)."),
+    ),
+    responses(
+        (status = 200, description = "Serie histórica interpolada, puntos contiguos `k_min..=0`. Sin snapshots en scope → arrays vacíos.", body = HistorySeriesResponse),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Not an installation member"),
+        (status = 404, description = "Installation missing"),
+    )
+)]
+pub async fn get_history_series(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Query(q): Query<LedgerViewQuery>,
+) -> Result<Json<HistorySeriesResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    // Solo lectura: cualquier miembro (viewer incluido) puede pedir la serie.
+    let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
+    let view = q.resolve();
+    let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
+
+    let today = installation_naive_today(&state.pool, iid).await?;
+    // `add_months_signed(d, 0)` devuelve el día 1 del mes de `d` → ancla del mes 0.
+    let anchor = add_months_signed(today, 0);
+
+    // ---- Fetch del scope (4 queries LedgerView, pipeline compartido) ------------------------
+    let scope = fetch_history_scope(&state.pool, view, iid, user.id.0, today).await?;
+
+    // 0 snapshots en scope → 200 con arrays vacíos.
+    if scope.headers.is_empty() {
+        return Ok(Json(HistorySeriesResponse {
+            anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
+            anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
+            view: view_label.into(),
+            points: Vec::new(),
+            asset_series: Vec::new(),
+            markers: Vec::new(),
+        }));
+    }
+
+    // ---- Markers: uno por cabecera; total = Σ items -----------------------------------------
+    let markers: Vec<HistoryMarker> = scope
+        .headers
+        .iter()
+        .map(|h| {
+            let total: Decimal = scope
+                .items_by_snapshot
+                .get(&h.id)
+                .map(|items| items.iter().map(|i| i.value).sum())
+                .unwrap_or(Decimal::ZERO);
+            HistoryMarker {
+                date_ymd: h.snapshot_date.format("%Y-%m-%d").to_string(),
+                month_index: month_index_of(h.snapshot_date, anchor),
+                month_fraction: month_fraction(h.snapshot_date, anchor),
+                kind: h.kind.clone(),
+                owner_user_id: h.owner_user_id,
+                total,
+            }
         })
         .collect();
 
-    let mut asset_series: Vec<HistoryAssetSeries> = asset_values
-        .into_iter()
+    // ---- Rejilla mensual k_min..=0 (primeros-de-mes) ----------------------------------------
+    // Las fechas de snapshot están validadas ≤ hoy, así que todo month_index ≤ 0;
+    // `.min(0)` es solo un cinturón (p. ej. cambio de calendar_tz a posteriori).
+    let k_min = markers.iter().map(|m| m.month_index).min().unwrap_or(0).min(0);
+    let grid: Vec<NaiveDate> = (k_min..=0).map(|k| add_months_signed(anchor, k)).collect();
+    let grid_len = grid.len();
+
+    // ---- Evaluación (sin cash-flow: serie de snapshots tier-1) ------------------------------
+    // Mapa de cash-flow vacío ⇒ interpolación lineal / amortización francesa idéntica bit a bit
+    // al histórico previo (P3 del engine). Cómputo puro sub-ms (decenas de snapshots × meses):
+    // deliberadamente SIN `spawn_blocking` a esta escala y SIN cache propia.
+    let acc = accumulate_series(&scope, &grid, today, &HashMap::new())?;
+
+    // ---- Agregación final --------------------------------------------------------------------
+    let live_asset_names: HashMap<Uuid, &str> =
+        scope.live_assets.iter().map(|a| (a.id, a.name.as_str())).collect();
+
+    let points: Vec<HistorySeriesPoint> = (0..grid_len)
+        .map(|g| HistorySeriesPoint {
+            month_index: k_min + g as i32,
+            net_worth: acc.assets_total[g] - acc.liabilities_total[g],
+            assets_total: acc.assets_total[g],
+            liabilities_total: acc.liabilities_total[g],
+        })
+        .collect();
+
+    let mut asset_series: Vec<HistoryAssetSeries> = acc
+        .asset_values
+        .iter()
         .map(|(asset_id, values)| {
             // Nombre: el asset vivo gana; si no, el label del snapshot más reciente.
             let asset_name = live_asset_names
-                .get(&asset_id)
+                .get(asset_id)
                 .map(|n| n.to_string())
-                .or_else(|| latest_label.get(&asset_id).map(|(_, l)| l.clone()))
+                .or_else(|| acc.latest_label.get(asset_id).map(|(_, l)| l.clone()))
                 .unwrap_or_default();
             HistoryAssetSeries {
-                asset_id,
+                asset_id: *asset_id,
                 asset_name,
                 values: values.iter().map(|v| v.to_f64().unwrap_or(0.0)).collect(),
             }
@@ -1213,6 +1316,360 @@ pub async fn get_history_series(
         points,
         asset_series,
         markers,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Cash-flow histórico (`GET /v1/history/cashflow`)
+// ---------------------------------------------------------------------------
+//
+// Dos capas independientes:
+//   1. `months[]` — agregado mensual firmado por kind (KPIs, **Decimal-string**). Independiente de
+//      los snapshots: solo un `GROUP BY date(month), kind` sobre la ventana. `expense`/`savings`
+//      conservan su signo real (negativos = cargos/aportaciones), `income` positivo, `net` = suma.
+//   2. `fine` (opcional) — la curva fina de patrimonio (weekly/daily) donde los deltas de cash-flow
+//      **moldean** los assets vinculados sin contradecir los snapshots (tier-2, curva anclada).
+//      Presente solo si hay transacciones vinculadas a algún asset Y snapshots que anclar.
+//
+// **`GET /v1/history/series` queda intacto** (tier-1): este endpoint reutiliza el mismo pipeline
+// (`fetch_history_scope` / `accumulate_series`) pero con un mapa de cash-flow no vacío y una
+// rejilla fina; jamás toca la serie mensual de snapshots. Sin cache; `spawn_blocking` solo en
+// `resolution=daily`. Sus lecturas nunca invalidan la cache de proyección (las transacciones no
+// son inputs del engine).
+
+/// Un mes del agregado de cash-flow. Signos reales de la suma (`expense`/`savings` ≤ 0, `income`
+/// ≥ 0); `net = expense + income + savings`. **Decimal-string** (son KPIs), redondeado a 2 dp.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CashflowMonth {
+    pub month_index: i32,
+    /// Primero-de-mes del mes, `YYYY-MM-01`.
+    pub date_ymd: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub expense: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub income: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub savings: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub net: Decimal,
+}
+
+/// Punto de la rejilla fina: fecha + su posición x fraccional (mismo helper que los markers).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CashflowFineGridPoint {
+    pub date_ymd: String,
+    pub month_index: i32,
+    pub month_fraction: f64,
+}
+
+/// Serie fina por asset (moldeada por cash-flow). Valores **f64** (excepción chart-only, igual que
+/// `HistoryAssetSeries`).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CashflowFineAssetSeries {
+    #[schema(value_type = String, format = "uuid")]
+    pub asset_id: Uuid,
+    pub asset_name: String,
+    pub values: Vec<f64>,
+}
+
+/// Capa fina del cash-flow: rejilla + series por asset + net worth, todo paralelo a `grid`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CashflowFine {
+    /// `weekly` | `daily`.
+    pub resolution: String,
+    pub grid: Vec<CashflowFineGridPoint>,
+    pub asset_series: Vec<CashflowFineAssetSeries>,
+    /// `Σ assets moldeados − Σ liabilities amortizadas`, evaluado en el MISMO grid fino. f64.
+    pub net_worth: Vec<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CashflowResponse {
+    /// Hoy civil de la instalación (`installation.calendar_tz`).
+    pub anchor_date_ymd: String,
+    /// Primero-de-mes de `anchor_date_ymd` — la fecha del punto `month_index = 0`.
+    pub anchor_month_first_ymd: String,
+    /// `household` | `mine`.
+    pub view: String,
+    /// Agregado mensual contiguo `-window_months..=0`, ascendente por `month_index`.
+    pub months: Vec<CashflowMonth>,
+    /// Curva fina moldeada. Ausente si no hay transacciones vinculadas a assets (o sin snapshots).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fine: Option<CashflowFine>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CashflowQuery {
+    #[serde(default)]
+    pub view: Option<String>,
+    /// Meses de ventana, default 24, clamp 1..=120.
+    #[serde(default)]
+    pub window_months: Option<i64>,
+    /// `weekly` (default) | `daily`. `daily` solo con `window_months <= 6`.
+    #[serde(default)]
+    pub resolution: Option<String>,
+}
+
+/// Fila cruda del agregado mensual: `(ym, kind)` → Σ amount firmado.
+#[derive(Debug, FromRow)]
+struct MonthKindRow {
+    ym: String,
+    kind: Option<String>,
+    total: Decimal,
+}
+
+/// Fila cruda de una pata de cash-flow: `(owner, asset)` + `(fecha, delta ya normalizado)`.
+#[derive(Debug, FromRow)]
+struct CashflowLegRow {
+    asset_id: Uuid,
+    owner_user_id: Uuid,
+    op_date: NaiveDate,
+    delta: Decimal,
+}
+
+const DEFAULT_CASHFLOW_WINDOW_MONTHS: i64 = 24;
+const MAX_CASHFLOW_WINDOW_MONTHS: i64 = 120;
+/// `resolution=daily` solo se permite con ventanas acotadas (coste del grid diario).
+const MAX_DAILY_WINDOW_MONTHS: i32 = 6;
+
+#[utoipa::path(
+    get,
+    path = "/v1/history/cashflow",
+    tag = "history",
+    params(
+        ("view" = Option<String>, Query, description = "`mine` = solo mis transacciones/snapshots; omitido u otro valor → `household`."),
+        ("window_months" = Option<i64>, Query, description = "Meses de ventana (default 24, clamp 1..=120)."),
+        ("resolution" = Option<String>, Query, description = "`weekly` (default) | `daily`. `daily` requiere `window_months <= 6`."),
+    ),
+    responses(
+        (status = 200, description = "Cash-flow mensual + curva fina opcional.", body = CashflowResponse),
+        (status = 400, description = "`daily_window_too_large` (daily con ventana > 6 meses)."),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Not an installation member"),
+        (status = 404, description = "Installation missing"),
+    )
+)]
+pub async fn get_history_cashflow(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Query(q): Query<CashflowQuery>,
+) -> Result<Json<CashflowResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    // Solo lectura: cualquier miembro (viewer incluido).
+    let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
+
+    let window_months: i32 = q
+        .window_months
+        .unwrap_or(DEFAULT_CASHFLOW_WINDOW_MONTHS)
+        .clamp(1, MAX_CASHFLOW_WINDOW_MONTHS) as i32;
+    let daily = matches!(q.resolution.as_deref().map(str::trim), Some("daily"));
+    if daily && window_months > MAX_DAILY_WINDOW_MONTHS {
+        return Err(ApiError::BadRequest(format!(
+            "daily_window_too_large: resolution=daily requires window_months <= {MAX_DAILY_WINDOW_MONTHS}"
+        )));
+    }
+    let resolution_label = if daily { "daily" } else { "weekly" };
+
+    let today = installation_naive_today(&state.pool, iid).await?;
+    let anchor = add_months_signed(today, 0); // primero-de-mes del mes 0.
+    let window_start = add_months_signed(anchor, -window_months);
+    let month_end = add_months_signed(anchor, 1); // exclusivo: incluye el mes 0 completo.
+
+    // ---- Agregado mensual firmado por kind --------------------------------------------------
+    let m_scope = view.scope_where("t");
+    let m_arg = view.next_arg_index();
+    let months_sql = format!(
+        "SELECT to_char(t.op_date, 'YYYY-MM') AS ym, t.kind AS kind, SUM(t.amount) AS total
+         FROM transactions t
+         WHERE {m_scope} AND t.op_date >= ${m_arg} AND t.op_date < ${end}
+         GROUP BY ym, t.kind",
+        end = m_arg + 1
+    );
+    let month_rows: Vec<MonthKindRow> = view
+        .bind_scope_as(sqlx::query_as(&months_sql), iid, user.id.0)
+        .bind(window_start)
+        .bind(month_end)
+        .fetch_all(&state.pool)
+        .await?;
+    let mut by_month_kind: HashMap<(String, String), Decimal> = HashMap::new();
+    for r in month_rows {
+        if let Some(kind) = r.kind {
+            *by_month_kind.entry((r.ym, kind)).or_insert(Decimal::ZERO) += r.total;
+        }
+    }
+    // Cifras KPI a escala fija de 2 decimales (rescale, como `canonical_amount`): así una suma a
+    // cero serializa "0.00" y no "0", y todas las cifras del mes comparten formato.
+    let money = |d: Decimal| -> Decimal {
+        let mut v = d.round_dp(2);
+        v.rescale(2);
+        v
+    };
+    let sum_of = |ym: &str, kind: &str| -> Decimal {
+        by_month_kind
+            .get(&(ym.to_string(), kind.to_string()))
+            .copied()
+            .unwrap_or(Decimal::ZERO)
+    };
+    let months: Vec<CashflowMonth> = (-window_months..=0)
+        .map(|mi| {
+            let m_date = add_months_signed(anchor, mi);
+            let ym = m_date.format("%Y-%m").to_string();
+            let expense = money(sum_of(&ym, "expense"));
+            let income = money(sum_of(&ym, "income"));
+            let savings = money(sum_of(&ym, "savings"));
+            CashflowMonth {
+                month_index: mi,
+                date_ymd: m_date.format("%Y-%m-%d").to_string(),
+                expense,
+                income,
+                savings,
+                // net = suma exacta de las tres cifras devueltas (el invariante se cumple sobre
+                // los strings serializados, no sobre valores pre-redondeo).
+                net: money(expense + income + savings),
+            }
+        })
+        .collect();
+
+    // ---- Patas de cash-flow por (owner, asset) ----------------------------------------------
+    // Pata cuenta: toda transacción de un batch con `account_asset_id` → delta = amount (+sube la
+    // cuenta). Pata destino ahorro: `kind='savings'` con `linked_asset_id` → delta = −amount
+    // (una aportación −200 sube el destino en +200). Una savings importada aparece en AMBAS
+    // (partida doble correcta: baja la cuenta, sube el destino). Deltas ya normalizados aquí; el
+    // engine solo los suma.
+    let acc_scope = view.scope_where("t");
+    let account_sql = format!(
+        "SELECT ti.account_asset_id AS asset_id, t.owner_user_id AS owner_user_id,
+                t.op_date AS op_date, t.amount AS delta
+         FROM transactions t
+         JOIN transaction_imports ti ON ti.id = t.import_id
+         WHERE {acc_scope} AND ti.account_asset_id IS NOT NULL"
+    );
+    let account_legs: Vec<CashflowLegRow> = view
+        .bind_scope_as(sqlx::query_as(&account_sql), iid, user.id.0)
+        .fetch_all(&state.pool)
+        .await?;
+
+    let sav_scope = view.scope_where("t");
+    let savings_sql = format!(
+        "SELECT t.linked_asset_id AS asset_id, t.owner_user_id AS owner_user_id,
+                t.op_date AS op_date, (-t.amount) AS delta
+         FROM transactions t
+         WHERE {sav_scope} AND t.kind = 'savings' AND t.linked_asset_id IS NOT NULL"
+    );
+    let savings_legs: Vec<CashflowLegRow> = view
+        .bind_scope_as(sqlx::query_as(&savings_sql), iid, user.id.0)
+        .fetch_all(&state.pool)
+        .await?;
+
+    let mut cashflow: HashMap<(Uuid, Uuid), Vec<CashFlowEntry>> = HashMap::new();
+    for leg in account_legs.into_iter().chain(savings_legs.into_iter()) {
+        cashflow
+            .entry((leg.owner_user_id, leg.asset_id))
+            .or_default()
+            .push(CashFlowEntry {
+                date: leg.op_date,
+                delta: leg.delta,
+            });
+    }
+
+    // ---- Capa fina (solo si hay vínculos a assets Y snapshots que anclar) --------------------
+    let fine = if cashflow.is_empty() {
+        None
+    } else {
+        let scope = fetch_history_scope(&state.pool, view, iid, user.id.0, today).await?;
+        if scope.headers.is_empty() {
+            None
+        } else {
+            // Rejilla fina hacia atrás desde HOY (último punto = hoy exacto → empalma con el vivo),
+            // paso 7 días (weekly) o 1 (daily), hasta cubrir la ventana.
+            let step = if daily { 1 } else { 7 };
+            let mut dates_desc = vec![today];
+            let mut cursor = today;
+            loop {
+                let prev = cursor - Duration::days(step);
+                if prev < window_start {
+                    break;
+                }
+                dates_desc.push(prev);
+                cursor = prev;
+            }
+            dates_desc.reverse(); // ascendente, termina en hoy.
+            let fine_grid = dates_desc;
+
+            // Cómputo puro. `spawn_blocking` SOLO en daily (grid ~180 puntos): mueve datos propios
+            // al pool blocking. Weekly (~104 puntos) corre inline como la serie mensual.
+            let acc = if daily {
+                let scope_c = scope.clone();
+                let grid_c = fine_grid.clone();
+                let cf_c = cashflow.clone();
+                tokio::task::spawn_blocking(move || {
+                    accumulate_series(&scope_c, &grid_c, today, &cf_c)
+                })
+                .await
+                .map_err(|_| ApiError::Unavailable)??
+            } else {
+                accumulate_series(&scope, &fine_grid, today, &cashflow)?
+            };
+
+            let live_asset_names: HashMap<Uuid, &str> =
+                scope.live_assets.iter().map(|a| (a.id, a.name.as_str())).collect();
+
+            let grid: Vec<CashflowFineGridPoint> = fine_grid
+                .iter()
+                .map(|d| CashflowFineGridPoint {
+                    date_ymd: d.format("%Y-%m-%d").to_string(),
+                    month_index: month_index_of(*d, anchor),
+                    month_fraction: month_fraction(*d, anchor),
+                })
+                .collect();
+
+            let net_worth: Vec<f64> = (0..fine_grid.len())
+                .map(|g| (acc.assets_total[g] - acc.liabilities_total[g]).to_f64().unwrap_or(0.0))
+                .collect();
+
+            let mut asset_series: Vec<CashflowFineAssetSeries> = acc
+                .asset_values
+                .iter()
+                .map(|(asset_id, values)| {
+                    let asset_name = live_asset_names
+                        .get(asset_id)
+                        .map(|n| n.to_string())
+                        .or_else(|| acc.latest_label.get(asset_id).map(|(_, l)| l.clone()))
+                        .unwrap_or_default();
+                    CashflowFineAssetSeries {
+                        asset_id: *asset_id,
+                        asset_name,
+                        values: values.iter().map(|v| v.to_f64().unwrap_or(0.0)).collect(),
+                    }
+                })
+                .collect();
+            asset_series.sort_by(|a, b| {
+                a.asset_name
+                    .cmp(&b.asset_name)
+                    .then_with(|| a.asset_id.cmp(&b.asset_id))
+            });
+
+            Some(CashflowFine {
+                resolution: resolution_label.into(),
+                grid,
+                asset_series,
+                net_worth,
+            })
+        }
+    };
+
+    Ok(Json(CashflowResponse {
+        anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
+        anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
+        view: view_label.into(),
+        months,
+        fine,
     }))
 }
 
@@ -1651,4 +2108,5 @@ pub fn history_router() -> Router {
         .route("/snapshots", get(list_snapshots).post(create_snapshot))
         .route("/snapshots/{id}", put(update_snapshot).delete(delete_snapshot))
         .route("/series", get(get_history_series))
+        .route("/cashflow", get(get_history_cashflow))
 }
