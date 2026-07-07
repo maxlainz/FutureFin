@@ -18,6 +18,7 @@ use crate::handlers::pending_users::pending_users_router;
 use crate::handlers::planning::planning_router;
 use crate::handlers::projection::projection_router;
 use crate::handlers::summary::summary_router;
+use crate::handlers::transactions::transactions_router;
 use crate::openapi::openapi_json;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
@@ -26,7 +27,8 @@ use axum::Router;
 /// Tope global del body en endpoints normales. Endpoints que reciben backups crecen su tope.
 const DEFAULT_BODY_LIMIT_BYTES: usize = 1 * 1024 * 1024;
 /// Tope para los endpoints de import de backup (`.ffbackup` en base64 → ~33% inflado).
-const BACKUP_IMPORT_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+/// Reutilizado por las rutas de import de transacciones (CSV en base64).
+pub(crate) const BACKUP_IMPORT_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn app_router() -> Router {
     let v1 = Router::new()
@@ -59,6 +61,7 @@ pub fn app_router() -> Router {
         .nest("/planning", planning_router())
         .nest("/projection", projection_router())
         .nest("/history", history_router())
+        .nest("/transactions", transactions_router())
         .route("/backup/user-export", post(export_user_backup))
         .route(
             "/backup/user-import/preview",

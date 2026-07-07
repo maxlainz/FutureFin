@@ -529,6 +529,114 @@ async fn preview_reports_snapshot_counts() {
     assert_eq!(preview.json()["counts"]["snapshot_items"].as_u64(), Some(1), "preview snapshot_items");
 }
 
+/// End-to-end v5: seed a CSV import (batch + transaction + learned rule) plus a manual
+/// savings transaction linked to an asset, export, dirty, import (full replace), and confirm the
+/// counts, the transactions/rules survival, and the re-link of category/asset/import refs to the
+/// fresh ledger UUIDs.
+#[tokio::test]
+async fn backup_v5_transactions_round_trip() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let asset_cat = app.create_category(&owner, "asset", "Cash").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+    let cash = create_asset(&app, &owner.cookie, &asset_cat, "Cuenta", "5000").await;
+
+    // Import one CSV expense row (categorized as Super, batch linked to the Cash account).
+    let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+               15/06/2026;15/06/2026;CONSUM BARNA;-9;EUR\n";
+    let b64 = B64.encode(csv);
+    let p = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/preview",
+            serde_json::json!({ "source": "myinvestor", "file_b64": b64 }),
+            &owner.cookie,
+        )
+        .await;
+    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    let conf = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/confirm",
+            serde_json::json!({
+                "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
+                "decisions": [ { "kind": "expense", "category_id": super_cat } ],
+                "learn_rules": true, "account_asset_id": cash.to_string(),
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(conf.status, http::StatusCode::OK, "import: {conf:?}");
+    assert_eq!(conf.json()["rules_learned"].as_u64(), Some(1));
+
+    // A manual savings transaction linked to the Cash asset.
+    let man = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({ "op_date": "2026-06-20", "concept": "Aporte", "amount": "-100",
+                                "kind": "savings", "linked_asset_id": cash.to_string() }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(man.status, http::StatusCode::CREATED, "manual: {man:?}");
+
+    let backup = export_ffbackup_b64(&app, &owner.cookie).await;
+
+    // Dirty: add a stray transaction the backup does not know.
+    app.post_json_with_cookie(
+        "/v1/transactions",
+        serde_json::json!({ "op_date": "2026-07-01", "concept": "Stray", "amount": "-1", "kind": "expense" }),
+        &owner.cookie,
+    )
+    .await;
+
+    // Preview reports the v5 counts.
+    let preview = import_preview(&app, &owner.cookie, &backup).await;
+    assert_eq!(preview.json()["counts"]["transaction_imports"].as_u64(), Some(1));
+    assert_eq!(preview.json()["counts"]["transactions"].as_u64(), Some(2));
+    assert_eq!(preview.json()["counts"]["categorization_rules"].as_u64(), Some(1));
+
+    // Apply replaces everything from the backup.
+    let applied = import_apply(&app, &owner.cookie, &backup).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "apply: {applied:?}");
+    let counts = &applied.json()["imported"];
+    assert_eq!(counts["transaction_imports"].as_u64(), Some(1), "imports count");
+    assert_eq!(counts["transactions"].as_u64(), Some(2), "transactions count");
+    assert_eq!(counts["categorization_rules"].as_u64(), Some(1), "rules count");
+
+    // Exactly the 2 backed-up transactions survive (the stray is gone).
+    assert_eq!(app.count_rows("transactions").await, 2, "solo las 2 del backup");
+    assert_eq!(app.count_rows("transaction_imports").await, 1);
+    assert_eq!(app.count_rows("categorization_rules").await, 1);
+
+    // The learned rule survives and points at the live Super category.
+    let rules = app.get_with_cookie("/v1/transactions/rules", &owner.cookie).await;
+    let rb = rules.json();
+    assert_eq!(rb.as_array().unwrap().len(), 1);
+    let super_now: String = sqlx::query_scalar(
+        "SELECT id::text FROM categories WHERE installation_id = (SELECT id FROM installation LIMIT 1) AND name = 'Super'",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("super cat");
+    assert_eq!(rb[0]["assign_category_id"].as_str().unwrap(), super_now, "rule re-linked to live category");
+
+    // No dangling links: every non-null linked_asset_id / category_id / import_id points at a
+    // live row of the user (the re-link minted fresh UUIDs).
+    let dangling: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM transactions t
+           WHERE t.owner_user_id = $1
+             AND (
+               (t.linked_asset_id IS NOT NULL AND t.linked_asset_id NOT IN (SELECT id FROM assets))
+               OR (t.category_id IS NOT NULL AND t.category_id NOT IN (SELECT id FROM categories))
+               OR (t.import_id IS NOT NULL AND t.import_id NOT IN (SELECT id FROM transaction_imports))
+             )"#,
+    )
+    .bind(owner.user_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("count dangling");
+    assert_eq!(dangling, 0, "sin refs colgantes tras el re-link");
+}
+
 /// A viewer cannot import (403) — enforced before any file parsing.
 #[tokio::test]
 async fn viewer_cannot_import_403() {

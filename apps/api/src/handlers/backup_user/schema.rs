@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
 
@@ -217,6 +217,64 @@ pub struct BackupSnapshotItem {
     pub payment_frequency: Option<String>,
 }
 
+/// A CSV import batch exported inside a `.ffbackup` (schema_version ≥ 5).
+///
+/// `account_asset_index` = position of the origin account asset in this payload's `assets` vec,
+/// when it still existed at export (`None` otherwise — the FK is `ON DELETE SET NULL`).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupTransactionImport {
+    pub source: String,
+    #[serde(default)]
+    pub account_asset_index: Option<usize>,
+    #[serde(default)]
+    pub original_filename: Option<String>,
+}
+
+/// A dated transaction exported inside a `.ffbackup` (schema_version ≥ 5).
+///
+/// Refs are by index into this payload's vecs: `import_index` → `transaction_imports`
+/// (`None` = manual/cash), `linked_asset_index` → `assets`, `linked_liability_index` →
+/// `liabilities`. The **fingerprint is NOT exported** (recomputed on import from
+/// source·op_date·amount·concept); only `fingerprint_ordinal` is carried to preserve the
+/// dedup ordinal of repeated occurrences.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupTransaction {
+    #[serde(default)]
+    pub import_index: Option<usize>,
+    pub source: String,
+    pub op_date: NaiveDate,
+    #[serde(default)]
+    pub value_date: Option<NaiveDate>,
+    pub concept: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub amount: Decimal,
+    pub currency: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub category_ref: Option<CategoryRef>,
+    pub fingerprint_ordinal: i32,
+    #[serde(default)]
+    pub linked_asset_index: Option<usize>,
+    #[serde(default)]
+    pub linked_liability_index: Option<usize>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// A learned/user categorization rule exported inside a `.ffbackup` (schema_version ≥ 5).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupCategorizationRule {
+    pub match_kind: String,
+    pub pattern: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub assign_kind: Option<String>,
+    #[serde(default)]
+    pub assign_category_ref: Option<CategoryRef>,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UiPreferences {
     #[serde(default)]
@@ -296,8 +354,34 @@ pub struct BackupPayloadV4 {
     pub snapshots: Vec<BackupSnapshot>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayloadV5 {
+    pub user: BackupUser,
+    pub categories_used: Vec<BackupCategory>,
+    pub assets: Vec<BackupAssetV3>,
+    #[serde(default)]
+    pub allocation_rules: Vec<BackupAllocationRule>,
+    pub liabilities: Vec<BackupLiability>,
+    pub budget_entries: Vec<BackupBudgetEntry>,
+    pub planning_flows: Vec<BackupPlanningFlow>,
+    #[serde(default)]
+    pub ui_preferences: UiPreferences,
+    pub installation_snapshot_informative: InstallationSnapshotInformative,
+    #[serde(default)]
+    pub snapshots: Vec<BackupSnapshot>,
+    /// CSV import batches (schema_version ≥ 5). Empty when migrating from an older backup.
+    #[serde(default)]
+    pub transaction_imports: Vec<BackupTransactionImport>,
+    /// Dated transactions (schema_version ≥ 5). Empty when migrating from an older backup.
+    #[serde(default)]
+    pub transactions: Vec<BackupTransaction>,
+    /// Categorization rules (schema_version ≥ 5). Empty when migrating from an older backup.
+    #[serde(default)]
+    pub categorization_rules: Vec<BackupCategorizationRule>,
+}
+
 /// Alias for the current-version payload. Export and import code work against this type.
-pub type BackupPayload = BackupPayloadV4;
+pub type BackupPayload = BackupPayloadV5;
 
 #[derive(Debug)]
 pub enum AnyPayload {
@@ -305,6 +389,7 @@ pub enum AnyPayload {
     V2(BackupPayloadV2),
     V3(BackupPayloadV3),
     V4(BackupPayloadV4),
+    V5(BackupPayloadV5),
 }
 
 pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, String> {
@@ -328,6 +413,11 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
             let p: BackupPayloadV4 = serde_json::from_slice(bytes)
                 .map_err(|e| format!("payload v4 malformed: {e}"))?;
             Ok(AnyPayload::V4(p))
+        }
+        5 => {
+            let p: BackupPayloadV5 = serde_json::from_slice(bytes)
+                .map_err(|e| format!("payload v5 malformed: {e}"))?;
+            Ok(AnyPayload::V5(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
             "schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
@@ -413,12 +503,35 @@ fn payload_v3_to_v4(p: BackupPayloadV3) -> BackupPayloadV4 {
     }
 }
 
+fn payload_v4_to_v5(p: BackupPayloadV4) -> BackupPayloadV5 {
+    // Transactions, imports and rules did not exist before v5 → start empty when importing an
+    // older backup. Everything else is carried over unchanged.
+    BackupPayloadV5 {
+        user: p.user,
+        categories_used: p.categories_used,
+        assets: p.assets,
+        allocation_rules: p.allocation_rules,
+        liabilities: p.liabilities,
+        budget_entries: p.budget_entries,
+        planning_flows: p.planning_flows,
+        ui_preferences: p.ui_preferences,
+        installation_snapshot_informative: p.installation_snapshot_informative,
+        snapshots: p.snapshots,
+        transaction_imports: Vec::new(),
+        transactions: Vec::new(),
+        categorization_rules: Vec::new(),
+    }
+}
+
 pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
     match any {
-        AnyPayload::V1(p) => payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p))),
-        AnyPayload::V2(p) => payload_v3_to_v4(payload_v2_to_v3(p)),
-        AnyPayload::V3(p) => payload_v3_to_v4(p),
-        AnyPayload::V4(p) => p,
+        AnyPayload::V1(p) => {
+            payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p))))
+        }
+        AnyPayload::V2(p) => payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(p))),
+        AnyPayload::V3(p) => payload_v4_to_v5(payload_v3_to_v4(p)),
+        AnyPayload::V4(p) => payload_v4_to_v5(p),
+        AnyPayload::V5(p) => p,
     }
 }
 
@@ -649,6 +762,101 @@ mod tests {
         assert_eq!(reser[1]["items"][0]["payment_amount"], "500.0000");
         // ledger_index null must serialize back as null (present, not dropped).
         assert!(reser[0]["items"][1]["ledger_index"].is_null());
+    }
+
+    #[test]
+    fn migrate_v4_fills_empty_transactions() {
+        // A v4 file (no transaction keys) parses and migrates to v5 with empty vecs.
+        let raw = serde_json::json!({
+            "user": { "username": "erin", "birth_date": null },
+            "categories_used": [],
+            "assets": [],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "snapshots": []
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let any = parse_payload(4, &bytes).unwrap();
+        let v5 = migrate_to_current(any);
+        assert!(v5.transaction_imports.is_empty(), "v4→v5 must default transaction_imports to empty");
+        assert!(v5.transactions.is_empty(), "v4→v5 must default transactions to empty");
+        assert!(v5.categorization_rules.is_empty(), "v4→v5 must default categorization_rules to empty");
+        assert!(v5.snapshots.is_empty());
+    }
+
+    #[test]
+    fn v5_transactions_round_trip() {
+        let raw = serde_json::json!({
+            "user": { "username": "frank", "birth_date": null },
+            "categories_used": [
+                { "scope": "expense", "name": "Supermercado", "sort_index": 0 },
+                { "scope": "income", "name": "Nómina", "sort_index": 1 }
+            ],
+            "assets": [{
+                "category_ref": { "scope": "asset", "name": "Cash" },
+                "name": "Cuenta", "current_value": "1000.00", "is_liquid": true, "sort_index": 0
+            }],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "snapshots": [],
+            "transaction_imports": [
+                { "source": "n26", "account_asset_index": 0, "original_filename": "junio.csv" }
+            ],
+            "transactions": [
+                {
+                    "import_index": 0, "source": "n26", "op_date": "2026-06-02",
+                    "value_date": "2026-06-02", "concept": "CONSUM BARNA", "amount": "-4.9800",
+                    "currency": "EUR", "kind": "expense",
+                    "category_ref": { "scope": "expense", "name": "Supermercado" },
+                    "fingerprint_ordinal": 0, "linked_asset_index": null,
+                    "linked_liability_index": null, "notes": null
+                },
+                {
+                    "import_index": null, "source": "manual", "op_date": "2026-06-05",
+                    "concept": "Efectivo", "amount": "-20.0000", "currency": "EUR",
+                    "kind": "expense", "fingerprint_ordinal": 0
+                }
+            ],
+            "categorization_rules": [
+                {
+                    "match_kind": "substring", "pattern": "CONSUM", "source": "n26",
+                    "assign_kind": "expense",
+                    "assign_category_ref": { "scope": "expense", "name": "Supermercado" }
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let any = parse_payload(5, &bytes).unwrap();
+        let v5 = migrate_to_current(any);
+
+        assert_eq!(v5.transaction_imports.len(), 1);
+        assert_eq!(v5.transaction_imports[0].source, "n26");
+        assert_eq!(v5.transaction_imports[0].account_asset_index, Some(0));
+
+        assert_eq!(v5.transactions.len(), 2);
+        assert_eq!(v5.transactions[0].import_index, Some(0));
+        assert_eq!(v5.transactions[0].amount, Decimal::from_str_exact("-4.9800").unwrap());
+        assert_eq!(v5.transactions[0].kind.as_deref(), Some("expense"));
+        assert_eq!(v5.transactions[1].import_index, None);
+        assert_eq!(v5.transactions[1].source, "manual");
+
+        assert_eq!(v5.categorization_rules.len(), 1);
+        assert_eq!(v5.categorization_rules[0].pattern, "CONSUM");
+        assert_eq!(v5.categorization_rules[0].source.as_deref(), Some("n26"));
+
+        // Decimal-string scale round-trip.
+        let reser = serde_json::to_value(&v5.transactions).unwrap();
+        assert_eq!(reser[0]["amount"], "-4.9800");
+        // fingerprint is never present in the payload (recomputed on import).
+        assert!(reser[0].get("fingerprint").is_none());
     }
 
     #[test]
