@@ -358,3 +358,29 @@ export type HistorySnapshotApi = {
   created_at: string;
   updated_at: string;
 };
+
+/**
+ * Ítem sugerido por `GET /v1/history/snapshots/prefill` para autocompletar el grid del modal.
+ * `item_id` preserva el enlace entre snapshots (se reenvía en POST/PUT). `existed: false` ⇒
+ * `value: "0"` (el ítem no existía en esa fecha según los datos del usuario). `basis` documenta
+ * de dónde sale el valor: `interpolated` (entre dos snapshots), `first_snapshot` (anterior al
+ * primero), `live` (valor actual), `not_owned` (ítem de otro usuario). Términos solo en pasivos.
+ */
+export type HistoryPrefillItemApi = {
+  item_id: string;
+  label: string;
+  value: string;
+  existed: boolean;
+  basis: "interpolated" | "first_snapshot" | "live" | "not_owned";
+  apr_percent?: string;
+  payment_amount?: string;
+  payment_frequency?: "monthly" | "weekly";
+};
+
+/** Respuesta de `GET /v1/history/snapshots/prefill`. Ítems ordenados: existentes primero
+ *  (label ASC), luego `not_owned`. */
+export type HistoryPrefillResponseApi = {
+  date_ymd: string;
+  kind: HistorySnapshotKindApi;
+  items: HistoryPrefillItemApi[];
+};

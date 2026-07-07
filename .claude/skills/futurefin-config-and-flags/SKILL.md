@@ -19,7 +19,8 @@ description: >
 # FutureFin configuration and flags
 
 All facts verified against the code on 2026-07-02 (v1.4.3, per `apps/api/Cargo.toml`); the
-`/v1/history/*` query params were added for v1.5.0 (2026-07-06) — no new env vars or installation
+`/v1/history/*` query params were added for v1.5.0 (2026-07-06), with `GET /v1/history/snapshots/prefill`
+(`?kind`/`?date`) added for v1.5.1 (2026-07-07) — none introduce new env vars or installation
 settings. This skill is the single home for "what can be configured, where, with what bounds".
 
 Vocabulary used below:
@@ -151,10 +152,12 @@ handler invalidates the whole installation's entries (`refresh_projection_after_
 | `GET /v1/history/snapshots` | `year` | `i32`, validated **1900–3000** (out of range → 400) | omitted → all years | Filters by a civil-date range (index-friendly), always own-user (no `?view`). |
 | `GET /v1/history/snapshots` | `kind` | `asset` \| `liability` (anything else → 400 `invalid_kind`) | omitted → both | Note: **stricter than `?view`/`?density`** — an unknown `kind` here **errors 400**, it does not silently fall back. |
 | `GET /v1/history/series` | `view` | `household` \| `mine` (standard `LedgerViewQuery::resolve`) | `household` | Standard scope filter (§4.1). `mine` = own series; `household` = server-side sum of every user's interpolated series. |
+| `GET /v1/history/snapshots/prefill` (v1.5.1) | `kind` | `asset` \| `liability` (anything else → 400 `invalid_kind`) | **required** | Which ledger side to pre-populate the backfill modal with. Always own-user (no `?view`). |
+| `GET /v1/history/snapshots/prefill` (v1.5.1) | `date` | civil date `YYYY-MM-DD`; a future date → 400 `snapshot_date_in_future` | **required** | Target date the suggested values are interpolated to (same math as `/v1/history/series`). Each item returns a `value` + `basis` ∈ `interpolated`\|`first_snapshot`\|`live`\|`not_owned`; items that didn't exist yet arrive `value:"0"`, `existed:false`. |
 
-No new **env vars** and no new installation settings ship with the history feature — it is
-entirely per-user request/data surface. The series endpoint has **no cache** (sub-ms compute) and
-takes no `?months`/`?density`.
+No new **env vars** and no new installation settings ship with the history feature (series or
+prefill) — it is entirely per-user request/data surface. The series and prefill endpoints have
+**no cache** (sub-ms compute) and take no `?months`/`?density`.
 
 ### Body limits (`apps/api/src/routes/mod.rs`)
 
