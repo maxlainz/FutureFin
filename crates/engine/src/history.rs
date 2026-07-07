@@ -55,14 +55,64 @@ pub struct HistoryObservation {
     pub terms: Option<LoanTerms>,
 }
 
+/// Serde de `NaiveDate` como cadena ISO-8601 `YYYY-MM-DD`. El motor declara chrono con
+/// `default-features = false` (sólo `alloc`, sin la feature `serde` — decisión de pureza), así que
+/// la conversión vive aquí, sin ampliar la superficie de dependencias/features del crate puro y sin
+/// depender del formateador de chrono: sólo `Datelike` + `from_ymd_opt`.
+mod date_ymd {
+    use chrono::{Datelike, NaiveDate};
+    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(date: &NaiveDate, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!(
+            "{:04}-{:02}-{:02}",
+            date.year(),
+            date.month(),
+            date.day()
+        ))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<NaiveDate, D::Error> {
+        let s = String::deserialize(d)?;
+        let mut parts = s.splitn(3, '-');
+        let y = parts.next().and_then(|p| p.parse::<i32>().ok());
+        let m = parts.next().and_then(|p| p.parse::<u32>().ok());
+        let day = parts.next().and_then(|p| p.parse::<u32>().ok());
+        match (y, m, day) {
+            (Some(y), Some(m), Some(day)) => NaiveDate::from_ymd_opt(y, m, day)
+                .ok_or_else(|| D::Error::custom("fecha fuera de rango")),
+            _ => Err(D::Error::custom("se esperaba YYYY-MM-DD")),
+        }
+    }
+}
+
+/// Un movimiento de cash-flow datado que **moldea** la curva de un activo dentro de su segmento
+/// (tier-2: nunca contradice los snapshots — la curva anclada pasa exacta por ellos, decisión 12).
+/// `delta` viene YA normalizado en signo por el llamante: **positivo sube** el valor del activo
+/// (pata cuenta = `+amount`; pata destino de un ahorro = `−amount`). El motor no interpreta signos
+/// ni fuentes: sólo suma `delta` en el intervalo semiabierto `(seg_start, ·]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CashFlowEntry {
+    #[serde(with = "date_ymd")]
+    pub date: NaiveDate,
+    pub delta: Decimal,
+}
+
 /// Un item (`source_item_id`) a lo largo del timeline. `observations[j]` es la observación en el
 /// snapshot con fecha `HistoryTimeline::dates[j]` (o `None` si el item no aparece en ese snapshot).
 /// Un vector más corto que `dates` se trata como `None` en los índices que falten.
+///
+/// `cashflow` (opcional, `#[serde(default)]`) son los movimientos datados que moldean la curva del
+/// item **entre** snapshots. Vacío ⇒ comportamiento idéntico al histórico previo (interpolación
+/// lineal / amortización francesa, bit a bit). Sólo se consulta en el brazo activo-observado-en-
+/// ambos-extremos; los pasivos y los items observados en un solo extremo lo ignoran (fase 1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
     pub source_item_id: Uuid,
     pub kind: HistoryItemKind,
     pub observations: Vec<Option<HistoryObservation>>,
+    #[serde(default)]
+    pub cashflow: Vec<CashFlowEntry>,
 }
 
 /// Un timeline es el conjunto de snapshots de un `(owner_user_id, kind)`: fechas **estrictamente
@@ -100,6 +150,66 @@ fn interpolate_linear(v_a: Decimal, v_b: Decimal, days_from_start: i64, days_tot
     }
     let f = Decimal::from(days_from_start.clamp(0, days_total)) / Decimal::from(days_total);
     v_a + f * (v_b - v_a)
+}
+
+/// Valor de un **activo** dentro de un segmento `[seg_start, seg_end]` **anclado** a los deltas de
+/// cash-flow (tier-2), con la curva pasando **exacta** por ambos snapshots:
+///
+/// `v(t) = Va + C(a→t) + f(t)·(Vb − Va − C_total)`
+///
+/// donde:
+/// - `C(a→t)` = Σ de `delta` de las entradas en el intervalo **semiabierto** `(seg_start, eval_date]`
+///   (una txn fechada en `seg_start` pertenece al segmento anterior; una fechada en `seg_end` sí
+///   cuenta — misma frontera que usa el brazo `evaluate_item_at` para elegir esta rama).
+/// - `C_total = C(a→b)` = Σ de `delta` en `(seg_start, seg_end]`.
+/// - `f(t) = days_from_start / days_total`, lineal en días civiles — **idéntica base** que
+///   [`interpolate_linear`] (mismo `clamp` y misma división).
+///
+/// **Exactitud en los extremos** (independiente del cash-flow):
+/// - `f = 0` (⇒ `days_from_start = 0`, `eval_date = seg_start`): `C(a→a) = 0` (intervalo vacío) y el
+///   sumando residual es `0` ⇒ `v = Va` **exacto**.
+/// - `f = 1` (⇒ `days_from_start = days_total`, `eval_date = seg_end`): `C(a→b) = C_total` y
+///   `v = Va + C_total + (Vb − Va − C_total) = Vb` **exacto** (sin división residual; `f = n/n = 1`).
+///
+/// Con `cashflow` vacío degenera a `Va + f·(Vb − Va)` = [`interpolate_linear`]; aun así, el llamante
+/// evita esta función cuando no hay deltas en `(seg_start, seg_end]` y usa `interpolate_linear`
+/// textual, para garantía de **identidad bit a bit** con el histórico previo (propiedad P3).
+///
+/// **Implementación:** barrido lineal `O(n)` sobre `cf` por punto de evaluación (sin asumir orden,
+/// sin sumas-prefijo). Elegido frente a búsqueda binaria / sumas-prefijo porque la firma recibe `cf`
+/// y `eval_date` **por punto** (encaja en el diseño per-punto de `evaluate_item_at`, sin estado
+/// per-item), el volumen es diminuto (decenas de entradas × decenas de meses, sub-ms como el resto
+/// del módulo) y el barrido es robusto a cualquier orden de entrada (una búsqueda binaria exigiría
+/// un contrato «ordenado» que fallaría en silencio si se incumpliera). Sin `f64`.
+pub fn anchored_cashflow_segment_value(
+    v_a: Decimal,
+    v_b: Decimal,
+    cf: &[CashFlowEntry],
+    seg_start: NaiveDate,
+    seg_end: NaiveDate,
+    eval_date: NaiveDate,
+    days_from_start: i64,
+    days_total: i64,
+) -> Decimal {
+    if days_total <= 0 {
+        return v_a;
+    }
+    let f = Decimal::from(days_from_start.clamp(0, days_total)) / Decimal::from(days_total);
+
+    // `C_total` sobre `(seg_start, seg_end]` y `C(a→t)` sobre `(seg_start, eval_date]`, ambos en un
+    // solo barrido. Intervalo semiabierto por la izquierda: `date > seg_start` (nunca `>=`).
+    let mut c_partial = Decimal::ZERO;
+    let mut c_total = Decimal::ZERO;
+    for entry in cf {
+        if entry.date > seg_start && entry.date <= seg_end {
+            c_total += entry.delta;
+            if entry.date <= eval_date {
+                c_partial += entry.delta;
+            }
+        }
+    }
+
+    v_a + c_partial + f * (v_b - v_a - c_total)
 }
 
 /// Valor de un pasivo dentro de un segmento `(P_a) → (P_b)`, con curva de amortización francesa
@@ -223,7 +333,28 @@ fn evaluate_item_at(dates: &[NaiveDate], item: &HistoryItem, g: NaiveDate) -> De
     match (obs_at(a), obs_at(a + 1)) {
         (Some(lo), Some(ro)) => match item.kind {
             HistoryItemKind::Asset => {
-                interpolate_linear(lo.value, ro.value, days_from_start, days_total)
+                // ÚNICA rama nueva: si hay algún movimiento de cash-flow en el intervalo
+                // semiabierto `(d_a, d_b]`, la curva se ancla a ellos (pasa exacta por ambos
+                // snapshots). Sin movimientos en el segmento ⇒ MISMA ruta de hoy
+                // (`interpolate_linear` textual) para identidad bit a bit (P3).
+                let has_cashflow = item
+                    .cashflow
+                    .iter()
+                    .any(|entry| entry.date > d_a && entry.date <= d_b);
+                if has_cashflow {
+                    anchored_cashflow_segment_value(
+                        lo.value,
+                        ro.value,
+                        &item.cashflow,
+                        d_a,
+                        d_b,
+                        e,
+                        days_from_start,
+                        days_total,
+                    )
+                } else {
+                    interpolate_linear(lo.value, ro.value, days_from_start, days_total)
+                }
             }
             HistoryItemKind::Liability => {
                 let terms = lo.terms.as_ref().or(ro.terms.as_ref());
@@ -316,6 +447,14 @@ mod tests {
             source_item_id: Uuid::from_u128(1),
             kind,
             observations,
+            cashflow: vec![],
+        }
+    }
+
+    fn cf_e(date: NaiveDate, delta: i64) -> CashFlowEntry {
+        CashFlowEntry {
+            date,
+            delta: dec(delta),
         }
     }
 
@@ -573,11 +712,13 @@ mod tests {
                     source_item_id: Uuid::from_u128(1),
                     kind: HistoryItemKind::Asset,
                     observations: vec![obs(1000), obs(1600)], // vivo en ambos
+                    cashflow: vec![],
                 },
                 HistoryItem {
                     source_item_id: Uuid::from_u128(2),
                     kind: HistoryItemKind::Asset,
                     observations: vec![obs(500), None], // borrado antes de hoy
+                    cashflow: vec![],
                 },
             ],
         };
@@ -633,5 +774,264 @@ mod tests {
             evaluate_timeline(&tl_eq, &[d(2025, 1, 1)]),
             Err(EngineError::InvalidHistoryTimeline)
         ));
+    }
+
+    // ---- Anclaje de cash-flow (B1) -----------------------------------------------------------
+
+    /// P1 — `v(seg_start) == Va` para cash-flow arbitrario.
+    #[test]
+    fn anchored_p1_start_equals_va() {
+        let seg_start = d(2025, 1, 1);
+        let seg_end = d(2025, 3, 1);
+        let days_total = (seg_end - seg_start).num_days();
+        // Deltas variados dentro del segmento (positivos y negativos, no suman cero).
+        let cf = vec![
+            cf_e(d(2025, 1, 10), 500),
+            cf_e(d(2025, 1, 20), -200),
+            cf_e(d(2025, 2, 15), 1000),
+        ];
+        let v = anchored_cashflow_segment_value(
+            dec(1000),
+            dec(7777),
+            &cf,
+            seg_start,
+            seg_end,
+            seg_start, // eval en el arranque
+            0,
+            days_total,
+        );
+        assert_eq!(v, dec(1000));
+    }
+
+    /// P2 — `v(seg_end) == Vb` EXACTO para cash-flow arbitrario (incluidos deltas que no suman cero,
+    /// un delta grande, y un delta fechado EN `seg_end`).
+    #[test]
+    fn anchored_p2_end_equals_vb_exact() {
+        let seg_start = d(2025, 1, 1);
+        let seg_end = d(2025, 3, 1);
+        let days_total = (seg_end - seg_start).num_days();
+        let cases: Vec<Vec<CashFlowEntry>> = vec![
+            vec![],                                              // vacío
+            vec![cf_e(d(2025, 1, 15), 500), cf_e(d(2025, 2, 10), 500)], // suma +1000
+            vec![cf_e(d(2025, 1, 15), 500), cf_e(d(2025, 2, 10), -500)], // suma 0
+            vec![cf_e(d(2025, 2, 28), 123_456)],                 // un delta enorme
+            vec![cf_e(seg_end, 999)],                            // delta EN seg_end (cuenta)
+            vec![cf_e(seg_start, 4242)],                         // delta EN seg_start (no cuenta)
+        ];
+        for cf in &cases {
+            let v = anchored_cashflow_segment_value(
+                dec(1000),
+                dec(3000),
+                cf,
+                seg_start,
+                seg_end,
+                seg_end, // eval en el cierre
+                days_total,
+                days_total,
+            );
+            assert_eq!(v, dec(3000), "Vb debe ser exacto con cash-flow {cf:?}");
+        }
+    }
+
+    /// P3a — cash-flow vacío ⇒ idéntico a `interpolate_linear` en múltiples fechas de evaluación.
+    #[test]
+    fn anchored_p3_empty_matches_interpolate_linear_pointwise() {
+        let seg_start = d(2025, 1, 1);
+        let seg_end = d(2025, 4, 1);
+        let days_total = (seg_end - seg_start).num_days();
+        let empty: Vec<CashFlowEntry> = vec![];
+        for dfs in [0i64, 7, 15, 30, 45, 60, 80, days_total] {
+            let eval = seg_start + chrono::Duration::days(dfs);
+            let anchored = anchored_cashflow_segment_value(
+                dec(1000),
+                dec(2000),
+                &empty,
+                seg_start,
+                seg_end,
+                eval,
+                dfs,
+                days_total,
+            );
+            let linear = interpolate_linear(dec(1000), dec(2000), dfs, days_total);
+            assert_eq!(anchored, linear, "dfs={dfs}");
+        }
+    }
+
+    /// P3b — un timeline completo evaluado con y sin el campo `cashflow` vacío produce Vecs
+    /// idénticos (bit a bit): el campo por defecto no altera nada.
+    #[test]
+    fn anchored_p3_timeline_identical_with_empty_cashflow_field() {
+        let dates = vec![d(2025, 1, 1), d(2025, 4, 1), d(2025, 8, 1)];
+        let observations = vec![obs(1000), obs(1600), obs(3000)];
+        let grid = vec![
+            d(2024, 12, 1),
+            d(2025, 1, 1),
+            d(2025, 2, 1),
+            d(2025, 3, 1),
+            d(2025, 5, 1),
+            d(2025, 6, 1),
+            d(2025, 8, 1),
+            d(2025, 9, 1),
+        ];
+        // (a) construido con el helper `item` (cashflow por defecto = vacío)
+        let tl_default = HistoryTimeline {
+            dates: dates.clone(),
+            items: vec![item(HistoryItemKind::Asset, observations.clone())],
+        };
+        // (b) cashflow explícitamente vacío
+        let tl_explicit_empty = HistoryTimeline {
+            dates: dates.clone(),
+            items: vec![HistoryItem {
+                source_item_id: Uuid::from_u128(1),
+                kind: HistoryItemKind::Asset,
+                observations: observations.clone(),
+                cashflow: vec![],
+            }],
+        };
+        let a = evaluate_timeline(&tl_default, &grid).unwrap();
+        let b = evaluate_timeline(&tl_explicit_empty, &grid).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// P4 — snapshots planos (`Va == Vb`) + un depósito +100 en el día `d`: salto justo después de
+    /// `d` por encima de `Va`, `v(seg_end) == Va` EXACTO, y forma que decae linealmente hacia `Va`.
+    /// Segmento de 100 días → `f = dfs/100` exacto → aritmética entera bit a bit.
+    #[test]
+    fn anchored_p4_flat_snapshots_deposit_jumps_then_decays_linearly() {
+        let seg_start = d(2025, 1, 1);
+        let days_total = 100i64;
+        let seg_end = seg_start + chrono::Duration::days(days_total);
+        let dep_date = seg_start + chrono::Duration::days(10);
+        let cf = vec![cf_e(dep_date, 100)];
+        let (va, vb) = (dec(1000), dec(1000)); // plano
+
+        let eval = |offset: i64| {
+            let eval_date = seg_start + chrono::Duration::days(offset);
+            anchored_cashflow_segment_value(va, vb, &cf, seg_start, seg_end, eval_date, offset, days_total)
+        };
+
+        // `v(n) = 1000 − n` antes del depósito; `1100 − n` a partir de él.
+        let just_before = eval(9); // 991
+        let at_dep = eval(10); // 1090
+        assert_eq!(just_before, dec(991));
+        assert_eq!(at_dep, dec(1090));
+        // Salto: justo tras el depósito el valor supera Va y salta respecto al día anterior.
+        assert!(at_dep > va, "at_dep={at_dep} !> Va={va}");
+        assert!(at_dep > just_before, "sin salto: {at_dep} !> {just_before}");
+        // v(seg_end) == Va exacto (el snapshot plano manda; el ingreso se reabsorbe).
+        assert_eq!(eval(days_total), va);
+        // Decaimiento lineal tras el depósito: diferencias iguales entre puntos equiespaciados.
+        let (v20, v40, v60) = (eval(20), eval(40), eval(60));
+        assert_eq!(v20, dec(1080));
+        assert_eq!(v40, dec(1060));
+        assert_eq!(v60, dec(1040));
+        assert_eq!(v20 - v40, v40 - v60); // colinealidad exacta
+    }
+
+    /// P5 — frontera semiabierta `(seg_start, seg_end]`: un delta fechado en `seg_start` NO cuenta
+    /// (curva = lineal pura); uno fechado un día después SÍ; uno en `seg_end` SÍ. Vía
+    /// `evaluate_timeline` (ejercita también la selección de rama por `has_cashflow`).
+    #[test]
+    fn anchored_p5_semiopen_boundary() {
+        let d_a = d(2025, 1, 1);
+        let d_b = d(2025, 2, 1);
+        let interior = d(2025, 1, 15);
+        let grid = vec![d_a, interior, d_b];
+
+        let build = |cashflow: Vec<CashFlowEntry>| HistoryTimeline {
+            dates: vec![d_a, d_b],
+            items: vec![HistoryItem {
+                source_item_id: Uuid::from_u128(1),
+                kind: HistoryItemKind::Asset,
+                observations: vec![obs(1000), obs(1000)], // plano
+                cashflow,
+            }],
+        };
+
+        // Delta en seg_start: NO cuenta → rama lineal pura → interior == 1000.
+        let at_start = evaluate_timeline(&build(vec![cf_e(d_a, 500)]), &grid).unwrap();
+        assert_eq!(at_start[0], vec![dec(1000), dec(1000), dec(1000)]);
+
+        // Delta un día DESPUÉS de seg_start: SÍ cuenta → curva anclada. El ingreso ya ocurrió
+        // en el punto interior (2025-01-15 > 2025-01-02) → `C(t)=500` → interior SALTA por encima
+        // de Va. Contraste directo con el caso anterior (mismo delta, un día antes, ignorado).
+        let after_start =
+            evaluate_timeline(&build(vec![cf_e(d(2025, 1, 2), 500)]), &grid).unwrap();
+        assert_eq!(after_start[0][0], dec(1000)); // extremo exacto
+        assert_eq!(after_start[0][2], dec(1000)); // extremo exacto
+        assert!(
+            after_start[0][1] > dec(1000),
+            "interior={} debería superar Va (el ingreso ya ocurrió y cuenta)",
+            after_start[0][1]
+        );
+
+        // Delta en seg_end: SÍ cuenta (intervalo cerrado por la derecha). Aún no ha ocurrido en el
+        // interior (2025-01-15 < 2025-02-01) → `C(t)=0` → interior PREDECLINA por debajo de Va.
+        let at_end = evaluate_timeline(&build(vec![cf_e(d_b, 500)]), &grid).unwrap();
+        assert_eq!(at_end[0][0], dec(1000)); // extremo exacto
+        assert_eq!(at_end[0][2], dec(1000)); // último snapshot exacto
+        assert!(
+            at_end[0][1] < dec(1000),
+            "interior={} debería predeclinar (< Va) por el ingreso en seg_end",
+            at_end[0][1]
+        );
+    }
+
+    /// Extra — un delta hacia un activo con un único snapshot / sin segmento no rompe nada (sin
+    /// panic, comportamiento actual); y el brazo `(Some, None)` y los pasivos ignoran el cash-flow.
+    #[test]
+    fn anchored_extra_single_snapshot_and_non_asset_paths_ignore_cashflow() {
+        // (1) Un único snapshot + cash-flow: se sirve el valor exacto, el cash-flow se ignora.
+        let tl = HistoryTimeline {
+            dates: vec![d(2025, 3, 1)],
+            items: vec![HistoryItem {
+                source_item_id: Uuid::from_u128(1),
+                kind: HistoryItemKind::Asset,
+                observations: vec![obs(1000)],
+                cashflow: vec![cf_e(d(2025, 2, 20), 500), cf_e(d(2025, 3, 10), -100)],
+            }],
+        };
+        let grid = vec![d(2025, 2, 1), d(2025, 3, 1), d(2025, 4, 1)];
+        let out = evaluate_timeline(&tl, &grid).unwrap();
+        assert_eq!(out[0], vec![dec(0), dec(1000), dec(0)]);
+
+        // (2) Item presente en un solo extremo `(Some, None)` + cash-flow: la rama anclada NO
+        // aplica (sólo `(Some, Some)` + Asset). Aparece/desaparece sin rampas, cash-flow ignorado.
+        let tl2 = HistoryTimeline {
+            dates: vec![d(2025, 1, 1), d(2025, 6, 1)],
+            items: vec![HistoryItem {
+                source_item_id: Uuid::from_u128(2),
+                kind: HistoryItemKind::Asset,
+                observations: vec![obs(1000), None],
+                cashflow: vec![cf_e(d(2025, 3, 1), 999)],
+            }],
+        };
+        let grid2 = vec![d(2025, 1, 1), d(2025, 3, 1), d(2025, 6, 1)];
+        let out2 = evaluate_timeline(&tl2, &grid2).unwrap();
+        assert_eq!(out2[0], vec![dec(1000), dec(0), dec(0)]);
+
+        // (3) Pasivo observado en ambos extremos + cash-flow: intacto (amortización pura, sin
+        // inyectar cuotas). El resultado debe ser idéntico al del mismo pasivo sin cash-flow.
+        let liab_cf = HistoryTimeline {
+            dates: vec![d(2024, 1, 1), d(2025, 1, 1)],
+            items: vec![HistoryItem {
+                source_item_id: Uuid::from_u128(3),
+                kind: HistoryItemKind::Liability,
+                observations: vec![obs_liab(200_000, 5, 1500), obs_liab(190_000, 5, 1500)],
+                cashflow: vec![cf_e(d(2024, 6, 1), 12345)],
+            }],
+        };
+        let liab_plain = HistoryTimeline {
+            dates: vec![d(2024, 1, 1), d(2025, 1, 1)],
+            items: vec![item(
+                HistoryItemKind::Liability,
+                vec![obs_liab(200_000, 5, 1500), obs_liab(190_000, 5, 1500)],
+            )],
+        };
+        let grid3 = vec![d(2024, 1, 1), d(2024, 6, 1), d(2025, 1, 1)];
+        assert_eq!(
+            evaluate_timeline(&liab_cf, &grid3).unwrap(),
+            evaluate_timeline(&liab_plain, &grid3).unwrap(),
+        );
     }
 }
