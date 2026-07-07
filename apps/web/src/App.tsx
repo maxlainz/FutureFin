@@ -27,6 +27,7 @@ import { SummaryView } from "./views/SummaryView";
 import type { BudgetScopeToggle } from "./views/BudgetView";
 import { BootstrapInstallationPanel } from "./auth/BootstrapInstallationPanel";
 import { ledgerViewQs } from "./lib/ledger";
+import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
 import type { LedgerPersonScope } from "./lib/ledger";
@@ -118,6 +119,9 @@ const LiabilitiesView = lazy(() =>
 );
 const BudgetView = lazy(() =>
   import("./views/BudgetView").then((m) => ({ default: m.BudgetView })),
+);
+const GastosView = lazy(() =>
+  import("./views/GastosView").then((m) => ({ default: m.GastosView })),
 );
 const UpcomingView = lazy(() =>
   import("./views/UpcomingView").then((m) => ({ default: m.UpcomingView })),
@@ -1195,6 +1199,11 @@ export default function App() {
           loadData: async () => {
             await Promise.all([loadBudgetPage(), loadAllocationRules()]);
           },
+        },
+        {
+          tab: "expenses",
+          // Vista autónoma: solo calentamos el chunk; los datos los carga ella al montar.
+          importChunk: () => import("./views/GastosView"),
         },
         {
           tab: "retirement",
@@ -2592,19 +2601,6 @@ export default function App() {
     setFfbackupImportPassword("");
   }
 
-  async function readFileAsBase64(file: File): Promise<string> {
-    const buf = await file.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    let binary = "";
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode(
-        ...bytes.subarray(i, Math.min(i + chunk, bytes.length)),
-      );
-    }
-    return window.btoa(binary);
-  }
-
   async function runFfbackupImportPreview(e: FormEvent) {
     e.preventDefault();
     if (!ffbackupImportFile) {
@@ -3227,6 +3223,15 @@ export default function App() {
               beginEditRule(r);
               setRuleModalOpen(true);
             }}
+          />
+        ) : activeTab === "expenses" ? (
+          <GastosView
+            installation={installation}
+            hasMembership={hasMembership}
+            ledgerPersonScope={ledgerPersonScope}
+            canEdit={installation?.role !== "viewer"}
+            user={user}
+            /* onCashflowMutated lo cablea el director al overlay del chart grande. */
           />
         ) : activeTab === "upcoming" ? (
           <UpcomingView

@@ -8,6 +8,7 @@ export type TabId =
   | "assets"
   | "liabilities"
   | "budget"
+  | "expenses"
   | "upcoming"
   | "projection"
   | "retirement"
@@ -27,6 +28,7 @@ export const TABS: { id: TabId; label: string }[] = [
   { id: "assets", label: "Activos" },
   { id: "liabilities", label: "Pasivos" },
   { id: "budget", label: "Presupuesto" },
+  { id: "expenses", label: "Gastos" },
   { id: "upcoming", label: "Próximos" },
   { id: "retirement", label: "Jubilación" },
   { id: "projection", label: "Proyección" },
@@ -38,6 +40,7 @@ export const TAB_PATH: Record<TabId, string> = {
   assets: "/activos",
   liabilities: "/pasivos",
   budget: "/presupuesto",
+  expenses: "/gastos",
   upcoming: "/proximos",
   projection: "/proyeccion",
   retirement: "/jubilacion",

@@ -2363,3 +2363,502 @@ fieldset.retirement-config-stack {
 /* ---------- Color helpers (delta numbers) ---------- */
 .num-pos { color: var(--ff-pos); }
 .num-neg { color: var(--ff-neg); }
+
+/* ============================================================
+   Pestaña «Gastos» (histórico de gasto mensual) — v1.6.0.
+   Solo tokens var(--ff-*) / var(--exp-*); sin hex hardcoded.
+   ============================================================ */
+
+/* ---- Toolbar (mes + ventana + acciones) ---- */
+.expenses-toolbar {
+  justify-content: space-between;
+}
+
+.expenses-month-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.expenses-month-nav .field.inline-role {
+  min-width: 9rem;
+}
+
+.expenses-window-pills {
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.expenses-toolbar-actions {
+  display: inline-flex;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.expenses-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.expenses-action-btn svg {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+}
+
+.exp-partial-chip {
+  color: var(--ff-ink-soft);
+}
+
+.exp-partial-note {
+  margin-top: 0.6rem;
+  font-size: 0.8rem;
+}
+
+/* ---- Comparativa ---- */
+.exp-comparison-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem 1.25rem;
+}
+
+@media (max-width: 720px) {
+  .exp-comparison-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.exp-derived-row td {
+  color: var(--ff-ink-soft);
+  font-style: italic;
+}
+
+.exp-uncategorized {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ff-muted);
+}
+
+.exp-cat-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--ff-accent);
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+/* ---- Movimientos (tabla) ---- */
+.exp-concept-cell {
+  max-width: 18rem;
+  word-break: break-word;
+}
+
+.exp-source-tag {
+  font-size: 0.7rem;
+  color: var(--ff-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.exp-cat-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.exp-inline-select {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: var(--ff-radius-input);
+  border: 1px solid var(--ff-line-soft);
+  background: var(--ff-paper);
+  color: var(--ff-ink);
+  max-width: 12rem;
+}
+
+.exp-inline-select:disabled {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ff-ink-soft);
+  appearance: none;
+}
+
+.exp-kind-select--savings {
+  border-color: color-mix(in oklch, var(--ff-accent) 55%, var(--ff-line-soft));
+  color: var(--ff-accent);
+}
+
+.exp-link-col {
+  width: 1%;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.exp-link-indicator {
+  color: var(--ff-muted);
+  display: inline-flex;
+}
+
+.exp-link-indicator svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+/* ============================================================
+   Comparativa — barras horizontales (CategoryComparisonBars)
+   ============================================================ */
+.cmp-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cmp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  font-size: 0.75rem;
+  color: var(--ff-ink-soft);
+}
+
+.cmp-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.cmp-swatch {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.cmp-swatch--real {
+  background: var(--ff-accent);
+}
+
+.cmp-swatch--budget {
+  background: var(--ff-line-soft);
+}
+
+.cmp-swatch--avg {
+  background: var(--exp-average);
+}
+
+.cmp-row {
+  display: grid;
+  grid-template-columns: minmax(6rem, 10rem) minmax(0, 1fr);
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+}
+
+.cmp-row-label {
+  font-size: 0.8rem;
+  color: var(--ff-ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmp-row-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cmp-bar {
+  height: 0.5rem;
+  border-radius: 3px;
+  min-width: 2px;
+}
+
+.cmp-bar--real {
+  background: var(--ff-accent);
+}
+
+.cmp-bar--budget {
+  background: var(--ff-line-soft);
+}
+
+.cmp-bar--avg {
+  background: var(--exp-average);
+}
+
+/* ============================================================
+   Cash-flow mensual — columnas divergentes (MonthlyCashflowBars)
+   ============================================================ */
+.cf-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cf-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  font-size: 0.75rem;
+  color: var(--ff-ink-soft);
+}
+
+.cf-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.cf-swatch {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.cf-swatch--income {
+  background: var(--ff-accent);
+}
+
+.cf-swatch--expense {
+  background: var(--exp-average);
+}
+
+.cf-swatch--savings {
+  background: color-mix(in oklch, var(--exp-average) 45%, var(--ff-accent));
+}
+
+.cf-track {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 140px;
+  width: 100%;
+}
+
+.cf-col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cf-col-up {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  border-bottom: 1px solid var(--proj-grid);
+}
+
+.cf-col-down {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.cf-bar {
+  width: 70%;
+  min-width: 3px;
+  border-radius: 2px;
+}
+
+.cf-bar--income {
+  background: var(--ff-accent);
+}
+
+.cf-bar--expense {
+  background: var(--exp-average);
+}
+
+.cf-bar--savings {
+  background: color-mix(in oklch, var(--exp-average) 45%, var(--ff-accent));
+}
+
+.cf-xlabels {
+  display: flex;
+  gap: 2px;
+  width: 100%;
+}
+
+.cf-xlabel {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
+  font-size: 0.66rem;
+  color: var(--ff-muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* ============================================================
+   Import wizard (ImportWizardModal) + alta manual
+   ============================================================ */
+.import-wizard {
+  min-width: 0;
+}
+
+.import-summary-banner {
+  font-size: 0.82rem;
+}
+
+.import-bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--ff-line-soft);
+  border-bottom: 1px solid var(--ff-line-soft);
+}
+
+.import-filter-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.import-bulk-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  align-items: center;
+}
+
+.import-bulk-actions .field.inline-role {
+  min-width: 8rem;
+}
+
+.table-scroll--sticky {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.table-scroll--sticky thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ff-paper);
+}
+
+.import-preview-scroll {
+  max-height: 52vh;
+}
+
+.import-preview-table {
+  font-size: 0.82rem;
+}
+
+.import-preview-table select {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.2rem 0.35rem;
+  border-radius: var(--ff-radius-input);
+  border: 1px solid var(--ff-line-soft);
+  background: var(--ff-paper);
+  color: var(--ff-ink);
+  max-width: 11rem;
+}
+
+.import-check-cell {
+  width: 1%;
+  text-align: center;
+  padding-right: 0.3rem;
+}
+
+.import-link-cell {
+  width: 1%;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.import-concept-cell {
+  max-width: 18rem;
+  word-break: break-word;
+}
+
+.import-row-hint {
+  font-size: 0.7rem;
+  color: var(--ff-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.import-row--muted td {
+  opacity: 0.6;
+}
+
+.import-links-row td {
+  background: color-mix(in oklch, var(--ff-paper) 60%, var(--ff-bg));
+}
+
+.import-links-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  padding: 0.35rem 0;
+}
+
+.import-links-editor .field.inline-role {
+  min-width: 11rem;
+}
+
+.is-active-link {
+  color: var(--ff-accent);
+}
+
+.import-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--ff-line-soft);
+}
+
+.import-footer-summary {
+  font-size: 0.82rem;
+}
+
+.import-account-select {
+  min-width: 14rem;
+  flex: 1 1 14rem;
+}
+
+/* ---- Alta manual de efectivo (grid multifila) ---- */
+.cash-entry-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--ff-line-soft);
+}
+
+.cash-entry-row:last-child {
+  border-bottom: none;
+}
+
+.cash-entry-row .field {
+  flex: 0 1 7rem;
+  min-width: 5.5rem;
+}
+
+.cash-entry-row .field.cash-entry-concept {
+  flex: 1 1 10rem;
+  min-width: 8rem;
+}
+
+.cash-entry-row .field.cash-entry-date {
+  flex: 0 1 8rem;
+}
+
+.cash-entry-row .field.cash-entry-amount {
+  flex: 0 1 6rem;
+}
