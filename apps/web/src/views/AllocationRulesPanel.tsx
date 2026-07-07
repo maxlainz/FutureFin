@@ -11,6 +11,7 @@ import {
   formatPercentDisplay,
   parseDisplayDecimal,
 } from "../lib/format";
+import { useIsMobile } from "../lib/responsive";
 
 function formatAllocationCap(
   capKind: AllocationRuleCapKind | null | undefined,
@@ -71,6 +72,7 @@ export function AllocationRulesPanel({
   moveRule: (id: string, dir: "up" | "down") => void;
   embedded?: boolean;
 }) {
+  const isMobile = useIsMobile();
   const assetById = new Map(assets.map((a) => [a.id, a.name]));
   const sinkIndex = rules.findIndex(
     (r) => r.kind === "remainder" && !r.cap_kind,
@@ -166,10 +168,10 @@ export function AllocationRulesPanel({
                 <tr>
                   <th>#</th>
                   <th>Destino</th>
-                  <th>Tipo</th>
+                  {isMobile ? null : <th>Tipo</th>}
                   <th className="num">Cantidad</th>
-                  <th className="num">Tope</th>
-                  {canEdit ? (
+                  {isMobile ? null : <th className="num">Tope</th>}
+                  {!isMobile && canEdit ? (
                     <th className="asset-actions-cell">
                       <span className="sr-only">Acciones</span>
                     </th>
@@ -177,65 +179,101 @@ export function AllocationRulesPanel({
                 </tr>
               </thead>
               <tbody>
-                {rules.map((r, i) => (
-                  <tr key={r.id}>
-                    <td>{i + 1}</td>
-                    <td>{assetById.get(r.target_asset_id) ?? "—"}</td>
-                    <td>
-                      {r.kind === "fixed"
-                        ? "Fija"
-                        : r.kind === "percent"
-                          ? "Porcentaje"
-                          : "Resto"}
-                    </td>
-                    <td className="num">
-                      {formatAllocationAmount(r.kind, r.amount, currencyIso)}
-                    </td>
-                    <td className="num muted">
-                      {formatAllocationCap(r.cap_kind, r.cap_value, currencyIso)}
-                    </td>
-                    {canEdit ? (
-                      <td className="asset-actions-cell">
-                        <div className="budget-row-actions">
-                          <button
-                            type="button"
-                            className="btn ghost icon-btn"
-                            aria-label="Subir prioridad"
-                            disabled={i === 0}
-                            onClick={() => moveRule(r.id, "up")}
-                          >
-                            ▲
-                          </button>
-                          <button
-                            type="button"
-                            className="btn ghost icon-btn"
-                            aria-label="Bajar prioridad"
-                            disabled={i === rules.length - 1}
-                            onClick={() => moveRule(r.id, "down")}
-                          >
-                            ▼
-                          </button>
-                          <button
-                            type="button"
-                            className="btn ghost icon-btn"
-                            aria-label="Editar regla"
-                            onClick={() => beginEditRule(r)}
-                          >
-                            <RowEditIcon />
-                          </button>
-                          <button
-                            type="button"
-                            className="btn ghost danger icon-btn"
-                            aria-label="Eliminar regla"
-                            onClick={() => deleteRule(r.id)}
-                          >
-                            <RowTrashIcon />
-                          </button>
-                        </div>
+                {rules.map((r, i) => {
+                  const rowTappable = isMobile && canEdit;
+                  const typeLabel =
+                    r.kind === "fixed"
+                      ? "Fija"
+                      : r.kind === "percent"
+                        ? "Porcentaje"
+                        : "Resto";
+                  const capLabel = formatAllocationCap(
+                    r.cap_kind,
+                    r.cap_value,
+                    currencyIso,
+                  );
+                  return (
+                    <tr
+                      key={r.id}
+                      className={rowTappable ? "row-tappable" : undefined}
+                      role={rowTappable ? "button" : undefined}
+                      tabIndex={rowTappable ? 0 : undefined}
+                      onClick={rowTappable ? () => beginEditRule(r) : undefined}
+                      onKeyDown={
+                        rowTappable
+                          ? (e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                beginEditRule(r);
+                              }
+                            }
+                          : undefined
+                      }
+                    >
+                      <td>{i + 1}</td>
+                      <td>
+                        {assetById.get(r.target_asset_id) ?? "—"}
+                        {isMobile ? (
+                          <span className="cell-subline">
+                            {typeLabel} · Tope {capLabel}
+                          </span>
+                        ) : null}
                       </td>
-                    ) : null}
-                  </tr>
-                ))}
+                      {isMobile ? null : <td>{typeLabel}</td>}
+                      <td className="num">
+                        {formatAllocationAmount(r.kind, r.amount, currencyIso)}
+                        {rowTappable ? (
+                          <span className="row-chevron" aria-hidden>
+                            ›
+                          </span>
+                        ) : null}
+                      </td>
+                      {isMobile ? null : (
+                        <td className="num muted">{capLabel}</td>
+                      )}
+                      {!isMobile && canEdit ? (
+                        <td className="asset-actions-cell">
+                          <div className="budget-row-actions">
+                            <button
+                              type="button"
+                              className="btn ghost icon-btn"
+                              aria-label="Subir prioridad"
+                              disabled={i === 0}
+                              onClick={() => moveRule(r.id, "up")}
+                            >
+                              ▲
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost icon-btn"
+                              aria-label="Bajar prioridad"
+                              disabled={i === rules.length - 1}
+                              onClick={() => moveRule(r.id, "down")}
+                            >
+                              ▼
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost icon-btn"
+                              aria-label="Editar regla"
+                              onClick={() => beginEditRule(r)}
+                            >
+                              <RowEditIcon />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost danger icon-btn"
+                              aria-label="Eliminar regla"
+                              onClick={() => deleteRule(r.id)}
+                            >
+                              <RowTrashIcon />
+                            </button>
+                          </div>
+                        </td>
+                      ) : null}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

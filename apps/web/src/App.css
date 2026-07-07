@@ -183,8 +183,10 @@
 }
 
 .app-root--projection-viewport {
-  height: 100vh;
-  min-height: 100vh;
+  /* 100dvh (no 100vh): en móvil las barras dinámicas de iOS/Chrome hacen que
+     100vh recorte la parte baja del chart. dvh sigue el viewport visible. */
+  height: 100dvh;
+  min-height: 100dvh;
   overflow: hidden;
 }
 
@@ -1745,7 +1747,11 @@
   margin-top: 0.65rem;
   width: 100%;
   max-width: 960px;
-  touch-action: none;
+  /* pan-y (no `none`): reserva el swipe VERTICAL para el scroll de página en
+     móvil — el navegador emite `pointercancel` y la máquina de gestos aborta.
+     El pan horizontal y el pinch quedan para JS (pan-y no los incluye). El
+     doble-tap-zoom queda desactivado. Inocuo en desktop (no afecta wheel/hover). */
+  touch-action: pan-y;
   overflow: hidden;
 }
 
@@ -3111,9 +3117,123 @@ fieldset.retirement-config-stack {
 /* ==========================================================================
    MOBILE · B — TABLAS (columnas esenciales, fila tappable, sub-lines)
    Propiedad del workstream B. No editar desde otros workstreams.
+   --------------------------------------------------------------------------
+   Mecanismo: el JSX de cada tabla gatea columnas por `useIsMobile()` (mismo
+   boolean para th y td). Estas clases solo se emiten en el DOM móvil, pero
+   van dentro de @media para respetar la invariante de regresión (desktop
+   pixel-idéntico). Sin hex — solo tokens.
    ========================================================================== */
+@media (max-width: 640px) { /* bp:mobile 640 */
+  /* Línea secundaria muted bajo la 1ª celda: datos demotados de las columnas
+     que desaparecen en móvil (categoría/tipo/TAE/cuota…). */
+  .cell-subline {
+    display: block;
+    margin-top: 0.2rem;
+    font-size: 0.75rem;
+    font-weight: 400;
+    line-height: 1.35;
+    color: var(--ff-muted);
+    white-space: normal;
+  }
+  .cell-subline svg {
+    width: 0.85em;
+    height: 0.85em;
+    vertical-align: -0.12em;
+  }
+
+  /* Fila tappable: abre el modal de edición existente (o expande, en el
+     preview del import). cursor + feedback :active con un lavado del acento. */
+  .row-tappable {
+    cursor: pointer;
+  }
+  .row-tappable:active {
+    background: color-mix(in oklch, var(--ff-accent) 12%, transparent);
+  }
+  .row-tappable:focus-visible {
+    outline: 2px solid var(--ff-accent);
+    outline-offset: -2px;
+  }
+
+  /* Affordance › muted. Inline al final de la celda de valor en las tablas de
+     ledger; en su propia celda estrecha en el preview del import (donde gira
+     90° al expandir la fila). */
+  .row-chevron {
+    display: inline-block;
+    margin-left: 0.4rem;
+    color: var(--ff-muted);
+    font-size: 1.05rem;
+    line-height: 1;
+    transition: transform 0.12s ease;
+  }
+  .row-tappable[aria-expanded="true"] .row-chevron {
+    transform: rotate(90deg);
+  }
+  .row-chevron-cell {
+    width: 1.5rem;
+    text-align: center;
+  }
+  .row-chevron-cell .row-chevron {
+    margin-left: 0;
+  }
+
+  /* Botón «Eliminar» solo-móvil dentro de los modales de edición (Movimientos,
+     Activos, Pasivos, Próximos, Budget, History, reglas): el borrado vivía en
+     la columna Acciones, que desaparece en móvil. Reusa `.asset-form-actions`
+     (column-reverse full-width, A5). Las reglas de asignación además exponen
+     reordenar ▲▼ aquí. */
+  .modal-mobile-delete-row,
+  .modal-mobile-reorder {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .modal-mobile-delete-row .btn {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+  .modal-mobile-reorder .btn {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+}
 
 /* ==========================================================================
    MOBILE · C — PROYECCIÓN (desbloqueo viewport, chart táctil, tooltip)
    Propiedad del workstream C. No editar desde otros workstreams.
    ========================================================================== */
+
+/* ---- C1. Desbloqueo del viewport de Proyección ----
+   En desktop la vista es un viewport BLOQUEADO (height:100dvh; overflow:hidden;
+   flex fullbleed) — sin scroll de página. En móvil eso ahoga el chart y deja
+   los controles inaccesibles: la convertimos en un documento que scrollea en
+   vertical, con el chart a altura acotada. */
+@media (max-width: 720px) { /* bp:struct 720 */
+  .app-root--projection-viewport {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+  .app-main--projection-fullbleed {
+    overflow: visible;
+  }
+  .workspace--projection-fullwidth,
+  .workspace--projection-fullwidth > .panel {
+    overflow: visible;
+    flex: initial;
+  }
+  /* El chart deja de estirarse (flex:1) y toma una altura fija cómoda para el
+     dedo; el resto de la vista fluye debajo con scroll vertical normal. */
+  .projection-chart-root--fullbleed {
+    flex: none;
+    height: min(72dvh, 30rem);
+  }
+}
+
+/* ---- C4. Tooltip táctil ----
+   En coarse el tap abre el tooltip cerca del dedo (offset vertical extra en JS).
+   El max-width evita que se recorte contra el `overflow:hidden` del chart en
+   pantallas estrechas; el centrado horizontal ya se clampa en JS (tipOffset.x). */
+@media (max-width: 640px) { /* bp:mobile 640 */
+  .projection-chart-tooltip {
+    max-width: min(16rem, calc(100vw - 2rem));
+  }
+}

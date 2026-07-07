@@ -28,7 +28,8 @@ import type {
 import { Modal, ModalFormError } from "../components/Modal";
 import { LinkIcon } from "../components/icons";
 import { formatCurrencyAmount } from "../lib/format";
-import { formatDateDmy } from "../lib/dates";
+import { formatDateDm, formatDateDmy } from "../lib/dates";
+import { useIsMobile } from "../lib/responsive";
 import { readFileAsBase64 } from "../lib/files";
 import {
   KIND_LABEL_ES,
@@ -178,6 +179,7 @@ export function ImportWizardModal({
   const [expandedLinks, setExpandedLinks] = useState<Set<number>>(new Set());
   const [bulkKind, setBulkKind] = useState<TransactionKindApi>("expense");
   const [bulkCategory, setBulkCategory] = useState<string>("");
+  const isMobile = useIsMobile();
 
   // Reset cada vez que se (re)abre el modal.
   useEffect(() => {
@@ -486,14 +488,20 @@ export function ImportWizardModal({
                       <th className="import-check-cell">
                         <span className="sr-only">Incluir</span>
                       </th>
-                      <th>Fecha</th>
+                      {isMobile ? null : <th>Fecha</th>}
                       <th>Concepto</th>
-                      <th className="num">Importe</th>
-                      <th>Kind</th>
-                      <th>Categoría</th>
-                      <th className="import-link-cell">
-                        <span className="sr-only">Vínculos</span>
-                      </th>
+                      {isMobile ? null : <th className="num">Importe</th>}
+                      {isMobile ? null : <th>Kind</th>}
+                      {isMobile ? null : <th>Categoría</th>}
+                      {isMobile ? (
+                        <th className="row-chevron-cell">
+                          <span className="sr-only">Detalles</span>
+                        </th>
+                      ) : (
+                        <th className="import-link-cell">
+                          <span className="sr-only">Vínculos</span>
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -504,6 +512,7 @@ export function ImportWizardModal({
                         row={rows[i]}
                         draft={state.drafts[i]}
                         currencyIso={currencyIso}
+                        isMobile={isMobile}
                         incomeCategories={incomeCategories}
                         expenseCategories={expenseCategories}
                         assets={assets}
@@ -580,6 +589,7 @@ type PreviewRowProps = {
   row: ImportPreviewRowApi;
   draft: ImportRowDraft;
   currencyIso: string;
+  isMobile: boolean;
   incomeCategories: CategoryRow[];
   expenseCategories: CategoryRow[];
   assets: AssetApiRow[];
@@ -594,6 +604,7 @@ const PreviewRowMemo = memo(function PreviewRow({
   row,
   draft,
   currencyIso,
+  isMobile,
   incomeCategories,
   expenseCategories,
   assets,
@@ -614,14 +625,75 @@ const PreviewRowMemo = memo(function PreviewRow({
   if (row.suggested_transfer) statusHints.push("Transferencia");
   if (row.currency_warning) statusHints.push("Divisa ≠ EUR");
 
+  // En móvil kind/categoría/vínculos migran a la fila expandible. colSpan
+  // dinámico: primera celda vacía (bajo el checkbox) + resto de columnas.
+  const detailColSpan = isMobile ? 2 : 6;
+  const kindSelect = (
+    <select
+      value={draft.kind}
+      aria-label="Kind"
+      onChange={(e) =>
+        onPatch(index, { kind: e.target.value as TransactionKindApi })
+      }
+    >
+      {TRANSACTION_KINDS.map((k) => (
+        <option key={k} value={k}>
+          {KIND_LABEL_ES[k]}
+        </option>
+      ))}
+    </select>
+  );
+  const categorySelect = (
+    <select
+      value={draft.categoryId}
+      aria-label="Categoría"
+      disabled={draft.kind === "savings"}
+      onChange={(e) => onPatch(index, { categoryId: e.target.value })}
+    >
+      <option value="">
+        {draft.kind === "savings" ? "—" : "Sin categoría"}
+      </option>
+      {cats.map((c) => (
+        <option key={c.id} value={c.id}>
+          {c.name}
+        </option>
+      ))}
+    </select>
+  );
+
+  // Desktop conserva EXACTAMENTE la expresión original (`""` en filas no muted);
+  // solo en móvil se añade `row-tappable`.
+  const rowClassName = isMobile
+    ? `${muted ? "import-row--muted " : ""}row-tappable`
+    : muted
+      ? "import-row--muted"
+      : "";
+
   return (
     <>
-      <tr className={muted ? "import-row--muted" : ""}>
+      <tr
+        className={rowClassName}
+        role={isMobile ? "button" : undefined}
+        tabIndex={isMobile ? 0 : undefined}
+        aria-expanded={isMobile ? expanded : undefined}
+        onClick={isMobile ? () => onToggleLinks(index) : undefined}
+        onKeyDown={
+          isMobile
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onToggleLinks(index);
+                }
+              }
+            : undefined
+        }
+      >
         <td className="import-check-cell">
           <input
             type="checkbox"
             checked={draft.include}
             aria-label="Incluir fila"
+            onClick={isMobile ? (e) => e.stopPropagation() : undefined}
             onChange={(e) => {
               const patch: Partial<ImportRowDraft> = { include: e.target.checked };
               // Incluir una fila duplicada implica forzar la nueva ocurrencia.
@@ -632,67 +704,65 @@ const PreviewRowMemo = memo(function PreviewRow({
             }}
           />
         </td>
-        <td>{formatDateDmy(row.op_date)}</td>
+        {isMobile ? null : <td>{formatDateDmy(row.op_date)}</td>}
         <td className="import-concept-cell">
           {row.concept}
-          {statusHints.length > 0 ? (
+          {isMobile ? (
+            <span className="cell-subline">
+              {formatDateDm(row.op_date)} ·{" "}
+              {formatCurrencyAmount(row.amount, currencyIso)}
+              {statusHints.length > 0 ? ` · ${statusHints.join(" · ")}` : ""}
+            </span>
+          ) : statusHints.length > 0 ? (
             <span className="import-row-hint"> {statusHints.join(" · ")}</span>
           ) : null}
         </td>
-        <td className={`num ${amountClass}`}>
-          {formatCurrencyAmount(row.amount, currencyIso)}
-        </td>
-        <td>
-          <select
-            value={draft.kind}
-            aria-label="Kind"
-            onChange={(e) =>
-              onPatch(index, { kind: e.target.value as TransactionKindApi })
-            }
-          >
-            {TRANSACTION_KINDS.map((k) => (
-              <option key={k} value={k}>
-                {KIND_LABEL_ES[k]}
-              </option>
-            ))}
-          </select>
-        </td>
-        <td>
-          <select
-            value={draft.categoryId}
-            aria-label="Categoría"
-            disabled={draft.kind === "savings"}
-            onChange={(e) => onPatch(index, { categoryId: e.target.value })}
-          >
-            <option value="">
-              {draft.kind === "savings" ? "—" : "Sin categoría"}
-            </option>
-            {cats.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </td>
-        <td className="import-link-cell">
-          <button
-            type="button"
-            className={`btn ghost icon-btn ${
-              draft.linkedAssetId || draft.linkedLiabilityId ? "is-active-link" : ""
-            }`}
-            aria-label="Vínculos"
-            aria-expanded={expanded}
-            onClick={() => onToggleLinks(index)}
-          >
-            <LinkIcon />
-          </button>
-        </td>
+        {isMobile ? null : (
+          <td className={`num ${amountClass}`}>
+            {formatCurrencyAmount(row.amount, currencyIso)}
+          </td>
+        )}
+        {isMobile ? null : <td>{kindSelect}</td>}
+        {isMobile ? null : <td>{categorySelect}</td>}
+        {isMobile ? (
+          <td className="row-chevron-cell">
+            <span className="row-chevron" aria-hidden>
+              ›
+            </span>
+          </td>
+        ) : (
+          <td className="import-link-cell">
+            <button
+              type="button"
+              className={`btn ghost icon-btn ${
+                draft.linkedAssetId || draft.linkedLiabilityId ? "is-active-link" : ""
+              }`}
+              aria-label="Vínculos"
+              aria-expanded={expanded}
+              onClick={() => onToggleLinks(index)}
+            >
+              <LinkIcon />
+            </button>
+          </td>
+        )}
       </tr>
       {expanded ? (
         <tr className="import-links-row">
           <td />
-          <td colSpan={6}>
+          <td colSpan={detailColSpan}>
             <div className="import-links-editor">
+              {isMobile ? (
+                <>
+                  <label className="field inline-role">
+                    <span>Tipo</span>
+                    {kindSelect}
+                  </label>
+                  <label className="field inline-role">
+                    <span>Categoría</span>
+                    {categorySelect}
+                  </label>
+                </>
+              ) : null}
               <label className="field inline-role">
                 <span>Activo destino</span>
                 <select

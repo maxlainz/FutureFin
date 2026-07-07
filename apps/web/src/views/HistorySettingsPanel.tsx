@@ -32,6 +32,7 @@ import {
   parseDisplayDecimal,
 } from "../lib/format";
 import { formatDateDmy, parseYmdComponents, todayYmdInTimeZone } from "../lib/dates";
+import { useIsMobile } from "../lib/responsive";
 
 const KIND_LABEL: Record<HistorySnapshotKindApi, string> = {
   asset: "Activos",
@@ -86,6 +87,7 @@ export function HistorySettingsPanel({
   const today = todayYmdInTimeZone(calendarTz);
   const todayComponents = parseYmdComponents(today);
   const currentYear = todayComponents ? todayComponents.y : new Date().getFullYear();
+  const isMobile = useIsMobile();
 
   const yearOptions = useMemo(() => {
     const out: number[] = [];
@@ -500,8 +502,8 @@ export function HistorySettingsPanel({
               <tr>
                 <th>Fecha</th>
                 <th className="num">Total</th>
-                <th className="num">Ítems</th>
-                {canEdit ? (
+                {isMobile ? null : <th className="num">Ítems</th>}
+                {!isMobile && canEdit ? (
                   <th className="asset-actions-cell">
                     <span className="sr-only">Acciones</span>
                   </th>
@@ -509,38 +511,72 @@ export function HistorySettingsPanel({
               </tr>
             </thead>
             <tbody>
-              {snapshots.map((s) => (
-                <tr key={s.id}>
-                  <td>{formatDateDmy(s.snapshot_date_ymd)}</td>
-                  <td className="num">{formatCurrencyAmount(s.total, currencyIso)}</td>
-                  <td className="num">{s.items.length}</td>
-                  {canEdit ? (
-                    <td className="asset-actions-cell">
-                      <div className="budget-row-actions">
-                        <button
-                          type="button"
-                          className="btn ghost icon-btn"
-                          aria-label="Editar snapshot"
-                          onClick={() => openEdit(s)}
-                        >
-                          <RowEditIcon />
-                        </button>
-                        <button
-                          type="button"
-                          className="btn ghost danger icon-btn"
-                          aria-label="Eliminar snapshot"
-                          onClick={() => {
-                            setDeleteError(null);
-                            setDeleteTarget(s);
-                          }}
-                        >
-                          <RowTrashIcon />
-                        </button>
-                      </div>
+              {snapshots.map((s) => {
+                const rowTappable = isMobile && canEdit;
+                return (
+                  <tr
+                    key={s.id}
+                    className={rowTappable ? "row-tappable" : undefined}
+                    role={rowTappable ? "button" : undefined}
+                    tabIndex={rowTappable ? 0 : undefined}
+                    onClick={rowTappable ? () => openEdit(s) : undefined}
+                    onKeyDown={
+                      rowTappable
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              openEdit(s);
+                            }
+                          }
+                        : undefined
+                    }
+                  >
+                    <td>
+                      {formatDateDmy(s.snapshot_date_ymd)}
+                      {isMobile ? (
+                        <span className="cell-subline">
+                          {s.items.length}{" "}
+                          {s.items.length === 1 ? "ítem" : "ítems"}
+                        </span>
+                      ) : null}
                     </td>
-                  ) : null}
-                </tr>
-              ))}
+                    <td className="num">
+                      {formatCurrencyAmount(s.total, currencyIso)}
+                      {rowTappable ? (
+                        <span className="row-chevron" aria-hidden>
+                          ›
+                        </span>
+                      ) : null}
+                    </td>
+                    {isMobile ? null : <td className="num">{s.items.length}</td>}
+                    {!isMobile && canEdit ? (
+                      <td className="asset-actions-cell">
+                        <div className="budget-row-actions">
+                          <button
+                            type="button"
+                            className="btn ghost icon-btn"
+                            aria-label="Editar snapshot"
+                            onClick={() => openEdit(s)}
+                          >
+                            <RowEditIcon />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost danger icon-btn"
+                            aria-label="Eliminar snapshot"
+                            onClick={() => {
+                              setDeleteError(null);
+                              setDeleteTarget(s);
+                            }}
+                          >
+                            <RowTrashIcon />
+                          </button>
+                        </div>
+                      </td>
+                    ) : null}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -722,6 +758,24 @@ export function HistorySettingsPanel({
                   Cancelar
                 </button>
               </div>
+              {isMobile && editingId ? (
+                <div className="modal-mobile-delete-row">
+                  <button
+                    type="button"
+                    className="btn ghost danger"
+                    disabled={saving}
+                    onClick={() => {
+                      const target =
+                        snapshots.find((s) => s.id === editingId) ?? null;
+                      setModalOpen(false);
+                      setDeleteError(null);
+                      setDeleteTarget(target);
+                    }}
+                  >
+                    Eliminar snapshot
+                  </button>
+                </div>
+              ) : null}
             </form>
           </Modal>
 

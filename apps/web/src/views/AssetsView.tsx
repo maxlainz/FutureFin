@@ -22,6 +22,7 @@ import {
   parseDisplayDecimal,
 } from "../lib/format";
 import { formatProjectionHoverMonthYear } from "../lib/dates";
+import { useIsMobile } from "../lib/responsive";
 import {
   assetContributionMonthlyEstimateNum,
   assetPortfolioCostTotals,
@@ -108,6 +109,7 @@ export function AssetsView({
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
+  const isMobile = useIsMobile();
 
   const assetMetricsReady = hasMembership && !assetsBusy;
   const assetsTotalVal = assetMetricsReady
@@ -344,6 +346,18 @@ export function AssetsView({
                 Cancelar
               </button>
             </div>
+            {isMobile && editingAssetId ? (
+              <div className="modal-mobile-delete-row">
+                <button
+                  type="button"
+                  className="btn ghost danger"
+                  disabled={assetSaving}
+                  onClick={() => deleteAssetRow(editingAssetId)}
+                >
+                  Eliminar activo
+                </button>
+              </div>
+            ) : null}
           </form>
         </Modal>
       ) : null}
@@ -428,8 +442,10 @@ export function AssetsView({
                           >
                             Valor
                           </th>
-                          {showPurchase ? <th className="num">Compra</th> : null}
-                          {showPurchase ? (
+                          {!isMobile && showPurchase ? (
+                            <th className="num">Compra</th>
+                          ) : null}
+                          {!isMobile && showPurchase ? (
                             <th
                               className="num"
                               title="Variación vs precio de compra (no anualizada)"
@@ -437,7 +453,7 @@ export function AssetsView({
                               Δ compra
                             </th>
                           ) : null}
-                          {showReturn ? (
+                          {!isMobile && showReturn ? (
                             <th
                               className="num"
                               title="Rentabilidad anual esperada (proyección)"
@@ -445,7 +461,7 @@ export function AssetsView({
                               Rent. % a.a.
                             </th>
                           ) : null}
-                          {showContribution ? (
+                          {!isMobile && showContribution ? (
                             <th
                               className="num"
                               title="Aporte estimado del primer mes (suma de reglas de Presupuesto → Asignación del sobrante que apuntan a este activo). Incluye flujos puntuales de Próximos. Cero si todas las reglas anteriores agotan el sobrante antes de llegar a este activo."
@@ -453,7 +469,7 @@ export function AssetsView({
                               Aporte
                             </th>
                           ) : null}
-                          {canEdit ? (
+                          {!isMobile && canEdit ? (
                             <th className="asset-actions-cell">
                               <span className="sr-only">Acciones</span>
                             </th>
@@ -478,9 +494,64 @@ export function AssetsView({
                               : null;
                           const targetReachLabel =
                             assetTargetReachMap.get(a.id) ?? null;
+                          const rowTappable = isMobile && canEdit;
+                          const subParts: string[] = [];
+                          if (showPurchase) {
+                            subParts.push(
+                              `Compra ${formatCurrencyOrDash(a.purchase_price, currencyIso)}`,
+                            );
+                            subParts.push(
+                              `Δ ${
+                                assetImplicitTotalReturnLabel(
+                                  a.current_value,
+                                  a.purchase_price,
+                                ) ?? METRIC_DASH
+                              }`,
+                            );
+                          }
+                          if (showReturn) {
+                            subParts.push(
+                              `Rent. ${
+                                a.expected_annual_return_percent != null &&
+                                a.expected_annual_return_percent !== ""
+                                  ? formatPercentAmount(
+                                      a.expected_annual_return_percent,
+                                    )
+                                  : METRIC_DASH
+                              }`,
+                            );
+                          }
+                          if (showContribution) {
+                            subParts.push(
+                              `Aporte ${formatAssetContributionNominalCell(a, currencyIso)}`,
+                            );
+                          }
                           return (
-                            <tr key={a.id}>
-                              <td>{a.name}</td>
+                            <tr
+                              key={a.id}
+                              className={rowTappable ? "row-tappable" : undefined}
+                              role={rowTappable ? "button" : undefined}
+                              tabIndex={rowTappable ? 0 : undefined}
+                              onClick={rowTappable ? () => beginEditAsset(a) : undefined}
+                              onKeyDown={
+                                rowTappable
+                                  ? (e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        beginEditAsset(a);
+                                      }
+                                    }
+                                  : undefined
+                              }
+                            >
+                              <td>
+                                {a.name}
+                                {isMobile && subParts.length > 0 ? (
+                                  <span className="cell-subline">
+                                    {subParts.join(" · ")}
+                                  </span>
+                                ) : null}
+                              </td>
                               <td className="num">
                                 {targetCompact ? (
                                   <span
@@ -495,13 +566,18 @@ export function AssetsView({
                                   </span>
                                 ) : null}
                                 {formatCurrencyAmount(a.current_value, currencyIso)}
+                                {rowTappable ? (
+                                  <span className="row-chevron" aria-hidden>
+                                    ›
+                                  </span>
+                                ) : null}
                               </td>
-                              {showPurchase ? (
+                              {!isMobile && showPurchase ? (
                                 <td className="num">
                                   {formatCurrencyOrDash(a.purchase_price, currencyIso)}
                                 </td>
                               ) : null}
-                              {showPurchase ? (
+                              {!isMobile && showPurchase ? (
                                 <td className="num muted">
                                   {assetImplicitTotalReturnLabel(
                                     a.current_value,
@@ -509,7 +585,7 @@ export function AssetsView({
                                   ) ?? METRIC_DASH}
                                 </td>
                               ) : null}
-                              {showReturn ? (
+                              {!isMobile && showReturn ? (
                                 <td className="num muted">
                                   {a.expected_annual_return_percent != null &&
                                   a.expected_annual_return_percent !== ""
@@ -519,12 +595,12 @@ export function AssetsView({
                                     : METRIC_DASH}
                                 </td>
                               ) : null}
-                              {showContribution ? (
+                              {!isMobile && showContribution ? (
                                 <td className="num muted tight">
                                   {formatAssetContributionNominalCell(a, currencyIso)}
                                 </td>
                               ) : null}
-                              {canEdit ? (
+                              {!isMobile && canEdit ? (
                                 <td className="asset-actions-cell">
                                   <div className="budget-row-actions">
                                     <button

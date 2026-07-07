@@ -11,6 +11,7 @@ import {
   formatCurrencyAmount,
   parseDisplayDecimal,
 } from "../../lib/format";
+import { useIsMobile } from "../../lib/responsive";
 
 type ChartScope = "asset" | "liability";
 
@@ -168,6 +169,7 @@ export function SummaryBreakdownBlock({
   labelColumn: string;
   chartScope: ChartScope;
 }) {
+  const isMobile = useIsMobile();
   if (rows.length === 0) {
     return (
       <div className="breakdown-block">
@@ -186,7 +188,7 @@ export function SummaryBreakdownBlock({
               <th>{labelColumn}</th>
               <th className="num">Importe</th>
               <th className="num">%</th>
-              <th className="breakdown-bar-col" aria-hidden />
+              {isMobile ? null : <th className="breakdown-bar-col" aria-hidden />}
             </tr>
           </thead>
           <tbody>
@@ -201,17 +203,19 @@ export function SummaryBreakdownBlock({
                   <td className="num muted">
                     {formatBreakdownPct(row.total, totalWhole)}
                   </td>
-                  <td className="breakdown-bar-cell">
-                    <div className="breakdown-bar-track">
-                      <div
-                        className="breakdown-bar-fill"
-                        style={{
-                          width: pct !== null ? `${pct}%` : "0%",
-                          background: summaryBreakdownBarGradient(chartScope, idx),
-                        }}
-                      />
-                    </div>
-                  </td>
+                  {isMobile ? null : (
+                    <td className="breakdown-bar-cell">
+                      <div className="breakdown-bar-track">
+                        <div
+                          className="breakdown-bar-fill"
+                          style={{
+                            width: pct !== null ? `${pct}%` : "0%",
+                            background: summaryBreakdownBarGradient(chartScope, idx),
+                          }}
+                        />
+                      </div>
+                    </td>
+                  )}
                 </tr>
               );
             })}

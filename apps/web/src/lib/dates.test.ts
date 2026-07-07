@@ -4,6 +4,7 @@ import {
   addOneMonthUtc,
   ageCompletedYearsCivil,
   civilDaysInMonth,
+  formatDateDm,
   formatProjectionAxisYear,
   formatProjectionHoverMonthYear,
   parseYmdComponents,
@@ -76,6 +77,20 @@ describe("parseYmdComponents", () => {
     expect(parseYmdComponents("not-a-date")).toBeNull();
     expect(parseYmdComponents("2026-13-01")).toBeNull();
     expect(parseYmdComponents("2026-05-32")).toBeNull();
+  });
+});
+
+describe("formatDateDm", () => {
+  it("formats DD/MM without year", () => {
+    expect(formatDateDm("2026-05-17")).toBe("17/05");
+    expect(formatDateDm("2026-01-03")).toBe("03/01");
+  });
+  it("zero-pads day and month", () => {
+    expect(formatDateDm("2026-12-09")).toBe("09/12");
+  });
+  it("returns the original string when unparseable", () => {
+    expect(formatDateDm("not-a-date")).toBe("not-a-date");
+    expect(formatDateDm("2026-13-40")).toBe("2026-13-40");
   });
 });
 
