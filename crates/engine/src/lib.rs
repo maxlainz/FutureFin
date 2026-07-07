@@ -4,8 +4,9 @@ mod history;
 mod projection;
 
 pub use history::{
-    add_months_signed, amortized_segment_value, evaluate_timeline, month_index_of, HistoryItem,
-    HistoryItemKind, HistoryObservation, HistoryTimeline, LoanTerms,
+    add_months_signed, amortized_segment_value, anchored_cashflow_segment_value, evaluate_timeline,
+    month_index_of, CashFlowEntry, HistoryItem, HistoryItemKind, HistoryObservation,
+    HistoryTimeline, LoanTerms,
 };
 pub use projection::{
     fire_target_at_month_index, first_month_per_asset_contribution_nominals,

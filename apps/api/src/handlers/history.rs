@@ -1140,6 +1140,9 @@ pub async fn get_history_series(
                     source_item_id,
                     kind,
                     observations,
+                    // Fase 1: los snapshots no llevan cash-flow; la curva anclada la usa el
+                    // endpoint /v1/history/cashflow (B2), no la serie de snapshots (tier-1).
+                    cashflow: vec![],
                 })
                 .collect(),
         };
