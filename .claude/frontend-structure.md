@@ -36,7 +36,11 @@ src/
 │   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto
 │   ├── snapshot-tracker.ts       # trigger del modal: EditLog (Map<assetId, epochMs>), SNAPSHOT_EDIT_WINDOW_MS, pruneEditLog,
 │   │                             #   liquidCoverageComplete (todos los activos líquidos editados dentro de la ventana rodante ~1h)
-│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH, SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath
+│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH (incl. expenses → «Gastos»/gastos), SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath
+│   ├── expenses.ts               # pure helpers de la pestaña Gastos: month labels (monthLabelEs/monthShortLabelEs), defaultSelectedMonth,
+│   │                             #   categoriesForKind (savings→[]), ImportRowDraft + initialDraftForRow/buildConfirmDecisions/summarizeDecisions/rowMatchesFilter,
+│   │                             #   deltaToneClass/formatDeltaCurrency (rojo/verde solo en deltas). Test: expenses.test.ts
+│   ├── files.ts                  # readFileAsBase64(File): base64 en trozos de 32 KiB. Compartido por el import .ffbackup (App.tsx) y el wizard de CSV
 │   └── theme.ts                  # ThemePref ("auto"|"light"|"dark") + apply/load/save + subscribeSystemThemeChanges
 │
 ├── components/                   # generic UI primitives (no domain knowledge)
@@ -52,6 +56,8 @@ src/
 │   └── charts/
 │       ├── summary.tsx           # SummaryDonutChart + SummaryBreakdownBlock (palette fría=activos / cálida=pasivos)
 │       ├── PlanningDirectionChart.tsx   # barra inflow/outflow — usada en Upcoming Y Budget
+│       ├── CategoryComparisonBars.tsx   # exporta DOS charts de la pestaña Gastos: CategoryComparisonBars (barras Real/Budget/Promedio por categoría)
+│       │                                #   y MonthlyCashflowBars (cash-flow mes a mes desde months[]). Tokens --ff-*/--exp-average; sin rojo en el chrome
 │       └── MiniProjection.tsx    # SVG compacto reusado en Resumen y Jubilación
 │
 ├── views/                        # one file per tab — receives props from App.tsx, owns local UI state
@@ -59,11 +65,19 @@ src/
 │   ├── AssetsView.tsx
 │   ├── LiabilitiesView.tsx       # tabla sin columna Tipo
 │   ├── BudgetView.tsx            # KPIs + Distribución (PlanningDirectionChart) + columnas Ingresos/Gastos
+│   ├── GastosView.tsx            # pestaña «Gastos» (v1.6.0). Vista AUTÓNOMA (self-fetch, patrón HistorySettingsPanel): KPIs del mes,
+│   │                             #   selector de mes + ventana, comparativa por categoría (tabla + CategoryComparisonBars + MonthlyCashflowBars),
+│   │                             #   tabla de movimientos con edición inline optimista + modal. `onCashflowMutated` avisa a App tras cada mutación.
+│   ├── ImportWizardModal.tsx     # wizard import CSV en 2 pasos (useReducer): select (fuente + archivo → /import/preview) → review (acciones masivas,
+│   │                             #   selects kind/categoría por fila, vínculos, cuenta origen → /import/confirm con decisions[] paralelo). Stateless (sha256)
+│   ├── ManualCashEntryModal.tsx  # alta manual de efectivo: grid multifila (magnitud + kind fija el signo) → POST /v1/transactions/batch
 │   ├── UpcomingView.tsx          # Planning
 │   ├── RetirementView.tsx        # KPIs + MiniProjection (zoomY, clampToMonth=jub+12, xAxis) + FIRE config
 │   ├── ProjectionView.tsx        # wraps ProjectionNetWorthChart
 │   ├── ProjectionNetWorthChart.tsx  # gran SVG chart, drag/zoom/hover, colores vía --proj-* tokens; se extiende a meses
-│   │                                #   negativos con la serie histórica (áreas + marcadores + divisor «Hoy») vía mergeProjectionWithHistory
+│   │                                #   negativos con la serie histórica (áreas + marcadores + divisor «Hoy») vía mergeProjectionWithHistory.
+│   │                                #   Overlay fino de cash-flow (v1.6.0): props cashflow/cashflowDaily/onRequestDailyCashflow — pinta la curva
+│   │                                #   fina (fine.grid por month_fraction real, deflactada igual) sobre la zona pasada; daily lazy al hacer zoom histórico
 │   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills + ThemeToggle en "Datos y sistema"
 │   ├── HistorySettingsPanel.tsx  # Ajustes → Histórico: filtros año/kind, tabla de snapshots, modal añadir/editar, borrar (backfill).
 │   │                             #   Prefill: el modal crear autocompleta el grid vía GET /v1/history/snapshots/prefill (repuebla en
@@ -83,7 +97,7 @@ src/
 - **`lib/`** is pure: no React, no fetch. May import from other `lib/*` and from `api/types`.
 - **`components/`** may import from `lib/` and `api/types`. They are dumb presentational widgets.
 - **`views/`** may import from anything below (`lib/`, `api/`, `components/`, other views). They own form/UI state via `useState` and receive data + mutation callbacks from `App.tsx`.
-- **`App.tsx`** owns the long-lived state (installation, user, ledgerPersonScope, lists, busy flags, `projectionSeries` **and `historySeries`**) and the API mutation handlers. `historySeries` is loaded by `loadHistorySeries()` (parallel to the projection, in the projection-tab effect and after every snapshot mutation; failure → `null`, so the chart degrades to the current future-only view). `saveSnapshotNow(kinds)` POSTs a capture and reloads it. Dispatch to a view is a `<XxxView {...props} />` call.
+- **`App.tsx`** owns the long-lived state (installation, user, ledgerPersonScope, lists, busy flags, `projectionSeries`, `historySeries` **and `cashflowSeries`/`cashflowDaily`**) and the API mutation handlers. `historySeries` is loaded by `loadHistorySeries()` (parallel to the projection, in the projection-tab effect and after every snapshot mutation; failure → `null`, so the chart degrades to the current future-only view). `cashflowSeries` is loaded by `loadCashflowSeries()` alongside it (weekly, `window_months=24`); `loadCashflowDaily()` fetches the daily detail lazily (`window_months=6&resolution=daily`, once per scope/reload via `cashflowDailyRequestedRef`) when the chart zooms into the recent past. Same degrade-to-`null` contract as `historySeries`. Both refresh after transaction mutations (`onCashflowMutated`) and after snapshot mutations (they anchor the fine curve). `saveSnapshotNow(kinds)` POSTs a capture and reloads both history and cash-flow. Dispatch to a view is a `<XxxView {...props} />` call.
 
 ## Where to add new code
 
