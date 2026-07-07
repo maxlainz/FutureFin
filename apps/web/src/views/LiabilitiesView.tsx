@@ -27,6 +27,7 @@ import {
   liabilityDerivedPrincipalPreview,
   liabilityPaymentMonthlyEquivalentNum,
 } from "../lib/ledger";
+import { useIsMobile } from "../lib/responsive";
 
 export function LiabilitiesView({
   installation,
@@ -110,6 +111,7 @@ export function LiabilitiesView({
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
+  const isMobile = useIsMobile();
 
   const derivePreview = liabilityDerivedPrincipalPreview(
     liabilityFormPaymentAmount,
@@ -373,6 +375,18 @@ export function LiabilitiesView({
                 Cancelar
               </button>
             </div>
+            {isMobile && editingLiabilityId ? (
+              <div className="modal-mobile-delete-row">
+                <button
+                  type="button"
+                  className="btn ghost danger"
+                  disabled={liabilitySaving}
+                  onClick={() => deleteLiabilityRow(editingLiabilityId)}
+                >
+                  Eliminar pasivo
+                </button>
+              </div>
+            ) : null}
           </form>
         </Modal>
       ) : null}
@@ -441,11 +455,11 @@ export function LiabilitiesView({
                         <tr>
                           <th>Etiqueta</th>
                           <th className="num">Principal</th>
-                          <th className="num">TAE %</th>
-                          <th className="num">Cuota</th>
-                          <th>Frec.</th>
-                          <th>Fin plan</th>
-                          {canEdit ? (
+                          {isMobile ? null : <th className="num">TAE %</th>}
+                          {isMobile ? null : <th className="num">Cuota</th>}
+                          {isMobile ? null : <th>Frec.</th>}
+                          {isMobile ? null : <th>Fin plan</th>}
+                          {!isMobile && canEdit ? (
                             <th className="asset-actions-cell">
                               <span className="sr-only">Acciones</span>
                             </th>
@@ -453,65 +467,109 @@ export function LiabilitiesView({
                         </tr>
                       </thead>
                       <tbody>
-                        {g.items.map((row) => (
-                          <tr key={row.id}>
-                            <td>{row.label}</td>
-                            <td className="num">
-                              {formatCurrencyAmount(row.principal, currencyIso)}
-                              {row.principal_derived_from_plan ? (
-                                <span
-                                  className="muted"
-                                  title="Principal derivado del plan"
-                                >
-                                  {" "}
-                                  deriv.
-                                </span>
-                              ) : null}
-                            </td>
-                            <td className="num">
-                              {row.apr_percent != null &&
-                              String(row.apr_percent).trim() !== ""
-                                ? formatPercentAmount(row.apr_percent)
-                                : METRIC_DASH}
-                            </td>
-                            <td className="num">
-                              {formatCurrencyOrDash(
-                                row.payment_amount,
-                                currencyIso,
-                              )}
-                            </td>
-                            <td>
-                              {row.payment_frequency
-                                ? PAYMENT_FREQ_LABEL[row.payment_frequency]
-                                : METRIC_DASH}
-                            </td>
-                            <td>{row.payment_end_date ?? METRIC_DASH}</td>
-                            {canEdit ? (
-                              <td className="asset-actions-cell">
-                                <div className="budget-row-actions">
-                                  <button
-                                    type="button"
-                                    className="btn ghost icon-btn"
-                                    aria-label="Editar pasivo"
-                                    disabled={liabilitySaving}
-                                    onClick={() => beginEditLiability(row)}
-                                  >
-                                    <RowEditIcon />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn ghost danger icon-btn"
-                                    aria-label="Eliminar pasivo"
-                                    disabled={liabilitySaving}
-                                    onClick={() => deleteLiabilityRow(row.id)}
-                                  >
-                                    <RowTrashIcon />
-                                  </button>
-                                </div>
+                        {g.items.map((row) => {
+                          const rowTappable = isMobile && canEdit;
+                          const aprLabel =
+                            row.apr_percent != null &&
+                            String(row.apr_percent).trim() !== ""
+                              ? formatPercentAmount(row.apr_percent)
+                              : METRIC_DASH;
+                          const freqLabel = row.payment_frequency
+                            ? PAYMENT_FREQ_LABEL[row.payment_frequency]
+                            : METRIC_DASH;
+                          return (
+                            <tr
+                              key={row.id}
+                              className={rowTappable ? "row-tappable" : undefined}
+                              role={rowTappable ? "button" : undefined}
+                              tabIndex={rowTappable ? 0 : undefined}
+                              onClick={
+                                rowTappable ? () => beginEditLiability(row) : undefined
+                              }
+                              onKeyDown={
+                                rowTappable
+                                  ? (e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        beginEditLiability(row);
+                                      }
+                                    }
+                                  : undefined
+                              }
+                            >
+                              <td>
+                                {row.label}
+                                {isMobile ? (
+                                  <span className="cell-subline">
+                                    TAE {aprLabel} · Cuota{" "}
+                                    {formatCurrencyOrDash(
+                                      row.payment_amount,
+                                      currencyIso,
+                                    )}{" "}
+                                    · {freqLabel} · Fin{" "}
+                                    {row.payment_end_date ?? METRIC_DASH}
+                                  </span>
+                                ) : null}
                               </td>
-                            ) : null}
-                          </tr>
-                        ))}
+                              <td className="num">
+                                {formatCurrencyAmount(row.principal, currencyIso)}
+                                {row.principal_derived_from_plan ? (
+                                  <span
+                                    className="muted"
+                                    title="Principal derivado del plan"
+                                  >
+                                    {" "}
+                                    deriv.
+                                  </span>
+                                ) : null}
+                                {rowTappable ? (
+                                  <span className="row-chevron" aria-hidden>
+                                    ›
+                                  </span>
+                                ) : null}
+                              </td>
+                              {isMobile ? null : (
+                                <td className="num">{aprLabel}</td>
+                              )}
+                              {isMobile ? null : (
+                                <td className="num">
+                                  {formatCurrencyOrDash(
+                                    row.payment_amount,
+                                    currencyIso,
+                                  )}
+                                </td>
+                              )}
+                              {isMobile ? null : <td>{freqLabel}</td>}
+                              {isMobile ? null : (
+                                <td>{row.payment_end_date ?? METRIC_DASH}</td>
+                              )}
+                              {!isMobile && canEdit ? (
+                                <td className="asset-actions-cell">
+                                  <div className="budget-row-actions">
+                                    <button
+                                      type="button"
+                                      className="btn ghost icon-btn"
+                                      aria-label="Editar pasivo"
+                                      disabled={liabilitySaving}
+                                      onClick={() => beginEditLiability(row)}
+                                    >
+                                      <RowEditIcon />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn ghost danger icon-btn"
+                                      aria-label="Eliminar pasivo"
+                                      disabled={liabilitySaving}
+                                      onClick={() => deleteLiabilityRow(row.id)}
+                                    >
+                                      <RowTrashIcon />
+                                    </button>
+                                  </div>
+                                </td>
+                              ) : null}
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

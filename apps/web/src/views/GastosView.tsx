@@ -47,8 +47,9 @@ import {
   formatPercentDisplay,
   parseDisplayDecimal,
 } from "../lib/format";
-import { formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
+import { formatDateDm, formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
 import { ledgerViewQs, type LedgerPersonScope } from "../lib/ledger";
+import { useIsMobile } from "../lib/responsive";
 import {
   KIND_LABEL_ES,
   TRANSACTION_KINDS,
@@ -84,6 +85,7 @@ export function GastosView({
   const currencyIso = installation?.installation.base_currency ?? "";
   const calendarTz = installation?.installation.calendar_tz?.trim() || "UTC";
   const today = todayYmdInTimeZone(calendarTz);
+  const isMobile = useIsMobile();
   const viewSuffix = ledgerViewQs(ledgerPersonScope);
   const viewAmp = ledgerPersonScope === "mine" ? "&view=mine" : "";
 
@@ -383,9 +385,9 @@ export function GastosView({
             <tr>
               <th>Categoría</th>
               <th className="num">Real</th>
-              <th className="num">Budget</th>
+              {isMobile ? null : <th className="num">Budget</th>}
               <th className="num">Δ</th>
-              <th className="num">Promedio {avgMonths}m</th>
+              {isMobile ? null : <th className="num">Promedio {avgMonths}m</th>}
             </tr>
           </thead>
           <tbody>
@@ -402,25 +404,49 @@ export function GastosView({
                         <span className="exp-cat-dot" aria-hidden /> {l.category_name}
                       </span>
                     )}
+                    {isMobile ? (
+                      <span className="cell-subline">
+                        Budget {formatCurrencyAmount(l.budget, currencyIso)} · Prom{" "}
+                        {avgMonths}m {formatCurrencyAmount(l.avg, currencyIso)}
+                      </span>
+                    ) : null}
                   </td>
                   <td className="num">{formatCurrencyAmount(l.actual, currencyIso)}</td>
-                  <td className="num">{formatCurrencyAmount(l.budget, currencyIso)}</td>
+                  {isMobile ? null : (
+                    <td className="num">{formatCurrencyAmount(l.budget, currencyIso)}</td>
+                  )}
                   <td className={`num ${toneClass}`}>
                     {formatDeltaCurrency(dNum, currencyIso)}
                   </td>
-                  <td className="num">{formatCurrencyAmount(l.avg, currencyIso)}</td>
+                  {isMobile ? null : (
+                    <td className="num">{formatCurrencyAmount(l.avg, currencyIso)}</td>
+                  )}
                 </tr>
               );
             })}
             {includeDerived && summary ? (
               <tr className="exp-derived-row">
-                <td>{summary.derived_debt_line.label}</td>
-                <td className="num">{METRIC_DASH}</td>
-                <td className="num">
-                  {formatCurrencyAmount(summary.derived_debt_line.budget, currencyIso)}
+                <td>
+                  {summary.derived_debt_line.label}
+                  {isMobile ? (
+                    <span className="cell-subline">
+                      Budget{" "}
+                      {formatCurrencyAmount(
+                        summary.derived_debt_line.budget,
+                        currencyIso,
+                      )}{" "}
+                      · Prom {avgMonths}m {METRIC_DASH}
+                    </span>
+                  ) : null}
                 </td>
                 <td className="num">{METRIC_DASH}</td>
+                {isMobile ? null : (
+                  <td className="num">
+                    {formatCurrencyAmount(summary.derived_debt_line.budget, currencyIso)}
+                  </td>
+                )}
                 <td className="num">{METRIC_DASH}</td>
+                {isMobile ? null : <td className="num">{METRIC_DASH}</td>}
               </tr>
             ) : null}
           </tbody>
@@ -680,7 +706,19 @@ export function GastosView({
               <section className="panel">
                 <h3 className="panel-title">Cash-flow mensual</h3>
                 {cashflow && cashflow.months.length > 0 ? (
-                  <MonthlyCashflowBars months={cashflow.months} currencyIso={currencyIso} />
+                  <MonthlyCashflowBars
+                    // Móvil: solo los últimos 12 meses. 24 columnas a ~13px son
+                    // ilegibles en phone; 12 ≈ 27px/columna y sin scroll-X (regla
+                    // de oro). Escritorio conserva la ventana completa.
+                    months={
+                      isMobile
+                        ? [...cashflow.months]
+                            .sort((a, b) => a.month_index - b.month_index)
+                            .slice(-12)
+                        : cashflow.months
+                    }
+                    currencyIso={currencyIso}
+                  />
                 ) : (
                   <p className="muted bordered-top">Sin datos.</p>
                 )}
@@ -700,13 +738,15 @@ export function GastosView({
                         <tr>
                           <th>Fecha</th>
                           <th>Concepto</th>
-                          <th>Categoría</th>
-                          <th>Tipo</th>
+                          {isMobile ? null : <th>Categoría</th>}
+                          {isMobile ? null : <th>Tipo</th>}
                           <th className="num">Importe</th>
-                          <th className="exp-link-col">
-                            <span className="sr-only">Vínculo</span>
-                          </th>
-                          {canEdit ? (
+                          {isMobile ? null : (
+                            <th className="exp-link-col">
+                              <span className="sr-only">Vínculo</span>
+                            </th>
+                          )}
+                          {!isMobile && canEdit ? (
                             <th className="asset-actions-cell">
                               <span className="sr-only">Acciones</span>
                             </th>
@@ -725,68 +765,118 @@ export function GastosView({
                             expenseCategories,
                           );
                           const hasLink = !!(t.linked_asset_id || t.linked_liability_id);
+                          const rowTappable = isMobile && canEdit;
+                          const openEdit = () => {
+                            setRowError(null);
+                            setEditTarget(t);
+                          };
+                          const categoryLabel =
+                            t.category_name ??
+                            (kind === "savings" ? "—" : "Sin categoría");
                           return (
-                            <tr key={t.id}>
-                              <td>{formatDateDmy(t.op_date)}</td>
+                            <tr
+                              key={t.id}
+                              className={rowTappable ? "row-tappable" : undefined}
+                              role={rowTappable ? "button" : undefined}
+                              tabIndex={rowTappable ? 0 : undefined}
+                              onClick={rowTappable ? openEdit : undefined}
+                              onKeyDown={
+                                rowTappable
+                                  ? (e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        openEdit();
+                                      }
+                                    }
+                                  : undefined
+                              }
+                            >
+                              <td>
+                                {isMobile
+                                  ? formatDateDm(t.op_date)
+                                  : formatDateDmy(t.op_date)}
+                              </td>
                               <td className="exp-concept-cell">
                                 {t.concept}
-                                {t.import_id ? null : (
+                                {isMobile ? (
+                                  <span className="cell-subline">
+                                    {categoryLabel} · {KIND_LABEL_ES[kind]}
+                                    {t.import_id ? null : " · efectivo"}
+                                    {hasLink ? (
+                                      <>
+                                        {" · "}
+                                        <LinkIcon />
+                                      </>
+                                    ) : null}
+                                  </span>
+                                ) : t.import_id ? null : (
                                   <span className="exp-source-tag"> efectivo</span>
                                 )}
                               </td>
-                              <td>
-                                <span className="exp-cat-edit">
-                                  {kind !== "savings" && !t.category_id ? (
-                                    <span className="exp-cat-dot" aria-hidden />
-                                  ) : null}
+                              {isMobile ? null : (
+                                <td>
+                                  <span className="exp-cat-edit">
+                                    {kind !== "savings" && !t.category_id ? (
+                                      <span className="exp-cat-dot" aria-hidden />
+                                    ) : null}
+                                    <select
+                                      className="exp-inline-select"
+                                      value={t.category_id ?? ""}
+                                      disabled={!canEdit || kind === "savings"}
+                                      aria-label="Categoría"
+                                      onChange={(e) => onInlineCategory(t, e.target.value)}
+                                    >
+                                      <option value="">
+                                        {kind === "savings" ? "—" : "Sin categoría"}
+                                      </option>
+                                      {cats.map((c) => (
+                                        <option key={c.id} value={c.id}>
+                                          {c.name}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </span>
+                                </td>
+                              )}
+                              {isMobile ? null : (
+                                <td>
                                   <select
-                                    className="exp-inline-select"
-                                    value={t.category_id ?? ""}
-                                    disabled={!canEdit || kind === "savings"}
-                                    aria-label="Categoría"
-                                    onChange={(e) => onInlineCategory(t, e.target.value)}
+                                    className={`exp-inline-select exp-kind-select ${
+                                      kind === "savings" ? "exp-kind-select--savings" : ""
+                                    }`}
+                                    value={kind}
+                                    disabled={!canEdit}
+                                    aria-label="Tipo"
+                                    onChange={(e) =>
+                                      onInlineKind(t, e.target.value as TransactionKindApi)
+                                    }
                                   >
-                                    <option value="">
-                                      {kind === "savings" ? "—" : "Sin categoría"}
-                                    </option>
-                                    {cats.map((c) => (
-                                      <option key={c.id} value={c.id}>
-                                        {c.name}
+                                    {TRANSACTION_KINDS.map((k) => (
+                                      <option key={k} value={k}>
+                                        {KIND_LABEL_ES[k]}
                                       </option>
                                     ))}
                                   </select>
-                                </span>
-                              </td>
-                              <td>
-                                <select
-                                  className={`exp-inline-select exp-kind-select ${
-                                    kind === "savings" ? "exp-kind-select--savings" : ""
-                                  }`}
-                                  value={kind}
-                                  disabled={!canEdit}
-                                  aria-label="Tipo"
-                                  onChange={(e) =>
-                                    onInlineKind(t, e.target.value as TransactionKindApi)
-                                  }
-                                >
-                                  {TRANSACTION_KINDS.map((k) => (
-                                    <option key={k} value={k}>
-                                      {KIND_LABEL_ES[k]}
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
+                                </td>
+                              )}
                               <td className={`num ${amountClass}`}>
                                 {formatCurrencyAmount(t.amount, currencyIso)}
-                              </td>
-                              <td className="exp-link-col">
-                                {hasLink ? (
-                                  <span className="exp-link-indicator" title="Con vínculo">
-                                    <LinkIcon />
+                                {rowTappable ? (
+                                  <span className="row-chevron" aria-hidden>
+                                    ›
                                   </span>
                                 ) : null}
                               </td>
-                              {canEdit ? (
+                              {isMobile ? null : (
+                                <td className="exp-link-col">
+                                  {hasLink ? (
+                                    <span className="exp-link-indicator" title="Con vínculo">
+                                      <LinkIcon />
+                                    </span>
+                                  ) : null}
+                                </td>
+                              )}
+                              {!isMobile && canEdit ? (
                                 <td className="asset-actions-cell">
                                   <div className="budget-row-actions">
                                     <button
@@ -861,6 +951,12 @@ export function GastosView({
           <EditTransactionModal
             target={editTarget}
             onClose={() => setEditTarget(null)}
+            isMobile={isMobile}
+            onRequestDelete={(t) => {
+              setEditTarget(null);
+              setRowError(null);
+              setDeleteTarget(t);
+            }}
             incomeCategories={incomeCategories}
             expenseCategories={expenseCategories}
             assets={assets}
@@ -917,6 +1013,8 @@ export function GastosView({
 function EditTransactionModal({
   target,
   onClose,
+  isMobile,
+  onRequestDelete,
   incomeCategories,
   expenseCategories,
   assets,
@@ -926,6 +1024,10 @@ function EditTransactionModal({
 }: {
   target: TransactionApi | null;
   onClose: () => void;
+  /** En móvil desaparece la columna Acciones → el borrado se ofrece aquí. */
+  isMobile: boolean;
+  /** Cierra este modal y abre el de confirmación de borrado (deleteTarget). */
+  onRequestDelete: (t: TransactionApi) => void;
   incomeCategories: CategoryRow[];
   expenseCategories: CategoryRow[];
   assets: AssetApiRow[];
@@ -1148,6 +1250,18 @@ function EditTransactionModal({
             Cancelar
           </button>
         </div>
+        {isMobile ? (
+          <div className="modal-mobile-delete-row">
+            <button
+              type="button"
+              className="btn ghost danger"
+              disabled={saving}
+              onClick={() => onRequestDelete(target)}
+            >
+              Eliminar movimiento
+            </button>
+          </div>
+        ) : null}
       </form>
     </Modal>
   );
