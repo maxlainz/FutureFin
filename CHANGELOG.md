@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-07-07
+
+Pequeña mejora sobre el histórico de v1.5.0: el modal de backfill deja de arrancar vacío. Ahora
+propone los items del usuario con sus valores **interpolados a la fecha elegida** con la misma
+matemática de la serie histórica.
+
+### Histórico — Prefill del backfill
+
+- **Nuevo endpoint** `GET /v1/history/snapshots/prefill?kind=&date=`: devuelve, para el `kind`
+  (`asset` \| `liability`) y la fecha civil pedidos, la lista de items del propio usuario con un
+  valor sugerido y un `basis` ∈ `interpolated` \| `first_snapshot` \| `live` \| `not_owned`.
+  Interpolación **idéntica a `/v1/history/series`** — lineal en días civiles para activos, curva de
+  amortización francesa (corregida por residuo) para pasivos — reutilizando el engine puro; sin
+  redondeo intermedio.
+- **Items posteriores o ya vendidos**: un item que aún no existía en esa fecha (o una fila ya
+  borrada/expirada) llega con `value: "0"` y `existed: false`; el modal lo marca con una pista
+  visual para que el usuario decida si incluirlo. `date` en el futuro / `kind` inválido → 400 con
+  los códigos estables ya usados por el backfill (`snapshot_date_in_future`, `invalid_kind`).
+- **Auto-relleno del modal de creación**: al abrir «Añadir snapshot» los valores se prerrellenan y
+  se **refrescan** al cambiar fecha o kind mientras el usuario no haya tocado nada; en cuanto edita
+  (dirty) el refetch automático se detiene y aparece «Recalcular sugerencias» para pedirlo a mano.
+- **Edición**: el modal de editar snapshot gana «Añadir items que faltan», que **solo** anexa los
+  items ausentes (nunca reescribe valores ya introducidos), útil cuando el ledger creció después de
+  guardar el snapshot.
+
+### Migración / compatibilidad
+
+- **Sin migración de base de datos**; endpoint puramente aditivo (GET de solo lectura, misma
+  matemática que la serie ya existente). **Sin breaking**: no cambia payloads existentes ni el
+  esquema `.ffbackup`.
+
+### Tests
+
+- **Integración (local)**: ~7 tests nuevos en `history_snapshots.rs` para el prefill
+  (interpolación, `first_snapshot`, `live`, `not_owned`, validaciones 400, viewer).
+
 ## [1.5.0] — 2026-07-06
 
 Perspectiva histórica del patrimonio: como los valores del ledger se actualizan a mano cada
