@@ -6,6 +6,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-07-07
+
+Fix visual de la pestaña **Gastos** (solo frontend): espaciados verticales que se tocaban en
+móvil y en escritorio.
+
+### Fixed
+- El toolbar de Gastos (mes · ventana · acciones) tocaba directamente el borde del panel
+  «Comparativa» (gap 0 verificado con Playwright en 390 y 1280 px): los botones «Importar CSV» /
+  «Añadir efectivo» se apoyaban sobre el panel. Ahora `expenses-toolbar` lleva `margin-bottom`
+  de 1rem, el mismo ritmo que separa los paneles entre sí.
+- Las barras de la comparativa (`CategoryComparisonBars`) dibujaban una **doble línea
+  separadora** (el borde inferior de la última fila de la tabla + su propio `bordered-top`),
+  que en móvil leía como una fila vacía. Se elimina el `bordered-top` (la tabla ya aporta el
+  separador) y el bloque pasa a `margin-top` propio; además las filas de barras ganan aire
+  (gap 0.5rem → 0.75rem) para que los ticks de una categoría no se fundan visualmente con la
+  barra de la siguiente.
+
+### Verificación
+- Barrido programático de gaps verticales entre hermanos del DOM (Playwright): el par
+  toolbar→panel con gap 0 desaparece; cero intersecciones reales de elementos en 360/390/1280 px.
+- Regla de oro re-verificada: sin scroll-X de página en 360/390/430/639/641/719/721/1280 px ×
+  12 rutas; tema claro y oscuro revisados; `typecheck` + `lint` + 220 tests Vitest en verde.
+
 ## [1.7.0] — 2026-07-07
 
 Revisión profunda de la **interfaz móvil** (solo frontend; sin cambios de API ni de esquema). Se
