@@ -26,9 +26,12 @@
    PROHIBIDO introducir un tercer breakpoint estructural sin actualizar
    la doctrina en .claude/design-system.md (sección «Responsive / móvil»).
 
-   Excepción sancionada única: 340px  bp:edge 340  — guarda de borde
-   ultra-estrecho que oculta SOLO el título del TopBar (queda el logo).
-   No es un eje estructural; no cuelgues más reglas de este ancho.
+   Excepciones sancionadas (por componente, NO ejes estructurales):
+   - 340px  bp:edge 340   — guarda ultra-estrecha que oculta SOLO el título
+     del TopBar (queda el logo). No cuelgues más reglas de este ancho.
+   - 1000px bp:topbar 1000 — colapso de la nav del TopBar a hamburguesa:
+     las 9 pills necesitan ~982px y entre 721-980 desbordaban la página
+     (regla de oro). Solo reglas del TopBar pueden usar este ancho.
 
    INVARIANTE DE REGRESIÓN: ninguna declaración nueva fuera de
    @media (max-width: …) salvo tokens inertes en theme.css y los
@@ -267,7 +270,11 @@
   flex-shrink: 0;
 }
 
-@media (max-width: 720px) {
+/* bp:topbar 1000 — excepción sancionada por componente (como bp:edge). Las 9 pills
+   de navegación necesitan ~982px; entre 721 y ~980 desbordaban la página entera
+   (violación de la regla de oro detectada en QA v1.7.0). El colapso a hamburguesa
+   sube a 1000px SOLO para la TopBar; el resto de la estructura sigue en 720. */
+@media (max-width: 1000px) { /* bp:topbar 1000 */
   .ff-topbar-nav {
     display: none;
   }
@@ -3235,5 +3242,10 @@ fieldset.retirement-config-stack {
 @media (max-width: 640px) { /* bp:mobile 640 */
   .projection-chart-tooltip {
     max-width: min(16rem, calc(100vw - 2rem));
+  }
+  /* Las líneas de meta de la cabecera del chart son largas ("Horizonte … · Δ
+     regular presup. …"); en phone se recortaban contra el borde derecho. */
+  .projection-chart-meta {
+    font-size: 0.62rem;
   }
 }
