@@ -384,3 +384,250 @@ export type HistoryPrefillResponseApi = {
   kind: HistorySnapshotKindApi;
   items: HistoryPrefillItemApi[];
 };
+
+// ---------------------------------------------------------------------------
+// Histórico de gasto mensual (transacciones) — v1.6.0
+// Espejo EXACTO de apps/api/src/handlers/transactions/schema.rs (autoridad).
+// Importes = string decimal firmado; los Option con skip_serializing_if se
+// OMITEN cuando null → aquí opcionales (`?`). Prefijo de rutas `/v1/transactions/*`.
+// ---------------------------------------------------------------------------
+
+/** `expense` | `income` | `savings`. `savings` exige `category_id` null. */
+export type TransactionKindApi = "expense" | "income" | "savings";
+
+/** Origen de la petición de import/preview. `auto` = autodetección por cabecera. */
+export type TransactionImportSourceApi = "auto" | "myinvestor" | "n26";
+
+/** Un movimiento. `import_id` ausente = manual (efectivo). Amount firmado (neg = cargo). */
+export type TransactionApi = {
+  id: string;
+  import_id?: string;
+  /** `myinvestor` | `n26` | `manual` | … */
+  source: string;
+  op_date: string;
+  value_date?: string;
+  concept: string;
+  amount: string;
+  currency: string;
+  kind?: TransactionKindApi;
+  category_id?: string;
+  category_name?: string;
+  linked_asset_id?: string;
+  linked_liability_id?: string;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Un mes con datos (para el selector). `is_complete=false` = mes civil en curso. DESC. */
+export type TransactionMonthApi = {
+  month: string;
+  is_complete: boolean;
+  txn_count: number;
+};
+
+/** Un batch de import (deshacer import = borrar batch, CASCADE). */
+export type TransactionImportBatchApi = {
+  id: string;
+  source: string;
+  account_asset_id?: string;
+  account_asset_name?: string;
+  original_filename?: string;
+  created_at: string;
+  txn_count: number;
+};
+
+/** Cuerpo de `POST /v1/transactions` (alta manual, 201). */
+export type CreateTransactionRequest = {
+  op_date: string;
+  value_date?: string;
+  concept: string;
+  amount: string;
+  kind: TransactionKindApi;
+  category_id?: string;
+  linked_asset_id?: string;
+  linked_liability_id?: string;
+  notes?: string;
+};
+
+/** Cuerpo de `POST /v1/transactions/batch` (1..1000). */
+export type BatchCreateTransactionsRequest = {
+  transactions: CreateTransactionRequest[];
+};
+
+/** Cuerpo de `PATCH /v1/transactions/{id}`. En importadas, op_date/amount/concept → 400. */
+export type PatchTransactionRequest = {
+  op_date?: string;
+  value_date?: string;
+  clear_value_date?: boolean;
+  concept?: string;
+  amount?: string;
+  kind?: TransactionKindApi;
+  category_id?: string;
+  clear_category?: boolean;
+  linked_asset_id?: string;
+  clear_linked_asset?: boolean;
+  linked_liability_id?: string;
+  clear_linked_liability?: boolean;
+  notes?: string;
+  clear_notes?: boolean;
+};
+
+/** Cuerpo de `POST /v1/transactions/import/preview`. */
+export type ImportPreviewRequest = {
+  source: TransactionImportSourceApi;
+  file_b64: string;
+  account_asset_id?: string;
+};
+
+/** Una fila del preview del import. `status` new/already_imported. */
+export type ImportPreviewRowApi = {
+  index: number;
+  op_date: string;
+  value_date?: string;
+  concept: string;
+  amount: string;
+  currency: string;
+  status: "new" | "already_imported";
+  suggested_kind: TransactionKindApi;
+  suggested_category_id?: string;
+  suggested_category_name?: string;
+  suggested_transfer: boolean;
+  currency_warning: boolean;
+  matched_rule_id?: string;
+};
+
+/** Respuesta de `POST /v1/transactions/import/preview`. */
+export type ImportPreviewResponseApi = {
+  /** Preset detectado: `myinvestor` | `n26`. */
+  source: string;
+  file_sha256: string;
+  row_count: number;
+  new_count: number;
+  already_imported_count: number;
+  suggested_transfer_count: number;
+  precategorized_count: number;
+  currency_warning_count: number;
+  rows: ImportPreviewRowApi[];
+};
+
+/** Una decisión de import, PARALELA POR ÍNDICE a las filas del preview (una por fila). */
+export type ImportDecisionApi = {
+  discard?: boolean;
+  force?: boolean;
+  kind: TransactionKindApi;
+  category_id?: string;
+  linked_asset_id?: string;
+  linked_liability_id?: string;
+};
+
+/** Cuerpo de `POST /v1/transactions/import/confirm`. */
+export type ImportConfirmRequest = {
+  source: TransactionImportSourceApi;
+  file_b64: string;
+  file_sha256: string;
+  decisions: ImportDecisionApi[];
+  learn_rules?: boolean;
+  account_asset_id?: string;
+  original_filename?: string;
+};
+
+/** Respuesta de `POST /v1/transactions/import/confirm`. */
+export type ImportConfirmResponseApi = {
+  import_id?: string;
+  imported: number;
+  skipped_already_imported: number;
+  discarded: number;
+  rules_learned: number;
+};
+
+/** Regla de categorización aprendida/manual. */
+export type TransactionRuleApi = {
+  id: string;
+  match_kind: "substring" | "prefix" | "exact";
+  pattern: string;
+  source?: string;
+  assign_kind?: TransactionKindApi;
+  assign_category_id?: string;
+  assign_category_name?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Una línea de comparativa por categoría (magnitudes POSITIVAS todas). */
+export type CategoryComparisonLineApi = {
+  category_id?: string;
+  category_name: string;
+  actual: string;
+  budget: string;
+  avg: string;
+  delta_vs_budget: string;
+  delta_vs_avg: string;
+};
+
+/** Línea derivada de pasivos (solo lado budget: `label`="Cuotas de pasivos"). */
+export type SummaryDerivedDebtLineApi = {
+  label: string;
+  budget: string;
+};
+
+/** Bloque {actual, avg} para savings e income. */
+export type SummaryBlockActualAvgApi = {
+  actual: string;
+  avg: string;
+};
+
+/** Totales de la comparativa. */
+export type SummaryTotalsApi = {
+  expense_actual: string;
+  expense_budget: string;
+  expense_avg: string;
+  income_actual: string;
+  income_budget: string;
+  income_avg: string;
+  savings_actual: string;
+  savings_avg: string;
+  net_actual: string;
+};
+
+/** Respuesta de `GET /v1/transactions/summary`. */
+export type TransactionsSummaryApi = {
+  year: number;
+  /** 1-12. */
+  month: number;
+  is_partial: boolean;
+  avg_months: number;
+  /** `household` | `mine`. */
+  view: string;
+  expense_categories: CategoryComparisonLineApi[];
+  income_categories: CategoryComparisonLineApi[];
+  derived_debt_line: SummaryDerivedDebtLineApi;
+  savings: SummaryBlockActualAvgApi;
+  income: SummaryBlockActualAvgApi;
+  totals: SummaryTotalsApi;
+};
+
+/**
+ * Un mes del cash-flow histórico (`GET /v1/history/cashflow`). `month_index` 0 = mes actual,
+ * negativos = pasado. `expense`/`savings` son NEGATIVOS (signo real), `income` positivo.
+ * Todo Decimal-string.
+ */
+export type CashflowMonthApi = {
+  month_index: number;
+  date_ymd: string;
+  expense: string;
+  income: string;
+  savings: string;
+  net: string;
+};
+
+/**
+ * Respuesta de `GET /v1/history/cashflow`. El frontend de C1-C6/C8 usa SOLO `months[]`;
+ * el campo `fine` (serie fina) lo consume el overlay del chart grande (director).
+ */
+export type HistoryCashflowApi = {
+  anchor_date_ymd: string;
+  anchor_month_first_ymd: string;
+  view: string;
+  months: CashflowMonthApi[];
+};

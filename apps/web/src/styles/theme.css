@@ -83,6 +83,11 @@
   --proj-area-8: #c026d3;
   --proj-area-9: #ca8a04;
   --proj-area-10: #475569;
+
+  /* Comparativa de gastos (pestaña «Gastos»): barra «Promedio». Real usa
+     --ff-accent y Budget --ff-line-soft; este es el gris medio del promedio.
+     Sin rojo en chrome. */
+  --exp-average: #71717a; /* zinc-500 */
 }
 
 [data-theme="dark"] {
@@ -144,6 +149,9 @@
   --proj-area-8: #f0abfc;  /* magenta claro */
   --proj-area-9: #fde047;  /* ámbar claro */
   --proj-area-10: #cbd5e1; /* gris claro */
+
+  /* Promedio de la comparativa, aclarado para contraste sobre zinc-900. */
+  --exp-average: #a1a1aa; /* zinc-400 */
 }
 
 /* Reset global de color + fondo, aplicado al body para que los modos

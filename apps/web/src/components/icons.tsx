@@ -242,3 +242,11 @@ export function DuplicateIcon(props: IconProps) {
     </IconBase>
   );
 }
+
+export function UploadIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M8 10.6V2.9m0 0L5.2 5.7M8 2.9l2.8 2.8M3 13h10" />
+    </IconBase>
+  );
+}
