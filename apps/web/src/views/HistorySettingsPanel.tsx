@@ -6,11 +6,21 @@
  * /v1/history/snapshots`), Decimal-as-string. `canEdit === false` → tabla de solo lectura sin
  * controles. Toda mutación exitosa refresca la lista y llama `onHistoryMutated` (que en App
  * recarga la serie histórica del chart).
+ *
+ * Prefill (backfill assistido): al crear un snapshot el grid se autocompleta con
+ * `GET /v1/history/snapshots/prefill?kind&date` (interpolación entre snapshots vecinos), un
+ * `DraftItem` por ítem sugerido reusando su `item_id` para preservar el enlace entre snapshots.
+ * En crear, cambiar fecha/tipo re-sugiere en silencio mientras el usuario no haya tocado el grid
+ * (`formDirty`); si lo tocó, aparece «Recalcular sugerencias». En editar, «Añadir items que
+ * faltan» hace append de los ítems cuyo `item_id` no esté ya en el grid, sin tocar las filas
+ * existentes. El fallo de red nunca bloquea: se cae a una fila en blanco y el modal sigue usable.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { apiDelete, apiGet, apiPost, apiPut } from "../api/client";
 import type {
+  HistoryPrefillItemApi,
+  HistoryPrefillResponseApi,
   HistorySnapshotApi,
   HistorySnapshotKindApi,
 } from "../api/types";
@@ -34,7 +44,9 @@ const KIND_FILTERS: HistorySnapshotKindApi[] = ["asset", "liability"];
 const YEARS_BACK = 15;
 
 /** Fila editable del grid de ítems del modal. `itemId` presente = ítem existente (se reenvía
- *  para preservar el enlace entre snapshots en el PUT). `key` es solo para React. */
+ *  para preservar el enlace entre snapshots en el PUT). `key` es solo para React.
+ *  `existedHint` es solo display (sugerencia de prefill de un ítem que no existía en esa fecha):
+ *  NO afecta a `buildItemsPayload` — una fila con valor "0" se envía igualmente. */
 type DraftItem = {
   key: string;
   itemId?: string;
@@ -43,6 +55,7 @@ type DraftItem = {
   aprPercent: string;
   paymentAmount: string;
   paymentFrequency: "" | "monthly" | "weekly";
+  existedHint?: boolean;
 };
 
 /** Cuerpo de un ítem enviado a la API (términos solo en pasivos). */
@@ -95,6 +108,17 @@ export function HistorySettingsPanel({
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Prefill (sugerencias de backfill). `formDirty` = el usuario tocó el grid en modo crear →
+  // deja de re-sugerir en silencio y ofrece «Recalcular». Un ref espejo lo hace legible desde
+  // los callbacks async sin re-crearlos. `prefillReqSeq` descarta respuestas fuera de orden.
+  const [formDirty, setFormDirty] = useState(false);
+  const formDirtyRef = useRef(false);
+  const prefillReqSeq = useRef(0);
+  const [prefillLoading, setPrefillLoading] = useState(false);
+  const [prefillError, setPrefillError] = useState(false);
+  const [appendLoading, setAppendLoading] = useState(false);
+  const [appendNote, setAppendNote] = useState<string | null>(null);
+
   // Modal borrar.
   const [deleteTarget, setDeleteTarget] = useState<HistorySnapshotApi | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -110,6 +134,27 @@ export function HistorySettingsPanel({
       aprPercent: "",
       paymentAmount: "",
       paymentFrequency: "",
+    };
+  }, []);
+
+  /** Marca el grid como editado por el usuario (solo relevante en modo crear). */
+  const markDirty = useCallback(() => {
+    formDirtyRef.current = true;
+    setFormDirty(true);
+  }, []);
+
+  /** Mapea un ítem de prefill a fila del grid, conservando `item_id` (enlace entre snapshots). */
+  const mapPrefillItem = useCallback((item: HistoryPrefillItemApi): DraftItem => {
+    keySeq.current += 1;
+    return {
+      key: `pf-${keySeq.current}`,
+      itemId: item.item_id,
+      label: item.label,
+      value: formatEditableDecimalString(item.value),
+      aprPercent: formatEditableDecimalString(item.apr_percent),
+      paymentAmount: formatEditableDecimalString(item.payment_amount),
+      paymentFrequency: item.payment_frequency ?? "",
+      existedHint: item.existed === false,
     };
   }, []);
 
@@ -133,33 +178,51 @@ export function HistorySettingsPanel({
     void fetchSnapshots();
   }, [fetchSnapshots]);
 
+  /** Deja el estado de prefill en su punto de partida (al abrir cualquiera de los dos modos). */
+  const resetPrefillState = useCallback(() => {
+    formDirtyRef.current = false;
+    setFormDirty(false);
+    prefillReqSeq.current += 1; // invalida cualquier respuesta en vuelo
+    setPrefillLoading(false);
+    setPrefillError(false);
+    setAppendLoading(false);
+    setAppendNote(null);
+  }, []);
+
   const openNew = useCallback(() => {
     setEditingId(null);
     setFormKind(kind);
     setFormDate(today);
+    // Fila en blanco como base usable de inmediato; el efecto de prefill la sustituye con las
+    // sugerencias cuando llegan (o la conserva si el fetch falla).
     setFormItems([blankItem()]);
     setFormError(null);
+    resetPrefillState();
     setModalOpen(true);
-  }, [kind, today, blankItem]);
+  }, [kind, today, blankItem, resetPrefillState]);
 
-  const openEdit = useCallback((s: HistorySnapshotApi) => {
-    setEditingId(s.id);
-    setFormKind(s.kind);
-    setFormDate(s.snapshot_date_ymd);
-    setFormItems(
-      s.items.map((it) => ({
-        key: it.item_id,
-        itemId: it.item_id,
-        label: it.label,
-        value: formatEditableDecimalString(it.value),
-        aprPercent: formatEditableDecimalString(it.apr_percent),
-        paymentAmount: formatEditableDecimalString(it.payment_amount),
-        paymentFrequency: it.payment_frequency ?? "",
-      })),
-    );
-    setFormError(null);
-    setModalOpen(true);
-  }, []);
+  const openEdit = useCallback(
+    (s: HistorySnapshotApi) => {
+      setEditingId(s.id);
+      setFormKind(s.kind);
+      setFormDate(s.snapshot_date_ymd);
+      setFormItems(
+        s.items.map((it) => ({
+          key: it.item_id,
+          itemId: it.item_id,
+          label: it.label,
+          value: formatEditableDecimalString(it.value),
+          aprPercent: formatEditableDecimalString(it.apr_percent),
+          paymentAmount: formatEditableDecimalString(it.payment_amount),
+          paymentFrequency: it.payment_frequency ?? "",
+        })),
+      );
+      setFormError(null);
+      resetPrefillState();
+      setModalOpen(true);
+    },
+    [resetPrefillState],
+  );
 
   const closeModal = useCallback(() => {
     if (saving) return;
@@ -167,16 +230,25 @@ export function HistorySettingsPanel({
   }, [saving]);
 
   const addItem = useCallback(() => {
+    markDirty();
     setFormItems((prev) => [...prev, blankItem()]);
-  }, [blankItem]);
+  }, [blankItem, markDirty]);
 
-  const removeItem = useCallback((key: string) => {
-    setFormItems((prev) => prev.filter((x) => x.key !== key));
-  }, []);
+  const removeItem = useCallback(
+    (key: string) => {
+      markDirty();
+      setFormItems((prev) => prev.filter((x) => x.key !== key));
+    },
+    [markDirty],
+  );
 
-  const updateItem = useCallback((key: string, patch: Partial<DraftItem>) => {
-    setFormItems((prev) => prev.map((x) => (x.key === key ? { ...x, ...patch } : x)));
-  }, []);
+  const updateItem = useCallback(
+    (key: string, patch: Partial<DraftItem>) => {
+      markDirty();
+      setFormItems((prev) => prev.map((x) => (x.key === key ? { ...x, ...patch } : x)));
+    },
+    [markDirty],
+  );
 
   /** Valida y normaliza (coma→punto) el grid de ítems. Descarta filas completamente vacías. */
   const buildItemsPayload = useCallback(
@@ -217,6 +289,83 @@ export function HistorySettingsPanel({
     },
     [],
   );
+
+  /** Pide sugerencias para (kind, date) y repuebla el grid (modo crear). `force` = el usuario
+   *  pidió recalcular explícitamente y sobreescribe aunque haya tocado el grid; sin `force` se
+   *  respeta un grid ya editado. Fallo de red → nota discreta, se conserva el grid (fila blanca). */
+  const runCreatePrefill = useCallback(
+    async (kindArg: HistorySnapshotKindApi, dateArg: string, force: boolean) => {
+      const reqId = prefillReqSeq.current + 1;
+      prefillReqSeq.current = reqId;
+      setPrefillLoading(true);
+      setPrefillError(false);
+      try {
+        const data = await apiGet<HistoryPrefillResponseApi>(
+          `/v1/history/snapshots/prefill?kind=${kindArg}&date=${encodeURIComponent(dateArg)}`,
+        );
+        if (reqId !== prefillReqSeq.current) return; // respuesta obsoleta
+        if (!force && formDirtyRef.current) return; // se editó a mitad de vuelo → conservar grid
+        const rows = data.items.map(mapPrefillItem);
+        setFormItems(rows.length > 0 ? rows : [blankItem()]);
+      } catch {
+        if (reqId !== prefillReqSeq.current) return;
+        setPrefillError(true);
+      } finally {
+        if (reqId === prefillReqSeq.current) setPrefillLoading(false);
+      }
+    },
+    [blankItem, mapPrefillItem],
+  );
+
+  // Modo crear: al abrir y en cada cambio de fecha/tipo, re-sugerir en silencio mientras el
+  // usuario no haya tocado el grid. Editar (editingId !== null) no auto-sugiere.
+  useEffect(() => {
+    if (!modalOpen || editingId !== null) return;
+    if (formDirtyRef.current) return;
+    if (!formDate.trim()) return;
+    void runCreatePrefill(formKind, formDate, false);
+  }, [modalOpen, editingId, formKind, formDate, runCreatePrefill]);
+
+  /** «Recalcular sugerencias»: descarta las ediciones y reescribe el grid con el prefill. */
+  const recalcSuggestions = useCallback(() => {
+    formDirtyRef.current = false;
+    setFormDirty(false);
+    void runCreatePrefill(formKind, formDate, true);
+  }, [formKind, formDate, runCreatePrefill]);
+
+  /** «Añadir items que faltan» (modo editar): añade solo los ítems cuyo `item_id` no esté ya en
+   *  el grid. Nunca toca las filas existentes. Sin novedades → nota «Nada que añadir.». */
+  const appendMissing = useCallback(async () => {
+    setAppendLoading(true);
+    setAppendNote(null);
+    try {
+      const data = await apiGet<HistoryPrefillResponseApi>(
+        `/v1/history/snapshots/prefill?kind=${formKind}&date=${encodeURIComponent(formDate)}`,
+      );
+      const present = new Set(
+        formItems.map((x) => x.itemId).filter((id): id is string => Boolean(id)),
+      );
+      const additions = data.items
+        .filter((it) => !present.has(it.item_id))
+        .map(mapPrefillItem);
+      if (additions.length === 0) {
+        setAppendNote("Nada que añadir.");
+      } else {
+        setFormItems((prev) => [...prev, ...additions]);
+      }
+    } catch {
+      setAppendNote("No se pudieron cargar sugerencias.");
+    } finally {
+      setAppendLoading(false);
+    }
+  }, [formKind, formDate, formItems, mapPrefillItem]);
+
+  // Auto-descartar la nota de «Añadir items que faltan» a los pocos segundos.
+  useEffect(() => {
+    if (!appendNote) return;
+    const t = window.setTimeout(() => setAppendNote(null), 4000);
+    return () => window.clearTimeout(t);
+  }, [appendNote]);
 
   const submitForm = useCallback(
     async (e: FormEvent) => {
@@ -432,6 +581,44 @@ export function HistorySettingsPanel({
                 />
               </label>
 
+              {editingId === null ? (
+                prefillLoading || prefillError || formDirty ? (
+                  <div className="snapshot-prefill-bar">
+                    {prefillLoading ? (
+                      <span className="muted snapshot-prefill-note">Cargando sugerencias…</span>
+                    ) : null}
+                    {prefillError ? (
+                      <span className="muted snapshot-prefill-note">
+                        No se pudieron cargar sugerencias.
+                      </span>
+                    ) : null}
+                    {formDirty && !prefillLoading ? (
+                      <button
+                        type="button"
+                        className="btn ghost text snapshot-prefill-action"
+                        onClick={recalcSuggestions}
+                      >
+                        Recalcular sugerencias
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null
+              ) : (
+                <div className="snapshot-prefill-bar">
+                  <button
+                    type="button"
+                    className="btn ghost text snapshot-prefill-action"
+                    disabled={appendLoading}
+                    onClick={() => void appendMissing()}
+                  >
+                    {appendLoading ? "Buscando…" : "Añadir items que faltan"}
+                  </button>
+                  {appendNote ? (
+                    <span className="muted snapshot-prefill-note">{appendNote}</span>
+                  ) : null}
+                </div>
+              )}
+
               <div className="snapshot-items">
                 {formItems.length === 0 ? (
                   <p className="muted tight">Sin ítems. Añade al menos uno.</p>
@@ -446,6 +633,11 @@ export function HistorySettingsPanel({
                           maxLength={200}
                           autoComplete="off"
                         />
+                        {it.existedHint ? (
+                          <span className="snapshot-item-existed-hint">
+                            No existía en esta fecha
+                          </span>
+                        ) : null}
                       </label>
                       <label className="field">
                         <span>Valor</span>

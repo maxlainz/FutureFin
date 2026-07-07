@@ -14,7 +14,8 @@ use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
 use crate::handlers::history::{
     __path_capture_snapshots, __path_create_snapshot, __path_delete_snapshot,
-    __path_get_history_series, __path_list_snapshots, __path_update_snapshot,
+    __path_get_history_series, __path_list_snapshots, __path_prefill_snapshot,
+    __path_update_snapshot,
 };
 #[allow(unused_imports)]
 use crate::handlers::installation::{
@@ -107,6 +108,7 @@ use utoipa::OpenApi;
         create_snapshot,
         update_snapshot,
         delete_snapshot,
+        prefill_snapshot,
         get_history_series,
         export_user_backup,
         import_user_backup_preview,
@@ -173,6 +175,8 @@ use utoipa::OpenApi;
         crate::handlers::history::HistorySeriesPoint,
         crate::handlers::history::HistoryAssetSeries,
         crate::handlers::history::HistoryMarker,
+        crate::handlers::history::PrefillResponse,
+        crate::handlers::history::PrefillItemResponse,
         crate::handlers::backup_user::ExportRequest,
         crate::handlers::backup_user::ImportRequest,
         crate::handlers::backup_user::ImportPreviewResponse,

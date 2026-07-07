@@ -2147,6 +2147,36 @@
   margin-bottom: 0.1rem;
 }
 
+/* Prefill (sugerencias de backfill): barra de estado/acciones + chip «no existía». */
+.snapshot-prefill-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.75rem;
+  margin-top: -0.15rem;
+}
+
+.snapshot-prefill-note {
+  font-size: 0.78rem;
+}
+
+.snapshot-prefill-action {
+  font-size: 0.78rem;
+}
+
+/* `.field .` gana en especificidad a `.field span` para el color/peso mutado del chip. */
+.field .snapshot-item-existed-hint {
+  align-self: flex-start;
+  font-weight: 400;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  color: var(--ff-muted);
+  background: var(--ff-pill);
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-pill);
+  padding: 0.1rem 0.45rem;
+}
+
 .assets-table {
   width: 100%;
   border-collapse: collapse;

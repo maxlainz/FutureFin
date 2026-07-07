@@ -24,8 +24,8 @@ use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use futurefin_engine::{
-    add_months_signed, evaluate_timeline, month_index_of, HistoryItem, HistoryItemKind,
-    HistoryObservation, HistoryTimeline, LoanTerms,
+    add_months_signed, amortized_segment_value, evaluate_timeline, month_index_of, HistoryItem,
+    HistoryItemKind, HistoryObservation, HistoryTimeline, LoanTerms,
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -1213,9 +1213,438 @@ pub async fn get_history_series(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Prefill de backfill (`GET /v1/history/snapshots/prefill`)
+// ---------------------------------------------------------------------------
+//
+// Dada una fecha `d` y un `kind`, devuelve, POR ITEM del usuario, el valor que el
+// panel de backfill debería pre-rellenar en esa fecha (editable por el usuario). No
+// crea ni modifica nada: reconstruye el MISMO timeline own-user que `GET /history/series`
+// (snapshots del kind + observación virtual «hoy» con las filas vivas no expiradas, salvo
+// que el último snapshot real sea de hoy) y evalúa cada item exactamente en `d`.
+//
+// Diferencia con la serie: la región **anterior al primer snapshot** no es 0 sino el valor
+// del primer snapshot (`basis = "first_snapshot"`), pensado para que el usuario complete el
+// pasado hacia atrás. Toda la interpolación intermedia reutiliza el motor
+// (`amortized_segment_value`; activos con `terms = None` → lineal en días civiles, idéntico
+// a la serie), nunca se reimplementa la amortización.
+
+/// Item pre-rellenado. `basis`: `interpolated` | `first_snapshot` | `live` | `not_owned`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PrefillItemResponse {
+    /// `source_item_id` del item (id del asset/liability vivo, o clave del backfill histórico).
+    #[schema(value_type = String, format = "uuid")]
+    pub item_id: Uuid,
+    pub label: String,
+    /// Valor sugerido, redondeado a 2 decimales (display-grade; el usuario lo edita).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub value: Decimal,
+    /// `true` si el item existía (con valor) en `d`; `false` para `not_owned`.
+    pub existed: bool,
+    /// Origen del valor: `interpolated` | `first_snapshot` | `live` | `not_owned`.
+    pub basis: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub apr_percent: Option<Decimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub payment_amount: Option<Decimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_frequency: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PrefillResponse {
+    /// Fecha solicitada, `YYYY-MM-DD`.
+    pub date_ymd: String,
+    /// `asset` | `liability`.
+    pub kind: String,
+    /// Items ordenados: `existed=true` primero (`label ASC`), luego `not_owned` (`label ASC`).
+    pub items: Vec<PrefillItemResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrefillQuery {
+    /// `asset` | `liability` (requerido).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// `YYYY-MM-DD` (requerido).
+    #[serde(default)]
+    pub date: Option<NaiveDate>,
+}
+
+#[derive(Debug, FromRow)]
+struct PrefillHeaderRow {
+    id: Uuid,
+    snapshot_date: NaiveDate,
+}
+
+/// Fila viva unificada (assets y liabilities normalizados a las mismas columnas). Para assets,
+/// las columnas de términos llegan como `NULL`.
+#[derive(Debug, FromRow)]
+struct PrefillLiveRow {
+    id: Uuid,
+    label: String,
+    value: Decimal,
+    apr_percent: Option<Decimal>,
+    payment_amount: Option<Decimal>,
+    payment_frequency: Option<String>,
+}
+
+/// Observación de un item en un punto del timeline: valor + términos crudos (para eco en la
+/// respuesta y para construir `LoanTerms` vía [`loan_terms_of`]).
+struct PrefillObs {
+    value: Decimal,
+    apr_percent: Option<Decimal>,
+    payment_amount: Option<Decimal>,
+    payment_frequency: Option<String>,
+}
+
+fn obs_has_terms(o: &PrefillObs) -> bool {
+    o.apr_percent.is_some() || o.payment_amount.is_some() || o.payment_frequency.is_some()
+}
+
+/// Evalúa un item en `d`. Devuelve `(valor, existió, basis, índice de observación de inicio
+/// de segmento)`. El índice sirve para elegir los términos a devolver (cuota/apr).
+fn prefill_eval_item(
+    dates: &[NaiveDate],
+    obs: &[Option<PrefillObs>],
+    d: NaiveDate,
+    is_liability: bool,
+) -> (Decimal, bool, &'static str, Option<usize>) {
+    let m = dates.len();
+    // `dates[0]` es el primer snapshot real (la observación virtual «hoy» se añade al final).
+    // Antes del primer snapshot: engancha al valor del primer snapshot si el item existía allí.
+    if d < dates[0] {
+        return match &obs[0] {
+            Some(o) => (o.value, true, "first_snapshot", Some(0)),
+            None => (Decimal::ZERO, false, "not_owned", None),
+        };
+    }
+
+    // `d ∈ [dates[0], dates[m-1]]` (validado `d ≤ hoy`; el último punto es hoy o el último
+    // snapshot real, ambos ≥ d). `a` = mayor índice con `dates[a] ≤ d`.
+    let a = match dates.binary_search(&d) {
+        Ok(idx) => idx,
+        Err(idx) => idx - 1, // idx ≥ 1 porque dates[0] ≤ d
+    };
+
+    if a == m - 1 {
+        // d coincide con el último punto: valor observado exacto, o `not_owned`.
+        return match &obs[a] {
+            Some(o) => (o.value, true, "interpolated", Some(a)),
+            None => (Decimal::ZERO, false, "not_owned", None),
+        };
+    }
+
+    let d_a = dates[a];
+    let d_b = dates[a + 1];
+    let days_total = (d_b - d_a).num_days();
+    let days_from_start = (d - d_a).num_days();
+
+    match (&obs[a], &obs[a + 1]) {
+        (Some(lo), Some(ro)) => {
+            // Términos de la observación de inicio (fallback a la final), como en la serie.
+            // Activos → `None` → el motor interpola linealmente en días civiles.
+            let terms = if is_liability {
+                loan_terms_of(lo.apr_percent, lo.payment_amount, lo.payment_frequency.as_deref())
+                    .or_else(|| {
+                        loan_terms_of(ro.apr_percent, ro.payment_amount, ro.payment_frequency.as_deref())
+                    })
+            } else {
+                None
+            };
+            let value =
+                amortized_segment_value(lo.value, ro.value, terms.as_ref(), days_from_start, days_total);
+            (value, true, "interpolated", Some(a))
+        }
+        // Observado solo a la izquierda: su valor exacto en su fecha, `not_owned` en el resto.
+        (Some(lo), None) => {
+            if d == d_a {
+                (lo.value, true, "interpolated", Some(a))
+            } else {
+                (Decimal::ZERO, false, "not_owned", None)
+            }
+        }
+        // Observado solo a la derecha (`d < d_b` en este segmento) o en ninguno → `not_owned`.
+        (None, _) => (Decimal::ZERO, false, "not_owned", None),
+    }
+}
+
+/// Elige los términos crudos a devolver para un pasivo: los de la observación de inicio de
+/// segmento; si no, la observación con términos más cercana a `d`; si no, la fila viva; si no,
+/// nada. (Los activos nunca llevan términos.)
+fn prefill_pick_terms(
+    dates: &[NaiveDate],
+    obs: &[Option<PrefillObs>],
+    seg_start: Option<usize>,
+    d: NaiveDate,
+    live: Option<&PrefillLiveRow>,
+) -> (Option<Decimal>, Option<Decimal>, Option<String>) {
+    if let Some(i) = seg_start {
+        if let Some(o) = &obs[i] {
+            if obs_has_terms(o) {
+                return (o.apr_percent, o.payment_amount, o.payment_frequency.clone());
+            }
+        }
+    }
+    let mut best: Option<(i64, &PrefillObs)> = None;
+    for (j, slot) in obs.iter().enumerate() {
+        if let Some(o) = slot {
+            if obs_has_terms(o) {
+                let dist = (dates[j] - d).num_days().abs();
+                if best.map_or(true, |(bd, _)| dist < bd) {
+                    best = Some((dist, o));
+                }
+            }
+        }
+    }
+    if let Some((_, o)) = best {
+        return (o.apr_percent, o.payment_amount, o.payment_frequency.clone());
+    }
+    if let Some(l) = live {
+        if l.apr_percent.is_some() || l.payment_amount.is_some() || l.payment_frequency.is_some() {
+            return (l.apr_percent, l.payment_amount, l.payment_frequency.clone());
+        }
+    }
+    (None, None, None)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/history/snapshots/prefill",
+    tag = "history",
+    params(
+        ("kind" = String, Query, description = "`asset` | `liability` (requerido)."),
+        ("date" = String, Query, description = "`YYYY-MM-DD` (requerido; ≤ hoy civil, ≥ 1900-01-01)."),
+    ),
+    responses(
+        (status = 200, description = "Valores pre-rellenados por item en `date` (own-user). Universo vacío → items []", body = PrefillResponse),
+        (status = 400, description = "kind ausente/inválido (`invalid_kind`) o fecha ausente/futura/antigua (`snapshot_date_in_future`/`snapshot_date_too_old`)"),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Not an installation member"),
+        (status = 404, description = "Installation missing"),
+    )
+)]
+pub async fn prefill_snapshot(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Query(q): Query<PrefillQuery>,
+) -> Result<Json<PrefillResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    // Solo lectura: cualquier miembro (viewer incluido) puede pedir el prefill. Siempre own-user.
+    let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
+
+    let kind = match &q.kind {
+        Some(k) => normalize_kind(k)?,
+        None => {
+            return Err(ApiError::BadRequest(
+                "invalid_kind: kind must be 'asset' or 'liability'".into(),
+            ))
+        }
+    };
+    let is_liability = kind == "liability";
+    let d = q.date.ok_or_else(|| {
+        ApiError::BadRequest("date is required and must be a valid YYYY-MM-DD date".into())
+    })?;
+    let today = installation_naive_today(&state.pool, iid).await?;
+    validate_snapshot_date(d, today)?;
+
+    // ---- Fetch own-user, single-kind (mismas queries que la serie, sin LedgerView) -----------
+    let headers: Vec<PrefillHeaderRow> = sqlx::query_as(
+        r#"SELECT id, snapshot_date
+           FROM history_snapshots
+           WHERE installation_id = $1 AND owner_user_id = $2 AND kind = $3
+           ORDER BY snapshot_date ASC"#,
+    )
+    .bind(iid)
+    .bind(user.id.0)
+    .bind(&kind)
+    .fetch_all(&state.pool)
+    .await?;
+
+    // Filas vivas propias no expiradas (assets o liabilities), normalizadas a `PrefillLiveRow`.
+    let live_rows: Vec<PrefillLiveRow> = if is_liability {
+        sqlx::query_as(
+            r#"SELECT id, label, principal AS value, apr_percent, payment_amount, payment_frequency
+               FROM liabilities
+               WHERE installation_id = $1 AND owner_user_id = $2
+                 AND (payment_end_date IS NULL OR payment_end_date >= $3)"#,
+        )
+        .bind(iid)
+        .bind(user.id.0)
+        .bind(today)
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"SELECT id, name AS label, current_value AS value,
+                      NULL::numeric AS apr_percent, NULL::numeric AS payment_amount,
+                      NULL::text AS payment_frequency
+               FROM assets
+               WHERE installation_id = $1 AND owner_user_id = $2"#,
+        )
+        .bind(iid)
+        .bind(user.id.0)
+        .fetch_all(&state.pool)
+        .await?
+    };
+
+    // ---- Sin timeline (0 snapshots del kind) → universo = filas vivas, basis "live" ----------
+    if headers.is_empty() {
+        let mut items: Vec<PrefillItemResponse> = live_rows
+            .into_iter()
+            .map(|r| PrefillItemResponse {
+                item_id: r.id,
+                label: r.label,
+                // Sugerencia display-grade: 2 decimales (la columna es NUMERIC(18,4) igualmente).
+                value: r.value.round_dp(2),
+                existed: true,
+                basis: "live".into(),
+                apr_percent: if is_liability { r.apr_percent } else { None },
+                payment_amount: if is_liability { r.payment_amount } else { None },
+                payment_frequency: if is_liability { r.payment_frequency } else { None },
+            })
+            .collect();
+        sort_prefill_items(&mut items);
+        return Ok(Json(PrefillResponse {
+            date_ymd: d.format("%Y-%m-%d").to_string(),
+            kind,
+            items,
+        }));
+    }
+
+    // ---- Con timeline: mismos items que la serie ---------------------------------------------
+    let ids: Vec<Uuid> = headers.iter().map(|h| h.id).collect();
+    let item_rows: Vec<SnapshotItemRow> = sqlx::query_as(
+        r#"SELECT snapshot_id, source_item_id, label, value, apr_percent,
+                  payment_amount, payment_frequency
+           FROM history_snapshot_items
+           WHERE snapshot_id = ANY($1)"#,
+    )
+    .bind(&ids)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut items_by_snapshot: HashMap<Uuid, Vec<SnapshotItemRow>> = HashMap::new();
+    for r in item_rows {
+        items_by_snapshot.entry(r.snapshot_id).or_default().push(r);
+    }
+
+    // Fechas ascendentes + observación virtual «hoy» salvo que el último snapshot real sea hoy.
+    let mut dates: Vec<NaiveDate> = headers.iter().map(|h| h.snapshot_date).collect();
+    let last_real = *dates.last().expect("headers non-empty");
+    let append_virtual = last_real < today;
+    let total_len = dates.len() + usize::from(append_virtual);
+
+    let mut obs_map: BTreeMap<Uuid, Vec<Option<PrefillObs>>> = BTreeMap::new();
+    // Nombre fallback: label del snapshot más reciente que contiene el item.
+    let mut latest_label: HashMap<Uuid, (NaiveDate, String)> = HashMap::new();
+    for (j, h) in headers.iter().enumerate() {
+        let Some(items) = items_by_snapshot.get(&h.id) else {
+            continue;
+        };
+        for it in items {
+            let obs = obs_map
+                .entry(it.source_item_id)
+                .or_insert_with(|| Vec::from_iter(std::iter::repeat_with(|| None).take(total_len)));
+            obs[j] = Some(PrefillObs {
+                value: it.value,
+                apr_percent: it.apr_percent,
+                payment_amount: it.payment_amount,
+                payment_frequency: it.payment_frequency.clone(),
+            });
+            let slot = latest_label
+                .entry(it.source_item_id)
+                .or_insert_with(|| (h.snapshot_date, it.label.clone()));
+            if h.snapshot_date >= slot.0 {
+                *slot = (h.snapshot_date, it.label.clone());
+            }
+        }
+    }
+
+    if append_virtual {
+        dates.push(today);
+        let last = total_len - 1;
+        for r in &live_rows {
+            let obs = obs_map
+                .entry(r.id)
+                .or_insert_with(|| Vec::from_iter(std::iter::repeat_with(|| None).take(total_len)));
+            obs[last] = Some(PrefillObs {
+                value: r.value,
+                apr_percent: r.apr_percent,
+                payment_amount: r.payment_amount,
+                payment_frequency: r.payment_frequency.clone(),
+            });
+        }
+    }
+
+    // Unir filas vivas al universo aunque la virtual se saltara (snapshot de hoy): un item
+    // vivo nunca-snapshoteado debe aparecer (con observaciones todo-`None` → `not_owned`).
+    for r in &live_rows {
+        obs_map
+            .entry(r.id)
+            .or_insert_with(|| Vec::from_iter(std::iter::repeat_with(|| None).take(total_len)));
+    }
+
+    let live_by_id: HashMap<Uuid, &PrefillLiveRow> =
+        live_rows.iter().map(|r| (r.id, r)).collect();
+
+    let mut items: Vec<PrefillItemResponse> = obs_map
+        .iter()
+        .map(|(id, obs)| {
+            let (value, existed, basis, seg_start) = prefill_eval_item(&dates, obs, d, is_liability);
+            let live = live_by_id.get(id).copied();
+            let label = live
+                .map(|l| l.label.clone())
+                .or_else(|| latest_label.get(id).map(|(_, l)| l.clone()))
+                .unwrap_or_default();
+            let (apr_percent, payment_amount, payment_frequency) = if is_liability {
+                prefill_pick_terms(&dates, obs, seg_start, d, live)
+            } else {
+                (None, None, None)
+            };
+            PrefillItemResponse {
+                item_id: *id,
+                label,
+                // Sugerencia display-grade: 2 decimales (evita 16+ dígitos de la interpolación
+                // Decimal en el input del formulario). Los términos se ecoan SIN redondear
+                // (son observaciones copiadas, no valores computados).
+                value: value.round_dp(2),
+                existed,
+                basis: basis.to_string(),
+                apr_percent,
+                payment_amount,
+                payment_frequency,
+            }
+        })
+        .collect();
+    sort_prefill_items(&mut items);
+
+    Ok(Json(PrefillResponse {
+        date_ymd: d.format("%Y-%m-%d").to_string(),
+        kind,
+        items,
+    }))
+}
+
+/// Orden de salida: `existed=true` primero, luego por `label ASC`. `sort_by` es estable, así que
+/// los empates de `(existed, label)` conservan el orden por `source_item_id` del `BTreeMap`.
+fn sort_prefill_items(items: &mut [PrefillItemResponse]) {
+    items.sort_by(|a, b| {
+        (!a.existed)
+            .cmp(&!b.existed)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+}
+
 pub fn history_router() -> Router {
     Router::new()
         .route("/snapshots/capture", post(capture_snapshots))
+        .route("/snapshots/prefill", get(prefill_snapshot))
         .route("/snapshots", get(list_snapshots).post(create_snapshot))
         .route("/snapshots/{id}", put(update_snapshot).delete(delete_snapshot))
         .route("/series", get(get_history_series))
