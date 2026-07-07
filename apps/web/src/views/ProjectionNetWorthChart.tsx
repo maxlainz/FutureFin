@@ -10,6 +10,8 @@ import {
   type WheelEvent,
 } from "react";
 import type {
+  CashflowFineApi,
+  HistoryCashflowApi,
   HistorySeriesApi,
   PlanningFlowApiRow,
   PlanningFlowDirectionApi,
@@ -45,6 +47,9 @@ import { chartPerf } from "../lib/perf";
 export function ProjectionNetWorthChart({
   series,
   history,
+  cashflow,
+  cashflowDaily,
+  onRequestDailyCashflow,
   milestones,
   focusMode,
   inflationAdjusted,
@@ -62,6 +67,12 @@ export function ProjectionNetWorthChart({
   /** Serie histórica (snapshots pasados) ya validada contra el anchor de la proyección, o
    *  `null` cuando no hay histórico usable → el merge es la identidad (render solo-futuro). */
   history: HistorySeriesApi | null;
+  /** Cash-flow histórico weekly (ventana 24m), ya validado contra el anchor. Su campo `fine`
+   *  alimenta el overlay fino de la zona pasada; `null` → el pasado se pinta solo mensual. */
+  cashflow: HistoryCashflowApi | null;
+  /** Detalle diario (ventana 6m), fetcheado lazy al hacer zoom histórico reciente. */
+  cashflowDaily: HistoryCashflowApi | null;
+  onRequestDailyCashflow?: () => void;
   milestones: ProjectionMilestoneApi[];
   focusMode: boolean;
   /** Cuando true (default), las series del chart se deflactan visualmente — la matemática del
@@ -581,6 +592,35 @@ export function ProjectionNetWorthChart({
     };
   }, [targetYMax, targetYMin]);
 
+  // Fetch lazy del detalle diario: se pide una sola vez (App lo desduplica) cuando la vista es un
+  // zoom histórico reciente — ventana corta (el span mínimo del chart es 12 meses) que arranca en
+  // el pasado y termina cerca de hoy. Sin serie fina weekly no habrá daily útil (mismo gating que
+  // el backend: sin transacciones vinculadas no hay `fine`). Hoisted antes del early return por
+  // las reglas de hooks (mismo patrón que la animación del eje Y).
+  const dailyVisStart = model?.visibleMonthStart ?? 0;
+  const dailyVisEnd = model?.visibleMonthEnd ?? 0;
+  const dailySpan = model?.monthSpan ?? 0;
+  useEffect(() => {
+    if (!onRequestDailyCashflow || cashflowDaily || cashflow?.fine == null) {
+      return;
+    }
+    if (
+      dailyVisStart < 0 &&
+      dailyVisStart >= -13 &&
+      dailyVisEnd <= 2 &&
+      dailySpan <= 14
+    ) {
+      onRequestDailyCashflow();
+    }
+  }, [
+    dailyVisStart,
+    dailyVisEnd,
+    dailySpan,
+    cashflow,
+    cashflowDaily,
+    onRequestDailyCashflow,
+  ]);
+
   if (!model) {
     return null;
   }
@@ -643,6 +683,71 @@ export function ProjectionNetWorthChart({
   if (!allowNegativeAxis && yTicks.length < 2) {
     yTicks = niceYTicks(Math.max(0, yMin), yMax, 6);
   }
+  // ── Overlay fino histórico (cash-flow anclado a snapshots) ──
+  // Curva semanal/diaria del pasado, posicionada por `month_fraction` real (xScale es lineal en
+  // meses y admite fracciones) y deflactada con el MISMO deflator fraccional que el resto del
+  // chart. La curva pasa exacta por los snapshots (anclaje del engine), así que "abraza" los
+  // markers existentes. Es display-only: el hover sigue snapeando a los vértices mensuales.
+  // Donde hay daily cargado se usa para su ventana y weekly para lo anterior (stitch contiguo).
+  const fineOverlay = (() => {
+    if (historyStartMonth >= 0 || visibleMonthStart >= 0) return null;
+    const valid = (src: HistoryCashflowApi | null): CashflowFineApi | null => {
+      const f = src?.fine;
+      return f && f.grid.length >= 2 && f.net_worth.length === f.grid.length
+        ? f
+        : null;
+    };
+    const weekly = valid(cashflow);
+    const daily = valid(cashflowDaily);
+    const primary = weekly ?? daily;
+    if (!primary) return null;
+    const effectivePct =
+      inflationAdjusted && installationInflationPct > 0
+        ? installationInflationPct
+        : 0;
+    const visEnd = Math.min(0, visibleMonthEnd);
+    const pointsOf = (f: CashflowFineApi, from: number, to: number): string[] => {
+      const parts: string[] = [];
+      for (let i = 0; i < f.grid.length; i++) {
+        const g = f.grid[i]!;
+        if (g.month_fraction < from || g.month_fraction > to) continue;
+        const v =
+          (f.net_worth[i] ?? 0) * deflationFactorAt(g.month_fraction, effectivePct);
+        parts.push(`${xScale(g.month_fraction)},${yScale(v)}`);
+      }
+      return parts;
+    };
+    const dailyStart = daily ? daily.grid[0]!.month_fraction : null;
+    let parts: string[];
+    if (daily && dailyStart != null) {
+      const weeklyBefore =
+        weekly && weekly.grid[0]!.month_fraction < dailyStart
+          ? pointsOf(weekly, visibleMonthStart, Math.min(dailyStart, visEnd))
+          : [];
+      parts = [
+        ...weeklyBefore,
+        ...pointsOf(daily, Math.max(visibleMonthStart, dailyStart), visEnd),
+      ];
+    } else {
+      parts = pointsOf(weekly!, visibleMonthStart, visEnd);
+    }
+    if (parts.length < 2) return null;
+    const coverageStart = Math.min(
+      weekly ? weekly.grid[0]!.month_fraction : Infinity,
+      dailyStart ?? Infinity,
+    );
+    // Puente con la polilínea mensual: el vértice mensual inmediatamente anterior a la cobertura
+    // fina se antepone para unir ambas curvas sin hueco. La mensual se recorta a ese mes (abajo).
+    const bridgeMonth = Math.floor(coverageStart);
+    if (bridgeMonth >= visibleMonthStart && bridgeMonth < coverageStart) {
+      const v = valueAtMonth(bridgeMonth, nw);
+      if (v != null && Number.isFinite(v)) {
+        parts.unshift(`${xScale(bridgeMonth)},${yScale(v)}`);
+      }
+    }
+    return { points: parts.join(" "), bridgeMonth };
+  })();
+
   // Cada punto visible se posiciona en X según su `month_index` real (no por
   // índice del array). Esto soporta puntos no equidistantes (hybrid).
   const nwPoints = nwVisible
@@ -650,8 +755,13 @@ export function ProjectionNetWorthChart({
     .join(" ");
   // NW partido en el mes 0: el tramo pasado (month_index ≤ 0) y el futuro (≥ 0) comparten el
   // vértice del mes 0 para unirse sin hueco. Solo se usan cuando hay histórico (historyStartMonth < 0).
+  // Con overlay fino activo, la mensual se recorta a los meses ANTERIORES a su cobertura (el
+  // tramo cubierto lo dibuja la curva fina — dibujar ambas mostraría cuerda + arco divergentes).
   const nwPastPoints = visibleIndices
-    .filter((i) => pts[i]!.month_index <= 0)
+    .filter(
+      (i) =>
+        pts[i]!.month_index <= (fineOverlay ? fineOverlay.bridgeMonth : 0),
+    )
     .map((i) => `${xScale(pts[i]!.month_index)},${yScale(nw[i] ?? 0)}`)
     .join(" ");
   const nwFuturePoints = visibleIndices
@@ -1021,6 +1131,16 @@ export function ProjectionNetWorthChart({
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
+              {fineOverlay ? (
+                <polyline
+                  points={fineOverlay.points}
+                  fill="none"
+                  stroke="var(--proj-nw-past)"
+                  strokeWidth={2.25}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              ) : null}
               <polyline
                 points={nwFuturePoints}
                 fill="none"

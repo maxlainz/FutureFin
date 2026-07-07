@@ -146,6 +146,7 @@ import type {
   CategoryScope,
   FireSettingsApi,
   HealthResponse,
+  HistoryCashflowApi,
   HistorySeriesApi,
   HistorySnapshotKindApi,
   InstallationAccess,
@@ -434,6 +435,19 @@ export default function App() {
   const [historySeries, setHistorySeries] = useState<HistorySeriesApi | null>(
     null,
   );
+
+  // Cash-flow histórico (transacciones): agregado mensual + serie fina anclada.
+  // Mismo contrato de degradación que historySeries: fallo → null en silencio y
+  // el chart pinta el pasado solo con la serie mensual. `cashflowDaily` es el
+  // detalle diario (ventana 6 meses) que se fetchea lazy cuando el chart hace
+  // zoom a la zona histórica reciente; se purga con cada recarga del weekly.
+  const [cashflowSeries, setCashflowSeries] =
+    useState<HistoryCashflowApi | null>(null);
+  const [cashflowDaily, setCashflowDaily] =
+    useState<HistoryCashflowApi | null>(null);
+  // Anti-bucle del fetch lazy diario: el chart puede pedirlo en cada re-render
+  // mientras no llegue; con esto solo se dispara una vez por (scope, recarga).
+  const cashflowDailyRequestedRef = useRef(false);
 
   // Trigger del modal «¿Guardar snapshot?» (ver lib/snapshot-tracker.ts y plan §5.2). Todo el
   // estado del disparo vive en refs (no provoca re-render); solo el paso visible del modal y su
@@ -1004,6 +1018,41 @@ export default function App() {
     }
   }, [ledgerPersonScope]);
 
+  const loadCashflowSeries = useCallback(async () => {
+    // Misma purga síncrona que loadHistorySeries: el overlay del scope anterior no debe
+    // sobrevivir la ventana de fetch. También purga el detalle diario (queda stale tras
+    // cualquier mutación de transacciones o cambio de scope) y rearma su fetch lazy.
+    setCashflowSeries(null);
+    setCashflowDaily(null);
+    cashflowDailyRequestedRef.current = false;
+    try {
+      const qs = ledgerViewQs(ledgerPersonScope);
+      const data = await apiGet<HistoryCashflowApi>(
+        `/v1/history/cashflow${qs}${qs ? "&" : "?"}window_months=24`,
+      );
+      setCashflowSeries(data);
+    } catch {
+      // El cash-flow es un enhancement: cualquier fallo degrada al pasado solo-mensual.
+      setCashflowSeries(null);
+    }
+  }, [ledgerPersonScope]);
+
+  // Detalle diario lazy (el endpoint limita daily a ventana ≤ 6 meses). Lo pide el chart
+  // cuando la vista hace zoom a la zona histórica reciente; un fallo se ignora (weekly sigue).
+  const loadCashflowDaily = useCallback(async () => {
+    if (cashflowDailyRequestedRef.current) return;
+    cashflowDailyRequestedRef.current = true;
+    try {
+      const qs = ledgerViewQs(ledgerPersonScope);
+      const data = await apiGet<HistoryCashflowApi>(
+        `/v1/history/cashflow${qs}${qs ? "&" : "?"}window_months=6&resolution=daily`,
+      );
+      setCashflowDaily(data);
+    } catch {
+      /* weekly sigue siendo el fallback */
+    }
+  }, [ledgerPersonScope]);
+
   // Captura un snapshot de hoy (upsert silencioso, sin confirmación). Resuelve (void) si se guardó;
   // **lanza** un `Error` con el mensaje de la API si falla (el llamador — SnapshotButton o los
   // handlers del modal — decide cómo mostrarlo). Los snapshots no son inputs del engine, así que
@@ -1020,8 +1069,10 @@ export default function App() {
         throw new Error(await errorMessageFromResponse(res));
       }
       void loadHistorySeries();
+      // Los snapshots son las anclas de la serie fina del cash-flow: refrescarla también.
+      void loadCashflowSeries();
     },
-    [loadHistorySeries],
+    [loadHistorySeries, loadCashflowSeries],
   );
 
   const loadRetirementPage = useCallback(
@@ -1393,7 +1444,15 @@ export default function App() {
     }
     void loadProjectionSeriesPage();
     void loadHistorySeries();
-  }, [user, hasMembership, activeTab, loadProjectionSeriesPage, loadHistorySeries]);
+    void loadCashflowSeries();
+  }, [
+    user,
+    hasMembership,
+    activeTab,
+    loadProjectionSeriesPage,
+    loadHistorySeries,
+    loadCashflowSeries,
+  ]);
 
   useEffect(() => {
     if (!user || !hasMembership || activeTab !== "retirement") {
@@ -3231,7 +3290,7 @@ export default function App() {
             ledgerPersonScope={ledgerPersonScope}
             canEdit={installation?.role !== "viewer"}
             user={user}
-            /* onCashflowMutated lo cablea el director al overlay del chart grande. */
+            onCashflowMutated={() => void loadCashflowSeries()}
           />
         ) : activeTab === "upcoming" ? (
           <UpcomingView
@@ -3302,6 +3361,9 @@ export default function App() {
             ledgerPersonScope={ledgerPersonScope}
             projectionSeries={projectionSeries}
             historySeries={historySeries}
+            cashflowSeries={cashflowSeries}
+            cashflowDaily={cashflowDaily}
+            onRequestDailyCashflow={() => void loadCashflowDaily()}
             projectionBusy={projectionBusy}
             projectionError={projectionError}
             userBirthDate={user?.birth_date ?? null}
@@ -3368,7 +3430,11 @@ export default function App() {
             canEditHistory={installation?.role !== "viewer"}
             currencyIso={installation?.installation.base_currency ?? ""}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
-            onHistoryMutated={() => void loadHistorySeries()}
+            onHistoryMutated={() => {
+              void loadHistorySeries();
+              // Los snapshots anclan la serie fina del cash-flow: refrescarla también.
+              void loadCashflowSeries();
+            }}
             isOwner={installation?.role === "owner"}
             settingsSubTab={settingsSubTab}
             navigateSettingsSubTab={navigateSettingsSubTab}
