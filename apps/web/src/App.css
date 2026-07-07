@@ -6,6 +6,38 @@
    styles/theme.css. Si añades color hardcoded aquí, mal.
    ============================================================ */
 
+/* ============================================================
+   BREAKPOINTS — convención canónica + regla de oro móvil
+   ------------------------------------------------------------
+   REGLA DE ORO: la página SOLO scrollea en vertical. Cero scroll
+   horizontal a nivel de página en cualquier ancho. El único scroll
+   lateral permitido es DENTRO de una tabla (`.table-scroll`), como
+   válvula residual — nunca la página entera.
+
+   Solo existen DOS breakpoints estructurales. CSS no admite var()
+   dentro de @media, así que la convención es un comentario greppable
+   `bp:` etiquetando CADA media query:
+
+     • 720px  bp:struct 720  — estructura: nav, colapsos de columnas,
+                               paddings de shell, KPI strip.
+     • 640px  bp:mobile 640  — densidad phone: táctil, toolbars,
+                               paddings de modal/panel, forms.
+
+   PROHIBIDO introducir un tercer breakpoint estructural sin actualizar
+   la doctrina en .claude/design-system.md (sección «Responsive / móvil»).
+
+   Excepción sancionada única: 340px  bp:edge 340  — guarda de borde
+   ultra-estrecho que oculta SOLO el título del TopBar (queda el logo).
+   No es un eje estructural; no cuelgues más reglas de este ancho.
+
+   INVARIANTE DE REGRESIÓN: ninguna declaración nueva fuera de
+   @media (max-width: …) salvo tokens inertes en theme.css y los
+   `minmax(min(100%, X), 1fr)` (no-op en desktop). Desktop pixel-idéntico.
+
+   La sección MOBILE vive AL FINAL de este archivo para ganar por orden
+   de cascada a las reglas grid inertes de las KPI strips.
+   ============================================================ */
+
 /* ---------- Auth screen ---------- */
 .auth-screen {
   min-height: 100vh;
@@ -2060,7 +2092,10 @@
 
 .asset-form-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  /* `min(100%, 11rem)`: no-op en desktop (el contenedor siempre supera 11rem,
+     así que la columna mínima queda en 11rem); en móvil estrecho evita que la
+     pista de 11rem desborde el panel y provoque scroll-X de página. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr));
   gap: 0.65rem 1rem;
   align-items: flex-end;
 }
@@ -2861,4 +2896,214 @@ fieldset.retirement-config-stack {
 
 .cash-entry-row .field.cash-entry-amount {
   flex: 0 1 6rem;
+}
+
+/* ============================================================
+   MOBILE — sistema responsive base (Workstream A)
+   ------------------------------------------------------------
+   Regla de oro: la página solo scrollea en vertical (ver cabecera).
+   Todo lo de aquí vive dentro de @media; desktop queda intacto.
+   Vive AL FINAL para ganar por cascada a las reglas grid inertes
+   de las KPI strips (.planning-direction-strip, --budget-summary).
+   Cada media query etiquetada con `bp:`. Sin hex — solo var(--ff-*)
+   / var(--exp-*) / clamp / min.
+   ============================================================ */
+
+/* ---- A1. KPI strip → grid (auto-fit, sin scroll-X) ---- */
+@media (max-width: 720px) { /* bp:struct 720 */
+  .metric-grid.workspace-kpi-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr));
+    gap: 0.6rem;
+    overflow: visible;
+  }
+  /* min-width:0 es CRÍTICO: el 10rem de desktop desbordaría → scroll de página. */
+  .metric-grid.workspace-kpi-strip > .metric-card {
+    min-width: 0;
+    max-width: none;
+  }
+  .metric-grid.workspace-kpi-strip .metric-value {
+    font-size: clamp(1rem, 4.4vw, 1.25rem);
+  }
+}
+
+/* ---- A2. Áreas táctiles (≥ --ff-touch-min) ---- */
+@media (max-width: 640px) { /* bp:mobile 640 */
+  .btn {
+    min-height: var(--ff-touch-min);
+  }
+  .btn.icon-btn {
+    min-width: var(--ff-touch-min);
+    min-height: var(--ff-touch-min);
+    justify-content: center;
+  }
+  /* Inputs de texto/fecha/número + selects. Checkbox y radio excluidos:
+     conservan su tamaño propio (evita inflar un checkbox de 1rem a 44px). */
+  .field input:not([type="checkbox"]):not([type="radio"]),
+  .field select {
+    min-height: var(--ff-touch-min);
+  }
+  .modal-close {
+    min-width: var(--ff-touch-min);
+    min-height: var(--ff-touch-min);
+  }
+  .ff-topbar-mobile-toggle {
+    width: var(--ff-touch-min);
+    height: var(--ff-touch-min);
+  }
+  .ff-mobile-drawer-item {
+    display: flex;
+    align-items: center;
+    min-height: var(--ff-touch-min);
+  }
+  /* Switch de Proyección: pista/thumb mayores para el dedo (2.6×1.5rem). */
+  .projection-focus-toggle-track {
+    width: 2.6rem;
+    height: 1.5rem;
+  }
+  .projection-focus-toggle-thumb {
+    width: 1.2rem;
+    height: 1.2rem;
+  }
+  .projection-focus-toggle
+    input[type="checkbox"]:checked
+    + .projection-focus-toggle-track
+    .projection-focus-toggle-thumb {
+    transform: translateX(1.1rem);
+  }
+
+  /* CARVE-OUT obligatorio: los controles densos dentro de tablas quedan
+     EXCLUIDOS del bump táctil — su densidad la gobierna el Workstream B
+     (tablas). Reseteamos min-height y min-width (los icon-btn traen ambos). */
+  .assets-table .btn,
+  .asset-actions-cell .btn,
+  .budget-row-actions .btn {
+    min-height: 0;
+    min-width: 0;
+  }
+  .exp-inline-select,
+  .import-preview-table select {
+    min-height: 0;
+  }
+}
+
+/* ---- A3. Toolbars → columna/stretch full-width ---- */
+@media (max-width: 640px) { /* bp:mobile 640 */
+  /* Gastos: 3 filas apiladas (mes · ventana · acciones). */
+  .expenses-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.6rem;
+  }
+  .expenses-month-nav {
+    width: 100%;
+  }
+  .expenses-month-nav .field.inline-role {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .expenses-window-pills {
+    display: flex;
+    width: 100%;
+  }
+  .expenses-window-pills .ff-nav-pill {
+    flex: 1 1 0;
+    text-align: center;
+    min-height: 2.5rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* Matar margin-left:auto para que las acciones ocupen su propia fila. */
+  .expenses-toolbar-actions {
+    display: flex;
+    width: 100%;
+    margin-left: 0;
+  }
+  .expenses-toolbar-actions .btn {
+    flex: 1 1 0;
+    justify-content: center;
+  }
+
+  /* Cabecera de panel (título + acciones/total) apilada. */
+  .panel-head-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  /* Import: barra bulk (filtros + acciones) apilada, select full-width. */
+  .import-bulk-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .import-bulk-actions {
+    width: 100%;
+  }
+  .import-bulk-actions .field.inline-role {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  /* Import: footer (resumen · cuenta · botones) apilado. */
+  .import-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .import-footer .import-account-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* ---- A4. TopBar compacta ---- */
+@media (max-width: 640px) { /* bp:mobile 640 */
+  .ff-topbar {
+    gap: 0.5rem;
+    padding: 0.55rem 0.75rem;
+  }
+  .ledger-view-select {
+    max-width: min(8.5rem, 34vw);
+  }
+}
+
+/* Borde ultra-estrecho: ocultar solo el título del TopBar (queda el logo).
+   Scoped a .ff-topbar-brand para NO tocar el «Menú» del drawer, que reusa
+   la clase .ff-topbar-title. */
+@media (max-width: 340px) { /* bp:edge 340 */
+  .ff-topbar-brand .ff-topbar-title {
+    display: none;
+  }
+}
+
+/* ---- A5. Modales / forms ---- */
+@media (max-width: 640px) { /* bp:mobile 640 */
+  .modal-backdrop {
+    padding: 0.5rem;
+  }
+  .modal-header {
+    padding: 0.7rem 0.85rem;
+  }
+  .modal-body {
+    padding: 0.85rem 0.85rem 1rem;
+  }
+  /* Acciones de formulario apiladas full-width; column-reverse mantiene el
+     orden DOM (primary primero, accesible) pero apila la ventana a móvil. */
+  .asset-form-actions {
+    flex-direction: column-reverse;
+  }
+  .asset-form-actions .btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* ---- A6. Paddings de shell ---- */
+@media (max-width: 640px) { /* bp:mobile 640 */
+  .app-main {
+    padding: 1rem 0.75rem 1.5rem;
+  }
+  .panel {
+    padding: 0.85rem;
+  }
 }

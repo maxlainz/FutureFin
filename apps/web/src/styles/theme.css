@@ -35,6 +35,13 @@
   --ff-radius-pill: 999px;
   --ff-radius-input: 10px;
 
+  /* ---------- Táctil ---------- */
+  /* Área táctil mínima para controles primarios en móvil (≥44px ≈ 2.75rem,
+     recomendación Apple HIG / WCAG 2.5.5). Token inerte: solo lo consume
+     la sección MOBILE de App.css dentro de @media (max-width: 640px), así
+     que definirlo aquí no afecta a desktop. */
+  --ff-touch-min: 2.75rem;
+
   /* ---------- Sombras ---------- */
   --ff-shadow-elev:
     0 4px 6px -1px rgba(10, 10, 10, 0.06),
