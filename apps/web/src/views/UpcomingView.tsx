@@ -16,6 +16,7 @@ import {
   parseDisplayDecimal,
 } from "../lib/format";
 import { budgetCategoryMap, type LedgerPersonScope } from "../lib/ledger";
+import { useIsMobile } from "../lib/responsive";
 import type { BudgetScopeToggle } from "./BudgetView";
 
 const PLANNING_DIRECTION_LABEL: Record<PlanningFlowDirectionApi, string> = {
@@ -92,6 +93,7 @@ export function UpcomingView({
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
+  const isMobile = useIsMobile();
   const categoryById = budgetCategoryMap(
     planningIncomeCategories,
     planningExpenseCategories,
@@ -331,6 +333,18 @@ export function UpcomingView({
                 Cancelar
               </button>
             </div>
+            {isMobile && editingPlanningFlowId ? (
+              <div className="modal-mobile-delete-row">
+                <button
+                  type="button"
+                  className="btn ghost danger"
+                  disabled={planningSaving}
+                  onClick={() => deletePlanningFlowRow(editingPlanningFlowId)}
+                >
+                  Eliminar flujo
+                </button>
+              </div>
+            ) : null}
           </form>
         </Modal>
       ) : null}
@@ -363,12 +377,12 @@ export function UpcomingView({
             <table className="assets-table">
               <thead>
                 <tr>
-                  <th>Dirección</th>
-                  <th>Categoría</th>
+                  {isMobile ? null : <th>Dirección</th>}
+                  {isMobile ? null : <th>Categoría</th>}
                   <th>Título</th>
                   <th className="num">Importe</th>
-                  <th>Fecha prevista</th>
-                  {canEdit ? (
+                  {isMobile ? null : <th>Fecha prevista</th>}
+                  {!isMobile && canEdit ? (
                     <th className="asset-actions-cell">
                       <span className="sr-only">Acciones</span>
                     </th>
@@ -376,44 +390,80 @@ export function UpcomingView({
                 </tr>
               </thead>
               <tbody>
-                {planningFlows.map((row) => (
-                  <tr key={row.id}>
-                    <td>{PLANNING_DIRECTION_LABEL[row.direction]}</td>
-                    <td>
-                      {categoryById.get(row.category_id)?.name ??
-                        row.category_id.slice(0, 8)}
-                    </td>
-                    <td>{row.title}</td>
-                    <td className="num">
-                      {formatCurrencyAmount(row.expected_amount, currencyIso)}
-                    </td>
-                    <td>{row.due_date ?? METRIC_DASH}</td>
-                    {canEdit ? (
-                      <td className="asset-actions-cell">
-                        <div className="budget-row-actions">
-                          <button
-                            type="button"
-                            className="btn ghost icon-btn"
-                            aria-label="Editar flujo planificado"
-                            disabled={planningSaving}
-                            onClick={() => beginEditPlanningFlow(row)}
-                          >
-                            <RowEditIcon />
-                          </button>
-                          <button
-                            type="button"
-                            className="btn ghost danger icon-btn"
-                            aria-label="Eliminar flujo planificado"
-                            disabled={planningSaving}
-                            onClick={() => deletePlanningFlowRow(row.id)}
-                          >
-                            <RowTrashIcon />
-                          </button>
-                        </div>
+                {planningFlows.map((row) => {
+                  const rowTappable = isMobile && canEdit;
+                  const categoryLabel =
+                    categoryById.get(row.category_id)?.name ??
+                    row.category_id.slice(0, 8);
+                  return (
+                    <tr
+                      key={row.id}
+                      className={rowTappable ? "row-tappable" : undefined}
+                      role={rowTappable ? "button" : undefined}
+                      tabIndex={rowTappable ? 0 : undefined}
+                      onClick={
+                        rowTappable ? () => beginEditPlanningFlow(row) : undefined
+                      }
+                      onKeyDown={
+                        rowTappable
+                          ? (e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                beginEditPlanningFlow(row);
+                              }
+                            }
+                          : undefined
+                      }
+                    >
+                      {isMobile ? null : (
+                        <td>{PLANNING_DIRECTION_LABEL[row.direction]}</td>
+                      )}
+                      {isMobile ? null : <td>{categoryLabel}</td>}
+                      <td>
+                        {row.title}
+                        {isMobile ? (
+                          <span className="cell-subline">
+                            {PLANNING_DIRECTION_LABEL[row.direction]} · {categoryLabel}{" "}
+                            · {row.due_date ?? METRIC_DASH}
+                          </span>
+                        ) : null}
                       </td>
-                    ) : null}
-                  </tr>
-                ))}
+                      <td className="num">
+                        {formatCurrencyAmount(row.expected_amount, currencyIso)}
+                        {rowTappable ? (
+                          <span className="row-chevron" aria-hidden>
+                            ›
+                          </span>
+                        ) : null}
+                      </td>
+                      {isMobile ? null : <td>{row.due_date ?? METRIC_DASH}</td>}
+                      {!isMobile && canEdit ? (
+                        <td className="asset-actions-cell">
+                          <div className="budget-row-actions">
+                            <button
+                              type="button"
+                              className="btn ghost icon-btn"
+                              aria-label="Editar flujo planificado"
+                              disabled={planningSaving}
+                              onClick={() => beginEditPlanningFlow(row)}
+                            >
+                              <RowEditIcon />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn ghost danger icon-btn"
+                              aria-label="Eliminar flujo planificado"
+                              disabled={planningSaving}
+                              onClick={() => deletePlanningFlowRow(row.id)}
+                            >
+                              <RowTrashIcon />
+                            </button>
+                          </div>
+                        </td>
+                      ) : null}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

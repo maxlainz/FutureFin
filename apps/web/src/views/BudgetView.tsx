@@ -25,6 +25,7 @@ import {
   type LedgerPersonScope,
   sortBudgetEntriesMacStyle,
 } from "../lib/ledger";
+import { useIsMobile } from "../lib/responsive";
 import { AllocationRulesPanel } from "./AllocationRulesPanel";
 
 export type BudgetScopeToggle = "income" | "expense";
@@ -161,6 +162,11 @@ export function BudgetView({
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
+  const isMobile = useIsMobile();
+
+  const ruleIndex = editingRuleId
+    ? allocationRules.findIndex((r) => r.id === editingRuleId)
+    : -1;
 
   const categoryMapForSort = budgetCategoryMap(
     budgetIncomeCategories,
@@ -427,6 +433,45 @@ export function BudgetView({
                 Cancelar
               </button>
             </div>
+            {isMobile && editingRuleId ? (
+              <>
+                <div className="modal-mobile-reorder">
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={ruleSaving || ruleIndex <= 0}
+                    onClick={() => moveRule(editingRuleId, "up")}
+                  >
+                    ▲ Subir
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={
+                      ruleSaving ||
+                      ruleIndex < 0 ||
+                      ruleIndex >= allocationRules.length - 1
+                    }
+                    onClick={() => moveRule(editingRuleId, "down")}
+                  >
+                    ▼ Bajar
+                  </button>
+                </div>
+                <div className="modal-mobile-delete-row">
+                  <button
+                    type="button"
+                    className="btn ghost danger"
+                    disabled={ruleSaving}
+                    onClick={() => {
+                      deleteRule(editingRuleId);
+                      closeRuleModal();
+                    }}
+                  >
+                    Eliminar regla
+                  </button>
+                </div>
+              </>
+            ) : null}
           </form>
         </Modal>
       ) : null}
@@ -600,7 +645,7 @@ export function BudgetView({
                     <tr>
                       <th>Categoría</th>
                       <th className="num">Importe mensual</th>
-                      {canEdit ? (
+                      {!isMobile && canEdit ? (
                         <th className="asset-actions-cell">
                           <span className="sr-only">Acciones</span>
                         </th>
@@ -608,41 +653,67 @@ export function BudgetView({
                     </tr>
                   </thead>
                   <tbody>
-                    {incomeEntries.map((row) => (
-                      <tr key={row.id}>
-                        <td>
-                          {categoryMapForSort.get(row.category_id)?.name ??
-                            row.category_id.slice(0, 8)}
-                        </td>
-                        <td className="num">
-                          {formatCurrencyAmount(row.amount, currencyIso)}
-                        </td>
-                        {canEdit ? (
-                          <td className="asset-actions-cell">
-                            <div className="budget-row-actions">
-                              <button
-                                type="button"
-                                className="btn ghost icon-btn"
-                                aria-label="Editar línea"
-                                disabled={budgetSaving}
-                                onClick={() => beginEditBudgetEntry(row)}
-                              >
-                                <RowEditIcon />
-                              </button>
-                              <button
-                                type="button"
-                                className="btn ghost danger icon-btn"
-                                aria-label="Eliminar línea"
-                                disabled={budgetSaving}
-                                onClick={() => deleteBudgetEntryRow(row.id)}
-                              >
-                                <RowTrashIcon />
-                              </button>
-                            </div>
+                    {incomeEntries.map((row) => {
+                      const rowTappable = isMobile && canEdit;
+                      return (
+                        <tr
+                          key={row.id}
+                          className={rowTappable ? "row-tappable" : undefined}
+                          role={rowTappable ? "button" : undefined}
+                          tabIndex={rowTappable ? 0 : undefined}
+                          onClick={
+                            rowTappable ? () => beginEditBudgetEntry(row) : undefined
+                          }
+                          onKeyDown={
+                            rowTappable
+                              ? (e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    beginEditBudgetEntry(row);
+                                  }
+                                }
+                              : undefined
+                          }
+                        >
+                          <td>
+                            {categoryMapForSort.get(row.category_id)?.name ??
+                              row.category_id.slice(0, 8)}
                           </td>
-                        ) : null}
-                      </tr>
-                    ))}
+                          <td className="num">
+                            {formatCurrencyAmount(row.amount, currencyIso)}
+                            {rowTappable ? (
+                              <span className="row-chevron" aria-hidden>
+                                ›
+                              </span>
+                            ) : null}
+                          </td>
+                          {!isMobile && canEdit ? (
+                            <td className="asset-actions-cell">
+                              <div className="budget-row-actions">
+                                <button
+                                  type="button"
+                                  className="btn ghost icon-btn"
+                                  aria-label="Editar línea"
+                                  disabled={budgetSaving}
+                                  onClick={() => beginEditBudgetEntry(row)}
+                                >
+                                  <RowEditIcon />
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn ghost danger icon-btn"
+                                  aria-label="Eliminar línea"
+                                  disabled={budgetSaving}
+                                  onClick={() => deleteBudgetEntryRow(row.id)}
+                                >
+                                  <RowTrashIcon />
+                                </button>
+                              </div>
+                            </td>
+                          ) : null}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -685,41 +756,67 @@ export function BudgetView({
                       </tr>
                     </thead>
                     <tbody>
-                      {expenseEntries.map((row) => (
-                        <tr key={row.id}>
-                          <td>
-                            {categoryMapForSort.get(row.category_id)?.name ??
-                              row.category_id.slice(0, 8)}
-                          </td>
-                          <td className="num">
-                            {formatCurrencyAmount(row.amount, currencyIso)}
-                          </td>
-                          {canEdit ? (
-                            <td className="asset-actions-cell">
-                              <div className="budget-row-actions">
-                                <button
-                                  type="button"
-                                  className="btn ghost icon-btn"
-                                  aria-label="Editar línea"
-                                  disabled={budgetSaving}
-                                  onClick={() => beginEditBudgetEntry(row)}
-                                >
-                                  <RowEditIcon />
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn ghost danger icon-btn"
-                                  aria-label="Eliminar línea"
-                                  disabled={budgetSaving}
-                                  onClick={() => deleteBudgetEntryRow(row.id)}
-                                >
-                                  <RowTrashIcon />
-                                </button>
-                              </div>
+                      {expenseEntries.map((row) => {
+                        const rowTappable = isMobile && canEdit;
+                        return (
+                          <tr
+                            key={row.id}
+                            className={rowTappable ? "row-tappable" : undefined}
+                            role={rowTappable ? "button" : undefined}
+                            tabIndex={rowTappable ? 0 : undefined}
+                            onClick={
+                              rowTappable ? () => beginEditBudgetEntry(row) : undefined
+                            }
+                            onKeyDown={
+                              rowTappable
+                                ? (e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      beginEditBudgetEntry(row);
+                                    }
+                                  }
+                                : undefined
+                            }
+                          >
+                            <td>
+                              {categoryMapForSort.get(row.category_id)?.name ??
+                                row.category_id.slice(0, 8)}
                             </td>
-                          ) : null}
-                        </tr>
-                      ))}
+                            <td className="num">
+                              {formatCurrencyAmount(row.amount, currencyIso)}
+                              {rowTappable ? (
+                                <span className="row-chevron" aria-hidden>
+                                  ›
+                                </span>
+                              ) : null}
+                            </td>
+                            {!isMobile && canEdit ? (
+                              <td className="asset-actions-cell">
+                                <div className="budget-row-actions">
+                                  <button
+                                    type="button"
+                                    className="btn ghost icon-btn"
+                                    aria-label="Editar línea"
+                                    disabled={budgetSaving}
+                                    onClick={() => beginEditBudgetEntry(row)}
+                                  >
+                                    <RowEditIcon />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn ghost danger icon-btn"
+                                    aria-label="Eliminar línea"
+                                    disabled={budgetSaving}
+                                    onClick={() => deleteBudgetEntryRow(row.id)}
+                                  >
+                                    <RowTrashIcon />
+                                  </button>
+                                </div>
+                              </td>
+                            ) : null}
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -738,26 +835,44 @@ export function BudgetView({
                     <thead>
                       <tr>
                         <th>Concepto</th>
-                        <th>Categoría pasivo</th>
-                        <th className="num">Cuota</th>
-                        <th>Frec.</th>
+                        {isMobile ? null : <th>Categoría pasivo</th>}
+                        {isMobile ? null : <th className="num">Cuota</th>}
+                        {isMobile ? null : <th>Frec.</th>}
                         <th className="num">Equiv. mensual</th>
                       </tr>
                     </thead>
                     <tbody>
                       {derivedLines.map((row) => (
                         <tr key={row.liability_id}>
-                          <td>{row.label}</td>
                           <td>
-                            {budgetDerivedCatLabel(
-                              budgetLiabilityCategories,
-                              row.category_id,
-                            )}
+                            {row.label}
+                            {isMobile ? (
+                              <span className="cell-subline">
+                                {budgetDerivedCatLabel(
+                                  budgetLiabilityCategories,
+                                  row.category_id,
+                                )}{" "}
+                                · {formatCurrencyAmount(row.amount, currencyIso)} ·{" "}
+                                {PAYMENT_FREQ_LABEL[row.frequency]}
+                              </span>
+                            ) : null}
                           </td>
-                          <td className="num">
-                            {formatCurrencyAmount(row.amount, currencyIso)}
-                          </td>
-                          <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
+                          {isMobile ? null : (
+                            <td>
+                              {budgetDerivedCatLabel(
+                                budgetLiabilityCategories,
+                                row.category_id,
+                              )}
+                            </td>
+                          )}
+                          {isMobile ? null : (
+                            <td className="num">
+                              {formatCurrencyAmount(row.amount, currencyIso)}
+                            </td>
+                          )}
+                          {isMobile ? null : (
+                            <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
+                          )}
                           <td className="num">
                             {formatCurrencyAmount(
                               row.monthly_equivalent,

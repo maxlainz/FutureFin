@@ -43,6 +43,46 @@ import {
   type LedgerPersonScope,
 } from "../lib/ledger";
 import { chartPerf } from "../lib/perf";
+import { panWindow, pinchWindow, type ChartDomain } from "../lib/chart-gestures";
+
+// ── Umbrales de la máquina de gestos táctiles ──
+// Un gesto arranca en `maybe`; cruzar SLOP_PX decide pan (horizontal) o cede al
+// scroll de página (vertical, vía `touch-action: pan-y` → pointercancel). Un
+// `maybe` que se suelta bajo SLOP_PX y TAP_MAX_MS es un TAP → tooltip.
+const SLOP_PX = 8;
+const TAP_MAX_MS = 300;
+// El tooltip táctil se auto-cierra si no hay nueva interacción.
+const TIP_CLOSE_MS = 3500;
+// En coarse el tooltip se eleva un extra sobre el dedo para no quedar tapado.
+const COARSE_TIP_LIFT_PX = 22;
+
+type GesturePhase = "idle" | "maybe" | "pan" | "pinch" | "yield";
+
+interface GestureState {
+  phase: GesturePhase;
+  /** Punteros táctiles activos, con su posición actual. Orden de inserción. */
+  pointers: Map<number, { x: number; y: number }>;
+  /** Origen del gesto (para slop de tap y delta de pan). Se resetea al comprometer pan. */
+  startClientX: number;
+  startClientY: number;
+  startTimeMs: number;
+  /** Snapshot de la ventana al comprometer pan/pinch (meses reales). */
+  windowStart: number;
+  windowSpan: number;
+  /** Meses por píxel-cliente, capturado 1 vez al comprometer el pan. */
+  monthsPerPx: number;
+  /** Distancia inicial entre los dos dedos y mes-ancla (punto medio) del pinch. */
+  pinchStartDist: number;
+  pinchAnchorMonth: number;
+  /** Captura PEREZOSA del puntero: solo se activa al comprometer un pan. */
+  captured: boolean;
+  capturedPointerId: number | null;
+  /** Ventana pendiente de commit, coalescida por requestAnimationFrame. */
+  pendingWindow: { startMonth: number; monthSpan: number } | null;
+  rafId: number | null;
+  /** Timeout de auto-cierre del tooltip táctil. */
+  tipTimeout: number | null;
+}
 
 export function ProjectionNetWorthChart({
   series,
@@ -106,6 +146,28 @@ export function ProjectionNetWorthChart({
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const yAxisAnimRef = useRef<number | null>(null);
+  // ── Máquina de gestos táctiles (Pointer Events) ──
+  // TODO el estado del gesto vive en este ref (sin re-render): puntos activos,
+  // snapshot de la ventana al comprometer un gesto, monthsPerPx capturado 1 vez,
+  // ventana pendiente coalescida por rAF, y el timeout de auto-cierre del
+  // tooltip. La ruta ratón (wheel/hover) NUNCA entra aquí (guards `pointerType`).
+  const gestureRef = useRef<GestureState>({
+    phase: "idle",
+    pointers: new Map(),
+    startClientX: 0,
+    startClientY: 0,
+    startTimeMs: 0,
+    windowStart: 0,
+    windowSpan: 0,
+    monthsPerPx: 0,
+    pinchStartDist: 0,
+    pinchAnchorMonth: 0,
+    captured: false,
+    capturedPointerId: null,
+    pendingWindow: null,
+    rafId: null,
+    tipTimeout: null,
+  });
   const [hover, setHover] = useState<number | null>(null);
   const [tipOffset, setTipOffset] = useState({ x: 0, y: 0 });
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
@@ -621,6 +683,16 @@ export function ProjectionNetWorthChart({
     onRequestDailyCashflow,
   ]);
 
+  // Cleanup de la máquina de gestos al desmontar: cancela cualquier rAF de commit
+  // y el timeout de auto-cierre del tooltip pendientes (evita callbacks huérfanos).
+  useEffect(() => {
+    const g = gestureRef.current;
+    return () => {
+      if (g.rafId != null) cancelAnimationFrame(g.rafId);
+      if (g.tipTimeout != null) window.clearTimeout(g.tipTimeout);
+    };
+  }, []);
+
   if (!model) {
     return null;
   }
@@ -830,18 +902,305 @@ export function ProjectionNetWorthChart({
     return best;
   }
 
-  function onPointerMove(e: PointerEvent<SVGSVGElement>) {
-    const i = pointerToIndex(e.clientX);
+  // Dominio panorámico compartido por la máquina de gestos (espejo de onWheel).
+  const gestureDomain: ChartDomain = {
+    totalMonths: series.months,
+    historyStartMonth,
+  };
+
+  /** Cuerpo compartido por el hover de ratón y el tap táctil: fija el índice
+   * `hover` y la posición del tooltip. `coarse` (tap) eleva más el tooltip sobre
+   * el dedo y clampa su centro horizontal para no recortarse contra el
+   * `overflow:hidden` del chart. Para ratón (`coarse=false`) el comportamiento es
+   * byte-idéntico al original. */
+  function showTooltipAt(clientX: number, clientY: number, coarse = false) {
+    const i = pointerToIndex(clientX);
     setHover(i);
     const wrap = wrapRef.current;
-    if (wrap) {
-      const r = wrap.getBoundingClientRect();
-      setTipOffset({ x: e.clientX - r.left, y: e.clientY - r.top });
+    if (!wrap) return;
+    const r = wrap.getBoundingClientRect();
+    let x = clientX - r.left;
+    let y = clientY - r.top;
+    if (coarse) {
+      y -= COARSE_TIP_LIFT_PX;
+      // El tooltip se centra vía translate(-50%): mantener su centro dentro del
+      // wrap (tipHalf estima la mitad del max-width min(16rem, 100vw−2rem)).
+      const tipHalf = Math.min(128, Math.max(0, (r.width - 32) / 2));
+      x = Math.max(tipHalf, Math.min(r.width - tipHalf, x));
+    }
+    setTipOffset({ x, y });
+  }
+
+  function onPointerMove(e: PointerEvent<SVGSVGElement>) {
+    // La ruta táctil NO ejecuta el hover de ratón: la conduce la máquina de gestos.
+    if (e.pointerType === "touch") {
+      handleTouchMove(e);
+      return;
+    }
+    showTooltipAt(e.clientX, e.clientY);
+  }
+
+  function onPointerLeave(e: PointerEvent<SVGSVGElement>) {
+    // En táctil el tooltip persiste hasta timeout/nuevo gesto; no lo mata el leave.
+    if (e.pointerType === "touch") return;
+    setHover(null);
+  }
+
+  // ── Máquina de gestos táctiles (Pointer Events) ──
+  // Estados: idle → maybe → (tap | pan | pinch | yield) → idle.
+  // pan-y cede el swipe vertical al scroll de página (→ pointercancel aborta).
+
+  /** Meses por píxel-CLIENTE del plot, para el pan 1:1. Convierte los px del dedo
+   * a meses respetando el escalado del SVG (viewBox → CSS). Se captura una vez. */
+  function computeMonthsPerClientPx(): number {
+    const svg = svgRef.current;
+    if (!svg) return 0;
+    const rect = svg.getBoundingClientRect();
+    const vb = svg.viewBox.baseVal;
+    if (!vb || rect.width === 0 || vb.width === 0) return 0;
+    const clientPerUserX = rect.width / vb.width;
+    const plotWidthClientPx = pw * clientPerUserX;
+    if (plotWidthClientPx <= 0) return 0;
+    return Math.max(1, monthSpan - 1) / plotWidthClientPx;
+  }
+
+  /** Commit de la ventana coalescido por rAF: muchos pointermove por frame → un
+   * solo setViewWindow por frame. */
+  function commitWindow(next: { startMonth: number; monthSpan: number }) {
+    const g = gestureRef.current;
+    g.pendingWindow = next;
+    if (g.rafId == null) {
+      g.rafId = requestAnimationFrame(() => {
+        g.rafId = null;
+        const w = g.pendingWindow;
+        g.pendingWindow = null;
+        if (w) {
+          setViewWindow((prev) =>
+            prev.startMonth === w.startMonth && prev.monthSpan === w.monthSpan
+              ? prev
+              : w,
+          );
+        }
+      });
     }
   }
 
-  function onPointerLeave() {
+  /** Vuelca de inmediato cualquier ventana pendiente (al soltar el pan). */
+  function flushPendingWindow() {
+    const g = gestureRef.current;
+    if (g.rafId != null) {
+      cancelAnimationFrame(g.rafId);
+      g.rafId = null;
+    }
+    const w = g.pendingWindow;
+    g.pendingWindow = null;
+    if (w) {
+      setViewWindow((prev) =>
+        prev.startMonth === w.startMonth && prev.monthSpan === w.monthSpan
+          ? prev
+          : w,
+      );
+    }
+  }
+
+  function scheduleTipClose() {
+    const g = gestureRef.current;
+    if (g.tipTimeout != null) window.clearTimeout(g.tipTimeout);
+    g.tipTimeout = window.setTimeout(() => {
+      g.tipTimeout = null;
+      setHover(null);
+    }, TIP_CLOSE_MS);
+  }
+
+  function clearTipTimeout() {
+    const g = gestureRef.current;
+    if (g.tipTimeout != null) {
+      window.clearTimeout(g.tipTimeout);
+      g.tipTimeout = null;
+    }
+  }
+
+  function releasePointerCaptureSafe(pointerId: number) {
+    const svg = svgRef.current;
+    const g = gestureRef.current;
+    if (svg && g.captured && g.capturedPointerId === pointerId) {
+      try {
+        svg.releasePointerCapture(pointerId);
+      } catch {
+        /* ya liberado / puntero desaparecido */
+      }
+      g.captured = false;
+      g.capturedPointerId = null;
+    }
+  }
+
+  /** Resetea el estado del gesto (no toca el tooltip: sobrevive tras un tap). */
+  function resetGesture() {
+    const g = gestureRef.current;
+    if (g.rafId != null) {
+      cancelAnimationFrame(g.rafId);
+      g.rafId = null;
+    }
+    g.pendingWindow = null;
+    g.pointers.clear();
+    g.phase = "idle";
+    g.captured = false;
+    g.capturedPointerId = null;
+  }
+
+  /** Compromete un pan: fija snapshot de ventana + monthsPerPx, resetea el origen
+   * al punto actual (pan 1:1 desde aquí, sin salto de SLOP) y CAPTURA el puntero
+   * (perezosamente — solo ahora) para no interferir con la decisión del compositor. */
+  function beginPan(e: PointerEvent<SVGSVGElement>) {
+    const g = gestureRef.current;
+    g.phase = "pan";
+    g.windowStart = visibleMonthStart;
+    g.windowSpan = monthSpan;
+    g.monthsPerPx = computeMonthsPerClientPx();
+    g.startClientX = e.clientX;
+    g.startClientY = e.clientY;
+    const svg = svgRef.current;
+    if (svg && !g.captured) {
+      try {
+        svg.setPointerCapture(e.pointerId);
+        g.captured = true;
+        g.capturedPointerId = e.pointerId;
+      } catch {
+        /* captura no disponible: el pan sigue funcionando sin ella */
+      }
+    }
+  }
+
+  function handleTouchMove(e: PointerEvent<SVGSVGElement>) {
+    const g = gestureRef.current;
+    const p = g.pointers.get(e.pointerId);
+    if (!p) return;
+    p.x = e.clientX;
+    p.y = e.clientY;
+
+    if (g.phase === "pinch" && g.pointers.size >= 2) {
+      const it = g.pointers.values();
+      const a = it.next().value!;
+      const b = it.next().value!;
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      if (g.pinchStartDist > 0) {
+        const scale = dist / g.pinchStartDist;
+        commitWindow(
+          pinchWindow(
+            g.windowStart,
+            g.windowSpan,
+            g.pinchAnchorMonth,
+            scale,
+            gestureDomain,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (g.phase === "pan") {
+      const dxPx = e.clientX - g.startClientX;
+      commitWindow({
+        startMonth: panWindow(
+          g.windowStart,
+          g.windowSpan,
+          dxPx,
+          g.monthsPerPx,
+          gestureDomain,
+        ),
+        monthSpan: g.windowSpan,
+      });
+      return;
+    }
+
+    if (g.phase === "maybe") {
+      const dx = e.clientX - g.startClientX;
+      const dy = e.clientY - g.startClientY;
+      if (Math.hypot(dx, dy) > SLOP_PX) {
+        if (Math.abs(dx) > Math.abs(dy)) {
+          // Intención horizontal → pan JS (pan-y no reserva el eje horizontal).
+          beginPan(e);
+        } else {
+          // Intención vertical → ceder al scroll de página. El navegador toma el
+          // puntero (pan-y) y emitirá pointercancel; no volvemos a panear.
+          g.phase = "yield";
+        }
+      }
+      return;
+    }
+    // phase === "yield": ignoramos moves; esperamos up/cancel.
+  }
+
+  function onPointerDown(e: PointerEvent<SVGSVGElement>) {
+    if (e.pointerType !== "touch") return;
+    const g = gestureRef.current;
+    // Cualquier gesto nuevo cierra el tooltip abierto (y su timeout).
+    clearTipTimeout();
     setHover(null);
+    g.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (g.pointers.size >= 2) {
+      // Segundo dedo → pinch anclado al punto medio, con snapshot de la ventana.
+      const it = g.pointers.values();
+      const a = it.next().value!;
+      const b = it.next().value!;
+      const midX = (a.x + b.x) / 2;
+      g.pinchStartDist = Math.hypot(a.x - b.x, a.y - b.y);
+      g.windowStart = visibleMonthStart;
+      g.windowSpan = monthSpan;
+      g.pinchAnchorMonth = pointerToMonth(midX);
+      // Un pan en curso deja de estar capturado: pasamos a pinch (2 dedos).
+      if (g.capturedPointerId != null) {
+        releasePointerCaptureSafe(g.capturedPointerId);
+      }
+      g.captured = false;
+      g.capturedPointerId = null;
+      g.phase = "pinch";
+      return;
+    }
+
+    // Primer dedo → maybe (aún indeciso entre tap / pan / scroll vertical).
+    g.phase = "maybe";
+    g.startClientX = e.clientX;
+    g.startClientY = e.clientY;
+    g.startTimeMs = performance.now();
+  }
+
+  function onPointerUp(e: PointerEvent<SVGSVGElement>) {
+    if (e.pointerType !== "touch") return;
+    const g = gestureRef.current;
+    const phase = g.phase;
+    g.pointers.delete(e.pointerId);
+    releasePointerCaptureSafe(e.pointerId);
+
+    if (phase === "maybe") {
+      // ¿Tap? Movimiento ≤ SLOP y duración ≤ TAP_MAX_MS → tooltip.
+      const dx = e.clientX - g.startClientX;
+      const dy = e.clientY - g.startClientY;
+      const dt = performance.now() - g.startTimeMs;
+      if (Math.hypot(dx, dy) <= SLOP_PX && dt <= TAP_MAX_MS) {
+        showTooltipAt(e.clientX, e.clientY, true);
+        scheduleTipClose();
+      }
+      resetGesture();
+      return;
+    }
+
+    if (phase === "pan") {
+      flushPendingWindow();
+      resetGesture();
+      return;
+    }
+
+    // pinch / yield / idle: al soltar un dedo cerramos el gesto entero.
+    resetGesture();
+  }
+
+  function onPointerCancel(e: PointerEvent<SVGSVGElement>) {
+    if (e.pointerType !== "touch") return;
+    // El navegador reclamó el puntero (scroll vertical bajo pan-y): abortar.
+    releasePointerCaptureSafe(e.pointerId);
+    resetGesture();
   }
 
   function onWheel(e: WheelEvent<SVGSVGElement>) {
@@ -906,8 +1265,11 @@ export function ProjectionNetWorthChart({
         }}
         role="application"
         aria-label="Proyección de patrimonio neto y capital aportado acumulado"
+        onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerLeave={onPointerLeave}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
         onWheel={onWheel}
       >
         <title>Patrimonio neto y capital aportado en el tiempo</title>
