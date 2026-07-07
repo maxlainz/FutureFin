@@ -14,8 +14,8 @@ use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
 use crate::handlers::history::{
     __path_capture_snapshots, __path_create_snapshot, __path_delete_snapshot,
-    __path_get_history_series, __path_list_snapshots, __path_prefill_snapshot,
-    __path_update_snapshot,
+    __path_get_history_cashflow, __path_get_history_series, __path_list_snapshots,
+    __path_prefill_snapshot, __path_update_snapshot,
 };
 #[allow(unused_imports)]
 use crate::handlers::installation::{
@@ -124,6 +124,7 @@ use utoipa::OpenApi;
         delete_snapshot,
         prefill_snapshot,
         get_history_series,
+        get_history_cashflow,
         import_preview,
         import_confirm,
         create_transaction,
@@ -204,6 +205,11 @@ use utoipa::OpenApi;
         crate::handlers::history::HistorySeriesPoint,
         crate::handlers::history::HistoryAssetSeries,
         crate::handlers::history::HistoryMarker,
+        crate::handlers::history::CashflowResponse,
+        crate::handlers::history::CashflowMonth,
+        crate::handlers::history::CashflowFine,
+        crate::handlers::history::CashflowFineGridPoint,
+        crate::handlers::history::CashflowFineAssetSeries,
         crate::handlers::history::PrefillResponse,
         crate::handlers::history::PrefillItemResponse,
         crate::handlers::transactions::TransactionResponse,
