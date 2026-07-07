@@ -621,13 +621,40 @@ export type CashflowMonthApi = {
   net: string;
 };
 
+/** Punto del grid fino del cash-flow histórico. `month_fraction` es el eje X real
+ *  (mes fraccional, negativo en el pasado); cada punto lleva su fecha — nunca se
+ *  indexa por posición. */
+export type CashflowFineGridPointApi = {
+  date_ymd: string;
+  month_index: number;
+  month_fraction: number;
+};
+
+export type CashflowFineAssetSeriesApi = {
+  asset_id: string;
+  asset_name: string;
+  /** f64 (excepción de arrays de series, como la proyección). Paralelo a `grid`. */
+  values: number[];
+};
+
+/** Serie fina anclada a snapshots (semanal/diaria). Solo presente cuando hay
+ *  transacciones vinculadas a algún asset y snapshots que anclen. */
+export type CashflowFineApi = {
+  resolution: "weekly" | "daily";
+  grid: CashflowFineGridPointApi[];
+  asset_series: CashflowFineAssetSeriesApi[];
+  /** Paralelo a `grid`: Σ assets moldeados − Σ pasivos amortizados. f64. */
+  net_worth: number[];
+};
+
 /**
  * Respuesta de `GET /v1/history/cashflow`. El frontend de C1-C6/C8 usa SOLO `months[]`;
- * el campo `fine` (serie fina) lo consume el overlay del chart grande (director).
+ * el campo `fine` (serie fina) lo consume el overlay del chart grande.
  */
 export type HistoryCashflowApi = {
   anchor_date_ymd: string;
   anchor_month_first_ymd: string;
   view: string;
   months: CashflowMonthApi[];
+  fine?: CashflowFineApi;
 };
