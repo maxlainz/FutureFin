@@ -39,7 +39,7 @@ export function CategoryComparisonBars({
   const pct = (v: number) => `${Math.max(0, (v / max) * 100)}%`;
 
   return (
-    <div className="cmp-bars bordered-top">
+    <div className="cmp-bars">
       <div className="cmp-legend" aria-hidden>
         <span className="cmp-legend-item">
           <span className="cmp-swatch cmp-swatch--real" /> Real
