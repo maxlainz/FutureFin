@@ -115,11 +115,14 @@ Public API (re-exported from `lib.rs`):
 pub fn evaluate_timeline(&HistoryTimeline, grid_dates: &[NaiveDate]) -> Result<Vec<Vec<Decimal>>, EngineError>
 pub fn amortized_segment_value(p_a: Decimal, p_b: Decimal, terms: Option<&LoanTerms>,
                                days_from_start: i64, days_total: i64) -> Decimal
+pub fn anchored_cashflow_segment_value(v_a: Decimal, v_b: Decimal, cf: &[CashFlowEntry],
+                               seg_start: NaiveDate, seg_end: NaiveDate, eval_date: NaiveDate,
+                               days_from_start: i64, days_total: i64) -> Decimal   // v1.6.0, tier-2
 pub fn add_months_signed(date: NaiveDate, delta: i32) -> NaiveDate  // month-first, signed (neg = past)
 pub fn month_index_of(date: NaiveDate, anchor_month_first: NaiveDate) -> i32  // (y2-y1)*12 + (m2-m1)
-// types: HistoryTimeline { dates, items }, HistoryItem { source_item_id, kind, observations },
+// types: HistoryTimeline { dates, items }, HistoryItem { source_item_id, kind, observations, cashflow },
 //        HistoryObservation { value, terms }, LoanTerms { apr_percent, monthly_payment },
-//        HistoryItemKind { Asset, Liability }
+//        HistoryItemKind { Asset, Liability }, CashFlowEntry { date, delta }
 ```
 
 `HistoryTimeline.dates` are **strictly ascending** (non-ascending → `InvalidHistoryTimeline`); the
@@ -144,6 +147,47 @@ result `= max( theo_c(x) + f·(P_b − theo_c(N)), 0 )`. The residual term makes
 `f=1 → P_b` **exact** regardless of `powd` approximation. Falls back to **linear** when `terms` is
 `None`, `apr ≤ 0`, `M ≤ 0`, `M ≤ P_a·i` (payment doesn't cover interest), or any checked op fails.
 Snapshot mutations are **not** projection-engine inputs — they never touch the projection cache.
+
+### Cash-flow anchoring (tier-2, v1.6.0)
+`HistoryItem` gained an optional `cashflow: Vec<CashFlowEntry>` field (`#[serde(default)]`). A
+`CashFlowEntry { date, delta }` is a dated cash movement that **shapes** an asset's curve **within**
+its segment **without ever contradicting the snapshots** — the anchored curve still passes exactly
+through both endpoints. `delta` is already sign-normalized by the caller (**positive raises** the
+asset value; account leg = `+amount`, savings-destination leg = `−amount`); the engine never
+interprets signs or sources, it only sums `delta`.
+
+`anchored_cashflow_segment_value` computes, for an **asset** segment `[seg_start, seg_end]` observed
+at both ends:
+
+```
+v(t) = Va + C(a→t) + f(t)·(Vb − Va − C_total)
+```
+
+- `C(a→t)` = Σ of `delta` over the **half-open** interval `(seg_start, eval_date]` (a txn dated on
+  `seg_start` belongs to the *previous* segment; one dated on `seg_end` **does** count).
+- `C_total = C(a→b)` = Σ of `delta` over `(seg_start, seg_end]`.
+- `f(t) = days_from_start / days_total`, linear in civil days — the **same** base as
+  `interpolate_linear` (same `clamp`, same division).
+
+Properties (unit-tested as P1–P5 in `history.rs`):
+- **P1 / P2 — endpoint exactness for arbitrary cash-flow**: `v(seg_start) = Va` (empty `(a→a]`,
+  residual term ×0) and `v(seg_end) = Vb` **exactly** (`C(a→b) = C_total` cancels the residual;
+  `f = n/n = 1`, no residual division). Holds for deltas that don't sum to zero, a delta dated on
+  `seg_end`, etc.
+- **P3 — empty ⇒ identical to `interpolate_linear`**: with `cashflow` empty the formula degenerates
+  to `Va + f·(Vb − Va)`; moreover the caller (`evaluate_item_at`) only takes the anchored branch
+  when some entry falls in `(d_a, d_b]`, otherwise it calls `interpolate_linear` **verbatim** — so a
+  timeline with an empty (default) `cashflow` field reproduces the previous history series **bit for
+  bit** (P3b).
+- Deposit into flat snapshots (`Va = Vb`) jumps just after the deposit date, then decays linearly
+  back to `Va` by `seg_end` (the snapshot wins; the inflow is re-absorbed).
+
+**Liabilities and one-sided items ignore cash-flow, deliberately**: only the `(Some, Some)` **Asset**
+arm consults `cashflow`. Liabilities already model the principal with residual-corrected French
+amortization — injecting the payment as a delta would double-count it — so they stay bit-for-bit
+identical to the no-cash-flow curve; items observed at a single endpoint keep their appear/disappear
+behavior. Implementation: `O(n)` linear scan over `cf` per evaluation point (no prefix sums, robust
+to any input order), sub-ms at this scale, no `f64`.
 
 ## Notes for the API handler (projection.rs)
 - Load `allocation_rules` from DB ordered by `priority ASC`, then map each `target_asset_id` → index in `assets[]` before building the engine input.
