@@ -21,7 +21,7 @@ src/
 │   ├── format.ts                 # money/percent/decimal formatting (es-ES locale), parseDisplayDecimal, METRIC_DASH
 │   ├── format.test.ts            # 29 tests
 │   ├── dates.ts                  # civil-calendar arithmetic (parallel to crates/engine), TZ-aware "today", interval counts
-│   ├── dates.test.ts             # 26 tests
+│   ├── dates.test.ts             # 29 tests (incl. formatDateDm)
 │   ├── ledger.ts                 # shared by views: ledgerViewQs, groupRowsByCategoryOrdered, asset/liability portfolio helpers,
 │   │                             #   PAYMENT_FREQ_LABEL, formatProjectionMilestoneCompactLabel, budgetCategoryMap,
 │   │                             #   sortBudgetEntriesMacStyle, formatAxisMoney, LedgerPersonScope, LiabilityPaymentFreq
@@ -41,6 +41,14 @@ src/
 │   │                             #   categoriesForKind (savings→[]), ImportRowDraft + initialDraftForRow/buildConfirmDecisions/summarizeDecisions/rowMatchesFilter,
 │   │                             #   deltaToneClass/formatDeltaCurrency (rojo/verde solo en deltas). Test: expenses.test.ts
 │   ├── files.ts                  # readFileAsBase64(File): base64 en trozos de 32 KiB. Compartido por el import .ffbackup (App.tsx) y el wizard de CSV
+│   ├── responsive.ts             # MOBILE_MAX_WIDTH (640 = bp:mobile), isMobileWidth (puro, test en node) y useIsMobile()
+│   │                             #   (matchMedia, lectura síncrona inicial). Gatea el patrón «columnas esenciales» de TODAS las
+│   │                             #   tablas en móvil: mismo boolean para th y td (desincronización imposible), fila tappable →
+│   │                             #   modal de edición. Desktop byte-idéntico con isMobile=false. Test: responsive.test.ts
+│   ├── chart-gestures.ts         # aritmética PURA de los gestos táctiles del chart grande: clampWindowStart, panWindow,
+│   │                             #   pinchWindow (+ ChartDomain). Espejo exacto de los clamps/ancla del onWheel — test de
+│   │                             #   equivalencia en chart-gestures.test.ts. ProjectionNetWorthChart la consume desde su
+│   │                             #   máquina de gestos Pointer Events (touch-action: pan-y; vertical = scroll de página)
 │   └── theme.ts                  # ThemePref ("auto"|"light"|"dark") + apply/load/save + subscribeSystemThemeChanges
 │
 ├── components/                   # generic UI primitives (no domain knowledge)
@@ -111,6 +119,7 @@ src/
 | New shared chart/SVG widget | `components/charts/` — si es una proyección compacta, considera reusar `MiniProjection` con props |
 | New full tab/page | `views/NewView.tsx` + add to `TABS` / `TAB_PATH` in `lib/navigation.ts` + render branch in `App.tsx` + add pill al `TopBar` (automático vía `TABS`) |
 | New Settings sub-tab | add to `SETTINGS_SUBTAB_SLUG`/`_LABEL` in `lib/navigation.ts` + render branch inside `SettingsView` (sub-tabs son `ff-nav-pill` ya, no tab-bar) |
+| Tabla nueva (o columnas nuevas en una existente) | seguir el patrón móvil «columnas esenciales»: gatear th/td con `useIsMobile()` (`lib/responsive.ts`), datos secundarios a `.cell-subline`, fila tappable → modal. Doctrina completa en design-system.md «Responsive / móvil». Controles densos dentro de la tabla → añadirlos al carve-out táctil de App.css (sección A2) |
 | New auth/setup flow | `auth/` |
 
 ## Why this layout

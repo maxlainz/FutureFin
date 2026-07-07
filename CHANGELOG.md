@@ -6,6 +6,51 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-07
+
+Revisión profunda de la **interfaz móvil** (solo frontend; sin cambios de API ni de esquema). Se
+adopta una regla de diseño global: **la página solo scrollea hacia abajo** — cero scroll horizontal
+de página; el scroll lateral queda confinado al interior de tablas como válvula residual.
+
+### Sistema responsive (App.css / theme.css)
+- Dos breakpoints canónicos etiquetados greppables (`/* bp:struct 720 */` estructura,
+  `/* bp:mobile 640 */` densidad phone), documentados en la cabecera de `App.css` y en la nueva
+  sección «Responsive / móvil» de `design-system.md`. Excepciones sancionadas por componente:
+  `bp:edge 340` (título del TopBar) y `bp:topbar 1000` (ver abajo).
+- Las franjas de KPIs abandonan el scroll horizontal deliberado: en ≤720px pasan a grid `auto-fit`
+  (2×2 en iPhone; los milestones N-variables de Proyección forman filas de 2).
+- Áreas táctiles: token `--ff-touch-min` (44px) aplicado a controles primarios en ≤640px, con
+  carve-out explícito para los controles densos de tabla.
+- Toolbars apiladas full-width en móvil (la de Gastos en 3 filas limpias), TopBar estrecha,
+  modales con acciones apiladas (primario al alcance del pulgar) y paddings reducidos.
+- **Fix estructural**: entre 721 y ~980px las 9 pills de navegación desbordaban la página entera;
+  el colapso a hamburguesa sube a 1000px (solo TopBar).
+
+### Tablas: columnas esenciales en móvil
+- Las 12 tablas muestran en ≤640px solo columnas esenciales (p. ej. Movimientos: fecha `dd/mm` ·
+  concepto · importe) con los datos secundarios en una sub-línea muted; tap en la fila (con
+  chevron, foco y teclado) abre el modal de edición existente, que gana botón «Eliminar» solo-móvil.
+- Mecanismo: hook `useIsMobile()` (`lib/responsive.ts`, matchMedia 640px) con render condicional —
+  th/td no pueden desincronizarse; los selects inline de Movimientos se omiten en móvil (edición
+  vía modal) y en el preview del import los selects y vínculos migran a la fila expandible.
+- Desktop byte-idéntico: con `isMobile=false` el JSX es exactamente el anterior.
+
+### Chart de patrimonio: gestos táctiles completos
+- Arrastrar = pan, pellizcar = zoom (ancla en el punto medio, mismos límites que la rueda — la
+  aritmética vive en `lib/chart-gestures.ts` con tests de equivalencia exacta contra el wheel),
+  tocar = tooltip con auto-cierre; `touch-action: pan-y` para que el arrastre vertical siga
+  scrolleando la página (el gesto aborta vía `pointercancel`).
+- En móvil la pestaña Proyección deja de ser un viewport bloqueado: scrollea como el resto, con el
+  chart a altura acotada (`min(72dvh, 30rem)`; `100dvh` para las barras dinámicas de iOS Safari).
+- La leyenda del chart baja a su propia banda bajo la cabecera en anchos <560px (se solapaban).
+- Ruta de escritorio intacta: `onWheel` y hover sin cambios (guards por `pointerType`).
+- Cash-flow mensual de Gastos: 12 meses en móvil (24 columnas eran ilegibles).
+
+### Verificación
+- QA automatizado (Playwright): `scrollWidth <= innerWidth` en 8 viewports (360-1280) × 12 rutas,
+  KPIs 2×2, tablas esenciales, táctil ≥44px, regresión desktop (columnas y selects inline
+  intactos a 1280px), capturas revisadas en tema claro y oscuro. 220 tests Vitest.
+
 ## [1.6.0] — 2026-07-07
 
 Histórico de **gasto mensual**: una nueva pestaña «Gastos» que importa el histórico REAL de gasto
