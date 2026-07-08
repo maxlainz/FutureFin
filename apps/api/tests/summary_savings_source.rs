@@ -163,12 +163,14 @@ async fn mode_b_summary_uses_avg_with_hybrid_subtraction() {
     set_mode_b(&app, &owner.cookie).await;
 
     // resta híbrida = 400 (L1 real) + 300 (L2 nominal) = 700; expense_eff = 1500 − 700 = 800.
-    // net = 3000 − 800 = 2200; savings_rate = 2200/3000 ≈ 0.7333.
+    // debt_service nominal = 500 (L1) + 300 (L2) = 800; el `net` resta las cuotas para casar con el
+    // modo A (que las incluye) y con la pendiente del chart: net = 3000 − 800 − 800 = 1400.
+    // savings_rate = 1400/3000 ≈ 0.4667.
     let h = health(&app, &owner.cookie, "/v1/summary").await;
     approx(parse_dec(&h["income_monthly_equivalent"]), 3000.0);
     approx(parse_dec(&h["expense_regular_monthly_equivalent"]), 800.0);
-    approx(parse_dec(&h["net_monthly_equivalent"]), 2200.0);
-    approx(parse_dec(&h["savings_rate"]), 2200.0 / 3000.0);
+    approx(parse_dec(&h["net_monthly_equivalent"]), 1400.0);
+    approx(parse_dec(&h["savings_rate"]), 1400.0 / 3000.0);
     assert_eq!(h["savings_source"], "transactions_avg");
     assert_eq!(h["savings_source_months_with_data"].as_u64().unwrap(), 1);
 }

@@ -5,8 +5,8 @@
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
 use crate::handlers::installation::{
-    naive_date_in_calendar_tz, require_installation_member, resolve_fire_settings, FireNumberMode,
-    FireSettings, SavingsSource, TaxBracket,
+    load_fire_settings, naive_date_in_calendar_tz, require_installation_member,
+    resolve_fire_settings, FireNumberMode, FireSettings, SavingsSource, TaxBracket,
 };
 use crate::handlers::person_view::LedgerView;
 use crate::handlers::transactions::summary::{effective_avg_income_expense, transactions_12m_avg};
@@ -584,11 +584,23 @@ pub(crate) fn monthly_payment_from(amount: Decimal, frequency: Option<&str>) -> 
     }
 }
 
-fn liability_monthly_payment(row: &LiabEngineRow) -> Decimal {
-    let Some(amt) = row.payment_amount else {
-        return Decimal::ZERO;
-    };
-    monthly_payment_from(amt, row.payment_frequency.as_deref())
+/// Cuota mensual equivalente de un pasivo a partir de sus campos crudos (`payment_amount`,
+/// `payment_frequency`). Sin importe → `0`. Fuente única compartida por `projection.rs` (filas
+/// `LiabEngineRow` ya cargadas para el engine) y `summary.rs` (filas de una SELECT dedicada).
+pub(crate) fn liability_monthly_payment(
+    amount: Option<Decimal>,
+    frequency: Option<&str>,
+) -> Decimal {
+    match amount {
+        Some(amt) => monthly_payment_from(amt, frequency),
+        None => Decimal::ZERO,
+    }
+}
+
+/// Predicado de "pasivo activo" (misma semántica que el `WHERE payment_end_date IS NULL OR >= today`
+/// de las lecturas SQL): un pasivo sin fecha de fin de pago o cuya fecha aún no ha pasado sigue vivo.
+pub(crate) fn liability_is_active(payment_end_date: Option<NaiveDate>, today: NaiveDate) -> bool {
+    payment_end_date.map_or(true, |d| d >= today)
 }
 
 /// Completed calendar age in years (`today` inclusive), used for horizon.
@@ -683,15 +695,14 @@ pub(crate) async fn build_installation_projection_input(
     let savings_source = fire_settings
         .map(|fs| fs.savings_source)
         .unwrap_or_default();
-    // `(income_regular, expense_regular, use_avg, fire_income, fire_expense)`. En modo A `fire_*`
-    // preservan EXACTAMENTE los escalares actuales (income_reg, expense_retirement).
-    let (income_reg_eff, expense_reg_eff, use_avg, fire_income, fire_expense): (
-        Decimal,
-        Decimal,
-        bool,
-        Decimal,
-        Decimal,
-    ) = match savings_source {
+    // Inputs regulares efectivos del mes 0. En modo A (`use_avg == false`) son EXACTAMENTE los
+    // escalares del presupuesto (income_reg, expense_reg); en modo B con datos, los promedios reales.
+    struct EffectiveInputs {
+        income: Decimal,
+        expense: Decimal,
+        use_avg: bool,
+    }
+    let inputs: EffectiveInputs = match savings_source {
         SavingsSource::TransactionsAvg => {
             let avg = transactions_12m_avg(pool, iid, session_user_id, view, today).await?;
             if avg.months_with_data > 0 {
@@ -700,23 +711,51 @@ pub(crate) async fn build_installation_projection_input(
                 // con `summary.rs` vía `effective_avg_income_expense` (punto de verdad único).
                 let active_liabs: Vec<(Uuid, Decimal)> = liabs
                     .iter()
-                    .filter(|row| row.payment_end_date.map_or(true, |d| d >= today))
-                    .map(|row| (row.id, liability_monthly_payment(row)))
+                    .filter(|row| liability_is_active(row.payment_end_date, today))
+                    .map(|row| {
+                        (
+                            row.id,
+                            liability_monthly_payment(
+                                row.payment_amount,
+                                row.payment_frequency.as_deref(),
+                            ),
+                        )
+                    })
                     .collect();
                 let (income_eff, expense_eff) =
                     effective_avg_income_expense(&avg, &active_liabs);
-                (income_eff, expense_eff, true, income_eff, expense_eff)
+                EffectiveInputs {
+                    income: income_eff,
+                    expense: expense_eff,
+                    use_avg: true,
+                }
             } else {
-                (income_reg, expense_reg, false, income_reg, expense_retirement)
+                EffectiveInputs {
+                    income: income_reg,
+                    expense: expense_reg,
+                    use_avg: false,
+                }
             }
         }
-        SavingsSource::Budget => (income_reg, expense_reg, false, income_reg, expense_retirement),
+        SavingsSource::Budget => EffectiveInputs {
+            income: income_reg,
+            expense: expense_reg,
+            use_avg: false,
+        },
     };
+    let use_avg = inputs.use_avg;
 
-    let monthly_net_regular = income_reg_eff - expense_reg_eff;
+    let monthly_net_regular = inputs.income - inputs.expense;
 
+    // Base del FIRE number: income = income efectivo; expense = gasto efectivo en modo B (el gasto ya
+    // no es el del presupuesto), o `expense_retirement` en modo A (comportamiento histórico).
     let fire_target_base = fire_settings.and_then(|fs| {
-        compute_fire_target_nw(fs, fire_income, income_retirement, fire_expense)
+        let fire_expense = if inputs.use_avg {
+            inputs.expense
+        } else {
+            expense_retirement
+        };
+        compute_fire_target_nw(fs, inputs.income, income_retirement, fire_expense)
     });
     let fire_target = fire_target_base.map(|base_amount| FireTarget {
         base_amount,
@@ -830,7 +869,7 @@ pub(crate) async fn build_installation_projection_input(
         .into_iter()
         .map(|r| ProjectionLiabilityInput {
             principal: r.principal.max(Decimal::ZERO),
-            monthly_payment: liability_monthly_payment(&r),
+            monthly_payment: liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()),
             payment_end: r.payment_end_date,
         })
         .collect();
@@ -838,8 +877,8 @@ pub(crate) async fn build_installation_projection_input(
     let input = ProjectionInput {
         ref_date: today,
         horizon_months,
-        income_regular_monthly: income_reg_eff,
-        expense_regular_monthly: expense_reg_eff,
+        income_regular_monthly: inputs.income,
+        expense_regular_monthly: inputs.expense,
         assets,
         allocation_rules,
         liabilities,
@@ -884,8 +923,8 @@ pub(crate) async fn monthly_income_expense_debt_for_view(
 
     let debt_service: Decimal = liabs
         .iter()
-        .filter(|r| r.payment_end_date.map_or(true, |d| d >= today))
-        .map(liability_monthly_payment)
+        .filter(|r| liability_is_active(r.payment_end_date, today))
+        .map(|r| liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()))
         .filter(|p| *p > Decimal::ZERO)
         .sum();
 
@@ -900,6 +939,11 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
     view: LedgerView,
     today: NaiveDate,
 ) -> Result<HashMap<Uuid, Decimal>, ApiError> {
+    // El reparto del primer mes depende del ahorro mensual efectivo, que en modo B
+    // (`transactions_avg`) sale del promedio real, no del presupuesto. Sin pasar `fire_settings` el
+    // endpoint de activos calcularía SIEMPRE en modo presupuesto (bug). El resto de campos de
+    // `fire_settings` (p.ej. `fire_target`) no altera las aportaciones del mes 1.
+    let fire_settings = load_fire_settings(pool, iid).await?;
     let built = build_installation_projection_input(
         pool,
         iid,
@@ -908,7 +952,7 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
         today,
         1,
         Decimal::ZERO,
-        None,
+        Some(&fire_settings),
     )
     .await?;
     let nominals =

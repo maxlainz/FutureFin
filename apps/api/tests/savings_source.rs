@@ -90,6 +90,15 @@ async fn projection_delta(app: &TestApp, cookie: &str, query: &str) -> f64 {
     parse_dec(&resp.json()["monthly_delta_assumption"])
 }
 
+/// `contribution_nominal_monthly` del primer (único) activo de GET /v1/assets.
+async fn asset_contribution(app: &TestApp, cookie: &str) -> f64 {
+    let resp = app.get_with_cookie("/v1/assets", cookie).await;
+    assert_eq!(resp.status, http::StatusCode::OK, "assets: {resp:?}");
+    let body = resp.json();
+    let first = body.as_array().and_then(|a| a.first()).expect("un activo");
+    parse_dec(&first["contribution_nominal_monthly"])
+}
+
 // ---------------------------------------------------------------------------
 // Fase 1 — serde / PATCH
 // ---------------------------------------------------------------------------
@@ -426,5 +435,62 @@ async fn mode_b_liability_end_date_step_up_present() {
     assert!(
         early > late,
         "modo B: la liability que termina antes debe dejar MÁS patrimonio al final (step-up); early={early}, late={late}"
+    );
+}
+
+/// Fix 3 (regresión): GET /v1/assets debe seguir el modo `savings_source`. El reparto del primer mes
+/// usa el ahorro mensual efectivo, así que `contribution_nominal_monthly` cambia entre modo A
+/// (presupuesto) y modo B (promedio real). Antes el endpoint pasaba `fire_settings = None` al builder
+/// → las aportaciones por activo salían SIEMPRE en modo presupuesto.
+#[tokio::test]
+async fn assets_contribution_follows_savings_source_mode() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let asset_cat = app.create_category(&owner, "asset", "Bolsa").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    // Presupuesto (modo A): surplus 5000 − 3000 = 2000.
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "3000").await;
+
+    // Un único activo con regla remainder → recibe TODO el ahorro mensual del primer mes.
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({ "category_id": asset_cat, "name": "MSCI", "current_value": "100000",
+                    "is_liquid": true, "expected_annual_return_percent": "5" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+    let rule = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({ "target_asset_id": asset_id, "kind": "remainder" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+
+    // Transacciones en el último mes completo (modo B): income 4000, expense 1000 → surplus 3000.
+    let today = server_today(&app, &owner.cookie).await;
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "4000", "income", None, None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Gasto", "-1000", "expense", None, None).await;
+
+    // Modo A (default): contribución = surplus presupuesto = 2000.
+    let contrib_a = asset_contribution(&app, &owner.cookie).await;
+    approx(contrib_a, 2000.0);
+
+    // Modo B: contribución = surplus promedio real = 3000. DEBE diferir de A (regresión del bug).
+    set_mode_b(&app, &owner.cookie).await;
+    let contrib_b = asset_contribution(&app, &owner.cookie).await;
+    approx(contrib_b, 3000.0);
+
+    assert!(
+        (contrib_a - contrib_b).abs() > 100.0,
+        "GET /v1/assets debe seguir el modo: A={contrib_a}, B={contrib_b}"
     );
 }

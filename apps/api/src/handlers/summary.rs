@@ -1,11 +1,10 @@
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_budget_totals_for_summary;
 use crate::handlers::installation::{
-    installation_naive_today, require_installation_member, resolve_fire_settings, FireSettings,
-    SavingsSource,
+    installation_naive_today, projection_savings_source, require_installation_member, SavingsSource,
 };
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::monthly_payment_from;
+use crate::handlers::projection::liability_monthly_payment;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::summary::{effective_avg_income_expense, transactions_12m_avg};
 use crate::state::AppState;
@@ -16,7 +15,6 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
-use sqlx::types::Json as SqlxJson;
 use sqlx::FromRow;
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -302,14 +300,9 @@ pub async fn get_summary(
     let mut effective_savings_source = SavingsSource::Budget;
     let mut savings_source_months_with_data: u32 = 0;
 
-    let fire_settings_json: Option<SqlxJson<FireSettings>> =
-        sqlx::query_scalar(r#"SELECT fire_settings FROM installation WHERE id = $1"#)
-            .bind(iid)
-            .fetch_one(&state.pool)
-            .await?;
-    let fire_settings = resolve_fire_settings(fire_settings_json.map(|j| j.0));
-
-    if fire_settings.savings_source == SavingsSource::TransactionsAvg {
+    // Fuente del ahorro efectiva (helper compartido con las mutaciones de transacciones y el
+    // engine): un único parser del JSONB `fire_settings` → `SavingsSource`.
+    if projection_savings_source(&state.pool, iid).await? == SavingsSource::TransactionsAvg {
         let avg = transactions_12m_avg(&state.pool, iid, user.id.0, view, today).await?;
         if avg.months_with_data > 0 {
             // Liabilities activas (por payment_end_date) con su cuota nominal mensual, con la MISMA
@@ -330,16 +323,17 @@ pub async fn get_summary(
             let active: Vec<(Uuid, Decimal)> = active_liabs
                 .into_iter()
                 .map(|(id, amount, freq)| {
-                    let monthly = amount
-                        .map(|a| monthly_payment_from(a, freq.as_deref()))
-                        .unwrap_or(Decimal::ZERO);
-                    (id, monthly)
+                    (id, liability_monthly_payment(amount, freq.as_deref()))
                 })
                 .collect();
+            let debt_service: Decimal = active.iter().map(|(_, q)| *q).sum();
             let (income_eff, expense_eff) = effective_avg_income_expense(&avg, &active);
             income_m = income_eff;
             expense_reg = expense_eff;
-            net_m = income_eff - expense_eff;
+            // El `net` debe casar con modo A (`net_monthly_equivalent` de budget.rs incluye las
+            // cuotas derivadas) y con la pendiente del chart (que resta el debt service). El KPI
+            // `monthly_net_excluding_derived_debt` sigue siendo income − expense_reg (sin cuotas).
+            net_m = income_eff - expense_eff - debt_service;
             effective_savings_source = SavingsSource::TransactionsAvg;
             savings_source_months_with_data = avg.months_with_data;
         }
