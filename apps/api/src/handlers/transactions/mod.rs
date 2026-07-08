@@ -4,12 +4,19 @@
 //! de Ingreso/Gasto, y sirve la comparativa mes real vs presupuesto vs promedio histórico.
 //! CRUD per-user (scoping con `LedgerView` en las lecturas; `owner_user_id` en las escrituras).
 //!
-//! ## Contrato no-cache (igual que history.rs)
-//! Las transacciones **no son inputs del motor de proyección** (que arranca en el mes 0 con el
-//! ledger vivo, no con el histórico de gasto). Por eso **ningún handler de este módulo llama a
-//! `refresh_projection_after_mutation`**: invalidar la cache aquí solo tiraría una entrada
-//! caliente sin cambiar ni un número de la proyección. Un test de regresión
-//! (`transactions_projection_cache.rs`) fija esta ausencia.
+//! ## Contrato de cache condicionado al modo (`savings_source`)
+//! Por defecto (`savings_source = budget`, modo A) las transacciones **no son inputs del motor de
+//! proyección** (que arranca en el mes 0 con el ledger vivo, no con el histórico de gasto) → sus
+//! mutaciones **no invalidan** la cache de proyección: invalidar solo tiraría una entrada caliente
+//! sin cambiar ni un número.
+//!
+//! En cambio, cuando la instalación está en `savings_source = transactions_avg` (modo B) la
+//! proyección deriva el ahorro mensual del promedio real 12m → las transacciones **SÍ son inputs
+//! del engine**, así que toda mutación que cambie el conjunto de transacciones **debe invalidar** la
+//! cache. Ese gating vive en `invalidate_projection_if_transactions_avg` (abajo) y lo llaman las
+//! mutaciones de `crud.rs`/`import.rs`/`recurring.rs` tras commitear. `rules.rs`, los previews y el
+//! borrado de una regla recurrente (sus instancias sobreviven, el conjunto no cambia) **nunca**
+//! invalidan. Regresión de ambos casos: `transactions_projection_cache.rs`.
 
 pub mod crud;
 pub mod csv_presets;
@@ -20,11 +27,15 @@ pub mod schema;
 pub mod summary;
 
 use crate::error::ApiError;
+use crate::handlers::installation::{projection_savings_source, SavingsSource};
+use crate::handlers::projection::refresh_projection_after_mutation;
+use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use chrono::NaiveDate;
 use sqlx::{FromRow, PgConnection};
+use std::sync::Arc;
 use uuid::Uuid;
 
 // Re-exports para el wiring de openapi.rs.
@@ -209,6 +220,21 @@ pub async fn next_fingerprint_ordinal(
     .fetch_one(&mut *conn)
     .await?;
     Ok(next)
+}
+
+/// Invalida la cache de proyección tras una mutación de transacciones **solo si** la instalación
+/// está en modo `transactions_avg` (entonces las transacciones son inputs del engine). En modo
+/// `budget` no hace nada (contrato histórico: las transacciones no tocan la proyección). Llamar tras
+/// commitear la mutación con éxito. La invalidación real corre en background (`tokio::spawn`).
+pub(crate) async fn invalidate_projection_if_transactions_avg(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    if projection_savings_source(&state.pool, iid).await? == SavingsSource::TransactionsAvg {
+        refresh_projection_after_mutation(state.clone(), iid, user_id);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

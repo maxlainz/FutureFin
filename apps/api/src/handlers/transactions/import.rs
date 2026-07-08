@@ -3,7 +3,9 @@
 //! Stateless: el preview no escribe nada y devuelve un `file_sha256`; el confirm reenvía el
 //! mismo `file_b64` + `file_sha256` (anti file-swap) más un `decisions[]` paralelo por índice.
 //! Dedup por huella (source · op_date · importe canónico · concepto normalizado) + ordinal.
-//! Ninguna escritura llama a `refresh_projection_after_mutation` (contrato no-cache del módulo).
+//! El confirm invalida la cache de proyección solo en modo `transactions_avg`
+//! (`invalidate_projection_if_transactions_avg`); el preview nunca escribe ni invalida. Ver el
+//! contrato en `transactions/mod.rs`.
 
 use crate::error::ApiError;
 use crate::handlers::installation::require_installation_member;
@@ -19,7 +21,7 @@ use crate::handlers::transactions::schema::{
 };
 use crate::handlers::transactions::{
     assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
-    next_fingerprint_ordinal,
+    invalidate_projection_if_transactions_avg, next_fingerprint_ordinal,
 };
 use crate::state::AppState;
 use axum::extract::Extension;
@@ -406,6 +408,7 @@ pub async fn import_confirm(
 
     tx.commit().await?;
 
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
     Ok(Json(ImportConfirmResponse {
         import_id: final_import_id,
         imported,

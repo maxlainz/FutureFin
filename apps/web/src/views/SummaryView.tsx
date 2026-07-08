@@ -80,6 +80,17 @@ export function SummaryView({
     : METRIC_DASH;
 
   const fh = summary?.financial_health;
+
+  // Modo B (promedio): el ahorro y la tasa vienen ya en base promedio ponderado desde
+  // el servidor. En ese modo los paréntesis «sin deuda» pierden sentido (la base ya es
+  // real) → los sustituimos por «promedio de N meses». En modo presupuesto: sin cambios.
+  const isAvgMode =
+    showMetrics && summary?.savings_source === "transactions_avg";
+  const avgMonths = summary?.savings_source_months_with_data ?? 0;
+  const avgParenthetical = isAvgMode
+    ? `promedio de ${avgMonths} ${avgMonths === 1 ? "mes" : "meses"}`
+    : undefined;
+
   const savingsMoneyParen =
     showMetrics && fh
       ? formatCurrencyAmount(fh.monthly_net_excluding_derived_debt, currencyIso)
@@ -93,10 +104,11 @@ export function SummaryView({
     fh &&
     (!isZeroMoneyMetric(fh.net_monthly_equivalent) ||
       !isZeroMoneyMetric(fh.monthly_net_excluding_derived_debt));
-  const savingsMoneyParenthetical =
-    showSavingsMoneyTile &&
-    savingsMoneyPrimary !== savingsMoneyParen &&
-    savingsMoneyParen !== ""
+  const savingsMoneyParenthetical = isAvgMode
+    ? avgParenthetical
+    : showSavingsMoneyTile &&
+        savingsMoneyPrimary !== savingsMoneyParen &&
+        savingsMoneyParen !== ""
       ? savingsMoneyParen
       : undefined;
 
@@ -111,10 +123,14 @@ export function SummaryView({
     if (showPctTile) {
       if (sr !== METRIC_DASH) {
         savingsRatePrimary = sr;
-        savingsRateParenthetical =
-          srx !== METRIC_DASH && srx !== sr ? srx : undefined;
+        savingsRateParenthetical = isAvgMode
+          ? avgParenthetical
+          : srx !== METRIC_DASH && srx !== sr
+            ? srx
+            : undefined;
       } else {
         savingsRatePrimary = srx;
+        if (isAvgMode) savingsRateParenthetical = avgParenthetical;
       }
     }
   }

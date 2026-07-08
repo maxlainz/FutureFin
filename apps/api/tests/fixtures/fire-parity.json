@@ -136,6 +136,30 @@
       },
       "expected_target_nw": 646654.611,
       "_calc_note": "(1500*12)=18000 → gross_up ≈ 22632.91 → /0.035 = 646654.61 (tramo 2)"
+    },
+    {
+      "name": "annual_expense mode, ES taxes, avg-style non-round expense (no cuotas)",
+      "_tripwire": "Gasto mensual 'tipo promedio sin cuotas' (Decimal no redondo). Fija que cliente y servidor derivan el MISMO need/target con una base como la que produce el modo B (transactions_avg). La fórmula es la misma en ambos modos; solo cambia la procedencia de expense_retirement.",
+      "fire_settings": {
+        "fire_number_mode": "annual_expense",
+        "fire_number_manual_amount": null,
+        "swr_pct": "3.5",
+        "taxes_enabled": true,
+        "tax_brackets": [
+          { "up_to": "6000",   "pct": "19" },
+          { "up_to": "50000",  "pct": "21" },
+          { "up_to": "200000", "pct": "23" },
+          { "up_to": "300000", "pct": "27" },
+          { "up_to": null,     "pct": "30" }
+        ]
+      },
+      "monthly": {
+        "income": "3200",
+        "income_retirement": "0",
+        "expense_retirement": "2137.5"
+      },
+      "expected_target_nw": 923327.306,
+      "_calc_note": "(2137.5*12)=25650 → gross_up: 0.79*g+120=25650 → g=32316.4557 → /0.035 = 923327.31 (tramo 2)"
     }
   ]
 }

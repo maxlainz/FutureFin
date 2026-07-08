@@ -9,16 +9,17 @@
 //! llamada posterior a esa fecha. El cursor es la única fuente de idempotencia: re-materializar no
 //! duplica ni recrea instancias borradas (el cursor ya pasó ese mes).
 //!
-//! Como el resto del módulo `transactions`, NINGÚN handler de aquí llama a
-//! `refresh_projection_after_mutation`: las transacciones (recurrentes o no) no son inputs del
-//! motor de proyección (contrato no-cache, regresión `transactions_projection_cache.rs`).
+//! Cache de proyección (contrato en `transactions/mod.rs`): `materialize` crea instancias reales →
+//! invalida solo en modo `transactions_avg`. En cambio, **borrar una regla NO invalida** en ningún
+//! modo: la FK `ON DELETE SET NULL` conserva las instancias ya materializadas, así que el conjunto
+//! de transacciones (y por tanto el promedio) no cambia.
 
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::crud::PreparedTxn;
-use crate::handlers::transactions::next_fingerprint_ordinal;
+use crate::handlers::transactions::{invalidate_projection_if_transactions_avg, next_fingerprint_ordinal};
 use crate::handlers::transactions::schema::{
     compute_fingerprint, MaterializeResponse, RecurrenceSpec, RecurringRuleResponse, SOURCE_MANUAL,
 };
@@ -323,6 +324,7 @@ pub async fn materialize_recurring(
 
     tx.commit().await?;
 
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
     Ok(Json(MaterializeResponse {
         rules_processed,
         materialized,

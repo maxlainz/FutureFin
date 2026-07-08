@@ -1,7 +1,10 @@
-//! Regresión del contrato no-cache del módulo `transactions`: las transacciones NO son inputs
-//! del motor de proyección, así que ninguna de sus mutaciones (import, alta manual, PATCH,
-//! DELETE, borrado de lote) debe invalidar la cache de proyección. Espejo de
-//! `snapshot_mutations_do_not_touch_projection_cache` en `history_snapshots.rs`.
+//! Contrato de cache de proyección condicionado al modo `savings_source`:
+//! - Modo A (`budget`, default): las transacciones NO son inputs del engine → **ninguna** mutación
+//!   invalida la cache (contrato histórico, espejo de `snapshot_mutations_do_not_touch_...`).
+//! - Modo B (`transactions_avg`): las transacciones SÍ son inputs del engine → **cada** mutación que
+//!   cambia el conjunto (create, batch, patch, delete, import confirm, delete import, materialize)
+//!   invalida; borrar una regla recurrente NO (sus instancias sobreviven).
+//! - Flip A↔B vía PATCH /v1/installation invalida (el propio PATCH de installation refresca).
 
 mod common;
 
@@ -20,8 +23,73 @@ async fn installation_id(app: &TestApp) -> Uuid {
         .expect("installation id")
 }
 
+fn household_key(iid: Uuid) -> ProjectionCacheKey {
+    ProjectionCacheKey {
+        installation_id: iid,
+        view: LedgerView::Household,
+        owner_user_id: None,
+        density: Density::Monthly,
+    }
+}
+
+async fn present(app: &TestApp, key: &ProjectionCacheKey) -> bool {
+    app.state.projection_cache.read().await.contains_key(key)
+}
+
+/// Calienta la entrada household (monthly) con un GET y verifica que quedó cacheada.
+async fn warm(app: &TestApp, cookie: &str, key: &ProjectionCacheKey) {
+    let r = app.get_with_cookie("/v1/projection/series", cookie).await;
+    assert_eq!(r.status, http::StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(present(app, key).await, "la cache debería estar caliente tras el GET");
+}
+
+/// Espera (polling) a que la invalidación en background (tokio::spawn) tire la entrada.
+async fn assert_invalidated(app: &TestApp, key: &ProjectionCacheKey, what: &str) {
+    for _ in 0..40 {
+        if !present(app, key).await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("modo B: la mutación «{what}» debía invalidar la cache de proyección");
+}
+
+async fn set_mode(app: &TestApp, cookie: &str, source: &str) {
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": { "savings_source": source } }),
+            cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "set mode {source}: {r:?}");
+}
+
+/// Import CSV MyInvestor de una sola fila; devuelve `(file_b64, file_sha256)` listos para confirm.
+async fn preview_csv(app: &TestApp, cookie: &str, concept: &str, amount: &str, day: u32) -> (String, String) {
+    let csv = format!(
+        "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+         {day:02}/06/2026;{day:02}/06/2026;{concept};{amount};EUR\n"
+    );
+    let b64 = B64.encode(csv);
+    let p = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/preview",
+            json!({ "source": "myinvestor", "file_b64": b64 }),
+            cookie,
+        )
+        .await;
+    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    (b64, sha)
+}
+
+// ---------------------------------------------------------------------------
+// Modo A (default `budget`): NINGUNA mutación invalida
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn transaction_mutations_do_not_touch_projection_cache() {
+async fn mode_a_mutations_do_not_touch_projection_cache() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let cat = app.create_category(&owner, "asset", "Cash").await;
@@ -32,24 +100,11 @@ async fn transaction_mutations_do_not_touch_projection_cache() {
     )
     .await;
 
-    // Calentar la cache household (monthly) con un GET.
-    let warm = app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
-    assert_eq!(warm.status, http::StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     let iid = installation_id(&app).await;
-    let key = ProjectionCacheKey {
-        installation_id: iid,
-        view: LedgerView::Household,
-        owner_user_id: None,
-        density: Density::Monthly,
-    };
-    {
-        let cache = app.state.projection_cache.read().await;
-        assert!(cache.contains_key(&key), "household caliente antes de las mutaciones");
-    }
+    let key = household_key(iid);
+    warm(&app, &owner.cookie, &key).await;
 
-    // --- Batería de mutaciones de transacciones ---
+    // --- Batería de mutaciones de transacciones (modo A, default) ---
     // 1. Alta manual.
     let created = app
         .post_json_with_cookie(
@@ -61,36 +116,40 @@ async fn transaction_mutations_do_not_touch_projection_cache() {
     assert_eq!(created.status, http::StatusCode::CREATED);
     let txn_id = created.json()["id"].as_str().unwrap().to_string();
 
-    // 2. Import CSV.
-    let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
-               15/06/2026;15/06/2026;IMPORTADA;-9;EUR\n";
-    let b64 = B64.encode(csv);
-    let p = app
-        .post_json_with_cookie(
-            "/v1/transactions/import/preview",
-            json!({ "source": "myinvestor", "file_b64": b64 }),
-            &owner.cookie,
-        )
-        .await;
-    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    // 2. Batch.
     app.post_json_with_cookie(
-        "/v1/transactions/import/confirm",
-        json!({ "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
-                "decisions": [ { "kind": "expense" } ], "learn_rules": true }),
+        "/v1/transactions/batch",
+        json!({ "transactions": [
+            { "op_date": "2026-06-11", "concept": "Lote", "amount": "-5", "kind": "expense" }
+        ] }),
         &owner.cookie,
     )
     .await;
 
-    // 3. PATCH + 4. DELETE de la manual.
+    // 3. Import CSV (preview + confirm).
+    let (b64, sha) = preview_csv(&app, &owner.cookie, "IMPORTADA", "-9", 15).await;
+    let conf = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/confirm",
+            json!({ "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
+                    "decisions": [ { "kind": "expense" } ], "learn_rules": false }),
+            &owner.cookie,
+        )
+        .await;
+    let import_id = conf.json()["import_id"].as_str().unwrap().to_string();
+
+    // 4. PATCH + 5. delete_import + 6. DELETE de la manual.
     app.patch_json_with_cookie(
         &format!("/v1/transactions/{txn_id}"),
         json!({ "notes": "editada" }),
         &owner.cookie,
     )
     .await;
+    app.delete_with_cookie(&format!("/v1/transactions/imports/{import_id}?confirm=true"), &owner.cookie)
+        .await;
     app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie).await;
 
-    // 5. Alta con recurrencia (crea regla + instancia de origen enlazada).
+    // 7. Alta con recurrencia + 8. materialize + 9. borrado de la regla.
     let rec = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -99,25 +158,155 @@ async fn transaction_mutations_do_not_touch_projection_cache() {
             &owner.cookie,
         )
         .await;
-    assert_eq!(rec.status, http::StatusCode::CREATED);
     let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
-
-    // 6. Materialize + 7. borrado de la regla.
-    app.post_json_with_cookie(
-        "/v1/transactions/recurring/materialize",
-        json!({}),
-        &owner.cookie,
-    )
-    .await;
+    app.post_json_with_cookie("/v1/transactions/recurring/materialize", json!({}), &owner.cookie)
+        .await;
     app.delete_with_cookie(&format!("/v1/transactions/recurring/{rule_id}"), &owner.cookie)
         .await;
 
-    // Margen para cualquier tarea de fondo (no debería haber ninguna que invalide).
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    let cache = app.state.projection_cache.read().await;
+    // Margen para cualquier tarea de fondo (no debería haber ninguna que invalide en modo A).
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        cache.contains_key(&key),
-        "las mutaciones de transacciones NO deben invalidar la cache de proyección (no son inputs del engine)"
+        present(&app, &key).await,
+        "modo A: las mutaciones de transacciones NO deben invalidar la cache (no son inputs del engine)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Modo B (`transactions_avg`): CADA mutación invalida
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mode_b_each_mutation_invalidates_projection_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+
+    // 1. create
+    warm(&app, &owner.cookie, &key).await;
+    let created = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-05-10", "concept": "Manual", "amount": "-25", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED);
+    let txn_id = created.json()["id"].as_str().unwrap().to_string();
+    assert_invalidated(&app, &key, "create").await;
+
+    // 2. batch
+    warm(&app, &owner.cookie, &key).await;
+    app.post_json_with_cookie(
+        "/v1/transactions/batch",
+        json!({ "transactions": [
+            { "op_date": "2026-05-11", "concept": "Lote", "amount": "-5", "kind": "expense" }
+        ] }),
+        &owner.cookie,
+    )
+    .await;
+    assert_invalidated(&app, &key, "batch").await;
+
+    // 3. patch
+    warm(&app, &owner.cookie, &key).await;
+    app.patch_json_with_cookie(
+        &format!("/v1/transactions/{txn_id}"),
+        json!({ "notes": "editada" }),
+        &owner.cookie,
+    )
+    .await;
+    assert_invalidated(&app, &key, "patch").await;
+
+    // 4. import confirm
+    warm(&app, &owner.cookie, &key).await;
+    let (b64, sha) = preview_csv(&app, &owner.cookie, "IMPORTADA", "-9", 15).await;
+    let conf = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/confirm",
+            json!({ "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
+                    "decisions": [ { "kind": "expense" } ], "learn_rules": false }),
+            &owner.cookie,
+        )
+        .await;
+    let import_id = conf.json()["import_id"].as_str().unwrap().to_string();
+    assert_invalidated(&app, &key, "import confirm").await;
+
+    // 5. delete import (cascadea sus transacciones)
+    warm(&app, &owner.cookie, &key).await;
+    app.delete_with_cookie(&format!("/v1/transactions/imports/{import_id}?confirm=true"), &owner.cookie)
+        .await;
+    assert_invalidated(&app, &key, "delete import").await;
+
+    // 6. delete
+    warm(&app, &owner.cookie, &key).await;
+    app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie).await;
+    assert_invalidated(&app, &key, "delete").await;
+
+    // 7. materialize (regla con cursor 2 meses atrás → genera ≥1 instancia)
+    let rec = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-04-15", "concept": "Nomina", "amount": "1500",
+                    "kind": "income", "recurrence": { "day_of_month": 15 } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rec.status, http::StatusCode::CREATED);
+    let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
+    warm(&app, &owner.cookie, &key).await;
+    let mat = app
+        .post_json_with_cookie("/v1/transactions/recurring/materialize", json!({}), &owner.cookie)
+        .await;
+    assert!(mat.json()["materialized"].as_u64().unwrap() >= 1, "materialize debe generar ≥1: {mat:?}");
+    assert_invalidated(&app, &key, "materialize").await;
+
+    // 8. borrar la regla recurrente NO invalida (instancias sobreviven, conjunto sin cambios).
+    warm(&app, &owner.cookie, &key).await;
+    app.delete_with_cookie(&format!("/v1/transactions/recurring/{rule_id}"), &owner.cookie)
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        present(&app, &key).await,
+        "modo B: borrar una regla recurrente NO cambia el conjunto de transacciones → no debe invalidar"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Flip A↔B vía PATCH /v1/installation invalida
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn flipping_savings_source_invalidates_projection_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+
+    // A → B
+    warm(&app, &owner.cookie, &key).await;
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+    assert_invalidated(&app, &key, "flip A→B").await;
+
+    // B → A
+    warm(&app, &owner.cookie, &key).await;
+    set_mode(&app, &owner.cookie, "budget").await;
+    assert_invalidated(&app, &key, "flip B→A").await;
 }
