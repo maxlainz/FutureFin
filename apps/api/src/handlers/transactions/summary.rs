@@ -35,7 +35,7 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use sqlx::FromRow;
+use sqlx::{FromRow, PgPool};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -131,6 +131,118 @@ fn bucket_all(
         .filter(|((y, k, _), _)| y == ym && k == kind)
         .map(|(_, v)| *v)
         .sum()
+}
+
+/// Promedio ponderado mensual de las transacciones de los 12 meses civiles COMPLETOS anteriores a
+/// hoy (ventana medio-abierta `[first_of_month(today) − 12m, first_of_month(today))`). A diferencia
+/// del summary de Movimientos, esta ventana **incluye** el último mes completo y excluye solo el mes
+/// en curso (parcial). Lo consume la proyección modo B (`savings_source = transactions_avg`).
+///
+/// Signos (magnitudes ≥ 0, como en el summary): `income` guardado positivo → `income_avg`;
+/// `expense` guardado negativo → `expense_avg = −Σ`. `savings` y `kind NULL` NO cuentan para
+/// income/expense (pero un mes con solo transacciones de esos tipos SÍ suma a `months_with_data`,
+/// mismo criterio que el summary). Denominador = `months_with_data` (meses del tramo con ≥1
+/// transacción de cualquier kind); `0` real → todo a cero, el llamante decide el fallback.
+pub(crate) struct TransactionsAvg {
+    pub income_avg: Decimal,
+    pub expense_avg: Decimal,
+    /// Promedio mensual (magnitud) de las transacciones `expense` con `linked_liability_id`, por
+    /// liability. Mismo denominador `months_with_data`.
+    pub per_liability_linked_avg: HashMap<Uuid, Decimal>,
+    pub months_with_data: u32,
+}
+
+pub(crate) async fn transactions_12m_avg(
+    pool: &PgPool,
+    installation_id: Uuid,
+    session_user_id: Uuid,
+    view: LedgerView,
+    today: NaiveDate,
+) -> Result<TransactionsAvg, ApiError> {
+    let window_end = first_of_month(today.year(), today.month());
+    let (sy, sm) = shift_month(today.year(), today.month(), -12);
+    let window_start = first_of_month(sy, sm);
+
+    let scope = view.scope_where("t");
+    let arg = view.next_arg_index();
+
+    // `months_with_data`: meses distintos del tramo con ≥1 transacción de cualquier kind (incluye
+    // `savings` y `kind NULL`), mismo criterio que el summary.
+    let months_sql = format!(
+        "SELECT COUNT(DISTINCT to_char(t.op_date, 'YYYY-MM'))::int
+         FROM transactions t
+         WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}",
+        end = arg + 1
+    );
+    let months_with_data: i32 = view
+        .bind_scope_scalar(sqlx::query_scalar(&months_sql), installation_id, session_user_id)
+        .bind(window_start)
+        .bind(window_end)
+        .fetch_one(pool)
+        .await?;
+    let months_with_data = months_with_data.max(0) as u32;
+
+    if months_with_data == 0 {
+        return Ok(TransactionsAvg {
+            income_avg: Decimal::ZERO,
+            expense_avg: Decimal::ZERO,
+            per_liability_linked_avg: HashMap::new(),
+            months_with_data: 0,
+        });
+    }
+    let denom = Decimal::from(months_with_data);
+
+    // Suma firmada por kind (solo income/expense).
+    let kind_sql = format!(
+        "SELECT t.kind AS kind, SUM(t.amount) AS total
+         FROM transactions t
+         WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
+           AND t.kind IN ('income', 'expense')
+         GROUP BY t.kind",
+        end = arg + 1
+    );
+    let kind_rows: Vec<(Option<String>, Decimal)> = view
+        .bind_scope_as(sqlx::query_as(&kind_sql), installation_id, session_user_id)
+        .bind(window_start)
+        .bind(window_end)
+        .fetch_all(pool)
+        .await?;
+    let mut income_sum = Decimal::ZERO;
+    let mut expense_sum = Decimal::ZERO;
+    for (kind, total) in kind_rows {
+        match kind.as_deref() {
+            Some("income") => income_sum += total,
+            Some("expense") => expense_sum += total,
+            _ => {}
+        }
+    }
+
+    // Cuotas vinculadas: Σ de expense con `linked_liability_id`, por liability.
+    let liab_sql = format!(
+        "SELECT t.linked_liability_id AS liability_id, SUM(t.amount) AS total
+         FROM transactions t
+         WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
+           AND t.kind = 'expense' AND t.linked_liability_id IS NOT NULL
+         GROUP BY t.linked_liability_id",
+        end = arg + 1
+    );
+    let liab_rows: Vec<(Uuid, Decimal)> = view
+        .bind_scope_as(sqlx::query_as(&liab_sql), installation_id, session_user_id)
+        .bind(window_start)
+        .bind(window_end)
+        .fetch_all(pool)
+        .await?;
+    let per_liability_linked_avg: HashMap<Uuid, Decimal> = liab_rows
+        .into_iter()
+        .map(|(id, total)| (id, (-total) / denom))
+        .collect();
+
+    Ok(TransactionsAvg {
+        income_avg: income_sum / denom,
+        expense_avg: (-expense_sum) / denom,
+        per_liability_linked_avg,
+        months_with_data,
+    })
 }
 
 #[utoipa::path(

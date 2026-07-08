@@ -48,6 +48,34 @@ impl<'de> Deserialize<'de> for FireNumberMode {
     }
 }
 
+/// Fuente del ahorro mensual de la simulación: presupuesto (modo A, default) vs promedio real de
+/// las transacciones de los últimos 12 meses (modo B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SavingsSource {
+    #[default]
+    Budget,
+    TransactionsAvg,
+}
+
+impl<'de> Deserialize<'de> for SavingsSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "budget" => Ok(Self::Budget),
+            "transactions_avg" => Ok(Self::TransactionsAvg),
+            _ => Err(D::Error::unknown_variant(
+                &s,
+                &["budget", "transactions_avg"],
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TaxBracket {
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -70,6 +98,9 @@ pub struct FireSettings {
     pub swr_pct: Decimal,
     pub taxes_enabled: bool,
     pub tax_brackets: Vec<TaxBracket>,
+    /// Fuente del ahorro de la simulación. Ausente en JSON → `budget` (cubierto por el
+    /// `#[serde(default)]` a nivel struct, que rellena los campos faltantes desde `default_fire_settings`).
+    pub savings_source: SavingsSource,
 }
 
 impl Default for FireSettings {
@@ -85,6 +116,7 @@ pub(crate) fn default_fire_settings() -> FireSettings {
         swr_pct: Decimal::new(35, 1),
         taxes_enabled: true,
         tax_brackets: default_es_tax_brackets(),
+        savings_source: SavingsSource::Budget,
     }
 }
 
