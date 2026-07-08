@@ -408,7 +408,7 @@ pub async fn import_confirm(
 
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
     Ok(Json(ImportConfirmResponse {
         import_id: final_import_id,
         imported,

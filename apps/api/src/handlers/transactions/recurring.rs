@@ -324,7 +324,7 @@ pub async fn materialize_recurring(
 
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
     Ok(Json(MaterializeResponse {
         rules_processed,
         materialized,

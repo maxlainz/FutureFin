@@ -226,15 +226,25 @@ pub async fn next_fingerprint_ordinal(
 /// está en modo `transactions_avg` (entonces las transacciones son inputs del engine). En modo
 /// `budget` no hace nada (contrato histórico: las transacciones no tocan la proyección). Llamar tras
 /// commitear la mutación con éxito. La invalidación real corre en background (`tokio::spawn`).
+///
+/// **Best-effort**: se ejecuta después de `tx.commit()`, con la escritura ya persistida. Un error del
+/// SELECT de `savings_source` NO debe convertir una mutación exitosa en un 5xx: el cliente reintentaría
+/// y duplicaría la transacción (el `fingerprint_ordinal` no lo impide). Por eso nunca propaga: un fallo
+/// solo se registra y la cache caliente queda como estaba (la sirve el TTL / el próximo warm-up).
 pub(crate) async fn invalidate_projection_if_transactions_avg(
     state: &Arc<AppState>,
     iid: Uuid,
     user_id: Uuid,
-) -> Result<(), ApiError> {
-    if projection_savings_source(&state.pool, iid).await? == SavingsSource::TransactionsAvg {
-        refresh_projection_after_mutation(state.clone(), iid, user_id);
+) {
+    match projection_savings_source(&state.pool, iid).await {
+        Ok(SavingsSource::TransactionsAvg) => {
+            refresh_projection_after_mutation(state.clone(), iid, user_id)
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = ?e, "post-commit projection invalidation skipped")
+        }
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

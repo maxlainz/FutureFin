@@ -1097,19 +1097,25 @@ export default function App() {
         // El preview del target en modo B (promedio) consume los equivalentes efectivos
         // del summary; lo cargamos aquí para que sea fresco y coherente con el scope
         // activo. Independiente y silencioso: cualquier fallo degrada el preview al
-        // presupuesto (modo A), sin bloquear budget/proyección.
-        void (async () => {
-          try {
-            const res = await fetch(`/v1/summary${qs}`, defaultFetchInit);
-            if (res.status === 403 || res.status === 404) {
-              setSummary(null);
-            } else if (res.ok) {
-              setSummary((await res.json()) as SummaryResponse);
+        // presupuesto (modo A), sin bloquear budget/proyección. Solo se lanza en modo B:
+        // en presupuesto RetirementView usa la base del budget y este fetch sería inútil.
+        if (
+          installation?.installation?.fire_settings?.savings_source ===
+          "transactions_avg"
+        ) {
+          void (async () => {
+            try {
+              const res = await fetch(`/v1/summary${qs}`, defaultFetchInit);
+              if (res.status === 403 || res.status === 404) {
+                setSummary(null);
+              } else if (res.ok) {
+                setSummary((await res.json()) as SummaryResponse);
+              }
+            } catch {
+              /* stale summary tolerado: el preview degrada a presupuesto */
             }
-          } catch {
-            /* stale summary tolerado: el preview degrada a presupuesto */
-          }
-        })();
+          })();
+        }
         const [budRes, projRes] = await Promise.all([budPromise, projPromise]);
         if (budRes.status === 403 || budRes.status === 404) {
           setRetirementBudgetSnapshot(null);
@@ -1146,7 +1152,7 @@ export default function App() {
         }
       }
     },
-    [ledgerPersonScope],
+    [ledgerPersonScope, installation],
   );
 
   const loadCategories = useCallback(async () => {
