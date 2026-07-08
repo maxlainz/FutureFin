@@ -4,7 +4,7 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.0.0] - 2026-07-09
 
 Toggle **«fuente del ahorro»** de la simulación FIRE: la proyección puede alimentarse del
 **presupuesto** (comportamiento histórico) o del **promedio real de los últimos 12 meses de
