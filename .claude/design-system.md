@@ -50,6 +50,19 @@ El chart se extiende a la izquierda con la serie histórica de patrimonio (meses
 
 Las áreas apiladas por activo del pasado **no** llevan token propio: reutilizan `--proj-area-1..10` (misma regla de rescale I6 que en el futuro). Verifica claro **y** oscuro: el velo `--proj-past-bg` debe leerse sin oscurecer las áreas.
 
+### Tokens de las gráficas de la pestaña «Movimientos» — v1.8.0
+
+Dos gráficas de apoyo (`components/charts/CategoryComparisonBars.tsx`), **amparadas por la excepción de charts** (varios colores funcionales para distinguir series). Fuera de esas gráficas, estos tokens están **prohibidos en chrome, texto o iconos** — como cualquier color de serie.
+
+| Token | Light | Dark | Uso |
+|---|---|---|---|
+| `--exp-average` | `#71717a` (zinc-500) | `#a1a1aa` (zinc-400) | Barra «Promedio» de la comparativa por categoría. La barra «Budget» de esa misma gráfica usa `--ff-accent` (no lleva token propio) |
+| `--cf-income` | `oklch(0.58 0.10 165)` | `oklch(0.72 0.10 165)` | Serie **Ingresos** del cash-flow mensual (`MonthlyCashflowBars`) — verde sobrio |
+| `--cf-expense` | `oklch(0.58 0.13 25)` | `oklch(0.70 0.13 25)` | Serie **Gastos** del cash-flow — rojo sobrio |
+| `--cf-savings` | `= var(--ff-accent)` | `= var(--ff-accent)` | Serie **Ahorro** del cash-flow |
+
+> **Excepción explícita a la regla "sin rojo/verde en el chrome"**: la comparativa por categoría (`CategoryComparisonBars`) pasó de 3 series (Real/Budget/Promedio) a **2 barras** (Budget = `--ff-accent`, Promedio = `--exp-average`); el valor Real vive ahora en la tabla y las KPIs. El cash-flow (`MonthlyCashflowBars`) sí introduce **verde/rojo** (`--cf-income`/`--cf-expense`) para ingresos vs gastos: son colores **funcionales de serie del gráfico**, no chrome decorativo, y por tanto quedan dentro de la única zona (charts) donde el design system acepta varios colores. Verifica claro **y** oscuro.
+
 ## Tema (auto / claro / oscuro)
 
 - Estado vive en `App.tsx` (`themePref: ThemePref`), persistido en `localStorage["ff-theme-pref"]`.
@@ -72,6 +85,7 @@ Las áreas apiladas por activo del pasado **no** llevan token propio: reutilizan
   - Tile con borde + paper, radius `--ff-radius-kpi`, `align-self: stretch` para alinear en altura.
   - **Slot del paréntesis siempre presente** — `MetricCard` renderiza un `<div>` con `&nbsp;` cuando no hay valor, para que dos KPIs en la misma fila tengan baseline alineada.
   - Variantes: `tone="hero" | "accent" | "accent-2"` con tinte progresivo del acento.
+- **Adornos en celdas numéricas alineadas a la derecha**: cualquier adorno variable (flechas de tendencia, badges) va en un **slot de ancho fijo siempre reservado** tras la cifra (mismo principio que el paren-slot de `MetricCard`) — nunca condicional. Si el adorno solo aparece en algunas filas, las cifras se desalinean; el slot vacío mantiene la columna. Precedente: `.exp-trend-slot` en la comparativa de Movimientos.
 
 ## Responsive / móvil
 

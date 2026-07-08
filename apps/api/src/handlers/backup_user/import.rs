@@ -61,6 +61,8 @@ pub struct ImportCounts {
     pub transactions: u32,
     /// Categorization rules in the backup (schema_version ≥ 5; 0 for older files).
     pub categorization_rules: u32,
+    /// Recurring-transaction rules in the backup (schema_version ≥ 6; 0 for older files).
+    pub recurring_transaction_rules: u32,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -176,6 +178,16 @@ pub async fn import_user_backup_apply(
     .await?;
     sqlx::query(
         r#"DELETE FROM categorization_rules WHERE installation_id = $1 AND owner_user_id = $2"#,
+    )
+    .bind(iid)
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
+    //    recurring_transaction_rules after transactions/imports/rules (transactions.recurring_rule_id
+    //    was already cleared by the delete above) and BEFORE assets/liabilities, so its SET NULL FKs
+    //    (linked_asset_id/linked_liability_id) never fire mid-wipe.
+    sqlx::query(
+        r#"DELETE FROM recurring_transaction_rules WHERE installation_id = $1 AND owner_user_id = $2"#,
     )
     .bind(iid)
     .bind(user.id.0)
@@ -311,6 +323,7 @@ async fn compute_counts(
         transaction_imports: payload.transaction_imports.len() as u32,
         transactions: payload.transactions.len() as u32,
         categorization_rules: payload.categorization_rules.len() as u32,
+        recurring_transaction_rules: payload.recurring_transaction_rules.len() as u32,
     })
 }
 
@@ -687,6 +700,82 @@ async fn insert_payload(
         transaction_imports += 1;
     }
 
+    // Insert recurring-transaction rules (schema_version ≥ 6) BEFORE transactions, so a transaction
+    // can resolve its `recurring_rule_index` to a fresh rule UUID. CHECK-backed fields validated in
+    // Rust → 400 (not a 500 from the constraint).
+    let mut new_recurring_rule_ids: Vec<Uuid> =
+        Vec::with_capacity(payload.recurring_transaction_rules.len());
+    let mut recurring_transaction_rules = 0u32;
+    for r in &payload.recurring_transaction_rules {
+        if !matches!(r.kind.as_str(), "expense" | "income" | "savings") {
+            return Err(ApiError::BadRequest(
+                "recurring_rule_kind_invalid: kind must be expense, income or savings".into(),
+            ));
+        }
+        if !(1..=31).contains(&r.day_of_month) {
+            return Err(ApiError::BadRequest(
+                "recurring_rule_day_out_of_range: day_of_month must be between 1 and 31".into(),
+            ));
+        }
+        let concept = r.concept.trim();
+        if concept.is_empty() {
+            return Err(ApiError::BadRequest(
+                "recurring_rule_concept_empty: concept must not be empty".into(),
+            ));
+        }
+        if concept.chars().count() > 500 {
+            return Err(ApiError::BadRequest(
+                "recurring_rule_concept_too_long: concept must be at most 500 characters".into(),
+            ));
+        }
+        let amount = r.amount.round_dp(4);
+        if amount.is_zero() {
+            return Err(ApiError::BadRequest(
+                "recurring_rule_amount_zero: amount must not be zero".into(),
+            ));
+        }
+        let category_id = match &r.category_ref {
+            Some(cr) => Some(resolve_category(cat_map, &cr.scope, &cr.name)?),
+            None => None,
+        };
+        let linked_asset_id = match r.linked_asset_index {
+            Some(i) => Some(*new_asset_ids.get(i).ok_or_else(|| {
+                ApiError::BadRequest("recurring_rule.linked_asset_index out of bounds".into())
+            })?),
+            None => None,
+        };
+        let linked_liability_id = match r.linked_liability_index {
+            Some(i) => Some(*new_liability_ids.get(i).ok_or_else(|| {
+                ApiError::BadRequest("recurring_rule.linked_liability_index out of bounds".into())
+            })?),
+            None => None,
+        };
+        let new_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO recurring_transaction_rules
+                   (id, installation_id, owner_user_id, concept, amount, kind, category_id,
+                    day_of_month, linked_asset_id, linked_liability_id, notes,
+                    last_materialized_month)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+        )
+        .bind(new_id)
+        .bind(iid)
+        .bind(user_id)
+        .bind(concept)
+        .bind(amount)
+        .bind(&r.kind)
+        .bind(category_id)
+        .bind(r.day_of_month)
+        .bind(linked_asset_id)
+        .bind(linked_liability_id)
+        .bind(r.notes.as_deref())
+        .bind(r.last_materialized_month)
+        .execute(&mut **tx)
+        .await?;
+        new_recurring_rule_ids.push(new_id);
+        recurring_transaction_rules += 1;
+    }
+
     // Insert transactions: all refs resolved to fresh UUIDs, fingerprint recomputed (never
     // exported), CHECK-backed fields validated in Rust → 400 (not a 500 from the constraint).
     let mut transactions = 0u32;
@@ -736,6 +825,12 @@ async fn insert_payload(
             })?),
             None => None,
         };
+        let recurring_rule_id = match t.recurring_rule_index {
+            Some(i) => Some(*new_recurring_rule_ids.get(i).ok_or_else(|| {
+                ApiError::BadRequest("transaction.recurring_rule_index out of bounds".into())
+            })?),
+            None => None,
+        };
         let amount = t.amount.round_dp(4);
         let fingerprint =
             crate::handlers::transactions::schema::compute_fingerprint(&t.source, t.op_date, amount, concept);
@@ -743,8 +838,8 @@ async fn insert_payload(
             r#"INSERT INTO transactions
                    (id, installation_id, owner_user_id, import_id, source, op_date, value_date,
                     concept, amount, currency, kind, category_id, fingerprint, fingerprint_ordinal,
-                    linked_asset_id, linked_liability_id, notes)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"#,
+                    linked_asset_id, linked_liability_id, notes, recurring_rule_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)"#,
         )
         .bind(Uuid::new_v4())
         .bind(iid)
@@ -763,6 +858,7 @@ async fn insert_payload(
         .bind(linked_asset_id)
         .bind(linked_liability_id)
         .bind(t.notes.as_deref())
+        .bind(recurring_rule_id)
         .execute(&mut **tx)
         .await?;
         transactions += 1;
@@ -831,6 +927,7 @@ async fn insert_payload(
         transaction_imports,
         transactions,
         categorization_rules,
+        recurring_transaction_rules,
     })
 }
 

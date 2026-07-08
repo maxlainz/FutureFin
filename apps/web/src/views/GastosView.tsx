@@ -8,8 +8,17 @@
  * → Movimientos (tabla con edición inline optimista + modal de edición completa + borrado).
  */
 
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { apiDelete, apiGet, apiPatch } from "../api/client";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
+import { apiDelete, apiGet, apiPatch, apiPost } from "../api/client";
 import type {
   AssetApiRow,
   CategoryComparisonLineApi,
@@ -18,6 +27,7 @@ import type {
   InstallationAccess,
   LiabilityApiRow,
   PatchTransactionRequest,
+  RecurringMaterializeResponse,
   TransactionApi,
   TransactionKindApi,
   TransactionMonthApi,
@@ -27,10 +37,14 @@ import type {
 import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
   ChevronIcon,
   ChevronLeftIcon,
+  EqualsIcon,
   LinkIcon,
   PlusIcon,
+  RefreshIcon,
   RowEditIcon,
   RowTrashIcon,
   UploadIcon,
@@ -51,20 +65,30 @@ import { formatDateDm, formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
 import { ledgerViewQs, type LedgerPersonScope } from "../lib/ledger";
 import { useIsMobile } from "../lib/responsive";
 import {
+  AVG_WINDOWS,
   KIND_LABEL_ES,
   TRANSACTION_KINDS,
   adjacentMonthInList,
+  avgWindowLabel,
   categoriesForKind,
   defaultSelectedMonth,
-  deltaToneClass,
   formatDeltaCurrency,
+  groupTransactionsByCategory,
   monthLabelEs,
+  naturalSortDir,
   parseMonth,
+  significanceThreshold,
+  significantDeltaTone,
+  sortTransactionGroups,
+  sortTransactions,
+  transactionMatchesQuery,
+  trendArrow,
+  type TxnSortDir,
+  type TxnSortKey,
 } from "../lib/expenses";
 import { ImportWizardModal } from "./ImportWizardModal";
 import { ManualCashEntryModal } from "./ManualCashEntryModal";
-
-const AVG_WINDOWS = [3, 6, 12];
+import { RecurringRulesModal } from "./RecurringRulesModal";
 
 export function GastosView({
   installation,
@@ -95,7 +119,7 @@ export function GastosView({
   const [liabilities, setLiabilities] = useState<LiabilityApiRow[]>([]);
   const [months, setMonths] = useState<TransactionMonthApi[]>([]);
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
-  const [avgMonths, setAvgMonths] = useState<number>(6);
+  const [avgWindow, setAvgWindow] = useState<string>("6");
 
   const [summary, setSummary] = useState<TransactionsSummaryApi | null>(null);
   const [transactions, setTransactions] = useState<TransactionApi[]>([]);
@@ -109,9 +133,31 @@ export function GastosView({
 
   const [importOpen, setImportOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
+  const [recurringOpen, setRecurringOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<TransactionApi | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<TransactionApi | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [deletingRecurring, setDeletingRecurring] = useState(false);
+  /** Materialización de recurrentes: una sola vez por montaje de la vista. */
+  const materializedOnce = useRef(false);
+
+  // Controles de la tabla de movimientos (estado local, filtrado/orden en vivo, sin fetch).
+  const [movementQuery, setMovementQuery] = useState("");
+  const [grouped, setGrouped] = useState(true);
+  const [sortKey, setSortKey] = useState<TxnSortKey>("date");
+  const [sortDir, setSortDir] = useState<TxnSortDir>("desc");
+
+  const toggleSort = useCallback(
+    (key: TxnSortKey) => {
+      if (sortKey === key) {
+        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+      } else {
+        setSortKey(key);
+        setSortDir(naturalSortDir(key));
+      }
+    },
+    [sortKey],
+  );
 
   // ---- Loaders -----------------------------------------------------------
 
@@ -168,14 +214,14 @@ export function GastosView({
     if (!c) return;
     try {
       const sum = await apiGet<TransactionsSummaryApi>(
-        `/v1/transactions/summary?year=${c.y}&month=${c.m}&avg_months=${avgMonths}${viewAmp}`,
+        `/v1/transactions/summary?year=${c.y}&month=${c.m}&avg_window=${avgWindow}${viewAmp}`,
       );
       setSummary(sum);
     } catch (e) {
       setError(e instanceof Error ? e.message : "No se pudo cargar la comparativa.");
       setSummary(null);
     }
-  }, [selectedMonth, avgMonths, viewAmp]);
+  }, [selectedMonth, avgWindow, viewAmp]);
 
   const loadTransactions = useCallback(async () => {
     if (!selectedMonth) {
@@ -327,10 +373,52 @@ export function GastosView({
     }
   }, [deleteTarget, handleMutated]);
 
+  /** Borra la regla recurrente ANTES del movimiento, luego el movimiento (secuencial). */
+  const confirmDeleteAndStopRecurring = useCallback(async () => {
+    if (!deleteTarget?.recurring_rule_id) return;
+    setDeletingRecurring(true);
+    setRowError(null);
+    try {
+      await apiDelete(
+        `/v1/transactions/recurring/${deleteTarget.recurring_rule_id}`,
+      );
+      await apiDelete(`/v1/transactions/${deleteTarget.id}`);
+      setDeleteTarget(null);
+      setNotice("Movimiento eliminado y repetición detenida.");
+      await handleMutated();
+    } catch (e) {
+      setRowError(e instanceof Error ? e.message : "No se pudo eliminar.");
+      setDeleteTarget(null);
+    } finally {
+      setDeletingRecurring(false);
+    }
+  }, [deleteTarget, handleMutated]);
+
+  // Materializa las reglas recurrentes pendientes una sola vez por montaje. Silencioso:
+  // si falla, el pasado/presente queda igual. Refresca solo si generó algún movimiento.
+  useEffect(() => {
+    if (!hasMembership || !canEdit || materializedOnce.current) return;
+    materializedOnce.current = true;
+    void (async () => {
+      try {
+        const res = await apiPost<RecurringMaterializeResponse>(
+          "/v1/transactions/recurring/materialize",
+          {},
+        );
+        if (res && res.materialized > 0) await handleMutated();
+      } catch {
+        /* silencioso */
+      }
+    })();
+  }, [hasMembership, canEdit, handleMutated]);
+
   // ---- Derived KPIs ------------------------------------------------------
 
   const totals = summary?.totals ?? null;
   const isPartial = summary?.is_partial ?? false;
+  const monthsWithData = summary?.months_with_data ?? 0;
+  const hasAvg = monthsWithData > 0;
+  const threshold = summary ? significanceThreshold(summary.totals) : 0;
 
   const savingsRate = useMemo(() => {
     if (!totals) return null;
@@ -358,11 +446,47 @@ export function GastosView({
         budget: parseDisplayDecimal(l.budget) ?? 0,
         avg: parseDisplayDecimal(l.avg) ?? 0,
       }))
-      .filter((r) => r.actual > 0 || r.budget > 0 || r.avg > 0);
+      // Real ya no se pinta como barra → una fila solo aporta si tiene budget o promedio.
+      .filter((r) => r.budget > 0 || r.avg > 0);
   }, [summary]);
 
   const noCategories =
     incomeCategories.length === 0 && expenseCategories.length === 0;
+
+  // ---- Movimientos: búsqueda / orden / agrupación (todo en cliente) -------
+
+  /** id → nombre de la categoría viva (para las cabeceras de grupo). */
+  const categoryNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of [...incomeCategories, ...expenseCategories]) m.set(c.id, c.name);
+    return m;
+  }, [incomeCategories, expenseCategories]);
+
+  const visibleRows = useMemo(
+    () =>
+      transactions.filter((t) =>
+        transactionMatchesQuery(t.concept, t.category_name ?? null, movementQuery),
+      ),
+    [transactions, movementQuery],
+  );
+
+  const sortedRows = useMemo(
+    () => sortTransactions(visibleRows, sortKey, sortDir),
+    [visibleRows, sortKey, sortDir],
+  );
+
+  // El orden de los GRUPOS es fijo (kind → |subtotal| desc); la clave activa solo
+  // ordena las filas dentro de cada grupo.
+  const movementGroups = useMemo(() => {
+    const gs = groupTransactionsByCategory(visibleRows, categoryNameById);
+    return sortTransactionGroups(gs).map((g) => ({
+      ...g,
+      rows: sortTransactions(g.rows, sortKey, sortDir),
+    }));
+  }, [visibleRows, categoryNameById, sortKey, sortDir]);
+
+  /** Nº de columnas visible de la tabla de movimientos (para el colspan del grupo). */
+  const movementCols = isMobile ? 3 : 6 + (canEdit ? 1 : 0);
 
   // ---- Render helpers ----------------------------------------------------
 
@@ -370,14 +494,50 @@ export function GastosView({
     selectedMonth !== null &&
     months.find((m) => m.month === selectedMonth)?.is_complete === false;
 
+  /**
+   * Flecha de tendencia «real vs promedio» para la celda Real (visible también en móvil). El slot
+   * se renderiza SIEMPRE con ancho fijo (aunque no haya glifo) para no desalinear las cifras de la
+   * columna Real — mismo principio que el paren-slot de MetricCard. Con promedio pero desviación
+   * bajo el umbral → «=» atenuado (`flat`); sin promedio → slot vacío (sin datos ≠ sin cambio).
+   */
+  function renderTrend(deltaVsAvg: number, kind: "expense" | "income") {
+    const arrow = trendArrow(deltaVsAvg, kind, threshold, hasAvg);
+    return (
+      <span
+        className={`exp-trend-slot ${arrow.direction === "flat" ? "muted" : arrow.tone}`}
+        title={arrow.direction ? "Real vs promedio" : undefined}
+        aria-hidden={arrow.direction ? undefined : true}
+      >
+        {arrow.direction === "up" ? (
+          <ArrowUpIcon />
+        ) : arrow.direction === "down" ? (
+          <ArrowDownIcon />
+        ) : arrow.direction === "flat" ? (
+          <EqualsIcon />
+        ) : null}
+      </span>
+    );
+  }
+
   function renderComparisonTable(
     lines: CategoryComparisonLineApi[],
     kind: "expense" | "income",
-    includeDerived: boolean,
+    total: { actual: string; budget: string; avg: string },
+    threshold: number,
+    hasAvg: boolean,
   ) {
-    if (lines.length === 0 && !includeDerived) {
+    if (lines.length === 0) {
       return <p className="muted bordered-top">Sin datos.</p>;
     }
+    const avgLabel = avgWindowLabel(avgWindow);
+    const totalActual = parseDisplayDecimal(total.actual) ?? 0;
+    const totalBudget = parseDisplayDecimal(total.budget) ?? 0;
+    const totalAvg = parseDisplayDecimal(total.avg) ?? 0;
+    const totalDeltaBudget = totalActual - totalBudget;
+    const totalDeltaAvg = totalActual - totalAvg;
+    const totalTone = isPartial
+      ? "muted"
+      : significantDeltaTone(totalDeltaBudget, kind, threshold);
     return (
       <div className="table-scroll bordered-top">
         <table className="assets-table exp-comparison-table">
@@ -387,13 +547,16 @@ export function GastosView({
               <th className="num">Real</th>
               {isMobile ? null : <th className="num">Budget</th>}
               <th className="num">Δ</th>
-              {isMobile ? null : <th className="num">Promedio {avgMonths}m</th>}
+              {isMobile ? null : <th className="num">Promedio {avgLabel}</th>}
             </tr>
           </thead>
           <tbody>
             {lines.map((l) => {
               const dNum = parseDisplayDecimal(l.delta_vs_budget) ?? 0;
-              const toneClass = isPartial ? "muted" : deltaToneClass(dNum, kind);
+              const dAvg = parseDisplayDecimal(l.delta_vs_avg) ?? 0;
+              const toneClass = isPartial
+                ? "muted"
+                : significantDeltaTone(dNum, kind, threshold);
               return (
                 <tr key={l.category_id ?? "uncategorized"}>
                   <td>
@@ -407,11 +570,17 @@ export function GastosView({
                     {isMobile ? (
                       <span className="cell-subline">
                         Budget {formatCurrencyAmount(l.budget, currencyIso)} · Prom{" "}
-                        {avgMonths}m {formatCurrencyAmount(l.avg, currencyIso)}
+                        {avgLabel}{" "}
+                        {hasAvg
+                          ? formatCurrencyAmount(l.avg, currencyIso)
+                          : METRIC_DASH}
                       </span>
                     ) : null}
                   </td>
-                  <td className="num">{formatCurrencyAmount(l.actual, currencyIso)}</td>
+                  <td className="num">
+                    {formatCurrencyAmount(l.actual, currencyIso)}
+                    {renderTrend(dAvg, kind)}
+                  </td>
                   {isMobile ? null : (
                     <td className="num">{formatCurrencyAmount(l.budget, currencyIso)}</td>
                   )}
@@ -419,39 +588,221 @@ export function GastosView({
                     {formatDeltaCurrency(dNum, currencyIso)}
                   </td>
                   {isMobile ? null : (
-                    <td className="num">{formatCurrencyAmount(l.avg, currencyIso)}</td>
+                    <td className="num">
+                      {hasAvg ? formatCurrencyAmount(l.avg, currencyIso) : METRIC_DASH}
+                    </td>
                   )}
                 </tr>
               );
             })}
-            {includeDerived && summary ? (
-              <tr className="exp-derived-row">
-                <td>
-                  {summary.derived_debt_line.label}
-                  {isMobile ? (
-                    <span className="cell-subline">
-                      Budget{" "}
-                      {formatCurrencyAmount(
-                        summary.derived_debt_line.budget,
-                        currencyIso,
-                      )}{" "}
-                      · Prom {avgMonths}m {METRIC_DASH}
-                    </span>
-                  ) : null}
+            <tr className="exp-total-row">
+              <td>
+                Total
+                {isMobile ? (
+                  <span className="cell-subline">
+                    Budget {formatCurrencyAmount(total.budget, currencyIso)} · Prom{" "}
+                    {avgLabel}{" "}
+                    {hasAvg
+                      ? formatCurrencyAmount(total.avg, currencyIso)
+                      : METRIC_DASH}
+                  </span>
+                ) : null}
+              </td>
+              <td className="num">
+                {formatCurrencyAmount(total.actual, currencyIso)}
+                {renderTrend(totalDeltaAvg, kind)}
+              </td>
+              {isMobile ? null : (
+                <td className="num">{formatCurrencyAmount(total.budget, currencyIso)}</td>
+              )}
+              <td className={`num ${totalTone}`}>
+                {formatDeltaCurrency(totalDeltaBudget, currencyIso)}
+              </td>
+              {isMobile ? null : (
+                <td className="num">
+                  {hasAvg ? formatCurrencyAmount(total.avg, currencyIso) : METRIC_DASH}
                 </td>
-                <td className="num">{METRIC_DASH}</td>
-                {isMobile ? null : (
-                  <td className="num">
-                    {formatCurrencyAmount(summary.derived_debt_line.budget, currencyIso)}
-                  </td>
-                )}
-                <td className="num">{METRIC_DASH}</td>
-                {isMobile ? null : <td className="num">{METRIC_DASH}</td>}
-              </tr>
-            ) : null}
+              )}
+            </tr>
           </tbody>
         </table>
       </div>
+    );
+  }
+
+  /** Cabecera ordenable de la tabla de movimientos (`<th>` con `aria-sort` + botón e indicador). */
+  function renderSortHeader(label: string, key: TxnSortKey, numeric = false) {
+    const active = sortKey === key;
+    return (
+      <th
+        className={numeric ? "num" : undefined}
+        aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
+      >
+        <button
+          type="button"
+          className={`exp-sort-btn ${active ? "is-active" : ""}`}
+          onClick={() => toggleSort(key)}
+        >
+          <span>{label}</span>
+          {active ? sortDir === "asc" ? <ArrowUpIcon /> : <ArrowDownIcon /> : null}
+        </button>
+      </th>
+    );
+  }
+
+  /** Una fila de la tabla de movimientos (compartida por el modo agrupado y el plano). */
+  function renderMovementRow(t: TransactionApi): ReactNode {
+    const kind = t.kind ?? "expense";
+    const amountNum = parseDisplayDecimal(t.amount) ?? 0;
+    const amountClass = amountNum < 0 ? "num-neg" : amountNum > 0 ? "num-pos" : "";
+    const cats = categoriesForKind(kind, incomeCategories, expenseCategories);
+    const hasLink = !!(t.linked_asset_id || t.linked_liability_id);
+    const rowTappable = isMobile && canEdit;
+    const openEdit = () => {
+      setRowError(null);
+      setEditTarget(t);
+    };
+    const categoryLabel =
+      t.category_name ?? (kind === "savings" ? "—" : "Sin categoría");
+    return (
+      <tr
+        key={t.id}
+        className={rowTappable ? "row-tappable" : undefined}
+        role={rowTappable ? "button" : undefined}
+        tabIndex={rowTappable ? 0 : undefined}
+        onClick={rowTappable ? openEdit : undefined}
+        onKeyDown={
+          rowTappable
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openEdit();
+                }
+              }
+            : undefined
+        }
+      >
+        <td>{isMobile ? formatDateDm(t.op_date) : formatDateDmy(t.op_date)}</td>
+        <td className="exp-concept-cell">
+          {t.concept}
+          {isMobile ? (
+            <span className="cell-subline">
+              {categoryLabel} · {KIND_LABEL_ES[kind]}
+              {t.import_id ? null : " · efectivo"}
+              {t.recurring_rule_id ? " · recurrente" : null}
+              {hasLink ? (
+                <>
+                  {" · "}
+                  <LinkIcon />
+                </>
+              ) : null}
+            </span>
+          ) : (
+            <>
+              {t.import_id ? null : (
+                <span className="exp-source-tag"> efectivo</span>
+              )}
+              {t.recurring_rule_id ? (
+                <span className="exp-source-tag exp-recurring-tag">
+                  {" "}
+                  <RefreshIcon /> recurrente
+                </span>
+              ) : null}
+            </>
+          )}
+        </td>
+        {isMobile ? null : (
+          <td>
+            <span className="exp-cat-edit">
+              {kind !== "savings" && !t.category_id ? (
+                <span className="exp-cat-dot" aria-hidden />
+              ) : null}
+              <select
+                className="exp-inline-select"
+                value={t.category_id ?? ""}
+                disabled={!canEdit || kind === "savings"}
+                aria-label="Categoría"
+                onChange={(e) => onInlineCategory(t, e.target.value)}
+              >
+                <option value="">
+                  {kind === "savings" ? "—" : "Sin categoría"}
+                </option>
+                {cats.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </span>
+          </td>
+        )}
+        {isMobile ? null : (
+          <td>
+            <select
+              className={`exp-inline-select exp-kind-select ${
+                kind === "savings" ? "exp-kind-select--savings" : ""
+              }`}
+              value={kind}
+              disabled={!canEdit}
+              aria-label="Tipo"
+              onChange={(e) =>
+                onInlineKind(t, e.target.value as TransactionKindApi)
+              }
+            >
+              {TRANSACTION_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {KIND_LABEL_ES[k]}
+                </option>
+              ))}
+            </select>
+          </td>
+        )}
+        <td className={`num ${amountClass}`}>
+          {formatCurrencyAmount(t.amount, currencyIso)}
+          {rowTappable ? (
+            <span className="row-chevron" aria-hidden>
+              ›
+            </span>
+          ) : null}
+        </td>
+        {isMobile ? null : (
+          <td className="exp-link-col">
+            {hasLink ? (
+              <span className="exp-link-indicator" title="Con vínculo">
+                <LinkIcon />
+              </span>
+            ) : null}
+          </td>
+        )}
+        {!isMobile && canEdit ? (
+          <td className="asset-actions-cell">
+            <div className="budget-row-actions">
+              <button
+                type="button"
+                className="btn ghost icon-btn"
+                aria-label="Editar movimiento"
+                onClick={() => {
+                  setRowError(null);
+                  setEditTarget(t);
+                }}
+              >
+                <RowEditIcon />
+              </button>
+              <button
+                type="button"
+                className="btn ghost danger icon-btn"
+                aria-label="Eliminar movimiento"
+                onClick={() => {
+                  setRowError(null);
+                  setDeleteTarget(t);
+                }}
+              >
+                <RowTrashIcon />
+              </button>
+            </div>
+          </td>
+        ) : null}
+      </tr>
     );
   }
 
@@ -460,7 +811,7 @@ export function GastosView({
   return (
     <div className="workspace expenses-page">
       <div className="workspace-header">
-        <h2 className="workspace-title">Gastos</h2>
+        <h2 className="workspace-title">Movimientos</h2>
         <p className="workspace-sub">
           {bootstrapLoading
             ? "Cargando…"
@@ -506,7 +857,9 @@ export function GastosView({
                 totals ? formatCurrencyOrDash(totals.expense_actual, currencyIso) : METRIC_DASH
               }
               parenthetical={
-                totals ? `media ${formatCurrencyAmount(totals.expense_avg, currencyIso)}` : undefined
+                totals
+                  ? `media ${hasAvg ? formatCurrencyAmount(totals.expense_avg, currencyIso) : METRIC_DASH}`
+                  : undefined
               }
             />
             <MetricCard
@@ -515,7 +868,9 @@ export function GastosView({
                 totals ? formatCurrencyOrDash(totals.income_actual, currencyIso) : METRIC_DASH
               }
               parenthetical={
-                totals ? `media ${formatCurrencyAmount(totals.income_avg, currencyIso)}` : undefined
+                totals
+                  ? `media ${hasAvg ? formatCurrencyAmount(totals.income_avg, currencyIso) : METRIC_DASH}`
+                  : undefined
               }
             />
             <MetricCard
@@ -524,7 +879,9 @@ export function GastosView({
                 totals ? formatCurrencyOrDash(totals.savings_actual, currencyIso) : METRIC_DASH
               }
               parenthetical={
-                totals ? `media ${formatCurrencyAmount(totals.savings_avg, currencyIso)}` : undefined
+                totals
+                  ? `media ${hasAvg ? formatCurrencyAmount(totals.savings_avg, currencyIso) : METRIC_DASH}`
+                  : undefined
               }
               tone="accent-2"
             />
@@ -532,9 +889,11 @@ export function GastosView({
               label="Tasa de ahorro"
               value={savingsRate !== null ? formatPercentDisplay(savingsRate) : METRIC_DASH}
               parenthetical={
-                savingsRateAvg !== null
-                  ? `media ${formatPercentDisplay(savingsRateAvg)}`
-                  : "vs media"
+                !hasAvg
+                  ? `media ${METRIC_DASH}`
+                  : savingsRateAvg !== null
+                    ? `media ${formatPercentDisplay(savingsRateAvg)}`
+                    : "vs media"
               }
               tone="accent"
             />
@@ -613,13 +972,13 @@ export function GastosView({
             <div className="expenses-window-pills" role="group" aria-label="Ventana del promedio">
               {AVG_WINDOWS.map((w) => (
                 <button
-                  key={w}
+                  key={w.id}
                   type="button"
-                  className={`ff-nav-pill ${avgMonths === w ? "is-active" : ""}`}
-                  aria-current={avgMonths === w ? "true" : undefined}
-                  onClick={() => setAvgMonths(w)}
+                  className={`ff-nav-pill ${avgWindow === w.id ? "is-active" : ""}`}
+                  aria-current={avgWindow === w.id ? "true" : undefined}
+                  onClick={() => setAvgWindow(w.id)}
                 >
-                  {w}m
+                  {w.pill}
                 </button>
               ))}
             </div>
@@ -641,6 +1000,14 @@ export function GastosView({
                 >
                   <PlusIcon />
                   Añadir efectivo
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost expenses-action-btn"
+                  onClick={() => setRecurringOpen(true)}
+                >
+                  <RefreshIcon />
+                  Recurrentes
                 </button>
               </div>
             ) : null}
@@ -681,7 +1048,13 @@ export function GastosView({
                         {renderComparisonTable(
                           summary.expense_categories,
                           "expense",
-                          true,
+                          {
+                            actual: summary.totals.expense_actual,
+                            budget: summary.totals.expense_budget,
+                            avg: summary.totals.expense_avg,
+                          },
+                          threshold,
+                          hasAvg,
                         )}
                       </div>
                       <div className="exp-comparison-col">
@@ -689,14 +1062,21 @@ export function GastosView({
                         {renderComparisonTable(
                           summary.income_categories,
                           "income",
-                          false,
+                          {
+                            actual: summary.totals.income_actual,
+                            budget: summary.totals.income_budget,
+                            avg: summary.totals.income_avg,
+                          },
+                          threshold,
+                          hasAvg,
                         )}
                       </div>
                     </div>
                     <CategoryComparisonBars
                       rows={comparisonBarRows}
                       currencyIso={currencyIso}
-                      avgMonths={avgMonths}
+                      avgLabel={avgWindowLabel(avgWindow)}
+                      hasAvg={hasAvg}
                     />
                   </>
                 )}
@@ -732,184 +1112,97 @@ export function GastosView({
                 ) : transactions.length === 0 ? (
                   <p className="muted bordered-top">Sin movimientos este mes.</p>
                 ) : (
-                  <div className="table-scroll table-scroll--sticky bordered-top">
-                    <table className="assets-table exp-movements-table">
-                      <thead>
-                        <tr>
-                          <th>Fecha</th>
-                          <th>Concepto</th>
-                          {isMobile ? null : <th>Categoría</th>}
-                          {isMobile ? null : <th>Tipo</th>}
-                          <th className="num">Importe</th>
-                          {isMobile ? null : (
-                            <th className="exp-link-col">
-                              <span className="sr-only">Vínculo</span>
-                            </th>
-                          )}
-                          {!isMobile && canEdit ? (
-                            <th className="asset-actions-cell">
-                              <span className="sr-only">Acciones</span>
-                            </th>
-                          ) : null}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {transactions.map((t) => {
-                          const kind = t.kind ?? "expense";
-                          const amountNum = parseDisplayDecimal(t.amount) ?? 0;
-                          const amountClass =
-                            amountNum < 0 ? "num-neg" : amountNum > 0 ? "num-pos" : "";
-                          const cats = categoriesForKind(
-                            kind,
-                            incomeCategories,
-                            expenseCategories,
-                          );
-                          const hasLink = !!(t.linked_asset_id || t.linked_liability_id);
-                          const rowTappable = isMobile && canEdit;
-                          const openEdit = () => {
-                            setRowError(null);
-                            setEditTarget(t);
-                          };
-                          const categoryLabel =
-                            t.category_name ??
-                            (kind === "savings" ? "—" : "Sin categoría");
-                          return (
-                            <tr
-                              key={t.id}
-                              className={rowTappable ? "row-tappable" : undefined}
-                              role={rowTappable ? "button" : undefined}
-                              tabIndex={rowTappable ? 0 : undefined}
-                              onClick={rowTappable ? openEdit : undefined}
-                              onKeyDown={
-                                rowTappable
-                                  ? (e) => {
-                                      if (e.key === "Enter" || e.key === " ") {
-                                        e.preventDefault();
-                                        openEdit();
-                                      }
-                                    }
-                                  : undefined
-                              }
-                            >
-                              <td>
-                                {isMobile
-                                  ? formatDateDm(t.op_date)
-                                  : formatDateDmy(t.op_date)}
-                              </td>
-                              <td className="exp-concept-cell">
-                                {t.concept}
-                                {isMobile ? (
-                                  <span className="cell-subline">
-                                    {categoryLabel} · {KIND_LABEL_ES[kind]}
-                                    {t.import_id ? null : " · efectivo"}
-                                    {hasLink ? (
-                                      <>
-                                        {" · "}
-                                        <LinkIcon />
-                                      </>
-                                    ) : null}
-                                  </span>
-                                ) : t.import_id ? null : (
-                                  <span className="exp-source-tag"> efectivo</span>
-                                )}
-                              </td>
+                  <>
+                    {/* Controles: búsqueda + agrupación (estado local, en vivo) */}
+                    <div className="exp-movements-controls bordered-top">
+                      <label className="field exp-search-field">
+                        <span className="sr-only">Buscar movimientos</span>
+                        <input
+                          type="search"
+                          value={movementQuery}
+                          placeholder="Buscar…"
+                          aria-label="Buscar movimientos"
+                          onChange={(e) => setMovementQuery(e.target.value)}
+                        />
+                      </label>
+                      <div
+                        className="exp-movements-group-toggle"
+                        role="group"
+                        aria-label="Agrupación"
+                      >
+                        <button
+                          type="button"
+                          className={`ff-nav-pill ${grouped ? "is-active" : ""}`}
+                          aria-pressed={grouped}
+                          onClick={() => setGrouped((g) => !g)}
+                        >
+                          Por categoría
+                        </button>
+                      </div>
+                    </div>
+                    {visibleRows.length === 0 ? (
+                      <p className="muted exp-movements-empty">Sin resultados.</p>
+                    ) : (
+                      <div className="table-scroll">
+                        <table className="assets-table exp-movements-table">
+                          <thead>
+                            <tr>
+                              {renderSortHeader("Fecha", "date")}
+                              {renderSortHeader("Concepto", "concept")}
+                              {isMobile ? null : <th>Categoría</th>}
+                              {isMobile ? null : <th>Tipo</th>}
+                              {renderSortHeader("Importe", "amount", true)}
                               {isMobile ? null : (
-                                <td>
-                                  <span className="exp-cat-edit">
-                                    {kind !== "savings" && !t.category_id ? (
-                                      <span className="exp-cat-dot" aria-hidden />
-                                    ) : null}
-                                    <select
-                                      className="exp-inline-select"
-                                      value={t.category_id ?? ""}
-                                      disabled={!canEdit || kind === "savings"}
-                                      aria-label="Categoría"
-                                      onChange={(e) => onInlineCategory(t, e.target.value)}
-                                    >
-                                      <option value="">
-                                        {kind === "savings" ? "—" : "Sin categoría"}
-                                      </option>
-                                      {cats.map((c) => (
-                                        <option key={c.id} value={c.id}>
-                                          {c.name}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </span>
-                                </td>
-                              )}
-                              {isMobile ? null : (
-                                <td>
-                                  <select
-                                    className={`exp-inline-select exp-kind-select ${
-                                      kind === "savings" ? "exp-kind-select--savings" : ""
-                                    }`}
-                                    value={kind}
-                                    disabled={!canEdit}
-                                    aria-label="Tipo"
-                                    onChange={(e) =>
-                                      onInlineKind(t, e.target.value as TransactionKindApi)
-                                    }
-                                  >
-                                    {TRANSACTION_KINDS.map((k) => (
-                                      <option key={k} value={k}>
-                                        {KIND_LABEL_ES[k]}
-                                      </option>
-                                    ))}
-                                  </select>
-                                </td>
-                              )}
-                              <td className={`num ${amountClass}`}>
-                                {formatCurrencyAmount(t.amount, currencyIso)}
-                                {rowTappable ? (
-                                  <span className="row-chevron" aria-hidden>
-                                    ›
-                                  </span>
-                                ) : null}
-                              </td>
-                              {isMobile ? null : (
-                                <td className="exp-link-col">
-                                  {hasLink ? (
-                                    <span className="exp-link-indicator" title="Con vínculo">
-                                      <LinkIcon />
-                                    </span>
-                                  ) : null}
-                                </td>
+                                <th className="exp-link-col">
+                                  <span className="sr-only">Vínculo</span>
+                                </th>
                               )}
                               {!isMobile && canEdit ? (
-                                <td className="asset-actions-cell">
-                                  <div className="budget-row-actions">
-                                    <button
-                                      type="button"
-                                      className="btn ghost icon-btn"
-                                      aria-label="Editar movimiento"
-                                      onClick={() => {
-                                        setRowError(null);
-                                        setEditTarget(t);
-                                      }}
-                                    >
-                                      <RowEditIcon />
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="btn ghost danger icon-btn"
-                                      aria-label="Eliminar movimiento"
-                                      onClick={() => {
-                                        setRowError(null);
-                                        setDeleteTarget(t);
-                                      }}
-                                    >
-                                      <RowTrashIcon />
-                                    </button>
-                                  </div>
-                                </td>
+                                <th className="asset-actions-cell">
+                                  <span className="sr-only">Acciones</span>
+                                </th>
                               ) : null}
                             </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                          </thead>
+                          <tbody>
+                            {grouped
+                              ? movementGroups.map((g) => (
+                                  <Fragment key={g.key}>
+                                    <tr className="exp-group-row">
+                                      <td colSpan={movementCols}>
+                                        <div className="exp-group-head">
+                                          <span className="exp-group-name">
+                                            {g.label}{" "}
+                                            <span className="exp-group-count">
+                                              ({g.rows.length})
+                                            </span>
+                                          </span>
+                                          <span
+                                            className={`num ${
+                                              g.subtotal < 0
+                                                ? "num-neg"
+                                                : g.subtotal > 0
+                                                  ? "num-pos"
+                                                  : ""
+                                            }`}
+                                          >
+                                            {formatCurrencyAmount(
+                                              String(g.subtotal),
+                                              currencyIso,
+                                            )}
+                                          </span>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                    {g.rows.map(renderMovementRow)}
+                                  </Fragment>
+                                ))
+                              : sortedRows.map(renderMovementRow)}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </>
                 )}
               </section>
             </>
@@ -930,7 +1223,7 @@ export function GastosView({
             currencyIso={currencyIso}
             onImported={(res) => {
               setNotice(
-                `Import: ${res.imported} importados, ${res.skipped_already_imported} omitidos, ${res.discarded} descartados.`,
+                `${res.imported} importados · ${res.skipped_already_imported + res.discarded} excluidos`,
               );
               void handleMutated();
             }}
@@ -947,6 +1240,12 @@ export function GastosView({
               setNotice(`${count} movimiento${count === 1 ? "" : "s"} añadido${count === 1 ? "" : "s"}.`);
               void handleMutated();
             }}
+          />
+          <RecurringRulesModal
+            open={recurringOpen}
+            onClose={() => setRecurringOpen(false)}
+            currencyIso={currencyIso}
+            onChanged={() => void handleMutated()}
           />
           <EditTransactionModal
             target={editTarget}
@@ -981,22 +1280,54 @@ export function GastosView({
                   <strong>{formatDateDmy(deleteTarget.op_date)}</strong>? Esta acción
                   no se puede deshacer.
                 </p>
-                <div className="asset-form-actions">
-                  <button
-                    type="button"
-                    className="btn ghost danger"
-                    onClick={() => void confirmDelete()}
-                  >
-                    Eliminar
-                  </button>
-                  <button
-                    type="button"
-                    className="btn ghost"
-                    onClick={() => setDeleteTarget(null)}
-                  >
-                    Cancelar
-                  </button>
-                </div>
+                {deleteTarget.recurring_rule_id ? (
+                  <>
+                    <p className="muted tight">Este movimiento es recurrente.</p>
+                    <div className="asset-form-actions">
+                      <button
+                        type="button"
+                        className="btn ghost danger"
+                        disabled={deletingRecurring}
+                        onClick={() => void confirmDelete()}
+                      >
+                        Eliminar solo este
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost danger"
+                        disabled={deletingRecurring}
+                        onClick={() => void confirmDeleteAndStopRecurring()}
+                      >
+                        Eliminar y detener repetición
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        disabled={deletingRecurring}
+                        onClick={() => setDeleteTarget(null)}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="asset-form-actions">
+                    <button
+                      type="button"
+                      className="btn ghost danger"
+                      onClick={() => void confirmDelete()}
+                    >
+                      Eliminar
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => setDeleteTarget(null)}
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                )}
               </div>
             ) : null}
           </Modal>

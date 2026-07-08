@@ -415,6 +415,8 @@ export type TransactionApi = {
   linked_asset_id?: string;
   linked_liability_id?: string;
   notes?: string;
+  /** Presente si el movimiento fue materializado por una regla recurrente. */
+  recurring_rule_id?: string;
   created_at: string;
   updated_at: string;
 };
@@ -437,7 +439,13 @@ export type TransactionImportBatchApi = {
   txn_count: number;
 };
 
-/** Cuerpo de `POST /v1/transactions` (alta manual, 201). */
+/** Recurrencia opcional al crear un movimiento: enviar `{}` marca «repetir cada mes» (el día por
+ *  defecto es el de `op_date`); `day_of_month` la fuerza a otro día del mes. */
+export type TransactionRecurrenceApi = {
+  day_of_month?: number;
+};
+
+/** Cuerpo de `POST /v1/transactions` (alta manual, 201). También el item de `/batch`. */
 export type CreateTransactionRequest = {
   op_date: string;
   value_date?: string;
@@ -448,6 +456,7 @@ export type CreateTransactionRequest = {
   linked_asset_id?: string;
   linked_liability_id?: string;
   notes?: string;
+  recurrence?: TransactionRecurrenceApi;
 };
 
 /** Cuerpo de `POST /v1/transactions/batch` (1..1000). */
@@ -565,12 +574,6 @@ export type CategoryComparisonLineApi = {
   delta_vs_avg: string;
 };
 
-/** Línea derivada de pasivos (solo lado budget: `label`="Cuotas de pasivos"). */
-export type SummaryDerivedDebtLineApi = {
-  label: string;
-  budget: string;
-};
-
 /** Bloque {actual, avg} para savings e income. */
 export type SummaryBlockActualAvgApi = {
   actual: string;
@@ -596,15 +599,44 @@ export type TransactionsSummaryApi = {
   /** 1-12. */
   month: number;
   is_partial: boolean;
-  avg_months: number;
+  /** Ventana del promedio solicitada: `3` | `6` | `12` | `ytd` | `all`. */
+  avg_window: string;
+  /** Nº de meses que abarca la ventana del promedio. */
+  window_months: number;
+  /** Nº de meses (dentro de la ventana) que tienen datos → si 0, no hay promedio. */
+  months_with_data: number;
   /** `household` | `mine`. */
   view: string;
   expense_categories: CategoryComparisonLineApi[];
   income_categories: CategoryComparisonLineApi[];
-  derived_debt_line: SummaryDerivedDebtLineApi;
   savings: SummaryBlockActualAvgApi;
   income: SummaryBlockActualAvgApi;
   totals: SummaryTotalsApi;
+};
+
+/** Una regla recurrente (`GET /v1/transactions/recurring`). Amount = string decimal firmado. */
+export type RecurringRuleApi = {
+  id: string;
+  concept: string;
+  amount: string;
+  kind: TransactionKindApi;
+  category_id?: string;
+  category_name?: string;
+  /** 1-31: día del mes en que se materializa. */
+  day_of_month: number;
+  linked_asset_id?: string;
+  linked_liability_id?: string;
+  notes?: string;
+  /** YYYY-MM-DD del último mes materializado. */
+  last_materialized_month: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Respuesta de `POST /v1/transactions/recurring/materialize`. */
+export type RecurringMaterializeResponse = {
+  rules_processed: number;
+  materialized: number;
 };
 
 /**

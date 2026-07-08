@@ -159,6 +159,11 @@ pub struct TransactionResponse {
     pub linked_liability_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Regla recurrente que generó este movimiento (o de la que es instancia de origen); `null`
+    /// para movimientos sueltos. `ON DELETE SET NULL` → sobrevive al borrado de la regla.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub recurring_rule_id: Option<Uuid>,
     #[schema(value_type = String, format = "date-time")]
     pub created_at: DateTime<Utc>,
     #[schema(value_type = String, format = "date-time")]
@@ -195,6 +200,14 @@ pub struct ImportBatchResponse {
 // Request DTOs — altas manuales / PATCH
 // ---------------------------------------------------------------------------
 
+/// Convierte una alta manual en una regla recurrente: se crea la regla-plantilla y la transacción
+/// que la origina queda enlazada a ella. `day_of_month` omitido → el día de `op_date`.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RecurrenceSpec {
+    #[serde(default)]
+    pub day_of_month: Option<u32>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateTransactionBody {
     #[schema(value_type = String, format = "date")]
@@ -219,6 +232,9 @@ pub struct CreateTransactionBody {
     pub linked_liability_id: Option<Uuid>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Si viene, además de la transacción se crea una regla recurrente enlazada.
+    #[serde(default)]
+    pub recurrence: Option<RecurrenceSpec>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -482,16 +498,6 @@ pub struct CategoryComparisonLine {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct DerivedDebtLine {
-    pub label: String,
-    /// Σ `monthly_equivalent` de pasivos activos (solo lado budget; los actuals viven en su
-    /// categoría de gasto ordinaria → sin doble conteo).
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub budget: Decimal,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
 pub struct BlockActualAvg {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
@@ -506,7 +512,7 @@ pub struct SummaryTotals {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_actual: Decimal,
-    /// Σ budget de categorías de gasto + `derived_debt_line`.
+    /// Σ budget de categorías de gasto (sin línea derivada de cuotas de pasivo).
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_budget: Decimal,
@@ -540,15 +546,66 @@ pub struct TransactionsSummaryResponse {
     pub month: u32,
     /// `true` si el mes seleccionado es el mes civil en curso de la instalación.
     pub is_partial: bool,
-    pub avg_months: u32,
+    /// Ventana efectiva del promedio: `"3"` | `"6"` | `"12"` (nº de meses) | `"ytd"` | `"all"`.
+    pub avg_window: String,
+    /// Nº de meses civiles del tramo `[window_start, selected)` (Months(n)=n; Ytd=month−1;
+    /// All=amplitud; puede ser 0).
+    pub window_months: u32,
+    /// Nº de meses del tramo con ≥1 transacción de cualquier kind/categoría. Es el denominador
+    /// del promedio ponderado (`max(months_with_data, 1)`).
+    pub months_with_data: u32,
     /// `household` | `mine`.
     pub view: String,
     pub expense_categories: Vec<CategoryComparisonLine>,
     pub income_categories: Vec<CategoryComparisonLine>,
-    pub derived_debt_line: DerivedDebtLine,
     pub savings: BlockActualAvg,
     pub income: BlockActualAvg,
     pub totals: SummaryTotals,
+}
+
+// ---------------------------------------------------------------------------
+// Recurring-rule DTOs (§B3)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RecurringRuleResponse {
+    #[schema(value_type = String, format = "uuid")]
+    pub id: Uuid,
+    pub concept: String,
+    /// Firmado (negativo = cargo).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+    /// `expense` | `income` | `savings`.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub category_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_name: Option<String>,
+    pub day_of_month: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub linked_asset_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub linked_liability_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// Cursor de idempotencia: primer día del mes más reciente ya materializado (`YYYY-MM-DD`).
+    pub last_materialized_month: String,
+    #[schema(value_type = String, format = "date-time")]
+    pub created_at: DateTime<Utc>,
+    #[schema(value_type = String, format = "date-time")]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MaterializeResponse {
+    /// Reglas del usuario examinadas.
+    pub rules_processed: u32,
+    /// Transacciones nuevas generadas.
+    pub materialized: u32,
 }
 
 #[cfg(test)]

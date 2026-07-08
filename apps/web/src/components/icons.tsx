@@ -234,6 +234,14 @@ export function ArrowDownIcon(props: IconProps) {
   );
 }
 
+export function EqualsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3.5 6h9M3.5 10h9" />
+    </IconBase>
+  );
+}
+
 export function DuplicateIcon(props: IconProps) {
   return (
     <IconBase {...props}>

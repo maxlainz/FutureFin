@@ -35,6 +35,8 @@ type CashDraft = {
   categoryId: string;
   linkedAssetId: string;
   linkedLiabilityId: string;
+  /** «Repetir cada mes»: al confirmar, el item lleva `recurrence: {}`. */
+  repeatMonthly: boolean;
 };
 
 export function ManualCashEntryModal({
@@ -69,6 +71,7 @@ export function ManualCashEntryModal({
         categoryId: "",
         linkedAssetId: "",
         linkedLiabilityId: "",
+        repeatMonthly: false,
       };
     },
     [defaultDate],
@@ -136,6 +139,7 @@ export function ManualCashEntryModal({
       if (r.kind === "expense" && r.linkedLiabilityId) {
         item.linked_liability_id = r.linkedLiabilityId;
       }
+      if (r.repeatMonthly) item.recurrence = {};
       items.push(item);
     }
     if (items.length === 0) {
@@ -285,6 +289,16 @@ export function ManualCashEntryModal({
                       </select>
                     </label>
                   ) : null}
+                  <label className="cash-entry-repeat">
+                    <input
+                      type="checkbox"
+                      checked={r.repeatMonthly}
+                      onChange={(e) =>
+                        updateRow(r.key, { repeatMonthly: e.target.checked })
+                      }
+                    />
+                    Repetir cada mes
+                  </label>
                   <button
                     type="button"
                     className="btn ghost danger icon-btn snapshot-item-remove"

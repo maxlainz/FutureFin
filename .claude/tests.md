@@ -50,21 +50,23 @@ npm test --workspace futurefin-web
 | `projection_cache.rs` | Cache de proyección: hit tras GET, invalidación tras mutación, aislamiento por vista/densidad, `?months=` bypassa el cache. |
 | `history_snapshots.rs` (20) | Snapshots CRUD: captura con términos copiados, upsert mismo día reemplaza items, excluye filas compartidas/expiradas, backfill roundtrip con filtro `year` y cascade, validaciones 400 (futuro, `duplicate_item_id`, términos en asset), 409 fecha ocupada, 404 cross-user, 403 viewer en toda mutación, GET nunca muta, y `snapshot_mutations_do_not_touch_projection_cache` (la cache de proyección sigue HIT — history NO es input del engine). **Prefill** (`GET /v1/history/snapshots/prefill`, v1.5.1, ~7): interpolación idéntica a la serie, `first_snapshot`, `live`, `not_owned` (0 + `existed:false`), validaciones (fecha futura / `invalid_kind` → 400), viewer. |
 | `history_series.rs` (7) | `GET /v1/history/series`: vacío→200, interpolación lineal exacta entre dos snapshots de asset, join a valores vivos (asset borrado→0 en k=0), curva de amortización por encima de la cuerda con extremos exactos, household suma dos usuarios + `?view=mine` filtra, markers con fecha/kind/total, snapshot único de hoy. Números predichos antes de ejecutar. |
-| `backup_user_roundtrip.rs` (10) | `.ffbackup` v4/v5: roundtrip con serie histórica idéntica, re-link de items a los UUIDs frescos de assets, `ledger_index` null conserva `item_key`, v3 sigue importando (0 snapshots), índice fuera de rango → 400 con rollback, import invalida la cache de proyección (fix del bug preexistente), preview reporta counts de snapshots/items, viewer 403, y **v5** (v1.6.0): roundtrip de transactions/imports/rules con re-link por índice y `fingerprint_ordinal` preservado. |
+| `backup_user_roundtrip.rs` (11) | `.ffbackup` v4/v5/v6: roundtrip con serie histórica idéntica, re-link de items a los UUIDs frescos de assets, `ledger_index` null conserva `item_key`, v3 sigue importando (0 snapshots), índice fuera de rango → 400 con rollback, import invalida la cache de proyección (fix del bug preexistente), preview reporta counts de snapshots/items, viewer 403, **v5** (v1.6.0): roundtrip de transactions/imports/rules con re-link por índice y `fingerprint_ordinal` preservado, y **v6** (v1.8.0): roundtrip de `recurring_transaction_rules` con `recurring_rule_index` re-enlazado y `last_materialized_month` preservado. |
 | `transactions_import.rs` (9) | Import CSV: autodetección MyInvestor/N26 por cabecera, preview marca `already_imported` y los omite por defecto, confirm inserta con ordinales, re-confirm mismo archivo → 0 nuevos, `force` añade ordinal nuevo, heurística de transferencia interna, regla aprendida pre-asigna en el siguiente preview, no-EUR rechazado en confirm, viewer 403, sha preview↔confirm distinto → 400. |
 | `transactions_crud.rs` (13) | CRUD de movimientos: alta manual individual/batch, `savings` exige categoría NULL, validación de scope income/expense, campos de huella inmutables en importadas (400 `immutable_field`), borrar asset/liability vinculado → SET NULL conservando el movimiento, remap al borrar categoría, viewer 403. |
-| `transactions_summary.rs` (4) | `GET /v1/transactions/summary`: números Decimal exactos por categoría (real/budget/avg), ventanas 3/6/12, mes parcial marcado, savings excluido del gasto, bucket «Sin categoría», línea derivada de pasivos solo lado budget (sin doble conteo). |
-| `transactions_projection_cache.rs` (1) | **`transaction_mutations_do_not_touch_projection_cache`** — la cache de proyección sigue HIT tras import/create/edit/delete/regla (las transacciones NO son inputs del engine; espejo del test de snapshots). |
+| `transactions_summary.rs` (9) | `GET /v1/transactions/summary`: números Decimal exactos por categoría (real/budget/avg), **promedio ponderado** (denominador = `months_with_data`, no el nº de meses del tramo → historial corto no diluye a 0), ventanas `avg_window` 3/6/12/`ytd`/`all` + alias legado `avg_months`, `avg_window` inválido → 400, mes parcial marcado, savings excluido del gasto, bucket «Sin categoría». **Ya no** hay línea derivada de cuotas de pasivo: `totals.expense_budget` = Σ budget de categorías de gasto. |
+| `transactions_projection_cache.rs` (1) | **`transaction_mutations_do_not_touch_projection_cache`** — la cache de proyección sigue HIT tras import/create/edit/delete/regla y también tras los endpoints recurrentes (materialize/delete regla; v1.8.0). Las transacciones NO son inputs del engine; espejo del test de snapshots. |
+| `transactions_recurring.rs` (13) | Movimientos recurrentes (v1.8.0): alta con `recurrence` crea regla + instancia de origen enlazada, `materialize` idempotente (2ª llamada → 0), no genera `op_date` futuro (mes en curso solo si el día ya llegó), clamp de `day_of_month` a fin de mes, borrar una instancia NO la recrea al re-materializar (cursor), `DELETE` de regla conserva las instancias (SET NULL), viewer 403 en materialize/delete, `recurrence.day_of_month` fuera de rango → 400. |
 | `history_cashflow.rs` (5) | `GET /v1/history/cashflow`: agregados mensuales exactos (Decimal-string, household y mine), la serie fina pasa por los snapshots, **`/v1/history/series` idéntico byte a byte con y sin transacciones** (regresión tier-1), `daily` con ventana >6m → 400, `fine` ausente sin vínculos. |
 
 ### API lib unit tests (run under `cargo test --workspace`)
 
 Besides the integration files above, the API crate carries `#[cfg(test)]` unit tests in library
-modules. Notably `apps/api/src/handlers/backup_user/schema.rs` `mod tests` (8 tests; 2 added in
-v1.6.0 for `.ffbackup` v5): reject a future `schema_version`, migrate v1 dropping legacy
-contribution fields, v3-with-rules round-trip, migrate v3→v4 filling empty `snapshots`, v4
-snapshot-items round-trip, migrate v4 filling empty transactions, v5 transactions round-trip,
-and the full v1→v5 migration chain. The `handlers/transactions/` module adds unit tests for the
+modules. Notably `apps/api/src/handlers/backup_user/schema.rs` `mod tests` (10 tests; 2 added in
+v1.6.0 for `.ffbackup` v5, 2 more in v1.8.0 for v6): reject a future `schema_version`, migrate v1
+dropping legacy contribution fields, v3-with-rules round-trip, migrate v3→v4 filling empty
+`snapshots`, v4 snapshot-items round-trip, migrate v4 filling empty transactions, v5 transactions
+round-trip, migrate v5 filling empty `recurring_transaction_rules`, v6 recurring-rules round-trip,
+and the full v1→v6 migration chain. The `handlers/transactions/` module adds unit tests for the
 CSV presets (separators, ES/US decimals, BOM/Windows-1252, header autodetection), the
 fingerprint/ordinal grouping and the rule-precedence logic. They need no Postgres.
 
@@ -106,7 +108,7 @@ Rules of thumb:
 ## Frontend (Vitest)
 
 - Config: `apps/web/vitest.config.ts` — `node` environment (no jsdom). Add `happy-dom` if you ever add component render tests.
-- Pure-function tests only. We have 137 across:
+- Pure-function tests only. We have 154 across (this list omits `responsive.test.ts` and `chart-gestures.test.ts`; run `npm test --workspace futurefin-web` for the authoritative total):
   - `lib/format.test.ts` (29) — Intl formatting in es-ES, edge cases (null/NaN/empty), Decimal string preservation.
   - `lib/dates.test.ts` (29) — civil calendar (leap years, day clamping, age before/after birthday), TZ fallback, payment intervals, `addMonthsCivil` con deltas **negativos** (v1.5.0).
   - `api/client.test.ts` (10) — `fetch` mocks: credentials, body serialization, 4xx error propagation, 204 handling.
@@ -114,7 +116,7 @@ Rules of thumb:
   - `lib/history-merge.test.ts` (12) — `mergeProjectionWithHistory`: identidad por referencia (history null/vacío/anchor distinto → render byte-idéntico), descarta puntos `month_index ≥ 0`, unión de asset series por `asset_id`, offset del futuro.
   - `lib/projection-chart.test.ts` (10) — `deflationFactorAt` (0 / ±12 meses / inflación 0) y los tick-builders con `startMonth=-24` + regresión `startMonth=0` idéntica al comportamiento previo.
   - `lib/snapshot-tracker.test.ts` (8) — `liquidCoverageComplete` (vacío→false, cobertura completa→true, stale tras `pruneEditLog`→false, asset nuevo dentro de la ventana).
-  - `lib/expenses.test.ts` (32) — helpers puros de la pestaña Gastos (v1.6.0): labels de mes, `defaultSelectedMonth` (último completo), `categoriesForKind` (savings sin categoría), `buildConfirmDecisions` paralelo por índice, filtros del preview, tonos de delta.
+  - `lib/expenses.test.ts` (49) — helpers puros de la pestaña «Movimientos» (v1.6.0, ampliado en v1.8.0): labels de mes, `defaultSelectedMonth` (último completo), `categoriesForKind` (savings sin categoría), `buildConfirmDecisions` paralelo por índice, filtros del preview, tonos de delta, y (v1.8.0) `significanceThreshold`/`trendArrow`/`significantDeltaTone` (umbral 1% del ingreso real), `AVG_WINDOWS`/`avgWindowLabel`, `capitalizeSource`.
 
 ### Writing a new frontend test
 Colocate beside the module: `lib/foo.ts` ↔ `lib/foo.test.ts`. Use `vi.mocked(globalThis.fetch)` if you need to stub fetch.

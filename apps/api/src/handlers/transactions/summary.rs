@@ -8,23 +8,25 @@
 //! - Ahorro/Inversión = `−Σ(amount)` (`savings`; una aportación −200 cuenta como +200 ahorrado);
 //!   excluido del consumo → tiene su propio bloque, nunca entra en `expense`.
 //!
-//! ## Promedio (`avg`)
-//! Media sobre los `avg_months` meses civiles COMPLETOS anteriores al seleccionado; denominador
-//! = `avg_months` (incluye meses a cero).
+//! ## Promedio ponderado (`avg`)
+//! El tramo del promedio es el rango medio-abierto `[window_start, selected)` de meses civiles,
+//! elegido con `avg_window` (`3`|`6`|`12`|`ytd`|`all`; alias legado `avg_months` 1..24). El
+//! denominador NO es el número de meses del tramo sino `months_with_data` = nº de meses del tramo
+//! con ≥1 transacción (promedio ponderado: los meses vacíos no diluyen la media). Si no hay
+//! ninguno el denominador es 1 (numerador 0 → avg 0).
 //!
-//! ## Sin doble conteo de cuotas de pasivo
-//! `derived_debt_line` es SOLO el lado presupuesto (Σ `monthly_equivalent` de pasivos activos,
-//! reutilizando la lógica de `budget.rs`). Los actuals de las cuotas viven en su categoría de
-//! gasto ordinaria (decisión 8) → no se suman dos veces.
+//! ## Sin línea derivada de cuotas de pasivo
+//! A diferencia de `budget.rs`, la comparativa NO añade una línea derivada de las cuotas de
+//! pasivos: `totals.expense_budget` es Σ del presupuesto de las categorías de gasto. Las cuotas
+//! reales viven ya en su categoría de gasto ordinaria (los movimientos importados/manuales) → así
+//! no se cuentan dos veces.
 
 use crate::error::ApiError;
-use crate::handlers::budget::ledger_budget_totals_for_summary;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::schema::{
-    BlockActualAvg, CategoryComparisonLine, DerivedDebtLine, SummaryTotals,
-    TransactionsSummaryResponse,
+    BlockActualAvg, CategoryComparisonLine, SummaryTotals, TransactionsSummaryResponse,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Query};
@@ -49,8 +51,31 @@ pub struct SummaryQuery {
     pub year: Option<i32>,
     #[serde(default)]
     pub month: Option<u32>,
+    /// Ventana del promedio: `3`|`6`|`12`|`ytd`|`all`. Gana sobre `avg_months` si vienen ambos.
+    #[serde(default)]
+    pub avg_window: Option<String>,
+    /// Alias legado (1..24 meses). Sólo se usa si `avg_window` está ausente.
     #[serde(default)]
     pub avg_months: Option<u32>,
+}
+
+/// Tramo del promedio, resuelto desde `avg_window`/`avg_months`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AvgWindow {
+    Months(u32),
+    Ytd,
+    All,
+}
+
+impl AvgWindow {
+    /// Valor efectivo para el response: `"3"`/`"6"`/`"12"`/… | `"ytd"` | `"all"`.
+    fn as_str(&self) -> String {
+        match self {
+            AvgWindow::Months(n) => n.to_string(),
+            AvgWindow::Ytd => "ytd".into(),
+            AvgWindow::All => "all".into(),
+        }
+    }
 }
 
 /// `(year, month) + delta` meses (delta con signo), normalizado.
@@ -67,6 +92,13 @@ fn ym_string(year: i32, month: u32) -> String {
 
 fn first_of_month(year: i32, month: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, 1).expect("valid first-of-month")
+}
+
+/// Nº de meses civiles entre dos primeros-de-mes (`b − a`); 0 si `b <= a`.
+fn months_between(a: NaiveDate, b: NaiveDate) -> u32 {
+    let za = a.year() * 12 + a.month() as i32 - 1;
+    let zb = b.year() * 12 + b.month() as i32 - 1;
+    (zb - za).max(0) as u32
 }
 
 #[derive(Debug, FromRow)]
@@ -109,7 +141,8 @@ fn bucket_all(
         ("view" = Option<String>, Query, description = "`mine` | household."),
         ("year" = Option<i32>, Query, description = "Año del mes seleccionado (default: último mes completo)."),
         ("month" = Option<u32>, Query, description = "Mes 1..12 (default: último mes completo)."),
-        ("avg_months" = Option<u32>, Query, description = "Ventana del promedio, 1..24 (default 6)."),
+        ("avg_window" = Option<String>, Query, description = "Ventana del promedio: `3`|`6`|`12`|`ytd`|`all`."),
+        ("avg_months" = Option<u32>, Query, description = "Alias legado (1..24 meses); `avg_window` gana."),
     ),
     responses(
         (status = 200, description = "Comparativa mensual", body = TransactionsSummaryResponse),
@@ -129,12 +162,30 @@ pub async fn get_transactions_summary(
     let view = LedgerViewQuery { view: q.view.clone() }.resolve();
     let today = installation_naive_today(&state.pool, iid).await?;
 
-    let avg_months = q.avg_months.unwrap_or(DEFAULT_AVG_MONTHS);
-    if avg_months == 0 || avg_months > MAX_AVG_MONTHS {
-        return Err(ApiError::BadRequest(format!(
-            "avg_months must be between 1 and {MAX_AVG_MONTHS}"
-        )));
-    }
+    // Ventana del promedio: `avg_window` gana; si falta, el alias legado `avg_months` (default 6).
+    let window = match &q.avg_window {
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "3" => AvgWindow::Months(3),
+            "6" => AvgWindow::Months(6),
+            "12" => AvgWindow::Months(12),
+            "ytd" => AvgWindow::Ytd,
+            "all" => AvgWindow::All,
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "avg_window must be one of 3, 6, 12, ytd, all".into(),
+                ))
+            }
+        },
+        None => {
+            let n = q.avg_months.unwrap_or(DEFAULT_AVG_MONTHS);
+            if n == 0 || n > MAX_AVG_MONTHS {
+                return Err(ApiError::BadRequest(format!(
+                    "avg_months must be between 1 and {MAX_AVG_MONTHS}"
+                )));
+            }
+            AvgWindow::Months(n)
+        }
+    };
 
     // Mes seleccionado: (year, month) o el último mes COMPLETO (el anterior al actual).
     let (year, month) = match (q.year, q.month) {
@@ -161,15 +212,46 @@ pub async fn get_transactions_summary(
     let month_start = first_of_month(year, month);
     let (ny, nm) = shift_month(year, month, 1);
     let month_end = first_of_month(ny, nm);
-    let (wy, wm) = shift_month(year, month, -(avg_months as i32));
-    let window_start = first_of_month(wy, wm);
-    let window_yms: Vec<String> = (1..=avg_months)
-        .map(|k| {
-            let (y, m) = shift_month(year, month, -(k as i32));
-            ym_string(y, m)
-        })
-        .collect();
-    let _ = month_start; // documenta el inicio del mes seleccionado; el rango de query usa window_start.
+
+    // `window_start`: primer día del primer mes del tramo del promedio `[window_start, selected)`.
+    let window_start = match window {
+        AvgWindow::Months(n) => {
+            let (wy, wm) = shift_month(year, month, -(n as i32));
+            first_of_month(wy, wm)
+        }
+        // Enero del año del mes seleccionado; con month == 1 coincide con el mes seleccionado → tramo vacío.
+        AvgWindow::Ytd => first_of_month(year, 1),
+        // Primer día del mes de MIN(op_date) del scope; si NULL o ≥ mes seleccionado → tramo vacío.
+        AvgWindow::All => {
+            let scope = view.scope_where("t");
+            let sql = format!("SELECT MIN(t.op_date) FROM transactions t WHERE {scope}");
+            let min_op: Option<NaiveDate> = view
+                .bind_scope_scalar(
+                    sqlx::query_scalar::<_, Option<NaiveDate>>(&sql),
+                    iid,
+                    user.id.0,
+                )
+                .fetch_one(&state.pool)
+                .await?;
+            match min_op {
+                Some(d) => {
+                    let candidate = first_of_month(d.year(), d.month());
+                    if candidate < month_start {
+                        candidate
+                    } else {
+                        month_start
+                    }
+                }
+                None => month_start,
+            }
+        }
+    };
+    let window_start_ym = ym_string(window_start.year(), window_start.month());
+    let window_months = months_between(window_start, month_start);
+
+    // `ym` pertenece al tramo del promedio (medio-abierto): `window_start_ym <= ym < selected_ym`.
+    // Comparación lexicográfica de "YYYY-MM" = cronológica (padding `{:04}` de `ym_string`).
+    let in_window = |ym: &str| ym >= window_start_ym.as_str() && ym < selected_ym.as_str();
 
     // ---- Actuals + ventana: transacciones agregadas por (ym, kind, category) ----------------
     let scope = view.scope_where("t");
@@ -193,6 +275,17 @@ pub async fn get_transactions_summary(
         let kind = r.kind.unwrap_or_default();
         *buckets.entry((r.ym, kind, r.category_id)).or_insert(Decimal::ZERO) += r.total;
     }
+
+    // `months_with_data` = meses distintos del tramo con ≥1 transacción de cualquier kind/categoría.
+    let months_with_data = {
+        let mut set: HashSet<&String> = HashSet::new();
+        for (ym, _kind, _cat) in buckets.keys() {
+            if in_window(ym.as_str()) {
+                set.insert(ym);
+            }
+        }
+        set.len() as u32
+    };
 
     // ---- Presupuesto por categoría (scope income/expense) ------------------------------------
     let bscope = view.scope_where("b");
@@ -227,13 +320,8 @@ pub async fn get_transactions_summary(
         rows.into_iter().collect()
     };
 
-    // ---- Línea derivada de cuotas (solo lado budget), reutilizando budget.rs -----------------
-    let budget_totals =
-        ledger_budget_totals_for_summary(&state.pool, iid, user.id.0, view, today).await?;
-    let derived_budget = budget_totals.expense_derived_monthly_equivalent;
-
     // ---- Construcción de las líneas por categoría --------------------------------------------
-    let avg_denom = Decimal::from(avg_months);
+    let avg_denom = Decimal::from(months_with_data.max(1));
 
     let build_lines = |scope_kind: &str,
                        budget_map: &HashMap<Uuid, Decimal>,
@@ -242,7 +330,7 @@ pub async fn get_transactions_summary(
         // Universo de categorías: presentes en actuals/ventana (buckets del kind) ∪ presupuesto.
         let mut cats: HashSet<Option<Uuid>> = HashSet::new();
         for (y, k, cat) in buckets.keys() {
-            if k == scope_kind && (y == &selected_ym || window_yms.contains(y)) {
+            if k == scope_kind && (y == &selected_ym || in_window(y.as_str())) {
                 cats.insert(*cat);
             }
         }
@@ -254,9 +342,10 @@ pub async fn get_transactions_summary(
             .into_iter()
             .map(|cat| {
                 let raw_sel = bucket(&buckets, &selected_ym, scope_kind, cat);
-                let raw_win: Decimal = window_yms
+                let raw_win: Decimal = buckets
                     .iter()
-                    .map(|ym| bucket(&buckets, ym, scope_kind, cat))
+                    .filter(|((y, k, c), _)| k == scope_kind && *c == cat && in_window(y.as_str()))
+                    .map(|(_, v)| *v)
                     .sum();
                 // income → magnitud = +suma; expense → magnitud = −suma.
                 let (actual, avg_raw) = if income_sign {
@@ -297,9 +386,10 @@ pub async fn get_transactions_summary(
 
     // ---- Bloques savings / income (agregados) ------------------------------------------------
     let savings_actual = -bucket_all(&buckets, &selected_ym, "savings");
-    let savings_win: Decimal = window_yms
+    let savings_win: Decimal = buckets
         .iter()
-        .map(|ym| bucket_all(&buckets, ym, "savings"))
+        .filter(|((y, k, _), _)| k == "savings" && in_window(y.as_str()))
+        .map(|(_, v)| *v)
         .sum();
     let savings_avg = (-savings_win / avg_denom).round_dp(4);
 
@@ -309,8 +399,8 @@ pub async fn get_transactions_summary(
     // ---- Totales -----------------------------------------------------------------------------
     let expense_actual: Decimal = expense_categories.iter().map(|l| l.actual).sum();
     let expense_avg: Decimal = expense_categories.iter().map(|l| l.avg).sum();
-    let expense_cat_budget: Decimal = expense_categories.iter().map(|l| l.budget).sum();
-    let expense_budget_total = expense_cat_budget + derived_budget;
+    // Σ presupuesto de categorías de gasto — sin línea derivada de cuotas (sin doble conteo).
+    let expense_budget_total: Decimal = expense_categories.iter().map(|l| l.budget).sum();
     let income_budget_total: Decimal = income_categories.iter().map(|l| l.budget).sum();
     let net_actual = income_actual - expense_actual;
 
@@ -318,14 +408,12 @@ pub async fn get_transactions_summary(
         year,
         month,
         is_partial,
-        avg_months,
+        avg_window: window.as_str(),
+        window_months,
+        months_with_data,
         view: if view == LedgerView::Mine { "mine".into() } else { "household".into() },
         expense_categories,
         income_categories,
-        derived_debt_line: DerivedDebtLine {
-            label: "Cuotas de pasivos".into(),
-            budget: derived_budget,
-        },
         savings: BlockActualAvg {
             actual: savings_actual,
             avg: savings_avg,

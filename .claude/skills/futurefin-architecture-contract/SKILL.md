@@ -18,8 +18,9 @@ description: >
 # FutureFin Architecture Contract
 
 Facts date-stamped **as of 2026-07-02, v1.4.3** (`apps/api/Cargo.toml`); D12 (historical
-snapshots) and the migration/backup-schema counts were added/refreshed for **v1.5.0** on 2026-07-06
-and again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-07. This is the
+snapshots) and the migration/backup-schema counts were added/refreshed for **v1.5.0** on 2026-07-06,
+again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-07, and for **v1.8.0**
+(recurring-transaction rules, backup schema_version 6) on 2026-07-08. This is the
 contract a retiring principal engineer would make you sign: the decisions
 below are settled, most of them by a documented incident. Do not re-litigate them casually; if you must change one, go through
 `.claude/skills/futurefin-change-control/SKILL.md`.
@@ -152,8 +153,9 @@ of looking at it. It was removed, not fixed. **Breaks if violated**: any mutatio
 reintroduces the class; `apps/api/tests/liabilities_purge.rs` guards this (local-only, see W1).
 
 ### D6. Migrations are embedded and fail loud
-`sqlx::migrate!("./migrations")` runs at startup (`db.rs::run_migrations`). 33 files in
-`apps/api/migrations/` as of 2026-07-07 (`ls apps/api/migrations | wc -l`; v1.6.0 added
+`sqlx::migrate!("./migrations")` runs at startup (`db.rs::run_migrations`). 34 files in
+`apps/api/migrations/` as of 2026-07-08 (`ls apps/api/migrations | wc -l`; v1.8.0 added
+`20260708090000_recurring_transaction_rules.sql`; v1.6.0 added
 `20260707120000_transactions_and_rules.sql`; v1.5.0 added `20260706203746_history_snapshots.sql`).
 There is **no
 auto-repair**: a checksum mismatch aborts startup and must be fixed by hand
@@ -246,11 +248,12 @@ deliberately omitted, with an explicit comment in the handler and a regression t
 (projection stays cache-HIT across a snapshot mutation). Snapshots have **no cache of their own**
 (sub-ms compute) and the series endpoint takes no `?months`/`?density`. Shared rows
 (`owner_user_id IS NULL`) are never captured — a documented limitation. Snapshots are included in
-`.ffbackup` **schema_version 5** (snapshots additive in v4 over v3; v5 additionally carries
-`transactions`/`transaction_imports`/`categorization_rules` — v1.6.0; import re-links snapshot items
-to fresh asset/liability UUIDs via `ledger_index`, else keeps `item_key`). The same D12 no-cache
-contract covers the v1.6.0 **transactions** module (`handlers/transactions/`, guarded by
-`transactions_projection_cache.rs`). **Breaks if violated**: wiring snapshot writes
+`.ffbackup` **schema_version 6** (additive chain: v4 added snapshots over v3; v5 added
+`transactions`/`transaction_imports`/`categorization_rules` — v1.6.0; v6 added
+`recurring_transaction_rules` + `BackupTransaction.recurring_rule_index` — v1.8.0; import re-links
+snapshot items to fresh asset/liability UUIDs via `ledger_index`, else keeps `item_key`). The same
+D12 no-cache contract covers the **transactions** module (`handlers/transactions/`, incl. the
+v1.8.0 recurring-rule endpoints, guarded by `transactions_projection_cache.rs`). **Breaks if violated**: wiring snapshot writes
 into `refresh_projection_after_mutation` couples two independent subsystems and needlessly evicts
 a hot projection cache; conversely, ever feeding snapshot data into the engine would make past
 "observations" silently reshape the *future* projection — a category error.

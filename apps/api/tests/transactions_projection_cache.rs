@@ -90,6 +90,28 @@ async fn transaction_mutations_do_not_touch_projection_cache() {
     .await;
     app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie).await;
 
+    // 5. Alta con recurrencia (crea regla + instancia de origen enlazada).
+    let rec = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-15", "concept": "Nomina", "amount": "1500",
+                    "kind": "income", "recurrence": { "day_of_month": 15 } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rec.status, http::StatusCode::CREATED);
+    let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
+
+    // 6. Materialize + 7. borrado de la regla.
+    app.post_json_with_cookie(
+        "/v1/transactions/recurring/materialize",
+        json!({}),
+        &owner.cookie,
+    )
+    .await;
+    app.delete_with_cookie(&format!("/v1/transactions/recurring/{rule_id}"), &owner.cookie)
+        .await;
+
     // Margen para cualquier tarea de fondo (no debería haber ninguna que invalide).
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
