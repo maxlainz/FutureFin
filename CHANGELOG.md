@@ -4,6 +4,90 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Toggle **«fuente del ahorro»** de la simulación FIRE: la proyección puede alimentarse del
+**presupuesto** (comportamiento histórico) o del **promedio real de los últimos 12 meses de
+transacciones**. Aditivo, sin migración. Cambio de clase **engine-input** (los errores son
+silenciosos: las cifras siguen pareciendo plausibles) → se incluyen números worked before/after.
+
+### Proyección — fuente del ahorro configurable (`savings_source`)
+- **Nuevo eje `savings_source` en `fire_settings`**: `"budget"` (default, modo A) | `"transactions_avg"`
+  (modo B). Se elige en **Ajustes → Proyección** con un segmented **«Presupuesto» / «Promedio 12
+  meses»** (owner-only, autosave vía `saveFireSettingsPatch`). Deserialización **estricta** como
+  `FireNumberMode`: valor desconocido → **422**; campo ausente → `budget` (backups viejos siguen
+  cargando; `#[serde(default)]` a nivel de struct `FireSettings`).
+- **Modo B — de dónde sale el ahorro**: el engine toma income/expense del **promedio ponderado** de
+  las transacciones en la ventana `[primer día del mes actual − 12 meses, primer día del mes actual)`
+  (12 meses calendario **completos**; el mes en curso queda fuera). Denominador = `months_with_data`
+  (meses del tramo con ≥1 transacción de cualquier `kind`), misma semántica que la comparativa de
+  Movimientos → un historial corto no diluye la media. Helper único
+  `transactions/summary.rs::transactions_12m_avg`.
+- **Resta híbrida de cuotas**: a `expense_avg` se le resta, por cada **liability activa** (filtrada
+  por `payment_end_date`), el **promedio real** de sus transacciones con `linked_liability_id` si
+  existen, y si no su **cuota nominal** del ledger (`liability_monthly_payment`, weekly ×52/12). Clamp
+  global `expense_eff = max(0, expense_avg − Σ resta)`. Fórmula en un **único punto de verdad**
+  (`effective_avg_income_expense`) consumido por `projection.rs` y `summary.rs` para que no diverjan.
+  El engine sigue modelando las liabilities como `debt_service` → el ahorro **sube automáticamente al
+  terminar cada préstamo** (step-up, verificado por test).
+- **Target FIRE en modo B**: `annual_expense` usa `expense_eff` como base (antes `expense_retirement`
+  del presupuesto) y `current_income` usa `income_eff`; `manual` sin cambios. **Cambio de base
+  semántico e intencional**. La **fase de jubilación** (income/expense_retirement) sigue viniendo del
+  **presupuesto** en ambos modos — desajuste target-vs-drawdown documentado en
+  `futurefin-fire-domain-reference`. `end_adj` (ajustes por end-date de partidas de presupuesto) se
+  **anula** en modo B (el gasto ya no es del presupuesto); los `planning_flows` (`flow_adj`) se
+  mantienen (ortogonales).
+- **Fallback silencioso**: `months_with_data == 0` en modo B → se usan los escalares del presupuesto
+  (modo A efectivo). La respuesta señaliza el modo **efectivo** tras el fallback.
+- **`GET /v1/summary` sigue el toggle**: en modo B con datos, `income_monthly_equivalent = income_eff`,
+  `expense_regular_monthly_equivalent = expense_eff`, `net_monthly_equivalent = income_eff − expense_eff
+  − Σ cuotas nominales activas` (casa con la pendiente del chart, que resta el debt service, y con el
+  modo A, que incluye las cuotas derivadas) y `savings_rate` derivado. Campos nuevos en
+  `financial_health`: **`savings_source`** (modo efectivo tras fallback) y
+  **`savings_source_months_with_data`** (0 en modo A/fallback). `GET /v1/assets`
+  (`contribution_nominal_monthly`) también respeta el modo.
+- **Preview FIRE de Jubilación (frontend)**: `RetirementView` consume los equivalentes efectivos de
+  `/v1/summary` en modo B (fetch gateado al modo) en vez de recalcular el need desde el presupuesto —
+  elimina la clase de divergencia cliente/servidor. KPIs de Resumen etiquetados con parenthetical
+  «promedio de N meses» en modo B.
+
+### Contrato de cache — invalidación ahora **condicionada al modo**
+- **`transactions` pasa a ser input del engine solo en modo B**: hasta ahora las mutaciones de
+  transacciones **nunca** invalidaban la cache de proyección (contrato «transactions no son inputs
+  del engine»). Con `savings_source = transactions_avg` **sí lo son**, así que create/batch/patch/
+  delete, delete de import, import confirm y `recurring/materialize` invalidan la cache **solo cuando
+  el modo efectivo es B** (gating en `invalidate_projection_if_transactions_avg`, best-effort
+  post-commit: lee `savings_source`, y un fallo del SELECT **jamás** convierte una mutación exitosa en
+  5xx). `rules.rs`, los previews y el borrado de una regla recurrente **nunca** invalidan. Sin warm-up
+  tras mutación (rechazado históricamente). Test `transactions_projection_cache.rs` reescrito con el
+  contrato condicional (modo A = ninguna mutación invalida; modo B = cada mutación invalida; flip
+  A↔B vía PATCH installation invalida).
+
+### Números worked before/after (fixture `summary_savings_source.rs`, cambio engine-input)
+Misma instalación, un único mes con datos (el último completo): income real 3.000, gasto total 1.500
+(de los cuales 400 vinculados a L1); presupuesto distinto adrede (income 9.000, gasto 8.000). Dos
+liabilities activas: L1 (cuota nominal 500, con txn vinculada avg 400) y L2 (cuota nominal 300, sin
+vincular).
+
+| KPI (`financial_health`) | Modo A (`budget`) — antes | Modo B (`transactions_avg`) — después |
+|---|---|---|
+| `income_monthly_equivalent` | 9.000 (presupuesto) | 3.000 (`income_avg`) |
+| `expense_regular_monthly_equivalent` | 8.000 (presupuesto) | 800 (`expense_eff` = 1.500 − [400 real L1 + 300 nominal L2]) |
+| `net_monthly_equivalent` | budget − cuotas derivadas | 1.400 (= 3.000 − 800 `expense_eff` − 800 debt_service nominal) |
+| `savings_source` | `budget`, months 0 | `transactions_avg`, months 1 |
+
+Proyección (fixture `savings_source.rs`, `monthly_delta_assumption`): con budget income 5.000 / gasto
+3.000 → **delta 2.000**; en modo B con income_avg 1.800 y expense_avg 600 (sin cuotas) → **delta
+1.200**. `months_with_data == 0` en modo B → delta = 3.000 (idéntico al presupuesto, sin regresión).
+
+### Migración / compatibilidad
+- **Sin migración**: `savings_source` es aditivo en el JSONB `fire_settings` con `#[serde(default)]`;
+  un `fire_settings` sin el campo → `budget`.
+- **Backups `.ffbackup`**: sin cambio de `CURRENT_SCHEMA_VERSION` (sigue en **6**); el campo viaja
+  dentro del snapshot informativo de settings con default en deserialización.
+- **Rollback**: volver a una imagen anterior ignora el campo (lo deserializa a `budget`); ningún dato
+  se pierde.
+
 ## [1.8.0] - 2026-07-08
 
 Rediseño de la pestaña **Gastos → «Movimientos»** (frontend + backend, desplegados juntos), promedio

@@ -207,7 +207,7 @@ NOT warm it; warm-up happens only after login, see futurefin-architecture-contra
 | `annual_inflation_assumption_percent` | PATCH only | sent as a **string** (`"2.5"`); empty string → `0`; must parse as decimal, bounds **0–50** (negative rejected) | `0` (column `NOT NULL DEFAULT 0`) | Annual % applied to the **moving FIRE target only** — `target(month_index) = base × (1+pct/100)^(month_index/12)` (`fire_target_at_month_index`; the engine evaluates month k against the target at index k−1 — see futurefin-fire-domain-reference §4); incomes/expenses/contributions stay nominal. `0` = flat target. Semantics owned by futurefin-fire-domain-reference. |
 | `fire_settings` | PATCH only | JSONB, shape below | column nullable; `NULL` → defaults applied on read (`resolve_fire_settings`) | FIRE target computation config. |
 
-### `fire_settings` JSONB shape (as of 2026-07-02)
+### `fire_settings` JSONB shape (as of 2026-07-09; `savings_source` added)
 
 ```json
 {
@@ -221,7 +221,8 @@ NOT warm it; warm-up happens only after login, see futurefin-architecture-contra
     { "up_to": "200000", "pct": "23" },
     { "up_to": "300000", "pct": "27" },
     { "up_to": null,     "pct": "30" }           // last bracket MUST be open-ended (up_to null)
-  ]
+  ],
+  "savings_source": "budget"                     // "budget" (default) | "transactions_avg"
 }
 ```
 
@@ -235,6 +236,7 @@ Validation (`validate_fire_settings` / `validate_tax_brackets`, all 400 on failu
 Deserialization details that matter:
 - `fire_number_mode` is **strict**: unknown strings → 422. Sole legacy alias
   `annual_expense_adjusted` (old backup schemas) maps to `annual_expense`.
+- **`savings_source`** (`SavingsSource` enum, `installation.rs`, `rename_all = "snake_case"`, `Default = Budget`) — source of the simulation's monthly saving: `budget` (mode A, default — from budget entries, historical behavior) or `transactions_avg` (mode B — weighted average of the last 12 complete calendar months of transactions, with a hybrid subtraction of each active liability's payment). Strict deserialize like `FireNumberMode`: unknown value → **422**; absent → `budget` (via the struct-level `#[serde(default)]`; old backups load). No extra `validate_fire_settings` bound — any of the two enum values is accepted. **What it affects**: `GET /v1/projection/*` (engine income/expense + FIRE target base in mode B), `GET /v1/summary` `financial_health` (income/expense/net/savings_rate + new fields `savings_source`, `savings_source_months_with_data`), `GET /v1/assets` (`contribution_nominal_monthly`), and — crucially — the **projection-cache invalidation contract**: in mode B transaction mutations invalidate the cache (`invalidate_projection_if_transactions_avg`), in mode A they never do (D12 in futurefin-architecture-contract). Read without a round-trip via `projection_savings_source(pool, iid)`. FIRE-math meaning owned by futurefin-fire-domain-reference.
 - The struct has `#[serde(default)]`: omitted fields fill with defaults
   (mode `annual_expense`, `swr_pct` 3.5, `taxes_enabled` true, Spanish IRPF brackets above).
 - In the PATCH body `fire_settings` is `Option<Option<FireSettings>>`: **omit** = unchanged,
@@ -307,6 +309,7 @@ Every table row above is re-verifiable; run these from the repo root when auditi
 - `?view` resolution: `grep -n "fn resolve" -A 5 apps/api/src/handlers/person_view.rs`
 - Installation validation bounds: `grep -n "normalize_currency\|validate_show_age_mode\|validate_annual_inflation\|normalize_calendar_tz\|swr_pct\|from(99u32)" apps/api/src/handlers/installation.rs`
 - fire_settings defaults + legacy alias: `grep -n "default_fire_settings\|annual_expense_adjusted" -A 8 apps/api/src/handlers/installation.rs`
+- `savings_source` enum + reader + conditional cache gating: `grep -n "enum SavingsSource\|savings_source\|projection_savings_source" apps/api/src/handlers/installation.rs apps/api/src/handlers/transactions/mod.rs`
 - Compose defaults + pull_policy + split-dev port: `grep -n ":-\|:?\|pull_policy\|5432:5432" docker-compose*.yml`
 - Vite env reading: `grep -n "loadEnv\|FUTUREFIN_API_PORT\|WEB_DEV_PORT\|strictPort" apps/web/vite.config.ts`
 - Dockerfile env: `grep -n "^ENV" apps/api/Dockerfile`
