@@ -741,24 +741,31 @@ pub(crate) async fn user_is_installation_owner(
     Ok(matches!(role.as_deref(), Some("owner")))
 }
 
-/// Fuente del ahorro efectiva de la proyección, leyendo SOLO el campo `savings_source` del JSONB
-/// (`fire_settings->>'savings_source'`) sin deserializar todo `FireSettings`. Lo usan las mutaciones
-/// de `transactions` para decidir si invalidar la cache de proyección: las transacciones son inputs
-/// del engine SOLO en modo `transactions_avg`. Ausente/`NULL`/desconocido → `Budget` (contrato
-/// histórico: en modo presupuesto las transacciones nunca tocan la cache).
+/// Carga y resuelve el `FireSettings` de la instalación por un **único** camino de deserialización
+/// (el del struct + `resolve_fire_settings`, que aplica los defaults y clamps). Fuente de verdad de
+/// la config FIRE para los handlers que la necesitan fuera de `compute_projection_series_response`.
+pub async fn load_fire_settings(
+    pool: &PgPool,
+    installation_id: Uuid,
+) -> Result<FireSettings, ApiError> {
+    let stored: Option<SqlxJson<FireSettings>> =
+        sqlx::query_scalar(r#"SELECT fire_settings FROM installation WHERE id = $1"#)
+            .bind(installation_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(resolve_fire_settings(stored.map(|j| j.0)))
+}
+
+/// Fuente del ahorro efectiva de la proyección. Lo usan las mutaciones de `transactions` para decidir
+/// si invalidar la cache de proyección (las transacciones son inputs del engine SOLO en modo
+/// `transactions_avg`) y `get_summary`. Deserializa el `FireSettings` completo por el mismo camino
+/// que el resto del código (`resolve_fire_settings`), de modo que cualquier variante futura del enum
+/// se resuelve por un único parser en lugar de caer silenciosamente a `Budget`.
 pub async fn projection_savings_source(
     pool: &PgPool,
     installation_id: Uuid,
 ) -> Result<SavingsSource, ApiError> {
-    let raw: Option<String> =
-        sqlx::query_scalar(r#"SELECT fire_settings->>'savings_source' FROM installation WHERE id = $1"#)
-            .bind(installation_id)
-            .fetch_one(pool)
-            .await?;
-    Ok(match raw.as_deref() {
-        Some("transactions_avg") => SavingsSource::TransactionsAvg,
-        _ => SavingsSource::Budget,
-    })
+    Ok(load_fire_settings(pool, installation_id).await?.savings_source)
 }
 
 /// Resolves the singleton installation and membership role, or `NotFound` / `Forbidden`.

@@ -181,7 +181,7 @@ pub async fn create_transaction(
     let id = insert_manual(&mut tx, iid, user.id.0, &prepared, ordinal, rule_id).await?;
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
     let resp = load_txn(&state.pool, id).await?;
     Ok((axum::http::StatusCode::CREATED, Json(resp)))
 }
@@ -262,7 +262,7 @@ pub async fn create_batch(
     }
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         out.push(load_txn(&state.pool, id).await?);
@@ -602,7 +602,7 @@ pub async fn patch_transaction(
     .await?;
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
     let resp = load_txn(&state.pool, id).await?;
     Ok(Json(resp))
 }
@@ -644,7 +644,7 @@ pub async fn delete_transaction(
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -763,6 +763,6 @@ pub async fn delete_import(
         return Err(ApiError::NotFound);
     }
     // El borrado del lote cascadea a sus transacciones → cambia el conjunto.
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await?;
+    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
