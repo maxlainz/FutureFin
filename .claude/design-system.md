@@ -165,6 +165,8 @@ Leyenda discreta que acompaña al MiniProjection. Cada item: `{ label, color, da
 | `ThemeToggle` | Segmented Auto/Claro/Oscuro |
 | `MiniProjection` | Chart compacto reutilizable (ver arriba) |
 
+> **Segmented control (`.ff-segmented`)**: para controles de 2–3 opciones inline (p. ej. la fuente del ahorro **Presupuesto / Promedio 12 meses** en `Ajustes → Proyección`, `SettingsView.tsx`) reutiliza la clase `ff-segmented`, que **comparte el mismo bloque de tokens** que `.ff-theme-toggle` en `App.css` (reglas agrupadas `.ff-theme-toggle, .ff-segmented`; opción activa `.is-active`). No dupliques estilos de segmented nuevos: añade la variante a ese bloque. Verifica claro **y** oscuro.
+
 ## Iconografía
 
 `apps/web/src/components/icons.tsx` — set unificado:

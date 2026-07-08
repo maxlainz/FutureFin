@@ -47,7 +47,7 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
 **Limitación documentada**: la captura solo toma filas del ledger con `owner_user_id = usuario`. Las filas compartidas del household (`owner_user_id IS NULL`, legacy/compartidas) **nunca se capturan** ni participan en la serie histórica. Consecuencia esperada: `history(mes 0)` puede diferir de `starting_net_worth` de la proyección cuando existen filas compartidas o usuarios sin snapshots; es un desajuste conocido y no un bug.
 
 ### Transactions (histórico de gasto mensual — v1.6.0)
-`20260707120000_transactions_and_rules.sql`. Tres tablas nuevas para el histórico REAL de gasto (importado de CSV bancario o metido a mano como efectivo), su categorización y las reglas aprendidas. Todas per-user (`owner_user_id NOT NULL`) y, como los snapshots, **no son inputs del engine de proyección** → sus mutaciones **nunca invalidan la cache de proyección** (contrato del módulo `handlers/transactions`, test de regresión `transactions_projection_cache.rs`). Ningún `CHECK` de valores sobre `source` (un banco nuevo no debe exigir migración; se valida en Rust).
+`20260707120000_transactions_and_rules.sql`. Tres tablas nuevas para el histórico REAL de gasto (importado de CSV bancario o metido a mano como efectivo), su categorización y las reglas aprendidas. Todas per-user (`owner_user_id NOT NULL`). **Contrato de cache condicionado al modo `fire_settings.savings_source`**: en modo A (`budget`, default) las transacciones **no son inputs del engine de proyección** → sus mutaciones **nunca invalidan la cache**; en modo B (`transactions_avg`) el ahorro de la simulación sale del promedio real 12m de las transacciones → **sí son inputs**, y las mutaciones invalidan la cache (`invalidate_projection_if_transactions_avg`). Ambos casos fijados por `transactions_projection_cache.rs`. Ningún `CHECK` de valores sobre `source` (un banco nuevo no debe exigir migración; se valida en Rust).
 
 **transaction_imports** (cabecera de un lote de import = un CSV): `id`, `installation_id (FK installation ON DELETE CASCADE)`, `owner_user_id (uuid NOT NULL FK users ON DELETE CASCADE)`, `source (text NOT NULL; `myinvestor`|`n26`|… validado en Rust)`, `account_asset_id (uuid nullable FK assets **ON DELETE SET NULL**; cuenta origen, metadata)`, `original_filename (text nullable, CHECK ≤300 chars)`, `created_at`. Índice `(installation_id, owner_user_id, created_at DESC)`. Borrar la cabecera deshace el import: sus `transactions` caen en cascada (`import_id ON DELETE CASCADE`).
 
@@ -82,13 +82,16 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
     { "up_to": "200000", "pct": "23" },
     { "up_to": "300000", "pct": "27" },
     { "up_to": null,     "pct": "30" }
-  ]
+  ],
+  "savings_source": "budget|transactions_avg"
 }
 ```
 Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF). Last bracket must have `up_to: null`.
 `fire_settings` is nullable; when null, defaults apply on read (handler calls `resolve_fire_settings`).
 
-**Deserialization is strict**: `fire_number_mode` only accepts `manual | annual_expense | current_income`. The legacy alias `annual_expense_adjusted` is mapped to `annual_expense` for backwards-compat with old backups, but any other value returns 422 (was silently coerced to default before May 2026). The field `fire_number_expense_adjustment_pct` was removed — it had no consumer.
+**`savings_source`** (`SavingsSource` enum, default `budget`) — fuente del ahorro mensual de la simulación FIRE: `budget` (modo A, presupuesto — histórico) o `transactions_avg` (modo B, promedio ponderado de los últimos 12 meses calendario completos de transacciones, con resta híbrida de cuotas por liability activa). Aditivo, **sin migración** (`FireSettings` tiene `#[serde(default)]` a nivel struct, así que un JSONB sin el campo → `budget`; backups viejos siguen cargando). En modo B las **transacciones se vuelven input del engine** (ver nota en §Transactions). Semántica completa en `futurefin-fire-domain-reference` y `futurefin-config-and-flags`.
+
+**Deserialization is strict**: `fire_number_mode` only accepts `manual | annual_expense | current_income`; `savings_source` only `budget | transactions_avg` (unknown → 422, like `FireNumberMode`). The legacy alias `annual_expense_adjusted` is mapped to `annual_expense` for backwards-compat with old backups, but any other value returns 422 (was silently coerced to default before May 2026). The field `fire_number_expense_adjustment_pct` was removed — it had no consumer.
 
 ## Key invariants
 - `Decimal` for all monetary/percentage columns — never `f64` in schema or Rust code
