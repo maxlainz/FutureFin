@@ -30,7 +30,7 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 |--------|------|-------|
 | GET | `/v1/installation/session-context` | Returns `{installation_initialized, access}` — used for routing the UI gate |
 | GET | `/v1/installation` | Own membership + installation snapshot |
-| PATCH | `/v1/installation` | Owner only. Updates tz, inflation, show_age_mode, fire_settings (no existe `target_age` — eliminado en v1.0.6) |
+| PATCH | `/v1/installation` | Owner only. Updates tz, inflation, show_age_mode, fire_settings (incluye `savings_source: "budget" \| "transactions_avg"` — fuente del ahorro de la simulación; no existe `target_age` — eliminado en v1.0.6) |
 | POST | `/v1/installation/setup` | Creates singleton installation (409 if exists) |
 
 ### Pending users (`/v1/installation/pending-users/`)
@@ -73,6 +73,10 @@ Accepts `?view=mine`. `principal_derived_from_plan` flag indicates auto-derived 
 ### Summary (`/v1/summary/`)
 Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=mine`. `total_liabilities` and breakdowns exclude expired rows (see Liabilities note above).
 
+**`financial_health` sigue el toggle `fire_settings.savings_source`**: en modo B (`transactions_avg`) con datos, `income_monthly_equivalent`, `expense_regular_monthly_equivalent` y `net_monthly_equivalent` (= income_eff − expense_eff − Σ cuotas nominales activas) y `savings_rate` salen del promedio real 12m con resta híbrida de cuotas (mismo helper `effective_avg_income_expense` que la proyección), no del presupuesto. Runway y demás KPIs no cambian de base. Campos nuevos en `financial_health`:
+- `savings_source` (`"budget" | "transactions_avg"`) — modo **efectivo** tras el fallback (`transactions_avg` con `months_with_data == 0` → devuelve `"budget"`).
+- `savings_source_months_with_data` (`u32`) — meses del promedio real; `0` en modo A y en el fallback.
+
 ### Budget (`/v1/budget/`)
 Income/expense entries + derived lines from liabilities. Accepts `?view=mine`. Derived lines only show liabilities with `payment_end_date > today`.
 
@@ -93,7 +97,7 @@ Response (`ProjectionSeriesResponse`) includes:
 
 > La misma excepción f64 cubre los arrays por punto de `GET /v1/history/series` (`points[].net_worth/assets_total/liabilities_total`, `asset_series[].values`, `markers[].total`) — misma justificación chart-only. Hay UNA sola definición de `serialize_decimal_as_f64` (`pub(crate)`, en `handlers/projection.rs`), usada solo por projection e history.
 
-**Cache server-side**: `AppState` mantiene un cache in-memory por `(installation_id, view, owner_user_id)` con sliding TTL de 60 min. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`. Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa `view=household` para que el primer GET sea hit. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
+**Cache server-side**: `AppState` mantiene un cache in-memory por `(installation_id, view, owner_user_id)` con sliding TTL de 60 min. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo con `fire_settings.savings_source = transactions_avg`** (ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa `view=household` para que el primer GET sea hit. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
 
 **Compresión**: todos los endpoints pasan por `tower_http::compression::CompressionLayer::new().gzip(true)`. `/v1/projection/series` baja de ~260 KB a ~30 KB con `Content-Encoding: gzip`.
 
@@ -146,7 +150,7 @@ Cash-flow histórico de las transacciones (tier-2 sobre los snapshots). Solo lec
 Params: `view` (`mine` | omitido → household); `window_months` (i64, default 24, clamp 1..=120); `resolution` (`weekly` default | `daily`). **Gating de daily**: `resolution=daily` exige `window_months <= 6` → si no, **400** `daily_window_too_large`. Response `CashflowResponse {anchor_date_ymd, anchor_month_first_ymd, view, months, fine?}`; numéricos de `fine` en **f64** (misma excepción chart-only que projection/history-series), `months[]` en Decimal-string.
 
 ### Transactions (`/v1/transactions/`) — v1.6.0
-Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26) o efectivo a mano, categorización con reglas aprendidas, y comparativa mes real vs presupuesto vs promedio. Decimal-as-string (importes firmados: negativo = cargo). **Ningún handler del módulo invalida la cache de proyección** (las transacciones no son inputs del engine; regresión: `transactions_projection_cache.rs`). Lecturas: cualquier miembro (`?view=mine` vía `LedgerView` en los GET de listado/comparativa/imports; las **reglas** son siempre own-user, sin `?view`); escrituras siempre `owner_user_id = usuario` y exigen `role_can_write` o **403**. Import limit 16 MiB (`BACKUP_IMPORT_BODY_LIMIT_BYTES`, reutilizado). Códigos 400 estables entre comillas.
+Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26) o efectivo a mano, categorización con reglas aprendidas, y comparativa mes real vs presupuesto vs promedio. Decimal-as-string (importes firmados: negativo = cargo). **Invalidación de la cache de proyección condicionada al modo** (`fire_settings.savings_source`): en modo A (`budget`, default) las transacciones **no son inputs del engine** → ninguna mutación invalida; en modo B (`transactions_avg`) el ahorro de la simulación sale del promedio real 12m → las mutaciones que cambian el conjunto (create/batch/patch/delete, delete import, import confirm, `recurring/materialize`) invalidan la cache vía `invalidate_projection_if_transactions_avg` (best-effort post-commit, jamás convierte una mutación exitosa en 5xx). `rules.rs`, previews y el borrado de una regla recurrente nunca invalidan. Regresión de ambos casos: `transactions_projection_cache.rs`. Lecturas: cualquier miembro (`?view=mine` vía `LedgerView` en los GET de listado/comparativa/imports; las **reglas** son siempre own-user, sin `?view`); escrituras siempre `owner_user_id = usuario` y exigen `role_can_write` o **403**. Import limit 16 MiB (`BACKUP_IMPORT_BODY_LIMIT_BYTES`, reutilizado). Códigos 400 estables entre comillas.
 
 | Method | Path | Rol | Notas |
 |--------|------|-----|-------|

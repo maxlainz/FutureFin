@@ -19,8 +19,9 @@ description: >
 
 Facts date-stamped **as of 2026-07-02, v1.4.3** (`apps/api/Cargo.toml`); D12 (historical
 snapshots) and the migration/backup-schema counts were added/refreshed for **v1.5.0** on 2026-07-06,
-again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-07, and for **v1.8.0**
-(recurring-transaction rules, backup schema_version 6) on 2026-07-08. This is the
+again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-07, for **v1.8.0**
+(recurring-transaction rules, backup schema_version 6) on 2026-07-08, and for **Unreleased** on
+2026-07-09 (D12a: the transactions no-cache contract became conditional on `savings_source`). This is the
 contract a retiring principal engineer would make you sign: the decisions
 below are settled, most of them by a documented incident. Do not re-litigate them casually; if you must change one, go through
 `.claude/skills/futurefin-change-control/SKILL.md`.
@@ -252,11 +253,33 @@ deliberately omitted, with an explicit comment in the handler and a regression t
 `transactions`/`transaction_imports`/`categorization_rules` — v1.6.0; v6 added
 `recurring_transaction_rules` + `BackupTransaction.recurring_rule_index` — v1.8.0; import re-links
 snapshot items to fresh asset/liability UUIDs via `ledger_index`, else keeps `item_key`). The same
-D12 no-cache contract covers the **transactions** module (`handlers/transactions/`, incl. the
-v1.8.0 recurring-rule endpoints, guarded by `transactions_projection_cache.rs`). **Breaks if violated**: wiring snapshot writes
+D12 no-cache contract **originally** covered the **transactions** module too
+(`handlers/transactions/`, incl. the v1.8.0 recurring-rule endpoints, guarded by
+`transactions_projection_cache.rs`). **Breaks if violated**: wiring snapshot writes
 into `refresh_projection_after_mutation` couples two independent subsystems and needlessly evicts
 a hot projection cache; conversely, ever feeding snapshot data into the engine would make past
 "observations" silently reshape the *future* projection — a category error.
+
+**D12a — the transactions half of the no-cache contract became CONDITIONAL (updated 2026-07-09,
+Unreleased).** The blanket "transactions are never a projection input" rule now holds **only** in
+`fire_settings.savings_source = budget` (mode A, the default — unchanged, still guarded by
+`transactions_projection_cache.rs`). In `savings_source = transactions_avg` (mode B) the projection
+derives the monthly saving from the **weighted 12-month average** of transactions
+(`transactions_12m_avg` + `effective_avg_income_expense`), so **transactions ARE an engine input**
+and every mutation that changes the transaction set (`crud.rs` create/batch/patch/delete +
+delete_import, `import.rs` confirm, `recurring.rs` materialize) **must** invalidate the projection
+cache — via `invalidate_projection_if_transactions_avg` (mod.rs), which reads
+`projection_savings_source(pool, iid)` and only then calls `refresh_projection_after_mutation`.
+It is **best-effort post-commit**: the write is already persisted, so a failing `savings_source`
+SELECT is logged and swallowed — it must never turn a successful mutation into a 5xx (a retry could
+double-insert). `rules.rs`, previews, and deleting a recurring rule never invalidate (the set is
+unchanged). This is a **superseding decision, not a contradiction**: the mode toggle is precisely
+what turns display-only history into a real engine input, so the invalidation must follow the mode.
+Still no warm-up after mutation (D7 / failure-archaeology §2.7): mode-B invalidation is
+delete-only. Regression for **both** modes (A = no mutation invalidates; B = each invalidates; A↔B
+flip via `PATCH /v1/installation` invalidates): `apps/api/tests/transactions_projection_cache.rs`.
+The snapshot half of D12 (`/v1/history/*`) is **unaffected** — snapshots are never an engine input
+in any mode.
 
 ## 3. Invariants table
 

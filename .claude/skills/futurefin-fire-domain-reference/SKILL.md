@@ -79,6 +79,42 @@ Critical input nuances (source of the worst historical bug in this area):
 - No target (`None`) is a **valid outcome** (retirement income covers expenses): the API returns
   `jubilacion_target_net_worth: null`, empty `fire_target_series`, `jubilacion_month_index: null`.
 
+### 2b. Mode B: `savings_source = transactions_avg` — need & net from the real 12-month average
+
+`fire_settings.savings_source` (default `budget` = everything above) can be flipped to
+`transactions_avg` (mode B, added Unreleased). It changes **where the pre-retirement income/expense
+scalars come from**, and therefore both the FIRE need and the simulation's monthly net. The gross-up,
+SWR, moving-target and drain formulas are **unchanged** — only the base numbers differ.
+
+- **Window & average**: weighted mean over `[first-of-month(today) − 12 months, first-of-month(today))`
+  — the 12 **complete** calendar months before the current one (the running month is excluded).
+  Denominator = `months_with_data` (months in the window with ≥1 transaction of any kind), same
+  weighted semantics as the Movimientos comparison → a short history does not dilute the mean.
+  Helper `transactions_12m_avg` (`handlers/transactions/summary.rs`).
+- **Hybrid liability subtraction**: `expense_eff = max(0, expense_avg − Σ per active liability)`,
+  where each active liability (filtered by `payment_end_date`) contributes its **real linked-txn
+  average** (`linked_liability_id`) if any exist, otherwise its **nominal monthly payment**
+  (`liability_monthly_payment`). Single source of truth `effective_avg_income_expense`, shared by
+  `projection.rs` and `summary.rs`. The engine still receives liabilities as `debt_service`, so the
+  saving **steps up automatically when a loan ends** (verified by test).
+- **Target**: `annual_expense` uses `expense_eff` as the base (mode A used `expense_retirement`);
+  `current_income` uses `income_eff` (`income_avg`); `manual` is unchanged. This is a **deliberate,
+  semantic change of base** — mode A's `expense_retirement` is a budget line, mode B's `expense_eff`
+  is measured spending net of debt service. `end_adj` (budget end-date adjustments) is zeroed in
+  mode B; `planning_flows` (`flow_adj`) still apply.
+- **Documented mismatch**: mode B only changes the **accumulation** phase. The **retirement** phase
+  still draws `income_retirement` / `expense_retirement` from the **budget** in both modes (the drain
+  step at §5 is unchanged). So the target is derived from real spending while the drawdown that must
+  fund it is budget-based — an accepted, intentional asymmetry.
+- **Fallback**: `months_with_data == 0` in mode B → silently reverts to the budget scalars (mode A
+  effective). `GET /v1/summary` reports the **effective** source in `financial_health.savings_source`
+  (so it can read `"budget"` even when the setting is `transactions_avg`).
+- **Preview parity**: the web preview must consume `/v1/summary`'s effective equivalents in mode B
+  (`RetirementView`, fetch gated on the mode), never recompute the need from the budget — otherwise
+  it re-opens the client/server divergence class of §2 (see §2.5 of failure-archaeology). Tripwire
+  case in `fire-parity.json`: `expense_retirement 2137.5 → expected_target_nw 923327.306` (proves both
+  sides derive the same need from an avg-style, non-round expense base).
+
 Defaults (Spain, `default_fire_settings`, installation.rs:81-114): mode `annual_expense`,
 `swr_pct = 3.5`, `taxes_enabled = true`, 5 IRPF capital-gains brackets:
 19% to 6.000, 21% to 50.000, 23% to 200.000, 27% to 300.000, 30% open-ended.
@@ -317,7 +353,8 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 
 - Single target formula + signature: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs`
 - Trigger uses k−1 / nw_prev: `grep -n "fire_target_at_month_index(input.fire_target" crates/engine/src/projection.rs`
-- FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (check the call site passes `expense_retirement`)
+- FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes `expense_eff` — see §2b)
+- Mode B (`savings_source`) base + hybrid subtraction: `grep -n "savings_source\|transactions_12m_avg\|effective_avg_income_expense\|use_avg" apps/api/src/handlers/projection.rs`
 - Closed-form gross-up: `grep -n "gross_up_net_annual_fire" apps/api/src/handlers/projection.rs`
 - Defaults (SWR 3.5, ES brackets): `grep -n -A8 "fn default_fire_settings" apps/api/src/handlers/installation.rs`
 - SWR bound 0–4: `grep -n "swr_pct must be between" apps/api/src/handlers/installation.rs`
@@ -326,7 +363,7 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 - Sink invariant: `grep -n "uncapped_remainder\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs`
 - Client still binary-search (90 iters): `grep -n "for (let i = 0; i < 90" apps/web/src/lib/fire.ts`
 - Budget retirement fields: `grep -n "persists_after_retirement\|ends_at_retirement" apps/api/src/handlers/budget.rs | head`
-- Fixture case count + tolerance: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (6 as of 2026-07-02) and `grep -n "_tolerance_eur" apps/api/tests/fixtures/fire-parity.json`
+- Fixture case count + tolerance: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (7 as of 2026-07-09, incl. the mode-B avg-style tripwire) and `grep -n "_tolerance_eur" apps/api/tests/fixtures/fire-parity.json`
 - If line anchors look stale: `git log --oneline -3 -- crates/engine/src/projection.rs apps/api/src/handlers/projection.rs`
 
 If you change anything this file describes, update this skill in the same change (CLAUDE.md
