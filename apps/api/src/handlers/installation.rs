@@ -741,6 +741,26 @@ pub(crate) async fn user_is_installation_owner(
     Ok(matches!(role.as_deref(), Some("owner")))
 }
 
+/// Fuente del ahorro efectiva de la proyección, leyendo SOLO el campo `savings_source` del JSONB
+/// (`fire_settings->>'savings_source'`) sin deserializar todo `FireSettings`. Lo usan las mutaciones
+/// de `transactions` para decidir si invalidar la cache de proyección: las transacciones son inputs
+/// del engine SOLO en modo `transactions_avg`. Ausente/`NULL`/desconocido → `Budget` (contrato
+/// histórico: en modo presupuesto las transacciones nunca tocan la cache).
+pub async fn projection_savings_source(
+    pool: &PgPool,
+    installation_id: Uuid,
+) -> Result<SavingsSource, ApiError> {
+    let raw: Option<String> =
+        sqlx::query_scalar(r#"SELECT fire_settings->>'savings_source' FROM installation WHERE id = $1"#)
+            .bind(installation_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(match raw.as_deref() {
+        Some("transactions_avg") => SavingsSource::TransactionsAvg,
+        _ => SavingsSource::Budget,
+    })
+}
+
 /// Resolves the singleton installation and membership role, or `NotFound` / `Forbidden`.
 pub async fn require_installation_member(
     pool: &PgPool,

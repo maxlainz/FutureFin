@@ -1094,6 +1094,22 @@ export default function App() {
         const projPromise = skipProjection
           ? Promise.resolve(null as Response | null)
           : fetch(`/v1/projection/series${qs}`, defaultFetchInit);
+        // El preview del target en modo B (promedio) consume los equivalentes efectivos
+        // del summary; lo cargamos aquí para que sea fresco y coherente con el scope
+        // activo. Independiente y silencioso: cualquier fallo degrada el preview al
+        // presupuesto (modo A), sin bloquear budget/proyección.
+        void (async () => {
+          try {
+            const res = await fetch(`/v1/summary${qs}`, defaultFetchInit);
+            if (res.status === 403 || res.status === 404) {
+              setSummary(null);
+            } else if (res.ok) {
+              setSummary((await res.json()) as SummaryResponse);
+            }
+          } catch {
+            /* stale summary tolerado: el preview degrada a presupuesto */
+          }
+        })();
         const [budRes, projRes] = await Promise.all([budPromise, projPromise]);
         if (budRes.status === 403 || budRes.status === 404) {
           setRetirementBudgetSnapshot(null);
@@ -3345,6 +3361,7 @@ export default function App() {
             projectionSeries={projectionSeries}
             projectionBusy={projectionBusy}
             retirementBudgetSnapshot={retirementBudgetSnapshot}
+            summary={summary}
             retirementBusy={retirementBusy}
             retirementError={retirementError}
             user={user}

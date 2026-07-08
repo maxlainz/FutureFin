@@ -245,6 +245,30 @@ pub(crate) async fn transactions_12m_avg(
     })
 }
 
+/// Resta híbrida de cuotas de pasivo sobre el promedio real (modo B). Por cada liability **activa**
+/// (el llamante ya filtró por `payment_end_date`) se resta de `expense_avg`: su promedio real
+/// vinculado si existe, si no su cuota nominal mensual. Devuelve `(income_eff, expense_eff)` con
+/// `expense_eff = max(0, expense_avg − Σ resta)`.
+///
+/// Único punto de verdad de esta fórmula: lo consumen `projection.rs` (input del engine) y
+/// `summary.rs` (KPIs de Resumen) para que ambos handlers no diverjan. `active_liabilities` es
+/// `(liability_id, cuota_nominal_mensual)`.
+pub(crate) fn effective_avg_income_expense(
+    avg: &TransactionsAvg,
+    active_liabilities: &[(Uuid, Decimal)],
+) -> (Decimal, Decimal) {
+    let mut liab_payments = Decimal::ZERO;
+    for (id, nominal) in active_liabilities {
+        liab_payments += avg
+            .per_liability_linked_avg
+            .get(id)
+            .copied()
+            .unwrap_or(*nominal);
+    }
+    let expense_eff = (avg.expense_avg - liab_payments).max(Decimal::ZERO);
+    (avg.income_avg, expense_eff)
+}
+
 #[utoipa::path(
     get,
     path = "/v1/transactions/summary",

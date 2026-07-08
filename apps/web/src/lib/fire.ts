@@ -12,6 +12,7 @@ import type {
   FireNumberModeApi,
   FireSettingsApi,
   ProjectionPointApi,
+  SavingsSourceApi,
   TaxBracketApi,
 } from "../api/types";
 import { parseDisplayDecimal } from "./format";
@@ -35,6 +36,7 @@ export function defaultFireSettingsApi(): FireSettingsApi {
       up_to: b.up_to,
       pct: b.pct,
     })),
+    savings_source: "budget",
   };
 }
 
@@ -80,6 +82,12 @@ export function normalizeInstallationFireSettings(
             pct: String(t.pct ?? ""),
           }))
         : base.tax_brackets,
+    savings_source: ((): SavingsSourceApi => {
+      const s = raw.savings_source;
+      return s === "transactions_avg" || s === "budget"
+        ? s
+        : base.savings_source ?? "budget";
+    })(),
   };
 }
 
