@@ -1,8 +1,13 @@
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_budget_totals_for_summary;
-use crate::handlers::installation::{installation_naive_today, require_installation_member};
+use crate::handlers::installation::{
+    installation_naive_today, require_installation_member, resolve_fire_settings, FireSettings,
+    SavingsSource,
+};
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
+use crate::handlers::projection::monthly_payment_from;
 use crate::handlers::session::require_session_user;
+use crate::handlers::transactions::summary::{effective_avg_income_expense, transactions_12m_avg};
 use crate::state::AppState;
 use axum::extract::{Extension, Query};
 use axum::routing::get;
@@ -11,6 +16,7 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
+use sqlx::types::Json as SqlxJson;
 use sqlx::FromRow;
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -67,6 +73,12 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub upcoming_coverage_ratio: Option<Decimal>,
+    /// Fuente **efectiva** del ahorro que produjo los equivalentes mensuales anteriores (tras el
+    /// fallback: en modo `transactions_avg` sin datos cae a `budget`). Contrato con el frontend.
+    pub savings_source: SavingsSource,
+    /// Meses con datos usados por el promedio real cuando `savings_source == transactions_avg`; `0`
+    /// en modo `budget` (configurado o por fallback).
+    pub savings_source_months_with_data: u32,
 }
 
 #[derive(Debug, FromRow)]
@@ -278,11 +290,60 @@ pub async fn get_summary(
     let budget_totals =
         ledger_budget_totals_for_summary(&state.pool, iid, user.id.0, view, today).await?;
 
-    let income_m = budget_totals.income_monthly_equivalent;
-    let expense_reg = budget_totals.expense_regular_monthly_equivalent;
+    // Base presupuesto (modo A). El modo B con datos sustituye income/expense_reg/net por el
+    // promedio real 12m; runway y expense_total/derived NO cambian de base.
+    let mut income_m = budget_totals.income_monthly_equivalent;
+    let mut expense_reg = budget_totals.expense_regular_monthly_equivalent;
     let expense_der = budget_totals.expense_derived_monthly_equivalent;
     let expense_tot = budget_totals.expense_total_monthly_equivalent;
-    let net_m = budget_totals.net_monthly_equivalent;
+    let mut net_m = budget_totals.net_monthly_equivalent;
+
+    // Fuente del ahorro efectiva (tras fallback) + meses con datos, para el response.
+    let mut effective_savings_source = SavingsSource::Budget;
+    let mut savings_source_months_with_data: u32 = 0;
+
+    let fire_settings_json: Option<SqlxJson<FireSettings>> =
+        sqlx::query_scalar(r#"SELECT fire_settings FROM installation WHERE id = $1"#)
+            .bind(iid)
+            .fetch_one(&state.pool)
+            .await?;
+    let fire_settings = resolve_fire_settings(fire_settings_json.map(|j| j.0));
+
+    if fire_settings.savings_source == SavingsSource::TransactionsAvg {
+        let avg = transactions_12m_avg(&state.pool, iid, user.id.0, view, today).await?;
+        if avg.months_with_data > 0 {
+            // Liabilities activas (por payment_end_date) con su cuota nominal mensual, con la MISMA
+            // vista/scope que el resto del summary. La resta híbrida la aplica el helper compartido.
+            let liab_scope2 = view.scope_where("");
+            let liab_today_ph2 = view.next_arg_index();
+            let liab_sql = format!(
+                r#"SELECT id, payment_amount, payment_frequency
+                   FROM liabilities
+                   WHERE {liab_scope2}
+                     AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph2})"#
+            );
+            let active_liabs: Vec<(Uuid, Option<Decimal>, Option<String>)> = view
+                .bind_scope_as(sqlx::query_as(&liab_sql), iid, user.id.0)
+                .bind(today)
+                .fetch_all(&state.pool)
+                .await?;
+            let active: Vec<(Uuid, Decimal)> = active_liabs
+                .into_iter()
+                .map(|(id, amount, freq)| {
+                    let monthly = amount
+                        .map(|a| monthly_payment_from(a, freq.as_deref()))
+                        .unwrap_or(Decimal::ZERO);
+                    (id, monthly)
+                })
+                .collect();
+            let (income_eff, expense_eff) = effective_avg_income_expense(&avg, &active);
+            income_m = income_eff;
+            expense_reg = expense_eff;
+            net_m = income_eff - expense_eff;
+            effective_savings_source = SavingsSource::TransactionsAvg;
+            savings_source_months_with_data = avg.months_with_data;
+        }
+    }
 
     let monthly_net_excluding_derived_debt = income_m - expense_reg;
 
@@ -327,6 +388,8 @@ pub async fn get_summary(
         upcoming_inflows_total,
         upcoming_outflows_total,
         upcoming_coverage_ratio,
+        savings_source: effective_savings_source,
+        savings_source_months_with_data,
     };
 
     let net_worth = total_assets - total_liabilities;

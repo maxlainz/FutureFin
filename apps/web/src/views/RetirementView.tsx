@@ -11,6 +11,7 @@ import type {
   FireSettingsApi,
   InstallationAccess,
   ProjectionSeriesApi,
+  SummaryResponse,
   UserResponse,
 } from "../api/types";
 import { MetricCard } from "../components/MetricCard";
@@ -48,6 +49,7 @@ export function RetirementView({
   projectionSeries,
   projectionBusy,
   retirementBudgetSnapshot,
+  summary,
   retirementBusy,
   retirementError,
   user,
@@ -63,6 +65,8 @@ export function RetirementView({
   projectionSeries: ProjectionSeriesApi | null;
   projectionBusy: boolean;
   retirementBudgetSnapshot: BudgetSnapshotApi | null;
+  /** Solo se consume en modo B (promedio): los equivalentes efectivos del ahorro real. */
+  summary: SummaryResponse | null;
   retirementBusy: boolean;
   retirementError: string | null;
   user: UserResponse | null;
@@ -126,11 +130,24 @@ export function RetirementView({
     return n != null && n > 0 ? n : 0;
   }, [installation?.installation.annual_inflation_assumption_percent]);
 
+  // Fuente EFECTIVA del ahorro (tras el fallback del servidor). En modo B (promedio) el
+  // preview del target NO recalcula el promedio en cliente: consume los equivalentes ya
+  // calculados por el servidor en /v1/summary (expense_regular = expense_avg_sin_cuotas,
+  // income = income_avg), de modo que el preview coincide con el target del servidor.
+  // `income_retirement` sigue del presupuesto (la fase post-jubilación no cambia de base
+  // en modo B). Si el servidor cayó a `budget` (0 meses con datos) o el summary aún no está
+  // cargado, se usan los equivalentes del presupuesto (idéntico a modo A).
+  const savingsAvgActive = summary?.savings_source === "transactions_avg";
+  const fireExpenseM = savingsAvgActive
+    ? summary?.financial_health.expense_regular_monthly_equivalent
+    : retirementBudgetSnapshot?.totals.expense_retirement_monthly_equivalent;
+  const fireIncomeM = savingsAvgActive
+    ? summary?.financial_health.income_monthly_equivalent
+    : retirementBudgetSnapshot?.totals.income_monthly_equivalent;
+
   const fireKpis = useMemo(() => {
-    const expenseM =
-      retirementBudgetSnapshot?.totals.expense_retirement_monthly_equivalent;
-    const incomeM =
-      retirementBudgetSnapshot?.totals.income_monthly_equivalent;
+    const expenseM = fireExpenseM;
+    const incomeM = fireIncomeM;
     const incomeRetM =
       retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent;
     const needAnnual = computeFireAnnualNeedNetEur(
@@ -185,8 +202,8 @@ export function RetirementView({
   }, [
     fireDraft,
     installationInflationPct,
-    retirementBudgetSnapshot?.totals.expense_retirement_monthly_equivalent,
-    retirementBudgetSnapshot?.totals.income_monthly_equivalent,
+    fireExpenseM,
+    fireIncomeM,
     retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent,
     projectionSeries?.points,
     projectionSeries?.months,
@@ -213,29 +230,16 @@ export function RetirementView({
   }, [fireDraft.fire_number_manual_amount, renderRetirementAmount]);
 
   const retirementObjectiveExpenseAnnualDisplay = useMemo<ReactNode>(() => {
-    const baseM = parseDisplayDecimal(
-      String(
-        retirementBudgetSnapshot?.totals.expense_retirement_monthly_equivalent ??
-          "",
-      ),
-    );
+    const baseM = parseDisplayDecimal(String(fireExpenseM ?? ""));
     if (!(baseM !== null && baseM >= 0)) return METRIC_DASH;
     return renderRetirementAmount(baseM * 12, baseM);
-  }, [
-    retirementBudgetSnapshot?.totals.expense_retirement_monthly_equivalent,
-    renderRetirementAmount,
-  ]);
+  }, [fireExpenseM, renderRetirementAmount]);
 
   const retirementObjectiveIncomeAnnualDisplay = useMemo<ReactNode>(() => {
-    const incM = parseDisplayDecimal(
-      String(retirementBudgetSnapshot?.totals.income_monthly_equivalent ?? ""),
-    );
+    const incM = parseDisplayDecimal(String(fireIncomeM ?? ""));
     if (!(incM !== null && incM >= 0)) return METRIC_DASH;
     return renderRetirementAmount(incM * 12, incM);
-  }, [
-    retirementBudgetSnapshot?.totals.income_monthly_equivalent,
-    renderRetirementAmount,
-  ]);
+  }, [fireIncomeM, renderRetirementAmount]);
 
   const skipFireAutosaveRef = useRef(true);
 

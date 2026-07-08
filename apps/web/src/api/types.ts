@@ -19,6 +19,11 @@ export type UserResponse = {
 
 export type FireNumberModeApi = "manual" | "annual_expense" | "current_income";
 
+/** Fuente del ahorro de la simulación: presupuesto (modo A, default) vs promedio real
+ *  de los últimos 12 meses de movimientos (modo B). Ausente en clientes/backups antiguos
+ *  → `budget`. */
+export type SavingsSourceApi = "budget" | "transactions_avg";
+
 export type TaxBracketApi = {
   up_to: string | null;
   pct: string;
@@ -31,6 +36,8 @@ export type FireSettingsApi = {
   swr_pct: string;
   taxes_enabled: boolean;
   tax_brackets: TaxBracketApi[];
+  /** Ausente en clientes/backups antiguos → tratar como `budget`. */
+  savings_source?: SavingsSourceApi;
 };
 
 export type InstallationSnapshot = {
@@ -136,6 +143,12 @@ export type SummaryResponse = {
   financial_health: FinancialHealthMetrics;
   assets_by_category: CategoryBreakdownLineApi[];
   liabilities_by_category: CategoryBreakdownLineApi[];
+  /** Fuente EFECTIVA del ahorro tras el fallback del servidor (`budget` si el modo
+   *  configurado era `transactions_avg` pero no había meses con datos). Ausente en
+   *  backends antiguos → `budget`. */
+  savings_source?: SavingsSourceApi;
+  /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
+  savings_source_months_with_data?: number;
 };
 
 export type BudgetTotalsApi = {

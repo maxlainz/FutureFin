@@ -9,7 +9,7 @@ use crate::handlers::installation::{
     FireSettings, SavingsSource, TaxBracket,
 };
 use crate::handlers::person_view::LedgerView;
-use crate::handlers::transactions::summary::transactions_12m_avg;
+use crate::handlers::transactions::summary::{effective_avg_income_expense, transactions_12m_avg};
 use crate::handlers::session::require_session_user;
 use crate::state::{AppState, Density, ProjectionCacheKey};
 use axum::extract::{Extension, Query};
@@ -696,21 +696,16 @@ pub(crate) async fn build_installation_projection_input(
             let avg = transactions_12m_avg(pool, iid, session_user_id, view, today).await?;
             if avg.months_with_data > 0 {
                 // Resta híbrida por liability activa: su avg real vinculado si existe, si no su
-                // cuota nominal (weekly ×52/12). Clamp global `expense_eff ≥ 0`.
-                let mut liab_payments = Decimal::ZERO;
-                for row in &liabs {
-                    let active = row.payment_end_date.map_or(true, |d| d >= today);
-                    if !active {
-                        continue;
-                    }
-                    liab_payments += avg
-                        .per_liability_linked_avg
-                        .get(&row.id)
-                        .copied()
-                        .unwrap_or_else(|| liability_monthly_payment(row));
-                }
-                let expense_eff = (avg.expense_avg - liab_payments).max(Decimal::ZERO);
-                (avg.income_avg, expense_eff, true, avg.income_avg, expense_eff)
+                // cuota nominal (weekly ×52/12). Clamp global `expense_eff ≥ 0`. Fórmula compartida
+                // con `summary.rs` vía `effective_avg_income_expense` (punto de verdad único).
+                let active_liabs: Vec<(Uuid, Decimal)> = liabs
+                    .iter()
+                    .filter(|row| row.payment_end_date.map_or(true, |d| d >= today))
+                    .map(|row| (row.id, liability_monthly_payment(row)))
+                    .collect();
+                let (income_eff, expense_eff) =
+                    effective_avg_income_expense(&avg, &active_liabs);
+                (income_eff, expense_eff, true, income_eff, expense_eff)
             } else {
                 (income_reg, expense_reg, false, income_reg, expense_retirement)
             }
