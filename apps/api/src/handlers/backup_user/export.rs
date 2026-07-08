@@ -22,8 +22,8 @@ use std::collections::HashMap;
 use super::crypto::{encrypt_payload, frame_file};
 use super::schema::{
     BackupAllocationRule, BackupAsset, BackupBudgetEntry, BackupCategorizationRule, BackupCategory,
-    BackupLiability, BackupPayload, BackupPlanningFlow, BackupSnapshot, BackupSnapshotItem,
-    BackupTransaction, BackupTransactionImport, BackupUser, CategoryRef,
+    BackupLiability, BackupPayload, BackupPlanningFlow, BackupRecurringRule, BackupSnapshot,
+    BackupSnapshotItem, BackupTransaction, BackupTransactionImport, BackupUser, CategoryRef,
     InstallationSnapshotInformative, UiPreferences, CURRENT_SCHEMA_VERSION,
 };
 
@@ -162,6 +162,16 @@ async fn build_payload(
     .await?;
     let (transaction_imports, import_id_to_index) =
         fetch_transaction_imports(pool, iid, user_id, &asset_id_to_index).await?;
+    // Recurring rules are fetched BEFORE transactions so a transaction can carry a
+    // `recurring_rule_index` into the same-ordering vec.
+    let (recurring_transaction_rules, recurring_rule_id_to_index) = fetch_recurring_rules(
+        pool,
+        iid,
+        user_id,
+        &asset_id_to_index,
+        &liability_id_to_index,
+    )
+    .await?;
     let transactions = fetch_transactions(
         pool,
         iid,
@@ -169,6 +179,7 @@ async fn build_payload(
         &import_id_to_index,
         &asset_id_to_index,
         &liability_id_to_index,
+        &recurring_rule_id_to_index,
     )
     .await?;
     let categorization_rules = fetch_categorization_rules(pool, iid, user_id).await?;
@@ -187,7 +198,71 @@ async fn build_payload(
         transaction_imports,
         transactions,
         categorization_rules,
+        recurring_transaction_rules,
     })
+}
+
+/// Recurring-transaction rules (schema_version ≥ 6). Returns the rules plus a `rule_id → index`
+/// map so transactions can carry a `recurring_rule_index`. Category is denormalized to
+/// `(scope, name)`; asset/liability links are resolved to indices in this payload's vecs.
+async fn fetch_recurring_rules(
+    pool: &PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    asset_id_to_index: &HashMap<Uuid, usize>,
+    liability_id_to_index: &HashMap<Uuid, usize>,
+) -> Result<(Vec<BackupRecurringRule>, HashMap<Uuid, usize>), ApiError> {
+    type Row = (
+        Uuid,           // id
+        String,         // concept
+        Decimal,        // amount
+        String,         // kind
+        Option<String>, // cat_scope
+        Option<String>, // cat_name
+        i32,            // day_of_month
+        Option<Uuid>,   // linked_asset_id
+        Option<Uuid>,   // linked_liability_id
+        Option<String>, // notes
+        NaiveDate,      // last_materialized_month
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"SELECT r.id, r.concept, r.amount, r.kind, c.scope AS cat_scope, c.name AS cat_name,
+                  r.day_of_month, r.linked_asset_id, r.linked_liability_id, r.notes,
+                  r.last_materialized_month
+           FROM recurring_transaction_rules r
+           LEFT JOIN categories c ON c.id = r.category_id
+           WHERE r.installation_id = $1 AND r.owner_user_id = $2
+           ORDER BY r.created_at ASC, r.id ASC"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut id_to_index = HashMap::with_capacity(rows.len());
+    let rules = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            id_to_index.insert(r.0, i);
+            let category_ref = match (r.4, r.5) {
+                (Some(scope), Some(name)) => Some(CategoryRef { scope, name }),
+                _ => None,
+            };
+            BackupRecurringRule {
+                concept: r.1,
+                amount: r.2,
+                kind: r.3,
+                category_ref,
+                day_of_month: r.6,
+                linked_asset_index: r.7.and_then(|a| asset_id_to_index.get(&a).copied()),
+                linked_liability_index: r.8.and_then(|l| liability_id_to_index.get(&l).copied()),
+                notes: r.9,
+                last_materialized_month: r.10,
+            }
+        })
+        .collect();
+    Ok((rules, id_to_index))
 }
 
 /// CSV import batches (schema_version ≥ 5). Returns the batches plus an `import_id → index` map so
@@ -235,6 +310,7 @@ async fn fetch_transactions(
     import_id_to_index: &HashMap<Uuid, usize>,
     asset_id_to_index: &HashMap<Uuid, usize>,
     liability_id_to_index: &HashMap<Uuid, usize>,
+    recurring_rule_id_to_index: &HashMap<Uuid, usize>,
 ) -> Result<Vec<BackupTransaction>, ApiError> {
     type Row = (
         Option<Uuid>,   // import_id
@@ -251,11 +327,12 @@ async fn fetch_transactions(
         Option<Uuid>,   // linked_asset_id
         Option<Uuid>,   // linked_liability_id
         Option<String>, // notes
+        Option<Uuid>,   // recurring_rule_id
     );
     let rows: Vec<Row> = sqlx::query_as(
         r#"SELECT t.import_id, t.source, t.op_date, t.value_date, t.concept, t.amount, t.currency,
                   t.kind, c.scope AS cat_scope, c.name AS cat_name, t.fingerprint_ordinal,
-                  t.linked_asset_id, t.linked_liability_id, t.notes
+                  t.linked_asset_id, t.linked_liability_id, t.notes, t.recurring_rule_id
            FROM transactions t
            LEFT JOIN categories c ON c.id = t.category_id
            WHERE t.installation_id = $1 AND t.owner_user_id = $2
@@ -287,6 +364,9 @@ async fn fetch_transactions(
                 linked_asset_index: r.11.and_then(|a| asset_id_to_index.get(&a).copied()),
                 linked_liability_index: r.12.and_then(|l| liability_id_to_index.get(&l).copied()),
                 notes: r.13,
+                recurring_rule_index: r
+                    .14
+                    .and_then(|id| recurring_rule_id_to_index.get(&id).copied()),
             }
         })
         .collect())
@@ -666,6 +746,7 @@ async fn fetch_categories_used(
                 OR EXISTS (SELECT 1 FROM planning_flows p WHERE p.category_id = c.id AND p.owner_user_id = $2)
                 OR EXISTS (SELECT 1 FROM transactions t WHERE t.category_id = c.id AND t.owner_user_id = $2)
                 OR EXISTS (SELECT 1 FROM categorization_rules r WHERE r.assign_category_id = c.id AND r.owner_user_id = $2)
+                OR EXISTS (SELECT 1 FROM recurring_transaction_rules rr WHERE rr.category_id = c.id AND rr.owner_user_id = $2)
              )
            ORDER BY c.scope ASC, c.sort_index ASC, c.name ASC"#,
     )

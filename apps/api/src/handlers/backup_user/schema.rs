@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
 
@@ -260,6 +260,10 @@ pub struct BackupTransaction {
     pub linked_liability_index: Option<usize>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// Regla recurrente de la que procede (índice en `recurring_transaction_rules`); `None` para
+    /// movimientos sueltos (schema_version ≥ 6).
+    #[serde(default)]
+    pub recurring_rule_index: Option<usize>,
 }
 
 /// A learned/user categorization rule exported inside a `.ffbackup` (schema_version ≥ 5).
@@ -273,6 +277,30 @@ pub struct BackupCategorizationRule {
     pub assign_kind: Option<String>,
     #[serde(default)]
     pub assign_category_ref: Option<CategoryRef>,
+}
+
+/// A recurring-transaction rule exported inside a `.ffbackup` (schema_version ≥ 6).
+///
+/// Category is denormalized to `(scope, name)` (like transactions); `linked_asset_index` /
+/// `linked_liability_index` are positions into this payload's `assets` / `liabilities` vecs
+/// (`None` when the FK was already SET NULL at export). `last_materialized_month` (first day of a
+/// month) is carried verbatim so a re-materialize after import does not regenerate past instances.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupRecurringRule {
+    pub concept: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub amount: Decimal,
+    pub kind: String,
+    #[serde(default)]
+    pub category_ref: Option<CategoryRef>,
+    pub day_of_month: i32,
+    #[serde(default)]
+    pub linked_asset_index: Option<usize>,
+    #[serde(default)]
+    pub linked_liability_index: Option<usize>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub last_materialized_month: NaiveDate,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, ToSchema)]
@@ -380,8 +408,34 @@ pub struct BackupPayloadV5 {
     pub categorization_rules: Vec<BackupCategorizationRule>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayloadV6 {
+    pub user: BackupUser,
+    pub categories_used: Vec<BackupCategory>,
+    pub assets: Vec<BackupAssetV3>,
+    #[serde(default)]
+    pub allocation_rules: Vec<BackupAllocationRule>,
+    pub liabilities: Vec<BackupLiability>,
+    pub budget_entries: Vec<BackupBudgetEntry>,
+    pub planning_flows: Vec<BackupPlanningFlow>,
+    #[serde(default)]
+    pub ui_preferences: UiPreferences,
+    pub installation_snapshot_informative: InstallationSnapshotInformative,
+    #[serde(default)]
+    pub snapshots: Vec<BackupSnapshot>,
+    #[serde(default)]
+    pub transaction_imports: Vec<BackupTransactionImport>,
+    #[serde(default)]
+    pub transactions: Vec<BackupTransaction>,
+    #[serde(default)]
+    pub categorization_rules: Vec<BackupCategorizationRule>,
+    /// Recurring-transaction rules (schema_version ≥ 6). Empty when migrating from an older backup.
+    #[serde(default)]
+    pub recurring_transaction_rules: Vec<BackupRecurringRule>,
+}
+
 /// Alias for the current-version payload. Export and import code work against this type.
-pub type BackupPayload = BackupPayloadV5;
+pub type BackupPayload = BackupPayloadV6;
 
 #[derive(Debug)]
 pub enum AnyPayload {
@@ -390,6 +444,7 @@ pub enum AnyPayload {
     V3(BackupPayloadV3),
     V4(BackupPayloadV4),
     V5(BackupPayloadV5),
+    V6(BackupPayloadV6),
 }
 
 pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, String> {
@@ -418,6 +473,11 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
             let p: BackupPayloadV5 = serde_json::from_slice(bytes)
                 .map_err(|e| format!("payload v5 malformed: {e}"))?;
             Ok(AnyPayload::V5(p))
+        }
+        6 => {
+            let p: BackupPayloadV6 = serde_json::from_slice(bytes)
+                .map_err(|e| format!("payload v6 malformed: {e}"))?;
+            Ok(AnyPayload::V6(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
             "schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
@@ -523,15 +583,39 @@ fn payload_v4_to_v5(p: BackupPayloadV4) -> BackupPayloadV5 {
     }
 }
 
+fn payload_v5_to_v6(p: BackupPayloadV5) -> BackupPayloadV6 {
+    // Recurring-transaction rules did not exist before v6 → start empty when importing an older
+    // backup. Everything else is carried over unchanged.
+    BackupPayloadV6 {
+        user: p.user,
+        categories_used: p.categories_used,
+        assets: p.assets,
+        allocation_rules: p.allocation_rules,
+        liabilities: p.liabilities,
+        budget_entries: p.budget_entries,
+        planning_flows: p.planning_flows,
+        ui_preferences: p.ui_preferences,
+        installation_snapshot_informative: p.installation_snapshot_informative,
+        snapshots: p.snapshots,
+        transaction_imports: p.transaction_imports,
+        transactions: p.transactions,
+        categorization_rules: p.categorization_rules,
+        recurring_transaction_rules: Vec::new(),
+    }
+}
+
 pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
     match any {
-        AnyPayload::V1(p) => {
-            payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p))))
+        AnyPayload::V1(p) => payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(
+            payload_v1_to_v2(p),
+        )))),
+        AnyPayload::V2(p) => {
+            payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(p))))
         }
-        AnyPayload::V2(p) => payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(p))),
-        AnyPayload::V3(p) => payload_v4_to_v5(payload_v3_to_v4(p)),
-        AnyPayload::V4(p) => payload_v4_to_v5(p),
-        AnyPayload::V5(p) => p,
+        AnyPayload::V3(p) => payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(p))),
+        AnyPayload::V4(p) => payload_v5_to_v6(payload_v4_to_v5(p)),
+        AnyPayload::V5(p) => payload_v5_to_v6(p),
+        AnyPayload::V6(p) => p,
     }
 }
 
@@ -857,6 +941,92 @@ mod tests {
         assert_eq!(reser[0]["amount"], "-4.9800");
         // fingerprint is never present in the payload (recomputed on import).
         assert!(reser[0].get("fingerprint").is_none());
+    }
+
+    #[test]
+    fn migrate_v5_fills_empty_recurring() {
+        // A v5 file (no recurring key) parses and migrates to v6 with an empty vec.
+        let raw = serde_json::json!({
+            "user": { "username": "gwen", "birth_date": null },
+            "categories_used": [],
+            "assets": [],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "snapshots": [],
+            "transaction_imports": [],
+            "transactions": [],
+            "categorization_rules": []
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let any = parse_payload(5, &bytes).unwrap();
+        let v6 = migrate_to_current(any);
+        assert!(
+            v6.recurring_transaction_rules.is_empty(),
+            "v5→v6 must default recurring_transaction_rules to empty"
+        );
+    }
+
+    #[test]
+    fn v6_recurring_rules_round_trip() {
+        let raw = serde_json::json!({
+            "user": { "username": "hank", "birth_date": null },
+            "categories_used": [
+                { "scope": "income", "name": "Nómina", "sort_index": 0 }
+            ],
+            "assets": [],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "snapshots": [],
+            "transaction_imports": [],
+            "transactions": [
+                {
+                    "import_index": null, "source": "manual", "op_date": "2026-06-01",
+                    "concept": "Nomina", "amount": "2000.0000", "currency": "EUR",
+                    "kind": "income",
+                    "category_ref": { "scope": "income", "name": "Nómina" },
+                    "fingerprint_ordinal": 0, "recurring_rule_index": 0
+                }
+            ],
+            "categorization_rules": [],
+            "recurring_transaction_rules": [
+                {
+                    "concept": "Nomina", "amount": "2000.0000", "kind": "income",
+                    "category_ref": { "scope": "income", "name": "Nómina" },
+                    "day_of_month": 1, "linked_asset_index": null,
+                    "linked_liability_index": null, "notes": null,
+                    "last_materialized_month": "2026-06-01"
+                }
+            ]
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let any = parse_payload(6, &bytes).unwrap();
+        let v6 = migrate_to_current(any);
+
+        assert_eq!(v6.recurring_transaction_rules.len(), 1);
+        let rule = &v6.recurring_transaction_rules[0];
+        assert_eq!(rule.concept, "Nomina");
+        assert_eq!(rule.amount, Decimal::from_str_exact("2000.0000").unwrap());
+        assert_eq!(rule.kind, "income");
+        assert_eq!(rule.day_of_month, 1);
+        assert_eq!(rule.category_ref.as_ref().map(|c| c.name.as_str()), Some("Nómina"));
+        assert_eq!(
+            rule.last_materialized_month,
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()
+        );
+        // The transaction points back at the rule by index.
+        assert_eq!(v6.transactions[0].recurring_rule_index, Some(0));
+
+        // Decimal-string scale round-trip.
+        let reser = serde_json::to_value(&v6.recurring_transaction_rules).unwrap();
+        assert_eq!(reser[0]["amount"], "2000.0000");
     }
 
     #[test]

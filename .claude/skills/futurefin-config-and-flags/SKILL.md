@@ -173,7 +173,8 @@ Most read endpoints accept `?view` (standard §4.1 scope: `GET /v1/transactions`
 |---|---|---|---|---|
 | `GET /v1/transactions` | `month` | `YYYY-MM` (invalid → 400) | omitted → all | Filters `op_date` to that calendar month. Plus `kind` (`expense`\|`income`\|`savings`, invalid → 400), `category_id` (uuid), `import_id` (uuid). |
 | `GET /v1/transactions/summary` | `year` + `month` | `year` 1900–3000, `month` 1–12; **provided together or neither** (else 400) | omitted → last **complete** calendar month | Selected month of the comparison. |
-| `GET /v1/transactions/summary` | `avg_months` | u32, **1–24** (out of range → 400) | `6` | Historical-average window. |
+| `GET /v1/transactions/summary` | `avg_window` | `3` \| `6` \| `12` \| `ytd` \| `all` (trim + case-insensitive; anything else → **400 `avg_window must be one of 3, 6, 12, ytd, all`**) | `6` | Historical-average window (v1.8.0). Weighted average: denominator = months in the window with ≥1 transaction, not the window width. `ytd` = calendar months of the selected year strictly before the selected month (Jan → empty); `all` = since the first transaction. |
+| `GET /v1/transactions/summary` | `avg_months` | u32, **1–24** (out of range → 400) | `6` | **Legacy alias** for `avg_window` (fixed-month window only). `avg_window` wins when both are sent. |
 | `DELETE /v1/transactions/imports/{id}` | `confirm` | `bool` | `false` | Must be `true` or **400 `confirm_required`** (undo cascades to the batch's transactions). |
 
 None of these query params (nor any transactions mutation) touch the projection cache — transactions

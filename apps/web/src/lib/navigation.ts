@@ -28,7 +28,7 @@ export const TABS: { id: TabId; label: string }[] = [
   { id: "assets", label: "Activos" },
   { id: "liabilities", label: "Pasivos" },
   { id: "budget", label: "Presupuesto" },
-  { id: "expenses", label: "Gastos" },
+  { id: "expenses", label: "Movimientos" },
   { id: "upcoming", label: "Próximos" },
   { id: "retirement", label: "Jubilación" },
   { id: "projection", label: "Proyección" },
@@ -40,7 +40,7 @@ export const TAB_PATH: Record<TabId, string> = {
   assets: "/activos",
   liabilities: "/pasivos",
   budget: "/presupuesto",
-  expenses: "/gastos",
+  expenses: "/movimientos",
   upcoming: "/proximos",
   projection: "/proyeccion",
   retirement: "/jubilacion",
@@ -77,6 +77,9 @@ export function tabFromPathname(pathname: string): TabId | null {
   if (p === TAB_PATH.settings || p.startsWith(`${TAB_PATH.settings}/`)) {
     return "settings";
   }
+  // Alias de lectura del renombrado «Gastos» → «Movimientos»: la ruta canónica es
+  // /movimientos (la escribe la navegación), pero /gastos sigue resolviendo a la pestaña.
+  if (p === "/gastos") return "expenses";
   const ids = Object.keys(TAB_PATH) as TabId[];
   for (const id of ids) {
     if (TAB_PATH[id] === p) return id;

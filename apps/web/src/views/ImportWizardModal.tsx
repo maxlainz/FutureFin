@@ -35,6 +35,7 @@ import {
   KIND_LABEL_ES,
   TRANSACTION_KINDS,
   buildConfirmDecisions,
+  capitalizeSource,
   categoriesForKind,
   initialDraftForRow,
   rowMatchesFilter,
@@ -177,7 +178,8 @@ export function ImportWizardModal({
 }) {
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const [expandedLinks, setExpandedLinks] = useState<Set<number>>(new Set());
-  const [bulkKind, setBulkKind] = useState<TransactionKindApi>("expense");
+  // "" = «Tipo…» (no aplicar kind). El cluster «Asignar a visibles» aplica kind y/o categoría.
+  const [bulkKind, setBulkKind] = useState<"" | TransactionKindApi>("");
   const [bulkCategory, setBulkCategory] = useState<string>("");
   const isMobile = useIsMobile();
 
@@ -186,7 +188,7 @@ export function ImportWizardModal({
     if (open) {
       dispatch({ type: "RESET" });
       setExpandedLinks(new Set());
-      setBulkKind("expense");
+      setBulkKind("");
       setBulkCategory("");
     }
   }, [open]);
@@ -216,6 +218,7 @@ export function ImportWizardModal({
         source: state.source,
         file_b64: state.fileB64,
       };
+      if (state.accountAssetId) body.account_asset_id = state.accountAssetId;
       const preview = await apiPost<ImportPreviewResponseApi>(
         "/v1/transactions/import/preview",
         body,
@@ -278,17 +281,18 @@ export function ImportWizardModal({
     });
   }, []);
 
-  function applyBulkCategory() {
-    if (!bulkCategory) return;
-    const [scope, id] = bulkCategory.split(":");
-    dispatch({
-      type: "PATCH_MANY",
-      indices: visibleIndices,
-      patch: {
-        kind: scope === "income" ? "income" : "expense",
-        categoryId: id,
-      },
-    });
+  // Cluster «Asignar a visibles»: aplica el kind (si hay uno elegido) y/o la categoría (si hay
+  // una elegida) a las filas visibles. La categoría manda sobre el kind (deriva su propio scope).
+  function applyBulkToVisible() {
+    const patch: Partial<ImportRowDraft> = {};
+    if (bulkKind) patch.kind = bulkKind;
+    if (bulkCategory) {
+      const [scope, id] = bulkCategory.split(":");
+      patch.kind = scope === "income" ? "income" : "expense";
+      patch.categoryId = id;
+    }
+    if (Object.keys(patch).length === 0) return;
+    dispatch({ type: "PATCH_MANY", indices: visibleIndices, patch });
   }
 
   const bulkCategoryOptions = useMemo(
@@ -319,22 +323,9 @@ export function ImportWizardModal({
             }}
           >
             <p className="muted tight">
-              Sube el CSV de tu banco. Detectamos el formato automáticamente
-              (MyInvestor o N26); nada se guarda hasta que confirmes.
+              Sube el CSV de tu banco. Detectamos el formato automáticamente; nada se
+              guarda hasta que confirmes.
             </p>
-            <div className="segmented" role="group" aria-label="Formato del CSV">
-              {SOURCE_OPTIONS.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  className={state.source === s.id ? "active" : ""}
-                  aria-pressed={state.source === s.id}
-                  onClick={() => dispatch({ type: "SET_SOURCE", source: s.id })}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
             <label className="field">
               <span>Archivo .csv</span>
               <input
@@ -353,6 +344,45 @@ export function ImportWizardModal({
                 }}
               />
             </label>
+            <label className="field">
+              <span>Cuenta origen (activo)</span>
+              <select
+                value={state.accountAssetId}
+                onChange={(e) =>
+                  dispatch({ type: "SET_ACCOUNT", accountAssetId: e.target.value })
+                }
+              >
+                <option value="">— Sin cuenta —</option>
+                {assets.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="muted tight">
+              ¿De qué cuenta es este CSV? Los movimientos se vincularán a ese activo.
+            </p>
+            <details className="import-source-override">
+              <summary>
+                Formato:{" "}
+                {SOURCE_OPTIONS.find((s) => s.id === state.source)?.label ??
+                  "Autodetectar"}
+              </summary>
+              <div className="segmented" role="group" aria-label="Formato del CSV">
+                {SOURCE_OPTIONS.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={state.source === s.id ? "active" : ""}
+                    aria-pressed={state.source === s.id}
+                    onClick={() => dispatch({ type: "SET_SOURCE", source: s.id })}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </details>
             <div className="asset-form-actions">
               <button
                 type="submit"
@@ -374,14 +404,31 @@ export function ImportWizardModal({
         ) : state.preview ? (
           <div className="stack">
             <div className="banner info-banner tight-banner import-summary-banner">
-              <strong>{state.preview.source}</strong> · {state.preview.row_count}{" "}
-              filas · {state.preview.new_count} nuevas ·{" "}
-              {state.preview.already_imported_count} ya importadas ·{" "}
-              {state.preview.suggested_transfer_count} transferencias ·{" "}
-              {state.preview.precategorized_count} pre-categorizadas
-              {state.preview.currency_warning_count > 0
-                ? ` · ${state.preview.currency_warning_count} en otra divisa`
-                : ""}
+              <strong>{capitalizeSource(state.preview.source)}</strong>
+              <span className="import-chips">
+                <span className="import-chip">{state.preview.row_count} filas</span>
+                <span className="import-chip">{state.preview.new_count} nuevas</span>
+                {state.preview.already_imported_count > 0 ? (
+                  <span className="import-chip">
+                    {state.preview.already_imported_count} duplicadas
+                  </span>
+                ) : null}
+                {state.preview.suggested_transfer_count > 0 ? (
+                  <span className="import-chip">
+                    {state.preview.suggested_transfer_count} transferencias
+                  </span>
+                ) : null}
+                {state.preview.precategorized_count > 0 ? (
+                  <span className="import-chip">
+                    {state.preview.precategorized_count} pre-categorizadas
+                  </span>
+                ) : null}
+                {state.preview.currency_warning_count > 0 ? (
+                  <span className="import-chip">
+                    {state.preview.currency_warning_count} otra divisa
+                  </span>
+                ) : null}
+              </span>
             </div>
 
             <div className="import-bulk-bar">
@@ -425,56 +472,50 @@ export function ImportWizardModal({
                 >
                   Excluir visibles
                 </button>
-                <label className="field inline-role">
-                  <span className="sr-only">Asignar kind a visibles</span>
-                  <select
-                    value={bulkKind}
-                    onChange={(e) =>
-                      setBulkKind(e.target.value as TransactionKindApi)
-                    }
-                  >
-                    {TRANSACTION_KINDS.map((k) => (
-                      <option key={k} value={k}>
-                        {KIND_LABEL_ES[k]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  className="btn ghost text"
-                  onClick={() =>
-                    dispatch({
-                      type: "PATCH_MANY",
-                      indices: visibleIndices,
-                      patch: { kind: bulkKind },
-                    })
-                  }
+                <div
+                  className="import-bulk-assign"
+                  role="group"
+                  aria-label="Asignar a visibles"
                 >
-                  Aplicar kind
-                </button>
-                <label className="field inline-role">
-                  <span className="sr-only">Asignar categoría a visibles</span>
-                  <select
-                    value={bulkCategory}
-                    onChange={(e) => setBulkCategory(e.target.value)}
+                  <label className="field inline-role">
+                    <span className="sr-only">Asignar tipo a visibles</span>
+                    <select
+                      value={bulkKind}
+                      onChange={(e) =>
+                        setBulkKind(e.target.value as "" | TransactionKindApi)
+                      }
+                    >
+                      <option value="">Tipo…</option>
+                      {TRANSACTION_KINDS.map((k) => (
+                        <option key={k} value={k}>
+                          {KIND_LABEL_ES[k]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field inline-role">
+                    <span className="sr-only">Asignar categoría a visibles</span>
+                    <select
+                      value={bulkCategory}
+                      onChange={(e) => setBulkCategory(e.target.value)}
+                    >
+                      <option value="">Categoría…</option>
+                      {bulkCategoryOptions.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn ghost text"
+                    disabled={!bulkKind && !bulkCategory}
+                    onClick={applyBulkToVisible}
                   >
-                    <option value="">Categoría…</option>
-                    {bulkCategoryOptions.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  className="btn ghost text"
-                  disabled={!bulkCategory}
-                  onClick={applyBulkCategory}
-                >
-                  Aplicar categoría
-                </button>
+                    Aplicar a visibles
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -491,7 +532,7 @@ export function ImportWizardModal({
                       {isMobile ? null : <th>Fecha</th>}
                       <th>Concepto</th>
                       {isMobile ? null : <th className="num">Importe</th>}
-                      {isMobile ? null : <th>Kind</th>}
+                      {isMobile ? null : <th>Tipo</th>}
                       {isMobile ? null : <th>Categoría</th>}
                       {isMobile ? (
                         <th className="row-chevron-cell">
@@ -529,25 +570,12 @@ export function ImportWizardModal({
 
             <div className="import-footer">
               <div className="import-footer-summary muted">
-                {summary.toImport} a importar · {summary.toSkip} omitidos ·{" "}
-                {summary.toDiscard} descartados
+                {summary.toImport} se importarán ·{" "}
+                {summary.toSkip + summary.toDiscard} excluidas
+                {summary.toSkip > 0
+                  ? ` (${summary.toSkip} duplicadas ya guardadas)`
+                  : ""}
               </div>
-              <label className="field import-account-select">
-                <span>Vincular a cuenta origen (activo)</span>
-                <select
-                  value={state.accountAssetId}
-                  onChange={(e) =>
-                    dispatch({ type: "SET_ACCOUNT", accountAssetId: e.target.value })
-                  }
-                >
-                  <option value="">— Sin cuenta —</option>
-                  {assets.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <div className="asset-form-actions">
                 <button
                   type="button"
@@ -631,7 +659,7 @@ const PreviewRowMemo = memo(function PreviewRow({
   const kindSelect = (
     <select
       value={draft.kind}
-      aria-label="Kind"
+      aria-label="Tipo"
       onChange={(e) =>
         onPatch(index, { kind: e.target.value as TransactionKindApi })
       }

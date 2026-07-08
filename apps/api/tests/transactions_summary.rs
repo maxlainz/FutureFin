@@ -116,15 +116,18 @@ async fn summary_numbers_windows_and_no_double_count() {
     assert_eq!(b["year"].as_i64().unwrap(), sy as i64);
     assert_eq!(b["month"].as_u64().unwrap(), sm as u64);
     assert_eq!(b["is_partial"], false, "mes 2 atrás → completo");
-    assert_eq!(b["avg_months"].as_u64().unwrap(), 3);
+    // Promedio PONDERADO: denominador = months_with_data (meses del tramo con datos), no window_months.
+    assert_eq!(b["avg_window"], "3");
+    assert_eq!(b["window_months"].as_u64().unwrap(), 3, "tramo [sel-3, sel)");
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2, "sólo sel-1 y sel-3 tienen datos");
 
-    // Línea Super: actual 150, budget 300, avg (60+0+90)/3=50, deltas -150 / +100.
+    // Línea Super: actual 150, budget 300, avg (60+90)/2=75, deltas -150 / +75.
     let sup = line(&b["expense_categories"], "Super");
     approx(parse_dec(&sup["actual"]), 150.0);
     approx(parse_dec(&sup["budget"]), 300.0);
-    approx(parse_dec(&sup["avg"]), 50.0);
+    approx(parse_dec(&sup["avg"]), 75.0);
     approx(parse_dec(&sup["delta_vs_budget"]), -150.0);
-    approx(parse_dec(&sup["delta_vs_avg"]), 100.0);
+    approx(parse_dec(&sup["delta_vs_avg"]), 75.0);
 
     // Sin categoría: actual 30, budget 0, avg 0.
     let sc = line(&b["expense_categories"], "Sin categoría");
@@ -132,29 +135,29 @@ async fn summary_numbers_windows_and_no_double_count() {
     approx(parse_dec(&sc["budget"]), 0.0);
     approx(parse_dec(&sc["avg"]), 0.0);
 
-    // Ingreso Nómina: actual 2000, budget 2000, avg 1000/3.
+    // Ingreso Nómina: actual 2000, budget 2000, avg 1000/2=500 (denominador ponderado 2).
     let nom = line(&b["income_categories"], "Nómina");
     approx(parse_dec(&nom["actual"]), 2000.0);
     approx(parse_dec(&nom["budget"]), 2000.0);
-    approx(parse_dec(&nom["avg"]), 1000.0 / 3.0);
+    approx(parse_dec(&nom["avg"]), 500.0);
     approx(parse_dec(&nom["delta_vs_budget"]), 0.0);
 
-    // Derived debt: 500 (solo lado budget).
-    approx(parse_dec(&b["derived_debt_line"]["budget"]), 500.0);
+    // Sin línea derivada de cuotas de pasivo: la key desaparece del JSON.
+    assert!(b.get("derived_debt_line").is_none(), "derived_debt_line eliminada");
 
-    // Savings block: actual 200, avg 100/3.
+    // Savings block: actual 200, avg 100/2=50.
     approx(parse_dec(&b["savings"]["actual"]), 200.0);
-    approx(parse_dec(&b["savings"]["avg"]), 100.0 / 3.0);
+    approx(parse_dec(&b["savings"]["avg"]), 50.0);
 
     // Income block agregado.
     approx(parse_dec(&b["income"]["actual"]), 2000.0);
-    approx(parse_dec(&b["income"]["avg"]), 1000.0 / 3.0);
+    approx(parse_dec(&b["income"]["avg"]), 500.0);
 
     // Totales. expense_actual = 150+30 = 180 (SIN la cuota del pasivo → sin doble conteo).
     let t = &b["totals"];
     approx(parse_dec(&t["expense_actual"]), 180.0);
-    approx(parse_dec(&t["expense_avg"]), 50.0);
-    approx(parse_dec(&t["expense_budget"]), 800.0); // 300 Super + 500 derived
+    approx(parse_dec(&t["expense_avg"]), 75.0);
+    approx(parse_dec(&t["expense_budget"]), 300.0); // sólo 300 Super (sin derived)
     approx(parse_dec(&t["income_actual"]), 2000.0);
     approx(parse_dec(&t["income_budget"]), 2000.0);
     approx(parse_dec(&t["savings_actual"]), 200.0);
@@ -197,4 +200,154 @@ async fn summary_avg_months_bounds_400() {
         .get_with_cookie("/v1/transactions/summary?year=2026&month=6&avg_months=0", &owner.cookie)
         .await;
     assert_eq!(bad.status, http::StatusCode::BAD_REQUEST);
+}
+
+/// Crea un presupuesto para una categoría.
+async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
+    let r = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            json!({ "category_id": cat, "amount": amount }),
+            cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "budget: {r:?}");
+}
+
+/// El denominador del promedio es `months_with_data` (meses del tramo con ≥1 transacción), NO
+/// `window_months`: un tramo de 6 meses con datos sólo en 2 divide entre 2.
+#[tokio::test]
+async fn summary_avg_window_weighted_denominator() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -2);
+    let (y1, m1) = shift_month(sy, sm, -1);
+    let (y3, m3) = shift_month(sy, sm, -3);
+
+    manual(&app, &owner.cookie, &date_in(sy, sm, 5), "Super sel", "-100", "expense", Some(&super_cat)).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 5), "Super -1", "-40", "expense", Some(&super_cat)).await;
+    // sel-2 vacío a propósito.
+    manual(&app, &owner.cookie, &date_in(y3, m3, 5), "Super -3", "-80", "expense", Some(&super_cat)).await;
+
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=6");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+
+    assert_eq!(b["avg_window"], "6");
+    assert_eq!(b["window_months"].as_u64().unwrap(), 6);
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2, "sólo sel-1 y sel-3 con datos");
+    let sup = line(&b["expense_categories"], "Super");
+    approx(parse_dec(&sup["actual"]), 100.0);
+    approx(parse_dec(&sup["avg"]), 60.0); // (40 + 80) / 2
+}
+
+/// YTD = enero..mes seleccionado (exclusive). El caso enero deja el tramo vacío → avg 0.
+#[tokio::test]
+async fn summary_avg_window_ytd() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+    budget(&app, &owner.cookie, &super_cat, "200").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let year = today.year() - 1; // año natural completamente en el pasado.
+
+    manual(&app, &owner.cookie, &date_in(year, 2, 10), "Feb", "-30", "expense", Some(&super_cat)).await;
+    manual(&app, &owner.cookie, &date_in(year, 4, 10), "Abr", "-50", "expense", Some(&super_cat)).await;
+    manual(&app, &owner.cookie, &date_in(year, 6, 10), "Jun", "-120", "expense", Some(&super_cat)).await;
+
+    // Mes seleccionado junio: YTD = ene..may (window_months 5), datos en feb y abr → denom 2.
+    let url = format!("/v1/transactions/summary?year={year}&month=6&avg_window=ytd");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+    assert_eq!(b["avg_window"], "ytd");
+    assert_eq!(b["window_months"].as_u64().unwrap(), 5);
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2);
+    let sup = line(&b["expense_categories"], "Super");
+    approx(parse_dec(&sup["actual"]), 120.0);
+    approx(parse_dec(&sup["avg"]), 40.0); // (30 + 50) / 2
+
+    // Mes seleccionado enero: tramo vacío → months_with_data 0, window_months 0, avg 0.
+    let url = format!("/v1/transactions/summary?year={year}&month=1&avg_window=ytd");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+    assert_eq!(b["window_months"].as_u64().unwrap(), 0);
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 0);
+    let sup = line(&b["expense_categories"], "Super");
+    approx(parse_dec(&sup["avg"]), 0.0);
+}
+
+/// ALL = desde el mes del MIN(op_date) hasta el seleccionado (exclusive). Sin historial → vacío.
+#[tokio::test]
+async fn summary_avg_window_all() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -2);
+    let (y2, m2) = shift_month(sy, sm, -2);
+    let (y5, m5) = shift_month(sy, sm, -5);
+
+    manual(&app, &owner.cookie, &date_in(sy, sm, 5), "Super sel", "-100", "expense", Some(&super_cat)).await;
+    manual(&app, &owner.cookie, &date_in(y2, m2, 5), "Super -2", "-40", "expense", Some(&super_cat)).await;
+    manual(&app, &owner.cookie, &date_in(y5, m5, 5), "Super -5", "-60", "expense", Some(&super_cat)).await;
+
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=all");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+    assert_eq!(b["avg_window"], "all");
+    assert_eq!(b["window_months"].as_u64().unwrap(), 5, "MIN(op_date) en sel-5 → 5 meses");
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2, "sel-2 y sel-5 con datos");
+    let sup = line(&b["expense_categories"], "Super");
+    approx(parse_dec(&sup["avg"]), 50.0); // (40 + 60) / 2
+
+    // Sin historial (app nueva) → tramo vacío.
+    let app2 = TestApp::spawn().await;
+    let owner2 = app2.register_and_login_owner("bob").await;
+    let today2 = server_today(&app2, &owner2.cookie).await;
+    let (sy2, sm2) = shift_month(today2.year(), today2.month(), -1);
+    let url = format!("/v1/transactions/summary?year={sy2}&month={sm2}&avg_window=all");
+    let b = app2.get_with_cookie(&url, &owner2.cookie).await.json();
+    assert_eq!(b["avg_window"], "all");
+    assert_eq!(b["window_months"].as_u64().unwrap(), 0, "sin transacciones → tramo vacío");
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn summary_avg_window_invalid_400() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bad = app
+        .get_with_cookie("/v1/transactions/summary?year=2026&month=6&avg_window=nope", &owner.cookie)
+        .await;
+    assert_eq!(bad.status, http::StatusCode::BAD_REQUEST);
+    assert!(bad.json()["message"].as_str().unwrap().contains("avg_window must be one of"));
+}
+
+/// La comparativa no añade la línea derivada de cuotas: la key no está y `expense_budget` es sólo
+/// la suma del presupuesto de categorías de gasto (aunque haya un pasivo activo).
+#[tokio::test]
+async fn summary_no_derived_debt_line() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let luz_cat = app.create_category(&owner, "expense", "Luz").await;
+    let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+    budget(&app, &owner.cookie, &luz_cat, "120").await;
+
+    // Pasivo activo con cuota 500/mes: NO debe sumar a expense_budget de la comparativa.
+    let today = server_today(&app, &owner.cookie).await;
+    let future = date_in(today.year() + 4, 1, 15);
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({ "category_id": liab_cat, "label": "Hipoteca", "principal": "100000",
+                    "payment_amount": "500", "payment_frequency": "monthly", "payment_end_date": future }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "liability: {r:?}");
+
+    let b = app.get_with_cookie("/v1/transactions/summary", &owner.cookie).await.json();
+    assert!(b.get("derived_debt_line").is_none(), "derived_debt_line eliminada");
+    approx(parse_dec(&b["totals"]["expense_budget"]), 120.0); // sólo Luz, sin +500 derivado
 }

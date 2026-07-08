@@ -36,10 +36,13 @@ src/
 │   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto
 │   ├── snapshot-tracker.ts       # trigger del modal: EditLog (Map<assetId, epochMs>), SNAPSHOT_EDIT_WINDOW_MS, pruneEditLog,
 │   │                             #   liquidCoverageComplete (todos los activos líquidos editados dentro de la ventana rodante ~1h)
-│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH (incl. expenses → «Gastos»/gastos), SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath
-│   ├── expenses.ts               # pure helpers de la pestaña Gastos: month labels (monthLabelEs/monthShortLabelEs), defaultSelectedMonth,
+│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH (incl. expenses → «Movimientos», slug canónico /movimientos + alias de lectura /gastos en tabFromPathname), SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath
+│   ├── expenses.ts               # pure helpers de la pestaña «Movimientos»: month labels (monthLabelEs/monthShortLabelEs), defaultSelectedMonth,
 │   │                             #   categoriesForKind (savings→[]), ImportRowDraft + initialDraftForRow/buildConfirmDecisions/summarizeDecisions/rowMatchesFilter,
-│   │                             #   deltaToneClass/formatDeltaCurrency (rojo/verde solo en deltas). Test: expenses.test.ts
+│   │                             #   deltaToneClass/formatDeltaCurrency (rojo/verde solo en deltas), significanceThreshold (1% del ingreso real)/trendArrow/significantDeltaTone
+│   │                             #   (umbral de significancia de las flechas ↑↓), AVG_WINDOWS + avgWindowLabel (pills 3m/6m/12m/YTD/Todo), capitalizeSource, y los helpers de la tabla de
+│   │                             #   movimientos: normalizeSearchText/transactionMatchesQuery (búsqueda sin acentos), compareTransactions/sortTransactions + naturalSortDir (TxnSortKey/
+│   │                             #   TxnSortDir; importe por |magnitud|, tiebreak estable), groupTransactionsByCategory/sortTransactionGroups (orden fijo: kind → |subtotal| desc). Test: expenses.test.ts
 │   ├── files.ts                  # readFileAsBase64(File): base64 en trozos de 32 KiB. Compartido por el import .ffbackup (App.tsx) y el wizard de CSV
 │   ├── responsive.ts             # MOBILE_MAX_WIDTH (640 = bp:mobile), isMobileWidth (puro, test en node) y useIsMobile()
 │   │                             #   (matchMedia, lectura síncrona inicial). Gatea el patrón «columnas esenciales» de TODAS las
@@ -64,8 +67,9 @@ src/
 │   └── charts/
 │       ├── summary.tsx           # SummaryDonutChart + SummaryBreakdownBlock (palette fría=activos / cálida=pasivos)
 │       ├── PlanningDirectionChart.tsx   # barra inflow/outflow — usada en Upcoming Y Budget
-│       ├── CategoryComparisonBars.tsx   # exporta DOS charts de la pestaña Gastos: CategoryComparisonBars (barras Real/Budget/Promedio por categoría)
-│       │                                #   y MonthlyCashflowBars (cash-flow mes a mes desde months[]). Tokens --ff-*/--exp-average; sin rojo en el chrome
+│       ├── CategoryComparisonBars.tsx   # exporta DOS charts de la pestaña «Movimientos»: CategoryComparisonBars (2 barras por categoría — Budget=--ff-accent, Promedio=--exp-average;
+│       │                                #   el Real vive en la tabla/KPIs) y MonthlyCashflowBars (cash-flow mes a mes desde months[], tokens --cf-income/--cf-expense/--cf-savings).
+│       │                                #   Verde/rojo del cash-flow = colores FUNCIONALES de serie (excepción de charts del design system), no chrome
 │       └── MiniProjection.tsx    # SVG compacto reusado en Resumen y Jubilación
 │
 ├── views/                        # one file per tab — receives props from App.tsx, owns local UI state
@@ -73,12 +77,22 @@ src/
 │   ├── AssetsView.tsx
 │   ├── LiabilitiesView.tsx       # tabla sin columna Tipo
 │   ├── BudgetView.tsx            # KPIs + Distribución (PlanningDirectionChart) + columnas Ingresos/Gastos
-│   ├── GastosView.tsx            # pestaña «Gastos» (v1.6.0). Vista AUTÓNOMA (self-fetch, patrón HistorySettingsPanel): KPIs del mes,
-│   │                             #   selector de mes + ventana, comparativa por categoría (tabla + CategoryComparisonBars + MonthlyCashflowBars),
-│   │                             #   tabla de movimientos con edición inline optimista + modal. `onCashflowMutated` avisa a App tras cada mutación.
-│   ├── ImportWizardModal.tsx     # wizard import CSV en 2 pasos (useReducer): select (fuente + archivo → /import/preview) → review (acciones masivas,
-│   │                             #   selects kind/categoría por fila, vínculos, cuenta origen → /import/confirm con decisions[] paralelo). Stateless (sha256)
-│   ├── ManualCashEntryModal.tsx  # alta manual de efectivo: grid multifila (magnitud + kind fija el signo) → POST /v1/transactions/batch
+│   ├── GastosView.tsx            # pestaña «Movimientos» (título «Movimientos» desde v1.8.0; TabId interno sigue siendo "expenses"). Vista AUTÓNOMA (self-fetch,
+│   │                             #   patrón HistorySettingsPanel): KPIs del mes (media «—» cuando no hay promedio), selector de mes + pills de ventana (3m/6m/12m/YTD/Todo),
+│   │                             #   comparativa por categoría con **fila TOTAL** y **flechas de tendencia** ↑↓/= (real vs promedio, umbral de significancia = 1% del ingreso real;
+│   │                             #   «=» atenuado si hay promedio pero |Δ| ≤ umbral, slot vacío sin promedio; el glifo va en un **slot de ancho fijo** siempre presente para no
+│   │                             #   desalinear las cifras), CategoryComparisonBars + MonthlyCashflowBars, tabla de movimientos SIN scroll interno (se quitó table-scroll--sticky →
+│   │                             #   la página crece; sin thead sticky) con **búsqueda** en vivo (concepto+categoría, insensible a acentos), **agrupación por categoría conmutable**
+│   │                             #   (subtotal firmado por grupo; orden de grupos FIJO: secciones por kind ingresos → ahorro → gastos y |subtotal| desc dentro de cada sección,
+│   │                             #   «Sin categoría» va con su kind) y **cabeceras ordenables** (fecha/concepto/importe; importe por magnitud; la clave activa solo ordena las filas
+│   │                             #   dentro de cada grupo) — helpers puros en lib/expenses.ts —, edición inline optimista + modal + tag «recurrente» +
+│   │                             #   borrado con dos opciones (solo este / y detener repetición). Materializa recurrentes en silencio al montar (solo canEdit). `onCashflowMutated` avisa a App.
+│   ├── ImportWizardModal.tsx     # wizard import CSV en 2 pasos (useReducer). Paso 1 = archivo → select «Cuenta origen (activo)» (movido desde el footer; ahora también en el preview) →
+│   │                             #   formato en <details> plegado (autodetección por defecto). Paso 2 = banner con fuente capitalizada + chips de conteos, bulk bar con cluster único
+│   │                             #   «Asignar a visibles», footer «{X} se importarán · {Y} excluidas ({Z} duplicadas)», columna «Tipo». /import/confirm con decisions[] paralelo. Stateless (sha256)
+│   ├── ManualCashEntryModal.tsx  # alta manual de efectivo: grid multifila (magnitud + kind fija el signo) + checkbox «Repetir cada mes» por fila (→ recurrence:{}) → POST /v1/transactions/batch
+│   ├── RecurringRulesModal.tsx   # modal «Recurrentes» (botón en la toolbar de Movimientos): lista GET /v1/transactions/recurring y permite «Detener» (DELETE) cada regla
+│   │                             #   (conserva las instancias ya materializadas). Patrón ManualCashEntryModal: fetch al abrir, toda la lógica de presentación aquí (nada en lib/)
 │   ├── UpcomingView.tsx          # Planning
 │   ├── RetirementView.tsx        # KPIs + MiniProjection (zoomY, clampToMonth=jub+12, xAxis) + FIRE config
 │   ├── ProjectionView.tsx        # wraps ProjectionNetWorthChart
