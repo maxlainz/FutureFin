@@ -158,6 +158,7 @@ use utoipa::OpenApi;
         crate::handlers::auth::PatchMeBody,
         crate::handlers::auth::UserResponse,
         crate::handlers::installation::FireNumberMode,
+        crate::handlers::installation::SavingsSource,
         crate::handlers::installation::FireSettings,
         crate::handlers::installation::TaxBracket,
         crate::handlers::installation::InstallationSnapshot,
