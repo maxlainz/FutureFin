@@ -13,6 +13,7 @@ use crate::handlers::transactions::schema::{
     BatchCreateBody, CreateTransactionBody, ImportBatchResponse, MonthEntry, PatchTransactionBody,
     TransactionResponse, SOURCE_MANUAL,
 };
+use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::{
     assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
     next_fingerprint_ordinal, row_to_response, TxnRow, TXN_SELECT,
@@ -35,17 +36,17 @@ const MAX_BATCH: usize = 1000;
 // Prepared (validated) transaction ready to insert
 // ---------------------------------------------------------------------------
 
-struct PreparedTxn {
-    op_date: NaiveDate,
-    value_date: Option<NaiveDate>,
-    concept: String,
-    amount: Decimal,
-    kind: String,
-    category_id: Option<Uuid>,
-    linked_asset_id: Option<Uuid>,
-    linked_liability_id: Option<Uuid>,
-    notes: Option<String>,
-    fingerprint: String,
+pub(super) struct PreparedTxn {
+    pub(super) op_date: NaiveDate,
+    pub(super) value_date: Option<NaiveDate>,
+    pub(super) concept: String,
+    pub(super) amount: Decimal,
+    pub(super) kind: String,
+    pub(super) category_id: Option<Uuid>,
+    pub(super) linked_asset_id: Option<Uuid>,
+    pub(super) linked_liability_id: Option<Uuid>,
+    pub(super) notes: Option<String>,
+    pub(super) fingerprint: String,
 }
 
 async fn validate_manual(
@@ -79,19 +80,21 @@ async fn validate_manual(
 }
 
 /// Inserta una transacción manual con `import_id NULL` en `ordinal` y devuelve su id.
-async fn insert_manual(
+/// `recurring_rule_id` enlaza la instancia a su regla recurrente (o `None` para movimientos sueltos).
+pub(super) async fn insert_manual(
     conn: &mut PgConnection,
     iid: Uuid,
     owner: Uuid,
     p: &PreparedTxn,
     ordinal: i32,
+    recurring_rule_id: Option<Uuid>,
 ) -> Result<Uuid, ApiError> {
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO transactions
                (installation_id, owner_user_id, import_id, source, op_date, value_date,
                 concept, amount, currency, kind, category_id, fingerprint, fingerprint_ordinal,
-                linked_asset_id, linked_liability_id, notes)
-           VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, 'EUR', $8, $9, $10, $11, $12, $13, $14)
+                linked_asset_id, linked_liability_id, notes, recurring_rule_id)
+           VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, 'EUR', $8, $9, $10, $11, $12, $13, $14, $15)
            RETURNING id"#,
     )
     .bind(iid)
@@ -108,6 +111,7 @@ async fn insert_manual(
     .bind(p.linked_asset_id)
     .bind(p.linked_liability_id)
     .bind(p.notes.as_deref())
+    .bind(recurring_rule_id)
     .fetch_one(&mut *conn)
     .await?;
     Ok(id)
@@ -148,10 +152,30 @@ pub async fn create_transaction(
     }
 
     let prepared = validate_manual(&state.pool, iid, &body).await?;
+    // Recurrencia (opcional): valida el día del mes ANTES de abrir la transacción.
+    let recurrence_day = match &body.recurrence {
+        Some(rec) => Some(recurring::resolve_rule_day(rec, body.op_date)?),
+        None => None,
+    };
 
     let mut tx = state.pool.begin().await?;
     let ordinal = next_fingerprint_ordinal(&mut tx, iid, user.id.0, &prepared.fingerprint).await?;
-    let id = insert_manual(&mut tx, iid, user.id.0, &prepared, ordinal).await?;
+    // Si hay recurrencia, primero se crea la regla-plantilla; la transacción de origen queda enlazada.
+    let rule_id = match recurrence_day {
+        Some(day) => Some(
+            recurring::insert_rule(
+                &mut tx,
+                iid,
+                user.id.0,
+                &prepared,
+                day,
+                recurring::month_start_of(body.op_date),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let id = insert_manual(&mut tx, iid, user.id.0, &prepared, ordinal, rule_id).await?;
     tx.commit().await?;
 
     let resp = load_txn(&state.pool, id).await?;
@@ -205,12 +229,30 @@ pub async fn create_batch(
     // Contador de ordinal por huella dentro del batch (arranca en el MAX+1 de la BD).
     let mut next_ord: HashMap<String, i32> = HashMap::new();
     let mut ids = Vec::with_capacity(prepared.len());
-    for p in &prepared {
+    // La recurrencia se acepta por ítem del batch (el modal de efectivo del frontend usa /batch).
+    for (b, p) in body.transactions.iter().zip(prepared.iter()) {
         let ord = match next_ord.get(&p.fingerprint) {
             Some(&o) => o,
             None => next_fingerprint_ordinal(&mut tx, iid, user.id.0, &p.fingerprint).await?,
         };
-        let id = insert_manual(&mut tx, iid, user.id.0, p, ord).await?;
+        let rule_id = match &b.recurrence {
+            Some(rec) => {
+                let day = recurring::resolve_rule_day(rec, b.op_date)?;
+                Some(
+                    recurring::insert_rule(
+                        &mut tx,
+                        iid,
+                        user.id.0,
+                        p,
+                        day,
+                        recurring::month_start_of(b.op_date),
+                    )
+                    .await?,
+                )
+            }
+            None => None,
+        };
+        let id = insert_manual(&mut tx, iid, user.id.0, p, ord, rule_id).await?;
         next_ord.insert(p.fingerprint.clone(), ord + 1);
         ids.push(id);
     }

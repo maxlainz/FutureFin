@@ -66,6 +66,10 @@ use crate::handlers::transactions::crud::{
 #[allow(unused_imports)]
 use crate::handlers::transactions::import::{__path_import_confirm, __path_import_preview};
 #[allow(unused_imports)]
+use crate::handlers::transactions::recurring::{
+    __path_delete_recurring_rule, __path_list_recurring_rules, __path_materialize_recurring,
+};
+#[allow(unused_imports)]
 use crate::handlers::transactions::rules::{
     __path_create_rule, __path_delete_rule, __path_list_rules, __path_patch_rule,
 };
@@ -139,6 +143,9 @@ use utoipa::OpenApi;
         create_rule,
         patch_rule,
         delete_rule,
+        list_recurring_rules,
+        materialize_recurring,
+        delete_recurring_rule,
         get_transactions_summary,
         export_user_backup,
         import_user_backup_preview,
@@ -227,8 +234,10 @@ use utoipa::OpenApi;
         crate::handlers::transactions::RuleResponse,
         crate::handlers::transactions::CreateRuleBody,
         crate::handlers::transactions::PatchRuleBody,
+        crate::handlers::transactions::RecurrenceSpec,
+        crate::handlers::transactions::RecurringRuleResponse,
+        crate::handlers::transactions::MaterializeResponse,
         crate::handlers::transactions::CategoryComparisonLine,
-        crate::handlers::transactions::DerivedDebtLine,
         crate::handlers::transactions::schema::BlockActualAvg,
         crate::handlers::transactions::schema::SummaryTotals,
         crate::handlers::transactions::TransactionsSummaryResponse,

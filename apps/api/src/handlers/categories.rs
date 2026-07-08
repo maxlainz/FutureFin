@@ -84,8 +84,9 @@ async fn category_reference_count(
     category_id: Uuid,
 ) -> Result<i64, ApiError> {
     // Nota: las `categorization_rules` NO cuentan aquí (su `assign_category_id` es ON DELETE SET
-    // NULL → una regla degradada nunca bloquea el borrado de una categoría). Las `transactions`
-    // sí (su `category_id` es ON DELETE RESTRICT → deben remapearse antes de borrar).
+    // NULL → una regla degradada nunca bloquea el borrado de una categoría). Las `transactions` y
+    // las `recurring_transaction_rules` sí (su `category_id` es ON DELETE RESTRICT → deben
+    // remapearse antes de borrar).
     let n: Option<i64> = sqlx::query_scalar(
         r#"SELECT (
                COALESCE((SELECT COUNT(*)::bigint FROM assets
@@ -97,6 +98,8 @@ async fn category_reference_count(
              + COALESCE((SELECT COUNT(*)::bigint FROM planning_flows
                          WHERE installation_id = $1 AND category_id = $2), 0)
              + COALESCE((SELECT COUNT(*)::bigint FROM transactions
+                         WHERE installation_id = $1 AND category_id = $2), 0)
+             + COALESCE((SELECT COUNT(*)::bigint FROM recurring_transaction_rules
                          WHERE installation_id = $1 AND category_id = $2), 0)
             )"#,
     )
@@ -429,10 +432,21 @@ pub async fn delete_category(
         .execute(&mut *tx)
         .await?;
 
-        // Las transacciones referencian la categoría con ON DELETE RESTRICT → hay que remaparlas
-        // (las `categorization_rules` no: su FK es SET NULL y se degradan solas).
+        // Las transacciones y las reglas recurrentes referencian la categoría con ON DELETE
+        // RESTRICT → hay que remaparlas (las `categorization_rules` no: su FK es SET NULL y se
+        // degradan solas).
         sqlx::query(
             r#"UPDATE transactions SET category_id = $1, updated_at = now()
+               WHERE installation_id = $2 AND category_id = $3"#,
+        )
+        .bind(target)
+        .bind(iid)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"UPDATE recurring_transaction_rules SET category_id = $1, updated_at = now()
                WHERE installation_id = $2 AND category_id = $3"#,
         )
         .bind(target)

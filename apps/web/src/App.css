@@ -2479,9 +2479,27 @@ fieldset.retirement-config-stack {
   }
 }
 
-.exp-derived-row td {
-  color: var(--ff-ink-soft);
-  font-style: italic;
+/* Fila TOTAL de la comparativa: separador grueso + negrita. */
+.exp-total-row td {
+  border-top: 2px solid var(--ff-line-soft);
+  font-weight: 600;
+}
+
+/* Slot SIEMPRE reservado tras el importe en la celda Real de la comparativa: contenga o no la
+   flecha «real vs promedio», ocupa el mismo ancho fijo para no desalinear las cifras de la columna
+   (mismo principio que el paren-slot de MetricCard). Color heredado de num-pos/num-neg cuando hay
+   flecha; vacío = sin color. */
+.exp-trend-slot {
+  display: inline-block;
+  width: 1em;
+  margin-left: 0.3rem;
+  text-align: center;
+}
+
+.exp-trend-slot svg {
+  width: 0.8em;
+  height: 0.8em;
+  vertical-align: -0.1em;
 }
 
 .exp-uncategorized {
@@ -2511,6 +2529,14 @@ fieldset.retirement-config-stack {
   color: var(--ff-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+/* Tag «recurrente» (reusa .exp-source-tag): icono a escala del texto. */
+.exp-recurring-tag svg {
+  width: 0.8em;
+  height: 0.8em;
+  vertical-align: -0.1em;
+  margin-right: 0.15rem;
 }
 
 .exp-cat-edit {
@@ -2558,6 +2584,94 @@ fieldset.retirement-config-stack {
   height: 1rem;
 }
 
+/* ---- Movimientos: controles (búsqueda + agrupación) ---- */
+.exp-movements-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.exp-search-field {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.exp-movements-group-toggle {
+  display: inline-flex;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+/* Estado vacío del filtro (search sin resultados). */
+.exp-movements-empty {
+  margin-top: 1rem;
+}
+
+/* Cabecera ordenable: el botón hereda la tipografía del th (mayúsculas, tracking) y se
+   comporta como texto clicable; el th ya gobierna la alineación. */
+.exp-sort-btn {
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.exp-sort-btn:hover,
+.exp-sort-btn.is-active {
+  color: var(--ff-ink);
+}
+
+.exp-sort-btn:focus-visible {
+  outline: 2px solid var(--ff-accent);
+  outline-offset: 2px;
+}
+
+.exp-sort-btn svg {
+  width: 0.85em;
+  height: 0.85em;
+  color: var(--ff-accent);
+}
+
+/* En la columna numérica el botón se empuja a la derecha (bajo las cifras). */
+.assets-table th.num .exp-sort-btn {
+  justify-content: flex-end;
+  width: 100%;
+}
+
+/* Fila de cabecera de grupo: franja sutil (--ff-pill) + borde superior marcado; el nombre en
+   semibold y el subtotal firmado alineado a la derecha dentro de la banda. */
+.exp-group-row td {
+  background: var(--ff-pill);
+  border-top: 2px solid var(--ff-line-soft);
+  padding-top: 0.4rem;
+  padding-bottom: 0.4rem;
+}
+
+.exp-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.exp-group-name {
+  font-weight: 600;
+  color: var(--ff-ink);
+}
+
+.exp-group-count {
+  font-weight: 400;
+  color: var(--ff-muted);
+}
+
 /* ============================================================
    Comparativa — barras horizontales (CategoryComparisonBars)
    ============================================================ */
@@ -2591,12 +2705,8 @@ fieldset.retirement-config-stack {
   display: inline-block;
 }
 
-.cmp-swatch--real {
-  background: var(--ff-accent);
-}
-
 .cmp-swatch--budget {
-  background: var(--ff-line-soft);
+  background: var(--ff-accent);
 }
 
 .cmp-swatch--avg {
@@ -2630,12 +2740,8 @@ fieldset.retirement-config-stack {
   min-width: 2px;
 }
 
-.cmp-bar--real {
-  background: var(--ff-accent);
-}
-
 .cmp-bar--budget {
-  background: var(--ff-line-soft);
+  background: var(--ff-accent);
 }
 
 .cmp-bar--avg {
@@ -2673,15 +2779,15 @@ fieldset.retirement-config-stack {
 }
 
 .cf-swatch--income {
-  background: var(--ff-accent);
+  background: var(--cf-income);
 }
 
 .cf-swatch--expense {
-  background: var(--exp-average);
+  background: var(--cf-expense);
 }
 
 .cf-swatch--savings {
-  background: color-mix(in oklch, var(--exp-average) 45%, var(--ff-accent));
+  background: var(--cf-savings);
 }
 
 .cf-track {
@@ -2721,15 +2827,15 @@ fieldset.retirement-config-stack {
 }
 
 .cf-bar--income {
-  background: var(--ff-accent);
+  background: var(--cf-income);
 }
 
 .cf-bar--expense {
-  background: var(--exp-average);
+  background: var(--cf-expense);
 }
 
 .cf-bar--savings {
-  background: color-mix(in oklch, var(--exp-average) 45%, var(--ff-accent));
+  background: var(--cf-savings);
 }
 
 .cf-xlabels {
@@ -2879,11 +2985,6 @@ fieldset.retirement-config-stack {
   font-size: 0.82rem;
 }
 
-.import-account-select {
-  min-width: 14rem;
-  flex: 1 1 14rem;
-}
-
 /* ---- Alta manual de efectivo (grid multifila) ---- */
 .cash-entry-row {
   display: flex;
@@ -2914,6 +3015,97 @@ fieldset.retirement-config-stack {
 
 .cash-entry-row .field.cash-entry-amount {
   flex: 0 1 6rem;
+}
+
+/* Checkbox «Repetir cada mes» por fila del alta manual. */
+.cash-entry-repeat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 1 auto;
+  font-size: 0.8rem;
+  color: var(--ff-ink-soft);
+  white-space: nowrap;
+}
+
+.cash-entry-repeat input {
+  margin: 0;
+}
+
+/* ---- Movimientos recurrentes (RecurringRulesModal) ---- */
+.recurring-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.recurring-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--ff-line-soft);
+}
+
+.recurring-item:last-child {
+  border-bottom: none;
+}
+
+.recurring-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.recurring-item-concept {
+  font-weight: 500;
+  word-break: break-word;
+}
+
+.recurring-item-meta {
+  font-size: 0.78rem;
+}
+
+.recurring-item-amount {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Import: override de formato (details plegable) + chips del banner ---- */
+.import-source-override {
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-input);
+  padding: 0.4rem 0.6rem;
+  background: var(--ff-paper);
+}
+
+.import-source-override > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--ff-ink-soft);
+}
+
+.import-source-override[open] > summary {
+  margin-bottom: 0.6rem;
+}
+
+/* Chips del banner-resumen del paso 2 (imita .chip). */
+.import-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.import-chip {
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--ff-radius-pill);
+  background: var(--ff-pill);
+  color: var(--ff-ink-soft);
+  border: 1px solid var(--ff-line-soft);
+  white-space: nowrap;
 }
 
 /* ============================================================
@@ -3022,10 +3214,15 @@ fieldset.retirement-config-stack {
   }
   .expenses-window-pills {
     display: flex;
+    flex-wrap: wrap;
     width: 100%;
   }
+  /* 5 pills reparten el ancho a partes iguales (basis 0 → no desbordan a 360px). */
   .expenses-window-pills .ff-nav-pill {
     flex: 1 1 0;
+    min-width: 0;
+    padding-left: 0.3rem;
+    padding-right: 0.3rem;
     text-align: center;
     min-height: 2.5rem;
     display: inline-flex;
@@ -3041,6 +3238,20 @@ fieldset.retirement-config-stack {
   .expenses-toolbar-actions .btn {
     flex: 1 1 0;
     justify-content: center;
+  }
+
+  /* Movimientos: búsqueda a ancho completo → el toggle «Por categoría» cae a su propia
+     línea, con altura táctil. */
+  .exp-search-field {
+    flex: 1 1 100%;
+  }
+  .exp-movements-group-toggle {
+    margin-left: 0;
+  }
+  .exp-movements-group-toggle .ff-nav-pill {
+    min-height: 2.5rem;
+    display: inline-flex;
+    align-items: center;
   }
 
   /* Cabecera de panel (título + acciones/total) apilada. */
@@ -3062,15 +3273,10 @@ fieldset.retirement-config-stack {
     min-width: 0;
   }
 
-  /* Import: footer (resumen · cuenta · botones) apilado. */
+  /* Import: footer (resumen · botones) apilado. */
   .import-footer {
     flex-direction: column;
     align-items: stretch;
-  }
-  .import-footer .import-account-select {
-    flex: 1 1 auto;
-    min-width: 0;
-    width: 100%;
   }
 }
 

@@ -2,21 +2,36 @@ import { describe, expect, it } from "vitest";
 import type {
   CategoryRow,
   ImportPreviewRowApi,
+  SummaryTotalsApi,
+  TransactionApi,
+  TransactionKindApi,
   TransactionMonthApi,
 } from "../api/types";
 import {
   adjacentMonthInList,
+  avgWindowLabel,
   buildConfirmDecisions,
+  capitalizeSource,
   categoriesForKind,
+  compareTransactions,
   defaultSelectedMonth,
   deltaToneClass,
+  groupTransactionsByCategory,
   initialDraftForRow,
   monthLabelEs,
   monthShortLabelEs,
+  naturalSortDir,
+  normalizeSearchText,
   parseMonth,
   rowMatchesFilter,
   signOf,
+  significanceThreshold,
+  significantDeltaTone,
+  sortTransactionGroups,
+  sortTransactions,
   summarizeDecisions,
+  transactionMatchesQuery,
+  trendArrow,
   type ImportRowDraft,
 } from "./expenses";
 
@@ -316,6 +331,405 @@ describe("signOf / deltaToneClass", () => {
   });
 });
 
+describe("significanceThreshold", () => {
+  it("is 1% of income_actual when there is real income", () => {
+    expect(significanceThreshold(totals({ income_actual: "2000" }))).toBeCloseTo(
+      20,
+    );
+  });
+  it("falls back to 1% of income_budget when actual income is 0", () => {
+    expect(
+      significanceThreshold(
+        totals({ income_actual: "0", income_budget: "1500" }),
+      ),
+    ).toBeCloseTo(15);
+  });
+  it("falls back to income_budget when actual income is negative", () => {
+    expect(
+      significanceThreshold(
+        totals({ income_actual: "-10", income_budget: "1500" }),
+      ),
+    ).toBeCloseTo(15);
+  });
+  it("is 0 when both income actual and budget are 0", () => {
+    expect(
+      significanceThreshold(totals({ income_actual: "0", income_budget: "0" })),
+    ).toBe(0);
+  });
+});
+
+describe("trendArrow", () => {
+  it("empty slot (null) when there is no average — no data is not 'no change'", () => {
+    expect(trendArrow(500, "expense", 10, false)).toEqual({
+      direction: null,
+      tone: "",
+    });
+    expect(trendArrow(5, "income", 10, false)).toEqual({
+      direction: null,
+      tone: "",
+    });
+  });
+  it("flat (=, neutral tone) when there IS an average but |Δ| is within the threshold (inclusive)", () => {
+    expect(trendArrow(10, "expense", 10, true)).toEqual({
+      direction: "flat",
+      tone: "",
+    });
+    expect(trendArrow(-10, "income", 10, true)).toEqual({
+      direction: "flat",
+      tone: "",
+    });
+    expect(trendArrow(0, "expense", 10, true)).toEqual({
+      direction: "flat",
+      tone: "",
+    });
+  });
+  it("expense up over average is unfavorable (red)", () => {
+    expect(trendArrow(50, "expense", 10, true)).toEqual({
+      direction: "up",
+      tone: "num-neg",
+    });
+  });
+  it("expense down under average is favorable (green)", () => {
+    expect(trendArrow(-50, "expense", 10, true)).toEqual({
+      direction: "down",
+      tone: "num-pos",
+    });
+  });
+  it("income up over average is favorable (green)", () => {
+    expect(trendArrow(50, "income", 10, true)).toEqual({
+      direction: "up",
+      tone: "num-pos",
+    });
+  });
+  it("income down under average is unfavorable (red)", () => {
+    expect(trendArrow(-50, "income", 10, true)).toEqual({
+      direction: "down",
+      tone: "num-neg",
+    });
+  });
+});
+
+describe("significantDeltaTone", () => {
+  it("is neutral below or at the threshold", () => {
+    expect(significantDeltaTone(10, "expense", 10)).toBe("");
+    expect(significantDeltaTone(-10, "income", 10)).toBe("");
+  });
+  it("is the delta tone above the threshold", () => {
+    expect(significantDeltaTone(50, "expense", 10)).toBe("num-neg");
+    expect(significantDeltaTone(-50, "expense", 10)).toBe("num-pos");
+    expect(significantDeltaTone(50, "income", 10)).toBe("num-pos");
+  });
+});
+
+describe("avgWindowLabel", () => {
+  it("maps known windows", () => {
+    expect(avgWindowLabel("3")).toBe("3m");
+    expect(avgWindowLabel("ytd")).toBe("YTD");
+    expect(avgWindowLabel("all")).toBe("total");
+  });
+  it("falls back to the id for unknown windows", () => {
+    expect(avgWindowLabel("weird")).toBe("weird");
+  });
+});
+
+describe("capitalizeSource", () => {
+  it("maps the known bank presets", () => {
+    expect(capitalizeSource("myinvestor")).toBe("MyInvestor");
+    expect(capitalizeSource("N26")).toBe("N26");
+  });
+  it("uppercases the first letter of a generic source", () => {
+    expect(capitalizeSource("manual")).toBe("Manual");
+  });
+  it("empty stays empty", () => {
+    expect(capitalizeSource("")).toBe("");
+    expect(capitalizeSource("   ")).toBe("");
+  });
+});
+
+describe("normalizeSearchText", () => {
+  it("lowercases and strips diacritics", () => {
+    expect(normalizeSearchText("Café CON Leche")).toBe("cafe con leche");
+    expect(normalizeSearchText("Nómina")).toBe("nomina");
+    expect(normalizeSearchText("ÑOÑO")).toBe("nono");
+  });
+  it("is idempotent on already-plain text", () => {
+    expect(normalizeSearchText("mercadona 42")).toBe("mercadona 42");
+  });
+});
+
+describe("transactionMatchesQuery", () => {
+  it("empty (or blank) query matches everything", () => {
+    expect(transactionMatchesQuery("Alquiler", "Vivienda", "")).toBe(true);
+    expect(transactionMatchesQuery("Alquiler", null, "   ")).toBe(true);
+  });
+  it("matches on concept, case- and accent-insensitive", () => {
+    expect(transactionMatchesQuery("Café Central", null, "cafe")).toBe(true);
+    expect(transactionMatchesQuery("Café Central", null, "CAFÉ")).toBe(true);
+  });
+  it("matches on category name too", () => {
+    expect(transactionMatchesQuery("MERCADONA", "Alimentación", "aliment")).toBe(true);
+  });
+  it("returns false when neither concept nor category match", () => {
+    expect(transactionMatchesQuery("Mercadona", "Alimentación", "gasolina")).toBe(false);
+  });
+  it("null category is fine", () => {
+    expect(transactionMatchesQuery("Retirada cajero", null, "cajero")).toBe(true);
+  });
+});
+
+describe("naturalSortDir", () => {
+  it("date and amount start descending, concept ascending", () => {
+    expect(naturalSortDir("date")).toBe("desc");
+    expect(naturalSortDir("amount")).toBe("desc");
+    expect(naturalSortDir("concept")).toBe("asc");
+  });
+});
+
+describe("compareTransactions / sortTransactions", () => {
+  const rows: TransactionApi[] = [
+    txn({ id: "a", op_date: "2026-06-01", concept: "Zeta", amount: "-10.0000" }),
+    txn({ id: "b", op_date: "2026-06-10", concept: "alfa", amount: "200.0000" }),
+    txn({ id: "c", op_date: "2026-06-05", concept: "Mike", amount: "-500.0000" }),
+  ];
+  it("date desc is the natural order (most recent first)", () => {
+    expect(sortTransactions(rows, "date", "desc").map((r) => r.id)).toEqual([
+      "b",
+      "c",
+      "a",
+    ]);
+  });
+  it("date asc reverses it", () => {
+    expect(sortTransactions(rows, "date", "asc").map((r) => r.id)).toEqual([
+      "a",
+      "c",
+      "b",
+    ]);
+  });
+  it("concept asc is alphabetical, accent/case-insensitive", () => {
+    expect(sortTransactions(rows, "concept", "asc").map((r) => r.id)).toEqual([
+      "b", // alfa
+      "c", // Mike
+      "a", // Zeta
+    ]);
+  });
+  it("amount sorts by MAGNITUDE, not signed value", () => {
+    // |200| < |−500|, and |−10| is the smallest.
+    expect(sortTransactions(rows, "amount", "desc").map((r) => r.id)).toEqual([
+      "c", // 500
+      "b", // 200
+      "a", // 10
+    ]);
+    expect(sortTransactions(rows, "amount", "asc").map((r) => r.id)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+  it("stable tiebreak: op_date desc then id, independent of dir", () => {
+    const tie: TransactionApi[] = [
+      txn({ id: "y", op_date: "2026-06-02", concept: "x", amount: "100" }),
+      txn({ id: "x", op_date: "2026-06-02", concept: "x", amount: "100" }),
+      txn({ id: "z", op_date: "2026-06-09", concept: "x", amount: "100" }),
+    ];
+    // Same concept + same magnitude → tiebreak by op_date desc (z first), then id asc.
+    expect(sortTransactions(tie, "amount", "desc").map((r) => r.id)).toEqual([
+      "z",
+      "x",
+      "y",
+    ]);
+    expect(sortTransactions(tie, "amount", "asc").map((r) => r.id)).toEqual([
+      "z",
+      "x",
+      "y",
+    ]);
+  });
+  it("does not mutate the input array", () => {
+    const input = [...rows];
+    sortTransactions(input, "amount", "asc");
+    expect(input.map((r) => r.id)).toEqual(["a", "b", "c"]);
+  });
+  it("compareTransactions is the primitive behind the sort", () => {
+    expect(compareTransactions(rows[1], rows[2], "amount", "desc")).toBeGreaterThan(0);
+  });
+});
+
+describe("groupTransactionsByCategory", () => {
+  const names = new Map<string, string>([
+    ["c1", "Alimentación"],
+    ["c2", "Ocio"],
+  ]);
+  it("groups by category, savings and uncategorized into their own buckets", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", category_id: "c1", amount: "-40.0000" }),
+      txn({ id: "2", category_id: "c1", amount: "-10.0000" }),
+      txn({ id: "3", kind: "savings", amount: "300.0000" }),
+      txn({ id: "4", amount: "-25.0000" }), // expense, no category
+      txn({ id: "5", category_id: "c2", amount: "-15.0000" }),
+    ];
+    const groups = groupTransactionsByCategory(rows, names);
+    const byKey = Object.fromEntries(groups.map((g) => [g.key, g]));
+    expect(byKey["c1"].label).toBe("Alimentación");
+    expect(byKey["c1"].rows).toHaveLength(2);
+    expect(byKey["c1"].subtotal).toBeCloseTo(-50);
+    expect(byKey["savings"].label).toBe("Ahorro / Inversión");
+    expect(byKey["savings"].subtotal).toBeCloseTo(300);
+    expect(byKey["uncategorized-expense"].label).toBe("Sin categoría");
+    expect(byKey["uncategorized-expense"].subtotal).toBeCloseTo(-25);
+  });
+  it("groups carry their kind (inherited from their rows)", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", kind: "income", category_id: "c1" }),
+      txn({ id: "2", kind: "savings" }),
+      txn({ id: "3", kind: "expense", category_id: "c2" }),
+    ];
+    const byKey = Object.fromEntries(
+      groupTransactionsByCategory(rows, names).map((g) => [g.key, g]),
+    );
+    expect(byKey["c1"].kind).toBe("income");
+    expect(byKey["savings"].kind).toBe("savings");
+    expect(byKey["c2"].kind).toBe("expense");
+  });
+  it("uncategorized splits BY KIND: income without category ≠ expense without category", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", kind: "income", amount: "1000.0000" }),
+      txn({ id: "2", kind: "expense", amount: "-25.0000" }),
+    ];
+    const groups = groupTransactionsByCategory(rows, names);
+    expect(groups).toHaveLength(2);
+    const byKey = Object.fromEntries(groups.map((g) => [g.key, g]));
+    expect(byKey["uncategorized-income"].kind).toBe("income");
+    expect(byKey["uncategorized-income"].label).toBe("Sin categoría");
+    expect(byKey["uncategorized-expense"].kind).toBe("expense");
+    expect(byKey["uncategorized-expense"].label).toBe("Sin categoría");
+  });
+  it("subtotal is SIGNED (positives and negatives net out)", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", category_id: "c1", amount: "100.0000" }),
+      txn({ id: "2", category_id: "c1", amount: "-30.0000" }),
+    ];
+    expect(groupTransactionsByCategory(rows, names)[0].subtotal).toBeCloseTo(70);
+  });
+  it("falls back to the row's cached category_name when the id is unknown", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", category_id: "gone", category_name: "Vieja" }),
+    ];
+    expect(groupTransactionsByCategory(rows, names)[0].label).toBe("Vieja");
+  });
+  it("savings with a stray category_id still lands in the savings bucket", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", kind: "savings", category_id: "c1", amount: "50" }),
+    ];
+    const groups = groupTransactionsByCategory(rows, names);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe("savings");
+  });
+});
+
+describe("sortTransactionGroups", () => {
+  function grp(
+    over: Partial<ReturnType<typeof groupTransactionsByCategory>[number]>,
+  ) {
+    return {
+      key: "k",
+      label: "L",
+      kind: "expense" as TransactionKindApi,
+      rows: [],
+      subtotal: 0,
+      ...over,
+    };
+  }
+  it("kind sections come first: income → savings → expense", () => {
+    const groups = [
+      grp({ key: "e", kind: "expense", subtotal: -9000 }),
+      grp({ key: "s", kind: "savings", subtotal: 10 }),
+      grp({ key: "i", kind: "income", subtotal: 100 }),
+    ];
+    // The expense group is by far the largest, but income still leads.
+    expect(sortTransactionGroups(groups).map((g) => g.key)).toEqual(["i", "s", "e"]);
+  });
+  it("within a section, groups always order by |subtotal| descending", () => {
+    const groups = [
+      grp({ key: "a", subtotal: 100 }),
+      grp({ key: "b", subtotal: -500 }),
+      grp({ key: "c", subtotal: -30 }),
+    ];
+    expect(sortTransactionGroups(groups).map((g) => g.key)).toEqual(["b", "a", "c"]);
+  });
+  it("kind priority + |subtotal| desc combined", () => {
+    const groups = [
+      grp({ key: "e1", kind: "expense", subtotal: -30 }),
+      grp({ key: "i1", kind: "income", subtotal: 100 }),
+      grp({ key: "e2", kind: "expense", subtotal: -500 }),
+      grp({ key: "i2", kind: "income", subtotal: 2000 }),
+    ];
+    expect(sortTransactionGroups(groups).map((g) => g.key)).toEqual([
+      "i2",
+      "i1",
+      "e2",
+      "e1",
+    ]);
+  });
+  it("ties break alphabetically by label (accent/case-insensitive)", () => {
+    const groups = [
+      grp({ key: "a", label: "Ómnibus", subtotal: -50 }),
+      grp({ key: "b", label: "alquiler", subtotal: 50 }),
+      grp({ key: "c", label: "Zapatos", subtotal: -50 }),
+    ];
+    expect(sortTransactionGroups(groups).map((g) => g.key)).toEqual(["b", "a", "c"]);
+  });
+  it("changing sortKey/sortDir does NOT reorder groups but DOES reorder their rows", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", category_id: "c1", concept: "Beta", op_date: "2026-06-01", amount: "-40.0000" }),
+      txn({ id: "2", category_id: "c1", concept: "Alfa", op_date: "2026-06-20", amount: "-10.0000" }),
+      txn({ id: "3", kind: "income", concept: "Nómina", op_date: "2026-06-25", amount: "2000.0000" }),
+      txn({ id: "4", category_id: "c2", concept: "Cine", op_date: "2026-06-10", amount: "-300.0000" }),
+    ];
+    const names = new Map([
+      ["c1", "Alimentación"],
+      ["c2", "Ocio"],
+    ]);
+    const groups = sortTransactionGroups(groupTransactionsByCategory(rows, names));
+    // Fixed group order: income section first, then expense groups by |subtotal| desc.
+    const expectedGroupKeys = ["uncategorized-income", "c2", "c1"];
+    expect(groups.map((g) => g.key)).toEqual(expectedGroupKeys);
+    for (const [key, dir] of [
+      ["date", "asc"],
+      ["date", "desc"],
+      ["concept", "asc"],
+      ["amount", "desc"],
+    ] as const) {
+      const resorted = sortTransactionGroups(
+        groupTransactionsByCategory(rows, names),
+      ).map((g) => ({ ...g, rows: sortTransactions(g.rows, key, dir) }));
+      expect(resorted.map((g) => g.key)).toEqual(expectedGroupKeys);
+    }
+    // …but the rows inside c1 do follow the active key.
+    const c1 = (key: "date" | "concept" | "amount", dir: "asc" | "desc") =>
+      sortTransactions(groups.find((g) => g.key === "c1")!.rows, key, dir).map(
+        (r) => r.id,
+      );
+    expect(c1("date", "desc")).toEqual(["2", "1"]);
+    expect(c1("date", "asc")).toEqual(["1", "2"]);
+    expect(c1("concept", "asc")).toEqual(["2", "1"]); // Alfa, Beta
+    expect(c1("amount", "desc")).toEqual(["1", "2"]); // |−40| > |−10|
+  });
+});
+
+function totals(overrides: Partial<SummaryTotalsApi>): SummaryTotalsApi {
+  return {
+    expense_actual: "0",
+    expense_budget: "0",
+    expense_avg: "0",
+    income_actual: "0",
+    income_budget: "0",
+    income_avg: "0",
+    savings_actual: "0",
+    savings_avg: "0",
+    net_actual: "0",
+    ...overrides,
+  };
+}
+
 function draft(overrides: Partial<ImportRowDraft>): ImportRowDraft {
   return {
     include: true,
@@ -324,6 +738,22 @@ function draft(overrides: Partial<ImportRowDraft>): ImportRowDraft {
     linkedAssetId: "",
     linkedLiabilityId: "",
     force: false,
+    ...overrides,
+  };
+}
+
+function txn(
+  overrides: Partial<TransactionApi> & { id: string },
+): TransactionApi {
+  return {
+    source: "manual",
+    op_date: "2026-06-15",
+    concept: "TEST",
+    amount: "-10.0000",
+    currency: "EUR",
+    kind: "expense" as TransactionKindApi,
+    created_at: "2026-06-15T00:00:00Z",
+    updated_at: "2026-06-15T00:00:00Z",
     ...overrides,
   };
 }

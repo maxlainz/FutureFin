@@ -6,6 +6,127 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Rediseño de la pestaña **Gastos → «Movimientos»** (frontend + backend, desplegados juntos), promedio
+**ponderado**, movimientos **recurrentes** y backup `.ffbackup` **v6**.
+
+### Movimientos — promedio ponderado (fix del «promedio 6m sale a 0»)
+- **El promedio de la comparativa salía 0 (o ridículamente bajo) con poco historial** — síntoma:
+  «Promedio 6m» a 0 aunque hubiera meses con gasto real. **Causa raíz**: el denominador del promedio
+  era el **ancho fijo** de la ventana (p. ej. 6), de modo que los meses **sin ninguna transacción**
+  contaban como 0 y diluían la media (3 meses reales ÷ 6 = mitad; 1 mes ÷ 6 ≈ ruido). **Fix**: el
+  promedio pasa a ser **ponderado** — el denominador es `months_with_data` (nº de meses del tramo con
+  ≥1 transacción del scope), nunca el ancho de la ventana; un mes vacío ya no diluye. Cuando
+  `months_with_data = 0`, promedios y KPIs muestran «—» en vez de un 0 engañoso. **Lección**: un
+  promedio sobre una ventana temporal debe dividir por los periodos con dato, no por el tamaño nominal
+  de la ventana.
+- **Ventanas nuevas del promedio**: al selector `3m · 6m · 12m` se añaden **`YTD`** (meses del año del
+  mes seleccionado estrictamente anteriores a él; enero → tramo vacío) y **`Todo`** (desde el primer
+  movimiento). El query param es ahora `avg_window` ∈ {`3`,`6`,`12`,`ytd`,`all`} (default `6`; trim +
+  case-insensitive; inválido → 400 `avg_window must be one of 3, 6, 12, ytd, all`). El antiguo
+  `avg_months` (1..24) se conserva como **alias legado**; `avg_window` gana si vienen ambos.
+
+### Movimientos — rediseño de la pestaña
+- **La pestaña «Gastos» pasa a llamarse «Movimientos»** (título y pill de navegación). La ruta
+  canónica es `/movimientos`; `/gastos` sigue resolviendo como **alias de lectura** en
+  `tabFromPathname` (los bookmarks viejos no se rompen). El `TabId` interno (`"expenses"`) y el
+  archivo `views/GastosView.tsx` no cambian.
+- **Fila TOTAL** en las tablas de gasto e ingreso (Real + flecha, Budget, Δ, Promedio) desde
+  `summary.totals`.
+- **Flechas de tendencia ↑/↓/=** en la celda «Real» (real vs promedio, `delta_vs_avg`), coloreadas
+  `num-pos`/`num-neg` **solo** si `|Δ|` supera el **umbral de significancia = 1 % del ingreso real del
+  mes** (fallback `income_budget`); con promedio pero por debajo del umbral la desviación se considera
+  ruido → glifo **«=» atenuado** (`EqualsIcon` nuevo en `icons.tsx`; también el Δ vs budget va en
+  gris); sin promedio el slot queda vacío (sin datos ≠ sin cambio). El glifo se pinta en un **slot de
+  ancho fijo siempre reservado** (`.exp-trend-slot`, aunque esté vacío) para no desalinear las cifras
+  de la columna Real — mismo principio que el paren-slot de `MetricCard`. Helpers puros nuevos con
+  Vitest en `lib/expenses.ts` (`significanceThreshold`, `trendArrow` — direcciones
+  `up`/`down`/`flat`/`null` —, `significantDeltaTone`, `AVG_WINDOWS`, `avgWindowLabel`,
+  `capitalizeSource`, y los de búsqueda/orden/agrupación de la tabla — ver abajo); `expenses.test.ts`
+  pasa de 32 a 75 tests.
+- **Tabla de movimientos: búsqueda + agrupación + ordenación**. Barra de controles bajo la cabecera:
+  **búsqueda** en vivo (concepto + nombre de categoría, insensible a mayúsculas y acentos, sin fetch) y
+  toggle **«Por categoría»** (activo por defecto) que conmuta agrupado ↔ lista plana. Las cabeceras
+  **Fecha / Concepto / Importe** son ordenables (click alterna asc/desc; cambiar de columna arranca en
+  su orden natural — fecha/importe desc, concepto asc; `aria-sort` + indicador ↑/↓). **Importe ordena
+  por magnitud** (`|amount|`, para ver los movimientos más grandes). En modo agrupado, cada grupo es una
+  categoría (savings → «Ahorro / Inversión»; sin categoría → «Sin categoría» **por kind**) con contador
+  y **subtotal firmado**, y el orden de los grupos es **FIJO**, ajeno a la clave activa: **secciones por
+  kind — ingresos → ahorro → gastos — y, dentro de cada sección, de mayor a menor cantidad
+  (`|subtotal|` desc)**; la clave activa solo ordena las filas DENTRO de cada grupo. Filtro sin
+  resultados → «Sin resultados.». Helpers puros nuevos en `lib/expenses.ts`: `normalizeSearchText`,
+  `transactionMatchesQuery`, `compareTransactions`/`sortTransactions` (`TxnSortKey`/`TxnSortDir`),
+  `naturalSortDir`, `groupTransactionsByCategory`/`sortTransactionGroups`.
+- Se retira el contador **«N meses con datos»** del toolbar (ruido); el «—» de promedios/KPIs sin
+  histórico se conserva.
+- **Tabla de movimientos sin scroll interno**: se retira `table-scroll--sticky` de la tabla principal
+  (la página crece en vez de anidar un scroll; se pierde deliberadamente el `thead` sticky). La clase
+  sigue existiendo para el preview del import.
+
+### Movimientos — gráficas (excepción de color sancionada)
+- La comparativa por categoría (`CategoryComparisonBars`) pasa de **3 series a 2**: **Budget**
+  (`--ff-accent`) y **Promedio** (`--exp-average`). La serie **Real** se elimina de las barras — vive ya
+  en la tabla y las KPIs.
+- El cash-flow mensual (`MonthlyCashflowBars`) estrena tokens de tema `--cf-income` (verde sobrio,
+  `oklch(0.58 0.10 165)` claro / `oklch(0.72 0.10 165)` oscuro), `--cf-expense` (rojo sobrio,
+  `oklch(0.58 0.13 25)` / `oklch(0.70 0.13 25)`) y `--cf-savings` (= `--ff-accent`). **Excepción
+  explícita** a la regla «sin rojo/verde en el chrome»: son colores **funcionales de serie** del
+  gráfico, dentro de la única zona (charts) donde el design system acepta varios colores. Sancionado en
+  `design-system.md`.
+
+### Movimientos — cuotas de pasivo fuera de la comparativa (API interno breaking)
+- Se elimina la línea derivada **«Cuotas de pasivos»** de la comparativa. Antes, el summary añadía una
+  línea derivada (`derived_debt_line`, solo lado budget) con el equivalente mensual de las cuotas de
+  pasivo; como las cuotas reales ya entran como movimientos en su categoría de gasto ordinaria, la
+  comparativa las **contaba dos veces**. Ahora `totals.expense_budget` = **Σ del presupuesto de las
+  categorías de gasto**, sin la línea derivada (el endpoint `/v1/budget` de la pestaña Presupuesto no
+  cambia; solo la comparativa de Movimientos).
+- **API breaking (interno)**: `GET /v1/transactions/summary` **elimina** del response
+  `derived_debt_line` y `avg_months`, y **añade** `avg_window`, `window_months`, `months_with_data`.
+  Frontend y backend se despliegan **juntos** en la misma imagen, así que no hay ventana de
+  incompatibilidad para clientes; se marca como breaking del contrato interno para dejar constancia.
+
+### Movimientos — recurrentes (nuevo)
+- **Movimientos recurrentes** per-user (nómina, alquiler, aportación mensual…). Una **regla-plantilla**
+  (`recurring_transaction_rules`) guarda concepto, importe firmado, `kind`, categoría, enlaces y día del
+  mes; `POST /v1/transactions/recurring/materialize` genera las **copias mensuales** pendientes en
+  `transactions` (`source='manual'`, enlazadas por `recurring_rule_id`), una por mes civil vencido.
+- **Idempotencia por cursor**: `last_materialized_month` (primer día de mes) es la **única** fuente de
+  idempotencia — re-materializar no duplica ni recrea instancias borradas (el cursor ya pasó ese mes);
+  a propósito **sin** `UNIQUE(regla, mes)`. **Nunca crea `op_date` futuro**: el mes en curso solo se
+  materializa cuando su día del mes ya ha llegado; el día se clampa a fin de mes en meses cortos.
+- **UI**: checkbox «Repetir cada mes» por fila en el alta de efectivo (`ManualCashEntryModal`); tag
+  «recurrente» en la tabla; borrar una instancia recurrente ofrece «Eliminar solo este» / «Eliminar y
+  detener repetición»; modal nuevo «Recurrentes» (`views/RecurringRulesModal.tsx`, botón en la toolbar)
+  para listar y detener reglas; materialización **silenciosa** al montar la vista (solo con permiso de
+  escritura, refresca si generó algo). Sin `PATCH` de plantilla (borrar y recrear). Como el resto del
+  módulo, **no invalida la cache de proyección** (las transacciones no son inputs del engine;
+  regresión ampliada en `transactions_projection_cache.rs`).
+
+### Import wizard — reorganización
+- **Paso 1**: el archivo primero; el select **«Cuenta origen (activo)»** sube desde el footer (y ahora
+  se envía también en el preview); el formato/preset va en un `<details>` plegado (autodetección por
+  defecto). **Paso 2**: banner con la fuente **capitalizada** (`MyInvestor`) + chips de conteos, bulk
+  bar con un único cluster «Asignar a visibles», footer «{X} se importarán · {Y} excluidas ({Z}
+  duplicadas ya guardadas)», y la columna «Kind» renombrada a «Tipo».
+
+### Migración / compatibilidad
+- **Migración `20260708090000_recurring_transaction_rules.sql`**: crea la tabla
+  `recurring_transaction_rules` (per-user; `amount` firmado `NUMERIC(18,4)` CHECK <> 0; `category_id`
+  FK `ON DELETE RESTRICT`; `linked_asset_id`/`linked_liability_id` FK `ON DELETE SET NULL`;
+  `day_of_month` 1..31; cursor `last_materialized_month DATE`) y añade la columna
+  `transactions.recurring_rule_id` (FK `ON DELETE SET NULL`) + índices. Sin pérdida de datos.
+- **Borrado de categorías**: `categories.rs` ahora cuenta (`category_reference_count`) y **remapea**
+  también las `recurring_transaction_rules` al borrar una categoría, junto a las `transactions` (ambas
+  con `category_id` `RESTRICT`).
+- **Backups `.ffbackup`**: `CURRENT_SCHEMA_VERSION` sube de **5 a 6**. `BackupPayloadV6` = V5 +
+  `recurring_transaction_rules: Vec<BackupRecurringRule>` + `BackupTransaction.recurring_rule_index`.
+  Los backups **v1..v5 siguen importando** (cadena `migrate_to_current` extendida con
+  `payload_v5_to_v6`, que arranca la colección nueva vacía). `last_materialized_month` se lleva verbatim
+  para no re-materializar duplicados al importar.
+- **Rollback**: volver a una imagen anterior con la migración ya aplicada deja la tabla/columna
+  huérfanas (inertes para el código viejo); un backup v6 no importa en un servidor ≤v5 (lo rechaza
+  `parse_payload` con 409 «newer than this server supports»).
+
 ## [1.7.1] — 2026-07-07
 
 Fix visual de la pestaña **Gastos** (solo frontend): espaciados verticales que se tocaban en

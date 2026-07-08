@@ -210,10 +210,12 @@ No breaking change ships without a version bump + a CHANGELOG entry explicitly m
   documented even the removal of a consumer-less field (`fire_number_expense_adjustment_pct`)
   and the new strict 422 as the only non-bit-exact changes.
 - **`.ffbackup` schema**: any shape change to exported user data requires bumping
-  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **4** —
-  v1.5.0 added `snapshots` via `payload_v3_to_v4`, an additive change: v3 files import with an
-  empty snapshot list) and extending the `migrate_to_current` chain so ALL older versions still
-  import (v1, v2 and v3 remain importable today; legacy per-asset contribution fields are dropped
+  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **6** — every
+  bump has been additive, each older file importing with the new collections empty: v4 added
+  `snapshots` via `payload_v3_to_v4` (v1.5.0), v5 added transactions/imports/rules (v1.6.0), v6
+  added `recurring_transaction_rules` + `BackupTransaction.recurring_rule_index` via
+  `payload_v5_to_v6` (v1.8.0)) and extending the `migrate_to_current` chain so ALL older versions
+  still import (v1..v5 remain importable today; legacy per-asset contribution fields are dropped
   on import, user reconfigures — the documented v1.1.0 pattern). `parse_payload` rejects versions
   newer than the server supports — keep that. Never break import of an old backup; it is users'
   only recovery path.

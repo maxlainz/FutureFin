@@ -9,10 +9,16 @@ import type {
   CategoryRow,
   ImportDecisionApi,
   ImportPreviewRowApi,
+  SummaryTotalsApi,
+  TransactionApi,
   TransactionKindApi,
   TransactionMonthApi,
 } from "../api/types";
-import { DISPLAY_NUMBER_LOCALE, formatCurrencyNumber } from "./format";
+import {
+  DISPLAY_NUMBER_LOCALE,
+  formatCurrencyNumber,
+  parseDisplayDecimal,
+} from "./format";
 
 /** Los tres kinds en orden de UI. */
 export const TRANSACTION_KINDS: TransactionKindApi[] = [
@@ -244,4 +250,243 @@ export function formatDeltaCurrency(value: number, currencyIso: string): string 
   if (r === 0) return formatCurrencyNumber(0, currencyIso);
   const sign = r > 0 ? "+" : "−";
   return `${sign}${formatCurrencyNumber(Math.abs(r), currencyIso)}`;
+}
+
+/**
+ * Umbral de significancia (en unidades de moneda) por debajo del cual una desviación es «ruido» y
+ * se muestra en gris / sin flecha: 1 % del ingreso REAL del mes; si no hay ingreso real (≤0), 1 %
+ * del ingreso presupuestado; si ambos son 0 → 0 (todo cuenta como significativo).
+ */
+export function significanceThreshold(totals: SummaryTotalsApi): number {
+  const incActual = parseDisplayDecimal(totals.income_actual) ?? 0;
+  if (incActual > 0) return incActual * 0.01;
+  const incBudget = parseDisplayDecimal(totals.income_budget) ?? 0;
+  if (incBudget > 0) return incBudget * 0.01;
+  return 0;
+}
+
+/**
+ * Flecha de tendencia «real vs promedio» de una línea de comparativa. Slot vacío
+ * (`direction:null`) SOLO si no hay promedio (`!hasAvg`: sin datos ≠ sin cambio). Con promedio pero
+ * desviación insignificante (`|Δ| <= threshold`) → `flat` (glifo «=» atenuado, tono `""`). En otro
+ * caso, `up` si Δ>0 (gasté/ingresé más que la media) y `down` si Δ<0. El TONO es semántico: subir
+ * ingresos o bajar gastos es favorable (`num-pos`); lo contrario es desfavorable (`num-neg`).
+ */
+export function trendArrow(
+  deltaVsAvg: number,
+  kind: "expense" | "income",
+  threshold: number,
+  hasAvg: boolean,
+): { direction: "up" | "down" | "flat" | null; tone: "num-pos" | "num-neg" | "" } {
+  if (!hasAvg) {
+    return { direction: null, tone: "" };
+  }
+  if (Math.abs(deltaVsAvg) <= threshold) {
+    return { direction: "flat", tone: "" };
+  }
+  const direction = deltaVsAvg > 0 ? "up" : "down";
+  const favorable =
+    (kind === "income" && deltaVsAvg > 0) ||
+    (kind === "expense" && deltaVsAvg < 0);
+  return { direction, tone: favorable ? "num-pos" : "num-neg" };
+}
+
+/**
+ * Tono de una cifra delta que respeta el umbral de significancia: `""` (gris/neutro) si la
+ * desviación no supera `threshold`, si no el tono habitual de `deltaToneClass` según el kind.
+ */
+export function significantDeltaTone(
+  value: number,
+  kind: "expense" | "income",
+  threshold: number,
+): string {
+  if (Math.abs(value) <= threshold) return "";
+  return deltaToneClass(value, kind);
+}
+
+/**
+ * Ventanas del promedio de la comparativa. `id` = valor del query `avg_window`; `pill` = etiqueta
+ * del botón de la toolbar; `label` = etiqueta usada en cabeceras/sublines («Promedio {label}»).
+ */
+export const AVG_WINDOWS: { id: string; pill: string; label: string }[] = [
+  { id: "3", pill: "3m", label: "3m" },
+  { id: "6", pill: "6m", label: "6m" },
+  { id: "12", pill: "12m", label: "12m" },
+  { id: "ytd", pill: "YTD", label: "YTD" },
+  { id: "all", pill: "Todo", label: "total" },
+];
+
+/** Etiqueta de una ventana del promedio; el propio `id` si no está en `AVG_WINDOWS`. */
+export function avgWindowLabel(id: string): string {
+  return AVG_WINDOWS.find((w) => w.id === id)?.label ?? id;
+}
+
+/**
+ * Nombre presentable de una fuente/preset de import: `myinvestor`→`MyInvestor`, `n26`→`N26`, resto
+ * con la primera letra en mayúscula. Cadena vacía → cadena vacía.
+ */
+export function capitalizeSource(raw: string): string {
+  const t = String(raw).trim();
+  if (t === "") return "";
+  const lower = t.toLowerCase();
+  if (lower === "myinvestor") return "MyInvestor";
+  if (lower === "n26") return "N26";
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+// ---------------------------------------------------------------------------
+// Tabla de movimientos — búsqueda, ordenación y agrupación por categoría.
+// ---------------------------------------------------------------------------
+
+/**
+ * Normaliza texto para búsqueda: minúsculas + NFD sin diacríticos (`Café` → `cafe`), de modo que
+ * la comparación sea insensible a mayúsculas Y a acentos.
+ */
+export function normalizeSearchText(s: string): string {
+  return String(s)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+/**
+ * ¿El movimiento casa con la query de búsqueda? Busca la query (normalizada) como subcadena del
+ * concepto Y del nombre de categoría concatenados. Query vacía (o solo espacios) → `true`.
+ */
+export function transactionMatchesQuery(
+  concept: string,
+  categoryName: string | null,
+  query: string,
+): boolean {
+  const q = normalizeSearchText(query).trim();
+  if (q === "") return true;
+  const haystack = normalizeSearchText(`${concept} ${categoryName ?? ""}`);
+  return haystack.includes(q);
+}
+
+/** Columna de ordenación de la tabla de movimientos. */
+export type TxnSortKey = "date" | "concept" | "amount";
+/** Dirección de ordenación. */
+export type TxnSortDir = "asc" | "desc";
+
+/** Dirección «natural» (primera pulsación) de cada columna: fecha/importe desc, concepto asc. */
+export function naturalSortDir(key: TxnSortKey): TxnSortDir {
+  return key === "concept" ? "asc" : "desc";
+}
+
+/**
+ * Compara dos movimientos por `key`/`dir`. IMPORTANTE: `amount` ordena por MAGNITUD (`|amount|`)
+ * para destacar los movimientos más grandes con independencia del signo (ingreso vs gasto). El
+ * desempate es un orden total ESTABLE independiente de `dir`: `op_date` desc y luego `id` asc.
+ */
+export function compareTransactions(
+  a: TransactionApi,
+  b: TransactionApi,
+  key: TxnSortKey,
+  dir: TxnSortDir,
+): number {
+  const mul = dir === "asc" ? 1 : -1;
+  let primary = 0;
+  if (key === "date") {
+    primary = a.op_date.localeCompare(b.op_date);
+  } else if (key === "concept") {
+    primary = normalizeSearchText(a.concept).localeCompare(
+      normalizeSearchText(b.concept),
+      DISPLAY_NUMBER_LOCALE,
+    );
+  } else {
+    const am = Math.abs(parseDisplayDecimal(a.amount) ?? 0);
+    const bm = Math.abs(parseDisplayDecimal(b.amount) ?? 0);
+    primary = am - bm;
+  }
+  if (primary !== 0) return primary * mul;
+  const byDate = b.op_date.localeCompare(a.op_date);
+  if (byDate !== 0) return byDate;
+  return a.id.localeCompare(b.id);
+}
+
+/** Ordena los movimientos (copia; orden total estable). Ver `compareTransactions`. */
+export function sortTransactions(
+  rows: TransactionApi[],
+  key: TxnSortKey,
+  dir: TxnSortDir,
+): TransactionApi[] {
+  return [...rows].sort((a, b) => compareTransactions(a, b, key, dir));
+}
+
+/** Un grupo de la tabla de movimientos agrupada por categoría. */
+export type TransactionGroup = {
+  /** `category_id` | `"savings"` | `"uncategorized-income"` | `"uncategorized-expense"`. */
+  key: string;
+  label: string;
+  /** Kind del grupo (una categoría solo tiene un scope → lo hereda de sus filas). */
+  kind: TransactionKindApi;
+  rows: TransactionApi[];
+  /** Suma FIRMADA de los `amount` del grupo (los deltas se compensan por signo). */
+  subtotal: number;
+};
+
+/**
+ * Agrupa los movimientos por categoría. Grupo = categoría; `kind=savings` → un único grupo
+ * «Ahorro / Inversión»; `category_id` nulo (y no savings) → «Sin categoría» POR KIND (un ingreso sin
+ * categoría va con los ingresos, un gasto con los gastos). El nombre visible sale de
+ * `categoryNameById` (categoría viva), con fallback al `category_name` cacheado en la fila. NO
+ * ordena: devuelve los grupos en orden de primera aparición (ordénalos con `sortTransactionGroups`).
+ */
+export function groupTransactionsByCategory(
+  rows: TransactionApi[],
+  categoryNameById: Map<string, string>,
+): TransactionGroup[] {
+  const groups = new Map<string, TransactionGroup>();
+  for (const r of rows) {
+    const kind = r.kind ?? "expense";
+    let key: string;
+    let label: string;
+    if (kind === "savings") {
+      key = "savings";
+      label = "Ahorro / Inversión";
+    } else if (r.category_id) {
+      key = r.category_id;
+      label = categoryNameById.get(r.category_id) ?? r.category_name ?? "Sin categoría";
+    } else {
+      key = `uncategorized-${kind}`;
+      label = "Sin categoría";
+    }
+    let g = groups.get(key);
+    if (!g) {
+      g = { key, label, kind, rows: [], subtotal: 0 };
+      groups.set(key, g);
+    }
+    g.rows.push(r);
+    g.subtotal += parseDisplayDecimal(r.amount) ?? 0;
+  }
+  return [...groups.values()];
+}
+
+/** Prioridad de sección de un kind en la tabla agrupada: ingresos, luego ahorro, abajo gastos. */
+const KIND_GROUP_PRIORITY: Record<TransactionKindApi, number> = {
+  income: 0,
+  savings: 1,
+  expense: 2,
+};
+
+/**
+ * Ordena los grupos en un orden FIJO, ajeno a la clave/dirección activa de la tabla (esa solo
+ * ordena las filas DENTRO de cada grupo): (1) secciones por kind — ingresos → ahorro → gastos —,
+ * (2) dentro de cada sección, de mayor a menor cantidad (`|subtotal|` descendente). Desempate
+ * estable: alfabético por `label` y luego `key`.
+ */
+export function sortTransactionGroups(groups: TransactionGroup[]): TransactionGroup[] {
+  return [...groups].sort((a, b) => {
+    const byKind = KIND_GROUP_PRIORITY[a.kind] - KIND_GROUP_PRIORITY[b.kind];
+    if (byKind !== 0) return byKind;
+    const byMagnitude = Math.abs(b.subtotal) - Math.abs(a.subtotal);
+    if (byMagnitude !== 0) return byMagnitude;
+    const byLabel = normalizeSearchText(a.label).localeCompare(
+      normalizeSearchText(b.label),
+      DISPLAY_NUMBER_LOCALE,
+    );
+    if (byLabel !== 0) return byLabel;
+    return a.key.localeCompare(b.key);
+  });
 }

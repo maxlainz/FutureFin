@@ -14,6 +14,7 @@
 pub mod crud;
 pub mod csv_presets;
 pub mod import;
+pub mod recurring;
 pub mod rules;
 pub mod schema;
 pub mod summary;
@@ -32,14 +33,16 @@ pub use crud::{
     list_months, list_transactions, patch_transaction,
 };
 pub use import::{import_confirm, import_preview};
+pub use recurring::{delete_recurring_rule, list_recurring_rules, materialize_recurring};
 pub use rules::{create_rule, delete_rule, list_rules, patch_rule};
 pub use summary::get_transactions_summary;
 
 pub use schema::{
-    BatchCreateBody, CategoryComparisonLine, CreateRuleBody, CreateTransactionBody, DerivedDebtLine,
+    BatchCreateBody, CategoryComparisonLine, CreateRuleBody, CreateTransactionBody,
     ImportBatchResponse, ImportConfirmBody, ImportConfirmResponse, ImportDecision, ImportPreviewBody,
-    ImportPreviewResponse, MonthEntry, PatchRuleBody, PatchTransactionBody, PreviewRow, RuleResponse,
-    TransactionResponse, TransactionsSummaryResponse,
+    ImportPreviewResponse, MaterializeResponse, MonthEntry, PatchRuleBody, PatchTransactionBody,
+    PreviewRow, RecurrenceSpec, RecurringRuleResponse, RuleResponse, TransactionResponse,
+    TransactionsSummaryResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -62,6 +65,7 @@ pub struct TxnRow {
     pub linked_asset_id: Option<Uuid>,
     pub linked_liability_id: Option<Uuid>,
     pub notes: Option<String>,
+    pub recurring_rule_id: Option<Uuid>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -69,7 +73,7 @@ pub struct TxnRow {
 pub const TXN_SELECT: &str = r#"SELECT t.id, t.import_id, t.source, t.op_date, t.value_date,
               t.concept, t.amount, t.currency, t.kind, t.category_id,
               c.name AS category_name, t.linked_asset_id, t.linked_liability_id,
-              t.notes, t.created_at, t.updated_at
+              t.notes, t.recurring_rule_id, t.created_at, t.updated_at
        FROM transactions t
        LEFT JOIN categories c ON c.id = t.category_id"#;
 
@@ -89,6 +93,7 @@ pub fn row_to_response(r: TxnRow) -> TransactionResponse {
         linked_asset_id: r.linked_asset_id,
         linked_liability_id: r.linked_liability_id,
         notes: r.notes,
+        recurring_rule_id: r.recurring_rule_id,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }
@@ -229,5 +234,9 @@ pub fn transactions_router() -> Router {
         .route("/imports/{id}", delete(delete_import))
         .route("/rules", get(list_rules).post(create_rule))
         .route("/rules/{id}", patch(patch_rule).delete(delete_rule))
+        // Reglas recurrentes: los segmentos estáticos deben resolverse antes que `/{id}`.
+        .route("/recurring", get(list_recurring_rules))
+        .route("/recurring/materialize", post(materialize_recurring))
+        .route("/recurring/{id}", delete(delete_recurring_rule))
         .route("/{id}", patch(patch_transaction).delete(delete_transaction))
 }

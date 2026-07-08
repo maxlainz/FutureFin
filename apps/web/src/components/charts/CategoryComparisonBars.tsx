@@ -1,12 +1,14 @@
 /**
- * Gráficas de apoyo de la pestaña «Gastos» (comparativa). Solo presentacionales, sin fetch.
+ * Gráficas de apoyo de la pestaña «Movimientos» (comparativa). Solo presentacionales, sin fetch.
  *
- *  - `CategoryComparisonBars`: barras horizontales agrupadas Real / Budget / Promedio por
- *    categoría. Real = var(--ff-accent), Budget = var(--ff-line-soft), Promedio = var(--exp-average).
+ *  - `CategoryComparisonBars`: barras horizontales por categoría comparando Budget vs Promedio (el
+ *    valor Real vive en la tabla, no en las barras). Budget = var(--ff-accent), Promedio =
+ *    var(--exp-average). Sin promedio (`hasAvg=false`) se ocultan las barras y la leyenda de
+ *    promedio y solo se pinta el Budget.
  *  - `MonthlyCashflowBars`: cash-flow mes a mes desde `months[]` de `/v1/history/cashflow`
  *    (ingresos hacia arriba; gastos + ahorro hacia abajo; neto en el tooltip).
  *
- * Todos los colores vienen de tokens `var(--ff-*)` / `var(--exp-*)`; sin rojo en el chrome.
+ * Todos los colores vienen de tokens `var(--ff-*)` / `var(--exp-*)` / `var(--cf-*)`.
  */
 
 import type { CashflowMonthApi } from "../../api/types";
@@ -21,18 +23,20 @@ export type ComparisonBarRow = {
   avg: number;
 };
 
-/** Barras horizontales agrupadas por categoría. Escala compartida sobre el máximo global. */
+/** Barras horizontales por categoría (Budget vs Promedio). Escala compartida sobre el máximo. */
 export function CategoryComparisonBars({
   rows,
   currencyIso,
-  avgMonths,
+  avgLabel,
+  hasAvg,
 }: {
   rows: ComparisonBarRow[];
   currencyIso: string;
-  avgMonths: number;
+  avgLabel: string;
+  hasAvg: boolean;
 }) {
   const max = rows.reduce(
-    (acc, r) => Math.max(acc, r.actual, r.budget, r.avg),
+    (acc, r) => Math.max(acc, r.budget, hasAvg ? r.avg : 0),
     0,
   );
   if (rows.length === 0 || !(max > 0)) return null;
@@ -42,14 +46,13 @@ export function CategoryComparisonBars({
     <div className="cmp-bars">
       <div className="cmp-legend" aria-hidden>
         <span className="cmp-legend-item">
-          <span className="cmp-swatch cmp-swatch--real" /> Real
-        </span>
-        <span className="cmp-legend-item">
           <span className="cmp-swatch cmp-swatch--budget" /> Budget
         </span>
-        <span className="cmp-legend-item">
-          <span className="cmp-swatch cmp-swatch--avg" /> Promedio {avgMonths}m
-        </span>
+        {hasAvg ? (
+          <span className="cmp-legend-item">
+            <span className="cmp-swatch cmp-swatch--avg" /> Promedio {avgLabel}
+          </span>
+        ) : null}
       </div>
       {rows.map((r) => (
         <div className="cmp-row" key={r.key}>
@@ -58,20 +61,17 @@ export function CategoryComparisonBars({
           </div>
           <div className="cmp-row-bars">
             <div
-              className="cmp-bar cmp-bar--real"
-              style={{ width: pct(r.actual) }}
-              title={`Real · ${formatCurrencyNumber(r.actual, currencyIso)}`}
-            />
-            <div
               className="cmp-bar cmp-bar--budget"
               style={{ width: pct(r.budget) }}
               title={`Budget · ${formatCurrencyNumber(r.budget, currencyIso)}`}
             />
-            <div
-              className="cmp-bar cmp-bar--avg"
-              style={{ width: pct(r.avg) }}
-              title={`Promedio · ${formatCurrencyNumber(r.avg, currencyIso)}`}
-            />
+            {hasAvg ? (
+              <div
+                className="cmp-bar cmp-bar--avg"
+                style={{ width: pct(r.avg) }}
+                title={`Promedio · ${formatCurrencyNumber(r.avg, currencyIso)}`}
+              />
+            ) : null}
           </div>
         </div>
       ))}

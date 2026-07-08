@@ -301,15 +301,18 @@ Semantics you must not misremember:
   decrypting. Wrong password ⇒ generic decrypt failure (indistinguishable from corruption,
   by design). **If the user forgets the password that was current at export time, the file is
   unrecoverable.**
-- **`schema_version` compatibility** (currently 4): v1, v2 and v3 files still import — they are
+- **`schema_version` compatibility** (currently 6): v1..v5 files still import — they are
   migrated forward in memory (v1/v2 legacy per-asset contribution fields are **dropped**, not
-  converted to allocation rules; v3→v4 just fills an empty history-snapshot list; the user
-  reconfigures rules after import — deliberate, owner-signed-off in v1.1.0). v4 (v1.5.0) added
-  the user's history snapshots to the payload; on import each snapshot item is re-linked to the
-  freshly-created asset/liability UUIDs (`ledger_index`) or keeps its `item_key` verbatim.
-  Files with a schema_version NEWER than the server's are rejected with "update FutureFin to
-  import this backup" — so **a v4 `.ffbackup` cannot be imported into a ≤1.4.x server** (clean
-  rejection, not corruption). Format/DTO code:
+  converted to allocation rules; v3→v4 fills an empty history-snapshot list; v4→v5 fills empty
+  transactions/imports/rules; v5→v6 fills an empty recurring-rules list; the user reconfigures
+  rules after import — deliberate, owner-signed-off in v1.1.0). v4 (v1.5.0) added the user's
+  history snapshots; on import each snapshot item is re-linked to the freshly-created
+  asset/liability UUIDs (`ledger_index`) or keeps its `item_key` verbatim. v5 (v1.6.0) added the
+  spending transactions/imports/categorization rules; v6 (v1.8.0) added recurring-transaction
+  rules (+ `BackupTransaction.recurring_rule_index`), all re-linked by index on import. Files with
+  a schema_version NEWER than the server's are rejected with "update FutureFin to import this
+  backup" — so **a v6 `.ffbackup` cannot be imported into a ≤1.7.x server** (clean rejection, not
+  corruption). Format/DTO code:
   `apps/api/src/handlers/backup_user/{crypto.rs,schema.rs}`.
 
 ## 5. Data locations: stateful vs stateless
