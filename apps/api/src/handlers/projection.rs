@@ -6,9 +6,10 @@ use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
 use crate::handlers::installation::{
     naive_date_in_calendar_tz, require_installation_member, resolve_fire_settings, FireNumberMode,
-    FireSettings, TaxBracket,
+    FireSettings, SavingsSource, TaxBracket,
 };
 use crate::handlers::person_view::LedgerView;
+use crate::handlers::transactions::summary::transactions_12m_avg;
 use crate::handlers::session::require_session_user;
 use crate::state::{AppState, Density, ProjectionCacheKey};
 use axum::extract::{Extension, Query};
@@ -284,6 +285,7 @@ struct AllocationRuleEngineRow {
 
 #[derive(Debug, FromRow)]
 struct LiabEngineRow {
+    id: Uuid,
     principal: Decimal,
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
@@ -662,10 +664,64 @@ pub(crate) async fn build_installation_projection_input(
 ) -> Result<BuiltProjection, ApiError> {
     let (income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
-    let monthly_net_regular = income_reg - expense_reg;
+
+    // Liabilities: se cargan aquí (antes que en modo A, donde estaban más abajo) para que el modo B
+    // pueda reusar las filas al restar las cuotas de `expense_avg` sin una segunda query.
+    let liab_scope = view.scope_where("");
+    let liab_sql = format!(
+        r#"SELECT id, principal, payment_amount, payment_frequency, payment_end_date
+           FROM liabilities WHERE {liab_scope}"#
+    );
+    let liabs: Vec<LiabEngineRow> = view
+        .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)
+        .fetch_all(pool)
+        .await?;
+
+    // Fuente del ahorro: presupuesto (modo A) vs promedio real 12m (modo B). El modo B con datos
+    // sustituye income/expense regulares por los promedios reales y anula `end_adj` (el gasto ya no
+    // viene del presupuesto). `months_with_data == 0` → fallback silencioso a modo A.
+    let savings_source = fire_settings
+        .map(|fs| fs.savings_source)
+        .unwrap_or_default();
+    // `(income_regular, expense_regular, use_avg, fire_income, fire_expense)`. En modo A `fire_*`
+    // preservan EXACTAMENTE los escalares actuales (income_reg, expense_retirement).
+    let (income_reg_eff, expense_reg_eff, use_avg, fire_income, fire_expense): (
+        Decimal,
+        Decimal,
+        bool,
+        Decimal,
+        Decimal,
+    ) = match savings_source {
+        SavingsSource::TransactionsAvg => {
+            let avg = transactions_12m_avg(pool, iid, session_user_id, view, today).await?;
+            if avg.months_with_data > 0 {
+                // Resta híbrida por liability activa: su avg real vinculado si existe, si no su
+                // cuota nominal (weekly ×52/12). Clamp global `expense_eff ≥ 0`.
+                let mut liab_payments = Decimal::ZERO;
+                for row in &liabs {
+                    let active = row.payment_end_date.map_or(true, |d| d >= today);
+                    if !active {
+                        continue;
+                    }
+                    liab_payments += avg
+                        .per_liability_linked_avg
+                        .get(&row.id)
+                        .copied()
+                        .unwrap_or_else(|| liability_monthly_payment(row));
+                }
+                let expense_eff = (avg.expense_avg - liab_payments).max(Decimal::ZERO);
+                (avg.income_avg, expense_eff, true, avg.income_avg, expense_eff)
+            } else {
+                (income_reg, expense_reg, false, income_reg, expense_retirement)
+            }
+        }
+        SavingsSource::Budget => (income_reg, expense_reg, false, income_reg, expense_retirement),
+    };
+
+    let monthly_net_regular = income_reg_eff - expense_reg_eff;
 
     let fire_target_base = fire_settings.and_then(|fs| {
-        compute_fire_target_nw(fs, income_reg, income_retirement, expense_retirement)
+        compute_fire_target_nw(fs, fire_income, income_retirement, fire_expense)
     });
     let fire_target = fire_target_base.map(|base_amount| FireTarget {
         base_amount,
@@ -697,16 +753,6 @@ pub(crate) async fn build_installation_projection_input(
         .fetch_all(pool)
         .await?;
 
-    let liab_scope = view.scope_where("");
-    let liab_sql = format!(
-        r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
-           FROM liabilities WHERE {liab_scope}"#
-    );
-    let liabs: Vec<LiabEngineRow> = view
-        .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)
-        .fetch_all(pool)
-        .await?;
-
     let plan_scope = view.scope_where("p");
     let plan_sql = format!(
         r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
@@ -721,7 +767,13 @@ pub(crate) async fn build_installation_projection_input(
 
     let flow_adj =
         planning_monthly_cash_adjustments_from_flows(today, horizon_months, &planning_rows);
-    let end_adj = expense_end_date_monthly_adjustments(today, horizon_months, &expense_end_entries);
+    // Modo B con datos: el gasto ya no viene del presupuesto → los ajustes por end-date de partidas
+    // de presupuesto se anulan (los `planning_flows` son ortogonales y se mantienen).
+    let end_adj = if use_avg {
+        vec![Decimal::ZERO; horizon_months as usize]
+    } else {
+        expense_end_date_monthly_adjustments(today, horizon_months, &expense_end_entries)
+    };
     let planning_monthly_cash_adjustment: Vec<Decimal> = flow_adj
         .iter()
         .zip(end_adj.iter())
@@ -791,8 +843,8 @@ pub(crate) async fn build_installation_projection_input(
     let input = ProjectionInput {
         ref_date: today,
         horizon_months,
-        income_regular_monthly: income_reg,
-        expense_regular_monthly: expense_reg,
+        income_regular_monthly: income_reg_eff,
+        expense_regular_monthly: expense_reg_eff,
         assets,
         allocation_rules,
         liabilities,
@@ -827,7 +879,7 @@ pub(crate) async fn monthly_income_expense_debt_for_view(
 
     let liab_scope = view.scope_where("");
     let liab_sql = format!(
-        r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
+        r#"SELECT id, principal, payment_amount, payment_frequency, payment_end_date
            FROM liabilities WHERE {liab_scope}"#
     );
     let liabs: Vec<LiabEngineRow> = view
