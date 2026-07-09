@@ -8,6 +8,7 @@ import type { FireSettingsApi } from "../api/types";
 import {
   defaultFireSettingsApi,
   normalizeInstallationFireSettings,
+  parseSavingsSource,
   savingsSourceUsesTransactions,
 } from "./fire";
 
@@ -72,6 +73,23 @@ describe("normalizeInstallationFireSettings — savings_source", () => {
       savings_source: "monte_carlo" as unknown,
     } as FireSettingsApi;
     expect(normalizeInstallationFireSettings(raw).savings_source).toBe("budget");
+  });
+});
+
+describe("parseSavingsSource", () => {
+  it("preserva los 3 valores válidos", () => {
+    expect(parseSavingsSource("budget")).toBe("budget");
+    expect(parseSavingsSource("transactions_avg")).toBe("transactions_avg");
+    expect(parseSavingsSource("budget_income_real_expense")).toBe(
+      "budget_income_real_expense",
+    );
+  });
+
+  it("desconocido / vacío / null → budget", () => {
+    expect(parseSavingsSource("monte_carlo")).toBe("budget");
+    expect(parseSavingsSource("")).toBe("budget");
+    expect(parseSavingsSource(null)).toBe("budget");
+    expect(parseSavingsSource(undefined)).toBe("budget");
   });
 });
 

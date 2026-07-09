@@ -40,6 +40,20 @@ export function defaultFireSettingsApi(): FireSettingsApi {
   };
 }
 
+/**
+ * Parser/allow-list de `savings_source` (los 3 modos: `budget` | `transactions_avg` |
+ * `budget_income_real_expense`). Cualquier valor ausente o desconocido cae a `"budget"` (modo A,
+ * el default seguro). Punto único usado por `normalizeInstallationFireSettings` (respuesta de la
+ * API) y por el `<select>` de Ajustes (evento onChange).
+ */
+export function parseSavingsSource(v: string | null | undefined): SavingsSourceApi {
+  return v === "transactions_avg" ||
+    v === "budget" ||
+    v === "budget_income_real_expense"
+    ? v
+    : "budget";
+}
+
 export function normalizeInstallationFireSettings(
   raw: FireSettingsApi | undefined | null,
 ): FireSettingsApi {
@@ -82,14 +96,7 @@ export function normalizeInstallationFireSettings(
             pct: String(t.pct ?? ""),
           }))
         : base.tax_brackets,
-    savings_source: ((): SavingsSourceApi => {
-      const s = raw.savings_source;
-      return s === "transactions_avg" ||
-        s === "budget" ||
-        s === "budget_income_real_expense"
-        ? s
-        : base.savings_source ?? "budget";
-    })(),
+    savings_source: parseSavingsSource(raw.savings_source),
   };
 }
 

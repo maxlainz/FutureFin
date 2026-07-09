@@ -330,8 +330,15 @@ pub async fn get_summary(
             let debt_service: Decimal = active.iter().map(|(_, q)| *q).sum();
             let (income_eff, expense_eff) = effective_avg_income_expense(&avg, &active);
             // Modo B: income del promedio real. Modo C: income del presupuesto (NO se sobreescribe).
-            if source == SavingsSource::TransactionsAvg {
-                income_m = income_eff;
+            // `match` exhaustivo (como projection.rs): una variante futura fuerza decisión del
+            // compilador en vez de heredar silenciosamente el `else` del modo C.
+            match source {
+                SavingsSource::TransactionsAvg => income_m = income_eff,
+                // Modo C: income del presupuesto; `income_m` conserva su valor previo.
+                SavingsSource::BudgetIncomeRealExpense => {}
+                // Inalcanzable: la rama está guardada por `source.uses_transactions()`, que es
+                // false para `Budget`. No-op explícito para mantener el `match` exhaustivo.
+                SavingsSource::Budget => {}
             }
             expense_reg = expense_eff;
             // El `net` debe casar con modo A (`net_monthly_equivalent` de budget.rs incluye las
