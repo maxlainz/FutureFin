@@ -120,6 +120,35 @@ pub(super) async fn insert_manual(
     Ok(id)
 }
 
+/// Inserta un movimiento manual y, si `recurrence_day` está presente, crea su regla recurrente,
+/// enlaza el movimiento a ella y backfillea las instancias intermedias hasta `today` — todo en el
+/// MISMO commit `tx`. Devuelve el id del movimiento de origen. Secuencia compartida por
+/// `create_transaction` y el bucle de `create_batch` (el manejo del `ordinal` queda fuera: se pasa
+/// ya resuelto). `today` debe ser `Some` cuando `recurrence_day` lo es (invariante de los callers).
+async fn insert_manual_with_recurrence(
+    tx: &mut PgConnection,
+    iid: Uuid,
+    owner: Uuid,
+    p: &PreparedTxn,
+    ordinal: i32,
+    recurrence_day: Option<i32>,
+    today: Option<NaiveDate>,
+) -> Result<Uuid, ApiError> {
+    let cursor = recurring::month_start_of(p.op_date);
+    let rule_id = match recurrence_day {
+        Some(day) => Some(recurring::insert_rule(&mut *tx, iid, owner, p, day, cursor).await?),
+        None => None,
+    };
+    let id = insert_manual(&mut *tx, iid, owner, p, ordinal, rule_id).await?;
+    // Backfill: un alta con fecha pasada deja creadas TODAS las instancias intermedias hasta hoy en
+    // el mismo commit (antes solo aparecían cuando el frontend llamaba a materialize al montar).
+    if let (Some(rule_id), Some(day)) = (rule_id, recurrence_day) {
+        let today = today.expect("today computed when recurrence present");
+        recurring::backfill_new_rule(&mut *tx, iid, owner, rule_id, p, day, cursor, today).await?;
+    }
+    Ok(id)
+}
+
 async fn load_txn(pool: &sqlx::PgPool, id: Uuid) -> Result<TransactionResponse, ApiError> {
     let sql = format!("{TXN_SELECT} WHERE t.id = $1");
     let row: TxnRow = sqlx::query_as(&sql).bind(id).fetch_one(pool).await?;
@@ -165,24 +194,16 @@ pub async fn create_transaction(
         Some(_) => Some(installation_naive_today(&state.pool, iid).await?),
         None => None,
     };
+    // Cota al backfill: una recurrencia con fecha demasiado antigua generaría cientos de instancias.
+    if let Some(today) = today {
+        recurring::assert_recurrence_not_too_old(body.op_date, today)?;
+    }
 
     let mut tx = state.pool.begin().await?;
     let ordinal = next_fingerprint_ordinal(&mut tx, iid, user.id.0, &prepared.fingerprint).await?;
-    // Si hay recurrencia, primero se crea la regla-plantilla; la transacción de origen queda enlazada.
-    let cursor = recurring::month_start_of(body.op_date);
-    let rule_id = match recurrence_day {
-        Some(day) => {
-            Some(recurring::insert_rule(&mut tx, iid, user.id.0, &prepared, day, cursor).await?)
-        }
-        None => None,
-    };
-    let id = insert_manual(&mut tx, iid, user.id.0, &prepared, ordinal, rule_id).await?;
-    // Backfill: un alta con fecha pasada deja creadas TODAS las instancias intermedias hasta hoy en
-    // el mismo commit (antes solo aparecían cuando el frontend llamaba a materialize al montar).
-    if let (Some(rule_id), Some(day), Some(today)) = (rule_id, recurrence_day, today) {
-        recurring::backfill_new_rule(&mut tx, iid, user.id.0, rule_id, &prepared, day, cursor, today)
+    let id =
+        insert_manual_with_recurrence(&mut tx, iid, user.id.0, &prepared, ordinal, recurrence_day, today)
             .await?;
-    }
     tx.commit().await?;
 
     invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
@@ -238,6 +259,14 @@ pub async fn create_batch(
     } else {
         None
     };
+    // Cota al backfill por ítem recurrente (pre-tx, reutilizando el `today` ya calculado).
+    if let Some(today) = today {
+        for b in &body.transactions {
+            if b.recurrence.is_some() {
+                recurring::assert_recurrence_not_too_old(b.op_date, today)?;
+            }
+        }
+    }
 
     let mut tx = state.pool.begin().await?;
     // Contador de ordinal por huella dentro del batch (arranca en el MAX+1 de la BD).
@@ -249,21 +278,13 @@ pub async fn create_batch(
             Some(&o) => o,
             None => next_fingerprint_ordinal(&mut tx, iid, user.id.0, &p.fingerprint).await?,
         };
-        let cursor = recurring::month_start_of(b.op_date);
-        let rule = match &b.recurrence {
-            Some(rec) => {
-                let day = recurring::resolve_rule_day(rec, b.op_date)?;
-                let rid = recurring::insert_rule(&mut tx, iid, user.id.0, p, day, cursor).await?;
-                Some((rid, day))
-            }
+        let recurrence_day = match &b.recurrence {
+            Some(rec) => Some(recurring::resolve_rule_day(rec, b.op_date)?),
             None => None,
         };
-        let id = insert_manual(&mut tx, iid, user.id.0, p, ord, rule.map(|(rid, _)| rid)).await?;
-        // Backfill por ítem: un alta con fecha pasada deja creadas las instancias intermedias.
-        if let Some((rid, day)) = rule {
-            let today = today.expect("today computed when any recurrence present");
-            recurring::backfill_new_rule(&mut tx, iid, user.id.0, rid, p, day, cursor, today).await?;
-        }
+        let id =
+            insert_manual_with_recurrence(&mut tx, iid, user.id.0, p, ord, recurrence_day, today)
+                .await?;
         next_ord.insert(p.fingerprint.clone(), ord + 1);
         ids.push(id);
     }

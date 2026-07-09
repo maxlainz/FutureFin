@@ -60,6 +60,30 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     (first_of_month(ny, nm) - first_of_month(year, month)).num_days() as u32
 }
 
+/// Nº máximo de años que el backfill de un alta recurrente con fecha pasada puede reconstruir.
+const MAX_RECURRENCE_BACKFILL_YEARS: i32 = 10;
+
+/// Cota inferior del backfill de recurrentes: una `op_date` a más de 10 años en el pasado genera
+/// ~cientos de instancias (≈2 queries/mes) en la MISMA transacción del alta. 10 años es una cota
+/// generosa que no molesta a ningún uso legítimo. Fuera de cota → 422 `recurrence_too_old`.
+pub(super) fn assert_recurrence_not_too_old(
+    op_date: NaiveDate,
+    today: NaiveDate,
+) -> Result<(), ApiError> {
+    let floor_year = today.year() - MAX_RECURRENCE_BACKFILL_YEARS;
+    // Reconstruye el mismo día/mes 10 años atrás; si ese día no existe (29-feb en año no bisiesto),
+    // cae al día 1 de ese mes (la cota es aproximada y generosa, no importa el día exacto).
+    let floor = NaiveDate::from_ymd_opt(floor_year, today.month(), today.day())
+        .or_else(|| NaiveDate::from_ymd_opt(floor_year, today.month(), 1))
+        .expect("valid floor date");
+    if op_date < floor {
+        return Err(ApiError::Unprocessable(format!(
+            "recurrence_too_old: recurrence op_date must be within the last {MAX_RECURRENCE_BACKFILL_YEARS} years"
+        )));
+    }
+    Ok(())
+}
+
 /// Resuelve y valida el `day_of_month` de una recurrencia: explícito (1..=31) o, si se omite, el
 /// día de `op_date`. Fuera de rango → 400 `recurrence_day_out_of_range`.
 pub(super) fn resolve_rule_day(rec: &RecurrenceSpec, op_date: NaiveDate) -> Result<i32, ApiError> {

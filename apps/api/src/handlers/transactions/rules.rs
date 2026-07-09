@@ -9,7 +9,8 @@ use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::schema::{
-    normalize_concept, normalize_kind, CreateRuleBody, PatchRuleBody, RuleResponse,
+    fold_diacritics_upper, normalize_concept, normalize_kind, CreateRuleBody, PatchRuleBody,
+    RuleResponse,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Path};
@@ -76,10 +77,15 @@ pub async fn load_rules(
 }
 
 fn rule_matches(r: &LoadedRule, norm_concept: &str) -> bool {
+    // Fold de diacríticos en AMBOS lados solo para comparar: un patrón acentuado («APORTACIóN»)
+    // matchea un concepto sin tilde («APORTACION») y viceversa. Los patrones almacenados y
+    // `normalize_concept`/fingerprints conservan sus acentos intactos.
+    let concept = fold_diacritics_upper(norm_concept);
+    let pattern = fold_diacritics_upper(&r.pattern);
     match r.match_kind.as_str() {
-        "exact" => norm_concept == r.pattern,
-        "prefix" => norm_concept.starts_with(&r.pattern),
-        _ => norm_concept.contains(&r.pattern),
+        "exact" => concept == pattern,
+        "prefix" => concept.starts_with(&pattern),
+        _ => concept.contains(&pattern),
     }
 }
 
