@@ -119,7 +119,7 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
 | `transactions_recurring.rs` | 16 | recurring rules (v1.8.0): `recurrence` create makes rule + linked origin instance, idempotent `materialize` (2nd call → 0), never a future `op_date` (current month only once its day arrived), `day_of_month` clamped to month end, deleting an instance is not recreated on re-materialize (cursor), rule `DELETE` keeps instances (SET NULL), viewer 403 on materialize/delete, out-of-range `recurrence.day_of_month` → 400; **create-time backfill** (post-2.0.0): `create_with_past_date_backfills_instances` (past date fills intermediate months in the same commit), `recurrence_op_date_within_bound_created`, and the 10-year bound `recurrence_op_date_too_old_*` → 422 `recurrence_too_old` |
 | `history_cashflow.rs` | 5 | `GET /v1/history/cashflow`: exact monthly aggregates (Decimal-string, household + mine), fine series passes through snapshots, `/v1/history/series` byte-identical with and without transactions (tier-1 regression), `daily` with window >6m → 400, `fine` absent without links |
 
-### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; 277 a 2026-07-11)
+### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; 277 a 2026-07-09)
 
 Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/**/*.test.{ts,tsx}"]`,
 `globals: false` (import `describe/it/expect` from `vitest` explicitly).
