@@ -60,16 +60,16 @@ src/
 │   ├── AccountCard.tsx           # tarjeta de cuenta en Ajustes (sustituye user-chip + Salir del header antiguo)
 │   ├── ThemeToggle.tsx           # segmented Auto/Claro/Oscuro (usado en Ajustes → Datos)
 │   ├── Modal.tsx                 # Modal + ModalFormError + InlineHint
-│   ├── MetricCard.tsx            # KPI con paren-slot siempre presente + tone hero/accent/accent-2
+│   ├── MetricCard.tsx            # KPI con paren-slot siempre presente (prop `trend?` ocupa el mismo slot, prioridad sobre `parenthetical`) + tone hero/accent/accent-2
 │   ├── SnapshotButton.tsx        # botón «Guardar snapshot» (idle→busy→success/error) en panel-head de Activos y Pasivos
 │   ├── SnapshotPromptModal.tsx   # modal «¿Guardar snapshot?» (paso assets → paso liabilities); tonto, lógica en App.tsx
 │   ├── icons.tsx                 # set unificado 16×16 stroke 1.5 (~25 iconos)
 │   └── charts/
 │       ├── summary.tsx           # SummaryDonutChart + SummaryBreakdownBlock (palette fría=activos / cálida=pasivos)
 │       ├── PlanningDirectionChart.tsx   # barra inflow/outflow — usada en Upcoming Y Budget
-│       ├── CategoryComparisonBars.tsx   # exporta DOS charts de la pestaña «Movimientos»: CategoryComparisonBars (2 barras por categoría — Budget=--ff-accent, Promedio=--exp-average;
-│       │                                #   el Real vive en la tabla/KPIs) y MonthlyCashflowBars (cash-flow mes a mes desde months[], tokens --cf-income/--cf-expense/--cf-savings).
-│       │                                #   Verde/rojo del cash-flow = colores FUNCIONALES de serie (excepción de charts del design system), no chrome
+│       ├── CategoryComparisonBars.tsx   # exporta SOLO MonthlyCashflowBars (cash-flow mes a mes desde months[], tokens --cf-income/--cf-expense/--cf-savings; verde/rojo = colores
+│       │                                #   FUNCIONALES de serie, excepción de charts del design system, no chrome). El chart CategoryComparisonBars (barras Budget vs Promedio) y el
+│       │                                #   token --exp-average se ELIMINARON tras 2.0.0: el Real vive en la tabla/KPIs y la tendencia vs presupuesto pasó a la banda de KPIs
 │       └── MiniProjection.tsx    # SVG compacto reusado en Resumen y Jubilación
 │
 ├── views/                        # one file per tab — receives props from App.tsx, owns local UI state
@@ -78,14 +78,18 @@ src/
 │   ├── LiabilitiesView.tsx       # tabla sin columna Tipo
 │   ├── BudgetView.tsx            # KPIs + Distribución (PlanningDirectionChart) + columnas Ingresos/Gastos
 │   ├── GastosView.tsx            # pestaña «Movimientos» (título «Movimientos» desde v1.8.0; TabId interno sigue siendo "expenses"). Vista AUTÓNOMA (self-fetch,
-│   │                             #   patrón HistorySettingsPanel): KPIs del mes (media «—» cuando no hay promedio), selector de mes + pills de ventana (3m/6m/12m/YTD/Todo),
+│   │                             #   patrón HistorySettingsPanel): KPIs cuya cifra principal es el PROMEDIO de la ventana (etiqueta «… promedio (3m/6m/12m/YTD/total)», «—» sin datos);
+│   │                             #   Gastos e Ingresos añaden bajo la cifra una línea `trend` (flecha + delta avg−budget «vs presupuesto», helper puro kpiBudgetTrend); Ahorro y Tasa sin
+│   │                             #   delta (no hay budget de ahorro). Tasa de ahorro aquí = savings/income de la ventana (≠ la del Resumen, que es net/income — distinto a propósito).
+│   │                             #   Selector de mes + pills de ventana (3m/6m/12m/YTD/Todo),
 │   │                             #   comparativa por categoría con **fila TOTAL** y **flechas de tendencia** ↑↓/= (real vs promedio, umbral de significancia = 1% del ingreso real;
 │   │                             #   «=» atenuado si hay promedio pero |Δ| ≤ umbral, slot vacío sin promedio; el glifo va en un **slot de ancho fijo** siempre presente para no
-│   │                             #   desalinear las cifras), CategoryComparisonBars + MonthlyCashflowBars, tabla de movimientos SIN scroll interno (se quitó table-scroll--sticky →
+│   │                             #   desalinear las cifras — la comparativa por barras CategoryComparisonBars se eliminó tras 2.0.0, queda solo MonthlyCashflowBars como chart de apoyo),
+│   │                             #   tabla de movimientos SIN scroll interno (se quitó table-scroll--sticky →
 │   │                             #   la página crece; sin thead sticky) con **búsqueda** en vivo (concepto+categoría, insensible a acentos), **agrupación por categoría conmutable**
 │   │                             #   (subtotal firmado por grupo; orden de grupos FIJO: secciones por kind ingresos → ahorro → gastos y |subtotal| desc dentro de cada sección,
 │   │                             #   «Sin categoría» va con su kind) y **cabeceras ordenables** (fecha/concepto/importe; importe por magnitud; la clave activa solo ordena las filas
-│   │                             #   dentro de cada grupo) — helpers puros en lib/expenses.ts —, edición inline optimista + modal + tag «recurrente» +
+│   │                             #   dentro de cada grupo) — helpers puros en lib/expenses.ts —, edición inline optimista + modal (fecha/importe/concepto editables también en importadas: el backend ancla la huella al CSV) + tag «recurrente» +
 │   │                             #   borrado con dos opciones (solo este / y detener repetición). Materializa recurrentes en silencio al montar (solo canEdit). `onCashflowMutated` avisa a App.
 │   ├── ImportWizardModal.tsx     # wizard import CSV en 2 pasos (useReducer). Paso 1 = archivo → select «Cuenta origen (activo)» (movido desde el footer; ahora también en el preview) →
 │   │                             #   formato en <details> plegado (autodetección por defecto). Paso 2 = banner con fuente capitalizada + chips de conteos, bulk bar con cluster único

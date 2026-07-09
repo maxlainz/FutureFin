@@ -52,16 +52,17 @@ Las áreas apiladas por activo del pasado **no** llevan token propio: reutilizan
 
 ### Tokens de las gráficas de la pestaña «Movimientos» — v1.8.0
 
-Dos gráficas de apoyo (`components/charts/CategoryComparisonBars.tsx`), **amparadas por la excepción de charts** (varios colores funcionales para distinguir series). Fuera de esas gráficas, estos tokens están **prohibidos en chrome, texto o iconos** — como cualquier color de serie.
+Una gráfica de apoyo (`components/charts/CategoryComparisonBars.tsx` → export único `MonthlyCashflowBars`), **amparada por la excepción de charts** (varios colores funcionales para distinguir series). Fuera de esa gráfica, estos tokens están **prohibidos en chrome, texto o iconos** — como cualquier color de serie.
 
 | Token | Light | Dark | Uso |
 |---|---|---|---|
-| `--exp-average` | `#71717a` (zinc-500) | `#a1a1aa` (zinc-400) | Barra «Promedio» de la comparativa por categoría. La barra «Budget» de esa misma gráfica usa `--ff-accent` (no lleva token propio) |
 | `--cf-income` | `oklch(0.58 0.10 165)` | `oklch(0.72 0.10 165)` | Serie **Ingresos** del cash-flow mensual (`MonthlyCashflowBars`) — verde sobrio |
 | `--cf-expense` | `oklch(0.58 0.13 25)` | `oklch(0.70 0.13 25)` | Serie **Gastos** del cash-flow — rojo sobrio |
 | `--cf-savings` | `= var(--ff-accent)` | `= var(--ff-accent)` | Serie **Ahorro** del cash-flow |
 
-> **Excepción explícita a la regla "sin rojo/verde en el chrome"**: la comparativa por categoría (`CategoryComparisonBars`) pasó de 3 series (Real/Budget/Promedio) a **2 barras** (Budget = `--ff-accent`, Promedio = `--exp-average`); el valor Real vive ahora en la tabla y las KPIs. El cash-flow (`MonthlyCashflowBars`) sí introduce **verde/rojo** (`--cf-income`/`--cf-expense`) para ingresos vs gastos: son colores **funcionales de serie del gráfico**, no chrome decorativo, y por tanto quedan dentro de la única zona (charts) donde el design system acepta varios colores. Verifica claro **y** oscuro.
+> **Comparativa por categoría eliminada**: el chart `CategoryComparisonBars` (barras horizontales Budget vs Promedio) se retiró tras 2.0.0 — con él se fueron el token **`--exp-average`** y el bloque CSS `.cmp-*`. El valor Real ya vivía en la tabla y las KPIs, y la tendencia vs presupuesto pasó a la banda de KPIs (ver §KPIs). El único chart que queda en ese archivo es `MonthlyCashflowBars`.
+>
+> **Excepción explícita a la regla "sin rojo/verde en el chrome"**: el cash-flow (`MonthlyCashflowBars`) introduce **verde/rojo** (`--cf-income`/`--cf-expense`) para ingresos vs gastos: son colores **funcionales de serie del gráfico**, no chrome decorativo, y por tanto quedan dentro de la única zona (charts) donde el design system acepta varios colores. Verifica claro **y** oscuro.
 
 ## Tema (auto / claro / oscuro)
 
@@ -84,6 +85,7 @@ Dos gráficas de apoyo (`components/charts/CategoryComparisonBars.tsx`), **ampar
 - **KPIs**:
   - Tile con borde + paper, radius `--ff-radius-kpi`, `align-self: stretch` para alinear en altura.
   - **Slot del paréntesis siempre presente** — `MetricCard` renderiza un `<div>` con `&nbsp;` cuando no hay valor, para que dos KPIs en la misma fila tengan baseline alineada.
+  - **Slot compartido `trend`** — prop `trend?: ReactNode` de `MetricCard` que ocupa **ese mismo slot reservado** (baseline intacta) y tiene **prioridad** sobre `parenthetical`. Se usa en la banda de Movimientos para la tendencia «promedio vs presupuesto» (flecha + delta + «vs presupuesto»). CSS `.metric-trend` (una sola línea, `white-space: nowrap`) con hijos `.metric-trend-arrow` / `.metric-trend-delta` (flecha y cifra: prioritarios, nunca truncados, color solo aquí vía `num-pos`/`num-neg`) y `.metric-trend-label` (cede espacio con ellipsis en tarjetas estrechas, hereda muted).
   - Variantes: `tone="hero" | "accent" | "accent-2"` con tinte progresivo del acento.
 - **Adornos en celdas numéricas alineadas a la derecha**: cualquier adorno variable (flechas de tendencia, badges) va en un **slot de ancho fijo siempre reservado** tras la cifra (mismo principio que el paren-slot de `MetricCard`) — nunca condicional. Si el adorno solo aparece en algunas filas, las cifras se desalinean; el slot vacío mantiene la columna. Precedente: `.exp-trend-slot` en la comparativa de Movimientos.
 
@@ -165,7 +167,7 @@ Leyenda discreta que acompaña al MiniProjection. Cada item: `{ label, color, da
 | `ThemeToggle` | Segmented Auto/Claro/Oscuro |
 | `MiniProjection` | Chart compacto reutilizable (ver arriba) |
 
-> **Segmented control (`.ff-segmented`)**: para controles de 2–3 opciones inline (p. ej. la fuente del ahorro **Presupuesto / Promedio 12 meses** en `Ajustes → Proyección`, `SettingsView.tsx`) reutiliza la clase `ff-segmented`, que **comparte el mismo bloque de tokens** que `.ff-theme-toggle` en `App.css` (reglas agrupadas `.ff-theme-toggle, .ff-segmented`; opción activa `.is-active`). No dupliques estilos de segmented nuevos: añade la variante a ese bloque. Verifica claro **y** oscuro.
+> **Segmented control (`.ff-theme-toggle`)**: el único segmented que queda es el toggle de tema Auto/Claro/Oscuro (`ThemeToggle`, clase `.ff-theme-toggle`). La antigua clase compartida **`.ff-segmented` se eliminó** tras 2.0.0: la «fuente del ahorro» de `Ajustes → Proyección` pasó a un `<select>` nativo estándar (con `<small>` de ayuda asociada por `aria-describedby`, fuera del `<label>`). Si necesitas un nuevo control inline de 2–3 opciones, valora primero un `<select>`; si de verdad hace falta un segmented, reintroduce la variante en el bloque de `.ff-theme-toggle` en `App.css`. Verifica claro **y** oscuro.
 
 ## Iconografía
 
