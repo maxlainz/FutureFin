@@ -31,6 +31,7 @@ import {
   findFirstMonthNetWorthAtLeastInflated,
   grossUpNetAnnualFire,
   normalizeInstallationFireSettings,
+  savingsSourceUsesTransactions,
 } from "../lib/fire";
 import { type LedgerPersonScope } from "../lib/ledger";
 import { TAB_PATH } from "../lib/navigation";
@@ -130,14 +131,17 @@ export function RetirementView({
     return n != null && n > 0 ? n : 0;
   }, [installation?.installation.annual_inflation_assumption_percent]);
 
-  // Fuente EFECTIVA del ahorro (tras el fallback del servidor). En modo B (promedio) el
-  // preview del target NO recalcula el promedio en cliente: consume los equivalentes ya
-  // calculados por el servidor en /v1/summary (expense_regular = expense_avg_sin_cuotas,
-  // income = income_avg), de modo que el preview coincide con el target del servidor.
-  // `income_retirement` sigue del presupuesto (la fase post-jubilación no cambia de base
-  // en modo B). Si el servidor cayó a `budget` (0 meses con datos) o el summary aún no está
-  // cargado, se usan los equivalentes del presupuesto (idéntico a modo A).
-  const savingsAvgActive = summary?.savings_source === "transactions_avg";
+  // Fuente EFECTIVA del ahorro (tras el fallback del servidor). En los modos con promedio
+  // (B `transactions_avg` y C `budget_income_real_expense`) el preview del target NO recalcula
+  // el promedio en cliente: consume los equivalentes ya calculados por el servidor en
+  // /v1/summary (expense_regular = expense_avg_sin_cuotas; income = presupuesto en C / promedio
+  // en B), de modo que el preview coincide con el target del servidor. `income_retirement`
+  // sigue del presupuesto (la fase post-jubilación no cambia de base). Si el servidor cayó a
+  // `budget` (0 meses con datos) o el summary aún no está cargado, se usan los equivalentes del
+  // presupuesto (idéntico a modo A).
+  const savingsAvgActive = savingsSourceUsesTransactions(
+    summary?.savings_source,
+  );
   const fireExpenseM = savingsAvgActive
     ? summary?.financial_health.expense_regular_monthly_equivalent
     : retirementBudgetSnapshot?.totals.expense_retirement_monthly_equivalent;

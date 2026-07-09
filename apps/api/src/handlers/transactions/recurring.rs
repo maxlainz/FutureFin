@@ -19,7 +19,7 @@ use crate::handlers::installation::{installation_naive_today, require_installati
 use crate::handlers::membership::role_can_write;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::crud::PreparedTxn;
-use crate::handlers::transactions::{invalidate_projection_if_transactions_avg, next_fingerprint_ordinal};
+use crate::handlers::transactions::{invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal};
 use crate::handlers::transactions::schema::{
     compute_fingerprint, MaterializeResponse, RecurrenceSpec, RecurringRuleResponse, SOURCE_MANUAL,
 };
@@ -397,7 +397,7 @@ pub async fn materialize_recurring(
 
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
+    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     Ok(Json(MaterializeResponse {
         rules_processed,
         materialized,

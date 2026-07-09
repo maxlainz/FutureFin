@@ -19,10 +19,16 @@ export type UserResponse = {
 
 export type FireNumberModeApi = "manual" | "annual_expense" | "current_income";
 
-/** Fuente del ahorro de la simulación: presupuesto (modo A, default) vs promedio real
- *  de los últimos 12 meses de movimientos (modo B). Ausente en clientes/backups antiguos
- *  → `budget`. */
-export type SavingsSourceApi = "budget" | "transactions_avg";
+/** Fuente del ahorro de la simulación:
+ *  - `budget` (modo A, default): ingresos y gastos del presupuesto.
+ *  - `transactions_avg` (modo B): promedio real de los últimos 12 meses de movimientos.
+ *  - `budget_income_real_expense` (modo C): ingresos del presupuesto + gasto real promedio
+ *    de los últimos 12 meses (mismo promedio ponderado que B, restando cuotas de préstamos).
+ *  Ausente en clientes/backups antiguos → `budget`. */
+export type SavingsSourceApi =
+  | "budget"
+  | "transactions_avg"
+  | "budget_income_real_expense";
 
 export type TaxBracketApi = {
   up_to: string | null;
@@ -144,8 +150,8 @@ export type SummaryResponse = {
   assets_by_category: CategoryBreakdownLineApi[];
   liabilities_by_category: CategoryBreakdownLineApi[];
   /** Fuente EFECTIVA del ahorro tras el fallback del servidor (`budget` si el modo
-   *  configurado era `transactions_avg` pero no había meses con datos). Ausente en
-   *  backends antiguos → `budget`. */
+   *  configurado usaba transacciones —`transactions_avg` o `budget_income_real_expense`—
+   *  pero no había meses con datos). Ausente en backends antiguos → `budget`. */
   savings_source?: SavingsSourceApi;
   /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
   savings_source_months_with_data?: number;

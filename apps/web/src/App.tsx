@@ -27,6 +27,7 @@ import { SummaryView } from "./views/SummaryView";
 import type { BudgetScopeToggle } from "./views/BudgetView";
 import { BootstrapInstallationPanel } from "./auth/BootstrapInstallationPanel";
 import { ledgerViewQs } from "./lib/ledger";
+import { savingsSourceUsesTransactions } from "./lib/fire";
 import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
@@ -1094,14 +1095,15 @@ export default function App() {
         const projPromise = skipProjection
           ? Promise.resolve(null as Response | null)
           : fetch(`/v1/projection/series${qs}`, defaultFetchInit);
-        // El preview del target en modo B (promedio) consume los equivalentes efectivos
-        // del summary; lo cargamos aquí para que sea fresco y coherente con el scope
+        // El preview del target en los modos con promedio (B y C) consume los equivalentes
+        // efectivos del summary; lo cargamos aquí para que sea fresco y coherente con el scope
         // activo. Independiente y silencioso: cualquier fallo degrada el preview al
-        // presupuesto (modo A), sin bloquear budget/proyección. Solo se lanza en modo B:
-        // en presupuesto RetirementView usa la base del budget y este fetch sería inútil.
+        // presupuesto (modo A), sin bloquear budget/proyección. Solo se lanza en B/C: en
+        // presupuesto RetirementView usa la base del budget y este fetch sería inútil.
         if (
-          installation?.installation?.fire_settings?.savings_source ===
-          "transactions_avg"
+          savingsSourceUsesTransactions(
+            installation?.installation?.fire_settings?.savings_source,
+          )
         ) {
           void (async () => {
             try {

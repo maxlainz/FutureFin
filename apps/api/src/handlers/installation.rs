@@ -48,14 +48,27 @@ impl<'de> Deserialize<'de> for FireNumberMode {
     }
 }
 
-/// Fuente del ahorro mensual de la simulación: presupuesto (modo A, default) vs promedio real de
-/// las transacciones de los últimos 12 meses (modo B).
+/// Fuente del ahorro mensual de la simulación:
+/// - `budget` (modo A, default): income y gasto del presupuesto.
+/// - `transactions_avg` (modo B): promedio real 12m de las transacciones para income y gasto.
+/// - `budget_income_real_expense` (modo C): income del presupuesto + gasto real (mismo promedio
+///   ponderado 12m que el modo B). Útil con nómina estable pero gasto que se quiere medir de verdad.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SavingsSource {
     #[default]
     Budget,
     TransactionsAvg,
+    BudgetIncomeRealExpense,
+}
+
+impl SavingsSource {
+    /// `true` para los modos cuyo ahorro deriva de las transacciones (promedio real 12m): modo B
+    /// (`transactions_avg`) y modo C (`budget_income_real_expense`). Punto ÚNICO del gate compartido
+    /// por la proyección, `/v1/summary` y la invalidación de cache de las mutaciones de transacciones.
+    pub(crate) fn uses_transactions(self) -> bool {
+        matches!(self, Self::TransactionsAvg | Self::BudgetIncomeRealExpense)
+    }
 }
 
 impl<'de> Deserialize<'de> for SavingsSource {
@@ -68,9 +81,10 @@ impl<'de> Deserialize<'de> for SavingsSource {
         match s.as_str() {
             "budget" => Ok(Self::Budget),
             "transactions_avg" => Ok(Self::TransactionsAvg),
+            "budget_income_real_expense" => Ok(Self::BudgetIncomeRealExpense),
             _ => Err(D::Error::unknown_variant(
                 &s,
-                &["budget", "transactions_avg"],
+                &["budget", "transactions_avg", "budget_income_real_expense"],
             )),
         }
     }

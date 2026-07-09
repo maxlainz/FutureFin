@@ -8,6 +8,7 @@ import type { FireSettingsApi } from "../api/types";
 import {
   defaultFireSettingsApi,
   normalizeInstallationFireSettings,
+  savingsSourceUsesTransactions,
 } from "./fire";
 
 describe("normalizeInstallationFireSettings — savings_source", () => {
@@ -54,6 +55,16 @@ describe("normalizeInstallationFireSettings — savings_source", () => {
     expect(normalizeInstallationFireSettings(raw).savings_source).toBe("budget");
   });
 
+  it("valor válido budget_income_real_expense se preserva", () => {
+    const raw = {
+      ...defaultFireSettingsApi(),
+      savings_source: "budget_income_real_expense",
+    } as FireSettingsApi;
+    expect(normalizeInstallationFireSettings(raw).savings_source).toBe(
+      "budget_income_real_expense",
+    );
+  });
+
   it("valor desconocido → budget", () => {
     const raw = {
       ...defaultFireSettingsApi(),
@@ -61,5 +72,25 @@ describe("normalizeInstallationFireSettings — savings_source", () => {
       savings_source: "monte_carlo" as unknown,
     } as FireSettingsApi;
     expect(normalizeInstallationFireSettings(raw).savings_source).toBe("budget");
+  });
+});
+
+describe("savingsSourceUsesTransactions", () => {
+  it("transactions_avg (modo B) → true", () => {
+    expect(savingsSourceUsesTransactions("transactions_avg")).toBe(true);
+  });
+
+  it("budget_income_real_expense (modo C) → true", () => {
+    expect(savingsSourceUsesTransactions("budget_income_real_expense")).toBe(
+      true,
+    );
+  });
+
+  it("budget (modo A) → false", () => {
+    expect(savingsSourceUsesTransactions("budget")).toBe(false);
+  });
+
+  it("undefined → false", () => {
+    expect(savingsSourceUsesTransactions(undefined)).toBe(false);
   });
 });
