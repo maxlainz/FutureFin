@@ -222,7 +222,7 @@ NOT warm it; warm-up happens only after login, see futurefin-architecture-contra
     { "up_to": "300000", "pct": "27" },
     { "up_to": null,     "pct": "30" }           // last bracket MUST be open-ended (up_to null)
   ],
-  "savings_source": "budget"                     // "budget" (default) | "transactions_avg"
+  "savings_source": "budget"                     // "budget" (default) | "transactions_avg" | "budget_income_real_expense"
 }
 ```
 
@@ -236,7 +236,12 @@ Validation (`validate_fire_settings` / `validate_tax_brackets`, all 400 on failu
 Deserialization details that matter:
 - `fire_number_mode` is **strict**: unknown strings → 422. Sole legacy alias
   `annual_expense_adjusted` (old backup schemas) maps to `annual_expense`.
-- **`savings_source`** (`SavingsSource` enum, `installation.rs`, `rename_all = "snake_case"`, `Default = Budget`) — source of the simulation's monthly saving: `budget` (mode A, default — from budget entries, historical behavior) or `transactions_avg` (mode B — weighted average of the last 12 complete calendar months of transactions, with a hybrid subtraction of each active liability's payment). Strict deserialize like `FireNumberMode`: unknown value → **422**; absent → `budget` (via the struct-level `#[serde(default)]`; old backups load). No extra `validate_fire_settings` bound — any of the two enum values is accepted. **What it affects**: `GET /v1/projection/*` (engine income/expense + FIRE target base in mode B), `GET /v1/summary` `financial_health` (income/expense/net/savings_rate + new fields `savings_source`, `savings_source_months_with_data`), `GET /v1/assets` (`contribution_nominal_monthly`), and — crucially — the **projection-cache invalidation contract**: in mode B transaction mutations invalidate the cache (`invalidate_projection_if_transactions_avg`), in mode A they never do (D12 in futurefin-architecture-contract). Read without a round-trip via `projection_savings_source(pool, iid)`. FIRE-math meaning owned by futurefin-fire-domain-reference.
+- **`savings_source`** (`SavingsSource` enum, `installation.rs`, `rename_all = "snake_case"`, `Default = Budget`) — source of the simulation's monthly saving, **three modes**:
+  - `budget` (mode A, default — from budget entries, historical behavior).
+  - `transactions_avg` (mode B — income and expense from the weighted average of the last 12 complete calendar months of transactions, with a hybrid subtraction of each active liability's payment).
+  - `budget_income_real_expense` (mode C — income from the **budget** + **real** expense, same `expense_eff` as B; FIRE target `annual_expense` uses the real expense, `current_income` uses budget income).
+
+  The 12m average that feeds the engine (`transactions_12m_avg`) counts only **real months** (≥1 transaction with `recurring_rule_id IS NULL`); pseudo-empty / recurring-only months are excluded entirely. Strict deserialize like `FireNumberMode`: unknown value → **422** (error lists all three valid variants); absent → `budget` (via the struct-level `#[serde(default)]`; old backups load). No extra `validate_fire_settings` bound — any of the three enum values is accepted. **What it affects** (modes B and C, gated by `SavingsSource::uses_transactions()`): `GET /v1/projection/*` (engine income/expense + FIRE target base), `GET /v1/summary` `financial_health` (income/expense/net/savings_rate + fields `savings_source`, `savings_source_months_with_data`; in mode C income stays the budget income), `GET /v1/assets` (`contribution_nominal_monthly`), and — crucially — the **projection-cache invalidation contract**: in B/C transaction mutations invalidate the cache (`invalidate_projection_if_savings_uses_transactions`), in mode A they never do (D12/D12a in futurefin-architecture-contract). Read without a round-trip via `projection_savings_source(pool, iid)`. FIRE-math meaning owned by futurefin-fire-domain-reference.
 - The struct has `#[serde(default)]`: omitted fields fill with defaults
   (mode `annual_expense`, `swr_pct` 3.5, `taxes_enabled` true, Spanish IRPF brackets above).
 - In the PATCH body `fire_settings` is `Option<Option<FireSettings>>`: **omit** = unchanged,

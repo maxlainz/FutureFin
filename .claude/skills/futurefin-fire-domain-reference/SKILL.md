@@ -79,18 +79,31 @@ Critical input nuances (source of the worst historical bug in this area):
 - No target (`None`) is a **valid outcome** (retirement income covers expenses): the API returns
   `jubilacion_target_net_worth: null`, empty `fire_target_series`, `jubilacion_month_index: null`.
 
-### 2b. Mode B: `savings_source = transactions_avg` — need & net from the real 12-month average
+### 2b. Modes B & C: `savings_source` — need & net from the real 12-month average
 
-`fire_settings.savings_source` (default `budget` = everything above) can be flipped to
-`transactions_avg` (mode B, added Unreleased). It changes **where the pre-retirement income/expense
-scalars come from**, and therefore both the FIRE need and the simulation's monthly net. The gross-up,
-SWR, moving-target and drain formulas are **unchanged** — only the base numbers differ.
+`fire_settings.savings_source` (default `budget` = everything above) has **two transactions-derived
+modes** (gate `SavingsSource::uses_transactions()`):
+
+- **Mode B `transactions_avg`** (shipped v2.0.0): income **and** expense come from the real 12m average.
+- **Mode C `budget_income_real_expense`** (Unreleased): income from the **budget**, expense from the real
+  12m average — same `expense_eff` as B. For a stable salary whose spending you want measured for real.
+
+They change **where the pre-retirement income/expense scalars come from**, and therefore both the FIRE
+need and the simulation's monthly net. The gross-up, SWR, moving-target and drain formulas are
+**unchanged** — only the base numbers differ.
 
 - **Window & average**: weighted mean over `[first-of-month(today) − 12 months, first-of-month(today))`
   — the 12 **complete** calendar months before the current one (the running month is excluded).
-  Denominator = `months_with_data` (months in the window with ≥1 transaction of any kind), same
-  weighted semantics as the Movimientos comparison → a short history does not dilute the mean.
-  Helper `transactions_12m_avg` (`handlers/transactions/summary.rs`).
+  Denominator = `months_with_data`, but counting **only real months** — a month in the window with ≥1
+  transaction `recurring_rule_id IS NULL` (any kind, same scope). A pseudo-empty month (only recurring
+  instances, e.g. after backfilling recurring rules) is excluded **entirely** — neither numerator nor
+  denominator; a real month counts **whole**, including its recurring transactions. This is a
+  **deliberate divergence** from the Movimientos comparison (`GET /v1/transactions/summary`), which still
+  counts any month with data (cross-ref comment in code). Worked example (test
+  `pseudo_empty_month_excluded_from_avg`): real month M−2 with manual income 2000 + recurring-only month
+  M−1 with recurring salary 3000 → `months_with_data = 1`, `income_avg = 2000` (before the fix: months=2,
+  avg=2500). Helper `transactions_12m_avg` (`handlers/transactions/summary.rs`), single-source `real_months`
+  predicate/CTE.
 - **Hybrid liability subtraction**: `expense_eff = max(0, expense_avg − Σ per active liability)`,
   where each active liability (filtered by `payment_end_date`) contributes its **real linked-txn
   average** (`linked_liability_id`) if any exist, otherwise its **nominal monthly payment**
@@ -98,19 +111,23 @@ SWR, moving-target and drain formulas are **unchanged** — only the base number
   `projection.rs` and `summary.rs`. The engine still receives liabilities as `debt_service`, so the
   saving **steps up automatically when a loan ends** (verified by test).
 - **Target**: `annual_expense` uses `expense_eff` as the base (mode A used `expense_retirement`);
-  `current_income` uses `income_eff` (`income_avg`); `manual` is unchanged. This is a **deliberate,
-  semantic change of base** — mode A's `expense_retirement` is a budget line, mode B's `expense_eff`
-  is measured spending net of debt service. `end_adj` (budget end-date adjustments) is zeroed in
-  mode B; `planning_flows` (`flow_adj`) still apply.
-- **Documented mismatch**: mode B only changes the **accumulation** phase. The **retirement** phase
-  still draws `income_retirement` / `expense_retirement` from the **budget** in both modes (the drain
+  `current_income` uses `income_eff` (`income_avg`) in mode B, and the **budget income** (`income_reg`)
+  in mode C; `manual` is unchanged. This is a **deliberate, semantic change of base** — mode A's
+  `expense_retirement` is a budget line, B/C's `expense_eff` is measured spending net of debt service.
+  `end_adj` (budget end-date adjustments) is zeroed in both B and C; `planning_flows` (`flow_adj`) still
+  apply. In `projection.rs` this lives in `EffectiveInputs`: B|C share the avg/liability branch and only
+  differ in the income scalar (mode C → `income_reg`, mode B → `income_eff`); flag `expense_from_avg`.
+- **Documented mismatch**: B/C only change the **accumulation** phase. The **retirement** phase
+  still draws `income_retirement` / `expense_retirement` from the **budget** in all modes (the drain
   step at §5 is unchanged). So the target is derived from real spending while the drawdown that must
   fund it is budget-based — an accepted, intentional asymmetry.
-- **Fallback**: `months_with_data == 0` in mode B → silently reverts to the budget scalars (mode A
+- **Fallback**: `months_with_data == 0` in mode B/C → silently reverts to the budget scalars (mode A
   effective). `GET /v1/summary` reports the **effective** source in `financial_health.savings_source`
-  (so it can read `"budget"` even when the setting is `transactions_avg`).
-- **Preview parity**: the web preview must consume `/v1/summary`'s effective equivalents in mode B
-  (`RetirementView`, fetch gated on the mode), never recompute the need from the budget — otherwise
+  (so it can read `"budget"` even when the setting is `transactions_avg` / `budget_income_real_expense`).
+- **Preview parity**: the web preview must consume `/v1/summary`'s effective equivalents in mode B/C
+  (`RetirementView`, fetch gated on `savingsSourceUsesTransactions`; in mode C the summary income is
+  already the budget income so the preview matches the server), never recompute the need from the budget
+  — otherwise
   it re-opens the client/server divergence class of §2 (see §2.5 of failure-archaeology). Tripwire
   case in `fire-parity.json`: `expense_retirement 2137.5 → expected_target_nw 923327.306` (proves both
   sides derive the same need from an avg-style, non-round expense base).
