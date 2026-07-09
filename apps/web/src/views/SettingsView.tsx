@@ -450,9 +450,13 @@ export function SettingsView({
           </form>
 
           <div className="stack bordered-top">
+            {/* El bloque de ayuda va FUERA del <label> (como hermano) para que el nombre accesible
+                del <select> sea solo su título y un clic en la ayuda no abra el desplegable;
+                aria-describedby lo asocia igualmente para lectores de pantalla. */}
             <label className="field">
               <span>Fuente del ahorro de la simulación</span>
               <select
+                aria-describedby="savings-source-help"
                 value={fireTaxDraft.savings_source ?? "budget"}
                 onChange={(e) =>
                   setFireTaxDraft((p) => ({
@@ -467,6 +471,8 @@ export function SettingsView({
                 <option value="budget">Presupuesto</option>
                 <option value="transactions_avg">Promedio 12 meses</option>
               </select>
+            </label>
+            <div className="field" id="savings-source-help">
               <small className="muted">
                 <strong>Presupuesto</strong>: la simulación ahorra cada mes lo
                 que fijas en tu presupuesto (ingresos − gastos presupuestados).
@@ -482,7 +488,7 @@ export function SettingsView({
                 El Resumen, la proyección y el target FIRE siguen el modo
                 elegido.
               </small>
-            </label>
+            </div>
             <p className="muted tight">
               {fireTaxSaving ? "Guardando…" : "Guardado automático."}
             </p>

@@ -10,6 +10,7 @@ mod common;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use chrono::{Datelike, NaiveDate};
 use common::TestApp;
 use futurefin_api::handlers::person_view::LedgerView;
 use futurefin_api::state::{Density, ProjectionCacheKey};
@@ -21,6 +22,17 @@ async fn installation_id(app: &TestApp) -> Uuid {
         .fetch_one(&app.pool)
         .await
         .expect("installation id")
+}
+
+fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
+    let zero = (year as i64) * 12 + (month as i64 - 1) + delta as i64;
+    ((zero.div_euclid(12)) as i32, (zero.rem_euclid(12) + 1) as u32)
+}
+
+/// "Hoy" del servidor (anchor de history) para fechas relativas independientes del reloj.
+async fn server_today(app: &TestApp, cookie: &str) -> NaiveDate {
+    let r = app.get_with_cookie("/v1/history/series", cookie).await;
+    NaiveDate::parse_from_str(r.json()["anchor_date_ymd"].as_str().unwrap(), "%Y-%m-%d").unwrap()
 }
 
 fn household_key(iid: Uuid) -> ProjectionCacheKey {
@@ -252,27 +264,34 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie).await;
     assert_invalidated(&app, &key, "delete").await;
 
-    // 7. materialize (regla con cursor 2 meses atrás → genera ≥1 instancia)
+    // 7. materialize (regla con cursor un par de meses atrás → genera ≥1 instancia). Fechas
+    // relativas al "hoy" del servidor para que el assert no dependa del reloj de la máquina.
+    let today = server_today(&app, &owner.cookie).await;
+    let (oy, om) = shift_month(today.year(), today.month(), -2);
+    let op_date = NaiveDate::from_ymd_opt(oy, om, 15).unwrap();
     let rec = app
         .post_json_with_cookie(
             "/v1/transactions",
-            json!({ "op_date": "2026-04-15", "concept": "Nomina", "amount": "1500",
-                    "kind": "income", "recurrence": { "day_of_month": 15 } }),
+            json!({ "op_date": op_date.format("%Y-%m-%d").to_string(), "concept": "Nomina",
+                    "amount": "1500", "kind": "income", "recurrence": { "day_of_month": 15 } }),
             &owner.cookie,
         )
         .await;
     assert_eq!(rec.status, http::StatusCode::CREATED);
     let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
-    // El alta con fecha pasada ya backfillea hasta hoy; rebobinamos por SQL (cursor a un mes previo,
-    // sin instancias) para que el ENDPOINT materialize vuelva a generar ≥1 y podamos probar que
-    // invalida en modo B.
+    // El alta con fecha pasada ya backfillea hasta hoy; rebobinamos por SQL (cursor a un mes previo
+    // al origen, sin instancias) para que el ENDPOINT materialize vuelva a generar ≥1 y podamos
+    // probar que invalida en modo B.
     let rid = Uuid::parse_str(&rule_id).unwrap();
     sqlx::query("DELETE FROM transactions WHERE recurring_rule_id = $1")
         .bind(rid)
         .execute(&app.pool)
         .await
         .expect("clear rule instances");
-    sqlx::query("UPDATE recurring_transaction_rules SET last_materialized_month = '2026-03-01' WHERE id = $1")
+    let (cy, cm) = shift_month(oy, om, -1);
+    let cursor = NaiveDate::from_ymd_opt(cy, cm, 1).unwrap();
+    sqlx::query("UPDATE recurring_transaction_rules SET last_materialized_month = $1 WHERE id = $2")
+        .bind(cursor)
         .bind(rid)
         .execute(&app.pool)
         .await

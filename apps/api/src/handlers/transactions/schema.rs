@@ -40,6 +40,26 @@ pub fn normalize_concept(raw: &str) -> String {
     out
 }
 
+/// Fold de diacríticos del español a ASCII en mayúscula (ÁÉÍÓÚÜÑ → AEIOUUN, y sus minúsculas).
+/// Se aplica **solo en comparaciones** (hint de savings en `csv_presets`, matching de reglas
+/// aprendidas en `rules`): NUNCA se usa en `normalize_concept` ni en la huella de dedup (esas deben
+/// conservar los acentos para no cambiar los fingerprints ni los patrones ya almacenados). Como
+/// `normalize_concept` solo hace ASCII-uppercase, las vocales acentuadas llegan en su caja original,
+/// por eso se contemplan mayúsculas y minúsculas.
+pub fn fold_diacritics_upper(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'Á' | 'À' | 'Ä' | 'Â' | 'á' | 'à' | 'ä' | 'â' => 'A',
+            'É' | 'È' | 'Ë' | 'Ê' | 'é' | 'è' | 'ë' | 'ê' => 'E',
+            'Í' | 'Ì' | 'Ï' | 'Î' | 'í' | 'ì' | 'ï' | 'î' => 'I',
+            'Ó' | 'Ò' | 'Ö' | 'Ô' | 'ó' | 'ò' | 'ö' | 'ô' => 'O',
+            'Ú' | 'Ù' | 'Ü' | 'Û' | 'ú' | 'ù' | 'ü' | 'û' => 'U',
+            'Ñ' | 'ñ' => 'N',
+            other => other,
+        })
+        .collect()
+}
+
 /// Forma canónica del importe a 4 decimales fijos, independiente del formato Display:
 /// `-26.000000000` → `-26.0000`, `-3` → `-3.0000`, `-3.00` → `-3.0000`. Garantiza que
 /// `-3` y `-3.00` produzcan la MISMA huella.

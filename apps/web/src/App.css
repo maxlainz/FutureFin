@@ -772,19 +772,40 @@
    sans (no la monoespaciada del paréntesis) para leerse como micro-copy y permitir wrap sin romper
    la regla de oro responsive. */
 .metric-trend {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
     sans-serif;
   font-size: 0.72rem;
   font-weight: 500;
   color: var(--ff-muted);
-  white-space: normal;
+  /* Slot de una sola línea: mantiene la altura uniforme de la banda KPI. La flecha y la cifra
+     delta nunca se truncan; solo «vs presupuesto» hace ellipsis si no cupiera. */
+  white-space: nowrap;
 }
 
 .metric-trend-arrow {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   vertical-align: -0.12em;
   margin-right: 0.15rem;
+}
+
+/* Flecha + cifra delta: prioritarias, nunca se truncan. */
+.metric-trend-delta {
+  flex: 0 0 auto;
+}
+
+/* Texto «vs presupuesto»: último, cede espacio con ellipsis si la tarjeta es estrecha. */
+.metric-trend-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: 0.28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .metric-trend-arrow svg {
