@@ -4,6 +4,76 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Tercer modo de «fuente del ahorro» de la simulación y endurecimiento del promedio real 12m para que un
+backfill de recurrentes no infraestime el gasto/ingreso medio. Sin migración, sin subir el
+`schema_version` del `.ffbackup`.
+
+### Proyección — tercer modo `budget_income_real_expense` (income de presupuesto + gasto real)
+
+- **Nuevo valor de `fire_settings.savings_source`**: `budget_income_real_expense` (modo C, label UI
+  «Ingresos de presupuesto + gasto real»), que se suma a `budget` (modo A) y `transactions_avg` (modo
+  B). Toma el **income del presupuesto** y el **gasto real** promediado (mismo `expense_eff` que el modo
+  B: promedio ponderado 12m + resta híbrida de cuotas de préstamos activos + clamp `≥ 0`). Útil cuando la
+  nómina es estable pero se quiere que el gasto refleje lo que se gasta de verdad. Ejemplo (test
+  `mode_c_income_budget_expense_real`): budget income 5.000, budget expense 2.000; mes real income 3.000,
+  gasto 800 → pendiente modo C = 5.000 − 800 = **4.200 €/mes** (modo A daría 3.000; modo B daría
+  3.000 − 800 = 2.200).
+- **Fallback**: `months_with_data == 0` → cae en silencio al presupuesto completo, igual que el modo B.
+- **Target FIRE**: en modo C, `annual_expense` usa el **gasto real** (`expense_eff`) como base y
+  `current_income` usa el **income del presupuesto** (no el de las transacciones); `manual` intacto. Sin
+  cambios en `compute_fire_target_nw` — todo se resuelve en `EffectiveInputs` de `projection.rs`.
+- **`GET /v1/summary`** en modo C: `income_monthly_equivalent` conserva el income del **presupuesto** (no
+  se sobreescribe), `expense_regular_monthly_equivalent = expense_eff` y
+  `net_monthly_equivalent = income − expense_eff − debt_service`. El `match` sobre `savings_source` es
+  exhaustivo (una variante futura fuerza decisión del compilador en vez de heredar el `else`).
+  `financial_health.savings_source` ecoa el modo **efectivo** tras el fallback.
+- **Backend**: gate único `SavingsSource::uses_transactions()` (`true` para B y C) sustituye al chequeo
+  `== TransactionsAvg` disperso; el helper de invalidación de cache pasa a llamarse
+  `invalidate_projection_if_savings_uses_transactions`; en `EffectiveInputs` el flag `use_avg` se
+  renombra a `expense_from_avg`. Frontend: helpers `savingsSourceUsesTransactions` / `parseSavingsSource`
+  en `lib/fire.ts` centralizan el gating de las 3 variantes (el `<select>` de Ajustes → Proyección gana
+  una tercera opción; el parenthetical «promedio de N meses» y el fetch gating sirven a B y C).
+- **Cache**: las mutaciones de transactions invalidan la proyección en modo B **y** C (regresión
+  `mode_c_mutation_invalidates_projection_cache` en `transactions_projection_cache.rs`).
+
+### Proyección — el promedio real 12m solo cuenta «meses reales» (excluye meses pseudovacíos)
+
+- **Síntoma → causa → fix**: al backfillear movimientos recurrentes (nómina/gastos fijos) meses atrás,
+  esos meses tenían instancias materializadas (`recurring_rule_id NOT NULL`) pero **ningún** movimiento
+  real. `transactions_12m_avg` (consumido por los modos B y C y por las KPIs de Resumen) los contaba como
+  meses con datos, diluyendo el promedio → gasto/ingreso medio infraestimado → proyección optimista.
+  Ahora el denominador `months_with_data` y las sumas por kind/liability se restringen a **meses reales**
+  (mes del tramo con ≥1 transacción `recurring_rule_id IS NULL`, cualquier kind, mismo scope). El
+  predicado de «mes real» vive en **una sola fuente** (`real_months_predicate`/CTE `real_months` en
+  `handlers/transactions/summary.rs`), reutilizada por las tres queries con los mismos binds.
+- **Regla exacta**: un mes vacío o «pseudovacío» (solo instancias recurrentes) queda excluido **por
+  completo** — ni numerador ni denominador; un mes real cuenta **entero**, incluidas sus transacciones
+  recurrentes. Worked example (test `pseudo_empty_month_excluded_from_avg`): mes real M−2 con income
+  manual 2.000 € + mes solo-recurrente M−1 con nómina recurrente 3.000 € → **antes** `months_with_data = 2`
+  e `income_avg = (2000 + 3000)/2 = 2.500`; **ahora** `months_with_data = 1` e `income_avg = 2.000`.
+  Casos hermanos: `real_month_counts_recurring_too` (M−2 con 2.000 manual + 3.000 recurrente → avg 5.000,
+  el mes real cuenta su recurrente) y `mode_b_all_pseudo_empty_falls_back_to_budget` (una ventana
+  entera de meses solo-recurrentes tras un backfill → 0 meses reales → fallback al presupuesto).
+- **Divergencia deliberada**: la pestaña **Movimientos** (`GET /v1/transactions/summary`) **NO cambia** —
+  su promedio ponderado sigue contando cualquier mes con datos (incluidos los solo-recurrentes), porque
+  ahí el usuario quiere ver el gasto que realmente ocurrió. Solo el promedio que **alimenta el engine**
+  (`transactions_12m_avg`) excluye los pseudovacíos. La diferencia está anotada con un comentario
+  cross-ref en el código.
+- **Cambio de números (aceptado, documentado)**: usuarios ya en modo B (o C) que hayan backfilleado
+  recurrentes verán su pendiente/target moverse — es precisamente el fix buscado, no un efecto colateral.
+
+### Compatibilidad
+
+- **Sin migración de DB ni de backup**: `savings_source` es aditivo (`FireSettings` tiene
+  `#[serde(default)]`); `CURRENT_SCHEMA_VERSION` del `.ffbackup` **no** sube.
+- **Backup con modo C ↔ servidores ≤ 2.0.1**: un `.ffbackup` exportado con
+  `savings_source = "budget_income_real_expense"` importado en un servidor ≤ 2.0.1 falla con **400**
+  `unknown variant` (la deserialización es estricta). Aceptado y documentado: subir
+  `CURRENT_SCHEMA_VERSION` penalizaría a **todos** los backups por una sola variante nueva; el
+  work-around es actualizar el servidor destino antes de importar.
+
 ## [2.0.1] - 2026-07-09
 
 Ronda de feedback tras 2.0.0: UX de Ajustes y de la banda de KPIs de Movimientos, edición de movimientos
