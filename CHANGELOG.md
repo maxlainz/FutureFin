@@ -4,6 +4,82 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Ronda de feedback tras 2.0.0: UX de Ajustes y de la banda de KPIs de Movimientos, edición de movimientos
+importados, backfill inmediato de recurrentes con fecha pasada y detección de ahorro insensible a acentos.
+Incluye dos cambios de **contrato de API** (el PATCH de una transacción importada ya no bloquea campos; nuevo
+**422 `recurrence_too_old`** en el alta con recurrencia). Sin migración.
+
+### Ajustes → Proyección — «fuente del ahorro» pasa a `<select>` estándar
+- **De segmented a desplegable nativo**: «Fuente del ahorro de la simulación» deja de ser el segmented
+  `.ff-segmented` y pasa a un `<select>` estándar con las mismas dos opciones (**Presupuesto** /
+  **Promedio 12 meses**). El bloque de ayuda sale **fuera** del `<label>` (como hermano, asociado con
+  `aria-describedby="savings-source-help"`) para que el nombre accesible del control sea solo su título y
+  un clic en la ayuda no despliegue el select. Tres `<small>` explican Presupuesto, Promedio 12 meses y que
+  Resumen/proyección/target FIRE siguen el modo elegido. **`.ff-segmented` se elimina de `App.css`** (el
+  bloque de tokens queda ya solo para `.ff-theme-toggle`): no queda ningún segmented de 2–3 opciones en la app.
+
+### Movimientos — KPIs muestran el promedio de la ventana + tendencia vs presupuesto
+- **Valor principal = promedio de la ventana**: las cuatro KPIs de la banda pasan a mostrar como cifra
+  principal el **promedio** de la ventana del selector (`expense_avg` / `income_avg` / `savings_avg` /
+  tasa promedio = `savings_avg / income_avg`), no el valor real del mes. Las etiquetas lo reflejan:
+  «Gasto promedio (3m/6m/12m/YTD/total)», «Ingreso promedio …», «Ahorro promedio …», «Tasa de ahorro …».
+  Sin promedio (`months_with_data == 0`) → `—`.
+- **Línea de tendencia bajo Gastos e Ingresos**: nueva línea de tendencia (flecha + delta `avg − budget` +
+  «vs presupuesto») bajo la cifra principal, con el color **solo** en la flecha y la cifra
+  (`num-pos`/`num-neg`); gastar menos / ingresar más que el presupuesto es favorable, `|Δ| ≤ umbral` → «=»
+  neutro. Helper puro `kpiBudgetTrend` en `lib/expenses.ts` (devuelve `null` — slot reservado pero vacío — si
+  no hay promedio o `budget <= 0`, porque comparar contra 0 no informa). **Ahorro y Tasa de ahorro no llevan
+  delta** (no existe presupuesto de ahorro). Desaparecen los parentheticals «media …».
+- **Frontend**: nuevo prop `trend?: ReactNode` en `MetricCard`, que ocupa el **mismo** slot reservado que
+  `parenthetical` (baseline de fila intacta) y tiene prioridad sobre él. CSS `.metric-trend` +
+  `.metric-trend-arrow` / `.metric-trend-delta` / `.metric-trend-label` (una sola línea; flecha y delta
+  nunca se truncan, «vs presupuesto» hace ellipsis en tarjetas estrechas).
+- **Definición deliberadamente distinta**: la «Tasa de ahorro» de Movimientos es `savings/income` (de la
+  ventana); la del **Resumen** es `net/income`. Son magnitudes distintas a propósito.
+
+### Movimientos — eliminada la comparativa de barras por categoría
+- **`CategoryComparisonBars` fuera**: se elimina el componente de barras horizontales Budget vs Promedio por
+  categoría (el valor Real ya vivía en la tabla y las KPIs). Con él se van el bloque CSS `.cmp-*` y el token
+  de color `--exp-average` (zinc-500/400 claro/oscuro). **`MonthlyCashflowBars`** (cash-flow mensual
+  divergente) permanece en el mismo archivo `charts/CategoryComparisonBars.tsx`, ahora su único export.
+
+### API — PATCH de movimientos importados ya no bloquea campos (huella anclada al CSV)
+- **`op_date`/`amount`/`concept` ahora editables también en importadas** (`import_id NOT NULL`). Hasta ahora
+  → **400 `immutable_field`**; ese código y esa rama **desaparecen del crate**. La diferencia de
+  comportamiento se traslada a la **huella de dedup**: en manuales se recomputa al cambiar esos campos
+  (tomando un ordinal libre, liberando el anterior); en importadas la huella queda **anclada** a la del CSV
+  original y **nunca** se recomputa, de modo que un re-import del mismo archivo sigue detectando el duplicado
+  aunque el usuario haya reubicado la fecha o corregido importe/concepto. El modal de edición deja de
+  deshabilitar esos inputs en importadas (el aviso pasa a «editarlo no afecta a la detección de duplicados»).
+  Tests: `patch_imported_op_date_is_immutable` → **`patch_imported_fields_editable_fingerprint_anchored`**,
+  y nuevo `patch_manual_op_date_recomputes_and_allows_reuse`.
+
+### Recurrentes — el alta con fecha pasada backfillea en la misma transacción (bugfix)
+- **Síntoma → causa → fix**: al crear un movimiento con `recurrence` y `op_date` en el pasado, las instancias
+  de los meses intermedios no aparecían hasta **recargar** la vista de Movimientos — porque era el frontend,
+  al montar, quien llamaba a `/recurring/materialize`. El create solo insertaba la instancia de origen y
+  creaba la regla; el relleno dependía de esa llamada posterior. Ahora el create (y `/batch`) backfillea
+  **todas** las instancias intermedias hasta hoy **dentro del mismo commit** del alta, vía el loop compartido
+  `materialize_rule` / `backfill_new_rule` (extraído de `materialize_recurring`) y el helper
+  `insert_manual_with_recurrence`. `POST /recurring/materialize` **sigue existiendo** para el avance de mes.
+- **API — nueva cota `recurrence_too_old` (422)**: una recurrencia con `op_date` a más de **10 años** en el
+  pasado generaría cientos de instancias en la transacción del alta → se rechaza con **422
+  `recurrence_too_old`** (`assert_recurrence_not_too_old`). Es la **primera** variante
+  `ApiError::Unprocessable` / `ErrorCode::Unprocessable` del crate (aparte de los 422 de deserialización de
+  serde). Tests: `create_with_past_date_backfills_instances`, `recurrence_op_date_too_old_*`,
+  `recurrence_op_date_within_bound_created`.
+
+### Import — clasificación de ahorro y reglas aprendidas insensibles a acentos
+- **Fold de diacríticos solo en comparaciones**: `is_savings_hint` (heurística de ahorro del preview) y el
+  matching de reglas aprendidas (`rule_matches`) pliegan los diacríticos del español (`ÁÉÍÓÚÜÑ`→`AEIOUUN`,
+  con minúsculas) antes de comparar, mediante el nuevo helper puro `fold_diacritics_upper` (en `schema.rs`).
+  Así «Aportación…» con tilde se detecta como ahorro y una regla acentuada matchea un concepto sin tilde y
+  viceversa. **Los patrones almacenados, `normalize_concept` y las huellas quedan intactos** (conservan sus
+  acentos): el fold es exclusivamente de comparación, nunca toca datos persistidos ni fingerprints. Tests
+  nuevos en `transactions_import.rs` (`savings_hint_accent_insensitive_*`, `learned_rule_matches_accent_insensitive*`).
+
 ## [2.0.0] - 2026-07-09
 
 Toggle **«fuente del ahorro»** de la simulación FIRE: la proyección puede alimentarse del
