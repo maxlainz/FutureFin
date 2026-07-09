@@ -18,6 +18,7 @@ import {
   deltaToneClass,
   groupTransactionsByCategory,
   initialDraftForRow,
+  kpiBudgetTrend,
   monthLabelEs,
   monthShortLabelEs,
   naturalSortDir,
@@ -418,6 +419,51 @@ describe("significantDeltaTone", () => {
     expect(significantDeltaTone(50, "expense", 10)).toBe("num-neg");
     expect(significantDeltaTone(-50, "expense", 10)).toBe("num-pos");
     expect(significantDeltaTone(50, "income", 10)).toBe("num-pos");
+  });
+});
+
+describe("kpiBudgetTrend", () => {
+  it("returns null when there is no average (no data ≠ no change)", () => {
+    expect(kpiBudgetTrend(800, 1000, "expense", 10, false)).toBeNull();
+  });
+  it("returns null when there is no budget to compare against (budget <= 0)", () => {
+    expect(kpiBudgetTrend(800, 0, "expense", 10, true)).toBeNull();
+    expect(kpiBudgetTrend(800, -50, "expense", 10, true)).toBeNull();
+  });
+  it("expense averaging below budget is favorable (down, green)", () => {
+    expect(kpiBudgetTrend(800, 1000, "expense", 10, true)).toEqual({
+      delta: -200,
+      direction: "down",
+      tone: "num-pos",
+    });
+  });
+  it("expense averaging above budget is unfavorable (up, red)", () => {
+    expect(kpiBudgetTrend(1200, 1000, "expense", 10, true)).toEqual({
+      delta: 200,
+      direction: "up",
+      tone: "num-neg",
+    });
+  });
+  it("income averaging above budget is favorable (up, green)", () => {
+    expect(kpiBudgetTrend(2200, 2000, "income", 10, true)).toEqual({
+      delta: 200,
+      direction: "up",
+      tone: "num-pos",
+    });
+  });
+  it("income averaging below budget is unfavorable (down, red)", () => {
+    expect(kpiBudgetTrend(1800, 2000, "income", 10, true)).toEqual({
+      delta: -200,
+      direction: "down",
+      tone: "num-neg",
+    });
+  });
+  it("within the threshold is flat with a neutral tone", () => {
+    expect(kpiBudgetTrend(1005, 1000, "expense", 10, true)).toEqual({
+      delta: 5,
+      direction: "flat",
+      tone: "",
+    });
   });
 });
 

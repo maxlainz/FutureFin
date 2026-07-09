@@ -12,10 +12,38 @@ mod common;
 use chrono::{Datelike, NaiveDate};
 use common::TestApp;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
     let zero = (year as i64) * 12 + (month as i64 - 1) + delta as i64;
     ((zero.div_euclid(12)) as i32, (zero.rem_euclid(12) + 1) as u32)
+}
+
+/// Rebobina una regla al estado "recién creada, SIN backfill": borra sus instancias fuera del mes de
+/// origen `(oy, om)` y devuelve el cursor al primer día de ese mes. Necesario desde el fix del
+/// backfill-en-create (un alta con fecha pasada ya materializa los meses intermedios en el commit del
+/// alta): para volver a ejercitar el ENDPOINT `materialize` dejamos sólo el origen pendiente.
+async fn rewind_rule_to_origin(app: &TestApp, rule_id: &str, oy: i32, om: u32) {
+    let rid = Uuid::parse_str(rule_id).unwrap();
+    let origin_start = NaiveDate::from_ymd_opt(oy, om, 1).unwrap();
+    let (ny, nm) = shift_month(oy, om, 1);
+    let next_start = NaiveDate::from_ymd_opt(ny, nm, 1).unwrap();
+    sqlx::query(
+        "DELETE FROM transactions \
+         WHERE recurring_rule_id = $1 AND (op_date < $2 OR op_date >= $3)",
+    )
+    .bind(rid)
+    .bind(origin_start)
+    .bind(next_start)
+    .execute(&app.pool)
+    .await
+    .expect("delete backfilled instances");
+    sqlx::query("UPDATE recurring_transaction_rules SET last_materialized_month = $1 WHERE id = $2")
+        .bind(origin_start)
+        .bind(rid)
+        .execute(&app.pool)
+        .await
+        .expect("rewind cursor");
 }
 
 /// Nº de días del mes civil `(year, month)`.
@@ -145,6 +173,7 @@ async fn materialize_fills_from_origin_and_is_idempotent() {
 
     // Regla con origen 3 meses atrás. `day_of_month=1` garantiza que el mes en curso siempre entra
     // (hoy es >= día 1 por definición), sea cual sea el día del calendario en que corra el test.
+    // El alta con fecha pasada YA backfillea (M-2, M-1, M) dentro del mismo commit del create.
     let r = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -154,8 +183,14 @@ async fn materialize_fills_from_origin_and_is_idempotent() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let rule_id = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
+    assert_eq!(app.count_rows("transactions").await, 4, "origen + 3 backfilleadas en el create");
 
-    // Materializa M-2, M-1, M (el mes actual, incluido: día 1 <= hoy).
+    // Rebobinamos (borra M-2/M-1/M, cursor → origen) para volver a ejercitar el ENDPOINT materialize.
+    rewind_rule_to_origin(&app, &rule_id, oy, om).await;
+    assert_eq!(app.count_rows("transactions").await, 1, "sólo el origen tras rebobinar");
+
+    // El endpoint materializa M-2, M-1, M (el mes actual incluido: día 1 <= hoy).
     let mat = materialize(&app, &owner.cookie).await;
     assert_eq!(mat.status, http::StatusCode::OK, "materialize: {mat:?}");
     assert_eq!(mat.json()["rules_processed"].as_u64().unwrap(), 1);
@@ -166,6 +201,58 @@ async fn materialize_fills_from_origin_and_is_idempotent() {
     let mat2 = materialize(&app, &owner.cookie).await;
     assert_eq!(mat2.json()["materialized"].as_u64().unwrap(), 0, "idempotente");
     assert_eq!(app.count_rows("transactions").await, 4);
+}
+
+#[tokio::test]
+async fn create_with_past_date_backfills_instances() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let today = server_today(&app, &owner.cookie).await;
+    let (oy, om) = shift_month(today.year(), today.month(), -4);
+
+    // Alta manual con recurrencia día 15 y fecha ~4 meses atrás. NO llamamos a materialize: el
+    // backfill debe ocurrir dentro del propio create.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": date_in(oy, om, 15), "concept": "Nomina", "amount": "1800",
+                    "kind": "income", "recurrence": { "day_of_month": 15 } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    // Meses intermedios M-3, M-2, M-1: una instancia (día 15) en cada uno, sin materialize manual.
+    for back in [3u32, 2, 1] {
+        let (my, mm) = shift_month(today.year(), today.month(), -(back as i32));
+        let l = list_month(&app, &owner.cookie, &format!("{my:04}-{mm:02}")).await;
+        assert_eq!(l.as_array().unwrap().len(), 1, "mes M-{back} backfilleado: {l:?}");
+        assert_eq!(l[0]["op_date"].as_str().unwrap(), date_in(my, mm, 15));
+    }
+    // El origen (M-4) sigue presente.
+    let origin = list_month(&app, &owner.cookie, &format!("{oy:04}-{om:02}")).await;
+    assert_eq!(origin.as_array().unwrap().len(), 1, "origen M-4");
+
+    // Mes en curso: incluido sólo si el día 15 ya llegó (robusto a cualquier día de ejecución).
+    let cur_ym = format!("{:04}-{:02}", today.year(), today.month());
+    let cur = list_month(&app, &owner.cookie, &cur_ym).await;
+    let expected_current = if today.day() >= 15 { 1 } else { 0 };
+    assert_eq!(
+        cur.as_array().unwrap().len(),
+        expected_current,
+        "mes en curso: esperado {expected_current} (hoy día {})",
+        today.day()
+    );
+
+    // Total = origen + 3 intermedios + (mes en curso si el día ya llegó).
+    let expected_total = 4 + expected_current as i64;
+    assert_eq!(app.count_rows("transactions").await, expected_total, "backfill hecho en el create");
+
+    // Un materialize posterior no crea nada (el cursor ya avanzó durante el create).
+    let mat = materialize(&app, &owner.cookie).await;
+    assert_eq!(mat.status, http::StatusCode::OK, "materialize: {mat:?}");
+    assert_eq!(mat.json()["materialized"].as_u64().unwrap(), 0, "backfill ya hecho en el create");
+    assert_eq!(app.count_rows("transactions").await, expected_total, "sin cambios tras materialize");
 }
 
 #[tokio::test]
@@ -227,6 +314,10 @@ async fn materialize_skips_future_dated_current_month() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let rule_id = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
+
+    // Rebobinamos al origen para ejercitar el ENDPOINT materialize (el create ya backfilleó M-1).
+    rewind_rule_to_origin(&app, &rule_id, oy, om).await;
 
     // Materializa sólo M-1 (pasado); el mes en curso queda fuera (su día aún no ha llegado).
     let mat = materialize(&app, &owner.cookie).await;
@@ -278,6 +369,10 @@ async fn materialize_includes_current_month_when_day_reached() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let rule_id = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
+
+    // Rebobinamos al origen para ejercitar el ENDPOINT materialize (el create ya backfilleó M-1/M).
+    rewind_rule_to_origin(&app, &rule_id, oy, om).await;
 
     let mat = materialize(&app, &owner.cookie).await;
     assert_eq!(mat.status, http::StatusCode::OK, "materialize: {mat:?}");
@@ -405,6 +500,11 @@ async fn dedup_preexisting_manual_takes_next_ordinal_without_409() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let rule_id = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
+
+    // Rebobinamos las instancias recurrentes al origen (el create ya había backfilleado M-1/M, con la
+    // colisión ya resuelta). El manual pre-existente (M-1, sin regla) sobrevive al rebobinado.
+    rewind_rule_to_origin(&app, &rule_id, oy, om).await;
 
     let mat = materialize(&app, &owner.cookie).await;
     assert_eq!(mat.status, http::StatusCode::OK, "materialize sin 409: {mat:?}");
@@ -467,6 +567,10 @@ async fn cross_user_isolation() {
         )
         .await;
     let alice_rule = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
+    // El alta con fecha pasada backfillea; rebobinamos al origen para que la parte de aislamiento
+    // (Bob no toca las reglas de Alice) parta de "cursor intacto en el origen, sólo la instancia de
+    // origen de Alice".
+    rewind_rule_to_origin(&app, &alice_rule, oy, om).await;
 
     // Bob no ve las reglas de Alice.
     let bl = app.get_with_cookie("/v1/transactions/recurring", &bob.cookie).await;

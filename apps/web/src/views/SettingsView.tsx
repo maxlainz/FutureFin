@@ -450,50 +450,42 @@ export function SettingsView({
           </form>
 
           <div className="stack bordered-top">
-            <div className="field">
+            <label className="field">
               <span>Fuente del ahorro de la simulación</span>
-              <div
-                className="ff-segmented"
-                role="group"
-                aria-label="Fuente del ahorro de la simulación"
+              <select
+                value={fireTaxDraft.savings_source ?? "budget"}
+                onChange={(e) =>
+                  setFireTaxDraft((p) => ({
+                    ...p,
+                    savings_source:
+                      e.target.value === "transactions_avg"
+                        ? "transactions_avg"
+                        : "budget",
+                  }))
+                }
               >
-                {(
-                  [
-                    { value: "budget", label: "Presupuesto" },
-                    { value: "transactions_avg", label: "Promedio 12 meses" },
-                  ] as const
-                ).map((o) => {
-                  const active =
-                    (fireTaxDraft.savings_source ?? "budget") === o.value;
-                  return (
-                    <button
-                      key={o.value}
-                      type="button"
-                      className={active ? "is-active" : ""}
-                      aria-pressed={active}
-                      onClick={() => {
-                        if (!active)
-                          setFireTaxDraft((p) => ({
-                            ...p,
-                            savings_source: o.value,
-                          }));
-                      }}
-                    >
-                      {o.label}
-                    </button>
-                  );
-                })}
-              </div>
+                <option value="budget">Presupuesto</option>
+                <option value="transactions_avg">Promedio 12 meses</option>
+              </select>
               <small className="muted">
-                En modo promedio, el ahorro de la simulación sale del promedio
-                ponderado de los últimos 12 meses de movimientos, descontando las
-                cuotas de préstamos activos (que la simulación ya modela aparte).
-                Con menos de 12 meses se usan los meses con datos.
+                <strong>Presupuesto</strong>: la simulación ahorra cada mes lo
+                que fijas en tu presupuesto (ingresos − gastos presupuestados).
+                No depende de tus movimientos.
               </small>
-              <p className="muted tight">
-                {fireTaxSaving ? "Guardando…" : "Guardado automático."}
-              </p>
-            </div>
+              <small className="muted">
+                <strong>Promedio 12 meses</strong>: el ahorro sale del promedio
+                ponderado de los últimos 12 meses de movimientos (denominador =
+                meses con datos), restando las cuotas de préstamos activos que
+                la simulación ya modela aparte. Sin datos, cae al presupuesto.
+              </small>
+              <small className="muted">
+                El Resumen, la proyección y el target FIRE siguen el modo
+                elegido.
+              </small>
+            </label>
+            <p className="muted tight">
+              {fireTaxSaving ? "Guardando…" : "Guardado automático."}
+            </p>
           </div>
         </section>
         ) : (

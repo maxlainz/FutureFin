@@ -244,7 +244,8 @@ pub struct BatchCreateBody {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PatchTransactionBody {
-    /// Solo manuales (import_id NULL). En importadas → 400 `immutable_field`.
+    /// Editable en manuales e importadas. En manuales recomputa la huella; en importadas la huella
+    /// queda anclada a la del CSV original (el dedup del re-import sigue funcionando).
     #[serde(default)]
     #[schema(value_type = Option<String>, format = "date")]
     pub op_date: Option<NaiveDate>,
@@ -253,10 +254,10 @@ pub struct PatchTransactionBody {
     pub value_date: Option<NaiveDate>,
     #[serde(default)]
     pub clear_value_date: Option<bool>,
-    /// Solo manuales. En importadas → 400 `immutable_field`.
+    /// Editable en manuales e importadas (huella anclada al CSV en importadas).
     #[serde(default)]
     pub concept: Option<String>,
-    /// Solo manuales. En importadas → 400 `immutable_field`.
+    /// Editable en manuales e importadas (huella anclada al CSV en importadas).
     #[serde(default)]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]

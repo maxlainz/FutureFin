@@ -263,6 +263,20 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         .await;
     assert_eq!(rec.status, http::StatusCode::CREATED);
     let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
+    // El alta con fecha pasada ya backfillea hasta hoy; rebobinamos por SQL (cursor a un mes previo,
+    // sin instancias) para que el ENDPOINT materialize vuelva a generar ≥1 y podamos probar que
+    // invalida en modo B.
+    let rid = Uuid::parse_str(&rule_id).unwrap();
+    sqlx::query("DELETE FROM transactions WHERE recurring_rule_id = $1")
+        .bind(rid)
+        .execute(&app.pool)
+        .await
+        .expect("clear rule instances");
+    sqlx::query("UPDATE recurring_transaction_rules SET last_materialized_month = '2026-03-01' WHERE id = $1")
+        .bind(rid)
+        .execute(&app.pool)
+        .await
+        .expect("rewind cursor");
     warm(&app, &owner.cookie, &key).await;
     let mat = app
         .post_json_with_cookie("/v1/transactions/recurring/materialize", json!({}), &owner.cookie)
