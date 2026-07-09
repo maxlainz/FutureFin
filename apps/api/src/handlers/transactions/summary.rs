@@ -172,6 +172,22 @@ pub(crate) async fn transactions_12m_avg(
 
     let scope = view.scope_where("t");
     let arg = view.next_arg_index();
+    let end = arg + 1;
+
+    // Definición ÚNICA de «mes real» (fuente de verdad compartida por las tres queries de abajo):
+    // el mes de una transacción `recurring_rule_id IS NULL` dentro del tramo `[window_start, window_end)`.
+    // El predicado se reutiliza tal cual en `months_sql`; su forma de CTE en `kind_sql`/`liab_sql`.
+    // Mismos `${arg}`/`${end}` en todas → mismos binds `window_start`/`window_end`.
+    let real_months_predicate = format!(
+        "{scope} AND t.op_date >= ${arg} AND t.op_date < ${end} AND t.recurring_rule_id IS NULL"
+    );
+    let real_months_cte = format!(
+        "WITH real_months AS (
+             SELECT DISTINCT to_char(t.op_date, 'YYYY-MM') AS ym
+             FROM transactions t
+             WHERE {real_months_predicate}
+         )"
+    );
 
     // `months_with_data`: meses REALES distintos del tramo, i.e. con ≥1 transacción `recurring_rule_id
     // IS NULL` (cualquier kind, incluidos `savings` y `kind NULL`). Los meses solo-recurrentes
@@ -179,9 +195,7 @@ pub(crate) async fn transactions_12m_avg(
     let months_sql = format!(
         "SELECT COUNT(DISTINCT to_char(t.op_date, 'YYYY-MM'))::int
          FROM transactions t
-         WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
-           AND t.recurring_rule_id IS NULL",
-        end = arg + 1
+         WHERE {real_months_predicate}"
     );
     let months_with_data: i32 = view
         .bind_scope_scalar(sqlx::query_scalar(&months_sql), installation_id, session_user_id)
@@ -201,23 +215,17 @@ pub(crate) async fn transactions_12m_avg(
     }
     let denom = Decimal::from(months_with_data);
 
-    // Suma firmada por kind (solo income/expense), restringida a los meses REALES (CTE `real_months`):
-    // un mes solo-recurrente no aporta ni al numerador ni al denominador. Los `${arg}`/`${end}` se
-    // reutilizan en la CTE y en la query principal (mismos binds `window_start`/`window_end`).
+    // Suma firmada por kind (solo income/expense), restringida a los meses REALES (CTE `real_months`,
+    // misma definición que `months_sql`): un mes solo-recurrente no aporta ni al numerador ni al
+    // denominador.
     let kind_sql = format!(
-        "WITH real_months AS (
-             SELECT DISTINCT to_char(t.op_date, 'YYYY-MM') AS ym
-             FROM transactions t
-             WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
-               AND t.recurring_rule_id IS NULL
-         )
+        "{real_months_cte}
          SELECT t.kind AS kind, SUM(t.amount) AS total
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.kind IN ('income', 'expense')
            AND to_char(t.op_date, 'YYYY-MM') IN (SELECT ym FROM real_months)
-         GROUP BY t.kind",
-        end = arg + 1
+         GROUP BY t.kind"
     );
     let kind_rows: Vec<(Option<String>, Decimal)> = view
         .bind_scope_as(sqlx::query_as(&kind_sql), installation_id, session_user_id)
@@ -238,19 +246,13 @@ pub(crate) async fn transactions_12m_avg(
     // Cuotas vinculadas: Σ de expense con `linked_liability_id`, por liability. Mismo filtro de meses
     // reales que la suma por kind (denominador `months_with_data` consistente).
     let liab_sql = format!(
-        "WITH real_months AS (
-             SELECT DISTINCT to_char(t.op_date, 'YYYY-MM') AS ym
-             FROM transactions t
-             WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
-               AND t.recurring_rule_id IS NULL
-         )
+        "{real_months_cte}
          SELECT t.linked_liability_id AS liability_id, SUM(t.amount) AS total
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.kind = 'expense' AND t.linked_liability_id IS NOT NULL
            AND to_char(t.op_date, 'YYYY-MM') IN (SELECT ym FROM real_months)
-         GROUP BY t.linked_liability_id",
-        end = arg + 1
+         GROUP BY t.linked_liability_id"
     );
     let liab_rows: Vec<(Uuid, Decimal)> = view
         .bind_scope_as(sqlx::query_as(&liab_sql), installation_id, session_user_id)
@@ -439,6 +441,10 @@ pub async fn get_transactions_summary(
     }
 
     // `months_with_data` = meses distintos del tramo con ≥1 transacción de cualquier kind/categoría.
+    // OJO — definición distinta A PROPÓSITO de la de `transactions_12m_avg` (arriba): aquí cuentan
+    // TODOS los movimientos, incluidos los recurrentes; allí solo los meses con ≥1 movimiento real
+    // (`recurring_rule_id IS NULL`). La pestaña Movimientos muestra lo que hay; la simulación usa la
+    // definición estricta. No alinear ambas sin una decisión de producto.
     let months_with_data = {
         let mut set: HashSet<&String> = HashSet::new();
         for (ym, _kind, _cat) in buckets.keys() {
