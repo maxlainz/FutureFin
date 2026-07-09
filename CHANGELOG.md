@@ -4,7 +4,7 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.1.0] - 2026-07-09
 
 Tercer modo de «fuente del ahorro» de la simulación y endurecimiento del promedio real 12m para que un
 backfill de recurrentes no infraestime el gasto/ingreso medio. Sin migración, sin subir el
