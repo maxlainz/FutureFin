@@ -1,83 +1,15 @@
 /**
- * Gráficas de apoyo de la pestaña «Movimientos» (comparativa). Solo presentacionales, sin fetch.
+ * Gráfica de apoyo de la pestaña «Movimientos» (cash-flow). Solo presentacional, sin fetch.
  *
- *  - `CategoryComparisonBars`: barras horizontales por categoría comparando Budget vs Promedio (el
- *    valor Real vive en la tabla, no en las barras). Budget = var(--ff-accent), Promedio =
- *    var(--exp-average). Sin promedio (`hasAvg=false`) se ocultan las barras y la leyenda de
- *    promedio y solo se pinta el Budget.
  *  - `MonthlyCashflowBars`: cash-flow mes a mes desde `months[]` de `/v1/history/cashflow`
  *    (ingresos hacia arriba; gastos + ahorro hacia abajo; neto en el tooltip).
  *
- * Todos los colores vienen de tokens `var(--ff-*)` / `var(--exp-*)` / `var(--cf-*)`.
+ * Todos los colores vienen de tokens `var(--ff-*)` / `var(--cf-*)`.
  */
 
 import type { CashflowMonthApi } from "../../api/types";
 import { formatCurrencyNumber } from "../../lib/format";
 import { monthLabelEs, monthShortLabelEs } from "../../lib/expenses";
-
-export type ComparisonBarRow = {
-  key: string;
-  label: string;
-  actual: number;
-  budget: number;
-  avg: number;
-};
-
-/** Barras horizontales por categoría (Budget vs Promedio). Escala compartida sobre el máximo. */
-export function CategoryComparisonBars({
-  rows,
-  currencyIso,
-  avgLabel,
-  hasAvg,
-}: {
-  rows: ComparisonBarRow[];
-  currencyIso: string;
-  avgLabel: string;
-  hasAvg: boolean;
-}) {
-  const max = rows.reduce(
-    (acc, r) => Math.max(acc, r.budget, hasAvg ? r.avg : 0),
-    0,
-  );
-  if (rows.length === 0 || !(max > 0)) return null;
-  const pct = (v: number) => `${Math.max(0, (v / max) * 100)}%`;
-
-  return (
-    <div className="cmp-bars">
-      <div className="cmp-legend" aria-hidden>
-        <span className="cmp-legend-item">
-          <span className="cmp-swatch cmp-swatch--budget" /> Budget
-        </span>
-        {hasAvg ? (
-          <span className="cmp-legend-item">
-            <span className="cmp-swatch cmp-swatch--avg" /> Promedio {avgLabel}
-          </span>
-        ) : null}
-      </div>
-      {rows.map((r) => (
-        <div className="cmp-row" key={r.key}>
-          <div className="cmp-row-label" title={r.label}>
-            {r.label}
-          </div>
-          <div className="cmp-row-bars">
-            <div
-              className="cmp-bar cmp-bar--budget"
-              style={{ width: pct(r.budget) }}
-              title={`Budget · ${formatCurrencyNumber(r.budget, currencyIso)}`}
-            />
-            {hasAvg ? (
-              <div
-                className="cmp-bar cmp-bar--avg"
-                style={{ width: pct(r.avg) }}
-                title={`Promedio · ${formatCurrencyNumber(r.avg, currencyIso)}`}
-              />
-            ) : null}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /**
  * Cash-flow mes a mes: columna divergente por mes (ingresos hacia arriba, gastos + ahorro hacia

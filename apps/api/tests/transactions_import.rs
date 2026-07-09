@@ -69,6 +69,14 @@ fn row_by_concept<'a>(rows: &'a [Value], needle: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no preview row containing '{needle}'"))
 }
 
+/// CSV MyInvestor de una sola fila (15/06/2026) con `concept`/`amount` a medida.
+fn myinvestor_csv(concept: &str, amount: &str) -> String {
+    format!(
+        "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+         15/06/2026;15/06/2026;{concept};{amount};EUR\n"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Autodetección + sugerencias (MyInvestor)
 // ---------------------------------------------------------------------------
@@ -267,6 +275,108 @@ async fn learned_rules_precategorize() {
     let consum = row_by_concept(re_rows["rows"].as_array().unwrap(), "CONSUM");
     assert_eq!(consum["suggested_category_id"], json!(super_cat), "pre-categorizada");
     assert!(consum["matched_rule_id"].is_string(), "matched_rule_id presente");
+}
+
+// ---------------------------------------------------------------------------
+// Hint de savings insensible a acentos (fold de diacríticos)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn savings_hint_accent_insensitive_cartera() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // Grafía real acentuada; antes solo se salvaba por el token "CARTERA".
+    let b64 = B64.encode(myinvestor_csv("Aportación automática cartera", "-100"));
+    let resp = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    assert_eq!(resp.status, http::StatusCode::OK, "preview: {resp:?}");
+    let body = resp.json();
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows[0]["suggested_kind"], "savings", "acentuada real → savings");
+}
+
+#[tokio::test]
+async fn savings_hint_accent_insensitive_no_cartera() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // Sin "cartera": el fold de APORTACIÓN/INVERSIÓN es lo único que puede disparar el hint.
+    let b64 = B64.encode(myinvestor_csv("Aportación periódica inversión", "-250"));
+    let resp = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    assert_eq!(resp.status, http::StatusCode::OK, "preview: {resp:?}");
+    let body = resp.json();
+    let rows = body["rows"].as_array().unwrap();
+    assert_eq!(rows[0]["suggested_kind"], "savings", "acentuada sin 'cartera' → savings vía fold");
+}
+
+#[tokio::test]
+async fn confirm_savings_learns_kind_rule() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let b64 = B64.encode(myinvestor_csv("Aportación automática cartera", "-100"));
+    let p = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let pb = p.json();
+    assert_eq!(pb["rows"][0]["suggested_kind"], "savings", "sugerido savings");
+    let sha = pb["file_sha256"].as_str().unwrap();
+
+    // Confirmar una fila kind=savings (sin categoría) con learn_rules → aprende la regla.
+    let c = confirm(
+        &app,
+        &owner.cookie,
+        "myinvestor",
+        &b64,
+        sha,
+        vec![json!({ "kind": "savings" })],
+        true,
+    )
+    .await;
+    assert_eq!(c.status, http::StatusCode::OK, "confirm: {c:?}");
+    assert!(c.json()["rules_learned"].as_u64().unwrap() >= 1, "≥1 regla aprendida: {:?}", c.json());
+
+    // La regla aprendida asigna kind savings (sin categoría).
+    let rules = app.get_with_cookie("/v1/transactions/rules", &owner.cookie).await;
+    let arr = rules.json();
+    let savings_rule = arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["assign_kind"] == "savings")
+        .unwrap_or_else(|| panic!("no savings rule learned: {arr:?}"));
+    assert!(savings_rule["assign_category_id"].is_null(), "savings sin categoría");
+}
+
+#[tokio::test]
+async fn learned_expense_rule_precedes_savings_hint() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Fondos").await;
+    let b64 = B64.encode(myinvestor_csv("Aportación automática cartera", "-100"));
+
+    // Primer preview: sin regla, el hint sugiere savings.
+    let p1 = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let pb1 = p1.json();
+    assert_eq!(pb1["rows"][0]["suggested_kind"], "savings", "primer preview: hint savings");
+    let sha1 = pb1["file_sha256"].as_str().unwrap();
+
+    // Confirmar como expense con categoría → aprende una regla expense.
+    let c = confirm(
+        &app,
+        &owner.cookie,
+        "myinvestor",
+        &b64,
+        sha1,
+        vec![json!({ "kind": "expense", "category_id": cat })],
+        true,
+    )
+    .await;
+    assert_eq!(c.status, http::StatusCode::OK, "confirm expense: {c:?}");
+    assert!(c.json()["rules_learned"].as_u64().unwrap() >= 1);
+
+    // Segundo preview del mismo archivo: la regla aprendida (expense) gana al hint savings (by-design).
+    let p2 = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let pb2 = p2.json();
+    let row = &pb2["rows"][0];
+    assert_eq!(row["suggested_kind"], "expense", "la regla aprendida tiene precedencia sobre el hint");
+    assert_eq!(row["suggested_category_id"], json!(cat), "categoría de la regla");
+    assert!(row["matched_rule_id"].is_string(), "matched_rule_id presente");
 }
 
 // ---------------------------------------------------------------------------

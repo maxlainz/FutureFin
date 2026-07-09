@@ -208,6 +208,124 @@ struct RuleCore {
     last_materialized_month: NaiveDate,
 }
 
+/// Materializa las instancias pendientes de UNA regla desde su cursor `last_materialized_month`
+/// hasta (incl.) el mes civil actual, sin sobrepasar `today`. Un mes cuyo día de recurrencia (ya
+/// con clamp de fin de mes) aún no ha llegado se difiere SIN avanzar el cursor. Cada instancia toma
+/// un ordinal MAX+1 (nunca 409 frente a un manual idéntico) y el cursor avanza sólo si insertó algo
+/// (idempotente). Devuelve cuántas instancias creó. Compartida por el endpoint `materialize` y por
+/// el backfill del alta con fecha pasada (`crud.rs`, vía `backfill_new_rule`). Privada: `RuleCore` no
+/// sale del módulo; los callers externos entran por `backfill_new_rule`.
+async fn materialize_rule(
+    conn: &mut PgConnection,
+    iid: Uuid,
+    owner: Uuid,
+    rule: &RuleCore,
+    today: NaiveDate,
+) -> Result<u32, ApiError> {
+    let current_month = first_of_month(today.year(), today.month());
+    let mut cursor = rule.last_materialized_month;
+    let mut materialized = 0u32;
+
+    // Avanza mes a mes desde el cursor hasta (incl.) el mes civil actual.
+    loop {
+        let (ny, nm) = shift_month(cursor.year(), cursor.month(), 1);
+        let next_month = first_of_month(ny, nm);
+        if next_month > current_month {
+            break;
+        }
+        // op_date = min(day_of_month, días del mes) → clamp del 31 en meses cortos (feb/abr).
+        let dim = days_in_month(ny, nm);
+        let day = (rule.day_of_month as u32).min(dim);
+        let op_date = NaiveDate::from_ymd_opt(ny, nm, day).expect("valid op date");
+
+        // Nunca materializamos con fecha futura: el ledger es histórico. Si el día de la recurrencia
+        // del mes en curso aún no ha llegado, paramos ANTES de insertar y SIN avanzar el cursor →
+        // ese mes se materializará en la primera llamada cuyo día ya haya vencido (idempotencia
+        // intacta: el cursor sólo avanza con inserciones).
+        if op_date > today {
+            break;
+        }
+
+        let fp = compute_fingerprint(SOURCE_MANUAL, op_date, rule.amount, &rule.concept);
+        // Ordinal MAX+1 dentro de la tx: una instancia manual idéntica preexistente jamás produce un
+        // 409 (la copia toma el siguiente ordinal).
+        let ordinal = next_fingerprint_ordinal(&mut *conn, iid, owner, &fp).await?;
+
+        sqlx::query(
+            r#"INSERT INTO transactions
+                   (installation_id, owner_user_id, import_id, source, op_date, value_date,
+                    concept, amount, currency, kind, category_id, fingerprint,
+                    fingerprint_ordinal, linked_asset_id, linked_liability_id, notes,
+                    recurring_rule_id)
+               VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, 'EUR', $7, $8, $9, $10, $11, $12, $13, $14)"#,
+        )
+        .bind(iid)
+        .bind(owner)
+        .bind(SOURCE_MANUAL)
+        .bind(op_date)
+        .bind(&rule.concept)
+        .bind(rule.amount)
+        .bind(&rule.kind)
+        .bind(rule.category_id)
+        .bind(&fp)
+        .bind(ordinal)
+        .bind(rule.linked_asset_id)
+        .bind(rule.linked_liability_id)
+        .bind(rule.notes.as_deref())
+        .bind(rule.id)
+        .execute(&mut *conn)
+        .await?;
+
+        cursor = next_month;
+        materialized += 1;
+    }
+
+    // Avanza el cursor sólo si generó algo (idempotente: 2ª llamada → 0 nuevas).
+    if cursor != rule.last_materialized_month {
+        sqlx::query(
+            r#"UPDATE recurring_transaction_rules
+               SET last_materialized_month = $1, updated_at = now()
+               WHERE id = $2"#,
+        )
+        .bind(cursor)
+        .bind(rule.id)
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    Ok(materialized)
+}
+
+/// Backfill de una regla recién creada desde un alta manual con fecha pasada: reconstruye la vista
+/// mínima de la regla a partir del `PreparedTxn` de la instancia de origen y delega en
+/// `materialize_rule`, dejando materializados todos los meses intermedios hasta hoy en el MISMO
+/// commit del alta. El cursor arranca en el mes de origen, así que la instancia de origen (ya
+/// insertada por el caller) nunca se duplica. Devuelve cuántas instancias intermedias creó.
+pub(super) async fn backfill_new_rule(
+    conn: &mut PgConnection,
+    iid: Uuid,
+    owner: Uuid,
+    rule_id: Uuid,
+    p: &PreparedTxn,
+    day_of_month: i32,
+    cursor: NaiveDate,
+    today: NaiveDate,
+) -> Result<u32, ApiError> {
+    let rule = RuleCore {
+        id: rule_id,
+        concept: p.concept.clone(),
+        amount: p.amount,
+        kind: p.kind.clone(),
+        category_id: p.category_id,
+        day_of_month,
+        linked_asset_id: p.linked_asset_id,
+        linked_liability_id: p.linked_liability_id,
+        notes: p.notes.clone(),
+        last_materialized_month: cursor,
+    };
+    materialize_rule(conn, iid, owner, &rule, today).await
+}
+
 #[utoipa::path(
     post,
     path = "/v1/transactions/recurring/materialize",
@@ -229,7 +347,6 @@ pub async fn materialize_recurring(
         return Err(ApiError::Forbidden);
     }
     let today = installation_naive_today(&state.pool, iid).await?;
-    let current_month = first_of_month(today.year(), today.month());
 
     let mut tx = state.pool.begin().await?;
 
@@ -250,76 +367,8 @@ pub async fn materialize_recurring(
 
     let rules_processed = rules.len() as u32;
     let mut materialized = 0u32;
-
     for rule in &rules {
-        // Avanza mes a mes desde el cursor hasta (incl.) el mes civil actual.
-        let mut cursor = rule.last_materialized_month;
-        loop {
-            let (ny, nm) = shift_month(cursor.year(), cursor.month(), 1);
-            let next_month = first_of_month(ny, nm);
-            if next_month > current_month {
-                break;
-            }
-            // op_date = min(day_of_month, días del mes) → clamp del 31 en meses cortos (feb/abr).
-            let dim = days_in_month(ny, nm);
-            let day = (rule.day_of_month as u32).min(dim);
-            let op_date = NaiveDate::from_ymd_opt(ny, nm, day).expect("valid op date");
-
-            // Nunca materializamos con fecha futura: el ledger es histórico (el alta manual limita
-            // `op_date` a hoy). Si el día de la recurrencia del mes en curso aún no ha llegado,
-            // paramos ANTES de insertar y SIN avanzar el cursor → ese mes se materializará en la
-            // primera llamada cuyo día ya haya vencido (idempotencia intacta: el cursor sólo
-            // avanza con inserciones).
-            if op_date > today {
-                break;
-            }
-
-            let fp = compute_fingerprint(SOURCE_MANUAL, op_date, rule.amount, &rule.concept);
-            // Ordinal MAX+1 dentro de la tx: una instancia manual idéntica preexistente jamás
-            // produce un 409 (la copia toma el siguiente ordinal).
-            let ordinal = next_fingerprint_ordinal(&mut tx, iid, user.id.0, &fp).await?;
-
-            sqlx::query(
-                r#"INSERT INTO transactions
-                       (installation_id, owner_user_id, import_id, source, op_date, value_date,
-                        concept, amount, currency, kind, category_id, fingerprint,
-                        fingerprint_ordinal, linked_asset_id, linked_liability_id, notes,
-                        recurring_rule_id)
-                   VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, 'EUR', $7, $8, $9, $10, $11, $12, $13, $14)"#,
-            )
-            .bind(iid)
-            .bind(user.id.0)
-            .bind(SOURCE_MANUAL)
-            .bind(op_date)
-            .bind(&rule.concept)
-            .bind(rule.amount)
-            .bind(&rule.kind)
-            .bind(rule.category_id)
-            .bind(&fp)
-            .bind(ordinal)
-            .bind(rule.linked_asset_id)
-            .bind(rule.linked_liability_id)
-            .bind(rule.notes.as_deref())
-            .bind(rule.id)
-            .execute(&mut *tx)
-            .await?;
-
-            cursor = next_month;
-            materialized += 1;
-        }
-
-        // Avanza el cursor sólo si generó algo (idempotente: 2ª llamada → 0 nuevas).
-        if cursor != rule.last_materialized_month {
-            sqlx::query(
-                r#"UPDATE recurring_transaction_rules
-                   SET last_materialized_month = $1, updated_at = now()
-                   WHERE id = $2"#,
-            )
-            .bind(cursor)
-            .bind(rule.id)
-            .execute(&mut *tx)
-            .await?;
-        }
+        materialized += materialize_rule(&mut tx, iid, user.id.0, rule, today).await?;
     }
 
     tx.commit().await?;

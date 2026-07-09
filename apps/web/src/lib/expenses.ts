@@ -305,6 +305,33 @@ export function significantDeltaTone(
 }
 
 /**
+ * Tendencia de un KPI de la banda de Movimientos: compara el PROMEDIO de la ventana con el
+ * PRESUPUESTO del mes (`delta = avg − budget`) para pintar bajo la cifra principal una flecha con su
+ * tono. Devuelve `null` (sin tendencia → slot reservado pero vacío) si no hay promedio (`!hasAvg`) o
+ * no hay presupuesto contra el que comparar (`budget <= 0`: comparar contra 0 no informa). Reutiliza
+ * `trendArrow`, así que la semántica del color es idéntica a la comparativa: gastar MENOS que el
+ * presupuesto o ingresar MÁS es favorable (`num-pos`); con `|Δ| <= threshold` la flecha es `flat`
+ * (glifo «=», tono neutro `""`). `avg`/`budget` en unidades de moneda.
+ */
+export function kpiBudgetTrend(
+  avg: number,
+  budget: number,
+  kind: "expense" | "income",
+  threshold: number,
+  hasAvg: boolean,
+): {
+  delta: number;
+  direction: "up" | "down" | "flat";
+  tone: "num-pos" | "num-neg" | "";
+} | null {
+  if (!hasAvg || budget <= 0) return null;
+  const delta = avg - budget;
+  const arrow = trendArrow(delta, kind, threshold, hasAvg);
+  // hasAvg es true aquí ⇒ trendArrow nunca devuelve direction null (defensivo: fallback a flat).
+  return { delta, direction: arrow.direction ?? "flat", tone: arrow.tone };
+}
+
+/**
  * Ventanas del promedio de la comparativa. `id` = valor del query `avg_window`; `pill` = etiqueta
  * del botón de la toolbar; `label` = etiqueta usada en cabeceras/sublines («Promedio {label}»).
  */
