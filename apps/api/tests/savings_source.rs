@@ -72,6 +72,24 @@ async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
     assert_eq!(r.status, http::StatusCode::CREATED, "budget: {r:?}");
 }
 
+/// Alta con recurrencia: crea la regla + su instancia de origen (y backfillea los meses intermedios
+/// hasta hoy dentro del propio commit del create). El origen y el backfill quedan con
+/// `recurring_rule_id NOT NULL` → son «pseudovacíos» a efectos del promedio.
+async fn recurring(
+    app: &TestApp,
+    cookie: &str,
+    date: &str,
+    concept: &str,
+    amount: &str,
+    kind: &str,
+    day_of_month: u32,
+) {
+    let body = json!({ "op_date": date, "concept": concept, "amount": amount, "kind": kind,
+                       "recurrence": { "day_of_month": day_of_month } });
+    let r = app.post_json_with_cookie("/v1/transactions", body, cookie).await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "recurring {concept}: {r:?}");
+}
+
 /// PATCH mode B (mínimo: solo `savings_source`; el resto de `FireSettings` cae al default de struct).
 async fn set_mode_b(app: &TestApp, cookie: &str) {
     let r = app
@@ -82,6 +100,18 @@ async fn set_mode_b(app: &TestApp, cookie: &str) {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "set mode B: {r:?}");
+}
+
+/// PATCH mode C (`budget_income_real_expense`): income del presupuesto + gasto real 12m.
+async fn set_mode_c(app: &TestApp, cookie: &str) {
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": { "savings_source": "budget_income_real_expense" } }),
+            cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "set mode C: {r:?}");
 }
 
 async fn projection_delta(app: &TestApp, cookie: &str, query: &str) -> f64 {
@@ -139,6 +169,31 @@ async fn patch_savings_source_transactions_avg_roundtrips() {
 }
 
 #[tokio::test]
+async fn patch_savings_source_budget_income_real_expense_roundtrips() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": { "savings_source": "budget_income_real_expense" } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    assert_eq!(
+        patched.json()["installation"]["fire_settings"]["savings_source"],
+        "budget_income_real_expense"
+    );
+
+    let got = app.get_with_cookie("/v1/installation", &owner.cookie).await;
+    assert_eq!(
+        got.json()["installation"]["fire_settings"]["savings_source"],
+        "budget_income_real_expense"
+    );
+}
+
+#[tokio::test]
 async fn patch_savings_source_unknown_returns_422() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
@@ -161,6 +216,13 @@ async fn patch_savings_source_unknown_returns_422() {
         body_text.contains("unknown variant") && body_text.contains("nope"),
         "cuerpo debe nombrar la variante desconocida: {body_text}"
     );
+    // El error debe listar las 3 variantes válidas (incluida la nueva de modo C).
+    for expected in ["budget", "transactions_avg", "budget_income_real_expense"] {
+        assert!(
+            body_text.contains(expected),
+            "el error debe listar la variante válida `{expected}`: {body_text}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -493,4 +555,221 @@ async fn assets_contribution_follows_savings_source_mode() {
         (contrib_a - contrib_b).abs() > 100.0,
         "GET /v1/assets debe seguir el modo: A={contrib_a}, B={contrib_b}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Ponderación sin meses pseudovacíos (solo-recurrentes) — Bloque 1
+// ---------------------------------------------------------------------------
+
+/// Un mes «pseudovacío» (solo instancias recurrentes, `recurring_rule_id NOT NULL`) queda excluido
+/// POR COMPLETO del promedio: ni denominador ni numerador. Aquí: 1 mes real (income manual 2000 en
+/// M-2) + 1 mes solo-recurrente (nómina recurrente 3000 en M-1) → months_with_data = 1, income_avg =
+/// 2000. (Antes del fix: months = 2, income_avg = (2000+3000)/2 = 2500.)
+#[tokio::test]
+async fn pseudo_empty_month_excluded_from_avg() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    // Presupuesto bien distinto (modo A = 8000 − 1000 = 7000) para ver que el modo B lo ignora.
+    budget(&app, &owner.cookie, &income_cat, "8000").await;
+    budget(&app, &owner.cookie, &expense_cat, "1000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y2, m2) = shift_month(today.year(), today.month(), -2); // mes real
+    let (y1, m1) = shift_month(today.year(), today.month(), -1); // mes solo-recurrente
+
+    // Mes real M-2: income manual 2000 (recurring_rule_id NULL).
+    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "Sueldo", "2000", "income", None, None).await;
+    // Mes solo-recurrente M-1: nómina recurrente 3000. El origen (día 1 de M-1) backfillea solo el
+    // mes en curso (fuera de ventana); NO toca M-2 (el backfill solo va hacia delante).
+    recurring(&app, &owner.cookie, &date_in(y1, m1, 1), "Nomina rec", "3000", "income", 1).await;
+
+    // Modo A (default) = presupuesto.
+    let delta_a = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_a, 7000.0);
+
+    // Modo B: solo M-2 es real → months_with_data = 1, income_avg = 2000, expense_avg = 0 → delta 2000.
+    set_mode_b(&app, &owner.cookie).await;
+    let delta_b = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_b, 2000.0);
+}
+
+/// Un mes real cuenta ENTERO, incluidas sus transacciones recurrentes: M-2 tiene income manual 2000 +
+/// nómina recurrente 3000 → income del mes = 5000; months_with_data = 1, income_avg = 5000.
+#[tokio::test]
+async fn real_month_counts_recurring_too() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "9000").await;
+    budget(&app, &owner.cookie, &expense_cat, "1000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y2, m2) = shift_month(today.year(), today.month(), -2);
+
+    // M-2 real: income manual 2000 + nómina recurrente 3000 (origen día 1 de M-2). El backfill crea
+    // instancias en M-1 (solo-recurrente, excluido) y en el mes en curso (fuera de ventana).
+    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "Sueldo", "2000", "income", None, None).await;
+    recurring(&app, &owner.cookie, &date_in(y2, m2, 1), "Nomina rec", "3000", "income", 1).await;
+
+    // Modo B: months_with_data = 1 (M-2), income_avg = (2000+3000)/1 = 5000 → delta 5000. Si la
+    // recurrente NO contase, income_avg sería 2000.
+    set_mode_b(&app, &owner.cookie).await;
+    let delta_b = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_b, 5000.0);
+}
+
+/// Caso motivador del backfill: si TODA la ventana son meses solo-recurrentes (0 meses reales) →
+/// months_with_data = 0 → fallback silencioso al presupuesto (modo A). Respuesta idéntica a A.
+#[tokio::test]
+async fn mode_b_all_pseudo_empty_falls_back_to_budget() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "1000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y3, m3) = shift_month(today.year(), today.month(), -3);
+
+    // Nómina recurrente con origen 3 meses atrás → backfillea M-3, M-2, M-1 (todos solo-recurrentes) +
+    // mes en curso. NINGÚN movimiento real en la ventana → months_with_data = 0.
+    recurring(&app, &owner.cookie, &date_in(y3, m3, 1), "Nomina rec", "3000", "income", 1).await;
+
+    // Modo A (default) = presupuesto 5000 − 1000 = 4000.
+    let delta_a = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_a, 4000.0);
+
+    // Modo B: 0 meses reales → fallback → idéntico a A (4000). Sin el fix serían 3 meses solo-
+    // recurrentes → income_avg = 3000 → delta 3000.
+    set_mode_b(&app, &owner.cookie).await;
+    let delta_b = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_b, 4000.0);
+    approx(delta_b, delta_a);
+}
+
+// ---------------------------------------------------------------------------
+// Modo C — income del presupuesto + gasto real 12m — Bloque 2
+// ---------------------------------------------------------------------------
+
+/// Modo C: la pendiente usa el income del PRESUPUESTO y el gasto REAL medio (mismo expense_eff que el
+/// modo B). Budget income 5000, expense 2000; real M-1: income 3000, expense 800 → delta = 5000 − 800
+/// = 4200. (Modo A daría 3000; modo B daría 3000 − 800 = 2200.)
+#[tokio::test]
+async fn mode_c_income_budget_expense_real() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "2000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None, None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Gasto", "-800", "expense", None, None).await;
+
+    // Modo A: 5000 − 2000 = 3000.
+    let delta_a = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_a, 3000.0);
+
+    // Modo C: income presupuesto 5000, expense real 800 → delta 4200.
+    set_mode_c(&app, &owner.cookie).await;
+    let delta_c = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_c, 4200.0);
+}
+
+/// Target FIRE modo C (annual_expense) usa `expense_eff` (gasto real) como base, igual que el modo B:
+/// expense_avg = 1000, sin liabilities → expense_eff = 1000 → target = (1000×12)/0.04 = 300000.
+#[tokio::test]
+async fn mode_c_target_annual_expense_uses_expense_eff() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    // Presupuesto presente (para que exista income de presupuesto) pero el target usa el gasto real.
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "9000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None, None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Gasto", "-1000", "expense", None, None).await;
+
+    // FIRE: annual_expense, SWR 4%, sin impuestos, modo C → target = (expense_eff 1000 ×12)/0.04.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": {
+                "fire_number_mode": "annual_expense",
+                "swr_pct": "4",
+                "taxes_enabled": false,
+                "tax_brackets": [],
+                "savings_source": "budget_income_real_expense"
+            } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+
+    let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
+    let target = parse_dec(&body["jubilacion_target_net_worth"]);
+    approx(target, 300_000.0);
+}
+
+/// Target FIRE modo C (current_income) usa el income del PRESUPUESTO, no el de las transacciones:
+/// budget income 5000 (aunque las txns midan 3000) → target = (5000×12)/0.04 = 1_500_000. Con el
+/// income de transacciones (modo B) saldría 900_000.
+#[tokio::test]
+async fn mode_c_target_current_income_uses_budget_income() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+
+    // Mes real (income 3000) → modo C activo; su income NO se usa para el target.
+    let today = server_today(&app, &owner.cookie).await;
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None, None).await;
+
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": {
+                "fire_number_mode": "current_income",
+                "swr_pct": "4",
+                "taxes_enabled": false,
+                "tax_brackets": [],
+                "savings_source": "budget_income_real_expense"
+            } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+
+    let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
+    let target = parse_dec(&body["jubilacion_target_net_worth"]);
+    approx(target, 1_500_000.0);
+}
+
+/// Modo C sin datos (`months_with_data == 0`) → fallback silencioso al presupuesto, como el modo B.
+#[tokio::test]
+async fn mode_c_zero_months_falls_back_to_budget() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "2000").await;
+
+    // Única transacción en el mes en curso (parcial) → fuera de ventana → months_with_data = 0.
+    let today = server_today(&app, &owner.cookie).await;
+    manual(&app, &owner.cookie, &date_in(today.year(), today.month(), 5), "Hoy", "9999", "income", None, None).await;
+
+    set_mode_c(&app, &owner.cookie).await;
+    let delta = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta, 3000.0); // presupuesto 5000 − 2000, sin tocar por la txn del mes parcial
 }

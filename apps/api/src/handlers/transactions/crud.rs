@@ -1,9 +1,10 @@
 //! Altas manuales, listado mensual, meses con datos, PATCH/DELETE de transacciones y gestión de
 //! lotes de import (`/v1/transactions`, `/months`, `/imports`, `/imports/{id}`).
 //!
-//! Cada mutación invalida la cache de proyección solo en modo `transactions_avg`
-//! (`invalidate_projection_if_transactions_avg`); en modo `budget` no hace nada. Ver el contrato en
-//! `transactions/mod.rs`.
+//! Cada mutación invalida la cache de proyección solo en los modos que usan transacciones
+//! (`transactions_avg` y `budget_income_real_expense`, vía
+//! `invalidate_projection_if_savings_uses_transactions`); en modo `budget` no hace nada. Ver el
+//! contrato en `transactions/mod.rs`.
 
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
@@ -18,7 +19,7 @@ use crate::handlers::transactions::schema::{
 use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::{
     assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
-    invalidate_projection_if_transactions_avg, next_fingerprint_ordinal, row_to_response, TxnRow,
+    invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal, row_to_response, TxnRow,
     TXN_SELECT,
 };
 use crate::state::AppState;
@@ -206,7 +207,7 @@ pub async fn create_transaction(
             .await?;
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
+    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     let resp = load_txn(&state.pool, id).await?;
     Ok((axum::http::StatusCode::CREATED, Json(resp)))
 }
@@ -290,7 +291,7 @@ pub async fn create_batch(
     }
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
+    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         out.push(load_txn(&state.pool, id).await?);
@@ -628,7 +629,7 @@ pub async fn patch_transaction(
     .await?;
     tx.commit().await?;
 
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
+    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     let resp = load_txn(&state.pool, id).await?;
     Ok(Json(resp))
 }
@@ -670,7 +671,7 @@ pub async fn delete_transaction(
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
+    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -789,6 +790,6 @@ pub async fn delete_import(
         return Err(ApiError::NotFound);
     }
     // El borrado del lote cascadea a sus transacciones → cambia el conjunto.
-    invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
+    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

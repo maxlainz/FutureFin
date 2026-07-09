@@ -288,8 +288,8 @@ pub async fn get_summary(
     let budget_totals =
         ledger_budget_totals_for_summary(&state.pool, iid, user.id.0, view, today).await?;
 
-    // Base presupuesto (modo A). El modo B con datos sustituye income/expense_reg/net por el
-    // promedio real 12m; runway y expense_total/derived NO cambian de base.
+    // Base presupuesto (modo A). Los modos B/C con datos sustituyen expense_reg/net por el promedio
+    // real 12m (y el modo B también el income); runway y expense_total/derived NO cambian de base.
     let mut income_m = budget_totals.income_monthly_equivalent;
     let mut expense_reg = budget_totals.expense_regular_monthly_equivalent;
     let expense_der = budget_totals.expense_derived_monthly_equivalent;
@@ -302,7 +302,8 @@ pub async fn get_summary(
 
     // Fuente del ahorro efectiva (helper compartido con las mutaciones de transacciones y el
     // engine): un único parser del JSONB `fire_settings` → `SavingsSource`.
-    if projection_savings_source(&state.pool, iid).await? == SavingsSource::TransactionsAvg {
+    let source = projection_savings_source(&state.pool, iid).await?;
+    if source.uses_transactions() {
         let avg = transactions_12m_avg(&state.pool, iid, user.id.0, view, today).await?;
         if avg.months_with_data > 0 {
             // Liabilities activas (por payment_end_date) con su cuota nominal mensual, con la MISMA
@@ -328,13 +329,17 @@ pub async fn get_summary(
                 .collect();
             let debt_service: Decimal = active.iter().map(|(_, q)| *q).sum();
             let (income_eff, expense_eff) = effective_avg_income_expense(&avg, &active);
-            income_m = income_eff;
+            // Modo B: income del promedio real. Modo C: income del presupuesto (NO se sobreescribe).
+            if source == SavingsSource::TransactionsAvg {
+                income_m = income_eff;
+            }
             expense_reg = expense_eff;
             // El `net` debe casar con modo A (`net_monthly_equivalent` de budget.rs incluye las
             // cuotas derivadas) y con la pendiente del chart (que resta el debt service). El KPI
             // `monthly_net_excluding_derived_debt` sigue siendo income − expense_reg (sin cuotas).
-            net_m = income_eff - expense_eff - debt_service;
-            effective_savings_source = SavingsSource::TransactionsAvg;
+            // Con `income_m` (income_eff en B, presupuesto en C) una sola línea sirve a ambos modos.
+            net_m = income_m - expense_eff - debt_service;
+            effective_savings_source = source;
             savings_source_months_with_data = avg.months_with_data;
         }
     }

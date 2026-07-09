@@ -25,6 +25,7 @@ import {
   isZeroMoneyMetric,
   parseDisplayDecimal,
 } from "../lib/format";
+import { savingsSourceUsesTransactions } from "../lib/fire";
 
 type LedgerPersonScope = "household" | "mine";
 
@@ -81,11 +82,11 @@ export function SummaryView({
 
   const fh = summary?.financial_health;
 
-  // Modo B (promedio): el ahorro y la tasa vienen ya en base promedio ponderado desde
-  // el servidor. En ese modo los paréntesis «sin deuda» pierden sentido (la base ya es
+  // Modos B y C (promedio): el ahorro y la tasa vienen ya en base promedio ponderado desde
+  // el servidor. En esos modos los paréntesis «sin deuda» pierden sentido (la base ya es
   // real) → los sustituimos por «promedio de N meses». En modo presupuesto: sin cambios.
   const isAvgMode =
-    showMetrics && summary?.savings_source === "transactions_avg";
+    showMetrics && savingsSourceUsesTransactions(summary?.savings_source);
   const avgMonths = summary?.savings_source_months_with_data ?? 0;
   const avgParenthetical = isAvgMode
     ? `promedio de ${avgMonths} ${avgMonths === 1 ? "mes" : "meses"}`
