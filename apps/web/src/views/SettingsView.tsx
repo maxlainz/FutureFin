@@ -25,6 +25,7 @@ import type { ThemePref } from "../lib/theme";
 import {
   DEFAULT_ES_TAX_BRACKETS_API,
   normalizeInstallationFireSettings,
+  parseSavingsSource,
 } from "../lib/fire";
 import {
   SETTINGS_SUBTAB_LABEL,
@@ -461,12 +462,7 @@ export function SettingsView({
                 onChange={(e) =>
                   setFireTaxDraft((p) => ({
                     ...p,
-                    savings_source:
-                      e.target.value === "transactions_avg"
-                        ? "transactions_avg"
-                        : e.target.value === "budget_income_real_expense"
-                          ? "budget_income_real_expense"
-                          : "budget",
+                    savings_source: parseSavingsSource(e.target.value),
                   }))
                 }
               >
