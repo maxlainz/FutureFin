@@ -464,12 +464,17 @@ export function SettingsView({
                     savings_source:
                       e.target.value === "transactions_avg"
                         ? "transactions_avg"
-                        : "budget",
+                        : e.target.value === "budget_income_real_expense"
+                          ? "budget_income_real_expense"
+                          : "budget",
                   }))
                 }
               >
                 <option value="budget">Presupuesto</option>
                 <option value="transactions_avg">Promedio 12 meses</option>
+                <option value="budget_income_real_expense">
+                  Ingresos de presupuesto + gasto real
+                </option>
               </select>
             </label>
             <div className="field" id="savings-source-help">
@@ -482,7 +487,17 @@ export function SettingsView({
                 <strong>Promedio 12 meses</strong>: el ahorro sale del promedio
                 ponderado de los últimos 12 meses de movimientos (denominador =
                 meses con datos), restando las cuotas de préstamos activos que
-                la simulación ya modela aparte. Sin datos, cae al presupuesto.
+                la simulación ya modela aparte. Los meses sin movimientos reales
+                (solo recurrentes) no cuentan en el promedio. Sin datos, cae al
+                presupuesto.
+              </small>
+              <small className="muted">
+                <strong>Ingresos de presupuesto + gasto real</strong>: la
+                simulación toma tus ingresos del presupuesto y el gasto medio
+                real de los últimos 12 meses (mismo promedio ponderado, restando
+                cuotas de préstamos activos). Útil si tu nómina es estable pero
+                quieres que el gasto refleje lo que gastas de verdad. Sin datos,
+                cae al presupuesto.
               </small>
               <small className="muted">
                 El Resumen, la proyección y el target FIRE siguen el modo

@@ -136,13 +136,20 @@ fn bucket_all(
 /// Promedio ponderado mensual de las transacciones de los 12 meses civiles COMPLETOS anteriores a
 /// hoy (ventana medio-abierta `[first_of_month(today) − 12m, first_of_month(today))`). A diferencia
 /// del summary de Movimientos, esta ventana **incluye** el último mes completo y excluye solo el mes
-/// en curso (parcial). Lo consume la proyección modo B (`savings_source = transactions_avg`).
+/// en curso (parcial). Lo consumen la proyección y `/v1/summary` en los modos que derivan el ahorro
+/// de las transacciones (`transactions_avg` y `budget_income_real_expense`).
 ///
 /// Signos (magnitudes ≥ 0, como en el summary): `income` guardado positivo → `income_avg`;
 /// `expense` guardado negativo → `expense_avg = −Σ`. `savings` y `kind NULL` NO cuentan para
-/// income/expense (pero un mes con solo transacciones de esos tipos SÍ suma a `months_with_data`,
-/// mismo criterio que el summary). Denominador = `months_with_data` (meses del tramo con ≥1
-/// transacción de cualquier kind); `0` real → todo a cero, el llamante decide el fallback.
+/// income/expense.
+///
+/// **Meses reales, no pseudovacíos**: a diferencia del summary de Movimientos, el denominador
+/// `months_with_data` cuenta solo los meses del tramo con ≥1 transacción **real** (`recurring_rule_id
+/// IS NULL`, cualquier kind, mismo scope). Un mes vacío o «pseudovacío» (solo instancias recurrentes
+/// materializadas, p. ej. tras un backfill) queda excluido POR COMPLETO del promedio — ni denominador
+/// ni numerador —; un mes real cuenta entero, incluidas sus transacciones recurrentes. Así un backfill
+/// de recurrentes no infraestima el gasto/ingreso medio. `0` meses reales → todo a cero, el llamante
+/// decide el fallback.
 pub(crate) struct TransactionsAvg {
     pub income_avg: Decimal,
     pub expense_avg: Decimal,
@@ -166,12 +173,14 @@ pub(crate) async fn transactions_12m_avg(
     let scope = view.scope_where("t");
     let arg = view.next_arg_index();
 
-    // `months_with_data`: meses distintos del tramo con ≥1 transacción de cualquier kind (incluye
-    // `savings` y `kind NULL`), mismo criterio que el summary.
+    // `months_with_data`: meses REALES distintos del tramo, i.e. con ≥1 transacción `recurring_rule_id
+    // IS NULL` (cualquier kind, incluidos `savings` y `kind NULL`). Los meses solo-recurrentes
+    // («pseudovacíos», p. ej. tras un backfill de recurrentes) no cuentan.
     let months_sql = format!(
         "SELECT COUNT(DISTINCT to_char(t.op_date, 'YYYY-MM'))::int
          FROM transactions t
-         WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}",
+         WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
+           AND t.recurring_rule_id IS NULL",
         end = arg + 1
     );
     let months_with_data: i32 = view
@@ -192,12 +201,21 @@ pub(crate) async fn transactions_12m_avg(
     }
     let denom = Decimal::from(months_with_data);
 
-    // Suma firmada por kind (solo income/expense).
+    // Suma firmada por kind (solo income/expense), restringida a los meses REALES (CTE `real_months`):
+    // un mes solo-recurrente no aporta ni al numerador ni al denominador. Los `${arg}`/`${end}` se
+    // reutilizan en la CTE y en la query principal (mismos binds `window_start`/`window_end`).
     let kind_sql = format!(
-        "SELECT t.kind AS kind, SUM(t.amount) AS total
+        "WITH real_months AS (
+             SELECT DISTINCT to_char(t.op_date, 'YYYY-MM') AS ym
+             FROM transactions t
+             WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
+               AND t.recurring_rule_id IS NULL
+         )
+         SELECT t.kind AS kind, SUM(t.amount) AS total
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.kind IN ('income', 'expense')
+           AND to_char(t.op_date, 'YYYY-MM') IN (SELECT ym FROM real_months)
          GROUP BY t.kind",
         end = arg + 1
     );
@@ -217,12 +235,20 @@ pub(crate) async fn transactions_12m_avg(
         }
     }
 
-    // Cuotas vinculadas: Σ de expense con `linked_liability_id`, por liability.
+    // Cuotas vinculadas: Σ de expense con `linked_liability_id`, por liability. Mismo filtro de meses
+    // reales que la suma por kind (denominador `months_with_data` consistente).
     let liab_sql = format!(
-        "SELECT t.linked_liability_id AS liability_id, SUM(t.amount) AS total
+        "WITH real_months AS (
+             SELECT DISTINCT to_char(t.op_date, 'YYYY-MM') AS ym
+             FROM transactions t
+             WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
+               AND t.recurring_rule_id IS NULL
+         )
+         SELECT t.linked_liability_id AS liability_id, SUM(t.amount) AS total
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.kind = 'expense' AND t.linked_liability_id IS NOT NULL
+           AND to_char(t.op_date, 'YYYY-MM') IN (SELECT ym FROM real_months)
          GROUP BY t.linked_liability_id",
         end = arg + 1
     );

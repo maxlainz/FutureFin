@@ -689,21 +689,23 @@ pub(crate) async fn build_installation_projection_input(
         .fetch_all(pool)
         .await?;
 
-    // Fuente del ahorro: presupuesto (modo A) vs promedio real 12m (modo B). El modo B con datos
-    // sustituye income/expense regulares por los promedios reales y anula `end_adj` (el gasto ya no
-    // viene del presupuesto). `months_with_data == 0` → fallback silencioso a modo A.
+    // Fuente del ahorro: presupuesto (modo A) vs modos que derivan de las transacciones (modo B
+    // `transactions_avg`, modo C `budget_income_real_expense`). Ambos toman el gasto del promedio real
+    // 12m (con resta híbrida de cuotas) y anulan `end_adj`; difieren solo en el income (B → promedio
+    // real; C → presupuesto). `months_with_data == 0` → fallback silencioso a modo A.
     let savings_source = fire_settings
         .map(|fs| fs.savings_source)
         .unwrap_or_default();
-    // Inputs regulares efectivos del mes 0. En modo A (`use_avg == false`) son EXACTAMENTE los
-    // escalares del presupuesto (income_reg, expense_reg); en modo B con datos, los promedios reales.
+    // Inputs regulares efectivos del mes 0. Con `expense_from_avg == false` (modo A o fallback) son
+    // EXACTAMENTE los escalares del presupuesto (income_reg, expense_reg); en modo B/C con datos, el
+    // gasto sale del promedio real (y en B también el income).
     struct EffectiveInputs {
         income: Decimal,
         expense: Decimal,
-        use_avg: bool,
+        expense_from_avg: bool,
     }
     let inputs: EffectiveInputs = match savings_source {
-        SavingsSource::TransactionsAvg => {
+        SavingsSource::TransactionsAvg | SavingsSource::BudgetIncomeRealExpense => {
             let avg = transactions_12m_avg(pool, iid, session_user_id, view, today).await?;
             if avg.months_with_data > 0 {
                 // Resta híbrida por liability activa: su avg real vinculado si existe, si no su
@@ -724,33 +726,39 @@ pub(crate) async fn build_installation_projection_input(
                     .collect();
                 let (income_eff, expense_eff) =
                     effective_avg_income_expense(&avg, &active_liabs);
+                // Modo C: income del presupuesto; modo B: income del promedio real.
+                let income = match savings_source {
+                    SavingsSource::BudgetIncomeRealExpense => income_reg,
+                    _ => income_eff,
+                };
                 EffectiveInputs {
-                    income: income_eff,
+                    income,
                     expense: expense_eff,
-                    use_avg: true,
+                    expense_from_avg: true,
                 }
             } else {
                 EffectiveInputs {
                     income: income_reg,
                     expense: expense_reg,
-                    use_avg: false,
+                    expense_from_avg: false,
                 }
             }
         }
         SavingsSource::Budget => EffectiveInputs {
             income: income_reg,
             expense: expense_reg,
-            use_avg: false,
+            expense_from_avg: false,
         },
     };
-    let use_avg = inputs.use_avg;
+    let expense_from_avg = inputs.expense_from_avg;
 
     let monthly_net_regular = inputs.income - inputs.expense;
 
-    // Base del FIRE number: income = income efectivo; expense = gasto efectivo en modo B (el gasto ya
-    // no es el del presupuesto), o `expense_retirement` en modo A (comportamiento histórico).
+    // Base del FIRE number: income = income efectivo (modo C → presupuesto; modo B → promedio real);
+    // expense = gasto efectivo en modo B/C (el gasto ya no es el del presupuesto), o
+    // `expense_retirement` en modo A (comportamiento histórico).
     let fire_target_base = fire_settings.and_then(|fs| {
-        let fire_expense = if inputs.use_avg {
+        let fire_expense = if inputs.expense_from_avg {
             inputs.expense
         } else {
             expense_retirement
@@ -801,9 +809,9 @@ pub(crate) async fn build_installation_projection_input(
 
     let flow_adj =
         planning_monthly_cash_adjustments_from_flows(today, horizon_months, &planning_rows);
-    // Modo B con datos: el gasto ya no viene del presupuesto → los ajustes por end-date de partidas
+    // Modo B/C con datos: el gasto ya no viene del presupuesto → los ajustes por end-date de partidas
     // de presupuesto se anulan (los `planning_flows` son ortogonales y se mantienen).
-    let end_adj = if use_avg {
+    let end_adj = if expense_from_avg {
         vec![Decimal::ZERO; horizon_months as usize]
     } else {
         expense_end_date_monthly_adjustments(today, horizon_months, &expense_end_entries)

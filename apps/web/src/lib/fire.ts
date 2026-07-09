@@ -84,11 +84,24 @@ export function normalizeInstallationFireSettings(
         : base.tax_brackets,
     savings_source: ((): SavingsSourceApi => {
       const s = raw.savings_source;
-      return s === "transactions_avg" || s === "budget"
+      return s === "transactions_avg" ||
+        s === "budget" ||
+        s === "budget_income_real_expense"
         ? s
         : base.savings_source ?? "budget";
     })(),
   };
+}
+
+/**
+ * ¿La fuente del ahorro usa el promedio de transacciones? True para el modo B
+ * (`transactions_avg`) y el modo C (`budget_income_real_expense`), que comparten el mismo
+ * promedio real de gasto de 12 meses. False para `budget` (modo A) y para valores ausentes.
+ * Punto único de gate en cliente para: parenthetical de Resumen, preview del target y fetch
+ * de `/v1/summary` en RetirementView.
+ */
+export function savingsSourceUsesTransactions(s?: SavingsSourceApi): boolean {
+  return s === "transactions_avg" || s === "budget_income_real_expense";
 }
 
 export function taxOnGrossCapitalAnnual(

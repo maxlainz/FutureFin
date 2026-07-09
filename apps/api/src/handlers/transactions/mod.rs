@@ -10,13 +10,14 @@
 //! mutaciones **no invalidan** la cache de proyección: invalidar solo tiraría una entrada caliente
 //! sin cambiar ni un número.
 //!
-//! En cambio, cuando la instalación está en `savings_source = transactions_avg` (modo B) la
-//! proyección deriva el ahorro mensual del promedio real 12m → las transacciones **SÍ son inputs
-//! del engine**, así que toda mutación que cambie el conjunto de transacciones **debe invalidar** la
-//! cache. Ese gating vive en `invalidate_projection_if_transactions_avg` (abajo) y lo llaman las
-//! mutaciones de `crud.rs`/`import.rs`/`recurring.rs` tras commitear. `rules.rs`, los previews y el
-//! borrado de una regla recurrente (sus instancias sobreviven, el conjunto no cambia) **nunca**
-//! invalidan. Regresión de ambos casos: `transactions_projection_cache.rs`.
+//! En cambio, en los modos que **usan transacciones** (`transactions_avg`, modo B; y
+//! `budget_income_real_expense`, modo C) la proyección deriva el gasto (y en B también el income) del
+//! promedio real 12m → las transacciones **SÍ son inputs del engine**, así que toda mutación que
+//! cambie el conjunto de transacciones **debe invalidar** la cache. Ese gating vive en
+//! `invalidate_projection_if_savings_uses_transactions` (abajo, sobre `SavingsSource::uses_transactions`)
+//! y lo llaman las mutaciones de `crud.rs`/`import.rs`/`recurring.rs` tras commitear. `rules.rs`, los
+//! previews y el borrado de una regla recurrente (sus instancias sobreviven, el conjunto no cambia)
+//! **nunca** invalidan. Regresión de ambos casos: `transactions_projection_cache.rs`.
 
 pub mod crud;
 pub mod csv_presets;
@@ -27,7 +28,7 @@ pub mod schema;
 pub mod summary;
 
 use crate::error::ApiError;
-use crate::handlers::installation::{projection_savings_source, SavingsSource};
+use crate::handlers::installation::projection_savings_source;
 use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
@@ -222,8 +223,9 @@ pub async fn next_fingerprint_ordinal(
     Ok(next)
 }
 
-/// Invalida la cache de proyección tras una mutación de transacciones **solo si** la instalación
-/// está en modo `transactions_avg` (entonces las transacciones son inputs del engine). En modo
+/// Invalida la cache de proyección tras una mutación de transacciones **solo si** la instalación está
+/// en un modo que usa transacciones (`transactions_avg` o `budget_income_real_expense` →
+/// `SavingsSource::uses_transactions`); entonces las transacciones son inputs del engine. En modo
 /// `budget` no hace nada (contrato histórico: las transacciones no tocan la proyección). Llamar tras
 /// commitear la mutación con éxito. La invalidación real corre en background (`tokio::spawn`).
 ///
@@ -231,13 +233,13 @@ pub async fn next_fingerprint_ordinal(
 /// SELECT de `savings_source` NO debe convertir una mutación exitosa en un 5xx: el cliente reintentaría
 /// y duplicaría la transacción (el `fingerprint_ordinal` no lo impide). Por eso nunca propaga: un fallo
 /// solo se registra y la cache caliente queda como estaba (la sirve el TTL / el próximo warm-up).
-pub(crate) async fn invalidate_projection_if_transactions_avg(
+pub(crate) async fn invalidate_projection_if_savings_uses_transactions(
     state: &Arc<AppState>,
     iid: Uuid,
     user_id: Uuid,
 ) {
     match projection_savings_source(&state.pool, iid).await {
-        Ok(SavingsSource::TransactionsAvg) => {
+        Ok(s) if s.uses_transactions() => {
             refresh_projection_after_mutation(state.clone(), iid, user_id)
         }
         Ok(_) => {}

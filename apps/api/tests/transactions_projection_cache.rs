@@ -343,3 +343,35 @@ async fn flipping_savings_source_invalidates_projection_cache() {
     set_mode(&app, &owner.cookie, "budget").await;
     assert_invalidated(&app, &key, "flip B→A").await;
 }
+
+// ---------------------------------------------------------------------------
+// Modo C (`budget_income_real_expense`): también usa transacciones → invalida (paridad con B)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mode_c_mutation_invalidates_projection_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    set_mode(&app, &owner.cookie, "budget_income_real_expense").await;
+
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+
+    warm(&app, &owner.cookie, &key).await;
+    let created = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-05-10", "concept": "Manual", "amount": "-25", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED);
+    assert_invalidated(&app, &key, "modo C create").await;
+}
