@@ -8,6 +8,7 @@ export function MetricCard({
   value,
   suffix,
   parenthetical,
+  trend,
   action,
   tone = "default",
 }: {
@@ -16,6 +17,11 @@ export function MetricCard({
   suffix?: string;
   /** Detalle del mismo KPI entre paréntesis (`.metric-value-parenthetical`). */
   parenthetical?: string;
+  /**
+   * Contenido de tendencia (flecha + delta) que ocupa el MISMO slot reservado que el paréntesis
+   * (baseline intacta). Si se pasa, tiene prioridad sobre `parenthetical`.
+   */
+  trend?: ReactNode;
   /** Botón/icono opcional en la esquina superior derecha (p.ej. engranaje de config). */
   action?: ReactNode;
   /** Variante visual: hero (acento más marcado), accent / accent-2 (tinte suave). */
@@ -30,6 +36,8 @@ export function MetricCard({
           ? " metric-card--accent-2"
           : "";
   const showParen = parenthetical != null && parenthetical !== "";
+  const hasTrend = trend != null && trend !== false;
+  const slotFilled = hasTrend || showParen;
   return (
     <article className={`metric-card${toneClass}`}>
       <div className="metric-card__header">
@@ -45,9 +53,9 @@ export function MetricCard({
       {/* Reservar siempre el slot del paréntesis para alinear KPIs en fila. */}
       <div
         className="metric-value-parenthetical"
-        aria-hidden={showParen ? undefined : true}
+        aria-hidden={slotFilled ? undefined : true}
       >
-        {showParen ? `(${parenthetical})` : " "}
+        {hasTrend ? trend : showParen ? `(${parenthetical})` : " "}
       </div>
     </article>
   );

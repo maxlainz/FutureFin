@@ -49,15 +49,10 @@ import {
   RowTrashIcon,
   UploadIcon,
 } from "../components/icons";
-import {
-  CategoryComparisonBars,
-  MonthlyCashflowBars,
-  type ComparisonBarRow,
-} from "../components/charts/CategoryComparisonBars";
+import { MonthlyCashflowBars } from "../components/charts/CategoryComparisonBars";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
-  formatCurrencyOrDash,
   formatPercentDisplay,
   parseDisplayDecimal,
 } from "../lib/format";
@@ -74,6 +69,7 @@ import {
   defaultSelectedMonth,
   formatDeltaCurrency,
   groupTransactionsByCategory,
+  kpiBudgetTrend,
   monthLabelEs,
   naturalSortDir,
   parseMonth,
@@ -419,14 +415,7 @@ export function GastosView({
   const monthsWithData = summary?.months_with_data ?? 0;
   const hasAvg = monthsWithData > 0;
   const threshold = summary ? significanceThreshold(summary.totals) : 0;
-
-  const savingsRate = useMemo(() => {
-    if (!totals) return null;
-    const inc = parseDisplayDecimal(totals.income_actual) ?? 0;
-    const sav = parseDisplayDecimal(totals.savings_actual) ?? 0;
-    if (inc <= 0) return null;
-    return (sav / inc) * 100;
-  }, [totals]);
+  const avgLabel = avgWindowLabel(avgWindow);
 
   const savingsRateAvg = useMemo(() => {
     if (!totals) return null;
@@ -435,20 +424,6 @@ export function GastosView({
     if (inc <= 0) return null;
     return (sav / inc) * 100;
   }, [totals]);
-
-  const comparisonBarRows: ComparisonBarRow[] = useMemo(() => {
-    if (!summary) return [];
-    return summary.expense_categories
-      .map((l) => ({
-        key: l.category_id ?? "uncategorized",
-        label: l.category_name,
-        actual: parseDisplayDecimal(l.actual) ?? 0,
-        budget: parseDisplayDecimal(l.budget) ?? 0,
-        avg: parseDisplayDecimal(l.avg) ?? 0,
-      }))
-      // Real ya no se pinta como barra → una fila solo aporta si tiene budget o promedio.
-      .filter((r) => r.budget > 0 || r.avg > 0);
-  }, [summary]);
 
   const noCategories =
     incomeCategories.length === 0 && expenseCategories.length === 0;
@@ -515,6 +490,45 @@ export function GastosView({
         ) : arrow.direction === "flat" ? (
           <EqualsIcon />
         ) : null}
+      </span>
+    );
+  }
+
+  /**
+   * Tendencia «promedio vs presupuesto» bajo la cifra principal de un KPI (solo Gastos e Ingresos).
+   * Ocupa el slot reservado del paréntesis de MetricCard. `undefined` (sin tendencia → slot vacío) si
+   * no hay promedio o no hay presupuesto contra el que comparar. La flecha y la cifra delta comparten
+   * tono (num-pos/num-neg); «vs presupuesto» hereda muted.
+   */
+  function renderKpiTrend(
+    avg: string,
+    budget: string,
+    kind: "expense" | "income",
+  ): ReactNode {
+    const t = kpiBudgetTrend(
+      parseDisplayDecimal(avg) ?? 0,
+      parseDisplayDecimal(budget) ?? 0,
+      kind,
+      threshold,
+      hasAvg,
+    );
+    if (!t) return undefined;
+    const colorClass = t.direction === "flat" ? "" : t.tone;
+    return (
+      <span className="metric-trend">
+        <span className={`metric-trend-arrow ${colorClass}`} aria-hidden>
+          {t.direction === "up" ? (
+            <ArrowUpIcon />
+          ) : t.direction === "down" ? (
+            <ArrowDownIcon />
+          ) : (
+            <EqualsIcon />
+          )}
+        </span>
+        <span className={colorClass}>
+          {formatDeltaCurrency(t.delta, currencyIso)}
+        </span>{" "}
+        vs presupuesto
       </span>
     );
   }
@@ -852,48 +866,46 @@ export function GastosView({
             aria-label="Resumen del mes"
           >
             <MetricCard
-              label="Gastos"
+              label={`Gasto promedio (${avgLabel})`}
               value={
-                totals ? formatCurrencyOrDash(totals.expense_actual, currencyIso) : METRIC_DASH
+                totals && hasAvg
+                  ? formatCurrencyAmount(totals.expense_avg, currencyIso)
+                  : METRIC_DASH
               }
-              parenthetical={
+              trend={
                 totals
-                  ? `media ${hasAvg ? formatCurrencyAmount(totals.expense_avg, currencyIso) : METRIC_DASH}`
+                  ? renderKpiTrend(totals.expense_avg, totals.expense_budget, "expense")
                   : undefined
               }
             />
             <MetricCard
-              label="Ingresos"
+              label={`Ingreso promedio (${avgLabel})`}
               value={
-                totals ? formatCurrencyOrDash(totals.income_actual, currencyIso) : METRIC_DASH
+                totals && hasAvg
+                  ? formatCurrencyAmount(totals.income_avg, currencyIso)
+                  : METRIC_DASH
               }
-              parenthetical={
+              trend={
                 totals
-                  ? `media ${hasAvg ? formatCurrencyAmount(totals.income_avg, currencyIso) : METRIC_DASH}`
+                  ? renderKpiTrend(totals.income_avg, totals.income_budget, "income")
                   : undefined
               }
             />
             <MetricCard
-              label="Ahorro/Inversión"
+              label={`Ahorro promedio (${avgLabel})`}
               value={
-                totals ? formatCurrencyOrDash(totals.savings_actual, currencyIso) : METRIC_DASH
-              }
-              parenthetical={
-                totals
-                  ? `media ${hasAvg ? formatCurrencyAmount(totals.savings_avg, currencyIso) : METRIC_DASH}`
-                  : undefined
+                totals && hasAvg
+                  ? formatCurrencyAmount(totals.savings_avg, currencyIso)
+                  : METRIC_DASH
               }
               tone="accent-2"
             />
             <MetricCard
-              label="Tasa de ahorro"
-              value={savingsRate !== null ? formatPercentDisplay(savingsRate) : METRIC_DASH}
-              parenthetical={
-                !hasAvg
-                  ? `media ${METRIC_DASH}`
-                  : savingsRateAvg !== null
-                    ? `media ${formatPercentDisplay(savingsRateAvg)}`
-                    : "vs media"
+              label={`Tasa de ahorro (${avgLabel})`}
+              value={
+                savingsRateAvg !== null
+                  ? formatPercentDisplay(savingsRateAvg)
+                  : METRIC_DASH
               }
               tone="accent"
             />
@@ -1072,12 +1084,6 @@ export function GastosView({
                         )}
                       </div>
                     </div>
-                    <CategoryComparisonBars
-                      rows={comparisonBarRows}
-                      currencyIso={currencyIso}
-                      avgLabel={avgWindowLabel(avgWindow)}
-                      hasAvg={hasAvg}
-                    />
                   </>
                 )}
               </section>
@@ -1412,24 +1418,24 @@ function EditTransactionModal({
     if (!target) return;
     setFormError(null);
     const patch: PatchTransactionRequest = { kind };
-    if (isManual) {
-      if (!opDate.trim()) {
-        setFormError("Indica una fecha.");
-        return;
-      }
-      if (!concept.trim()) {
-        setFormError("Indica un concepto.");
-        return;
-      }
-      const parsed = parseDisplayDecimal(amount);
-      if (parsed === null || parsed === 0) {
-        setFormError("Indica un importe distinto de 0.");
-        return;
-      }
-      patch.op_date = opDate;
-      patch.concept = concept.trim();
-      patch.amount = amount.trim().replace(",", ".");
+    // Fecha/concepto/importe son editables también en importadas: el backend conserva la huella
+    // original del CSV, así que reubicar una nómina o corregir un importe no rompe el dedup.
+    if (!opDate.trim()) {
+      setFormError("Indica una fecha.");
+      return;
     }
+    if (!concept.trim()) {
+      setFormError("Indica un concepto.");
+      return;
+    }
+    const parsed = parseDisplayDecimal(amount);
+    if (parsed === null || parsed === 0) {
+      setFormError("Indica un importe distinto de 0.");
+      return;
+    }
+    patch.op_date = opDate;
+    patch.concept = concept.trim();
+    patch.amount = amount.trim().replace(",", ".");
     if (kind === "savings" || !categoryId) patch.clear_category = true;
     else patch.category_id = categoryId;
     if (valueDate.trim()) patch.value_date = valueDate;
@@ -1462,7 +1468,8 @@ function EditTransactionModal({
         <ModalFormError message={formError} />
         {!isManual ? (
           <p className="muted tight">
-            Movimiento importado: fecha, concepto e importe no se pueden editar.
+            Movimiento importado: editarlo no afecta a la detección de duplicados
+            del CSV (la huella original se conserva).
           </p>
         ) : null}
         <div className="asset-form-grid">
@@ -1471,7 +1478,6 @@ function EditTransactionModal({
             <input
               type="date"
               value={opDate}
-              disabled={!isManual}
               onChange={(e) => setOpDate(e.target.value)}
             />
           </label>
@@ -1489,7 +1495,6 @@ function EditTransactionModal({
               value={amount}
               inputMode="decimal"
               autoComplete="off"
-              disabled={!isManual}
               onChange={(e) => setAmount(e.target.value)}
             />
           </label>
@@ -1500,7 +1505,6 @@ function EditTransactionModal({
             value={concept}
             maxLength={500}
             autoComplete="off"
-            disabled={!isManual}
             onChange={(e) => setConcept(e.target.value)}
           />
         </label>

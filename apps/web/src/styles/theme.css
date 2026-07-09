@@ -91,10 +91,6 @@
   --proj-area-9: #ca8a04;
   --proj-area-10: #475569;
 
-  /* Comparativa de gastos (pestaña «Movimientos»): barra «Promedio». Budget usa
-     --ff-accent; este es el gris medio del promedio. */
-  --exp-average: #71717a; /* zinc-500 */
-
   /* Cash-flow mensual (MonthlyCashflowBars): ingresos en verde, gastos en
      rojo-terroso, ahorro = acento. El verde/rojo aquí son colores FUNCIONALES
      del gráfico (única zona donde se aceptan varios colores), no chrome. */
@@ -162,9 +158,6 @@
   --proj-area-8: #f0abfc;  /* magenta claro */
   --proj-area-9: #fde047;  /* ámbar claro */
   --proj-area-10: #cbd5e1; /* gris claro */
-
-  /* Promedio de la comparativa, aclarado para contraste sobre zinc-900. */
-  --exp-average: #a1a1aa; /* zinc-400 */
 
   /* Cash-flow mensual, aclarado para contraste sobre zinc-900. */
   --cf-income: oklch(0.72 0.10 165);

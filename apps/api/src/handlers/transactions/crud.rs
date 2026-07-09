@@ -160,25 +160,29 @@ pub async fn create_transaction(
         Some(rec) => Some(recurring::resolve_rule_day(rec, body.op_date)?),
         None => None,
     };
+    // "Hoy" de la instalación para el backfill de meses intermedios (solo si hay recurrencia).
+    let today = match recurrence_day {
+        Some(_) => Some(installation_naive_today(&state.pool, iid).await?),
+        None => None,
+    };
 
     let mut tx = state.pool.begin().await?;
     let ordinal = next_fingerprint_ordinal(&mut tx, iid, user.id.0, &prepared.fingerprint).await?;
     // Si hay recurrencia, primero se crea la regla-plantilla; la transacción de origen queda enlazada.
+    let cursor = recurring::month_start_of(body.op_date);
     let rule_id = match recurrence_day {
-        Some(day) => Some(
-            recurring::insert_rule(
-                &mut tx,
-                iid,
-                user.id.0,
-                &prepared,
-                day,
-                recurring::month_start_of(body.op_date),
-            )
-            .await?,
-        ),
+        Some(day) => {
+            Some(recurring::insert_rule(&mut tx, iid, user.id.0, &prepared, day, cursor).await?)
+        }
         None => None,
     };
     let id = insert_manual(&mut tx, iid, user.id.0, &prepared, ordinal, rule_id).await?;
+    // Backfill: un alta con fecha pasada deja creadas TODAS las instancias intermedias hasta hoy en
+    // el mismo commit (antes solo aparecían cuando el frontend llamaba a materialize al montar).
+    if let (Some(rule_id), Some(day), Some(today)) = (rule_id, recurrence_day, today) {
+        recurring::backfill_new_rule(&mut tx, iid, user.id.0, rule_id, &prepared, day, cursor, today)
+            .await?;
+    }
     tx.commit().await?;
 
     invalidate_projection_if_transactions_avg(&state, iid, user.id.0).await;
@@ -228,6 +232,12 @@ pub async fn create_batch(
     for b in &body.transactions {
         prepared.push(validate_manual(&state.pool, iid, b).await?);
     }
+    // "Hoy" de la instalación para el backfill (solo si algún ítem trae recurrencia).
+    let today = if body.transactions.iter().any(|b| b.recurrence.is_some()) {
+        Some(installation_naive_today(&state.pool, iid).await?)
+    } else {
+        None
+    };
 
     let mut tx = state.pool.begin().await?;
     // Contador de ordinal por huella dentro del batch (arranca en el MAX+1 de la BD).
@@ -239,24 +249,21 @@ pub async fn create_batch(
             Some(&o) => o,
             None => next_fingerprint_ordinal(&mut tx, iid, user.id.0, &p.fingerprint).await?,
         };
-        let rule_id = match &b.recurrence {
+        let cursor = recurring::month_start_of(b.op_date);
+        let rule = match &b.recurrence {
             Some(rec) => {
                 let day = recurring::resolve_rule_day(rec, b.op_date)?;
-                Some(
-                    recurring::insert_rule(
-                        &mut tx,
-                        iid,
-                        user.id.0,
-                        p,
-                        day,
-                        recurring::month_start_of(b.op_date),
-                    )
-                    .await?,
-                )
+                let rid = recurring::insert_rule(&mut tx, iid, user.id.0, p, day, cursor).await?;
+                Some((rid, day))
             }
             None => None,
         };
-        let id = insert_manual(&mut tx, iid, user.id.0, p, ord, rule_id).await?;
+        let id = insert_manual(&mut tx, iid, user.id.0, p, ord, rule.map(|(rid, _)| rid)).await?;
+        // Backfill por ítem: un alta con fecha pasada deja creadas las instancias intermedias.
+        if let Some((rid, day)) = rule {
+            let today = today.expect("today computed when any recurrence present");
+            recurring::backfill_new_rule(&mut tx, iid, user.id.0, rid, p, day, cursor, today).await?;
+        }
         next_ord.insert(p.fingerprint.clone(), ord + 1);
         ids.push(id);
     }
@@ -463,7 +470,7 @@ struct TxnCore {
     params(("id" = Uuid, Path, description = "Transaction id")),
     responses(
         (status = 200, description = "Transacción actualizada", body = TransactionResponse),
-        (status = 400, description = "Validación / campo inmutable en importadas"),
+        (status = 400, description = "Validación"),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
         (status = 404, description = "Transacción inexistente o de otro usuario"),
@@ -497,15 +504,11 @@ pub async fn patch_transaction(
         return Err(ApiError::NotFound);
     };
 
+    // op_date/amount/concept son editables tanto en manuales como en importadas. La diferencia está
+    // en la huella de dedup (ver más abajo): en manuales se recomputa; en importadas queda anclada a
+    // la del CSV original, para que un re-import del mismo archivo siga detectando el duplicado
+    // aunque el usuario haya reubicado la fecha o corregido el importe/concepto.
     let is_imported = current.import_id.is_some();
-    // En importadas, op_date/amount/concept son inmutables (protegen la huella).
-    if is_imported
-        && (body.op_date.is_some() || body.amount.is_some() || body.concept.is_some())
-    {
-        return Err(ApiError::BadRequest(
-            "immutable_field: op_date/amount/concept are immutable on imported transactions (delete + re-add manually to change them)".into(),
-        ));
-    }
 
     let new_op_date = body.op_date.unwrap_or(current.op_date);
     let new_amount = body.amount.map(|a| a.round_dp(4)).unwrap_or(current.amount);
@@ -563,7 +566,9 @@ pub async fn patch_transaction(
     assert_asset_in_installation(&state.pool, iid, new_linked_asset).await?;
     assert_liability_in_installation(&state.pool, iid, new_linked_liability).await?;
 
-    // Huella: solo se recomputa en manuales cuando cambian op_date/amount/concept.
+    // Huella: en manuales se recomputa cuando cambian op_date/amount/concept (y toma un ordinal
+    // libre); en importadas NUNCA se recomputa → queda anclada a la del CSV original para que el
+    // dedup del re-import siga funcionando pese a la edición.
     let mut tx = state.pool.begin().await?;
     let (new_fp, new_ordinal) = if !is_imported {
         let fp = compute_fingerprint(&current.source, new_op_date, new_amount, &new_concept);

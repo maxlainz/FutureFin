@@ -155,35 +155,109 @@ async fn zero_amount_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// PATCH: inmutabilidad en importadas, mutabilidad + recompute en manuales
+// PATCH: importadas editables (huella anclada al CSV), manuales recomputan la huella
 // ---------------------------------------------------------------------------
 
+/// Total `expense_actual` (magnitud) del summary de un mes concreto.
+async fn month_expense_actual(app: &TestApp, cookie: &str, year: i32, month: u32) -> f64 {
+    let s = app
+        .get_with_cookie(&format!("/v1/transactions/summary?year={year}&month={month}"), cookie)
+        .await;
+    s.json()["totals"]["expense_actual"].as_str().unwrap().parse::<f64>().unwrap()
+}
+
 #[tokio::test]
-async fn patch_imported_op_date_is_immutable() {
+async fn patch_imported_fields_editable_fingerprint_anchored() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
+    // Importada: 15/06/2026, -9, "TIENDA IMPORTADA".
     let id = import_one_expense(&app, &owner.cookie).await;
 
-    // Cambiar kind/categoría/notas → OK.
-    let ok = app
+    // Editar los 3 campos que antes eran inmutables: fecha (a otro mes), importe y concepto.
+    let patched = app
         .patch_json_with_cookie(
             &format!("/v1/transactions/{id}"),
-            json!({ "kind": "expense", "notes": "revisado" }),
+            json!({ "op_date": "2026-05-20", "amount": "-15", "concept": "TIENDA MOVIDA" }),
             &owner.cookie,
         )
         .await;
-    assert_eq!(ok.status, http::StatusCode::OK, "patch kind/notes: {ok:?}");
+    assert_eq!(patched.status, http::StatusCode::OK, "patch importada: {patched:?}");
+    let pb = patched.json();
+    assert_eq!(pb["op_date"], "2026-05-20");
+    assert_eq!(pb["concept"], "TIENDA MOVIDA");
+    assert_eq!(pb["amount"].as_str().unwrap().parse::<f64>().unwrap(), -15.0);
+    assert!(pb["import_id"].is_string(), "sigue siendo importada");
 
-    // Cambiar op_date en una importada → 400 immutable_field.
-    let bad = app
-        .patch_json_with_cookie(
-            &format!("/v1/transactions/{id}"),
-            json!({ "op_date": "2020-01-01" }),
+    // El summary re-agrega por la NUEVA fecha: mayo la incluye, junio ya no.
+    assert_eq!(month_expense_actual(&app, &owner.cookie, 2026, 5).await, 15.0, "mayo incluye la movida");
+    assert_eq!(month_expense_actual(&app, &owner.cookie, 2026, 6).await, 0.0, "junio ya no la tiene");
+
+    // La huella queda anclada al CSV original → re-importar el MISMO archivo la omite por dedup
+    // (pese a que la fila fue reubicada de fecha y editada en importe/concepto).
+    let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+               15/06/2026;15/06/2026;TIENDA IMPORTADA;-9;EUR\n";
+    let b64 = B64.encode(csv);
+    let p = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/preview",
+            json!({ "source": "myinvestor", "file_b64": b64 }),
             &owner.cookie,
         )
         .await;
-    assert_eq!(bad.status, http::StatusCode::BAD_REQUEST);
-    assert!(bad.json()["message"].as_str().unwrap().contains("immutable_field"));
+    let pj = p.json();
+    assert_eq!(pj["already_imported_count"].as_u64(), Some(1), "dedup detecta la huella anclada");
+    let sha = pj["file_sha256"].as_str().unwrap();
+    let c = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/confirm",
+            json!({
+                "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
+                "decisions": [ { "kind": "expense" } ], "learn_rules": false,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(c.status, http::StatusCode::OK, "re-import: {c:?}");
+    let cb = c.json();
+    assert!(cb["skipped_already_imported"].as_u64().unwrap() >= 1, "re-import omitido por dedup: {cb:?}");
+    assert_eq!(cb["imported"].as_u64(), Some(0), "no se importa nada nuevo");
+    // Sigue habiendo una única fila (no se duplicó).
+    assert_eq!(app.count_rows("transactions").await, 1, "sin duplicar la fila anclada");
+}
+
+#[tokio::test]
+async fn patch_manual_op_date_recomputes_and_allows_reuse() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // Manual: 2026-06-10, "Café", -5.
+    let created = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "Café", "amount": "-5", "kind": "expense" }),
+    )
+    .await;
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    // Cambiar la fecha → recomputa la huella (source=manual, op_date nueva) y libera la vieja.
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "op_date": "2026-06-11" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "patch op_date manual: {patched:?}");
+    assert_eq!(patched.json()["op_date"], "2026-06-11");
+
+    // La huella original (op_date 2026-06-10) quedó libre → crear un manual idéntico con la fecha
+    // original no colisiona (201).
+    let again = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "Café", "amount": "-5", "kind": "expense" }),
+    )
+    .await;
+    assert_eq!(again.status, http::StatusCode::CREATED, "reuse freed fingerprint: {again:?}");
 }
 
 #[tokio::test]
