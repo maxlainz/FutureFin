@@ -86,6 +86,23 @@ import { ImportWizardModal } from "./ImportWizardModal";
 import { ManualCashEntryModal } from "./ManualCashEntryModal";
 import { RecurringRulesModal } from "./RecurringRulesModal";
 
+/** Glifo de dirección de tendencia (compartido por la tabla y las KPIs). `null`/`undefined` → sin
+ * glifo (no hay datos ≠ sin cambio). */
+function trendGlyph(
+  direction: "up" | "down" | "flat" | null | undefined,
+): ReactNode {
+  switch (direction) {
+    case "up":
+      return <ArrowUpIcon />;
+    case "down":
+      return <ArrowDownIcon />;
+    case "flat":
+      return <EqualsIcon />;
+    default:
+      return null;
+  }
+}
+
 export function GastosView({
   installation,
   hasMembership,
@@ -483,13 +500,7 @@ export function GastosView({
         title={arrow.direction ? "Real vs promedio" : undefined}
         aria-hidden={arrow.direction ? undefined : true}
       >
-        {arrow.direction === "up" ? (
-          <ArrowUpIcon />
-        ) : arrow.direction === "down" ? (
-          <ArrowDownIcon />
-        ) : arrow.direction === "flat" ? (
-          <EqualsIcon />
-        ) : null}
+        {trendGlyph(arrow.direction)}
       </span>
     );
   }
@@ -514,21 +525,17 @@ export function GastosView({
     );
     if (!t) return undefined;
     const colorClass = t.direction === "flat" ? "" : t.tone;
+    // Orden fijo: flecha + delta (nunca truncados) y «vs presupuesto» al final con ellipsis si
+    // la tarjeta es estrecha, para no romper la altura de una línea de la banda KPI.
     return (
       <span className="metric-trend">
         <span className={`metric-trend-arrow ${colorClass}`} aria-hidden>
-          {t.direction === "up" ? (
-            <ArrowUpIcon />
-          ) : t.direction === "down" ? (
-            <ArrowDownIcon />
-          ) : (
-            <EqualsIcon />
-          )}
+          {trendGlyph(t.direction)}
         </span>
-        <span className={colorClass}>
+        <span className={`metric-trend-delta ${colorClass}`}>
           {formatDeltaCurrency(t.delta, currencyIso)}
-        </span>{" "}
-        vs presupuesto
+        </span>
+        <span className="metric-trend-label">vs presupuesto</span>
       </span>
     );
   }

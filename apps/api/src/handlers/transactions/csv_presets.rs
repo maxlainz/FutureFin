@@ -3,7 +3,7 @@
 //! detección → `preset.parse()`. Ningún `f64`: todos los importes son `Decimal`.
 
 use crate::error::ApiError;
-use crate::handlers::transactions::schema::normalize_concept;
+use crate::handlers::transactions::schema::{fold_diacritics_upper, normalize_concept};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -249,25 +249,6 @@ const TRANSFER_TOKENS: &[&str] = &[
     "ESTALVI",
 ];
 const SAVINGS_TOKENS: &[&str] = &["APORTACION", "INVERSION", "CARTERA"];
-
-/// Fold de diacríticos del español a ASCII en mayúscula (ÁÉÍÓÚÜÑ → AEIOUUN, y sus minúsculas).
-/// **Local al hint de savings**: NO se usa en `normalize_concept` ni en la huella de dedup (esa
-/// debe seguir conservando los acentos para no cambiar los fingerprints ya almacenados). Como
-/// `normalize_concept` solo hace ASCII-uppercase, las vocales acentuadas llegan aquí en su caja
-/// original, por eso se contemplan mayúsculas y minúsculas.
-fn fold_diacritics_upper(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'Á' | 'À' | 'Ä' | 'Â' | 'á' | 'à' | 'ä' | 'â' => 'A',
-            'É' | 'È' | 'Ë' | 'Ê' | 'é' | 'è' | 'ë' | 'ê' => 'E',
-            'Í' | 'Ì' | 'Ï' | 'Î' | 'í' | 'ì' | 'ï' | 'î' => 'I',
-            'Ó' | 'Ò' | 'Ö' | 'Ô' | 'ó' | 'ò' | 'ö' | 'ô' => 'O',
-            'Ú' | 'Ù' | 'Ü' | 'Û' | 'ú' | 'ù' | 'ü' | 'û' => 'U',
-            'Ñ' | 'ñ' => 'N',
-            other => other,
-        })
-        .collect()
-}
 
 /// Heurística savings (ahorro/inversión): tokens `APORTACION/INVERSION/CARTERA` en el concepto,
 /// comparados tras plegar los diacríticos → «Aportación», «inversión» (grafía real acentuada) también

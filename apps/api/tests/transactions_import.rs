@@ -307,6 +307,67 @@ async fn savings_hint_accent_insensitive_no_cartera() {
     assert_eq!(rows[0]["suggested_kind"], "savings", "acentuada sin 'cartera' → savings vía fold");
 }
 
+// ---------------------------------------------------------------------------
+// Matching de reglas aprendidas insensible a acentos (fold en ambos lados)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn learned_rule_matches_accent_insensitive() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Fondos").await;
+    // Regla con patrón ACENTUADO.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({ "match_kind": "substring", "pattern": "Aportación cartera",
+                    "source": "myinvestor", "assign_kind": "expense", "assign_category_id": cat }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "rule: {r:?}");
+    // Concepto SIN tilde en el CSV → debe matchear la regla acentuada.
+    let b64 = B64.encode(myinvestor_csv("Aportacion cartera fondo indexado", "-100"));
+    let p = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let body = p.json();
+    let row = &body["rows"][0];
+    assert!(
+        row["matched_rule_id"].is_string(),
+        "regla acentuada debe matchear concepto sin tilde: {row:?}"
+    );
+    // La regla aprendida (expense) gana al hint savings de «CARTERA/APORTACION».
+    assert_eq!(row["suggested_kind"], "expense", "kind de la regla");
+    assert_eq!(row["suggested_category_id"], json!(cat), "categoría de la regla");
+}
+
+#[tokio::test]
+async fn learned_rule_matches_accent_insensitive_reverse() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Fondos").await;
+    // Regla con patrón SIN tilde (dirección inversa: pattern sin acento vs concepto acentuado).
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({ "match_kind": "substring", "pattern": "Aportacion cartera",
+                    "source": "myinvestor", "assign_kind": "expense", "assign_category_id": cat }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "rule: {r:?}");
+    // Concepto CON tilde → debe matchear la regla sin tilde.
+    let b64 = B64.encode(myinvestor_csv("Aportación cartera fondo", "-100"));
+    let p = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let body = p.json();
+    let row = &body["rows"][0];
+    assert!(
+        row["matched_rule_id"].is_string(),
+        "regla sin tilde debe matchear concepto acentuado: {row:?}"
+    );
+    assert_eq!(row["suggested_kind"], "expense", "kind de la regla");
+    assert_eq!(row["suggested_category_id"], json!(cat), "categoría de la regla");
+}
+
 #[tokio::test]
 async fn confirm_savings_learns_kind_rule() {
     let app = TestApp::spawn().await;

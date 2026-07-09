@@ -16,6 +16,7 @@ pub struct ErrorBody {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     BadRequest,
+    Unprocessable,
     Unauthorized,
     Forbidden,
     NotFound,
@@ -28,6 +29,10 @@ pub enum ErrorCode {
 pub enum ApiError {
     #[error("{0}")]
     BadRequest(String),
+    /// Petición bien formada pero rechazada por una regla de negocio (422). El mensaje sigue el
+    /// estilo `snake_code: descripción` del resto de validaciones del módulo.
+    #[error("{0}")]
+    Unprocessable(String),
     #[error("unauthorized")]
     Unauthorized,
     #[error("forbidden")]
@@ -64,6 +69,7 @@ impl ApiError {
     fn status(&self) -> StatusCode {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
@@ -76,6 +82,7 @@ impl ApiError {
     fn sanitised_message(&self) -> String {
         match self {
             ApiError::BadRequest(s) => s.clone(),
+            ApiError::Unprocessable(s) => s.clone(),
             ApiError::Unauthorized => "authentication required".into(),
             ApiError::Forbidden => "forbidden".into(),
             ApiError::NotFound => "not found".into(),
@@ -91,6 +98,7 @@ impl ApiError {
     fn code(&self) -> ErrorCode {
         match self {
             ApiError::BadRequest(_) => ErrorCode::BadRequest,
+            ApiError::Unprocessable(_) => ErrorCode::Unprocessable,
             ApiError::Unauthorized => ErrorCode::Unauthorized,
             ApiError::Forbidden => ErrorCode::Forbidden,
             ApiError::NotFound => ErrorCode::NotFound,

@@ -160,6 +160,44 @@ async fn recurrence_day_out_of_range_400() {
     }
 }
 
+#[tokio::test]
+async fn recurrence_op_date_too_old_422() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let today = server_today(&app, &owner.cookie).await;
+    // 11 años atrás → más allá de la cota de 10 años del backfill.
+    let op_date = date_in(today.year() - 11, today.month(), 15);
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": op_date, "concept": "Nomina", "amount": "1500",
+                    "kind": "income", "recurrence": { "day_of_month": 15 } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::UNPROCESSABLE_ENTITY, "11 años: {r:?}");
+    assert!(r.json()["message"].as_str().unwrap().contains("recurrence_too_old"));
+}
+
+#[tokio::test]
+async fn recurrence_op_date_within_bound_created() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let today = server_today(&app, &owner.cookie).await;
+    // 9 años atrás → dentro de la cota; el alta se crea y backfillea sin 422.
+    let op_date = date_in(today.year() - 9, today.month(), 15);
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": op_date, "concept": "Nomina", "amount": "1500",
+                    "kind": "income", "recurrence": { "day_of_month": 15 } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "9 años: {r:?}");
+    assert!(r.json()["recurring_rule_id"].is_string());
+}
+
 // ---------------------------------------------------------------------------
 // Materialización
 // ---------------------------------------------------------------------------
