@@ -260,23 +260,25 @@ into `refresh_projection_after_mutation` couples two independent subsystems and 
 a hot projection cache; conversely, ever feeding snapshot data into the engine would make past
 "observations" silently reshape the *future* projection — a category error.
 
-**D12a — the transactions half of the no-cache contract became CONDITIONAL (updated 2026-07-09,
-Unreleased).** The blanket "transactions are never a projection input" rule now holds **only** in
+**D12a — the transactions half of the no-cache contract became CONDITIONAL (D12a v2 2026-07-09; mode
+C added Unreleased).** The blanket "transactions are never a projection input" rule now holds **only** in
 `fire_settings.savings_source = budget` (mode A, the default — unchanged, still guarded by
-`transactions_projection_cache.rs`). In `savings_source = transactions_avg` (mode B) the projection
+`transactions_projection_cache.rs`). In the **modes that use transactions** — `transactions_avg` (mode B)
+and `budget_income_real_expense` (mode C), i.e. `SavingsSource::uses_transactions()` — the projection
 derives the monthly saving from the **weighted 12-month average** of transactions
-(`transactions_12m_avg` + `effective_avg_income_expense`), so **transactions ARE an engine input**
-and every mutation that changes the transaction set (`crud.rs` create/batch/patch/delete +
-delete_import, `import.rs` confirm, `recurring.rs` materialize) **must** invalidate the projection
-cache — via `invalidate_projection_if_transactions_avg` (mod.rs), which reads
-`projection_savings_source(pool, iid)` and only then calls `refresh_projection_after_mutation`.
-It is **best-effort post-commit**: the write is already persisted, so a failing `savings_source`
-SELECT is logged and swallowed — it must never turn a successful mutation into a 5xx (a retry could
-double-insert). `rules.rs`, previews, and deleting a recurring rule never invalidate (the set is
-unchanged). This is a **superseding decision, not a contradiction**: the mode toggle is precisely
-what turns display-only history into a real engine input, so the invalidation must follow the mode.
-Still no warm-up after mutation (D7 / failure-archaeology §2.7): mode-B invalidation is
-delete-only. Regression for **both** modes (A = no mutation invalidates; B = each invalidates; A↔B
+(`transactions_12m_avg` + `effective_avg_income_expense`; mode C keeps the budget income and only takes
+the real expense), so **transactions ARE an engine input** and every mutation that changes the
+transaction set (`crud.rs` create/batch/patch/delete + delete_import, `import.rs` confirm, `recurring.rs`
+materialize) **must** invalidate the projection cache — via
+`invalidate_projection_if_savings_uses_transactions` (mod.rs), which reads
+`projection_savings_source(pool, iid)`, checks `uses_transactions()`, and only then calls
+`refresh_projection_after_mutation`. It is **best-effort post-commit**: the write is already persisted, so
+a failing `savings_source` SELECT is logged and swallowed — it must never turn a successful mutation into
+a 5xx (a retry could double-insert). `rules.rs`, previews, and deleting a recurring rule never invalidate
+(the set is unchanged). This is a **superseding decision, not a contradiction**: the mode toggle is
+precisely what turns display-only history into a real engine input, so the invalidation must follow the
+mode. Still no warm-up after mutation (D7 / failure-archaeology §2.7): B/C invalidation is delete-only.
+Regression for **all three** modes (A = no mutation invalidates; B and C = each invalidates; A↔B/C
 flip via `PATCH /v1/installation` invalidates): `apps/api/tests/transactions_projection_cache.rs`.
 The snapshot half of D12 (`/v1/history/*`) is **unaffected** — snapshots are never an engine input
 in any mode.
