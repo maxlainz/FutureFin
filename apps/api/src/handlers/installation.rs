@@ -782,6 +782,34 @@ pub async fn projection_savings_source(
     Ok(load_fire_settings(pool, installation_id).await?.savings_source)
 }
 
+/// Los tres escalares de instalación que `/v1/summary` necesita, en **una** query:
+/// `(hoy en el calendario civil, inflación anual %, fuente del ahorro configurada)`.
+///
+/// Sustituye a `installation_naive_today` + `projection_savings_source` (dos round-trips) sin
+/// duplicar parseos: la fecha sale de [`naive_date_in_calendar_tz`] y el `savings_source` del
+/// mismo camino de deserialización que el resto del código ([`resolve_fire_settings`]).
+/// La inflación se **clampa a ≥ 0**, mismo criterio que `compute_projection_series_response`
+/// (una inflación negativa guardada no debe alargar el runway ni encoger el target FIRE).
+pub(crate) async fn installation_calendar_inflation_savings(
+    pool: &PgPool,
+    installation_id: Uuid,
+) -> Result<(NaiveDate, Decimal, SavingsSource), ApiError> {
+    type Row = (String, Decimal, Option<SqlxJson<FireSettings>>);
+    let row: Option<Row> = sqlx::query_as(
+        r#"SELECT calendar_tz, annual_inflation_assumption_percent, fire_settings
+           FROM installation WHERE id = $1"#,
+    )
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?;
+    let (tz_str, inflation, fire_settings) = row.ok_or(ApiError::NotFound)?;
+    Ok((
+        naive_date_in_calendar_tz(&tz_str)?,
+        inflation.max(Decimal::ZERO),
+        resolve_fire_settings(fire_settings.map(|j| j.0)).savings_source,
+    ))
+}
+
 /// Resolves the singleton installation and membership role, or `NotFound` / `Forbidden`.
 pub async fn require_installation_member(
     pool: &PgPool,
