@@ -2,6 +2,7 @@
 
 mod history;
 mod projection;
+mod runway;
 
 pub use history::{
     add_months_signed, amortized_segment_value, anchored_cashflow_segment_value, evaluate_timeline,
@@ -13,3 +14,4 @@ pub use projection::{
     project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
     FireTarget, ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
 };
+pub use runway::{liquid_runway_months, RunwayOutcome, MAX_RUNWAY_MONTHS};
