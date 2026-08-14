@@ -1,7 +1,7 @@
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_budget_totals_for_summary;
 use crate::handlers::installation::{
-    installation_naive_today, projection_savings_source, require_installation_member, SavingsSource,
+    installation_calendar_inflation_savings, require_installation_member, SavingsSource,
 };
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::projection::liability_monthly_payment;
@@ -13,6 +13,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
 use chrono::NaiveDate;
+use futurefin_engine::{liquid_runway_months, RunwayOutcome};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::FromRow;
@@ -30,9 +31,15 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_regular_monthly_equivalent: Decimal,
+    /// Cuotas mensuales derivadas de los pasivos **activos** (`payment_end_date` nula o futura).
+    /// En modo A son la línea derivada del presupuesto; en los modos B/C (con datos) la base pasa a
+    /// ser el gasto real promedio y este campo es exactamente el servicio de deuda nominal, de modo
+    /// que `expense_total = expense_regular + expense_derived` sigue valiendo en los tres modos.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_derived_monthly_equivalent: Decimal,
+    /// Gasto mensual total: presupuesto regular + cuotas derivadas en modo A; **gasto real promedio
+    /// 12m (con resta híbrida de cuotas) + servicio de deuda** en los modos B/C con datos.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_total_monthly_equivalent: Decimal,
@@ -55,11 +62,18 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub liquid_assets_total: Decimal,
-    /// Liquid assets ÷ total monthly expenses (including derived debt payments) when expenses are positive.
+    /// Meses que los activos **líquidos** cubren el gasto total mensual, componiendo la rentabilidad
+    /// esperada de esos activos (media ponderada por valor) y con el gasto creciendo a la inflación
+    /// de la instalación (`futurefin_engine::liquid_runway_months`). `null` cuando no hay base de
+    /// gasto (`expense_total == 0`) **o** cuando el runway es indefinido (ver `runway_is_indefinite`).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub runway_months: Option<Decimal>,
+    /// `true` cuando el retorno esperado de los líquidos cubre el gasto durante al menos
+    /// `MAX_RUNWAY_MONTHS` (100 años); en ese caso `runway_months` es `null`. Con gasto 0 el runway
+    /// tampoco existe pero este campo es `false` (no está «cubierto», simplemente no hay base).
+    pub runway_is_indefinite: bool,
     /// Sum of **expected_amount** for income-category flows (not annualized).
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
@@ -239,7 +253,7 @@ pub struct SummaryResponse {
         ("view" = Option<String>, Query, description = "`mine` = sums for rows attributed to the signed-in user; omit = household."),
     ),
     responses(
-        (status = 200, description = "Installation aggregates + MVP financial_health (budget-aligned monthly equivalents, runway, upcoming sums); purges expired liability payment plans first", body = SummaryResponse),
+        (status = 200, description = "Installation aggregates + financial_health (monthly equivalents según `fire_settings.savings_source`, runway de líquidos con retorno e inflación, sumas de Próximos). Los pasivos con `payment_end_date` pasada se **filtran** de las lecturas; nunca se borran (reads never mutate).", body = SummaryResponse),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Not an installation member"),
         (status = 404, description = "Installation missing"),
@@ -253,7 +267,10 @@ pub async fn get_summary(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    let today = installation_naive_today(&state.pool, iid).await?;
+    // Una sola query para los tres escalares de instalación que necesita este handler: fecha civil,
+    // inflación (base del runway) y fuente del ahorro configurada.
+    let (today, inflation_pct, source) =
+        installation_calendar_inflation_savings(&state.pool, iid).await?;
     let view = q.resolve();
 
     let asset_scope = view.scope_where("");
@@ -267,8 +284,12 @@ pub async fn get_summary(
            WHERE {liab_scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph})"#
     );
+    // Filas `(valor, rentabilidad anual %)` de los líquidos — mismo scope que antes de la suma. El
+    // runway necesita la rentabilidad por activo (media ponderada por valor), así que la suma
+    // (`liquid_assets_total`) se hace en Rust en vez de en SQL.
     let liquid_sql = format!(
-        "SELECT COALESCE(SUM(current_value), 0) FROM assets WHERE {asset_scope} AND is_liquid = true"
+        r#"SELECT current_value, expected_annual_return_percent
+           FROM assets WHERE {asset_scope} AND is_liquid = true"#
     );
 
     let total_assets: Decimal = view
@@ -280,29 +301,31 @@ pub async fn get_summary(
         .bind(today)
         .fetch_one(&state.pool)
         .await?;
-    let liquid_assets: Decimal = view
-        .bind_scope_scalar(sqlx::query_scalar(&liquid_sql), iid, user.id.0)
-        .fetch_one(&state.pool)
+    let liquid_rows: Vec<(Decimal, Option<Decimal>)> = view
+        .bind_scope_as(sqlx::query_as(&liquid_sql), iid, user.id.0)
+        .fetch_all(&state.pool)
         .await?;
+    let liquid_assets: Decimal = liquid_rows.iter().map(|(v, _)| *v).sum();
 
     let budget_totals =
         ledger_budget_totals_for_summary(&state.pool, iid, user.id.0, view, today).await?;
 
-    // Base presupuesto (modo A). Los modos B/C con datos sustituyen expense_reg/net por el promedio
-    // real 12m (y el modo B también el income); runway y expense_total/derived NO cambian de base.
+    // Base presupuesto (modo A). Los modos B/C con datos sustituyen TODA la base de gasto por el
+    // promedio real 12m (y el modo B también el income): `expense_reg` = gasto real efectivo,
+    // `expense_der` = servicio de deuda y `expense_tot` = suma de ambos. El runway se calcula sobre
+    // `expense_tot`, así que también sigue el modo.
     let mut income_m = budget_totals.income_monthly_equivalent;
     let mut expense_reg = budget_totals.expense_regular_monthly_equivalent;
-    let expense_der = budget_totals.expense_derived_monthly_equivalent;
-    let expense_tot = budget_totals.expense_total_monthly_equivalent;
+    let mut expense_der = budget_totals.expense_derived_monthly_equivalent;
+    let mut expense_tot = budget_totals.expense_total_monthly_equivalent;
     let mut net_m = budget_totals.net_monthly_equivalent;
 
     // Fuente del ahorro efectiva (tras fallback) + meses con datos, para el response.
     let mut effective_savings_source = SavingsSource::Budget;
     let mut savings_source_months_with_data: u32 = 0;
 
-    // Fuente del ahorro efectiva (helper compartido con las mutaciones de transacciones y el
-    // engine): un único parser del JSONB `fire_settings` → `SavingsSource`.
-    let source = projection_savings_source(&state.pool, iid).await?;
+    // `source` viene de `installation_calendar_inflation_savings` (mismo parser del JSONB
+    // `fire_settings` que el engine y las mutaciones de transacciones).
     if source.uses_transactions() {
         let avg = transactions_12m_avg(&state.pool, iid, user.id.0, view, today).await?;
         if avg.months_with_data > 0 {
@@ -346,6 +369,14 @@ pub async fn get_summary(
             // `monthly_net_excluding_derived_debt` sigue siendo income − expense_reg (sin cuotas).
             // Con `income_m` (income_eff en B, presupuesto en C) una sola línea sirve a ambos modos.
             net_m = income_m - expense_eff - debt_service;
+            // Base de gasto derivada/total también en modo real: la línea «derivada» pasa a ser el
+            // servicio de deuda nominal de los pasivos activos y el total la suma con el gasto
+            // efectivo. Así se restauran en B/C las dos identidades que en modo A siempre valen:
+            //   expense_total = expense_regular + expense_derived
+            //   net           = income − expense_total
+            // (antes se dejaban los valores de presupuesto, que no casaban con `expense_reg`/`net`).
+            expense_der = debt_service;
+            expense_tot = expense_eff + debt_service;
             effective_savings_source = source;
             savings_source_months_with_data = avg.months_with_data;
         }
@@ -365,11 +396,15 @@ pub async fn get_summary(
         None
     };
 
-    let runway_months = if expense_tot > Decimal::ZERO {
-        Some(liquid_assets / expense_tot)
-    } else {
-        None
-    };
+    // Runway compuesto: los líquidos rinden su rentabilidad esperada mientras se drenan y el gasto
+    // se infla con la inflación de la instalación. Sin rentabilidad ni inflación se reduce EXACTO a
+    // `liquid_assets / expense_tot` (ver `runway.rs`), que es el contrato histórico.
+    let (runway_months, runway_is_indefinite) =
+        match liquid_runway_months(&liquid_rows, expense_tot, inflation_pct) {
+            RunwayOutcome::Months(m) => (Some(m), false),
+            RunwayOutcome::Indefinite => (None, true),
+            RunwayOutcome::NoExpenseBase => (None, false),
+        };
 
     let (upcoming_inflows_total, upcoming_outflows_total) =
         planning_flow_totals_in_out(&state.pool, iid, user.id.0, view).await?;
@@ -391,6 +426,7 @@ pub async fn get_summary(
         savings_rate_excluding_derived_debt,
         liquid_assets_total: liquid_assets,
         runway_months,
+        runway_is_indefinite,
         upcoming_inflows_total,
         upcoming_outflows_total,
         upcoming_coverage_ratio,

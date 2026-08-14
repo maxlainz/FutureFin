@@ -253,6 +253,13 @@ pub struct ProjectionSeriesResponse {
     pub asset_series: Vec<AssetSeries>,
     /// Densidad de los puntos serializados: `monthly` (default) o `hybrid`.
     pub density: String,
+    /// Fuente del ahorro **efectiva** que produjo `monthly_delta_assumption` (tras el fallback: en
+    /// modo `transactions_avg` / `budget_income_real_expense` sin meses reales cae a `budget`).
+    /// Mismo naming y semántica que el campo homónimo de `/v1/summary`.
+    pub savings_source: SavingsSource,
+    /// Meses reales usados por el promedio cuando `savings_source` deriva de transacciones; `0` en
+    /// modo `budget` (configurado o por fallback).
+    pub savings_source_months_with_data: u32,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -662,6 +669,16 @@ pub(crate) struct BuiltProjection {
     /// Flujos de planificación crudos (scope + amount + due_date) — los reusa el handler para
     /// calcular el baseline de milestones sin tener que volver a la BD.
     pub planning_rows: Vec<PlanningFlowProjRow>,
+    /// Fuente del ahorro **efectiva** (tras el fallback: modo B/C sin meses reales → `budget`).
+    /// Es la que produjo `input.income_regular_monthly` / `input.expense_regular_monthly`.
+    pub effective_savings_source: SavingsSource,
+    /// Meses reales que alimentaron el promedio cuando la fuente efectiva usa transacciones; `0` en
+    /// modo A y en el fallback.
+    pub savings_source_months_with_data: u32,
+    /// Servicio de deuda mensual de los pasivos **activos** (`payment_end_date` nula o ≥ hoy), con
+    /// la cuota nominal normalizada a mensual. No entra en `expense_regular_monthly` (el engine
+    /// amortiza los pasivos aparte); lo consumen los caps `months_expense` de `assets.rs`.
+    pub debt_service_monthly: Decimal,
 }
 
 pub(crate) async fn build_installation_projection_input(
@@ -703,6 +720,10 @@ pub(crate) async fn build_installation_projection_input(
         income: Decimal,
         expense: Decimal,
         expense_from_avg: bool,
+        /// Fuente efectiva tras el fallback (modo B/C sin meses reales → `Budget`).
+        effective_source: SavingsSource,
+        /// Meses reales del promedio; `0` en modo A y en el fallback.
+        months_with_data: u32,
     }
     let inputs: EffectiveInputs = match savings_source {
         SavingsSource::TransactionsAvg | SavingsSource::BudgetIncomeRealExpense => {
@@ -735,12 +756,16 @@ pub(crate) async fn build_installation_projection_input(
                     income,
                     expense: expense_eff,
                     expense_from_avg: true,
+                    effective_source: savings_source,
+                    months_with_data: avg.months_with_data,
                 }
             } else {
                 EffectiveInputs {
                     income: income_reg,
                     expense: expense_reg,
                     expense_from_avg: false,
+                    effective_source: SavingsSource::Budget,
+                    months_with_data: 0,
                 }
             }
         }
@@ -748,9 +773,23 @@ pub(crate) async fn build_installation_projection_input(
             income: income_reg,
             expense: expense_reg,
             expense_from_avg: false,
+            effective_source: SavingsSource::Budget,
+            months_with_data: 0,
         },
     };
     let expense_from_avg = inputs.expense_from_avg;
+    let effective_savings_source = inputs.effective_source;
+    let savings_source_months_with_data = inputs.months_with_data;
+
+    // Servicio de deuda mensual de los pasivos activos (mismo filtro `payment_end_date` que las
+    // lecturas SQL). No es un input del engine (que amortiza los pasivos por su cuenta): lo exporta
+    // `BuiltProjection` para los caps `months_expense` de `assets.rs`.
+    let debt_service_monthly: Decimal = liabs
+        .iter()
+        .filter(|r| liability_is_active(r.payment_end_date, today))
+        .map(|r| liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()))
+        .filter(|p| *p > Decimal::ZERO)
+        .sum();
 
     let monthly_net_regular = inputs.income - inputs.expense;
 
@@ -903,54 +942,39 @@ pub(crate) async fn build_installation_projection_input(
         monthly_net_regular,
         asset_id_name,
         planning_rows,
+        effective_savings_source,
+        savings_source_months_with_data,
+        debt_service_monthly,
     })
 }
 
-/// Monthly cash baseline for a view: `(income, expense, debt_service)`. Used by other handlers
-/// (e.g. `assets.rs`) to resolve allocation-rule caps expressed in `months_expense` /
-/// `income_multiple` into absolute €.
-pub(crate) async fn monthly_income_expense_debt_for_view(
-    pool: &sqlx::PgPool,
-    iid: Uuid,
-    session_user_id: Uuid,
-    view: LedgerView,
-    today: NaiveDate,
-) -> Result<(Decimal, Decimal, Decimal), ApiError> {
-    let (income_reg, _income_retirement, expense_reg, _expense_retirement, _expense_end_entries) =
-        ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
-
-    let liab_scope = view.scope_where("");
-    let liab_sql = format!(
-        r#"SELECT id, principal, payment_amount, payment_frequency, payment_end_date
-           FROM liabilities WHERE {liab_scope}"#
-    );
-    let liabs: Vec<LiabEngineRow> = view
-        .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)
-        .fetch_all(pool)
-        .await?;
-
-    let debt_service: Decimal = liabs
-        .iter()
-        .filter(|r| liability_is_active(r.payment_end_date, today))
-        .map(|r| liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()))
-        .filter(|p| *p > Decimal::ZERO)
-        .sum();
-
-    Ok((income_reg, expense_reg, debt_service))
+/// Todo lo que `assets.rs` necesita del motor para una vista, con **un solo**
+/// `build_installation_projection_input` (horizonte 1 mes: basta para el reparto del mes 1 y para
+/// los escalares del mes 0).
+pub(crate) struct AssetsProjectionContext {
+    /// Asset id → € nominales encaminados en el mes 1 (fixed escalado + parte del remanente).
+    pub nominals: HashMap<Uuid, Decimal>,
+    /// Income mensual **efectivo** del mes 0 (presupuesto en modo A/fallback; promedio real en B).
+    pub income_monthly: Decimal,
+    /// Gasto mensual **efectivo** + servicio de deuda de los pasivos activos.
+    pub expense_with_debt: Decimal,
 }
 
-/// Map asset id → nominal € routed in month 1 (fixed escalado + parte del remanente). Vista alineada al listado de activos / proyección.
-pub(crate) async fn first_month_asset_contribution_nominals_map(
+/// Contexto de proyección para el listado/edición de activos: aportación del primer mes por activo
+/// más los escalares que resuelven los caps de las reglas de asignación.
+///
+/// Los caps `months_expense` / `income_multiple` se resuelven con **los mismos escalares que usa el
+/// engine** (fix B4): en modo B/C con datos el ahorro sale del promedio real 12m, así que antes —
+/// cuando estos escalares venían siempre del presupuesto — el objetivo mostrado en Activos no
+/// casaba ni con la aportación del mes 1 ni con la simulación. El resto de campos de `fire_settings`
+/// (p.ej. `fire_target`) no altera ni las aportaciones del mes 1 ni los escalares.
+pub(crate) async fn assets_projection_context(
     pool: &sqlx::PgPool,
     iid: Uuid,
     session_user_id: Uuid,
     view: LedgerView,
     today: NaiveDate,
-) -> Result<HashMap<Uuid, Decimal>, ApiError> {
-    // El reparto del primer mes depende del ahorro mensual efectivo, que en modo B
-    // (`transactions_avg`) sale del promedio real, no del presupuesto. Sin pasar `fire_settings` el
-    // endpoint de activos calcularía SIEMPRE en modo presupuesto (bug). El resto de campos de
-    // `fire_settings` (p.ej. `fire_target`) no altera las aportaciones del mes 1.
+) -> Result<AssetsProjectionContext, ApiError> {
     let fire_settings = load_fire_settings(pool, iid).await?;
     let built = build_installation_projection_input(
         pool,
@@ -963,15 +987,22 @@ pub(crate) async fn first_month_asset_contribution_nominals_map(
         Some(&fire_settings),
     )
     .await?;
-    let nominals =
+    let nominals_vec =
         first_month_per_asset_contribution_nominals(&built.input).map_err(map_engine_err)?;
-    Ok(built
+    let nominals: HashMap<Uuid, Decimal> = built
         .input
         .assets
         .iter()
-        .zip(nominals.into_iter())
+        .zip(nominals_vec.into_iter())
         .map(|(a, n)| (a.id, n))
-        .collect())
+        .collect();
+    Ok(AssetsProjectionContext {
+        nominals,
+        income_monthly: built.input.income_regular_monthly,
+        // Misma semántica que el helper anterior (`expense_reg + debt_service`), pero con la base de
+        // gasto EFECTIVA en vez de la del presupuesto.
+        expense_with_debt: built.input.expense_regular_monthly + built.debt_service_monthly,
+    })
 }
 
 #[utoipa::path(
@@ -1123,6 +1154,9 @@ pub async fn compute_projection_series_response(
         monthly_net_regular: monthly_delta_assumption,
         asset_id_name,
         planning_rows,
+        effective_savings_source,
+        savings_source_months_with_data,
+        debt_service_monthly: _,
     } = built;
 
     // Las dos simulaciones (principal + marker «compound supera ahorro») son CPU-bound y se
@@ -1284,6 +1318,8 @@ pub async fn compute_projection_series_response(
             Density::Monthly => "monthly".into(),
             Density::Hybrid => "hybrid".into(),
         },
+        savings_source: effective_savings_source,
+        savings_source_months_with_data,
     })
 }
 
