@@ -19,7 +19,7 @@ description: >
 
 How to prove things in this repo: what counts as evidence, the exact test inventory and
 harness, and how to add tests. Verified against the code on 2026-07-02 (v1.4.3); counts and the
-history-snapshots test files refreshed for v1.5.0 on 2026-07-06.
+test-file inventory refreshed on 2026-08-14 for v2.2.0 (new `summary_runway.rs`, engine `runway.rs`).
 
 Why this matters here: the hardest live problem in FutureFin is **projection correctness** —
 errors are silent (numbers look plausible but wrong). Eyeballing a chart is never acceptance.
@@ -40,15 +40,16 @@ withdrawn in retirement); **gross-up** = inflating a net annual need to the pre-
 amount using progressive tax brackets; **installation** = the singleton row all data belongs
 to; **cascade** = the ordered allocation-rules pipeline distributing monthly surplus to assets.
 
-## 2. Test inventory (as of 2026-07-06, v1.5.0)
+## 2. Test inventory (as of 2026-08-14, v2.2.0)
 
-Three suites. None share infrastructure; run all three before merging.
+Three suites. None share infrastructure; run all three before merging. Counts below are date-stamped,
+not authoritative — recount with the commands in "Provenance and maintenance".
 
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
-| Engine unit tests (43) | `crates/engine/src/{projection.rs (22), history.rs (21)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
-| Backend integration (109 tests, 17 files, as of 2026-07-08) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
-| Frontend Vitest (137) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
+| Engine unit tests (51) | `crates/engine/src/{projection.rs (22), history.rs (21), runway.rs (8)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| Backend integration (156 tests, 20 files, as of 2026-08-14) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
+| Frontend Vitest (293, 11 files, as of 2026-08-14) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
 
 Plus API lib unit tests run by `cargo test --workspace` (no Postgres): notably
 `apps/api/src/handlers/backup_user/schema.rs` `mod tests` (10; 2 added in v1.6.0 for `.ffbackup` v5
@@ -79,7 +80,7 @@ DB" symptom. Single test: append `-- <test_fn_name>` or `--test <file_stem>`.
 1. Creates schema `ff_test_<uuid-simple>` in the test DB.
 2. Opens a pool (max 5 conns) with `after_connect` hook: `SET search_path TO "<schema>", public`
    on every connection — so all queries in the test hit only that schema.
-3. Runs `sqlx::migrate!("./migrations")` inside it (32 migration files as of 2026-07-06 —
+3. Runs `sqlx::migrate!("./migrations")` inside it (34 migration files as of 2026-08-14 —
    count with `ls apps/api/migrations | wc -l`).
 4. Returns `(PgPool, schema_name)`. **Schemas leak intentionally** — no teardown, so a failed
    test leaves its state inspectable.
@@ -97,7 +98,7 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
   | docker exec -i ff-test-db psql -U futurefin -d futurefin_test
 ```
 
-### Integration test files (all 11)
+### Integration test files (all 20, 2026-08-14)
 
 | File | Tests | Covers |
 |---|---|---|
@@ -107,7 +108,7 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
 | `installation_patch.rs` | 3 | unknown `fire_number_mode` rejected; legacy `annual_expense_adjusted` alias accepted; valid mode change |
 | `unique_violation.rs` | 2 | duplicate username / duplicate category name → 409 via central `From<sqlx::Error>` |
 | `projection_marker.rs` | 1 | regression capture: stable marker + starting NW across the perf refactor (the template for capture-first) |
-| `fire_parity.rs` | 1 (×6 fixture cases) | server `jubilacion_target_net_worth` matches `fire-parity.json` ± 1 € |
+| `fire_parity.rs` | 1 (×7 fixture cases) | server `jubilacion_target_net_worth` matches `fire-parity.json` ± 1 € |
 | `projection_cache.rs` | 5 | cache hit faster than miss + identical body; invalidation on mutation; logout drops only `view=mine` entries; `density=hybrid` decimation (months 0–12 monthly, then 24,36,48…); monthly/hybrid cached as separate keys |
 | `history_snapshots.rs` | 20 | snapshot capture (copied terms) / same-day upsert / exclude shared+expired / backfill CRUD roundtrip with `year` filter + cascade / 400 validations (future, `duplicate_item_id`, terms-on-asset) / 409 date taken / 404 cross-user / 403 viewer on every mutation / GET never mutates / `snapshot_mutations_do_not_touch_projection_cache` (cache stays HIT — history is NOT a projection input) |
 | `history_series.rs` | 7 | `GET /v1/history/series`: empty→200, exact linear interpolation between two asset snapshots, join to live values (deleted asset→0 at k=0), amortization curve above the chord with exact endpoints, household sums two users + `?view=mine` filters, markers carry date/kind/total, single today snapshot. Numbers predicted before running |
@@ -116,23 +117,25 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
 | `transactions_crud.rs` | 14 | manual create/batch, `savings` requires NULL category, income/expense scope validation, **PATCH edits op_date/amount/concept on imported rows with the fingerprint anchored to the CSV** (`patch_imported_fields_editable_fingerprint_anchored`, ex `patch_imported_op_date_is_immutable`; no more `immutable_field`) while manuals recompute the fingerprint and free the ordinal (`patch_manual_op_date_recomputes_and_allows_reuse`), deleting linked asset/liability SET NULLs the link keeping the row, category delete remaps transactions, viewer 403 |
 | `transactions_summary.rs` | 9 | exact Decimal per-category actual/budget/avg, **weighted average** (denominator = `months_with_data`, not the window width → short history no longer dilutes to 0), `avg_window` 3/6/12/`ytd`/`all` + legacy `avg_months` alias, invalid `avg_window` → 400, partial month flagged, savings excluded from expense, «Sin categoría» bucket. **No** derived-debt line anymore: `totals.expense_budget` = Σ expense-category budget |
 | `transactions_projection_cache.rs` | 4 | mode-conditioned cache contract (`fire_settings.savings_source`): `mode_a_mutations_do_not_touch_projection_cache` (mode `budget`: cache stays HIT across import/create/edit/delete/rule writes + recurring endpoints — transactions not engine inputs), `mode_b_each_mutation_invalidates_projection_cache` (mode `transactions_avg`: every mutation invalidates), `mode_c_mutation_invalidates_projection_cache` (mode `budget_income_real_expense`: parity with B), `flipping_savings_source_invalidates_projection_cache` (switching mode invalidates) |
-| `savings_source.rs` | 19 | `savings_source` toggle observed through the projection (`monthly_delta_assumption`, `?months=240` to bypass the cache). Serde/PATCH: default `budget`, roundtrip of `transactions_avg` and `budget_income_real_expense`, unknown value → 422 listing all 3 variants. **Mode B**: weighted avg excludes `savings` + partial month, `months_with_data==0` → budget fallback, hybrid liability subtraction (real linked / nominal / ended not subtracted), `expense_eff ≥ 0` clamp, `annual_expense` target uses `expense_eff`, household/mine scoping, loan-end step-up, `GET /v1/assets` follows the mode. **Real months**: `pseudo_empty_month_excluded_from_avg` (real month 2000 + recurring-only month 3000 → months=1, avg=2000), `real_month_counts_recurring_too` (a real month counts its recurring → avg 5000), `mode_b_all_pseudo_empty_falls_back_to_budget` (full backfill → 0 real months → budget). **Mode C**: `mode_c_income_budget_expense_real` (budget income 5000 − real expense 800 = 4200), `annual_expense` target uses `expense_eff`, `current_income` target uses budget income, `months==0` → fallback. Numbers predicted before running |
+| `savings_source.rs` | 21 | `savings_source` toggle observed through the projection (`monthly_delta_assumption`, `?months=240` to bypass the cache). Serde/PATCH: default `budget`, roundtrip of `transactions_avg` and `budget_income_real_expense`, unknown value → 422 listing all 3 variants. **Mode B**: weighted avg excludes `savings` + partial month, `months_with_data==0` → budget fallback, hybrid liability subtraction (real linked / nominal / ended not subtracted), `expense_eff ≥ 0` clamp, `annual_expense` target uses `expense_eff`, household/mine scoping, loan-end step-up, `GET /v1/assets` follows the mode. **Real months**: `pseudo_empty_month_excluded_from_avg` (real month 2000 + recurring-only month 3000 → months=1, avg=2000), `real_month_counts_recurring_too` (a real month counts its recurring → avg 5000), `mode_b_all_pseudo_empty_falls_back_to_budget` (full backfill → 0 real months → budget). **Mode C**: `mode_c_income_budget_expense_real` (budget income 5000 − real expense 800 = 4200), `annual_expense` target uses `expense_eff`, `current_income` target uses budget income, `months==0` → fallback. **v2.2.0**: `assets_cap_targets_follow_savings_source_mode` (asset caps `months_expense`/`income_multiple` are 18.000/10.000 in mode A and 6.000/8.000 in mode B — fails against the pre-fix code) and `projection_series_reports_effective_savings_source` (the two new `/v1/projection/series` fields: budget/0, fallback budget/0, transactions_avg/1). Numbers predicted before running |
+| `summary_runway.rs` | 7 | `financial_health` runway + expense base (v2.2.0). The first two are the **capture-first regression** written *before* the change and still green after it: `runway_pre_change_baseline_liquid_over_expense` (mode A, no return/inflation → `runway_months == liquid_assets_total / expense_total` exactly, `expense_derived` = active liability payments) and `runway_zero_expense_is_null` (no expense → field not serialized). New behavior, each with its number predicted in the doc comment: return extends (12.000 @ 5 % vs 1.200/month → >10 and <11), inflation shortens (3 % → <10 and >9), `runway_indefinite_when_returns_cover_expense` (1M @ 7 % vs 1.000/month → `runway_months` null + `runway_is_indefinite` true), `mode_b_runway_uses_effective_expense_base` (identities `expense_total = expense_reg + expense_der` and `net = income − expense_total` restored; runway 16.000/1.600 = 10 where mode A would be 16.000/8.800), `mode_b_zero_months_falls_back_to_budget_runway` (fallback block identical to mode A) |
 | `summary_savings_source.rs` | 6 | `GET /v1/summary` `financial_health` following `savings_source`: mode A = budget, mode B uses the avg with hybrid subtraction, `months==0` → fallback, household/mine scoping, `mode_b_summary_pseudo_empty_month_excluded` (recurring-only months don't count in `savings_source_months_with_data`), `mode_c_income_not_overwritten` (mode C keeps budget income in `income_monthly_equivalent`) |
 | `transactions_recurring.rs` | 16 | recurring rules (v1.8.0): `recurrence` create makes rule + linked origin instance, idempotent `materialize` (2nd call → 0), never a future `op_date` (current month only once its day arrived), `day_of_month` clamped to month end, deleting an instance is not recreated on re-materialize (cursor), rule `DELETE` keeps instances (SET NULL), viewer 403 on materialize/delete, out-of-range `recurrence.day_of_month` → 400; **create-time backfill** (post-2.0.0): `create_with_past_date_backfills_instances` (past date fills intermediate months in the same commit), `recurrence_op_date_within_bound_created`, and the 10-year bound `recurrence_op_date_too_old_*` → 422 `recurrence_too_old` |
 | `history_cashflow.rs` | 5 | `GET /v1/history/cashflow`: exact monthly aggregates (Decimal-string, household + mine), fine series passes through snapshots, `/v1/history/series` byte-identical with and without transactions (tier-1 regression), `daily` with window >6m → 400, `fine` absent without links |
 
-### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; 277 a 2026-07-09)
+### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; 293 a 2026-08-14)
 
 Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/**/*.test.{ts,tsx}"]`,
 `globals: false` (import `describe/it/expect` from `vitest` explicitly).
 
 | File | Tests | Covers |
 |---|---|---|
-| `apps/web/src/lib/format.test.ts` | 29 | es-ES Intl formatting, null/NaN/empty edges, Decimal string preservation |
-| `apps/web/src/lib/dates.test.ts` | 29 | civil calendar (leap years, day clamping, age around birthday), TZ fallback, payment intervals, negative `addMonthsCivil` deltas (v1.5.0) |
+| `apps/web/src/lib/format.test.ts` | 33 | es-ES Intl formatting, null/NaN/empty edges, Decimal string preservation; `formatMonthsRough` in years+months from 24 and `formatRunwayValue` («Cubierto» when the runway is indefinite) (v2.2.0) |
+| `apps/web/src/lib/fire.normalize.test.ts` | 18 | `savings_source` normalizers/gating, incl. `savingsAvgParenthetical` («promedio de N meses», singular, `undefined` in mode A / after fallback) (v2.2.0) |
+| `apps/web/src/lib/dates.test.ts` | 32 | civil calendar (leap years, day clamping, age around birthday), TZ fallback, payment intervals, negative `addMonthsCivil` deltas (v1.5.0) |
 | `apps/web/src/api/client.test.ts` | 10 | fetch mocks: credentials, body serialization, 4xx propagation, 204 handling |
-| `apps/web/src/lib/fire.test.ts` | 7 | FIRE parity vs the shared fixture (1 sanity + 6 cases) |
-| `apps/web/src/lib/history-merge.test.ts` | 11 | `mergeProjectionWithHistory`: identity-by-reference (null/empty/anchor-mismatch → byte-identical render), drops `month_index ≥ 0`, asset-series union by id, future offset |
+| `apps/web/src/lib/fire.test.ts` | 8 | FIRE parity vs the shared fixture (1 sanity + 6 cases) |
+| `apps/web/src/lib/history-merge.test.ts` | 12 | `mergeProjectionWithHistory`: identity-by-reference (null/empty/anchor-mismatch → byte-identical render), drops `month_index ≥ 0`, asset-series union by id, future offset |
 | `apps/web/src/lib/projection-chart.test.ts` | 10 | `deflationFactorAt` (0 / ±12 / inflation 0) + tick-builders with `startMonth=-24` and the `startMonth=0` regression (identical to prior behavior) |
 | `apps/web/src/lib/snapshot-tracker.test.ts` | 8 | `liquidCoverageComplete` (empty→false, full coverage→true, stale after `pruneEditLog`→false, new asset within the window) |
 
@@ -322,14 +325,14 @@ the same day (CI claim, migration count, missing `projection_cache.rs` row). Re-
 facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
-- Engine test count: `grep -c "#\[test\]" crates/engine/src/projection.rs crates/engine/src/history.rs` (22 + 21 = 43)
-- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (90 total across 16 files)
-- Migration count: `ls apps/api/migrations | wc -l` (32)
+- Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (51 on 2026-08-14 = projection 22 + history 21 + runway 8)
+- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (156 across 20 files on 2026-08-14)
+- Migration count: `ls apps/api/migrations | wc -l` (34 on 2026-08-14; v2.2.0 shipped no migration)
 - CI coverage claims: read `.github/workflows/ci.yml` (jobs: rust, web, docker-stack; grep it
   for `TEST_DATABASE_URL` — absent means integration tests still not in CI; grep for
   `npm test`/`vitest` — absent means Vitest still not in CI)
 - TestApp helper names: `grep -n "pub async fn\|pub fn" apps/api/tests/common/mod.rs`
 - Vitest env: `grep -n environment apps/web/vitest.config.ts` (still `"node"`?)
-- Fixture case count: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (6 cases)
+- Fixture case count: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (7 cases on 2026-08-14; v2.2.0 did **not** touch the fixture)
 - Cleanup script existence: `ls scripts/` (clean-test-schemas.sh did NOT exist as of 2026-07-02)
 - Default TEST_DATABASE_URL: `grep -n "5433" apps/api/tests/common/mod.rs`

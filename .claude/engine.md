@@ -1,11 +1,13 @@
 # Projection Engine (crates/engine)
 
 Pure Rust crate — no I/O, no DB, no async. Pure financial math (projection + history interpolation).
-Only `Decimal` arithmetic. Two modules:
+Only `Decimal` arithmetic. Three modules:
 - `projection.rs` — monthly net-worth / FIRE simulation (this doc's main subject).
 - `history.rs` — pure interpolation of the **historical** net-worth series from manual snapshots
   (see [History interpolation](#history-interpolation-historyrs) below). Deps unchanged
   (`rust_decimal` feature `maths` already present for `powd`).
+- `runway.rs` — liquidity runway with compounded return + inflation (v2.2.0; see
+  [Runway](#runway-runwayrs) below). Consumed by `GET /v1/summary`.
 
 ## Public API
 
@@ -22,6 +24,16 @@ pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> R
 // usaba `years = (k-1)/12` y el handler `years = month_index/12`, lo que generaba un off-by-one
 // de un mes entre cuándo se disparaba la jubilación y la serie pintada en el chart.
 pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal>
+
+// Liquidity runway (v2.2.0): months the liquid assets cover the monthly expense, compounding the
+// assets' expected return and inflating the expense. See the Runway section below.
+pub const MAX_RUNWAY_MONTHS: u32 = 1200;
+pub enum RunwayOutcome { Months(Decimal), Indefinite, NoExpenseBase }
+pub fn liquid_runway_months(
+    liquid_assets: &[(Decimal, Option<Decimal>)], // (current_value, expected_annual_return_percent)
+    monthly_expense: Decimal,
+    annual_inflation_percent: Decimal,
+) -> RunwayOutcome
 ```
 
 ## ProjectionInput fields
@@ -189,6 +201,46 @@ identical to the no-cash-flow curve; items observed at a single endpoint keep th
 behavior. Implementation: `O(n)` linear scan over `cf` per evaluation point (no prefix sums, robust
 to any input order), sub-ms at this scale, no `f64`.
 
+## Runway (`runway.rs`)
+
+Pure module (v2.2.0) that answers "how many months do the **liquid** assets cover the monthly
+expense?" while compounding the assets' expected return and inflating the expense. Sole consumer:
+`GET /v1/summary` → `financial_health.runway_months` / `runway_is_indefinite`
+(`apps/api/src/handlers/summary.rs`). Public API in the block above; 8 unit tests in-module.
+
+| Input | Meaning |
+|---|---|
+| `liquid_assets: &[(Decimal, Option<Decimal>)]` | One row per liquid asset: `(current_value, expected_annual_return_percent)`. The handler passes exactly the rows of `assets WHERE is_liquid = true` in the requested scope. |
+| `monthly_expense: Decimal` | Total monthly expense to cover — in the handler, `expense_total_monthly_equivalent` (so it follows `savings_source`). |
+| `annual_inflation_percent: Decimal` | `installation.annual_inflation_assumption_percent`, clamped to ≥ 0 by the handler. |
+
+Model (each rule exists for a reason — do not "simplify" one away):
+
+- **Nominal frame**: assets grow at their *nominal* expected return and the expense is inflated every
+  month. The result is a count of months (frame-invariant), but mixing nominal returns with a
+  constant expense would overstate the runway.
+- **Withdraw-then-grow order**: each month pays the expense first and grows what is left — the same
+  order as the simulation loop in `projection.rs` (negative cash flow drains before the multipliers
+  apply), so both curves stay coherent.
+- **Value-weighted multiplier**: `m = Σ vₐ·monthly_multiplier(rₐ) / Σ vₐ`, i.e. a **prorated drain**
+  (every asset funds the expense in proportion to its weight). Slightly **conservative** versus the
+  engine's real drain, which empties the lowest-return liquids first and therefore keeps the
+  high-return ones longer. Deliberate: the KPI must not promise more than the simulation.
+- **Rates ≤ 0 → zero growth**: inherited from `monthly_multiplier` (shared with the simulation via
+  `pub(crate)`, so the runway uses *exactly* the engine's annual→monthly conversion). The engine does
+  not model losses; a negative expected return behaves like no return.
+- **100-year cap**: surviving `MAX_RUNWAY_MONTHS` (1.200) months returns `Indefinite` — no epsilon,
+  no closed form. `ln`-based closed forms suffer cancellation exactly at the `A·j → g` boundary; the
+  monthly loop avoids it and costs microseconds.
+- **Exact reduction to `A / g`**: with return and inflation 0, `m = m_inf = 1` and the final
+  fractional month reconstructs `A/g` with a single division — bit-exact, so the pre-change baseline
+  test asserts it without tolerances.
+- Edge cases: `monthly_expense <= 0` → `NoExpenseBase` (not "infinite"); total balance ≤ 0 →
+  `Months(0)`.
+
+Worked values (engine-verified, 12.000 € liquid vs 1.200 €/month): return 0 % / inflation 0 % → 10;
+5 % / 0 % → 10,19; 0 % / 3 % → 9,89; 5 % / 3 % → 10,07 months.
+
 ## Notes for the API handler (projection.rs)
 - Load `allocation_rules` from DB ordered by `priority ASC`, then map each `target_asset_id` → index in `assets[]` before building the engine input.
 - Planning flows with `due_date`: placed in their calendar month. Flows without `due_date`: spread over 90 days from ref_date.
@@ -200,5 +252,5 @@ to any input order), sub-ms at this scale, no `f64`.
 - `project_net_worth_series` is CPU-bound (840 months × N assets × `Decimal::powd`). The handler wraps it in `tokio::task::spawn_blocking` to avoid blocking the reactor.
 - `compound_outpaces_true_savings_month` is a **second projection pass** with `planning_adj = 0` and `liability.monthly_payment = 0` so the marker compares `market_growth` against a clean `income − expense` baseline. Eliminating the double pass would change the indicator's semantics; instead the handler runs both projections in parallel with `tokio::join!(spawn_blocking, spawn_blocking)`.
 - The gross-up of net-annual FIRE through tax brackets uses a **closed-form per-bracket solver** (no binary search). `gross = (net − r·prev_ceiling + K) / (1 − r)`, advancing one bracket at a time until the candidate fits. Old code used 90 iterations of binary search on `Decimal`.
-- `build_installation_projection_input` returns a `BuiltProjection` struct that carries `input`, `monthly_net_regular`, `asset_id_name` (Vec<(Uuid, String)>) and `planning_rows`. The handler reuses those instead of issuing a second `SELECT id, name FROM assets` and a second `SELECT planning_flows` (deleted with Fase 2.3).
+- `build_installation_projection_input` returns a `BuiltProjection` struct that carries `input`, `monthly_net_regular`, `asset_id_name` (Vec<(Uuid, String)>) and `planning_rows`. The handler reuses those instead of issuing a second `SELECT id, name FROM assets` and a second `SELECT planning_flows` (deleted with Fase 2.3). Desde v2.2.0 también expone `effective_savings_source` + `savings_source_months_with_data` (fuente **tras** el fallback, serializadas en `ProjectionSeriesResponse`) y `debt_service_monthly` (cuotas de pasivos activos; **no** es input del engine, que amortiza los pasivos aparte), que consume `assets_projection_context` para los caps `months_expense`.
 - Initial queries in `get_projection_series` (installation row, user birth_date, household birth_date) run concurrently via `tokio::try_join!`.

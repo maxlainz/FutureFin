@@ -18,8 +18,8 @@ description: >
 # FutureFin FIRE Domain Reference
 
 Everything here is the model **as implemented** (verified against code on 2026-07-02,
-v1.4.3), not textbook FIRE theory. Line anchors are as of that date; re-verify with the
-commands in "Provenance and maintenance" if the files have changed.
+v1.4.3; §2b/§2c re-verified 2026-08-14 against v2.2.0), not textbook FIRE theory. Line anchors are as
+of that date; re-verify with the commands in "Provenance and maintenance" if the files have changed.
 
 Primary sources (ground truth, in this order):
 - `crates/engine/src/projection.rs` — the simulation (pure, `Decimal`-only, 22 unit tests).
@@ -52,6 +52,7 @@ Historical note: `projection_target_age` was **removed** in v1.0.6 (migration
 | **Contributed capital** | Cumulative cost basis: initial `purchase_price` of assets + every euro routed to assets or to `surplus_cash` before retirement. Never includes market growth. |
 | **Drawdown / drain** | In deficit months, cash is pulled from `surplus_cash` first, then from assets (liquid, lowest-return first). Retirement is modelled as income dropping, which creates the deficit. |
 | **Installation** | The single-household deployment singleton; `fire_settings` and inflation live on its one DB row. |
+| **Runway** | Months the **liquid** assets cover the total monthly expense, compounding their expected return and inflating the expense (§2c). A KPI of `/v1/summary`, not part of the FIRE target math. |
 
 ## 2. The FIRE number: three modes
 
@@ -85,7 +86,7 @@ Critical input nuances (source of the worst historical bug in this area):
 modes** (gate `SavingsSource::uses_transactions()`):
 
 - **Mode B `transactions_avg`** (shipped v2.0.0): income **and** expense come from the real 12m average.
-- **Mode C `budget_income_real_expense`** (Unreleased): income from the **budget**, expense from the real
+- **Mode C `budget_income_real_expense`** (shipped v2.1.0): income from the **budget**, expense from the real
   12m average — same `expense_eff` as B. For a stable salary whose spending you want measured for real.
 
 They change **where the pre-retirement income/expense scalars come from**, and therefore both the FIRE
@@ -121,9 +122,23 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
   still draws `income_retirement` / `expense_retirement` from the **budget** in all modes (the drain
   step at §5 is unchanged). So the target is derived from real spending while the drawdown that must
   fund it is budget-based — an accepted, intentional asymmetry.
+- **Everything downstream follows the mode too (v2.2.0)** — B/C are no longer "only the projection
+  scalars":
+  - `GET /v1/summary` `financial_health`: `expense_derived_monthly_equivalent` = **debt service** of
+    active liabilities and `expense_total_monthly_equivalent` = `expense_eff + debt_service`. Before
+    v2.2.0 those two kept budget values while `expense_reg`/`net` were already real, so
+    `expense_total = expense_reg + expense_der` and `net = income − expense_total` were **broken in
+    B/C**; they now hold in all three modes.
+  - `runway_months` follows `expense_total`, hence the real base in B/C (see §2c).
+  - `GET/POST/PATCH /v1/assets`: allocation caps `months_expense` / `income_multiple` resolve with the
+    **effective** scalars (`assets_projection_context`), so the € target matches the month-1
+    contribution shown in the same response and the simulation.
+  - `GET /v1/projection/series` echoes the effective mode in `savings_source` +
+    `savings_source_months_with_data` (same naming as summary), so the chart can label the Δ base.
 - **Fallback**: `months_with_data == 0` in mode B/C → silently reverts to the budget scalars (mode A
   effective). `GET /v1/summary` reports the **effective** source in `financial_health.savings_source`
-  (so it can read `"budget"` even when the setting is `transactions_avg` / `budget_income_real_expense`).
+  (so it can read `"budget"` even when the setting is `transactions_avg` / `budget_income_real_expense`),
+  and the whole `financial_health` block is then byte-identical to mode A.
 - **Preview parity**: the web preview must consume `/v1/summary`'s effective equivalents in mode B/C
   (`RetirementView`, fetch gated on `savingsSourceUsesTransactions`; in mode C the summary income is
   already the budget income so the preview matches the server), never recompute the need from the budget
@@ -131,6 +146,15 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
   it re-opens the client/server divergence class of §2 (see §2.5 of failure-archaeology). Tripwire
   case in `fire-parity.json`: `expense_retirement 2137.5 → expected_target_nw 923327.306` (proves both
   sides derive the same need from an avg-style, non-round expense base).
+- **Read the mode from `summary.financial_health`, never from the root of `SummaryResponse`** (v2.2.0
+  fix): the server nests `savings_source` and `savings_source_months_with_data` inside
+  `FinancialHealthMetrics`, but `types.ts` declared them at the root until v2.2.0. `SummaryView` and
+  `RetirementView` therefore read `undefined`, `savingsSourceUsesTransactions(undefined)` returned
+  `false`, and the Jubilación tab ("Gasto actual", "Ingresos actuales", "Patrimonio objetivo", "Primer
+  cruce") silently used budget figures in B/C, diverging from the server's
+  `jubilacion_target_net_worth`. Nothing failed loudly — a missing optional field is legitimate
+  `undefined` for TypeScript. The parenthetical now goes through one shared pure helper,
+  `savingsAvgParenthetical(source, months)` in `lib/fire.ts`.
 
 Defaults (Spain, `default_fire_settings`, installation.rs:81-114): mode `annual_expense`,
 `swr_pct = 3.5`, `taxes_enabled = true`, 5 IRPF capital-gains brackets:
@@ -146,6 +170,32 @@ Validation (`validate_fire_settings`, installation.rs:123-190): `swr_pct` bounde
 `Deserialize` accepts it (installation.rs:41, "Alias preservado para importar backups antiguos";
 pinned by the test in `apps/api/tests/installation_patch.rs`) and the web normalizer mirrors it
 (fire.ts:54). Do not "tighten" the server deserializer — old-backup imports depend on the alias.
+
+### 2c. Runway (v2.2.0): liquid assets vs an inflating expense
+
+Not part of the FIRE target, but the same economic frame — and the one KPI users read as "how long
+could I stop earning". Pure function `liquid_runway_months` in `crates/engine/src/runway.rs`,
+consumed only by `GET /v1/summary` (`financial_health.runway_months` + `runway_is_indefinite`);
+full contract in `.claude/engine.md` §Runway.
+
+- **Was** `liquid_assets_total / expense_total`. **Is** a month-by-month `Decimal` loop where the
+  liquid balance grows at the value-weighted mean of the assets' monthly multipliers
+  (`m = Σ vₐ·monthly_multiplier(rₐ) / Σ vₐ`) and the expense grows with
+  `annual_inflation_assumption_percent` (clamped ≥ 0 by the handler).
+- **Same frame as the simulation**: nominal euros, withdraw-then-grow order, and *literally* the
+  engine's `monthly_multiplier` (made `pub(crate)` for this) — including the "rates ≤ 0 → no growth"
+  rule. A KPI that used a different annual→monthly conversion would drift from the chart.
+- **Value-weighted = prorated drain**, deliberately *conservative*: the engine's real drain empties
+  the lowest-return liquids first, so it would last slightly longer. The KPI must never promise more
+  than the simulation.
+- **Cap 1.200 months (100 years)** → `RunwayOutcome::Indefinite` → `runway_months` omitted from the
+  JSON (`skip_serializing_if`) + `runway_is_indefinite: true` (UI: «Cubierto»). `monthly_expense <= 0`
+  → `NoExpenseBase` → also omitted, but the flag stays `false` (UI hides the tile). Do not conflate
+  the two.
+- **Follows `savings_source`**: the expense base is `expense_total_monthly_equivalent`, so in B/C with
+  data it is real spending + debt service (§2b), not budget.
+- **Reduces exactly to `A/g`** with return and inflation 0 (single final division, no tolerances) —
+  that is how the pre-change regression test stayed valid.
 
 ## 3. Tax gross-up through capital-gains brackets
 
@@ -372,6 +422,9 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 - Trigger uses k−1 / nw_prev: `grep -n "fire_target_at_month_index(input.fire_target" crates/engine/src/projection.rs`
 - FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes `expense_eff` — see §2b)
 - Mode B (`savings_source`) base + hybrid subtraction: `grep -n "savings_source\|transactions_12m_avg\|effective_avg_income_expense\|use_avg" apps/api/src/handlers/projection.rs`
+- Mode B/C reach into summary/assets/series (v2.2.0): `grep -n "expense_der = debt_service\|expense_tot = expense_eff" apps/api/src/handlers/summary.rs`; `grep -n "assets_projection_context" apps/api/src/handlers/{projection,assets}.rs`
+- Runway model + cap: `grep -n "pub fn liquid_runway_months\|MAX_RUNWAY_MONTHS\|RunwayOutcome" crates/engine/src/runway.rs` and `grep -n "liquid_runway_months\|runway_is_indefinite" apps/api/src/handlers/summary.rs`
+- Frontend reads the mode from `financial_health` (not the root): `grep -n "savings_source" apps/web/src/api/types.ts apps/web/src/views/{SummaryView,RetirementView}.tsx`
 - Closed-form gross-up: `grep -n "gross_up_net_annual_fire" apps/api/src/handlers/projection.rs`
 - Defaults (SWR 3.5, ES brackets): `grep -n -A8 "fn default_fire_settings" apps/api/src/handlers/installation.rs`
 - SWR bound 0–4: `grep -n "swr_pct must be between" apps/api/src/handlers/installation.rs`
