@@ -166,13 +166,41 @@ export function isZeroFractionMetric(ratio: string | null | undefined): boolean 
   return !Number.isFinite(r) || r === 0;
 }
 
+/**
+ * Duración en meses para KPIs. Por debajo de 24 meses se muestra en meses con un decimal
+ * (`"3,5 meses"`); a partir de 24 se redondea al mes entero y se pasa a años + meses
+ * (`"2 años"`, `"2 años y 6 meses"`) — a esas escalas el decimal de mes es ruido.
+ */
 export function formatMonthsRough(s: string | null | undefined): string {
   if (s == null || s === "") return METRIC_DASH;
   const r = Number(String(s).replace(",", "."));
   if (!Number.isFinite(r)) return METRIC_DASH;
+  if (r >= 24) {
+    const total = Math.round(r);
+    const years = Math.floor(total / 12);
+    const months = total % 12;
+    const yearsPart = `${years.toLocaleString(DISPLAY_NUMBER_LOCALE)} ${
+      years === 1 ? "año" : "años"
+    }`;
+    if (months === 0) return yearsPart;
+    return `${yearsPart} y ${months} ${months === 1 ? "mes" : "meses"}`;
+  }
   return `${r.toLocaleString(DISPLAY_NUMBER_LOCALE, {
     maximumFractionDigits: 1,
   })} meses`;
+}
+
+/**
+ * Valor de la tarjeta Runway. El servidor marca `runway_is_indefinite` cuando el retorno
+ * esperado de los líquidos cubre el gasto ≥100 años (y entonces `runway_months` viene `null`):
+ * en ese caso no hay número que enseñar, solo el hecho de que está cubierto.
+ */
+export function formatRunwayValue(
+  months: string | null | undefined,
+  isIndefinite: boolean | undefined,
+): string {
+  if (isIndefinite) return "Cubierto";
+  return formatMonthsRough(months);
 }
 
 export function breakdownPercentOfTotal(part: string, whole: string): number | null {

@@ -42,6 +42,7 @@ import {
   formatProjectionMilestoneCompactLabel,
   type LedgerPersonScope,
 } from "../lib/ledger";
+import { savingsSourceUsesTransactions } from "../lib/fire";
 import { chartPerf } from "../lib/perf";
 import { panWindow, pinchWindow, type ChartDomain } from "../lib/chart-gestures";
 
@@ -1242,6 +1243,12 @@ export function ProjectionNetWorthChart({
 
   const horizonLine = formatProjectionChartHorizonLine(series);
   const deltaStr = formatCurrencyAmount(series.monthly_delta_assumption, currencyIso);
+  // Base del Δ mensual: presupuesto (modo A) o promedio de movimientos (modos B y C, ya con
+  // el fallback del servidor aplicado). Se mantiene corto: comparte línea con más metadatos.
+  const deltaAvgMonths = series.savings_source_months_with_data ?? 0;
+  const deltaBaseLabel = savingsSourceUsesTransactions(series.savings_source)
+    ? `prom. ${deltaAvgMonths} ${deltaAvgMonths === 1 ? "mes" : "meses"}`
+    : "presup.";
   const scopeShort = ledgerPersonScope === "mine" ? "Mi vista" : "Hogar";
   const inflationShort =
     installationInflationPct > 0
@@ -1290,7 +1297,7 @@ export function ProjectionNetWorthChart({
           {horizonLine}
         </text>
         <text x={ml} y={layoutDims.headlineBlockTopY + 40} className="projection-chart-meta">
-          {inflationShort} · Δ regular presup. {deltaStr}/mes
+          {inflationShort} · Δ regular {deltaBaseLabel} {deltaStr}/mes
         </text>
 
         <g
