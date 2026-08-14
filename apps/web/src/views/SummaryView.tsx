@@ -19,13 +19,13 @@ import {
   formatCurrencyNumber,
   formatDebtToAssetsPct,
   formatFractionAsPercent,
-  formatMonthsRough,
   formatPercentDisplay,
+  formatRunwayValue,
   isZeroFractionMetric,
   isZeroMoneyMetric,
   parseDisplayDecimal,
 } from "../lib/format";
-import { savingsSourceUsesTransactions } from "../lib/fire";
+import { savingsAvgParenthetical } from "../lib/fire";
 
 type LedgerPersonScope = "household" | "mine";
 
@@ -85,12 +85,14 @@ export function SummaryView({
   // Modos B y C (promedio): el ahorro y la tasa vienen ya en base promedio ponderado desde
   // el servidor. En esos modos los paréntesis «sin deuda» pierden sentido (la base ya es
   // real) → los sustituimos por «promedio de N meses». En modo presupuesto: sin cambios.
-  const isAvgMode =
-    showMetrics && savingsSourceUsesTransactions(summary?.savings_source);
-  const avgMonths = summary?.savings_source_months_with_data ?? 0;
-  const avgParenthetical = isAvgMode
-    ? `promedio de ${avgMonths} ${avgMonths === 1 ? "mes" : "meses"}`
+  // La fuente efectiva vive dentro de `financial_health` (no en la raíz del summary).
+  const avgParenthetical = showMetrics
+    ? savingsAvgParenthetical(
+        fh?.savings_source,
+        fh?.savings_source_months_with_data,
+      )
     : undefined;
+  const isAvgMode = avgParenthetical !== undefined;
 
   const savingsMoneyParen =
     showMetrics && fh
@@ -138,13 +140,24 @@ export function SummaryView({
   const showSavingsRateTile =
     showMetrics && fh && savingsRatePrimary !== METRIC_DASH;
 
+  // Runway: con retorno suficiente el servidor manda `runway_is_indefinite` y `runway_months`
+  // a null — la tarjeta sigue siendo relevante (es la mejor noticia posible).
+  const runwayIsIndefinite = fh?.runway_is_indefinite === true;
+  const showRunwayTile =
+    showMetrics &&
+    fh &&
+    (runwayIsIndefinite || !isZeroMoneyMetric(fh.runway_months));
+  const runwayParenthetical = runwayIsIndefinite
+    ? "más de 100 años"
+    : avgParenthetical;
+
   const financialHealthHasAnyTile =
     showMetrics &&
     fh &&
     (showSavingsMoneyTile ||
       showSavingsRateTile ||
       !isZeroMoneyMetric(fh.liquid_assets_total) ||
-      !isZeroMoneyMetric(fh.runway_months) ||
+      showRunwayTile ||
       !isZeroFractionMetric(fh.upcoming_coverage_ratio));
 
   const liquidAssetsPctOfTotalAssets =
@@ -233,12 +246,14 @@ export function SummaryView({
                   }
                 />
               ) : null}
-              {!isZeroMoneyMetric(summary.financial_health.runway_months) ? (
+              {showRunwayTile ? (
                 <MetricCard
                   label="Runway"
-                  value={formatMonthsRough(
+                  value={formatRunwayValue(
                     summary.financial_health.runway_months,
+                    summary.financial_health.runway_is_indefinite,
                   )}
+                  parenthetical={runwayParenthetical}
                 />
               ) : null}
             </div>

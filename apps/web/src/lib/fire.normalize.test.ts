@@ -9,6 +9,7 @@ import {
   defaultFireSettingsApi,
   normalizeInstallationFireSettings,
   parseSavingsSource,
+  savingsAvgParenthetical,
   savingsSourceUsesTransactions,
 } from "./fire";
 
@@ -110,5 +111,32 @@ describe("savingsSourceUsesTransactions", () => {
 
   it("undefined → false", () => {
     expect(savingsSourceUsesTransactions(undefined)).toBe(false);
+  });
+});
+
+describe("savingsAvgParenthetical", () => {
+  it("modo budget (A) → sin paréntesis", () => {
+    expect(savingsAvgParenthetical("budget", 6)).toBeUndefined();
+  });
+
+  it("transactions_avg (modo B) con 6 meses", () => {
+    expect(savingsAvgParenthetical("transactions_avg", 6)).toBe(
+      "promedio de 6 meses",
+    );
+  });
+
+  it("budget_income_real_expense (modo C) con 1 mes → singular", () => {
+    expect(savingsAvgParenthetical("budget_income_real_expense", 1)).toBe(
+      "promedio de 1 mes",
+    );
+  });
+
+  it("fuente ausente → sin paréntesis", () => {
+    expect(savingsAvgParenthetical(undefined, 6)).toBeUndefined();
+  });
+
+  it("0 meses (fallback del servidor a budget) o meses ausentes → sin paréntesis", () => {
+    expect(savingsAvgParenthetical("transactions_avg", 0)).toBeUndefined();
+    expect(savingsAvgParenthetical("transactions_avg", undefined)).toBeUndefined();
   });
 });

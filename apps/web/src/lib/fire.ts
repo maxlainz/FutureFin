@@ -111,6 +111,23 @@ export function savingsSourceUsesTransactions(s?: SavingsSourceApi): boolean {
   return s === "transactions_avg" || s === "budget_income_real_expense";
 }
 
+/**
+ * Paréntesis de UI que explica la base de una métrica derivada del promedio de movimientos.
+ * Devuelve `"promedio de N meses"` (singular `"promedio de 1 mes"`) solo en los modos que usan
+ * transacciones (B `transactions_avg` y C `budget_income_real_expense`) y con al menos un mes
+ * con datos; `undefined` en modo `budget` o cuando el servidor cayó al fallback (0 meses).
+ * Punto único compartido por Resumen y el chart de proyección.
+ */
+export function savingsAvgParenthetical(
+  source: SavingsSourceApi | undefined,
+  months: number | undefined,
+): string | undefined {
+  if (!savingsSourceUsesTransactions(source)) return undefined;
+  const n = months ?? 0;
+  if (!Number.isFinite(n) || n < 1) return undefined;
+  return `promedio de ${n} ${n === 1 ? "mes" : "meses"}`;
+}
+
 export function taxOnGrossCapitalAnnual(
   gross: number,
   brackets: TaxBracketApi[],

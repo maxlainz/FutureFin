@@ -130,9 +130,18 @@ export type FinancialHealthMetrics = {
   savings_rate_excluding_derived_debt: string | null;
   liquid_assets_total: string;
   runway_months: string | null;
+  /** `true` cuando el retorno esperado de los activos líquidos cubre el gasto durante ≥100 años
+   *  (runway prácticamente indefinido). En ese caso `runway_months` viene `null`. */
+  runway_is_indefinite?: boolean;
   upcoming_inflows_total: string;
   upcoming_outflows_total: string;
   upcoming_coverage_ratio: string | null;
+  /** Fuente EFECTIVA del ahorro tras el fallback del servidor (`budget` si el modo
+   *  configurado usaba transacciones —`transactions_avg` o `budget_income_real_expense`—
+   *  pero no había meses con datos). Ausente en backends antiguos → `budget`. */
+  savings_source?: SavingsSourceApi;
+  /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
+  savings_source_months_with_data?: number;
 };
 
 export type CategoryBreakdownLineApi = {
@@ -149,12 +158,6 @@ export type SummaryResponse = {
   financial_health: FinancialHealthMetrics;
   assets_by_category: CategoryBreakdownLineApi[];
   liabilities_by_category: CategoryBreakdownLineApi[];
-  /** Fuente EFECTIVA del ahorro tras el fallback del servidor (`budget` si el modo
-   *  configurado usaba transacciones —`transactions_avg` o `budget_income_real_expense`—
-   *  pero no había meses con datos). Ausente en backends antiguos → `budget`. */
-  savings_source?: SavingsSourceApi;
-  /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
-  savings_source_months_with_data?: number;
 };
 
 export type BudgetTotalsApi = {
@@ -262,6 +265,12 @@ export type ProjectionSeriesApi = {
   asset_series?: AssetSeriesApi[];
   /** Densidad de los puntos serializados. Default `monthly`. Con `hybrid` el cliente recibe ~82 puntos en lugar de ~841. */
   density?: "monthly" | "hybrid";
+  /** Fuente EFECTIVA del ahorro usada por el engine para esta serie (tras el fallback del
+   *  servidor a `budget` cuando el modo con transacciones no tenía meses con datos).
+   *  Ausente en backends antiguos → `budget`. */
+  savings_source?: SavingsSourceApi;
+  /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
+  savings_source_months_with_data?: number;
 };
 
 export type FfbackupImportCounts = {

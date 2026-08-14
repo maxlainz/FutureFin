@@ -12,6 +12,7 @@ import {
   formatFractionAsPercent,
   formatMoneyAmount,
   formatMonthsRough,
+  formatRunwayValue,
   formatPercentAmount,
   formatPercentDisplay,
   formatPercentDisplaySigned,
@@ -165,6 +166,28 @@ describe("formatMonthsRough", () => {
   it("returns dash on missing data", () => {
     expect(formatMonthsRough(null)).toBe(METRIC_DASH);
     expect(formatMonthsRough("abc")).toBe(METRIC_DASH);
+  });
+  it("switches to years from 24 months on", () => {
+    expect(formatMonthsRough("24")).toBe("2 años");
+    expect(formatMonthsRough("30")).toBe("2 años y 6 meses");
+    expect(formatMonthsRough("25")).toBe("2 años y 1 mes");
+    expect(formatMonthsRough("1200")).toBe("100 años");
+  });
+  it("keeps the months format just below the threshold", () => {
+    expect(formatMonthsRough("23.5")).toBe("23,5 meses");
+  });
+});
+
+describe("formatRunwayValue", () => {
+  it("shows 'Cubierto' when the server marks it indefinite", () => {
+    expect(formatRunwayValue(null, true)).toBe("Cubierto");
+    expect(formatRunwayValue("12", true)).toBe("Cubierto");
+  });
+  it("delegates to formatMonthsRough otherwise", () => {
+    expect(formatRunwayValue("30", false)).toBe("2 años y 6 meses");
+    expect(formatRunwayValue("12", undefined)).toBe("12 meses");
+    expect(formatRunwayValue(null, false)).toBe(METRIC_DASH);
+    expect(formatRunwayValue(null, undefined)).toBe(METRIC_DASH);
   });
 });
 
