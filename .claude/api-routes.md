@@ -65,6 +65,8 @@ Cap kinds (all optional; `cap_kind`/`cap_value` are paired):
 - `months_expense` — N × (monthly expense + debt service); evaluated per-month against current state.
 - `income_multiple` — N × monthly income.
 
+**Base de los caps en `/v1/assets` (v2.2.0)**: el `contribution_target_amount` que devuelven `GET/POST/PATCH /v1/assets` resuelve `months_expense` / `income_multiple` con los escalares **efectivos** del engine — o sea, en modo B/C con datos el gasto/income salen del promedio real 12m, no del presupuesto (antes se resolvían siempre con presupuesto y el objetivo no casaba ni con la aportación del mes 1 mostrada en la misma respuesta ni con la proyección). Un único `assets_projection_context` (`handlers/projection.rs`) devuelve `{nominals, income_monthly, expense_with_debt}` de **un solo** `build_installation_projection_input` por request; sustituye a `first_month_asset_contribution_nominals_map` + `monthly_income_expense_debt_for_view` (eliminados).
+
 ### Liabilities (`/v1/liabilities/`)
 Accepts `?view=mine`. `principal_derived_from_plan` flag indicates auto-derived principal from planning flows.
 
@@ -76,10 +78,16 @@ Aggregated net worth, financial health metrics, category breakdowns. Accepts `?v
 **`financial_health` sigue el toggle `fire_settings.savings_source`** (3 modos; gate `SavingsSource::uses_transactions()` = B o C). Con datos:
 - **Modo B (`transactions_avg`)**: `income_monthly_equivalent`, `expense_regular_monthly_equivalent`, `net_monthly_equivalent` (= income_eff − expense_eff − Σ cuotas nominales activas) y `savings_rate` salen del promedio real 12m con resta híbrida de cuotas (mismo helper `effective_avg_income_expense` que la proyección), no del presupuesto.
 - **Modo C (`budget_income_real_expense`)**: igual que B pero `income_monthly_equivalent` **conserva el income del presupuesto** (NO se sobreescribe); `expense_regular_monthly_equivalent = expense_eff` y `net_monthly_equivalent = income (presupuesto) − expense_eff − debt_service`. El `match` sobre `savings_source` es exhaustivo (`Budget` es rama inalcanzable no-op, guardada por `uses_transactions()`).
+- **Base de gasto derivada/total (v2.2.0)**: en B/C con datos, `expense_derived_monthly_equivalent` = **servicio de deuda** de los pasivos activos (`payment_end_date IS NULL OR >= today`, cuota normalizada a mensual) y `expense_total_monthly_equivalent` = `expense_eff + debt_service`. Antes se dejaban los valores del presupuesto, lo que rompía en B/C las dos identidades que en modo A siempre valen y que ahora se cumplen en los **tres** modos:
+  - `expense_total_monthly_equivalent = expense_regular_monthly_equivalent + expense_derived_monthly_equivalent`
+  - `net_monthly_equivalent = income_monthly_equivalent − expense_total_monthly_equivalent`
+- **Fallback**: `months_with_data == 0` en B/C → el bloque `financial_health` completo es **idéntico** al de modo A (runway incluido).
 
-Runway y demás KPIs no cambian de base. Campos nuevos en `financial_health`:
+Campos de `financial_health` relacionados con el modo y el runway:
 - `savings_source` (`"budget" | "transactions_avg" | "budget_income_real_expense"`) — modo **efectivo** tras el fallback (B o C con `months_with_data == 0` → devuelve `"budget"`).
 - `savings_source_months_with_data` (`u32`) — meses **reales** del promedio (ver §Transactions); `0` en modo A y en el fallback.
+- `runway_months` (Decimal-string, opcional) — meses que los activos **líquidos** cubren `expense_total_monthly_equivalent`, **componiendo** la rentabilidad esperada de esos líquidos (media ponderada por valor de los multiplicadores mensuales) y la inflación del gasto (`installation.annual_inflation_assumption_percent`, clampada a ≥ 0). Lo calcula `futurefin_engine::liquid_runway_months` (ver [`engine.md`](engine.md) §Runway). **No** es `liquid_assets_total / expense_total`, salvo que rentabilidad e inflación sean 0, caso en el que se reduce exactamente a esa división. Como sigue `expense_total`, en B/C se calcula sobre la base de gasto real. Se **omite** del JSON (`skip_serializing_if`) cuando es `None`: sin base de gasto (`expense_total == 0`) o runway indefinido.
+- `runway_is_indefinite` (`bool`) — `true` cuando el saldo sobrevive el cap de `MAX_RUNWAY_MONTHS` = 1.200 meses (100 años), es decir el retorno cubre el gasto; entonces `runway_months` no viaja. Con `expense_total == 0` es `false` (no hay base, no es que esté cubierto). La UI muestra «Cubierto» en el primer caso y oculta la tarjeta en el segundo.
 
 ### Budget (`/v1/budget/`)
 Income/expense entries + derived lines from liabilities. Accepts `?view=mine`. Derived lines only show liabilities with `payment_end_date > today`.
@@ -98,6 +106,7 @@ Response (`ProjectionSeriesResponse`) includes:
 - `milestones[]` — next 3 net-worth milestones (1/2.5/5×10ⁿ thresholds), each with `target`, `reached_month_index`, `reached_date_ymd`
 - `compound_outpaces_true_savings_month_index` — first month where compound return > base monthly savings (optional)
 - `fire_target_series: f64[]`, `asset_series[].values: f64[]` — arrays grandes paralelos a `points` (también `f64`).
+- `savings_source` + `savings_source_months_with_data` (v2.2.0) — fuente del ahorro **efectiva** (tras el fallback) que produjo `monthly_delta_assumption`, y los meses reales del promedio; mismo naming y semántica que en `/v1/summary`. Aditivos: los sirve `BuiltProjection` sin queries extra, para que el chart etiquete la base del Δ mensual sin pedir `/v1/summary`.
 
 > La misma excepción f64 cubre los arrays por punto de `GET /v1/history/series` (`points[].net_worth/assets_total/liabilities_total`, `asset_series[].values`, `markers[].total`) — misma justificación chart-only. Hay UNA sola definición de `serialize_decimal_as_f64` (`pub(crate)`, en `handlers/projection.rs`), usada solo por projection e history.
 

@@ -144,7 +144,7 @@ npm workspace:   apps/web (futurefin-web)
 
 **crates/domain** — shared primitives: `UserId` (newtype over `Uuid`), re-exports `Decimal` and `Uuid`. No `f64` for monetary values anywhere in the domain.
 
-**crates/engine** — pure projection math (`project_net_worth_series`, `first_month_per_asset_contribution_nominals`) plus historical-snapshot interpolation (`history.rs`: `evaluate_timeline`, linear-for-assets / French-amortization-for-liabilities, `month_index_of` / `add_months_signed`). No I/O, no DB; only `Decimal` arithmetic. Has unit tests.
+**crates/engine** — pure projection math (`project_net_worth_series`, `first_month_per_asset_contribution_nominals`) plus historical-snapshot interpolation (`history.rs`: `evaluate_timeline`, linear-for-assets / French-amortization-for-liabilities, `month_index_of` / `add_months_signed`) y el runway de liquidez (`runway.rs`: `liquid_runway_months` — meses que cubren los activos líquidos componiendo su rentabilidad esperada y la inflación del gasto; lo consume `GET /v1/summary`). No I/O, no DB; only `Decimal` arithmetic. Has unit tests.
 
 **apps/api** — Axum HTTP server. Entry point: `main.rs` (bin), with shared crate modules in `lib.rs`. Key modules:
 - `routes/mod.rs` — full route map; all routes under `/v1/` except `/health` and `/openapi.json`. `DefaultBodyLimit` caps requests at 1 MB globally, 16 MB on `/backup/user-import*`.
