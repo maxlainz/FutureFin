@@ -140,7 +140,7 @@ export function RetirementView({
   // `budget` (0 meses con datos) o el summary aún no está cargado, se usan los equivalentes del
   // presupuesto (idéntico a modo A).
   const savingsAvgActive = savingsSourceUsesTransactions(
-    summary?.savings_source,
+    summary?.financial_health.savings_source,
   );
   const fireExpenseM = savingsAvgActive
     ? summary?.financial_health.expense_regular_monthly_equivalent
