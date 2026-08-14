@@ -2,10 +2,7 @@ use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::{
-    first_month_asset_contribution_nominals_map, monthly_income_expense_debt_for_view,
-    refresh_projection_after_mutation,
-};
+use crate::handlers::projection::{assets_projection_context, refresh_projection_after_mutation};
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -237,7 +234,8 @@ fn row_to_response(
 
 /// Build `asset_id → target_€` from the **first** allocation rule (lowest `priority`) that
 /// targets each asset and has a cap. Caps in `months_expense` / `income_multiple` are resolved
-/// to absolute € using the scope's monthly income / expense + debt_service baseline.
+/// to absolute € using the scope's **effective** monthly income / expense + debt_service baseline
+/// (`assets_projection_context`), es decir los mismos escalares con los que simula el engine.
 async fn fetch_asset_resolved_targets(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -298,31 +296,17 @@ pub async fn list_assets(
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
     let today = installation_naive_today(&state.pool, iid).await?;
-    let nominals = first_month_asset_contribution_nominals_map(
-        &state.pool,
-        iid,
-        user.id.0,
-        q.resolve(),
-        today,
-    )
-    .await?;
-    let (income_m, expense_m, debt_m) = monthly_income_expense_debt_for_view(
-        &state.pool,
-        iid,
-        user.id.0,
-        q.resolve(),
-        today,
-    )
-    .await?;
+    let ctx = assets_projection_context(&state.pool, iid, user.id.0, q.resolve(), today).await?;
     let targets = fetch_asset_resolved_targets(
         &state.pool,
         iid,
         q.resolve(),
         user.id.0,
-        income_m,
-        expense_m + debt_m,
+        ctx.income_monthly,
+        ctx.expense_with_debt,
     )
     .await?;
+    let nominals = ctx.nominals;
 
     let view_assets = q.resolve();
     let assets_scope = view_assets.scope_where("");
@@ -411,30 +395,16 @@ pub async fn create_asset(
     .await?;
 
     let today = installation_naive_today(&state.pool, iid).await?;
-    let nominals = first_month_asset_contribution_nominals_map(
-        &state.pool,
-        iid,
-        user.id.0,
-        LedgerView::Household,
-        today,
-    )
-    .await?;
-    let n = nominals.get(&row.id).copied().unwrap_or(Decimal::ZERO);
-    let (income_m, expense_m, debt_m) = monthly_income_expense_debt_for_view(
-        &state.pool,
-        iid,
-        user.id.0,
-        LedgerView::Household,
-        today,
-    )
-    .await?;
+    let ctx =
+        assets_projection_context(&state.pool, iid, user.id.0, LedgerView::Household, today).await?;
+    let n = ctx.nominals.get(&row.id).copied().unwrap_or(Decimal::ZERO);
     let targets = fetch_asset_resolved_targets(
         &state.pool,
         iid,
         LedgerView::Household,
         user.id.0,
-        income_m,
-        expense_m + debt_m,
+        ctx.income_monthly,
+        ctx.expense_with_debt,
     )
     .await?;
     let t = targets.get(&row.id).copied();
@@ -566,30 +536,16 @@ pub async fn patch_asset(
     .await?;
 
     let today = installation_naive_today(&state.pool, iid).await?;
-    let nominals = first_month_asset_contribution_nominals_map(
-        &state.pool,
-        iid,
-        user.id.0,
-        LedgerView::Household,
-        today,
-    )
-    .await?;
-    let n = nominals.get(&updated.id).copied().unwrap_or(Decimal::ZERO);
-    let (income_m, expense_m, debt_m) = monthly_income_expense_debt_for_view(
-        &state.pool,
-        iid,
-        user.id.0,
-        LedgerView::Household,
-        today,
-    )
-    .await?;
+    let ctx =
+        assets_projection_context(&state.pool, iid, user.id.0, LedgerView::Household, today).await?;
+    let n = ctx.nominals.get(&updated.id).copied().unwrap_or(Decimal::ZERO);
     let targets = fetch_asset_resolved_targets(
         &state.pool,
         iid,
         LedgerView::Household,
         user.id.0,
-        income_m,
-        expense_m + debt_m,
+        ctx.income_monthly,
+        ctx.expense_with_debt,
     )
     .await?;
     let t = targets.get(&updated.id).copied();
