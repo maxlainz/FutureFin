@@ -154,7 +154,12 @@ fn month_window(month_first: NaiveDate) -> (NaiveDate, NaiveDate) {
     (start, end)
 }
 
-fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
+/// Factor de crecimiento **mensual** equivalente a una tasa anual nominal (raíz 12ª del factor
+/// anual). Tasas ausentes o ≤ 0 se tratan como crecimiento 0 (factor 1).
+///
+/// `pub(crate)` porque `runway.rs` lo comparte: el runway debe usar EXACTAMENTE la misma
+/// conversión anual→mensual que la simulación, o divergiría del chart de proyección.
+pub(crate) fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
     let Some(p) = annual_percent else {
         return Decimal::ONE;
     };
