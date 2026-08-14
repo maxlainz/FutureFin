@@ -557,6 +557,146 @@ async fn assets_contribution_follows_savings_source_mode() {
     );
 }
 
+/// Fix B4 (regresión): los caps `months_expense` / `income_multiple` de las reglas de asignación se
+/// resuelven con los escalares **efectivos** del engine, no con los del presupuesto.
+///
+/// Dataset con presupuesto y transacciones deliberadamente distintos (sin pasivos → debt_service 0):
+/// - presupuesto: income 5.000, gasto 3.000
+/// - promedio real del último mes completo: income 4.000, gasto 1.000
+///
+/// PREDICCIÓN (a mano):
+/// - modo A: `Colchón` (cap `months_expense` 6) = 6 × 3.000 = **18.000**;
+///   `Bolsa` (cap `income_multiple` 2) = 2 × 5.000 = **10.000**
+/// - modo B: `Colchón` = 6 × 1.000 = **6.000**; `Bolsa` = 2 × 4.000 = **8.000**
+/// (antes del fix ambos modos devolvían los valores del presupuesto).
+#[tokio::test]
+async fn assets_cap_targets_follow_savings_source_mode() {
+    /// `nombre → contribution_target_amount` de GET /v1/assets (los activos sin cap no aparecen).
+    async fn targets(app: &TestApp, cookie: &str) -> std::collections::HashMap<String, f64> {
+        let resp = app.get_with_cookie("/v1/assets", cookie).await;
+        assert_eq!(resp.status, http::StatusCode::OK, "assets: {resp:?}");
+        resp.json()
+            .as_array()
+            .expect("array de activos")
+            .iter()
+            .filter_map(|a| {
+                let name = a["name"].as_str()?.to_string();
+                let t = a.get("contribution_target_amount")?;
+                Some((name, parse_dec(t)))
+            })
+            .collect()
+    }
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let asset_cat = app.create_category(&owner, "asset", "Bolsa").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "3000").await;
+
+    let mut ids = Vec::new();
+    for (name, value) in [("Colchón", "1000"), ("Bolsa", "1000")] {
+        let a = app
+            .post_json_with_cookie(
+                "/v1/assets",
+                json!({ "category_id": asset_cat, "name": name, "current_value": value,
+                        "is_liquid": true }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(a.status, http::StatusCode::CREATED, "{a:?}");
+        ids.push(a.json()["id"].as_str().unwrap().to_string());
+    }
+
+    // Colchón: remainder con cap en meses de gasto. Bolsa: percent con cap en múltiplos de ingreso.
+    let r1 = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({ "target_asset_id": ids[0], "kind": "remainder",
+                    "cap_kind": "months_expense", "cap_value": "6" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r1.status, http::StatusCode::CREATED, "{r1:?}");
+    let r2 = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({ "target_asset_id": ids[1], "kind": "percent", "amount": "50",
+                    "cap_kind": "income_multiple", "cap_value": "2" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r2.status, http::StatusCode::CREATED, "{r2:?}");
+
+    // Promedio real del último mes completo: income 4.000, gasto 1.000.
+    let today = server_today(&app, &owner.cookie).await;
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "4000", "income", None, None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Gasto", "-1000", "expense", None, None).await;
+
+    let modo_a = targets(&app, &owner.cookie).await;
+    approx(modo_a["Colchón"], 18_000.0);
+    approx(modo_a["Bolsa"], 10_000.0);
+
+    set_mode_b(&app, &owner.cookie).await;
+    let modo_b = targets(&app, &owner.cookie).await;
+    approx(modo_b["Colchón"], 6_000.0);
+    approx(modo_b["Bolsa"], 8_000.0);
+
+    assert!(
+        (modo_a["Colchón"] - modo_b["Colchón"]).abs() > 100.0
+            && (modo_a["Bolsa"] - modo_b["Bolsa"]).abs() > 100.0,
+        "los caps deben cambiar con el modo: A={modo_a:?}, B={modo_b:?}"
+    );
+}
+
+/// `GET /v1/projection/series` reporta la fuente **efectiva** (tras el fallback) y los meses reales
+/// que la alimentaron, para que la web etiquete la pendiente sin un fetch extra.
+///
+/// PREDICCIÓN: modo A → `"budget"` / 0; modo B **sin** meses reales → `"budget"` / 0 (fallback);
+/// modo B con un mes real → `"transactions_avg"` / 1.
+#[tokio::test]
+async fn projection_series_reports_effective_savings_source() {
+    async fn source(app: &TestApp, cookie: &str) -> (String, u64) {
+        let resp = app
+            .get_with_cookie("/v1/projection/series?months=240", cookie)
+            .await;
+        assert_eq!(resp.status, http::StatusCode::OK, "projection: {resp:?}");
+        let body = resp.json();
+        (
+            body["savings_source"].as_str().expect("savings_source").to_string(),
+            body["savings_source_months_with_data"].as_u64().expect("months"),
+        )
+    }
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "3000").await;
+
+    assert_eq!(source(&app, &owner.cookie).await, ("budget".into(), 0));
+
+    // Modo B sin transacciones en la ventana (solo una en el mes en curso) → fallback a budget.
+    let today = server_today(&app, &owner.cookie).await;
+    manual(&app, &owner.cookie, &date_in(today.year(), today.month(), 5), "Hoy", "9999", "income", None, None).await;
+    set_mode_b(&app, &owner.cookie).await;
+    assert_eq!(
+        source(&app, &owner.cookie).await,
+        ("budget".into(), 0),
+        "fallback ⇒ la fuente efectiva reportada es budget, no la configurada"
+    );
+
+    // Un mes real en la ventana → la fuente efectiva pasa a ser la configurada.
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "4000", "income", None, None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Gasto", "-1000", "expense", None, None).await;
+    assert_eq!(source(&app, &owner.cookie).await, ("transactions_avg".into(), 1));
+}
+
 // ---------------------------------------------------------------------------
 // Ponderación sin meses pseudovacíos (solo-recurrentes) — Bloque 1
 // ---------------------------------------------------------------------------
