@@ -4,6 +4,128 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] - 2026-08-14
+
+Coherencia de **todas** las métricas con `fire_settings.savings_source` (modos B `transactions_avg` y C
+`budget_income_real_expense`) y un **runway** que ya no es una división: compone la rentabilidad esperada de
+los activos líquidos y la inflación del gasto. Incluye el fix del bug que hacía que la pestaña **Jubilación**
+ignorara el modo activo y divergiera del target del servidor. Sin migración; el `schema_version` del
+`.ffbackup` sigue en **6**.
+
+### Fixed — Jubilación usaba SIEMPRE presupuesto en los modos B y C
+
+- **Síntoma → causa → fix**: en modo B/C, la pestaña **Jubilación** («Gasto actual», «Ingresos actuales»,
+  «Patrimonio objetivo», «Primer cruce») mostraba cifras de **presupuesto** y su «Patrimonio objetivo»
+  divergía del `jubilacion_target_net_worth` que devolvía el servidor; los paréntesis «promedio de N meses»
+  del Resumen tampoco aparecían. Causa raíz: el backend serializa `savings_source` y
+  `savings_source_months_with_data` **dentro de `financial_health`** (`FinancialHealthMetrics`), pero
+  `apps/web/src/api/types.ts` los declaraba en la **raíz** de `SummaryResponse` → `SummaryView` y
+  `RetirementView` leían siempre `undefined`, y `savingsSourceUsesTransactions(undefined)` es `false`, así
+  que el cliente se comportaba como si el modo fuera siempre A. TypeScript no lo detectaba: campos
+  opcionales inexistentes en el JSON son `undefined` legítimo. Fix: los dos campos se mueven a
+  `FinancialHealthMetrics` en `types.ts` (el `typecheck` señaló los dos consumidores) y ambas vistas leen de
+  `summary.financial_health`. **Sin cambio de servidor** — el JSON siempre fue el correcto.
+- **No regresiona**: el paréntesis pasa por un helper puro compartido, `savingsAvgParenthetical(source,
+  months)` en `lib/fire.ts` (`"promedio de N meses"`, singular incluido; `undefined` en modo A o tras el
+  fallback del servidor), consumido por Resumen y por el chart de proyección — una sola definición que los
+  tests de Vitest fijan.
+
+### Fixed — caps `months_expense` / `income_multiple` de Activos se resolvían con presupuesto
+
+- **Objetivo mostrado incoherente con la simulación**: `GET/POST/PATCH /v1/assets` resolvía los caps de las
+  reglas de asignación (`months_expense` = N × (gasto + servicio de deuda), `income_multiple` = N × income)
+  con los escalares del **presupuesto**, incluso en modo B/C — mientras la aportación del mes 1 mostrada en
+  la misma respuesta ya salía del promedio real. El objetivo en € no casaba ni con esa aportación ni con la
+  proyección. Ahora ambos salen del **mismo** build: `assets_projection_context` (`handlers/projection.rs`)
+  sustituye a `first_month_asset_contribution_nominals_map` + `monthly_income_expense_debt_for_view` (ambos
+  eliminados) y devuelve `{nominals, income_monthly, expense_with_debt}` con los escalares **efectivos** que
+  usa el engine. De paso, cada call site pasa de **dos** construcciones de proyección por request a **una**.
+- **Regresión**: `assets_cap_targets_follow_savings_source_mode` (`savings_source.rs`) — con el mismo
+  ledger, los caps valen 18.000 € / 10.000 € en modo A y 6.000 € / 8.000 € en modo B; el test falla contra
+  el código anterior.
+
+### Changed — `/v1/summary`: base de gasto real en B/C y runway con rentabilidad e inflación
+
+**Cambio de contrato (no breaking de schema)**: no se añade, quita ni renombra ningún campo obligatorio; lo
+que cambia es el **valor** de tres campos ya existentes de `financial_health` en escenarios concretos. Un
+cliente que solo los pinte sigue funcionando.
+
+- **Base de gasto en modo B/C con datos**: `expense_derived_monthly_equivalent` pasa a ser exactamente el
+  **servicio de deuda** de los pasivos activos (mismo filtro `payment_end_date IS NULL OR >= today` que el
+  resto de lecturas) y `expense_total_monthly_equivalent` pasa a `expense_eff + debt_service` (gasto real
+  promedio 12m con resta híbrida de cuotas, más el servicio de deuda). Hasta 2.1.0, en esos modos
+  `expense_reg` y `net` se sustituían por la base real pero `expense_der`/`expense_tot` se quedaban con los
+  del presupuesto, así que las dos identidades que en modo A siempre valen estaban **rotas**:
+  `expense_total = expense_regular + expense_derived` y `net = income − expense_total`. Ahora vuelven a
+  valer en los tres modos (`mode_b_runway_uses_effective_expense_base`).
+- **`runway_months` compone rentabilidad e inflación**: era `liquid_assets_total / expense_total`. Ahora lo
+  calcula la función pura nueva `liquid_runway_months` (`crates/engine/src/runway.rs`): bucle mes a mes en
+  `Decimal` en el que los líquidos crecen a la **media ponderada por valor** de sus multiplicadores
+  mensuales y el gasto se **infla** con `annual_inflation_assumption_percent`, con retirada antes del
+  crecimiento (el mismo orden que la simulación) y cap de 1.200 meses (100 años). Sin rentabilidad ni
+  inflación se reduce **exactamente** a la división anterior, así que la captura de regresión previa al
+  cambio (`runway_pre_change_baseline_liquid_over_expense`) sigue verde sin tolerancias.
+- **Sin datos, sin cambio**: en modo B/C con `months_with_data == 0` el fallback al presupuesto sigue
+  devolviendo un `financial_health` **idéntico** al de modo A (`mode_b_zero_months_falls_back_to_budget_runway`).
+- **Backend**: nuevo helper `installation_calendar_inflation_savings` (una query para fecha civil +
+  inflación clampada a ≥ 0 + `savings_source`) que sustituye en summary a `installation_naive_today` +
+  `projection_savings_source` — un round-trip menos. `liquid_sql` pasa a devolver filas
+  `(current_value, expected_annual_return_percent)` y la suma `liquid_assets_total` se hace en Rust (el
+  runway necesita la rentabilidad por activo). `monthly_multiplier` pasa a `pub(crate)` para que el runway
+  use **exactamente** la misma conversión anual→mensual que la simulación (y su regla «tasas ≤ 0 →
+  crecimiento 0»).
+
+### Números worked before/after (runway, verificados ejecutando el engine)
+
+12.000 € en activos líquidos, gasto total 1.200 €/mes. «Antes» es siempre la división
+`liquid_assets_total / expense_total` = 10 meses, insensible a rentabilidad e inflación:
+
+| Escenario | Antes (2.1.0) | Ahora (2.2.0) |
+|---|---|---|
+| Rentabilidad 0 %, inflación 0 % | 10 meses | **10 meses** (idéntico, por construcción) |
+| Rentabilidad 5 %, inflación 0 % | 10 meses | **10,19 meses** |
+| Rentabilidad 0 %, inflación 3 % | 10 meses | **9,89 meses** |
+| Rentabilidad 5 %, inflación 3 % | 10 meses | **10,07 meses** |
+| 1.000.000 € al 7 %, gasto 1.000 €/mes | 1.000 meses | **«Cubierto»** (`runway_is_indefinite`) |
+
+Y el efecto del cambio de base (test `mode_b_runway_uses_effective_expense_base`): 16.000 € líquidos sin
+rentabilidad, presupuesto de gasto 8.000 €/mes, dos pasivos activos con 800 €/mes de cuotas y un único mes
+real con 800 € de gasto:
+
+| `financial_health` | Modo A (`budget`) | Modo B — antes (2.1.0) | Modo B — ahora (2.2.0) |
+|---|---|---|---|
+| `expense_regular_monthly_equivalent` | 8.000 | 800 (`expense_eff`) | 800 (`expense_eff`) |
+| `expense_derived_monthly_equivalent` | 800 | 800 (línea derivada del presupuesto) | 800 (ahora **por definición** el debt service; aquí coinciden porque ambos pasivos están activos) |
+| `expense_total_monthly_equivalent` | 8.800 | 8.800 (presupuesto) | **1.600** |
+| `net_monthly_equivalent` | 200 | 1.400 (≠ income − total ✗) | 1.400 (= 3.000 − 1.600 ✓) |
+| `runway_months` | 1,8 | 1,8 | **10** |
+
+### Added
+
+- **`financial_health.runway_is_indefinite` (`bool`)**: `true` cuando la rentabilidad esperada de los
+  líquidos cubre el gasto durante ≥ 100 años; en ese caso `runway_months` **no se serializa**
+  (`skip_serializing_if`, igual que hoy con gasto 0). Distingue el caso «cubierto» del «sin base de gasto»
+  (`expense_total == 0`), donde el flag es `false`.
+- **`GET /v1/projection/series`: `savings_source` y `savings_source_months_with_data`** (aditivos, mismo
+  naming y semántica que en `/v1/summary`): fuente **efectiva** tras el fallback que produjo
+  `monthly_delta_assumption`. Permite etiquetar la base del Δ mensual en el chart sin un fetch extra.
+- **UI — runway legible**: `formatMonthsRough` pasa a años + meses a partir de 24 meses («2 años», «2 años y
+  6 meses»; por debajo de 24 sigue en meses con un decimal, sin cambios), y el nuevo `formatRunwayValue`
+  muestra **«Cubierto»** cuando el runway es indefinido, con el paréntesis «más de 100 años». La tarjeta
+  Runway se muestra también en ese caso (antes se ocultaba: `runway_months` null se leía como cero).
+- **UI — base visible en las métricas derivadas**: paréntesis «promedio de N meses» en Ahorro, Tasa y Runway
+  del Resumen en modo B/C, y la línea de meta del chart de proyección pasa de «Δ regular presup.» a
+  «Δ regular prom. N meses» cuando la base viene de movimientos.
+
+### Compatibilidad
+
+- **Sin migración de DB ni de backup**: los tres campos nuevos son de respuesta; `CURRENT_SCHEMA_VERSION`
+  del `.ffbackup` **sigue en 6**. Rollback a 2.1.0 sin pasos manuales.
+- **Los números pueden moverse tras actualizar**: quien tenga rentabilidades esperadas en sus activos
+  líquidos o inflación > 0 verá un runway distinto (mayor con retorno, menor con inflación), y quien esté en
+  modo B/C verá cambiar `expense_total`/`expense_derived` y, con ellos, el runway. Es precisamente el fix
+  buscado, no un efecto colateral.
+
 ## [2.1.0] - 2026-07-09
 
 Tercer modo de «fuente del ahorro» de la simulación y endurecimiento del promedio real 12m para que un
