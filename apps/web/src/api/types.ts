@@ -129,9 +129,13 @@ export type FinancialHealthMetrics = {
   monthly_net_excluding_derived_debt: string;
   savings_rate_excluding_derived_debt: string | null;
   liquid_assets_total: string;
+  /** El valor `1200` es el tope del bucle del servidor y significa «al menos 100 años» (un
+   *  suelo, no una medida exacta). */
   runway_months: string | null;
-  /** `true` cuando el retorno esperado de los activos líquidos cubre el gasto durante ≥100 años
-   *  (runway prácticamente indefinido). En ese caso `runway_months` viene `null`. */
+  /** `true` cuando la retirada anual (12 × `expense_total_monthly_equivalent`, grosseada con los
+   *  tramos fiscales de `fire_settings` igual que el target FIRE) no supera el SWR de la
+   *  instalación aplicado a `liquid_assets_total`. En ese caso `runway_months` viene `null`.
+   *  Con `swr_pct = 0` nunca es `true`. */
   runway_is_indefinite?: boolean;
   upcoming_inflows_total: string;
   upcoming_outflows_total: string;

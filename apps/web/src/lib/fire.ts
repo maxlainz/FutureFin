@@ -15,7 +15,7 @@ import type {
   SavingsSourceApi,
   TaxBracketApi,
 } from "../api/types";
-import { parseDisplayDecimal } from "./format";
+import { formatPercentAmount, parseDisplayDecimal } from "./format";
 
 export const DEFAULT_ES_TAX_BRACKETS_API: TaxBracketApi[] = [
   { up_to: "6000", pct: "19" },
@@ -126,6 +126,21 @@ export function savingsAvgParenthetical(
   const n = months ?? 0;
   if (!Number.isFinite(n) || n < 1) return undefined;
   return `promedio de ${n} ${n === 1 ? "mes" : "meses"}`;
+}
+
+/**
+ * Paréntesis de la tarjeta Runway cuando el servidor la marca infinita: explica el porqué (la
+ * retirada anual cabe en el SWR configurado en Jubilación). Solo pinta la etiqueta — la decisión
+ * es exclusivamente del servidor (`runway_is_indefinite`), aquí no se re-deriva el umbral. Sin
+ * `fire_settings` (instalación aún sin cargar) se omite el número en vez de inventar el default:
+ * el porcentaje mostrado debe ser siempre el realmente configurado.
+ */
+export function runwaySwrParenthetical(
+  fire: FireSettingsApi | undefined | null,
+): string {
+  if (!fire) return "dentro del SWR";
+  const swr = normalizeInstallationFireSettings(fire).swr_pct;
+  return `dentro del SWR ${formatPercentAmount(swr)}`;
 }
 
 export function taxOnGrossCapitalAnnual(
