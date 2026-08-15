@@ -1,10 +1,10 @@
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_budget_totals_for_summary;
 use crate::handlers::installation::{
-    installation_calendar_inflation_savings, require_installation_member, SavingsSource,
+    installation_calendar_inflation_fire, require_installation_member, SavingsSource,
 };
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::liability_monthly_payment;
+use crate::handlers::projection::{gross_up_net_annual_fire, liability_monthly_payment};
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::summary::{effective_avg_income_expense, transactions_12m_avg};
 use crate::state::AppState;
@@ -66,13 +66,17 @@ pub struct FinancialHealthMetrics {
     /// esperada de esos activos (media ponderada por valor) y con el gasto creciendo a la inflación
     /// de la instalación (`futurefin_engine::liquid_runway_months`). `null` cuando no hay base de
     /// gasto (`expense_total == 0`) **o** cuando el runway es indefinido (ver `runway_is_indefinite`).
+    /// El valor `1200` es el tope del bucle del servidor y significa «al menos 100 años» (un
+    /// **suelo**, no una medida exacta).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub runway_months: Option<Decimal>,
-    /// `true` cuando el retorno esperado de los líquidos cubre el gasto durante al menos
-    /// `MAX_RUNWAY_MONTHS` (100 años); en ese caso `runway_months` es `null`. Con gasto 0 el runway
-    /// tampoco existe pero este campo es `false` (no está «cubierto», simplemente no hay base).
+    /// `true` cuando la retirada anual — `12 × expense_total_monthly_equivalent`, grosseada por los
+    /// tramos fiscales de `fire_settings` igual que el target FIRE — no supera el SWR de la
+    /// instalación aplicado a `liquid_assets_total`; en ese caso `runway_months` es `null`. Con
+    /// gasto 0 el runway tampoco existe pero este campo es `false` (no hay base). Con
+    /// `swr_pct = 0` nunca es `true`.
     pub runway_is_indefinite: bool,
     /// Sum of **expected_amount** for income-category flows (not annualized).
     #[serde(with = "rust_decimal::serde::str")]
@@ -267,10 +271,10 @@ pub async fn get_summary(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    // Una sola query para los tres escalares de instalación que necesita este handler: fecha civil,
-    // inflación (base del runway) y fuente del ahorro configurada.
-    let (today, inflation_pct, source) =
-        installation_calendar_inflation_savings(&state.pool, iid).await?;
+    // Una sola query para los escalares de instalación que necesita este handler: fecha civil,
+    // inflación (base del runway) y los fire_settings (fuente del ahorro + SWR/tramos del runway).
+    let (today, inflation_pct, fire) = installation_calendar_inflation_fire(&state.pool, iid).await?;
+    let source = fire.savings_source;
     let view = q.resolve();
 
     let asset_scope = view.scope_where("");
@@ -397,14 +401,27 @@ pub async fn get_summary(
     };
 
     // Runway compuesto: los líquidos rinden su rentabilidad esperada mientras se drenan y el gasto
-    // se infla con la inflación de la instalación. Sin rentabilidad ni inflación se reduce EXACTO a
-    // `liquid_assets / expense_tot` (ver `runway.rs`), que es el contrato histórico.
-    let (runway_months, runway_is_indefinite) =
-        match liquid_runway_months(&liquid_rows, expense_tot, inflation_pct) {
-            RunwayOutcome::Months(m) => (Some(m), false),
-            RunwayOutcome::Indefinite => (None, true),
-            RunwayOutcome::NoExpenseBase => (None, false),
-        };
+    // se infla con la inflación de la instalación. El caso «infinito» NO lo decide el tope del
+    // bucle sino el SWR de la instalación sobre el gasto anual grosseado con los mismos tramos
+    // fiscales que el target FIRE: infinito ⟺ gross_up(12·expense_tot) ≤ liquid·(swr/100) (ver
+    // `runway.rs`). Por debajo del umbral y sin rentabilidad ni inflación se reduce EXACTO a
+    // `liquid_assets / expense_tot`, que es el contrato histórico.
+    let annual_expense_gross = gross_up_net_annual_fire(
+        expense_tot * Decimal::from(12u32),
+        &fire.tax_brackets,
+        fire.taxes_enabled,
+    );
+    let (runway_months, runway_is_indefinite) = match liquid_runway_months(
+        &liquid_rows,
+        expense_tot,
+        inflation_pct,
+        fire.swr_pct,
+        annual_expense_gross,
+    ) {
+        RunwayOutcome::Months(m) => (Some(m), false),
+        RunwayOutcome::Indefinite => (None, true),
+        RunwayOutcome::NoExpenseBase => (None, false),
+    };
 
     let (upcoming_inflows_total, upcoming_outflows_total) =
         planning_flow_totals_in_out(&state.pool, iid, user.id.0, view).await?;
