@@ -5,15 +5,20 @@ use rust_decimal::Decimal;
 
 use crate::projection::monthly_multiplier;
 
-/// Tope del bucle: 1.200 meses = 100 años. Sobrevivir el tope se reporta como `Indefinite`.
+/// Tope del bucle finito: 1.200 meses = 100 años. Sobrevivirlo ya **no** significa `Indefinite`
+/// (eso lo decide el umbral SWR): se reporta como `Months(1200)`, un **suelo** («al menos 100
+/// años»), porque a partir de ahí el número exacto deja de ser informativo.
 pub const MAX_RUNWAY_MONTHS: u32 = 1200;
 
 /// Resultado del runway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunwayOutcome {
     /// Meses cubiertos, con el último mes **fraccionario** (p.ej. `10.5` = diez meses y medio).
+    /// El valor `1200` (`MAX_RUNWAY_MONTHS`) es el tope del bucle y significa «≥ 100 años»,
+    /// no una medida exacta.
     Months(Decimal),
-    /// El saldo sobrevive `MAX_RUNWAY_MONTHS` meses: la rentabilidad cubre el gasto inflado.
+    /// La retirada anual (el gasto anual grosseado, `annual_expense_for_swr`) no supera el SWR
+    /// aplicado al saldo líquido: `annual_expense_for_swr ≤ A·(swr_pct/100)`.
     Indefinite,
     /// No hay base de gasto (`monthly_expense <= 0`): el runway no está definido.
     NoExpenseBase,
@@ -23,6 +28,9 @@ pub enum RunwayOutcome {
 ///
 /// `liquid_assets` son pares `(valor, rentabilidad anual %)`; `monthly_expense` es el gasto
 /// mensual total de partida y `annual_inflation_percent` la inflación anual que lo encarece.
+/// `swr_pct` es la tasa de retirada segura de la instalación (`fire_settings.swr_pct`, en %) y
+/// `annual_expense_for_swr` el gasto **anual** ya grosseado por impuestos por el handler (el
+/// mismo `gross_up` del FIRE target; sin impuestos es simplemente `12·monthly_expense`).
 ///
 /// # Modelo
 ///
@@ -39,17 +47,30 @@ pub enum RunwayOutcome {
 ///   más tiempo los de rentabilidad alta.
 /// - **Tasas ≤ 0 → crecimiento 0**: herencia documentada de [`monthly_multiplier`], que devuelve
 ///   factor 1 tanto para `None` como para tasas no positivas (el engine no modela pérdidas).
-/// - **Cap de 100 años**: si el saldo aguanta `MAX_RUNWAY_MONTHS` meses se devuelve `Indefinite`
-///   (sin epsilon ni forma cerrada: `ln` sufre cancelación justo en la frontera `A·j → g`; el
-///   bucle mes a mes la evita y cuesta microsegundos).
+/// - **Umbral SWR (caso infinito)**: el runway es `Indefinite` ⟺ la retirada anual no supera el
+///   SWR sobre el saldo inicial: `annual_expense_for_swr ≤ A·(swr_pct/100)`. Se compara sin
+///   dividir — `annual_expense_for_swr·100 ≤ A·swr_pct` — para que la frontera sea **exacta** en
+///   `Decimal`. Con `swr_pct ≤ 0` el lado derecho es ≤ 0 y el izquierdo > 0, así que nunca se
+///   cumple (no necesita guarda aparte). Es el «FIRE number» de liquidez: `A ≥ gasto_bruto/SWR`.
+/// - **El disparador es deliberadamente independiente de rentabilidad e inflación**: mira solo
+///   `A`, el gasto grosseado y el SWR — la definición de SWR ya asume una cartera cuyo retorno
+///   real sostiene esa retirada a largo plazo. Rentabilidad e inflación siguen gobernando el
+///   caso **finito** (el bucle de abajo). Consecuencia asumida: un saldo por debajo del umbral
+///   con rentabilidad altísima ya no es «infinito», y uno en el umbral con rentabilidad 0 sí.
+/// - **Orden de checks**: `NoExpenseBase` se decide **antes** que el umbral SWR — con gasto 0 la
+///   desigualdad `0 ≤ A·swr` sería trivialmente cierta y marcaría infinito un runway indefinido.
+/// - **Tope de 100 años**: si el saldo aguanta `MAX_RUNWAY_MONTHS` meses sin haber cumplido el
+///   umbral SWR se devuelve `Months(1200)` como **suelo** («al menos 100 años»), no `Indefinite`:
+///   el infinito lo decide en exclusiva el SWR.
 ///
 /// # Reducción exacta a `A / g`
 ///
-/// Con rentabilidad e inflación 0 se tiene `m = m_inf = 1`, luego `balance_k = A − k·g` y `g`
-/// constante. Sea `n = ⌊A/g⌋`: para todo `k ≤ n` se cumple `balance_{k−1} = A − (k−1)·g ≥ g`, así
-/// que el bucle no corta; en `k = n+1` se cumple `balance_n = A − n·g < g` y se devuelve
-/// `n + (A − n·g)/g = A/g`. La única división es la final, de modo que el resultado es la división
-/// simple exacta (regresión sin tolerancias en los tests).
+/// Cuando el umbral SWR no se cumple, con rentabilidad e inflación 0 se tiene `m = m_inf = 1`,
+/// luego `balance_k = A − k·g` y `g` constante. Sea `n = ⌊A/g⌋`: para todo `k ≤ n` se cumple
+/// `balance_{k−1} = A − (k−1)·g ≥ g`, así que el bucle no corta; en `k = n+1` se cumple
+/// `balance_n = A − n·g < g` y se devuelve `n + (A − n·g)/g = A/g`. La única división es la
+/// final, de modo que el resultado es la división simple exacta (regresión sin tolerancias en
+/// los tests).
 ///
 /// Casos límite: `monthly_expense <= 0` → [`RunwayOutcome::NoExpenseBase`]; saldo total ≤ 0 →
 /// `Months(0)`.
@@ -57,6 +78,8 @@ pub fn liquid_runway_months(
     liquid_assets: &[(Decimal, Option<Decimal>)],
     monthly_expense: Decimal,
     annual_inflation_percent: Decimal,
+    swr_pct: Decimal,
+    annual_expense_for_swr: Decimal,
 ) -> RunwayOutcome {
     if monthly_expense <= Decimal::ZERO {
         return RunwayOutcome::NoExpenseBase;
@@ -67,6 +90,13 @@ pub fn liquid_runway_months(
         // Sin saldo no hay nada que cubrir. (El bucle daría lo mismo para 0, pero un saldo
         // negativo produciría meses negativos: se corta aquí.)
         return RunwayOutcome::Months(Decimal::ZERO);
+    }
+
+    // Infinito ⟺ la retirada anual (grosseada) no supera el SWR. Comparación exacta sin dividir.
+    // OJO: el `100` desporcentúa `swr_pct` — no confundir ni compartir con `MAX_RUNWAY_MONTHS`
+    // aunque 12·100 = 1200 coincidan numéricamente.
+    if annual_expense_for_swr * Decimal::from(100u32) <= balance_0 * swr_pct {
+        return RunwayOutcome::Indefinite;
     }
 
     // Media ponderada por valor de los multiplicadores mensuales (drenaje prorrateado).
@@ -87,7 +117,10 @@ pub fn liquid_runway_months(
         balance = (balance - g) * m;
         g *= m_inf;
     }
-    RunwayOutcome::Indefinite
+    // El saldo sobrevive el tope sin haber cumplido el umbral SWR: NO es infinito, pero el
+    // número exacto ya no informa. Se devuelve el tope como SUELO («al menos 100 años»); la UI
+    // lo renderiza como «+100 años».
+    RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS))
 }
 
 #[cfg(test)]
@@ -96,6 +129,21 @@ mod tests {
 
     fn d(n: i64) -> Decimal {
         Decimal::from(n)
+    }
+
+    /// SWR por defecto de la instalación (`default_fire_settings`): 3,5 %.
+    fn swr() -> Decimal {
+        Decimal::new(35, 1)
+    }
+
+    /// Llamada con el gasto anual sin gross-up (`12·g`) — el caso de los tests sin impuestos.
+    fn runway(
+        assets: &[(Decimal, Option<Decimal>)],
+        g: Decimal,
+        infl: Decimal,
+        swr_pct: Decimal,
+    ) -> RunwayOutcome {
+        liquid_runway_months(assets, g, infl, swr_pct, g * d(12))
     }
 
     fn months(o: RunwayOutcome) -> Decimal {
@@ -122,10 +170,10 @@ mod tests {
     /// 12.000 / 1.000 = **12** exacto; 10.000 / 3.000 = **10000/3000** exacto (periódico).
     #[test]
     fn zero_return_zero_inflation_equals_plain_division() {
-        let entero = liquid_runway_months(&[(d(12_000), None)], d(1_000), Decimal::ZERO);
+        let entero = runway(&[(d(12_000), None)], d(1_000), Decimal::ZERO, swr());
         assert_eq!(entero, RunwayOutcome::Months(d(12)));
 
-        let fraccionario = liquid_runway_months(&[(d(10_000), None)], d(3_000), Decimal::ZERO);
+        let fraccionario = runway(&[(d(10_000), None)], d(3_000), Decimal::ZERO, swr());
         assert_eq!(
             fraccionario,
             RunwayOutcome::Months(d(10_000) / d(3_000)),
@@ -137,10 +185,11 @@ mod tests {
     /// (el saldo remanente crece ~0,407%/mes mientras se consume).
     #[test]
     fn positive_return_extends_runway() {
-        let con_retorno = months(liquid_runway_months(
+        let con_retorno = months(runway(
             &[(d(12_000), Some(d(5)))],
             d(1_000),
             Decimal::ZERO,
+            swr(),
         ));
         assert!(
             con_retorno > d(12),
@@ -152,18 +201,19 @@ mod tests {
     /// el gasto del mes k es 1.000·m_inf^(k−1) > 1.000.
     #[test]
     fn inflation_shortens_runway() {
-        let con_inflacion = months(liquid_runway_months(&[(d(12_000), None)], d(1_000), d(3)));
+        let con_inflacion = months(runway(&[(d(12_000), None)], d(1_000), d(3), swr()));
         assert!(
             con_inflacion < d(12),
             "esperado < 12 meses, obtenido {con_inflacion}"
         );
     }
 
-    /// 1.000.000 al 7% anual rinde ~5.650 €/mes, muy por encima del gasto de 1.000 sin inflación:
-    /// el saldo nunca baja → `Indefinite` al llegar al cap de 1.200 meses.
+    /// 1.000.000 con gasto de 1.000/mes: la retirada anual es 12.000 €, muy por debajo del
+    /// 3,5 % del saldo (35.000 €) → `Indefinite` por el umbral SWR (con el criterio anterior
+    /// —sobrevivir el cap— este escenario también era indefinido: el pinning cruza el cambio).
     #[test]
-    fn return_covering_expense_is_indefinite() {
-        let out = liquid_runway_months(&[(d(1_000_000), Some(d(7)))], d(1_000), Decimal::ZERO);
+    fn withdrawal_within_swr_is_indefinite() {
+        let out = runway(&[(d(1_000_000), Some(d(7)))], d(1_000), Decimal::ZERO, swr());
         assert_eq!(out, RunwayOutcome::Indefinite);
     }
 
@@ -179,10 +229,11 @@ mod tests {
         let balance_0 = v_lento + v_rapido;
         let m_ponderado = (v_lento * Decimal::ONE + v_rapido * m10) / balance_0;
 
-        let out = liquid_runway_months(
+        let out = runway(
             &[(v_lento, None), (v_rapido, Some(d(10)))],
             d(2_000),
             Decimal::ZERO,
+            swr(),
         );
         assert_eq!(
             months(out),
@@ -205,17 +256,19 @@ mod tests {
     /// −5% da exactamente el mismo runway que «sin rentabilidad» (12 meses).
     #[test]
     fn negative_return_treated_as_zero_growth() {
-        let negativo = liquid_runway_months(&[(d(12_000), Some(d(-5)))], d(1_000), Decimal::ZERO);
-        let sin_tasa = liquid_runway_months(&[(d(12_000), None)], d(1_000), Decimal::ZERO);
+        let negativo = runway(&[(d(12_000), Some(d(-5)))], d(1_000), Decimal::ZERO, swr());
+        let sin_tasa = runway(&[(d(12_000), None)], d(1_000), Decimal::ZERO, swr());
         assert_eq!(negativo, sin_tasa);
         assert_eq!(negativo, RunwayOutcome::Months(d(12)));
     }
 
-    /// Sin gasto el runway no está definido (ni siquiera «infinito»): `NoExpenseBase`.
+    /// Sin gasto el runway no está definido (ni siquiera «infinito»): `NoExpenseBase`. Este test
+    /// también fija el ORDEN de los checks: con gasto 0 la desigualdad SWR (`0 ≤ A·swr`) sería
+    /// trivialmente cierta, así que `NoExpenseBase` debe decidirse antes que el umbral.
     #[test]
     fn zero_expense_is_no_expense_base() {
         assert_eq!(
-            liquid_runway_months(&[(d(12_000), Some(d(5)))], Decimal::ZERO, d(3)),
+            runway(&[(d(12_000), Some(d(5)))], Decimal::ZERO, d(3), swr()),
             RunwayOutcome::NoExpenseBase
         );
     }
@@ -224,12 +277,71 @@ mod tests {
     #[test]
     fn zero_balance_is_zero_months() {
         assert_eq!(
-            liquid_runway_months(&[], d(1_000), Decimal::ZERO),
+            runway(&[], d(1_000), Decimal::ZERO, swr()),
             RunwayOutcome::Months(Decimal::ZERO)
         );
         assert_eq!(
-            liquid_runway_months(&[(Decimal::ZERO, Some(d(5)))], d(1_000), Decimal::ZERO),
+            runway(&[(Decimal::ZERO, Some(d(5)))], d(1_000), Decimal::ZERO, swr()),
             RunwayOutcome::Months(Decimal::ZERO)
+        );
+    }
+
+    /// Frontera EXACTA del umbral: 300.000 al 4 % = 12.000 €/año = 12 × 1.000 → `Indefinite`
+    /// por igualdad (la comparación sin división lo hace posible en `Decimal`). Nota: sin
+    /// rentabilidad el saldo se agotaría en 300 meses — el KPI mide tasa de retirada, no
+    /// supervivencia (decisión de diseño documentada en el docstring del módulo).
+    #[test]
+    fn swr_threshold_exact_equality_is_indefinite() {
+        let out = runway(&[(d(300_000), None)], d(1_000), Decimal::ZERO, d(4));
+        assert_eq!(out, RunwayOutcome::Indefinite);
+    }
+
+    /// Un euro por debajo del umbral (299.999 al 4 % < 12.000 €/año) → finito, y como no hay
+    /// rentabilidad ni inflación la reducción exacta a `A/g` sigue intacta: 299.999/1.000.
+    #[test]
+    fn just_below_swr_threshold_is_finite() {
+        let out = runway(&[(d(299_999), None)], d(1_000), Decimal::ZERO, d(4));
+        assert_eq!(out, RunwayOutcome::Months(d(299_999) / d(1_000)));
+    }
+
+    /// `swr = 0` (válido en la API) nunca marca infinito, por grande que sea el saldo o la
+    /// rentabilidad: el escenario de 1M al 7 % que con SWR 3,5 es `Indefinite` aquí agota el
+    /// tope y devuelve el suelo `Months(1200)`. También defensivo con `swr < 0`: el JSONB
+    /// almacenado no se revalida al leer.
+    #[test]
+    fn swr_zero_never_indefinite() {
+        let cero = runway(&[(d(1_000_000), Some(d(7)))], d(1_000), Decimal::ZERO, Decimal::ZERO);
+        assert_eq!(cero, RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)));
+
+        let negativo = runway(&[(d(1_000_000), Some(d(7)))], d(1_000), Decimal::ZERO, d(-1));
+        assert_eq!(negativo, RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)));
+    }
+
+    /// Retirada por ENCIMA del SWR (48.000 > 35.000 = 1M·3,5 %) pero retorno que cubre el gasto
+    /// (7 % ⇒ ~5.654 €/mes > 4.000): el saldo sobrevive el tope y se devuelve `Months(1200)`
+    /// como suelo, NO `Indefinite` — el infinito lo decide en exclusiva el SWR. (En 2.2.0 este
+    /// escenario era `Indefinite` por el cap.)
+    #[test]
+    fn cap_reached_without_swr_is_months_at_cap() {
+        let out = runway(&[(d(1_000_000), Some(d(7)))], d(4_000), Decimal::ZERO, swr());
+        assert_eq!(out, RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)));
+    }
+
+    /// El 5.º parámetro participa: con el gasto anual SIN grossear (12.000 ≤ 35.000) el caso es
+    /// `Indefinite`, pero si el handler pasa un gasto grosseado mayor que el umbral (36.000 >
+    /// 35.000) el mismo escenario pasa a finito. Fija que el umbral usa `annual_expense_for_swr`
+    /// y no recalcula `12·monthly_expense` por su cuenta.
+    #[test]
+    fn grossed_expense_raises_threshold() {
+        let assets = [(d(1_000_000), Some(d(7)))];
+        let sin_gross = liquid_runway_months(&assets, d(1_000), Decimal::ZERO, swr(), d(12_000));
+        assert_eq!(sin_gross, RunwayOutcome::Indefinite);
+
+        let con_gross = liquid_runway_months(&assets, d(1_000), Decimal::ZERO, swr(), d(36_000));
+        assert_eq!(
+            con_gross,
+            RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)),
+            "por encima del umbral y con retorno > gasto, el bucle agota el tope (suelo)"
         );
     }
 }

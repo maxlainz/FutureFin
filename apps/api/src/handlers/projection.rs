@@ -104,7 +104,7 @@ fn tax_on_gross_capital_annual(gross: Decimal, brackets: &[TaxBracket]) -> Decim
 /// acumulado de los tramos anteriores. Despejando `g = (net − r_i·prev_i + K_i) / (1 − r_i)` se
 /// obtiene un candidato; si cae dentro del tramo (≤ `ceiling_i`), es la solución; si no, se
 /// avanza al siguiente y se actualiza `K_i`.
-fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBracket], taxes_enabled: bool) -> Decimal {
+pub(crate) fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBracket], taxes_enabled: bool) -> Decimal {
     if !taxes_enabled || net_annual <= Decimal::ZERO {
         return net_annual.max(Decimal::ZERO);
     }
