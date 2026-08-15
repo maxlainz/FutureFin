@@ -179,13 +179,18 @@ describe("formatMonthsRough", () => {
 });
 
 describe("formatRunwayValue", () => {
-  it("shows 'Cubierto' when the server marks it indefinite", () => {
-    expect(formatRunwayValue(null, true)).toBe("Cubierto");
-    expect(formatRunwayValue("12", true)).toBe("Cubierto");
+  it("shows 'Infinito' when the server marks it indefinite (withdrawal within SWR)", () => {
+    expect(formatRunwayValue(null, true)).toBe("Infinito");
+    expect(formatRunwayValue("12", true)).toBe("Infinito");
+  });
+  it("reports the 1200-month server cap as a floor, not an exact value", () => {
+    expect(formatRunwayValue("1200", false)).toBe("+100 años");
+    expect(formatRunwayValue("1200.0000", false)).toBe("+100 años");
   });
   it("delegates to formatMonthsRough otherwise", () => {
     expect(formatRunwayValue("30", false)).toBe("2 años y 6 meses");
     expect(formatRunwayValue("12", undefined)).toBe("12 meses");
+    expect(formatRunwayValue("1199", false)).toBe("99 años y 11 meses");
     expect(formatRunwayValue(null, false)).toBe(METRIC_DASH);
     expect(formatRunwayValue(null, undefined)).toBe(METRIC_DASH);
   });

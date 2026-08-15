@@ -191,15 +191,21 @@ export function formatMonthsRough(s: string | null | undefined): string {
 }
 
 /**
- * Valor de la tarjeta Runway. El servidor marca `runway_is_indefinite` cuando el retorno
- * esperado de los líquidos cubre el gasto ≥100 años (y entonces `runway_months` viene `null`):
- * en ese caso no hay número que enseñar, solo el hecho de que está cubierto.
+ * Valor de la tarjeta Runway. El servidor marca `runway_is_indefinite` cuando la retirada anual
+ * (grosseada por impuestos) no supera el SWR de la instalación (y entonces `runway_months` viene
+ * `null`): no hay número que enseñar, solo el hecho. Un `runway_months` de `1200` es el tope del
+ * bucle del servidor — un **suelo** («al menos 100 años»), no una medida — y se muestra como
+ * «+100 años» en vez del «100 años» exacto de `formatMonthsRough`.
  */
 export function formatRunwayValue(
   months: string | null | undefined,
   isIndefinite: boolean | undefined,
 ): string {
-  if (isIndefinite) return "Cubierto";
+  if (isIndefinite) return "Infinito";
+  if (months != null) {
+    const n = parseDisplayDecimal(String(months));
+    if (n !== null && n >= 1200) return "+100 años";
+  }
   return formatMonthsRough(months);
 }
 
