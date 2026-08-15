@@ -8,7 +8,7 @@ FutureFin is a self-hosted household finance + FIRE-planning app: Rust/Axum API 
 
 The repo carries three documentation layers. Consult them in this order:
 
-1. **This file** — commands, conventions, architecture summary, git workflow.
+1. **This file** — commands, conventions, delegation norm, architecture summary, git workflow.
 2. **Skills** (`.claude/skills/*/SKILL.md`) — task-shaped runbooks with verified commands, the project's history and its discipline. **Pick by task type** (table below).
 3. **Reference docs** (`.claude/*.md`) — per-area fact sheets (routes, schema, engine, env…).
 
@@ -31,6 +31,24 @@ The repo carries three documentation layers. Consult them in this order:
 | Numeric analysis: closed forms, index proofs, f64 safety, determinism audits | [`futurefin-proof-and-analysis-toolkit`](.claude/skills/futurefin-proof-and-analysis-toolkit/SKILL.md) |
 | "What should we build next?" / public capability claims | [`futurefin-research-frontier`](.claude/skills/futurefin-research-frontier/SKILL.md) |
 | Turning a hypothesis into an accepted change (evidence bar, predict-then-run) | [`futurefin-research-methodology`](.claude/skills/futurefin-research-methodology/SKILL.md) |
+
+## Norm — delegate to Opus subagents whenever possible
+
+**Default posture: delegate.** Any unit of work that can be handed to a subagent should be, and every subagent runs on **Opus** (`Agent` tool with `model: "opus"`). Never let delegated work silently fall to a smaller model: this repo's failure modes are *silent wrong numbers* (projection/FIRE math, Decimal handling, index arithmetic), and a cheaper model reads as confident on exactly those.
+
+**Delegate by default:**
+- Exploration and search that spans many files or naming conventions (`Explore` / `general-purpose`).
+- Per-area research feeding a change (routes, schema, engine, frontend structure).
+- Independent work that can run concurrently — launch those subagents **in a single message** so they run in parallel.
+- Reviews, audits and adversarial verification of a finding before you act on it.
+- Anything whose raw output (file dumps, long logs, test noise) would flood the main context; the subagent returns the conclusion, not the dump.
+
+**Keep in the main session** (do NOT delegate): git operations (commit, push, tag, merge to `main`), migrations and releases, anything destructive or irreversible, and small edits to a file you already have open — delegation there costs more than it saves.
+
+**How to delegate well:**
+- Subagents start with **fresh context**: they do not inherit yours. State the task, the files/paths involved, and **which skill they must load** from the routing table above.
+- Ask for a conclusion plus the evidence for it (paths, line numbers, command output) — never a bare verdict.
+- Never take a subagent's claim at face value on money math or invariants: the main session stays the owner and re-verifies with the gates in [`futurefin-change-control`](.claude/skills/futurefin-change-control/SKILL.md) before committing.
 
 ## Reference docs (`.claude/`)
 
