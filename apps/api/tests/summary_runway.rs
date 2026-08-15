@@ -8,9 +8,12 @@
 //! - `expense_total_monthly_equivalent` = gasto de presupuesto + cuotas derivadas.
 //! - sin gasto (`expense_total == 0`) el campo `runway_months` **no se serializa**.
 //!
-//! El resto cubre el comportamiento nuevo (todos con el número o la desigualdad PREDICHOS en el
-//! comentario de cada test): rentabilidad que alarga, inflación que acorta, caso indefinido, y la
-//! base de gasto efectiva en modo B (`transactions_avg`) con sus identidades.
+//! El resto cubre el comportamiento compuesto (todos con el número o la desigualdad PREDICHOS en
+//! el comentario de cada test): rentabilidad que alarga, inflación que acorta, el caso indefinido
+//! decidido por el **umbral SWR** (v2.3.0: infinito ⟺ `gross_up(12·gasto) ≤ líquidos·swr/100`,
+//! con el mismo gross-up fiscal que el target FIRE; el tope de 1.200 meses pasa a ser un suelo
+//! finito `Months(1200)`), y la base de gasto efectiva en modo B (`transactions_avg`) con sus
+//! identidades.
 
 mod common;
 
@@ -146,6 +149,17 @@ async fn set_mode_b(app: &TestApp, cookie: &str) {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "set mode B: {r:?}");
+}
+
+/// PATCH de `fire_settings`. OJO: el JSONB se REEMPLAZA entero — los campos ausentes caen a
+/// `default_fire_settings()` por el `#[serde(default)]` del struct (p.ej. `savings_source`
+/// vuelve a `budget`). Válido en los tests de modo A de este fichero; no usarlo en tests de
+/// modo B/C sin reenviar también `savings_source`.
+async fn set_fire_settings(app: &TestApp, cookie: &str, fs: Value) {
+    let r = app
+        .patch_json_with_cookie("/v1/installation", json!({ "fire_settings": fs }), cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "set fire_settings: {r:?}");
 }
 
 async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
@@ -322,13 +336,15 @@ async fn runway_with_inflation_is_shorter_than_without() {
     assert_eq!(h["runway_is_indefinite"], false);
 }
 
-/// 1.000.000 € al 7 % anual rinden ~5.650 €/mes, muy por encima de un gasto de 1.000 €/mes sin
-/// inflación.
+/// 1.000.000 € líquidos con gasto de 1.000 €/mes y SWR por defecto (3,5 %).
 ///
-/// PREDICCIÓN: el saldo nunca baja → el bucle agota el cap de 100 años → `runway_months` **null** y
-/// `runway_is_indefinite == true` (el campo distingue este caso del «sin base de gasto»).
+/// PREDICCIÓN: la retirada anual grosseada — gross_up(12.000) ≈ 15.038 € con los tramos ES por
+/// defecto — queda muy por debajo del 3,5 % del saldo (35.000 €) → umbral SWR cumplido →
+/// `runway_months` **null** y `runway_is_indefinite == true` (el campo distingue este caso del
+/// «sin base de gasto»). Este escenario también era indefinido con el criterio anterior
+/// (sobrevivir el cap de 100 años): el pinning cruza el cambio de 2.3.0.
 #[tokio::test]
-async fn runway_indefinite_when_returns_cover_expense() {
+async fn runway_indefinite_when_withdrawal_within_swr() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
 
@@ -347,6 +363,119 @@ async fn runway_indefinite_when_returns_cover_expense() {
         h["runway_months"]
     );
     assert_eq!(h["runway_is_indefinite"], true);
+}
+
+/// Frontera EXACTA del umbral SWR, con impuestos desactivados para que el gasto grosseado sea el
+/// neto y la igualdad sea alcanzable en `Decimal`: 240.000 € líquidos **sin rentabilidad** y gasto
+/// de 700 €/mes con SWR 3,5 %.
+///
+/// PREDICCIÓN: 240.000 × 3,5 % = 8.400 = 12 × 700 → exactamente en el umbral → **Infinito**
+/// (aunque sin rentabilidad el saldo se agotaría en ~28,5 años: el KPI mide tasa de retirada, no
+/// supervivencia — decisión de diseño de 2.3.0). Al añadir 1 € más de gasto (701/mes), la
+/// retirada anual pasa a 8.412 > 8.400 → finito, y sin rentabilidad ni inflación el runway es la
+/// división exacta 240.000/701.
+#[tokio::test]
+async fn runway_indefinite_at_exact_swr_threshold() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let asset_cat = app.create_category(&owner, "asset", "Cuenta").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    set_fire_settings(&app, &owner.cookie, json!({ "taxes_enabled": false })).await;
+    liquid_asset(&app, &owner.cookie, &asset_cat, "Cuenta A", "240000").await;
+    budget(&app, &owner.cookie, &expense_cat, "700").await;
+
+    let h = health(&app, &owner.cookie).await;
+    assert_eq!(dec(&h["liquid_assets_total"]), d(240_000));
+    assert_eq!(dec(&h["expense_total_monthly_equivalent"]), d(700));
+    assert!(
+        h["runway_months"].is_null(),
+        "en el umbral exacto el runway es indefinido, got {:?}",
+        h["runway_months"]
+    );
+    assert_eq!(h["runway_is_indefinite"], true);
+
+    // 1 €/mes más de gasto rompe la igualdad: 12 × 701 = 8.412 > 8.400.
+    budget(&app, &owner.cookie, &expense_cat, "1").await;
+
+    let h = health(&app, &owner.cookie).await;
+    assert_eq!(dec(&h["expense_total_monthly_equivalent"]), d(701));
+    assert_eq!(h["runway_is_indefinite"], false);
+    assert_eq!(
+        dec(&h["runway_months"]),
+        d(240_000) / d(701),
+        "justo bajo el umbral la reducción exacta a A/g sigue intacta"
+    );
+}
+
+/// El umbral usa el gasto anual GROSSEADO con los mismos tramos fiscales que el target FIRE.
+///
+/// Escenario: 270.000 € líquidos sin rentabilidad, gasto 700 €/mes, SWR 3,5 % — entre los dos
+/// umbrales.
+///
+/// PREDICCIÓN: umbral sin impuestos = 12 × 700 / 3,5 % = 240.000 €; con los tramos ES por defecto
+/// gross_up(8.400) = 8.280/0,79 ≈ 10.481 € → umbral ≈ 299.457 €. Con impuestos activados (default)
+/// 270.000 < 299.457 → **finito** (y exacto: 270.000/700, la rentabilidad es 0); al desactivar
+/// impuestos, 270.000 ≥ 240.000 → **Infinito**. Fija que el runway comparte el gross-up del
+/// target FIRE (si alguien lo desacopla, este test cae).
+#[tokio::test]
+async fn runway_gross_up_raises_threshold() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let asset_cat = app.create_category(&owner, "asset", "Cuenta").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    liquid_asset(&app, &owner.cookie, &asset_cat, "Cuenta A", "270000").await;
+    budget(&app, &owner.cookie, &expense_cat, "700").await;
+
+    // Impuestos activados por defecto: la retirada bruta supera el 3,5 % → finito.
+    let con_impuestos = health(&app, &owner.cookie).await;
+    assert_eq!(con_impuestos["runway_is_indefinite"], false);
+    assert_eq!(
+        dec(&con_impuestos["runway_months"]),
+        d(270_000) / d(700),
+        "finito por gross-up: sin rentabilidad ni inflación, división exacta"
+    );
+
+    set_fire_settings(&app, &owner.cookie, json!({ "taxes_enabled": false })).await;
+
+    let sin_impuestos = health(&app, &owner.cookie).await;
+    assert!(
+        sin_impuestos["runway_months"].is_null(),
+        "sin impuestos el umbral baja a 240.000 y 270.000 lo supera, got {:?}",
+        sin_impuestos["runway_months"]
+    );
+    assert_eq!(sin_impuestos["runway_is_indefinite"], true);
+}
+
+/// `swr_pct = 0` (válido en la API) nunca marca infinito, por grande que sea el saldo o la
+/// rentabilidad.
+///
+/// PREDICCIÓN: 1.000.000 € al 7 % con gasto 1.000 €/mes — el escenario que con SWR 3,5 es
+/// `Indefinite` (y que en 2.2.0 lo era por el cap) — aquí NO cumple el umbral (A·0 = 0); el
+/// retorno (~5.654 €/mes) cubre el gasto, así que el bucle agota el tope y devuelve el **suelo**:
+/// `runway_months == 1200` y `runway_is_indefinite == false`.
+#[tokio::test]
+async fn runway_swr_zero_never_indefinite() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let asset_cat = app.create_category(&owner, "asset", "Cuenta").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    set_fire_settings(&app, &owner.cookie, json!({ "swr_pct": "0" })).await;
+    liquid_asset_with_return(&app, &owner.cookie, &asset_cat, "Cartera", "1000000", "7").await;
+    budget(&app, &owner.cookie, &expense_cat, "1000").await;
+
+    let h = health(&app, &owner.cookie).await;
+    assert_eq!(h["runway_is_indefinite"], false, "con SWR 0 jamás hay infinito");
+    assert_eq!(
+        dec(&h["runway_months"]),
+        d(1_200),
+        "el saldo sobrevive el tope → suelo Months(1200), no Indefinite"
+    );
 }
 
 // ---------------------------------------------------------------------------
