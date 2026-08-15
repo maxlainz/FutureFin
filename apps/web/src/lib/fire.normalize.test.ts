@@ -9,6 +9,7 @@ import {
   defaultFireSettingsApi,
   normalizeInstallationFireSettings,
   parseSavingsSource,
+  runwaySwrParenthetical,
   savingsAvgParenthetical,
   savingsSourceUsesTransactions,
 } from "./fire";
@@ -138,5 +139,27 @@ describe("savingsAvgParenthetical", () => {
   it("0 meses (fallback del servidor a budget) o meses ausentes → sin paréntesis", () => {
     expect(savingsAvgParenthetical("transactions_avg", 0)).toBeUndefined();
     expect(savingsAvgParenthetical("transactions_avg", undefined)).toBeUndefined();
+  });
+});
+
+describe("runwaySwrParenthetical", () => {
+  it("sin fire_settings (instalación sin cargar) → etiqueta sin número, no el default", () => {
+    expect(runwaySwrParenthetical(null)).toBe("dentro del SWR");
+    expect(runwaySwrParenthetical(undefined)).toBe("dentro del SWR");
+  });
+
+  it("formatea el SWR configurado con un decimal y ' %' (es-ES)", () => {
+    expect(
+      runwaySwrParenthetical({ ...defaultFireSettingsApi(), swr_pct: "3.5" }),
+    ).toBe("dentro del SWR 3,5 %");
+    expect(
+      runwaySwrParenthetical({ ...defaultFireSettingsApi(), swr_pct: "4" }),
+    ).toBe("dentro del SWR 4,0 %");
+  });
+
+  it("swr_pct vacío → el normalizador cae al default 3,5", () => {
+    expect(
+      runwaySwrParenthetical({ ...defaultFireSettingsApi(), swr_pct: "" }),
+    ).toBe("dentro del SWR 3,5 %");
   });
 });

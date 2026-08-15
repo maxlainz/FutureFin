@@ -25,7 +25,7 @@ import {
   isZeroMoneyMetric,
   parseDisplayDecimal,
 } from "../lib/format";
-import { savingsAvgParenthetical } from "../lib/fire";
+import { runwaySwrParenthetical, savingsAvgParenthetical } from "../lib/fire";
 
 type LedgerPersonScope = "household" | "mine";
 
@@ -140,15 +140,16 @@ export function SummaryView({
   const showSavingsRateTile =
     showMetrics && fh && savingsRatePrimary !== METRIC_DASH;
 
-  // Runway: con retorno suficiente el servidor manda `runway_is_indefinite` y `runway_months`
-  // a null — la tarjeta sigue siendo relevante (es la mejor noticia posible).
+  // Runway: el servidor marca `runway_is_indefinite` (y `runway_months` a null) cuando la
+  // retirada anual cabe en el SWR de `fire_settings` (pestaña Jubilación) — la tarjeta sigue
+  // siendo relevante (es la mejor noticia posible) y el paréntesis explica el porqué.
   const runwayIsIndefinite = fh?.runway_is_indefinite === true;
   const showRunwayTile =
     showMetrics &&
     fh &&
     (runwayIsIndefinite || !isZeroMoneyMetric(fh.runway_months));
   const runwayParenthetical = runwayIsIndefinite
-    ? "más de 100 años"
+    ? runwaySwrParenthetical(installation?.installation.fire_settings)
     : avgParenthetical;
 
   const financialHealthHasAnyTile =
