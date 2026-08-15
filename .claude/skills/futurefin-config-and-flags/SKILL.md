@@ -233,6 +233,15 @@ Validation (`validate_fire_settings` / `validate_tax_brackets`, all 400 on failu
   may (and must) have `up_to: null`; non-last `up_to` values must be > 0 and strictly increasing.
 - Brackets are **not validated when `taxes_enabled` is false** — stale brackets can sit dormant.
 
+Consumers beyond the FIRE target (v2.3.0 widened them):
+- **`swr_pct`** feeds the Jubilación target *and* `GET /v1/summary` → `financial_health.runway_is_indefinite`:
+  the runway is indefinite ⟺ the grossed-up annual expense fits inside `swr_pct` × liquid balance
+  (`.claude/engine.md` §Runway). `swr_pct = 0` is a valid setting that makes the flag unreachable.
+- **`tax_brackets` / `taxes_enabled`** likewise reach the runway through the *same* gross-up
+  (`gross_up_net_annual_fire`, `pub(crate)` in `handlers/projection.rs`), so editing brackets moves the
+  FIRE target and the runway threshold together. Dormant brackets (`taxes_enabled = false`) affect
+  neither.
+
 Deserialization details that matter:
 - `fire_number_mode` is **strict**: unknown strings → 422. Sole legacy alias
   `annual_expense_adjusted` (old backup schemas) maps to `annual_expense`.

@@ -6,8 +6,9 @@ Only `Decimal` arithmetic. Three modules:
 - `history.rs` — pure interpolation of the **historical** net-worth series from manual snapshots
   (see [History interpolation](#history-interpolation-historyrs) below). Deps unchanged
   (`rust_decimal` feature `maths` already present for `powd`).
-- `runway.rs` — liquidity runway with compounded return + inflation (v2.2.0; see
-  [Runway](#runway-runwayrs) below). Consumed by `GET /v1/summary`.
+- `runway.rs` — liquidity runway with compounded return + inflation (v2.2.0; **SWR threshold for the
+  infinite case** since v2.3.0 — `Indefinite` ⟺ the grossed-up annual withdrawal fits inside
+  `swr_pct` × liquid balance; see [Runway](#runway-runwayrs) below). Consumed by `GET /v1/summary`.
 
 ## Public API
 
@@ -27,12 +28,16 @@ pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> 
 
 // Liquidity runway (v2.2.0): months the liquid assets cover the monthly expense, compounding the
 // assets' expected return and inflating the expense. See the Runway section below.
+// NOT an infinity sentinel (v2.3.0): the finite loop's cap. Surviving it returns `Months(1200)`,
+// a FLOOR ("at least 100 years"); only the SWR threshold yields `Indefinite`.
 pub const MAX_RUNWAY_MONTHS: u32 = 1200;
 pub enum RunwayOutcome { Months(Decimal), Indefinite, NoExpenseBase }
 pub fn liquid_runway_months(
     liquid_assets: &[(Decimal, Option<Decimal>)], // (current_value, expected_annual_return_percent)
     monthly_expense: Decimal,
     annual_inflation_percent: Decimal,
+    swr_pct: Decimal,              // installation fire_settings.swr_pct (%), v2.3.0
+    annual_expense_for_swr: Decimal, // ANNUAL expense already grossed up by the handler, v2.3.0
 ) -> RunwayOutcome
 ```
 
@@ -206,13 +211,16 @@ to any input order), sub-ms at this scale, no `f64`.
 Pure module (v2.2.0) that answers "how many months do the **liquid** assets cover the monthly
 expense?" while compounding the assets' expected return and inflating the expense. Sole consumer:
 `GET /v1/summary` → `financial_health.runway_months` / `runway_is_indefinite`
-(`apps/api/src/handlers/summary.rs`). Public API in the block above; 8 unit tests in-module.
+(`apps/api/src/handlers/summary.rs`). Public API in the block above; 13 unit tests in-module
+(as of 2026-08-15, v2.3.0).
 
 | Input | Meaning |
 |---|---|
 | `liquid_assets: &[(Decimal, Option<Decimal>)]` | One row per liquid asset: `(current_value, expected_annual_return_percent)`. The handler passes exactly the rows of `assets WHERE is_liquid = true` in the requested scope. |
 | `monthly_expense: Decimal` | Total monthly expense to cover — in the handler, `expense_total_monthly_equivalent` (so it follows `savings_source`). |
 | `annual_inflation_percent: Decimal` | `installation.annual_inflation_assumption_percent`, clamped to ≥ 0 by the handler. |
+| `swr_pct: Decimal` (v2.3.0) | `installation.fire_settings.swr_pct` (in %) — the **same** safe-withdrawal rate the FIRE target uses (Jubilación tab), read via `installation_calendar_inflation_fire`. Only drives the infinite case. |
+| `annual_expense_for_swr: Decimal` (v2.3.0) | The **annual** expense already grossed up for taxes by the handler: `gross_up_net_annual_fire(expense_total × 12, fire.tax_brackets, fire.taxes_enabled)` — the *same* gross-up as the FIRE target. With `taxes_enabled = false` it is plainly `12 × monthly_expense`. The engine never recomputes `12 × monthly_expense` itself. |
 
 Model (each rule exists for a reason — do not "simplify" one away):
 
@@ -229,17 +237,38 @@ Model (each rule exists for a reason — do not "simplify" one away):
 - **Rates ≤ 0 → zero growth**: inherited from `monthly_multiplier` (shared with the simulation via
   `pub(crate)`, so the runway uses *exactly* the engine's annual→monthly conversion). The engine does
   not model losses; a negative expected return behaves like no return.
-- **100-year cap**: surviving `MAX_RUNWAY_MONTHS` (1.200) months returns `Indefinite` — no epsilon,
-  no closed form. `ln`-based closed forms suffer cancellation exactly at the `A·j → g` boundary; the
-  monthly loop avoids it and costs microseconds.
-- **Exact reduction to `A / g`**: with return and inflation 0, `m = m_inf = 1` and the final
-  fractional month reconstructs `A/g` with a single division — bit-exact, so the pre-change baseline
-  test asserts it without tolerances.
+- **SWR threshold (the infinite case, v2.3.0)**: `Indefinite` ⟺ the grossed-up annual withdrawal does
+  not exceed the SWR applied to the starting balance, `annual_expense_for_swr ≤ A·(swr_pct/100)`.
+  Compared **without dividing** — `annual_expense_for_swr·100 ≤ A·swr_pct` — so the boundary is
+  *exact* in `Decimal`. It is the liquidity "FIRE number": `A ≥ gross_expense / SWR`. `swr_pct ≤ 0`
+  can never satisfy it (right side ≤ 0, left side > 0), so no separate guard is needed. Beware: the
+  `100` de-percentages `swr_pct` and is unrelated to `MAX_RUNWAY_MONTHS`, even though `12·100 = 1200`.
+- **Check order (contract)**: `NoExpenseBase` (expense ≤ 0) → `Months(0)` (balance ≤ 0) → SWR
+  threshold → finite loop. `NoExpenseBase` must come **first**: with expense 0 the inequality
+  `0 ≤ A·swr` is trivially true and would report an undefined runway as infinite.
+- **The trigger is deliberately independent of return and inflation**: it looks only at `A`, the
+  grossed expense and the SWR — the definition of SWR already assumes a portfolio whose real return
+  sustains that withdrawal long-term. Return and inflation still govern the **finite** case (the loop
+  below). Accepted consequence: a balance below the threshold with a huge return is no longer
+  "infinite", and one exactly at the threshold with 0 % return is.
+- **100-year cap is a floor, not a sentinel**: surviving `MAX_RUNWAY_MONTHS` (1.200) months without
+  meeting the SWR threshold returns `Months(1200)` — read as "at least 100 years", not an exact
+  measure and **not** `Indefinite` (the UI renders it «+100 años»). Still no epsilon and no closed
+  form: `ln`-based closed forms suffer cancellation exactly at the `A·j → g` boundary; the monthly
+  loop avoids it and costs microseconds.
+- **Exact reduction to `A / g`** (when the SWR threshold is *not* met, i.e. the finite branch): with
+  return and inflation 0, `m = m_inf = 1` and the final fractional month reconstructs `A/g` with a
+  single division — bit-exact, so the pre-change baseline test asserts it without tolerances.
 - Edge cases: `monthly_expense <= 0` → `NoExpenseBase` (not "infinite"); total balance ≤ 0 →
   `Months(0)`.
 
-Worked values (engine-verified, 12.000 € liquid vs 1.200 €/month): return 0 % / inflation 0 % → 10;
-5 % / 0 % → 10,19; 0 % / 3 % → 9,89; 5 % / 3 % → 10,07 months.
+Worked values (engine-verified). Finite branch, 12.000 € liquid vs 1.200 €/month, SWR 3,5 % (all four
+below the threshold, unchanged since v2.2.0): return 0 % / inflation 0 % → 10; 5 % / 0 % → 10,19;
+0 % / 3 % → 9,89; 5 % / 3 % → 10,07 months. Threshold branch (v2.3.0): 240.000 € vs 700 €/month at
+SWR 3,5 % with taxes off → `Indefinite` on the **exact** boundary (840.000 = 840.000); 1.000.000 € at
+7 % vs 4.000 €/month at SWR 3,5 % → `Months(1200)` floor, since 48.000 > 35.000 (it was `Indefinite`
+in v2.2.0, when the cap decided infinity); with the default ES brackets `gross_up(8.400) ≈ 10.481 €`,
+raising the threshold to ≈ 299.457 € of liquid balance.
 
 ## Notes for the API handler (projection.rs)
 - Load `allocation_rules` from DB ordered by `priority ASC`, then map each `target_asset_id` → index in `assets[]` before building the engine input.
@@ -251,6 +280,6 @@ Worked values (engine-verified, 12.000 € liquid vs 1.200 €/month): return 0 
 ## Performance notes (handler ↔ engine boundary)
 - `project_net_worth_series` is CPU-bound (840 months × N assets × `Decimal::powd`). The handler wraps it in `tokio::task::spawn_blocking` to avoid blocking the reactor.
 - `compound_outpaces_true_savings_month` is a **second projection pass** with `planning_adj = 0` and `liability.monthly_payment = 0` so the marker compares `market_growth` against a clean `income − expense` baseline. Eliminating the double pass would change the indicator's semantics; instead the handler runs both projections in parallel with `tokio::join!(spawn_blocking, spawn_blocking)`.
-- The gross-up of net-annual FIRE through tax brackets uses a **closed-form per-bracket solver** (no binary search). `gross = (net − r·prev_ceiling + K) / (1 − r)`, advancing one bracket at a time until the candidate fits. Old code used 90 iterations of binary search on `Decimal`.
+- The gross-up of net-annual FIRE through tax brackets uses a **closed-form per-bracket solver** (no binary search). `gross = (net − r·prev_ceiling + K) / (1 − r)`, advancing one bracket at a time until the candidate fits. Old code used 90 iterations of binary search on `Decimal`. Desde v2.3.0 `gross_up_net_annual_fire` es `pub(crate)` (`apps/api/src/handlers/projection.rs`) y tiene **dos consumidores**: el target FIRE y el umbral SWR del runway en `summary.rs` (`annual_expense_gross`). Cualquier cambio en los tramos o en el solver mueve **ambos** números a la vez — es intencional: comparten definición fiscal por diseño.
 - `build_installation_projection_input` returns a `BuiltProjection` struct that carries `input`, `monthly_net_regular`, `asset_id_name` (Vec<(Uuid, String)>) and `planning_rows`. The handler reuses those instead of issuing a second `SELECT id, name FROM assets` and a second `SELECT planning_flows` (deleted with Fase 2.3). Desde v2.2.0 también expone `effective_savings_source` + `savings_source_months_with_data` (fuente **tras** el fallback, serializadas en `ProjectionSeriesResponse`) y `debt_service_monthly` (cuotas de pasivos activos; **no** es input del engine, que amortiza los pasivos aparte), que consume `assets_projection_context` para los caps `months_expense`.
 - Initial queries in `get_projection_series` (installation row, user birth_date, household birth_date) run concurrently via `tokio::try_join!`.
