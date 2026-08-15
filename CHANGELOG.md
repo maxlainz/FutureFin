@@ -4,7 +4,52 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [2.2.0] - 2026-08-14
+## [2.3.0] - 2026-08-15
+
+El caso «infinito» del **runway** deja de decidirlo el tope de simulación de 100 años y pasa a decidirlo el
+**SWR configurado en Jubilación** (cierra el issue #1, con una modificación acordada sobre su propuesta
+original). Sin migración; el `schema_version` del `.ffbackup` sigue en **6**.
+
+### Changed — el runway «infinito» lo decide el SWR, no el tope de 100 años
+
+- **Por qué**: el tope de 1.200 meses era un proxy tosco («Cubierto (más de 100 años)») y la condición
+  analítica de perpetuidad `A·j ≥ g` que proponía el issue seguía siendo una propiedad del modelo de
+  rentabilidad — que el engine no modela con pérdidas ni volatilidad. El SWR es el parámetro que el usuario
+  **ya configura** en Jubilación y el que define «puedo dejar de trabajar»: usarlo como umbral hace del
+  runway un proxy de FIRE coherente con el resto de la app. Se descartan por tanto **ambos** disparadores
+  anteriores (tope y perpetuidad).
+- **La condición**, con el mismo gross-up fiscal que el target FIRE (`gross_up_net_annual_fire`, tramos de
+  `fire_settings.tax_brackets` y `taxes_enabled`):
+  `infinito ⟺ gross_up(12 × expense_total) ≤ líquidos × (swr_pct/100)`. La comparación se hace sin
+  división (`gross·100 ≤ A·swr`), así que la frontera es **exacta** en `Decimal`. Con `swr_pct = 0` nunca
+  hay infinito. El disparador es deliberadamente independiente de rentabilidad e inflación (que siguen
+  gobernando el caso finito): es la definición de SWR, que ya asume una cartera cuyo retorno real sostiene
+  esa retirada.
+- **Ejemplos antes/después** (SWR 3,5 % por defecto): `1.000.000 € al 7 %` con `4.000 €/mes` de gasto —
+  antes «Cubierto» (el saldo sobrevivía el tope), ahora **«+100 años» finito** porque la retirada bruta
+  (48.000 €) supera el 3,5 % del saldo (35.000 €). Y el converso: `240.000 €` **sin rentabilidad** con
+  `700 €/mes` (impuestos off) — antes ~28,5 años, ahora **«Infinito»** (8.400 = 8.400, frontera exacta).
+  La semántica del KPI pasa de «el dinero no se acaba en 100 años» a «tu tasa de retirada cabe en tu SWR».
+- **Engine (breaking para la capa handler)**: `liquid_runway_months` gana dos parámetros — `swr_pct` y
+  `annual_expense_for_swr` (el gasto anual ya grosseado por el handler) — y `MAX_RUNWAY_MONTHS` deja de ser
+  centinela de infinito: sobrevivir el tope devuelve `Months(1200)`, un **suelo** («al menos 100 años»).
+  El orden de checks es contrato: `NoExpenseBase` → `Months(0)` → umbral SWR → bucle finito (con gasto 0
+  la desigualdad SWR sería trivialmente cierta). La reducción exacta a `A/g` bajo el umbral sigue intacta
+  (`runway_pre_change_baseline_liquid_over_expense` sigue dando 10,000… exacto).
+- **API no breaking**: `runway_months` y `runway_is_indefinite` conservan tipo, nullabilidad y significado
+  («infinito ⇒ months null»); solo cambia el disparador. El valor `1200` en `runway_months` es el suelo.
+  `installation_calendar_inflation_savings` pasa a llamarse `installation_calendar_inflation_fire` y
+  devuelve los `FireSettings` completos (misma única query; summary ya no descarta `swr_pct` ni los tramos).
+- **UI**: la tarjeta pasa de «Cubierto (más de 100 años)» a **«Infinito (dentro del SWR 3,5 %)»**
+  — el paréntesis (`runwaySwrParenthetical`, helper puro en `lib/fire.ts`) muestra el SWR realmente
+  configurado, no promete supervivencia — y el suelo se muestra como «+100 años» (`formatRunwayValue`).
+- **Regresión**: `runway.rs` 8 → 13 tests unitarios (frontera exacta por igualdad, un euro por debajo,
+  `swr = 0` y `swr < 0` nunca infinitos, tope como suelo, y que el gasto grosseado participa);
+  `summary_runway.rs` 7 → 10 (frontera exacta end-to-end con impuestos off, flip del umbral al activar
+  impuestos — fija que runway y target FIRE comparten gross-up — y suelo `1200` con SWR 0). El escenario
+  del test indefinido histórico (1M @ 7 % / 1.000 €/mes) sigue siendo infinito con ambos criterios.
+
+
 
 Coherencia de **todas** las métricas con `fire_settings.savings_source` (modos B `transactions_avg` y C
 `budget_income_real_expense`) y un **runway** que ya no es una división: compone la rentabilidad esperada de

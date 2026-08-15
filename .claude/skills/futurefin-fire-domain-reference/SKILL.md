@@ -52,7 +52,7 @@ Historical note: `projection_target_age` was **removed** in v1.0.6 (migration
 | **Contributed capital** | Cumulative cost basis: initial `purchase_price` of assets + every euro routed to assets or to `surplus_cash` before retirement. Never includes market growth. |
 | **Drawdown / drain** | In deficit months, cash is pulled from `surplus_cash` first, then from assets (liquid, lowest-return first). Retirement is modelled as income dropping, which creates the deficit. |
 | **Installation** | The single-household deployment singleton; `fire_settings` and inflation live on its one DB row. |
-| **Runway** | Months the **liquid** assets cover the total monthly expense, compounding their expected return and inflating the expense (§2c). A KPI of `/v1/summary`, not part of the FIRE target math. |
+| **Runway** | Months the **liquid** assets cover the total monthly expense, compounding their expected return and inflating the expense (§2c). A KPI of `/v1/summary`. It shares two inputs with the FIRE target since v2.3.0 — the same `swr_pct` and the same tax gross-up — because its *infinite* case is exactly a liquidity FIRE number: `Indefinite` ⟺ the grossed-up annual withdrawal ≤ SWR × liquid balance. The finite case remains its own simulation. |
 
 ## 2. The FIRE number: three modes
 
@@ -171,9 +171,10 @@ Validation (`validate_fire_settings`, installation.rs:123-190): `swr_pct` bounde
 pinned by the test in `apps/api/tests/installation_patch.rs`) and the web normalizer mirrors it
 (fire.ts:54). Do not "tighten" the server deserializer — old-backup imports depend on the alias.
 
-### 2c. Runway (v2.2.0): liquid assets vs an inflating expense
+### 2c. Runway (v2.2.0; SWR threshold since v2.3.0): liquid assets vs an inflating expense
 
-Not part of the FIRE target, but the same economic frame — and the one KPI users read as "how long
+Not the FIRE target itself, but the same economic frame — and, since v2.3.0, literally the same SWR
+and the same tax gross-up for its infinite case. It is the one KPI users read as "how long
 could I stop earning". Pure function `liquid_runway_months` in `crates/engine/src/runway.rs`,
 consumed only by `GET /v1/summary` (`financial_health.runway_months` + `runway_is_indefinite`);
 full contract in `.claude/engine.md` §Runway.
@@ -188,14 +189,32 @@ full contract in `.claude/engine.md` §Runway.
 - **Value-weighted = prorated drain**, deliberately *conservative*: the engine's real drain empties
   the lowest-return liquids first, so it would last slightly longer. The KPI must never promise more
   than the simulation.
-- **Cap 1.200 months (100 years)** → `RunwayOutcome::Indefinite` → `runway_months` omitted from the
-  JSON (`skip_serializing_if`) + `runway_is_indefinite: true` (UI: «Cubierto»). `monthly_expense <= 0`
-  → `NoExpenseBase` → also omitted, but the flag stays `false` (UI hides the tile). Do not conflate
-  the two.
+- **The infinite case is an SWR threshold, not the cap** (v2.3.0): `RunwayOutcome::Indefinite` ⟺
+  `annual_expense_for_swr ≤ A·(swr_pct/100)`, compared without dividing
+  (`annual_expense_for_swr·100 ≤ A·swr_pct`) so the boundary is exact in `Decimal`. The handler
+  passes `swr_pct` from `fire_settings` (the **same** rate as the target, Jubilación tab) and
+  `annual_expense_for_swr = gross_up_net_annual_fire(expense_total·12, tax_brackets, taxes_enabled)`
+  — the **same** gross-up as §3. So the liquidity question is the FIRE question restricted to liquid
+  assets: `A ≥ gross_expense / SWR`. `swr_pct ≤ 0` never triggers it. Deliberately independent of
+  return and inflation: SWR already presumes a portfolio whose real return sustains the withdrawal;
+  return and inflation govern only the finite loop. Accepted consequence: below the threshold, an
+  enormous expected return no longer buys "infinite"; at the threshold, a 0 % return still does.
+- **Cap 1.200 months (100 years) is a floor, not infinity**: surviving it without meeting the SWR
+  threshold returns `Months(1200)`, meaning "at least 100 years" (UI: «+100 años»). Compared to v2.2.0 this
+  is the behavioral change that flips scenarios like 1M @ 7 % vs 4.000 €/month from `Indefinite` to
+  the floor.
+- **Three outcomes, do not conflate them**: `Indefinite` → `runway_months` omitted from the JSON
+  (`skip_serializing_if`) + `runway_is_indefinite: true` (UI value «Infinito», parenthetical
+  «dentro del SWR 3,5 %» via `runwaySwrParenthetical` in `apps/web/src/lib/fire.ts`).
+  `monthly_expense <= 0` → `NoExpenseBase` → also omitted, but the flag stays `false` (UI hides the
+  tile). `Months(_)` → the value travels. Check order is part of the contract: `NoExpenseBase` is
+  decided **before** the threshold, or a zero expense would satisfy `0 ≤ A·swr` and report an
+  undefined runway as infinite.
 - **Follows `savings_source`**: the expense base is `expense_total_monthly_equivalent`, so in B/C with
   data it is real spending + debt service (§2b), not budget.
-- **Reduces exactly to `A/g`** with return and inflation 0 (single final division, no tolerances) —
-  that is how the pre-change regression test stayed valid.
+- **Reduces exactly to `A/g`** with return and inflation 0 **and the SWR threshold unmet** (single
+  final division, no tolerances) — that is how the pre-change regression test stayed valid across
+  both changes (`runway_pre_change_baseline_liquid_over_expense` is still exact).
 
 ## 3. Tax gross-up through capital-gains brackets
 
@@ -424,6 +443,7 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 - Mode B (`savings_source`) base + hybrid subtraction: `grep -n "savings_source\|transactions_12m_avg\|effective_avg_income_expense\|use_avg" apps/api/src/handlers/projection.rs`
 - Mode B/C reach into summary/assets/series (v2.2.0): `grep -n "expense_der = debt_service\|expense_tot = expense_eff" apps/api/src/handlers/summary.rs`; `grep -n "assets_projection_context" apps/api/src/handlers/{projection,assets}.rs`
 - Runway model + cap: `grep -n "pub fn liquid_runway_months\|MAX_RUNWAY_MONTHS\|RunwayOutcome" crates/engine/src/runway.rs` and `grep -n "liquid_runway_months\|runway_is_indefinite" apps/api/src/handlers/summary.rs`
+- Runway infinite case is the SWR threshold, not the cap (v2.3.0): `grep -n "swr_pct" crates/engine/src/runway.rs` (the `Indefinite` branch must compare `annual_expense_for_swr * 100 <= balance_0 * swr_pct`) and `grep -n "annual_expense_gross\|gross_up_net_annual_fire" apps/api/src/handlers/summary.rs` (the handler must reuse the target's gross-up)
 - Frontend reads the mode from `financial_health` (not the root): `grep -n "savings_source" apps/web/src/api/types.ts apps/web/src/views/{SummaryView,RetirementView}.tsx`
 - Closed-form gross-up: `grep -n "gross_up_net_annual_fire" apps/api/src/handlers/projection.rs`
 - Defaults (SWR 3.5, ES brackets): `grep -n -A8 "fn default_fire_settings" apps/api/src/handlers/installation.rs`
