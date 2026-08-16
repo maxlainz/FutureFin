@@ -28,10 +28,28 @@ Este documento y el código (`apps/api/src/handlers/{session,installation,member
 ## Pending users
 Users who registered but have no `installation_memberships` row. Owner sees them via `/v1/installation/pending-users/`. Until approved they get `403 Forbidden` on any installation-scoped endpoint.
 
+## API tokens (Bearer) — segundo esquema de auth (v3.0.0)
+Per-user Bearer tokens (`ffp_` + 43 chars base64url de 32 bytes `OsRng`) para acceso programático —
+hoy, el servidor MCP embebido (`/mcp`). Diseño espejo de las sesiones-en-DB (no JWT):
+
+- **Solo se persiste el SHA-256 hex** del secreto (`api_tokens.token_hash` UNIQUE); el secreto viaja
+  una única vez en el 201 del `POST /v1/api-tokens`.
+- **El token NO congela rol ni installation**: `require_api_token` devuelve solo `{user_id, token_id}`
+  y el caller encadena `require_installation_member` — revocar la membership (o el token:
+  `revoked_at`) corta el acceso al instante, igual que borrar una sesión.
+- **Cualquier miembro (viewer incluido) crea/lista/revoca los SUYOS** por cookie de sesión: un token
+  no puede hacer nada que su dueño no pueda ya. Usuario pending → 403 (el mismo gate de siempre).
+- Todo Bearer inválido (ausente, malformado, revocado, expirado, inexistente) es el mismo **401** —
+  no se filtra qué tokens existen. La respuesta añade `WWW-Authenticate: Bearer`.
+- Máx. 10 tokens activos por usuario; `last_used_at` con throttle de 60 s.
+
 ## Key functions
 ```rust
 // handlers/session.rs
 require_session_user(&jar, &pool) -> Result<SessionUser, ApiError>
+
+// handlers/api_tokens.rs
+require_api_token(pool, authorization: Option<&HeaderValue>) -> Result<ApiTokenIdentity, ApiError>
 
 // handlers/installation.rs
 require_installation_member(pool, user_id) -> Result<(Uuid, MembershipRole), ApiError>

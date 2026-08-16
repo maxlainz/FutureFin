@@ -2,11 +2,12 @@
 
 All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid session cookie `ff_session` unless noted.
 
-## Top-level (no auth required)
-| Method | Path | Handler |
-|--------|------|---------|
-| GET | `/health` | `health::health_check` |
-| GET | `/openapi.json` | `openapi::openapi_json` |
+## Top-level
+| Method | Path | Handler | Auth |
+|--------|------|---------|------|
+| GET | `/health` | `health::health_check` | none |
+| GET | `/openapi.json` | `openapi::openapi_json` | none |
+| POST/GET/DELETE | `/mcp` | `mcp::mcp_router` (rmcp `StreamableHttpService`) | Bearer `ffp_…` (ver sección MCP abajo) |
 
 ## /v1 routes
 
@@ -35,6 +36,23 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 
 ### Pending users (`/v1/installation/pending-users/`)
 Owner-only management of users awaiting approval.
+
+### API tokens (`/v1/api-tokens`) — handler `api_tokens.rs`
+Credencial Bearer del servidor MCP (`/mcp`). Gestión autenticada por cookie de sesión; cualquier
+miembro (viewer incluido) gestiona SOLO los suyos — el token hereda identidad y rol vivo, no puede
+hacer nada que su dueño no pueda ya.
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/v1/api-tokens` | Lista propios (`token_prefix`, nunca el secreto ni el hash), orden `created_at DESC`. Incluye revocados (auditoría). |
+| POST | `/v1/api-tokens` | Body `{label (1..64), expires_in_days? (1..=3650)}` → 201 con `token` (secreto `ffp_` + 43 chars base64url) **una única vez**. Máx. 10 activos por usuario → 400 `token_limit_reached`. |
+| DELETE | `/v1/api-tokens/{id}` | Soft-revoke (`revoked_at = now()`). Id ajeno o ya revocado → 404. |
+
+- **Solo se persiste el SHA-256 hex** del secreto (`token_hash` UNIQUE); lookup O(1), sin
+  comparación de secretos en Rust.
+- `require_api_token(pool, authorization)` (mismo archivo) valida `Bearer ffp_…` → 401 para todo
+  fallo (ausente/malformado/revocado/expirado, sin distinguir). Actualiza `last_used_at` con
+  throttle de 60 s (telemetría de auth, análoga a `sessions` — no viola reads-never-mutate).
 
 ### Categories (`/v1/categories/`)
 Scopes: `asset`, `liability`, `income`, `expense`. Per-installation.
@@ -227,3 +245,33 @@ For `sqlx::query_scalar`, use `bind_scope_scalar` instead. The helpers guarantee
 - `23503` (foreign_key_violation) → `ApiError::BadRequest("referenced record missing")`
 
 Handlers should just `?` any `sqlx::Error`; never write per-call `.map_err(...)` to translate codes.
+
+## MCP (`/mcp`, Streamable HTTP)
+
+Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` con el SDK oficial
+`rmcp` 3.1 (spec 2026-07-28 sessionless + `LocalSessionManager` para clientes legacy con
+`Mcp-Session-Id`). Mismo binario y puerto que el API; se monta en el router raíz junto a `/health`
+(gana siempre al fallback SPA). Kill-switch: `FUTUREFIN_MCP_ENABLED=0` → el router ni se monta (404).
+
+- **Auth**: middleware `mcp/auth.rs::mcp_bearer_auth` corta ANTES del protocolo — `require_api_token`
+  + `require_installation_member` → `McpIdentity {user_id, installation_id, role, token_id}` en las
+  extensions del request; rmcp propaga las `http::request::Parts` hasta el `RequestContext` de cada
+  tool. Fallo → 401/403 JSON `{error, message}` + `WWW-Authenticate: Bearer`.
+- **Tools v1 (10, todas read-only)**: `get_summary`, `get_projection` (density **hybrid fija**,
+  `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler),
+  `get_budget`, `get_transactions_summary`, `list_transactions` (truncado a `limit` 1..500 def 100,
+  responde `{total_count, truncated, transactions}`), `get_history`, `list_assets`,
+  `list_liabilities`, `list_planning_flows`, `get_settings`. Todas menos `get_settings` aceptan
+  `view: "household"|"mine"` (misma semántica que `?view=`).
+- **Cero deriva handler↔tool**: cada tool llama a la MISMA core fn que el endpoint HTTP
+  (`summary_core`, `projection_series_cached`, `budget_snapshot_core`, `transactions_summary_core`,
+  `list_transactions_core`, `history_series_core`, `list_assets_core`, `list_liabilities_core`,
+  `list_planning_flows_core`, `installation_access_core`) y serializa el mismo struct serde →
+  Decimal-as-string intacto. Paridad congelada en `apps/api/tests/mcp_http.rs`.
+- **Errores**: dominio/validación → `CallToolResult{is_error:true}` con el JSON `{error, message}`
+  de `ErrorBody`; `Db`/`Unavailable` → `ErrorData::internal_error` sanitizado (detalle a tracing).
+- **NO está en OpenAPI a propósito**: no es un recurso REST — es JSON-RPC cuyo contrato define la
+  spec MCP y que se autodescribe vía `tools/list`.
+- **Límite conocido**: el conector de claude.ai exige OAuth 2.1 (fuera de scope v1). Claude
+  Code/Desktop: `claude mcp add --transport http futurefin https://host/mcp --header
+  "Authorization: Bearer ffp_…"`.

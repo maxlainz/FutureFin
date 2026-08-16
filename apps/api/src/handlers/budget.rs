@@ -413,14 +413,23 @@ pub async fn get_budget_snapshot(
 ) -> Result<Json<BudgetSnapshotResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = budget_snapshot_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
 
-    let today = installation_naive_today(&state.pool, iid).await?;
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_budget`.
+pub(crate) async fn budget_snapshot_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<BudgetSnapshotResponse, ApiError> {
+    let today = installation_naive_today(pool, iid).await?;
 
-    let view = q.resolve();
     let (rows, derived_raw) = fetch_budget_rows_and_derived_liabilities(
-        &state.pool,
+        pool,
         iid,
-        user.id.0,
+        user_id,
         view,
         today,
     )
@@ -448,11 +457,11 @@ pub async fn get_budget_snapshot(
         });
     }
 
-    Ok(Json(BudgetSnapshotResponse {
+    Ok(BudgetSnapshotResponse {
         entries,
         derived_from_liabilities,
         totals,
-    }))
+    })
 }
 
 #[utoipa::path(

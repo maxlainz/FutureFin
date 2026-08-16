@@ -324,10 +324,38 @@ pub async fn get_transactions_summary(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
     let view = LedgerViewQuery { view: q.view.clone() }.resolve();
-    let today = installation_naive_today(&state.pool, iid).await?;
+    let out = transactions_summary_core(
+        &state.pool,
+        iid,
+        user.id.0,
+        view,
+        q.year,
+        q.month,
+        q.avg_window.clone(),
+        q.avg_months,
+    )
+    .await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_transactions_summary`.
+/// La validación de parámetros vive AQUÍ para que ambos caminos devuelvan los mismos
+/// códigos 400 estables.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn transactions_summary_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+    q_year: Option<i32>,
+    q_month: Option<u32>,
+    q_avg_window: Option<String>,
+    q_avg_months: Option<u32>,
+) -> Result<TransactionsSummaryResponse, ApiError> {
+    let today = installation_naive_today(pool, iid).await?;
 
     // Ventana del promedio: `avg_window` gana; si falta, el alias legado `avg_months` (default 6).
-    let window = match &q.avg_window {
+    let window = match &q_avg_window {
         Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "3" => AvgWindow::Months(3),
             "6" => AvgWindow::Months(6),
@@ -341,7 +369,7 @@ pub async fn get_transactions_summary(
             }
         },
         None => {
-            let n = q.avg_months.unwrap_or(DEFAULT_AVG_MONTHS);
+            let n = q_avg_months.unwrap_or(DEFAULT_AVG_MONTHS);
             if n == 0 || n > MAX_AVG_MONTHS {
                 return Err(ApiError::BadRequest(format!(
                     "avg_months must be between 1 and {MAX_AVG_MONTHS}"
@@ -352,7 +380,7 @@ pub async fn get_transactions_summary(
     };
 
     // Mes seleccionado: (year, month) o el último mes COMPLETO (el anterior al actual).
-    let (year, month) = match (q.year, q.month) {
+    let (year, month) = match (q_year, q_month) {
         (Some(y), Some(m)) => {
             if !(1900..=3000).contains(&y) {
                 return Err(ApiError::BadRequest("year must be between 1900 and 3000".into()));
@@ -393,9 +421,9 @@ pub async fn get_transactions_summary(
                 .bind_scope_scalar(
                     sqlx::query_scalar::<_, Option<NaiveDate>>(&sql),
                     iid,
-                    user.id.0,
+                    user_id,
                 )
-                .fetch_one(&state.pool)
+                .fetch_one(pool)
                 .await?;
             match min_op {
                 Some(d) => {
@@ -429,10 +457,10 @@ pub async fn get_transactions_summary(
         end = arg + 1
     );
     let raw: Vec<BucketRow> = view
-        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
+        .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
         .bind(window_start)
         .bind(month_end)
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await?;
     let mut buckets: HashMap<(String, String, Option<Uuid>), Decimal> = HashMap::new();
     for r in raw {
@@ -465,8 +493,8 @@ pub async fn get_transactions_summary(
          GROUP BY b.category_id, c.scope"
     );
     let brows: Vec<(Uuid, String, Decimal)> = view
-        .bind_scope_as(sqlx::query_as(&bsql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&bsql), iid, user_id)
+        .fetch_all(pool)
         .await?;
     let mut expense_budget: HashMap<Uuid, Decimal> = HashMap::new();
     let mut income_budget: HashMap<Uuid, Decimal> = HashMap::new();
@@ -483,7 +511,7 @@ pub async fn get_transactions_summary(
         let rows: Vec<(Uuid, String)> =
             sqlx::query_as(r#"SELECT id, name FROM categories WHERE installation_id = $1"#)
                 .bind(iid)
-                .fetch_all(&state.pool)
+                .fetch_all(pool)
                 .await?;
         rows.into_iter().collect()
     };
@@ -572,7 +600,7 @@ pub async fn get_transactions_summary(
     let income_budget_total: Decimal = income_categories.iter().map(|l| l.budget).sum();
     let net_actual = income_actual - expense_actual;
 
-    Ok(Json(TransactionsSummaryResponse {
+    Ok(TransactionsSummaryResponse {
         year,
         month,
         is_partial,
@@ -601,5 +629,5 @@ pub async fn get_transactions_summary(
             savings_avg,
             net_actual,
         },
-    }))
+    })
 }

@@ -3430,3 +3430,48 @@ fieldset.retirement-config-stack {
     font-size: 0.62rem;
   }
 }
+
+/* ---------- Ajustes → Tokens de API (MCP) ---------- */
+.panel-title-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  vertical-align: -0.1em;
+  margin-right: 0.3rem;
+  color: var(--ff-ink-soft);
+}
+
+/* Aviso del secreto recién creado: se enseña UNA vez, borde acentuado para que no pase
+   desapercibido antes de cerrar. */
+.token-reveal {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid color-mix(in oklch, var(--ff-accent) 40%, var(--ff-line-soft));
+  border-radius: var(--ff-radius-kpi);
+  background: color-mix(in oklch, var(--ff-accent) 6%, var(--ff-paper));
+  color: var(--ff-ink);
+}
+
+.token-reveal p {
+  margin: 0;
+}
+
+.token-reveal-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.token-secret {
+  flex: 1 1 14rem;
+  min-width: 0;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-input);
+  background: var(--ff-bg);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+}

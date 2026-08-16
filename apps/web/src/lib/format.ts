@@ -221,3 +221,25 @@ export function formatBreakdownPct(part: string, whole: string): string {
   if (pct === null) return METRIC_DASH;
   return formatPercentDisplay(pct);
 }
+
+/** ISO timestamp (`2026-08-16T10:20:30Z`) → `DD/MM/YYYY` (solo fecha); original si no parsea. */
+function isoTimestampDmy(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
+
+/** Último uso de un token de API: `Nunca` o la fecha corta del ISO timestamp. */
+export function lastUsedLabel(lastUsedAt: string | null | undefined): string {
+  return lastUsedAt ? isoTimestampDmy(lastUsedAt) : "Nunca";
+}
+
+/** Estado de vigencia de un token de API: revocado gana a caducidad; sin `expires_at` = sin caducidad. */
+export function tokenExpiryLabel(
+  expiresAt: string | null | undefined,
+  revokedAt: string | null | undefined,
+): string {
+  if (revokedAt) return `Revocado ${isoTimestampDmy(revokedAt)}`;
+  if (!expiresAt) return "Sin caducidad";
+  return `Caduca ${isoTimestampDmy(expiresAt)}`;
+}

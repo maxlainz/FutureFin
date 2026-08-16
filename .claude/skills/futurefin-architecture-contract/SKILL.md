@@ -335,6 +335,32 @@ converts a two-process namespace into an exposed service for zero security gain;
 `/dev/tcp` fallback makes a container with a dead database report healthy — the exact failure the
 healthcheck exists to catch.
 
+### D14. Second auth scheme: per-user Bearer API tokens, hash-only, live role (v3.0.0)
+The embedded MCP server (`/mcp`, module `apps/api/src/mcp/`, official `rmcp` SDK) needed a
+non-cookie credential. The decision mirrors D3 (sessions-in-DB, not JWT), deliberately:
+
+- **The stored credential is only the SHA-256 hex of the secret** (`api_tokens.token_hash`
+  UNIQUE). The secret (`ffp_` + 43 chars base64url of 32 `OsRng` bytes) travels once, in the
+  `POST /v1/api-tokens` 201. Lookup is an O(1) hash-equality in SQL — no secret comparison in
+  Rust, no timing surface.
+- **The token freezes NOTHING**: `require_api_token` (handlers/api_tokens.rs) returns only
+  `{user_id, token_id}`; every `/mcp` request re-runs `require_installation_member` for the live
+  role/installation. Revoking a token (`revoked_at`) or a membership cuts access on the next
+  request — same revocation semantics as deleting a session row.
+- **Any member (viewer included) may mint their own tokens** via the cookie-authed CRUD: a token
+  can never do more than its owner, and MCP v1 is read-only. Pending users hit the same 403 gate.
+- **MCP tools call the SAME core fns as the HTTP handlers** (`summary_core`,
+  `projection_series_cached`, `budget_snapshot_core`, …): read handlers were split into
+  extractors+auth vs `*_core(pool, iid, user_id, view, …)`. A tool with its own SQL or its own
+  response type is the D2/D8 dual-branch drift bug reborn — don't.
+- `/mcp` is **deliberately not in OpenAPI** (JSON-RPC, self-described via `tools/list`), and
+  `FUTUREFIN_MCP_ENABLED=0` unmounts the router entirely.
+
+**Breaks if violated**: storing the secret (or a reversible form) turns a DB leak into credential
+theft; caching role/installation in the token resurrects stale-privilege bugs the session design
+already killed; duplicating query logic in tools reintroduces silent handler↔tool divergence
+(plausible-but-different numbers, the owner's stated worst failure mode).
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
@@ -342,7 +368,7 @@ healthcheck exists to catch.
 | I1 | Exactly one **uncapped `remainder`** allocation rule per scope, always **last** in the cascade (the "sink") | `handlers/allocation_rules.rs` create/patch/delete/reorder; API errors `remainder_required`, `uncapped_remainder_exists`, `sink_must_be_last` | `grep -n "remainder_required\|uncapped_remainder_exists\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs` |
 | I2 | `fire_target_at_month_index` is the ONLY FIRE-target formula — engine crossover and API `fire_target_series` both call it | `crates/engine/src/projection.rs` (public fn + regression test for the old off-by-one) | `grep -rn "fire_target_at_month_index" crates/ apps/api/src/` — every inflation-compounding of a FIRE target must route through it |
 | I3 | Amounts serialize as decimal strings, EXCEPT the documented f64 arrays of `/v1/projection/series` and the per-point arrays of `/v1/history/series` (D4) | ONE `pub(crate)` definition of `serialize_decimal_as_f64` in `handlers/projection.rs`, used by the projection and history responses only | `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) |
-| I4 | All routes live under `/v1/`, except root `/health` and `/openapi.json` (plus the SPA static fallback when `WEB_STATIC_ROOT` is set) | `routes/mod.rs` (`nest("/v1", v1)`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest" apps/api/src/routes/mod.rs` |
+| I4 | All routes live under `/v1/`, except root `/health`, `/openapi.json` and `/mcp` (Bearer-authed MCP endpoint, v3.0.0; mounted only when `mcp_enabled`) — plus the SPA static fallback when `WEB_STATIC_ROOT` is set | `routes/mod.rs` (`nest("/v1", v1)` + conditional `merge(mcp_router)`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest\|mcp" apps/api/src/routes/mod.rs` |
 | I5 | Reads never mutate (D5): expired liabilities filtered, never deleted, by GETs | WHERE clauses in liabilities/summary/budget/assets/projection handlers | `TEST_DATABASE_URL=... cargo test --workspace liabilities_purge` (local; not in CI) |
 | I6 | In charts, the stacked per-asset areas sum EXACTLY to the (visible) net-worth line at every x | `MiniProjection.tsx` rescales each asset share by `visibleNw × (asset_i / Σassets)` — necessary because raw engine `net_worth = Σassets + surplus_cash − Σprincipals − undrained`, so raw `per_asset_series` does NOT sum to NW | Read the `cumulative` block in `apps/web/src/components/charts/MiniProjection.tsx` (~lines 164–190); any new stacked chart must reuse `MiniProjection`, not re-derive |
 | I7 | `planning_monthly_cash_adjustment.len() == horizon_months`; allocation `target_index` in bounds; horizon ≥ 1 | Engine input validation → `EngineError::{InvalidPlanningAdjustments, InvalidAllocationRuleTarget, InvalidHorizon}` → 400 | `cargo test -p futurefin-engine` |
@@ -450,6 +476,12 @@ Re-verify volatile claims with:
 - Default ES brackets (W4): `grep -n -A24 "default_es_tax_brackets" apps/api/src/handlers/installation.rs` vs `DEFAULT_ES_TAX_BRACKETS_API` in `apps/web/src/lib/fire.ts`.
 - App.tsx size (W2): `wc -l apps/web/src/App.tsx`.
 - Doc drift (W6): the standing-errata table in futurefin-docs-and-writing §7 is the record.
+- **D14 — API tokens + MCP (added 2026-08-16, v3.0.0)**: `grep -n "token_hash\|require_api_token" apps/api/src/handlers/api_tokens.rs`
+  (hash-only storage, single 401); `grep -n "require_installation_member" apps/api/src/mcp/auth.rs`
+  (live role per request); `grep -rn "_core\b" apps/api/src/mcp/server.rs` (tools call handler
+  cores, no SQL in tools); `grep -n "mcp" apps/api/src/routes/mod.rs` (conditional mount);
+  `grep -rn "api_tokens" apps/api/src/handlers/backup_user/` → **must be empty** (excluded from
+  `.ffbackup` on purpose).
 - **D13 — the image is the store**: `grep -n '^FROM' apps/api/Dockerfile` (runtime is
   `debian:bookworm-slim`; `postgres:15/16-bookworm` appear only as `AS pg15`/`AS pg16` COPY
   sources); `grep -n '^VOLUME' apps/api/Dockerfile` → **must be empty** (the only `VOLUME` hits in

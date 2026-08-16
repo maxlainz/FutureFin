@@ -154,6 +154,15 @@ export function DownloadIcon(props: IconProps) {
   );
 }
 
+export function KeyIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="5.5" cy="10.5" r="2.75" />
+      <path d="M7.5 8.5L13 3m-2.5 2.5L12.5 7.5" />
+    </IconBase>
+  );
+}
+
 export function CalendarIcon(props: IconProps) {
   return (
     <IconBase {...props}>

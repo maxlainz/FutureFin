@@ -1,4 +1,5 @@
 pub mod allocation_rules;
+pub mod api_tokens;
 pub mod assets;
 pub mod auth;
 pub mod backup_user;

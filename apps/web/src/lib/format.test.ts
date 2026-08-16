@@ -18,6 +18,8 @@ import {
   formatPercentDisplaySigned,
   isZeroFractionMetric,
   isZeroMoneyMetric,
+  lastUsedLabel,
+  tokenExpiryLabel,
   normalizeCurrencyIso,
   parseDisplayDecimal,
 } from "./format";
@@ -208,5 +210,25 @@ describe("breakdownPercentOfTotal + formatBreakdownPct", () => {
   it("computes ratio correctly", () => {
     expect(breakdownPercentOfTotal("25", "100")).toBe(25);
     expect(formatBreakdownPct("25", "100")).toBe("25,0 %");
+  });
+});
+
+describe("lastUsedLabel + tokenExpiryLabel (tokens de API)", () => {
+  it("lastUsedLabel: Nunca sin timestamp, fecha corta con ISO", () => {
+    expect(lastUsedLabel(null)).toBe("Nunca");
+    expect(lastUsedLabel(undefined)).toBe("Nunca");
+    expect(lastUsedLabel("2026-08-16T10:20:30.123456Z")).toBe("16/08/2026");
+  });
+  it("tokenExpiryLabel: revocado gana a caducidad", () => {
+    expect(
+      tokenExpiryLabel("2027-01-01T00:00:00Z", "2026-08-16T09:00:00Z"),
+    ).toBe("Revocado 16/08/2026");
+  });
+  it("tokenExpiryLabel: sin expires_at = sin caducidad", () => {
+    expect(tokenExpiryLabel(null, null)).toBe("Sin caducidad");
+    expect(tokenExpiryLabel(undefined, undefined)).toBe("Sin caducidad");
+  });
+  it("tokenExpiryLabel: con expires_at anuncia la fecha", () => {
+    expect(tokenExpiryLabel("2026-11-14T12:00:00Z", null)).toBe("Caduca 14/11/2026");
   });
 });
