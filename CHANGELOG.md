@@ -4,6 +4,113 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [3.0.0] - 2026-08-16
+
+**Imagen autocontenida**: PostgreSQL pasa a vivir **dentro de la propia imagen** de FutureFin. El stack
+deja de ser dos contenedores (app + `futurefin-database`) y pasa a ser **uno solo**, con lo que un
+`docker compose pull && up -d` — o watchtower con `:latest` — actualiza todo el sistema de una pieza.
+Sin migraciones SQL nuevas; el `schema_version` del `.ffbackup` sigue en **6**. **Breaking operacional**
+(topología de despliegue), no de API ni de backups.
+
+### Changed — PostgreSQL 16 embebido, un solo contenedor
+
+- **Por qué**: la pareja app+DB unida por `depends_on` era fricción pura para una app monoinstalación —
+  dos servicios que gestionar, una `POSTGRES_PASSWORD` obligatoria que nadie usaba desde fuera, y
+  actualizaciones desatendidas frágiles (watchtower actualizaba la app pero la DB y su healthcheck
+  quedaban a su suerte). El volumen y el binario ya estaban acoplados de facto.
+- **Cómo**: el runtime sigue siendo `debian:bookworm-slim` (digest-pinned) con los binarios de PostgreSQL
+  **copiados de las imágenes oficiales** `postgres:16-bookworm` y `postgres:15-bookworm` (digests de
+  índice multi-arch; gate `ldd` en build; JIT/llvmjit eliminado: ~120 MB de libLLVM sin uso aquí).
+  Deliberadamente **no** se usa `postgres:*` como base ni se declara `VOLUME`: el `VOLUME` heredado crea
+  volúmenes anónimos en un `docker run` sin `-v`, y watchtower los pierde al recrear — pérdida silenciosa.
+  En su lugar, el entrypoint comprueba con `mountpoint` que hay un volumen real y **aborta** sin él
+  (`FUTUREFIN_ALLOW_EPHEMERAL_DB=1` solo para uso desechable).
+- **Postgres es socket-only**: sin listener TCP en absoluto (`listen_addresses=''`), auth local `trust`
+  — no hay puerto que proteger ni contraseña que gestionar; `POSTGRES_PASSWORD` deja de ser obligatoria
+  (si viene, se aplica al rol y nada más). La API conecta por
+  `postgres:///futurefin?host=/var/run/postgresql&user=futurefin`.
+- **Apagado ordenado supervisado**: el entrypoint (PID 1) para primero la API — que ahora hace *graceful
+  shutdown* de verdad (`with_graceful_shutdown` + cierre del pool; tokio gana la feature `signal`) — y
+  después el postmaster con **SIGINT** (*fast shutdown* con checkpoint; SIGTERM sería *smart* y puede
+  colgarse). `stop_grace_period: 60s` en compose; con watchtower configura `WATCHTOWER_TIMEOUT=60s`.
+  Un SIGKILL no corrompe (WAL), solo fuerza recovery al siguiente arranque.
+- **Healthcheck**: pasa de `/v1/health` (liveness puro) a **`/v1/ready`** (`SELECT 1`) — en un contenedor
+  único, "healthy" debe implicar base de datos viva. Se retira el fallback `</dev/tcp` (enmascaraba
+  justamente ese 503); el `CMD-SHELL` se mantiene (incidente v1.0.2 sigue vigente). La imagen además
+  declara su propio `HEALTHCHECK` para quien use `docker run` pelado.
+- **Procesos sin privilegios**: `postgres` (uid 999, como la imagen oficial Debian) para el postmaster y
+  un usuario dedicado `futurefin` (uid 10001) para la API vía `gosu`; root solo en el supervisor.
+- **Logs**: un único flujo — `docker compose logs -f futurefin` mezcla entrypoint
+  (`[futurefin-entrypoint]`), PostgreSQL y la API.
+- La API gana `connect_with_retry` (backoff 0,5→4 s, `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS`, default 30):
+  el modo con DB externa pierde el `depends_on: service_healthy` que suplía la falta de retry.
+- Tamaño de imagen: ~120 MB → ~330-360 MB descomprimida; a cambio desaparece la descarga separada de
+  `postgres:16.4-alpine`, así que el total transferido es comparable.
+
+### Added — backup automático pre-migración (con retención)
+
+- Antes de arrancar la API con una **versión nueva o migraciones pendientes** (comparando los manifiestos
+  `/app/VERSION` y `/app/migration-versions.txt` contra `_sqlx_migrations`), el entrypoint escribe
+  `pre-migration-<desde>-a-<hasta>-<ts>.sql.gz` en el volumen nuevo **`ffdata`** (`/var/lib/futurefin`).
+  Si el backup **falla, el arranque se aborta**: el momento en que no se puede escribir el backup es
+  exactamente el momento en que más falta hace (bypass deliberado: `FUTUREFIN_PREMIGRATION_BACKUP=off`).
+- **Retención** para no hinchar el volumen: los `FUTUREFIN_BACKUP_KEEP` (10) más recientes son intocables;
+  del resto se borran los de más de `FUTUREFIN_BACKUP_KEEP_DAYS` (90) días; bajo presión de disco
+  (<256 MB libres) se poda de viejo a nuevo sin tocar nunca los 3 últimos.
+- Mismo formato `.sql.gz` que `scripts/backup-postgres.sh` ⇒ **un único procedimiento de restore**:
+  el nuevo `scripts/restore-postgres.sh <dump> [--yes]`, que usa el modo rescate **`db-only`**
+  (`FUTUREFIN_MODE=db-only`: solo PostgreSQL, sin API — también útil para psql/inspección manual).
+
+### Added — auto-`pg_upgrade` de versiones mayores de PostgreSQL
+
+- La imagen empaqueta **16 (activa) + 15**, y el entrypoint detecta un `PGDATA` de un major anterior y lo
+  actualiza solo: parada limpia del cluster viejo → `pg_dumpall` **obligatorio** → cluster nuevo en
+  staging con locale/encoding/checksums idénticos → `pg_upgrade` en modo **copia** (no `--link`: el
+  cluster viejo queda utilizable si algo falla) → verificación por **censo de filas** → swap reanudable.
+  El cluster antiguo se conserva en `$PGDATA/pgdata_old_15` (borrado manual, nunca automático).
+- El 15 se incluye hoy sin usuarios que lo necesiten **a propósito**: permite ejercitar el camino completo
+  en CI en vez de estrenarlo en producción el día que toque 16→17 (la lección del auto-repair). Política:
+  cada imagen lleva el major actual + el anterior (la 4.x llevará 17+16).
+
+### Deprecated — base de datos externa (`DATABASE_URL`)
+
+- Definir `DATABASE_URL` sigue funcionando pero queda **deprecado; se elimina en 4.0.0**, con aviso
+  enmarcado en cada arranque. Es lo que mantiene vivo, sin intervención, a un usuario 2.x cuyo watchtower
+  le plantó la imagen 3.x sin tocar su compose: sin volumen montado en el contenedor de la app, la 3.x
+  usa su `futurefin-database` de siempre (probado en CI).
+- **Automigración one-shot**: con `DATABASE_URL` definida **y** un volumen vacío montado, el entrypoint
+  copia la base externa a la embebida una única vez — dump (la externa solo se **lee**), restore,
+  **verificación por censo de filas**, marcador de idempotencia (jamás re-migra; máximo 3 reintentos y
+  los intentos fallidos se apartan con `mv`, nunca `rm`). Si la externa no responde, **aborta** en vez de
+  arrancar vacío en silencio. Opt-out: `FUTUREFIN_DB_MODE=external`.
+
+### Migración / compatibilidad
+
+- **Migraciones SQL**: ninguna nueva. El esquema de 3.0.0 es idéntico al de 2.3.0; `.ffbackup`
+  `schema_version` sigue en **6**. API: sin cambios de contrato.
+- **Datos**: **sin pérdida**. El volumen `futurefin_pgdata` se reutiliza tal cual — mismo nombre y misma
+  ruta de montaje (`/var/lib/postgresql/data`) en el compose nuevo. En el **primer arranque** tras
+  actualizar, una sola vez: (1) ajuste de propiedad de los ficheros (la imagen Alpine de 2.x usaba uid 70;
+  la Debian usa 999), y (2) `REINDEX DATABASE` + `REFRESH COLLATION VERSION`, porque los índices de texto
+  se construyeron con la colación de musl y ahora los lee un PostgreSQL glibc — sin ese REINDEX habría
+  índices únicos silenciosamente corruptos (comprobado en CI: el username duplicado devuelve 409, no éxito).
+- **Primer arranque tras actualizar**: sustituye tu `docker-compose.yml` por el de 3.0.0 y ejecuta
+  `docker compose up -d --remove-orphans` (retira el contenedor `futurefin-database`). Tarda más de lo
+  normal una única vez (chown + REINDEX + backup automático; `start_period: 120s`). Verifica con
+  `/v1/ready` (no `/v1/health`) y `docker compose logs futurefin | grep -E "migrations applied|ERROR"`.
+  Recomendado antes: exportar tu `.ffbackup` y un `pg_dump`.
+- **Rollback a 2.x**: la imagen 2.x no arranca PostgreSQL. `docker compose down`, restaura tu
+  `docker-compose.yml` y `.env` de 2.x (con `POSTGRES_PASSWORD`) y levanta: el volumen `pgdata` no cambió
+  de forma y `postgres:16.4-alpine` reajusta la propiedad al arrancar. Si la 3.x llegó a aplicar
+  migraciones de una futura 3.y, aplica la regla forward-only de siempre (VersionMissing). El volumen
+  `ffdata` queda huérfano — consérvalo si quieres los backups automáticos.
+- **Breaking operacional**: desaparece el servicio `futurefin-database` — cualquier script/cron que haga
+  `docker compose exec futurefin-database …` debe apuntar a `futurefin` y añadir `-h /var/run/postgresql`
+  (así lo hacen ya `scripts/backup-postgres.sh` y `db-stats.sh`). `docker-compose.split-dev.yml`
+  desaparece: el Postgres de desarrollo es ahora el compose autónomo `docker-compose.dev.yml` (project
+  `futurefin-dev`, volumen `devdata` — nota en el propio fichero para reutilizar el volumen antiguo).
+  Quien siga el tag `:2` no salta a 3.x automáticamente.
+
 ## [2.3.0] - 2026-08-15
 
 El caso «infinito» del **runway** deja de decidirlo el tope de simulación de 100 años y pasa a decidirlo el
