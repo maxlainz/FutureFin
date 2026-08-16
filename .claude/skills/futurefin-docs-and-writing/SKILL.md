@@ -16,7 +16,9 @@ description: >
 
 # FutureFin — Docs of Record & House Writing Style
 
-Facts below verified against the repo on **2026-07-02, v1.4.3** (`apps/api/Cargo.toml`). This skill
+Facts below verified against the repo on **2026-07-02, v1.4.3** (`apps/api/Cargo.toml`) and
+re-verified **2026-08-16 for v3.0.0** (self-contained Docker image), which is where §7's errata
+rows come from. This skill
 tells you (a) which file owns which facts, (b) what to update when you change something, (c) how
 entries must be written, and (d) which documented facts are currently WRONG (standing errata).
 
@@ -48,7 +50,7 @@ current drift is a duplicated or orphaned fact).
 | `.claude/data-model.md` | Tables, columns, invariants, `fire_settings` JSONB shape, `.ffbackup` schema notes | AI sessions |
 | `.claude/engine.md` | Engine public API, `ProjectionInput`/`Output`, simulation loop, inflation model, handler↔engine boundary notes | AI sessions |
 | `.claude/auth-and-membership.md` | Auth flow, roles table, cookie attrs, pending users, key auth functions | AI sessions |
-| `.claude/env-and-config.md` | Every env var + default, `.env` loading order, Vite config, compose-file matrix | AI sessions |
+| `.claude/env-and-config.md` | Every env var + default (API binary **and**, since 3.0.0, the container entrypoint's `FUTUREFIN_*` / `POSTGRES_*` vars), `.env` loading order, Vite config, and the compose-file matrix — which since 3.0.0 is `docker-compose.yml` (production, **one service** with PostgreSQL inside the image), `docker-compose.local.yml` (`pull_policy: never` for a locally built image) and `docker-compose.dev.yml` (standalone dev Postgres on 127.0.0.1:5432, replacing the deleted `docker-compose.split-dev.yml`) | AI sessions |
 | `.claude/adding-handler.md` | The canonical new-handler recipe (handler → mod.rs → routes → openapi → migration → test) | AI sessions |
 | `.claude/frontend-structure.md` | `apps/web/src/` layout, import rules, "where to add new code" table, prefetch/perf notes | AI sessions |
 | `.claude/design-system.md` | Tokens (`--ff-*`, `--proj-*`), palette rules, theme, icon set, rules for new UI | AI sessions |
@@ -77,6 +79,7 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 | Test infra: TestApp helper, fixture, CI workflow, test command | `.claude/tests.md` |
 | Handler-authoring pattern itself (new mandatory step) | `.claude/adding-handler.md` |
 | Dev/build/deploy command, git workflow | `CLAUDE.md` |
+| Container behavior: `Dockerfile`, `apps/api/docker-entrypoint.sh`, any `docker-compose*.yml` (embedded PG, automatic backups, shutdown, upgrade paths) | `.claude/env-and-config.md` (entrypoint vars + compose matrix) **and** `README.md` (self-hoster steps: quick start, "Actualizar", "Actualizar desde 2.x") **and** `CLAUDE.md` if a command changed **and** `CHANGELOG.md` |
 | Anything a user or self-hoster can observe | `CHANGELOG.md` entry (under `## [Unreleased]` until release) |
 | Docker quick start, backup story, supported tags | `README.md` |
 | Any fact stated in a `.claude/skills/*/SKILL.md` | that skill, same PR (see §6) |
@@ -219,6 +222,9 @@ rule; v1.2.0 is the precedent).
 - Every skill in `.claude/skills/` ends with a **Provenance and maintenance** section: one-line
   read-only commands that re-verify its volatile facts. When you touch a skill's area, run its
   provenance lines; any mismatch means the skill must be updated **in the same PR** as the change.
+  Rule re-checked 2026-08-16: all 15 skills comply —
+  `for f in .claude/skills/*/SKILL.md; do grep -qi '^## .*Provenance' "$f" || echo "MISSING: $f"; done`
+  prints nothing. A new skill without that section is incomplete.
 - Skills date-stamp volatile facts ("as of 2026-07-02, v1.4.3"). When you re-verify, refresh the
   date even if nothing changed.
 - One home per fact across the library: if your edit would duplicate a sibling skill's topic,
@@ -236,6 +242,18 @@ data-model.md, engine.md and api-routes.md; the stale `mac_*` `horizon_basis` do
 README) were **all fixed in the docs-of-record on 2026-07-02** in the same change that made
 CLAUDE.md the single entry point.
 
+**Re-swept 2026-08-16 for v3.0.0 — still no known drift.** The self-contained-image release
+rewrote the deployment story (single container, no `futurefin-database` service, no
+`docker-compose.split-dev.yml`, `POSTGRES_PASSWORD` no longer required, healthcheck on
+`/v1/ready`), which is exactly the kind of change that historically leaves stragglers. A sweep of
+`grep -rn 'split-dev\|futurefin-database\|POSTGRES_PASSWORD' --include='*.md' .` on 2026-08-16
+found **every** remaining hit to be legitimate: correct 2.x history (CHANGELOG; "the
+`--remove-orphans` retires the old `futurefin-database` container"), an explicit "this no longer
+exists / is deleted" note, the unrelated test-DB `docker run -e POSTGRES_PASSWORD=futurefin_test`,
+or **"split-dev" as the name of the still-current workflow** (`cargo run` + Vite) — only the
+`docker-compose.split-dev.yml` *file* is gone, replaced by the standalone `docker-compose.dev.yml`.
+Nothing to record.
+
 The rule stands: when you find a doc/code disagreement, verify against code (the code is ground
 truth), then fix the doc in the same change. If you cannot, add a row here with "verified <date>"
 — never leave a known-wrong fact unrecorded:
@@ -248,10 +266,19 @@ truth), then fix the doc in the same change. If you cannot, add a row here with 
 
 Verified 2026-07-02 against v1.4.3 by reading: `CLAUDE.md`, all 9 `.claude/*.md`, `CHANGELOG.md`,
 `README.md`, `.github/workflows/ci.yml`, `apps/api/src/routes/mod.rs`,
-`apps/api/src/handlers/projection.rs`, `apps/api/migrations/`. Re-verify with:
+`apps/api/src/handlers/projection.rs`, `apps/api/migrations/`. Re-verified **2026-08-16 for
+v3.0.0** (§1 env-and-config row, §2 container row, §7 sweep) against `README.md`, `CLAUDE.md`,
+`.claude/env-and-config.md`, `docker-compose*.yml` and `apps/api/docker-entrypoint.sh`.
+Re-verify with:
 
-- Current version: `grep -n '^version' apps/api/Cargo.toml` (and top entry of `CHANGELOG.md`)
-- Migration count: `ls apps/api/migrations | wc -l`
+- Current version: `grep -n '^version' apps/api/Cargo.toml` (and top entry of `CHANGELOG.md`).
+  **2.3.0 on 2026-08-16 — the 3.0.0 bump + CHANGELOG section were still to be written**
+  (release ritual §5; gates in futurefin-change-control §4)
+- Migration count: `ls apps/api/migrations | wc -l` (34 on 2026-08-16)
+- Compose matrix matches the §1 env-and-config row: `ls docker-compose*.yml` (yml / local / dev —
+  **no `split-dev`**) and `awk '/^services:/{f=1;next} /^volumes:/{f=0} f && /^  [a-z]/' docker-compose.yml` (one service)
+- §7 sweep reproducible: `grep -rn 'split-dev\|futurefin-database\|POSTGRES_PASSWORD' --include='*.md' .`
+  — every hit must be 2.x history, an explicit "no longer exists" note, or the test-DB `docker run`
 - Old errata stay fixed? (all must return empty/clean): `grep -n "no CI yet" .claude/tests.md`;
   `grep -rn projection_target_age .claude/*.md apps/api/src crates` (only the historical mention
   in data-model.md's "eliminada" note is expected); `grep -n AUTH_MODEL .claude/auth-and-membership.md`;
