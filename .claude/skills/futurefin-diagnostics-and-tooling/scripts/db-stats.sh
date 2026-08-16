@@ -3,24 +3,25 @@
 # _sqlx_migrations state, session/liability/pending-user diagnostics.
 #
 # Runs psql INSIDE the compose container because the prod stack does NOT
-# expose Postgres on the host (docker-compose.yml has no ports: on
-# futurefin-database; only docker-compose.split-dev.yml adds 127.0.0.1:5432).
+# expose Postgres AT ALL (since 3.0.0 PostgreSQL is embedded in the single
+# `futurefin` container, socket-only — no TCP listener even inside; the dev
+# database is a separate compose, docker-compose.dev.yml, on 127.0.0.1:5432).
 #
 # Usage (from repo root, where docker-compose.yml lives):
 #   bash .claude/skills/futurefin-diagnostics-and-tooling/scripts/db-stats.sh
 #   POSTGRES_USER=futurefin POSTGRES_DB=futurefin bash .../db-stats.sh
 #
 # Env vars (defaults match docker-compose.yml):
-#   DB_SERVICE     compose service name (default futurefin-database)
+#   DB_SERVICE     compose service name (default futurefin)
 #   POSTGRES_USER  psql -U (default futurefin)
 #   POSTGRES_DB    psql -d (default futurefin)
 #
 # Read-only: only SELECTs. Interpretation guide: ../SKILL.md § "db-stats.sh".
 # Written against the schema as of 2026-07-02 (v1.4.3, 31 migration files),
-# verified by code reading. Degrades with a clear error if Docker or the DB
-# container is not up.
+# updated 3.0.0 for the single-container stack. Degrades with a clear error
+# if Docker or the container is not up.
 set -euo pipefail
-DB_SERVICE="${DB_SERVICE:-futurefin-database}"
+DB_SERVICE="${DB_SERVICE:-futurefin}"
 PGUSER="${POSTGRES_USER:-futurefin}"
 PGDB="${POSTGRES_DB:-futurefin}"
 
@@ -34,10 +35,14 @@ if ! docker compose ps --status running "$DB_SERVICE" 2>/dev/null | grep -q "$DB
   exit 1
 fi
 
-psql_run() { # runs psql in the container; -T because there is no TTY here
+psql_run() { # runs psql in the container via Unix socket; -T because there is no TTY here
   docker compose exec -T "$DB_SERVICE" \
-    psql -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 -P pager=off "$@"
+    psql -h /var/run/postgresql -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 -P pager=off "$@"
 }
+
+echo "== Server version and collation (adopted clusters show datcollate=en_US.utf8) =="
+psql_run -c "SHOW server_version;"
+psql_run -c "SELECT datname, datcollate, datcollversion FROM pg_database WHERE datname = current_database();"
 
 echo "== _sqlx_migrations (must equal the repo's apps/api/migrations/*.sql count) =="
 if [[ -d apps/api/migrations ]]; then

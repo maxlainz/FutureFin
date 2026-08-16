@@ -5,6 +5,7 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -35,33 +36,207 @@ jobs:
           npm run typecheck:web
           npm run build:web
 
-  # Imagen API + Compose: detecta Dockerfile roto, entrypoint faltante y arranque contra Postgres.
+  # Imagen autocontenida (3.x): construye y ejercita los caminos críticos del contenedor
+  # único — arranque desde cero, preservación de datos V2→V3 (uid + colación), compat
+  # externa (watchtower sobre compose 2.x), automigración, pg_upgrade 15→16 y apagado
+  # ordenado. Es la ÚNICA evidencia automatizada de «sin pérdida de datos»: no debilitar.
   docker-stack:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Build API image
-        run: docker build -t futurefin-ci:latest -f apps/api/Dockerfile .
-      - name: Start Postgres + API
+
+      - name: shellcheck (entrypoint + scripts)
         run: |
-          FUTUREFIN_IMAGE=futurefin-ci FUTUREFIN_TAG=latest \
-          POSTGRES_PASSWORD=ci-test \
-          docker compose up -d
-      - name: Wait for /v1/health
+          sudo apt-get install -y -q shellcheck >/dev/null
+          shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh \
+            .claude/skills/futurefin-diagnostics-and-tooling/scripts/*.sh
+
+      - name: Build image
+        run: docker build -t futurefin-ci:latest -f apps/api/Dockerfile .
+
+      - name: Image sanity (PG majors, label, no-volume guard)
         run: |
           set -e
+          docker run --rm --entrypoint sh futurefin-ci:latest -c \
+            '/usr/lib/postgresql/16/bin/postgres --version && /usr/lib/postgresql/15/bin/postgres --version'
+          test "$(docker inspect -f '{{index .Config.Labels "com.futurefin.postgres.majors"}}' futurefin-ci:latest)" = "15,16"
+          # Sin volumen debe ABORTAR (guardia anti-pérdida), no arrancar con datos efímeros.
+          if docker run --rm futurefin-ci:latest 2>&1 | tee /tmp/novol.log; then
+            echo "ERROR: container started without a volume"; exit 1
+          fi
+          grep -q "no persistent volume" /tmp/novol.log
+
+      # ── Escenario 1: instalación nueva + recreate estilo watchtower + apagado limpio ──
+      - name: Fresh install → /v1/ready + seed data
+        run: |
+          set -e
+          FUTUREFIN_IMAGE=futurefin-ci FUTUREFIN_TAG=latest docker compose -p ffresh up -d
           for i in $(seq 1 90); do
-            if curl -sf http://127.0.0.1:8080/v1/health; then
-              echo "health ok"
-              exit 0
-            fi
-            sleep 2
+            curl -sf http://127.0.0.1:8080/v1/ready >/dev/null && break; sleep 2
+            [ "$i" = 90 ] && { docker compose -p ffresh ps -a; docker compose -p ffresh logs --tail=200; exit 1; }
           done
-          POSTGRES_PASSWORD=ci-test docker compose ps -a
-          POSTGRES_PASSWORD=ci-test docker compose logs --tail=100 futurefin || true
-          exit 1
-      - name: Stop stack
+          docker compose -p ffresh logs futurefin | grep -q "initializing fresh PostgreSQL 16"
+          curl -sf -X POST http://127.0.0.1:8080/v1/auth/register -H 'content-type: application/json' \
+            -d '{"username":"citest","password":"ci-test-password-123","birth_date":"1990-01-01"}' >/dev/null
+          curl -sf -c /tmp/jar -X POST http://127.0.0.1:8080/v1/auth/login -H 'content-type: application/json' \
+            -d '{"username":"citest","password":"ci-test-password-123"}' >/dev/null
+          curl -sf -b /tmp/jar -X POST http://127.0.0.1:8080/v1/categories -H 'content-type: application/json' \
+            -d '{"scope":"asset","name":"Ácido Ñandú"}' >/dev/null
+
+      - name: Recreate (watchtower-style) keeps data
+        run: |
+          set -e
+          FUTUREFIN_IMAGE=futurefin-ci FUTUREFIN_TAG=latest docker compose -p ffresh up -d --force-recreate
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8080/v1/ready >/dev/null && break; sleep 2
+            [ "$i" = 60 ] && { docker compose -p ffresh logs --tail=200; exit 1; }
+          done
+          curl -sf -c /tmp/jar2 -X POST http://127.0.0.1:8080/v1/auth/login -H 'content-type: application/json' \
+            -d '{"username":"citest","password":"ci-test-password-123"}' >/dev/null
+          curl -sf -b /tmp/jar2 http://127.0.0.1:8080/v1/categories | grep -q 'Ácido Ñandú'
+
+      - name: Clean shutdown (SIGTERM → API drains → PG checkpoint → exit 0)
+        run: |
+          set -e
+          docker compose -p ffresh stop -t 60 futurefin
+          docker compose -p ffresh logs futurefin > /tmp/shutdown.log
+          grep -q "shutdown signal received"      /tmp/shutdown.log   # entrypoint + API
+          grep -q "database pool closed"          /tmp/shutdown.log   # API cerró el pool
+          grep -q "database system is shut down"  /tmp/shutdown.log   # checkpoint de PG
+          grep -q "clean shutdown complete"       /tmp/shutdown.log   # supervisor
+          test "$(docker inspect -f '{{.State.ExitCode}}' futurefin)" = "0"
+          docker compose -p ffresh down -v --remove-orphans
+
+      # ── Escenario 2: compose 2.x real → (a) imagen 3.x sin tocar el compose (RR7/watchtower)
+      #    y después (b) migración al compose 3.x reutilizando el volumen ──
+      - name: V2 stack up + seed data (2.3.0 real)
+        run: |
+          set -e
+          POSTGRES_PASSWORD=ci-test docker compose -p futurefin -f .github/testdata/docker-compose.v2.yml up -d
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8080/v1/health >/dev/null && break; sleep 2
+            [ "$i" = 90 ] && { docker compose -p futurefin -f .github/testdata/docker-compose.v2.yml logs --tail=200; exit 1; }
+          done
+          curl -sf -X POST http://127.0.0.1:8080/v1/auth/register -H 'content-type: application/json' \
+            -d '{"username":"citest","password":"ci-test-password-123","birth_date":"1990-01-01"}' >/dev/null
+          curl -sf -c /tmp/v2jar -X POST http://127.0.0.1:8080/v1/auth/login -H 'content-type: application/json' \
+            -d '{"username":"citest","password":"ci-test-password-123"}' >/dev/null
+          curl -sf -b /tmp/v2jar -X POST http://127.0.0.1:8080/v1/categories -H 'content-type: application/json' \
+            -d '{"scope":"asset","name":"Ácido Ñandú"}' >/dev/null
+
+      - name: V3 image over untouched V2 compose → external compat mode (watchtower case)
+        run: |
+          set -e
+          POSTGRES_PASSWORD=ci-test docker compose -p futurefin \
+            -f .github/testdata/docker-compose.v2.yml -f .github/testdata/docker-compose.v2-app-v3.yml \
+            up -d futurefin
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8080/v1/health >/dev/null && break; sleep 2
+            [ "$i" = 60 ] && { docker logs futurefin --tail=100; exit 1; }
+          done
+          docker logs futurefin 2>&1 | grep -q "DEPRECATED"
+          curl -sf -c /tmp/rr7jar -X POST http://127.0.0.1:8080/v1/auth/login -H 'content-type: application/json' \
+            -d '{"username":"citest","password":"ci-test-password-123"}' >/dev/null
+          curl -sf -b /tmp/rr7jar http://127.0.0.1:8080/v1/categories | grep -q 'Ácido Ñandú'
+
+      - name: Migrate to V3 compose reusing the volume (chown + REINDEX + backup)
+        run: |
+          set -e
+          POSTGRES_PASSWORD=ci-test docker compose -p futurefin \
+            -f .github/testdata/docker-compose.v2.yml -f .github/testdata/docker-compose.v2-app-v3.yml \
+            down --remove-orphans
+          FUTUREFIN_IMAGE=futurefin-ci FUTUREFIN_TAG=latest docker compose -p futurefin up -d --remove-orphans
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8080/v1/ready >/dev/null && break; sleep 2
+            [ "$i" = 90 ] && { docker compose -p futurefin logs --tail=300; exit 1; }
+          done
+          docker compose -p futurefin logs futurefin > /tmp/v2v3.log
+          grep -q "adopting ownership of PGDATA"    /tmp/v2v3.log   # uid 70 (alpine) → 999
+          grep -q "reindexing database after adoption" /tmp/v2v3.log # colación musl→glibc
+          # Login con las MISMAS credenciales (índice único de username sano tras REINDEX)
+          curl -sf -c /tmp/v3jar -X POST http://127.0.0.1:8080/v1/auth/login -H 'content-type: application/json' \
+            -d '{"username":"citest","password":"ci-test-password-123"}' >/dev/null
+          curl -sf -b /tmp/v3jar http://127.0.0.1:8080/v1/categories | grep -q 'Ácido Ñandú'
+          # Registrar un username duplicado debe rechazarse (409/422) — detector de índice
+          # único corrupto por colación: con el índice roto esto devolvería 200 o 500.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/v1/auth/register \
+            -H 'content-type: application/json' \
+            -d '{"username":"citest","password":"otra-password-456","birth_date":"1991-01-01"}')
+          echo "duplicate register -> $code"
+          case "$code" in 409|422) ;; *) echo "ERROR: expected 409/422"; exit 1;; esac
+          # Backup automático pre-migración presente en el volumen ffdata
+          docker compose -p futurefin exec -T futurefin sh -c 'ls /var/lib/futurefin/backups/pre-migration-*.sql.gz'
+          docker compose -p futurefin down -v --remove-orphans
+
+      # ── Escenario 3: automigración one-shot desde base externa ──
+      - name: External DB automigration (dump → embedded → detach)
+        run: |
+          set -e
+          docker compose -f .github/testdata/docker-compose.automigrate.yml up -d extdb seed
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8081/v1/health >/dev/null && break; sleep 2
+            [ "$i" = 90 ] && { docker compose -f .github/testdata/docker-compose.automigrate.yml logs --tail=200; exit 1; }
+          done
+          curl -sf -X POST http://127.0.0.1:8081/v1/auth/register -H 'content-type: application/json' \
+            -d '{"username":"extuser","password":"ci-test-password-123","birth_date":"1985-05-05"}' >/dev/null
+          docker compose -f .github/testdata/docker-compose.automigrate.yml stop seed
+          docker compose -f .github/testdata/docker-compose.automigrate.yml up -d futurefin
+          for i in $(seq 1 90); do
+            curl -sf http://127.0.0.1:8080/v1/ready >/dev/null && break; sleep 2
+            [ "$i" = 90 ] && { docker compose -f .github/testdata/docker-compose.automigrate.yml logs futurefin --tail=300; exit 1; }
+          done
+          docker compose -f .github/testdata/docker-compose.automigrate.yml logs futurefin | grep -q "automigration completed"
+          # La base externa deja de usarse: apagarla y comprobar que todo sigue vivo
+          docker compose -f .github/testdata/docker-compose.automigrate.yml stop extdb
+          docker compose -f .github/testdata/docker-compose.automigrate.yml restart futurefin
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8080/v1/ready >/dev/null && break; sleep 2
+            [ "$i" = 60 ] && { docker compose -f .github/testdata/docker-compose.automigrate.yml logs futurefin --tail=300; exit 1; }
+          done
+          curl -sf -c /tmp/amjar -X POST http://127.0.0.1:8080/v1/auth/login -H 'content-type: application/json' \
+            -d '{"username":"extuser","password":"ci-test-password-123"}' >/dev/null
+          docker compose -f .github/testdata/docker-compose.automigrate.yml down -v --remove-orphans
+
+      # ── Escenario 4: auto-pg_upgrade 15 → 16 ──
+      - name: pg_upgrade 15→16 (seeded PG15 volume)
+        run: |
+          set -e
+          docker volume create pg15data >/dev/null
+          docker volume create pg15state >/dev/null
+          docker run -d --name pg15seed -v pg15data:/var/lib/postgresql/data \
+            -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=futurefin \
+            postgres:15-bookworm
+          for i in $(seq 1 60); do
+            docker exec pg15seed pg_isready -q -U futurefin -d futurefin && break; sleep 2
+            [ "$i" = 60 ] && { docker logs pg15seed --tail=50; exit 1; }
+          done
+          docker exec pg15seed psql -U futurefin -d futurefin \
+            -c "CREATE TABLE ci_marker(name text); INSERT INTO ci_marker VALUES ('sobrevivió-al-upgrade');"
+          docker stop pg15seed && docker rm pg15seed
+          docker run -d --name ffpg15 -p 8083:8080 \
+            -v pg15data:/var/lib/postgresql/data -v pg15state:/var/lib/futurefin \
+            futurefin-ci:latest
+          for i in $(seq 1 120); do
+            curl -sf http://127.0.0.1:8083/v1/ready >/dev/null && break; sleep 2
+            [ "$i" = 120 ] && { docker logs ffpg15 --tail=300; exit 1; }
+          done
+          docker logs ffpg15 2>&1 | grep -q "pg_upgrade needed: PostgreSQL 15 -> 16"
+          docker logs ffpg15 2>&1 | grep -q "pg_upgrade 15 -> 16 completed"
+          docker exec ffpg15 psql -X -tA -h /var/run/postgresql -U futurefin -d futurefin \
+            -c "SELECT name FROM ci_marker" | grep -q 'sobrevivió-al-upgrade'
+          docker exec ffpg15 psql -X -tA -h /var/run/postgresql -U futurefin -d futurefin \
+            -c "SHOW server_version" | grep -q '^16'
+          docker exec ffpg15 sh -c 'test -d /var/lib/postgresql/data/pgdata_old_15'
+          docker exec ffpg15 sh -c 'ls /var/lib/futurefin/backups/pre-pgupgrade-15-to-16-*.sql.gz'
+          docker rm -f ffpg15
+          docker volume rm pg15data pg15state
+
+      - name: Cleanup
         if: always()
-        run: POSTGRES_PASSWORD=ci-test docker compose down -v --remove-orphans
+        run: |
+          docker compose -p ffresh down -v --remove-orphans 2>/dev/null || true
+          docker compose -p futurefin down -v --remove-orphans 2>/dev/null || true
+          docker compose -f .github/testdata/docker-compose.automigrate.yml down -v --remove-orphans 2>/dev/null || true
+          docker rm -f ffpg15 pg15seed 2>/dev/null || true

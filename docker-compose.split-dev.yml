@@ -1,7 +1,0 @@
-# Override puntual para split-dev (cargo run + vite).
-# Expone Postgres en 127.0.0.1:5432 para que la API local pueda conectarse.
-# NO usar en producción.
-services:
-  futurefin-database:
-    ports:
-      - "127.0.0.1:5432:5432"
