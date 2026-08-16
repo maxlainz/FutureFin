@@ -1029,16 +1029,28 @@ pub async fn get_projection_series(
 
     let view = resolve_ledger_view(&q);
     let density = resolve_density(&q);
+    let response =
+        projection_series_cached(&state, user.id.0, iid, view, q.months, density).await?;
+    Ok(Json(response))
+}
 
-    // Cache hot path: solo aplica cuando no hay `months_override` (caso por
-    // defecto y 99% del tráfico). Si el cliente pide un horizonte custom,
-    // recomputamos directamente sin cachear.
-    if q.months.is_none() {
+/// Core sin HTTP con la política de cache intacta: lo comparten el handler GET y la
+/// tool MCP `get_projection`. Cache hot path solo sin `months_override` (caso por
+/// defecto y 99% del tráfico); con horizonte custom se recomputa sin cachear.
+pub(crate) async fn projection_series_cached(
+    state: &AppState,
+    user_id: Uuid,
+    iid: Uuid,
+    view: LedgerView,
+    months_override: Option<u32>,
+    density: Density,
+) -> Result<ProjectionSeriesResponse, ApiError> {
+    if months_override.is_none() {
         let key = ProjectionCacheKey {
             installation_id: iid,
             view,
             owner_user_id: if matches!(view, LedgerView::Mine) {
-                Some(user.id.0)
+                Some(user_id)
             } else {
                 None
             },
@@ -1046,13 +1058,12 @@ pub async fn get_projection_series(
         };
         if let Some(cached) = state.projection_cache_get(&key).await {
             tracing::info!(installation_id = %iid, view = ?view, density = ?density, "projection cache HIT");
-            return Ok(Json((*cached).clone()));
+            return Ok((*cached).clone());
         }
         tracing::info!(installation_id = %iid, view = ?view, density = ?density, "projection cache MISS, computing");
         let t0 = std::time::Instant::now();
         let response =
-            compute_projection_series_response(&state, user.id.0, iid, view, None, density)
-                .await?;
+            compute_projection_series_response(state, user_id, iid, view, None, density).await?;
         tracing::info!(
             installation_id = %iid,
             density = ?density,
@@ -1062,13 +1073,10 @@ pub async fn get_projection_series(
         state
             .projection_cache_insert(key, Arc::new(response.clone()))
             .await;
-        return Ok(Json(response));
+        return Ok(response);
     }
 
-    let response =
-        compute_projection_series_response(&state, user.id.0, iid, view, q.months, density)
-            .await?;
-    Ok(Json(response))
+    compute_projection_series_response(state, user_id, iid, view, months_override, density).await
 }
 
 /// Calcula la respuesta de proyección sin tocar el cache. Es la unidad de

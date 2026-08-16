@@ -1,7 +1,7 @@
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::LedgerViewQuery;
+use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
@@ -354,10 +354,19 @@ pub async fn list_liabilities(
 ) -> Result<Json<Vec<LiabilityResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = list_liabilities_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
 
-    let today = installation_naive_today(&state.pool, iid).await?;
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_liabilities`.
+pub(crate) async fn list_liabilities_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<Vec<LiabilityResponse>, ApiError> {
+    let today = installation_naive_today(pool, iid).await?;
 
-    let view = q.resolve();
     let scope = view.scope_where("");
     let today_ph = view.next_arg_index();
     let sql = format!(
@@ -370,16 +379,16 @@ pub async fn list_liabilities(
            ORDER BY sort_index ASC, label ASC"#
     );
     let rows: Vec<LiabilityRow> = view
-        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
+        .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
         .bind(today)
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await?;
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         out.push(row_to_response(r)?);
     }
-    Ok(Json(out))
+    Ok(out)
 }
 
 #[utoipa::path(

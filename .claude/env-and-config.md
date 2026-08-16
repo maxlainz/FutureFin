@@ -14,6 +14,7 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 | `CORS_ORIGINS` | 4 localhost entries | Comma-separated. Not required — defaults to localhost. Set only for cross-origin API access. |
 | `COOKIE_SECURE` | `false` | Bool env var parsed by `main.rs`. |
 | `SESSION_TTL_DAYS` | `30` | Acepta 1–400; un valor fuera de rango o no numérico **cae silenciosamente al default 30** (filter-then-default, no clamp). |
+| `FUTUREFIN_MCP_ENABLED` | `true` | Bool (`parse_bool_env` de `main.rs`). Con `0`/`false` el router `/mcp` **ni se monta** (404 del fallback); los endpoints `/v1/api-tokens` siguen montados. Default habilitado: el endpoint es inerte sin tokens (todo 401) y producción sigue sin requerir env vars. |
 | `WEB_STATIC_ROOT` | — | Path to Vite `dist/`. Docker sets `/app/web`. Omit for API-only. |
 | `FUTUREFIN_API_PORT` | `8081` | Used by Vite proxy (`vite.config.ts`) |
 | `WEB_DEV_PORT` | `8080` | Vite dev server port |

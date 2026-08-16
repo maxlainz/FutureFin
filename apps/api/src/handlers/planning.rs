@@ -191,8 +191,17 @@ pub async fn list_planning_flows(
 ) -> Result<Json<Vec<PlanningFlowResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = list_planning_flows_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
 
-    let view = q.resolve();
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_planning_flows`.
+pub(crate) async fn list_planning_flows_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: crate::handlers::person_view::LedgerView,
+) -> Result<Vec<PlanningFlowResponse>, ApiError> {
     let scope = view.scope_where("p");
     let sql = format!(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
@@ -204,8 +213,8 @@ pub async fn list_planning_flows(
            ORDER BY p.sort_index ASC, p.due_date ASC NULLS LAST, p.title ASC"#
     );
     let rows: Vec<PlanningFlowJoinRow> = view
-        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
+        .fetch_all(pool)
         .await?;
 
     let mut out = Vec::with_capacity(rows.len());
@@ -213,7 +222,7 @@ pub async fn list_planning_flows(
         out.push(row_to_response(r)?);
     }
 
-    Ok(Json(out))
+    Ok(out)
 }
 
 #[utoipa::path(

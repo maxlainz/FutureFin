@@ -1217,26 +1217,36 @@ pub async fn get_history_series(
     let user = require_session_user(&jar, &state.pool).await?;
     // Solo lectura: cualquier miembro (viewer incluido) puede pedir la serie.
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = q.resolve();
+    let out = history_series_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_history`.
+pub(crate) async fn history_series_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<HistorySeriesResponse, ApiError> {
     let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
 
-    let today = installation_naive_today(&state.pool, iid).await?;
+    let today = installation_naive_today(pool, iid).await?;
     // `add_months_signed(d, 0)` devuelve el día 1 del mes de `d` → ancla del mes 0.
     let anchor = add_months_signed(today, 0);
 
     // ---- Fetch del scope (4 queries LedgerView, pipeline compartido) ------------------------
-    let scope = fetch_history_scope(&state.pool, view, iid, user.id.0, today).await?;
+    let scope = fetch_history_scope(pool, view, iid, user_id, today).await?;
 
     // 0 snapshots en scope → 200 con arrays vacíos.
     if scope.headers.is_empty() {
-        return Ok(Json(HistorySeriesResponse {
+        return Ok(HistorySeriesResponse {
             anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
             anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
             view: view_label.into(),
             points: Vec::new(),
             asset_series: Vec::new(),
             markers: Vec::new(),
-        }));
+        });
     }
 
     // ---- Markers: uno por cabecera; total = Σ items -----------------------------------------
@@ -1309,14 +1319,14 @@ pub async fn get_history_series(
             .then_with(|| a.asset_id.cmp(&b.asset_id))
     });
 
-    Ok(Json(HistorySeriesResponse {
+    Ok(HistorySeriesResponse {
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
         view: view_label.into(),
         points,
         asset_series,
         markers,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -66,7 +66,7 @@ impl From<sqlx::Error> for ApiError {
 }
 
 impl ApiError {
-    fn status(&self) -> StatusCode {
+    pub(crate) fn status(&self) -> StatusCode {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -79,7 +79,7 @@ impl ApiError {
         }
     }
 
-    fn sanitised_message(&self) -> String {
+    pub(crate) fn sanitised_message(&self) -> String {
         match self {
             ApiError::BadRequest(s) => s.clone(),
             ApiError::Unprocessable(s) => s.clone(),
@@ -95,7 +95,7 @@ impl ApiError {
         }
     }
 
-    fn code(&self) -> ErrorCode {
+    pub(crate) fn code(&self) -> ErrorCode {
         match self {
             ApiError::BadRequest(_) => ErrorCode::BadRequest,
             ApiError::Unprocessable(_) => ErrorCode::Unprocessable,

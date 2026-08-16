@@ -270,12 +270,21 @@ pub async fn get_summary(
 ) -> Result<Json<SummaryResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = summary_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
 
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_summary`.
+pub(crate) async fn summary_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<SummaryResponse, ApiError> {
     // Una sola query para los escalares de instalación que necesita este handler: fecha civil,
     // inflación (base del runway) y los fire_settings (fuente del ahorro + SWR/tramos del runway).
-    let (today, inflation_pct, fire) = installation_calendar_inflation_fire(&state.pool, iid).await?;
+    let (today, inflation_pct, fire) = installation_calendar_inflation_fire(pool, iid).await?;
     let source = fire.savings_source;
-    let view = q.resolve();
 
     let asset_scope = view.scope_where("");
     let liab_scope = view.scope_where("");
@@ -297,22 +306,22 @@ pub async fn get_summary(
     );
 
     let total_assets: Decimal = view
-        .bind_scope_scalar(sqlx::query_scalar(&total_assets_sql), iid, user.id.0)
-        .fetch_one(&state.pool)
+        .bind_scope_scalar(sqlx::query_scalar(&total_assets_sql), iid, user_id)
+        .fetch_one(pool)
         .await?;
     let total_liabilities: Decimal = view
-        .bind_scope_scalar(sqlx::query_scalar(&total_liab_sql), iid, user.id.0)
+        .bind_scope_scalar(sqlx::query_scalar(&total_liab_sql), iid, user_id)
         .bind(today)
-        .fetch_one(&state.pool)
+        .fetch_one(pool)
         .await?;
     let liquid_rows: Vec<(Decimal, Option<Decimal>)> = view
-        .bind_scope_as(sqlx::query_as(&liquid_sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&liquid_sql), iid, user_id)
+        .fetch_all(pool)
         .await?;
     let liquid_assets: Decimal = liquid_rows.iter().map(|(v, _)| *v).sum();
 
     let budget_totals =
-        ledger_budget_totals_for_summary(&state.pool, iid, user.id.0, view, today).await?;
+        ledger_budget_totals_for_summary(pool, iid, user_id, view, today).await?;
 
     // Base presupuesto (modo A). Los modos B/C con datos sustituyen TODA la base de gasto por el
     // promedio real 12m (y el modo B también el income): `expense_reg` = gasto real efectivo,
@@ -331,7 +340,7 @@ pub async fn get_summary(
     // `source` viene de `installation_calendar_inflation_savings` (mismo parser del JSONB
     // `fire_settings` que el engine y las mutaciones de transacciones).
     if source.uses_transactions() {
-        let avg = transactions_12m_avg(&state.pool, iid, user.id.0, view, today).await?;
+        let avg = transactions_12m_avg(pool, iid, user_id, view, today).await?;
         if avg.months_with_data > 0 {
             // Liabilities activas (por payment_end_date) con su cuota nominal mensual, con la MISMA
             // vista/scope que el resto del summary. La resta híbrida la aplica el helper compartido.
@@ -344,9 +353,9 @@ pub async fn get_summary(
                      AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph2})"#
             );
             let active_liabs: Vec<(Uuid, Option<Decimal>, Option<String>)> = view
-                .bind_scope_as(sqlx::query_as(&liab_sql), iid, user.id.0)
+                .bind_scope_as(sqlx::query_as(&liab_sql), iid, user_id)
                 .bind(today)
-                .fetch_all(&state.pool)
+                .fetch_all(pool)
                 .await?;
             let active: Vec<(Uuid, Decimal)> = active_liabs
                 .into_iter()
@@ -424,7 +433,7 @@ pub async fn get_summary(
     };
 
     let (upcoming_inflows_total, upcoming_outflows_total) =
-        planning_flow_totals_in_out(&state.pool, iid, user.id.0, view).await?;
+        planning_flow_totals_in_out(pool, iid, user_id, view).await?;
 
     let upcoming_coverage_ratio = if upcoming_outflows_total > Decimal::ZERO {
         Some(upcoming_inflows_total / upcoming_outflows_total)
@@ -460,9 +469,9 @@ pub async fn get_summary(
     };
 
     let (assets_by_category, liabilities_by_category, liabilities_by_type_tag) =
-        load_breakdown_lines(&state.pool, iid, user.id.0, view, today).await?;
+        load_breakdown_lines(pool, iid, user_id, view, today).await?;
 
-    Ok(Json(SummaryResponse {
+    Ok(SummaryResponse {
         total_assets,
         total_liabilities,
         net_worth,
@@ -471,7 +480,7 @@ pub async fn get_summary(
         assets_by_category,
         liabilities_by_category,
         liabilities_by_type_tag,
-    }))
+    })
 }
 
 pub fn summary_router() -> Router {

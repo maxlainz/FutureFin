@@ -44,6 +44,8 @@ pub struct AppState {
     pub pool: PgPool,
     pub cookie_secure: bool,
     pub session_ttl_days: i64,
+    /// `FUTUREFIN_MCP_ENABLED` (default true). Con `false` el router `/mcp` ni se monta.
+    pub mcp_enabled: bool,
     pub projection_cache: RwLock<ProjectionCacheMap>,
 }
 
@@ -53,12 +55,14 @@ impl AppState {
         pool: PgPool,
         cookie_secure: bool,
         session_ttl_days: i64,
+        mcp_enabled: bool,
     ) -> Self {
         Self {
             version,
             pool,
             cookie_secure,
             session_ttl_days,
+            mcp_enabled,
             projection_cache: RwLock::new(HashMap::new()),
         }
     }

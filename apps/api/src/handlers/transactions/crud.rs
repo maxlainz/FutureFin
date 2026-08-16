@@ -363,12 +363,38 @@ pub async fn list_transactions(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
     let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let out = list_transactions_core(
+        &state.pool,
+        iid,
+        user.id.0,
+        view,
+        q.month.as_deref(),
+        q.kind.as_deref(),
+        q.category_id,
+        q.import_id,
+    )
+    .await?;
+    Ok(Json(out))
+}
 
-    let kind = match &q.kind {
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_transactions`.
+/// La validación de filtros vive aquí para que ambos caminos devuelvan los mismos 400.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn list_transactions_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: crate::handlers::person_view::LedgerView,
+    month: Option<&str>,
+    kind: Option<&str>,
+    category_id: Option<Uuid>,
+    import_id: Option<Uuid>,
+) -> Result<Vec<TransactionResponse>, ApiError> {
+    let kind = match kind {
         Some(k) => Some(normalize_kind(k)?),
         None => None,
     };
-    let month_range = match &q.month {
+    let month_range = match month {
         Some(m) => Some(parse_month(m)?),
         None => None,
     };
@@ -384,32 +410,32 @@ pub async fn list_transactions(
         sql.push_str(&format!(" AND t.kind = ${arg}"));
         arg += 1;
     }
-    if q.category_id.is_some() {
+    if category_id.is_some() {
         sql.push_str(&format!(" AND t.category_id = ${arg}"));
         arg += 1;
     }
-    if q.import_id.is_some() {
+    if import_id.is_some() {
         sql.push_str(&format!(" AND t.import_id = ${arg}"));
         // (last placeholder; no further increment needed)
         let _ = arg;
     }
     sql.push_str(" ORDER BY t.op_date DESC, t.created_at DESC, t.id DESC");
 
-    let mut query = view.bind_scope_as(sqlx::query_as::<_, TxnRow>(&sql), iid, user.id.0);
+    let mut query = view.bind_scope_as(sqlx::query_as::<_, TxnRow>(&sql), iid, user_id);
     if let Some((start, end)) = month_range {
         query = query.bind(start).bind(end);
     }
     if let Some(k) = kind {
         query = query.bind(k);
     }
-    if let Some(cid) = q.category_id {
+    if let Some(cid) = category_id {
         query = query.bind(cid);
     }
-    if let Some(imp) = q.import_id {
+    if let Some(imp) = import_id {
         query = query.bind(imp);
     }
-    let rows: Vec<TxnRow> = query.fetch_all(&state.pool).await?;
-    Ok(Json(rows.into_iter().map(row_to_response).collect()))
+    let rows: Vec<TxnRow> = query.fetch_all(pool).await?;
+    Ok(rows.into_iter().map(row_to_response).collect())
 }
 
 // ---------------------------------------------------------------------------

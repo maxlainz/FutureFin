@@ -19,6 +19,7 @@ import type {
 import { Modal, ModalFormError } from "../components/Modal";
 import { RowEditIcon, RowTrashIcon } from "../components/icons";
 import { AccountCard } from "../components/AccountCard";
+import { ApiTokensPanel } from "./ApiTokensPanel";
 import { HistorySettingsPanel } from "./HistorySettingsPanel";
 import { ThemeToggle } from "../components/ThemeToggle";
 import type { ThemePref } from "../lib/theme";
@@ -325,6 +326,7 @@ export function SettingsView({
       {settingsSubTab === "access" && isOwner ? (
         <section className="panel">
           <h3 className="panel-title">Aprobar acceso</h3>
+          {/* (sección owner-only; los tokens de API van en su propio panel abajo) */}
           {pendingUsersBusy ? (
             <p className="muted bordered-top">Cargando…</p>
           ) : pendingUsers.length === 0 ? (
@@ -365,6 +367,8 @@ export function SettingsView({
           )}
         </section>
       ) : null}
+
+      {settingsSubTab === "access" && hasMembership ? <ApiTokensPanel /> : null}
 
       {settingsSubTab === "calendar" && hasMembership ? (
         <section className="panel">

@@ -514,6 +514,15 @@ pub async fn get_my_installation(
     jar: CookieJar,
 ) -> Result<Json<Option<InstallationAccess>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
+    Ok(Json(installation_access_core(&state.pool, user.id.0).await?))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_settings`.
+/// `None` = el usuario no es miembro de ninguna instalación.
+pub(crate) async fn installation_access_core(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Option<InstallationAccess>, ApiError> {
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
@@ -524,15 +533,15 @@ pub async fn get_my_installation(
            ORDER BY i.created_at ASC
            LIMIT 1"#,
     )
-    .bind(user.id.0)
-    .fetch_optional(&state.pool)
+    .bind(user_id)
+    .fetch_optional(pool)
     .await?;
 
     let Some(r) = row else {
-        return Ok(Json(None));
+        return Ok(None);
     };
 
-    Ok(Json(Some(installation_access_from_row(r)?)))
+    Ok(Some(installation_access_from_row(r)?))
 }
 
 #[utoipa::path(
