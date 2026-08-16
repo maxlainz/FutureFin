@@ -4,7 +4,7 @@ This file provides guidance to any AI model (or human) working with code in this
 
 ## Start here — route your task
 
-FutureFin is a self-hosted household finance + FIRE-planning app: Rust/Axum API (`apps/api`), pure-Decimal projection engine (`crates/engine`), React 19 SPA (`apps/web`), PostgreSQL. Money is NEVER `f64` in domain code. UI copy en español; código e identificadores en inglés.
+FutureFin is a self-hosted household finance + FIRE-planning app: Rust/Axum API (`apps/api`), pure-Decimal projection engine (`crates/engine`), React 19 SPA (`apps/web`), PostgreSQL — **embebido en la propia imagen Docker desde 3.0.0** (un solo contenedor en producción; en dev sigue siendo un Postgres aparte). Money is NEVER `f64` in domain code. UI copy en español; código e identificadores en inglés.
 
 The repo carries three documentation layers. Consult them in this order:
 
@@ -74,8 +74,8 @@ Extended reference — read these before working on the relevant area:
 ```bash
 cp .env.example .env
 # Uncomment the dev vars in .env (PORT, DATABASE_URL, RUST_LOG)
-# Postgres only — el override split-dev expone 5432 al host (imprescindible para cargo run):
-docker compose -f docker-compose.yml -f docker-compose.split-dev.yml up -d futurefin-database
+# Postgres de desarrollo — compose autónomo que expone 127.0.0.1:5432 (imprescindible para cargo run):
+docker compose -f docker-compose.dev.yml up -d
 
 # Terminal 1 — API at :8081 (auto-migrates DB on start)
 cd apps/api && cargo run
@@ -97,16 +97,16 @@ Set `PORT=8080` in `.env`, then `cd apps/api && cargo run`.
 #    --load es obligatorio con BuildKit para que quede en el store local de Docker
 docker build --load -f apps/api/Dockerfile -t futurefin-local:dev .
 
-# 2. Asegúrate de que .env tiene:
+# 2. Asegúrate de que .env tiene (ya no hace falta POSTGRES_PASSWORD):
 #      FUTUREFIN_IMAGE=futurefin-local
 #      FUTUREFIN_TAG=dev
-#      POSTGRES_PASSWORD=<lo que sea>
+#    OJO: sin DATABASE_URL descomentada — la imagen la interpretaría como DB externa.
 
 # 3. Arrancar el stack con el override local (evita que Compose haga pull de la imagen local)
 docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d
 
-# 4. Smoke test
-curl -sf http://127.0.0.1:8080/v1/health
+# 4. Smoke test — /v1/ready valida también el Postgres embebido
+curl -sf http://127.0.0.1:8080/v1/ready
 
 # 5. Rebuild tras cambios (la caché de Docker reutiliza las capas sin cambios)
 docker build --load -f apps/api/Dockerfile -t futurefin-local:dev . \
@@ -118,9 +118,13 @@ docker build --load -f apps/api/Dockerfile -t futurefin-local:dev . \
 
 ### Production stack (maintenance)
 ```bash
-docker compose logs -f futurefin          # logs
-docker compose down --remove-orphans      # stop
-curl -sf http://127.0.0.1:8080/v1/health  # smoke test
+docker compose logs -f futurefin          # logs (un solo flujo: entrypoint + PostgreSQL + API)
+docker compose down --remove-orphans      # stop (los datos quedan en los volúmenes pgdata/ffdata)
+curl -sf http://127.0.0.1:8080/v1/ready   # smoke test (valida también el PG embebido)
+# psql contra la base embebida (socket-only, sin TCP):
+docker compose exec futurefin psql -h /var/run/postgresql -U futurefin -d futurefin
+# Modo rescate (solo PostgreSQL, sin API — restore/inspección):
+#   FUTUREFIN_MODE=db-only  →  ver scripts/restore-postgres.sh
 ```
 
 ### Rust
@@ -190,6 +194,8 @@ npm workspace:   apps/web (futurefin-web)
 
 **Dual-port dev**: Vite `:8080`, API `:8081` (set in `.env.example`). `vite.config.ts` reads `FUTUREFIN_API_PORT` and `WEB_DEV_PORT` from repo-root `.env`. Docker image serves both on `:8080` via `WEB_STATIC_ROOT=/app/web`.
 
+**Imagen autocontenida (3.0.0)**: en producción PostgreSQL 16 corre **dentro** del contenedor `futurefin` (socket Unix, sin TCP), supervisado por `apps/api/docker-entrypoint.sh` (PID 1): adopción de volúmenes 2.x (chown + REINDEX una vez), backup automático pre-migración con retención, auto-`pg_upgrade` (15+16 empaquetados), automigración one-shot desde una `DATABASE_URL` externa (modo deprecado, se elimina en 4.0.0) y apagado ordenado (API con graceful shutdown primero, después **SIGINT** al postmaster — nunca SIGTERM). El entrypoint **jamás borra un cluster** (solo `mv`), la imagen **no declara `VOLUME`** y aborta si no hay volumen montado en `PGDATA`. Runbook completo: skill `futurefin-run-and-operate`; trampas de la migración: `futurefin-failure-archaeology`.
+
 **View scoping**: all ledger endpoints accept `?view=mine` to filter by `owner_user_id = current_user`. Default is `household` (full installation scope). This is a client-side filter, not an authorization boundary. Handlers must use `LedgerView::scope_where` + `bind_scope_as/scalar` so the two branches stay in sync.
 
 **Reads never mutate**: liabilities with `payment_end_date < today` are **filtered** out of `GET /v1/liabilities`, `/summary`, `/budget` (derived lines), `/assets`, `/projection` via `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)`. They are **not** physically deleted. The legacy `purge_expired_liabilities` function was removed in May 2026 — GET handlers were silently issuing `DELETE` statements, violating HTTP semantics and impeding caching.
@@ -203,7 +209,7 @@ npm workspace:   apps/web (futurefin-web)
 **CORS**: `CORS_ORIGINS` env var (comma-separated). Not required — defaults to localhost origins. Set explicitly only for cross-origin API access.
 
 ### Migrations
-SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup via `db::run_migrations`. Filenames: `YYYYMMDDHHMMSS_description.sql`. No auto-repair: a checksum mismatch fails loud and must be resolved by hand (e.g. `psql -c "DELETE FROM _sqlx_migrations WHERE version = X"` if the change is genuinely idempotent).
+SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup via `db::run_migrations`. Filenames: `YYYYMMDDHHMMSS_description.sql`. No auto-repair: a checksum mismatch fails loud and must be resolved by hand (e.g. `psql -c "DELETE FROM _sqlx_migrations WHERE version = X"` if the change is genuinely idempotent; en producción el `psql` es `docker compose exec futurefin psql -h /var/run/postgresql -U futurefin -d futurefin`). Antes de aplicar migraciones nuevas, el entrypoint escribe un backup automático `pre-migration-*.sql.gz` en el volumen `ffdata`.
 
 ## UI conventions
 

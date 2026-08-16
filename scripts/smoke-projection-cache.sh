@@ -11,7 +11,7 @@
 set -euo pipefail
 BASE="${BASE:-http://127.0.0.1:8080}"
 JAR=$(mktemp)
-trap "rm -f $JAR" EXIT
+trap 'rm -f "$JAR"' EXIT
 
 if [[ -n "${SMOKE_USER:-}" && -n "${SMOKE_PASS:-}" ]]; then
   USER="$SMOKE_USER"
@@ -41,7 +41,7 @@ fi
 # puede tardar 200-500 ms en máquina lenta; damos margen suficiente.
 WARMUP_MS=1500
 echo "→ Esperando warm-up ${WARMUP_MS}ms…"
-sleep $(awk "BEGIN{print $WARMUP_MS/1000}")
+sleep "$(awk "BEGIN{print $WARMUP_MS/1000}")"
 
 echo "→ GET density=hybrid (esperado ~5 KB, render rápido)"
 for i in 1 2; do
