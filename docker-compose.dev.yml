@@ -1,0 +1,35 @@
+# Postgres para desarrollo (split-dev: `cargo run` + `npm run dev:web`).
+# Uso:  docker compose -f docker-compose.dev.yml up -d
+# NO usar en producción — expone el puerto de la base de datos en el host.
+#
+# Sustituye al antiguo docker-compose.split-dev.yml: desde 3.0.0 el compose de
+# producción ya no tiene servicio de base de datos que "override-ar", así que el
+# Postgres de desarrollo es un compose autónomo con su propio project name.
+name: futurefin-dev
+
+services:
+  db:
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    container_name: futurefin-dev-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-futurefin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-futurefin}
+      POSTGRES_DB: ${POSTGRES_DB:-futurefin}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - devdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-futurefin} -d ${POSTGRES_DB:-futurefin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  devdata:
+  # ¿Vienes de 2.x y quieres conservar los datos de tu split-dev anterior?
+  # Sustituye `devdata:` (la línea de arriba) por:
+  #   devdata:
+  #     external: true
+  #     name: futurefin_pgdata

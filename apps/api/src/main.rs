@@ -31,7 +31,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (see .env.example)");
-    let pool = db::connect(&database_url).await?;
+    let connect_timeout = std::env::var("FUTUREFIN_DB_CONNECT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| (1..=600).contains(&s))
+        .unwrap_or(30);
+    let pool =
+        db::connect_with_retry(&database_url, std::time::Duration::from_secs(connect_timeout))
+            .await?;
     tracing::info!("database connected");
     db::run_migrations(&pool).await?;
     tracing::info!("migrations applied");
@@ -43,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|&d| (1..=400).contains(&d))
         .unwrap_or(30);
 
+    let shutdown_pool = pool.clone();
     let state = Arc::new(AppState::new(
         env!("CARGO_PKG_VERSION"),
         pool,
@@ -82,8 +90,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port()));
     tracing::info!("listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Con Postgres en el mismo contenedor, drenar y cerrar el pool ANTES de que el
+    // supervisor pare el postmaster es parte del contrato de apagado ordenado.
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    tracing::info!("http server stopped");
+    shutdown_pool.close().await;
+    tracing::info!("database pool closed");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    let mut int = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+    tokio::select! {
+        _ = term.recv() => {},
+        _ = int.recv() => {},
+    }
+    tracing::info!("shutdown signal received — draining connections");
 }
 
 fn web_static_root() -> Option<PathBuf> {

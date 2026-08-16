@@ -1,0 +1,47 @@
+# Copia CONGELADA del docker-compose.yml de la serie 2.x (última: 2.3.0), usada por CI
+# para el test de preservación de datos V2→V3. No depende de `git show v2.3.0:...`
+# porque actions/checkout no trae tags por defecto.
+# NO actualizar este fichero al evolucionar el compose de producción: su valor es
+# precisamente ser la topología antigua exacta (dos servicios, imagen 2.3.0 pineada).
+name: futurefin
+
+services:
+  futurefin-database:
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    container_name: futurefin-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-futurefin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-futurefin}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-futurefin} -d ${POSTGRES_DB:-futurefin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  futurefin:
+    image: maxlainz/futurefin:2.3.0
+    container_name: futurefin
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    environment:
+      PORT: "8080"
+      WEB_STATIC_ROOT: /app/web
+      DATABASE_URL: postgres://${POSTGRES_USER:-futurefin}:${POSTGRES_PASSWORD}@futurefin-database:5432/${POSTGRES_DB:-futurefin}
+      RUST_LOG: "futurefin_api=info,tower_http=info,sqlx=warn"
+    depends_on:
+      futurefin-database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/health || bash -c '</dev/tcp/localhost/8080'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  pgdata:

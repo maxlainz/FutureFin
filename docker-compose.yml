@@ -1,42 +1,42 @@
 name: futurefin
 
-services:
-  futurefin-database:
-    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
-    container_name: futurefin-database
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-futurefin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DB:-futurefin}
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-futurefin} -d ${POSTGRES_DB:-futurefin}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+# Desde 3.0.0 el stack es UN solo servicio: PostgreSQL corre dentro de la imagen.
+# El volumen `pgdata` conserva el MISMO nombre y ruta que en 2.x — actualizar desde 2.x
+# es sustituir este fichero y ejecutar `docker compose up -d --remove-orphans`
+# (el --remove-orphans retira el antiguo contenedor `futurefin-database`).
 
+services:
   futurefin:
     image: ${FUTUREFIN_IMAGE:-maxlainz/futurefin}:${FUTUREFIN_TAG:-latest}
     container_name: futurefin
     restart: unless-stopped
+    # PostgreSQL vive dentro de este contenedor: dale margen para el checkpoint de cierre.
+    # (Watchtower ignora esto y usa su propio timeout: configura WATCHTOWER_TIMEOUT=60s.)
+    stop_grace_period: 60s
     ports:
       - "${APP_PORT:-8080}:8080"
     environment:
-      PORT: "8080"
-      WEB_STATIC_ROOT: /app/web
-      DATABASE_URL: postgres://${POSTGRES_USER:-futurefin}:${POSTGRES_PASSWORD}@futurefin-database:5432/${POSTGRES_DB:-futurefin}
       RUST_LOG: "futurefin_api=info,tower_http=info,sqlx=warn"
-    depends_on:
-      futurefin-database:
-        condition: service_healthy
+      # Ninguna variable es obligatoria. POSTGRES_USER / POSTGRES_DB solo si los
+      # personalizaste en 2.x; POSTGRES_PASSWORD ya no hace falta (socket Unix local).
+      POSTGRES_USER: ${POSTGRES_USER:-futurefin}
+      POSTGRES_DB: ${POSTGRES_DB:-futurefin}
+    volumes:
+      # MISMO nombre y ruta que en 2.x: la actualización reutiliza tus datos tal cual.
+      - pgdata:/var/lib/postgresql/data
+      # Backups automáticos pre-migración y staging de pg_upgrade.
+      - ffdata:/var/lib/futurefin
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/health || bash -c '</dev/tcp/localhost/8080'"]
+      # CMD-SHELL obligatorio (incidente v1.0.2: la forma exec no resuelve curl por PATH).
+      # NO añadir un fallback `</dev/tcp/...`: enmascararía un 503 de /v1/ready y el
+      # contenedor saldría "healthy" con la base caída.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/v1/ready >/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      # El primer arranque tras actualizar desde 2.x hace chown + REINDEX + backup.
+      start_period: 120s
 
 volumes:
   pgdata:
+  ffdata:

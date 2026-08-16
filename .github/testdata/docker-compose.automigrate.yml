@@ -1,0 +1,48 @@
+# Escenario de CI: automigración one-shot desde una base EXTERNA.
+#   extdb    — Postgres externo (como una instalación con DB gestionada aparte)
+#   seed     — app 2.3.0 apuntando a extdb, solo para sembrar datos reales vía API (:8081)
+#   futurefin — imagen 3.x con DATABASE_URL a extdb Y volúmenes vacíos montados
+#               → debe dump+restaurar a la base embebida una sola vez y desengancharse.
+name: ffmigrate
+
+services:
+  extdb:
+    image: postgres:16.4-alpine@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c
+    environment:
+      POSTGRES_USER: futurefin
+      POSTGRES_PASSWORD: ci-test
+      POSTGRES_DB: futurefin
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U futurefin -d futurefin"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  seed:
+    image: maxlainz/futurefin:2.3.0
+    ports:
+      - "8081:8080"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://futurefin:ci-test@extdb:5432/futurefin
+    depends_on:
+      extdb:
+        condition: service_healthy
+
+  futurefin:
+    image: futurefin-ci:latest
+    pull_policy: never
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://futurefin:ci-test@extdb:5432/futurefin
+    volumes:
+      - emptydata:/var/lib/postgresql/data
+      - ffdata:/var/lib/futurefin
+    depends_on:
+      extdb:
+        condition: service_healthy
+
+volumes:
+  emptydata:
+  ffdata:
