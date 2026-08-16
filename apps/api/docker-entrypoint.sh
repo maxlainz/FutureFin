@@ -67,8 +67,12 @@ pgdata_empty() {
 }
 
 # Ficheros de estado KEY=VALUE en $STATE_DIR/state/<nombre>.env
-state_get() { # $1=file $2=key
-  sed -n "s/^$2=//p" "$STATE_DIR/state/$1.env" 2>/dev/null | head -n1
+state_get() { # $1=file $2=key — vacío (exit 0) si el fichero aún no existe.
+  # OJO: con `set -Eeuo pipefail`, un sed que falla dentro de una sustitución de comando
+  # en una asignación MATA el script sin mensaje (así murió el segundo arranque en CI).
+  local f="$STATE_DIR/state/$1.env"
+  [ -f "$f" ] || return 0
+  sed -n "s/^$2=//p" "$f" | head -n1
 }
 state_set() { # $1=file $2=key $3=value
   local f="$STATE_DIR/state/$1.env" tmp
@@ -106,6 +110,14 @@ stop_pid() { # $1=pid $2=señal $3=timeout_s [$4=señal_escalada]
     if [ "$waited" -ge $((timeout * 5)) ]; then
       warn "process $pid did not stop after ${timeout}s ($sig) — escalating to $esc"
       kill -s "$esc" "$pid" 2>/dev/null || true
+      # La escalada también está acotada: si en 10 s sigue vivo, SIGKILL. Un `wait`
+      # sin límite aquí puede bloquear el apagado para siempre.
+      local w2=0
+      while kill -0 "$pid" 2>/dev/null && [ "$w2" -lt 50 ]; do sleep 0.2; w2=$((w2 + 1)); done
+      if kill -0 "$pid" 2>/dev/null; then
+        warn "process $pid survived $esc — sending KILL"
+        kill -s KILL "$pid" 2>/dev/null || true
+      fi
       wait "$pid" 2>/dev/null || true
       return 0
     fi
@@ -188,11 +200,24 @@ start_postgres() {
   local extra=()
   [ -n "${FUTUREFIN_PG_LOG_LEVEL:-}" ] && extra+=(-c "log_min_messages=$FUTUREFIN_PG_LOG_LEVEL")
   log "starting embedded PostgreSQL $PG_MAJOR (socket-only at $SOCK_DIR)"
-  run_as_pg "$PG_BINROOT/$PG_MAJOR/bin/postgres" -D "$PGDATA" \
-    -c listen_addresses="${FUTUREFIN_PG_LISTEN:-}" \
-    -c unix_socket_directories="$SOCK_DIR" \
-    -c logging_collector=off \
-    "${extra[@]}" &
+  # OJO: el postmaster se lanza INLINE, nunca vía una función en background
+  # (`run_as_pg … &` crea un subshell bash intermedio: $! sería el subshell, que
+  # además IGNORA SIGINT/SIGQUIT en jobs de background — el apagado ordenado nunca
+  # llegaría al postmaster; así se produjo el stop colgado de 60 s en CI).
+  # gosu hace exec, de modo que $! ES el postmaster.
+  if is_root; then
+    gosu postgres "$PG_BINROOT/$PG_MAJOR/bin/postgres" -D "$PGDATA" \
+      -c listen_addresses="${FUTUREFIN_PG_LISTEN:-}" \
+      -c unix_socket_directories="$SOCK_DIR" \
+      -c logging_collector=off \
+      "${extra[@]}" &
+  else
+    "$PG_BINROOT/$PG_MAJOR/bin/postgres" -D "$PGDATA" \
+      -c listen_addresses="${FUTUREFIN_PG_LISTEN:-}" \
+      -c unix_socket_directories="$SOCK_DIR" \
+      -c logging_collector=off \
+      "${extra[@]}" &
+  fi
   PG_PID=$!
 }
 
@@ -265,10 +290,12 @@ premigration_backup() {
 }
 
 prune_backups() {
+  # Los `ls` van protegidos con `|| true`: con pipefail, un glob sin coincidencias
+  # mataría la función entera en silencio (misma clase de bug que state_get).
   local f avail n
   cd "$BACKUP_DIR" || return 0
   # Los $BACKUP_KEEP más recientes son intocables; del resto, fuera los de > KEEP_DAYS.
-  ls -1t pre-*.sql.gz 2>/dev/null | tail -n +"$((BACKUP_KEEP + 1))" | while read -r f; do
+  (ls -1t pre-*.sql.gz 2>/dev/null || true) | tail -n +"$((BACKUP_KEEP + 1))" | while read -r f; do
     if [ -n "$(find "$f" -maxdepth 0 -mtime +"$BACKUP_KEEP_DAYS" 2>/dev/null)" ]; then
       log "pruning old automatic backup: $f"
       rm -f "$f"
@@ -277,9 +304,10 @@ prune_backups() {
   # Presión de disco: por debajo de 256 MB libres seguimos podando (nunca los 3 últimos).
   avail="$(df -Pm "$BACKUP_DIR" | awk 'NR==2 {print $4}')"
   if [ "${avail:-999999}" -lt 256 ]; then
-    n=$(ls -1 pre-*.sql.gz 2>/dev/null | wc -l)
+    n=$( (ls -1 pre-*.sql.gz 2>/dev/null || true) | wc -l)
     while [ "$n" -gt 3 ] && [ "$avail" -lt 256 ]; do
-      f="$(ls -1tr pre-*.sql.gz | head -n1)"
+      f="$( (ls -1tr pre-*.sql.gz 2>/dev/null || true) | head -n1)"
+      [ -n "$f" ] || break
       warn "low disk space (${avail}MB) — pruning $f"
       rm -f "$f"
       n=$((n - 1))
