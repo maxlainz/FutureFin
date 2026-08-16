@@ -15,9 +15,12 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. As of 2026-07-06: version **v1.5.0**
-(`apps/api/Cargo.toml`), **32** migration files in `apps/api/migrations/`, **11** integration-test
-files in `apps/api/tests/`. All paths below are from the repo root.
+How changes are classified, gated and reviewed in this repo. Refreshed **2026-08-16 for v3.0.0**
+(the self-contained Docker image): **34** migration files in `apps/api/migrations/`, **20**
+integration-test files in `apps/api/tests/`, `.ffbackup` `CURRENT_SCHEMA_VERSION` **6**. All paths
+below are from the repo root. (Previously stamped 2026-07-06 at v1.5.0: 32 migrations, 11 test
+files.) **Note for whoever cuts 3.0.0**: `apps/api/Cargo.toml` still read `2.3.0` on 2026-08-16 —
+the version bump and the CHANGELOG section are Section 4 gates, not done yet.
 
 Vocabulary (defined once): **installation** = the singleton row all financial data belongs to
 (one per deployment). **scope / view** = `?view=mine` filters ledger queries by
@@ -51,11 +54,20 @@ a real Postgres (Section 6); they are **not** run in CI, so running them locally
 | **DB migration** | New file in `apps/api/migrations/` | Section 3 in full (never edit shipped; data-loss sign-off; grep for query drift); integration tests — every test applies ALL migrations to a fresh schema, so a broken migration fails everything; update `.claude/data-model.md`; if exported tables change shape → check `apps/api/src/handlers/backup_user/` (Section 5) and the export SQL. |
 | **UI-visual** | Anything in `apps/web/src/` that renders | `npm run typecheck:web && npm run lint:web && npm run build:web && npm test --workspace futurefin-web`; verify **light AND dark theme** before merging (owner-mandated); tokens only, no hex (Section 2.4); icons only in `components/icons.tsx`; small charts via `MiniProjection`; update `.claude/design-system.md` / `.claude/frontend-structure.md` if conventions moved; CHANGELOG. |
 | **Docs-only** | `CLAUDE.md`, `.claude/*.md`, `README.md`, CHANGELOG wording | No test gates. Gate = accuracy: verify every command/path/claim against the code before writing it (docs have drifted before — eight errata were found and fixed on 2026-07-02; prefer commands over frozen counts, e.g. `ls apps/api/migrations \| wc -l`). Record unfixable drift in futurefin-docs-and-writing §7. |
-| **Infra-release** | `Dockerfile`, `docker-compose*.yml`, `.github/workflows/*`, version bump, tag | CI green on `dev`; full local Docker-stack test (Section 4.2) before tagging; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. |
+| **Infra-release** | `Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose*.yml`, `.github/workflows/*`, version bump, tag | CI green on `dev` — **including the `docker-stack` job, which since 3.0.0 is the only automated evidence of "no data loss"; never merge on a red or skipped one**; full local Docker-stack test (Section 4.2) before tagging, **plus the V2→V3 upgrade drill with real seeded data** (4.2, step B) — the published image now carries the database, so a bad entrypoint destroys installations that never ran your code path in CI; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. Any edit to `docker-entrypoint.sh` also needs `shellcheck -S warning` clean (CI gates it). |
 
-CI (`.github/workflows/ci.yml`, runs on push/PR to `main` and `dev`) covers only:
-`cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked`,
-`npm run typecheck:web` + `npm run build:web`, and a Docker-stack build + `/v1/health` smoke.
+CI (`.github/workflows/ci.yml`, runs on push/PR to `main` and `dev`) covers three jobs:
+- `rust` — `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked`.
+- `web` — `npm run typecheck:web` + `npm run build:web`.
+- `docker-stack` — `shellcheck` on the entrypoint and `scripts/*.sh`, an image build, then the
+  container's real data paths: image sanity + **no-volume guard** (a volume-less `docker run` must
+  abort), fresh install → `/v1/ready` + seeded data, watchtower-style `--force-recreate` keeping
+  data, **clean shutdown** (drain → pool closed → PG checkpoint → exit 0), **V2→V3 over a real 2.3.0
+  stack** (uid adoption + collation REINDEX + duplicate-register detector + automatic
+  pre-migration backup), the 3.x image over an untouched 2.x compose (deprecated external-DB
+  compat), one-shot **automigration** from an external DB, and **pg_upgrade 15→16** verified by row
+  census.
+
 CI does **not** run: Postgres integration tests, `npm run lint:web`, or frontend Vitest. Those
 are local gates you must run yourself (Section 6).
 
@@ -124,7 +136,44 @@ strict custom `Deserialize` (`apps/api/src/handlers/installation.rs`); pinned by
 (removed v1.3.0): the old `IDEMPOTENT_MIGRATION_REPAIR_VERSIONS` loop (12 rounds of
 checksum-repair) silently masked real drift between the embedded migrations and the DB. Never
 reintroduce auto-repair. Manual fix, only when the file change is genuinely idempotent:
-`psql "$DATABASE_URL" -c "DELETE FROM _sqlx_migrations WHERE version = <X>"` then restart.
+
+```bash
+# Production (3.x, single container, DB on a Unix socket — there is no TCP port and no password):
+docker compose exec futurefin \
+  psql -h /var/run/postgresql -U futurefin -d futurefin \
+  -c "DELETE FROM _sqlx_migrations WHERE version = <X>"
+docker compose restart futurefin
+
+# Split-dev (host-side API against docker-compose.dev.yml):
+psql "$DATABASE_URL" -c "DELETE FROM _sqlx_migrations WHERE version = <X>"
+```
+
+If the container will not stay up long enough to `exec` into it, bring PostgreSQL up **without**
+the API and do it there: `docker compose run --rm -e FUTUREFIN_MODE=db-only futurefin` (the same
+rescue mode `scripts/restore-postgres.sh` uses). Never script either of these.
+
+### 2.8 The container's data-safety rules (3.0.0) — the entrypoint is on the data path
+Since 3.0.0 the published image carries PostgreSQL, so `apps/api/docker-entrypoint.sh`,
+`apps/api/Dockerfile` and `docker-compose.yml` are **data-integrity code**, not packaging. Three
+rules are non-negotiable; each exists because breaking it loses data silently
+(full story: futurefin-failure-archaeology §2.11; normative form: futurefin-architecture-contract
+D13/W8):
+
+- **The entrypoint NEVER deletes a cluster — only moves it aside.** Old or partial clusters go to
+  `$PGDATA/pgdata_old_<major>` or `$STATE_DIR/failed-automigration-<ts>` via `mv`. The only `rm`s
+  in the script are its own backups under retention and the pg_upgrade staging once copied. A
+  review that finds a new `rm -rf` touching `$PGDATA` blocks the change.
+- **The image declares no `VOLUME`, and the runtime is not based on `postgres:*`.** The inherited
+  `VOLUME` of the official images creates anonymous volumes on `docker run` without `-v`, and
+  watchtower drops them on recreate — total, silent loss. The `mountpoint` guard that refuses to
+  start without a real volume only works while nothing pre-mounts one.
+- **The postmaster is stopped with SIGINT (fast), after the API has drained.** SIGTERM to a
+  postmaster is *smart* shutdown and waits for clients forever; escalation is SIGQUIT, never
+  SIGKILL. Do not remove `stop_grace_period: 60s` from compose, and keep the healthcheck as
+  `CMD-SHELL` on `/v1/ready` **without** a `</dev/tcp` fallback.
+
+Corollary for reviewers: a diff that touches any of these three files is Infra-release class even
+if it "only changes a comment" — re-run the `docker-stack` job.
 
 ## 3. Migration discipline
 
@@ -177,19 +226,67 @@ GHCR (always) and Docker Hub `maxlainz/futurefin` (if secrets set), tags `:X.Y.Z
 
 ### 4.2 Before tagging: full local Docker-stack test (owner-mandated)
 
-Run the CLAUDE.md "Test local con Docker Desktop" flow — it validates API + frontend + DB
-exactly as production, without waiting for CI to publish:
+Since 3.0.0 the image *is* the stack — one container, PostgreSQL inside it. Three drills, in
+order. **A is always required; B is required for any Infra-release; C at least once per release
+train that changes migrations or the entrypoint.**
+
+**A — fresh stack from the locally built image.**
 
 ```bash
 docker build --load -f apps/api/Dockerfile -t futurefin-local:dev .
-# .env must have: FUTUREFIN_IMAGE=futurefin-local, FUTUREFIN_TAG=dev, POSTGRES_PASSWORD=<any>
+# .env only needs: FUTUREFIN_IMAGE=futurefin-local, FUTUREFIN_TAG=dev
+# (POSTGRES_PASSWORD is NO LONGER required — the embedded DB is socket-only.)
+# TRAP: leave DATABASE_URL commented out. A split-dev .env with it uncommented flips the
+# image into deprecated external-DB mode and you will test the wrong code path.
 docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d
-curl -sf http://127.0.0.1:8080/v1/health
+curl -sf http://127.0.0.1:8080/v1/ready          # readiness, not /v1/health: it round-trips the DB
+docker compose logs futurefin | grep -E "migrations applied|initializing fresh PostgreSQL"
 ```
 
-Full flow, traps and the rebuild loop: futurefin-build-and-env §4. Then click through the app
-once, including migrations applying on first boot against a DB restored from real data if the
-release contains migrations.
+Then click through the app once (light **and** dark, 4.3), and finish with a clean stop to prove
+the shutdown contract holds with your changes:
+
+```bash
+docker compose stop -t 60 futurefin
+docker compose logs futurefin | grep -E "database pool closed|database system is shut down|clean shutdown complete"
+docker inspect -f '{{.State.ExitCode}}' futurefin      # must be 0
+```
+
+**B — the V2→V3 upgrade drill with real data (do this before tagging any Infra-release).**
+Mirror what CI does, on your machine, so you see the adoption path a real installation will take:
+bring up the frozen 2.x topology from `.github/testdata/docker-compose.v2.yml`, seed it through
+the API (register a user, create a category with accented characters), then swap in the new
+compose and let the entrypoint adopt the volume.
+
+```bash
+# 1. Real 2.x stack (two containers, image pinned to 2.3.0)
+POSTGRES_PASSWORD=drill docker compose -p futurefin -f .github/testdata/docker-compose.v2.yml up -d
+# … register + log in + create data via curl or the UI at :8080 …
+
+# 2. Migrate to the 3.x compose reusing the same `pgdata` volume
+POSTGRES_PASSWORD=drill docker compose -p futurefin -f .github/testdata/docker-compose.v2.yml down --remove-orphans
+FUTUREFIN_IMAGE=futurefin-local FUTUREFIN_TAG=dev \
+  docker compose -p futurefin -f docker-compose.yml -f docker-compose.local.yml up -d --remove-orphans
+#   (`--remove-orphans` is what retires the old `futurefin-database` container — the same step a
+#    real self-hoster runs; the `local.yml` override keeps compose from pulling your local tag.)
+curl -sf http://127.0.0.1:8080/v1/ready
+
+# 3. What must be true afterwards
+docker compose -p futurefin logs futurefin | grep -E "adopting ownership of PGDATA|reindexing database after adoption"
+#    …log in with the SAME credentials and see the SAME data…
+#    …re-registering an existing username must return 409/422 (unique index survived the
+#      musl→glibc collation change — failure-archaeology §2.11 trap 3)…
+docker compose -p futurefin exec -T futurefin sh -c 'ls /var/lib/futurefin/backups/pre-migration-*.sql.gz'
+```
+
+**C — restore drill.** Take one of those automatic dumps (or `./scripts/backup-postgres.sh`) and
+put it back with `./scripts/restore-postgres.sh backups/<file>.sql.gz`. The script stops the
+service, starts a rescue container in `FUTUREFIN_MODE=db-only`, prints a row census **before and
+after**, restarts the stack and waits for `/v1/ready`. Compare the two censuses — that is the
+evidence, not the absence of an error message.
+
+Full flow, traps and the rebuild loop: futurefin-build-and-env §4. Operational detail on backups,
+`db-only` mode and rollback: futurefin-run-and-operate.
 
 ### 4.3 Visual changes: verify light AND dark
 
@@ -258,19 +355,39 @@ Then, per change class:
 - [ ] `CHANGELOG.md` entry under `[Unreleased]` (or the release version), root-cause style —
       say WHY, not just what; mark breaking changes explicitly.
 - [ ] No non-negotiable (Section 2) violated; no gate routed around.
-- [ ] If releasing: Section 4 in order — bump, mirror-merge, local Docker-stack test, tag from
-      `main`, `git checkout dev` afterwards. After push: pull again.
+- [ ] If you touched `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh` or any
+      `docker-compose*.yml`: `shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh`
+      clean, `docker-stack` green in CI, and Section 2.8 re-read (no cluster deletion, no `VOLUME`,
+      SIGINT to the postmaster).
+- [ ] If releasing: Section 4 in order — bump, mirror-merge, local Docker-stack test **and the
+      V2→V3 upgrade drill (4.2 B)**, tag from `main`, `git checkout dev` afterwards. After push:
+      pull again.
 
 ## Provenance and maintenance
 
 Facts above verified against the repo on 2026-07-02 (v1.4.3, branch
 `claude/skill-library-handoff-rtfotl`); version/migration/test-file counts and the backup
-schema version refreshed for v1.5.0 on 2026-07-06 (history-snapshots feature). Re-verify before
-trusting:
+schema version refreshed for v1.5.0 on 2026-07-06 (history-snapshots feature); §1 Infra-release
+gates, §2.7 recovery commands, new §2.8, §4.2 drills and §6 checklist refreshed **2026-08-16 for
+v3.0.0** (self-contained image) against `apps/api/Dockerfile`,
+`apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
+`.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml`
-- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations`
-- CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack)
+- Current version: `grep '^version' apps/api/Cargo.toml` (3.0.0 on 2026-08-16)
+- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (34 on 2026-08-16)
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (20 on 2026-08-16)
+- CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
+  `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
+- Compose topology (one service since 3.0.0):
+  `awk '/^services:/{f=1;next} /^volumes:/{f=0} f && /^  [a-z]/' docker-compose.yml`;
+  overlays: `ls docker-compose*.yml`; frozen 2.x topologies for the drill: `ls .github/testdata/`
+- §2.8 rules still hold: `grep -n '^VOLUME' apps/api/Dockerfile` (empty),
+  `grep -n 'rm -rf "\$PGDATA"' apps/api/docker-entrypoint.sh` (empty),
+  `grep -n 'stop_pid "\$PG_PID" INT' apps/api/docker-entrypoint.sh`,
+  `grep -n 'stop_grace_period\|CMD-SHELL' docker-compose.yml`
+- Rescue mode used by 4.2 C: `grep -n 'FUTUREFIN_MODE=db-only' scripts/restore-postgres.sh` and
+  `grep -n 'db-only' apps/api/docker-entrypoint.sh`
+- Shellcheck gate reproduces locally: `shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh .claude/skills/futurefin-diagnostics-and-tooling/scripts/*.sh`
 - Publish trigger + registries: `cat .github/workflows/publish-image.yml`
 - Backup schema version + chain: `grep -n 'CURRENT_SCHEMA_VERSION\|migrate_to_current' apps/api/src/handlers/backup_user/schema.rs`
 - Scope helpers exist: `grep -n 'pub fn scope_where\|bind_scope' apps/api/src/handlers/person_view.rs`

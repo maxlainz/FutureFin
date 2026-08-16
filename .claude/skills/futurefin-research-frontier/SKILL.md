@@ -19,10 +19,15 @@ description: >
 # FutureFin Research Frontier
 
 Candidate directions where FutureFin — a self-hosted household finance app — can be genuinely
-better than consumer tools. As of 2026-07-02: **v1.4.3** (`apps/api/Cargo.toml`), 31 migrations,
-engine at `crates/engine/src/projection.rs` (~1114 lines incl. unit tests), 8 integration-test
-files in `apps/api/tests/`. Every item below is a **CANDIDATE — none is implemented**. Do not
-describe any of them as existing features anywhere.
+better than consumer tools. Refreshed **2026-08-16 for v3.0.0**: 34 migrations, engine at
+`crates/engine/src/projection.rs` (~1122 lines incl. unit tests), 20 integration-test files in
+`apps/api/tests/` (originally written 2026-07-02 at v1.4.3, 31 migrations, 8 test files).
+
+**Implementation status — read before quoting this file.** Every item here was a pure candidate
+until 3.0.0. That is no longer true of **item 2**: its *pre-migration backup* half **shipped in
+3.0.0** (automatic, inside the container — see the item for the exact mechanism and for the two
+pieces that remain open). Items 1 and 3–9 remain **CANDIDATES — not implemented**; do not describe
+any of them as existing features anywhere.
 
 **Calibration (owner-confirmed):** this is NOT a research program. "Beyond SOTA" means practical
 excellence on exactly three axes:
@@ -69,8 +74,11 @@ if a proposal leans on none, it probably belongs in a different product.
 ## Claims discipline (external positioning)
 
 Nothing may be claimed in `README.md`, `CHANGELOG.md`, release notes, or any public text unless
-it traces to **in-repo, runnable evidence**. As of 2026-07-02 `README.md` makes no claims about
-Monte Carlo, stochastic modeling or bit-exactness — keep it that way until the evidence exists.
+it traces to **in-repo, runnable evidence**. Re-checked 2026-08-16: `README.md` still makes no
+claims about Monte Carlo, stochastic modeling or bit-exactness — keep it that way until the
+evidence exists. Its 3.0.0 backup wording ("el contenedor escribe **automáticamente** un backup
+`pre-migration-*.sql.gz` antes de aplicar migraciones nuevas") is inside the rule, not an
+exception: it names a mechanism CI asserts, and it deliberately stops short of "never lose data".
 
 | Claim you might be tempted to write | Minimum evidence required first |
 |---|---|
@@ -78,7 +86,7 @@ Monte Carlo, stochastic modeling or bit-exactness — keep it that way until the
 | "Deterministic / bit-exact projections" | A replay test asserting two runs of `project_net_worth_series` on the same input are `assert_eq!`-identical, running in CI (`cargo test -p futurefin-engine --locked` — CI runs engine tests; the Postgres integration tests do NOT run in CI, they need local `TEST_DATABASE_URL`) |
 | "Property-tested engine invariants" | proptest suite merged and green (item 1), named properties listed in the CHANGELOG entry |
 | "Tax-aware withdrawals" | Engine drawdown tax model + regenerated parity fixture with both suites green (item 7) |
-| "Safe upgrades / never lose data" | Pre-migration dump hook + a restore actually exercised in a test or documented drill (item 2) |
+| "Safe upgrades / never lose data" | Pre-migration dump hook + a restore actually exercised in a test or documented drill (item 2). **Partly earned in 3.0.0**: the automatic pre-migration dump exists and the CI `docker-stack` job exercises V2→V3 with real data, automigration and pg_upgrade 15→16. Still unearned, and therefore still unclaimable: an explicit **downgrade guard** with a friendly message, and a restore drill run against a *production-shaped* dump. Word claims to what the evidence covers — "backs itself up before every migration" is provable today; "never lose data" is not. |
 
 Rule of thumb: the CHANGELOG entry that introduces a capability must name the test(s) that prove
 it. If you cannot name the test, the claim is not ready.
@@ -92,7 +100,7 @@ change the economic model and therefore execute through
 | # | Item | Axis | Value | Effort | Risk | Verdict |
 |---|---|---|---|---|---|---|
 | 1 | Property-based engine invariants (proptest) | 2 | High | Low | Low | Do first |
-| 2 | Migration-safety tooling (pre-migration dump, downgrade guard) | 3 | High | Low–Med | Low | Do |
+| 2 | Migration-safety tooling (pre-migration dump ✅ shipped 3.0.0; downgrade guard + `migration_guard.rs` still open) | 3 | High | Low | Low | **Partly done** — finish the remainder |
 | 3 | Projection-as-auditable-artifact (recomputable snapshot) | 2, 3 | Med–High | Med | Low | Do |
 | 4 | Sequence-of-returns risk surfacing (deterministic stress) | 1 | High | Med | Med | Via campaign |
 | 5 | Liability interest accrual (discovered gap) | 1 | Med–High | Med | Med | Via campaign |
@@ -155,36 +163,73 @@ either mutation, the suite is decorative — fix the generators before merging.
 
 ---
 
-### 2. Migration-safety tooling for self-hosted installs
+### 2. Migration-safety tooling for self-hosted installs — PARTLY SHIPPED IN 3.0.0
 
 **Why consumer tools fall short:** SaaS handles upgrades invisibly; most self-hosted apps just
-say "back up first". FutureFin auto-migrates on startup (`apps/api/src/db.rs:20`,
-`sqlx::migrate!`) — an upgrade IS a migration, and today nothing snapshots the DB before it runs.
+say "back up first". FutureFin auto-migrates on startup (`apps/api/src/db.rs`, `sqlx::migrate!`) —
+an upgrade IS a migration.
 
-**FutureFin's asset:** `scripts/backup-postgres.sh` already does a correct compose-exec
-`pg_dump | gzip -9` with retention (`ENV_FILE=.env.prod`, `BACKUP_DIR=./backups`,
-`KEEP_BACKUPS=30` defaults — read it before extending). sqlx already fails loud on checksum
-mismatch, and an older binary refuses to run when `_sqlx_migrations` contains versions it does
-not know (a de-facto partial downgrade guard — verify the exact error text before documenting it
-as such; unverified beyond sqlx's documented behavior).
+#### ✅ Shipped in 3.0.0 — the automatic pre-migration backup
 
-**First three steps in this repo:**
-1. Add `scripts/upgrade-with-backup.sh`: run `scripts/backup-postgres.sh`, then
-   `docker compose --env-file .env.prod pull && up -d`, then poll
-   `curl -sf http://127.0.0.1:8080/v1/health`; on failed health after N tries, print the exact
-   restore command for the dump just taken (do NOT auto-restore).
-2. In `apps/api/src/main.rs`, log before/after `db::run_migrations`: count of pending
-   migrations about to apply and app version (`env!("CARGO_PKG_VERSION")` is already logged at
-   startup, main.rs:30) — so post-incident forensics can tell "which upgrade ran which
-   migrations".
-3. Add an integration test `apps/api/tests/migration_guard.rs` asserting the documented failure
-   mode: applying a fake `_sqlx_migrations` row with an unknown version makes
-   `run_migrations` return an error (schema-isolated harness from `apps/api/tests/common/mod.rs`).
+The original framing of this item ("today nothing snapshots the DB before it runs") is **no longer
+true**. With the self-contained image, the container backs *itself* up before letting the API touch
+the schema. Mechanism, in `apps/api/docker-entrypoint.sh::premigration_backup`, running after
+PostgreSQL is up and before the API is launched:
 
-**You have a result when:** a full drill on the local Docker stack (CLAUDE.md "Test local con
-Docker Desktop") — upgrade with the script, deliberately break the image tag, restore from the
-auto-taken dump — ends with `/v1/health` green and data intact, and the drill's commands are
-recorded in `.claude/skills/futurefin-run-and-operate/SKILL.md` or README "Backups".
+- **Detection without starting the API.** The image ships a manifest `/app/migration-versions.txt`
+  (built in the Dockerfile from `ls apps/api/migrations/*.sql`) plus `/app/VERSION`. The entrypoint
+  takes a backup when **either** the app version changed since the last boot
+  (`$STATE_DIR/state/last-version`) **or** `comm` shows a migration in the manifest that is absent
+  from `_sqlx_migrations`. A brand-new database (no `_sqlx_migrations` rows) skips it — there is
+  nothing to lose yet.
+- **Output**: `pg_dump … | gzip -6` to
+  `/var/lib/futurefin/backups/pre-migration-<from>-to-<to>-<UTC ts>.sql.gz`, i.e. inside the
+  **`ffdata` volume**, separate from `pgdata`. Retention `prune_backups`: keep the newest
+  `FUTUREFIN_BACKUP_KEEP` (10), then drop anything older than `FUTUREFIN_BACKUP_KEEP_DAYS` (90),
+  plus a disk-pressure sweep below 256 MB free that never deletes the last 3.
+- **Failure aborts the boot.** If `pg_dump` fails, the partial file is removed and the entrypoint
+  `die`s: *"refusing to start with pending migrations and no safety net"*. Deliberate bypass:
+  `FUTUREFIN_PREMIGRATION_BACKUP=off`. This is the part that makes it a safety property rather than
+  a convenience.
+- **Sibling guarantees from the same release**: `pg_upgrade` writes a **mandatory** `pg_dumpall`
+  first and verifies the new cluster by row census before swapping; the one-shot external
+  automigration dumps the source read-only and verifies by census too. Both preserve the old
+  cluster (`mv`, never `rm`).
+- **Evidence**: CI `docker-stack` asserts `ls /var/lib/futurefin/backups/pre-migration-*.sql.gz`
+  after the V2→V3 upgrade, and `pre-pgupgrade-15-to-16-*.sql.gz` after the major upgrade.
+
+**Consequence for the old step 1 — `scripts/upgrade-with-backup.sh` is obsolete as designed.** An
+external wrapper that dumps *before* `docker compose pull && up -d` no longer adds anything: the
+new container takes its own dump after it starts and before it migrates, which is strictly better
+(it cannot be forgotten, and it runs at the exact moment the schema is at risk). Do not build it.
+What the host-side scripts are for now: `scripts/backup-postgres.sh` (ad-hoc dump via
+`compose exec … pg_dump -h /var/run/postgresql`) and `scripts/restore-postgres.sh` (restores into a
+temporary `FUTUREFIN_MODE=db-only` container, printing a row census before and after).
+
+#### Still open — the two pieces this item has left
+
+1. **Explicit downgrade guard with a friendly message.** Running an older image over a
+   newer-migrated database still surfaces as sqlx's raw `VersionMissing` error. It *is* a de-facto
+   guard (it refuses to start rather than corrupting anything), but the message does not tell a
+   self-hoster what happened or what to do — unlike the entrypoint's own guards, which do
+   (`PGDATA was created by PostgreSQL N, NEWER than this image's M …`). Target: detect the
+   condition and emit the same quality of message, naming the restore path and the
+   `pre-migration-*.sql.gz` file that matches.
+2. **`apps/api/tests/migration_guard.rs`.** Still absent (20 integration-test files, none of them
+   this one). Insert a fake `_sqlx_migrations` row with an unknown version into a schema-isolated
+   test DB (`apps/api/tests/common/mod.rs`) and assert `run_migrations` returns an error. This is
+   the piece that turns "sqlx documents it" into "we test it".
+
+Optional and cheap: log pending-migration count + app version around `db::run_migrations` in
+`apps/api/src/main.rs`, so post-incident forensics can answer "which upgrade ran which migrations"
+from the app log as well as from the backup filename.
+
+**You have a result when:** (a) `migration_guard.rs` is green, (b) starting an older tag over a
+migrated volume prints a message a non-Rust user can act on, and (c) a restore drill —
+`scripts/restore-postgres.sh` against an automatic `pre-migration-*.sql.gz` pulled out of `ffdata`
+— ends with `/v1/ready` green and the row census matching, with the commands recorded in
+`.claude/skills/futurefin-run-and-operate/SKILL.md` or README "Backups". Only then does the
+"safe upgrades" claim cover the whole item (claims table above).
 
 ---
 
@@ -367,6 +412,20 @@ Ajustes UI (they are already user-editable via `PATCH /v1/installation` fire_set
 
 ---
 
+## Observables — watched, not proposed
+
+Things worth *noticing* that do not yet clear the bar for a ranked item (no evidence of need at
+this scale). Listing them here keeps them from being re-discovered as "obvious wins".
+
+- **Memory tuning of the embedded PostgreSQL** (`shared_buffers`, `work_mem`, `effective_cache_size`).
+  Since 3.0.0 the postmaster runs inside the app container with PostgreSQL's stock defaults — the
+  entrypoint sets only `listen_addresses`, `unix_socket_directories` and `logging_collector`. For a
+  single-household ledger (thousands of rows, one user at a time, the heavy work being pure-Decimal
+  CPU in the engine, not I/O) there is **no measured evidence that any of this is a bottleneck**.
+  Do not tune blind: if it ever matters, measure first (futurefin-diagnostics-and-tooling), and
+  remember every knob added to the entrypoint is more bash on the data path
+  (futurefin-architecture-contract W8).
+
 ## Adding a new frontier item
 
 1. Check `futurefin-failure-archaeology` — is it a settled rejection?
@@ -379,18 +438,34 @@ Ajustes UI (they are already user-editable via `PATCH /v1/installation` fire_set
 
 ## Provenance and maintenance
 
-Facts verified 2026-07-02 against v1.4.3. Re-verify before relying on them:
+Facts verified 2026-07-02 against v1.4.3; item 2, the claims table and the counts re-verified
+**2026-08-16 for v3.0.0** against `apps/api/docker-entrypoint.sh`, `apps/api/Dockerfile`,
+`.github/workflows/ci.yml` and `scripts/`. Re-verify before relying on them:
 
-- Version: `grep -m1 '^version' apps/api/Cargo.toml`
+- Version: `grep -m1 '^version' apps/api/Cargo.toml` — **read `2.3.0` on 2026-08-16; the 3.0.0
+  bump is part of the release gate and had not been applied yet** (futurefin-change-control §4).
+- Item 2 shipped half (pre-migration backup):
+  `grep -n 'premigration_backup\|migration-versions.txt\|refusing to start with pending migrations' apps/api/docker-entrypoint.sh`
+  and `grep -n 'FUTUREFIN_BACKUP_KEEP\|FUTUREFIN_PREMIGRATION_BACKUP' apps/api/docker-entrypoint.sh`
+  (defaults 10 / 90 days / `on`); CI assertion: `grep -n 'pre-migration-\|pre-pgupgrade-' .github/workflows/ci.yml`.
+- Item 2 open half: `ls apps/api/tests/migration_guard.rs` → **must still be missing**;
+  `ls apps/api/tests/*.rs | wc -l` (20 on 2026-08-16; 8 on 2026-07-02).
+- Host-side backup/restore scripts (no `upgrade-with-backup.sh` — deliberately): `ls scripts/`.
+- Embedded PG runs with stock memory settings (Observables): `grep -n -A9 '^start_postgres()' apps/api/docker-entrypoint.sh`
+  → the postmaster gets only `listen_addresses`, `unix_socket_directories`, `logging_collector`
+  (+ optional `log_min_messages`); no `shared_buffers`/`work_mem` anywhere.
 - Engine purity (no RNG/IO deps): `grep -A8 '\[dependencies\]' crates/engine/Cargo.toml`
 - No proptest yet: `grep -rn proptest crates/ apps/ --include=Cargo.toml` (empty = item 1 still open)
 - Liability loop has no interest accrual: `grep -n 'principals\[i\] -= pay' crates/engine/src/projection.rs`
 - Drain is tax-free / gross-up only in target: `grep -n 'gross_up_net_annual_fire\|drain_from_assets' apps/api/src/handlers/projection.rs crates/engine/src/projection.rs`
-- Backup script defaults: `sed -n '17,19p' scripts/backup-postgres.sh`
+- Backup script defaults: `grep -n 'BACKUP_DIR=\|KEEP_BACKUPS=\|ENV_FILE=' scripts/backup-postgres.sh`
+  (since 3.0.0 it `compose exec`s into the single `futurefin` service and `ENV_FILE` is optional)
 - Migration runner (auto on startup, fails loud): `cat apps/api/src/db.rs`
 - Parity fixture + consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
 - CI covers engine tests but NOT Postgres integration tests: `grep -n 'cargo test' .github/workflows/ci.yml`
+  (since 3.0.0 the `docker-stack` job also exercises the container's data paths end-to-end:
+  `grep -n '^      - name:' .github/workflows/ci.yml`)
 - README still claim-free on MC/determinism: `grep -in 'monte\|stochastic\|bit-exact\|deterministic' README.md` (empty = good)
 - Currency/locale state: `grep -n 'EUR.*USD.*GBP' apps/api/src/handlers/installation.rs; grep -n DISPLAY_NUMBER_LOCALE apps/web/src/lib/format.ts`
 - Horizon basis strings: `grep -n '"lifespan_90"\|"fallback_no_demographics"\|"months_override"' apps/api/src/handlers/projection.rs`
-- Migration count: `ls apps/api/migrations | wc -l` (31 as of 2026-07-02)
+- Migration count: `ls apps/api/migrations | wc -l` (34 as of 2026-08-16; 31 as of 2026-07-02)

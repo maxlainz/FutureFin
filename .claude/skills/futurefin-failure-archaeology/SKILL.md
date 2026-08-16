@@ -6,7 +6,10 @@ description: >
   (re)introduce any of: age-based retirement trigger / target age, per-asset contribution config,
   deflated ("real") engine simulation, migration auto-repair, GET handlers that delete/purge rows,
   binary-search tax gross-up, warm-up-cache-after-mutation, OAuth login, public pension API,
-  ZIP/CSV export, Caddy/TLS overlay, or Decimal-string serialization for large projection arrays.
+  ZIP/CSV export, Caddy/TLS overlay, Decimal-string serialization for large projection arrays, or
+  any undo of the 3.0.0 self-contained image (Postgres back as its own compose service, a
+  `postgres:*` runtime base, a `VOLUME` in the Dockerfile, SIGTERM to the postmaster, a `/dev/tcp`
+  healthcheck fallback).
   Also load it when you hit a symptom that "smells historical": backup export 500s, projection
   numbers that look plausible but shift with inflation toggles, chart deflation wrong only at some
   densities, overlapping table action buttons, FIRE preview diverging from server target, inverted
@@ -21,8 +24,9 @@ description: >
 Purpose: no future session should re-fight a settled battle or re-introduce a rejected design.
 Everything below is mined from `git log` (50 commits, 2026-05-02 → 2026-06-24), `CHANGELOG.md`
 (forensic-grade; read it when in doubt), and cross-checked against the code as of **2026-07-02,
-v1.4.3, 31 migration files**. Evidence columns cite commit hashes, versions and current file paths
-so you can re-verify with `git show <hash>` and `Read <path>`.
+v1.4.3, 31 migration files**; §1 row 19 and §2.11 were added on **2026-08-16 for v3.0.0**
+(34 migration files, self-contained Docker image). Evidence columns cite commit hashes, versions
+and current file paths so you can re-verify with `git show <hash>` and `Read <path>`.
 
 Vocabulary used below (defined once):
 - **FIRE target / gross-up**: net worth needed to retire = gross annual need / SWR (safe
@@ -54,6 +58,7 @@ Vocabulary used below (defined once):
 | 16 | `households`/`persons` as product concepts | Renamed/collapsed into the `installation` singleton; `persons` later dropped with legacy FIRE | migrations `20260203…households.sql` → `20260207…installation_remove_household.sql`; d123105 |
 | 17 | Docker healthcheck `CMD` exec form | `curl` not on exec PATH → always unhealthy; use `CMD-SHELL` (+ `/dev/tcp` fallback) | d0bb259, v1.0.2 |
 | 18 | `fire_number_expense_adjustment_pct`, `bump_contributed_series_with_purchase_basis` | Zombie code with no consumer / obsolete binary-compat patch | 0bba819, v1.3.0 |
+| 19 | Postgres as a separate compose service (`futurefin-database`, `postgres:16.4-alpine`) | Two moving parts, an externally-managed `POSTGRES_PASSWORD` and no snapshot before migrations, in an app whose stated axis is "upgrades that never lose data". Replaced in 3.0.0 by PostgreSQL **embedded in the image** (one container, socket-only). Five traps found doing it — read §2.11 before touching the image | 5ca91f4, v3.0.0; `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose.yml` (one service), CI job `docker-stack` |
 
 ## 2. Detailed entries
 
@@ -188,6 +193,65 @@ Vocabulary used below (defined once):
 - **Status**: settled. If you want multi-tenant/households or pension modeling, that's a
   research-frontier topic, not a restoration job.
 
+### 2.11 Embedding PostgreSQL in the image — five traps found on the way (v3.0.0)
+
+- **Context**: 2.x shipped two containers (`futurefin` + `futurefin-database`). 3.0.0 collapsed
+  them into one self-contained image (PostgreSQL 16 active, PostgreSQL 15 binaries bundled only
+  for auto-`pg_upgrade`), reusing the **existing `pgdata` volume unchanged** — the whole point was
+  that upgrading from 2.x loses nothing. Getting there surfaced five ways to lose data or hang the
+  container, four of which are silent. Each is now pinned by a rule in the code and a scenario in
+  the CI `docker-stack` job. **Do not undo any of them.**
+- **Trap 1 — never base the runtime on `postgres:*` (and never declare `VOLUME`).** The official
+  Postgres images declare `VOLUME /var/lib/postgresql/data`. A user running `docker run` **without**
+  `-v` therefore gets an **anonymous** volume they never see — and watchtower discards it when it
+  recreates the container: complete, silent data loss with no error anywhere. Fix: runtime is
+  `debian:bookworm-slim` and the PG binaries are `COPY --from=` build stages; the Dockerfile
+  declares **no `VOLUME` of its own**, so the entrypoint's `mountpoint` check can distinguish "real
+  volume" from "nothing", and **aborts** without one (`no persistent volume is mounted at
+  $PGDATA …`, opt-out `FUTUREFIN_ALLOW_EPHEMERAL_DB=1`). Declaring `VOLUME` would pre-mount an
+  anonymous volume and blind that guard. CI: the "Image sanity" step asserts a volume-less
+  `docker run` **fails** and logs `no persistent volume`.
+- **Trap 2 — the PGDATA uid differs between Alpine and Debian.** `postgres:*-alpine` (what 2.x
+  used) runs postgres as **uid 70**; the Debian-flavoured binaries here use **uid 999**. A 2.x
+  volume mounted as-is is therefore unreadable by the new postmaster. Fix: `adopt_cluster` does a
+  one-time `chown -R postgres:postgres "$PGDATA"` + `chmod 0700` when the owner differs, logging
+  `adopting ownership of PGDATA (uid 70 -> 999)`.
+- **Trap 3 — musl→glibc changes text collation, and btree indexes go silently corrupt.** The 2.x
+  cluster's text indexes were built under musl's collation order; read back under glibc, index
+  scans miss rows that are physically present. **Nothing errors.** A unique index looks like it
+  enforces nothing: the classic observable is that **registering an already-taken username
+  succeeds instead of returning 409**. Fix: `maybe_adoption_reindex` runs
+  `REINDEX DATABASE` + `ALTER DATABASE … REFRESH COLLATION VERSION` **once per cluster**, keyed on
+  the cluster's *system identifier* (`REINDEXED_SYSID` in the entrypoint state file), so it never
+  repeats and never runs on a cluster this image created itself. CI encodes exactly that detector:
+  after V2→V3 it re-registers `citest` and **requires 409/422** — with a broken unique index the
+  call would return 200 (or 500).
+- **Trap 4 — stop the postmaster with SIGINT, never SIGTERM.** For PostgreSQL, SIGTERM is *smart*
+  shutdown: wait for every client to disconnect, indefinitely. SIGINT is *fast* shutdown: roll
+  back, checkpoint, exit. Sending SIGTERM from the supervisor made the container hang until Docker
+  SIGKILLed it — a killed checkpoint, i.e. recovery work (or worse) on next boot. This is the same
+  reason the official image sets `STOPSIGNAL SIGINT`. Fix: `on_term` stops the **API first**
+  (SIGTERM → axum graceful shutdown → `pool.close()`), then `stop_pid "$PG_PID" INT …` with
+  **SIGQUIT** (immediate) as the escalation, never SIGKILL; compose sets `stop_grace_period: 60s`
+  and self-hosters on watchtower must set `WATCHTOWER_TIMEOUT=60s`. CI: the "Clean shutdown" step
+  greps the log for `shutdown signal received` → `database pool closed` →
+  `database system is shut down` → `clean shutdown complete` and asserts **exit code 0**.
+- **Trap 5 — the healthcheck's `</dev/tcp` fallback was REMOVED; `CMD-SHELL` STAYS.** The 2.x
+  healthcheck was `curl -sf …/v1/health || bash -c '</dev/tcp/localhost/8080'`. With the database
+  now inside the container, that fallback answers "healthy" from the mere TCP listener while
+  `/v1/ready` is returning **503 with the database down** — it masks the one failure the probe
+  exists to catch. The probe is now `/v1/ready` (which round-trips the pool) with **no fallback**.
+  What did **not** change is the `CMD-SHELL` form: incident v1.0.2 (§1 row 17) — the exec form does
+  not resolve `curl` through PATH and the container is permanently unhealthy — **is still live**.
+  Removing the fallback is not permission to go back to `CMD`.
+- **Status**: shipped in 3.0.0 (5ca91f4). **Evidence**: CI job `docker-stack`
+  (`.github/workflows/ci.yml`) — image sanity + no-volume guard, fresh install, watchtower-style
+  recreate, clean shutdown, **V2→V3 with real seeded data** (adoption `chown` + collation REINDEX +
+  automatic pre-migration backup + the duplicate-register detector), V3 image over an untouched 2.x
+  compose (deprecated external-DB compat), one-shot **automigration** from an external database, and
+  **pg_upgrade 15→16** with a row census. Frozen 2.x topologies live in `.github/testdata/`.
+  Normative statement of the resulting contract: futurefin-architecture-contract **D13** and **W8**.
+
 ## 3. Designs that were tried and replaced
 
 | Old design | Specific failure mode | Replacement (current) |
@@ -215,6 +279,11 @@ Vocabulary used below (defined once):
 | Apply `display: flex`/`inline-flex` to a `<td>` | §2.3 |
 | Drop a column in a migration | §2.1 — grep handlers for the column first; §3 row 2 for the data-loss sign-off precedent |
 | Re-add OAuth, pensions API, persons, ZIP export, Caddy | §2.10, table rows 12–16 |
+| Base the runtime image on `postgres:*`, or add a `VOLUME` to the Dockerfile | §2.11 trap 1 — anonymous volumes + watchtower = silent total data loss |
+| "Simplify" the entrypoint's `mv`-aside of an old cluster into an `rm -rf` | §2.11; futurefin-architecture-contract W8 (the entrypoint never deletes a cluster) |
+| Stop the embedded postmaster with SIGTERM, or drop `stop_grace_period` | §2.11 trap 4 — SIGTERM is *smart* shutdown and hangs |
+| Add a `</dev/tcp` fallback to the healthcheck, or switch it back to exec-form `CMD` | §2.11 trap 5 + §1 row 17 — the two rules point in opposite directions on purpose |
+| Split PostgreSQL back out into its own compose service | §1 row 19, §2.11 |
 | Trust an old migration file as evidence of current schema | §2.10 last bullet |
 
 ## 5. When NOT to use this skill
@@ -236,12 +305,28 @@ Vocabulary used below (defined once):
 ## 6. Provenance and maintenance
 
 Compiled 2026-07-02 at v1.4.3 from `git log` (all 50 commits), `CHANGELOG.md` (complete read),
-and direct code inspection. Re-verify volatile facts before relying on them:
+and direct code inspection. §1 row 19 and §2.11 (embedded PostgreSQL) added 2026-08-16 for
+**v3.0.0**, by reading `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`,
+`docker-compose.yml`, `.github/workflows/ci.yml` and `.github/testdata/`. Re-verify volatile facts
+before relying on them:
 
 - Commit hashes and dates: `git log --oneline` (50 commits as of 2026-07-02; new work lands on `dev`).
-- Version: `grep '^version' apps/api/Cargo.toml` (1.4.3) + top of `CHANGELOG.md`.
-- Migration count and drop-migrations: `ls apps/api/migrations/ | wc -l` (31 as of 2026-07-02);
-  `ls apps/api/migrations/ | grep -i drop`.
+- Version: `grep '^version' apps/api/Cargo.toml` + top of `CHANGELOG.md` (3.0.0 on 2026-08-16).
+- Migration count and drop-migrations: `ls apps/api/migrations/ | wc -l` (34 as of 2026-08-16;
+  31 as of 2026-07-02); `ls apps/api/migrations/ | grep -i drop`.
+- §2.11 trap 1 (no `postgres:*` base, no `VOLUME`): `grep -n '^FROM' apps/api/Dockerfile` and
+  `grep -n '^VOLUME' apps/api/Dockerfile` (the latter must be empty); guard text:
+  `grep -n 'no persistent volume' apps/api/docker-entrypoint.sh`.
+- §2.11 trap 2 (uid adoption): `grep -n 'adopting ownership of PGDATA' apps/api/docker-entrypoint.sh`.
+- §2.11 trap 3 (collation REINDEX, once per system identifier):
+  `grep -n 'REINDEX DATABASE\|REFRESH COLLATION VERSION\|REINDEXED_SYSID' apps/api/docker-entrypoint.sh`;
+  the CI detector: `grep -n 'duplicate register' .github/workflows/ci.yml`.
+- §2.11 trap 4 (SIGINT, not SIGTERM): `grep -n 'stop_pid "\$PG_PID" INT' apps/api/docker-entrypoint.sh`
+  (two sites) and `grep -n 'stop_grace_period' docker-compose.yml`.
+- §2.11 trap 5 (no `/dev/tcp`, `CMD-SHELL` kept): `grep -n 'dev/tcp' docker-compose.yml apps/api/Dockerfile`
+  → only the two "do NOT add it back" comments; `grep -n 'CMD-SHELL' docker-compose.yml`.
+- §2.11 evidence: `grep -n '^      - name:' .github/workflows/ci.yml` (job `docker-stack`
+  scenarios) and `ls .github/testdata/` (frozen 2.x compose topologies).
 - FIRE helper is still the single source: `grep -rn 'fire_target_at_month_index' crates/ apps/api/src/`.
 - Scope helpers still used: `grep -n 'scope_where' apps/api/src/handlers/person_view.rs`.
 - No auto-repair regression: `grep -n 'repair' apps/api/src/db.rs` (expect no hits).

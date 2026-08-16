@@ -29,7 +29,7 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 | `FUTUREFIN_PREMIGRATION_BACKUP` | `on` | `off` desactiva el backup automático pre-migración (y su aborto-si-falla). |
 | `FUTUREFIN_ALLOW_EPHEMERAL_DB` | `0` | `1` permite arrancar **sin volumen** en `PGDATA` (CI/demo). Sin esto, el contenedor aborta a propósito. |
 | `FUTUREFIN_EXTERNAL_WAIT_SECS` | `60` | Espera a que la DB externa responda antes de automigrar/abortar. |
-| `FUTUREFIN_API_STOP_TIMEOUT` / `FUTUREFIN_PG_STOP_TIMEOUT` | `15` / `30` | Timeouts del apagado ordenado (API TERM; postmaster SIGINT con escalada QUIT→KILL). |
+| `FUTUREFIN_API_STOP_TIMEOUT` / `FUTUREFIN_PG_STOP_TIMEOUT` | `15` / `30` | Timeouts del apagado ordenado (API: TERM con escalada a KILL; postmaster: SIGINT con escalada a QUIT). |
 | `FUTUREFIN_STATE_DIR` | `/var/lib/futurefin` | Volumen `ffdata`: backups, staging de pg_upgrade, estado (marcadores de reindex/automigración). Avanzada. |
 | `FUTUREFIN_BACKUP_DIR` | `$FUTUREFIN_STATE_DIR/backups` | Avanzada. |
 | `FUTUREFIN_PG_LISTEN` | vacío (sin TCP) | Solo depuración: `127.0.0.1` abre TCP dentro del contenedor. |
