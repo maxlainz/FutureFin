@@ -20,8 +20,10 @@ description: >
 Facts date-stamped **as of 2026-07-02, v1.4.3** (`apps/api/Cargo.toml`); D12 (historical
 snapshots) and the migration/backup-schema counts were added/refreshed for **v1.5.0** on 2026-07-06,
 again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-07, for **v1.8.0**
-(recurring-transaction rules, backup schema_version 6) on 2026-07-08, and for **Unreleased** on
-2026-07-09 (D12a: the transactions no-cache contract became conditional on `savings_source`). This is the
+(recurring-transaction rules, backup schema_version 6) on 2026-07-08, for **Unreleased** on
+2026-07-09 (D12a: the transactions no-cache contract became conditional on `savings_source`), and for
+**v3.0.0** on 2026-08-16 (D13: the image now contains the store; W8: the container is a two-process
+supervisor). This is the
 contract a retiring principal engineer would make you sign: the decisions
 below are settled, most of them by a documented incident. Do not re-litigate them casually; if you must change one, go through
 `.claude/skills/futurefin-change-control/SKILL.md`.
@@ -66,8 +68,13 @@ npm workspace
                      composition root; lib/, api/, components/, views/ per .claude/frontend-structure.md.
 ```
 
-Postgres 16 is the only store. The Docker image serves API + built SPA on one port via
-`WEB_STATIC_ROOT` (`main.rs::web_static_root` → `ServeDir` fallback).
+Postgres 16 is the only store — and **since v3.0.0 the Docker image also CONTAINS it**. The
+published image serves API + built SPA on one port via `WEB_STATIC_ROOT`
+(`main.rs::web_static_root` → `ServeDir` fallback) *and* runs the PostgreSQL that backs them, in
+the same container: one container, two supervised processes, no database service in
+`docker-compose.yml`. See **D13** for the runtime shape and **W8** for what that costs. In
+split-dev the API still talks to a separate Postgres (`docker-compose.dev.yml`) over TCP — the
+embedded database exists only inside the image.
 
 ### The engine purity contract (load-bearing)
 
@@ -283,6 +290,51 @@ flip via `PATCH /v1/installation` invalidates): `apps/api/tests/transactions_pro
 The snapshot half of D12 (`/v1/history/*`) is **unaffected** — snapshots are never an engine input
 in any mode.
 
+### D13. The image CONTAINS the store — one container, two supervised processes (v3.0.0)
+Until 2.x the store was a second compose service (`futurefin-database`, `postgres:16.4-alpine`).
+Since v3.0.0 PostgreSQL 16 runs **inside** the published image (plus PostgreSQL 15 binaries, used
+only for auto-`pg_upgrade` of older volumes), supervised by `apps/api/docker-entrypoint.sh`.
+`docker-compose.yml` has exactly one service and two volumes: `pgdata:/var/lib/postgresql/data`
+(**same name and path as 2.x** — the upgrade reuses the existing volume as-is) and
+`ffdata:/var/lib/futurefin` (automatic pre-migration backups, entrypoint state files, pg_upgrade
+staging). **Why**: a self-hosted household app whose stated axis is "upgrades and backups that
+never lose data" was shipping an upgrade path with two moving parts, an externally-managed
+password, and no snapshot before migrations ran. Four sub-decisions are load-bearing, each with a
+trap behind it (all five traps: futurefin-failure-archaeology §2.11):
+
+- **The runtime is NOT based on `postgres:*`.** Base is `debian:bookworm-slim`; the PG 15/16
+  binaries are `COPY --from=` build stages of the official images. `postgres:*` declares
+  `VOLUME /var/lib/postgresql/data`, so a `docker run` without `-v` silently gets an **anonymous**
+  volume — and watchtower drops it on recreate: total, silent data loss.
+- **The image declares NO `VOLUME` of its own**, precisely so the entrypoint's `mountpoint` check
+  (`is_mounted`) can tell "a real volume is mounted" from "nothing is". Without one it **aborts**
+  (`no persistent volume is mounted at $PGDATA …`) instead of booting onto the container's
+  ephemeral layer; `FUTUREFIN_ALLOW_EPHEMERAL_DB=1` is the deliberate opt-out for throwaway runs.
+  Declaring `VOLUME` would pre-mount an anonymous volume and blind the guard.
+- **Healthcheck is `/v1/ready`, `CMD-SHELL`, with NO `</dev/tcp` fallback.** `/v1/ready`
+  round-trips the pool (`SELECT 1` in `handlers/health.rs`, 503 on failure), so it actually
+  reports the embedded database. The `CMD-SHELL` form stays (incident v1.0.2: the exec form does
+  not resolve `curl` via PATH); the `/dev/tcp` fallback that shipped alongside it was **removed** —
+  it would answer "healthy" from the TCP listener while `/v1/ready` was returning 503 with the
+  database down. Both `docker-compose.yml` and the Dockerfile carry the comment; do not "restore"
+  it.
+- **The embedded database authenticates by trust over a local Unix socket.** `initdb
+  --auth-local=trust --auth-host=scram-sha-256`; the postmaster runs with `listen_addresses=''`
+  and `unix_socket_directories=/var/run/postgresql`, so there is **no TCP listener at all**, and
+  the only things inside the namespace are the two processes the entrypoint started. The API's
+  `DATABASE_URL` is exported by the entrypoint as
+  `postgres:///$POSTGRES_DB?host=/var/run/postgresql&user=$POSTGRES_USER`. A password here would
+  not defend against anything an attacker in that namespace could not already do — it would only
+  add a secret to generate, inject, rotate and lose: **one more failure mode, not one fewer**.
+  `POSTGRES_PASSWORD` is still honored if present (applied to the role) purely so 2.x installs
+  that set it are not surprised.
+
+**Breaks if violated**: basing the runtime on `postgres:*` or declaring `VOLUME` re-arms the
+anonymous-volume loss for every `docker run`/watchtower user; adding a TCP listener or a password
+converts a two-process namespace into an exposed service for zero security gain; re-adding the
+`/dev/tcp` fallback makes a container with a dead database report healthy — the exact failure the
+healthcheck exists to catch.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
@@ -324,6 +376,12 @@ in any mode.
   key pays ~500 ms recompute) and NOT multi-replica-safe — invalidation only reaches the local
   `HashMap`, so running >1 API replica behind a load balancer serves stale projections. The
   compose stack runs one replica; keep it that way or move the cache out of process first.
+  **Since v3.0.0 "keep it that way" stopped being a convention and became a physical
+  impossibility** (D13): the database lives in the same container, so a second replica would not
+  merely carry its own stale cache — it would carry its **own PostgreSQL and its own data
+  directory**, two divergent installations behind one load balancer. Scaling replicas now requires
+  extracting BOTH the database and the cache out of the process, in that order; doing only the
+  cache is worse than doing nothing.
 - **W6 — reference docs can drift from code** (the eight errata found while authoring this
   library — stale CI claim, `projection_target_age` remnants, dead README route, etc. — were all
   fixed on 2026-07-02, but the mechanism that produced them remains: docs are hand-maintained).
@@ -334,15 +392,53 @@ in any mode.
   risk, tax-aware withdrawal and variable SWR are all candidate directions and currently
   UNIMPLEMENTED. Any work here goes through
   `.claude/skills/futurefin-projection-realism-campaign/SKILL.md`.
+- **W8 — the container is a two-process bash supervisor** (new with D13, v3.0.0).
+  `apps/api/docker-entrypoint.sh` is PID 1 and runs as **root** — only to `chown` and then `gosu`
+  down: the postmaster runs as `postgres` (uid 999, matching the Debian official image), the API as
+  `futurefin` (uid 10001). Neither workload ever runs as root. What this adds to the contract:
+  - **Ordered shutdown is now an invariant, not a nicety.** `on_term` (trapped on TERM/INT) stops
+    the **API first** with SIGTERM — which `main.rs` turns into
+    `axum::serve(...).with_graceful_shutdown(shutdown_signal())` followed by `pool.close()`, i.e.
+    the log pair `shutdown signal received — draining connections` → `database pool closed` — and
+    **only then** sends **SIGINT to the postmaster**. SIGINT is PostgreSQL's *fast* shutdown
+    (roll back, checkpoint, exit). **SIGTERM to a postmaster is *smart* shutdown**: it waits for
+    clients to disconnect, indefinitely, so the container would hang until Docker SIGKILLed it
+    mid-checkpoint. That is why the official image sets `STOPSIGNAL SIGINT`, and why the escalation
+    here is SIGQUIT (immediate), never SIGKILL. Timeouts:
+    `FUTUREFIN_API_STOP_TIMEOUT` (15 s) and `FUTUREFIN_PG_STOP_TIMEOUT` (30 s), under compose's
+    `stop_grace_period: 60s`. **Watchtower ignores compose's grace period** — self-hosters running
+    auto-updates must set `WATCHTOWER_TIMEOUT=60s` or every unattended update kills the postmaster
+    mid-checkpoint.
+  - **The entrypoint NEVER deletes a cluster.** Old or partial clusters are moved aside with `mv`
+    (`$PGDATA/pgdata_old_<major>` after pg_upgrade, `$STATE_DIR/failed-automigration-<ts>` after an
+    interrupted automigration). The only `rm`s in the script are its own backups under retention
+    and the pg_upgrade staging directory once its contents are safely copied in. A "cleanup" patch
+    that turns any of those `mv`s into `rm -rf` is a data-loss patch.
+  - **A dead process is a restart, not a repair.** `supervise` tears the other process down and
+    exits 1 so `restart: unless-stopped` recovers the container. A restart loop here is a real
+    incident, not self-healing.
+  - **The weak point proper**: ~630 lines of bash now sit on the data path (adoption `chown`,
+    collation REINDEX, pre-migration `pg_dump`, `pg_upgrade` swap, one-shot automigration). CI
+    gates it with `shellcheck -S warning` and the `docker-stack` job exercises fresh install,
+    watchtower-style recreate, clean shutdown, V2→V3 adoption, external-DB compat, one-shot
+    automigration and pg_upgrade 15→16 — but a bug in it loses data in a way **no Rust test can
+    catch**. Treat every edit to `docker-entrypoint.sh` / `Dockerfile` / `docker-compose.yml` as
+    Infra-release class (futurefin-change-control §1) and never merge one on a red or skipped
+    `docker-stack` job.
 
 ## Provenance and maintenance
 
 Written 2026-07-02 against branch `claude/skill-library-handoff-rtfotl` at v1.4.3, by reading the
-files cited inline (not from memory of the docs — docs can drift, see W6). Re-verify
-volatile claims with:
+files cited inline (not from memory of the docs — docs can drift, see W6). D13 and W8 written
+2026-08-16 for **v3.0.0** against branch `claude/docker-self-contained-v3-skg8jm`, by reading
+`apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose.yml`,
+`apps/api/src/main.rs`, `apps/api/src/handlers/health.rs` and `.github/workflows/ci.yml`.
+Re-verify volatile claims with:
 
-- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md`.
-- Migration count: `ls apps/api/migrations | wc -l` (33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
+- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md`. **On 2026-08-16 it
+  still read `2.3.0`: the 3.0.0 bump is part of the release gate, not yet applied** — see
+  futurefin-change-control §4.
+- Migration count: `ls apps/api/migrations | wc -l` (34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
 - Engine purity deps (I8): `grep -E "tokio|sqlx|reqwest|axum" crates/engine/Cargo.toml` → empty.
 - Horizon rule (D11): `grep -n "LIFESPAN_AGE\|FALLBACK_YEARS\|clamp(12, 840)\|fallback_no_demographics" apps/api/src/handlers/projection.rs`.
 - Cache TTL/keys (D7): `grep -n "PROJECTION_CACHE_TTL\|ProjectionCacheKey\|invalidate_projection" apps/api/src/state.rs`.
@@ -353,8 +449,27 @@ volatile claims with:
 - Session mechanics (D3): `grep -n "expires_at\|SESSION_COOKIE" apps/api/src/handlers/session.rs` and `grep -n "SESSION_TTL_DAYS" apps/api/src/main.rs`.
 - Default ES brackets (W4): `grep -n -A24 "default_es_tax_brackets" apps/api/src/handlers/installation.rs` vs `DEFAULT_ES_TAX_BRACKETS_API` in `apps/web/src/lib/fire.ts`.
 - App.tsx size (W2): `wc -l apps/web/src/App.tsx`.
-- Doc drift (W6): the standing-errata table in futurefin-docs-and-writing §7 is the record; empty as of 2026-07-02.
+- Doc drift (W6): the standing-errata table in futurefin-docs-and-writing §7 is the record.
+- **D13 — the image is the store**: `grep -n '^FROM' apps/api/Dockerfile` (runtime is
+  `debian:bookworm-slim`; `postgres:15/16-bookworm` appear only as `AS pg15`/`AS pg16` COPY
+  sources); `grep -n '^VOLUME' apps/api/Dockerfile` → **must be empty** (the only `VOLUME` hits in
+  that file are the header comment explaining why there is none);
+  `grep -n 'HEALTHCHECK' -A2 apps/api/Dockerfile` and the `healthcheck:` block of
+  `docker-compose.yml` (both `/v1/ready`, both without `</dev/tcp`);
+  `awk '/^services:/{f=1;next} /^volumes:/{f=0} f && /^  [a-z]/' docker-compose.yml` → one service.
+- **D13 — socket-only trust auth**: `grep -n 'auth-local=trust\|listen_addresses\|unix_socket_directories' apps/api/docker-entrypoint.sh`.
+- **W8 — volume guard / no-delete / SIGINT**:
+  `grep -n 'no persistent volume' apps/api/docker-entrypoint.sh`;
+  `grep -n 'rm -rf "\$PGDATA"' apps/api/docker-entrypoint.sh` → **must be empty**;
+  `grep -n 'stop_pid "\$PG_PID" INT' apps/api/docker-entrypoint.sh` (two call sites: `on_term`
+  and `supervise`); `grep -n 'stop_grace_period' docker-compose.yml`.
+- **W8 — API graceful shutdown**: `grep -n 'with_graceful_shutdown\|pool closed\|draining connections' apps/api/src/main.rs`.
+- **W8 — CI coverage of the container paths**: `grep -n '^      - name:' .github/workflows/ci.yml`
+  (job `docker-stack`: image sanity + no-volume guard, fresh install, watchtower-style recreate,
+  clean shutdown, V2→V3 adoption, external compat, automigration, pg_upgrade 15→16) and
+  `ls .github/testdata/`.
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the
-engine), or CI starts running the Postgres integration suite.
+engine), the container's process model or shutdown contract changes (D13/W8), or CI starts running
+the Postgres integration suite.
