@@ -39,11 +39,18 @@ RUN cargo build --release -p futurefin-api --locked \
 
 # --- Binarios PostgreSQL (estos stages son solo FUENTE de COPY, nunca la base) ---
 FROM postgres:16-bookworm@sha256:60f4761b9035e0b8d5218f701a8c3382f641bf12b1604822574cf5be3baeb537 AS pg16
-# libpq vive en un directorio con triplete de arquitectura; el glob de shell lo resuelve
-# por plataforma sin hardcodear x86_64/aarch64.
-RUN mkdir /pglib && cp -a /usr/lib/*-linux-gnu/libpq.so.5* /pglib/
+# La imagen oficial hace dpkg-divert de postgresql.conf.sample al directorio PADRE y deja
+# un symlink en la ruta versionada — al copiar solo /usr/share/postgresql/16 el enlace
+# quedaría roto e initdb fallaría. Materializar el fichero real (cada major con el SUYO).
+RUN rm /usr/share/postgresql/16/postgresql.conf.sample \
+    && cp /usr/share/postgresql/postgresql.conf.sample /usr/share/postgresql/16/postgresql.conf.sample \
+    # libpq vive en un directorio con triplete de arquitectura; el glob de shell lo
+    # resuelve por plataforma sin hardcodear x86_64/aarch64.
+    && mkdir /pglib && cp -a /usr/lib/*-linux-gnu/libpq.so.5* /pglib/
 
 FROM postgres:15-bookworm@sha256:cf7f8fb958c63e62875e30645dc4819ff0243a923f3c709e752b99dedd40bfcd AS pg15
+RUN rm /usr/share/postgresql/15/postgresql.conf.sample \
+    && cp /usr/share/postgresql/postgresql.conf.sample /usr/share/postgresql/15/postgresql.conf.sample
 
 # --- Runtime ---
 FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252 AS runtime
@@ -67,7 +74,9 @@ COPY --from=pg16 /pglib/ /usr/lib/
 # JIT fuera: llvmjit arrastra libLLVM (~120 MB) y no aporta nada a esta carga de trabajo.
 RUN rm -f /usr/lib/postgresql/*/lib/llvmjit.so /usr/lib/postgresql/*/lib/llvmjit_types.bc
 
-# Gate de enlazado: el build FALLA si a algún binario o librería de PG le falta una .so.
+# Gate de enlazado y de instalación: el build FALLA si a algún binario o librería de PG
+# le falta una .so, o si quedó algún symlink roto en los árboles copiados (la causa del
+# incidente del postgresql.conf.sample divertido).
 RUN set -eu; fail=0; \
     for f in /usr/lib/postgresql/1?/bin/* /usr/lib/postgresql/1?/lib/*.so /usr/lib/libpq.so.5; do \
         if ldd "$f" 2>/dev/null | grep -q 'not found'; then \
@@ -75,6 +84,10 @@ RUN set -eu; fail=0; \
         fi; \
     done; \
     [ "$fail" -eq 0 ]; \
+    broken="$(find /usr/lib/postgresql /usr/share/postgresql -xtype l)"; \
+    if [ -n "$broken" ]; then echo "BROKEN SYMLINKS:"; echo "$broken"; exit 1; fi; \
+    test -s /usr/share/postgresql/16/postgresql.conf.sample; \
+    test -s /usr/share/postgresql/15/postgresql.conf.sample; \
     /usr/lib/postgresql/16/bin/postgres --version; \
     /usr/lib/postgresql/15/bin/postgres --version; \
     /usr/lib/postgresql/16/bin/pg_upgrade --version
@@ -89,6 +102,15 @@ RUN groupadd -r -g 999 postgres \
     && chown -R postgres:postgres /var/lib/postgresql /var/lib/futurefin /var/run/postgresql \
     && chmod 0700 /var/lib/postgresql/data \
     && chmod 2775 /var/run/postgresql
+
+# Smoke de initdb en BUILD: ejercita binarios + ficheros share + locales de verdad.
+# C.UTF-8 = camino de instalación nueva; en_US.utf8 = camino de adopción 2.x/pg_upgrade
+# (valida también el localedef de arriba). Falla el build si initdb no puede crear un cluster.
+RUN set -eu; \
+    gosu postgres /usr/lib/postgresql/16/bin/initdb -D /tmp/_smoke1 --username=smoke --encoding=UTF8 --locale=C.UTF-8 >/dev/null; \
+    gosu postgres /usr/lib/postgresql/16/bin/initdb -D /tmp/_smoke2 --username=smoke --encoding=UTF8 --locale=en_US.utf8 >/dev/null; \
+    gosu postgres /usr/lib/postgresql/15/bin/initdb -D /tmp/_smoke3 --username=smoke --encoding=UTF8 --locale=en_US.utf8 >/dev/null; \
+    rm -rf /tmp/_smoke1 /tmp/_smoke2 /tmp/_smoke3
 
 WORKDIR /app
 COPY --from=rust-builder --chown=root:root /src/target/release/futurefin-api /app/futurefin-api
