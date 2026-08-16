@@ -63,7 +63,11 @@ jobs:
             '/usr/lib/postgresql/16/bin/postgres --version && /usr/lib/postgresql/15/bin/postgres --version'
           test "$(docker inspect -f '{{index .Config.Labels "com.futurefin.postgres.majors"}}' futurefin-ci:latest)" = "15,16"
           # Sin volumen debe ABORTAR (guardia anti-pérdida), no arrancar con datos efímeros.
-          if docker run --rm futurefin-ci:latest 2>&1 | tee /tmp/novol.log; then
+          # Sin pipeline: el exit code que importa es el del contenedor, no el de tee.
+          rc=0
+          docker run --rm futurefin-ci:latest >/tmp/novol.log 2>&1 || rc=$?
+          cat /tmp/novol.log
+          if [ "$rc" -eq 0 ]; then
             echo "ERROR: container started without a volume"; exit 1
           fi
           grep -q "no persistent volume" /tmp/novol.log
