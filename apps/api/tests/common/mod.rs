@@ -210,9 +210,10 @@ impl TestApp {
             pool.clone(),
             false,
             30,
+            true,
         ));
         let router = Router::new()
-            .merge(routes::app_router())
+            .merge(routes::app_router(&state))
             .layer(Extension(state.clone()));
         Self {
             router,

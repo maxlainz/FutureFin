@@ -1,4 +1,5 @@
 use crate::handlers::allocation_rules::allocation_rules_router;
+use crate::handlers::api_tokens::api_tokens_router;
 use crate::handlers::assets::assets_router;
 use crate::handlers::auth::{login, logout, me, patch_me, register};
 use crate::handlers::backup_user::{
@@ -20,9 +21,11 @@ use crate::handlers::projection::projection_router;
 use crate::handlers::summary::summary_router;
 use crate::handlers::transactions::transactions_router;
 use crate::openapi::openapi_json;
+use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
+use std::sync::Arc;
 
 /// Tope global del body en endpoints normales. Endpoints que reciben backups crecen su tope.
 const DEFAULT_BODY_LIMIT_BYTES: usize = 1 * 1024 * 1024;
@@ -30,7 +33,7 @@ const DEFAULT_BODY_LIMIT_BYTES: usize = 1 * 1024 * 1024;
 /// Reutilizado por las rutas de import de transacciones (CSV en base64).
 pub(crate) const BACKUP_IMPORT_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
-pub fn app_router() -> Router {
+pub fn app_router(state: &Arc<AppState>) -> Router {
     let v1 = Router::new()
         .route("/health", get(health_check))
         .route("/ready", get(ready_check))
@@ -52,6 +55,7 @@ pub fn app_router() -> Router {
         )
         .route("/installation/setup", post(setup_installation))
         .nest("/installation/pending-users", pending_users_router())
+        .nest("/api-tokens", api_tokens_router())
         .nest("/categories", categories_router())
         .nest("/assets", assets_router())
         .nest("/allocation-rules", allocation_rules_router())
@@ -75,9 +79,19 @@ pub fn app_router() -> Router {
         )
         .fallback(fallback::v1_not_found);
 
+    // El endpoint MCP vive en el nivel raíz (como /health y /openapi.json), dentro del
+    // router api → gana siempre al fallback SPA de main.rs. Con MCP deshabilitado el
+    // router ni se monta y /mcp cae al fallback (404 o index.html según despliegue).
+    let mcp = if state.mcp_enabled {
+        crate::mcp::mcp_router(state.clone())
+    } else {
+        Router::new()
+    };
+
     Router::new()
         .route("/health", get(health_check))
         .route("/openapi.json", get(openapi_json))
         .nest("/v1", v1)
+        .merge(mcp)
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
 }

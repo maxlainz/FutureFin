@@ -722,3 +722,22 @@ export type HistoryCashflowApi = {
   months: CashflowMonthApi[];
   fine?: CashflowFineApi;
 };
+
+/**
+ * Token de API (`GET /v1/api-tokens`) — credencial Bearer del servidor MCP (`/mcp`).
+ * Nunca incluye el secreto: `token_prefix` son los primeros caracteres (`ffp_XXXXXXXX`)
+ * para identificarlo. Timestamps ISO; `expires_at`/`last_used_at`/`revoked_at` ausentes
+ * cuando no aplican.
+ */
+export type ApiTokenApi = {
+  id: string;
+  label: string;
+  token_prefix: string;
+  created_at: string;
+  expires_at?: string | null;
+  last_used_at?: string | null;
+  revoked_at?: string | null;
+};
+
+/** Respuesta del `POST /v1/api-tokens`: el campo `token` (secreto) SOLO viaja aquí, una vez. */
+export type CreateApiTokenResponseApi = ApiTokenApi & { token: string };

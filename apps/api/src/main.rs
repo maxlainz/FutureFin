@@ -49,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse::<i64>().ok())
         .filter(|&d| (1..=400).contains(&d))
         .unwrap_or(30);
+    let mcp_enabled = parse_bool_env("FUTUREFIN_MCP_ENABLED").unwrap_or(true);
 
     let shutdown_pool = pool.clone();
     let state = Arc::new(AppState::new(
@@ -56,12 +57,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         cookie_secure,
         session_ttl_days,
+        mcp_enabled,
     ));
 
-    tracing::info!(port = port(), session_ttl_days, cookie_secure, "server config");
+    tracing::info!(
+        port = port(),
+        session_ttl_days,
+        cookie_secure,
+        mcp_enabled,
+        "server config"
+    );
 
     let api = Router::new()
-        .merge(routes::app_router())
+        .merge(routes::app_router(&state))
         .layer(Extension(state))
         .layer(cors_layer())
         // gzip para responses >1 KB. Reduce ~10× el JSON de /v1/projection/series
@@ -166,5 +174,13 @@ fn cors_layer() -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([CONTENT_TYPE, ACCEPT])
+        // AUTHORIZATION + Mcp-Session-Id: clientes MCP de navegador (p.ej. MCP Inspector)
+        // mandan el Bearer y la sesión legacy por header y necesitan pasar el preflight.
+        .allow_headers([
+            CONTENT_TYPE,
+            ACCEPT,
+            http::header::AUTHORIZATION,
+            http::HeaderName::from_static("mcp-session-id"),
+        ])
+        .expose_headers([http::HeaderName::from_static("mcp-session-id")])
 }

@@ -6,11 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [3.0.0] - 2026-08-16
 
-**Imagen autocontenida**: PostgreSQL pasa a vivir **dentro de la propia imagen** de FutureFin. El stack
-deja de ser dos contenedores (app + `futurefin-database`) y pasa a ser **uno solo**, con lo que un
-`docker compose pull && up -d` — o watchtower con `:latest` — actualiza todo el sistema de una pieza.
-Sin migraciones SQL nuevas; el `schema_version` del `.ffbackup` sigue en **6**. **Breaking operacional**
-(topología de despliegue), no de API ni de backups.
+**Imagen autocontenida + servidor MCP**: PostgreSQL pasa a vivir **dentro de la propia imagen** de
+FutureFin. El stack deja de ser dos contenedores (app + `futurefin-database`) y pasa a ser **uno solo**,
+con lo que un `docker compose pull && up -d` — o watchtower con `:latest` — actualiza todo el sistema de
+una pieza. Además la release estrena un **servidor MCP embebido de solo lectura** (`/mcp`) con **tokens
+de API por usuario**, para conectar Claude u otro cliente MCP a la instalación. Una migración SQL nueva
+(`api_tokens`); el `schema_version` del `.ffbackup` sigue en **6**. **Breaking operacional** (topología
+de despliegue), no de API ni de backups.
 
 ### Changed — PostgreSQL 16 embebido, un solo contenedor
 
@@ -84,10 +86,56 @@ Sin migraciones SQL nuevas; el `schema_version` del `.ffbackup` sigue en **6**. 
   los intentos fallidos se apartan con `mv`, nunca `rm`). Si la externa no responde, **aborta** en vez de
   arrancar vacío en silencio. Opt-out: `FUTUREFIN_DB_MODE=external`.
 
+### Added — Servidor MCP embebido (solo lectura) y tokens de API
+
+- **`/mcp` (Streamable HTTP) dentro del mismo binario y puerto**: FutureFin expone un servidor
+  [MCP](https://modelcontextprotocol.io) con **10 tools de solo lectura** — `get_summary`,
+  `get_projection`, `get_budget`, `get_transactions_summary`, `list_transactions`, `get_history`,
+  `list_assets`, `list_liabilities`, `list_planning_flows`, `get_settings` — para consultar las
+  finanzas desde Claude Code/Desktop u otro cliente MCP. Implementado con el SDK oficial Rust
+  (`rmcp` 3.1, spec 2026-07-28 sessionless + compatibilidad con clientes legacy con
+  `Mcp-Session-Id`). Cero contenedores nuevos: sale por el mismo `EXPOSE 8080`; compose e imagen
+  no cambian.
+- **Cero deriva handler↔tool por construcción**: cada tool llama a la MISMA core fn que su endpoint
+  HTTP (los handlers de lectura se partieron en «extractores + auth» y `*_core(pool, iid, user_id,
+  view, …)`, sin cambiar SQL ni tipos) y serializa el mismo struct serde → el contrato
+  Decimal-as-string sobrevive intacto (test de paridad byte a byte `get_summary` vs `GET
+  /v1/summary` en `mcp_http.rs`). `get_projection` comparte la cache de proyección con el handler
+  (misma key, mismo TTL) y va **fijo a `density=hybrid`** (~82 puntos ≈5 KB) con `asset_series`
+  opt-in — la serie mensual completa (~260 KB) no aporta nada a un LLM.
+- **Tokens de API por usuario (`ffp_…`)**: nueva tabla `api_tokens` y CRUD `GET/POST /v1/api-tokens`
+  + `DELETE /v1/api-tokens/{id}` (auth por cookie, en OpenAPI). El secreto son 32 bytes de `OsRng`
+  en base64url con prefijo reconocible y **solo se persiste su SHA-256**; se muestra **una única
+  vez** al crear. El token NO congela rol ni installation: cada request MCP re-resuelve
+  `require_installation_member`, así que revocar la membership mata el token al instante (misma
+  filosofía que las sesiones en DB). Cualquier miembro — viewer incluido — puede crear los suyos:
+  un token no puede hacer nada que su dueño no pueda ya y el MCP v1 es 100 % lectura. Máximo 10
+  activos por usuario; revocación soft (`revoked_at`, la fila queda como auditoría);
+  `last_used_at` con throttle de 60 s.
+- **Errores con el contrato de siempre**: validación/dominio → `CallToolResult{is_error}` con el
+  mismo JSON `{error, message}` del wire HTTP (el LLM puede leerlo y corregir); `Db/Unavailable` →
+  error de protocolo sanitizado (detalle solo a tracing), espejo exacto de `error.rs`.
+- **UI**: Ajustes → **Acceso** gana el panel «Tokens de API (MCP)» (crear con label + caducidad
+  opcional 90 días/1 año, copiar-una-vez, último uso, revocar con confirmación). El sub-tab Acceso
+  pasa a ser visible para **cualquier miembro** (aprobar usuarios pendientes sigue siendo
+  owner-only dentro del tab).
+- **Config**: `FUTUREFIN_MCP_ENABLED` (default `true`; con `0` el router `/mcp` ni se monta →
+  404). El endpoint es inerte sin tokens (todo responde 401), así que el default habilitado no
+  abre nada por sí solo. CORS gana `Authorization` y `Mcp-Session-Id` en `allow_headers` (para MCP
+  Inspector/clientes de navegador).
+- **Límite conocido**: el conector de claude.ai (web/móvil) exige OAuth 2.1 — fuera de scope en
+  esta versión; el middleware Bearer es el punto de extensión si algún día se añade. Claude
+  Code/Desktop y clientes genéricos funcionan con el token:
+  `claude mcp add --transport http futurefin https://tu-host/mcp --header "Authorization: Bearer ffp_…"`.
+
 ### Migración / compatibilidad
 
-- **Migraciones SQL**: ninguna nueva. El esquema de 3.0.0 es idéntico al de 2.3.0; `.ffbackup`
-  `schema_version` sigue en **6**. API: sin cambios de contrato.
+- **Migración `20260816120000_api_tokens.sql`**: crea la tabla `api_tokens` (id, user_id FK→users
+  ON DELETE CASCADE, label, token_hash UNIQUE, token_prefix, created_at, expires_at, last_used_at,
+  revoked_at). Sin pérdida de datos; el resto del esquema es idéntico al de 2.3.0.
+- **Backups `.ffbackup`**: `schema_version` sigue en **6**. `api_tokens` queda **excluida a
+  propósito** del export/import: son credenciales de la instalación, no datos financieros — un
+  restore no debe resucitar secretos. API: sin cambios de contrato en los endpoints existentes.
 - **Datos**: **sin pérdida**. El volumen `futurefin_pgdata` se reutiliza tal cual — mismo nombre y misma
   ruta de montaje (`/var/lib/postgresql/data`) en el compose nuevo. En el **primer arranque** tras
   actualizar, una sola vez: (1) ajuste de propiedad de los ficheros (la imagen Alpine de 2.x usaba uid 70;

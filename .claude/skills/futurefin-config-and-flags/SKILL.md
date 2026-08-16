@@ -3,7 +3,8 @@ name: futurefin-config-and-flags
 description: >
   Catalog of every configuration axis in FutureFin: environment variables of the API binary (PORT,
   DATABASE_URL, SESSION_TTL_DAYS, COOKIE_SECURE, CORS_ORIGINS, WEB_STATIC_ROOT, RUST_LOG,
-  FUTUREFIN_DB_CONNECT_TIMEOUT_SECS, FUTUREFIN_API_PORT, WEB_DEV_PORT, TEST_DATABASE_URL) and of
+  FUTUREFIN_DB_CONNECT_TIMEOUT_SECS, FUTUREFIN_MCP_ENABLED, FUTUREFIN_API_PORT, WEB_DEV_PORT,
+  TEST_DATABASE_URL) and of
   the self-contained container entrypoint (FUTUREFIN_DB_MODE, FUTUREFIN_MODE, FUTUREFIN_BACKUP_KEEP*,
   FUTUREFIN_PREMIGRATION_BACKUP, FUTUREFIN_ALLOW_EPHEMERAL_DB, FUTUREFIN_STATE_DIR, POSTGRES_*),
   deployment knobs (FUTUREFIN_IMAGE/TAG, APP_PORT), the three docker-compose files
@@ -79,7 +80,8 @@ entrypoint (`apps/api/docker-entrypoint.sh`, Docker image only), **§1.3** compo
 | `PORT` | `8080` | u16; unparseable → silently falls back to 8080 | both | API listen port, binds `0.0.0.0`. Use `8081` in split-dev so Vite can take 8080. Container always runs with `PORT=8080` — since 3.0.0 that comes **only** from the Dockerfile `ENV` (the prod compose no longer restates it); the host side is `APP_PORT`. |
 | `SESSION_TTL_DAYS` | `30` | integer **1–400**; out-of-range or unparseable → **silently** 30 | both | Session cookie/DB row lifetime. Stored in `AppState.session_ttl_days`. |
 | `COOKIE_SECURE` | `false` | true only for exact strings `1`, `true`, `TRUE`, `yes`, `YES` (`parse_bool_env`). `True`, `Yes`, `on` etc. parse as **false** | prod (behind HTTPS) | Sets the `Secure` attribute on the `ff_session` cookie. |
-| `CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080` | comma-separated origins, entries trimmed, empties dropped; an unparseable entry **panics at startup**; empty result panics | prod, only for cross-origin API access | `allow_credentials(true)`, methods GET/POST/PATCH/DELETE/OPTIONS, headers `content-type`/`accept`. Same-origin deployments (the normal Docker image) never send CORS preflights, so the default is fine. |
+| `FUTUREFIN_MCP_ENABLED` | `true` | `parse_bool_env` (same quirk as `COOKIE_SECURE`: only `1/true/TRUE/yes/YES` are true — but here **unset → true**, any other string → false) | both (new in 3.0.0) | Parsed by `main.rs` into `AppState.mcp_enabled`. `false` means `routes::app_router` never mounts the `/mcp` router (404 from the fallback); `/v1/api-tokens` stays mounted. Default enabled: the endpoint is inert without tokens (everything 401s) and prod keeps its zero-required-vars story. |
+| `CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080` | comma-separated origins, entries trimmed, empties dropped; an unparseable entry **panics at startup**; empty result panics | prod, only for cross-origin API access | `allow_credentials(true)`, methods GET/POST/PATCH/DELETE/OPTIONS, headers `content-type`/`accept`/`authorization`/`mcp-session-id` (the last two added in 3.0.0 for browser MCP clients; `mcp-session-id` is also exposed). Same-origin deployments (the normal Docker image) never send CORS preflights, so the default is fine. |
 | `WEB_STATIC_ROOT` | unset | path; empty/whitespace value treated as unset; set-but-missing path → startup warning, API-only mode | prod (Docker sets `/app/web`) | When the path exists, the SPA is served from it with `index.html` fallback (single-port mode). Omit in split-dev — Vite serves the UI. |
 | `RUST_LOG` | `futurefin_api=info,tower_http=info,sqlx=warn` | tracing `EnvFilter` syntax; invalid filter → the default is used | both | Default is applied in `main.rs` when the env filter can't be built from the env. |
 
@@ -416,7 +418,8 @@ auditing for drift (all confirmed working on 2026-08-16):
 - **Entrypoint variables and their defaults (§1.2)**: `grep -n 'FUTUREFIN_[A-Z_]*:-\|FUTUREFIN_MODE\|FUTUREFIN_PG_LISTEN\|FUTUREFIN_PG_LOG_LEVEL' apps/api/docker-entrypoint.sh` (the whole config block is lines ~17–34)
 - Entrypoint guards and abort messages (mountpoint guard, invalid db_mode, embedded-wins warning): `grep -n 'no persistent volume\|invalid FUTUREFIN_DB_MODE\|already contains an embedded cluster\|DEPRECATED' apps/api/docker-entrypoint.sh`
 - Socket `DATABASE_URL` the entrypoint exports: `grep -n 'export DATABASE_URL' apps/api/docker-entrypoint.sh`
-- CORS default origin list + panic: `grep -n "CORS_ORIGINS" -A 6 apps/api/src/main.rs`
+- CORS default origin list + panic + MCP headers: `grep -n "CORS_ORIGINS" -A 6 apps/api/src/main.rs` and `grep -n "mcp-session-id\|AUTHORIZATION" apps/api/src/main.rs`
+- MCP kill-switch (added 2026-08-16, v3.0.0): `grep -n "FUTUREFIN_MCP_ENABLED" apps/api/src/main.rs` and `grep -n "mcp_enabled" apps/api/src/routes/mod.rs apps/api/src/state.rs`
 - Pool constants: `grep -n "connections\|timeout\|lifetime" apps/api/src/db.rs`
 - Cache TTL + key + Density docs: `grep -n "PROJECTION_CACHE_TTL\|pub enum Density\|ProjectionCacheKey" -A 6 apps/api/src/state.rs`
 - Body limits: `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`

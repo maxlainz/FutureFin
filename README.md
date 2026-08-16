@@ -7,6 +7,7 @@ Self-hosted personal finance app: shared household budget, upcoming cash flows, 
 - **DB:** PostgreSQL — **incluido en la propia imagen** desde 3.0.0; migrations run automatically on startup
 - **Auth:** username + password (Argon2id), `HttpOnly` session cookie, no email required
 - **Multi-user:** one installation per deployment; new users wait for owner approval
+- **MCP:** embedded read-only MCP server (`/mcp`) with per-user API tokens — connect Claude to your finances (see [Conectar Claude](#conectar-claude-mcp))
 
 ---
 
@@ -96,6 +97,36 @@ Tres capas complementarias:
 
 ---
 
+## Conectar Claude (MCP)
+
+Desde 3.0.0 FutureFin incluye un **servidor MCP de solo lectura** en `/mcp` (mismo puerto que la
+app): Claude puede consultar tu resumen, proyección FIRE, presupuesto, movimientos, histórico,
+activos y pasivos — nunca modificarlos.
+
+1. En la app: `Ajustes → Acceso → Tokens de API (MCP)` → **Crear token**. Copia el secreto
+   (`ffp_…`): solo se muestra una vez. El token hereda tu usuario y rol, y puedes revocarlo cuando
+   quieras (corte inmediato).
+2. En Claude Code (o Claude Desktop con conectores locales):
+
+   ```bash
+   claude mcp add --transport http futurefin https://tu-host/mcp \
+     --header "Authorization: Bearer ffp_..."
+   ```
+
+3. Cualquier otro cliente MCP genérico funciona igual: transporte **Streamable HTTP** + header
+   `Authorization: Bearer <token>`.
+
+Notas:
+
+- **Acceso remoto**: expón la instalación como prefieras (p. ej. Cloudflare Tunnel). FutureFin no
+  gestiona TLS ni conectividad; el gate es el token.
+- **Limitación**: el conector web de claude.ai exige OAuth 2.1 y no soporta tokens estáticos —
+  fuera de alcance por ahora. Usa Claude Code/Desktop.
+- **Apagarlo del todo**: `FUTUREFIN_MCP_ENABLED=0` (el endpoint deja de existir). Sin tokens
+  creados, `/mcp` responde 401 a todo.
+
+---
+
 ## Environment variables
 
 Desde 3.0.0 **ninguna variable es obligatoria**.
@@ -114,6 +145,7 @@ Desde 3.0.0 **ninguna variable es obligatoria**.
 | `DATABASE_URL` | No | **Deprecado** (se elimina en 4.0.0): base de datos externa. Ver «Actualizar desde 2.x». |
 | `FUTUREFIN_DB_MODE` | No | `auto` (default) \| `embedded` \| `external`. |
 | `FUTUREFIN_ALLOW_EPHEMERAL_DB` | No | `1` permite arrancar sin volumen (solo pruebas desechables). |
+| `FUTUREFIN_MCP_ENABLED` | No | `0` desmonta el servidor MCP (`/mcp`). Default `true`. |
 | `PORT` | No | Internal container port. Default `8080`. |
 | `WEB_STATIC_ROOT` | No | Path to Vite `dist/`. Docker sets `/app/web`. Omit for API-only mode. |
 | `SESSION_TTL_DAYS` | No | Default `30`, max `400` |

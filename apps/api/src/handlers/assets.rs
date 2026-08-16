@@ -294,22 +294,31 @@ pub async fn list_assets(
 ) -> Result<Json<Vec<AssetResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = list_assets_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
 
-    let today = installation_naive_today(&state.pool, iid).await?;
-    let ctx = assets_projection_context(&state.pool, iid, user.id.0, q.resolve(), today).await?;
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_assets`.
+pub(crate) async fn list_assets_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<Vec<AssetResponse>, ApiError> {
+    let today = installation_naive_today(pool, iid).await?;
+    let ctx = assets_projection_context(pool, iid, user_id, view, today).await?;
     let targets = fetch_asset_resolved_targets(
-        &state.pool,
+        pool,
         iid,
-        q.resolve(),
-        user.id.0,
+        view,
+        user_id,
         ctx.income_monthly,
         ctx.expense_with_debt,
     )
     .await?;
     let nominals = ctx.nominals;
 
-    let view_assets = q.resolve();
-    let assets_scope = view_assets.scope_where("");
+    let assets_scope = view.scope_where("");
     let assets_sql = format!(
         r#"SELECT id, category_id, name, current_value, purchase_price,
                   is_liquid, expected_annual_return_percent,
@@ -318,20 +327,19 @@ pub async fn list_assets(
            WHERE {assets_scope}
            ORDER BY sort_index ASC, name ASC"#
     );
-    let rows: Vec<AssetRow> = view_assets
-        .bind_scope_as(sqlx::query_as(&assets_sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+    let rows: Vec<AssetRow> = view
+        .bind_scope_as(sqlx::query_as(&assets_sql), iid, user_id)
+        .fetch_all(pool)
         .await?;
 
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| {
-                let n = nominals.get(&r.id).copied().unwrap_or(Decimal::ZERO);
-                let t = targets.get(&r.id).copied();
-                row_to_response(r, n, t)
-            })
-            .collect(),
-    ))
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let n = nominals.get(&r.id).copied().unwrap_or(Decimal::ZERO);
+            let t = targets.get(&r.id).copied();
+            row_to_response(r, n, t)
+        })
+        .collect())
 }
 
 #[utoipa::path(

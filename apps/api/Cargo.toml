@@ -24,6 +24,12 @@ dotenvy = "0.15"
 futurefin-domain = { path = "../../crates/domain" }
 futurefin-engine = { path = "../../crates/engine" }
 http = "1"
+rmcp = { version = "3.1", default-features = false, features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", features = [

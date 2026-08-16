@@ -514,17 +514,24 @@ export default function App() {
   );
 
   const hasMembership = installation !== null;
-  const isInstallationOwner = installation?.role === "owner";
 
   const visibleSettingsSubTabs = useMemo<SettingsSubTabId[]>(() => {
     const out: SettingsSubTabId[] = [];
-    if (isInstallationOwner) out.push("access");
+    // «Acceso» es de cualquier miembro desde los tokens de API (MCP); la sección de
+    // aprobar usuarios pendientes sigue siendo owner-only dentro del tab.
     if (hasMembership) {
-      out.push("calendar", "projection", "retirement", "categories", "history");
+      out.push(
+        "access",
+        "calendar",
+        "projection",
+        "retirement",
+        "categories",
+        "history",
+      );
     }
     out.push("data");
     return out;
-  }, [isInstallationOwner, hasMembership]);
+  }, [hasMembership]);
 
   const defaultSettingsSubTab: SettingsSubTabId =
     visibleSettingsSubTabs[0] ?? "data";

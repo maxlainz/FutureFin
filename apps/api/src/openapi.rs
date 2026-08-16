@@ -10,6 +10,10 @@ use crate::handlers::backup_user::import::{
     __path_import_user_backup_apply, __path_import_user_backup_preview,
 };
 #[allow(unused_imports)]
+use crate::handlers::api_tokens::{
+    __path_create_api_token, __path_list_api_tokens, __path_revoke_api_token,
+};
+#[allow(unused_imports)]
 use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
 use crate::handlers::history::{
@@ -150,6 +154,9 @@ use utoipa::OpenApi;
         export_user_backup,
         import_user_backup_preview,
         import_user_backup_apply,
+        list_api_tokens,
+        create_api_token,
+        revoke_api_token,
     ),
     components(schemas(
         crate::handlers::health::HealthBody,
@@ -167,6 +174,9 @@ use utoipa::OpenApi;
         crate::handlers::installation::SetupInstallationBody,
         crate::handlers::installation::PatchInstallationBody,
         crate::handlers::membership::MembershipRole,
+        crate::handlers::api_tokens::ApiTokenResponse,
+        crate::handlers::api_tokens::CreateApiTokenBody,
+        crate::handlers::api_tokens::CreateApiTokenResponse,
         crate::handlers::pending_users::ApprovePendingUserBody,
         crate::handlers::pending_users::ApproveMemberRole,
         crate::handlers::categories::CategoryScope,
@@ -253,6 +263,10 @@ use utoipa::OpenApi;
     )),
     tags(
         (name = "health", description = "Liveness and readiness probes"),
+        (
+            name = "api-tokens",
+            description = "Per-user Bearer tokens (`ffp_…`) for programmatic access — the credential for the embedded MCP server at `/mcp`. The secret is returned exactly once on creation; only its SHA-256 is stored."
+        ),
         (
             name = "auth",
             description = "Username/password sessions"
