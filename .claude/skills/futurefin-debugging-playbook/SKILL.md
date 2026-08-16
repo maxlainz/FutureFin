@@ -17,13 +17,21 @@ description: >
 
 Symptom → triage runbook for FutureFin (self-hosted household finance app: Axum API +
 `crates/engine` pure projection math + React/Vite SPA + Postgres 16). Facts verified against
-the code as of 2026-07-02, v1.4.3.
+the code as of 2026-07-02, v1.4.3; the container/DB sections re-verified 2026-08-16 for
+**v3.0.0** (self-contained image: PostgreSQL 16 embedded in the single `futurefin` container).
 
 Vocabulary you need (one line each; full domain detail in
 `.claude/skills/futurefin-fire-domain-reference/SKILL.md`):
 
 - **Installation**: singleton row per deployment; all financial data belongs to it. Users not in
   `installation_memberships` are "pending" and get **403** on data endpoints.
+- **Single container (3.0.0)**: production is ONE service, `futurefin`. PostgreSQL 16 runs
+  inside it, **socket-only** at `/var/run/postgresql` — no TCP listener, no port, no
+  `futurefin-database` service. A bash entrypoint (`apps/api/docker-entrypoint.sh`) supervises
+  both processes. DB access is always `docker compose exec futurefin psql -h /var/run/postgresql
+  -U futurefin -d futurefin`. Dev Postgres is now a **separate, autonomous** compose:
+  `docker compose -f docker-compose.dev.yml up -d` (project `futurefin-dev`, volume `devdata`,
+  `127.0.0.1:5432`), replacing the old `docker-compose.split-dev.yml` override.
 - **View scope**: `?view=mine` filters rows by `owner_user_id = current user`; default is
   `household` (whole installation). Client-side filter, NOT an authorization boundary.
 - **Density**: `GET /v1/projection/series?density=hybrid` serializes ~82 non-equidistant points
@@ -72,7 +80,13 @@ Vocabulary you need (one line each; full domain detail in
 | Chart wrong only with `density=hybrid` (deflation, X positions, milestones) | Diff hybrid vs monthly responses | Array-index math on non-equidistant points | Trap 6 |
 | Visual bug only in dark mode | Toggle theme, inspect computed CSS | Hardcoded hex instead of `var(--ff-*)`/`var(--proj-*)` token | Trap 7 |
 | Table columns overlap / content hidden under action buttons | Inspect the `<td>`'s computed `display` | `display` other than `table-cell` set on a `<td>` | Trap 8 |
-| `docker ps` shows container `unhealthy` | `docker compose logs -f futurefin` | Healthcheck exec-form vs shell, or app actually down | Trap 9 |
+| `docker ps` shows container `unhealthy` | `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/v1/ready` | `/v1/ready` 503 = embedded Postgres really down (3.0.0 dropped the `/dev/tcp` fallback that used to mask it); or `FUTUREFIN_MODE=db-only` | Trap 9 |
+| Container exits immediately, FATAL `no persistent volume is mounted at /var/lib/postgresql/data` | `docker inspect -f '{{json .Mounts}}' futurefin` | Deliberate anti-data-loss guard: nothing mounted at `$PGDATA` | Trap 12a |
+| FATAL `DATABASE_URL is set and the embedded volume is empty, but the external database does not answer` | `docker compose config \| grep -n DATABASE_URL` | A leftover `DATABASE_URL` (typically a dev `.env` sitting next to the prod compose) with an empty volume | Trap 12b |
+| Boxed `DEPRECATED … base de datos EXTERNA` warning, app otherwise fine | `docker inspect -f '{{json .Mounts}}' futurefin` | External-compat mode: 2.x compose running the 3.x image (e.g. after watchtower) | Trap 12c |
+| FATAL `pre-migration backup FAILED` | Check free space/permissions on the `ffdata` volume | The automatic pre-migration dump could not be written; startup aborts **on purpose** | Trap 12d |
+| FATAL `cannot connect as role 'futurefin'` while adopting a 2.x cluster | Recall the `POSTGRES_USER` of the 2.x install | Adopted cluster whose superuser role is not `futurefin` | Trap 12e |
+| `pg_upgrade needed: PostgreSQL 15 -> 16` followed by a failure | Read the pg_upgrade logs inside the `ffdata` volume | Major upgrade aborted; old cluster preserved untouched (nothing is ever deleted) | Trap 12f |
 | Login "succeeds" but next request is 401; login loop | Check `Set-Cookie` in devtools: is `Secure` set? Are you on HTTP? | `COOKIE_SECURE=true` behind non-HTTPS | Trap 10 |
 | Split-dev: UI loads but every `/v1/*` call 404s or connection-refused | `curl http://127.0.0.1:8081/v1/health` directly | Vite proxy port mismatch (`.env` at repo root) | Trap 11 |
 
@@ -146,7 +160,7 @@ All mappings live in `apps/api/src/error.rs` and `apps/api/src/routes/mod.rs`. V
 **Discriminating experiment for 403 vs role issues:**
 
 ```bash
-docker compose exec futurefin-database psql -U futurefin -d futurefin \
+docker compose exec futurefin psql -h /var/run/postgresql -U futurefin -d futurefin \
   -c "SELECT u.username, m.role FROM users u LEFT JOIN installation_memberships m ON m.user_id = u.id;"
 ```
 
@@ -168,13 +182,21 @@ design (`apps/api/src/db.rs`).
   row and restart so it re-applies:
 
 ```bash
-docker compose exec futurefin-database psql -U futurefin -d futurefin \
+docker compose exec futurefin psql -h /var/run/postgresql -U futurefin -d futurefin \
   -c "SELECT version, description, success FROM _sqlx_migrations ORDER BY version DESC LIMIT 10;"
-docker compose exec futurefin-database psql -U futurefin -d futurefin \
+docker compose exec futurefin psql -h /var/run/postgresql -U futurefin -d futurefin \
   -c "DELETE FROM _sqlx_migrations WHERE version = <X>;"
 ```
 
-31 migration files in `apps/api/migrations/` as of 2026-07-02 (`ls apps/api/migrations | wc -l`).
+34 migration files in `apps/api/migrations/` as of 2026-08-16 (`ls apps/api/migrations | wc -l`;
+31 as of 2026-07-02).
+
+**3.0.0 note.** A checksum mismatch now surfaces *after* the entrypoint milestones, and the
+automatic pre-migration dump (`/var/lib/futurefin/backups/pre-migration-*.sql.gz`) was already
+written before the API tried to migrate — that is your rollback material. If the container is
+crash-looping and you need psql without the API, stop it first and start the rescue mode
+(PostgreSQL only, API not started): `docker compose stop futurefin && docker compose run --rm
+-e FUTUREFIN_MODE=db-only futurefin` — never two postmasters on the same volume.
 
 ### 5. Stale projection after a mutation (cache invalidation)
 
@@ -250,28 +272,51 @@ computed `display`. Anything other than `table-cell` on a `<td>` (or non-`table-
 is the root cause; move the styling to an inner wrapper element. Do not reach for
 sticky/z-index/overflow hacks until every cell reports `table-cell`.
 
-### 9. Docker container unhealthy
+### 9. Docker container unhealthy (single container since 3.0.0)
 
 **Story.** v1.0.2 (2026-05-12): the healthcheck used exec-form `CMD`, so `curl` was not resolved
-via shell PATH and the check failed even with a healthy app; changed to `CMD-SHELL` with a bash
-`/dev/tcp` fallback for curl-less images (v1.0.1 had already added `curl` to the runtime stage
-for this). Same release added `RUST_LOG` to `docker-compose.yml` because container logs were
-empty by default — if you see no logs at all, suspect `RUST_LOG` unset, not a dead app.
+via shell PATH and the check failed even with a healthy app; changed to `CMD-SHELL` **plus** a
+bash `</dev/tcp/...` fallback for curl-less images (v1.0.1 had already added `curl` to the
+runtime stage for this). Same release added `RUST_LOG` to `docker-compose.yml` because container
+logs were empty by default — if you see no logs at all, suspect `RUST_LOG` unset, not a dead app.
+
+**What changed in 3.0.0.** The `CMD-SHELL` form stays (the v1.0.2 incident is still live), but
+the probe now hits **`/v1/ready`, not `/v1/health`**, and the `</dev/tcp/...` fallback was
+**removed on purpose**: a TCP-connect fallback answers as long as the Axum listener is alive, so
+it would mask a 503 from `/v1/ready` and mark the container *healthy with the database down* —
+exactly the failure that matters now that Postgres lives inside the same container. There is no
+separate DB healthcheck anymore, because there is no separate DB container. The comment in
+`docker-compose.yml` says this out loud: do not re-add the fallback.
+
+Consequences for triage:
+
+- **`unhealthy` now means the embedded Postgres is genuinely down (or unreachable via its socket),
+  or the API process died.** It is no longer "the probe is flaky".
+- **In rescue mode (`FUTUREFIN_MODE=db-only`) `unhealthy` is the expected state** — that mode
+  starts PostgreSQL and deliberately does NOT start the API, so nothing answers `/v1/ready`.
+- The first boot after upgrading from 2.x does chown + REINDEX + backup; that is why
+  `start_period` is 120 s. `stop_grace_period` is 60 s so the PG checkpoint completes on stop
+  (watchtower ignores it — set `WATCHTOWER_TIMEOUT=60s`).
 
 **Discriminating experiment.**
 
 ```bash
-docker compose ps                          # which container is unhealthy?
-docker compose logs -f futurefin           # app logs (startup milestones: version, DB connected,
-                                           # migrations applied, server config)
-docker compose exec futurefin sh -c "curl -sf http://localhost:8080/v1/health"  # inside
-curl -sf http://127.0.0.1:8080/v1/health   # outside (compose maps APP_PORT, default 8080)
+docker compose ps                            # single service now: futurefin
+docker compose logs -f futurefin             # THREE interleaved sources (see below)
+curl -s -o /dev/null -w 'ready:%{http_code}\n'  http://127.0.0.1:8080/v1/ready
+curl -s -o /dev/null -w 'health:%{http_code}\n' http://127.0.0.1:8080/v1/health
+docker compose exec futurefin sh -c 'curl -fsS http://127.0.0.1:8080/v1/ready'   # inside
+docker compose exec futurefin pg_isready -h /var/run/postgresql -U futurefin     # embedded PG
 ```
 
-Inside-OK / outside-fails → port mapping or host firewall. Both fail with logs showing a
-migration error → trap 4. Logs empty → `RUST_LOG` missing from the environment (compose default:
-`futurefin_api=info,tower_http=info,sqlx=warn`). DB container unhealthy → its own
-`pg_isready`-based healthcheck; check `POSTGRES_PASSWORD` in `.env`.
+| Observation | Conclusion |
+|---|---|
+| `/v1/health` 200 but `/v1/ready` 503 | API alive, embedded Postgres down/not accepting → read the PostgreSQL lines in the log; check the `ffdata`/`pgdata` volumes for disk space |
+| Both 503/refused from outside, OK inside the container | Port mapping (`APP_PORT`) or host firewall |
+| Both fail, logs show a migration error | Trap 4 |
+| No logs at all | `RUST_LOG` missing (compose default `futurefin_api=info,tower_http=info,sqlx=warn`) — the entrypoint and PostgreSQL still log regardless, so *truly* empty logs mean the container never started: read `docker inspect futurefin` |
+| Container never reaches healthy and the log ends at a `FATAL:` line | Trap 12 (startup guards) |
+| `pg_isready` OK inside, `/v1/ready` still 503 | The API's own pool is broken (custom `DATABASE_URL`?) — see trap 12b/12c |
 
 ### 10. Login/session issues — `cookie_secure` behind non-HTTPS
 
@@ -309,12 +354,104 @@ grep -E "^(PORT|FUTUREFIN_API_PORT|WEB_DEV_PORT)" .env
 Watch the Vite startup banner for the actual port it bound. Full environment recreation:
 `.claude/skills/futurefin-build-and-env/SKILL.md`.
 
+**3.0.0 note.** The split-dev *workflow* is unchanged (`cargo run` + `npm run dev:web`), but its
+Postgres no longer comes from `docker-compose.yml -f docker-compose.split-dev.yml`: use the
+standalone `docker compose -f docker-compose.dev.yml up -d` (project `futurefin-dev`, container
+`futurefin-dev-db`, volume `devdata`, published on `127.0.0.1:5432`). If `cargo run` reports
+"connection refused" on 5432 after upgrading, that override is what disappeared.
+
+### 12. Startup FATALs of the self-contained image (3.0.0)
+
+The entrypoint (`apps/api/docker-entrypoint.sh`) prefixes every line with
+`[futurefin-entrypoint]` and refuses to start in situations where continuing could lose data.
+**These aborts are features.** Golden rule of the entrypoint: it NEVER deletes a cluster — old
+or partial clusters are moved aside (`$PGDATA/pgdata_old_<major>`,
+`/var/lib/futurefin/failed-automigration-<ts>`), never removed. So a failed start is recoverable
+by construction; do not "clean up" volumes to make an error go away.
+
+**12a. `FATAL: no persistent volume is mounted at /var/lib/postgresql/data`.**
+First move: `docker inspect -f '{{json .Mounts}}' futurefin`. The guard fires when nothing is
+mounted at `$PGDATA`, because the database would then live in the container's writable layer and
+die with the container. Discriminating experiment: the same image with
+`-v <somevolume>:/var/lib/postgresql/data` starts normally. Fix: mount the volume (the shipped
+`docker-compose.yml` does). `FUTUREFIN_ALLOW_EPHEMERAL_DB=1` bypasses it and is **only** for
+throwaway containers (CI, a quick `--version` probe); it logs a loud warning. CI pins this
+behavior in the "Image sanity (PG majors, label, no-volume guard)" step.
+
+**12b. `FATAL: DATABASE_URL is set and the embedded volume is empty, but the external database
+does not answer`.** First move: `docker compose config | grep -n DATABASE_URL` — the usual cause
+is a dev `.env` sitting next to the production compose, or a leftover 2.x variable. With a
+`DATABASE_URL` pointing outside the container **and** an empty `$PGDATA`, the entrypoint assumes
+you are migrating from an external database and waits `FUTUREFIN_EXTERNAL_WAIT_SECS` (60 s) for
+it; it refuses to silently start with an empty database. Discriminating experiment: unset
+`DATABASE_URL` → the container initializes a fresh cluster (`initializing fresh PostgreSQL 16
+cluster`) and starts. Fix: either remove `DATABASE_URL` (fresh install) or bring the external DB
+up one last time so the one-shot automigration can dump→restore→detach.
+
+**12c. Boxed `DEPRECATED … base de datos EXTERNA` warning (app works).** First move:
+`docker inspect -f '{{json .Mounts}}' futurefin`. You are in external-compat mode: a 2.x compose
+(no volume on the app container, `DATABASE_URL` pointing at `futurefin-database`) running the
+3.x image — the classic watchtower/`:latest` case. The entrypoint deliberately does NOT migrate
+here (writing to the ephemeral layer would be worse) and just runs the API against the external
+DB. Discriminating experiment: the log shows the boxed warning and **no** `starting embedded
+PostgreSQL` line. It is supported, not broken — but migrate when you can (replace the compose
+with the 3.x one; CI covers exactly this transition). The mode disappears in 4.0.0.
+
+**12d. `FATAL: pre-migration backup FAILED`.** First move: check the `ffdata` volume
+(`docker run --rm -v futurefin_ffdata:/d alpine df -h /d`) and its permissions. Before applying
+migrations for a new app version, the entrypoint writes
+`/var/lib/futurefin/backups/pre-migration-<from>-to-<to>-<ts>.sql.gz`; if that dump cannot be
+written it **aborts the boot on purpose** rather than migrating without a safety net.
+Discriminating experiment: free space (or fix ownership) and restart — the same container boots
+and logs `pre-migration backup written: …`. `FUTUREFIN_PREMIGRATION_BACKUP=off` is a deliberate
+bypass, never a fix.
+
+**12e. `FATAL: cannot connect as role 'futurefin'` while adopting a cluster.** First move: recall
+the `POSTGRES_USER` of your 2.x installation. On an adopted 2.x cluster the superuser role is
+whatever `POSTGRES_USER` created it; the 3.x default is `futurefin`. Discriminating experiment:
+`docker compose run --rm -e FUTUREFIN_MODE=db-only futurefin` (with the stack stopped) and list
+roles — or just set `POSTGRES_USER` back to the old value in the compose and restart. Nothing was
+modified: the abort happens before any write.
+
+**12f. `pg_upgrade needed: PostgreSQL 15 -> 16` followed by a failure.** First move: read the
+upgrade logs, which live in the `ffdata` volume under `/var/lib/futurefin/pgupgrade/logs`. The
+upgrade runs in **copy** mode into a staging directory and is verified by a per-table row census
+before the swap, so a failure leaves your old cluster **untouched** — either still at `$PGDATA`
+(failure before the swap) or at `$PGDATA/pgdata_old_15` (failure after it; the swap is resumable
+and re-runs on the next boot). Discriminating experiment:
+`docker compose exec futurefin sh -c 'ls /var/lib/postgresql/data'` — `PG_VERSION` says which
+major is live, `pgdata_old_15/` shows the swap already happened. A mandatory
+`pre-pgupgrade-15-to-16-*.sql.gz` dump is written before anything is touched. If the image does
+not bundle your old major at all the entrypoint says so and names the two escape routes
+(stepwise upgrade with an older FutureFin, or dump + external automigration). CI pins the whole
+path in the "pg_upgrade 15→16 (seeded PG15 volume)" step.
+
 ## Where the evidence lives
 
 - **API logs**: `RUST_LOG` env filter; default (in `main.rs` and compose)
   `futurefin_api=info,tower_http=info,sqlx=warn`. For SQL statements set `sqlx=debug`; for
   request traces `tower_http=debug`. Docker: `docker compose logs -f futurefin`. Split-dev:
-  the `cargo run` terminal. Startup milestones log version, DB connect, migrations, server config.
+  the `cargo run` terminal.
+- **Container logs mix THREE sources since 3.0.0.** `docker compose logs -f futurefin`
+  interleaves (1) the entrypoint, every line prefixed `[futurefin-entrypoint]`, (2) PostgreSQL
+  itself (`logging_collector=off`, so it goes to stdout) and (3) the API. There is no
+  `docker compose logs futurefin-database` anymore. Isolate a source with
+  `docker compose logs futurefin | grep '^futurefin.*\[futurefin-entrypoint\]'` (entrypoint) or
+  `grep -v futurefin-entrypoint` (PG + API).
+- **Startup milestones, in order.** Entrypoint first:
+  `[futurefin-entrypoint] FutureFin 3.0.0 — mode=… db_mode=… postgres_majors=…`; then exactly one
+  cluster path — `initializing fresh PostgreSQL 16 cluster` (new install) OR
+  `adopting ownership of PGDATA (uid 70 -> 999)` + `reindexing database after adoption
+  (musl->glibc collation)` (upgrade from a 2.x alpine cluster) OR
+  `pg_upgrade needed: PostgreSQL 15 -> 16`; then
+  `starting embedded PostgreSQL 16 (socket-only at /var/run/postgresql)`, optionally
+  `pre-migration backup written: …`, then `starting FutureFin API 3.0.0`. After that the classic
+  binary milestones: `futurefin starting` → `database connected` → `migrations applied` →
+  `server config` → `serving web UI and API on one port` → `listening on http://…`.
+  Shutdown: `shutdown signal received` (logged by both entrypoint and API) → `http server
+  stopped` → `database pool closed` → `database system is shut down` (PostgreSQL checkpoint) →
+  `clean shutdown complete`. A boot that stops between two of these tells you which stage failed;
+  CI greps the shutdown four to prove a clean stop.
 - **Projection cache**: info-level lines `projection cache HIT` / `MISS, computing` /
   `invalidated by installation` / `warm-up household projection` (in `handlers/projection.rs`
   and `state.rs`). Script: `scripts/smoke-projection-cache.sh`.
@@ -323,8 +460,11 @@ Watch the Vite startup banner for the actual port it bound. Full environment rec
   >1 KB), the `density` field echoed in the projection response body, `Set-Cookie` flags, and
   the two-phase hybrid+monthly request pair. Application tab: `ff_session` cookie, `localStorage`
   theme pref.
-- **Database**: `docker compose exec futurefin-database psql -U futurefin -d futurefin`
-  (split-dev: `psql "postgres://futurefin:futurefin@127.0.0.1:5432/futurefin"`).
+- **Database**: production is socket-only inside the single container —
+  `docker compose exec futurefin psql -h /var/run/postgresql -U futurefin -d futurefin`
+  (there is no host port and no TCP listener to connect to). Split-dev, with
+  `docker compose -f docker-compose.dev.yml up -d` running:
+  `psql "postgres://futurefin:futurefin@127.0.0.1:5432/futurefin"`.
 - **History**: `CHANGELOG.md` documents root causes per release — grep it for your symptom before
   re-deriving anything. Full incident chronicle:
   `.claude/skills/futurefin-failure-archaeology/SKILL.md`.
@@ -349,8 +489,10 @@ Watch the Vite startup banner for the actual port it bound. Full environment rec
 
 ## Provenance and maintenance
 
-Written 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). All mechanisms verified by reading
-code, not by running services. Re-verify before trusting:
+Written 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); traps 9 and 12, the container/DB
+evidence sections and the vocabulary entry rewritten 2026-08-16 for **v3.0.0** (self-contained
+image). All mechanisms verified by reading code, not by running services. Re-verify before
+trusting:
 
 - Error mapping (23505→409, 23503→400): `grep -n "23505\|23503" apps/api/src/error.rs`
 - Body limits (1 MiB / 16 MiB): `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`
@@ -361,10 +503,28 @@ code, not by running services. Re-verify before trusting:
 - Chart uses `month_index`: `grep -n "month_index" apps/web/src/views/ProjectionNetWorthChart.tsx`
 - Cookie secure flag: `grep -n "COOKIE_SECURE" apps/api/src/main.rs && grep -n "secure(" apps/api/src/handlers/auth.rs`
 - Vite proxy ports: `grep -n "FUTUREFIN_API_PORT\|WEB_DEV_PORT" apps/web/vite.config.ts`
-- Healthcheck + default RUST_LOG: `grep -n "CMD-SHELL\|RUST_LOG" docker-compose.yml`
-- Migration count (31 as of 2026-07-02): `ls apps/api/migrations | wc -l`
+- Healthcheck (CMD-SHELL, `/v1/ready`, no `/dev/tcp` fallback) + default RUST_LOG + grace/start
+  periods: `grep -n "CMD-SHELL\|v1/ready\|dev/tcp\|RUST_LOG\|stop_grace_period\|start_period" docker-compose.yml`
+- Single service, embedded PG, socket-only:
+  `grep -n "services:\|futurefin:\|pgdata\|ffdata" docker-compose.yml` and
+  `grep -n "socket-only\|unix_socket_directories\|listen_addresses\|logging_collector" apps/api/docker-entrypoint.sh`
+- Startup/shutdown milestones (trap 9, "Where the evidence lives"): entrypoint side
+  `grep -n 'log "\|warn "' apps/api/docker-entrypoint.sh`; API side
+  `grep -n "futurefin starting\|database connected\|migrations applied\|server config\|serving web UI\|listening\|http server stopped\|database pool closed\|shutdown signal" apps/api/src/main.rs`
+- The exact FATAL strings of trap 12:
+  `grep -n "no persistent volume\|does not answer\|pre-migration backup FAILED\|cannot connect as role\|pg_upgrade needed\|DEPRECATED" apps/api/docker-entrypoint.sh`
+- Nothing is ever deleted (moved aside instead):
+  `grep -n "pgdata_old_\|failed-automigration-" apps/api/docker-entrypoint.sh`
+- Rescue mode exists: `grep -n "db-only" apps/api/docker-entrypoint.sh`
+- Dev Postgres compose (project `futurefin-dev`, 127.0.0.1:5432, volume `devdata`):
+  `grep -n "^name:\|5432\|devdata" docker-compose.dev.yml` (and `ls docker-compose*.yml` —
+  `docker-compose.split-dev.yml` is gone)
+- Container paths behind trap 9/12 are exercised by CI:
+  `grep -n "name:" .github/workflows/ci.yml`
+- Migration count (34 as of 2026-08-16; 31 as of 2026-07-02): `ls apps/api/migrations | wc -l`
 - Default log filter: `grep -n "EnvFilter" apps/api/src/main.rs`
 - Parity fixture still dual-consumed: `grep -rn "fire-parity.json" apps/api/tests/ apps/web/src/`
-- Incident quotes (v1.0.2, v1.0.10, v1.0.12, v1.0.18–20, v1.2.0, v1.3.0, v1.4.0, v1.4.2): `CHANGELOG.md`
+- Incident quotes (v1.0.2, v1.0.10, v1.0.12, v1.0.18–20, v1.2.0, v1.3.0, v1.4.0, v1.4.2, 3.0.0):
+  `CHANGELOG.md`
 - Doc drift record: the standing-errata table lives in futurefin-docs-and-writing §7 (empty as
   of 2026-07-02); when docs and `handlers/projection.rs` disagree, the code is ground truth.

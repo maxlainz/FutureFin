@@ -21,7 +21,9 @@ How to prove things in this repo: what counts as evidence, the exact test invent
 harness, and how to add tests. Verified against the code on 2026-07-02 (v1.4.3); counts and the
 test-file inventory refreshed on 2026-08-14 for v2.2.0 (new `summary_runway.rs`, engine `runway.rs`)
 and on 2026-08-15 for v2.3.0 (runway SWR threshold: engine `runway.rs` 8 → 13, `summary_runway.rs`
-7 → 10).
+7 → 10); § 3 (CI reality) and § 6 (coverage gaps) rewritten on 2026-08-16 for **v3.0.0**, whose
+`docker-stack` job grew from a boot smoke test into the project's only automated *no-data-loss*
+evidence. The cargo test suites themselves are **unchanged** by 3.0.0.
 
 Why this matters here: the hardest live problem in FutureFin is **projection correctness** —
 errors are silent (numbers look plausible but wrong). Eyeballing a chart is never acceptance.
@@ -75,6 +77,17 @@ If `TEST_DATABASE_URL` is unset, tests default to that exact URL
 (`apps/api/tests/common/mod.rs::test_database_url`). If no Postgres is listening there, every
 integration test panics at "connect to TEST_DATABASE_URL" — that is the "hangs/fails without
 DB" symptom. Single test: append `-- <test_fn_name>` or `--test <file_stem>`.
+
+**3.0.0 leaves this untouched.** The self-contained production image changed nothing here: the
+test database is still the standalone `ff-test-db` container on **port 5433**, still reached over
+TCP, still one `ff_test_<uuid>` schema per test. Do not point the suite at the embedded Postgres
+of a running `futurefin` container — it holds real data and exposes no TCP port.
+
+Useful new option: `TEST_DATABASE_URL` also accepts libpq's **Unix-socket** form,
+`postgres:///futurefin?host=/path/to/socket&user=futurefin` (sqlx 0.8 parses it; the 3.0.0
+entrypoint uses exactly this shape to point the API at the embedded server, and the full suite
+was run against a socket URL to confirm). Handy when you already have a local Postgres on a
+socket and would rather not publish a port; the 5433 TCP default stays the documented path.
 
 ### `isolated_pool()` mechanics (read before touching the harness)
 
@@ -144,14 +157,35 @@ Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/*
 ## 3. CI reality
 
 `.github/workflows/ci.yml` runs on push/PR to `main` and `dev`. Verified against the file on
-2026-07-02:
+2026-07-02; the `docker-stack` job re-read on 2026-08-16 (v3.0.0):
 
 **CI DOES run** (three jobs):
 - `rust`: `cargo build -p futurefin-api --locked` + `cargo test -p futurefin-engine --locked`
 - `web`: `npm install`, `npm run typecheck:web`, `npm run build:web`
-- `docker-stack`: builds the API image, `docker compose up`, polls `GET /v1/health` (90×2 s)
+- `docker-stack`: since 3.0.0 this is no longer a boot smoke test — it is the **only automated
+  evidence that upgrading does not lose data**, and the job comment says so ("no debilitar").
+  Its steps, in order:
 
-**CI does NOT run** — verified absent from `ci.yml`:
+  | Step | What it proves |
+  |---|---|
+  | shellcheck (entrypoint + scripts) | `apps/api/docker-entrypoint.sh`, `scripts/*.sh` and this skill-family's `.claude/skills/futurefin-diagnostics-and-tooling/scripts/*.sh` are shellcheck-clean at `-S warning` |
+  | Build image | `docker build -f apps/api/Dockerfile` succeeds |
+  | Image sanity | both bundled majors run (`postgresql/16` **and** `/15` `postgres --version`), the label `com.futurefin.postgres.majors` equals `15,16`, and running **without a volume ABORTS** with `no persistent volume` (the anti-data-loss guard, asserted as a failure — a container that started would fail the job) |
+  | Fresh install → `/v1/ready` + seed | virgin volume boots, logs `initializing fresh PostgreSQL 16`, `/v1/ready` answers within 90×2 s, then register + login + create a category named `Ácido Ñandú` (deliberate Ñ/accents) through the API |
+  | Recreate (watchtower-style) keeps data | `up -d --force-recreate` and the same login + the accented category still there |
+  | Clean shutdown | `stop -t 60`, then greps `shutdown signal received`, `database pool closed`, `database system is shut down`, `clean shutdown complete`, and asserts container `ExitCode == 0` |
+  | V2 stack up + seed (2.3.0 **real**) | the frozen 2.x topology (two containers, image `maxlainz/futurefin:2.3.0`) boots and gets real seeded data |
+  | V3 image over untouched V2 compose | watchtower case: 3.x image + 2.x compose → boxed `DEPRECATED` warning, external-compat mode, login and data still work |
+  | Migrate to V3 compose reusing the volume | the real upgrade: greps `adopting ownership of PGDATA` (uid 70 → 999) and `reindexing database after adoption`; same credentials log in; `Ácido Ñandú` intact; **duplicate username must be rejected (409/422)** — the detector for a unique index silently corrupted by the musl→glibc collation change; and a `pre-migration-*.sql.gz` exists in the `ffdata` volume |
+  | External DB automigration | one-shot dump → embedded restore → `automigration completed`; then the external DB is **stopped** and the stack restarted, proving it detached |
+  | pg_upgrade 15→16 | a PG15 volume seeded with a marker row is handed to the 3.x image: logs `pg_upgrade needed: PostgreSQL 15 -> 16` and `pg_upgrade 15 -> 16 completed`, the marker row survives, `SHOW server_version` starts with 16, `pgdata_old_15/` exists, and a `pre-pgupgrade-15-to-16-*.sql.gz` backup was written |
+
+  Frozen inputs live in `.github/testdata/docker-compose.{v2,v2-app-v3,automigrate}.yml`.
+  **`docker-compose.v2.yml` must NOT be updated when the production compose evolves** — its
+  entire value is being the exact 2.x topology (two services, image pinned to 2.3.0). Treat it
+  as a fixture, like `fire-parity.json`.
+
+**CI does NOT run** — verified absent from `ci.yml` (unchanged by 3.0.0):
 - Backend integration tests (`apps/api/tests/`) — no Postgres service, no `TEST_DATABASE_URL`
 - Frontend Vitest (`npm test`) — the web job only typechecks and builds
 - ESLint (`npm run lint:web`)
@@ -169,6 +203,12 @@ npm run typecheck:web                    # (CI also runs this, run anyway — it
 Before tagging a release, additionally run the full local Docker-stack test (CLAUDE.md § "Test
 local con Docker Desktop"). Release gates live in
 `.claude/skills/futurefin-change-control/SKILL.md`.
+
+**If your change touches `apps/api/docker-entrypoint.sh`, `apps/api/Dockerfile`,
+`docker-compose.yml` or the compose fixtures, the `docker-stack` job IS your test suite** —
+read its output rather than trusting a green checkmark, and never weaken a step to make it pass
+(each assertion above corresponds to a way a user could lose their database). Adding a new
+startup path (a new guard, a new migration mode) means adding a step there in the same PR.
 
 ## 4. Golden / certified inventory
 
@@ -294,10 +334,18 @@ configured — `environment: "node"` only. The config comment says: if component
 are ever added, switch to `happy-dom` or `jsdom` in `apps/web/vitest.config.ts`. Until then,
 test pure functions only; extract logic out of components to make it testable.
 
-## 6. Coverage gaps — be honest (as of 2026-07-02)
+## 6. Coverage gaps — be honest (as of 2026-07-02; container coverage restated 2026-08-16)
 
 - **No E2E browser tests.** Nothing drives the real SPA; auth-flow + UI regressions are
-  caught only manually. The docker-stack CI job proves the server boots, not that the UI works.
+  caught only manually. The `docker-stack` job now drives a lot through the **API** (register,
+  login, create/read an accented category, duplicate-username rejection) across fresh installs,
+  V2→V3 upgrades, automigration and pg_upgrade — so it proves the server boots *and keeps your
+  data*, but it still never loads the UI.
+- **Container failure paths are covered only for the happy-ish cases CI exercises.** The guards
+  that abort a boot (`pre-migration backup FAILED`, `cannot connect as role …`, a partially
+  restored automigration, an interrupted pg_upgrade swap resume) have no automated test; the
+  no-volume guard is the one exception. Treat them as reasoned-but-unproven and read
+  `futurefin-debugging-playbook` trap 12 before touching them.
 - **Integration tests not in CI.** A PR can go green with every `apps/api/tests/` test broken.
   This is the biggest gap; until fixed, the local obligation list in § 3 is mandatory.
 - **No property-based tests** on the engine (e.g. invariants like "cascade never allocates
@@ -323,8 +371,9 @@ test pure functions only; extract logic out of components to make it testable.
 ## Provenance and maintenance
 
 Verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); `.claude/tests.md` was corrected
-the same day (CI claim, migration count, missing `projection_cache.rs` row). Re-verify volatile
-facts with:
+the same day (CI claim, migration count, missing `projection_cache.rs` row), and both files were
+updated together on 2026-08-16 for **v3.0.0** (`docker-stack` job contents, socket form of
+`TEST_DATABASE_URL`, container coverage gaps). Re-verify volatile facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
 - Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (56 on 2026-08-15 = projection 22 + history 21 + runway 13)
@@ -333,6 +382,17 @@ facts with:
 - CI coverage claims: read `.github/workflows/ci.yml` (jobs: rust, web, docker-stack; grep it
   for `TEST_DATABASE_URL` — absent means integration tests still not in CI; grep for
   `npm test`/`vitest` — absent means Vitest still not in CI)
+- `docker-stack` step list (the § 3 table, one row per step):
+  `grep -n "      - name:" .github/workflows/ci.yml`
+- Its no-data-loss assertions verbatim:
+  `grep -n "no persistent volume\|initializing fresh PostgreSQL 16\|Ácido Ñandú\|adopting ownership\|reindexing database after adoption\|automigration completed\|pg_upgrade needed\|pgdata_old_15\|pre-migration-\|pre-pgupgrade-\|clean shutdown complete\|ExitCode" .github/workflows/ci.yml`
+- Frozen compose fixtures still frozen (v2 pinned to the 2.x two-service topology):
+  `ls .github/testdata/` and `grep -n "image:\|services:" .github/testdata/docker-compose.v2.yml`
+- Shellcheck gate over the entrypoint and every shipped script:
+  `grep -n "shellcheck" .github/workflows/ci.yml`
+- Test DB is still TCP on 5433, untouched by the embedded-Postgres image:
+  `grep -n "5433" apps/api/tests/common/mod.rs` and `grep -rn "5433" .github/workflows/ci.yml`
+  (the second must print nothing — the integration suite is still not in CI)
 - TestApp helper names: `grep -n "pub async fn\|pub fn" apps/api/tests/common/mod.rs`
 - Vitest env: `grep -n environment apps/web/vitest.config.ts` (still `"node"`?)
 - Fixture case count: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (7 cases on 2026-08-14; v2.2.0 did **not** touch the fixture)
