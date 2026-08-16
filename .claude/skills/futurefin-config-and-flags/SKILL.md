@@ -1,34 +1,53 @@
 ---
 name: futurefin-config-and-flags
 description: >
-  Catalog of every configuration axis in FutureFin: environment variables (PORT, DATABASE_URL,
-  SESSION_TTL_DAYS, COOKIE_SECURE, CORS_ORIGINS, WEB_STATIC_ROOT, RUST_LOG, FUTUREFIN_API_PORT,
-  WEB_DEV_PORT, POSTGRES_*, FUTUREFIN_IMAGE/TAG, APP_PORT, TEST_DATABASE_URL), the three
-  docker-compose files, API query-parameter flags (?view=mine, ?months, ?density=hybrid),
-  request-body limits, and per-installation runtime settings (PATCH /v1/installation:
-  base_currency, calendar_tz, show_age_mode, annual_inflation_assumption_percent, the
-  fire_settings JSONB with swr_pct and tax_brackets bounds). Load this skill when you need to know
-  what an option is called, its default, its validation bounds, where it is parsed, whether it is
-  prod or dev-only, why a setting change returns 400, why an env var "isn't taking effect"
-  (.env precedence), why CORS panics at startup, or when ADDING a new env var / installation
-  setting / query param. Do NOT load it for step-by-step environment setup (use
-  futurefin-build-and-env), deployment/upgrade/backup operations (futurefin-run-and-operate),
+  Catalog of every configuration axis in FutureFin: environment variables of the API binary (PORT,
+  DATABASE_URL, SESSION_TTL_DAYS, COOKIE_SECURE, CORS_ORIGINS, WEB_STATIC_ROOT, RUST_LOG,
+  FUTUREFIN_DB_CONNECT_TIMEOUT_SECS, FUTUREFIN_API_PORT, WEB_DEV_PORT, TEST_DATABASE_URL) and of
+  the self-contained container entrypoint (FUTUREFIN_DB_MODE, FUTUREFIN_MODE, FUTUREFIN_BACKUP_KEEP*,
+  FUTUREFIN_PREMIGRATION_BACKUP, FUTUREFIN_ALLOW_EPHEMERAL_DB, FUTUREFIN_STATE_DIR, POSTGRES_*),
+  deployment knobs (FUTUREFIN_IMAGE/TAG, APP_PORT), the three docker-compose files
+  (prod single-service, dev standalone, local-image override), API query-parameter flags
+  (?view=mine, ?months, ?density=hybrid), request-body limits, and per-installation runtime
+  settings (PATCH /v1/installation: base_currency, calendar_tz, show_age_mode,
+  annual_inflation_assumption_percent, the fire_settings JSONB with swr_pct and tax_brackets
+  bounds). Load this skill when you need to know what an option is called, its default, its
+  validation bounds, WHICH FILE parses it (Rust binary vs entrypoint vs compose), whether it is
+  prod or dev-only, why production needs no env var at all since 3.0.0, why setting DATABASE_URL
+  flips the image into deprecated external-DB mode, why a setting change returns 400, why an env
+  var "isn't taking effect" (.env precedence), why CORS panics at startup, or when ADDING a new
+  env var / installation setting / query param. Do NOT load it for step-by-step environment setup
+  (use futurefin-build-and-env), deployment/upgrade/backup operations (futurefin-run-and-operate),
   or the MEANING of the FIRE math these settings feed (futurefin-fire-domain-reference).
 ---
 
 # FutureFin configuration and flags
 
-All facts verified against the code on 2026-07-02 (v1.4.3, per `apps/api/Cargo.toml`); the
-`/v1/history/*` query params were added for v1.5.0 (2026-07-06), with `GET /v1/history/snapshots/prefill`
-(`?kind`/`?date`) added for v1.5.1 (2026-07-07) — none introduce new env vars or installation
-settings. This skill is the single home for "what can be configured, where, with what bounds".
+Env/compose/entrypoint facts re-verified on **2026-08-16 for v3.0.0** (the self-contained-image
+release); the query-param, body-limit and installation-settings sections were last verified
+2026-07-02 (v1.4.3) plus the v1.5.x/v1.6.0/v1.8.0/v2.x additions noted inline — none of those
+introduced env vars. This skill is the single home for "what can be configured, where, with what
+bounds".
+
+**What 3.0.0 changed (read this before trusting any older note):** the Docker image is
+**self-contained** — PostgreSQL 16 runs *inside* the single `futurefin` container over a Unix
+socket (`/var/run/postgresql`, no TCP), so the compose service `futurefin-database` is gone,
+**no environment variable is required in production** (an empty `.env` works), `DATABASE_URL` is
+no longer composed for you (setting it now means "use an external database", deprecated), and a
+new family of `FUTUREFIN_*` variables is parsed by the container **entrypoint**, not by the Rust
+binary (§1.2). `docker-compose.split-dev.yml` was replaced by the standalone
+`docker-compose.dev.yml` (§3).
 
 Vocabulary used below:
 - **Installation** — the singleton row in table `installation`; one per deployment; all financial
   data belongs to it. Its columns are the *runtime* settings (changed via API, stored in DB).
 - **SWR** — Safe Withdrawal Rate: the % of net worth withdrawn per year in retirement.
   `FIRE number = annual expenses / (SWR/100)`.
-- **split-dev** — the two-process dev mode: `cargo run` API on :8081 + Vite dev server on :8080.
+- **split-dev** — the two-process dev mode: `cargo run` API on :8081 + Vite dev server on :8080,
+  against the standalone dev Postgres of `docker-compose.dev.yml` on 127.0.0.1:5432.
+- **Embedded / external DB** — embedded = the PostgreSQL inside the image (default since 3.0.0);
+  external = a separate Postgres reached via `DATABASE_URL` (2.x behavior, **deprecated**,
+  removed in 4.0.0).
 - **Nominal vs real** — nominal = future euros; real = deflated to today's purchasing power.
 
 ## When NOT to use this skill
@@ -46,12 +65,18 @@ Vocabulary used below:
 
 ## 1. Environment variable catalog
 
-### API runtime (parsed in `apps/api/src/main.rs`)
+Three different processes parse configuration, and confusing them is the usual source of "my env
+var does nothing": **§1.1** the Rust binary (`apps/api/src/main.rs`), **§1.2** the container
+entrypoint (`apps/api/docker-entrypoint.sh`, Docker image only), **§1.3** compose itself
+(`docker-compose*.yml`, substituted before any container starts).
+
+### 1.1 API runtime (parsed in `apps/api/src/main.rs`)
 
 | Variable | Default | Bounds / parsing | Prod or dev | Notes |
 |---|---|---|---|---|
-| `DATABASE_URL` | **none — required** | any Postgres URL; process panics with `expect` if unset | both | In Docker compose it is **composed** from `POSTGRES_*` vars: `postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@futurefin-database:5432/$POSTGRES_DB`. In split-dev set it yourself in `.env` (e.g. `postgres://futurefin:futurefin@127.0.0.1:5432/futurefin`). |
-| `PORT` | `8080` | u16; unparseable → silently falls back to 8080 | both | API listen port, binds `0.0.0.0`. Use `8081` in split-dev so Vite can take 8080. Container always runs with `PORT=8080` (Dockerfile `ENV`, restated in compose). |
+| `DATABASE_URL` | **none — the binary still panics with `expect` if unset** | any Postgres URL | both | **Changed in 3.0.0.** In the image you no longer set it: the entrypoint exports `postgres:///$POSTGRES_DB?host=/var/run/postgresql&user=$POSTGRES_USER` (Unix socket) right before launching the binary. Setting it yourself in production switches the image to **external-DB mode** — deprecated, removed in 4.0.0, and with an empty mounted volume it triggers the one-shot automigration instead (§1.2). In split-dev you still set it by hand in `.env`: `postgres://futurefin:futurefin@127.0.0.1:5432/futurefin`. |
+| `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS` | `30` | u64, **1–600**; out of range or unparseable → **silently** 30 | both (new in 3.0.0) | Total budget for `db::connect_with_retry` (`apps/api/src/db.rs`), which retries with backoff 0.5s → 1s → 2s → 4s → 4s… instead of crash-looping. Matters in external-DB compat mode, where no `depends_on: service_healthy` guarantees ordering; with the embedded DB the entrypoint already waited on `pg_isready`. |
+| `PORT` | `8080` | u16; unparseable → silently falls back to 8080 | both | API listen port, binds `0.0.0.0`. Use `8081` in split-dev so Vite can take 8080. Container always runs with `PORT=8080` — since 3.0.0 that comes **only** from the Dockerfile `ENV` (the prod compose no longer restates it); the host side is `APP_PORT`. |
 | `SESSION_TTL_DAYS` | `30` | integer **1–400**; out-of-range or unparseable → **silently** 30 | both | Session cookie/DB row lifetime. Stored in `AppState.session_ttl_days`. |
 | `COOKIE_SECURE` | `false` | true only for exact strings `1`, `true`, `TRUE`, `yes`, `YES` (`parse_bool_env`). `True`, `Yes`, `on` etc. parse as **false** | prod (behind HTTPS) | Sets the `Secure` attribute on the `ff_session` cookie. |
 | `CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080` | comma-separated origins, entries trimmed, empties dropped; an unparseable entry **panics at startup**; empty result panics | prod, only for cross-origin API access | `allow_credentials(true)`, methods GET/POST/PATCH/DELETE/OPTIONS, headers `content-type`/`accept`. Same-origin deployments (the normal Docker image) never send CORS preflights, so the default is fine. |
@@ -64,16 +89,47 @@ Not env-configurable (hardcoded constants — changing them is a code change):
 - Body limits: 1 MiB global, 16 MiB for backup import (`apps/api/src/routes/mod.rs`, see §4).
 - Gzip compression for responses >1 KB (`main.rs`, `CompressionLayer`).
 
-### Compose / deployment level (consumed by `docker-compose.yml`, not by the Rust binary)
+### 1.2 Container entrypoint (parsed in `apps/api/docker-entrypoint.sh`) — new in 3.0.0
+
+The entrypoint is PID 1 in the image: it decides embedded vs external DB, initializes/adopts/
+upgrades the cluster, takes the automatic pre-migration backup, launches the postmaster and the
+API, and shuts both down in order. **None of these variables is required** — the defaults below
+are exactly what production runs with an empty `.env`.
+
+| Variable | Default | Values / bounds | Notes |
+|---|---|---|---|
+| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded` \| `external`; anything else **aborts** at startup (`invalid FUTUREFIN_DB_MODE`) | `auto` = embedded unless `DATABASE_URL` points somewhere other than the socket; then, with a **mounted but empty** volume it runs the one-shot automigration (dump external → restore embedded → row census verification), with an existing cluster the **embedded DB wins** and a warning is logged, and with **no** volume mounted it silently stays external (the watchtower-over-2.x-compose case). `external` forces the deprecated path and never automigrates. |
+| `FUTUREFIN_MODE` | `serve` (or `argv[1]`) | `serve` \| `db-only` | `db-only` = rescue mode: PostgreSQL up, API **not** started, restore instructions printed. Any other `argv` is `exec`'d verbatim (`docker run … pg_dump --version`). |
+| `FUTUREFIN_PREMIGRATION_BACKUP` | `on` | `on` = enabled; any other value disables it | Automatic `pg_dump` + gzip into `$FUTUREFIN_BACKUP_DIR` whenever the app version changed or migrations are pending. A **failing** backup aborts startup on purpose ("refusing to start with pending migrations and no safety net") — set it to `off` only to bypass deliberately. |
+| `FUTUREFIN_BACKUP_KEEP` | `10` | integer | The newest N automatic backups are never pruned. |
+| `FUTUREFIN_BACKUP_KEEP_DAYS` | `90` | integer (days) | Beyond the newest `KEEP`, files older than this are deleted. Plus an emergency prune when the volume drops under 256 MB free, which never goes below 3 files. |
+| `FUTUREFIN_ALLOW_EPHEMERAL_DB` | `0` | `1` = allow | Guard against silent data loss: if `$PGDATA` is **not a real mountpoint** the container **aborts** ("no persistent volume is mounted"). `1` runs with a throwaway DB that dies with the container — never for real data. |
+| `FUTUREFIN_EXTERNAL_WAIT_SECS` | `60` | seconds | How long automigration waits for the external DB to answer `pg_isready` before refusing to start empty. |
+| `FUTUREFIN_API_STOP_TIMEOUT` | `15` | seconds | SIGTERM grace for the API before escalating to SIGKILL. |
+| `FUTUREFIN_PG_STOP_TIMEOUT` | `30` | seconds | SIGINT (**fast** shutdown — never SIGTERM, which is *smart* and can hang) grace for the postmaster before SIGQUIT. Keep compose's `stop_grace_period: 60s` above `API_STOP_TIMEOUT + PG_STOP_TIMEOUT`. |
+| `FUTUREFIN_STATE_DIR` | `/var/lib/futurefin` (Dockerfile `ENV`) | path | Volume `ffdata`: `state/` files, automatic backups, pg_upgrade staging. |
+| `FUTUREFIN_BACKUP_DIR` | `$FUTUREFIN_STATE_DIR/backups` | path | Where `pre-migration-*`, `pre-pgupgrade-*` and `pre-automigration-*` dumps land. |
+| `FUTUREFIN_PG_LISTEN` | empty = socket only | postgres `listen_addresses` | **Debug only.** Setting it opens TCP inside the container; production is socket-only by design. |
+| `FUTUREFIN_PG_LOG_LEVEL` | unset | postgres `log_min_messages` (e.g. `debug1`) | Debug only. |
+| `POSTGRES_USER` | `futurefin` | role name | Compat with 2.x: set it only if your 2.x install customized it, otherwise the adopted cluster's superuser won't match and startup dies with a clear message. |
+| `POSTGRES_DB` | `futurefin` | database name | Same 2.x-compat rationale; created on first boot if missing. |
+| `POSTGRES_PASSWORD` | unset | any string | **No longer required** (local socket, `trust`). If present it is only `ALTER ROLE … PASSWORD`-applied, for people who reach the role from outside. |
+
+Dockerfile `ENV`s the entrypoint reads but you should not override: `PGDATA=/var/lib/postgresql/data`,
+`PG_MAJOR=16`, `WEB_STATIC_ROOT=/app/web`, `PORT=8080`. The image also carries
+`LABEL com.futurefin.postgres.majors="15,16"` (16 active, 15 bundled only to auto-`pg_upgrade`
+older volumes) and a `HEALTHCHECK` on `/v1/ready`, and deliberately declares **no `VOLUME`** — the
+mountpoint guard above depends on that.
+
+### 1.3 Compose / deployment level (substituted by `docker-compose*.yml`, never seen by the binary)
 
 | Variable | Default | Prod or dev | Notes |
 |---|---|---|---|
-| `POSTGRES_PASSWORD` | **none — compose fails** (`:?Set POSTGRES_PASSWORD in .env`) | prod | The only variable production strictly requires in `.env`. |
-| `POSTGRES_USER` | `futurefin` | prod | Also used in the DB healthcheck. |
-| `POSTGRES_DB` | `futurefin` | prod | |
 | `FUTUREFIN_IMAGE` | `maxlainz/futurefin` | prod | Set to `futurefin-local` for the local-image test flow (§3). |
 | `FUTUREFIN_TAG` | `latest` | prod | Pin to `X.Y.Z` for stability; rollback = change tag + `up -d`. |
 | `APP_PORT` | `8080` | prod | **Host** port mapped to the container's fixed internal `:8080`. This is the distinction: `APP_PORT` = host side of the mapping, `PORT` = what the binary listens on inside the container (always 8080 there). |
+| `POSTGRES_USER` / `POSTGRES_DB` | `futurefin` / `futurefin` | prod + dev | Passed through to the container (§1.2) and, in `docker-compose.dev.yml`, to the dev Postgres and its `pg_isready` healthcheck. |
+| `POSTGRES_PASSWORD` | dev compose defaults it to `futurefin`; prod compose does not pass it at all | dev (prod: optional) | **Changed in 3.0.0**: the old `${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}` guard is gone — production no longer needs it. It still matters in split-dev, where it must match the password inside your `DATABASE_URL`. |
 
 ### Dev-only (Vite, tests, scripts)
 
@@ -81,12 +137,18 @@ Not env-configurable (hardcoded constants — changing them is a code change):
 |---|---|---|---|
 | `FUTUREFIN_API_PORT` | `8081` | `apps/web/vite.config.ts` | Vite proxy target port for `/v1`, `/health`, `/openapi.json`. Read **without** `VITE_` prefix — the config uses `loadEnv(mode, repoRoot, "")`, i.e. all vars, from the **repo root** `.env` (not `apps/web/.env`). |
 | `WEB_DEV_PORT` | `8080` | `apps/web/vite.config.ts` | Vite dev-server port. `strictPort: false` — if 8080 is busy Vite silently picks the next port; check the terminal banner. |
-| `TEST_DATABASE_URL` | `postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test` | `apps/api/tests/common/mod.rs` | Postgres for integration tests (each test creates its own schema). Not run in CI as of 2026-07-02 — see `.claude/skills/futurefin-validation-and-qa/SKILL.md`. |
+| `TEST_DATABASE_URL` | `postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test` | `apps/api/tests/common/mod.rs` | Postgres for integration tests (each test creates its own schema). Still not run in CI as of 2026-08-16 (no `TEST_DATABASE_URL` in any job) — see `.claude/skills/futurefin-validation-and-qa/SKILL.md`. |
 | `BASE`, `SMOKE_USER`, `SMOKE_PASS` | `http://127.0.0.1:8080`, auto-registers throwaway user | `scripts/smoke-projection-cache.sh` | Owned by futurefin-diagnostics-and-tooling. |
 | `ENV_FILE`, `BACKUP_DIR`, `KEEP_BACKUPS` | `.env.prod`, `./backups`, `30` | `scripts/backup-postgres.sh` | Owned by futurefin-run-and-operate. |
 
-`.env.example` at the repo root is the canonical template: production needs only
-`POSTGRES_PASSWORD`; the dev vars (`PORT=8081`, `DATABASE_URL`, `RUST_LOG`) ship commented out.
+`.env.example` at the repo root is the canonical template: since 3.0.0 **every line in it is
+commented out** — production runs with an empty `.env` or none at all. It documents the optional
+prod knobs (`FUTUREFIN_TAG`, `APP_PORT`, `FUTUREFIN_IMAGE`, the two backup-retention vars), the
+2.x compat trio (`POSTGRES_USER`/`POSTGRES_DB`/`POSTGRES_PASSWORD`), the deprecated external-DB
+pair (`DATABASE_URL`, `FUTUREFIN_DB_MODE=external`) and the dev block (`PORT=8081`,
+`DATABASE_URL`, `RUST_LOG`) — with an explicit warning not to leave the dev `DATABASE_URL`
+uncommented next to the production compose, because the image would read it as "I want an
+external database".
 
 ## 2. `.env` loading order and precedence
 
@@ -100,7 +162,9 @@ API side — `main.rs::load_env()` runs before anything else:
 dotenvy never overwrites variables already set: **real environment > repo-root `.env` > CWD
 `.env`**. If a change to `.env` "isn't taking effect", check for the variable exported in your
 shell or injected by compose — that wins. Both loads are `let _ = ... .ok()`: a missing `.env` is
-silent, so in Docker (no `.env` in the image) only real env vars apply.
+silent, so in Docker (no `.env` in the image) only real env vars apply — and since 3.0.0 the one
+that matters most, `DATABASE_URL`, is `export`ed by the entrypoint immediately before launching
+the binary, so inside the container it always wins.
 
 Vite side — `apps/web/vite.config.ts` computes `repoRoot = apps/web/../..` and calls
 `loadEnv(mode, repoRoot, "")`. The empty-string third argument disables the `VITE_` prefix filter,
@@ -109,13 +173,24 @@ settings only; they are not baked into the client bundle.
 
 ## 3. Docker Compose file matrix
 
-| File | Scenario | What it does |
-|---|---|---|
-| `docker-compose.yml` | Production / normal run | `futurefin-database` (postgres:16.4-alpine, digest-pinned, no host port, volume `pgdata`) + `futurefin` (pulled image, host `${APP_PORT:-8080}` → container 8080, healthchecks on both, app waits for `service_healthy`). Sets `PORT=8080`, `WEB_STATIC_ROOT=/app/web`, composed `DATABASE_URL`, `RUST_LOG`. |
-| `docker-compose.local.yml` | Test a locally built image without publishing | Override adding **`pull_policy: never`** to service `futurefin` — otherwise compose tries to pull `futurefin-local:dev` from Docker Hub and fails. Use with `FUTUREFIN_IMAGE=futurefin-local`, `FUTUREFIN_TAG=dev` in `.env`: `docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d`. Full recipe: CLAUDE.md "Test local con Docker Desktop". |
-| `docker-compose.split-dev.yml` | split-dev (`cargo run` + `npm run dev:web`) | Override exposing Postgres on **`127.0.0.1:5432`** so the host-side API can connect. Not for production (never expose the DB port there). Usage: `docker compose -f docker-compose.yml -f docker-compose.split-dev.yml up -d futurefin-database`. (CLAUDE.md's short form `docker compose up -d futurefin-database` works too but exposes no DB port — then your host API can't reach it; the split-dev override or a manual `docker run` is what actually opens 5432.) |
+Three files, but only **one** of them is an override now (3.0.0 replaced
+`docker-compose.split-dev.yml` — it no longer exists — with the standalone `docker-compose.dev.yml`):
 
-Overrides are additive: always pass `-f docker-compose.yml -f <override>.yml`, base file first.
+| File | Project name | Scenario | What it does |
+|---|---|---|---|
+| `docker-compose.yml` | `futurefin` | Production / normal run | **One** service, `futurefin`: the published image, host `${APP_PORT:-8080}` → container 8080, `restart: unless-stopped`, `stop_grace_period: 60s` (the embedded postmaster needs room to checkpoint; Watchtower ignores it — set `WATCHTOWER_TIMEOUT=60s`). Volumes `pgdata:/var/lib/postgresql/data` (**same name and path as 2.x**, so upgrading reuses the data as-is) and `ffdata:/var/lib/futurefin` (automatic backups + pg_upgrade staging). Environment: only `RUST_LOG`, `POSTGRES_USER`, `POSTGRES_DB` — `PORT`/`WEB_STATIC_ROOT`/`PGDATA` come from the Dockerfile `ENV` and **`DATABASE_URL` is deliberately absent**. Healthcheck: `["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/v1/ready >/dev/null"]`, `interval 15s`, `timeout 5s`, `retries 5`, `start_period 120s` (first boot after a 2.x upgrade does chown + REINDEX + backup). CMD-SHELL is mandatory (v1.0.2 incident: the exec form doesn't resolve `curl` via PATH) and **no `</dev/tcp/…>` fallback** may be added — it would mask a 503 from `/v1/ready` and report healthy with the DB down. |
+| `docker-compose.local.yml` | (inherits `futurefin`) | Test a locally built image without publishing | Unchanged: an override adding **`pull_policy: never`** to service `futurefin` — otherwise compose tries to pull `futurefin-local:dev` from Docker Hub and fails. Use with `FUTUREFIN_IMAGE=futurefin-local`, `FUTUREFIN_TAG=dev` in `.env`: `docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d`. Full recipe: CLAUDE.md "Test local con Docker Desktop". |
+| `docker-compose.dev.yml` | `futurefin-dev` | split-dev (`cargo run` + `npm run dev:web`) | **Standalone, not an override** — the production file has no DB service left to override. Single service `db` (`postgres:16.4-alpine`, digest-pinned, container `futurefin-dev-db`) published on **`127.0.0.1:5432`**, volume `devdata`, `pg_isready` healthcheck, creds defaulting to `futurefin`/`futurefin`/`futurefin`. Usage: `docker compose -f docker-compose.dev.yml up -d` (no `-f docker-compose.yml`). Never in production. A comment inside explains how to keep your pre-3.0.0 dev data: replace the `devdata:` entry with `devdata: {external: true, name: futurefin_pgdata}`. |
+
+Only `docker-compose.local.yml` is combined with the base file (`-f docker-compose.yml -f
+docker-compose.local.yml`, base first). `docker-compose.dev.yml` is passed **alone** and lives in
+its own compose project, so it never collides with a production stack on the same host — but note
+the two projects would both want host port 5432/8080 respectively, and the dev volume is
+`futurefin-dev_devdata`, *not* `futurefin_pgdata`.
+
+The postgres image digest now appears in exactly two places: `docker-compose.dev.yml` (dev DB) and
+`apps/api/Dockerfile` (the pg15/pg16 COPY source stages). It is **no longer** in
+`docker-compose.yml`.
 
 ## 4. API query-parameter flags and body limits
 
@@ -269,15 +344,36 @@ First decide the layer: **env var** = per-deployment, operator-set, needs restar
 futurefin-change-control gates regardless of layer.
 
 ### New env var — checklist
-1. `apps/api/src/main.rs` — parse next to the existing helpers (`parse_bool_env`, `port()`).
-   Follow house style: explicit default, bounds via `.filter(...)`, never panic except for
-   truly required values (only `DATABASE_URL` and bad `CORS_ORIGINS` panic today).
+
+**Step 0 (new in 3.0.0): decide the consumer, and say so in the docs.** A variable is parsed in
+exactly one of three places, and the reader must be told which: the **Rust binary**
+(`apps/api/src/main.rs`, needs a restart of the API), the **container entrypoint**
+(`apps/api/docker-entrypoint.sh`, only exists in the Docker image, affects DB lifecycle/backups
+before the API ever starts), or **compose substitution** (`docker-compose*.yml`, resolved on the
+host before the container exists — so it is *not* visible inside the container unless also passed
+through `environment:`). Anything touching cluster init, adoption, pg_upgrade, backups or process
+supervision belongs to the entrypoint; anything the handlers read at request time belongs to the
+binary.
+
+1. **Binary consumer**: `apps/api/src/main.rs` — parse next to the existing helpers
+   (`parse_bool_env`, `port()`, `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS`). Follow house style: explicit
+   default, bounds via `.filter(...)`, never panic except for truly required values (only
+   `DATABASE_URL` and bad `CORS_ORIGINS` panic today).
+   **Entrypoint consumer**: add it to the `── Configuración ──` block at the top of
+   `apps/api/docker-entrypoint.sh` as `NAME="${FUTUREFIN_X:-default}"` — all of them are defaulted
+   there in one place, and CI runs `shellcheck -S warning` over the script.
 2. If handlers need it at request time: add a field to `AppState` (`apps/api/src/state.rs`) and
    thread it through `AppState::new(...)` in `main.rs`.
-3. Log it in the startup `tracing::info!(... , "server config")` line so deployments are auditable.
-4. `.env.example` — add it, commented out unless production-required, with the default noted.
-5. If production-relevant: `docker-compose.yml` `environment:` block (and decide compose default).
-6. Docs of record: `.claude/env-and-config.md` table + `README.md` "Environment variables" table.
+3. Log it: the binary's startup `tracing::info!(... , "server config")` line, or an entrypoint
+   `log ...` line, so deployments are auditable.
+4. `.env.example` — add it, **commented out** (production must keep working with an empty `.env`),
+   with the default noted and in the right block (prod / 2.x compat / external-DB / dev).
+5. If production-relevant *and* it must reach the container: `docker-compose.yml` `environment:`
+   block. Compose-only knobs (image, tag, host port) stay in the `${VAR:-default}` interpolations.
+   Do **not** reintroduce a `${VAR:?…}` hard requirement — 3.0.0's contract is that production
+   needs no variable at all.
+6. Docs of record: `.claude/env-and-config.md` table + `README.md` "Environment variables" table,
+   plus §1.1/§1.2/§1.3 here, stating **which file parses it**.
 7. If integration tests need it: `apps/api/tests/common/mod.rs` follows the
    default-with-override pattern (`TEST_DATABASE_URL`).
 
@@ -311,9 +407,15 @@ and if the endpoint is the cached projection route, extend `ProjectionCacheKey` 
 
 ## Provenance and maintenance
 
-Every table row above is re-verifiable; run these from the repo root when auditing for drift:
+Env/compose/entrypoint rows re-verified **2026-08-16 against v3.0.0**; the rest of the tables
+carry their own dates inline. Every row is re-verifiable — run these from the repo root when
+auditing for drift (all confirmed working on 2026-08-16):
 
 - Env parsing, defaults, bounds, load order: `grep -n "env::var\|unwrap_or\|contains(&d)\|load_env" apps/api/src/main.rs`
+- DB connect budget + retry backoff: `grep -n "FUTUREFIN_DB_CONNECT_TIMEOUT_SECS" -A 6 apps/api/src/main.rs` and `grep -n "connect_with_retry" -A 20 apps/api/src/db.rs`
+- **Entrypoint variables and their defaults (§1.2)**: `grep -n 'FUTUREFIN_[A-Z_]*:-\|FUTUREFIN_MODE\|FUTUREFIN_PG_LISTEN\|FUTUREFIN_PG_LOG_LEVEL' apps/api/docker-entrypoint.sh` (the whole config block is lines ~17–34)
+- Entrypoint guards and abort messages (mountpoint guard, invalid db_mode, embedded-wins warning): `grep -n 'no persistent volume\|invalid FUTUREFIN_DB_MODE\|already contains an embedded cluster\|DEPRECATED' apps/api/docker-entrypoint.sh`
+- Socket `DATABASE_URL` the entrypoint exports: `grep -n 'export DATABASE_URL' apps/api/docker-entrypoint.sh`
 - CORS default origin list + panic: `grep -n "CORS_ORIGINS" -A 6 apps/api/src/main.rs`
 - Pool constants: `grep -n "connections\|timeout\|lifetime" apps/api/src/db.rs`
 - Cache TTL + key + Density docs: `grep -n "PROJECTION_CACHE_TTL\|pub enum Density\|ProjectionCacheKey" -A 6 apps/api/src/state.rs`
@@ -324,9 +426,11 @@ Every table row above is re-verifiable; run these from the repo root when auditi
 - Installation validation bounds: `grep -n "normalize_currency\|validate_show_age_mode\|validate_annual_inflation\|normalize_calendar_tz\|swr_pct\|from(99u32)" apps/api/src/handlers/installation.rs`
 - fire_settings defaults + legacy alias: `grep -n "default_fire_settings\|annual_expense_adjusted" -A 8 apps/api/src/handlers/installation.rs`
 - `savings_source` enum + reader + conditional cache gating: `grep -n "enum SavingsSource\|savings_source\|projection_savings_source" apps/api/src/handlers/installation.rs apps/api/src/handlers/transactions/mod.rs`
-- Compose defaults + pull_policy + split-dev port: `grep -n ":-\|:?\|pull_policy\|5432:5432" docker-compose*.yml`
+- Compose file matrix (should list exactly three, no `split-dev`): `ls docker-compose*.yml`
+- Compose services, volumes, healthcheck, ports, project names: `grep -n 'name:\|image:\|test:\|start_period\|stop_grace_period\|pull_policy\|5432\|/var/lib' docker-compose*.yml`
+- Compose interpolation defaults / absence of hard requirements: `grep -n ":-\|:?" docker-compose*.yml`
+- Dockerfile env, label, healthcheck, stages: `grep -n "^ENV\|^LABEL\|^HEALTHCHECK\|^FROM\|^CMD\|^ENTRYPOINT" apps/api/Dockerfile`
 - Vite env reading: `grep -n "loadEnv\|FUTUREFIN_API_PORT\|WEB_DEV_PORT\|strictPort" apps/web/vite.config.ts`
-- Dockerfile env: `grep -n "^ENV" apps/api/Dockerfile`
 - Test DB default: `grep -n "TEST_DATABASE_URL" apps/api/tests/common/mod.rs`
 - Version stamp: `grep -n "^version" apps/api/Cargo.toml`
 
@@ -334,6 +438,14 @@ Every table row above is re-verifiable; run these from the repo root when auditi
 env-and-config.md's fake `DATABASE_URL` "default", and the `mac_*` `horizon_basis` doc comment in
 `handlers/projection.rs` — were all fixed on 2026-07-02. The standing-errata record lives in
 futurefin-docs-and-writing §7.)
+
+**Drift check for 3.0.0**: any doc, script or skill that still says
+`docker-compose.split-dev.yml`, `docker compose up -d futurefin-database`, "`POSTGRES_PASSWORD`
+is required", or composes `DATABASE_URL` from `POSTGRES_*` is stale — none of those exist any
+more. `grep -rn 'split-dev\|futurefin-database' --include='*.md' --include='*.sh' .` finds them
+(legitimate survivors: CHANGELOG history, `README`/`run-and-operate` telling you `--remove-orphans`
+retires the old container, and `.github/testdata/docker-compose.v2*.yml`, which recreate a real
+2.x stack on purpose to test the upgrade path).
 
 When you change anything cataloged here, update this file in the same change, plus the matching
 doc of record (`.claude/env-and-config.md`, `.claude/data-model.md`, `README.md`).
