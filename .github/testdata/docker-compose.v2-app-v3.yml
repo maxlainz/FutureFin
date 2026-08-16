@@ -1,0 +1,9 @@
+# Override de CI sobre docker-compose.v2.yml: sustituye SOLO la imagen de la app por la
+# recién construida. Simula a un usuario 2.x con watchtower + :latest que recibe la
+# imagen 3.x sin haber tocado su compose: sin volumen en el contenedor de la app y con
+# DATABASE_URL apuntando al servicio antiguo, la 3.x debe entrar en modo compat externa
+# (deprecado) y seguir funcionando contra `futurefin-database`.
+services:
+  futurefin:
+    image: futurefin-ci:latest
+    pull_policy: never

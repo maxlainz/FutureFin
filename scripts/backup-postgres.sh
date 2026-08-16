@@ -1,34 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Backup de PostgreSQL usando el stack de producción (Compose).
+# Backup de PostgreSQL del stack de producción (contenedor único desde 3.0.0):
+# ejecuta pg_dump DENTRO del contenedor `futurefin` vía socket Unix y lo comprime al host.
 #
 # Uso (desde la raíz del repo):
 #   ./scripts/backup-postgres.sh
 #
 # Variables opcionales:
-#   ENV_FILE=.env.prod
+#   SERVICE=futurefin        # nombre del servicio compose
+#   ENV_FILE=                # --env-file para compose (ya no es obligatorio)
 #   BACKUP_DIR=./backups
 #   KEEP_BACKUPS=30
+#   POSTGRES_USER=futurefin
+#   POSTGRES_DB=futurefin
+#
+# Nota: los backups AUTOMÁTICOS pre-migración viven dentro del volumen ffdata
+# (/var/lib/futurefin/backups). Para copiarlos al host:
+#   docker compose cp futurefin:/var/lib/futurefin/backups ./backups-auto
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-ENV_FILE="${ENV_FILE:-.env.prod}"
+SERVICE="${SERVICE:-futurefin}"
+ENV_FILE="${ENV_FILE:-}"
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-30}"
+POSTGRES_USER="${POSTGRES_USER:-futurefin}"
+POSTGRES_DB="${POSTGRES_DB:-futurefin}"
 
-get_env() {
-  # Lee KEY=VALUE desde el fichero ENV_FILE sin intentar "source" (para evitar fallar con placeholders tipo <...>).
-  local key="$1"
-  awk -F= -v k="$key" '$1 == k {sub(/^[ \t]+/, "", $2); print $2; exit}' "$ENV_FILE"
+compose() {
+  if [[ -n "$ENV_FILE" ]]; then
+    docker compose --env-file "$ENV_FILE" "$@"
+  else
+    docker compose "$@"
+  fi
 }
 
-POSTGRES_USER="$(get_env "POSTGRES_USER")"
-POSTGRES_DB="$(get_env "POSTGRES_DB")"
-
-if [[ -z "$POSTGRES_USER" || -z "$POSTGRES_DB" ]]; then
-  echo "Faltan POSTGRES_USER/POSTGRES_DB en $ENV_FILE" >&2
+if ! compose ps --status running "$SERVICE" 2>/dev/null | grep -q "$SERVICE"; then
+  echo "El servicio '$SERVICE' no está corriendo. Arráncalo con: docker compose up -d" >&2
   exit 1
 fi
 
@@ -39,12 +49,11 @@ outfile="${BACKUP_DIR}/futurefin-postgres-${ts}.sql.gz"
 
 echo "Creando backup PostgreSQL -> $outfile"
 
-# -T: no asigna TTY (evita errores en CI / pipes)
-# pg_dump existe en la imagen oficial de postgres.
-docker compose --env-file "$ENV_FILE" exec -T futurefin-database \
-  pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" | gzip -9 > "$outfile"
+# -T: no asigna TTY (evita errores en CI / pipes). pg_dump va dentro de la imagen 3.x.
+compose exec -T "$SERVICE" \
+  pg_dump -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" | gzip -9 > "$outfile"
 
-echo "Backup OK"
+echo "Backup OK ($(du -h "$outfile" | cut -f1))"
 
 echo "Retención: conservar últimos ${KEEP_BACKUPS} backups"
 mapfile -t files < <(ls -1t "${BACKUP_DIR}"/futurefin-postgres-*.sql.gz 2>/dev/null || true)
@@ -55,4 +64,3 @@ if (( ${#files[@]} > KEEP_BACKUPS )); then
 fi
 
 echo "Retención OK"
-
