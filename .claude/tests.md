@@ -2,6 +2,8 @@
 
 Test setup post-refactor (May 2026). Before: 22 engine unit tests, nothing else. Ahora hay suites de engine (unit), API (integración contra Postgres real) y frontend (Vitest). No congeles totales en docs — cuéntalos con: `cargo test --workspace 2>/dev/null | grep "test result"` y `npm test --workspace futurefin-web 2>&1 | grep Tests`.
 
+> **3.0.0 (2026-08-16) no cambia nada de esta página salvo la fila `docker-stack` de la matriz de CI.** La imagen de producción ahora lleva PostgreSQL embebido, pero la base de tests sigue siendo el contenedor **`ff-test-db` en el puerto 5433**, por TCP, con un schema `ff_test_<uuid>` por test. **No** apuntes la suite al Postgres embebido de un contenedor `futurefin` en marcha: contiene datos reales y no expone TCP (solo socket Unix).
+
 ## TL;DR
 
 ```bash
@@ -16,13 +18,19 @@ TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_
 npm test --workspace futurefin-web
 ```
 
+`TEST_DATABASE_URL` admite además la forma **socket Unix** de libpq —
+`postgres:///futurefin?host=/ruta/al/sock&user=futurefin` — soportada por sqlx 0.8 y verificada
+corriendo la suite completa (es exactamente la forma que el entrypoint 3.0.0 usa para enchufar la
+API al Postgres embebido). Útil si ya tienes un Postgres local por socket y no quieres publicar
+puerto; el default documentado sigue siendo el TCP de 5433.
+
 ## Backend
 
 ### Engine unit tests (`crates/engine/src/{projection.rs,history.rs,runway.rs}`)
 - `projection.rs` `mod tests`: 22 tests covering cascade allocation, retirement drain, FIRE target inflation, off-by-one between `fire_target_at_month_index(k+1)` and the handler's series.
 - `history.rs` `mod tests`: 21 tests (v1.5.0 + cash-flow tier-2) covering linear interpolation (midpoint exact, endpoints), the French-amortization curve (matches a pure schedule when the residual is 0, residual correction passes through both endpoints, midpoint above the linear chord, fallbacks when payment ≤ interest / no terms / apr=0, clamp ≥ 0), timeline rules (item absent from an intermediate snapshot = 0 between pairs, appears/disappears when present in only one, first-month clamp, virtual-today join with a deleted item → 0), and `month_index_of` / `add_months_signed` with negative deltas across a year boundary.
 - `runway.rs` `mod tests`: 13 tests (v2.3.0; 8 in v2.2.0) covering `liquid_runway_months` — exact reduction to `A/g` with no return/inflation (no tolerances), return extends / inflation shortens, `Indefinite` via the **SWR threshold** (`withdrawal_within_swr_is_indefinite`, renamed from `return_covering_expense_is_indefinite`), value-weighted multiplier (vs the naive per-asset mean), negative return = zero growth, `NoExpenseBase` with zero expense (which also pins the check *order* against the threshold), `Months(0)` with zero balance. The five added in v2.3.0: `swr_threshold_exact_equality_is_indefinite` (exact `Decimal` boundary, 300.000 @ 4 %), `just_below_swr_threshold_is_finite` (one euro under → finite, `A/g` intact), `swr_zero_never_indefinite` (also defensive with `swr < 0`), `cap_reached_without_swr_is_months_at_cap` (surviving the cap is the `Months(1200)` **floor**, not `Indefinite`), `grossed_expense_raises_threshold` (the 5th parameter participates; the engine never recomputes `12 × monthly_expense`). Predicted values in each test's doc comment.
-- Engine total: **51** as of 2026-08-14 (22 + 21 + 8) — recount with `cargo test -p futurefin-engine 2>&1 | grep "test result"`.
+- Engine total: **56** as of 2026-08-16 (22 + 21 + 13; eran 51 antes del umbral SWR de v2.3.0) — recuéntalo con `cargo test -p futurefin-engine 2>&1 | grep "test result"` o, sin compilar, `grep -c '#\[test\]' crates/engine/src/{projection,history,runway}.rs`.
 - Pure: no Postgres, no env. `cargo test -p futurefin-engine` runs both (and they run in **CI**, unlike the integration suite).
 
 ### Integration tests (`apps/api/tests/`)
@@ -160,7 +168,9 @@ CI existe: `.github/workflows/ci.yml` corre en push/PR a `main`/`dev`:
 |---|---|---|
 | `rust` | `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked` | los tests de integración (`apps/api/tests/`) — necesitan `TEST_DATABASE_URL` |
 | `web` | `npm run typecheck:web`, `npm run build:web` | Vitest (`npm test`), `npm run lint:web` |
-| `docker-stack` | build de imagen + compose up + smoke `/v1/health` | — |
+| `docker-stack` (3.0.0) | shellcheck (`docker-entrypoint.sh`, `scripts/*.sh`, scripts de skills) + build de la imagen autocontenida + **sanity** (majors PG 15 y 16 presentes, label `com.futurefin.postgres.majors=15,16`, arranque **sin volumen** debe ABORTAR) + **instalación nueva** (volumen virgen → `initializing fresh PostgreSQL 16`, `/v1/ready`, alta + login + categoría «Ácido Ñandú» vía API) + **recreate estilo watchtower** conservando datos + **apagado limpio** (greps de `shutdown signal received`, `database pool closed`, `database system is shut down`, `clean shutdown complete` y `ExitCode == 0`) + **stack 2.3.0 REAL con datos** → **imagen V3 sobre el compose V2** (modo compat externa: warning `DEPRECATED`, login y datos intactos) → **migración al compose V3 reutilizando el volumen** (`adopting ownership of PGDATA`, `reindexing database after adoption`, login idéntico, categoría con Ñ/acentos intacta, username duplicado → 409/422, backup `pre-migration-*.sql.gz` presente) + **automigración desde DB externa** (dump → embebida → `automigration completed` → se apaga la externa y todo sigue vivo) + **pg_upgrade 15→16** (marker row sobrevive, `SHOW server_version` empieza por 16, `pgdata_old_15/`, backup `pre-pgupgrade-15-to-16-*.sql.gz`) | UI real (no hay E2E de navegador); las guardas de arranque que abortan (`pre-migration backup FAILED`, rol inexistente, swap de pg_upgrade interrumpido) salvo la de «sin volumen» |
+
+El `docker-stack` dejó de ser un smoke de arranque: desde 3.0.0 es **la única evidencia automatizada de «sin pérdida de datos»** (así lo dice el comentario del job: «no debilitar»). Sus entradas congeladas viven en `.github/testdata/docker-compose.{v2,v2-app-v3,automigrate}.yml`; **`docker-compose.v2.yml` NO se actualiza** cuando evolucione el compose de producción — su valor es ser la topología 2.x exacta (dos servicios, imagen pineada a 2.3.0), igual que un fixture. Si tocas `apps/api/docker-entrypoint.sh`, `apps/api/Dockerfile`, `docker-compose.yml` o esos ficheros, ese job **es** tu suite: léelo, no lo debilites, y añade un paso nuevo si añades un camino de arranque nuevo.
 
 **Consecuencia**: antes de mergear tienes que correr EN LOCAL lo que CI no cubre:
 ```bash
@@ -169,3 +179,27 @@ npm test --workspace futurefin-web
 npm run lint:web
 ```
 (Checklist completo: [`.claude/skills/futurefin-change-control/SKILL.md`](skills/futurefin-change-control/SKILL.md).)
+
+## Procedencia y re-verificación
+
+Contenido verificado leyendo el código; la tabla de CI y las notas de contenedor se
+re-verificaron el **2026-08-16 (v3.0.0)**. Comandos para comprobar que esta página no ha
+derivado (todos desde la raíz del repo):
+
+```bash
+# Jobs y pasos de CI (la fila docker-stack = un paso por línea)
+grep -n "^  [a-z-]*:$\|      - name:" .github/workflows/ci.yml
+# Aserciones de «sin pérdida de datos» que cita la tabla
+grep -n "no persistent volume\|initializing fresh PostgreSQL 16\|Ácido Ñandú\|adopting ownership\|reindexing database after adoption\|automigration completed\|pg_upgrade needed\|pgdata_old_15\|pre-migration-\|pre-pgupgrade-\|clean shutdown complete\|ExitCode" .github/workflows/ci.yml
+# Integración y Vitest siguen FUERA de CI (ambos deben no imprimir nada)
+grep -n "TEST_DATABASE_URL\|5433" .github/workflows/ci.yml
+grep -n "npm test\|vitest\|lint:web" .github/workflows/ci.yml
+# Fixtures congelados (v2 = topología 2.x, imagen pineada)
+ls .github/testdata/ && grep -n "image:\|services:" .github/testdata/docker-compose.v2.yml
+# La base de tests sigue en 5433 por TCP
+grep -n "5433" apps/api/tests/common/mod.rs
+# Recuentos sin compilar
+grep -c '#\[test\]' crates/engine/src/{projection,history,runway}.rs
+grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'
+ls apps/api/migrations | wc -l          # 34 a 2026-08-16
+```

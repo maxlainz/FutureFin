@@ -21,12 +21,24 @@ description: >
 # FutureFin diagnostics and tooling — measure, don't eyeball
 
 Everything here is verified against the code as of 2026-07-02 (v1.4.3, 31 migration
-files). All commands run from the repo root. The three scripts shipped with this
-skill live in `.claude/skills/futurefin-diagnostics-and-tooling/scripts/` and were
-**written against the API contract as of 2026-07-02, verified by code reading**
+files); the container/DB sections and `db-stats.sh` were re-verified 2026-08-16 for
+**v3.0.0** (34 migration files, self-contained image). All commands run from the repo
+root. The three scripts shipped with this skill live in
+`.claude/skills/futurefin-diagnostics-and-tooling/scripts/` and were **written against
+the API contract as of 2026-07-02, verified by code reading**
 (`apps/api/src/routes/mod.rs`, `apps/api/src/handlers/projection.rs`,
 `apps/api/src/state.rs`) — not by execution. They check preconditions and fail with
-actionable errors when the API/DB is not running.
+actionable errors when the API/DB is not running. They are shellcheck-clean and CI
+enforces it (`docker-stack` job, step "shellcheck (entrypoint + scripts)").
+
+**3.0.0 topology, once.** Production is a **single container** (`futurefin`) with
+PostgreSQL 16 embedded, listening **only on the Unix socket** `/var/run/postgresql` —
+no TCP listener, no host port, no `futurefin-database` service. Every DB measurement
+below therefore goes through `docker compose exec futurefin psql -h /var/run/postgresql
+…`. The development Postgres is a separate, autonomous compose
+(`docker compose -f docker-compose.dev.yml up -d`, project `futurefin-dev`, volume
+`devdata`, published on `127.0.0.1:5432`), which is what split-dev `cargo run` talks
+to. The old `docker-compose.split-dev.yml` override no longer exists.
 
 ## Vocabulary (once)
 
@@ -66,7 +78,7 @@ mutation!)** → 2× GET to show MISS→HIT after invalidation → logout.
 | Endpoint | Auth | What it proves |
 |---|---|---|
 | `GET /health` and `GET /v1/health` | none | Process is up; returns `{status, service, version}` — read `version` to confirm which build is running. |
-| `GET /v1/ready` | none | DB reachable (`SELECT 1`); 503 (`Unavailable`) if not. Distinguishes "app up, DB down" from "app down". |
+| `GET /v1/ready` | none | DB reachable (`SELECT 1`); 503 (`Unavailable`) if not. Distinguishes "app up, DB down" from "app down". **Since 3.0.0 this is also the compose healthcheck** (it replaced `/v1/health`, and the old `</dev/tcp/…` fallback was deliberately removed so a 503 can no longer be masked) — so the `docker ps` health state and this probe now say the same thing. |
 | `GET /openapi.json` | none | Full utoipa-generated contract. Snapshot it before/after a change: `curl -s $BASE/openapi.json | python3 -m json.tool > /tmp/openapi-before.json` and `diff` later. Any route/field drift shows up here without reading Rust. |
 
 ### Log axes (`RUST_LOG`)
@@ -91,10 +103,17 @@ in Docker, edit `RUST_LOG` in `docker-compose.yml` env and
 ### Container state
 
 ```bash
-docker compose ps                      # both services "running (healthy)"?
-docker compose logs -f futurefin       # API logs (cache HIT/MISS lines live here)
-docker compose logs futurefin-database # Postgres startup/errors
+docker compose ps                      # ONE service since 3.0.0: futurefin "running (healthy)"?
+docker compose logs -f futurefin       # entrypoint + PostgreSQL + API, interleaved
+# Isolate a source when the noise gets in the way:
+docker compose logs futurefin | grep    '\[futurefin-entrypoint\]'   # boot/migration/backup path
+docker compose logs futurefin | grep -v '\[futurefin-entrypoint\]'   # PostgreSQL + API
+docker compose logs futurefin | grep -E "projection cache (HIT|MISS|invalidated)"
 ```
+
+There is no `docker compose logs futurefin-database` anymore: PostgreSQL runs inside
+the same container with `logging_collector=off`, so its lines land on the same stdout
+as the API's. The `[futurefin-entrypoint]` prefix is the reliable discriminator.
 
 ## 2. Curl cookbook (verified against `routes/mod.rs`)
 
@@ -159,20 +178,34 @@ differ if members own different rows; `mine` has its own cache key.
 
 ## 3. DB-level diagnosis
 
-The prod compose does **not** expose Postgres on the host (no `ports:` on
-`futurefin-database`; only `docker-compose.split-dev.yml` adds `127.0.0.1:5432`).
-Go through the container:
+Since 3.0.0 the prod stack does **not** expose Postgres at all — not on the host and not
+even on TCP inside the container: the embedded server is started with an empty
+`listen_addresses` and `unix_socket_directories=/var/run/postgresql`, so the socket is
+the only way in. There is nothing to port-forward and no password to find. Go through
+the single container:
 
 ```bash
-docker compose exec -T futurefin-database psql -U futurefin -d futurefin -P pager=off -c '<SQL>'
+docker compose exec -T futurefin psql -h /var/run/postgresql -U futurefin -d futurefin \
+  -P pager=off -c '<SQL>'
 ```
 
-Useful queries (current tables as of 2026-07-02: `users, sessions, installation,
+(Development instead has a real TCP port, from its own compose:
+`docker compose -f docker-compose.dev.yml up -d` then
+`psql "postgres://futurefin:futurefin@127.0.0.1:5432/futurefin" -c '<SQL>'`.)
+
+Useful queries (tables as of 2026-08-16: `users, sessions, installation,
 installation_memberships, persons, categories, assets, liabilities, budget_entries,
-planning_flows, allocation_rules, _sqlx_migrations`):
+planning_flows, allocation_rules, history_snapshots, history_snapshot_items,
+transaction_imports, transactions, categorization_rules, recurring_transaction_rules,
+_sqlx_migrations` — enumerate them with the `db-stats.sh` row-count query rather than
+trusting this list):
 
 ```sql
--- Migration state: applied count must equal `ls apps/api/migrations/*.sql | wc -l` (31 as of 2026-07-02)
+-- Which server + which collation: an adopted 2.x cluster (created by postgres:16-alpine,
+-- musl) shows a different datcollate than a cluster initdb'd by the 3.x image (C.UTF-8).
+SHOW server_version;
+SELECT datname, datcollate, datcollversion FROM pg_database WHERE datname = current_database();
+-- Migration state: applied count must equal `ls apps/api/migrations/*.sql | wc -l` (34 as of 2026-08-16)
 SELECT count(*), max(version), bool_and(success) FROM _sqlx_migrations;
 -- Expired liabilities STILL stored is NORMAL (reads never mutate, v1.3.0):
 SELECT count(*) FROM liabilities WHERE payment_end_date < CURRENT_DATE;
@@ -189,7 +222,7 @@ e.g. the assets query in `build_installation_projection_input`), substitute the
 `$1`/`$2` binds with literals, and:
 
 ```bash
-docker compose exec -T futurefin-database psql -U futurefin -d futurefin -c \
+docker compose exec -T futurefin psql -h /var/run/postgresql -U futurefin -d futurefin -c \
   "EXPLAIN (ANALYZE, BUFFERS) SELECT id, name, current_value FROM assets
    WHERE installation_id = '<uuid>' ORDER BY sort_index ASC, name ASC;"
 ```
@@ -298,12 +331,24 @@ bash .claude/skills/futurefin-diagnostics-and-tooling/scripts/db-stats.sh
 # non-default credentials: POSTGRES_USER=... POSTGRES_DB=... DB_SERVICE=... bash .../db-stats.sh
 ```
 
-SELECT-only, via `docker compose exec futurefin-database psql`. Prints: applied
-`_sqlx_migrations` (count/latest/`all_success` + last 5) next to the repo file
+SELECT-only, via `docker compose exec -T $DB_SERVICE psql -h /var/run/postgresql`
+(`DB_SERVICE` defaults to **`futurefin`** — the single 3.0.0 service; it was
+`futurefin-database` in 2.x, hence the env var). It aborts with an actionable message
+if `docker` is missing or that compose service is not running, and warns if you are
+not in the repo root. Prints, in order: **server version and database collation**,
+applied `_sqlx_migrations` (count/latest/`all_success` + last 5) next to the repo file
 count, exact row counts for every `public` table, active-vs-expired sessions,
 expired-but-still-stored liabilities, pending users, and membership roles.
 
 Interpretation:
+- `SHOW server_version` / `datcollate` + `datcollversion` (added in 3.0.0): they tell
+  you **which cluster you are on**. A cluster created by the 3.x image reports the
+  `C.UTF-8` locale it was `initdb`'d with; a cluster **adopted** from a 2.x
+  `postgres:16-alpine` volume carries the old musl locale (e.g. `en_US.utf8`) — which
+  is exactly why the entrypoint runs a one-time `REINDEX DATABASE` on adoption. A
+  non-empty `datcollversion` mismatch warning in the PG logs plus an adopted collation
+  is the signature to look for when unique indexes behave oddly after an upgrade.
+  `server_version` also confirms a `pg_upgrade` really landed (16.x, not 15.x).
 - `applied` ≠ repo file count → the running image and your checkout disagree
   (old image, or migration added but API not restarted). `all_success = f` →
   a migration failed; startup should have failed loud.
@@ -329,7 +374,9 @@ Interpretation:
 
 ## Provenance and maintenance
 
-Facts date-stamped 2026-07-02 (v1.4.3). Re-verify before trusting:
+Facts date-stamped 2026-07-02 (v1.4.3); container/DB access, `db-stats.sh` and the
+table list re-verified 2026-08-16 (**v3.0.0**, 34 migration files). Re-verify before
+trusting:
 
 - Route paths / new endpoints: `grep -n 'route(' apps/api/src/routes/mod.rs`
 - Cache TTL + key shape: `grep -n 'PROJECTION_CACHE_TTL\|pub struct ProjectionCacheKey' -A6 apps/api/src/state.rs`
@@ -338,9 +385,25 @@ Facts date-stamped 2026-07-02 (v1.4.3). Re-verify before trusting:
 - Cache log messages grepped in §1: `grep -rn '"projection cache\|warm-up' apps/api/src/handlers/projection.rs apps/api/src/state.rs`
 - gzip layer: `grep -n 'CompressionLayer' apps/api/src/main.rs`
 - Default RUST_LOG: `grep -n 'futurefin_api=info' apps/api/src/main.rs docker-compose.yml`
-- Migration count (31 as of 2026-07-02): `ls apps/api/migrations/*.sql | wc -l`
+- Migration count (34 as of 2026-08-16; 31 as of 2026-07-02): `ls apps/api/migrations/*.sql | wc -l`
 - Table list: `grep -rn 'CREATE TABLE\|DROP TABLE\|RENAME TO' apps/api/migrations/`
-- DB port not host-exposed: `grep -n 'ports' docker-compose.yml docker-compose.split-dev.yml`
+  (careful: `persons` is dropped and later re-created — the live list is what
+  `db-stats.sh`'s row-count query returns)
+- Postgres is socket-only, no TCP at all:
+  `grep -n 'listen_addresses\|unix_socket_directories\|socket-only' apps/api/docker-entrypoint.sh`
+  and `grep -n 'ports:' -A2 docker-compose.yml` (only `APP_PORT:8080`, no 5432)
+- Single service + volumes: `grep -n 'services:\|futurefin:\|pgdata\|ffdata' docker-compose.yml`
+- Dev DB on 127.0.0.1:5432 lives in its own compose:
+  `grep -n '^name:\|5432\|devdata' docker-compose.dev.yml` (and `ls docker-compose*.yml` —
+  `docker-compose.split-dev.yml` no longer exists)
+- Readiness probe is the healthcheck, without a `/dev/tcp` fallback:
+  `grep -n 'CMD-SHELL\|v1/ready\|dev/tcp' docker-compose.yml`
+- Entrypoint log prefix used to split the three log sources:
+  `grep -n 'futurefin-entrypoint' apps/api/docker-entrypoint.sh | head -3`
+- `db-stats.sh` defaults and its two 3.0.0 queries:
+  `grep -n 'DB_SERVICE\|/var/run/postgresql\|server_version\|datcollate' .claude/skills/futurefin-diagnostics-and-tooling/scripts/db-stats.sh`
+- Scripts stay shellcheck-clean (CI enforces):
+  `shellcheck -S warning .claude/skills/futurefin-diagnostics-and-tooling/scripts/*.sh`
 - Two-phase fetch + chunking: `grep -n 'fetchProjectionTwoPhase\|density=hybrid\|import("./views/ProjectionView")' apps/web/src/App.tsx`
 - Smoke script env/behavior: `sed -n '1,45p' scripts/smoke-projection-cache.sh`
 - Size/timing norms (~260→30 KB, ~5 KB hybrid, ~82 vs ~841 points, sub-ms hit,
