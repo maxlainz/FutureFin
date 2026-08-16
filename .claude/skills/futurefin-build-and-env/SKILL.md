@@ -3,13 +3,16 @@ name: futurefin-build-and-env
 description: >
   Load this skill when you need to recreate the FutureFin development environment from scratch,
   build or run any part of the stack, or debug environment/build failures. Triggers: fresh clone /
-  new machine / "how do I run this", split-dev setup (cargo run + Vite), API-only mode, building
-  the Docker image locally, running the compose stack locally, cargo build/test commands, npm
-  typecheck/lint/build/test commands, TEST_DATABASE_URL, ff-test-db; and symptoms like
-  "connection refused 5432", "DATABASE_URL must be set", "Port 8080 is in use", Vite proxy
-  ECONNREFUSED, "migration ... was previously applied but has been modified" (checksum mismatch,
-  VersionMismatch), stale UI being served, `docker compose up` pulling instead of using a local
-  image, or leftover ff_test_* schemas. Do NOT use for: the catalog of env vars / query params /
+  new machine / "how do I run this", split-dev setup (cargo run + Vite against
+  docker-compose.dev.yml), API-only mode, building the self-contained Docker image locally (the
+  one that bundles PostgreSQL 16/15), running the compose stack locally, cargo build/test
+  commands, npm typecheck/lint/build/test commands, TEST_DATABASE_URL, ff-test-db; and symptoms
+  like "connection refused 5432", "DATABASE_URL must be set", "no persistent volume is mounted",
+  "Port 8080 is in use", Vite proxy ECONNREFUSED, "migration ... was previously applied but has
+  been modified" (checksum mismatch, VersionMismatch), stale UI being served, `docker compose up`
+  pulling instead of using a local image, a dev `.env` accidentally flipping the production image
+  into external-database mode, `ldd` "not found" failures during the image build, or leftover
+  ff_test_* schemas. Do NOT use for: the catalog of env vars / entrypoint vars / query params /
   fire_settings axes (futurefin-config-and-flags), production deploy/upgrade/rollback/backups
   (futurefin-run-and-operate), or writing/extending tests (futurefin-validation-and-qa).
 ---
@@ -17,16 +20,29 @@ description: >
 # FutureFin — build and environment recreation
 
 Runbook to go from a bare machine to a fully working FutureFin dev environment, plus every
-build/verify command and the known traps. Facts date-stamped 2026-07-02 (repo at v1.4.3,
-31 migration files). All commands are run from the repo root unless stated otherwise.
+build/verify command and the known traps. Facts re-verified **2026-08-16 for v3.0.0** (34
+migration files). All commands are run from the repo root unless stated otherwise.
+
+**What 3.0.0 changed for anyone setting up or building:** the published Docker image is now
+**self-contained** — PostgreSQL 16 runs inside the single `futurefin` container over a Unix
+socket, so `docker-compose.yml` has exactly one service, no env var is required in production, and
+the compose service `futurefin-database` is gone. `docker-compose.split-dev.yml` was **deleted**
+and replaced by the standalone `docker-compose.dev.yml` (own project `futurefin-dev`, service
+`db`, volume `devdata`). Everything in §5 (cargo/npm commands) and the ff-test-db recipe is
+unchanged.
 
 Vocabulary used below:
 - **split-dev** — the two-process dev mode: Rust API via `cargo run` on port 8081 + Vite dev
-  server on port 8080 proxying API paths. This is the normal way to develop.
+  server on port 8080 proxying API paths, both talking to the standalone dev Postgres on
+  127.0.0.1:5432. This is the normal way to develop; the embedded-Postgres image is *not* used in
+  dev.
 - **installation** — FutureFin's single-tenant unit: one row in the `installation` table per
   deployment; all financial data belongs to it.
 - **migrations** — SQLx SQL files embedded into the API binary from `apps/api/migrations/`,
   applied automatically at startup.
+- **entrypoint** — `apps/api/docker-entrypoint.sh`, PID 1 in the image since 3.0.0: it
+  initializes/adopts/upgrades the embedded cluster, takes automatic backups, and supervises both
+  PostgreSQL and the API. It exists only inside the container — split-dev never runs it.
 
 ## 1. Prerequisites
 
@@ -36,7 +52,7 @@ Vocabulary used below:
 | Node.js | 20+ works; prefer 24 | README says 20+, but CI runs Node 24 and the Docker build stage is `node:24.15-bookworm-slim` (upgraded from 22.14 in v1.0.7 to align with CI). Use 24 to match what actually gets tested/shipped. |
 | npm | 10+ | Workspaces feature required (root `package.json` declares `apps/web`). |
 | Docker + Compose v2 | any recent | Needed for Postgres in dev and for the local image build. BuildKit assumed (default in modern Docker). |
-| PostgreSQL | — | Never installed on the host; always runs in Docker (`postgres:16.4-alpine`, digest-pinned in `docker-compose.yml`). |
+| PostgreSQL | — | Never installed on the host. In **dev** it runs as its own container (`postgres:16.4-alpine`, digest-pinned in `docker-compose.dev.yml`). In **production** it is *inside* the FutureFin image (PostgreSQL 16 active, 15 bundled only for automatic `pg_upgrade` of older volumes — `LABEL com.futurefin.postgres.majors="15,16"`). |
 
 Workspace layout: Cargo workspace members `apps/api`, `crates/domain`, `crates/engine`
 (root `Cargo.toml`); npm workspace `apps/web` (package name `futurefin-web`).
@@ -49,30 +65,37 @@ Copy-pasteable sequence from a fresh clone:
 cp .env.example .env
 ```
 
-Edit `.env`: uncomment the three dev vars (they ship commented out) and set any
-`POSTGRES_PASSWORD` (compose refuses to start the DB without one):
+Edit `.env`: since 3.0.0 **every line ships commented out** (production needs no variable at all),
+so for split-dev uncomment the three dev vars in the "Desarrollo" block:
 
 ```env
-POSTGRES_PASSWORD=dev_only_password
 PORT=8081
 DATABASE_URL=postgres://futurefin:futurefin@127.0.0.1:5432/futurefin
 RUST_LOG=futurefin_api=info,tower_http=info
 ```
 
-Note: the dev `DATABASE_URL` uses user/password `futurefin:futurefin` — if you set a different
-`POSTGRES_PASSWORD`, either keep `POSTGRES_PASSWORD=futurefin` for dev or update the password
-inside `DATABASE_URL` to match. They must agree.
+`POSTGRES_PASSWORD` is no longer needed: `docker-compose.dev.yml` defaults user/password/db to
+`futurefin`/`futurefin`/`futurefin`, which is exactly what that `DATABASE_URL` expects. If you do
+set `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` in `.env`, the dev compose picks them up and
+your `DATABASE_URL` must be updated to match — they must agree.
 
-Start Postgres only, **with the split-dev override** (required — see trap T4):
+> **Do not leave the dev `DATABASE_URL` uncommented if you also run the production compose on this
+> machine.** The 3.0.0 image reads a `DATABASE_URL` as "I want an *external* database" and enters
+> the deprecated external mode (or, with an empty volume, starts a one-shot automigration). Keep
+> the dev and prod `.env` files separate — see trap T10.
+
+Start the dev Postgres — a **standalone** compose file, not an override (see trap T4):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.split-dev.yml up -d futurefin-database
+docker compose -f docker-compose.dev.yml up -d
 ```
 
-`docker-compose.yml` deliberately does not map the DB port to the host;
-`docker-compose.split-dev.yml` adds `127.0.0.1:5432:5432` so your local `cargo run` can connect.
-(CLAUDE.md/README show the short form `docker compose up -d futurefin-database` — that starts the
-DB but leaves it unreachable from the host.)
+That file (project name `futurefin-dev`, service `db`, container `futurefin-dev-db`, volume
+`devdata`) publishes `127.0.0.1:5432:5432` so your local `cargo run` can connect. It replaced
+`docker-compose.split-dev.yml`, which is **deleted**: the production compose no longer has a
+database service to override — PostgreSQL now lives inside the app image. Coming from a 2.x
+checkout and want to keep your old dev data? A comment inside `docker-compose.dev.yml` shows how:
+declare `devdata` as `external: true` with `name: futurefin_pgdata`.
 
 ```bash
 # Terminal 1 — API on :8081 (applies migrations on startup)
@@ -108,24 +131,26 @@ trap T6). Useful for curl-driven backend work.
 
 ## 4. Full local Docker-stack build ("Test local con Docker Desktop")
 
-Validates the complete production artifact (API + embedded frontend + DB) without waiting for CI
-to publish an image. This flow is also the release gate: run it before tagging any release.
+Validates the complete production artifact (API + embedded frontend + **embedded PostgreSQL**)
+without waiting for CI to publish an image. This flow is also the release gate: run it before
+tagging any release.
 
 ```bash
 # 1. Build the image locally (slow the first time; cached on rebuilds)
 #    --load is mandatory with BuildKit so the image lands in Docker's local store
 docker build --load -f apps/api/Dockerfile -t futurefin-local:dev .
 
-# 2. Make sure .env contains:
+# 2. Make sure .env contains (nothing else is required since 3.0.0):
 #      FUTUREFIN_IMAGE=futurefin-local
 #      FUTUREFIN_TAG=dev
-#      POSTGRES_PASSWORD=<anything>
+#    …and does NOT contain an uncommented DATABASE_URL (see trap T10).
 
 # 3. Start the stack with the local override (stops Compose from pulling the local-only image)
 docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d
 
-# 4. Smoke test
-curl -sf http://127.0.0.1:8080/v1/health
+# 4. Smoke test — /v1/ready also proves the embedded Postgres answers
+curl -sf http://127.0.0.1:8080/v1/ready
+docker compose logs futurefin | grep "initializing fresh PostgreSQL 16"   # first boot only
 
 # 5. Rebuild loop after changes (Docker layer cache reuses unchanged stages)
 docker build --load -f apps/api/Dockerfile -t futurefin-local:dev . \
@@ -133,15 +158,54 @@ docker build --load -f apps/api/Dockerfile -t futurefin-local:dev . \
      up -d --no-deps futurefin
 ```
 
-`docker-compose.local.yml` only adds `pull_policy: never` to the `futurefin` service so Compose
-uses the image that exists only locally. The Dockerfile is three stages: `node:24.15` builds the
-SPA (`npm ci && npm run build:web`, asserts `dist/index.html` exists), `rust:bookworm` builds
-`cargo build --release -p futurefin-api --locked`, and a `debian:bookworm-slim` runtime runs as
-`nobody` with `PORT=8080` and `WEB_STATIC_ROOT=/app/web`. All base images are digest-pinned.
+`docker-compose.local.yml` still only adds `pull_policy: never` to the `futurefin` service so
+Compose uses the image that exists only locally. Note there is **no `futurefin-database` service
+to wait for** any more — one container, two volumes (`pgdata` for the cluster, `ffdata` for
+automatic backups and pg_upgrade staging), `stop_grace_period: 60s`, healthcheck on `/v1/ready`
+with `start_period: 120s`.
 
-CI (`.github/workflows/ci.yml`) proves this exact flow: it builds the image, starts
-`docker compose up -d` with `FUTUREFIN_IMAGE=futurefin-ci`, and polls `/v1/health` for up to
-180 s. If your local stack passes step 4, you match CI's `docker-stack` job.
+### What the 3.0.0 Dockerfile actually does
+
+Five stages, all bases digest-pinned:
+
+1. `node:24.15-bookworm-slim` (`web`) — `npm ci && npm run build:web`, asserts `dist/index.html`
+   and a non-empty `dist/assets`.
+2. `rust:bookworm` (`rust-builder`) — `cargo build --release -p futurefin-api --locked`, and also
+   emits two manifests the entrypoint consumes without starting the API: `/version.txt` (app
+   version) and `/migration-versions.txt` (embedded migration versions, used to decide whether a
+   pre-migration backup is needed).
+3. `postgres:16-bookworm` (`pg16`) and 4. `postgres:15-bookworm` (`pg15`) — **source stages only**,
+   never a base. Their digests must be the ones of the multi-arch **index** (manifest list), not a
+   single-platform manifest, or the arm64 build fails.
+5. `debian:bookworm-slim` (`runtime`) — copies `/usr/lib/postgresql/{15,16}` +
+   `/usr/share/postgresql/{15,16}` + `libpq.so.5` out of those stages, installs the runtime libs
+   plus `gosu`/`curl`, and runs `localedef … en_US.UTF-8` (without that locale glibc cannot open
+   the `datcollate=en_US.utf8` clusters produced by the 2.x official image).
+
+Three build-time rules that will bite you if you edit the Dockerfile:
+
+- **The `ldd` gate.** After the COPYs, a `RUN` loop runs `ldd` over every PG binary and `.so` and
+  **fails the build** if any prints "not found". If you add a PG extension or drop a lib from the
+  `apt-get install` list, this is what catches it — read the printed list, add the missing package.
+- **No `VOLUME` instruction, deliberately.** Basing the runtime on `postgres:*` (or declaring
+  `VOLUME` yourself) creates anonymous volumes on a plain `docker run`, which Watchtower silently
+  loses on recreate. The entrypoint instead uses `mountpoint` to detect a real volume and refuses
+  to start without one (trap T9).
+- **`llvmjit.so` is deleted on purpose** (~120 MB of libLLVM this workload never uses). Expect a
+  final image around 320–360 MB uncompressed; check with `docker image ls futurefin-local:dev`.
+
+Two unprivileged users exist in the image: `postgres` (uid 999, like the official Debian image) for
+the postmaster and `futurefin` (uid 10001) for the API. PID 1 is root only so it can `chown` an
+adopted 2.x volume and then `gosu` down.
+
+CI (`.github/workflows/ci.yml`, job `docker-stack`) proves far more than a health poll now:
+`shellcheck -S warning` over the entrypoint and scripts, an image-sanity step (both PG majors
+report `--version`, the `com.futurefin.postgres.majors=15,16` label is `15,16`, and a volume-less
+`docker run` **must abort** with "no persistent volume"), a fresh install polled on `/v1/ready`, a
+Watchtower-style `--force-recreate`, an ordered-shutdown check, a real 2.x stack upgraded to 3.x
+reusing the volume, external-DB compat, one-shot automigration, and a 15→16 `pg_upgrade`. It is
+the only automated evidence of "no data loss" — do not weaken it. If your local stack passes step
+4, you match the first CI scenario only.
 
 ## 5. Build / verify command reference
 
@@ -171,11 +235,12 @@ TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_
 Each integration test creates its own schema `ff_test_<uuid>` inside `futurefin_test`, applies all
 migrations there, and runs against the real router. Schemas are leaked on purpose (see trap T8).
 
-What CI runs (as of 2026-07-02, `.github/workflows/ci.yml`): `cargo build -p futurefin-api
---locked`, `cargo test -p futurefin-engine --locked`, `npm install` + `typecheck:web` +
-`build:web`, and the Docker-stack build + health smoke. **CI does NOT run the Postgres
-integration tests** — no `TEST_DATABASE_URL` in CI — so run `cargo test --workspace` locally
-before considering backend changes verified.
+What CI runs (as of 2026-08-16, `.github/workflows/ci.yml`, three jobs): `rust` = `cargo build -p
+futurefin-api --locked` + `cargo test -p futurefin-engine --locked`; `web` = Node 24, `npm
+install` + `typecheck:web` + `build:web`; `docker-stack` = the shellcheck + image-sanity +
+five-scenario container suite described in §4. **CI still does NOT run the Postgres integration
+tests** — no `TEST_DATABASE_URL` in CI — so run `cargo test --workspace` locally before
+considering backend changes verified.
 
 ## 6. How migrations run in dev
 
@@ -192,9 +257,18 @@ before considering backend changes verified.
   binary doesn't embed. The same mechanism is why downgrading a production image past a
   migration is blocked (see futurefin-run-and-operate). If branch B has a *different file for
   the same version* you get a checksum mismatch instead (trap T5). Recovery for branch
-  switching: recreate the dev DB — `docker compose down` + `docker volume rm futurefin_pgdata` +
-  restart (or, only if branch A's migration was genuinely additive and harmless, delete its row
-  from `_sqlx_migrations` by hand).
+  switching: recreate the dev DB — note the volume name **changed in 3.0.0**, the dev compose
+  project is `futurefin-dev` and its volume is `devdata`:
+
+  ```bash
+  docker compose -f docker-compose.dev.yml down
+  docker volume rm futurefin-dev_devdata      # was futurefin_pgdata before 3.0.0
+  docker compose -f docker-compose.dev.yml up -d
+  ```
+
+  (or, only if branch A's migration was genuinely additive and harmless, delete its row from
+  `_sqlx_migrations` by hand). `futurefin_pgdata` is now a *production* volume name — never
+  `docker volume rm` it to fix a dev problem.
 - There is **no auto-repair**: a checksum-repair loop existed and was deliberately removed in
   v1.3.0 because it masked drift. Mismatches now fail loud at startup and must be fixed by hand.
   Never reintroduce auto-repair.
@@ -219,19 +293,39 @@ CWD on the machine that built it) then (2) `.env` in the current working directo
 API still connects to the old DB. Cause: same dotenvy rule — process env wins. Fix: `unset
 DATABASE_URL PORT RUST_LOG` (or start a fresh shell), rerun.
 
-**T4 — API can't reach Postgres: "Connection refused (os error 111)" on 127.0.0.1:5432.** Cause:
-you started the DB with plain `docker compose up -d futurefin-database`; the base compose file
-does not publish the DB port to the host (production hardening). Fix: restart with the override —
-`docker compose -f docker-compose.yml -f docker-compose.split-dev.yml up -d futurefin-database`.
-Never use that override in production.
+**T4 — API can't reach Postgres: "Connection refused (os error 111)" on 127.0.0.1:5432.** Cause
+(**changed in 3.0.0**): you never started the dev database. There is no split-dev override any
+more and the production compose has no database service at all — its PostgreSQL lives inside the
+app container on a Unix socket, unreachable from the host by design. Fix: start the standalone dev
+compose, which is the only thing that publishes 5432:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.dev.yml ps      # db should be healthy
+```
+
+Related near-misses: `docker compose up -d` (the production file) starts the all-in-one container
+and gives you *nothing* on 5432; and if you also have a production stack running, its `APP_PORT`
+8080 will collide with Vite (T1).
 
 **T5 — Startup fails with migration checksum/version mismatch** (`VersionMismatch` /
 "was previously applied but has been modified"). Cause: a migration file changed after it was
 applied to this DB (edited migration, branch switch where the same version differs, or a squash).
-Fix (dev DB only, and only if the current file is genuinely equivalent/idempotent):
+Fix (dev DB only, and only if the current file is genuinely equivalent/idempotent) — note **how
+you reach psql changed in 3.0.0**:
 
 ```bash
-docker exec -it futurefin-database psql -U futurefin -d futurefin \
+# dev (standalone Postgres, port published on the host — no container needed)
+psql postgres://futurefin:futurefin@127.0.0.1:5432/futurefin \
+  -c "DELETE FROM _sqlx_migrations WHERE version = <X>"
+
+# same thing from inside the dev container, if you prefer
+docker compose -f docker-compose.dev.yml exec db psql -U futurefin -d futurefin \
+  -c "DELETE FROM _sqlx_migrations WHERE version = <X>"
+
+# production / local all-in-one image: PostgreSQL is INSIDE the futurefin container,
+# socket-only — there is no futurefin-database container and no TCP port to hit
+docker compose exec futurefin psql -h /var/run/postgresql -U futurefin -d futurefin \
   -c "DELETE FROM _sqlx_migrations WHERE version = <X>"
 ```
 
@@ -263,12 +357,37 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -Atc \
   | docker exec -i ff-test-db psql -U futurefin -d futurefin_test
 ```
 
+**T9 — The container exits immediately with "no persistent volume is mounted at
+/var/lib/postgresql/data".** (New in 3.0.0.) Cause: **not a bug — a deliberate anti-data-loss
+guard.** The embedded PostgreSQL writes into `$PGDATA`; if that path is not a real mountpoint, the
+cluster would live in the container's ephemeral layer and vanish on the next `docker run` /
+Watchtower recreate. The image declares no `VOLUME` precisely so anonymous volumes can't hide the
+problem, and the entrypoint checks with `mountpoint` before doing anything. Fix: run it through
+compose (`docker-compose.yml` mounts `pgdata` and `ffdata`) or add `-v` yourself on a bare
+`docker run`. Only for genuinely throwaway containers, set `FUTUREFIN_ALLOW_EPHEMERAL_DB=1` —
+it starts with a warning and the data dies with the container. CI asserts this abort happens, so
+do not "fix" it by relaxing the guard.
+
+**T10 — A dev `.env` turns the production image into an external-database install.** (New in
+3.0.0.) Symptom: you start the local/production stack and the logs print a big `DEPRECATED`
+banner about an external database, or it refuses to start with "DATABASE_URL is set and the
+embedded volume is empty, but the external database does not answer" — possibly after starting a
+one-shot **automigration** from a database you didn't mean to migrate. Cause: `DATABASE_URL` is
+uncommented in the `.env` you passed to compose. The 3.0.0 image treats any `DATABASE_URL` that
+doesn't point at `/var/run/postgresql` as "use an external database"; with a mounted but empty
+`pgdata` it dumps that external DB and restores it into the embedded one, once. Fix: keep separate
+`.env` files — the dev one (with `PORT=8081` + `DATABASE_URL` for split-dev) and the prod/local
+one (only `FUTUREFIN_IMAGE`/`FUTUREFIN_TAG`/`APP_PORT`, everything else commented) — and pass the
+right one with `--env-file`. To force the embedded database regardless of a stray variable, set
+`FUTUREFIN_DB_MODE=embedded`.
+
 ## 8. When NOT to use this skill
 
-- Cataloging or adding **env vars, compose knobs, query params, `fire_settings` axes** →
-  `.claude/skills/futurefin-config-and-flags/SKILL.md` (this skill only touches the vars needed to
-  boot a dev environment).
-- **Production** deploy, upgrade, rollback, backups, logs, health monitoring →
+- Cataloging or adding **env vars, entrypoint `FUTUREFIN_*` vars, compose knobs, query params,
+  `fire_settings` axes** → `.claude/skills/futurefin-config-and-flags/SKILL.md` (this skill only
+  touches the vars needed to boot a dev environment or build the image).
+- **Production** deploy, upgrade, rollback, the 2.x → 3.x migration path, automigration,
+  `pg_upgrade`, backups, logs, health monitoring →
   `.claude/skills/futurefin-run-and-operate/SKILL.md`.
 - **Writing or extending tests**, TestApp harness, parity fixtures, evidence standards →
   `.claude/skills/futurefin-validation-and-qa/SKILL.md` (here you only learn how to *run* them).
@@ -276,19 +395,27 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -Atc \
 
 ## 9. Provenance and maintenance
 
-Written 2026-07-02 against v1.4.3 from: `CLAUDE.md`, `README.md`, `.env.example`,
-`rust-toolchain.toml`, `package.json` + `apps/web/package.json`, `apps/api/Cargo.toml`,
-`apps/api/Dockerfile`, `apps/web/vite.config.ts`, `apps/api/src/{main.rs,db.rs}`,
-`docker-compose{,.local,.split-dev}.yml`, `.github/workflows/ci.yml`, `.claude/env-and-config.md`,
-`.claude/tests.md`, `CHANGELOG.md` (v1.0.7 Node bump, v1.3.0 auto-repair
-removal). Re-verify before trusting volatile facts:
+Written 2026-07-02 against v1.4.3; **fully re-verified 2026-08-16 against v3.0.0** (self-contained
+image) from: `CLAUDE.md`, `README.md`, `.env.example`, `rust-toolchain.toml`, `package.json` +
+`apps/web/package.json`, `apps/api/Cargo.toml`, `apps/api/Dockerfile`,
+**`apps/api/docker-entrypoint.sh`**, `apps/web/vite.config.ts`, `apps/api/src/{main.rs,db.rs}`,
+`docker-compose{,.local,.dev}.yml`, `.github/workflows/ci.yml`, `.claude/env-and-config.md`,
+`.claude/tests.md`, `CHANGELOG.md` (v1.0.7 Node bump, v1.3.0 auto-repair removal, 3.0.0
+self-contained image). Re-verify before trusting volatile facts — every command below was run on
+2026-08-16:
 
-- Version: `grep '^version' apps/api/Cargo.toml`
-- Migration count/list: `ls apps/api/migrations | wc -l`
+- Version: `grep '^version' apps/api/Cargo.toml` (3.0.0)
+- Migration count/list: `ls apps/api/migrations | wc -l` (34)
+- Compose files present — must be exactly three, and **no** `split-dev`: `ls docker-compose*.yml`
+- Dev DB definition (project name, service, port, volume): `cat docker-compose.dev.yml`
+- Production stack is one service, two volumes, `/v1/ready` healthcheck: `cat docker-compose.yml`
+- Image stages, `ldd` gate, locale, users, label, absence of `VOLUME`:
+  `grep -n '^FROM\|^ENV\|^LABEL\|^HEALTHCHECK\|localedef\|ldd\|llvmjit\|useradd\|VOLUME' apps/api/Dockerfile`
+- Entrypoint modes, guards and defaults:
+  `grep -n 'FUTUREFIN_[A-Z_]*:-\|no persistent volume\|invalid FUTUREFIN_DB_MODE\|export DATABASE_URL' apps/api/docker-entrypoint.sh`
 - Node versions: `grep node-version .github/workflows/ci.yml` and `grep 'FROM node' apps/api/Dockerfile`
 - Vite proxy paths + port defaults: `grep -n 'FUTUREFIN_API_PORT\|WEB_DEV_PORT\|proxy' apps/web/vite.config.ts`
-- API port default + env loading: `grep -n 'fn port\|fn load_env' -A 5 apps/api/src/main.rs`
-- Migration runner (no auto-repair): `grep -n 'migrate!' apps/api/src/db.rs`
-- Split-dev DB port mapping: `cat docker-compose.split-dev.yml`
-- CI jobs actually run: `grep -n 'run:' .github/workflows/ci.yml`
+- API port default + env loading + connect timeout: `grep -n 'fn port\|fn load_env\|FUTUREFIN_DB_CONNECT_TIMEOUT_SECS' -A 5 apps/api/src/main.rs`
+- Migration runner (no auto-repair) + connect retry: `grep -n 'migrate!\|connect_with_retry' apps/api/src/db.rs`
+- CI jobs actually run: `grep -n 'name:\|run:' .github/workflows/ci.yml`
 - Test DB recipe: TL;DR block at top of `.claude/tests.md`
