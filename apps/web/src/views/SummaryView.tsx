@@ -17,6 +17,7 @@ import {
   METRIC_DASH,
   formatCurrencyAmount,
   formatCurrencyNumber,
+  formatCurrencyOrDash,
   formatDebtToAssetsPct,
   formatFractionAsPercent,
   formatPercentDisplay,
@@ -140,6 +141,27 @@ export function SummaryView({
   const showSavingsRateTile =
     showMetrics && fh && savingsRatePrimary !== METRIC_DASH;
 
+  // KPI «Ahorro real vs esperado»: real = promedio bruto 12m de movimientos (ausente sin datos),
+  // esperado = neto del presupuesto (capturado pre-override B/C, no sigue el modo). Se muestra
+  // también con esperado ≤ 0 («de −300 € esperados»); solo se oculta cuando faltan los dos lados.
+  const savingsExpected = fh?.savings_expected_monthly_equivalent ?? null;
+  const hasSavingsActual =
+    (fh?.savings_actual_months_with_data ?? 0) > 0 &&
+    fh?.savings_actual_monthly_avg_12m != null;
+  const showSavingsVsExpectedTile =
+    showMetrics &&
+    fh !== undefined &&
+    savingsExpected !== null &&
+    (hasSavingsActual || !isZeroMoneyMetric(savingsExpected));
+  const savingsVsExpectedValue = formatCurrencyOrDash(
+    hasSavingsActual ? fh?.savings_actual_monthly_avg_12m : null,
+    currencyIso,
+  );
+  const savingsVsExpectedParenthetical =
+    savingsExpected !== null
+      ? `de ${formatCurrencyAmount(savingsExpected, currencyIso)} esperados`
+      : undefined;
+
   // Runway: el servidor marca `runway_is_indefinite` (y `runway_months` a null) cuando la
   // retirada anual cabe en el SWR de `fire_settings` (pestaña Jubilación) — la tarjeta sigue
   // siendo relevante (es la mejor noticia posible) y el paréntesis explica el porqué.
@@ -157,6 +179,7 @@ export function SummaryView({
     fh &&
     (showSavingsMoneyTile ||
       showSavingsRateTile ||
+      showSavingsVsExpectedTile ||
       !isZeroMoneyMetric(fh.liquid_assets_total) ||
       showRunwayTile ||
       !isZeroFractionMetric(fh.upcoming_coverage_ratio));
@@ -233,6 +256,13 @@ export function SummaryView({
                   label="Tasa de ahorro"
                   value={savingsRatePrimary}
                   parenthetical={savingsRateParenthetical}
+                />
+              ) : null}
+              {showSavingsVsExpectedTile ? (
+                <MetricCard
+                  label="Ahorro real vs esperado"
+                  value={savingsVsExpectedValue}
+                  parenthetical={savingsVsExpectedParenthetical}
                 />
               ) : null}
               {!isZeroMoneyMetric(summary.financial_health.liquid_assets_total) ? (

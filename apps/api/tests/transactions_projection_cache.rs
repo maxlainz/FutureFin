@@ -166,7 +166,7 @@ async fn mode_a_mutations_do_not_touch_projection_cache() {
         .post_json_with_cookie(
             "/v1/transactions",
             json!({ "op_date": "2026-06-15", "concept": "Nomina", "amount": "1500",
-                    "kind": "income", "recurrence": { "day_of_month": 15 } }),
+                    "kind": "income", "recurrence": {} }),
             &owner.cookie,
         )
         .await;
@@ -273,13 +273,13 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         .post_json_with_cookie(
             "/v1/transactions",
             json!({ "op_date": op_date.format("%Y-%m-%d").to_string(), "concept": "Nomina",
-                    "amount": "1500", "kind": "income", "recurrence": { "day_of_month": 15 } }),
+                    "amount": "1500", "kind": "income", "recurrence": {} }),
             &owner.cookie,
         )
         .await;
     assert_eq!(rec.status, http::StatusCode::CREATED);
     let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
-    // El alta con fecha pasada ya backfillea hasta hoy; rebobinamos por SQL (cursor a un mes previo
+    // El alta con fecha pasada ya backfillea los meses cerrados; rebobinamos por SQL (cursor a un mes previo
     // al origen, sin instancias) para que el ENDPOINT materialize vuelva a generar ≥1 y podamos
     // probar que invalida en modo B.
     let rid = Uuid::parse_str(&rule_id).unwrap();

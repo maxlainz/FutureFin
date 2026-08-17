@@ -11,16 +11,16 @@ use crate::handlers::installation::{installation_naive_today, require_installati
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::LedgerViewQuery;
 use crate::handlers::session::require_session_user;
+use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::schema::{
-    compute_fingerprint, normalize_concept_field, normalize_kind, normalize_notes,
-    BatchCreateBody, CreateTransactionBody, ImportBatchResponse, MonthEntry, PatchTransactionBody,
+    compute_fingerprint, normalize_concept_field, normalize_kind, normalize_notes, BatchCreateBody,
+    CreateTransactionBody, ImportBatchResponse, MonthEntry, PatchTransactionBody,
     TransactionResponse, SOURCE_MANUAL,
 };
-use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::{
     assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
-    invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal, row_to_response, TxnRow,
-    TXN_SELECT,
+    invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal, row_to_response,
+    TxnRow, TXN_SELECT,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -62,7 +62,9 @@ async fn validate_manual(
     let concept = normalize_concept_field(&body.concept)?;
     let amount = body.amount.round_dp(4);
     if amount.is_zero() {
-        return Err(ApiError::BadRequest("amount_zero: amount must not be zero".into()));
+        return Err(ApiError::BadRequest(
+            "amount_zero: amount must not be zero".into(),
+        ));
     }
     assert_transaction_category(pool, iid, &kind, body.category_id).await?;
     assert_asset_in_installation(pool, iid, body.linked_asset_id).await?;
@@ -121,31 +123,34 @@ pub(super) async fn insert_manual(
     Ok(id)
 }
 
-/// Inserta un movimiento manual y, si `recurrence_day` está presente, crea su regla recurrente,
-/// enlaza el movimiento a ella y backfillea las instancias intermedias hasta `today` — todo en el
-/// MISMO commit `tx`. Devuelve el id del movimiento de origen. Secuencia compartida por
-/// `create_transaction` y el bucle de `create_batch` (el manejo del `ordinal` queda fuera: se pasa
-/// ya resuelto). `today` debe ser `Some` cuando `recurrence_day` lo es (invariante de los callers).
+/// Inserta un movimiento manual y, si `is_recurring`, crea su regla recurrente (resolución
+/// mensual), enlaza el movimiento a ella y backfillea las instancias de los meses cerrados
+/// intermedios — todo en el MISMO commit `tx`. Devuelve el id del movimiento de origen. Secuencia
+/// compartida por `create_transaction` y el bucle de `create_batch` (el manejo del `ordinal` queda
+/// fuera: se pasa ya resuelto). `today` debe ser `Some` cuando `is_recurring` (invariante de los
+/// callers).
 async fn insert_manual_with_recurrence(
     tx: &mut PgConnection,
     iid: Uuid,
     owner: Uuid,
     p: &PreparedTxn,
     ordinal: i32,
-    recurrence_day: Option<i32>,
+    is_recurring: bool,
     today: Option<NaiveDate>,
 ) -> Result<Uuid, ApiError> {
     let cursor = recurring::month_start_of(p.op_date);
-    let rule_id = match recurrence_day {
-        Some(day) => Some(recurring::insert_rule(&mut *tx, iid, owner, p, day, cursor).await?),
-        None => None,
+    let rule_id = if is_recurring {
+        Some(recurring::insert_rule(&mut *tx, iid, owner, p, cursor).await?)
+    } else {
+        None
     };
     let id = insert_manual(&mut *tx, iid, owner, p, ordinal, rule_id).await?;
-    // Backfill: un alta con fecha pasada deja creadas TODAS las instancias intermedias hasta hoy en
-    // el mismo commit (antes solo aparecían cuando el frontend llamaba a materialize al montar).
-    if let (Some(rule_id), Some(day)) = (rule_id, recurrence_day) {
+    // Backfill: un alta con fecha pasada deja creadas TODAS las instancias de meses cerrados
+    // intermedios en el mismo commit (antes solo aparecían cuando el frontend llamaba a
+    // materialize al montar).
+    if let Some(rule_id) = rule_id {
         let today = today.expect("today computed when recurrence present");
-        recurring::backfill_new_rule(&mut *tx, iid, owner, rule_id, p, day, cursor, today).await?;
+        recurring::backfill_new_rule(&mut *tx, iid, owner, rule_id, p, cursor, today).await?;
     }
     Ok(id)
 }
@@ -185,15 +190,13 @@ pub async fn create_transaction(
     }
 
     let prepared = validate_manual(&state.pool, iid, &body).await?;
-    // Recurrencia (opcional): valida el día del mes ANTES de abrir la transacción.
-    let recurrence_day = match &body.recurrence {
-        Some(rec) => Some(recurring::resolve_rule_day(rec, body.op_date)?),
-        None => None,
-    };
+    // Recurrencia (opcional): marcador sin campos — las reglas tienen resolución mensual.
+    let is_recurring = body.recurrence.is_some();
     // "Hoy" de la instalación para el backfill de meses intermedios (solo si hay recurrencia).
-    let today = match recurrence_day {
-        Some(_) => Some(installation_naive_today(&state.pool, iid).await?),
-        None => None,
+    let today = if is_recurring {
+        Some(installation_naive_today(&state.pool, iid).await?)
+    } else {
+        None
     };
     // Cota al backfill: una recurrencia con fecha demasiado antigua generaría cientos de instancias.
     if let Some(today) = today {
@@ -202,9 +205,16 @@ pub async fn create_transaction(
 
     let mut tx = state.pool.begin().await?;
     let ordinal = next_fingerprint_ordinal(&mut tx, iid, user.id.0, &prepared.fingerprint).await?;
-    let id =
-        insert_manual_with_recurrence(&mut tx, iid, user.id.0, &prepared, ordinal, recurrence_day, today)
-            .await?;
+    let id = insert_manual_with_recurrence(
+        &mut tx,
+        iid,
+        user.id.0,
+        &prepared,
+        ordinal,
+        is_recurring,
+        today,
+    )
+    .await?;
     tx.commit().await?;
 
     invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
@@ -279,13 +289,16 @@ pub async fn create_batch(
             Some(&o) => o,
             None => next_fingerprint_ordinal(&mut tx, iid, user.id.0, &p.fingerprint).await?,
         };
-        let recurrence_day = match &b.recurrence {
-            Some(rec) => Some(recurring::resolve_rule_day(rec, b.op_date)?),
-            None => None,
-        };
-        let id =
-            insert_manual_with_recurrence(&mut tx, iid, user.id.0, p, ord, recurrence_day, today)
-                .await?;
+        let id = insert_manual_with_recurrence(
+            &mut tx,
+            iid,
+            user.id.0,
+            p,
+            ord,
+            b.recurrence.is_some(),
+            today,
+        )
+        .await?;
         next_ord.insert(p.fingerprint.clone(), ord + 1);
         ids.push(id);
     }
@@ -331,7 +344,11 @@ fn parse_month(raw: &str) -> Result<(NaiveDate, NaiveDate), ApiError> {
         .ok_or_else(|| ApiError::BadRequest("month must be YYYY-MM".into()))?;
     let start = NaiveDate::from_ymd_opt(year, month, 1)
         .ok_or_else(|| ApiError::BadRequest("month must be a valid YYYY-MM".into()))?;
-    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
     let end = NaiveDate::from_ymd_opt(ny, nm, 1).expect("valid next month");
     Ok((start, end))
 }
@@ -362,7 +379,10 @@ pub async fn list_transactions(
 ) -> Result<Json<Vec<TransactionResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let view = LedgerViewQuery {
+        view: q.view.clone(),
+    }
+    .resolve();
     let out = list_transactions_core(
         &state.pool,
         iid,
@@ -403,7 +423,11 @@ pub(crate) async fn list_transactions_core(
     let mut arg = view.next_arg_index();
     let mut sql = format!("{TXN_SELECT} WHERE {scope}");
     if month_range.is_some() {
-        sql.push_str(&format!(" AND t.op_date >= ${} AND t.op_date < ${}", arg, arg + 1));
+        sql.push_str(&format!(
+            " AND t.op_date >= ${} AND t.op_date < ${}",
+            arg,
+            arg + 1
+        ));
         arg += 2;
     }
     if kind.is_some() {
@@ -561,7 +585,9 @@ pub async fn patch_transaction(
     let new_op_date = body.op_date.unwrap_or(current.op_date);
     let new_amount = body.amount.map(|a| a.round_dp(4)).unwrap_or(current.amount);
     if new_amount.is_zero() {
-        return Err(ApiError::BadRequest("amount_zero: amount must not be zero".into()));
+        return Err(ApiError::BadRequest(
+            "amount_zero: amount must not be zero".into(),
+        ));
     }
     let new_concept = match &body.concept {
         Some(c) => normalize_concept_field(c)?,
@@ -605,9 +631,7 @@ pub async fn patch_transaction(
         Some(k) => assert_transaction_category(&state.pool, iid, k, new_category).await?,
         None => {
             if new_category.is_some() {
-                return Err(ApiError::BadRequest(
-                    "category requires a kind".into(),
-                ));
+                return Err(ApiError::BadRequest("category requires a kind".into()));
             }
         }
     }
@@ -800,7 +824,8 @@ pub async fn delete_import(
     }
     if !q.confirm {
         return Err(ApiError::BadRequest(
-            "confirm_required: pass ?confirm=true to undo this import (deletes its transactions)".into(),
+            "confirm_required: pass ?confirm=true to undo this import (deletes its transactions)"
+                .into(),
         ));
     }
     let res = sqlx::query(

@@ -94,7 +94,7 @@ export function RecurringRulesModal({
                   <div className="recurring-item-main">
                     <span className="recurring-item-concept">{r.concept}</span>
                     <span className="recurring-item-meta muted">
-                      {categoryLabel} · día {r.day_of_month}
+                      {categoryLabel} · a mes cerrado
                     </span>
                   </div>
                   <span className="recurring-item-amount num">{amountLabel}</span>

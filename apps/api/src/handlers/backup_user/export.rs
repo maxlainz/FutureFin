@@ -219,7 +219,6 @@ async fn fetch_recurring_rules(
         String,         // kind
         Option<String>, // cat_scope
         Option<String>, // cat_name
-        i32,            // day_of_month
         Option<Uuid>,   // linked_asset_id
         Option<Uuid>,   // linked_liability_id
         Option<String>, // notes
@@ -227,7 +226,7 @@ async fn fetch_recurring_rules(
     );
     let rows: Vec<Row> = sqlx::query_as(
         r#"SELECT r.id, r.concept, r.amount, r.kind, c.scope AS cat_scope, c.name AS cat_name,
-                  r.day_of_month, r.linked_asset_id, r.linked_liability_id, r.notes,
+                  r.linked_asset_id, r.linked_liability_id, r.notes,
                   r.last_materialized_month
            FROM recurring_transaction_rules r
            LEFT JOIN categories c ON c.id = r.category_id
@@ -254,11 +253,10 @@ async fn fetch_recurring_rules(
                 amount: r.2,
                 kind: r.3,
                 category_ref,
-                day_of_month: r.6,
-                linked_asset_index: r.7.and_then(|a| asset_id_to_index.get(&a).copied()),
-                linked_liability_index: r.8.and_then(|l| liability_id_to_index.get(&l).copied()),
-                notes: r.9,
-                last_materialized_month: r.10,
+                linked_asset_index: r.6.and_then(|a| asset_id_to_index.get(&a).copied()),
+                linked_liability_index: r.7.and_then(|l| liability_id_to_index.get(&l).copied()),
+                notes: r.8,
+                last_materialized_month: r.9,
             }
         })
         .collect();

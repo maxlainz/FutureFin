@@ -24,7 +24,10 @@ fn approx(a: f64, b: f64) {
 
 fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
     let zero = (year as i64) * 12 + (month as i64 - 1) + delta as i64;
-    ((zero.div_euclid(12)) as i32, (zero.rem_euclid(12) + 1) as u32)
+    (
+        (zero.div_euclid(12)) as i32,
+        (zero.rem_euclid(12) + 1) as u32,
+    )
 }
 
 fn date_in(year: i32, month: u32, day: u32) -> String {
@@ -53,8 +56,14 @@ async fn manual(
     if let Some(l) = linked_liability {
         body["linked_liability_id"] = json!(l);
     }
-    let r = app.post_json_with_cookie("/v1/transactions", body, cookie).await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "manual {concept}: {r:?}");
+    let r = app
+        .post_json_with_cookie("/v1/transactions", body, cookie)
+        .await;
+    assert_eq!(
+        r.status,
+        http::StatusCode::CREATED,
+        "manual {concept}: {r:?}"
+    );
 }
 
 async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
@@ -99,12 +108,17 @@ async fn recurring(
     concept: &str,
     amount: &str,
     kind: &str,
-    day_of_month: u32,
 ) {
     let body = json!({ "op_date": date, "concept": concept, "amount": amount, "kind": kind,
-                       "recurrence": { "day_of_month": day_of_month } });
-    let r = app.post_json_with_cookie("/v1/transactions", body, cookie).await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "recurring {concept}: {r:?}");
+                       "recurrence": {} });
+    let r = app
+        .post_json_with_cookie("/v1/transactions", body, cookie)
+        .await;
+    assert_eq!(
+        r.status,
+        http::StatusCode::CREATED,
+        "recurring {concept}: {r:?}"
+    );
 }
 
 /// `financial_health` del summary para una query dada.
@@ -130,7 +144,16 @@ async fn mode_a_summary_is_budget_based() {
     // Transacciones presentes: en modo A deben IGNORARSE por completo.
     let today = server_today(&app, &owner.cookie).await;
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
-    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "9999", "income", None).await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 10),
+        "Sueldo",
+        "9999",
+        "income",
+        None,
+    )
+    .await;
 
     let h = health(&app, &owner.cookie, "/v1/summary").await;
     approx(parse_dec(&h["income_monthly_equivalent"]), 5000.0);
@@ -184,9 +207,36 @@ async fn mode_b_summary_uses_avg_with_hybrid_subtraction() {
 
     // Único mes con datos (el último completo): income 3000; expense total 1500 (400 → L1).
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
-    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None).await;
-    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Cuota L1", "-400", "expense", Some(&l1_id)).await;
-    manual(&app, &owner.cookie, &date_in(y1, m1, 12), "Resto", "-1100", "expense", None).await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 10),
+        "Sueldo",
+        "3000",
+        "income",
+        None,
+    )
+    .await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 11),
+        "Cuota L1",
+        "-400",
+        "expense",
+        Some(&l1_id),
+    )
+    .await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 12),
+        "Resto",
+        "-1100",
+        "expense",
+        None,
+    )
+    .await;
 
     set_mode_b(&app, &owner.cookie).await;
 
@@ -218,7 +268,16 @@ async fn mode_b_summary_zero_months_falls_back_to_budget() {
 
     // Solo una transacción en el mes en curso (parcial) → fuera de ventana → months_with_data = 0.
     let today = server_today(&app, &owner.cookie).await;
-    manual(&app, &owner.cookie, &date_in(today.year(), today.month(), 5), "Hoy", "9999", "income", None).await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(today.year(), today.month(), 5),
+        "Hoy",
+        "9999",
+        "income",
+        None,
+    )
+    .await;
 
     set_mode_b(&app, &owner.cookie).await;
 
@@ -227,7 +286,10 @@ async fn mode_b_summary_zero_months_falls_back_to_budget() {
     approx(parse_dec(&h["income_monthly_equivalent"]), 5000.0);
     approx(parse_dec(&h["expense_regular_monthly_equivalent"]), 2000.0);
     approx(parse_dec(&h["net_monthly_equivalent"]), 3000.0);
-    assert_eq!(h["savings_source"], "budget", "sin datos → fuente efectiva = budget");
+    assert_eq!(
+        h["savings_source"], "budget",
+        "sin datos → fuente efectiva = budget"
+    );
     assert_eq!(h["savings_source_months_with_data"].as_u64().unwrap(), 0);
 }
 
@@ -239,14 +301,52 @@ async fn mode_b_summary_zero_months_falls_back_to_budget() {
 async fn mode_b_summary_household_vs_mine_scoping() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
-    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+    let member = app
+        .register_and_approve_member(&owner, "bob", "member")
+        .await;
 
     let today = server_today(&app, &owner.cookie).await;
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
-    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Owner in", "2000", "income", None).await;
-    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Owner out", "-800", "expense", None).await;
-    manual(&app, &member.cookie, &date_in(y1, m1, 12), "Member in", "1000", "income", None).await;
-    manual(&app, &member.cookie, &date_in(y1, m1, 13), "Member out", "-400", "expense", None).await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 10),
+        "Owner in",
+        "2000",
+        "income",
+        None,
+    )
+    .await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 11),
+        "Owner out",
+        "-800",
+        "expense",
+        None,
+    )
+    .await;
+    manual(
+        &app,
+        &member.cookie,
+        &date_in(y1, m1, 12),
+        "Member in",
+        "1000",
+        "income",
+        None,
+    )
+    .await;
+    manual(
+        &app,
+        &member.cookie,
+        &date_in(y1, m1, 13),
+        "Member out",
+        "-400",
+        "expense",
+        None,
+    )
+    .await;
 
     set_mode_b(&app, &owner.cookie).await;
 
@@ -260,7 +360,10 @@ async fn mode_b_summary_household_vs_mine_scoping() {
     // mine (owner): income 2000, expense 800 → net 1200.
     let mine = health(&app, &owner.cookie, "/v1/summary?view=mine").await;
     approx(parse_dec(&mine["income_monthly_equivalent"]), 2000.0);
-    approx(parse_dec(&mine["expense_regular_monthly_equivalent"]), 800.0);
+    approx(
+        parse_dec(&mine["expense_regular_monthly_equivalent"]),
+        800.0,
+    );
     approx(parse_dec(&mine["net_monthly_equivalent"]), 1200.0);
 }
 
@@ -286,8 +389,25 @@ async fn mode_b_summary_pseudo_empty_month_excluded() {
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
 
     // Mes real M-2 (income manual 2000) + mes solo-recurrente M-1 (nómina recurrente 3000).
-    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "Sueldo", "2000", "income", None).await;
-    recurring(&app, &owner.cookie, &date_in(y1, m1, 1), "Nomina rec", "3000", "income", 1).await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y2, m2, 10),
+        "Sueldo",
+        "2000",
+        "income",
+        None,
+    )
+    .await;
+    recurring(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 1),
+        "Nomina rec",
+        "3000",
+        "income",
+    )
+    .await;
 
     set_mode_b(&app, &owner.cookie).await;
     let h = health(&app, &owner.cookie, "/v1/summary").await;
@@ -346,9 +466,36 @@ async fn mode_c_income_not_overwritten() {
     assert_eq!(l2.status, http::StatusCode::CREATED, "{l2:?}");
 
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
-    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None).await;
-    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Cuota L1", "-400", "expense", Some(&l1_id)).await;
-    manual(&app, &owner.cookie, &date_in(y1, m1, 12), "Resto", "-1100", "expense", None).await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 10),
+        "Sueldo",
+        "3000",
+        "income",
+        None,
+    )
+    .await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 11),
+        "Cuota L1",
+        "-400",
+        "expense",
+        Some(&l1_id),
+    )
+    .await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 12),
+        "Resto",
+        "-1100",
+        "expense",
+        None,
+    )
+    .await;
 
     set_mode_c(&app, &owner.cookie).await;
 
@@ -358,4 +505,209 @@ async fn mode_c_income_not_overwritten() {
     approx(parse_dec(&h["net_monthly_equivalent"]), 3400.0);
     assert_eq!(h["savings_source"], "budget_income_real_expense");
     assert_eq!(h["savings_source_months_with_data"].as_u64().unwrap(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// KPI «ahorro real vs esperado» — campos servidos en los TRES modos
+// ---------------------------------------------------------------------------
+
+/// Modo A con transacciones: el numerador «real» existe aunque el modo ignore las transacciones
+/// para el resto de KPIs. Presupuesto 5000/3000 → esperado 2000 (== net del modo A). Dos meses
+/// cerrados: M-2 (+3000/−2000) y M-1 (+3000/−2500) → real = (6000 − 4500) / 2 = 750.
+#[tokio::test]
+async fn mode_a_real_vs_expected_present_with_transactions() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "3000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y2, m2) = shift_month(today.year(), today.month(), -2);
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "S1", "3000", "income", None).await;
+    manual(&app, &owner.cookie, &date_in(y2, m2, 11), "G1", "-2000", "expense", None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "S2", "3000", "income", None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "G2", "-2500", "expense", None).await;
+
+    let h = health(&app, &owner.cookie, "/v1/summary").await;
+    approx(parse_dec(&h["savings_expected_monthly_equivalent"]), 2000.0);
+    approx(
+        parse_dec(&h["savings_expected_monthly_equivalent"]),
+        parse_dec(&h["net_monthly_equivalent"]),
+    );
+    approx(parse_dec(&h["savings_actual_monthly_avg_12m"]), 750.0);
+    assert_eq!(h["savings_actual_months_with_data"].as_u64().unwrap(), 2);
+    // El contrato del modo A no se contamina: fuente efectiva budget con months 0.
+    assert_eq!(h["savings_source"], "budget");
+    assert_eq!(h["savings_source_months_with_data"].as_u64().unwrap(), 0);
+}
+
+/// Sin transacciones: el «real» va AUSENTE del JSON (no "0", que significaría «ahorras 0 €»).
+#[tokio::test]
+async fn real_vs_expected_absent_without_transactions() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "4000").await;
+    budget(&app, &owner.cookie, &expense_cat, "3600").await;
+
+    let h = health(&app, &owner.cookie, "/v1/summary").await;
+    approx(parse_dec(&h["savings_expected_monthly_equivalent"]), 400.0);
+    assert!(
+        h.get("savings_actual_monthly_avg_12m").is_none(),
+        "sin meses con datos el campo debe omitirse: {h:?}"
+    );
+    assert_eq!(h["savings_actual_months_with_data"].as_u64().unwrap(), 0);
+}
+
+/// Modo B: `net_monthly_equivalent` pasa a base real, pero el «esperado» sigue siendo el neto del
+/// PRESUPUESTO (captura pre-override). Misma data que el test de modo A: real 750, esperado 2000.
+#[tokio::test]
+async fn mode_b_expected_is_budget_net_not_override() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "3000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y2, m2) = shift_month(today.year(), today.month(), -2);
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "S1", "3000", "income", None).await;
+    manual(&app, &owner.cookie, &date_in(y2, m2, 11), "G1", "-2000", "expense", None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "S2", "3000", "income", None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "G2", "-2500", "expense", None).await;
+
+    set_mode_b(&app, &owner.cookie).await;
+
+    // Sin pasivos: net del modo B = 3000 − 2250 = 750 ≠ esperado 2000.
+    let h = health(&app, &owner.cookie, "/v1/summary").await;
+    approx(parse_dec(&h["net_monthly_equivalent"]), 750.0);
+    approx(parse_dec(&h["savings_expected_monthly_equivalent"]), 2000.0);
+    approx(parse_dec(&h["savings_actual_monthly_avg_12m"]), 750.0);
+    assert_eq!(h["savings_actual_months_with_data"].as_u64().unwrap(), 2);
+}
+
+/// Modo C: el «real» del KPI es idéntico al de los modos A/B con la misma data — es bruto y no
+/// sigue el modo (ni la resta híbrida ni el income de presupuesto lo tocan).
+#[tokio::test]
+async fn mode_c_actual_is_raw() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+    budget(&app, &owner.cookie, &income_cat, "5000").await;
+    budget(&app, &owner.cookie, &expense_cat, "3000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y2, m2) = shift_month(today.year(), today.month(), -2);
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "S1", "3000", "income", None).await;
+    manual(&app, &owner.cookie, &date_in(y2, m2, 11), "G1", "-2000", "expense", None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "S2", "3000", "income", None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "G2", "-2500", "expense", None).await;
+
+    set_mode_c(&app, &owner.cookie).await;
+
+    let h = health(&app, &owner.cookie, "/v1/summary").await;
+    approx(parse_dec(&h["income_monthly_equivalent"]), 5000.0); // income de presupuesto (modo C)
+    approx(parse_dec(&h["savings_actual_monthly_avg_12m"]), 750.0); // bruto, idéntico a A/B
+    approx(parse_dec(&h["savings_expected_monthly_equivalent"]), 2000.0);
+    assert_eq!(h["savings_actual_months_with_data"].as_u64().unwrap(), 2);
+}
+
+/// Ambos lados del KPI siguen el scope: household suma presupuesto y transacciones de todos;
+/// `?view=mine` solo los del solicitante.
+#[tokio::test]
+async fn real_vs_expected_household_vs_mine_scoping() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app
+        .register_and_approve_member(&owner, "bob", "member")
+        .await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    budget(&app, &owner.cookie, &income_cat, "3000").await;
+    budget(&app, &member.cookie, &income_cat, "1000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "O in", "2000", "income", None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "O out", "-800", "expense", None).await;
+    manual(&app, &member.cookie, &date_in(y1, m1, 12), "M in", "1000", "income", None).await;
+    manual(&app, &member.cookie, &date_in(y1, m1, 13), "M out", "-400", "expense", None).await;
+
+    // household: esperado 4000 (3000+1000); real (3000 − 1200) / 1 = 1800.
+    let hh = health(&app, &owner.cookie, "/v1/summary").await;
+    approx(parse_dec(&hh["savings_expected_monthly_equivalent"]), 4000.0);
+    approx(parse_dec(&hh["savings_actual_monthly_avg_12m"]), 1800.0);
+
+    // mine (owner): esperado 3000; real (2000 − 800) / 1 = 1200.
+    let mine = health(&app, &owner.cookie, "/v1/summary?view=mine").await;
+    approx(parse_dec(&mine["savings_expected_monthly_equivalent"]), 3000.0);
+    approx(parse_dec(&mine["savings_actual_monthly_avg_12m"]), 1200.0);
+}
+
+/// El «real» hereda el contrato de meses «reales»: un mes solo-recurrente no cuenta (ni numerador
+/// ni denominador), un mes con manual sí.
+#[tokio::test]
+async fn real_vs_expected_pseudo_empty_month_excluded() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    budget(&app, &owner.cookie, &income_cat, "1000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y2, m2) = shift_month(today.year(), today.month(), -2);
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "Sueldo", "2000", "income", None).await;
+    recurring(
+        &app,
+        &owner.cookie,
+        &date_in(y1, m1, 1),
+        "Nomina rec",
+        "3000",
+        "income",
+    )
+    .await;
+
+    let h = health(&app, &owner.cookie, "/v1/summary").await;
+    assert_eq!(
+        h["savings_actual_months_with_data"].as_u64().unwrap(),
+        1,
+        "el mes solo-recurrente no cuenta"
+    );
+    approx(parse_dec(&h["savings_actual_monthly_avg_12m"]), 2000.0);
+}
+
+/// El mes en curso (parcial) queda fuera de la ventana del «real».
+#[tokio::test]
+async fn real_vs_expected_ignores_current_month() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let income_cat = app.create_category(&owner, "income", "Nómina").await;
+    budget(&app, &owner.cookie, &income_cat, "1000").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    manual(
+        &app,
+        &owner.cookie,
+        &date_in(today.year(), today.month(), 1),
+        "Hoy",
+        "9999",
+        "income",
+        None,
+    )
+    .await;
+
+    let h = health(&app, &owner.cookie, "/v1/summary").await;
+    approx(parse_dec(&h["savings_expected_monthly_equivalent"]), 1000.0);
+    assert!(
+        h.get("savings_actual_monthly_avg_12m").is_none(),
+        "el mes en curso no alimenta el promedio: {h:?}"
+    );
+    assert_eq!(h["savings_actual_months_with_data"].as_u64().unwrap(), 0);
 }
