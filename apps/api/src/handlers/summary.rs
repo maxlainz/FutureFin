@@ -95,6 +95,25 @@ pub struct FinancialHealthMetrics {
     /// Meses con datos usados por el promedio real cuando `savings_source == transactions_avg`; `0`
     /// en modo `budget` (configurado o por fallback).
     pub savings_source_months_with_data: u32,
+    /// Ahorro mensual **esperado** (KPI «ahorro real vs esperado»): el neto del presupuesto
+    /// (`net_monthly_equivalent` del snapshot de budget, cuotas derivadas incluidas), capturado
+    /// ANTES del override B/C — no sigue el modo `savings_source`, así que en B/C puede diferir
+    /// del `net_monthly_equivalent` servido arriba.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub savings_expected_monthly_equivalent: Decimal,
+    /// Ahorro mensual **real**: promedio bruto `income − expense` de las transacciones de los
+    /// últimos 12 meses civiles completos (mes en curso fuera; meses solo-recurrentes excluidos;
+    /// SIN resta híbrida de cuotas — las cuotas pagadas ya cuentan como gasto, simétrico al
+    /// esperado, que incluye las cuotas derivadas). Ausente ⟺ sin meses con datos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub savings_actual_monthly_avg_12m: Option<Decimal>,
+    /// Meses «reales» que sustentan `savings_actual_monthly_avg_12m` (`0` = sin movimientos). A
+    /// diferencia de `savings_source_months_with_data`, se sirve con su valor real en los tres
+    /// modos (aquel vale 0 en modo `budget` por contrato con el frontend).
+    pub savings_actual_months_with_data: u32,
 }
 
 #[derive(Debug, FromRow)]
@@ -320,8 +339,7 @@ pub(crate) async fn summary_core(
         .await?;
     let liquid_assets: Decimal = liquid_rows.iter().map(|(v, _)| *v).sum();
 
-    let budget_totals =
-        ledger_budget_totals_for_summary(pool, iid, user_id, view, today).await?;
+    let budget_totals = ledger_budget_totals_for_summary(pool, iid, user_id, view, today).await?;
 
     // Base presupuesto (modo A). Los modos B/C con datos sustituyen TODA la base de gasto por el
     // promedio real 12m (y el modo B también el income): `expense_reg` = gasto real efectivo,
@@ -333,67 +351,76 @@ pub(crate) async fn summary_core(
     let mut expense_tot = budget_totals.expense_total_monthly_equivalent;
     let mut net_m = budget_totals.net_monthly_equivalent;
 
+    // Denominador del KPI «ahorro real vs esperado»: siempre el neto del presupuesto, capturado
+    // ANTES del override B/C (los modos con datos reescriben `net_m` con la base real).
+    let savings_expected_monthly_equivalent = budget_totals.net_monthly_equivalent;
+
     // Fuente del ahorro efectiva (tras fallback) + meses con datos, para el response.
     let mut effective_savings_source = SavingsSource::Budget;
     let mut savings_source_months_with_data: u32 = 0;
 
+    // Promedio 12m de transacciones: base de los modos B/C y numerador «real» del KPI en los TRES
+    // modos (por eso se calcula fuera del gate; sin transacciones cuesta 1 query, con ellas 3).
+    let avg = transactions_12m_avg(pool, iid, user_id, view, today).await?;
+
     // `source` viene de `installation_calendar_inflation_savings` (mismo parser del JSONB
     // `fire_settings` que el engine y las mutaciones de transacciones).
-    if source.uses_transactions() {
-        let avg = transactions_12m_avg(pool, iid, user_id, view, today).await?;
-        if avg.months_with_data > 0 {
-            // Liabilities activas (por payment_end_date) con su cuota nominal mensual, con la MISMA
-            // vista/scope que el resto del summary. La resta híbrida la aplica el helper compartido.
-            let liab_scope2 = view.scope_where("");
-            let liab_today_ph2 = view.next_arg_index();
-            let liab_sql = format!(
-                r#"SELECT id, payment_amount, payment_frequency
+    if source.uses_transactions() && avg.months_with_data > 0 {
+        // Liabilities activas (por payment_end_date) con su cuota nominal mensual, con la MISMA
+        // vista/scope que el resto del summary. La resta híbrida la aplica el helper compartido.
+        let liab_scope2 = view.scope_where("");
+        let liab_today_ph2 = view.next_arg_index();
+        let liab_sql = format!(
+            r#"SELECT id, payment_amount, payment_frequency
                    FROM liabilities
                    WHERE {liab_scope2}
                      AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph2})"#
-            );
-            let active_liabs: Vec<(Uuid, Option<Decimal>, Option<String>)> = view
-                .bind_scope_as(sqlx::query_as(&liab_sql), iid, user_id)
-                .bind(today)
-                .fetch_all(pool)
-                .await?;
-            let active: Vec<(Uuid, Decimal)> = active_liabs
-                .into_iter()
-                .map(|(id, amount, freq)| {
-                    (id, liability_monthly_payment(amount, freq.as_deref()))
-                })
-                .collect();
-            let debt_service: Decimal = active.iter().map(|(_, q)| *q).sum();
-            let (income_eff, expense_eff) = effective_avg_income_expense(&avg, &active);
-            // Modo B: income del promedio real. Modo C: income del presupuesto (NO se sobreescribe).
-            // `match` exhaustivo (como projection.rs): una variante futura fuerza decisión del
-            // compilador en vez de heredar silenciosamente el `else` del modo C.
-            match source {
-                SavingsSource::TransactionsAvg => income_m = income_eff,
-                // Modo C: income del presupuesto; `income_m` conserva su valor previo.
-                SavingsSource::BudgetIncomeRealExpense => {}
-                // Inalcanzable: la rama está guardada por `source.uses_transactions()`, que es
-                // false para `Budget`. No-op explícito para mantener el `match` exhaustivo.
-                SavingsSource::Budget => {}
-            }
-            expense_reg = expense_eff;
-            // El `net` debe casar con modo A (`net_monthly_equivalent` de budget.rs incluye las
-            // cuotas derivadas) y con la pendiente del chart (que resta el debt service). El KPI
-            // `monthly_net_excluding_derived_debt` sigue siendo income − expense_reg (sin cuotas).
-            // Con `income_m` (income_eff en B, presupuesto en C) una sola línea sirve a ambos modos.
-            net_m = income_m - expense_eff - debt_service;
-            // Base de gasto derivada/total también en modo real: la línea «derivada» pasa a ser el
-            // servicio de deuda nominal de los pasivos activos y el total la suma con el gasto
-            // efectivo. Así se restauran en B/C las dos identidades que en modo A siempre valen:
-            //   expense_total = expense_regular + expense_derived
-            //   net           = income − expense_total
-            // (antes se dejaban los valores de presupuesto, que no casaban con `expense_reg`/`net`).
-            expense_der = debt_service;
-            expense_tot = expense_eff + debt_service;
-            effective_savings_source = source;
-            savings_source_months_with_data = avg.months_with_data;
+        );
+        let active_liabs: Vec<(Uuid, Option<Decimal>, Option<String>)> = view
+            .bind_scope_as(sqlx::query_as(&liab_sql), iid, user_id)
+            .bind(today)
+            .fetch_all(pool)
+            .await?;
+        let active: Vec<(Uuid, Decimal)> = active_liabs
+            .into_iter()
+            .map(|(id, amount, freq)| (id, liability_monthly_payment(amount, freq.as_deref())))
+            .collect();
+        let debt_service: Decimal = active.iter().map(|(_, q)| *q).sum();
+        let (income_eff, expense_eff) = effective_avg_income_expense(&avg, &active);
+        // Modo B: income del promedio real. Modo C: income del presupuesto (NO se sobreescribe).
+        // `match` exhaustivo (como projection.rs): una variante futura fuerza decisión del
+        // compilador en vez de heredar silenciosamente el `else` del modo C.
+        match source {
+            SavingsSource::TransactionsAvg => income_m = income_eff,
+            // Modo C: income del presupuesto; `income_m` conserva su valor previo.
+            SavingsSource::BudgetIncomeRealExpense => {}
+            // Inalcanzable: la rama está guardada por `source.uses_transactions()`, que es
+            // false para `Budget`. No-op explícito para mantener el `match` exhaustivo.
+            SavingsSource::Budget => {}
         }
+        expense_reg = expense_eff;
+        // El `net` debe casar con modo A (`net_monthly_equivalent` de budget.rs incluye las
+        // cuotas derivadas) y con la pendiente del chart (que resta el debt service). El KPI
+        // `monthly_net_excluding_derived_debt` sigue siendo income − expense_reg (sin cuotas).
+        // Con `income_m` (income_eff en B, presupuesto en C) una sola línea sirve a ambos modos.
+        net_m = income_m - expense_eff - debt_service;
+        // Base de gasto derivada/total también en modo real: la línea «derivada» pasa a ser el
+        // servicio de deuda nominal de los pasivos activos y el total la suma con el gasto
+        // efectivo. Así se restauran en B/C las dos identidades que en modo A siempre valen:
+        //   expense_total = expense_regular + expense_derived
+        //   net           = income − expense_total
+        // (antes se dejaban los valores de presupuesto, que no casaban con `expense_reg`/`net`).
+        expense_der = debt_service;
+        expense_tot = expense_eff + debt_service;
+        effective_savings_source = source;
+        savings_source_months_with_data = avg.months_with_data;
     }
+
+    // Numerador del KPI «ahorro real vs esperado»: bruto y SIN condicionar al modo, para que la
+    // cifra sea la misma en A/B/C (el gasto real ya contiene las cuotas como transacciones).
+    let savings_actual_months_with_data = avg.months_with_data;
+    let savings_actual_monthly_avg_12m =
+        (avg.months_with_data > 0).then(|| avg.income_avg - avg.expense_avg);
 
     let monthly_net_excluding_derived_debt = income_m - expense_reg;
 
@@ -458,6 +485,9 @@ pub(crate) async fn summary_core(
         upcoming_coverage_ratio,
         savings_source: effective_savings_source,
         savings_source_months_with_data,
+        savings_expected_monthly_equivalent,
+        savings_actual_monthly_avg_12m,
+        savings_actual_months_with_data,
     };
 
     let net_worth = total_assets - total_liabilities;

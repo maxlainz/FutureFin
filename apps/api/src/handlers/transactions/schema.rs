@@ -71,7 +71,12 @@ pub fn canonical_amount(amount: Decimal) -> String {
 
 /// Huella de dedup: `source · op_date ISO · importe canónico 4dp · normalize_concept(concept)`
 /// unidos con `\u{1f}`. Computada en Rust (nunca almacenada en el CSV/backup).
-pub fn compute_fingerprint(source: &str, op_date: NaiveDate, amount: Decimal, concept: &str) -> String {
+pub fn compute_fingerprint(
+    source: &str,
+    op_date: NaiveDate,
+    amount: Decimal,
+    concept: &str,
+) -> String {
     format!(
         "{source}{sep}{date}{sep}{amount}{sep}{concept}",
         sep = FINGERPRINT_SEP,
@@ -221,12 +226,11 @@ pub struct ImportBatchResponse {
 // ---------------------------------------------------------------------------
 
 /// Convierte una alta manual en una regla recurrente: se crea la regla-plantilla y la transacción
-/// que la origina queda enlazada a ella. `day_of_month` omitido → el día de `op_date`.
+/// que la origina queda enlazada a ella. Marcador sin campos: las reglas tienen resolución
+/// MENSUAL (la instancia del mes M se fecha en su último día y solo se materializa con M ya
+/// cerrado). El antiguo `day_of_month` (≤3.1.0) se ignora si un cliente viejo lo envía.
 #[derive(Debug, Deserialize, ToSchema)]
-pub struct RecurrenceSpec {
-    #[serde(default)]
-    pub day_of_month: Option<u32>,
-}
+pub struct RecurrenceSpec {}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateTransactionBody {
@@ -604,7 +608,6 @@ pub struct RecurringRuleResponse {
     pub category_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category_name: Option<String>,
-    pub day_of_month: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub linked_asset_id: Option<Uuid>,
@@ -638,17 +641,32 @@ mod tests {
     fn normalize_concept_uppercases_ascii_keeps_accents_collapses_ws() {
         // ASCII-uppercase only: the accented chars stay verbatim (é not É).
         assert_eq!(normalize_concept("  Café   Módena  "), "CAFé MóDENA");
-        assert_eq!(normalize_concept("WWW.AMAZON* AB12CD34"), "WWW.AMAZON* AB12CD34");
+        assert_eq!(
+            normalize_concept("WWW.AMAZON* AB12CD34"),
+            "WWW.AMAZON* AB12CD34"
+        );
         assert_eq!(normalize_concept("estalvi"), "ESTALVI");
         assert_eq!(normalize_concept("\tSopar\n entrada "), "SOPAR ENTRADA");
     }
 
     #[test]
     fn canonical_amount_is_stable_across_scales() {
-        assert_eq!(canonical_amount(Decimal::from_str("-26.000000000").unwrap()), "-26.0000");
-        assert_eq!(canonical_amount(Decimal::from_str("-3").unwrap()), "-3.0000");
-        assert_eq!(canonical_amount(Decimal::from_str("-3.00").unwrap()), "-3.0000");
-        assert_eq!(canonical_amount(Decimal::from_str("1761.34").unwrap()), "1761.3400");
+        assert_eq!(
+            canonical_amount(Decimal::from_str("-26.000000000").unwrap()),
+            "-26.0000"
+        );
+        assert_eq!(
+            canonical_amount(Decimal::from_str("-3").unwrap()),
+            "-3.0000"
+        );
+        assert_eq!(
+            canonical_amount(Decimal::from_str("-3.00").unwrap()),
+            "-3.0000"
+        );
+        assert_eq!(
+            canonical_amount(Decimal::from_str("1761.34").unwrap()),
+            "1761.3400"
+        );
         // -3 and -3.00 collapse to the same canonical string → same fingerprint.
         assert_eq!(
             canonical_amount(Decimal::from_str("-3").unwrap()),
@@ -659,20 +677,42 @@ mod tests {
     #[test]
     fn fingerprint_is_deterministic_and_dedups_scale_variants() {
         let d = NaiveDate::from_ymd_opt(2026, 6, 2).unwrap();
-        let a = compute_fingerprint("n26", d, Decimal::from_str("-26.000000000").unwrap(), " Sopar  entrada ");
+        let a = compute_fingerprint(
+            "n26",
+            d,
+            Decimal::from_str("-26.000000000").unwrap(),
+            " Sopar  entrada ",
+        );
         let b = compute_fingerprint("n26", d, Decimal::from_str("-26").unwrap(), "Sopar entrada");
         assert_eq!(a, b, "scale + whitespace variants must share a fingerprint");
         // Different source, date, amount or concept must diverge.
-        assert_ne!(a, compute_fingerprint("myinvestor", d, Decimal::from_str("-26").unwrap(), "Sopar entrada"));
-        assert_ne!(a, compute_fingerprint("n26", d, Decimal::from_str("-27").unwrap(), "Sopar entrada"));
+        assert_ne!(
+            a,
+            compute_fingerprint(
+                "myinvestor",
+                d,
+                Decimal::from_str("-26").unwrap(),
+                "Sopar entrada"
+            )
+        );
+        assert_ne!(
+            a,
+            compute_fingerprint("n26", d, Decimal::from_str("-27").unwrap(), "Sopar entrada")
+        );
     }
 
     #[test]
     fn derive_rule_pattern_strips_numeric_reference_suffixes() {
         assert_eq!(derive_rule_pattern("WWW.AMAZON* AB12CD34"), "WWW.AMAZON*");
-        assert_eq!(derive_rule_pattern("PERIODO 27/05/2026 27/06/2026"), "PERIODO");
+        assert_eq!(
+            derive_rule_pattern("PERIODO 27/05/2026 27/06/2026"),
+            "PERIODO"
+        );
         assert_eq!(derive_rule_pattern("Nomina Juny"), "NOMINA JUNY");
-        assert_eq!(derive_rule_pattern("Aportacion automatica cartera"), "APORTACION AUTOMATICA CARTERA");
+        assert_eq!(
+            derive_rule_pattern("Aportacion automatica cartera"),
+            "APORTACION AUTOMATICA CARTERA"
+        );
         // Never strip the only token even if it has digits.
         assert_eq!(derive_rule_pattern("365 ALMENDRO"), "365 ALMENDRO");
         assert_eq!(derive_rule_pattern("A1B2"), "A1B2");

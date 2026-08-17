@@ -4,6 +4,55 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] - 2026-08-17
+
+Dos cambios sobre la misma base: las estadísticas de movimientos. `schema_version` del `.ffbackup`
+sube a **7** (los v1..v6 siguen importando). **Breaking acotado** en las reglas recurrentes (abajo).
+
+### Added — KPI «Ahorro real vs esperado» en el Dashboard
+
+- Nueva card en «Salud financiera» (Resumen): el ahorro **real** en grande (promedio mensual de los
+  movimientos de los últimos 12 meses civiles completos) y debajo «(de X € esperados)» (el neto del
+  presupuesto). **Por qué**: la tasa de ahorro sola no dice si el plan se cumple — hasta ahora el
+  Dashboard mostraba una única base (presupuesto en modo A, promedio real en B/C), nunca las dos a
+  la vez, así que la pregunta «¿ahorro lo que planifiqué?» no tenía respuesta a la vista.
+- Tres campos aditivos en `financial_health` de `GET /v1/summary` (no breaking; también visibles
+  vía la tool MCP `get_summary`): `savings_expected_monthly_equivalent` (neto del presupuesto,
+  capturado antes del override B/C — no sigue el modo), `savings_actual_monthly_avg_12m` (promedio
+  **bruto** `income − expense`, sin resta híbrida de cuotas: las cuotas pagadas ya cuentan como
+  gasto, simétrico al esperado que incluye las cuotas derivadas; **ausente** sin meses con datos) y
+  `savings_actual_months_with_data`. Idénticos en los tres modos `savings_source`; para servir el
+  real también en modo A, `/v1/summary` calcula ahora siempre el promedio 12m (1 query extra sin
+  transacciones, 3 con; el endpoint no tiene cache). Sin movimientos la card muestra «—»; con
+  esperado ≤ 0 se muestra igualmente (el numerador sigue siendo información).
+
+### Changed — **breaking**: reglas recurrentes con resolución mensual (sin `day_of_month`)
+
+- **Por qué**: las instancias recurrentes se fechaban al día configurado (típicamente el 1) y
+  aparecían al principio del mes en curso, distorsionando sus estadísticas — el flujo real del
+  usuario registra el resto de operaciones al cerrar el mes. Un día configurable por regla no
+  aporta nada a una estadística mensual y era la fuente de la distorsión, así que se elimina la
+  resolución diaria en vez de parchearla.
+- **Semántica nueva** (materializador y backfill del alta comparten el mismo loop): la instancia
+  del mes M se fecha en el **último día de M** (cuenta en las estadísticas de M — `op_date` es la
+  única atribución mensual) y solo se crea con M ya **cerrado** (servidor en M+1). El mes en curso
+  jamás se materializa, ni siquiera en su último día. Se descartó fechar en el 1 de M+1: movería la
+  nómina de enero a las estadísticas de febrero.
+- **Breaking** (sign-off del owner en la sesión de diseño):
+  - Migración SQL que **elimina la columna** `recurring_transaction_rules.day_of_month`
+    (data-loss deliberado: se pierde la configuración por-regla del día; las instancias ya
+    materializadas conservan su `op_date` histórico — para meses cerrados el bucket mensual es el
+    mismo, así que promedios y comparativas no cambian).
+  - `RecurringRuleResponse` pierde `day_of_month`; `recurrence` en `POST /v1/transactions[/batch]`
+    pasa a ser un marcador vacío `{}` — un cliente ≤3.1.0 que aún envíe `day_of_month` no falla:
+    el campo se **ignora** (y el error `recurrence_day_out_of_range` desaparece).
+  - `.ffbackup` `schema_version` **6 → 7**: `BackupRecurringRule` pierde `day_of_month`
+    (`payload_v6_to_v7` lo descarta al importar backups viejos; la cadena v1→…→v7 completa sigue
+    importando).
+- Las reglas existentes adoptan la política automáticamente (era un atributo de la plantilla, no
+  de las instancias). Las instancias del mes en curso ya materializadas a día 1 se conservan: un
+  único mes residual que desaparece al cambiar de mes.
+
 ## [3.1.0] - 2026-08-17
 
 **Conector de claude.ai web: OAuth 2.1 embebido**. El límite conocido de la 3.0.0 — «el conector de

@@ -712,11 +712,6 @@ async fn insert_payload(
                 "recurring_rule_kind_invalid: kind must be expense, income or savings".into(),
             ));
         }
-        if !(1..=31).contains(&r.day_of_month) {
-            return Err(ApiError::BadRequest(
-                "recurring_rule_day_out_of_range: day_of_month must be between 1 and 31".into(),
-            ));
-        }
         let concept = r.concept.trim();
         if concept.is_empty() {
             return Err(ApiError::BadRequest(
@@ -754,9 +749,9 @@ async fn insert_payload(
         sqlx::query(
             r#"INSERT INTO recurring_transaction_rules
                    (id, installation_id, owner_user_id, concept, amount, kind, category_id,
-                    day_of_month, linked_asset_id, linked_liability_id, notes,
+                    linked_asset_id, linked_liability_id, notes,
                     last_materialized_month)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
         )
         .bind(new_id)
         .bind(iid)
@@ -765,7 +760,6 @@ async fn insert_payload(
         .bind(amount)
         .bind(&r.kind)
         .bind(category_id)
-        .bind(r.day_of_month)
         .bind(linked_asset_id)
         .bind(linked_liability_id)
         .bind(r.notes.as_deref())

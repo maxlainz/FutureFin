@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
 
@@ -279,7 +279,29 @@ pub struct BackupCategorizationRule {
     pub assign_category_ref: Option<CategoryRef>,
 }
 
-/// A recurring-transaction rule exported inside a `.ffbackup` (schema_version ≥ 6).
+/// A recurring-transaction rule as exported in schema_version 6 — rules still carried a
+/// configurable `day_of_month` (dropped in v7: rules became month-resolution only).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupRecurringRuleV6 {
+    pub concept: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub amount: Decimal,
+    pub kind: String,
+    #[serde(default)]
+    pub category_ref: Option<CategoryRef>,
+    pub day_of_month: i32,
+    #[serde(default)]
+    pub linked_asset_index: Option<usize>,
+    #[serde(default)]
+    pub linked_liability_index: Option<usize>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub last_materialized_month: NaiveDate,
+}
+
+/// A recurring-transaction rule exported inside a `.ffbackup` (schema_version ≥ 7 — since v7 rules
+/// are month-resolution only: no `day_of_month`, instances are dated at end-of-month by the
+/// materializer).
 ///
 /// Category is denormalized to `(scope, name)` (like transactions); `linked_asset_index` /
 /// `linked_liability_index` are positions into this payload's `assets` / `liabilities` vecs
@@ -293,7 +315,6 @@ pub struct BackupRecurringRule {
     pub kind: String,
     #[serde(default)]
     pub category_ref: Option<CategoryRef>,
-    pub day_of_month: i32,
     #[serde(default)]
     pub linked_asset_index: Option<usize>,
     #[serde(default)]
@@ -431,11 +452,37 @@ pub struct BackupPayloadV6 {
     pub categorization_rules: Vec<BackupCategorizationRule>,
     /// Recurring-transaction rules (schema_version ≥ 6). Empty when migrating from an older backup.
     #[serde(default)]
+    pub recurring_transaction_rules: Vec<BackupRecurringRuleV6>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayloadV7 {
+    pub user: BackupUser,
+    pub categories_used: Vec<BackupCategory>,
+    pub assets: Vec<BackupAssetV3>,
+    #[serde(default)]
+    pub allocation_rules: Vec<BackupAllocationRule>,
+    pub liabilities: Vec<BackupLiability>,
+    pub budget_entries: Vec<BackupBudgetEntry>,
+    pub planning_flows: Vec<BackupPlanningFlow>,
+    #[serde(default)]
+    pub ui_preferences: UiPreferences,
+    pub installation_snapshot_informative: InstallationSnapshotInformative,
+    #[serde(default)]
+    pub snapshots: Vec<BackupSnapshot>,
+    #[serde(default)]
+    pub transaction_imports: Vec<BackupTransactionImport>,
+    #[serde(default)]
+    pub transactions: Vec<BackupTransaction>,
+    #[serde(default)]
+    pub categorization_rules: Vec<BackupCategorizationRule>,
+    /// Recurring-transaction rules (month-resolution since v7: `day_of_month` was dropped).
+    #[serde(default)]
     pub recurring_transaction_rules: Vec<BackupRecurringRule>,
 }
 
 /// Alias for the current-version payload. Export and import code work against this type.
-pub type BackupPayload = BackupPayloadV6;
+pub type BackupPayload = BackupPayloadV7;
 
 #[derive(Debug)]
 pub enum AnyPayload {
@@ -445,6 +492,7 @@ pub enum AnyPayload {
     V4(BackupPayloadV4),
     V5(BackupPayloadV5),
     V6(BackupPayloadV6),
+    V7(BackupPayloadV7),
 }
 
 pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, String> {
@@ -478,6 +526,11 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
             let p: BackupPayloadV6 = serde_json::from_slice(bytes)
                 .map_err(|e| format!("payload v6 malformed: {e}"))?;
             Ok(AnyPayload::V6(p))
+        }
+        7 => {
+            let p: BackupPayloadV7 = serde_json::from_slice(bytes)
+                .map_err(|e| format!("payload v7 malformed: {e}"))?;
+            Ok(AnyPayload::V7(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
             "schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
@@ -604,18 +657,55 @@ fn payload_v5_to_v6(p: BackupPayloadV5) -> BackupPayloadV6 {
     }
 }
 
+fn payload_v6_to_v7(p: BackupPayloadV6) -> BackupPayloadV7 {
+    // v7 dropped the per-rule `day_of_month` (rules are month-resolution only; instances are dated
+    // at end-of-month by the materializer). The field is discarded; everything else carries over.
+    BackupPayloadV7 {
+        user: p.user,
+        categories_used: p.categories_used,
+        assets: p.assets,
+        allocation_rules: p.allocation_rules,
+        liabilities: p.liabilities,
+        budget_entries: p.budget_entries,
+        planning_flows: p.planning_flows,
+        ui_preferences: p.ui_preferences,
+        installation_snapshot_informative: p.installation_snapshot_informative,
+        snapshots: p.snapshots,
+        transaction_imports: p.transaction_imports,
+        transactions: p.transactions,
+        categorization_rules: p.categorization_rules,
+        recurring_transaction_rules: p
+            .recurring_transaction_rules
+            .into_iter()
+            .map(|r| BackupRecurringRule {
+                concept: r.concept,
+                amount: r.amount,
+                kind: r.kind,
+                category_ref: r.category_ref,
+                linked_asset_index: r.linked_asset_index,
+                linked_liability_index: r.linked_liability_index,
+                notes: r.notes,
+                last_materialized_month: r.last_materialized_month,
+            })
+            .collect(),
+    }
+}
+
 pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
     match any {
-        AnyPayload::V1(p) => payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(
-            payload_v1_to_v2(p),
-        )))),
-        AnyPayload::V2(p) => {
-            payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(p))))
+        AnyPayload::V1(p) => payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(
+            payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p))),
+        ))),
+        AnyPayload::V2(p) => payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(
+            payload_v3_to_v4(payload_v2_to_v3(p)),
+        ))),
+        AnyPayload::V3(p) => {
+            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(p))))
         }
-        AnyPayload::V3(p) => payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(p))),
-        AnyPayload::V4(p) => payload_v5_to_v6(payload_v4_to_v5(p)),
-        AnyPayload::V5(p) => payload_v5_to_v6(p),
-        AnyPayload::V6(p) => p,
+        AnyPayload::V4(p) => payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(p))),
+        AnyPayload::V5(p) => payload_v6_to_v7(payload_v5_to_v6(p)),
+        AnyPayload::V6(p) => payload_v6_to_v7(p),
+        AnyPayload::V7(p) => p,
     }
 }
 
@@ -760,7 +850,10 @@ mod tests {
         let bytes = serde_json::to_vec(&raw).unwrap();
         let any = parse_payload(3, &bytes).unwrap();
         let v4 = migrate_to_current(any);
-        assert!(v4.snapshots.is_empty(), "v3→v4 must default snapshots to empty");
+        assert!(
+            v4.snapshots.is_empty(),
+            "v3→v4 must default snapshots to empty"
+        );
         assert_eq!(v4.assets.len(), 1);
     }
 
@@ -820,13 +913,19 @@ mod tests {
 
         let asnap = &v4.snapshots[0];
         assert_eq!(asnap.kind, "asset");
-        assert_eq!(asnap.snapshot_date, NaiveDate::from_ymd_opt(2025, 1, 15).unwrap());
+        assert_eq!(
+            asnap.snapshot_date,
+            NaiveDate::from_ymd_opt(2025, 1, 15).unwrap()
+        );
         assert_eq!(asnap.source, "backfill");
         assert_eq!(asnap.items.len(), 2);
         assert_eq!(asnap.items[0].ledger_index, Some(0));
         assert_eq!(asnap.items[0].item_key, Uuid::parse_str(k_asset).unwrap());
         assert_eq!(asnap.items[0].label, "Fondo");
-        assert_eq!(asnap.items[0].value, Decimal::from_str_exact("1234.5600").unwrap());
+        assert_eq!(
+            asnap.items[0].value,
+            Decimal::from_str_exact("1234.5600").unwrap()
+        );
         assert!(asnap.items[0].apr_percent.is_none());
         assert_eq!(asnap.items[1].ledger_index, None);
         assert_eq!(asnap.items[1].item_key, Uuid::parse_str(k_deleted).unwrap());
@@ -834,9 +933,18 @@ mod tests {
         let lsnap = &v4.snapshots[1];
         assert_eq!(lsnap.kind, "liability");
         assert_eq!(lsnap.source, "capture");
-        assert_eq!(lsnap.items[0].value, Decimal::from_str_exact("80000.0000").unwrap());
-        assert_eq!(lsnap.items[0].apr_percent, Some(Decimal::from_str_exact("3.2500").unwrap()));
-        assert_eq!(lsnap.items[0].payment_amount, Some(Decimal::from_str_exact("500.0000").unwrap()));
+        assert_eq!(
+            lsnap.items[0].value,
+            Decimal::from_str_exact("80000.0000").unwrap()
+        );
+        assert_eq!(
+            lsnap.items[0].apr_percent,
+            Some(Decimal::from_str_exact("3.2500").unwrap())
+        );
+        assert_eq!(
+            lsnap.items[0].payment_amount,
+            Some(Decimal::from_str_exact("500.0000").unwrap())
+        );
         assert_eq!(lsnap.items[0].payment_frequency.as_deref(), Some("monthly"));
 
         // Decimal-string round-trip: re-serialize and confirm the scale-preserving strings.
@@ -866,9 +974,18 @@ mod tests {
         let bytes = serde_json::to_vec(&raw).unwrap();
         let any = parse_payload(4, &bytes).unwrap();
         let v5 = migrate_to_current(any);
-        assert!(v5.transaction_imports.is_empty(), "v4→v5 must default transaction_imports to empty");
-        assert!(v5.transactions.is_empty(), "v4→v5 must default transactions to empty");
-        assert!(v5.categorization_rules.is_empty(), "v4→v5 must default categorization_rules to empty");
+        assert!(
+            v5.transaction_imports.is_empty(),
+            "v4→v5 must default transaction_imports to empty"
+        );
+        assert!(
+            v5.transactions.is_empty(),
+            "v4→v5 must default transactions to empty"
+        );
+        assert!(
+            v5.categorization_rules.is_empty(),
+            "v4→v5 must default categorization_rules to empty"
+        );
         assert!(v5.snapshots.is_empty());
     }
 
@@ -927,7 +1044,10 @@ mod tests {
 
         assert_eq!(v5.transactions.len(), 2);
         assert_eq!(v5.transactions[0].import_index, Some(0));
-        assert_eq!(v5.transactions[0].amount, Decimal::from_str_exact("-4.9800").unwrap());
+        assert_eq!(
+            v5.transactions[0].amount,
+            Decimal::from_str_exact("-4.9800").unwrap()
+        );
         assert_eq!(v5.transactions[0].kind.as_deref(), Some("expense"));
         assert_eq!(v5.transactions[1].import_index, None);
         assert_eq!(v5.transactions[1].source, "manual");
@@ -945,7 +1065,7 @@ mod tests {
 
     #[test]
     fn migrate_v5_fills_empty_recurring() {
-        // A v5 file (no recurring key) parses and migrates to v6 with an empty vec.
+        // A v5 file (no recurring key) parses and migrates to current with an empty vec.
         let raw = serde_json::json!({
             "user": { "username": "gwen", "birth_date": null },
             "categories_used": [],
@@ -963,10 +1083,10 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&raw).unwrap();
         let any = parse_payload(5, &bytes).unwrap();
-        let v6 = migrate_to_current(any);
+        let cur = migrate_to_current(any);
         assert!(
-            v6.recurring_transaction_rules.is_empty(),
-            "v5→v6 must default recurring_transaction_rules to empty"
+            cur.recurring_transaction_rules.is_empty(),
+            "v5→current must default recurring_transaction_rules to empty"
         );
     }
 
@@ -1008,25 +1128,31 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&raw).unwrap();
         let any = parse_payload(6, &bytes).unwrap();
-        let v6 = migrate_to_current(any);
+        let v7 = migrate_to_current(any);
 
-        assert_eq!(v6.recurring_transaction_rules.len(), 1);
-        let rule = &v6.recurring_transaction_rules[0];
+        assert_eq!(v7.recurring_transaction_rules.len(), 1);
+        let rule = &v7.recurring_transaction_rules[0];
         assert_eq!(rule.concept, "Nomina");
         assert_eq!(rule.amount, Decimal::from_str_exact("2000.0000").unwrap());
         assert_eq!(rule.kind, "income");
-        assert_eq!(rule.day_of_month, 1);
-        assert_eq!(rule.category_ref.as_ref().map(|c| c.name.as_str()), Some("Nómina"));
+        assert_eq!(
+            rule.category_ref.as_ref().map(|c| c.name.as_str()),
+            Some("Nómina")
+        );
         assert_eq!(
             rule.last_materialized_month,
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()
         );
         // The transaction points back at the rule by index.
-        assert_eq!(v6.transactions[0].recurring_rule_index, Some(0));
+        assert_eq!(v7.transactions[0].recurring_rule_index, Some(0));
 
-        // Decimal-string scale round-trip.
-        let reser = serde_json::to_value(&v6.recurring_transaction_rules).unwrap();
+        // Decimal-string scale round-trip; v6→v7 drops the legacy `day_of_month`.
+        let reser = serde_json::to_value(&v7.recurring_transaction_rules).unwrap();
         assert_eq!(reser[0]["amount"], "2000.0000");
+        assert!(
+            reser[0].get("day_of_month").is_none(),
+            "v7 rules must not carry day_of_month"
+        );
     }
 
     #[test]

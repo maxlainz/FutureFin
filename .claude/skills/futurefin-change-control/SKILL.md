@@ -16,12 +16,13 @@ description: >
 # FutureFin Change Control
 
 How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-17 for
-v3.1.0** (embedded OAuth 2.1): **36** migration files in `apps/api/migrations/`, **23**
-integration-test files in `apps/api/tests/`, `.ffbackup` `CURRENT_SCHEMA_VERSION` still **6** (the
-`oauth_*` tables are deliberately outside the backup, so the OAuth release did **not** bump it). All
-paths below are from the repo root. (Previously stamped 2026-08-16 at v3.0.0 with 34/20 — already one
-release behind then; and 2026-07-06 at v1.5.0: 32 migrations, 11 test files.) `apps/api/Cargo.toml`
-reads `3.1.0` and `CHANGELOG.md` carries its `## [3.1.0] — 2026-08-17` section, so the Section 4
+v3.2.0** (KPI ahorro real-vs-esperado + reglas recurrentes mensuales): **37** migration files in
+`apps/api/migrations/`, **23** integration-test files in `apps/api/tests/`, `.ffbackup`
+`CURRENT_SCHEMA_VERSION` = **7** (v3.2.0 dropped `day_of_month` from backed-up recurring rules —
+the first non-additive bump; older files still import via `payload_v6_to_v7`). All paths below are
+from the repo root. (Previously stamped 2026-08-17 at v3.1.0 with 36/23 and schema 6; 2026-08-16 at
+v3.0.0 with 34/20; and 2026-07-06 at v1.5.0: 32 migrations, 11 test files.) `apps/api/Cargo.toml`
+reads `3.2.0` and `CHANGELOG.md` carries its `## [3.2.0] - 2026-08-17` section, so the Section 4
 version/CHANGELOG gates for this release are satisfied.
 
 Vocabulary (defined once): **installation** = the singleton row all financial data belongs to
@@ -309,13 +310,13 @@ No breaking change ships without a version bump + a CHANGELOG entry explicitly m
   documented even the removal of a consumer-less field (`fire_number_expense_adjustment_pct`)
   and the new strict 422 as the only non-bit-exact changes.
 - **`.ffbackup` schema**: any shape change to exported user data requires bumping
-  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **6** — every
-  bump has been additive, each older file importing with the new collections empty: v4 added
-  `snapshots` via `payload_v3_to_v4` (v1.5.0), v5 added transactions/imports/rules (v1.6.0), v6
-  added `recurring_transaction_rules` + `BackupTransaction.recurring_rule_index` via
-  `payload_v5_to_v6` (v1.8.0)) and extending the `migrate_to_current` chain so ALL older versions
-  still import (v1..v5 remain importable today; legacy per-asset contribution fields are dropped
-  on import, user reconfigures — the documented v1.1.0 pattern). `parse_payload` rejects versions
+  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **7**: v4
+  added `snapshots` via `payload_v3_to_v4` (v1.5.0), v5 added transactions/imports/rules (v1.6.0),
+  v6 added `recurring_transaction_rules` + `BackupTransaction.recurring_rule_index` via
+  `payload_v5_to_v6` (v1.8.0), and v7 — the first NON-additive bump — dropped `day_of_month` from
+  recurring rules via `payload_v6_to_v7` (3.2.0)) and extending the `migrate_to_current` chain so
+  ALL older versions still import (v1..v6 remain importable today; dropped fields are discarded on
+  import — the documented v1.1.0 pattern). `parse_payload` rejects versions
   newer than the server supports — keep that. Never break import of an old backup; it is users'
   only recovery path.
 - **Engine input struct** (`ProjectionInput` and friends in `crates/engine`): field
