@@ -7,7 +7,17 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 |--------|------|---------|------|
 | GET | `/health` | `health::health_check` | none |
 | GET | `/openapi.json` | `openapi::openapi_json` | none |
-| POST/GET/DELETE | `/mcp` | `mcp::mcp_router` (rmcp `StreamableHttpService`) | Bearer `ffp_…` (ver sección MCP abajo) |
+| POST/GET/DELETE | `/mcp` | `mcp::mcp_router` (rmcp `StreamableHttpService`) | Bearer `ffp_…` (api_tokens) **o** `ffo_…` (OAuth) — ver sección MCP abajo |
+| GET | `/.well-known/oauth-protected-resource` | `oauth::metadata::protected_resource` | none |
+| GET | `/.well-known/oauth-protected-resource/mcp` | `oauth::metadata::protected_resource` (mismo handler; sufijo de path RFC 9728 §3.1) | none |
+| GET | `/.well-known/oauth-authorization-server` | `oauth::metadata::authorization_server` | none |
+| GET | `/.well-known/oauth-authorization-server/mcp` | `oauth::metadata::authorization_server` (mismo handler; sufijo RFC 8414 §3.1) | none |
+| POST | `/oauth/register` | `oauth::register::register_client` (DCR, RFC 7591) | **ninguna — registro público** |
+| POST | `/oauth/token` | `oauth::token::token` (`authorization_code`+PKCE / `refresh_token`) | client auth (`none` \| `client_secret_basic` \| `client_secret_post`) |
+| POST | `/oauth/revoke` | `oauth::token::revoke` (RFC 7009) | client auth (idem) |
+
+> `GET /oauth/authorize` **no tiene ruta backend**: la sirve el fallback SPA de `main.rs`. Ver la
+> sección OAuth abajo — registrarla es un error que rompe la pantalla de consentimiento.
 
 ## /v1 routes
 
@@ -253,10 +263,16 @@ Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` 
 `Mcp-Session-Id`). Mismo binario y puerto que el API; se monta en el router raíz junto a `/health`
 (gana siempre al fallback SPA). Kill-switch: `FUTUREFIN_MCP_ENABLED=0` → el router ni se monta (404).
 
-- **Auth**: middleware `mcp/auth.rs::mcp_bearer_auth` corta ANTES del protocolo — `require_api_token`
-  + `require_installation_member` → `McpIdentity {user_id, installation_id, role, token_id}` en las
-  extensions del request; rmcp propaga las `http::request::Parts` hasta el `RequestContext` de cada
-  tool. Fallo → 401/403 JSON `{error, message}` + `WWW-Authenticate: Bearer`.
+- **Auth (dos esquemas Bearer)**: middleware `mcp/auth.rs::mcp_bearer_auth` corta ANTES del
+  protocolo y despacha **por prefijo del Bearer** → `ffo_` = access token OAuth
+  (`oauth::access::require_oauth_access_token`), cualquier otra cosa (incl. prefijos desconocidos)
+  = token de API (`handlers::api_tokens::require_api_token`, el 401 indistinto). Tras cualquiera de
+  las dos, `require_installation_member` re-resuelve membership y rol **vivos** →
+  `McpIdentity {user_id, installation_id, role, credential}` en las extensions del request, con
+  `credential: McpCredential::{ApiToken{token_id} | OAuth{grant_id, token_id}}`; rmcp propaga las
+  `http::request::Parts` hasta el `RequestContext` de cada tool. Fallo → 401/403 JSON
+  `{error, message}`; **solo el 401** añade `WWW-Authenticate` (ver la nota del challenge en la
+  sección OAuth).
 - **Tools v1 (10, todas read-only)**: `get_summary`, `get_projection` (density **hybrid fija**,
   `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler),
   `get_budget`, `get_transactions_summary`, `list_transactions` (truncado a `limit` 1..500 def 100,
@@ -272,6 +288,135 @@ Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` 
   de `ErrorBody`; `Db`/`Unavailable` → `ErrorData::internal_error` sanitizado (detalle a tracing).
 - **NO está en OpenAPI a propósito**: no es un recurso REST — es JSON-RPC cuyo contrato define la
   spec MCP y que se autodescribe vía `tools/list`.
-- **Límite conocido**: el conector de claude.ai exige OAuth 2.1 (fuera de scope v1). Claude
-  Code/Desktop: `claude mcp add --transport http futurefin https://host/mcp --header
+- **Límite conocido de 3.0.0 — resuelto en 3.1.0**: el conector de claude.ai exige OAuth 2.1, que
+  entonces estaba fuera de scope. Desde 3.1.0 el authorization server va embebido (sección
+  siguiente) y `/mcp` acepta **dos** esquemas Bearer: `ffp_…` (token de API, pegado a mano) y
+  `ffo_…` (access token OAuth, emitido por el flujo de consentimiento). Claude Code/Desktop sigue
+  funcionando igual: `claude mcp add --transport http futurefin https://host/mcp --header
   "Authorization: Bearer ffp_…"`.
+
+## OAuth 2.1 (v3.1.0)
+
+Authorization server **embebido** en el mismo binario y puerto, módulo `apps/api/src/oauth/`
+(protocolo) + `apps/api/src/handlers/oauth_consent.rs` (pantalla de consentimiento y panel). Existe
+para una sola cosa: que el conector de claude.ai web pueda hablar con `/mcp`, que exige OAuth 2.1 y
+no acepta un Bearer pegado a mano. FutureFin es a la vez **authorization server y resource server**
+— no hay IdP externo, ni claves de firma, ni JWT. Regresión completa: `apps/api/tests/oauth_flow.rs`.
+
+### Rutas de protocolo (nivel raíz, **fuera de OpenAPI**)
+
+| Method | Path | Notas |
+|--------|------|-------|
+| GET | `/.well-known/oauth-protected-resource[/mcp]` | RFC 9728. `{resource: "{base}/mcp", authorization_servers: [base], bearer_methods_supported: ["header"]}`. Sin SELECT y sin mutación: solo refleja la URL pública. |
+| GET | `/.well-known/oauth-authorization-server[/mcp]` | RFC 8414. `issuer`, `authorization_endpoint` (`{base}/oauth/authorize`), `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `code_challenge_methods_supported: ["S256"]` (único), `grant_types_supported: [authorization_code, refresh_token]`, `authorization_response_iss_parameter_supported: true`. **Sin `scopes_supported`** a propósito: MCP v1 es read-only entero, no hay scopes con función. |
+| POST | `/oauth/register` | DCR (RFC 7591), **público y sin autenticación**. Body `{redirect_uris (1..5, requerido), client_name?, client_uri?, token_endpoint_auth_method?, grant_types?, response_types?}` → **201** `{client_id ("ffc_…"), client_id_issued_at, client_secret? ("ffcs_…"), client_secret_expires_at? (0 = no caduca), …}`. `token_endpoint_auth_method` omitido ⇒ `client_secret_basic` (default RFC 7591 §2) y se emite secreto; `none` ⇒ cliente público sin secreto (el caso de claude.ai). Errores `invalid_client_metadata` / `invalid_redirect_uri`. |
+| POST | `/oauth/token` | `grant_type=authorization_code` (PKCE **S256 obligatorio**) o `grant_type=refresh_token` (rotación). Form-urlencoded. → `{access_token ("ffo_…"), token_type: "Bearer", expires_in: 3600, refresh_token ("ffr_…"), scope?}` + `Cache-Control: no-store`. |
+| POST | `/oauth/revoke` | RFC 7009. Un `ffr_…` revoca el **grant entero** (§2.1: "desconectar" en claude corta todo); un `ffo_…` revoca solo su fila. Token desconocido → **200** igualmente (§2.2). |
+
+**`GET /oauth/authorize` NO se registra en el backend — prohibido.** La sirve el fallback SPA
+(`ServeDir(...).fallback(ServeFile(index.html))` de `main.rs`), porque la pantalla de consentimiento
+es React. Si registraras cualquier método en ese path, axum devolvería **405** en los demás y un
+method-mismatch **no cae al fallback**: mataría la pantalla en producción. Fijado por el test
+`get_oauth_authorize_is_not_handled_by_the_api` y por el comentario de cabecera de `oauth/mod.rs`.
+
+### Endpoints de la SPA (`/v1/oauth/*`, **sí en OpenAPI**) — handler `oauth_consent.rs`
+
+| Method | Path | Auth | Notas |
+|--------|------|------|-------|
+| GET | `/v1/oauth/authorize-details` | **pública** (cookie opcional) | Valida los parámetros del authorization request y devuelve qué pintar. **Sin sesión a propósito**: solo devuelve metadata que el propio cliente registró (`client_name` — texto NO verificado —, `client_uri`, `redirect_host` — el único dato verificado —, `resource`), nada del usuario; a cambio, un `redirect_uri` que no cuadra se ve **antes** de teclear la contraseña. Con cookie válida añade `already_connected` / `connected_at`. `status` ∈ `consent` \| `invalid_request` (fatal: pintar el error, **jamás** redirigir) \| `redirect_error` (navegar a `redirect_to`). |
+| POST | `/v1/oauth/authorize` | cookie + `require_installation_member` | Body `{approve: bool, …params del authorize (flatten)}` → **200** `{redirect_to}`, la URL a la que la SPA navega. Approve → `code` + `state` (eco literal) + `iss` (RFC 9207); deny → `error=access_denied` al redirect registrado (no dejar al cliente colgado). Error fatal → **400** `authorize_error: <code>`. 401 sin sesión, 403 si pending. |
+| GET | `/v1/oauth/connections` | cookie + membership | Conexiones activas **del caller** (`oauth_grants` no revocados), orden `created_at DESC`: `{id, client_name, client_uri?, redirect_host?, created_at, last_used_at?}`. |
+| DELETE | `/v1/oauth/connections/{id}` | cookie + membership | Soft-revoke (`revoked_at = now()`, `revoked_reason = 'user_panel'`) → **204**; corte inmediato. Solo grants propios: un id ajeno devuelve el mismo **404** que uno inexistente (no revela existencia). |
+
+- **CSRF del POST, por partida doble**: la cookie es `SameSite=Lax` (un POST cross-site no la lleva)
+  y el body es JSON, que no es un "simple request" → exige preflight, que la lista blanca CORS
+  bloquea. **No cambies el body a form-urlencoded** (perderías la segunda mitad).
+- **La validación del authorize vive UNA vez**, en `oauth::authorize::validate_authorize_params`, y
+  la consumen los dos endpoints. Nunca dupliques esas reglas en un handler. La distinción crítica
+  (OAuth 2.1 §7.12.2) es `AuthorizeParamError::Fatal` (client_id desconocido o `redirect_uri` sin
+  match exacto → **no se puede redirigir**, sería un open redirect) vs `Redirectable`
+  (`response_type`/PKCE/`resource` malos con cliente y redirect ya validados → error al
+  `redirect_uri` registrado). El match del `redirect_uri` es de **string completa**, ni prefijo ni
+  solo host.
+
+### Contrato de tokens
+
+| Credencial | Prefijo | Persistencia | TTL |
+|---|---|---|---|
+| `client_id` | `ffc_` | claro (no es secreto) | — |
+| client secret | `ffcs_` | **solo** SHA-256 hex (`oauth_clients.client_secret_hash`) | no caduca (`client_secret_expires_at: 0`) |
+| authorization code | *(sin prefijo)* | **solo** SHA-256 hex (PK `oauth_authorization_codes.code_hash`) | **2 min**, un solo uso |
+| access token | `ffo_` | **solo** SHA-256 hex (`token_hash` UNIQUE) | **1 h** (`expires_in: 3600`) |
+| refresh token | `ffr_` | **solo** SHA-256 hex (`token_hash` UNIQUE) | **90 días sin uso** (sliding: cada rotación emite uno nuevo con 90 días) |
+
+- **Todos opacos y hash-only** — mismo contrato que `api_tokens` (`auth/secret.rs`:
+  `generate_opaque_secret` = prefijo + 43 chars base64url de 32 bytes `OsRng`, `sha256_hex`,
+  `generate_opaque_id` para `client_id`). Lookup O(1) por hash exacto, cero comparación de secretos
+  en Rust. Nada se congela en el token: rol e installation se re-resuelven vivos en cada request.
+- **Las expiries las calcula Postgres**, nunca Rust (`now() + $n::interval`).
+- **El grant es la unidad de todo** (`oauth_grants`: una fila por app+usuario). Es lo que ve y
+  revoca el panel, y lo que los `access.rs`/`token.rs` exigen vivo por JOIN → revocar una fila corta
+  todos los tokens de esa app sin tocarlos, igual que borrar una sesión.
+- **Rotación + reuse-detection**: cada canje de refresh consume el actual (`consumed_at`), emite uno
+  nuevo y los encadena (`replaced_by`, auditoría de la rotación). Presentar un code o un refresh **ya
+  consumido** es la señal de robo → se revoca el **grant entero** (OAuth 2.1 §4.3.1/§7.5), con
+  `revoked_reason ∈ {code_reuse, refresh_token_reuse}`. Los dos grant types corren en una
+  transacción con `FOR UPDATE` sobre la fila de la credencial.
+- **Anti-flood del registro abierto**: `POST /oauth/register` hace GC perezoso (borra clientes de
+  >24 h **sin ningún grant** — jamás uno consentido) y corta con `503 temporarily_unavailable` si
+  quedan ≥1000 clientes. El GC vive en el POST y no en un GET (D5, reads never mutate).
+
+### Formato de error — **no es `ApiError`**
+
+Las rutas de protocolo devuelven `OAuthError` (`oauth/error.rs`): JSON
+`{"error": "...", "error_description": "..."}` de RFC 6749 §5.2, no el `{error, message}` del API
+propio, porque el body y los códigos (`invalid_request`, `invalid_client`, `invalid_grant`,
+`invalid_target`, `unsupported_grant_type`, `invalid_client_metadata`, `invalid_redirect_uri`,
+`server_error`, `temporarily_unavailable`) los fija la RFC. Toda respuesta lleva
+`Cache-Control: no-store`. `invalid_client` es **siempre 401** (nunca 400): es la señal exacta con la
+que claude.ai re-registra el cliente vía DCR — gracias a ella un restore de backup sin tablas OAuth
+se auto-recupera sin intervención; ese 401 añade `WWW-Authenticate: Basic realm="FutureFin"`. Los
+`/v1/oauth/*` sí hablan `ApiError` normal (son API propio). `oauth::access::require_oauth_access_token`
+devuelve `ApiError` a propósito: alimenta al middleware de `/mcp`.
+
+### Por qué el protocolo está fuera de OpenAPI
+
+Igual que `/mcp`: su contrato lo fijan las RFC (8414/9728/7591/7009 + la spec de autorización MCP) y
+los clientes lo descubren por los documentos `.well-known`, no por nuestro esquema. Duplicarlo en
+`utoipa` solo crearía deriva. Los **cuatro** endpoints de la SPA sí están anotados
+(`__path_authorize_details`, `__path_authorize_decision`, `__path_list_connections`,
+`__path_revoke_connection`, tag `oauth`, en `openapi.rs`) porque son API propio.
+
+### Kill-switch — con una excepción
+
+`FUTUREFIN_MCP_ENABLED=0` desmonta el router de protocolo completo (`oauth_protocol_router()` no se
+construye: las 7 rutas raíz caen al fallback) **y** los dos endpoints del flujo
+(`/v1/oauth/authorize-details`, `POST /v1/oauth/authorize`). **`GET/DELETE /v1/oauth/connections[/{id}]`
+se montan SIEMPRE** — precedente de `/v1/api-tokens`: con MCP apagado sigues pudiendo *ver y revocar*
+credenciales que ya existen. La bifurcación está en `oauth_consent_router(mcp_enabled)` y en
+`routes/mod.rs`; OAuth hoy no sirve a nada más que a MCP, de ahí que compartan el interruptor.
+
+### El challenge del 401 de `/mcp` — solo el 401
+
+Cuando `/mcp` rechaza por credencial (**401**), el middleware añade
+`WWW-Authenticate: Bearer realm="FutureFin", resource_metadata="{base}/.well-known/oauth-protected-resource/mcp"`
+(RFC 9728 §5.1) para que un cliente OAuth descubra el authorization server. **Un 403 nunca lo
+lleva**: un usuario pending o con membership revocada recibiría el challenge, se re-autenticaría,
+obtendría un token nuevo y volvería a comer el mismo 403 — bucle infinito. Si la URL pública no se
+puede derivar, el header degrada a `Bearer` a secas.
+
+### URL pública (issuer)
+
+`oauth/url.rs::public_base_url` — `FUTUREFIN_PUBLIC_URL` si está fijada; si no, se **deriva del
+request**: `X-Forwarded-Proto`/`X-Forwarded-Host` (primer valor de cada uno) o el header `Host`, con
+un charset estricto (`host[:puerto]`, IPv6 entre corchetes; sin `/`, `@`, espacios ni controles;
+≤255 chars) → si no cuadra, **400 `invalid_request`**. Sin `Host` tampoco hay issuer. Así producción
+sigue sin requerir ninguna env var (promesa 3.0.0). Ver [`env-and-config.md`](env-and-config.md).
+Los redirects se construyen **siempre** con `oauth::url::append_query` (escaping de `url::Url`) —
+concatenar a mano es donde nacen los open redirect.
+
+### Anti-clickjacking global
+
+`main.rs` aplica `SetResponseHeaderLayer::overriding(X_FRAME_OPTIONS, "DENY")` **sobre el router
+final** (API + fallback SPA), no sobre el sub-router `api`: la pantalla de consentimiento la sirve el
+fallback, y era justo la que había que proteger. Nada de FutureFin se embebe legítimamente en iframes.

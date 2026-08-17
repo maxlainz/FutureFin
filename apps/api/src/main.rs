@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -50,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|&d| (1..=400).contains(&d))
         .unwrap_or(30);
     let mcp_enabled = parse_bool_env("FUTUREFIN_MCP_ENABLED").unwrap_or(true);
+    let public_url = public_url();
 
     let shutdown_pool = pool.clone();
     let state = Arc::new(AppState::new(
@@ -58,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cookie_secure,
         session_ttl_days,
         mcp_enabled,
+        public_url.clone(),
     ));
 
     tracing::info!(
@@ -65,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_ttl_days,
         cookie_secure,
         mcp_enabled,
+        public_url = public_url.as_deref().unwrap_or("(derived from request)"),
         "server config"
     );
 
@@ -93,7 +97,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Router::new().merge(api).fallback(fallback::not_found)
         }
         None => Router::new().merge(api).fallback(fallback::not_found),
-    };
+    }
+    // Anti-clickjacking global (protege sobre todo la pantalla de consentimiento OAuth,
+    // servida por el fallback SPA — por eso la capa va en el router final, no en `api`).
+    // Nada de FutureFin se embebe legítimamente en iframes.
+    .layer(SetResponseHeaderLayer::overriding(
+        http::header::X_FRAME_OPTIONS,
+        http::HeaderValue::from_static("DENY"),
+    ));
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port()));
     tracing::info!("listening on http://{}", addr);
@@ -118,6 +129,29 @@ async fn shutdown_signal() {
         _ = int.recv() => {},
     }
     tracing::info!("shutdown signal received — draining connections");
+}
+
+/// `FUTUREFIN_PUBLIC_URL` (opcional): origen público canónico para el issuer OAuth.
+/// Fail-loud como CORS_ORIGINS: un valor presente pero inválido aborta el arranque en
+/// vez de emitir metadata OAuth rota en silencio. Se normaliza al origen (sin path,
+/// query ni fragmento, sin barra final).
+fn public_url() -> Option<String> {
+    let raw = std::env::var("FUTUREFIN_PUBLIC_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let parsed = url::Url::parse(&raw)
+        .unwrap_or_else(|e| panic!("invalid FUTUREFIN_PUBLIC_URL ({raw}): {e}"));
+    if !matches!(parsed.scheme(), "http" | "https") {
+        panic!("FUTUREFIN_PUBLIC_URL must be http(s), got: {raw}");
+    }
+    if parsed.host_str().is_none() {
+        panic!("FUTUREFIN_PUBLIC_URL must include a host: {raw}");
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        panic!("FUTUREFIN_PUBLIC_URL must be a bare origin (no path/query/fragment): {raw}");
+    }
+    Some(parsed.origin().ascii_serialization())
 }
 
 fn web_static_root() -> Option<PathBuf> {

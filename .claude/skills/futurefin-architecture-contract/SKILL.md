@@ -361,6 +361,50 @@ theft; caching role/installation in the token resurrects stale-privilege bugs th
 already killed; duplicating query logic in tools reintroduces silent handler↔tool divergence
 (plausible-but-different numbers, the owner's stated worst failure mode).
 
+*(v3.1.0 makes this the second of THREE schemes: OAuth access tokens — D15 — are dispatched by
+Bearer prefix in `mcp/auth.rs::authenticate` and obey every rule above.)*
+
+### D15. FutureFin as its own OAuth 2.1 authorization server for MCP (v3.1.0)
+The claude.ai web connector requires the MCP authorization spec (OAuth 2.1 + PKCE S256 + RFC
+8414/9728 metadata + DCR RFC 7591). The decision: the **same binary is authorization server AND
+resource server** (`apps/api/src/oauth/`) — no external IdP, no new container, zero signing keys.
+This is NOT a login mechanism: username+password Argon2id stays the only way to authenticate a
+person (the failure-archaeology "OAuth login" rejection is untouched); OAuth here *delegates*
+read-only access to a client app after explicit consent.
+
+- **Same credential contract as D3/D14, extended**: authorization codes, access tokens (`ffo_`,
+  1 h) and refresh tokens (`ffr_`, 90 days idle, rotated on every use) are opaque, hash-only
+  (`auth/secret.rs::sha256_hex`), and freeze nothing — every `/mcp` request re-runs
+  `require_installation_member`. All expiries are computed by Postgres (`now() + interval`),
+  never by Rust's clock.
+- **The grant (`oauth_grants`, one row per client+user, partial-UNIQUE on the live pair) is the
+  unit of consent and revocation**: auth lookups JOIN it and require `revoked_at IS NULL`, so one
+  UPDATE kills every token of a connection — the session-row philosophy at grant scale. Reusing a
+  consumed code or a rotated refresh token revokes the whole grant (`revoked_reason` audit).
+- **Open DCR is safe by design**: a client row grants nothing — the gate is the user's login +
+  consent screen. Anti-flood: lazy GC of grant-less clients >24 h inside `POST /oauth/register`
+  (never in a GET — D5), 1000-client cap → 503. Unknown `client_id` at the token endpoint is
+  **401 `invalid_client`** — the exact signal that makes claude.ai re-register, and what lets a
+  backup restore (which excludes `oauth_*` tables) self-heal.
+- **`resource` (RFC 8707) validated hard at issuance, deliberately NOT re-validated at `/mcp`**:
+  we are the only AS and only RS of our tokens; re-checking against the per-request Host would
+  break "consent via tunnel domain, query via LAN IP" for zero real security.
+- **Issuer derived from the request** (`X-Forwarded-Proto`/`X-Forwarded-Host`/`Host`, strict host
+  charset) so no env var became mandatory; `FUTUREFIN_PUBLIC_URL` is an optional fail-loud
+  override. The `/mcp` 401 advertises `resource_metadata` (RFC 9728 §5.1) — **only the 401**: a
+  403 (pending user) with that header sends clients into an infinite re-auth loop.
+- **The consent screen is the SPA** (`/oauth/authorize` served by the static fallback, resolved in
+  `main.tsx`); protocol endpoints are flat root routes and there is **never** a backend route at
+  `/oauth/authorize` (an axum 405 does not fall through to the SPA fallback). Everything OAuth
+  mounts under `mcp_enabled` **except** `GET/DELETE /v1/oauth/connections`, mounted always
+  (precedent `/v1/api-tokens`: killing MCP must not strand existing grants unrevocable).
+
+**Breaks if violated**: a JWT access token (or any role/installation claim) resurrects the exact
+stale-privilege class D3 killed, plus key management; validating `resource` against the request
+Host breaks LAN access with tunnel-issued tokens; a backend route at `/oauth/authorize` kills the
+consent screen in production with a silent 405; `WWW-Authenticate` on 403 loops claude.ai forever;
+prefix-or-substring redirect matching (instead of exact string) is an open redirect.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
@@ -368,7 +412,7 @@ already killed; duplicating query logic in tools reintroduces silent handler↔t
 | I1 | Exactly one **uncapped `remainder`** allocation rule per scope, always **last** in the cascade (the "sink") | `handlers/allocation_rules.rs` create/patch/delete/reorder; API errors `remainder_required`, `uncapped_remainder_exists`, `sink_must_be_last` | `grep -n "remainder_required\|uncapped_remainder_exists\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs` |
 | I2 | `fire_target_at_month_index` is the ONLY FIRE-target formula — engine crossover and API `fire_target_series` both call it | `crates/engine/src/projection.rs` (public fn + regression test for the old off-by-one) | `grep -rn "fire_target_at_month_index" crates/ apps/api/src/` — every inflation-compounding of a FIRE target must route through it |
 | I3 | Amounts serialize as decimal strings, EXCEPT the documented f64 arrays of `/v1/projection/series` and the per-point arrays of `/v1/history/series` (D4) | ONE `pub(crate)` definition of `serialize_decimal_as_f64` in `handlers/projection.rs`, used by the projection and history responses only | `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) |
-| I4 | All routes live under `/v1/`, except root `/health`, `/openapi.json` and `/mcp` (Bearer-authed MCP endpoint, v3.0.0; mounted only when `mcp_enabled`) — plus the SPA static fallback when `WEB_STATIC_ROOT` is set | `routes/mod.rs` (`nest("/v1", v1)` + conditional `merge(mcp_router)`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest\|mcp" apps/api/src/routes/mod.rs` |
+| I4 | All routes live under `/v1/`, except root `/health`, `/openapi.json`, `/mcp` (v3.0.0) and the OAuth protocol routes (v3.1.0: `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server[/mcp]`, `/oauth/register`, `/oauth/token`, `/oauth/revoke` — root-level because RFC 8414/9728 fix the `.well-known` URLs and the metadata advertises the rest); `/mcp` + OAuth protocol mounted only when `mcp_enabled`. `/oauth/authorize` has NO backend route (SPA fallback serves it; a 405 would not fall through). Plus the SPA static fallback when `WEB_STATIC_ROOT` is set | `routes/mod.rs` (`nest("/v1", v1)` + conditional `merge(mcp)` + `merge(oauth_protocol)`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest\|mcp\|oauth" apps/api/src/routes/mod.rs` |
 | I5 | Reads never mutate (D5): expired liabilities filtered, never deleted, by GETs | WHERE clauses in liabilities/summary/budget/assets/projection handlers | `TEST_DATABASE_URL=... cargo test --workspace liabilities_purge` (local; not in CI) |
 | I6 | In charts, the stacked per-asset areas sum EXACTLY to the (visible) net-worth line at every x | `MiniProjection.tsx` rescales each asset share by `visibleNw × (asset_i / Σassets)` — necessary because raw engine `net_worth = Σassets + surplus_cash − Σprincipals − undrained`, so raw `per_asset_series` does NOT sum to NW | Read the `cumulative` block in `apps/web/src/components/charts/MiniProjection.tsx` (~lines 164–190); any new stacked chart must reuse `MiniProjection`, not re-derive |
 | I7 | `planning_monthly_cash_adjustment.len() == horizon_months`; allocation `target_index` in bounds; horizon ≥ 1 | Engine input validation → `EngineError::{InvalidPlanningAdjustments, InvalidAllocationRuleTarget, InvalidHorizon}` → 400 | `cargo test -p futurefin-engine` |
@@ -461,10 +505,9 @@ files cited inline (not from memory of the docs — docs can drift, see W6). D13
 `apps/api/src/main.rs`, `apps/api/src/handlers/health.rs` and `.github/workflows/ci.yml`.
 Re-verify volatile claims with:
 
-- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md`. **On 2026-08-16 it
-  still read `2.3.0`: the 3.0.0 bump is part of the release gate, not yet applied** — see
-  futurefin-change-control §4.
-- Migration count: `ls apps/api/migrations | wc -l` (34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
+- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md` (3.1.0 on
+  2026-08-17).
+- Migration count: `ls apps/api/migrations | wc -l` (36 on 2026-08-17; 34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
 - Engine purity deps (I8): `grep -E "tokio|sqlx|reqwest|axum" crates/engine/Cargo.toml` → empty.
 - Horizon rule (D11): `grep -n "LIFESPAN_AGE\|FALLBACK_YEARS\|clamp(12, 840)\|fallback_no_demographics" apps/api/src/handlers/projection.rs`.
 - Cache TTL/keys (D7): `grep -n "PROJECTION_CACHE_TTL\|ProjectionCacheKey\|invalidate_projection" apps/api/src/state.rs`.
@@ -482,6 +525,17 @@ Re-verify volatile claims with:
   cores, no SQL in tools); `grep -n "mcp" apps/api/src/routes/mod.rs` (conditional mount);
   `grep -rn "api_tokens" apps/api/src/handlers/backup_user/` → **must be empty** (excluded from
   `.ffbackup` on purpose).
+- **D15 — embedded OAuth 2.1 AS/RS (added 2026-08-17, v3.1.0)**:
+  `grep -n "ACCESS_TOKEN_PREFIX\|REFRESH_TOKEN_PREFIX" apps/api/src/oauth/mod.rs` (prefixes);
+  `grep -n "sha256_hex" apps/api/src/oauth/*.rs` (hash-only everywhere);
+  `grep -n "now() + " apps/api/migrations/20260817090000_oauth.sql apps/api/src/oauth/token.rs`
+  (Postgres computes expiries); `grep -n "revoked_reason" apps/api/src/oauth/token.rs` (reuse
+  detection revokes the grant); `grep -n "oauth_grants_active_uniq" apps/api/migrations/20260817090000_oauth.sql`
+  (partial-UNIQUE grant); `grep -n "UNAUTHORIZED" apps/api/src/mcp/auth.rs` (WWW-Authenticate
+  only on 401); `grep -rn "oauth" apps/api/src/handlers/backup_user/` → **must be empty**;
+  `grep -n "oauth/authorize" apps/api/src/routes/mod.rs apps/api/src/oauth/mod.rs` → no backend
+  route registered at that path (only the /v1 consent endpoints);
+  `grep -n "connections" apps/api/src/handlers/oauth_consent.rs` (panel mounted unconditionally).
 - **D13 — the image is the store**: `grep -n '^FROM' apps/api/Dockerfile` (runtime is
   `debian:bookworm-slim`; `postgres:15/16-bookworm` appear only as `AS pg15`/`AS pg16` COPY
   sources); `grep -n '^VOLUME' apps/api/Dockerfile` → **must be empty** (the only `VOLUME` hits in

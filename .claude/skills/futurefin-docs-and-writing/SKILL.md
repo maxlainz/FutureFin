@@ -254,6 +254,20 @@ or **"split-dev" as the name of the still-current workflow** (`cargo run` + Vite
 `docker-compose.split-dev.yml` *file* is gone, replaced by the standalone `docker-compose.dev.yml`.
 Nothing to record.
 
+**Swept again 2026-08-17 for v3.1.0 (embedded OAuth 2.1) — drift found and fixed, none left.**
+Unlike the two sweeps above, this one *did* turn something up, and it is a pattern worth naming:
+**the 3.0.0/MCP release bumped code but not the frozen counters in the skills**. Corrected in the
+same change: `futurefin-change-control`'s header (34 migrations / 20 integration-test files → 36 / 23)
+and its provenance version stamp (3.0.0 → 3.1.0); `futurefin-validation-and-qa`'s suite table
+(159 tests / 20 files → 206 / 23; Vitest 293 / 11 files → 309 / 12; migration count 34 → 36; three
+inventory rows missing since the MCP release — `api_tokens.rs`, `mcp_http.rs` — plus the new
+`oauth_flow.rs`); this file's own provenance (34 → 36, 2.3.0 → 3.1.0); `.claude/tests.md`'s Vitest
+total and migration stamp. Two content-level drifts also fixed: `.claude/api-routes.md` and
+`.claude/auth-and-membership.md` both said the `/mcp` failure adds a bare `WWW-Authenticate: Bearer`
+on 401 *and* 403 — true at 3.0.0, wrong at 3.1.0 (only the 401, and it now carries
+`realm` + `resource_metadata`). **Lesson**: §3.1's "prefer commands over hard counts" is not a style
+preference — every count frozen without a date-stamp in this library has now been wrong at least once.
+
 The rule stands: when you find a doc/code disagreement, verify against code (the code is ground
 truth), then fix the doc in the same change. If you cannot, add a row here with "verified <date>"
 — never leave a known-wrong fact unrecorded:
@@ -272,9 +286,10 @@ v3.0.0** (§1 env-and-config row, §2 container row, §7 sweep) against `README.
 Re-verify with:
 
 - Current version: `grep -n '^version' apps/api/Cargo.toml` (and top entry of `CHANGELOG.md`).
-  **2.3.0 on 2026-08-16 — the 3.0.0 bump + CHANGELOG section were still to be written**
+  **3.1.0 on 2026-08-17, with its `## [3.1.0] — 2026-08-17` CHANGELOG section already written**
   (release ritual §5; gates in futurefin-change-control §4)
-- Migration count: `ls apps/api/migrations | wc -l` (34 on 2026-08-16)
+- Migration count: `ls apps/api/migrations | wc -l` (36 on 2026-08-17 — 35 at 3.0.0, +1 for
+  `20260817090000_oauth.sql`)
 - Compose matrix matches the §1 env-and-config row: `ls docker-compose*.yml` (yml / local / dev —
   **no `split-dev`**) and `awk '/^services:/{f=1;next} /^volumes:/{f=0} f && /^  [a-z]/' docker-compose.yml` (one service)
 - §7 sweep reproducible: `grep -rn 'split-dev\|futurefin-database\|POSTGRES_PASSWORD' --include='*.md' .`

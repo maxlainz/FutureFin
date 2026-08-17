@@ -51,7 +51,7 @@ Vocabulary used below (defined once):
 | 9 | Hand-written `match view { Household / Mine }` SQL branches | Live bug: inverted bind order between branches in `budget.rs`; helpers enforce placeholder order | 0bba819, v1.3.0; `apps/api/src/handlers/person_view.rs` |
 | 10 | Projection-cache warm-up after mutation | Race: two concurrent warm-ups could leave the cache stale; warm-up runs after login only, mutations only invalidate | b65acf6, v1.4.0 (CHANGELOG §Warm-up post-login) |
 | 11 | Chart deflation by array index | Wrong with `?density=hybrid` (non-equidistant points); must use `month_index` | 669307d, v1.4.2 |
-| 12 | OAuth login, `fire.rs`/`persons.rs` handler suite, engine `fire.rs` | Legacy pre-1.0 scope cut; username+password (Argon2id) is the auth model | d123105 (2026-05-03), `20260506120000_installation_drop_fire_settings.sql` |
+| 12 | OAuth **login** (FutureFin as *client* of an external IdP), `fire.rs`/`persons.rs` handler suite, engine `fire.rs` | Legacy pre-1.0 scope cut; username+password (Argon2id) is the auth model. **Distinct from v3.1.0's OAuth**: there FutureFin is the *authorization server* delegating MCP access after password login — that is adopted (architecture-contract D15), the login-with-IdP idea stays rejected | d123105 (2026-05-03), `20260506120000_installation_drop_fire_settings.sql` |
 | 13 | Public pension API (`users.pension_*` columns) | Superseded by "persists after retirement" income toggle (v1.0.3) | 4a8e2af, ee24867; `20260515120000_drop_users_pension_columns.sql` |
 | 14 | ZIP/CSV export (`GET /v1/backup/export.zip`) | Replaced by encrypted per-user `.ffbackup` (AES-256-GCM, Argon2id-derived key) | 660a8ec, v1.0.9; routes in `apps/api/src/routes/mod.rs` |
 | 15 | Caddy TLS overlay + compose-watch dev flow | Deploy simplified to a single `docker-compose.yml`; only `POSTGRES_PASSWORD` required | 5cc0914, 71a877d, v1.0.1 |
@@ -192,6 +192,12 @@ Vocabulary used below (defined once):
   exist — always check the final schema, not migration N of 31.
 - **Status**: settled. If you want multi-tenant/households or pension modeling, that's a
   research-frontier topic, not a restoration job.
+- **Scope note (added 2026-08-17, v3.1.0)**: the removed `auth/oauth.rs` was OAuth as a **login**
+  mechanism — FutureFin acting as OAuth *client* of an external IdP so users could sign in with
+  it. That rejection stands: Argon2id username+password remains the only way a person
+  authenticates. v3.1.0's embedded OAuth 2.1 (`apps/api/src/oauth/`) is the OPPOSITE role —
+  FutureFin as *authorization server* issuing delegated read-only MCP credentials to client apps
+  (claude.ai) after a normal password login + consent. Adopting it does not reopen this entry.
 
 ### 2.11 Embedding PostgreSQL in the image — five traps found on the way (v3.0.0)
 
@@ -278,7 +284,7 @@ Vocabulary used below (defined once):
 | Hand-write household/mine SQL branches | §2.6; use `LedgerView` helpers |
 | Apply `display: flex`/`inline-flex` to a `<td>` | §2.3 |
 | Drop a column in a migration | §2.1 — grep handlers for the column first; §3 row 2 for the data-loss sign-off precedent |
-| Re-add OAuth, pensions API, persons, ZIP export, Caddy | §2.10, table rows 12–16 |
+| Re-add OAuth **as app login** (external IdP), pensions API, persons, ZIP export, Caddy | §2.10 + its scope note (OAuth-as-authorization-server for MCP is adopted, v3.1.0/D15 — not a re-add), table rows 12–16 |
 | Base the runtime image on `postgres:*`, or add a `VOLUME` to the Dockerfile | §2.11 trap 1 — anonymous volumes + watchtower = silent total data loss |
 | "Simplify" the entrypoint's `mv`-aside of an old cluster into an `rm -rf` | §2.11; futurefin-architecture-contract W8 (the entrypoint never deletes a cluster) |
 | Stop the embedded postmaster with SIGTERM, or drop `stop_grace_period` | §2.11 trap 4 — SIGTERM is *smart* shutdown and hangs |

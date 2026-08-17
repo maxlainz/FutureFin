@@ -38,14 +38,30 @@ puerto; el default documentado sigue siendo el TCP de 5433.
 - **Schema-isolated per test**: `common::isolated_pool()` creates `ff_test_<uuid>`, sets `search_path`, applies every migration in `apps/api/migrations/` (count them with `ls apps/api/migrations | wc -l`), returns the pool. Schemas are leaked intentionally — drop them with `psql -c "DROP SCHEMA ff_test_<id> CASCADE"` or wipe the test DB.
 
 ### Test infrastructure (`apps/api/tests/common/mod.rs`)
-- `TestApp::spawn() -> TestApp { router, pool, schema }` — fresh schema + axum router wired with cookie cookies.
+- `TestApp::spawn() -> TestApp { router, pool, schema, state }` — fresh schema + axum router wired with cookie cookies. Los cuatro campos son `pub`, lo que permite construir un `TestApp` a mano con otro `AppState` (es como se prueba el kill-switch, ver abajo).
 - Convenience methods on `TestApp`:
-  - `register_and_login_owner("alice") -> LoggedInOwner { username, cookie }` — first user becomes owner via bootstrap.
+  - `register_and_login_owner("alice") -> LoggedInOwner { username, cookie, user_id }` — first user becomes owner via bootstrap.
   - `register_and_approve_member("bob") -> LoggedInOwner` (v1.5.0) — registers a second user and has the owner approve them as a writable member; used by the household-aggregation and cross-user tests (`history_series.rs`, `history_snapshots.rs`).
   - `create_category(&owner, "asset", "Bolsa") -> id`
   - `count_rows("liabilities") -> i64` — query against the test schema.
   - `get(uri)`, `get_with_cookie(uri, cookie)`, `post_json(uri, body)`, `post_json_with_cookie`, `patch_json_with_cookie`, `delete_with_cookie` — return `ResponseParts { status, headers, body: Vec<u8> }`.
   - `ResponseParts::json()` parses body as `serde_json::Value`; `.session_cookie()` extracts `ff_session=…` from Set-Cookie.
+- **Helpers añadidos en v3.1.0** (los estrena `oauth_flow.rs`; el token endpoint OAuth habla `form`, no JSON):
+  - `post_form(uri, form: &[(&str, &str)])` — POST `application/x-www-form-urlencoded`, percent-encodeando clave y valor con el `urlencode` privado del módulo (set no reservado `A-Za-z0-9-_.~`). Para `/oauth/token` y `/oauth/revoke`.
+  - `post_form_with_basic_auth(uri, form, client_id, secret)` — igual + `Authorization: Basic base64(client_id:secret)` (base64 **estándar con padding**, no URL-safe), para `client_secret_basic`.
+  - `get_with_headers(uri, headers: &[(&str, &str)])` — GET aplicando headers verbatim. Es la vía para inyectar `x-forwarded-host` / `x-forwarded-proto` / un `Host` malformado y probar la derivación del issuer.
+  - `mcp_initialize(bearer: Option<&str>)` — POST `initialize` mínimo a `/mcp` (protocolVersion `2026-07-28`, headers `MCP-Protocol-Version`/`Mcp-Method`), con `Authorization: Bearer …` solo si `bearer` es `Some`. 200 = credencial válida, 401/403 = rechazada. Es el helper más usado de `oauth_flow.rs`. **Trampa**: `api_tokens.rs` conserva su propio duplicado privado del mismo nombre (protocolVersion `2025-06-18`, sin esos headers) — el helper nuevo **no** lo sustituyó; si tocas uno, mira el otro.
+- **`request()` inyecta `Host: futurefin.test` si falta** (insert-if-absent, así que un `Host` explícito de `get_with_headers` gana):
+  ```rust
+  if !req.headers().contains_key(http::header::HOST) {
+      req.headers_mut().insert(
+          http::header::HOST,
+          http::HeaderValue::from_static("futurefin.test"),
+      );
+  }
+  ```
+  **Por qué**: `tower::ServiceExt::oneshot` no pasa por la capa HTTP/1.1, así que no sintetiza `Host`. Los endpoints OAuth derivan el origen público del request (`oauth/url.rs::public_base_url`, con `AppState.public_url = None` en tests) → sin `Host` devolverían un **400 irreal** y cualquier test que roce `/oauth/*` o `/v1/oauth/*` fallaría por el motivo equivocado. El literal `"futurefin.test"` está en **dos** sitios que deben coincidir (`request()` y `mcp_initialize()`) y es el origen que asertan las expectativas de `oauth_flow.rs` (`issuer == "http://futurefin.test"`).
+- **Kill-switch: sin `set_var`.** Ni `oauth_flow.rs` ni `mcp_http.rs` tocan el entorno. `FUTUREFIN_MCP_ENABLED=0` se simula construyendo el router a mano con `AppState::new(…, /*mcp_enabled*/ false, /*public_url*/ None)` y montando un `TestApp` literal (patrón de `mcp_http.rs::mcp_disabled_returns_404`). `AppState::new` ganó en 3.1.0 un 6º parámetro `public_url: Option<String>`; `spawn()` pasa `None` **a propósito**, para que el issuer siempre se derive del request y `FUTUREFIN_PUBLIC_URL` no haga falta en tests.
 
 ### Tests checked in
 | File | Covers |
@@ -72,6 +88,7 @@ puerto; el default documentado sigue siendo el TCP de 5433.
 | `history_cashflow.rs` (5) | `GET /v1/history/cashflow`: agregados mensuales exactos (Decimal-string, household y mine), la serie fina pasa por los snapshots, **`/v1/history/series` idéntico byte a byte con y sin transacciones** (regresión tier-1), `daily` con ventana >6m → 400, `fine` ausente sin vínculos. |
 | `api_tokens.rs` (8) | Tokens de API (v3.0.0, `/v1/api-tokens` + gate Bearer de `/mcp`): 201 con secreto `ffp_` una sola vez y `token_prefix` coherente, listado sin secreto/hash, revocado y expirado → 401 (con `WWW-Authenticate`), Bearer malformado/prefijo ajeno/secreto random → mismo 401, usuario pending → 403 al crear, viewer puede crear y su token autentica, aislamiento entre usuarios (listado y DELETE ajeno → 404), validaciones 400 (label/`expires_in_days`) y límite de 10 activos (`token_limit_reached`) que se libera al revocar. |
 | `mcp_http.rs` (9) | Flujo MCP end-to-end sobre `/mcp` (stateless 2026-07-28 con headers SEP-2243 `Mcp-Method`/`Mcp-Name` + `_meta` por request): initialize → `serverInfo.name == "futurefin"`, `tools/list` congela el catálogo de 10 tools, **paridad byte a byte** `get_summary` vs `GET /v1/summary`, `get_projection` hybrid fijo + `asset_series` opt-in + **pobla la misma cache** que el handler, error de validación → `is_error: true` con el JSON `{error, message}` del wire HTTP, `view: "mine"` filtra al usuario del token, `list_transactions` trunca con `total_count/truncated`, `get_settings` devuelve installation + rol, y `mcp_enabled=false` → `/mcp` 404 (los tests construyen `AppState` a mano para ese caso). |
+| `oauth_flow.rs` (30) | **OAuth 2.1 embebido (v3.1.0)** — la suite más grande por nº de tests. **Metadata/descubrimiento**: los 4 paths `.well-known` devuelven JSON y no el fallback SPA (si sale `text/html`, el fallback se los está tragando), `issuer`/`resource`/`authorization_servers` exactos, el issuer sigue `x-forwarded-proto`/`x-forwarded-host` y un `Host` malformado → 400. **`WWW-Authenticate`**: el 401 de `/mcp` anuncia `resource_metadata="…/oauth-protected-resource/mcp"` y el **403** (token vivo cuyo usuario pierde la membership) **no lleva header** — anti-bucle. **DCR**: cliente público (`ffc_`, sin secreto) vs confidencial (`ffcs_`, `client_secret_expires_at: 0`, default `client_secret_basic` al omitir el método), 8 `redirect_uris` rechazados (http no-loopback, `ftp:`, fragmento, userinfo, relativa, >5, ausente, vacío) vs loopback con puerto dinámico aceptado, y metadata desconocida ignorada (RFC 7591 §3.1). **Canje**: happy path code → `ffo_`/`ffr_` → `/mcp` 200 con `expires_in: 3600`, `token_type: Bearer`, `Cache-Control: no-store`, `state` eco literal + `iss` (RFC 9207); verifier PKCE incorrecto, `redirect_uri` distinto al del authorize, code expirado (forzado por SQL), `client_id` desconocido → **401 `invalid_client`** (la señal de re-registro de claude), Basic con secreto malo → 401 dejando el code **vivo**. **Reuse-detection**: reusar un code o un refresh ya consumido revoca el grant entero y deja `revoked_reason` = `code_reuse` / `refresh_token_reuse` (leído de la columna), matando el access token en curso; refresh de otro cliente rechazado; access expirado → 401. **Consentimiento**: errores fatales nunca traen `redirect_to` (anti-open-redirect, y son **200** con `status: invalid_request`), `plain` PKCE y un `resource` ajeno son **redirigibles** (`error=invalid_request` / `invalid_target` con `state`), `authorize-details` funciona **sin sesión** y reporta `already_connected`, deny → `access_denied` sin crear grant, sin sesión → 401, usuario pending → 403 sin grant, re-consentir la misma app deja **1 sola fila** en `oauth_grants`. **Revocación**: el panel corta `/mcp` al instante (y el refresh), aislamiento entre usuarios (listado vacío, DELETE ajeno → 404), RFC 7009 con `ffr_` mata el grant y un token desconocido sigue devolviendo 200. **Kill-switch**: con `mcp_enabled=false` las rutas de protocolo y `authorize-details` dan 404 pero `GET /v1/oauth/connections` sigue **200**. **Guardias**: `get_oauth_authorize_is_not_handled_by_the_api` (404 esperado; un 405 sería la señal de que alguien registró la ruta y rompió la pantalla en producción), `backup_export_works_with_oauth_grants_present` (anti-deriva SQL del incidente v1.0.10 — las tablas OAuth quedan fuera del `.ffbackup` por construcción) y `oauth_and_api_token_schemes_do_not_cross` (un `ffr_` como Bearer o un `ffo_` con un carácter alterado → 401). PKCE real con `OsRng` + SHA-256; caducidades forzadas por `UPDATE … expires_at = now() - interval '1 minute'` (no hay mock de reloj). |
 
 ### API lib unit tests (run under `cargo test --workspace`)
 
@@ -84,6 +101,13 @@ round-trip, migrate v5 filling empty `recurring_transaction_rules`, v6 recurring
 and the full v1→v6 migration chain. The `handlers/transactions/` module adds unit tests for the
 CSV presets (separators, ES/US decimals, BOM/Windows-1252, header autodetection), the
 fingerprint/ordinal grouping and the rule-precedence logic. They need no Postgres.
+
+**Excepción consciente (v3.1.0)**: el módulo `apps/api/src/oauth/` (9 ficheros), `auth/secret.rs` y
+`handlers/oauth_consent.rs` **no llevan ni un `#[test]`**. Su cobertura es 100 % de integración
+(`oauth_flow.rs`), porque casi todo lo que hay que probar cruza la DB (transacciones con
+`FOR UPDATE`, expiries calculadas por Postgres, revocación por JOIN) o el router entero (fallback
+SPA, kill-switch, headers). Si añades un helper **puro** ahí (parsing, validación de charset), ese sí
+merece un unit test local.
 
 ### Writing a new integration test
 
@@ -123,9 +147,9 @@ Rules of thumb:
 ## Frontend (Vitest)
 
 - Config: `apps/web/vitest.config.ts` — `node` environment (no jsdom). Add `happy-dom` if you ever add component render tests.
-- Pure-function tests only. 293 en 11 ficheros a 2026-08-14 (esta lista omite `responsive.test.ts` y `chart-gestures.test.ts`; el total autoritativo lo da `npm test --workspace futurefin-web 2>&1 | grep Tests`):
-  - `lib/format.test.ts` (34) — Intl formatting in es-ES, edge cases (null/NaN/empty), Decimal string preservation; `formatMonthsRough` en años + meses desde 24 y `formatRunwayValue` («Infinito» si el runway es indefinido; «+100 años» para el suelo `months ≥ 1200`) (v2.3.0).
-  - `lib/fire.normalize.test.ts` (18) — normalizadores y gating de `savings_source`, incluido `savingsAvgParenthetical` (paréntesis «promedio de N meses», singular, `undefined` en modo A / fallback) (v2.2.0).
+- Pure-function tests only. **309 en 12 ficheros a 2026-08-17** (medido, no estimado: `npm test --workspace futurefin-web 2>&1 | grep Tests`). Ojo al contar a mano: `chart-gestures.test.ts` y `fire.test.ts` generan tests en bucles, así que el nº de `it(` en el fichero es menor que el que reporta Vitest (10 → 77 y 2 → 8 respectivamente). Esta lista omite `responsive.test.ts` (3) y `chart-gestures.test.ts` (77):
+  - `lib/format.test.ts` (38) — Intl formatting in es-ES, edge cases (null/NaN/empty), Decimal string preservation; `formatMonthsRough` en años + meses desde 24 y `formatRunwayValue` («Infinito» si el runway es indefinido; «+100 años» para el suelo `months ≥ 1200`) (v2.3.0).
+  - `lib/fire.normalize.test.ts` (21) — normalizadores y gating de `savings_source`, incluido `savingsAvgParenthetical` (paréntesis «promedio de N meses», singular, `undefined` en modo A / fallback) (v2.2.0).
   - `lib/dates.test.ts` (32) — civil calendar (leap years, day clamping, age before/after birthday), TZ fallback, payment intervals, `addMonthsCivil` con deltas **negativos** (v1.5.0).
   - `api/client.test.ts` (10) — `fetch` mocks: credentials, body serialization, 4xx error propagation, 204 handling.
   - `lib/fire.test.ts` (8) — **FIRE target parity** vs server: loads the same `apps/api/tests/fixtures/fire-parity.json` and asserts `grossUpNetAnnualFire(computeFireAnnualNeedNetEur(...)) / (swr/100)` matches `expected_target_nw` (± 1 €).
@@ -133,6 +157,7 @@ Rules of thumb:
   - `lib/projection-chart.test.ts` (10) — `deflationFactorAt` (0 / ±12 meses / inflación 0) y los tick-builders con `startMonth=-24` + regresión `startMonth=0` idéntica al comportamiento previo.
   - `lib/snapshot-tracker.test.ts` (8) — `liquidCoverageComplete` (vacío→false, cobertura completa→true, stale tras `pruneEditLog`→false, asset nuevo dentro de la ventana).
   - `lib/expenses.test.ts` (82) — helpers puros de la pestaña «Movimientos» (v1.6.0, ampliado en v1.8.0): labels de mes, `defaultSelectedMonth` (último completo), `categoriesForKind` (savings sin categoría), `buildConfirmDecisions` paralelo por índice, filtros del preview, tonos de delta, y (v1.8.0) `significanceThreshold`/`trendArrow`/`significantDeltaTone` (umbral 1% del ingreso real), `AVG_WINDOWS`/`avgWindowLabel`, `capitalizeSource`.
+  - `lib/oauth.test.ts` (8) — helpers de la pantalla de consentimiento (v3.1.0): `parseAuthorizeParams` (query completa con opcionales URL-decoded, `null` si falta cualquiera de los 5 obligatorios, opcionales ausentes **no** se inventan, y `code_challenge_method=plain` **SÍ** parsea — el rechazo es del servidor, no del cliente: la división de responsabilidades queda congelada en un test), `redirectHostLabel` (host con y sin puerto; string no-URL devuelto tal cual) y `authorizeErrorMessage` (códigos conocidos vs default legible).
 
 ### Writing a new frontend test
 Colocate beside the module: `lib/foo.ts` ↔ `lib/foo.test.ts`. Use `vi.mocked(globalThis.fetch)` if you need to stub fetch.
@@ -185,8 +210,9 @@ npm run lint:web
 ## Procedencia y re-verificación
 
 Contenido verificado leyendo el código; la tabla de CI y las notas de contenedor se
-re-verificaron el **2026-08-16 (v3.0.0)**. Comandos para comprobar que esta página no ha
-derivado (todos desde la raíz del repo):
+re-verificaron el **2026-08-16 (v3.0.0)**, y la suite `oauth_flow.rs`, los helpers nuevos de
+`common/mod.rs` y los recuentos de Vitest el **2026-08-17 (v3.1.0)**. Comandos para comprobar que
+esta página no ha derivado (todos desde la raíz del repo):
 
 ```bash
 # Jobs y pasos de CI (la fila docker-stack = un paso por línea)
@@ -203,5 +229,11 @@ grep -n "5433" apps/api/tests/common/mod.rs
 # Recuentos sin compilar
 grep -c '#\[test\]' crates/engine/src/{projection,history,runway}.rs
 grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'
-ls apps/api/migrations | wc -l          # 35 a 2026-08-16 (v3.0.0 añade api_tokens)
+                                        # 206 en 23 suites a 2026-08-17 (oauth_flow.rs aporta 30)
+ls apps/api/tests/*.rs | wc -l          # 23 a 2026-08-17
+ls apps/api/migrations | wc -l          # 36 a 2026-08-17 (v3.1.0 añade 20260817090000_oauth.sql)
+# Vitest: el nº de `it(` NO es el total (hay bucles) — el autoritativo es el runner
+npm test --workspace futurefin-web 2>&1 | grep "Tests "   # 309 en 12 ficheros a 2026-08-17
+# El Host por defecto del harness (sin él, todo /oauth/* daría 400 irreal)
+grep -n "futurefin.test" apps/api/tests/common/mod.rs      # 2 hits: request() y mcp_initialize()
 ```

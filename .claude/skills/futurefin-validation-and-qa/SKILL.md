@@ -23,7 +23,10 @@ test-file inventory refreshed on 2026-08-14 for v2.2.0 (new `summary_runway.rs`,
 and on 2026-08-15 for v2.3.0 (runway SWR threshold: engine `runway.rs` 8 → 13, `summary_runway.rs`
 7 → 10); § 3 (CI reality) and § 6 (coverage gaps) rewritten on 2026-08-16 for **v3.0.0**, whose
 `docker-stack` job grew from a boot smoke test into the project's only automated *no-data-loss*
-evidence. The cargo test suites themselves are **unchanged** by 3.0.0.
+evidence. The `docker-stack` job aside, the cargo test suites were **unchanged** by the image work
+itself. Counts and the test-file inventory re-counted **2026-08-17 for v3.1.0**: the three suites
+that the MCP/OAuth releases added (`api_tokens.rs`, `mcp_http.rs`, `oauth_flow.rs`) had been missing
+from § 2's inventory, and every total here was one release behind.
 
 Why this matters here: the hardest live problem in FutureFin is **projection correctness** —
 errors are silent (numbers look plausible but wrong). Eyeballing a chart is never acceptance.
@@ -52,8 +55,8 @@ not authoritative — recount with the commands in "Provenance and maintenance".
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
 | Engine unit tests (56) | `crates/engine/src/{projection.rs (22), history.rs (21), runway.rs (13)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
-| Backend integration (159 tests, 20 files, as of 2026-08-15) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
-| Frontend Vitest (293, 11 files, as of 2026-08-14) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
+| Backend integration (**206 tests, 23 files, as of 2026-08-17**) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
+| Frontend Vitest (**309, 12 files, as of 2026-08-17**) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
 
 Plus API lib unit tests run by `cargo test --workspace` (no Postgres): notably
 `apps/api/src/handlers/backup_user/schema.rs` `mod tests` (10; 2 added in v1.6.0 for `.ffbackup` v5
@@ -95,7 +98,7 @@ socket and would rather not publish a port; the 5433 TCP default stays the docum
 1. Creates schema `ff_test_<uuid-simple>` in the test DB.
 2. Opens a pool (max 5 conns) with `after_connect` hook: `SET search_path TO "<schema>", public`
    on every connection — so all queries in the test hit only that schema.
-3. Runs `sqlx::migrate!("./migrations")` inside it (34 migration files as of 2026-08-14 —
+3. Runs `sqlx::migrate!("./migrations")` inside it (**36** migration files as of 2026-08-17 —
    count with `ls apps/api/migrations | wc -l`).
 4. Returns `(PgPool, schema_name)`. **Schemas leak intentionally** — no teardown, so a failed
    test leaves its state inspectable.
@@ -137,22 +140,26 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
 | `summary_savings_source.rs` | 6 | `GET /v1/summary` `financial_health` following `savings_source`: mode A = budget, mode B uses the avg with hybrid subtraction, `months==0` → fallback, household/mine scoping, `mode_b_summary_pseudo_empty_month_excluded` (recurring-only months don't count in `savings_source_months_with_data`), `mode_c_income_not_overwritten` (mode C keeps budget income in `income_monthly_equivalent`) |
 | `transactions_recurring.rs` | 16 | recurring rules (v1.8.0): `recurrence` create makes rule + linked origin instance, idempotent `materialize` (2nd call → 0), never a future `op_date` (current month only once its day arrived), `day_of_month` clamped to month end, deleting an instance is not recreated on re-materialize (cursor), rule `DELETE` keeps instances (SET NULL), viewer 403 on materialize/delete, out-of-range `recurrence.day_of_month` → 400; **create-time backfill** (post-2.0.0): `create_with_past_date_backfills_instances` (past date fills intermediate months in the same commit), `recurrence_op_date_within_bound_created`, and the 10-year bound `recurrence_op_date_too_old_*` → 422 `recurrence_too_old` |
 | `history_cashflow.rs` | 5 | `GET /v1/history/cashflow`: exact monthly aggregates (Decimal-string, household + mine), fine series passes through snapshots, `/v1/history/series` byte-identical with and without transactions (tier-1 regression), `daily` with window >6m → 400, `fine` absent without links |
+| `oauth_flow.rs` | 30 | Embedded OAuth 2.1 (v3.1.0), the largest suite by test count: `.well-known` metadata is JSON and not the SPA fallback, issuer follows `X-Forwarded-*` and a malformed `Host` → 400, the `/mcp` **401** advertises `resource_metadata` while the **403** carries no `WWW-Authenticate` (anti-loop), DCR happy paths + 8 rejected `redirect_uris` + unknown metadata ignored, `authorization_code`+PKCE end-to-end to `/mcp` (`expires_in: 3600`, `no-store`, `state` echo + `iss`), code/refresh **reuse-detection** revoking the whole grant with `revoked_reason` `code_reuse`/`refresh_token_reuse`, refresh rotation, unknown `client_id` → **401 `invalid_client`**, consent fatal-vs-redirectable split (fatal never returns `redirect_to`), `plain` PKCE and foreign `resource` redirectable, deny/pending/no-session gating, re-consent reuses **one** grant row, panel + RFC 7009 revocation cutting `/mcp` instantly, cross-user isolation, kill-switch (protocol 404 but `/v1/oauth/connections` still 200), the `GET /oauth/authorize` route-shadowing guard, `.ffbackup` export unaffected, and no crossing between the `ffp_`/`ffo_` schemes. Real PKCE via `OsRng`+SHA-256; expiries forced with SQL (no clock mock). **Note**: the whole `apps/api/src/oauth/` module has zero in-source unit tests — coverage is 100 % here |
+| `api_tokens.rs` | 8 | API tokens (v3.0.0) + the `/mcp` Bearer gate: 201 exposes the `ffp_` secret exactly once with a coherent `token_prefix`, listing never returns secret or hash, revoked/expired/malformed/foreign-prefix/random all collapse to the same 401, pending user → 403 on create, a viewer's token authenticates, cross-user isolation (list + foreign DELETE → 404), 400 validations and the 10-active-token limit (`token_limit_reached`) released by revoking |
+| `mcp_http.rs` | 9 | MCP end-to-end over `/mcp` (stateless 2026-07-28 + SEP-2243 headers): initialize, `tools/list` freezing the 10-tool catalog, **byte-for-byte parity** `get_summary` vs `GET /v1/summary`, `get_projection` fixed-hybrid + opt-in `asset_series` + shares the handler's cache, validation error → `is_error: true` with the HTTP wire JSON, `view: "mine"` scoping, `list_transactions` truncation, `get_settings`, and `mcp_enabled=false` → 404 (router built by hand) |
 
-### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; 293 a 2026-08-14)
+### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; **309 en 12 ficheros a 2026-08-17**)
 
 Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/**/*.test.{ts,tsx}"]`,
 `globals: false` (import `describe/it/expect` from `vitest` explicitly).
 
 | File | Tests | Covers |
 |---|---|---|
-| `apps/web/src/lib/format.test.ts` | 34 | es-ES Intl formatting, null/NaN/empty edges, Decimal string preservation; `formatMonthsRough` in years+months from 24 and `formatRunwayValue` («Infinito» when the runway is indefinite; «+100 años» for the `months ≥ 1200` floor) (v2.3.0) |
-| `apps/web/src/lib/fire.normalize.test.ts` | 18 | `savings_source` normalizers/gating, incl. `savingsAvgParenthetical` («promedio de N meses», singular, `undefined` in mode A / after fallback) (v2.2.0) |
+| `apps/web/src/lib/format.test.ts` | 38 | es-ES Intl formatting, null/NaN/empty edges, Decimal string preservation; `formatMonthsRough` in years+months from 24 and `formatRunwayValue` («Infinito» when the runway is indefinite; «+100 años» for the `months ≥ 1200` floor) (v2.3.0) |
+| `apps/web/src/lib/fire.normalize.test.ts` | 21 | `savings_source` normalizers/gating, incl. `savingsAvgParenthetical` («promedio de N meses», singular, `undefined` in mode A / after fallback) (v2.2.0) |
 | `apps/web/src/lib/dates.test.ts` | 32 | civil calendar (leap years, day clamping, age around birthday), TZ fallback, payment intervals, negative `addMonthsCivil` deltas (v1.5.0) |
 | `apps/web/src/api/client.test.ts` | 10 | fetch mocks: credentials, body serialization, 4xx propagation, 204 handling |
-| `apps/web/src/lib/fire.test.ts` | 8 | FIRE parity vs the shared fixture (1 sanity + 6 cases) |
+| `apps/web/src/lib/fire.test.ts` | 8 | FIRE parity vs the shared fixture (1 sanity + **7** fixture cases generated in a loop, so the file only shows 2 `it(` call sites) |
 | `apps/web/src/lib/history-merge.test.ts` | 12 | `mergeProjectionWithHistory`: identity-by-reference (null/empty/anchor-mismatch → byte-identical render), drops `month_index ≥ 0`, asset-series union by id, future offset |
 | `apps/web/src/lib/projection-chart.test.ts` | 10 | `deflationFactorAt` (0 / ±12 / inflation 0) + tick-builders with `startMonth=-24` and the `startMonth=0` regression (identical to prior behavior) |
 | `apps/web/src/lib/snapshot-tracker.test.ts` | 8 | `liquidCoverageComplete` (empty→false, full coverage→true, stale after `pruneEditLog`→false, new asset within the window) |
+| `apps/web/src/lib/oauth.test.ts` | 8 | OAuth consent-screen helpers (v3.1.0): `parseAuthorizeParams` (full query URL-decoded, `null` if any of the 5 required params is missing, absent optionals not invented, and `code_challenge_method=plain` **does** parse — the client/server validation split is frozen in a test), `redirectHostLabel`, `authorizeErrorMessage` |
 
 ## 3. CI reality
 
@@ -306,11 +313,15 @@ async fn my_endpoint_does_x() {
 ```
 
 Available on `TestApp` (all in `common/mod.rs`): `spawn()` → `{router, pool, schema, state}`;
-`register_and_login_owner(name)` → `LoggedInOwner {username, cookie}`;
+`register_and_login_owner(name)` → `LoggedInOwner {username, cookie, user_id}`;
 `create_category(&owner, scope, name)` → id string; `count_rows(table)` → i64 (direct DB
 check — how `liabilities_purge.rs` proves rows persist); `get`, `get_with_cookie`,
-`post_json`, `post_json_with_cookie`, `patch_json_with_cookie`, `delete_with_cookie` → all
-return `ResponseParts {status, headers, body}` with `.json()` and `.session_cookie()`.
+`post_json`, `post_json_with_cookie`, `patch_json_with_cookie`, `delete_with_cookie`, and
+(v3.1.0) `post_form`, `post_form_with_basic_auth`, `get_with_headers`, `mcp_initialize` → all
+return `ResponseParts {status, headers, body}` with `.json()` and `.session_cookie()`. Since
+v3.1.0 `request()` also injects `Host: futurefin.test` when absent — `oneshot` doesn't synthesize
+one and the OAuth endpoints derive their issuer from it. Full signatures and rationale:
+[`.claude/tests.md`](../../tests.md) §Test infrastructure.
 `app.state` exposes `AppState` internals (e.g. `projection_cache`) — see `projection_cache.rs`
 for asserting cache keys directly. Mutation-triggered background work runs in `tokio::spawn`;
 sleep ~100 ms before asserting its effects (pattern in `projection_cache.rs`).
@@ -373,12 +384,14 @@ test pure functions only; extract logic out of components to make it testable.
 Verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); `.claude/tests.md` was corrected
 the same day (CI claim, migration count, missing `projection_cache.rs` row), and both files were
 updated together on 2026-08-16 for **v3.0.0** (`docker-stack` job contents, socket form of
-`TEST_DATABASE_URL`, container coverage gaps). Re-verify volatile facts with:
+`TEST_DATABASE_URL`, container coverage gaps) and again on **2026-08-17 for v3.1.0** (all counts,
+plus the three inventory rows the MCP/OAuth releases had left out). Re-verify volatile facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
-- Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (56 on 2026-08-15 = projection 22 + history 21 + runway 13)
-- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (159 across 20 files on 2026-08-15)
-- Migration count: `ls apps/api/migrations | wc -l` (34 on 2026-08-15; neither v2.2.0 nor v2.3.0 shipped a migration)
+- Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (56 on 2026-08-17 = projection 22 + history 21 + runway 13; unchanged by 3.0.0/3.1.0 — neither touched the engine)
+- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (**206 across 23 files on 2026-08-17**; `oauth_flow.rs` alone is 30)
+- Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**309 in 12 files on 2026-08-17**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
+- Migration count: `ls apps/api/migrations | wc -l` (**36 on 2026-08-17**; v2.2.0/v2.3.0 shipped none, v3.0.0 added `api_tokens`, v3.1.0 added `20260817090000_oauth.sql`)
 - CI coverage claims: read `.github/workflows/ci.yml` (jobs: rust, web, docker-stack; grep it
   for `TEST_DATABASE_URL` — absent means integration tests still not in CI; grep for
   `npm test`/`vitest` — absent means Vitest still not in CI)

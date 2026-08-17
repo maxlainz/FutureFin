@@ -7,7 +7,9 @@ src/
 ├── App.tsx                       # composition root: auth gate + global state + route → view dispatch
 ├── App.css                       # global styles (consume --ff-* tokens; no hardcoded hex)
 ├── index.css                     # minimal reset, font-family
-├── main.tsx                      # ReactDOM.createRoot entry — imports styles/theme.css before index.css
+├── main.tsx                      # ReactDOM.createRoot entry — imports styles/theme.css before index.css.
+│                                 #   ADEMÁS: resuelve la ruta /oauth/authorize aquí (NO en App.tsx) → lazy
+│                                 #   OAuthAuthorizeView en vez de <App/>. Ver §Ruta /oauth/authorize abajo
 │
 ├── styles/
 │   └── theme.css                 # design tokens (--ff-*, --proj-*) con variantes claro/[data-theme=dark]
@@ -52,7 +54,12 @@ src/
 │   │                             #   pinchWindow (+ ChartDomain). Espejo exacto de los clamps/ancla del onWheel — test de
 │   │                             #   equivalencia en chart-gestures.test.ts. ProjectionNetWorthChart la consume desde su
 │   │                             #   máquina de gestos Pointer Events (touch-action: pan-y; vertical = scroll de página)
-│   └── theme.ts                  # ThemePref ("auto"|"light"|"dark") + apply/load/save + subscribeSystemThemeChanges
+│   ├── theme.ts                  # ThemePref ("auto"|"light"|"dark") + apply/load/save + subscribeSystemThemeChanges
+│   └── oauth.ts                  # helpers PUROS de la pantalla de consentimiento (v3.1.0): AuthorizeParams,
+│                                 #   parseAuthorizeParams (null si falta cualquiera de los 5 params obligatorios;
+│                                 #   `code_challenge_method=plain` SÍ parsea — rechazarlo es del servidor),
+│                                 #   redirectHostLabel, authorizeErrorMessage (8 códigos → copy es-ES).
+│                                 #   Test: oauth.test.ts (8 casos)
 │
 ├── components/                   # generic UI primitives (no domain knowledge)
 │   ├── TopBar.tsx                # cabecera única: marca + nav pills + extras + hamburguesa
@@ -108,6 +115,20 @@ src/
 │   ├── ApiTokensPanel.tsx        # Ajustes → Acceso: tokens de API (MCP). Self-fetch (patrón HistorySettingsPanel); crear (modal
 │   │                             #   label + caducidad), secreto mostrado UNA vez con copiar, tabla (prefix/último uso/vigencia),
 │   │                             #   revocar con modal de confirmación. Visible para cualquier miembro (v3.0.0).
+│   ├── OAuthConnectionsPanel.tsx # Ajustes → Acceso, sección «Conexiones», justo debajo de ApiTokensPanel (v3.1.0). Calco del
+│   │                             #   patrón ApiTokensPanel: sin props, self-fetch GET /v1/oauth/connections; tabla
+│   │                             #   Aplicación (client_name + host verificado) / Conectada / Último uso; revocar =
+│   │                             #   DELETE /v1/oauth/connections/{id} tras Modal de confirmación → corte inmediato.
+│   │                             #   Sigue disponible con FUTUREFIN_MCP_ENABLED=0 (el endpoint se monta siempre)
+│   ├── OAuthAuthorizeView.tsx    # pantalla de consentimiento OAuth (v3.1.0), montada desde main.tsx, NO desde App.tsx.
+│   │                             #   Autónoma: aplica el tema ella misma (applyTheme/loadThemePref) e importa App.css,
+│   │                             #   porque App.tsx nunca monta. Máquina de fases: loading → disabled (404 = kill-switch)
+│   │                             #   | invalid (error FATAL: pinta y muere, JAMÁS redirige) | redirecting (error
+│   │                             #   redirigible → location.replace) | login (401 → LoginPanel) | consent → submitting
+│   │                             #   → pending (403) | error. Endpoints: GET /v1/oauth/authorize-details, GET /v1/auth/me,
+│   │                             #   POST /v1/oauth/authorize, POST /v1/auth/logout («Cambiar de usuario»).
+│   │                             #   **El redirect final lo construye el SERVIDOR** (`redirect_to`); el cliente nunca
+│   │                             #   concatena code/state. Aprobar y cancelar usan el mismo POST (`approve: bool`)
 │   ├── HistorySettingsPanel.tsx  # Ajustes → Histórico: filtros año/kind, tabla de snapshots, modal añadir/editar, borrar (backfill).
 │   │                             #   Prefill: el modal crear autocompleta el grid vía GET /v1/history/snapshots/prefill (repuebla en
 │   │                             #   silencio al cambiar fecha/kind si el grid no está «dirty»; «Recalcular» si lo está); editar ofrece
@@ -115,7 +136,11 @@ src/
 │   └── AllocationRulesPanel.tsx  # used embedded inside BudgetView modal
 │
 └── auth/
-    └── BootstrapInstallationPanel.tsx  # first-user setup form (currency + IANA tz)
+    ├── BootstrapInstallationPanel.tsx  # first-user setup form (currency + IANA tz)
+    └── LoginPanel.tsx                  # panel de login AUTOCONTENIDO (v3.1.0): props {intro?, onAuthenticated},
+                                        #   POST /v1/auth/login y ya. Sin modo registro (en una instalación ya
+                                        #   creada el owner aprueba desde Ajustes), sin logout ni refresh.
+                                        #   Lo consume solo OAuthAuthorizeView
 ```
 
 > Para los **tokens, paleta y reglas visuales** del rediseño V1 consulta [`design-system.md`](design-system.md).
@@ -142,6 +167,7 @@ src/
 | New Settings sub-tab | add to `SETTINGS_SUBTAB_SLUG`/`_LABEL` in `lib/navigation.ts` + render branch inside `SettingsView` (sub-tabs son `ff-nav-pill` ya, no tab-bar) |
 | Tabla nueva (o columnas nuevas en una existente) | seguir el patrón móvil «columnas esenciales»: gatear th/td con `useIsMobile()` (`lib/responsive.ts`), datos secundarios a `.cell-subline`, fila tappable → modal. Doctrina completa en design-system.md «Responsive / móvil». Controles densos dentro de la tabla → añadirlos al carve-out táctil de App.css (sección A2) |
 | New auth/setup flow | `auth/` |
+| New **standalone page outside the tab router** (like `/oauth/authorize`) | `main.tsx`: rama lazy antes de `<App/>`. Ver §Ruta `/oauth/authorize` — el router de `App.tsx` canonicaliza cualquier path desconocido |
 
 ## Why this layout
 
@@ -150,6 +176,50 @@ src/
 - **Views are self-contained**: each one can be opened and understood without scrolling 10K lines.
 - **Tests live next to code**: `format.test.ts` sits beside `format.ts`. The pattern scales — add helpers + tests together.
 - **No circular deps**: `views/` import `lib/`, `lib/` doesn't import `views/`. Linter would catch it.
+
+## Ruta `/oauth/authorize` — resuelta en `main.tsx`, no en el router de `App.tsx` (v3.1.0)
+
+La pantalla de consentimiento OAuth es la única vista que **no** cuelga del router de `App.tsx`. La
+decisión se toma en `main.tsx`, a nivel de módulo, antes de que React renderice:
+
+```tsx
+const OAuthAuthorizeView = lazy(() =>
+  import("./views/OAuthAuthorizeView").then((m) => ({ default: m.OAuthAuthorizeView })),
+);
+const isOAuthAuthorize =
+  window.location.pathname.replace(/\/+$/, "") === "/oauth/authorize";
+// …
+{isOAuthAuthorize ? (
+  <Suspense fallback={null}><OAuthAuthorizeView /></Suspense>
+) : (
+  <App />
+)}
+```
+
+- **Match exacto** (tras quitar barras finales), no por prefijo. En esa ruta `<App/>` **no se monta
+  en absoluto** — de ahí que la vista aplique el tema por su cuenta e importe `App.css`.
+- **Chunk lazy**: `React.lazy` + `import()`, así que el bundle principal no carga la pantalla de
+  consentimiento para el 99,9 % de las visitas. `Suspense fallback={null}` (pantalla en blanco
+  mientras baja el chunk, que es diminuto). Nada de esto pasa por `prefetchOtherViews`: no es una
+  pestaña y no se llega a ella navegando.
+- **Por qué NO puede vivir en el router de `App.tsx`**: su `useLayoutEffect` de canonicalización
+  reescribe cualquier path que no reconozca —
+  ```tsx
+  if (tabFromPathname(pathname) === null) { navigate("/resumen", true); return; }
+  ```
+  y `navigate` hace `window.history.replaceState(null, "", "/resumen")`, **una URL sin query
+  string**. `tabFromPathname` (`lib/navigation.ts`) devuelve `null` para `/oauth/authorize`, así que
+  el efecto destruiría `client_id`, `redirect_uri`, `code_challenge` y `state` de forma
+  irrecuperable — y al ser un `useLayoutEffect`, antes del primer paint. Registrar la ruta en `TABS`
+  tampoco sirve: no es una pestaña. **`App.tsx` queda literalmente intacto** (cero menciones a
+  `oauth`), que era el objetivo.
+- Simetría con el backend: la ruta **tampoco** existe en el API — la sirve el fallback SPA. Ver
+  [`api-routes.md`](api-routes.md) §OAuth 2.1 y la prohibición del proxy `"/oauth"` a secas en
+  [`env-and-config.md`](env-and-config.md) §Vite config.
+- `auth/LoginPanel.tsx` es un panel de login **duplicado a propósito** (plan B autorizado), no una
+  extracción del formulario de `App.tsx`: el estado de auth de `App.tsx` está entrelazado con
+  logout/refresh y moverlo arriesgaba regresión sin cambiar nada observable. Si algún día `App.tsx`
+  adelgaza, ese panel es el punto de aterrizaje natural.
 
 ## Prefetching de views lazy
 
@@ -190,7 +260,7 @@ Cuando activo:
 ## What is NOT extracted (intentional)
 
 - **API mutation handlers** (`submitAssetForm`, `deleteLiabilityRow`, etc.) stay in `App.tsx`. They close over `setAssets`, `setLiabilities`, etc. Moving them out requires a state library (Redux / Zustand / TanStack Query) — out of scope.
-- **Auth gate flow** (login/register/pending screens) is inline in `App.tsx`. `BootstrapInstallationPanel` is extracted but the login/register form is small enough that splitting it adds ceremony.
+- **Auth gate flow** (login/register/pending screens) is inline in `App.tsx`. `BootstrapInstallationPanel` is extracted but the login/register form is small enough that splitting it adds ceremony. v3.1.0 needed a login form **outside** `App.tsx` (the OAuth consent screen) and deliberately **duplicated** it as `auth/LoginPanel.tsx` instead of extracting the original — see §Ruta `/oauth/authorize`.
 - **FIRE client-side math** (`lib/fire.ts`) duplicates the Rust engine's tax/gross-up logic. Intentional: it powers the **live preview** of the FIRE settings form (user types `swr_pct`, sees the target update without a round-trip). If you change tax brackets server-side, mirror the change here.
 
 ## Frontend tests
