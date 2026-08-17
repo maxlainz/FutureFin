@@ -14,7 +14,8 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 | `CORS_ORIGINS` | 4 localhost entries | Comma-separated. Not required — defaults to localhost. Set only for cross-origin API access. |
 | `COOKIE_SECURE` | `false` | Bool env var parsed by `main.rs`. |
 | `SESSION_TTL_DAYS` | `30` | Acepta 1–400; un valor fuera de rango o no numérico **cae silenciosamente al default 30** (filter-then-default, no clamp). |
-| `FUTUREFIN_MCP_ENABLED` | `true` | Bool (`parse_bool_env` de `main.rs`). Con `0`/`false` el router `/mcp` **ni se monta** (404 del fallback); los endpoints `/v1/api-tokens` siguen montados. Default habilitado: el endpoint es inerte sin tokens (todo 401) y producción sigue sin requerir env vars. |
+| `FUTUREFIN_MCP_ENABLED` | `true` | Bool (`parse_bool_env` de `main.rs`). Con `0`/`false` el router `/mcp` **ni se monta** (404 del fallback) **y desde 3.1.0 tampoco el protocolo OAuth**: las 7 rutas raíz (`/.well-known/oauth-*`, `/oauth/register|token|revoke`) ni se construyen, y con ellas caen `/v1/oauth/authorize-details` y `POST /v1/oauth/authorize`. **EXCEPCIÓN: `GET/DELETE /v1/oauth/connections[/{id}]` se montan siempre**, igual que `/v1/api-tokens` — apagar MCP no puede dejarte sin poder revocar credenciales ya concedidas. Default habilitado: el endpoint es inerte sin credenciales (todo 401) y producción sigue sin requerir env vars. |
+| `FUTUREFIN_PUBLIC_URL` | — (derivado del request) | **Opcional** (3.1.0). Origen público canónico usado como `issuer` OAuth y para construir los endpoints de la metadata `.well-known`. Sin ella, `oauth/url.rs::public_base_url` lo **deriva por request**: `X-Forwarded-Proto` + `X-Forwarded-Host` (primer valor de cada uno) o el header `Host`, con charset estricto (`host[:puerto]`, IPv6 entre corchetes, ≤255 chars, sin `/`, `@`, espacios ni controles) → si no cuadra, **400 `invalid_request`**. **Fíjala solo si tu reverse proxy no manda esos headers** (o manda un `Host` interno): entonces claude.ai recibiría un issuer inalcanzable y la conexión falla. Formato: origen desnudo, `https://finanzas.example.com` — **sin path, query, fragmento ni barra final**. **Validación fail-loud** como `CORS_ORIGINS` (`main.rs::public_url()`): si está presente pero es inválida (no parseable, esquema ≠ http/https, sin host, o con path/query/fragmento) el arranque hace **panic** en vez de servir metadata OAuth rota en silencio. Se normaliza al origen ASCII. El log de arranque la imprime (`public_url=…` o `(derived from request)`). Irrelevante con `FUTUREFIN_MCP_ENABLED=0`. |
 | `WEB_STATIC_ROOT` | — | Path to Vite `dist/`. Docker sets `/app/web`. Omit for API-only. |
 | `FUTUREFIN_API_PORT` | `8081` | Used by Vite proxy (`vite.config.ts`) |
 | `WEB_DEV_PORT` | `8080` | Vite dev server port |
@@ -61,6 +62,22 @@ Mantén `.env` de dev y de prod separados.
 
 ## Vite config
 `apps/web/vite.config.ts` loads env from repo root (two levels up from `apps/web`). It reads `FUTUREFIN_API_PORT` and `WEB_DEV_PORT` without the `VITE_` prefix (uses `loadEnv` with `""`).
+
+**Proxy en dev** — las claves de `server.proxy` son **prefijos**, y las rutas de protocolo se listan
+**una a una** a propósito:
+
+| Clave | Por qué |
+|---|---|
+| `/health`, `/openapi.json`, `/v1` | El API de siempre (`/v1` cubre también `/v1/oauth/*`). |
+| `/.well-known` | Metadata OAuth (RFC 8414/9728) — vive en el API. |
+| `/oauth/token`, `/oauth/register`, `/oauth/revoke` | Protocolo OAuth (3.1.0), endpoint por endpoint. |
+| `/mcp` | Transporte MCP. |
+
+- **PROHIBIDO proxyar `"/oauth"` a secas.** Al ser prefijo, se llevaría también `/oauth/authorize`
+  — que es una **vista de la SPA**, no una ruta del backend — al servidor Rust, que no la tiene: en
+  dev verías un 404 en lugar de la pantalla de consentimiento, y el authorization request moriría en
+  el primer salto del navegador. Mismo motivo por el que el backend no registra la ruta (ver
+  [`api-routes.md`](api-routes.md) §OAuth 2.1).
 
 ## Docker Compose files
 

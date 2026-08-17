@@ -741,3 +741,34 @@ export type ApiTokenApi = {
 
 /** Respuesta del `POST /v1/api-tokens`: el campo `token` (secreto) SOLO viaja aquí, una vez. */
 export type CreateApiTokenResponseApi = ApiTokenApi & { token: string };
+
+/**
+ * `GET /v1/oauth/authorize-details` — validación del authorization request para la
+ * pantalla de consentimiento. `consent` = pintar; `invalid_request` = error FATAL
+ * (jamás redirigir); `redirect_error` = navegar a `redirect_to` (lleva `?error=…`).
+ * `client_name` es texto declarado por la app (NO verificado); `redirect_host` sí.
+ */
+export type OAuthAuthorizeDetailsApi = {
+  status: "consent" | "invalid_request" | "redirect_error";
+  client_name?: string;
+  client_uri?: string | null;
+  redirect_host?: string;
+  resource?: string;
+  already_connected?: boolean;
+  connected_at?: string | null;
+  error_code?: string;
+  redirect_to?: string;
+};
+
+/** `POST /v1/oauth/authorize` — a dónde navegar (código o `error=access_denied`). */
+export type OAuthAuthorizeDecisionApi = { redirect_to: string };
+
+/** `GET /v1/oauth/connections` — apps conectadas por OAuth del propio usuario. */
+export type OAuthConnectionApi = {
+  id: string;
+  client_name: string;
+  client_uri?: string | null;
+  redirect_host?: string | null;
+  created_at: string;
+  last_used_at?: string | null;
+};

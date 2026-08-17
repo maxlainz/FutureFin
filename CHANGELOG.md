@@ -4,6 +4,96 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [3.1.0] - 2026-08-17
+
+**Conector de claude.ai web: OAuth 2.1 embebido**. El límite conocido de la 3.0.0 — «el conector de
+claude.ai exige OAuth 2.1, fuera de scope» — desaparece: el mismo binario actúa ahora de
+**authorization server + resource server OAuth 2.1** para `/mcp`, sin IdP externo ni contenedores
+nuevos. Añadir FutureFin como conector personalizado en claude.ai (web/móvil/Desktop) pasa a ser:
+pegar `https://tu-host/mcp`, iniciar sesión en la pantalla de consentimiento de FutureFin y
+autorizar. Los tokens `ffp_…` de la 3.0.0 siguen funcionando igual (Claude Code y clientes MCP
+genéricos); OAuth es el **tercer esquema de credencial**, no un reemplazo. El login de la app no
+cambia (username+password Argon2id): OAuth aquí delega acceso a una app, nunca inicia sesión.
+Una migración SQL nueva (5 tablas `oauth_*`); `schema_version` del `.ffbackup` sigue en **6**.
+**No breaking**.
+
+### Added — Authorization server OAuth 2.1 en el propio binario
+
+- **Protocolo completo en rutas raíz** (fuera de OpenAPI, como `/mcp`): metadata de descubrimiento
+  RFC 8414 (`/.well-known/oauth-authorization-server`) y RFC 9728
+  (`/.well-known/oauth-protected-resource`) — **ambas también con el sufijo `/mcp`**, porque la
+  inserción de path del §3.1 de esas RFC es lo que consulta claude.ai y montarlas solo en la raíz
+  es la causa #1 de «connection failed» —, registro dinámico de clientes RFC 7591
+  (`POST /oauth/register`, abierto: la fila de cliente no da acceso a nada, el gate es el
+  consentimiento), token endpoint (`POST /oauth/token`, grants `authorization_code` + PKCE
+  **S256-only** y `refresh_token` con rotación) y revocación RFC 7009 (`POST /oauth/revoke`).
+  El 401 de `/mcp` anuncia la metadata vía `WWW-Authenticate: Bearer resource_metadata="…"`
+  (RFC 9728 §5.1) — **solo el 401**: un 403 (usuario pendiente, membership revocada) con ese header
+  metería a claude en un bucle de re-autorización infinito.
+- **Credenciales con el contrato D14 de siempre, nada de JWT**: access tokens opacos `ffo_…` (1 h) y
+  refresh tokens `ffr_…` (90 días **sin uso**; cada refresh rota y renueva la ventana), solo se
+  persiste el SHA-256, y cada request `/mcp` re-resuelve la membership viva — revocar corta al
+  instante. Reusar un authorization code ya canjeado o un refresh token ya rotado es la señal de
+  robo del OAuth 2.1: **revoca el grant entero** (`revoked_reason` = `code_reuse` /
+  `refresh_token_reuse` queda como auditoría). Todas las caducidades las calcula Postgres
+  (`now() + interval`), nunca el reloj de Rust.
+- **El grant es la unidad de consentimiento**: una fila por (app, usuario) — índice UNIQUE parcial
+  `WHERE revoked_at IS NULL` — y re-consentir la misma app la reutiliza en vez de duplicarla.
+  Revocar el grant mata sus access/refresh tokens sin tocarlos (el lookup de auth hace JOIN y exige
+  el grant vivo): una fila que actualizar para cortar todo, como borrar una sesión.
+- **`resource` (RFC 8707) validado en la emisión, no re-validado en `/mcp`** — decisión documentada
+  (D15): FutureFin es el único AS y el único RS de sus tokens; re-comparar contra el Host de cada
+  request rompería el caso real «consiento por el dominio del túnel, consulto por la IP de LAN».
+- **URL pública derivada del request** (`X-Forwarded-Proto`/`X-Forwarded-Host`/`Host`, con charset
+  estricto anti header-injection) — **ninguna env var nueva es obligatoria**. Para proxies que no
+  mandan esos headers: `FUTUREFIN_PUBLIC_URL` (opcional, validada al arrancar, fail-loud como
+  `CORS_ORIGINS`).
+- **Anti-flood del registro abierto**: GC perezoso dentro del propio `POST /oauth/register` (borra
+  clientes de >24 h sin ningún grant; nunca en un GET — D5) y cupo de 1000 clientes → 503.
+  `client_id` desconocido en el token endpoint responde **401 `invalid_client`**, la señal exacta
+  con la que claude.ai re-registra vía DCR — y por la que un restore de backup sin tablas OAuth se
+  auto-recupera sin intervención.
+
+### Added — Pantalla de consentimiento en la SPA y panel de conexiones
+
+- **`/oauth/authorize` es una vista de la SPA** (chunk lazy propio enganchado en `main.tsx`, fuera
+  del router de pestañas): valida los parámetros vía `GET /v1/oauth/authorize-details`, reutiliza
+  el login existente si no hay sesión (los query params OAuth sobreviven porque el login es un
+  fetch, sin navegación) y muestra el consentimiento con el design system — el **host del
+  redirect** destacado como único dato verificado, el nombre del cliente marcado como declarado
+  por la app, «Autorizas como {usuario}» con cambio de usuario, y el detalle de permisos (solo
+  lectura). Autorizar/Cancelar van por `POST /v1/oauth/authorize` (cookie; deny devuelve
+  `error=access_denied` al cliente). Errores fatales (cliente desconocido, redirect sin match
+  exacto) se **pintan y nunca redirigen** — redirigir sería un open redirect.
+- **Ajustes → Acceso gana el panel «Conexiones»**: apps conectadas por usuario (nombre, host,
+  fecha, último uso con el throttle de 60 s) y revocación con confirmación — corte inmediato.
+  `GET/DELETE /v1/oauth/connections` se montan **siempre**, incluso con
+  `FUTUREFIN_MCP_ENABLED=0` (precedente `/v1/api-tokens`: apagar MCP no puede dejarte sin poder
+  revocar grants existentes).
+- **Anti-clickjacking global**: toda respuesta (SPA incluida) lleva `X-Frame-Options: DENY` —
+  protege sobre todo la pantalla de consentimiento; nada de FutureFin se embebe legítimamente en
+  iframes.
+
+### Migración / compatibilidad
+
+- **Migración `20260817090000_oauth.sql`**: crea `oauth_clients`, `oauth_grants`,
+  `oauth_authorization_codes`, `oauth_access_tokens` y `oauth_refresh_tokens` (FKs con
+  `ON DELETE CASCADE` colgando de grants; soft-revoke con `revoked_at`/`revoked_reason`).
+  Sin pérdida de datos; el resto del esquema es idéntico al de 3.0.0.
+- **Backups `.ffbackup`**: `schema_version` sigue en **6**. Las cinco tablas `oauth_*` quedan
+  **excluidas a propósito** del export/import (mismo criterio que `api_tokens`: credenciales, no
+  datos financieros). Tras un restore, claude.ai se reconecta solo: su `client_id` ya no existe →
+  401 `invalid_client` → re-registro DCR → nuevo consentimiento.
+- **API**: endpoints existentes sin cambios. Nuevos: rutas raíz `/.well-known/*` y `/oauth/*`
+  (protocolo, fuera de OpenAPI) y `/v1/oauth/*` (SPA, en OpenAPI).
+- **Rollback**: volver a la imagen 3.0.0 con la migración aplicada es seguro — las tablas `oauth_*`
+  quedan huérfanas e inertes (ningún código 3.0.0 las toca) y el conector de claude.ai deja de
+  funcionar hasta re-actualizar.
+- **Fuera de scope** (documentado): conectividad/TLS/túnel (sigue siendo del usuario), scopes
+  granulares (MCP v1 es 100 % lectura), RFC 7592 (editar un registro: los clientes re-registran) y
+  rate-limit del token endpoint (secretos de 256 bits `OsRng`, lookup por hash exacto — no hay
+  adivinación online viable).
+
 ## [3.0.0] - 2026-08-16
 
 **Imagen autocontenida + servidor MCP**: PostgreSQL pasa a vivir **dentro de la propia imagen** de

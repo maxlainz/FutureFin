@@ -22,6 +22,13 @@ export default defineConfig(({ mode }) => {
         "/health": { target: apiTarget, changeOrigin: true },
         "/openapi.json": { target: apiTarget, changeOrigin: true },
         "/v1": { target: apiTarget, changeOrigin: true },
+        // OAuth/MCP: rutas de protocolo, una a una. PROHIBIDO proxyar "/oauth" a secas:
+        // se llevaría /oauth/authorize (vista SPA) a la API y en dev verías un 404.
+        "/.well-known": { target: apiTarget, changeOrigin: true },
+        "/oauth/token": { target: apiTarget, changeOrigin: true },
+        "/oauth/register": { target: apiTarget, changeOrigin: true },
+        "/oauth/revoke": { target: apiTarget, changeOrigin: true },
+        "/mcp": { target: apiTarget, changeOrigin: true },
       },
     },
   };

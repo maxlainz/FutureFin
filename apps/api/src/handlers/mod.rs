@@ -11,6 +11,7 @@ pub mod history;
 pub mod installation;
 pub mod liabilities;
 pub mod membership;
+pub mod oauth_consent;
 pub mod pending_users;
 pub mod person_view;
 pub mod planning;

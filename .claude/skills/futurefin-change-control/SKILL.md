@@ -15,12 +15,14 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Refreshed **2026-08-16 for v3.0.0**
-(the self-contained Docker image): **34** migration files in `apps/api/migrations/`, **20**
-integration-test files in `apps/api/tests/`, `.ffbackup` `CURRENT_SCHEMA_VERSION` **6**. All paths
-below are from the repo root. (Previously stamped 2026-07-06 at v1.5.0: 32 migrations, 11 test
-files.) **Note for whoever cuts 3.0.0**: `apps/api/Cargo.toml` still read `2.3.0` on 2026-08-16 —
-the version bump and the CHANGELOG section are Section 4 gates, not done yet.
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-17 for
+v3.1.0** (embedded OAuth 2.1): **36** migration files in `apps/api/migrations/`, **23**
+integration-test files in `apps/api/tests/`, `.ffbackup` `CURRENT_SCHEMA_VERSION` still **6** (the
+`oauth_*` tables are deliberately outside the backup, so the OAuth release did **not** bump it). All
+paths below are from the repo root. (Previously stamped 2026-08-16 at v3.0.0 with 34/20 — already one
+release behind then; and 2026-07-06 at v1.5.0: 32 migrations, 11 test files.) `apps/api/Cargo.toml`
+reads `3.1.0` and `CHANGELOG.md` carries its `## [3.1.0] — 2026-08-17` section, so the Section 4
+version/CHANGELOG gates for this release are satisfied.
 
 Vocabulary (defined once): **installation** = the singleton row all financial data belongs to
 (one per deployment). **scope / view** = `?view=mine` filters ledger queries by
@@ -369,13 +371,14 @@ Facts above verified against the repo on 2026-07-02 (v1.4.3, branch
 `claude/skill-library-handoff-rtfotl`); version/migration/test-file counts and the backup
 schema version refreshed for v1.5.0 on 2026-07-06 (history-snapshots feature); §1 Infra-release
 gates, §2.7 recovery commands, new §2.8, §4.2 drills and §6 checklist refreshed **2026-08-16 for
-v3.0.0** (self-contained image) against `apps/api/Dockerfile`,
+v3.0.0** (self-contained image), and the version/migration/test-file counts re-counted **2026-08-17
+for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `apps/api/Dockerfile`,
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (3.0.0 on 2026-08-16)
-- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (34 on 2026-08-16)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (20 on 2026-08-16)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**3.1.0** on 2026-08-17)
+- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**36** on 2026-08-17)
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**23** on 2026-08-17); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (206)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
 - Compose topology (one service since 3.0.0):

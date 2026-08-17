@@ -56,6 +56,10 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
         .route("/installation/setup", post(setup_installation))
         .nest("/installation/pending-users", pending_users_router())
         .nest("/api-tokens", api_tokens_router())
+        .nest(
+            "/oauth",
+            crate::handlers::oauth_consent::oauth_consent_router(state.mcp_enabled),
+        )
         .nest("/categories", categories_router())
         .nest("/assets", assets_router())
         .nest("/allocation-rules", allocation_rules_router())
@@ -87,11 +91,20 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
     } else {
         Router::new()
     };
+    // Protocolo OAuth (metadata .well-known, register, token, revoke): mismo criterio y
+    // mismo kill-switch que /mcp — OAuth hoy solo sirve al conector MCP. OJO: el panel
+    // /v1/oauth/connections NO va aquí; se monta siempre (ver oauth_consent_router).
+    let oauth_protocol = if state.mcp_enabled {
+        crate::oauth::oauth_protocol_router()
+    } else {
+        Router::new()
+    };
 
     Router::new()
         .route("/health", get(health_check))
         .route("/openapi.json", get(openapi_json))
         .nest("/v1", v1)
         .merge(mcp)
+        .merge(oauth_protocol)
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
 }

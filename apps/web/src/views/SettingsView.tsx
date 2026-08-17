@@ -21,6 +21,7 @@ import { RowEditIcon, RowTrashIcon } from "../components/icons";
 import { AccountCard } from "../components/AccountCard";
 import { ApiTokensPanel } from "./ApiTokensPanel";
 import { HistorySettingsPanel } from "./HistorySettingsPanel";
+import { OAuthConnectionsPanel } from "./OAuthConnectionsPanel";
 import { ThemeToggle } from "../components/ThemeToggle";
 import type { ThemePref } from "../lib/theme";
 import {
@@ -369,6 +370,8 @@ export function SettingsView({
       ) : null}
 
       {settingsSubTab === "access" && hasMembership ? <ApiTokensPanel /> : null}
+
+      {settingsSubTab === "access" && hasMembership ? <OAuthConnectionsPanel /> : null}
 
       {settingsSubTab === "calendar" && hasMembership ? (
         <section className="panel">

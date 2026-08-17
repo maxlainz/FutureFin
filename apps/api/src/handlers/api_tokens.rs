@@ -8,6 +8,7 @@
 //! por cookie de sesión como el resto del API; cualquier miembro puede crear los suyos
 //! (un token no puede hacer nada que su dueño no pueda ya).
 
+use crate::auth::secret::{generate_opaque_secret, sha256_hex};
 use crate::error::ApiError;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::session::require_session_user;
@@ -16,10 +17,7 @@ use axum::extract::{Extension, Path};
 use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-use base64::Engine;
 use chrono::{DateTime, Utc};
-use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -38,22 +36,6 @@ const MAX_ACTIVE_TOKENS_PER_USER: i64 = 10;
 pub struct ApiTokenIdentity {
     pub user_id: Uuid,
     pub token_id: Uuid,
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(bytes);
-    let mut s = String::with_capacity(64);
-    for b in digest {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-fn generate_token() -> String {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    format!("{TOKEN_PREFIX}{}", B64URL.encode(bytes))
 }
 
 /// Valida un header `Authorization: Bearer ffp_…` contra `api_tokens`.
@@ -215,7 +197,7 @@ pub async fn create_api_token(
         )));
     }
 
-    let token = generate_token();
+    let token = generate_opaque_secret(TOKEN_PREFIX);
     let token_hash = sha256_hex(token.as_bytes());
     let token_prefix: String = token.chars().take(VISIBLE_PREFIX_LEN).collect();
 

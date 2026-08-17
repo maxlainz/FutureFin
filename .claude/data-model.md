@@ -70,6 +70,89 @@ All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullab
 
 **Columna nueva en `transactions`**: `recurring_rule_id (uuid nullable FK recurring_transaction_rules **ON DELETE SET NULL**)` + índice `transactions_recurring_rule_idx (recurring_rule_id)`. Enlaza cada instancia (y la de origen) a su regla; borrar la regla **conserva** las instancias (quedan como manuales sueltas).
 
+## OAuth (v3.1.0)
+
+`20260817090000_oauth.sql`. Cinco tablas para el authorization server embebido (ver
+[`api-routes.md`](api-routes.md) §OAuth 2.1 y [`auth-and-membership.md`](auth-and-membership.md)).
+Mismo contrato de credenciales que `api_tokens`: **solo se persiste el SHA-256 hex** del secreto,
+nada se congela (rol y membership se re-resuelven vivos en cada request), revocación = una fila.
+**Las expiries las calcula Postgres** (`now() + $n::interval`), nunca Rust — así el TTL no depende
+del reloj del proceso.
+
+**oauth_clients** (apps registradas por DCR): `id (uuid PK)`, `client_id (text NOT NULL UNIQUE; el
+público `ffc_…`)`, `client_secret_hash (text nullable — SHA-256 hex de `ffcs_…`; **NULL** para
+clientes públicos)`, `client_name (text NOT NULL)`, `client_uri (text nullable)`,
+`redirect_uris (text[] NOT NULL)`, `token_endpoint_auth_method (text NOT NULL)`, `created_at`,
+`last_used_at (nullable, throttle 60 s)`.
+- CHECKs: `oauth_clients_name_len` (`client_name` 1..120), `oauth_clients_redirects_card`
+  (`cardinality(redirect_uris)` 1..5), `oauth_clients_auth_method` (∈ {`none`,
+  `client_secret_basic`, `client_secret_post`}) y `oauth_clients_secret_presence` — el emparejamiento
+  que hace imposible una fila incoherente: `none` ⇒ `client_secret_hash IS NULL`, cualquier otro
+  método ⇒ `IS NOT NULL`.
+- Índice `oauth_clients_created_at_idx (created_at)`: lo consume el **GC perezoso** de registros
+  huérfanos de `POST /oauth/register` (clientes de >24 h sin ningún grant).
+- **Sin `installation_id`**: un cliente registrado no pertenece a nadie ni da acceso a nada. El gate
+  real es el consentimiento del usuario, o sea una fila en `oauth_grants`.
+
+**oauth_grants** (el consentimiento — **la unidad de todo**): `id (uuid PK)`,
+`client_id (uuid NOT NULL FK oauth_clients ON DELETE CASCADE)`,
+`user_id (uuid NOT NULL FK users ON DELETE CASCADE)`, `scope (text nullable)`,
+`resource (text nullable)`, `created_at`, `last_used_at (nullable, throttle 60 s — el «Último uso»
+del panel)`, `revoked_at (nullable)`, `revoked_reason (text nullable)`.
+- **`CREATE UNIQUE INDEX oauth_grants_active_uniq ON oauth_grants (client_id, user_id) WHERE revoked_at IS NULL`
+  — índice UNIQUE parcial, y el `WHERE` es todo el diseño.** Habilita el upsert de
+  `issue_authorization_code` (`ON CONFLICT (client_id, user_id) WHERE revoked_at IS NULL DO UPDATE`):
+  re-consentir la misma app **refresca el grant vivo** en vez de duplicar la fila que ve el panel. Y
+  como la unicidad solo aplica a las filas vivas, un grant revocado **no bloquea** un consentimiento
+  posterior — el historial de revocaciones se acumula sin colisionar.
+- **Soft-revoke con motivo**: revocar es `revoked_at = now()` + `revoked_reason` ∈ `user_panel`
+  (botón del panel) \| `refresh_token_reuse` \| `code_reuse` (señales de robo, OAuth 2.1 §4.3.1/§7.5)
+  \| `rfc7009` (revocación del cliente). La fila queda como auditoría. **Es el único punto de corte
+  que hay que tocar**: `oauth/access.rs` valida el access token con un JOIN que exige
+  `g.revoked_at IS NULL`, así que revocar el grant mata todos sus tokens sin actualizarlos (misma
+  filosofía que borrar una sesión).
+- Índices `oauth_grants_user_id_idx (user_id)` (lo consume el panel) y
+  `oauth_grants_client_id_idx (client_id)`.
+
+**oauth_authorization_codes**: `code_hash (text PK — el SHA-256 hex es la PK, el code en claro
+nunca se persiste)`, `grant_id (uuid NOT NULL FK oauth_grants ON DELETE CASCADE)`,
+`redirect_uri (text NOT NULL)`, `code_challenge (text NOT NULL)`,
+`code_challenge_method (text NOT NULL)`, `resource`, `scope`, `created_at`,
+`expires_at (NOT NULL; **2 min**)`, `consumed_at (nullable — un solo uso)`.
+- CHECKs: `oauth_codes_pkce_s256` (`code_challenge_method = 'S256'` — PKCE S256 **obligatorio a
+  nivel de schema**, no solo en Rust) y `oauth_codes_challenge_len` (43..128 chars).
+- Índices `(grant_id)` y `(expires_at)`.
+
+**oauth_access_tokens** (`ffo_`, 1 h): `id (uuid PK)`,
+`grant_id (uuid NOT NULL FK oauth_grants ON DELETE CASCADE)`, `token_hash (text NOT NULL UNIQUE)`,
+`created_at`, `expires_at (NOT NULL)`, `revoked_at (nullable)`. Índices `(grant_id)` y
+`(expires_at)`. `revoked_at` aquí solo lo usa RFC 7009 con un `ffo_` explícito; el corte normal es
+revocar el grant.
+
+**oauth_refresh_tokens** (`ffr_`, 90 días **sin uso**): `id (uuid PK)`,
+`grant_id (uuid NOT NULL FK oauth_grants ON DELETE CASCADE)`, `token_hash (text NOT NULL UNIQUE)`,
+`created_at`, `expires_at (NOT NULL)`, `consumed_at (nullable)`,
+`replaced_by (uuid nullable FK oauth_refresh_tokens **ON DELETE SET NULL** — self-FK)`,
+`revoked_at (nullable)`. Índice `(grant_id)`.
+- **`consumed_at` + `replaced_by` son la rotación**: cada canje consume el actual, emite uno nuevo
+  con `expires_at = now() + 90 días` (sliding por construcción) y los **encadena** para poder
+  auditar la cadena. Que `replaced_by` sea `SET NULL` y no `CASCADE` es deliberado: purgar tokens
+  viejos no debe borrar los nuevos.
+- **Sin `UNIQUE (grant_id)`**: un grant puede tener varios refresh vivos (cadenas de rotación en
+  paralelo). La detección de robo no la da una constraint sino `consumed_at` (ver `oauth/token.rs`,
+  `FOR UPDATE` sobre la fila).
+
+**Cascadas, de fuera a dentro**: borrar un `users` → sus grants → sus codes y tokens; borrar un
+`oauth_clients` → sus grants → idem. Ningún token queda huérfano por construcción, así que no hace
+falta un job de limpieza para la integridad (los índices por `expires_at` están para una purga
+futura de filas caducadas, que hoy no existe).
+
+**Excluidas del `.ffbackup` por construcción.** Son credenciales de la instalación, no datos
+financieros: un restore no debe resucitar accesos concedidos. La exclusión no es una lista negra que
+haya que mantener — `backup_user/export.rs` es una **whitelist**: un `SELECT` explícito por tabla
+exportada, y ninguno menciona `oauth_*`. **No los añadas ahí.** Corolario: `CURRENT_SCHEMA_VERSION`
+sigue en **6** — esta migración no toca el formato de backup.
+
 ## FIRE settings (JSONB in installation.fire_settings)
 ```json
 {

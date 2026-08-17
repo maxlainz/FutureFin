@@ -426,6 +426,7 @@ async fn mcp_disabled_returns_404() {
         false,
         30,
         false,
+        None,
     ));
     let router = Router::new()
         .merge(routes::app_router(&state))

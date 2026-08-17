@@ -3,7 +3,8 @@ name: futurefin-config-and-flags
 description: >
   Catalog of every configuration axis in FutureFin: environment variables of the API binary (PORT,
   DATABASE_URL, SESSION_TTL_DAYS, COOKIE_SECURE, CORS_ORIGINS, WEB_STATIC_ROOT, RUST_LOG,
-  FUTUREFIN_DB_CONNECT_TIMEOUT_SECS, FUTUREFIN_MCP_ENABLED, FUTUREFIN_API_PORT, WEB_DEV_PORT,
+  FUTUREFIN_DB_CONNECT_TIMEOUT_SECS, FUTUREFIN_MCP_ENABLED, FUTUREFIN_PUBLIC_URL,
+  FUTUREFIN_API_PORT, WEB_DEV_PORT,
   TEST_DATABASE_URL) and of
   the self-contained container entrypoint (FUTUREFIN_DB_MODE, FUTUREFIN_MODE, FUTUREFIN_BACKUP_KEEP*,
   FUTUREFIN_PREMIGRATION_BACKUP, FUTUREFIN_ALLOW_EPHEMERAL_DB, FUTUREFIN_STATE_DIR, POSTGRES_*),
@@ -25,10 +26,16 @@ description: >
 # FutureFin configuration and flags
 
 Env/compose/entrypoint facts re-verified on **2026-08-16 for v3.0.0** (the self-contained-image
-release); the query-param, body-limit and installation-settings sections were last verified
-2026-07-02 (v1.4.3) plus the v1.5.x/v1.6.0/v1.8.0/v2.x additions noted inline — none of those
-introduced env vars. This skill is the single home for "what can be configured, where, with what
-bounds".
+release), plus the **v3.1.0 additions of 2026-08-17** (`FUTUREFIN_PUBLIC_URL`, the widened
+`FUTUREFIN_MCP_ENABLED` scope); the query-param, body-limit and installation-settings sections were
+last verified 2026-07-02 (v1.4.3) plus the v1.5.x/v1.6.0/v1.8.0/v2.x additions noted inline — none
+of those introduced env vars. This skill is the single home for "what can be configured, where, with
+what bounds".
+
+**What 3.1.0 changed**: the embedded OAuth 2.1 authorization server added exactly **one** optional
+env var, `FUTUREFIN_PUBLIC_URL` (§1.1) — production still needs none, because the issuer is derived
+from the request headers by default. `FUTUREFIN_MCP_ENABLED` now gates OAuth too, with one
+deliberate exception (§1.1). No new installation setting, no new query param.
 
 **What 3.0.0 changed (read this before trusting any older note):** the Docker image is
 **self-contained** — PostgreSQL 16 runs *inside* the single `futurefin` container over a Unix
@@ -80,7 +87,8 @@ entrypoint (`apps/api/docker-entrypoint.sh`, Docker image only), **§1.3** compo
 | `PORT` | `8080` | u16; unparseable → silently falls back to 8080 | both | API listen port, binds `0.0.0.0`. Use `8081` in split-dev so Vite can take 8080. Container always runs with `PORT=8080` — since 3.0.0 that comes **only** from the Dockerfile `ENV` (the prod compose no longer restates it); the host side is `APP_PORT`. |
 | `SESSION_TTL_DAYS` | `30` | integer **1–400**; out-of-range or unparseable → **silently** 30 | both | Session cookie/DB row lifetime. Stored in `AppState.session_ttl_days`. |
 | `COOKIE_SECURE` | `false` | true only for exact strings `1`, `true`, `TRUE`, `yes`, `YES` (`parse_bool_env`). `True`, `Yes`, `on` etc. parse as **false** | prod (behind HTTPS) | Sets the `Secure` attribute on the `ff_session` cookie. |
-| `FUTUREFIN_MCP_ENABLED` | `true` | `parse_bool_env` (same quirk as `COOKIE_SECURE`: only `1/true/TRUE/yes/YES` are true — but here **unset → true**, any other string → false) | both (new in 3.0.0) | Parsed by `main.rs` into `AppState.mcp_enabled`. `false` means `routes::app_router` never mounts the `/mcp` router (404 from the fallback); `/v1/api-tokens` stays mounted. Default enabled: the endpoint is inert without tokens (everything 401s) and prod keeps its zero-required-vars story. |
+| `FUTUREFIN_MCP_ENABLED` | `true` | `parse_bool_env` (same quirk as `COOKIE_SECURE`: only `1/true/TRUE/yes/YES` are true — but here **unset → true**, any other string → false) | both (new in 3.0.0) | Parsed by `main.rs` into `AppState.mcp_enabled`. `false` means `routes::app_router` never mounts the `/mcp` router (404 from the fallback). **Widened in 3.1.0**: the same flag also drops `oauth::oauth_protocol_router()` — the 7 root routes (`/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server[/mcp]`, `POST /oauth/register|token|revoke`) — and the two consent endpoints `GET /v1/oauth/authorize-details` + `POST /v1/oauth/authorize`. **Exception, on purpose**: `/v1/api-tokens` and `GET/DELETE /v1/oauth/connections[/{id}]` stay mounted (`oauth_consent_router(mcp_enabled)` only gates the flow half) — turning MCP off must never strip your ability to revoke credentials you already granted. Default enabled: the surface is inert without credentials (everything 401s) and prod keeps its zero-required-vars story. Tested without touching the environment: the suites build the router by hand with `mcp_enabled = false` (`oauth_flow.rs::oauth_protocol_disabled_with_mcp_but_connections_panel_survives`, `mcp_http.rs::mcp_disabled_returns_404`). |
+| `FUTUREFIN_PUBLIC_URL` | unset → **derived per request** | must parse as a URL, scheme `http`/`https`, host present, and be a **bare origin** (no path, query or fragment); normalized to `Url::origin().ascii_serialization()` (no trailing slash). Present-but-invalid → **panic at startup** (fail-loud, like `CORS_ORIGINS`) | prod, **optional** (new in 3.1.0) | Parsed by the **Rust binary** (`main.rs::public_url()`) into `AppState.public_url`; consumed by `oauth::url::public_base_url` as the OAuth **issuer** and as the base of every URL in the `.well-known` metadata, the `iss` of the authorize redirect, and the `resource_metadata` of the `/mcp` 401 challenge. Unset (the default and the normal case) → derived from the request: `X-Forwarded-Proto` + `X-Forwarded-Host` (first value of each) else the `Host` header, through a strict charset (`host[:port]`, bracketed IPv6, ≤255 chars, no `/ @`, spaces or control chars) → a bad host is **400 `invalid_request`**, no host at all likewise. **Set it only when your reverse proxy sends neither `X-Forwarded-*` nor a public `Host`** — otherwise the metadata would advertise an unreachable issuer and claude.ai reports "connection failed". Irrelevant with `FUTUREFIN_MCP_ENABLED=0`. Echoed in the startup `"server config"` line as `public_url=…` or `(derived from request)`. Tests never set it (`TestApp::spawn` passes `None`), which is what makes the forwarded-header derivation testable. |
 | `CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080` | comma-separated origins, entries trimmed, empties dropped; an unparseable entry **panics at startup**; empty result panics | prod, only for cross-origin API access | `allow_credentials(true)`, methods GET/POST/PATCH/DELETE/OPTIONS, headers `content-type`/`accept`/`authorization`/`mcp-session-id` (the last two added in 3.0.0 for browser MCP clients; `mcp-session-id` is also exposed). Same-origin deployments (the normal Docker image) never send CORS preflights, so the default is fine. |
 | `WEB_STATIC_ROOT` | unset | path; empty/whitespace value treated as unset; set-but-missing path → startup warning, API-only mode | prod (Docker sets `/app/web`) | When the path exists, the SPA is served from it with `index.html` fallback (single-port mode). Omit in split-dev — Vite serves the UI. |
 | `RUST_LOG` | `futurefin_api=info,tower_http=info,sqlx=warn` | tracing `EnvFilter` syntax; invalid filter → the default is used | both | Default is applied in `main.rs` when the env filter can't be built from the env. |
@@ -137,7 +145,7 @@ mountpoint guard above depends on that.
 
 | Variable | Default | Consumed where | Notes |
 |---|---|---|---|
-| `FUTUREFIN_API_PORT` | `8081` | `apps/web/vite.config.ts` | Vite proxy target port for `/v1`, `/health`, `/openapi.json`. Read **without** `VITE_` prefix — the config uses `loadEnv(mode, repoRoot, "")`, i.e. all vars, from the **repo root** `.env` (not `apps/web/.env`). |
+| `FUTUREFIN_API_PORT` | `8081` | `apps/web/vite.config.ts` | Vite proxy target port for `/v1`, `/health`, `/openapi.json` and — since 3.1.0 — `/.well-known`, `/oauth/token`, `/oauth/register`, `/oauth/revoke`, `/mcp`. Read **without** `VITE_` prefix — the config uses `loadEnv(mode, repoRoot, "")`, i.e. all vars, from the **repo root** `.env` (not `apps/web/.env`). **Never add a bare `"/oauth"` proxy key**: keys are prefixes, so it would hijack `/oauth/authorize` — an SPA view, not a backend route — and dev would 404 instead of showing the consent screen. |
 | `WEB_DEV_PORT` | `8080` | `apps/web/vite.config.ts` | Vite dev-server port. `strictPort: false` — if 8080 is busy Vite silently picks the next port; check the terminal banner. |
 | `TEST_DATABASE_URL` | `postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test` | `apps/api/tests/common/mod.rs` | Postgres for integration tests (each test creates its own schema). Still not run in CI as of 2026-08-16 (no `TEST_DATABASE_URL` in any job) — see `.claude/skills/futurefin-validation-and-qa/SKILL.md`. |
 | `BASE`, `SMOKE_USER`, `SMOKE_PASS` | `http://127.0.0.1:8080`, auto-registers throwaway user | `scripts/smoke-projection-cache.sh` | Owned by futurefin-diagnostics-and-tooling. |
@@ -145,7 +153,8 @@ mountpoint guard above depends on that.
 
 `.env.example` at the repo root is the canonical template: since 3.0.0 **every line in it is
 commented out** — production runs with an empty `.env` or none at all. It documents the optional
-prod knobs (`FUTUREFIN_TAG`, `APP_PORT`, `FUTUREFIN_IMAGE`, the two backup-retention vars), the
+prod knobs (`FUTUREFIN_TAG`, `APP_PORT`, `FUTUREFIN_IMAGE`, the two backup-retention vars, and since
+3.1.0 `FUTUREFIN_MCP_ENABLED` + `FUTUREFIN_PUBLIC_URL`), the
 2.x compat trio (`POSTGRES_USER`/`POSTGRES_DB`/`POSTGRES_PASSWORD`), the deprecated external-DB
 pair (`DATABASE_URL`, `FUTUREFIN_DB_MODE=external`) and the dev block (`PORT=8081`,
 `DATABASE_URL`, `RUST_LOG`) — with an explicit warning not to leave the dev `DATABASE_URL`
@@ -409,9 +418,10 @@ and if the endpoint is the cached projection route, extend `ProjectionCacheKey` 
 
 ## Provenance and maintenance
 
-Env/compose/entrypoint rows re-verified **2026-08-16 against v3.0.0**; the rest of the tables
-carry their own dates inline. Every row is re-verifiable — run these from the repo root when
-auditing for drift (all confirmed working on 2026-08-16):
+Env/compose/entrypoint rows re-verified **2026-08-16 against v3.0.0**, and the two OAuth-related
+rows (`FUTUREFIN_PUBLIC_URL`, `FUTUREFIN_MCP_ENABLED`) **2026-08-17 against v3.1.0**; the rest of the
+tables carry their own dates inline. Every row is re-verifiable — run these from the repo root when
+auditing for drift (all confirmed working on 2026-08-17):
 
 - Env parsing, defaults, bounds, load order: `grep -n "env::var\|unwrap_or\|contains(&d)\|load_env" apps/api/src/main.rs`
 - DB connect budget + retry backoff: `grep -n "FUTUREFIN_DB_CONNECT_TIMEOUT_SECS" -A 6 apps/api/src/main.rs` and `grep -n "connect_with_retry" -A 20 apps/api/src/db.rs`
@@ -419,7 +429,11 @@ auditing for drift (all confirmed working on 2026-08-16):
 - Entrypoint guards and abort messages (mountpoint guard, invalid db_mode, embedded-wins warning): `grep -n 'no persistent volume\|invalid FUTUREFIN_DB_MODE\|already contains an embedded cluster\|DEPRECATED' apps/api/docker-entrypoint.sh`
 - Socket `DATABASE_URL` the entrypoint exports: `grep -n 'export DATABASE_URL' apps/api/docker-entrypoint.sh`
 - CORS default origin list + panic + MCP headers: `grep -n "CORS_ORIGINS" -A 6 apps/api/src/main.rs` and `grep -n "mcp-session-id\|AUTHORIZATION" apps/api/src/main.rs`
-- MCP kill-switch (added 2026-08-16, v3.0.0): `grep -n "FUTUREFIN_MCP_ENABLED" apps/api/src/main.rs` and `grep -n "mcp_enabled" apps/api/src/routes/mod.rs apps/api/src/state.rs`
+- MCP kill-switch (added 2026-08-16, v3.0.0; widened to OAuth 2026-08-17, v3.1.0): `grep -n "FUTUREFIN_MCP_ENABLED" apps/api/src/main.rs` and `grep -n "mcp_enabled" apps/api/src/routes/mod.rs apps/api/src/state.rs apps/api/src/handlers/oauth_consent.rs` — the last hit must show `oauth_consent_router(mcp_enabled)` gating ONLY `/authorize-details` + `/authorize`, with `/connections` mounted unconditionally
+- `FUTUREFIN_PUBLIC_URL` parsing, bounds and the four panics: `grep -n "FUTUREFIN_PUBLIC_URL" -A 14 apps/api/src/main.rs`; where it is consumed: `grep -n "public_url\|state.public_url" apps/api/src/state.rs apps/api/src/oauth/url.rs`
+- Request-derived issuer (the default path) + strict host charset: `grep -n "x-forwarded-proto\|x-forwarded-host\|fn is_valid_host" -A 8 apps/api/src/oauth/url.rs`
+- The 7 OAuth protocol routes gated by the kill-switch: `grep -n "route(" apps/api/src/oauth/mod.rs`
+- Vite proxy keys (must list `/oauth/token|register|revoke` one by one and **no bare `/oauth`**): `grep -n "proxy\|/oauth\|well-known\|/mcp" apps/web/vite.config.ts`
 - Pool constants: `grep -n "connections\|timeout\|lifetime" apps/api/src/db.rs`
 - Cache TTL + key + Density docs: `grep -n "PROJECTION_CACHE_TTL\|pub enum Density\|ProjectionCacheKey" -A 6 apps/api/src/state.rs`
 - Body limits: `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`
