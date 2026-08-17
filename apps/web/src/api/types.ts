@@ -146,6 +146,15 @@ export type FinancialHealthMetrics = {
   savings_source?: SavingsSourceApi;
   /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
   savings_source_months_with_data?: number;
+  /** KPI «ahorro real vs esperado»: neto mensual del PRESUPUESTO (cuotas derivadas incluidas),
+   *  capturado antes del override B/C — no sigue el modo. Ausente en backends antiguos. */
+  savings_expected_monthly_equivalent?: string;
+  /** Promedio bruto `income − expense` de los últimos 12 meses civiles completos (sin resta
+   *  híbrida de cuotas). Omitido cuando no hay meses con datos. */
+  savings_actual_monthly_avg_12m?: string | null;
+  /** Meses «reales» que sustentan el promedio anterior (0 = sin movimientos); a diferencia de
+   *  `savings_source_months_with_data`, trae su valor real en los tres modos. */
+  savings_actual_months_with_data?: number;
 };
 
 export type CategoryBreakdownLineApi = {
@@ -471,11 +480,10 @@ export type TransactionImportBatchApi = {
   txn_count: number;
 };
 
-/** Recurrencia opcional al crear un movimiento: enviar `{}` marca «repetir cada mes» (el día por
- *  defecto es el de `op_date`); `day_of_month` la fuerza a otro día del mes. */
-export type TransactionRecurrenceApi = {
-  day_of_month?: number;
-};
+/** Recurrencia opcional al crear un movimiento: enviar `{}` marca «repetir cada mes». Las reglas
+ *  tienen resolución mensual (sin día): la instancia del mes M se fecha en su último día y solo se
+ *  materializa con M ya cerrado. */
+export type TransactionRecurrenceApi = Record<string, never>;
 
 /** Cuerpo de `POST /v1/transactions` (alta manual, 201). También el item de `/batch`. */
 export type CreateTransactionRequest = {
@@ -654,8 +662,6 @@ export type RecurringRuleApi = {
   kind: TransactionKindApi;
   category_id?: string;
   category_name?: string;
-  /** 1-31: día del mes en que se materializa. */
-  day_of_month: number;
   linked_asset_id?: string;
   linked_liability_id?: string;
   notes?: string;

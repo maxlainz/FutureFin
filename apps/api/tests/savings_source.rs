@@ -82,10 +82,9 @@ async fn recurring(
     concept: &str,
     amount: &str,
     kind: &str,
-    day_of_month: u32,
 ) {
     let body = json!({ "op_date": date, "concept": concept, "amount": amount, "kind": kind,
-                       "recurrence": { "day_of_month": day_of_month } });
+                       "recurrence": {} });
     let r = app.post_json_with_cookie("/v1/transactions", body, cookie).await;
     assert_eq!(r.status, http::StatusCode::CREATED, "recurring {concept}: {r:?}");
 }
@@ -721,9 +720,9 @@ async fn pseudo_empty_month_excluded_from_avg() {
 
     // Mes real M-2: income manual 2000 (recurring_rule_id NULL).
     manual(&app, &owner.cookie, &date_in(y2, m2, 10), "Sueldo", "2000", "income", None, None).await;
-    // Mes solo-recurrente M-1: nómina recurrente 3000. El origen (día 1 de M-1) backfillea solo el
-    // mes en curso (fuera de ventana); NO toca M-2 (el backfill solo va hacia delante).
-    recurring(&app, &owner.cookie, &date_in(y1, m1, 1), "Nomina rec", "3000", "income", 1).await;
+    // Mes solo-recurrente M-1: nómina recurrente 3000 (el origen es la propia instancia de M-1; el
+    // backfill no crea nada más — el mes en curso jamás se materializa).
+    recurring(&app, &owner.cookie, &date_in(y1, m1, 1), "Nomina rec", "3000", "income").await;
 
     // Modo A (default) = presupuesto.
     let delta_a = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
@@ -750,9 +749,9 @@ async fn real_month_counts_recurring_too() {
     let (y2, m2) = shift_month(today.year(), today.month(), -2);
 
     // M-2 real: income manual 2000 + nómina recurrente 3000 (origen día 1 de M-2). El backfill crea
-    // instancias en M-1 (solo-recurrente, excluido) y en el mes en curso (fuera de ventana).
+    // una instancia en M-1 (solo-recurrente, excluido); el mes en curso jamás se materializa.
     manual(&app, &owner.cookie, &date_in(y2, m2, 10), "Sueldo", "2000", "income", None, None).await;
-    recurring(&app, &owner.cookie, &date_in(y2, m2, 1), "Nomina rec", "3000", "income", 1).await;
+    recurring(&app, &owner.cookie, &date_in(y2, m2, 1), "Nomina rec", "3000", "income").await;
 
     // Modo B: months_with_data = 1 (M-2), income_avg = (2000+3000)/1 = 5000 → delta 5000. Si la
     // recurrente NO contase, income_avg sería 2000.
@@ -775,9 +774,9 @@ async fn mode_b_all_pseudo_empty_falls_back_to_budget() {
     let today = server_today(&app, &owner.cookie).await;
     let (y3, m3) = shift_month(today.year(), today.month(), -3);
 
-    // Nómina recurrente con origen 3 meses atrás → backfillea M-3, M-2, M-1 (todos solo-recurrentes) +
-    // mes en curso. NINGÚN movimiento real en la ventana → months_with_data = 0.
-    recurring(&app, &owner.cookie, &date_in(y3, m3, 1), "Nomina rec", "3000", "income", 1).await;
+    // Nómina recurrente con origen 3 meses atrás → backfillea M-2 y M-1 (todos solo-recurrentes;
+    // el mes en curso jamás). NINGÚN movimiento real en la ventana → months_with_data = 0.
+    recurring(&app, &owner.cookie, &date_in(y3, m3, 1), "Nomina rec", "3000", "income").await;
 
     // Modo A (default) = presupuesto 5000 − 1000 = 4000.
     let delta_a = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;

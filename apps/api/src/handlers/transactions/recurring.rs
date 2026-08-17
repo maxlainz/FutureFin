@@ -1,13 +1,15 @@
 //! Reglas de transacción recurrente (`/v1/transactions/recurring`).
 //!
 //! Una regla es una **plantilla** per-user (nómina, alquiler, aportación mensual…): concepto,
-//! importe firmado, kind, categoría, enlaces y día del mes. `POST /materialize` genera las
-//! transacciones reales pendientes en `transactions` (`source='manual'`, `recurring_rule_id` de la
-//! regla), una por cada mes civil vencido desde el cursor `last_materialized_month`. Nunca crea
-//! movimientos con fecha futura: el mes en curso sólo se materializa cuando su día de recurrencia
-//! (ya con clamp de fin de mes) es <= hoy; si aún no ha llegado, ese mes se deja para la primera
-//! llamada posterior a esa fecha. El cursor es la única fuente de idempotencia: re-materializar no
-//! duplica ni recrea instancias borradas (el cursor ya pasó ese mes).
+//! importe firmado, kind, categoría y enlaces. Las reglas tienen resolución **MENSUAL** (sin día
+//! configurable desde 3.2.0): `POST /materialize` genera las transacciones reales pendientes en
+//! `transactions` (`source='manual'`, `recurring_rule_id` de la regla), una por cada mes civil
+//! **cerrado** desde el cursor `last_materialized_month`, con `op_date` = **último día** de su mes
+//! (así la instancia cuenta en las estadísticas del mes al que pertenece). El mes en curso jamás
+//! se materializa — ni siquiera en su último día: sus recurrentes aparecen en la primera llamada
+//! con el servidor ya en el mes siguiente, de modo que el mes abierto no muestra movimientos
+//! sintéticos que distorsionen sus estadísticas. El cursor es la única fuente de idempotencia:
+//! re-materializar no duplica ni recrea instancias borradas (el cursor ya pasó ese mes).
 //!
 //! Cache de proyección (contrato en `transactions/mod.rs`): `materialize` crea instancias reales →
 //! invalida solo en modo `transactions_avg`. En cambio, **borrar una regla NO invalida** en ningún
@@ -19,9 +21,11 @@ use crate::handlers::installation::{installation_naive_today, require_installati
 use crate::handlers::membership::role_can_write;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::crud::PreparedTxn;
-use crate::handlers::transactions::{invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal};
 use crate::handlers::transactions::schema::{
-    compute_fingerprint, MaterializeResponse, RecurrenceSpec, RecurringRuleResponse, SOURCE_MANUAL,
+    compute_fingerprint, MaterializeResponse, RecurringRuleResponse, SOURCE_MANUAL,
+};
+use crate::handlers::transactions::{
+    invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Path};
@@ -84,24 +88,6 @@ pub(super) fn assert_recurrence_not_too_old(
     Ok(())
 }
 
-/// Resuelve y valida el `day_of_month` de una recurrencia: explícito (1..=31) o, si se omite, el
-/// día de `op_date`. Fuera de rango → 400 `recurrence_day_out_of_range`.
-pub(super) fn resolve_rule_day(rec: &RecurrenceSpec, op_date: NaiveDate) -> Result<i32, ApiError> {
-    let day = match rec.day_of_month {
-        Some(d) => {
-            if !(1..=31).contains(&d) {
-                return Err(ApiError::BadRequest(
-                    "recurrence_day_out_of_range: recurrence.day_of_month must be between 1 and 31"
-                        .into(),
-                ));
-            }
-            d
-        }
-        None => op_date.day(),
-    };
-    Ok(day as i32)
-}
-
 // ---------------------------------------------------------------------------
 // Inserción de la regla (usado por crud.rs en el alta con recurrencia)
 // ---------------------------------------------------------------------------
@@ -113,14 +99,13 @@ pub(super) async fn insert_rule(
     iid: Uuid,
     owner: Uuid,
     p: &PreparedTxn,
-    day_of_month: i32,
     last_materialized_month: NaiveDate,
 ) -> Result<Uuid, ApiError> {
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO recurring_transaction_rules
                (installation_id, owner_user_id, concept, amount, kind, category_id,
-                day_of_month, linked_asset_id, linked_liability_id, notes, last_materialized_month)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                linked_asset_id, linked_liability_id, notes, last_materialized_month)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING id"#,
     )
     .bind(iid)
@@ -129,7 +114,6 @@ pub(super) async fn insert_rule(
     .bind(p.amount)
     .bind(&p.kind)
     .bind(p.category_id)
-    .bind(day_of_month)
     .bind(p.linked_asset_id)
     .bind(p.linked_liability_id)
     .bind(p.notes.as_deref())
@@ -151,7 +135,6 @@ struct RuleRow {
     kind: String,
     category_id: Option<Uuid>,
     category_name: Option<String>,
-    day_of_month: i32,
     linked_asset_id: Option<Uuid>,
     linked_liability_id: Option<Uuid>,
     notes: Option<String>,
@@ -168,7 +151,6 @@ fn row_to_response(r: RuleRow) -> RecurringRuleResponse {
         kind: r.kind,
         category_id: r.category_id,
         category_name: r.category_name,
-        day_of_month: r.day_of_month as u32,
         linked_asset_id: r.linked_asset_id,
         linked_liability_id: r.linked_liability_id,
         notes: r.notes,
@@ -179,7 +161,7 @@ fn row_to_response(r: RuleRow) -> RecurringRuleResponse {
 }
 
 const RULE_SELECT: &str = r#"SELECT r.id, r.concept, r.amount, r.kind, r.category_id,
-              c.name AS category_name, r.day_of_month, r.linked_asset_id, r.linked_liability_id,
+              c.name AS category_name, r.linked_asset_id, r.linked_liability_id,
               r.notes, r.last_materialized_month, r.created_at, r.updated_at
        FROM recurring_transaction_rules r
        LEFT JOIN categories c ON c.id = r.category_id"#;
@@ -225,7 +207,6 @@ struct RuleCore {
     amount: Decimal,
     kind: String,
     category_id: Option<Uuid>,
-    day_of_month: i32,
     linked_asset_id: Option<Uuid>,
     linked_liability_id: Option<Uuid>,
     notes: Option<String>,
@@ -233,12 +214,13 @@ struct RuleCore {
 }
 
 /// Materializa las instancias pendientes de UNA regla desde su cursor `last_materialized_month`
-/// hasta (incl.) el mes civil actual, sin sobrepasar `today`. Un mes cuyo día de recurrencia (ya
-/// con clamp de fin de mes) aún no ha llegado se difiere SIN avanzar el cursor. Cada instancia toma
-/// un ordinal MAX+1 (nunca 409 frente a un manual idéntico) y el cursor avanza sólo si insertó algo
-/// (idempotente). Devuelve cuántas instancias creó. Compartida por el endpoint `materialize` y por
-/// el backfill del alta con fecha pasada (`crud.rs`, vía `backfill_new_rule`). Privada: `RuleCore` no
-/// sale del módulo; los callers externos entran por `backfill_new_rule`.
+/// hasta el último mes civil **cerrado** (el mes en curso queda siempre fuera). Cada instancia se
+/// fecha en el **último día de su mes** — la atribución mensual de las estadísticas es `op_date`,
+/// así que la instancia de M cuenta en M pero solo existe con el servidor ya en M+1. Cada
+/// instancia toma un ordinal MAX+1 (nunca 409 frente a un manual idéntico) y el cursor avanza sólo
+/// si insertó algo (idempotente). Devuelve cuántas instancias creó. Compartida por el endpoint
+/// `materialize` y por el backfill del alta con fecha pasada (`crud.rs`, vía `backfill_new_rule`).
+/// Privada: `RuleCore` no sale del módulo; los callers externos entran por `backfill_new_rule`.
 async fn materialize_rule(
     conn: &mut PgConnection,
     iid: Uuid,
@@ -250,25 +232,16 @@ async fn materialize_rule(
     let mut cursor = rule.last_materialized_month;
     let mut materialized = 0u32;
 
-    // Avanza mes a mes desde el cursor hasta (incl.) el mes civil actual.
+    // Avanza mes a mes desde el cursor mientras el mes esté CERRADO (estrictamente anterior al mes
+    // civil actual). Como el último día de un mes cerrado siempre es < today, aquí no puede
+    // generarse una fecha futura — el ledger sigue siendo histórico por construcción.
     loop {
         let (ny, nm) = shift_month(cursor.year(), cursor.month(), 1);
         let next_month = first_of_month(ny, nm);
-        if next_month > current_month {
+        if next_month >= current_month {
             break;
         }
-        // op_date = min(day_of_month, días del mes) → clamp del 31 en meses cortos (feb/abr).
-        let dim = days_in_month(ny, nm);
-        let day = (rule.day_of_month as u32).min(dim);
-        let op_date = NaiveDate::from_ymd_opt(ny, nm, day).expect("valid op date");
-
-        // Nunca materializamos con fecha futura: el ledger es histórico. Si el día de la recurrencia
-        // del mes en curso aún no ha llegado, paramos ANTES de insertar y SIN avanzar el cursor →
-        // ese mes se materializará en la primera llamada cuyo día ya haya vencido (idempotencia
-        // intacta: el cursor sólo avanza con inserciones).
-        if op_date > today {
-            break;
-        }
+        let op_date = NaiveDate::from_ymd_opt(ny, nm, days_in_month(ny, nm)).expect("valid op date");
 
         let fp = compute_fingerprint(SOURCE_MANUAL, op_date, rule.amount, &rule.concept);
         // Ordinal MAX+1 dentro de la tx: una instancia manual idéntica preexistente jamás produce un
@@ -331,7 +304,6 @@ pub(super) async fn backfill_new_rule(
     owner: Uuid,
     rule_id: Uuid,
     p: &PreparedTxn,
-    day_of_month: i32,
     cursor: NaiveDate,
     today: NaiveDate,
 ) -> Result<u32, ApiError> {
@@ -341,7 +313,6 @@ pub(super) async fn backfill_new_rule(
         amount: p.amount,
         kind: p.kind.clone(),
         category_id: p.category_id,
-        day_of_month,
         linked_asset_id: p.linked_asset_id,
         linked_liability_id: p.linked_liability_id,
         notes: p.notes.clone(),
@@ -377,7 +348,7 @@ pub async fn materialize_recurring(
     // `FOR UPDATE` serializa llamadas concurrentes: dos materializaciones simultáneas no pueden
     // avanzar el mismo cursor a la vez (la segunda espera a que la primera commitee).
     let rules: Vec<RuleCore> = sqlx::query_as(
-        r#"SELECT id, concept, amount, kind, category_id, day_of_month,
+        r#"SELECT id, concept, amount, kind, category_id,
                   linked_asset_id, linked_liability_id, notes, last_materialized_month
            FROM recurring_transaction_rules
            WHERE installation_id = $1 AND owner_user_id = $2

@@ -648,11 +648,11 @@ async fn server_today(app: &TestApp, cookie: &str) -> NaiveDate {
     NaiveDate::parse_from_str(resp.json()["anchor_date_ymd"].as_str().unwrap(), "%Y-%m-%d").unwrap()
 }
 
-/// End-to-end v6: create a recurring rule + materialize it, export, dirty, import (full replace),
+/// End-to-end: create a recurring rule + materialize it, export, dirty, import (full replace),
 /// and confirm the rule survives with the SAME cursor, its instances are re-linked to the fresh
 /// rule UUID, and a post-import materialize does not duplicate anything.
 #[tokio::test]
-async fn backup_v6_recurring_rules_round_trip() {
+async fn backup_recurring_rules_round_trip() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let nomina_cat = app.create_category(&owner, "income", "Nómina").await;
@@ -660,14 +660,14 @@ async fn backup_v6_recurring_rules_round_trip() {
     let (oy, om) = shift_month(today.year(), today.month(), -2);
     let origin = NaiveDate::from_ymd_opt(oy, om, 1).unwrap().format("%Y-%m-%d").to_string();
 
-    // Rule (origin 2 months ago) + materialize (fills M-1 and M). `day_of_month=1` garantiza que
-    // el mes en curso siempre entra (hoy es >= día 1), sea cual sea el día en que corra el test.
+    // Rule (origin 2 months ago) + materialize (fills the closed month M-1; the current month is
+    // never materialized since 3.2.0).
     let r = app
         .post_json_with_cookie(
             "/v1/transactions",
             serde_json::json!({ "op_date": origin, "concept": "Nomina", "amount": "1500",
                                 "kind": "income", "category_id": nomina_cat,
-                                "recurrence": { "day_of_month": 1 } }),
+                                "recurrence": {} }),
             &owner.cookie,
         )
         .await;
@@ -676,7 +676,7 @@ async fn backup_v6_recurring_rules_round_trip() {
         .post_json_with_cookie("/v1/transactions/recurring/materialize", serde_json::json!({}), &owner.cookie)
         .await;
     assert_eq!(mat.status, http::StatusCode::OK, "materialize: {mat:?}");
-    assert_eq!(app.count_rows("transactions").await, 3, "origen + 2 materializadas");
+    assert_eq!(app.count_rows("transactions").await, 2, "origen + 1 materializada (M-1)");
 
     let cursor_before = app.get_with_cookie("/v1/transactions/recurring", &owner.cookie).await.json()
         [0]["last_materialized_month"]
@@ -700,10 +700,10 @@ async fn backup_v6_recurring_rules_round_trip() {
     let applied = import_apply(&app, &owner.cookie, &backup).await;
     assert_eq!(applied.status, http::StatusCode::OK, "apply: {applied:?}");
     assert_eq!(applied.json()["imported"]["recurring_transaction_rules"].as_u64(), Some(1));
-    assert_eq!(applied.json()["imported"]["transactions"].as_u64(), Some(3));
+    assert_eq!(applied.json()["imported"]["transactions"].as_u64(), Some(2));
 
-    // Exactly the 3 backed-up transactions survive (the stray is gone).
-    assert_eq!(app.count_rows("transactions").await, 3, "solo las 3 del backup");
+    // Exactly the 2 backed-up transactions survive (the stray is gone).
+    assert_eq!(app.count_rows("transactions").await, 2, "solo las 2 del backup");
     assert_eq!(app.count_rows("recurring_transaction_rules").await, 1);
 
     // The rule survives with the same cursor and its category re-linked.
@@ -712,7 +712,7 @@ async fn backup_v6_recurring_rules_round_trip() {
     assert_eq!(rules[0]["last_materialized_month"].as_str().unwrap(), cursor_before, "cursor conservado");
     assert_eq!(rules[0]["category_name"], "Nómina", "categoría re-enlazada");
 
-    // Every instance is re-linked to the fresh rule UUID (origin + 2 materialized = 3).
+    // Every instance is re-linked to the fresh rule UUID (origin + 1 materialized = 2).
     let relinked: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM transactions
            WHERE recurring_rule_id IS NOT NULL
@@ -721,14 +721,14 @@ async fn backup_v6_recurring_rules_round_trip() {
     .fetch_one(&app.pool)
     .await
     .expect("count relinked");
-    assert_eq!(relinked, 3, "instancias re-enlazadas a la regla nueva");
+    assert_eq!(relinked, 2, "instancias re-enlazadas a la regla nueva");
 
     // A post-import materialize does not duplicate (cursor preserved).
     let mat2 = app
         .post_json_with_cookie("/v1/transactions/recurring/materialize", serde_json::json!({}), &owner.cookie)
         .await;
     assert_eq!(mat2.json()["materialized"].as_u64().unwrap(), 0, "sin duplicados tras import");
-    assert_eq!(app.count_rows("transactions").await, 3);
+    assert_eq!(app.count_rows("transactions").await, 2);
 }
 
 /// A viewer cannot import (403) — enforced before any file parsing.
