@@ -99,31 +99,46 @@ Tres capas complementarias:
 
 ## Conectar Claude (MCP)
 
-Desde 3.0.0 FutureFin incluye un **servidor MCP de solo lectura** en `/mcp` (mismo puerto que la
-app): Claude puede consultar tu resumen, proyección FIRE, presupuesto, movimientos, histórico,
-activos y pasivos — nunca modificarlos.
+FutureFin incluye un **servidor MCP de solo lectura** en `/mcp` (mismo puerto que la app): Claude
+puede consultar tu resumen, proyección FIRE, presupuesto, movimientos, histórico, activos y
+pasivos — nunca modificarlos. Hay dos maneras de conectar:
+
+### claude.ai (web / móvil / Desktop) — conector personalizado con OAuth (3.1.0)
+
+1. Expón tu instalación por **HTTPS público** (p. ej. Cloudflare Tunnel): las conexiones de
+   claude.ai salen de la infraestructura de Anthropic, no de tu navegador — `localhost` no sirve.
+2. En claude.ai: `Configuración → Conectores → Añadir conector personalizado` y pega
+   `https://tu-host/mcp`. No hay que rellenar nada más: el registro de cliente es automático (DCR).
+3. Claude te llevará a la **pantalla de autorización de FutureFin**: inicia sesión con tu usuario
+   de siempre y pulsa **Autorizar** (acceso de solo lectura).
+4. Revocar: `Ajustes → Acceso → Conexiones` → **Revocar** (corte inmediato; claude tendrá que
+   volver a pedir permiso).
+
+### Claude Code / clientes MCP genéricos — token de API
 
 1. En la app: `Ajustes → Acceso → Tokens de API (MCP)` → **Crear token**. Copia el secreto
    (`ffp_…`): solo se muestra una vez. El token hereda tu usuario y rol, y puedes revocarlo cuando
    quieras (corte inmediato).
-2. En Claude Code (o Claude Desktop con conectores locales):
+2. En Claude Code:
 
    ```bash
    claude mcp add --transport http futurefin https://tu-host/mcp \
      --header "Authorization: Bearer ffp_..."
    ```
 
+   (Claude Code también puede conectar sin token, vía el mismo flujo OAuth: `claude mcp add
+   --transport http futurefin https://tu-host/mcp` y autorizar en el navegador.)
 3. Cualquier otro cliente MCP genérico funciona igual: transporte **Streamable HTTP** + header
-   `Authorization: Bearer <token>`.
+   `Authorization: Bearer <token>`, o el flujo OAuth 2.1 estándar del protocolo MCP.
 
 Notas:
 
-- **Acceso remoto**: expón la instalación como prefieras (p. ej. Cloudflare Tunnel). FutureFin no
-  gestiona TLS ni conectividad; el gate es el token.
-- **Limitación**: el conector web de claude.ai exige OAuth 2.1 y no soporta tokens estáticos —
-  fuera de alcance por ahora. Usa Claude Code/Desktop.
-- **Apagarlo del todo**: `FUTUREFIN_MCP_ENABLED=0` (el endpoint deja de existir). Sin tokens
-  creados, `/mcp` responde 401 a todo.
+- **Acceso remoto**: FutureFin no gestiona TLS ni conectividad (Cloudflare Tunnel, reverse proxy…
+  a tu elección). Si tu proxy no manda `X-Forwarded-Proto`/`Host` correctos, fija
+  `FUTUREFIN_PUBLIC_URL=https://tu-host`.
+- **Apagarlo del todo**: `FUTUREFIN_MCP_ENABLED=0` (desmonta `/mcp` y todo el protocolo OAuth; el
+  panel de conexiones sigue disponible para revocar). Sin tokens ni conexiones, `/mcp` responde
+  401 a todo.
 
 ---
 
@@ -145,7 +160,8 @@ Desde 3.0.0 **ninguna variable es obligatoria**.
 | `DATABASE_URL` | No | **Deprecado** (se elimina en 4.0.0): base de datos externa. Ver «Actualizar desde 2.x». |
 | `FUTUREFIN_DB_MODE` | No | `auto` (default) \| `embedded` \| `external`. |
 | `FUTUREFIN_ALLOW_EPHEMERAL_DB` | No | `1` permite arrancar sin volumen (solo pruebas desechables). |
-| `FUTUREFIN_MCP_ENABLED` | No | `0` desmonta el servidor MCP (`/mcp`). Default `true`. |
+| `FUTUREFIN_MCP_ENABLED` | No | `0` desmonta el servidor MCP (`/mcp`) y el protocolo OAuth (el panel de conexiones sigue). Default `true`. |
+| `FUTUREFIN_PUBLIC_URL` | No | Origen público (`https://tu-host`) para OAuth. Solo si tu proxy no manda `X-Forwarded-Proto`/`Host`. |
 | `PORT` | No | Internal container port. Default `8080`. |
 | `WEB_STATIC_ROOT` | No | Path to Vite `dist/`. Docker sets `/app/web`. Omit for API-only mode. |
 | `SESSION_TTL_DAYS` | No | Default `30`, max `400` |

@@ -14,6 +14,11 @@ use crate::handlers::api_tokens::{
     __path_create_api_token, __path_list_api_tokens, __path_revoke_api_token,
 };
 #[allow(unused_imports)]
+use crate::handlers::oauth_consent::{
+    __path_authorize_decision, __path_authorize_details, __path_list_connections,
+    __path_revoke_connection,
+};
+#[allow(unused_imports)]
 use crate::handlers::health::{__path_health_check, __path_ready_check};
 #[allow(unused_imports)]
 use crate::handlers::history::{
@@ -157,6 +162,10 @@ use utoipa::OpenApi;
         list_api_tokens,
         create_api_token,
         revoke_api_token,
+        authorize_details,
+        authorize_decision,
+        list_connections,
+        revoke_connection,
     ),
     components(schemas(
         crate::handlers::health::HealthBody,
@@ -177,6 +186,12 @@ use utoipa::OpenApi;
         crate::handlers::api_tokens::ApiTokenResponse,
         crate::handlers::api_tokens::CreateApiTokenBody,
         crate::handlers::api_tokens::CreateApiTokenResponse,
+        crate::handlers::oauth_consent::AuthorizeDetailsStatus,
+        crate::handlers::oauth_consent::AuthorizeDetailsResponse,
+        crate::handlers::oauth_consent::AuthorizeDecisionBody,
+        crate::handlers::oauth_consent::AuthorizeDecisionResponse,
+        crate::handlers::oauth_consent::OAuthConnectionResponse,
+        crate::oauth::authorize::AuthorizeParams,
         crate::handlers::pending_users::ApprovePendingUserBody,
         crate::handlers::pending_users::ApproveMemberRole,
         crate::handlers::categories::CategoryScope,

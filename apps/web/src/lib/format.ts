@@ -223,7 +223,7 @@ export function formatBreakdownPct(part: string, whole: string): string {
 }
 
 /** ISO timestamp (`2026-08-16T10:20:30Z`) → `DD/MM/YYYY` (solo fecha); original si no parsea. */
-function isoTimestampDmy(iso: string): string {
+export function isoTimestampDmy(iso: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
   if (!m) return iso;
   return `${m[3]}/${m[2]}/${m[1]}`;

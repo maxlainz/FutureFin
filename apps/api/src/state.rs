@@ -46,6 +46,10 @@ pub struct AppState {
     pub session_ttl_days: i64,
     /// `FUTUREFIN_MCP_ENABLED` (default true). Con `false` el router `/mcp` ni se monta.
     pub mcp_enabled: bool,
+    /// `FUTUREFIN_PUBLIC_URL` (opcional): origen público canónico (`https://host`, sin
+    /// barra final), validado al arrancar. `None` ⇒ el issuer OAuth se deriva de los
+    /// headers del request (X-Forwarded-Proto / Host).
+    pub public_url: Option<String>,
     pub projection_cache: RwLock<ProjectionCacheMap>,
 }
 
@@ -56,6 +60,7 @@ impl AppState {
         cookie_secure: bool,
         session_ttl_days: i64,
         mcp_enabled: bool,
+        public_url: Option<String>,
     ) -> Self {
         Self {
             version,
@@ -63,6 +68,7 @@ impl AppState {
             cookie_secure,
             session_ttl_days,
             mcp_enabled,
+            public_url,
             projection_cache: RwLock::new(HashMap::new()),
         }
     }

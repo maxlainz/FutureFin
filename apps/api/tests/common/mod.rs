@@ -211,6 +211,7 @@ impl TestApp {
             false,
             30,
             true,
+            None,
         ));
         let router = Router::new()
             .merge(routes::app_router(&state))
@@ -223,7 +224,15 @@ impl TestApp {
         }
     }
 
-    pub async fn request(&self, req: Request<Body>) -> ResponseParts {
+    pub async fn request(&self, mut req: Request<Body>) -> ResponseParts {
+        // HTTP/1.1 exige Host y el oneshot no lo pone solo; sin él, los endpoints que
+        // derivan la URL pública (OAuth) fallarían con un 400 irreal. Solo si falta.
+        if !req.headers().contains_key(http::header::HOST) {
+            req.headers_mut().insert(
+                http::header::HOST,
+                http::HeaderValue::from_static("futurefin.test"),
+            );
+        }
         let resp = self
             .router
             .clone()
@@ -323,6 +332,109 @@ impl TestApp {
         )
         .await
     }
+
+    /// POST `application/x-www-form-urlencoded` (token endpoint OAuth).
+    pub async fn post_form(&self, uri: &str, form: &[(&str, &str)]) -> ResponseParts {
+        let body: String = form
+            .iter()
+            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        self.request(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri(uri)
+                .header(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .expect("build form POST request"),
+        )
+        .await
+    }
+
+    /// Como `post_form` pero con `Authorization: Basic base64(client_id:secret)`.
+    pub async fn post_form_with_basic_auth(
+        &self,
+        uri: &str,
+        form: &[(&str, &str)],
+        client_id: &str,
+        secret: &str,
+    ) -> ResponseParts {
+        use base64::Engine;
+        let creds = base64::engine::general_purpose::STANDARD
+            .encode(format!("{client_id}:{secret}"));
+        let body: String = form
+            .iter()
+            .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        self.request(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri(uri)
+                .header(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(http::header::AUTHORIZATION, format!("Basic {creds}"))
+                .body(Body::from(body))
+                .expect("build form POST request"),
+        )
+        .await
+    }
+
+    /// GET con `Host` (y opcionalmente otros headers) — para los endpoints de metadata
+    /// OAuth, cuyo issuer se deriva del request.
+    pub async fn get_with_headers(&self, uri: &str, headers: &[(&str, &str)]) -> ResponseParts {
+        let mut builder = Request::builder().uri(uri);
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        self.request(builder.body(Body::empty()).expect("build GET request"))
+            .await
+    }
+
+    /// POST `initialize` mínimo a `/mcp` con el Bearer dado. Devuelve la respuesta cruda
+    /// (200 = token válido; 401/403 = rechazado).
+    pub async fn mcp_initialize(&self, bearer: Option<&str>) -> ResponseParts {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-07-28",
+                "capabilities": {},
+                "clientInfo": {"name": "oauth-test", "version": "0.0.0"}
+            }
+        });
+        let mut builder = Request::builder()
+            .method(http::Method::POST)
+            .uri("/mcp")
+            .header(http::header::HOST, "futurefin.test")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(http::header::ACCEPT, "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2026-07-28")
+            .header("Mcp-Method", "initialize");
+        if let Some(b) = bearer {
+            builder = builder.header(http::header::AUTHORIZATION, format!("Bearer {b}"));
+        }
+        self.request(
+            builder
+                .body(Body::from(serde_json::to_vec(&body).expect("json")))
+                .expect("build MCP request"),
+        )
+        .await
+    }
+}
+
+/// Percent-encoding mínimo suficiente para los tests (valores base64url + URLs).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[derive(Debug)]
