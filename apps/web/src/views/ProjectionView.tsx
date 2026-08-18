@@ -8,6 +8,7 @@ import type {
   ProjectionSeriesApi,
 } from "../api/types";
 import { MetricCard } from "../components/MetricCard";
+import { Switch } from "../components/Switch";
 import {
   METRIC_DASH,
   formatCurrencyNumber,
@@ -170,34 +171,20 @@ export function ProjectionView({
       <div className="workspace-header">
         <div className="projection-header-main">
           <h2 className="workspace-title">Proyección</h2>
-          <label className="projection-focus-toggle">
-            <span className="projection-focus-toggle-label">Focus</span>
-            <input
-              type="checkbox"
-              role="switch"
-              checked={focusMode}
-              onChange={(e) => setFocusMode(e.target.checked)}
-              aria-label="Activar focus en la proyección"
-            />
-            <span className="projection-focus-toggle-track" aria-hidden="true">
-              <span className="projection-focus-toggle-thumb" />
-            </span>
-          </label>
-          <label className="projection-focus-toggle">
-            <span className="projection-focus-toggle-label">
-              Inflation Adjusted
-            </span>
-            <input
-              type="checkbox"
-              role="switch"
-              checked={inflationAdjusted}
-              onChange={(e) => setInflationAdjusted(e.target.checked)}
-              aria-label="Mostrar la proyección ajustada a inflación (en dinero de hoy)"
-            />
-            <span className="projection-focus-toggle-track" aria-hidden="true">
-              <span className="projection-focus-toggle-thumb" />
-            </span>
-          </label>
+          <Switch
+            variant="chart"
+            label="Focus"
+            checked={focusMode}
+            onChange={setFocusMode}
+            ariaLabel="Activar focus en la proyección"
+          />
+          <Switch
+            variant="chart"
+            label="Inflation Adjusted"
+            checked={inflationAdjusted}
+            onChange={setInflationAdjusted}
+            ariaLabel="Mostrar la proyección ajustada a inflación (en dinero de hoy)"
+          />
         </div>
       </div>
 

@@ -195,7 +195,7 @@ export function OAuthAuthorizeView() {
       case "login":
         return (
           <LoginPanel
-            intro="Una aplicación quiere conectarse a tu FutureFin en modo solo lectura. Inicia sesión para revisar y autorizar el acceso."
+            intro="Una aplicación quiere conectarse a tu FutureFin con tu rol (lectura, y escritura si está permitida en Ajustes → MCP). Inicia sesión para revisar y autorizar el acceso."
             onAuthenticated={() => void evaluate()}
           />
         );
@@ -244,9 +244,10 @@ export function OAuthAuthorizeView() {
             <div className="stack">
               <p className="tight">
                 Podrá <strong>leer</strong> tu resumen, proyección, presupuesto,
-                movimientos, histórico, activos y pasivos.{" "}
-                <strong>No podrá modificar nada.</strong> Puedes revocar el acceso
-                cuando quieras en Ajustes → Acceso.
+                movimientos, histórico, activos y pasivos, y{" "}
+                <strong>registrar o modificar datos en tu nombre</strong> si tu rol
+                escribe y el interruptor de escritura está activado (Ajustes → MCP).
+                Puedes revocar el acceso cuando quieras en Ajustes → MCP.
               </p>
               {details.already_connected ? (
                 <p className="muted tight">

@@ -1,11 +1,12 @@
 /**
- * Ajustes → Acceso: tokens de API (Bearer) para el servidor MCP embebido (`/mcp`).
+ * Ajustes → MCP: tokens de API (Bearer) para el servidor MCP embebido (`/mcp`).
  *
  * Panel autoservicio (self-fetch al montar, patrón HistorySettingsPanel): lista los tokens
  * del PROPIO usuario, crea nuevos (modal con label + caducidad) y los revoca. El secreto
  * completo solo existe en la respuesta del POST — se muestra UNA vez con botón de copiar
  * y no vuelve a ser recuperable. Cualquier miembro (viewer incluido) puede crear los
- * suyos: el token hereda su identidad y rol, y el MCP v1 es solo lectura.
+ * suyos: el token hereda su identidad y rol vivos en cada uso — lectura siempre, escritura
+ * solo si el rol escribe y `mcp_write_enabled` está activado (Ajustes → MCP).
  */
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
@@ -124,8 +125,9 @@ export function ApiTokensPanel() {
       </div>
       <p className="muted">
         Conecta Claude u otro cliente MCP en <code>https://tu-host/mcp</code> con el header{" "}
-        <code>Authorization: Bearer &lt;token&gt;</code>. El token hereda tu rol y solo
-        permite lectura.
+        <code>Authorization: Bearer &lt;token&gt;</code>. El token hereda tu rol en cada uso:
+        lectura siempre, y escritura solo si tu rol escribe y el interruptor «Permitir escritura
+        vía MCP» está activado.
       </p>
 
       {error ? (

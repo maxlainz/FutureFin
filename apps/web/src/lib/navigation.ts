@@ -16,6 +16,7 @@ export type TabId =
 
 export type SettingsSubTabId =
   | "access"
+  | "mcp"
   | "calendar"
   | "projection"
   | "retirement"
@@ -48,7 +49,9 @@ export const TAB_PATH: Record<TabId, string> = {
 };
 
 export const SETTINGS_SUBTAB_SLUG: Record<SettingsSubTabId, string> = {
+  // El slug `acceso` se conserva aunque la pestaña se llame «Usuarios»: URLs guardadas.
   access: "acceso",
+  mcp: "mcp",
   calendar: "calendario",
   projection: "proyeccion",
   retirement: "jubilacion",
@@ -58,7 +61,8 @@ export const SETTINGS_SUBTAB_SLUG: Record<SettingsSubTabId, string> = {
 };
 
 export const SETTINGS_SUBTAB_LABEL: Record<SettingsSubTabId, string> = {
-  access: "Acceso",
+  access: "Usuarios",
+  mcp: "MCP",
   calendar: "Calendario",
   projection: "Proyección",
   retirement: "Jubilación",

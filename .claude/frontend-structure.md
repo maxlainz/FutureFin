@@ -66,6 +66,7 @@ src/
 │   ├── MobileNavDrawer.tsx       # drawer derecho ≤720px
 │   ├── AccountCard.tsx           # tarjeta de cuenta en Ajustes (sustituye user-chip + Salir del header antiguo)
 │   ├── ThemeToggle.tsx           # segmented Auto/Claro/Oscuro (usado en Ajustes → Datos)
+│   ├── Switch.tsx                # switch accesible track+thumb (`.ff-switch*`); variant="chart" = label small-caps (Proyección); usado también en Ajustes → MCP
 │   ├── Modal.tsx                 # Modal + ModalFormError + InlineHint
 │   ├── MetricCard.tsx            # KPI con paren-slot siempre presente (prop `trend?` ocupa el mismo slot, prioridad sobre `parenthetical`) + tone hero/accent/accent-2
 │   ├── SnapshotButton.tsx        # botón «Guardar snapshot» (idle→busy→success/error) en panel-head de Activos y Pasivos
@@ -111,7 +112,7 @@ src/
 │   │                                #   negativos con la serie histórica (áreas + marcadores + divisor «Hoy») vía mergeProjectionWithHistory.
 │   │                                #   Overlay fino de cash-flow (v1.6.0): props cashflow/cashflowDaily/onRequestDailyCashflow — pinta la curva
 │   │                                #   fina (fine.grid por month_fraction real, deflactada igual) sobre la zona pasada; daily lazy al hacer zoom histórico
-│   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills + ThemeToggle en "Datos y sistema"
+│   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills («Usuarios» owner-only, «MCP» con tokens/conexiones/toggle de escritura) + ThemeToggle en "Datos y sistema"
 │   ├── ApiTokensPanel.tsx        # Ajustes → Acceso: tokens de API (MCP). Self-fetch (patrón HistorySettingsPanel); crear (modal
 │   │                             #   label + caducidad), secreto mostrado UNA vez con copiar, tabla (prefix/último uso/vigencia),
 │   │                             #   revocar con modal de confirmación. Visible para cualquier miembro (v3.0.0).
@@ -164,7 +165,7 @@ src/
 | New icon | extender el set en `components/icons.tsx` (viewBox 16×16, stroke 1.5). No crear SVG sueltos en views. |
 | New shared chart/SVG widget | `components/charts/` — si es una proyección compacta, considera reusar `MiniProjection` con props |
 | New full tab/page | `views/NewView.tsx` + add to `TABS` / `TAB_PATH` in `lib/navigation.ts` + render branch in `App.tsx` + add pill al `TopBar` (automático vía `TABS`) |
-| New Settings sub-tab | add to `SETTINGS_SUBTAB_SLUG`/`_LABEL` in `lib/navigation.ts` + render branch inside `SettingsView` (sub-tabs son `ff-nav-pill` ya, no tab-bar) |
+| New Settings sub-tab | add to `SettingsSubTabId` + `SETTINGS_SUBTAB_SLUG`/`_LABEL` in `lib/navigation.ts` (con test en `navigation.test.ts`), visibilidad en `visibleSettingsSubTabs` (App.tsx) + render branch inside `SettingsView` (sub-tabs son `ff-nav-pill` ya, no tab-bar). Precedente completo: la sub-tab `mcp` (tokens + conexiones + toggle de escritura; «access» quedó owner-only renombrada «Usuarios», slug `acceso` intacto) |
 | Tabla nueva (o columnas nuevas en una existente) | seguir el patrón móvil «columnas esenciales»: gatear th/td con `useIsMobile()` (`lib/responsive.ts`), datos secundarios a `.cell-subline`, fila tappable → modal. Doctrina completa en design-system.md «Responsive / móvil». Controles densos dentro de la tabla → añadirlos al carve-out táctil de App.css (sección A2) |
 | New auth/setup flow | `auth/` |
 | New **standalone page outside the tab router** (like `/oauth/authorize`) | `main.tsx`: rama lazy antes de `<App/>`. Ver §Ruta `/oauth/authorize` — el router de `App.tsx` canonicaliza cualquier path desconocido |

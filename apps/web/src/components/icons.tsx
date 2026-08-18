@@ -163,6 +163,17 @@ export function KeyIcon(props: IconProps) {
   );
 }
 
+/** Enchufe (servidor MCP): conector de dos patillas entrando en una toma. */
+export function PlugIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M6 2v3.5M10 2v3.5" />
+      <path d="M4.5 5.5h7v2.5a3.5 3.5 0 0 1-7 0V5.5Z" />
+      <path d="M8 11.5V14" />
+    </IconBase>
+  );
+}
+
 export function CalendarIcon(props: IconProps) {
   return (
     <IconBase {...props}>
