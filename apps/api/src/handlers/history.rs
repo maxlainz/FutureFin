@@ -530,15 +530,27 @@ pub async fn list_snapshots(
 ) -> Result<Json<Vec<SnapshotResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = list_snapshots_core(&state.pool, iid, user.id.0, q.year, q.kind.as_deref()).await?;
+    Ok(Json(out))
+}
 
-    if let Some(y) = q.year {
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_snapshots`. Siempre own-user
+/// (el CRUD de snapshots no acepta `?view`).
+pub(crate) async fn list_snapshots_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    year: Option<i32>,
+    kind: Option<&str>,
+) -> Result<Vec<SnapshotResponse>, ApiError> {
+    if let Some(y) = year {
         if !(1900..=3000).contains(&y) {
             return Err(ApiError::BadRequest(
                 "year must be between 1900 and 3000".into(),
             ));
         }
     }
-    let kind = match &q.kind {
+    let kind = match kind {
         None => None,
         Some(k) => Some(normalize_kind(k)?),
     };
@@ -550,7 +562,7 @@ pub async fn list_snapshots(
          WHERE installation_id = $1 AND owner_user_id = $2",
     );
     let mut next = 3;
-    if q.year.is_some() {
+    if year.is_some() {
         sql.push_str(&format!(
             " AND snapshot_date >= ${} AND snapshot_date < ${}",
             next,
@@ -565,8 +577,8 @@ pub async fn list_snapshots(
 
     let mut query = sqlx::query_as::<_, SnapshotHeaderRow>(&sql)
         .bind(iid)
-        .bind(user.id.0);
-    if let Some(y) = q.year {
+        .bind(user_id);
+    if let Some(y) = year {
         let start = NaiveDate::from_ymd_opt(y, 1, 1).expect("valid Jan 1");
         let end = NaiveDate::from_ymd_opt(y + 1, 1, 1).expect("valid next Jan 1");
         query = query.bind(start).bind(end);
@@ -574,9 +586,9 @@ pub async fn list_snapshots(
     if let Some(k) = kind {
         query = query.bind(k);
     }
-    let headers: Vec<SnapshotHeaderRow> = query.fetch_all(&state.pool).await?;
+    let headers: Vec<SnapshotHeaderRow> = query.fetch_all(pool).await?;
     if headers.is_empty() {
-        return Ok(Json(Vec::new()));
+        return Ok(Vec::new());
     }
 
     let ids: Vec<Uuid> = headers.iter().map(|h| h.id).collect();
@@ -588,7 +600,7 @@ pub async fn list_snapshots(
            ORDER BY label ASC"#,
     )
     .bind(&ids)
-    .fetch_all(&state.pool)
+    .fetch_all(pool)
     .await?;
 
     let mut by_parent: HashMap<Uuid, Vec<SnapshotItemRow>> = HashMap::new();
@@ -596,14 +608,13 @@ pub async fn list_snapshots(
         by_parent.entry(r.snapshot_id).or_default().push(r);
     }
 
-    let out: Vec<SnapshotResponse> = headers
+    Ok(headers
         .into_iter()
         .map(|h| {
             let items = by_parent.remove(&h.id).unwrap_or_default();
             build_response(h, items)
         })
-        .collect();
-    Ok(Json(out))
+        .collect())
 }
 
 #[utoipa::path(
@@ -1472,13 +1483,39 @@ pub async fn get_history_cashflow(
     // Solo lectura: cualquier miembro (viewer incluido).
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
     let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let out = history_cashflow_core(
+        &state.pool,
+        iid,
+        user.id.0,
+        view,
+        q.window_months,
+        q.resolution.as_deref(),
+        true,
+    )
+    .await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_history_cashflow`. Con
+/// `include_fine = false` omite la curva fina (y sus queries de patas): el agregado mensual es
+/// lo útil para un LLM, la curva es payload de chart (opt-in `include_curve` en la tool; el
+/// endpoint HTTP siempre pasa `true`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn history_cashflow_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+    window_months: Option<i64>,
+    resolution: Option<&str>,
+    include_fine: bool,
+) -> Result<CashflowResponse, ApiError> {
     let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
 
-    let window_months: i32 = q
-        .window_months
+    let window_months: i32 = window_months
         .unwrap_or(DEFAULT_CASHFLOW_WINDOW_MONTHS)
         .clamp(1, MAX_CASHFLOW_WINDOW_MONTHS) as i32;
-    let daily = matches!(q.resolution.as_deref().map(str::trim), Some("daily"));
+    let daily = matches!(resolution.map(str::trim), Some("daily"));
     if daily && window_months > MAX_DAILY_WINDOW_MONTHS {
         return Err(ApiError::BadRequest(format!(
             "daily_window_too_large: resolution=daily requires window_months <= {MAX_DAILY_WINDOW_MONTHS}"
@@ -1486,7 +1523,7 @@ pub async fn get_history_cashflow(
     }
     let resolution_label = if daily { "daily" } else { "weekly" };
 
-    let today = installation_naive_today(&state.pool, iid).await?;
+    let today = installation_naive_today(pool, iid).await?;
     let anchor = add_months_signed(today, 0); // primero-de-mes del mes 0.
     let window_start = add_months_signed(anchor, -window_months);
     let month_end = add_months_signed(anchor, 1); // exclusivo: incluye el mes 0 completo.
@@ -1502,10 +1539,10 @@ pub async fn get_history_cashflow(
         end = m_arg + 1
     );
     let month_rows: Vec<MonthKindRow> = view
-        .bind_scope_as(sqlx::query_as(&months_sql), iid, user.id.0)
+        .bind_scope_as(sqlx::query_as(&months_sql), iid, user_id)
         .bind(window_start)
         .bind(month_end)
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await?;
     let mut by_month_kind: HashMap<(String, String), Decimal> = HashMap::new();
     for r in month_rows {
@@ -1552,47 +1589,49 @@ pub async fn get_history_cashflow(
     // (una aportación −200 sube el destino en +200). Una savings importada aparece en AMBAS
     // (partida doble correcta: baja la cuenta, sube el destino). Deltas ya normalizados aquí; el
     // engine solo los suma.
-    let acc_scope = view.scope_where("t");
-    let account_sql = format!(
-        "SELECT ti.account_asset_id AS asset_id, t.owner_user_id AS owner_user_id,
-                t.op_date AS op_date, t.amount AS delta
-         FROM transactions t
-         JOIN transaction_imports ti ON ti.id = t.import_id
-         WHERE {acc_scope} AND ti.account_asset_id IS NOT NULL"
-    );
-    let account_legs: Vec<CashflowLegRow> = view
-        .bind_scope_as(sqlx::query_as(&account_sql), iid, user.id.0)
-        .fetch_all(&state.pool)
-        .await?;
-
-    let sav_scope = view.scope_where("t");
-    let savings_sql = format!(
-        "SELECT t.linked_asset_id AS asset_id, t.owner_user_id AS owner_user_id,
-                t.op_date AS op_date, (-t.amount) AS delta
-         FROM transactions t
-         WHERE {sav_scope} AND t.kind = 'savings' AND t.linked_asset_id IS NOT NULL"
-    );
-    let savings_legs: Vec<CashflowLegRow> = view
-        .bind_scope_as(sqlx::query_as(&savings_sql), iid, user.id.0)
-        .fetch_all(&state.pool)
-        .await?;
-
     let mut cashflow: HashMap<(Uuid, Uuid), Vec<CashFlowEntry>> = HashMap::new();
-    for leg in account_legs.into_iter().chain(savings_legs.into_iter()) {
-        cashflow
-            .entry((leg.owner_user_id, leg.asset_id))
-            .or_default()
-            .push(CashFlowEntry {
-                date: leg.op_date,
-                delta: leg.delta,
-            });
+    if include_fine {
+        let acc_scope = view.scope_where("t");
+        let account_sql = format!(
+            "SELECT ti.account_asset_id AS asset_id, t.owner_user_id AS owner_user_id,
+                    t.op_date AS op_date, t.amount AS delta
+             FROM transactions t
+             JOIN transaction_imports ti ON ti.id = t.import_id
+             WHERE {acc_scope} AND ti.account_asset_id IS NOT NULL"
+        );
+        let account_legs: Vec<CashflowLegRow> = view
+            .bind_scope_as(sqlx::query_as(&account_sql), iid, user_id)
+            .fetch_all(pool)
+            .await?;
+
+        let sav_scope = view.scope_where("t");
+        let savings_sql = format!(
+            "SELECT t.linked_asset_id AS asset_id, t.owner_user_id AS owner_user_id,
+                    t.op_date AS op_date, (-t.amount) AS delta
+             FROM transactions t
+             WHERE {sav_scope} AND t.kind = 'savings' AND t.linked_asset_id IS NOT NULL"
+        );
+        let savings_legs: Vec<CashflowLegRow> = view
+            .bind_scope_as(sqlx::query_as(&savings_sql), iid, user_id)
+            .fetch_all(pool)
+            .await?;
+
+        for leg in account_legs.into_iter().chain(savings_legs.into_iter()) {
+            cashflow
+                .entry((leg.owner_user_id, leg.asset_id))
+                .or_default()
+                .push(CashFlowEntry {
+                    date: leg.op_date,
+                    delta: leg.delta,
+                });
+        }
     }
 
     // ---- Capa fina (solo si hay vínculos a assets Y snapshots que anclar) --------------------
     let fine = if cashflow.is_empty() {
         None
     } else {
-        let scope = fetch_history_scope(&state.pool, view, iid, user.id.0, today).await?;
+        let scope = fetch_history_scope(pool, view, iid, user_id, today).await?;
         if scope.headers.is_empty() {
             None
         } else {
@@ -1674,13 +1713,13 @@ pub async fn get_history_cashflow(
         }
     };
 
-    Ok(Json(CashflowResponse {
+    Ok(CashflowResponse {
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
         view: view_label.into(),
         months,
         fine,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -247,16 +247,27 @@ pub async fn list_rules(
 ) -> Result<Json<Vec<RuleResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = list_categorization_rules_core(&state.pool, iid, user.id.0).await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_categorization_rules`.
+/// Siempre own-user (el endpoint no acepta `?view` — no inventarlo en la tool).
+pub(crate) async fn list_categorization_rules_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+) -> Result<Vec<RuleResponse>, ApiError> {
     let sql = format!(
         "{RULE_SELECT} WHERE r.installation_id = $1 AND r.owner_user_id = $2 \
          ORDER BY r.updated_at DESC, r.id ASC"
     );
     let rows: Vec<RuleRow> = sqlx::query_as(&sql)
         .bind(iid)
-        .bind(user.id.0)
-        .fetch_all(&state.pool)
+        .bind(user_id)
+        .fetch_all(pool)
         .await?;
-    Ok(Json(rows.into_iter().map(row_to_response).collect()))
+    Ok(rows.into_iter().map(row_to_response).collect())
 }
 
 /// Valida `(assign_kind, assign_category_id)`: savings exige categoría NULL; expense/income con

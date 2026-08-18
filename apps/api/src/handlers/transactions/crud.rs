@@ -9,7 +9,7 @@
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::LedgerViewQuery;
+use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::schema::{
@@ -485,8 +485,18 @@ pub async fn list_months(
 ) -> Result<Json<Vec<MonthEntry>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = q.resolve();
-    let today = installation_naive_today(&state.pool, iid).await?;
+    let out = list_months_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_transaction_months`.
+pub(crate) async fn list_months_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<Vec<MonthEntry>, ApiError> {
+    let today = installation_naive_today(pool, iid).await?;
     let current_month = today.format("%Y-%m").to_string();
 
     let scope = view.scope_where("t");
@@ -498,18 +508,17 @@ pub async fn list_months(
          ORDER BY month DESC"
     );
     let rows: Vec<(String, i64)> = view
-        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
+        .fetch_all(pool)
         .await?;
-    let out = rows
+    Ok(rows
         .into_iter()
         .map(|(month, txn_count)| MonthEntry {
             is_complete: month != current_month,
             month,
             txn_count,
         })
-        .collect();
-    Ok(Json(out))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -759,7 +768,17 @@ pub async fn list_imports(
 ) -> Result<Json<Vec<ImportBatchResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = q.resolve();
+    let out = list_imports_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_transaction_imports`.
+pub(crate) async fn list_imports_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<Vec<ImportBatchResponse>, ApiError> {
     let scope = view.scope_where("ti");
     let sql = format!(
         "SELECT ti.id, ti.source, ti.account_asset_id, a.name AS account_asset_name,
@@ -771,10 +790,10 @@ pub async fn list_imports(
          ORDER BY ti.created_at DESC, ti.id DESC"
     );
     let rows: Vec<ImportRow> = view
-        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
+        .fetch_all(pool)
         .await?;
-    let out = rows
+    Ok(rows
         .into_iter()
         .map(|r| ImportBatchResponse {
             id: r.id,
@@ -785,8 +804,7 @@ pub async fn list_imports(
             created_at: r.created_at,
             txn_count: r.txn_count,
         })
-        .collect();
-    Ok(Json(out))
+        .collect())
 }
 
 #[derive(Debug, Deserialize)]

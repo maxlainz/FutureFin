@@ -1084,17 +1084,30 @@ pub(crate) async fn projection_series_cached(
 /// (c) warm-up post-mutación. `density` solo afecta a la serialización (qué
 /// puntos incluir en `points`/`fire_target_series`/`asset_series.values`);
 /// el compute interno del engine siempre es el horizonte mensual completo.
-pub async fn compute_projection_series_response(
-    state: &AppState,
-    user_id: Uuid,
+/// Contexto resuelto de una proyección: `today` en la TZ de la instalación, inflación efectiva,
+/// `show_age_mode`, `fire_settings` resueltos, DOB para demografía y la regla de horizonte.
+/// Extraído de `compute_projection_series_response` para que la tool MCP `simulate_projection`
+/// resuelva EXACTAMENTE el mismo contexto (mismas queries, misma regla de clamp) sin duplicarlo.
+pub(crate) struct ProjectionContext {
+    pub today: NaiveDate,
+    pub inflation_annual_percent: Decimal,
+    pub show_age_mode: String,
+    pub fire_settings: FireSettings,
+    /// DOB de demografía: la del usuario de la sesión, o la del primer miembro del hogar.
+    pub birth_date: Option<NaiveDate>,
+    pub months: u32,
+    pub horizon_basis: String,
+}
+
+/// Resuelve el [`ProjectionContext`]. 1 query consolidada a `installation` (calendar_tz +
+/// inflación + show_age_mode + fire_settings) y las DOB del usuario y del primer miembro del
+/// hogar en paralelo con `try_join!`.
+pub(crate) async fn resolve_projection_context(
+    pool: &sqlx::PgPool,
     iid: Uuid,
-    view: LedgerView,
+    user_id: Uuid,
     months_override: Option<u32>,
-    density: Density,
-) -> Result<ProjectionSeriesResponse, ApiError> {
-    // 1 query consolidada (calendar_tz + inflación + show_age_mode + fire_settings) en lugar
-    // de dos round-trips a `installation`. Las DOB del usuario y del primer miembro del hogar
-    // se piden en paralelo con `try_join!`.
+) -> Result<ProjectionContext, ApiError> {
     type InstallationRow = (
         String, // calendar_tz
         Decimal,
@@ -1109,12 +1122,12 @@ pub async fn compute_projection_series_response(
            FROM installation WHERE id = $1"#,
     )
     .bind(iid)
-    .fetch_one(&state.pool);
+    .fetch_one(pool);
     let session_birth_q = sqlx::query_scalar::<_, Option<NaiveDate>>(
         r#"SELECT birth_date FROM users WHERE id = $1"#,
     )
     .bind(user_id)
-    .fetch_one(&state.pool);
+    .fetch_one(pool);
     let household_birth_q = sqlx::query_scalar::<_, NaiveDate>(
         r#"SELECT birth_date FROM persons
            WHERE installation_id = $1 AND birth_date IS NOT NULL
@@ -1122,7 +1135,7 @@ pub async fn compute_projection_series_response(
            LIMIT 1"#,
     )
     .bind(iid)
-    .fetch_optional(&state.pool);
+    .fetch_optional(pool);
 
     let (inst_row, session_birth, household_member_birth) =
         tokio::try_join!(inst_q, session_birth_q, household_birth_q)?;
@@ -1132,9 +1145,8 @@ pub async fn compute_projection_series_response(
     let show_age_mode = inst_row.2;
     let fire_settings = resolve_fire_settings(inst_row.3.map(|j| j.0));
 
-    let resolved_birth_for_demographics = session_birth.or(household_member_birth);
-
-    let birth_dates: Vec<Option<NaiveDate>> = vec![resolved_birth_for_demographics];
+    let birth_date = session_birth.or(household_member_birth);
+    let birth_dates: Vec<Option<NaiveDate>> = vec![birth_date];
 
     let (months, horizon_basis): (u32, String) = match months_override {
         Some(m) => (m.clamp(12, 840), "months_override".into()),
@@ -1143,6 +1155,35 @@ pub async fn compute_projection_series_response(
             (m, b.into())
         }
     };
+
+    Ok(ProjectionContext {
+        today,
+        inflation_annual_percent,
+        show_age_mode,
+        fire_settings,
+        birth_date,
+        months,
+        horizon_basis,
+    })
+}
+
+pub async fn compute_projection_series_response(
+    state: &AppState,
+    user_id: Uuid,
+    iid: Uuid,
+    view: LedgerView,
+    months_override: Option<u32>,
+    density: Density,
+) -> Result<ProjectionSeriesResponse, ApiError> {
+    let ProjectionContext {
+        today,
+        inflation_annual_percent,
+        show_age_mode,
+        fire_settings,
+        birth_date: resolved_birth_for_demographics,
+        months,
+        horizon_basis,
+    } = resolve_projection_context(&state.pool, iid, user_id, months_override).await?;
 
     let horizon_years = months / 12;
 
