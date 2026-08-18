@@ -212,8 +212,12 @@ jobs:
           docker run -d --name pg15seed -v pg15data:/var/lib/postgresql/data \
             -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=futurefin \
             postgres:15-bookworm
+          # Sondeo por TCP a propósito: el servidor temporal de initdb solo escucha en el
+          # socket Unix, así que pg_isready daba OK antes de que existiera la DB (flake).
           for i in $(seq 1 60); do
-            docker exec pg15seed pg_isready -q -U futurefin -d futurefin && break; sleep 2
+            docker exec -e PGPASSWORD=ci pg15seed \
+              psql -X -q -h 127.0.0.1 -U futurefin -d futurefin -c "SELECT 1" >/dev/null 2>&1 && break
+            sleep 2
             [ "$i" = 60 ] && { docker logs pg15seed --tail=50; exit 1; }
           done
           docker exec pg15seed psql -U futurefin -d futurefin \
