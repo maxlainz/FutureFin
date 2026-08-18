@@ -7,7 +7,7 @@ Self-hosted personal finance app: shared household budget, upcoming cash flows, 
 - **DB:** PostgreSQL — **incluido en la propia imagen** desde 3.0.0; migrations run automatically on startup
 - **Auth:** username + password (Argon2id), `HttpOnly` session cookie, no email required
 - **Multi-user:** one installation per deployment; new users wait for owner approval
-- **MCP:** embedded read-only MCP server (`/mcp`) with per-user API tokens — connect Claude to your finances (see [Conectar Claude](#conectar-claude-mcp))
+- **MCP:** embedded MCP server (`/mcp`) with per-user API tokens — Claude can read, simulate what-ifs and (if you allow it) record and edit your finances (see [Conectar Claude](#conectar-claude-mcp))
 
 ---
 
@@ -99,9 +99,12 @@ Tres capas complementarias:
 
 ## Conectar Claude (MCP)
 
-FutureFin incluye un **servidor MCP de solo lectura** en `/mcp` (mismo puerto que la app): Claude
-puede consultar tu resumen, proyección FIRE, presupuesto, movimientos, histórico, activos y
-pasivos — nunca modificarlos. Hay dos maneras de conectar:
+FutureFin incluye un **servidor MCP** en `/mcp` (mismo puerto que la app): Claude puede
+consultar tu resumen, proyección FIRE, presupuesto, movimientos, histórico, activos y pasivos,
+simular escenarios («¿y si gasto 200 € más al mes?») sin tocar nada, y — si tu rol lo permite y
+el interruptor «Permitir escritura vía MCP» (Ajustes → MCP) está activado — registrar
+movimientos, capturar snapshots y mantener tu plan al día. Las operaciones destructivas siempre
+piden confirmación (sin ella devuelven un preview). Hay dos maneras de conectar:
 
 ### claude.ai (web / móvil / Desktop) — conector personalizado con OAuth (3.1.0)
 
@@ -110,13 +113,14 @@ pasivos — nunca modificarlos. Hay dos maneras de conectar:
 2. En claude.ai: `Configuración → Conectores → Añadir conector personalizado` y pega
    `https://tu-host/mcp`. No hay que rellenar nada más: el registro de cliente es automático (DCR).
 3. Claude te llevará a la **pantalla de autorización de FutureFin**: inicia sesión con tu usuario
-   de siempre y pulsa **Autorizar** (acceso de solo lectura).
-4. Revocar: `Ajustes → Acceso → Conexiones` → **Revocar** (corte inmediato; claude tendrá que
+   de siempre y pulsa **Autorizar** (el acceso hereda tu rol; la escritura se puede apagar en
+   Ajustes → MCP).
+4. Revocar: `Ajustes → MCP → Conexiones` → **Revocar** (corte inmediato; claude tendrá que
    volver a pedir permiso).
 
 ### Claude Code / clientes MCP genéricos — token de API
 
-1. En la app: `Ajustes → Acceso → Tokens de API (MCP)` → **Crear token**. Copia el secreto
+1. En la app: `Ajustes → MCP → Tokens de API (MCP)` → **Crear token**. Copia el secreto
    (`ffp_…`): solo se muestra una vez. El token hereda tu usuario y rol, y puedes revocarlo cuando
    quieras (corte inmediato).
 2. En Claude Code:

@@ -348,7 +348,11 @@ non-cookie credential. The decision mirrors D3 (sessions-in-DB, not JWT), delibe
   role/installation. Revoking a token (`revoked_at`) or a membership cuts access on the next
   request — same revocation semantics as deleting a session row.
 - **Any member (viewer included) may mint their own tokens** via the cookie-authed CRUD: a token
-  can never do more than its owner, and MCP v1 is read-only. Pending users hit the same 403 gate.
+  can never do more than its owner. Since the #2/#3 MCP expansion (2026-08-18) tools also WRITE:
+  every write tool re-checks `require_mcp_write` per request (`role_can_write` on the live role +
+  the DB kill-switch `installation.mcp_write_enabled`, toggle in Ajustes → MCP), so a viewer's
+  token still cannot write and flipping the toggle cuts writes for ALL tokens on the next call.
+  Pending users hit the same 403 gate.
 - **MCP tools call the SAME core fns as the HTTP handlers** (`summary_core`,
   `projection_series_cached`, `budget_snapshot_core`, …): read handlers were split into
   extractors+auth vs `*_core(pool, iid, user_id, view, …)`. A tool with its own SQL or its own
