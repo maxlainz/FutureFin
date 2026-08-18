@@ -1815,7 +1815,7 @@
   min-height: 0;
 }
 
-.projection-focus-toggle {
+.ff-switch {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
@@ -1823,8 +1823,13 @@
   flex-shrink: 0;
 }
 
-.projection-focus-toggle-label {
+.ff-switch-label {
   color: var(--ff-ink-soft);
+  font-size: 0.8rem;
+}
+
+/* Variante de barra de chart (Proyección): label small-caps compacto. */
+.ff-switch--chart .ff-switch-label {
   font-size: 0.75rem;
   letter-spacing: 0.08em;
   font-variant: small-caps;
@@ -1832,13 +1837,13 @@
   text-transform: lowercase;
 }
 
-.projection-focus-toggle input[type="checkbox"] {
+.ff-switch input[type="checkbox"] {
   position: absolute;
   opacity: 0;
   pointer-events: none;
 }
 
-.projection-focus-toggle-track {
+.ff-switch-track {
   width: 2.1rem;
   height: 1.2rem;
   border-radius: 999px;
@@ -1851,7 +1856,7 @@
   transition: background 150ms ease, border-color 150ms ease;
 }
 
-.projection-focus-toggle-thumb {
+.ff-switch-thumb {
   width: 0.92rem;
   height: 0.92rem;
   border-radius: 999px;
@@ -1860,21 +1865,35 @@
   transition: transform 150ms ease;
 }
 
-.projection-focus-toggle input[type="checkbox"]:checked + .projection-focus-toggle-track {
+.ff-switch input[type="checkbox"]:checked + .ff-switch-track {
   background: var(--ff-accent);
   border-color: var(--ff-accent);
 }
 
-.projection-focus-toggle
+.ff-switch
   input[type="checkbox"]:checked
-  + .projection-focus-toggle-track
-  .projection-focus-toggle-thumb {
+  + .ff-switch-track
+  .ff-switch-thumb {
   transform: translateX(0.88rem);
 }
 
-.projection-focus-toggle input[type="checkbox"]:focus-visible + .projection-focus-toggle-track {
+.ff-switch input[type="checkbox"]:focus-visible + .ff-switch-track {
   outline: 2px solid var(--ff-accent);
   outline-offset: 2px;
+}
+
+.ff-switch input[type="checkbox"]:disabled + .ff-switch-track {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Ajustes → MCP: fila del toggle de escritura + su nota de autosave. */
+.mcp-write-toggle-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+  padding-top: 0.75rem;
 }
 
 .projection-chart-svg {
@@ -3137,18 +3156,18 @@ fieldset.retirement-config-stack {
     min-height: var(--ff-touch-min);
   }
   /* Switch de Proyección: pista/thumb mayores para el dedo (2.6×1.5rem). */
-  .projection-focus-toggle-track {
+  .ff-switch-track {
     width: 2.6rem;
     height: 1.5rem;
   }
-  .projection-focus-toggle-thumb {
+  .ff-switch-thumb {
     width: 1.2rem;
     height: 1.2rem;
   }
-  .projection-focus-toggle
+  .ff-switch
     input[type="checkbox"]:checked
-    + .projection-focus-toggle-track
-    .projection-focus-toggle-thumb {
+    + .ff-switch-track
+    .ff-switch-thumb {
     transform: translateX(1.1rem);
   }
 

@@ -1,5 +1,5 @@
 /**
- * Ajustes → Acceso: conexiones OAuth (apps autorizadas vía `/oauth/authorize`, p. ej.
+ * Ajustes → MCP: conexiones OAuth (apps autorizadas vía `/oauth/authorize`, p. ej.
  * el conector de claude.ai). Calco del patrón de ApiTokensPanel: self-fetch al montar,
  * lista del PROPIO usuario y revocación con confirmación (corte inmediato — el access
  * token muere con el grant sin esperar a caducar). Disponible incluso con
@@ -64,8 +64,9 @@ export function OAuthConnectionsPanel() {
         </h3>
       </div>
       <p className="muted">
-        Aplicaciones autorizadas por OAuth (p. ej. el conector de claude.ai). Solo
-        lectura; revocar corta el acceso al instante.
+        Aplicaciones autorizadas por OAuth (p. ej. el conector de claude.ai). El acceso hereda tu
+        rol en cada uso: lectura siempre, y escritura solo con el interruptor de escritura MCP
+        activado. Revocar corta el acceso al instante.
       </p>
 
       {error ? (
