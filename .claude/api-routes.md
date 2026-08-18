@@ -41,7 +41,7 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 |--------|------|-------|
 | GET | `/v1/installation/session-context` | Returns `{installation_initialized, access}` — used for routing the UI gate |
 | GET | `/v1/installation` | Own membership + installation snapshot |
-| PATCH | `/v1/installation` | Owner only. Updates tz, inflation, show_age_mode, fire_settings (incluye `savings_source: "budget" \| "transactions_avg" \| "budget_income_real_expense"` — fuente del ahorro de la simulación; no existe `target_age` — eliminado en v1.0.6) |
+| PATCH | `/v1/installation` | Owner only. Updates tz, inflation, show_age_mode, fire_settings (incluye `savings_source: "budget" \| "transactions_avg" \| "budget_income_real_expense"` — fuente del ahorro de la simulación; no existe `target_age` — eliminado en v1.0.6) y `mcp_write_enabled` (bool, kill-switch vivo de las tools de escritura MCP — issue #3) |
 | POST | `/v1/installation/setup` | Creates singleton installation (409 if exists) |
 
 ### Pending users (`/v1/installation/pending-users/`)

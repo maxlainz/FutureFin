@@ -254,6 +254,9 @@ pub struct InstallationSnapshot {
     pub annual_inflation_assumption_percent: Decimal,
     pub show_age_mode: String,
     pub fire_settings: FireSettings,
+    /// Kill-switch vivo de la escritura vía MCP (issue #3): con `false` las tools de escritura
+    /// devuelven error tipado en el siguiente request. Editable solo por el owner (Ajustes → MCP).
+    pub mcp_write_enabled: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -302,6 +305,9 @@ pub struct PatchInstallationBody {
     /// Omit = unchanged; JSON `null` clears stored JSON (defaults apply on read).
     #[serde(default)]
     pub fire_settings: Option<Option<FireSettings>>,
+    /// Omit = unchanged. Kill-switch de la escritura vía MCP (owner-only como todo el PATCH).
+    #[serde(default)]
+    pub mcp_write_enabled: Option<bool>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -312,6 +318,7 @@ struct InstallationMemberRow {
     annual_inflation_assumption_percent: Decimal,
     show_age_mode: String,
     fire_settings: Option<SqlxJson<FireSettings>>,
+    mcp_write_enabled: bool,
     role: String,
 }
 
@@ -325,6 +332,7 @@ fn installation_access_from_row(r: InstallationMemberRow) -> Result<Installation
             annual_inflation_assumption_percent: r.annual_inflation_assumption_percent.max(Decimal::ZERO),
             show_age_mode: r.show_age_mode,
             fire_settings: resolve_fire_settings(r.fire_settings.map(|j| j.0)),
+            mcp_write_enabled: r.mcp_write_enabled,
         },
         role,
     })
@@ -478,7 +486,7 @@ pub async fn get_installation_session_context(
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
-                  i.show_age_mode, i.fire_settings, m.role
+                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -526,7 +534,7 @@ pub(crate) async fn installation_access_core(
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
-                  i.show_age_mode, i.fire_settings, m.role
+                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -599,16 +607,17 @@ pub async fn patch_my_installation(
         && body.show_age_mode.is_none()
         && body.annual_inflation_assumption_percent.is_none()
         && body.fire_settings.is_none()
+        && body.mcp_write_enabled.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one of calendar_tz, show_age_mode, annual_inflation_assumption_percent, fire_settings".into(),
+            "provide at least one of calendar_tz, show_age_mode, annual_inflation_assumption_percent, fire_settings, mcp_write_enabled".into(),
         ));
     }
 
     let row_before: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
-                  i.show_age_mode, i.fire_settings, m.role
+                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -659,17 +668,21 @@ pub async fn patch_my_installation(
         }
     };
 
+    let new_mcp_write = body.mcp_write_enabled.unwrap_or(row_before.mcp_write_enabled);
+
     sqlx::query(
         r#"UPDATE installation SET calendar_tz = $1,
                show_age_mode = $2,
                annual_inflation_assumption_percent = $3,
-               fire_settings = $4
-           WHERE id = $5"#,
+               fire_settings = $4,
+               mcp_write_enabled = $5
+           WHERE id = $6"#,
     )
     .bind(&new_tz)
     .bind(&new_show_age)
     .bind(new_ann_inf)
     .bind(new_fire_settings_json)
+    .bind(new_mcp_write)
     .bind(iid)
     .execute(&state.pool)
     .await?;
@@ -677,7 +690,7 @@ pub async fn patch_my_installation(
     let row: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
-                  i.show_age_mode, i.fire_settings, m.role
+                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -769,6 +782,7 @@ pub async fn setup_installation(
                 annual_inflation_assumption_percent: Decimal::ZERO,
                 show_age_mode: body.show_age_mode,
                 fire_settings: default_fire_settings(),
+                mcp_write_enabled: true,
             },
             role: MembershipRole::Owner,
         }),
