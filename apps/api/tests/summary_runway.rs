@@ -482,20 +482,20 @@ async fn runway_swr_zero_never_indefinite() {
 // Modo B: base de gasto efectiva + identidades
 // ---------------------------------------------------------------------------
 
-/// Modo B (`transactions_avg`) con datos: la base de gasto del panel pasa a ser el gasto real medio
-/// más el servicio de deuda, y el runway se calcula sobre ella.
+/// Modo B (`transactions_avg`) con datos (reforma 3.4.0): la base de gasto del panel es el promedio
+/// real CRUDO — las cuotas ya viven dentro de los movimientos — y el runway se calcula sobre ella.
 ///
 /// Escenario: presupuesto deliberadamente distinto (income 9.000, gasto 8.000). Pasivos activos L1
-/// (cuota nominal 500, con movimiento vinculado de 400 → gana el real) y L2 (nominal 300, sin
-/// vincular). Único mes real: income 3.000, gasto 1.500 (400 de ellos a L1). Líquidos 16.000 sin
-/// rentabilidad, inflación 0.
+/// (cuota nominal 500, con movimiento vinculado de 400) y L2 (nominal 300, sin vincular) — ambos
+/// irrelevantes para la caja en modo real. Único mes real: income 3.000, gasto 1.500 (400 de ellos
+/// a L1). Líquidos 15.000 sin rentabilidad, inflación 0.
 ///
 /// PREDICCIÓN (a mano):
-/// - resta híbrida = 400 (L1 real) + 300 (L2 nominal) = 700 ⇒ `expense_regular` = 1.500 − 700 = 800
-/// - `debt_service` nominal = 500 + 300 = 800 ⇒ `expense_derived` = **800**
-/// - `expense_total` = 800 + 800 = **1.600** (en modo A sería 8.000 + 800 = 8.800)
-/// - `net` = 3.000 − 800 − 800 = **1.400**
-/// - `runway` = 16.000 / 1.600 = **10** exactos (con la base de presupuesto saldrían 16.000/8.800 ≈ 1,82)
+/// - `expense_regular` = promedio crudo = **1.500** (sin resta híbrida)
+/// - `expense_derived` = **0** (las cuotas no se re-suman como servicio de deuda)
+/// - `expense_total` = **1.500** (en modo A sería 8.000 + 800 = 8.800)
+/// - `net` = 3.000 − 1.500 = **1.500**
+/// - `runway` = 15.000 / 1.500 = **10** exactos
 /// más las identidades `expense_total = expense_reg + expense_der` y `net = income − expense_total`.
 #[tokio::test]
 async fn mode_b_runway_uses_effective_expense_base() {
@@ -507,7 +507,7 @@ async fn mode_b_runway_uses_effective_expense_base() {
     let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
 
-    liquid_asset(&app, &owner.cookie, &asset_cat, "Cuenta A", "16000").await;
+    liquid_asset(&app, &owner.cookie, &asset_cat, "Cuenta A", "15000").await;
     budget(&app, &owner.cookie, &income_cat, "9000").await;
     budget(&app, &owner.cookie, &expense_cat, "8000").await;
 
@@ -537,11 +537,11 @@ async fn mode_b_runway_uses_effective_expense_base() {
     let net = dec(&h["net_monthly_equivalent"]);
 
     assert_eq!(income, d(3_000));
-    assert_eq!(expense_reg, d(800));
-    assert_eq!(expense_der, d(800), "en modo B la línea derivada es el servicio de deuda");
-    assert_eq!(expense_tot, d(1_600));
-    assert_eq!(net, d(1_400));
-    // Identidades restauradas en modo B (rotas antes del cambio de base).
+    assert_eq!(expense_reg, d(1_500));
+    assert_eq!(expense_der, Decimal::ZERO, "modo real: la cuota ya vive dentro del gasto, derived = 0");
+    assert_eq!(expense_tot, d(1_500));
+    assert_eq!(net, d(1_500));
+    // Identidades del panel, válidas en los tres modos.
     assert_eq!(
         expense_tot,
         expense_reg + expense_der,
@@ -549,8 +549,8 @@ async fn mode_b_runway_uses_effective_expense_base() {
     );
     assert_eq!(net, income - expense_tot, "net = income − expense_total");
 
-    // Runway sobre la base efectiva: 16.000 / 1.600 = 10 (sin rentabilidad ni inflación).
-    assert_eq!(dec(&h["liquid_assets_total"]), d(16_000));
+    // Runway sobre la base efectiva: 15.000 / 1.500 = 10 (sin rentabilidad ni inflación).
+    assert_eq!(dec(&h["liquid_assets_total"]), d(15_000));
     assert_eq!(dec(&h["runway_months"]), d(10));
     assert_eq!(
         dec(&h["runway_months"]),

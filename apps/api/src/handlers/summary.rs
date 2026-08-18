@@ -4,9 +4,9 @@ use crate::handlers::installation::{
     installation_calendar_inflation_fire, require_installation_member, SavingsSource,
 };
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::{gross_up_net_annual_fire, liability_monthly_payment};
+use crate::handlers::projection::gross_up_net_annual_fire;
 use crate::handlers::session::require_session_user;
-use crate::handlers::transactions::summary::{effective_avg_income_expense, transactions_12m_avg};
+use crate::handlers::transactions::summary::transactions_12m_avg;
 use crate::state::AppState;
 use axum::extract::{Extension, Query};
 use axum::routing::get;
@@ -32,14 +32,15 @@ pub struct FinancialHealthMetrics {
     #[schema(value_type = String)]
     pub expense_regular_monthly_equivalent: Decimal,
     /// Cuotas mensuales derivadas de los pasivos **activos** (`payment_end_date` nula o futura).
-    /// En modo A son la línea derivada del presupuesto; en los modos B/C (con datos) la base pasa a
-    /// ser el gasto real promedio y este campo es exactamente el servicio de deuda nominal, de modo
-    /// que `expense_total = expense_regular + expense_derived` sigue valiendo en los tres modos.
+    /// En modo A son la línea derivada del presupuesto; en los modos B/C (con datos) es **0**: las
+    /// cuotas pagadas ya viven dentro del promedio real de gasto (reforma 3.4.0), así que no hay
+    /// componente derivada y `expense_total = expense_regular + expense_derived` sigue valiendo en
+    /// los tres modos.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_derived_monthly_equivalent: Decimal,
     /// Gasto mensual total: presupuesto regular + cuotas derivadas en modo A; **gasto real promedio
-    /// 12m (con resta híbrida de cuotas) + servicio de deuda** en los modos B/C con datos.
+    /// 12m crudo** (cuotas incluidas dentro) en los modos B/C con datos.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_total_monthly_equivalent: Decimal,
@@ -104,8 +105,8 @@ pub struct FinancialHealthMetrics {
     pub savings_expected_monthly_equivalent: Decimal,
     /// Ahorro mensual **real**: promedio bruto `income − expense` de las transacciones de los
     /// últimos 12 meses civiles completos (mes en curso fuera; meses solo-recurrentes excluidos;
-    /// SIN resta híbrida de cuotas — las cuotas pagadas ya cuentan como gasto, simétrico al
-    /// esperado, que incluye las cuotas derivadas). Ausente ⟺ sin meses con datos.
+    /// las cuotas pagadas ya cuentan como gasto, simétrico al esperado, que incluye las cuotas
+    /// derivadas del presupuesto). Ausente ⟺ sin meses con datos.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
@@ -342,9 +343,9 @@ pub(crate) async fn summary_core(
     let budget_totals = ledger_budget_totals_for_summary(pool, iid, user_id, view, today).await?;
 
     // Base presupuesto (modo A). Los modos B/C con datos sustituyen TODA la base de gasto por el
-    // promedio real 12m (y el modo B también el income): `expense_reg` = gasto real efectivo,
-    // `expense_der` = servicio de deuda y `expense_tot` = suma de ambos. El runway se calcula sobre
-    // `expense_tot`, así que también sigue el modo.
+    // promedio real 12m (y el modo B también el income): `expense_reg` = promedio real crudo (las
+    // cuotas de pasivo ya van dentro), `expense_der` = 0 y `expense_tot` = el mismo promedio. El
+    // runway se calcula sobre `expense_tot`, así que también sigue el modo.
     let mut income_m = budget_totals.income_monthly_equivalent;
     let mut expense_reg = budget_totals.expense_regular_monthly_equivalent;
     let mut expense_der = budget_totals.expense_derived_monthly_equivalent;
@@ -366,52 +367,27 @@ pub(crate) async fn summary_core(
     // `source` viene de `installation_calendar_inflation_savings` (mismo parser del JSONB
     // `fire_settings` que el engine y las mutaciones de transacciones).
     if source.uses_transactions() && avg.months_with_data > 0 {
-        // Liabilities activas (por payment_end_date) con su cuota nominal mensual, con la MISMA
-        // vista/scope que el resto del summary. La resta híbrida la aplica el helper compartido.
-        let liab_scope2 = view.scope_where("");
-        let liab_today_ph2 = view.next_arg_index();
-        let liab_sql = format!(
-            r#"SELECT id, payment_amount, payment_frequency
-                   FROM liabilities
-                   WHERE {liab_scope2}
-                     AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph2})"#
-        );
-        let active_liabs: Vec<(Uuid, Option<Decimal>, Option<String>)> = view
-            .bind_scope_as(sqlx::query_as(&liab_sql), iid, user_id)
-            .bind(today)
-            .fetch_all(pool)
-            .await?;
-        let active: Vec<(Uuid, Decimal)> = active_liabs
-            .into_iter()
-            .map(|(id, amount, freq)| (id, liability_monthly_payment(amount, freq.as_deref())))
-            .collect();
-        let debt_service: Decimal = active.iter().map(|(_, q)| *q).sum();
-        let (income_eff, expense_eff) = effective_avg_income_expense(&avg, &active);
         // Modo B: income del promedio real. Modo C: income del presupuesto (NO se sobreescribe).
         // `match` exhaustivo (como projection.rs): una variante futura fuerza decisión del
         // compilador en vez de heredar silenciosamente el `else` del modo C.
         match source {
-            SavingsSource::TransactionsAvg => income_m = income_eff,
+            SavingsSource::TransactionsAvg => income_m = avg.income_avg,
             // Modo C: income del presupuesto; `income_m` conserva su valor previo.
             SavingsSource::BudgetIncomeRealExpense => {}
             // Inalcanzable: la rama está guardada por `source.uses_transactions()`, que es
             // false para `Budget`. No-op explícito para mantener el `match` exhaustivo.
             SavingsSource::Budget => {}
         }
-        expense_reg = expense_eff;
-        // El `net` debe casar con modo A (`net_monthly_equivalent` de budget.rs incluye las
-        // cuotas derivadas) y con la pendiente del chart (que resta el debt service). El KPI
-        // `monthly_net_excluding_derived_debt` sigue siendo income − expense_reg (sin cuotas).
-        // Con `income_m` (income_eff en B, presupuesto en C) una sola línea sirve a ambos modos.
-        net_m = income_m - expense_eff - debt_service;
-        // Base de gasto derivada/total también en modo real: la línea «derivada» pasa a ser el
-        // servicio de deuda nominal de los pasivos activos y el total la suma con el gasto
-        // efectivo. Así se restauran en B/C las dos identidades que en modo A siempre valen:
-        //   expense_total = expense_regular + expense_derived
+        // Contrato de los modos reales (reforma 3.4.0): las cuotas de pasivo ya viven dentro del
+        // promedio de gasto (los movimientos importados las contienen, amortización incluida), así
+        // que NO se restan ni se vuelven a sumar como servicio de deuda. Los pasivos solo restan
+        // su principal en `net_worth`. Se mantienen las dos identidades de siempre:
+        //   expense_total = expense_regular + expense_derived   (derived = 0 en modo real)
         //   net           = income − expense_total
-        // (antes se dejaban los valores de presupuesto, que no casaban con `expense_reg`/`net`).
-        expense_der = debt_service;
-        expense_tot = expense_eff + debt_service;
+        expense_reg = avg.expense_avg;
+        expense_der = Decimal::ZERO;
+        expense_tot = avg.expense_avg;
+        net_m = income_m - avg.expense_avg;
         effective_savings_source = source;
         savings_source_months_with_data = avg.months_with_data;
     }

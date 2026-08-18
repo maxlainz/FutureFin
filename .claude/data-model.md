@@ -174,9 +174,9 @@ Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF). Last bracke
 `fire_settings` is nullable; when null, defaults apply on read (handler calls `resolve_fire_settings`).
 
 **`savings_source`** (`SavingsSource` enum, default `budget`) — fuente del ahorro mensual de la simulación FIRE, **tres modos**:
-- `budget` (modo A, presupuesto — histórico).
-- `transactions_avg` (modo B): income y gasto del promedio ponderado real 12m de las transacciones, con resta híbrida de cuotas por liability activa.
-- `budget_income_real_expense` (modo C): income del **presupuesto** + gasto **real** (mismo `expense_eff` que B). Target FIRE `annual_expense` usa el gasto real, `current_income` usa el income del presupuesto.
+- `budget` (modo A, presupuesto — histórico): budget entries + cuota derivada de pasivos time-limited (el engine cobra el debt service y amortiza el principal).
+- `transactions_avg` (modo B): income y gasto del promedio ponderado real 12m de las transacciones, **crudo** (reforma 3.4.0: las cuotas de pasivo ya viven dentro de los movimientos; los pasivos no tocan la caja de la simulación y solo restan su principal pendiente al NW, constante en todo el horizonte — `monthly_payment` se anula en memoria antes de entrar al engine).
+- `budget_income_real_expense` (modo C): income del **presupuesto** + gasto **real** (mismo promedio crudo que B, mismo contrato de pasivos). Target FIRE `annual_expense` usa el gasto real, `current_income` usa el income del presupuesto.
 
 El promedio 12m que alimenta el engine cuenta solo **meses reales** (≥1 transacción `recurring_rule_id IS NULL`); meses solo-recurrentes se excluyen por completo (ver §Transactions en `api-routes.md`). Aditivo, **sin migración** (`FireSettings` tiene `#[serde(default)]` a nivel struct, así que un JSONB sin el campo → `budget`; backups viejos siguen cargando). En B y C las **transacciones se vuelven input del engine** (gate `SavingsSource::uses_transactions()`; ver nota en §Transactions). Semántica completa en `futurefin-fire-domain-reference` y `futurefin-config-and-flags`.
 
