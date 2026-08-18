@@ -266,6 +266,12 @@ async fn fetch_budget_rows_and_derived_liabilities(
         .fetch_all(pool)
         .await?;
 
+    // Predicado de «pasivo activo» unificado con el resto del sistema (liabilities.rs, summary.rs,
+    // projection.rs, history.rs): fecha fin NULL = plan indefinido, sigue activo; borde `>=` (el
+    // día exacto de fin aún cuenta). Hasta la 3.4.0 esta query era el único outlier (exigía
+    // NOT NULL y `>` estricto): un pasivo sin fecha fin no generaba línea derivada aunque el
+    // engine sí cobrara su cuota — el modo A no lo contaba «una vez» de forma consistente y el
+    // KPI «real vs esperado» del Resumen descuadraba exactamente en esa cuota.
     let derived_scope = view.scope_where("");
     let today_ph = view.next_arg_index();
     let derived_sql = format!(
@@ -274,8 +280,7 @@ async fn fetch_budget_rows_and_derived_liabilities(
            WHERE {derived_scope}
              AND payment_amount IS NOT NULL
              AND payment_frequency IS NOT NULL
-             AND payment_end_date IS NOT NULL
-             AND payment_end_date > ${today_ph}"#
+             AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph})"#
     );
     let derived_raw: Vec<LiabilityDerivedRow> = view
         .bind_scope_as(sqlx::query_as(&derived_sql), iid, session_user_id)

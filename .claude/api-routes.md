@@ -124,7 +124,7 @@ API no breaking (aditivo); `/v1/summary` no tiene cache → sin contrato de inva
 - `runway_is_indefinite` (`bool`) — desde **v2.3.0** lo decide el **umbral SWR**, no sobrevivir el cap: `true` ⟺ la retirada anual bruta no supera el SWR sobre el saldo líquido, es decir `gross_up(expense_total × 12) × 100 ≤ liquid_assets_total × swr_pct`, con `swr_pct`/`tax_brackets`/`taxes_enabled` de `installation.fire_settings` (pestaña Jubilación) y el **mismo** `gross_up_net_annual_fire` del target FIRE. Entonces `runway_months` no viaja. Con `swr_pct ≤ 0` nunca es `true`. Con `expense_total == 0` es `false` (no hay base de gasto, no es que esté cubierto). El disparador es deliberadamente independiente de rentabilidad e inflación (que gobiernan solo el caso finito). La UI muestra «Infinito (dentro del SWR 3,5 %)» en el primer caso y oculta la tarjeta en el segundo. **API no breaking**: tipo y nullabilidad de ambos campos son los de v2.2.0.
 
 ### Budget (`/v1/budget/`)
-Income/expense entries + derived lines from liabilities. Accepts `?view=mine`. Derived lines only show liabilities with `payment_end_date > today`.
+Income/expense entries + derived lines from liabilities. Accepts `?view=mine`. Derived lines show liabilities with a payment plan (`payment_amount` + `payment_frequency`) that are **active**: `payment_end_date IS NULL OR payment_end_date >= today` — same predicate as `/v1/liabilities` and `/v1/summary` (unificado en 3.4.0; antes exigía fecha fin NOT NULL y `>` estricto, y un pasivo sin fecha fin no derivaba línea).
 
 ### Planning (`/v1/planning/`)
 Upcoming cash flows (one-off inflows/outflows) with due dates.

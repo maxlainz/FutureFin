@@ -729,13 +729,21 @@ pub(crate) async fn build_installation_projection_input(
 
     // Liabilities: una sola carga para todos los consumidores (debt service de modo A, caps de
     // assets.rs y el input del engine). En modo real (B/C) se les anula la cuota más abajo.
+    // Solo pasivos ACTIVOS (mismo predicado que /v1/summary y /v1/liabilities): hasta la 3.4.0
+    // esta query no filtraba y el principal de un pasivo ya vencido seguía restando net worth en
+    // toda la serie — `projection.starting_net_worth` divergía de `summary.net_worth` (contra el
+    // contrato D5/I5 de la arquitectura).
     let liab_scope = view.scope_where("");
+    let liab_today_ph = view.next_arg_index();
     let liab_sql = format!(
         r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
-           FROM liabilities WHERE {liab_scope}"#
+           FROM liabilities
+           WHERE {liab_scope}
+             AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph})"#
     );
     let mut liabs: Vec<LiabEngineRow> = view
         .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)
+        .bind(today)
         .fetch_all(pool)
         .await?;
 
