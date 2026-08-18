@@ -661,6 +661,23 @@ fn map_engine_err(e: EngineError) -> ApiError {
     ApiError::BadRequest(e.to_string())
 }
 
+/// Primer mes cuyo patrimonio cruza el target FIRE (inflado mes a mes). Se evalúa sobre TODOS
+/// los meses de la serie — nunca sobre puntos decimados — para no perder precisión. Compartido
+/// por `compute_projection_series_response` y `simulate_projection_core`.
+fn fire_crossover_month(
+    ft: Option<&futurefin_engine::FireTarget>,
+    net_worth: &[Decimal],
+) -> Option<u32> {
+    let ft = ft.filter(|f| f.base_amount > Decimal::ZERO)?;
+    for (i, nw) in net_worth.iter().enumerate() {
+        let target = fire_target_at_month_index(Some(ft), i as u32).unwrap_or(Decimal::ZERO);
+        if target > Decimal::ZERO && *nw >= target {
+            return Some(i as u32);
+        }
+    }
+    None
+}
+
 pub(crate) struct BuiltProjection {
     pub input: ProjectionInput,
     pub monthly_net_regular: Decimal,
@@ -681,6 +698,21 @@ pub(crate) struct BuiltProjection {
     pub debt_service_monthly: Decimal,
 }
 
+/// Overrides what-if de `simulate_projection` que deben aplicarse DENTRO del ensamblado, en el
+/// punto semántico correcto (antes de derivar target FIRE y bases de caps). Los overrides
+/// post-build (ajustes de caja, one-off, tasas por activo) NO van aquí: se aplican mutando el
+/// `ProjectionInput` clonado (patrón `compound_outpaces_true_savings_month`).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct SimOverrides {
+    /// Gasto mensual extra «real»: se suma al gasto efectivo y al gasto de jubilación ANTES de
+    /// derivar el target FIRE y las bases de caps — mueve el objetivo en todos los modos.
+    pub extra_monthly_expense: Decimal,
+    /// Gasto MENSUAL de jubilación (el caller ya dividió el anual entre 12): sustituye por
+    /// completo la base de gasto del target FIRE y el gasto post-jubilación (gana sobre
+    /// `extra_monthly_expense` en ese tramo).
+    pub retirement_monthly_expense: Option<Decimal>,
+}
+
 pub(crate) async fn build_installation_projection_input(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -690,6 +722,7 @@ pub(crate) async fn build_installation_projection_input(
     horizon_months: u32,
     inflation_annual_percent: Decimal,
     fire_settings: Option<&FireSettings>,
+    overrides: Option<&SimOverrides>,
 ) -> Result<BuiltProjection, ApiError> {
     let (income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
@@ -777,6 +810,17 @@ pub(crate) async fn build_installation_projection_input(
             months_with_data: 0,
         },
     };
+    // Overrides what-if pre-target: el gasto extra entra ANTES de derivar el target FIRE y las
+    // bases de caps (semántica «gasto real»); el gasto de jubilación explícito sustituye al
+    // derivado. Sin overrides (`None`, todos los callers no-simulación) nada cambia.
+    let ov = overrides.cloned().unwrap_or_default();
+    let mut inputs = inputs;
+    inputs.expense += ov.extra_monthly_expense;
+    let expense_retirement = match ov.retirement_monthly_expense {
+        Some(v) => v,
+        None => expense_retirement + ov.extra_monthly_expense,
+    };
+
     let expense_from_avg = inputs.expense_from_avg;
     let effective_savings_source = inputs.effective_source;
     let savings_source_months_with_data = inputs.months_with_data;
@@ -797,10 +841,12 @@ pub(crate) async fn build_installation_projection_input(
     // expense = gasto efectivo en modo B/C (el gasto ya no es el del presupuesto), o
     // `expense_retirement` en modo A (comportamiento histórico).
     let fire_target_base = fire_settings.and_then(|fs| {
-        let fire_expense = if inputs.expense_from_avg {
-            inputs.expense
-        } else {
-            expense_retirement
+        // El override explícito de gasto de jubilación ancla el target en TODOS los modos; sin
+        // él, la base histórica (gasto efectivo en B/C, gasto de jubilación en A).
+        let fire_expense = match ov.retirement_monthly_expense {
+            Some(v) => v,
+            None if inputs.expense_from_avg => inputs.expense,
+            None => expense_retirement,
         };
         compute_fire_target_nw(fs, inputs.income, income_retirement, fire_expense)
     });
@@ -985,6 +1031,7 @@ pub(crate) async fn assets_projection_context(
         1,
         Decimal::ZERO,
         Some(&fire_settings),
+        None,
     )
     .await?;
     let nominals_vec =
@@ -1196,6 +1243,7 @@ pub async fn compute_projection_series_response(
         months,
         inflation_annual_percent,
         Some(&fire_settings),
+        None,
     )
     .await?;
     let BuiltProjection {
@@ -1313,17 +1361,7 @@ pub async fn compute_projection_series_response(
     let (fire_target_series, jubilacion_month_index, jubilacion_target_net_worth) =
         match fire_target_ref {
             Some(ft) if ft.base_amount > Decimal::ZERO => {
-                // Detectar el crossover sobre TODOS los meses (no solo los
-                // serializados) para no perder precisión por la decimación.
-                let mut crossed_at: Option<u32> = None;
-                for (i, nw) in output.net_worth.iter().enumerate() {
-                    let target =
-                        fire_target_at_month_index(Some(ft), i as u32).unwrap_or(Decimal::ZERO);
-                    if target > Decimal::ZERO && *nw >= target {
-                        crossed_at = Some(i as u32);
-                        break;
-                    }
-                }
+                let crossed_at = fire_crossover_month(Some(ft), &output.net_worth);
                 // Serializar el target solo en los puntos retenidos por la
                 // densidad. Paralelo a `points`.
                 let series: Vec<f64> = kept_indices
@@ -1369,6 +1407,389 @@ pub async fn compute_projection_series_response(
         },
         savings_source: effective_savings_source,
         savings_source_months_with_data,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// simulate_projection (tool MCP, what-if puro sin persistir)
+// ---------------------------------------------------------------------------
+
+/// Overrides parseados de la tool `simulate_projection` (los strings decimales/UUID/fecha ya
+/// convertidos por la capa MCP; las COTAS de dominio se validan aquí, en el core).
+#[derive(Debug, Default)]
+pub(crate) struct SimulationSpec {
+    pub months: Option<u32>,
+    /// Gasto puntual: importe > 0 + exactamente uno de (`month_index` 1..=horizonte, `date`).
+    pub one_off_amount: Option<Decimal>,
+    pub one_off_month_index: Option<u32>,
+    pub one_off_date: Option<NaiveDate>,
+    pub extra_monthly_expense: Option<Decimal>,
+    pub extra_monthly_cash_adjustment: Option<Decimal>,
+    pub extra_monthly_savings: Option<Decimal>,
+    pub swr_pct: Option<Decimal>,
+    pub annual_inflation_percent: Option<Decimal>,
+    pub retirement_annual_expense: Option<Decimal>,
+    pub asset_return_overrides: Vec<(Uuid, Decimal)>,
+    pub include_series: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SimKpis {
+    /// Mes del cruce con el target FIRE (None = no se alcanza en el horizonte).
+    pub jubilacion_month_index: Option<u32>,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub final_net_worth: Decimal,
+    /// Base del target FIRE (euros de hoy; el target servido crece con la inflación).
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub fire_target_base: Option<Decimal>,
+    /// Runway de líquidos con la misma fórmula que `/v1/summary`, sobre los inputs del lado.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub runway_months: Option<Decimal>,
+    pub runway_is_indefinite: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SimDeltas {
+    /// `scenario − baseline` en meses; None si alguno de los dos lados no alcanza el target.
+    pub jubilacion_months_delta: Option<i64>,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub final_net_worth_delta: Decimal,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub fire_target_base_delta: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub runway_months_delta: Option<Decimal>,
+}
+
+/// Series decimadas (hybrid) opt-in — números f64 como el resto de series de chart.
+#[derive(Debug, Serialize)]
+pub(crate) struct SimSeries {
+    pub month_indices: Vec<u32>,
+    pub baseline_net_worth: Vec<f64>,
+    pub scenario_net_worth: Vec<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SimulateProjectionResponse {
+    pub horizon_months: u32,
+    pub view: String,
+    pub baseline: SimKpis,
+    pub scenario: SimKpis,
+    pub deltas: SimDeltas,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<SimSeries>,
+}
+
+fn require_non_negative(name: &str, v: Option<Decimal>) -> Result<Decimal, ApiError> {
+    let v = v.unwrap_or(Decimal::ZERO);
+    if v < Decimal::ZERO {
+        return Err(ApiError::BadRequest(format!("{name} must be >= 0")));
+    }
+    Ok(v)
+}
+
+/// KPIs de un lado de la simulación (baseline o escenario).
+fn sim_kpis(
+    input: &ProjectionInput,
+    output: &futurefin_engine::ProjectionOutput,
+    debt_service_monthly: Decimal,
+    inflation_annual_percent: Decimal,
+    fs: &FireSettings,
+) -> SimKpis {
+    let jubilacion_month_index = fire_crossover_month(input.fire_target.as_ref(), &output.net_worth);
+    let final_net_worth = output.net_worth.last().copied().unwrap_or(Decimal::ZERO);
+
+    // Runway: misma fórmula que `/v1/summary` (gasto total = regular + servicio de deuda;
+    // infinito ⟺ SWR sobre el gasto anual grosseado), evaluada sobre los inputs del lado.
+    let liquid_rows: Vec<(Decimal, Option<Decimal>)> = input
+        .assets
+        .iter()
+        .filter(|a| a.is_liquid)
+        .map(|a| (a.value.max(Decimal::ZERO), a.expected_annual_return_percent))
+        .collect();
+    let monthly_expense = input.expense_regular_monthly + debt_service_monthly;
+    let annual_expense_gross = gross_up_net_annual_fire(
+        monthly_expense * Decimal::from(12u32),
+        &fs.tax_brackets,
+        fs.taxes_enabled,
+    );
+    let (runway_months, runway_is_indefinite) = match futurefin_engine::liquid_runway_months(
+        &liquid_rows,
+        monthly_expense,
+        inflation_annual_percent,
+        fs.swr_pct,
+        annual_expense_gross,
+    ) {
+        futurefin_engine::RunwayOutcome::Months(m) => (Some(m.round_dp(1)), false),
+        futurefin_engine::RunwayOutcome::Indefinite => (None, true),
+        futurefin_engine::RunwayOutcome::NoExpenseBase => (None, false),
+    };
+
+    SimKpis {
+        jubilacion_month_index,
+        final_net_worth,
+        fire_target_base: input.fire_target.as_ref().map(|ft| ft.base_amount),
+        runway_months,
+        runway_is_indefinite,
+    }
+}
+
+/// What-if de proyección/FIRE sin persistir nada. Ensambla el baseline y el escenario con el
+/// MISMO contexto (`resolve_projection_context`: today, horizonte, inflación, fire_settings) y
+/// re-simula ambos en `spawn_blocking` (patrón del marker de `compute_projection_series_response`).
+///
+/// **Cache-neutral por construcción**: jamás pasa por `projection_series_cached` (que insertaría
+/// el what-if en la cache del hogar) — regresión pinneada en `mcp_simulate.rs`.
+///
+/// Dos ensamblados (una tanda de SELECTs por lado) a propósito: los overrides pre-target
+/// (`SimOverrides`) se aplican DENTRO de `build_installation_projection_input`, en el mismo punto
+/// donde se derivan target y caps, para que la semántica del escenario no pueda divergir de la de
+/// una proyección real con esos valores guardados. El resto de overrides muta el input clonado.
+pub(crate) async fn simulate_projection_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+    spec: SimulationSpec,
+) -> Result<SimulateProjectionResponse, ApiError> {
+    // ---- Cotas de dominio (mismas que sus ejes de settings reales) --------------------------
+    if let Some(m) = spec.months {
+        if !(12..=840).contains(&m) {
+            return Err(ApiError::BadRequest("months must be between 12 and 840".into()));
+        }
+    }
+    let extra_expense = require_non_negative("extra_monthly_expense", spec.extra_monthly_expense)?;
+    let extra_cash_adj = require_non_negative(
+        "extra_monthly_cash_adjustment",
+        spec.extra_monthly_cash_adjustment,
+    )?;
+    let extra_savings = require_non_negative("extra_monthly_savings", spec.extra_monthly_savings)?;
+    if let Some(p) = spec.annual_inflation_percent {
+        crate::handlers::installation::validate_annual_inflation_assumption(p)?;
+    }
+    if let Some(v) = spec.retirement_annual_expense {
+        if v <= Decimal::ZERO {
+            return Err(ApiError::BadRequest(
+                "retirement_annual_expense must be > 0".into(),
+            ));
+        }
+    }
+    for (asset_id, pct) in &spec.asset_return_overrides {
+        // −100 no tiene raíz 12ª real (el engine clamparía a pérdida total): se rechaza.
+        if *pct <= Decimal::from(-100) {
+            return Err(ApiError::BadRequest(format!(
+                "expected_annual_return_percent for asset {asset_id} must be greater than -100"
+            )));
+        }
+    }
+    match (
+        spec.one_off_amount,
+        spec.one_off_month_index,
+        spec.one_off_date,
+    ) {
+        (None, None, None) => {}
+        (Some(a), mi, d) => {
+            if a <= Decimal::ZERO {
+                return Err(ApiError::BadRequest("one_off_expense.amount must be > 0".into()));
+            }
+            if mi.is_some() == d.is_some() {
+                return Err(ApiError::BadRequest(
+                    "one_off_expense requires exactly one of month_index or date".into(),
+                ));
+            }
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "one_off_expense.amount is required with month_index/date".into(),
+            ))
+        }
+    }
+
+    // ---- Contexto compartido (mismas queries y regla de horizonte que el GET) ----------------
+    let ctx = resolve_projection_context(pool, iid, user_id, spec.months).await?;
+    let months = ctx.months;
+
+    // Settings efectivos del escenario, re-validados con las cotas del PATCH real.
+    let mut fs_eff = ctx.fire_settings.clone();
+    if let Some(swr) = spec.swr_pct {
+        fs_eff.swr_pct = swr;
+    }
+    crate::handlers::installation::validate_fire_settings(&fs_eff)?;
+    let inflation_eff = spec
+        .annual_inflation_percent
+        .unwrap_or(ctx.inflation_annual_percent);
+
+    let sim_ov = SimOverrides {
+        extra_monthly_expense: extra_expense,
+        retirement_monthly_expense: spec
+            .retirement_annual_expense
+            .map(|v| v / Decimal::from(12u32)),
+    };
+
+    let baseline_built = build_installation_projection_input(
+        pool,
+        iid,
+        user_id,
+        view,
+        ctx.today,
+        months,
+        ctx.inflation_annual_percent,
+        Some(&ctx.fire_settings),
+        None,
+    )
+    .await?;
+    let scenario_built = build_installation_projection_input(
+        pool,
+        iid,
+        user_id,
+        view,
+        ctx.today,
+        months,
+        inflation_eff,
+        Some(&fs_eff),
+        Some(&sim_ov),
+    )
+    .await?;
+
+    // ---- Overrides post-build sobre el input clonado del escenario ---------------------------
+    let mut scenario_input = scenario_built.input.clone();
+
+    // Ajustes de caja constantes: mecanismo planning adjustment (entran en el net_cash mensual y
+    // pasan por la cascada real, sin mover target ni caps).
+    let monthly_adj = extra_savings - extra_cash_adj;
+    if !monthly_adj.is_zero() {
+        for slot in scenario_input.planning_monthly_cash_adjustment.iter_mut() {
+            *slot += monthly_adj;
+        }
+    }
+
+    // Gasto puntual.
+    if let Some(amount) = spec.one_off_amount {
+        match (spec.one_off_month_index, spec.one_off_date) {
+            (Some(k), None) => {
+                if !(1..=months).contains(&k) {
+                    return Err(ApiError::BadRequest(format!(
+                        "one_off_expense.month_index must be between 1 and {months}"
+                    )));
+                }
+                scenario_input.planning_monthly_cash_adjustment[(k - 1) as usize] -= amount;
+            }
+            (None, Some(date)) => {
+                // Mismo mapeo fecha→mes que un planning flow real con due_date.
+                let synthetic = PlanningFlowProjRow {
+                    scope: "expense".into(),
+                    expected_amount: amount,
+                    due_date: Some(date),
+                };
+                let adj = planning_monthly_cash_adjustments_from_flows(
+                    ctx.today,
+                    months,
+                    std::slice::from_ref(&synthetic),
+                );
+                if adj.iter().all(|v| v.is_zero()) {
+                    return Err(ApiError::BadRequest(
+                        "one_off_expense.date is outside the projection horizon".into(),
+                    ));
+                }
+                for (slot, extra) in scenario_input
+                    .planning_monthly_cash_adjustment
+                    .iter_mut()
+                    .zip(adj.iter())
+                {
+                    *slot += *extra;
+                }
+            }
+            _ => unreachable!("validated above"),
+        }
+    }
+
+    // Tasas por activo (los negativos > −100 son válidos desde el fix de `monthly_multiplier`).
+    for (asset_id, pct) in &spec.asset_return_overrides {
+        let Some(idx) = scenario_built
+            .asset_id_name
+            .iter()
+            .position(|(id, _)| id == asset_id)
+        else {
+            return Err(ApiError::BadRequest(format!(
+                "unknown asset_id {asset_id} (not in scope for this view)"
+            )));
+        };
+        scenario_input.assets[idx].expected_annual_return_percent = Some(*pct);
+    }
+
+    // ---- Doble simulación en el pool blocking (CPU-bound; patrón del marker) -----------------
+    let baseline_input = baseline_built.input.clone();
+    let scenario_sim_input = scenario_input.clone();
+    let (baseline_join, scenario_join) = tokio::join!(
+        tokio::task::spawn_blocking(move || project_net_worth_series(&baseline_input)),
+        tokio::task::spawn_blocking(move || project_net_worth_series(&scenario_sim_input)),
+    );
+    let baseline_out = baseline_join
+        .map_err(|e| ApiError::BadRequest(format!("projection task panic: {e}")))?
+        .map_err(map_engine_err)?;
+    let scenario_out = scenario_join
+        .map_err(|e| ApiError::BadRequest(format!("projection task panic: {e}")))?
+        .map_err(map_engine_err)?;
+
+    let baseline = sim_kpis(
+        &baseline_built.input,
+        &baseline_out,
+        baseline_built.debt_service_monthly,
+        ctx.inflation_annual_percent,
+        &ctx.fire_settings,
+    );
+    let scenario = sim_kpis(
+        &scenario_input,
+        &scenario_out,
+        scenario_built.debt_service_monthly,
+        inflation_eff,
+        &fs_eff,
+    );
+
+    let deltas = SimDeltas {
+        jubilacion_months_delta: match (baseline.jubilacion_month_index, scenario.jubilacion_month_index)
+        {
+            (Some(b), Some(s)) => Some(s as i64 - b as i64),
+            _ => None,
+        },
+        final_net_worth_delta: scenario.final_net_worth - baseline.final_net_worth,
+        fire_target_base_delta: match (baseline.fire_target_base, scenario.fire_target_base) {
+            (Some(b), Some(s)) => Some(s - b),
+            _ => None,
+        },
+        runway_months_delta: match (baseline.runway_months, scenario.runway_months) {
+            (Some(b), Some(s)) => Some(s - b),
+            _ => None,
+        },
+    };
+
+    let series = if spec.include_series {
+        let kept = density_month_indices(Density::Hybrid, baseline_out.net_worth.len() as u32);
+        let pick = |serie: &[Decimal]| -> Vec<f64> {
+            kept.iter()
+                .filter_map(|&i| serie.get(i as usize))
+                .map(|v| v.to_f64().unwrap_or(0.0))
+                .collect()
+        };
+        Some(SimSeries {
+            baseline_net_worth: pick(&baseline_out.net_worth),
+            scenario_net_worth: pick(&scenario_out.net_worth),
+            month_indices: kept,
+        })
+    } else {
+        None
+    };
+
+    Ok(SimulateProjectionResponse {
+        horizon_months: months,
+        view: if view == LedgerView::Mine {
+            "mine".into()
+        } else {
+            "household".into()
+        },
+        baseline,
+        scenario,
+        deltas,
+        series,
     })
 }
 

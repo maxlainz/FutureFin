@@ -183,6 +183,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "list_transaction_imports",
             "list_transaction_months",
             "list_transactions",
+            "simulate_projection",
         ],
         "catálogo congelado: cada tool nueva se añade aquí a conciencia"
     );

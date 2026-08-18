@@ -301,6 +301,18 @@ Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` 
   `list_transaction_months`, `list_snapshots` (`year`, `kind`, `include_items` opt-in default
   false), `list_transaction_imports`. Paridad byte a byte pinneada en
   `new_read_tools_match_http_endpoints`.
+- **`simulate_projection` (what-if puro, issue #2)**: simula baseline + escenario con overrides y
+  devuelve KPIs (`jubilacion_month_index`, `final_net_worth`, `fire_target_base`, runway) +
+  `deltas`; series decimadas opt-in (`include_series`). Overrides: `one_off_expense`
+  (`amount` + exactamente uno de `month_index`/`date`; mismo mapeo fecha→mes que un planning flow
+  real), `extra_monthly_expense` (gasto REAL: entra antes del target/caps vía `SimOverrides`
+  dentro de `build_installation_projection_input`), `extra_monthly_cash_adjustment` y
+  `extra_monthly_savings` (NEUTROS: mecanismo planning-adjustment, no mueven target ni caps),
+  `swr_pct` / `annual_inflation_percent` / `retirement_annual_expense` (re-validados con las
+  cotas del PATCH real), `asset_return_overrides` (negativos válidos hasta −100 exclusivo),
+  `months` 12..840. **Cache-neutral por construcción**: usa `resolve_projection_context` +
+  `build_…` + doble `spawn_blocking`, nunca `projection_series_cached`. No persiste nada.
+  Regresión: `apps/api/tests/mcp_simulate.rs`.
 - **Tool annotations**: toda tool declara `annotations` (macro `#[tool(annotations(...))]` de
   rmcp): `title` legible, `open_world_hint = false` (el servidor solo toca su propia DB) y
   `read_only_hint = true` en las lecturas. Sin ellas un cliente conforme al spec asume el peor

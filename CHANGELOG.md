@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — MCP: `simulate_projection` (what-if de proyección/FIRE sin persistir)
+
+- La capacidad que faltaba para un asistente conversacional: «¿y si me compro X?», «¿y si gasto
+  200 € más al mes?», «¿y si el SWR fuera 3?» sin tocar el estado guardado. Simula baseline y
+  escenario con el mismo contexto (today, horizonte, inflación, fire_settings) y devuelve KPIs +
+  deltas (mes de jubilación, patrimonio final, base del target FIRE, runway de líquidos con la
+  fórmula de `/v1/summary`); series decimadas opt-in.
+- Dos semánticas de gasto mensual con nombres distintos: `extra_monthly_expense` (gasto REAL —
+  mueve el target FIRE y las bases de caps, aplicado dentro del ensamblado vía `SimOverrides`) y
+  `extra_monthly_cash_adjustment` (NEUTRO — solo resta caja por el mecanismo planning-adjustment);
+  `extra_monthly_savings` es el espejo positivo neutro. `one_off_expense` acepta `month_index` o
+  `date` (mismo mapeo fecha→mes que un planning flow real). Los overrides de settings re-aplican
+  las cotas del PATCH (`swr_pct` 0..4, inflación 0..50) y `asset_return_overrides` admite tasas
+  negativas (> −100) gracias al fix del engine.
+- **Cache-neutral por construcción**: nunca pasa por `projection_series_cached` (regresión:
+  `mcp_simulate.rs`, 6 tests).
+
 ### Added — MCP: 9 tools de lectura nuevas + endpoint de serie mensual por categoría
 
 - El catálogo pasa de 10 a 19 tools de lectura, cerrando los huecos de superficie del dominio:
