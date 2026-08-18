@@ -153,3 +153,84 @@ async fn summary_excludes_expired_liability_principal_and_breakdown() {
         "GET /v1/summary no debe borrar filas vencidas"
     );
 }
+
+/// Reforma 3.4.0 (fix C-10): la proyección también filtra pasivos vencidos. Antes
+/// `build_installation_projection_input` cargaba TODOS los pasivos del scope y el engine restaba
+/// su principal del net worth en cada mes — `projection.starting_net_worth` divergía de
+/// `summary.net_worth` exactamente en el principal vencido (contra el contrato D5/I5).
+#[tokio::test]
+async fn projection_excludes_expired_liability_principal() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("carol").await;
+    let cat_id = app.create_category(&owner, "liability", "Préstamo").await;
+
+    let today = Utc::now().date_naive();
+    let past = (today - Duration::days(30)).format("%Y-%m-%d").to_string();
+    let future = (today + Duration::days(365 * 5)).format("%Y-%m-%d").to_string();
+
+    app.post_json_with_cookie(
+        "/v1/liabilities",
+        serde_json::json!({
+            "category_id": cat_id,
+            "label": "Vencido",
+            "principal": "9999",
+            "payment_amount": "100",
+            "payment_frequency": "monthly",
+            "payment_end_date": past,
+        }),
+        &owner.cookie,
+    )
+    .await;
+    app.post_json_with_cookie(
+        "/v1/liabilities",
+        serde_json::json!({
+            "category_id": cat_id,
+            "label": "Activo",
+            "principal": "50000",
+            "payment_amount": "300",
+            "payment_frequency": "monthly",
+            "payment_end_date": future,
+        }),
+        &owner.cookie,
+    )
+    .await;
+
+    // Sin activos: summary.net_worth = −50000 (solo el principal activo).
+    let summary = app.get_with_cookie("/v1/summary", &owner.cookie).await;
+    assert_eq!(summary.status, http::StatusCode::OK);
+    let summary_nw: f64 = summary.json()["net_worth"]
+        .as_str()
+        .expect("net_worth is string")
+        .parse()
+        .expect("parse net_worth");
+
+    // `?months=240` esquiva la cache (solo cachea sin `months`): siempre estado fresco.
+    let proj = app
+        .get_with_cookie("/v1/projection/series?months=240", &owner.cookie)
+        .await;
+    assert_eq!(proj.status, http::StatusCode::OK);
+    let body = proj.json();
+    let starting: f64 = body["starting_net_worth"]
+        .as_str()
+        .expect("starting_net_worth is string")
+        .parse()
+        .expect("parse starting_net_worth");
+
+    assert!(
+        (summary_nw - (-50_000.0)).abs() < 0.001,
+        "summary.net_worth solo debe restar el principal activo, got {summary_nw}"
+    );
+    assert!(
+        (starting - summary_nw).abs() < 0.001,
+        "projection.starting_net_worth ({starting}) debe coincidir con summary.net_worth ({summary_nw}) — el principal vencido no puede lastrar la serie"
+    );
+
+    // Y en TODA la serie el vencido sigue sin aparecer: con presupuesto vacío el delta es 0 y el
+    // único movimiento del NW es la amortización del pasivo activo (modo A) — nunca los −9999.
+    let points = body["points"].as_array().expect("points");
+    let first_nw = points[0]["net_worth"].as_f64().expect("net_worth f64");
+    assert!(
+        (first_nw - starting).abs() < 0.001,
+        "points[0] debe arrancar en starting_net_worth, got {first_nw}"
+    );
+}

@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — Coherencia del predicado «pasivo activo» (**cambia números**)
+
+- **La línea derivada del presupuesto ahora incluye los pasivos sin fecha fin** (`/v1/budget`,
+  y con ella los totales del modo A en `/v1/summary`). La query era el único outlier del
+  sistema: exigía `payment_end_date IS NOT NULL AND > today` mientras el resto usa
+  `IS NULL OR >= today` (NULL = plan indefinido; el día exacto de fin aún cuenta). Consecuencia
+  del bug: un pasivo con cuota y sin fecha fin no aparecía en «Derivado de pasivos» pero el
+  engine SÍ cobraba su cuota → el modo A no contaba la cuota «una vez» de forma consistente y el
+  KPI «ahorro real vs esperado» del Resumen descuadraba exactamente en esa cuota, para siempre.
+  Quien tenga pasivos con plan y sin fecha fin verá subir `expense_derived`/`expense_total` (y
+  bajar el net) — es la cifra correcta que faltaba.
+- **La proyección filtra los pasivos vencidos** (fix C-10): `build_installation_projection_input`
+  cargaba TODOS los pasivos del scope y el engine restaba su principal del net worth en cada mes
+  del horizonte — `projection.starting_net_worth` divergía de `summary.net_worth` exactamente en
+  el principal vencido, contra el contrato D5/I5 de la arquitectura. Pinned por
+  `projection_excludes_expired_liability_principal`.
+- Cobertura dedicada nueva de las líneas derivadas (`budget_derived.rs`, 5 tests: NULL end,
+  vencido, borde `>=`, sin plan, semanal ×52/12, scoping) — hueco real detectado en la
+  investigación: no existía ningún test directo de `derived_from_liabilities`.
+
 ### Changed — Modos B/C: promedio real crudo; los pasivos solo restan patrimonio (**breaking de números**)
 
 - **Reforma de las cuotas de pasivo en los modos reales** (`savings_source ∈ {transactions_avg,

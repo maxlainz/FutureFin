@@ -67,7 +67,8 @@ puerto; el default documentado sigue siendo el TCP de 5433.
 | File | Covers |
 |---|---|
 | `smoke.rs` | health/ready, 401 on unauth, register→login→me, first-user bootstrap |
-| `liabilities_purge.rs` | expired liabilities hidden from GET listings + summary totals but **persist in DB** |
+| `liabilities_purge.rs` | expired liabilities hidden from GET listings + summary totals but **persist in DB**; since 3.4.0 also `projection_excludes_expired_liability_principal` (la proyección filtra vencidos: `starting_net_worth == summary.net_worth`) |
+| `budget_derived.rs` (5) | Líneas derivadas de pasivos en `GET /v1/budget` (cobertura dedicada, 3.4.0): fecha fin NULL SÍ deriva, vencido no, borde `>=` (termina hoy cuenta), sin plan de pago no deriva, semanal ×52/12, scoping household/mine |
 | `body_limits.rs` | 1 MB cap on normal endpoints (413), 16 MB cap on `/backup/user-import` |
 | `installation_patch.rs` | unknown `fire_number_mode` rejected (422); legacy `annual_expense_adjusted` alias still accepted |
 | `unique_violation.rs` | duplicate username + duplicate category name → 409 via central `From<sqlx::Error>` |
