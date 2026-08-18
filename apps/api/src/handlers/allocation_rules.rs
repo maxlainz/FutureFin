@@ -334,8 +334,17 @@ pub async fn list_allocation_rules(
 ) -> Result<Json<Vec<AllocationRuleResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = list_allocation_rules_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
 
-    let view = q.resolve();
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_allocation_rules`.
+pub(crate) async fn list_allocation_rules_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<Vec<AllocationRuleResponse>, ApiError> {
     let scope = view.scope_where("");
     let sql = format!(
         r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
@@ -345,11 +354,11 @@ pub async fn list_allocation_rules(
            ORDER BY priority ASC, id ASC"#
     );
     let rows: Vec<RuleRow> = view
-        .bind_scope_as(sqlx::query_as(&sql), iid, user.id.0)
-        .fetch_all(&state.pool)
+        .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
+        .fetch_all(pool)
         .await?;
 
-    Ok(Json(rows.into_iter().map(row_to_response).collect()))
+    Ok(rows.into_iter().map(row_to_response).collect())
 }
 
 #[utoipa::path(
