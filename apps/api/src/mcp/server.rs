@@ -18,7 +18,9 @@ use crate::handlers::installation::{installation_access_core, settings_user_core
 use crate::handlers::liabilities::list_liabilities_core;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::planning::list_planning_flows_core;
-use crate::handlers::projection::projection_series_cached;
+use crate::handlers::projection::{
+    projection_series_cached, simulate_projection_core, SimulationSpec,
+};
 use crate::handlers::summary::summary_core;
 use crate::handlers::transactions::crud::{
     list_imports_core, list_months_core, list_transactions_core,
@@ -244,6 +246,74 @@ pub struct SnapshotsParams {
     /// Incluir el detalle por ítem de cada snapshot. Default false (solo cabecera y total).
     #[serde(default)]
     pub include_items: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OneOffExpenseParam {
+    /// Importe del gasto puntual (> 0), string decimal.
+    pub amount: String,
+    /// Mes de la proyección (1..=horizonte). Exactamente uno de month_index o date.
+    #[serde(default)]
+    pub month_index: Option<u32>,
+    /// Fecha "YYYY-MM-DD" (se mapea al mes como un planning flow real).
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AssetReturnOverrideParam {
+    /// UUID del activo (de list_assets).
+    pub asset_id: String,
+    /// Rentabilidad anual esperada en % (> -100; los negativos componen pérdidas), string decimal.
+    pub expected_annual_return_percent: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SimulateParams {
+    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// Horizonte en meses (12–840). Omitido = horizonte de la instalación.
+    #[serde(default)]
+    #[schemars(range(min = 12, max = 840))]
+    pub months: Option<u32>,
+    /// Incluir las series decimadas baseline/escenario. Default false (solo KPIs y deltas).
+    #[serde(default)]
+    pub include_series: Option<bool>,
+    /// Gasto puntual («¿y si me compro X?»): drena caja el mes indicado con la cascada real.
+    #[serde(default)]
+    pub one_off_expense: Option<OneOffExpenseParam>,
+    /// Gasto mensual extra REAL (>= 0, string decimal): mueve también el target FIRE y las
+    /// bases de caps — «vivir gastando más».
+    #[serde(default)]
+    pub extra_monthly_expense: Option<String>,
+    /// Ajuste de caja mensual NEUTRO (>= 0, se resta): menos ahorro sin mover el target FIRE
+    /// ni los caps. Usa este para «ahorro X € menos al mes sin cambiar mi objetivo».
+    #[serde(default)]
+    pub extra_monthly_cash_adjustment: Option<String>,
+    /// Ahorro mensual extra (>= 0): más caja asignable vía la cascada, sin mover el target.
+    #[serde(default)]
+    pub extra_monthly_savings: Option<String>,
+    /// SWR en % (0–4, string decimal): «¿y si el SWR fuera 3?».
+    #[serde(default)]
+    pub swr_pct: Option<String>,
+    /// Inflación anual asumida en % (0–50, string decimal).
+    #[serde(default)]
+    pub annual_inflation_percent: Option<String>,
+    /// Gasto ANUAL de jubilación (> 0, string decimal): sustituye la base del target FIRE y el
+    /// gasto post-jubilación.
+    #[serde(default)]
+    pub retirement_annual_expense: Option<String>,
+    /// Overrides de rentabilidad por activo.
+    #[serde(default)]
+    pub asset_return_overrides: Option<Vec<AssetReturnOverrideParam>>,
+}
+
+/// Parsea un string decimal de un parámetro de simulación con error tipado.
+fn parse_decimal_param(name: &str, raw: &str) -> Result<rust_decimal::Decimal, ApiError> {
+    raw.trim()
+        .parse::<rust_decimal::Decimal>()
+        .map_err(|_| ApiError::BadRequest(format!("{name} must be a decimal string")))
 }
 
 const LIST_TRANSACTIONS_DEFAULT_LIMIT: usize = 100;
@@ -507,6 +577,82 @@ impl FutureFinMcp {
             Err(e) => Err(e),
         };
         to_tool_result(res)
+    }
+
+    #[tool(
+        name = "simulate_projection",
+        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo) y devuelve KPIs + deltas (mes de jubilación, patrimonio final, target FIRE, runway). Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
+        annotations(title = "Simular escenario", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn simulate_projection(
+        &self,
+        Parameters(p): Parameters<SimulateParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let view = resolve_view(&p.view);
+
+        // Parseo de strings → tipos (las cotas de dominio se validan en el core).
+        let build_spec = || -> Result<SimulationSpec, ApiError> {
+            let mut spec = SimulationSpec {
+                months: p.months,
+                include_series: p.include_series.unwrap_or(false),
+                ..Default::default()
+            };
+            if let Some(one_off) = &p.one_off_expense {
+                spec.one_off_amount =
+                    Some(parse_decimal_param("one_off_expense.amount", &one_off.amount)?);
+                spec.one_off_month_index = one_off.month_index;
+                spec.one_off_date = match &one_off.date {
+                    Some(raw) => Some(raw.trim().parse().map_err(|_| {
+                        ApiError::BadRequest(
+                            "one_off_expense.date must be YYYY-MM-DD".into(),
+                        )
+                    })?),
+                    None => None,
+                };
+            }
+            let parse_opt = |name: &str, raw: &Option<String>| -> Result<_, ApiError> {
+                raw.as_ref()
+                    .map(|r| parse_decimal_param(name, r))
+                    .transpose()
+            };
+            spec.extra_monthly_expense =
+                parse_opt("extra_monthly_expense", &p.extra_monthly_expense)?;
+            spec.extra_monthly_cash_adjustment = parse_opt(
+                "extra_monthly_cash_adjustment",
+                &p.extra_monthly_cash_adjustment,
+            )?;
+            spec.extra_monthly_savings =
+                parse_opt("extra_monthly_savings", &p.extra_monthly_savings)?;
+            spec.swr_pct = parse_opt("swr_pct", &p.swr_pct)?;
+            spec.annual_inflation_percent =
+                parse_opt("annual_inflation_percent", &p.annual_inflation_percent)?;
+            spec.retirement_annual_expense =
+                parse_opt("retirement_annual_expense", &p.retirement_annual_expense)?;
+            if let Some(overrides) = &p.asset_return_overrides {
+                for o in overrides {
+                    let asset_id = Uuid::parse_str(o.asset_id.trim()).map_err(|_| {
+                        ApiError::BadRequest("asset_return_overrides.asset_id must be a UUID".into())
+                    })?;
+                    let pct = parse_decimal_param(
+                        "asset_return_overrides.expected_annual_return_percent",
+                        &o.expected_annual_return_percent,
+                    )?;
+                    spec.asset_return_overrides.push((asset_id, pct));
+                }
+            }
+            Ok(spec)
+        };
+        let spec = match build_spec() {
+            Ok(s) => s,
+            Err(e) => return to_tool_outcome(e),
+        };
+
+        to_tool_result(
+            simulate_projection_core(&self.state.pool, id.installation_id, id.user_id, view, spec)
+                .await,
+        )
     }
 
     #[tool(
