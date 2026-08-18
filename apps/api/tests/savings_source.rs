@@ -287,10 +287,11 @@ async fn mode_b_zero_months_falls_back_to_budget() {
     approx(delta, 3000.0); // presupuesto 5000 − 2000, NO tocado por la txn del mes parcial
 }
 
-/// Resta híbrida de cuotas: liability con txns vinculadas usa su avg real; sin vincular usa la
-/// cuota nominal; terminada (payment_end pasado) NO se resta. Clamp implícito no aplica aquí.
+/// Reforma 3.4.0: el promedio de gasto se usa CRUDO — las cuotas ya viven dentro de los
+/// movimientos, así que ni los vínculos (`linked_liability_id`) ni las cuotas nominales de las
+/// liabilities alteran el delta mensual. (Antes: resta híbrida 450 real + 300 nominal → 4750.)
 #[tokio::test]
-async fn mode_b_hybrid_liability_subtraction() {
+async fn mode_b_raw_avg_ignores_liability_links() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
@@ -334,29 +335,31 @@ async fn mode_b_hybrid_liability_subtraction() {
     assert_eq!(l3.status, http::StatusCode::CREATED, "{l3:?}");
 
     // Transacciones en el último mes completo: income 6000; expense total 2000 (de los cuales 450
-    // vinculados a L1) → income_avg 6000, expense_avg 2000, per_liability[L1] = 450.
+    // vinculados a L1 — el vínculo es metadata y no altera nada) → income_avg 6000, expense_avg 2000.
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
     manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "6000", "income", None, None).await;
     manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Cuota L1", "-450", "expense", None, Some(&l1_id)).await;
     manual(&app, &owner.cookie, &date_in(y1, m1, 12), "Resto", "-1550", "expense", None, None).await;
 
     set_mode_b(&app, &owner.cookie).await;
-    // resta = 450 (L1 real) + 300 (L2 nominal) = 750; expense_eff = 2000 − 750 = 1250.
-    // delta = 6000 − 1250 = 4750. (Si L1 usara nominal 500 → 4800; si restara L3 → 4050.)
+    // Promedio crudo: delta = income_avg − expense_avg = 6000 − 2000 = 4000, con L1/L2/L3
+    // presentes e irrelevantes para la caja. (Con la resta híbrida antigua habría sido 4750.)
     let delta = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
-    approx(delta, 4750.0);
+    approx(delta, 4000.0);
 }
 
-/// `expense_eff` se clampa a ≥ 0: aunque las cuotas nominales superen el gasto real medido.
+/// Reforma 3.4.0: en modo real el pasivo es una **resta constante** de NW — sin cargo de caja,
+/// sin amortización y sin escalón al vencer el plan. NW(k) = k·delta − principal, todo el
+/// horizonte. (Antes, el engine cobraba 1000/mes de debt service y amortizaba el principal.)
 #[tokio::test]
-async fn mode_b_clamps_expense_eff_non_negative() {
+async fn mode_b_liability_static_nw_subtraction() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
 
     let today = server_today(&app, &owner.cookie).await;
     let future = date_in(today.year() + 5, 1, 15);
-    // Cuota nominal 1000, sin gasto real medido.
+    // Cuota nominal 1000 (se ignora en la caja del modo real), principal 100000.
     let r = app
         .post_json_with_cookie(
             "/v1/liabilities",
@@ -367,23 +370,39 @@ async fn mode_b_clamps_expense_eff_non_negative() {
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
 
-    // Solo income → expense_avg = 0; months_with_data = 1.
+    // Solo income → income_avg = 2000, expense_avg = 0; months_with_data = 1.
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
     manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "2000", "income", None, None).await;
 
     set_mode_b(&app, &owner.cookie).await;
-    // expense_eff = max(0, 0 − 1000) = 0 → delta = income_avg − 0 = 2000.
-    let delta = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
-    approx(delta, 2000.0);
+    // delta = income_avg − expense_avg = 2000; la cuota nominal NO se cobra.
+    let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
+    approx(parse_dec(&body["monthly_delta_assumption"]), 2000.0);
+
+    // Serie sin activos: NW(k) = surplus_cash(k) − principal = 2000·k − 100000 en TODOS los
+    // puntos — lineal exacto, sin escalón en el mes ~100 (donde la amortización antigua habría
+    // saldado el principal) ni al vencer el plan.
+    let points = body["points"].as_array().unwrap();
+    assert!(points.len() > 200, "serie mensual esperada, {} puntos", points.len());
+    for p in points {
+        let k = p["month_index"].as_u64().unwrap() as f64;
+        let nw = p["net_worth"].as_f64().unwrap();
+        let expected = 2000.0 * k - 100_000.0;
+        assert!(
+            (nw - expected).abs() < 0.5,
+            "mes {k}: net_worth {nw}, esperado {expected} (resta estática de principal)"
+        );
+    }
 }
 
-/// Target FIRE modo B (annual_expense) usa `expense_eff` como base: target = (expense_eff×12)/SWR.
+/// Target FIRE modo B (annual_expense) usa el promedio de gasto crudo como base:
+/// target = (expense_avg×12)/SWR.
 #[tokio::test]
-async fn mode_b_target_annual_expense_uses_expense_eff() {
+async fn mode_b_target_annual_expense_uses_expense_avg() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
 
-    // Solo transacciones: expense_avg = 1000, income_avg = 3000; sin liabilities → expense_eff = 1000.
+    // Solo transacciones: expense_avg = 1000, income_avg = 3000.
     let today = server_today(&app, &owner.cookie).await;
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
     manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None, None).await;
@@ -436,11 +455,14 @@ async fn mode_b_household_vs_mine_scoping() {
     approx(mine, 1200.0);
 }
 
-/// Step-up al terminar un préstamo: en modo B las liabilities siguen llegando al engine, así que
-/// una que termina antes libera caja hacia el activo (que crece) y deja MÁS patrimonio al final
-/// que otra idéntica que sigue activa todo el horizonte.
+/// Reforma 3.4.0 — pin del coste aceptado: en modo real NO hay step-up al terminar un préstamo.
+/// La cuota vive dentro del promedio de gasto (se carga todo el horizonte) y el principal resta
+/// constante, así que la fecha de fin del plan es irrelevante para la trayectoria: dos préstamos
+/// idénticos salvo el vencimiento producen EXACTAMENTE el mismo patrimonio final. Decisión de
+/// producto (owner, 2026-08-18): proyección conservadora a cambio de un modelo simple sin
+/// dependencia del vínculo; la realidad entra en cada recomputación vía promedio y principal.
 #[tokio::test]
-async fn mode_b_liability_end_date_step_up_present() {
+async fn mode_b_no_step_up_at_liability_end() {
     async fn terminal_nw(username: &str, end_year_offset: i32) -> f64 {
         let app = TestApp::spawn().await;
         let owner = app.register_and_login_owner(username).await;
@@ -488,14 +510,13 @@ async fn mode_b_liability_end_date_step_up_present() {
         points.last().unwrap()["net_worth"].as_f64().unwrap()
     }
 
-    // EARLY: préstamo termina ~1 año → libera 1000/mes al activo desde el mes ~12.
+    // EARLY: préstamo termina ~1 año. LATE: termina ~26 años (fuera del horizonte de 240 meses).
     let early = terminal_nw("alice", 1).await;
-    // LATE: préstamo termina ~26 años (más allá del horizonte de 240 meses) → activo todo el tiempo.
     let late = terminal_nw("bob", 26).await;
 
     assert!(
-        early > late,
-        "modo B: la liability que termina antes debe dejar MÁS patrimonio al final (step-up); early={early}, late={late}"
+        (early - late).abs() < 0.5,
+        "modo real: el vencimiento del plan no debe alterar la trayectoria (sin step-up); early={early}, late={late}"
     );
 }
 
@@ -794,8 +815,8 @@ async fn mode_b_all_pseudo_empty_falls_back_to_budget() {
 // Modo C — income del presupuesto + gasto real 12m — Bloque 2
 // ---------------------------------------------------------------------------
 
-/// Modo C: la pendiente usa el income del PRESUPUESTO y el gasto REAL medio (mismo expense_eff que el
-/// modo B). Budget income 5000, expense 2000; real M-1: income 3000, expense 800 → delta = 5000 − 800
+/// Modo C: la pendiente usa el income del PRESUPUESTO y el gasto REAL medio (mismo promedio crudo
+/// que el modo B). Budget income 5000, expense 2000; real M-1: income 3000, expense 800 → delta = 5000 − 800
 /// = 4200. (Modo A daría 3000; modo B daría 3000 − 800 = 2200.)
 #[tokio::test]
 async fn mode_c_income_budget_expense_real() {
@@ -821,10 +842,10 @@ async fn mode_c_income_budget_expense_real() {
     approx(delta_c, 4200.0);
 }
 
-/// Target FIRE modo C (annual_expense) usa `expense_eff` (gasto real) como base, igual que el modo B:
-/// expense_avg = 1000, sin liabilities → expense_eff = 1000 → target = (1000×12)/0.04 = 300000.
+/// Target FIRE modo C (annual_expense) usa el gasto real medio como base, igual que el modo B:
+/// expense_avg = 1000 → target = (1000×12)/0.04 = 300000.
 #[tokio::test]
-async fn mode_c_target_annual_expense_uses_expense_eff() {
+async fn mode_c_target_annual_expense_uses_expense_avg() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let income_cat = app.create_category(&owner, "income", "Nómina").await;
@@ -838,7 +859,7 @@ async fn mode_c_target_annual_expense_uses_expense_eff() {
     manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None, None).await;
     manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Gasto", "-1000", "expense", None, None).await;
 
-    // FIRE: annual_expense, SWR 4%, sin impuestos, modo C → target = (expense_eff 1000 ×12)/0.04.
+    // FIRE: annual_expense, SWR 4%, sin impuestos, modo C → target = (expense_avg 1000 ×12)/0.04.
     let patched = app
         .patch_json_with_cookie(
             "/v1/installation",

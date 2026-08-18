@@ -154,9 +154,6 @@ fn bucket_all(
 pub(crate) struct TransactionsAvg {
     pub income_avg: Decimal,
     pub expense_avg: Decimal,
-    /// Promedio mensual (magnitud) de las transacciones `expense` con `linked_liability_id`, por
-    /// liability. Mismo denominador `months_with_data`.
-    pub per_liability_linked_avg: HashMap<Uuid, Decimal>,
     pub months_with_data: u32,
 }
 
@@ -210,7 +207,6 @@ pub(crate) async fn transactions_12m_avg(
         return Ok(TransactionsAvg {
             income_avg: Decimal::ZERO,
             expense_avg: Decimal::ZERO,
-            per_liability_linked_avg: HashMap::new(),
             months_with_data: 0,
         });
     }
@@ -244,58 +240,11 @@ pub(crate) async fn transactions_12m_avg(
         }
     }
 
-    // Cuotas vinculadas: Σ de expense con `linked_liability_id`, por liability. Mismo filtro de meses
-    // reales que la suma por kind (denominador `months_with_data` consistente).
-    let liab_sql = format!(
-        "{real_months_cte}
-         SELECT t.linked_liability_id AS liability_id, SUM(t.amount) AS total
-         FROM transactions t
-         WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
-           AND t.kind = 'expense' AND t.linked_liability_id IS NOT NULL
-           AND to_char(t.op_date, 'YYYY-MM') IN (SELECT ym FROM real_months)
-         GROUP BY t.linked_liability_id"
-    );
-    let liab_rows: Vec<(Uuid, Decimal)> = view
-        .bind_scope_as(sqlx::query_as(&liab_sql), installation_id, session_user_id)
-        .bind(window_start)
-        .bind(window_end)
-        .fetch_all(pool)
-        .await?;
-    let per_liability_linked_avg: HashMap<Uuid, Decimal> = liab_rows
-        .into_iter()
-        .map(|(id, total)| (id, (-total) / denom))
-        .collect();
-
     Ok(TransactionsAvg {
         income_avg: income_sum / denom,
         expense_avg: (-expense_sum) / denom,
-        per_liability_linked_avg,
         months_with_data,
     })
-}
-
-/// Resta híbrida de cuotas de pasivo sobre el promedio real (modo B). Por cada liability **activa**
-/// (el llamante ya filtró por `payment_end_date`) se resta de `expense_avg`: su promedio real
-/// vinculado si existe, si no su cuota nominal mensual. Devuelve `(income_eff, expense_eff)` con
-/// `expense_eff = max(0, expense_avg − Σ resta)`.
-///
-/// Único punto de verdad de esta fórmula: lo consumen `projection.rs` (input del engine) y
-/// `summary.rs` (KPIs de Resumen) para que ambos handlers no diverjan. `active_liabilities` es
-/// `(liability_id, cuota_nominal_mensual)`.
-pub(crate) fn effective_avg_income_expense(
-    avg: &TransactionsAvg,
-    active_liabilities: &[(Uuid, Decimal)],
-) -> (Decimal, Decimal) {
-    let mut liab_payments = Decimal::ZERO;
-    for (id, nominal) in active_liabilities {
-        liab_payments += avg
-            .per_liability_linked_avg
-            .get(id)
-            .copied()
-            .unwrap_or(*nominal);
-    }
-    let expense_eff = (avg.expense_avg - liab_payments).max(Decimal::ZERO);
-    (avg.income_avg, expense_eff)
 }
 
 #[utoipa::path(

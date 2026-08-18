@@ -535,18 +535,19 @@ export function SettingsView({
               <small className="muted">
                 <strong>Promedio 12 meses</strong>: el ahorro sale del promedio
                 ponderado de los últimos 12 meses de movimientos (denominador =
-                meses con datos), restando las cuotas de préstamos activos que
-                la simulación ya modela aparte. Los meses sin movimientos reales
-                (solo recurrentes) no cuentan en el promedio. Sin datos, cae al
-                presupuesto.
+                meses con datos). Las cuotas de préstamos cuentan como un gasto
+                más — ya están en tus movimientos — y los pasivos solo restan su
+                principal pendiente al patrimonio. Los meses sin movimientos
+                reales (solo recurrentes) no cuentan en el promedio. Sin datos,
+                cae al presupuesto.
               </small>
               <small className="muted">
                 <strong>Ingresos de presupuesto + gasto real</strong>: la
                 simulación toma tus ingresos del presupuesto y el gasto medio
-                real de los últimos 12 meses (mismo promedio ponderado, restando
-                cuotas de préstamos activos). Útil si tu nómina es estable pero
-                quieres que el gasto refleje lo que gastas de verdad. Sin datos,
-                cae al presupuesto.
+                real de los últimos 12 meses (mismo promedio ponderado, cuotas
+                incluidas). Útil si tu nómina es estable pero quieres que el
+                gasto refleje lo que gastas de verdad. Sin datos, cae al
+                presupuesto.
               </small>
               <small className="muted">
                 El Resumen, la proyección y el target FIRE siguen el modo
