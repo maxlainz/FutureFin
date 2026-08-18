@@ -179,9 +179,18 @@ pub async fn list_categories(
 ) -> Result<Json<Vec<CategoryResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out = list_categories_core(&state.pool, iid, q.scope.as_deref()).await?;
+    Ok(Json(out))
+}
 
-    let scope_filter: Option<String> = match q.scope.as_deref().map(str::trim).filter(|s| !s.is_empty())
-    {
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_categories`. Per-installation
+/// (las categorías no tienen owner — no acepta `view`).
+pub(crate) async fn list_categories_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    scope: Option<&str>,
+) -> Result<Vec<CategoryResponse>, ApiError> {
+    let scope_filter: Option<String> = match scope.map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
         Some(s) => Some(CategoryScope::parse(s)?.as_str().to_string()),
     };
@@ -195,7 +204,7 @@ pub async fn list_categories(
         )
         .bind(iid)
         .bind(sc)
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await?
     } else {
         sqlx::query_as(
@@ -205,7 +214,7 @@ pub async fn list_categories(
                ORDER BY scope ASC, sort_index ASC, name ASC"#,
         )
         .bind(iid)
-        .fetch_all(&state.pool)
+        .fetch_all(pool)
         .await?
     };
 
@@ -213,7 +222,7 @@ pub async fn list_categories(
     for r in rows {
         out.push(row_to_response(r)?);
     }
-    Ok(Json(out))
+    Ok(out)
 }
 
 #[utoipa::path(
