@@ -6,6 +6,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — MCP: annotations, verbosidad e identidad en las 10 tools existentes
+
+- **Tool annotations en todo el catálogo** (`#[tool(annotations(...))]` de rmcp): `title` legible,
+  `read_only_hint = true` y `open_world_hint = false` en las 10 tools. Sin ellas un cliente
+  conforme al spec MCP debe asumir el peor caso y tratar cada lectura como escritura destructiva.
+- **`get_history`** gana `window_months` (1..1200) e `include_asset_series` (default `false` en la
+  tool): un backfill de años ya no vuelca toda la rejilla + un array por activo en cada llamada.
+  Los mismos knobs llegan a `GET /v1/history/series` (aditivos; default `include_asset_series =
+  true` — contrato REST intacto). La interpolación sigue anclándose en todos los snapshots; solo
+  se recortan puntos y markers emitidos.
+- **`list_transactions`** pagina **en SQL** (`LIMIT`/`OFFSET` + `COUNT(*)` para `total_count`,
+  nuevo parámetro `offset`, filtro `import_id` que el HTTP ya tenía): la DB ya no materializa el
+  conjunto entero para servir una página. El endpoint HTTP conserva su shape sin paginar.
+- **`get_projection`** declara el rango real de `months` (12..840) en el schema publicado y avisa
+  en la descripción de que un `months` explícito recomputa sin cache.
+- **`get_settings`** incluye `user {id, username, birth_date}` del usuario del token (la DOB que
+  fija el horizonte de proyección). El endpoint HTTP `GET /v1/installation` no cambia.
+
 ### Changed — **cambio de comportamiento**: las rentabilidades negativas componen de verdad en el engine
 
 - `monthly_multiplier` (engine) trataba cualquier tasa anual ≤ 0 como crecimiento 0: un activo

@@ -383,7 +383,7 @@ pub async fn list_transactions(
         view: q.view.clone(),
     }
     .resolve();
-    let out = list_transactions_core(
+    let (out, _total) = list_transactions_core(
         &state.pool,
         iid,
         user.id.0,
@@ -392,6 +392,8 @@ pub async fn list_transactions(
         q.kind.as_deref(),
         q.category_id,
         q.import_id,
+        None,
+        0,
     )
     .await?;
     Ok(Json(out))
@@ -399,17 +401,24 @@ pub async fn list_transactions(
 
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_transactions`.
 /// La validación de filtros vive aquí para que ambos caminos devuelvan los mismos 400.
+///
+/// Paginación: con `limit = None` (el handler HTTP) no se emite `LIMIT`/`OFFSET` ni la query de
+/// `COUNT` — el conjunto entero, contrato REST intacto. Con `limit = Some(n)` (la tool MCP) la
+/// paginación baja a SQL y `total_count` sale de un `COUNT(*)` con los mismos filtros: la DB ya
+/// no materializa el conjunto entero para servir una página.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn list_transactions_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
     user_id: Uuid,
-    view: crate::handlers::person_view::LedgerView,
+    view: LedgerView,
     month: Option<&str>,
     kind: Option<&str>,
     category_id: Option<Uuid>,
     import_id: Option<Uuid>,
-) -> Result<Vec<TransactionResponse>, ApiError> {
+    limit: Option<i64>,
+    offset: i64,
+) -> Result<(Vec<TransactionResponse>, i64), ApiError> {
     let kind = match kind {
         Some(k) => Some(normalize_kind(k)?),
         None => None,
@@ -421,9 +430,9 @@ pub(crate) async fn list_transactions_core(
 
     let scope = view.scope_where("t");
     let mut arg = view.next_arg_index();
-    let mut sql = format!("{TXN_SELECT} WHERE {scope}");
+    let mut filters = String::new();
     if month_range.is_some() {
-        sql.push_str(&format!(
+        filters.push_str(&format!(
             " AND t.op_date >= ${} AND t.op_date < ${}",
             arg,
             arg + 1
@@ -431,35 +440,64 @@ pub(crate) async fn list_transactions_core(
         arg += 2;
     }
     if kind.is_some() {
-        sql.push_str(&format!(" AND t.kind = ${arg}"));
+        filters.push_str(&format!(" AND t.kind = ${arg}"));
         arg += 1;
     }
     if category_id.is_some() {
-        sql.push_str(&format!(" AND t.category_id = ${arg}"));
+        filters.push_str(&format!(" AND t.category_id = ${arg}"));
         arg += 1;
     }
     if import_id.is_some() {
-        sql.push_str(&format!(" AND t.import_id = ${arg}"));
-        // (last placeholder; no further increment needed)
-        let _ = arg;
+        filters.push_str(&format!(" AND t.import_id = ${arg}"));
+        arg += 1;
     }
-    sql.push_str(" ORDER BY t.op_date DESC, t.created_at DESC, t.id DESC");
 
-    let mut query = view.bind_scope_as(sqlx::query_as::<_, TxnRow>(&sql), iid, user_id);
-    if let Some((start, end)) = month_range {
-        query = query.bind(start).bind(end);
+    let mut sql = format!("{TXN_SELECT} WHERE {scope}{filters}");
+    sql.push_str(" ORDER BY t.op_date DESC, t.created_at DESC, t.id DESC");
+    if limit.is_some() {
+        sql.push_str(&format!(" LIMIT ${} OFFSET ${}", arg, arg + 1));
     }
-    if let Some(k) = kind {
-        query = query.bind(k);
+
+    // Cierre que aplica los binds de filtro en el MISMO orden en que se emitieron los
+    // placeholders — compartido por la query principal y el COUNT.
+    macro_rules! bind_filters {
+        ($q:expr) => {{
+            let mut query = $q;
+            if let Some((start, end)) = month_range {
+                query = query.bind(start).bind(end);
+            }
+            if let Some(ref k) = kind {
+                query = query.bind(k.clone());
+            }
+            if let Some(cid) = category_id {
+                query = query.bind(cid);
+            }
+            if let Some(imp) = import_id {
+                query = query.bind(imp);
+            }
+            query
+        }};
     }
-    if let Some(cid) = category_id {
-        query = query.bind(cid);
-    }
-    if let Some(imp) = import_id {
-        query = query.bind(imp);
+
+    let mut query =
+        bind_filters!(view.bind_scope_as(sqlx::query_as::<_, TxnRow>(&sql), iid, user_id));
+    if let Some(l) = limit {
+        query = query.bind(l).bind(offset);
     }
     let rows: Vec<TxnRow> = query.fetch_all(pool).await?;
-    Ok(rows.into_iter().map(row_to_response).collect())
+
+    let total_count: i64 = match limit {
+        None => rows.len() as i64,
+        Some(_) => {
+            let count_sql =
+                format!("SELECT COUNT(*)::bigint FROM transactions t WHERE {scope}{filters}");
+            bind_filters!(view.bind_scope_scalar(sqlx::query_scalar(&count_sql), iid, user_id))
+                .fetch_one(pool)
+                .await?
+        }
+    };
+
+    Ok((rows.into_iter().map(row_to_response).collect(), total_count))
 }
 
 // ---------------------------------------------------------------------------

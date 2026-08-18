@@ -1206,12 +1206,33 @@ fn accumulate_series(
     })
 }
 
+/// Query de `GET /v1/history/series`. `window_months` e `include_asset_series` llegaron con la
+/// revisión de verbosidad MCP (issue #2) y son aditivos: omitidos, la respuesta es idéntica a la
+/// histórica (toda la serie + series por activo).
+#[derive(Debug, Deserialize)]
+pub struct HistorySeriesQuery {
+    #[serde(default)]
+    pub view: Option<String>,
+    /// Limita la rejilla emitida a los últimos N meses (clamp 1..=1200). La interpolación sigue
+    /// anclándose en TODOS los snapshots; solo se recortan los puntos/markers devueltos.
+    #[serde(default)]
+    pub window_months: Option<i64>,
+    /// `false` omite `asset_series` (payload por activo × puntos). Default true en HTTP.
+    #[serde(default)]
+    pub include_asset_series: Option<bool>,
+}
+
+/// Clamp del windowing de la serie histórica (100 años, el mismo techo que el runway).
+const MAX_HISTORY_WINDOW_MONTHS: i64 = 1200;
+
 #[utoipa::path(
     get,
     path = "/v1/history/series",
     tag = "history",
     params(
         ("view" = Option<String>, Query, description = "`mine` = solo mis snapshots; omitido u otro valor → `household` (todos los usuarios de la instalación)."),
+        ("window_months" = Option<i64>, Query, description = "Limita la serie a los últimos N meses (clamp 1..=1200). Omitido = desde el snapshot más antiguo."),
+        ("include_asset_series" = Option<bool>, Query, description = "`false` omite `asset_series`. Default `true`."),
     ),
     responses(
         (status = 200, description = "Serie histórica interpolada, puntos contiguos `k_min..=0`. Sin snapshots en scope → arrays vacíos.", body = HistorySeriesResponse),
@@ -1223,12 +1244,21 @@ fn accumulate_series(
 pub async fn get_history_series(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
-    Query(q): Query<LedgerViewQuery>,
+    Query(q): Query<HistorySeriesQuery>,
 ) -> Result<Json<HistorySeriesResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     // Solo lectura: cualquier miembro (viewer incluido) puede pedir la serie.
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = history_series_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let out = history_series_core(
+        &state.pool,
+        iid,
+        user.id.0,
+        view,
+        q.window_months,
+        q.include_asset_series.unwrap_or(true),
+    )
+    .await?;
     Ok(Json(out))
 }
 
@@ -1238,6 +1268,8 @@ pub(crate) async fn history_series_core(
     iid: Uuid,
     user_id: Uuid,
     view: LedgerView,
+    window_months: Option<i64>,
+    include_asset_series: bool,
 ) -> Result<HistorySeriesResponse, ApiError> {
     let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
 
@@ -1284,7 +1316,17 @@ pub(crate) async fn history_series_core(
     // ---- Rejilla mensual k_min..=0 (primeros-de-mes) ----------------------------------------
     // Las fechas de snapshot están validadas ≤ hoy, así que todo month_index ≤ 0;
     // `.min(0)` es solo un cinturón (p. ej. cambio de calendar_tz a posteriori).
-    let k_min = markers.iter().map(|m| m.month_index).min().unwrap_or(0).min(0);
+    // `window_months` recorta la rejilla emitida (y los markers devueltos); la interpolación
+    // sigue anclándose en TODOS los snapshots del scope.
+    let k_min_full = markers.iter().map(|m| m.month_index).min().unwrap_or(0).min(0);
+    let k_min = match window_months {
+        Some(w) => k_min_full.max(-(w.clamp(1, MAX_HISTORY_WINDOW_MONTHS) as i32)),
+        None => k_min_full,
+    };
+    let markers: Vec<HistoryMarker> = markers
+        .into_iter()
+        .filter(|m| m.month_index >= k_min)
+        .collect();
     let grid: Vec<NaiveDate> = (k_min..=0).map(|k| add_months_signed(anchor, k)).collect();
     let grid_len = grid.len();
 
@@ -1307,23 +1349,26 @@ pub(crate) async fn history_series_core(
         })
         .collect();
 
-    let mut asset_series: Vec<HistoryAssetSeries> = acc
-        .asset_values
-        .iter()
-        .map(|(asset_id, values)| {
-            // Nombre: el asset vivo gana; si no, el label del snapshot más reciente.
-            let asset_name = live_asset_names
-                .get(asset_id)
-                .map(|n| n.to_string())
-                .or_else(|| acc.latest_label.get(asset_id).map(|(_, l)| l.clone()))
-                .unwrap_or_default();
-            HistoryAssetSeries {
-                asset_id: *asset_id,
-                asset_name,
-                values: values.iter().map(|v| v.to_f64().unwrap_or(0.0)).collect(),
-            }
-        })
-        .collect();
+    let mut asset_series: Vec<HistoryAssetSeries> = if include_asset_series {
+        acc.asset_values
+            .iter()
+            .map(|(asset_id, values)| {
+                // Nombre: el asset vivo gana; si no, el label del snapshot más reciente.
+                let asset_name = live_asset_names
+                    .get(asset_id)
+                    .map(|n| n.to_string())
+                    .or_else(|| acc.latest_label.get(asset_id).map(|(_, l)| l.clone()))
+                    .unwrap_or_default();
+                HistoryAssetSeries {
+                    asset_id: *asset_id,
+                    asset_name,
+                    values: values.iter().map(|v| v.to_f64().unwrap_or(0.0)).collect(),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     asset_series.sort_by(|a, b| {
         a.asset_name
             .cmp(&b.asset_name)

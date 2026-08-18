@@ -460,3 +460,173 @@ async fn mcp_disabled_returns_404() {
         "con FUTUREFIN_MCP_ENABLED=0 /mcp no existe: {resp:?}"
     );
 }
+
+#[tokio::test]
+async fn tools_list_exposes_annotations_on_every_tool() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(&app, &token, tools_list_body()).await;
+    for tool in resp["result"]["tools"].as_array().expect("tools array") {
+        let name = tool["name"].as_str().unwrap();
+        let ann = &tool["annotations"];
+        assert!(
+            ann.is_object(),
+            "la tool {name} debe declarar annotations (sin ellas un cliente conforme asume el peor caso): {tool}"
+        );
+        assert!(
+            ann["title"].is_string(),
+            "la tool {name} debe declarar un title legible"
+        );
+        assert_eq!(
+            ann["openWorldHint"], false,
+            "el servidor solo toca su propia DB ({name})"
+        );
+        // Lecturas → readOnlyHint true. Las tools de escritura (issue #3) declaran false y
+        // este assert se ramifica por tool cuando existan.
+        assert_eq!(ann["readOnlyHint"], true, "tool {name}");
+    }
+}
+
+#[tokio::test]
+async fn get_settings_includes_user_identity() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let envelope =
+        mcp_post(&app, &token, tool_call_body("get_settings", serde_json::json!({}))).await;
+    let settings = tool_text_json(&envelope);
+    assert_eq!(settings["user"]["username"], "alice", "{settings}");
+    assert!(settings["user"]["id"].is_string());
+    // El shape histórico (installation + role) sigue intacto.
+    assert_eq!(settings["role"], "owner");
+    assert!(settings["installation"]["base_currency"].is_string());
+}
+
+#[tokio::test]
+async fn get_history_asset_series_is_opt_in_and_windowed() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // Un asset y una captura de snapshot para que la serie no sea vacía.
+    let cat = app.create_category(&owner, "asset", "Fondo").await;
+    let created = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "category_id": cat,
+                "name": "MSCI World",
+                "current_value": "10000",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let captured = app
+        .post_json_with_cookie(
+            "/v1/history/snapshots/capture",
+            serde_json::json!({}),
+            &owner.cookie,
+        )
+        .await;
+    assert!(captured.status.is_success(), "{captured:?}");
+
+    // HTTP sin params: asset_series presente (contrato REST intacto).
+    let via_http = app.get_with_cookie("/v1/history/series", &owner.cookie).await;
+    assert_eq!(via_http.status, http::StatusCode::OK);
+    let http_json = via_http.json();
+    assert!(
+        !http_json["asset_series"].as_array().unwrap().is_empty(),
+        "{http_json}"
+    );
+
+    // Tool sin params: asset_series omitida por defecto, puntos presentes.
+    let envelope =
+        mcp_post(&app, &token, tool_call_body("get_history", serde_json::json!({}))).await;
+    let tool_json = tool_text_json(&envelope);
+    assert!(tool_json["asset_series"].as_array().unwrap().is_empty());
+    assert!(!tool_json["points"].as_array().unwrap().is_empty());
+
+    // Opt-in explícito → idéntico al HTTP por defecto.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_history",
+            serde_json::json!({"include_asset_series": true}),
+        ),
+    )
+    .await;
+    assert_eq!(tool_text_json(&envelope), http_json);
+
+    // window_months acota la rejilla (con 1 solo snapshot de hoy la serie ya es corta;
+    // el clamp no debe romper nada).
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("get_history", serde_json::json!({"window_months": 1})),
+    )
+    .await;
+    let windowed = tool_text_json(&envelope);
+    assert!(windowed["points"].as_array().unwrap().len() <= 2, "{windowed}");
+}
+
+#[tokio::test]
+async fn list_transactions_offset_paginates_in_sql() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat = app.create_category(&owner, "expense", "Comida").await;
+    for i in 0..3 {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                serde_json::json!({
+                    "op_date": format!("2026-07-{:02}", 10 + i),
+                    "amount": "-10.00",
+                    "kind": "expense",
+                    "concept": format!("compra {i}"),
+                    "category_id": cat,
+                }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    // Página 1: limit 2 → 2 filas, total 3, truncated.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_transactions", serde_json::json!({"limit": 2})),
+    )
+    .await;
+    let page1 = tool_text_json(&envelope);
+    assert_eq!(page1["total_count"], 3);
+    assert_eq!(page1["offset"], 0);
+    assert_eq!(page1["truncated"], true);
+    let page1_rows = page1["transactions"].as_array().unwrap().clone();
+    assert_eq!(page1_rows.len(), 2);
+
+    // Página 2: offset 2 → la fila restante, truncated false, sin solaparse con la página 1.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "list_transactions",
+            serde_json::json!({"limit": 2, "offset": 2}),
+        ),
+    )
+    .await;
+    let page2 = tool_text_json(&envelope);
+    assert_eq!(page2["total_count"], 3);
+    assert_eq!(page2["truncated"], false);
+    let page2_rows = page2["transactions"].as_array().unwrap();
+    assert_eq!(page2_rows.len(), 1);
+    let ids1: Vec<&str> = page1_rows.iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert!(!ids1.contains(&page2_rows[0]["id"].as_str().unwrap()));
+}

@@ -544,6 +544,33 @@ pub(crate) async fn installation_access_core(
     Ok(Some(installation_access_from_row(r)?))
 }
 
+/// Identidad mínima del usuario del token para la tool MCP `get_settings` (el endpoint HTTP
+/// `GET /v1/installation` NO la incluye — la sesión web ya conoce a su usuario).
+#[derive(Debug, Serialize)]
+pub(crate) struct SettingsUser {
+    pub id: Uuid,
+    pub username: String,
+    /// La DOB que fija el horizonte de proyección (si está definida).
+    pub birth_date: Option<chrono::NaiveDate>,
+}
+
+/// Core sin HTTP: identidad del usuario para `get_settings` (MCP).
+pub(crate) async fn settings_user_core(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<SettingsUser, ApiError> {
+    let (username, birth_date): (String, Option<chrono::NaiveDate>) =
+        sqlx::query_as(r#"SELECT username, birth_date FROM users WHERE id = $1"#)
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(SettingsUser {
+        id: user_id,
+        username,
+        birth_date,
+    })
+}
+
 #[utoipa::path(
     patch,
     path = "/v1/installation",
