@@ -414,7 +414,19 @@ pub async fn create_liability(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = create_liability_core(&state, iid, user.id.0, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+}
 
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_liability`. Dos modos:
+/// `principal` explícito o `derive_principal_from_plan` (cuota + frecuencia + fecha fin →
+/// amortización francesa hacia atrás). Invalidación FULL dentro.
+pub(crate) async fn create_liability_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    body: CreateLiabilityBody,
+) -> Result<LiabilityResponse, ApiError> {
     assert_liability_category(&state.pool, iid, body.category_id).await?;
 
     let label = normalize_label(&body.label)?;
@@ -487,15 +499,12 @@ pub async fn create_liability(
     .bind(&notes)
     .bind(sort_index)
     .bind(principal_derived)
-    .bind(user.id.0)
+    .bind(user_id)
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(row_to_response(row)?),
-    ))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    row_to_response(row)
 }
 
 #[utoipa::path(

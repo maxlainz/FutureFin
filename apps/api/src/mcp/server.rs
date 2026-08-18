@@ -16,15 +16,17 @@
 //! del contrato de `error.rs`.
 
 use crate::error::{ApiError, ErrorBody};
-use crate::handlers::allocation_rules::list_allocation_rules_core;
-use crate::handlers::assets::list_assets_core;
-use crate::handlers::budget::budget_snapshot_core;
+use crate::handlers::allocation_rules::{list_allocation_rules_core, patch_allocation_rule_core};
+use crate::handlers::assets::{create_asset_core, list_assets_core, patch_asset_core};
+use crate::handlers::budget::{
+    budget_snapshot_core, create_budget_entry_core, patch_budget_entry_core,
+};
 use crate::handlers::categories::{create_category_core, list_categories_core};
 use crate::handlers::history::{
     capture_snapshots_core, history_cashflow_core, history_series_core, list_snapshots_core,
 };
 use crate::handlers::installation::{installation_access_core, settings_user_core};
-use crate::handlers::liabilities::list_liabilities_core;
+use crate::handlers::liabilities::{create_liability_core, list_liabilities_core};
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::planning::{
     create_planning_flow_core, list_planning_flows_core, patch_planning_flow_core,
@@ -38,7 +40,7 @@ use crate::handlers::transactions::crud::{
     patch_transaction_core,
 };
 use crate::handlers::transactions::recurring::{
-    list_recurring_rules_core, materialize_recurring_core,
+    delete_recurring_rule_core, list_recurring_rules_core, materialize_recurring_core,
 };
 use crate::handlers::transactions::rules::{
     create_categorization_rule_core, list_categorization_rules_core,
@@ -483,6 +485,138 @@ pub struct CreateCategorizationRuleParams {
     /// Categoría a asignar (UUID; scope acorde al assign_kind).
     #[serde(default)]
     pub assign_category_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateAssetValueParams {
+    /// UUID del activo (de list_assets).
+    pub asset_id: String,
+    /// Valor actual >= 0 como string decimal («mi fondo vale ahora 52300»).
+    #[serde(default)]
+    pub current_value: Option<String>,
+    /// Rentabilidad anual esperada en % (> -100; negativos componen pérdidas), string decimal.
+    #[serde(default)]
+    pub expected_annual_return_percent: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateAssetParams {
+    pub name: String,
+    /// Categoría con scope asset (UUID de list_categories).
+    pub category_id: String,
+    /// Valor actual >= 0, string decimal.
+    pub current_value: String,
+    /// Líquido = drenable para gastos (default true).
+    #[serde(default)]
+    pub is_liquid: Option<bool>,
+    /// Rentabilidad anual esperada en % (> -100), string decimal.
+    #[serde(default)]
+    pub expected_annual_return_percent: Option<String>,
+    /// Precio de compra >= 0 (base de coste), string decimal.
+    #[serde(default)]
+    pub purchase_price: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateLiabilityParams {
+    pub label: String,
+    /// Categoría con scope liability (UUID de list_categories).
+    pub category_id: String,
+    /// Principal >= 0 como string decimal. Obligatorio salvo derive_principal_from_plan.
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// true = derivar el principal del plan de pago (exige payment_amount + payment_frequency
+    /// + payment_end_date; amortización francesa hacia atrás).
+    #[serde(default)]
+    pub derive_principal_from_plan: Option<bool>,
+    /// TAE en % >= 0, string decimal.
+    #[serde(default)]
+    pub apr_percent: Option<String>,
+    /// Cuota como string decimal (> 0 si se pasa).
+    #[serde(default)]
+    pub payment_amount: Option<String>,
+    /// "monthly" | "weekly" (obligatoria si hay payment_amount).
+    #[serde(default)]
+    pub payment_frequency: Option<String>,
+    /// "YYYY-MM-DD" — fin del plan de pago.
+    #[serde(default)]
+    pub payment_end_date: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateBudgetEntryParams {
+    /// Categoría income|expense (UUID de list_categories).
+    pub category_id: String,
+    /// Importe mensual > 0 como string decimal.
+    pub amount: String,
+    /// El ingreso persiste tras la jubilación (pensión, alquileres…). Default false.
+    #[serde(default)]
+    pub persists_after_retirement: Option<bool>,
+    /// El gasto termina al jubilarse. Incompatible con expense_end_date. Default false.
+    #[serde(default)]
+    pub ends_at_retirement: Option<bool>,
+    /// "YYYY-MM-DD" — el gasto termina en esa fecha. Incompatible con ends_at_retirement.
+    #[serde(default)]
+    pub expense_end_date: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateBudgetEntryParams {
+    /// UUID de la entrada (de get_budget).
+    pub id: String,
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// Importe mensual > 0 como string decimal.
+    #[serde(default)]
+    pub amount: Option<String>,
+    #[serde(default)]
+    pub persists_after_retirement: Option<bool>,
+    #[serde(default)]
+    pub ends_at_retirement: Option<bool>,
+    /// "YYYY-MM-DD". Incompatible con clear_expense_end_date.
+    #[serde(default)]
+    pub expense_end_date: Option<String>,
+    /// true = borrar la fecha fin del gasto.
+    #[serde(default)]
+    pub clear_expense_end_date: Option<bool>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateAllocationRuleParams {
+    /// UUID de la regla (de list_allocation_rules).
+    pub rule_id: String,
+    /// Importe de la regla como string decimal: euros/mes para kind=fixed, % para
+    /// kind=percent. (El kind y el orden no se editan desde chat.)
+    #[serde(default)]
+    pub amount: Option<String>,
+    /// Cap: {"kind": "amount"|"months_expense"|"income_multiple", "value": "..."}. clear_cap
+    /// lo elimina.
+    #[serde(default)]
+    pub cap_kind: Option<String>,
+    #[serde(default)]
+    pub cap_value: Option<String>,
+    /// true = quitar el cap.
+    #[serde(default)]
+    pub clear_cap: Option<bool>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteRecurringRuleParams {
+    /// UUID de la plantilla (de list_recurring_rules).
+    pub id: String,
+    /// Sin confirm=true la tool NO borra: devuelve un preview de la plantilla.
+    #[serde(default)]
+    pub confirm: Option<bool>,
 }
 
 const LIST_TRANSACTIONS_DEFAULT_LIMIT: usize = 100;
@@ -1343,6 +1477,406 @@ impl FutureFinMcp {
                     r.assign_kind.as_deref().unwrap_or("-"),
                     r.assign_category_name.as_deref().unwrap_or("(sin categoría)")),
             }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_asset_value",
+        description = "Actualiza la valoración de un activo («mi fondo vale ahora 52.300 €»): current_value y/o expected_annual_return_percent (> -100; negativos componen pérdidas). Subset deliberado del PATCH completo. Sin owner-check: cualquier member edita cualquier activo del hogar (contrato del ledger). Devuelve valor anterior y nuevo. Mueve la proyección entera.",
+        annotations(title = "Actualizar valor de activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_asset_value(
+        &self,
+        Parameters(p): Parameters<UpdateAssetValueParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<(Uuid, crate::handlers::assets::PatchAssetBody), ApiError> {
+            if p.current_value.is_none() && p.expected_annual_return_percent.is_none() {
+                return Err(ApiError::BadRequest(
+                    "provide current_value and/or expected_annual_return_percent".into(),
+                ));
+            }
+            Ok((
+                parse_uuid_param("asset_id", &p.asset_id)?,
+                crate::handlers::assets::PatchAssetBody {
+                    category_id: None,
+                    name: None,
+                    current_value: p
+                        .current_value
+                        .as_deref()
+                        .map(|v| parse_decimal_param("current_value", v))
+                        .transpose()?,
+                    purchase_price: None,
+                    is_liquid: None,
+                    expected_annual_return_percent: p
+                        .expected_annual_return_percent
+                        .as_deref()
+                        .map(|v| parse_decimal_param("expected_annual_return_percent", v))
+                        .transpose()?,
+                    notes: None,
+                    sort_index: None,
+                },
+            ))
+        };
+        let (asset_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            // Valor anterior: del listado core (sin SQL propio en el módulo MCP).
+            let before = list_assets_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                LedgerView::Household,
+            )
+            .await?
+            .into_iter()
+            .find(|a| a.id == asset_id)
+            .map(|a| a.current_value);
+            let a = patch_asset_core(&self.state, id.installation_id, id.user_id, asset_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": a.id,
+                "name": a.name,
+                "valor_anterior": before.map(|v| v.to_string()),
+                "valor_nuevo": a.current_value.to_string(),
+                "expected_annual_return_percent": a.expected_annual_return_percent.map(|v| v.to_string()),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "create_asset",
+        description = "Da de alta un activo («he abierto un depósito de 10.000 € al 3 %»): nombre, categoría scope asset, valor actual, liquidez (default true), rentabilidad esperada opcional (> -100). Mueve la proyección entera.",
+        annotations(title = "Crear activo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn create_asset(
+        &self,
+        Parameters(p): Parameters<CreateAssetParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<crate::handlers::assets::CreateAssetBody, ApiError> {
+            Ok(crate::handlers::assets::CreateAssetBody {
+                category_id: parse_uuid_param("category_id", &p.category_id)?,
+                name: p.name.clone(),
+                current_value: parse_decimal_param("current_value", &p.current_value)?,
+                purchase_price: p
+                    .purchase_price
+                    .as_deref()
+                    .map(|v| parse_decimal_param("purchase_price", v))
+                    .transpose()?,
+                is_liquid: p.is_liquid,
+                expected_annual_return_percent: p
+                    .expected_annual_return_percent
+                    .as_deref()
+                    .map(|v| parse_decimal_param("expected_annual_return_percent", v))
+                    .transpose()?,
+                notes: p.notes.clone(),
+                sort_index: None,
+            })
+        };
+        let body = match run() {
+            Ok(b) => b,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let a = create_asset_core(&self.state, id.installation_id, id.user_id, body).await?;
+            Ok(serde_json::json!({
+                "id": a.id,
+                "resumen": format!("{} · {} ({})", a.name, a.current_value,
+                    if a.is_liquid { "líquido" } else { "ilíquido" }),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "create_liability",
+        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva por amortización francesa). Mueve la proyección entera.",
+        annotations(title = "Crear pasivo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn create_liability(
+        &self,
+        Parameters(p): Parameters<CreateLiabilityParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<crate::handlers::liabilities::CreateLiabilityBody, ApiError> {
+            Ok(crate::handlers::liabilities::CreateLiabilityBody {
+                category_id: parse_uuid_param("category_id", &p.category_id)?,
+                label: p.label.clone(),
+                type_tag: None,
+                derive_principal_from_plan: p.derive_principal_from_plan,
+                principal: p
+                    .principal
+                    .as_deref()
+                    .map(|v| parse_decimal_param("principal", v))
+                    .transpose()?,
+                apr_percent: p
+                    .apr_percent
+                    .as_deref()
+                    .map(|v| parse_decimal_param("apr_percent", v))
+                    .transpose()?,
+                payment_amount: p
+                    .payment_amount
+                    .as_deref()
+                    .map(|v| parse_decimal_param("payment_amount", v))
+                    .transpose()?,
+                payment_frequency: p
+                    .payment_frequency
+                    .as_deref()
+                    .map(crate::handlers::liabilities::PaymentFrequency::parse)
+                    .transpose()?,
+                payment_end_date: p
+                    .payment_end_date
+                    .as_deref()
+                    .map(|d| parse_date_param("payment_end_date", d))
+                    .transpose()?,
+                notes: p.notes.clone(),
+                sort_index: None,
+            })
+        };
+        let body = match run() {
+            Ok(b) => b,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let l = create_liability_core(&self.state, id.installation_id, id.user_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": l.id,
+                "resumen": format!("{} · principal {}", l.label, l.principal),
+                "principal_derived_from_plan": l.principal_derived_from_plan,
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "create_budget_entry",
+        description = "Añade una partida al presupuesto mensual: categoría income|expense + importe > 0. En modo A el presupuesto es la fuente del ahorro proyectado: esto mueve la proyección entera — considera enseñar antes el impacto con simulate_projection. ends_at_retirement y expense_end_date son excluyentes.",
+        annotations(title = "Crear partida de presupuesto", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn create_budget_entry(
+        &self,
+        Parameters(p): Parameters<CreateBudgetEntryParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<crate::handlers::budget::CreateBudgetEntryBody, ApiError> {
+            Ok(crate::handlers::budget::CreateBudgetEntryBody {
+                category_id: parse_uuid_param("category_id", &p.category_id)?,
+                amount: parse_decimal_param("amount", &p.amount)?,
+                notes: p.notes.clone(),
+                sort_index: None,
+                persists_after_retirement: p.persists_after_retirement.unwrap_or(false),
+                ends_at_retirement: p.ends_at_retirement.unwrap_or(false),
+                expense_end_date: p
+                    .expense_end_date
+                    .as_deref()
+                    .map(|d| parse_date_param("expense_end_date", d))
+                    .transpose()?,
+            })
+        };
+        let body = match run() {
+            Ok(b) => b,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let b = create_budget_entry_core(&self.state, id.installation_id, id.user_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": b.id,
+                "category_id": b.category_id,
+                "scope": b.scope,
+                "amount_monthly": b.amount.to_string(),
+                "persists_after_retirement": b.persists_after_retirement,
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_budget_entry",
+        description = "Edita una partida del presupuesto («sube el presupuesto de ocio a 250 €»): cualquier campo es opcional; clear_expense_end_date borra la fecha fin. Mueve la proyección entera en modo A.",
+        annotations(title = "Editar partida de presupuesto", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_budget_entry(
+        &self,
+        Parameters(p): Parameters<UpdateBudgetEntryParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<(Uuid, crate::handlers::budget::PatchBudgetEntryBody), ApiError> {
+            if p.expense_end_date.is_some() && p.clear_expense_end_date == Some(true) {
+                return Err(ApiError::BadRequest(
+                    "provide either expense_end_date or clear_expense_end_date, not both".into(),
+                ));
+            }
+            Ok((
+                parse_uuid_param("id", &p.id)?,
+                crate::handlers::budget::PatchBudgetEntryBody {
+                    category_id: parse_opt_uuid_param("category_id", &p.category_id)?,
+                    amount: p
+                        .amount
+                        .as_deref()
+                        .map(|v| parse_decimal_param("amount", v))
+                        .transpose()?,
+                    notes: p.notes.clone(),
+                    sort_index: None,
+                    persists_after_retirement: p.persists_after_retirement,
+                    ends_at_retirement: p.ends_at_retirement,
+                    expense_end_date: p
+                        .expense_end_date
+                        .as_deref()
+                        .map(|d| parse_date_param("expense_end_date", d))
+                        .transpose()?,
+                    clear_expense_end_date: p.clear_expense_end_date,
+                },
+            ))
+        };
+        let (entry_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let b = patch_budget_entry_core(&self.state, id.installation_id, id.user_id, entry_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": b.id,
+                "category_id": b.category_id,
+                "scope": b.scope,
+                "amount_monthly": b.amount.to_string(),
+                "persists_after_retirement": b.persists_after_retirement,
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_allocation_rule",
+        description = "Edita una regla de la cascada de asignación («aporta 200 € más al mes al fondo indexado»): amount (euros para fixed, % para percent), cap (kind+value o clear_cap) y enabled. Deliberadamente SIN create/delete/reorder desde chat: los invariantes del sumidero los enforcea el servidor con errores tipados (remainder_required, uncapped_remainder_exists). Mueve la proyección entera.",
+        annotations(title = "Editar regla de asignación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_allocation_rule(
+        &self,
+        Parameters(p): Parameters<UpdateAllocationRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<(Uuid, crate::handlers::allocation_rules::PatchAllocationRuleBody), ApiError> {
+            if p.amount.is_none()
+                && p.cap_kind.is_none()
+                && p.clear_cap.is_none()
+                && p.enabled.is_none()
+            {
+                return Err(ApiError::BadRequest(
+                    "provide at least one of amount, cap_kind/cap_value, clear_cap, enabled".into(),
+                ));
+            }
+            if p.clear_cap == Some(true) && p.cap_kind.is_some() {
+                return Err(ApiError::BadRequest(
+                    "provide either a cap or clear_cap, not both".into(),
+                ));
+            }
+            let cap = if p.clear_cap == Some(true) {
+                Some(serde_json::Value::Null)
+            } else if let Some(kind) = &p.cap_kind {
+                Some(serde_json::json!({"kind": kind, "value": p.cap_value}))
+            } else {
+                None
+            };
+            Ok((
+                parse_uuid_param("rule_id", &p.rule_id)?,
+                crate::handlers::allocation_rules::PatchAllocationRuleBody {
+                    target_asset_id: None,
+                    kind: None,
+                    amount: p
+                        .amount
+                        .as_ref()
+                        .map(|a| serde_json::Value::String(a.clone())),
+                    cap,
+                    enabled: p.enabled,
+                    notes: None,
+                },
+            ))
+        };
+        let (rule_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let before = list_allocation_rules_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                LedgerView::Household,
+            )
+            .await?
+            .into_iter()
+            .find(|r| r.id == rule_id);
+            let r = patch_allocation_rule_core(&self.state, id.installation_id, id.user_id, rule_id, body)
+                .await?;
+            Ok(serde_json::json!({"id": r.id, "antes": before, "despues": r}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_recurring_rule",
+        description = "Retira una plantilla recurrente («deja de apuntarme el gimnasio»). Solo borra la PLANTILLA: las instancias ya materializadas sobreviven. Sin confirm=true no borra nada — devuelve un preview con la plantilla y su cursor last_materialized_month.",
+        annotations(title = "Borrar recurrente", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_recurring_rule(
+        &self,
+        Parameters(p): Parameters<DeleteRecurringRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let rule_id = match parse_uuid_param("id", &p.id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            // Preview vía la core de listado (cero SQL propio); 404 si no es suya.
+            let rule = list_recurring_rules_core(&self.state.pool, id.installation_id, id.user_id)
+                .await?
+                .into_iter()
+                .find(|r| r.id == rule_id)
+                .ok_or(ApiError::NotFound)?;
+            if !p.confirm.unwrap_or(false) {
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_recurring_rule",
+                    "effects": {
+                        "rule": rule,
+                        "nota": "solo se borra la plantilla; las instancias materializadas se conservan",
+                    },
+                }));
+            }
+            delete_recurring_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id)
+                .await?;
+            Ok(serde_json::json!({"id": rule_id, "deleted": true}))
         }
         .await;
         to_tool_result(res)

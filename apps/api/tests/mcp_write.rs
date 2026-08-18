@@ -504,3 +504,279 @@ async fn planning_flow_update_and_due_date_tristate() {
     .await;
     tool_error(&envelope, "bad_request");
 }
+
+// ---------------------------------------------------------------------------
+// Tramo 2 — assets / liabilities / budget / allocation / delete_recurring_rule
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn asset_tools_create_update_and_reject_absurd_returns() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+    let cat = app.create_category(&owner, "asset", "Fondos").await;
+
+    warm(&app, &owner.cookie, &key).await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_asset",
+            json!({"name": "Depósito", "category_id": cat, "current_value": "10000", "expected_annual_return_percent": "3"}),
+        ),
+    )
+    .await;
+    let created = tool_json(&envelope);
+    let asset_id = created["id"].as_str().unwrap().to_string();
+    assert!(created["resumen"].as_str().unwrap().contains("Depósito"));
+    assert_invalidated(&app, &key, "create_asset").await;
+
+    // update_asset_value: valor anterior/nuevo + FULL.
+    warm(&app, &owner.cookie, &key).await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_asset_value",
+            json!({"asset_id": asset_id, "current_value": "10500", "expected_annual_return_percent": "-20"}),
+        ),
+    )
+    .await;
+    let updated = tool_json(&envelope);
+    let num = |v: &serde_json::Value| v.as_str().unwrap().parse::<f64>().unwrap();
+    assert_eq!(num(&updated["valor_anterior"]), 10000.0);
+    assert_eq!(num(&updated["valor_nuevo"]), 10500.0);
+    assert_eq!(num(&updated["expected_annual_return_percent"]), -20.0);
+    assert_invalidated(&app, &key, "update_asset_value").await;
+
+    // Cota compartida con el PATCH HTTP: retorno <= -100 → bad_request.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_asset_value",
+            json!({"asset_id": asset_id, "expected_annual_return_percent": "-100"}),
+        ),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(body["message"].as_str().unwrap().contains("-100"));
+
+    // Sin campos → bad_request.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_asset_value", json!({"asset_id": asset_id})),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+}
+
+#[tokio::test]
+async fn liability_create_with_derived_principal() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "liability", "Préstamos").await;
+
+    // Modo derive sin plan completo → mismos 400 que HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_liability",
+            json!({"label": "Coche", "category_id": cat, "derive_principal_from_plan": true, "payment_amount": "300"}),
+        ),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(body["message"].as_str().unwrap().contains("payment_frequency"));
+
+    // Plan completo → el principal se deriva (> 0) y queda marcado.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_liability",
+            json!({"label": "Coche", "category_id": cat, "derive_principal_from_plan": true,
+                   "payment_amount": "300", "payment_frequency": "monthly",
+                   "payment_end_date": "2028-12-01", "apr_percent": "5"}),
+        ),
+    )
+    .await;
+    let created = tool_json(&envelope);
+    assert_eq!(created["principal_derived_from_plan"], true);
+    assert!(created["resumen"].as_str().unwrap().contains("Coche"));
+}
+
+#[tokio::test]
+async fn budget_tools_move_projection_and_validate() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+    let cat = app.create_category(&owner, "expense", "Ocio").await;
+
+    warm(&app, &owner.cookie, &key).await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("create_budget_entry", json!({"category_id": cat, "amount": "150"})),
+    )
+    .await;
+    let created = tool_json(&envelope);
+    assert_eq!(created["amount_monthly"].as_str().unwrap().parse::<f64>().unwrap(), 150.0);
+    assert_invalidated(&app, &key, "create_budget_entry").await;
+
+    // «Sube el presupuesto de ocio a 250» + exclusión mutua validada.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_budget_entry",
+            json!({"id": created["id"], "amount": "250"}),
+        ),
+    )
+    .await;
+    let updated = tool_json(&envelope);
+    assert_eq!(updated["amount_monthly"].as_str().unwrap().parse::<f64>().unwrap(), 250.0);
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_budget_entry",
+            json!({"id": created["id"], "ends_at_retirement": true, "expense_end_date": "2030-01-01"}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+}
+
+#[tokio::test]
+async fn allocation_rule_update_respects_sink_invariant() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "asset", "Fondos").await;
+
+    // Un activo + su regla sink (remainder sin cap) por HTTP.
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat, "name": "Fondo", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+    let rule = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({"target_asset_id": asset_id, "kind": "remainder"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+    let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+
+    // Capar el único sink lo destruiría → mismo error tipado que HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_allocation_rule",
+            json!({"rule_id": rule_id, "cap_kind": "amount", "cap_value": "5000"}),
+        ),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(
+        body["message"].as_str().unwrap().contains("remainder_required"),
+        "{body}"
+    );
+
+    // enabled=false es un cambio legal y devuelve antes/después.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_allocation_rule",
+            json!({"rule_id": rule_id, "enabled": false}),
+        ),
+    )
+    .await;
+    let out = tool_json(&envelope);
+    assert_eq!(out["antes"]["enabled"], true);
+    assert_eq!(out["despues"]["enabled"], false);
+}
+
+#[tokio::test]
+async fn delete_recurring_rule_previews_then_deletes() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "expense", "Gimnasio").await;
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_transaction",
+            json!({"op_date": "2026-07-01", "concept": "gym", "amount": "-30.00", "kind": "expense", "category_id": cat, "recurring": true}),
+        ),
+    )
+    .await;
+    let created = tool_json(&envelope);
+    let rule_id = created["recurring_rule_id"].as_str().unwrap().to_string();
+
+    // Sin confirm → preview con la plantilla; NO borra.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_recurring_rule", json!({"id": rule_id})),
+    )
+    .await;
+    let preview = tool_json(&envelope);
+    assert_eq!(preview["preview"], true);
+    assert_eq!(preview["confirm_required"], true);
+    assert_eq!(preview["effects"]["rule"]["id"].as_str().unwrap(), rule_id);
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM recurring_transaction_rules")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "el preview no debe borrar nada");
+
+    // Con confirm → borra; la instancia materializada sobrevive (SET NULL).
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_recurring_rule", json!({"id": rule_id, "confirm": true})),
+    )
+    .await;
+    let out = tool_json(&envelope);
+    assert_eq!(out["deleted"], true);
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM recurring_transaction_rules")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    let txns: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM transactions")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert!(txns >= 1, "las instancias sobreviven al borrado de la plantilla");
+
+    // Repetir el borrado → not_found (idempotencia observable).
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_recurring_rule", json!({"id": rule_id, "confirm": true})),
+    )
+    .await;
+    tool_error(&envelope, "not_found");
+}

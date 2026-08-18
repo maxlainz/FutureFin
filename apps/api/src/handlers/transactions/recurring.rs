@@ -424,18 +424,31 @@ pub async fn delete_recurring_rule(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
-    // La FK `transactions.recurring_rule_id` es ON DELETE SET NULL → las instancias sobreviven.
+    delete_recurring_rule_core(&state.pool, iid, user.id.0, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_recurring_rule`. Solo
+/// borra la plantilla — la FK `transactions.recurring_rule_id` es ON DELETE SET NULL, las
+/// instancias ya materializadas sobreviven → por eso NO invalida la cache (contrato pinneado
+/// en `transactions_projection_cache.rs`).
+pub(crate) async fn delete_recurring_rule_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
     let res = sqlx::query(
         r#"DELETE FROM recurring_transaction_rules
            WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
     )
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
-    .execute(&state.pool)
+    .bind(user_id)
+    .execute(pool)
     .await?;
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(())
 }

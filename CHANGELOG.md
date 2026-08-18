@@ -26,6 +26,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   destructividad/idempotencia según la tabla del issue. `get_info` y las instrucciones del
   servidor ya no anuncian «solo lectura».
 
+### Added — MCP: tools de escritura, tramo 2 (ledger y presupuesto)
+
+- 7 tools más: `update_asset_value` («mi fondo vale ahora 52.300 €», subset deliberado con
+  before/after), `create_asset`, `create_liability` (con `derive_principal_from_plan`),
+  `create_budget_entry`/`update_budget_entry`, `update_allocation_rule` («aporta 200 € más al
+  mes al fondo», subset amount/cap/enabled — la edición estructural de la cascada queda fuera de
+  chat y la invariante del sink vive en la core compartida) y `delete_recurring_rule`, que
+  estrena el patrón **preview/confirm**: sin `confirm: true` devuelve un preview como éxito
+  (información para el LLM, no un fallo) y no toca nada.
+- Cores de mutación extraídas: `create_asset_core`, `patch_asset_core`, `create_liability_core`,
+  `create_budget_entry_core`, `patch_budget_entry_core`, `patch_allocation_rule_core` y
+  `delete_recurring_rule_core` — como en el tramo 1, la invalidación (FULL, o NONE en la regla
+  recurrente) vive dentro de la core.
+- La capa API valida ahora `expected_annual_return_percent > −100` al crear/editar activos
+  (HTTP y MCP): el engine clampa ≤ −100 a pérdida total, pero los inputs nuevos absurdos se
+  rechazan con error tipado (misma cota que los overrides de `simulate_projection`).
+
 ### Changed — Ajustes: pestaña dedicada «MCP» (y «Acceso» pasa a «Usuarios»)
 
 - Todo lo relacionado con el servidor MCP vive ahora en una sub-tab propia de Ajustes: panel

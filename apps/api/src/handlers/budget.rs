@@ -487,7 +487,18 @@ pub async fn create_budget_entry(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = create_budget_entry_core(&state, iid, user.id.0, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+}
 
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_budget_entry`. En modo A
+/// el budget es la fuente del ahorro proyectado → invalidación FULL dentro.
+pub(crate) async fn create_budget_entry_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    body: CreateBudgetEntryBody,
+) -> Result<BudgetEntryResponse, ApiError> {
     assert_budget_category(&state.pool, iid, body.category_id).await?;
 
     if body.amount <= Decimal::ZERO {
@@ -519,7 +530,7 @@ pub async fn create_budget_entry(
     .bind(body.amount)
     .bind(&notes)
     .bind(sort_index)
-    .bind(user.id.0)
+    .bind(user_id)
     .bind(body.persists_after_retirement)
     .bind(body.ends_at_retirement)
     .bind(body.expense_end_date)
@@ -538,11 +549,8 @@ pub async fn create_budget_entry(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(row_to_entry_response(row)?),
-    ))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    row_to_entry_response(row)
 }
 
 #[utoipa::path(
@@ -572,7 +580,19 @@ pub async fn patch_budget_entry(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = patch_budget_entry_core(&state, iid, user.id.0, id, body).await?;
+    Ok(Json(resp))
+}
 
+/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_budget_entry`.
+/// Exclusión mutua `ends_at_retirement` ⊕ `expense_end_date` re-verificada tras el merge.
+pub(crate) async fn patch_budget_entry_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: PatchBudgetEntryBody,
+) -> Result<BudgetEntryResponse, ApiError> {
     if body.category_id.is_none()
         && body.amount.is_none()
         && body.notes.is_none()
@@ -678,8 +698,8 @@ pub async fn patch_budget_entry(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(Json(row_to_entry_response(updated)?))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    row_to_entry_response(updated)
 }
 
 #[utoipa::path(

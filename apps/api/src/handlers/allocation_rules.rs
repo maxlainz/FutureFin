@@ -496,7 +496,21 @@ pub async fn patch_allocation_rule(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = patch_allocation_rule_core(&state, iid, user.id.0, id, body).await?;
+    Ok(Json(resp))
+}
 
+/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_allocation_rule` (subset
+/// amount/cap/enabled — sin create/delete/reorder desde chat). La invariante del sink
+/// (`remainder_required` / `uncapped_remainder_exists`) vive AQUÍ dentro: reimplementarla en
+/// otro camino es la vía rápida a corromper la cascada. Invalidación FULL dentro.
+pub(crate) async fn patch_allocation_rule_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: PatchAllocationRuleBody,
+) -> Result<AllocationRuleResponse, ApiError> {
     let current: Option<RuleRow> = sqlx::query_as(
         r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
                   cap_kind, cap_value, enabled, notes
@@ -616,8 +630,8 @@ pub async fn patch_allocation_rule(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(Json(row_to_response(updated)))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    Ok(row_to_response(updated))
 }
 
 #[utoipa::path(
