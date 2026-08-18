@@ -188,7 +188,19 @@ pub async fn create_transaction(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = create_transaction_core(&state, iid, user.id.0, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+}
 
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_transaction`. La
+/// invalidación condicionada de la cache (COND: solo modos B/C) vive DENTRO, post-commit —
+/// así el contrato es idéntico por ambos caminos. El caller ya validó sesión + rol.
+pub(crate) async fn create_transaction_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    body: CreateTransactionBody,
+) -> Result<TransactionResponse, ApiError> {
     let prepared = validate_manual(&state.pool, iid, &body).await?;
     // Recurrencia (opcional): marcador sin campos — las reglas tienen resolución mensual.
     let is_recurring = body.recurrence.is_some();
@@ -204,11 +216,11 @@ pub async fn create_transaction(
     }
 
     let mut tx = state.pool.begin().await?;
-    let ordinal = next_fingerprint_ordinal(&mut tx, iid, user.id.0, &prepared.fingerprint).await?;
+    let ordinal = next_fingerprint_ordinal(&mut tx, iid, user_id, &prepared.fingerprint).await?;
     let id = insert_manual_with_recurrence(
         &mut tx,
         iid,
-        user.id.0,
+        user_id,
         &prepared,
         ordinal,
         is_recurring,
@@ -217,9 +229,8 @@ pub async fn create_transaction(
     .await?;
     tx.commit().await?;
 
-    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
-    let resp = load_txn(&state.pool, id).await?;
-    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+    invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+    load_txn(&state.pool, id).await
 }
 
 // ---------------------------------------------------------------------------
@@ -607,7 +618,20 @@ pub async fn patch_transaction(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = patch_transaction_core(&state, iid, user.id.0, id, body).await?;
+    Ok(Json(resp))
+}
 
+/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_transaction`. Merge campo a
+/// campo con flags `clear_*`, política de huella (manual recomputa / importada anclada) e
+/// invalidación COND post-commit dentro. Owner-guard → 404 (solo movimientos propios).
+pub(crate) async fn patch_transaction_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: PatchTransactionBody,
+) -> Result<TransactionResponse, ApiError> {
     let current: Option<TxnCore> = sqlx::query_as(
         r#"SELECT import_id, source, op_date, value_date, concept, amount, kind, category_id,
                   linked_asset_id, linked_liability_id, notes, fingerprint, fingerprint_ordinal
@@ -616,7 +640,7 @@ pub async fn patch_transaction(
     )
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
+    .bind(user_id)
     .fetch_optional(&state.pool)
     .await?;
     let Some(current) = current else {
@@ -694,7 +718,7 @@ pub async fn patch_transaction(
         if fp == current.fingerprint {
             (current.fingerprint.clone(), current.fingerprint_ordinal)
         } else {
-            let ord = next_fingerprint_ordinal(&mut tx, iid, user.id.0, &fp).await?;
+            let ord = next_fingerprint_ordinal(&mut tx, iid, user_id, &fp).await?;
             (fp, ord)
         }
     } else {
@@ -721,14 +745,13 @@ pub async fn patch_transaction(
     .bind(new_ordinal)
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
+    .bind(user_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
 
-    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
-    let resp = load_txn(&state.pool, id).await?;
-    Ok(Json(resp))
+    invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+    load_txn(&state.pool, id).await
 }
 
 // ---------------------------------------------------------------------------
