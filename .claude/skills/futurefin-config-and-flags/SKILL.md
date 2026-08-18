@@ -13,7 +13,7 @@ description: >
   (?view=mine, ?months, ?density=hybrid), request-body limits, and per-installation runtime
   settings (PATCH /v1/installation: base_currency, calendar_tz, show_age_mode,
   annual_inflation_assumption_percent, the fire_settings JSONB with swr_pct and tax_brackets
-  bounds). Load this skill when you need to know what an option is called, its default, its
+  bounds, and mcp_write_enabled — the live kill-switch of the MCP write tools). Load this skill when you need to know what an option is called, its default, its
   validation bounds, WHICH FILE parses it (Rust binary vs entrypoint vs compose), whether it is
   prod or dev-only, why production needs no env var at all since 3.0.0, why setting DATABASE_URL
   flips the image into deprecated external-DB mode, why a setting change returns 400, why an env
@@ -419,9 +419,11 @@ and if the endpoint is the cached projection route, extend `ProjectionCacheKey` 
 
 ## Provenance and maintenance
 
-Env/compose/entrypoint rows re-verified **2026-08-16 against v3.0.0**, and the two OAuth-related
-rows (`FUTUREFIN_PUBLIC_URL`, `FUTUREFIN_MCP_ENABLED`) **2026-08-17 against v3.1.0**; the rest of the
-tables carry their own dates inline. Every row is re-verifiable — run these from the repo root when
+Env/compose/entrypoint rows re-verified **2026-08-16 against v3.0.0**, the two OAuth-related
+rows (`FUTUREFIN_PUBLIC_URL`, `FUTUREFIN_MCP_ENABLED`) **2026-08-17 against v3.1.0**, and the
+`mcp_write_enabled` installation-setting row **2026-08-18** (issue #3; re-verify with
+`grep -n "mcp_write_enabled" apps/api/src/handlers/installation.rs apps/api/src/mcp/auth.rs`);
+the rest of the tables carry their own dates inline. Every row is re-verifiable — run these from the repo root when
 auditing for drift (all confirmed working on 2026-08-17):
 
 - Env parsing, defaults, bounds, load order: `grep -n "env::var\|unwrap_or\|contains(&d)\|load_env" apps/api/src/main.rs`

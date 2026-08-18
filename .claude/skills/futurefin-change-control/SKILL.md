@@ -377,9 +377,9 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (**3.1.0** on 2026-08-17)
-- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**36** on 2026-08-17)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**23** on 2026-08-17); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (206)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**3.2.0** on 2026-08-18)
+- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**38** on 2026-08-18 — la 38ª es `20260818120000_installation_mcp_write_enabled`, issue #3)
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**25** on 2026-08-18 — nuevas `mcp_simulate.rs` y `mcp_write.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (242)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
 - Compose topology (one service since 3.0.0):
