@@ -36,12 +36,20 @@ async fn create_asset(app: &TestApp, cookie: &str, cat: &str, name: &str, value:
     Uuid::parse_str(r.json()["id"].as_str().expect("asset id")).expect("asset uuid")
 }
 
-async fn create_liability(app: &TestApp, cookie: &str, cat: &str, label: &str, principal: &str) -> Uuid {
+async fn create_liability(
+    app: &TestApp,
+    cookie: &str,
+    cat: &str,
+    exp_cat: &str,
+    label: &str,
+    principal: &str,
+) -> Uuid {
     let r = app
         .post_json_with_cookie(
             "/v1/liabilities",
             serde_json::json!({
                 "category_id": cat,
+                "expense_category_id": exp_cat,
                 "label": label,
                 "principal": principal,
                 "apr_percent": "3.5",
@@ -145,10 +153,13 @@ async fn backup_v4_roundtrip_series_identical() {
     let owner = app.register_and_login_owner("alice").await;
     let asset_cat = app.create_category(&owner, "asset", "Cash").await;
     let liab_cat = app.create_category(&owner, "liability", "Loan").await;
+    // Categoría de gasto usada SOLO por expense_category_id: cubre el caso que sin la cláusula
+    // nueva de fetch_categories_used haría fallar el import (resolve_category hard-fail).
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
     let ua = create_asset(&app, &owner.cookie, &asset_cat, "A", "10000").await;
     let ub = create_asset(&app, &owner.cookie, &asset_cat, "B", "5000").await;
-    let ul = create_liability(&app, &owner.cookie, &liab_cat, "L", "20000").await;
+    let ul = create_liability(&app, &owner.cookie, &liab_cat, &liab_exp_cat, "L", "20000").await;
 
     // Backfill a past date for both kinds (item_id = live ledger id → links to today).
     let past = past_ymd(200);
@@ -233,6 +244,21 @@ async fn backup_v4_roundtrip_series_identical() {
         markers_before,
         "marker count must survive the round-trip"
     );
+
+    // 3.4.0: la categoría de gasto de la cuota sobrevive el round-trip (`expense_category_ref`
+    // por (scope, name)); además "Cuotas" solo la usa `expense_category_id`, así que este assert
+    // cubre la cláusula nueva de `fetch_categories_used` — sin ella el import habría fallado.
+    let liabs_after = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    let l = liabs_after.as_array().unwrap().first().expect("liability after import").clone();
+    let exp_cat_after = l["expense_category_id"].as_str().expect("expense_category_id viaja");
+    let cats = app.get_with_cookie("/v1/categories?scope=expense", &owner.cookie).await.json();
+    let cuotas = cats
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Cuotas")
+        .expect("categoría Cuotas reimportada");
+    assert_eq!(exp_cat_after, cuotas["id"].as_str().unwrap(), "re-vinculada por (scope, name)");
 }
 
 /// After import, every asset-snapshot item that carried a `ledger_index` re-links to a FRESH,

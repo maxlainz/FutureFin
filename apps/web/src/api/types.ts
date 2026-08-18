@@ -203,6 +203,8 @@ export type BudgetEntryApiRow = {
 export type DerivedBudgetLineApi = {
   liability_id: string;
   category_id: string;
+  /** Categoría de GASTO donde la comparativa atribuye la cuota; ausente = sin asignar (pre-3.4.0). */
+  expense_category_id?: string;
   label: string;
   amount: string;
   frequency: "monthly" | "weekly";
@@ -319,6 +321,8 @@ export type FfbackupImportApplyResponse = {
 export type LiabilityApiRow = {
   id: string;
   category_id: string;
+  /** Categoría de GASTO de la cuota; ausente solo en pasivos pre-3.4.0 sin asignar. */
+  expense_category_id?: string;
   label: string;
   type_tag: string | null;
   principal_derived_from_plan?: boolean;

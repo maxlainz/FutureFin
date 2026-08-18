@@ -15,11 +15,16 @@
 //! con ≥1 transacción (promedio ponderado: los meses vacíos no diluyen la media). Si no hay
 //! ninguno el denominador es 1 (numerador 0 → avg 0).
 //!
-//! ## Sin línea derivada de cuotas de pasivo
-//! A diferencia de `budget.rs`, la comparativa NO añade una línea derivada de las cuotas de
-//! pasivos: `totals.expense_budget` es Σ del presupuesto de las categorías de gasto. Las cuotas
-//! reales viven ya en su categoría de gasto ordinaria (los movimientos importados/manuales) → así
-//! no se cuentan dos veces.
+//! ## Cuotas de pasivo: atribuidas a su categoría de gasto (3.4.0)
+//! Desde 3.4.0 cada pasivo puede declarar `expense_category_id` (obligatorio al crear) y su
+//! equivalente mensual entra en el lado Budget de ESA categoría — emparejado con los recibos
+//! reales, que ya viven categorizados → `Hipoteca · Real 512 · Budget 500 · Δ +12`. Historia:
+//! la v1.8.0 retiró la antigua `derived_debt_line` porque era una fila sintética SIN pareja
+//! (solo lado budget, con la cuota real dentro de otra categoría) y la comparativa la contaba
+//! dos veces; el emparejamiento por categoría elimina esa asimetría. Pasivos sin categoría
+//! asignada (NULL, anteriores a 3.4.0) no aportan nada — comportamiento previo intacto. Nota
+//! documentada: presupuestar a mano la cuota en la misma categoría infla su Budget (visible y
+//! autocorregible, no silencioso).
 
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
@@ -454,6 +459,36 @@ pub(crate) async fn transactions_summary_core(
             "income" => *income_budget.entry(cat).or_insert(Decimal::ZERO) += total,
             _ => {}
         }
+    }
+
+    // ---- Cuotas de pasivo atribuidas a su categoría de gasto (3.4.0) -------------------------
+    // El pasivo «publica» su cuota en el presupuesto: el equivalente mensual del plan entra en
+    // el lado Budget de SU categoría de gasto, donde se empareja con los recibos reales (que ya
+    // viven categorizados) → la fila y el total se igualan. Solo pasivos con categoría asignada
+    // (los NULL previos a 3.4.0 se comportan como siempre) y ACTIVOS en el mes seleccionado
+    // (fin de plan NULL = indefinido; el mes en que termina aún cuenta). El universo de
+    // `build_lines` une las claves del budget_map, así que una categoría solo-cuota materializa
+    // su fila aunque no tenga movimientos ni partidas.
+    let lscope = view.scope_where("");
+    let l_month_ph = view.next_arg_index();
+    let lsql = format!(
+        "SELECT expense_category_id, payment_amount, payment_frequency
+         FROM liabilities
+         WHERE {lscope}
+           AND expense_category_id IS NOT NULL
+           AND payment_amount IS NOT NULL
+           AND payment_frequency IS NOT NULL
+           AND (payment_end_date IS NULL OR payment_end_date >= ${l_month_ph})"
+    );
+    let lrows: Vec<(Option<Uuid>, Decimal, String)> = view
+        .bind_scope_as(sqlx::query_as(&lsql), iid, user_id)
+        .bind(month_start)
+        .fetch_all(pool)
+        .await?;
+    for (cat, amount, freq) in lrows {
+        let Some(cat) = cat else { continue };
+        *expense_budget.entry(cat).or_insert(Decimal::ZERO) +=
+            crate::handlers::budget::monthly_equivalent(amount, &freq);
     }
 
     // ---- Nombres de categoría ----------------------------------------------------------------

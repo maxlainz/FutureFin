@@ -836,6 +836,7 @@ export function BudgetView({
                       <tr>
                         <th>Concepto</th>
                         {isMobile ? null : <th>Categoría pasivo</th>}
+                        {isMobile ? null : <th>Categoría gasto</th>}
                         {isMobile ? null : <th className="num">Cuota</th>}
                         {isMobile ? null : <th>Frec.</th>}
                         <th className="num">Equiv. mensual</th>
@@ -866,6 +867,23 @@ export function BudgetView({
                             </td>
                           )}
                           {isMobile ? null : (
+                            <td>
+                              {row.expense_category_id ? (
+                                budgetDerivedCatLabel(
+                                  budgetExpenseCategories,
+                                  row.expense_category_id,
+                                )
+                              ) : (
+                                <span
+                                  className="muted"
+                                  title="Asigna la categoría de gasto en Pasivos para que Movimientos empareje la cuota."
+                                >
+                                  Sin asignar
+                                </span>
+                              )}
+                            </td>
+                          )}
+                          {isMobile ? null : (
                             <td className="num">
                               {formatCurrencyAmount(row.amount, currencyIso)}
                             </td>
@@ -885,6 +903,13 @@ export function BudgetView({
                   </table>
                 </div>
               )}
+              {derivedLines.length > 0 ? (
+                <p className="muted tight">
+                  Estas cuotas ya cuentan en el total y, con categoría de gasto
+                  asignada, en el presupuesto de esa categoría — no las
+                  dupliques como partida propia.
+                </p>
+              ) : null}
             </section>
           </div>
         </div>

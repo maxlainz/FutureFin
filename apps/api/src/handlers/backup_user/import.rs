@@ -462,18 +462,25 @@ async fn insert_payload(
     let mut liabilities = 0u32;
     for l in &payload.liabilities {
         let cid = resolve_category(cat_map, &l.category_ref.scope, &l.category_ref.name)?;
+        // Backups anteriores a 3.4.0 no llevan el campo → NULL (pasivo sin asignar, como los
+        // legacy). El INSERT directo bypasea a propósito la obligatoriedad del create.
+        let expense_cid = match &l.expense_category_ref {
+            Some(r) => Some(resolve_category(cat_map, &r.scope, &r.name)?),
+            None => None,
+        };
         let new_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO liabilities (
-                   id, installation_id, owner_user_id, category_id, label, type_tag,
-                   principal, principal_derived_from_plan, apr_percent, payment_amount,
+                   id, installation_id, owner_user_id, category_id, expense_category_id, label,
+                   type_tag, principal, principal_derived_from_plan, apr_percent, payment_amount,
                    payment_frequency, payment_end_date, notes, sort_index
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
         )
         .bind(new_id)
         .bind(iid)
         .bind(user_id)
         .bind(cid)
+        .bind(expense_cid)
         .bind(&l.label)
         .bind(l.type_tag.as_deref())
         .bind(l.principal)

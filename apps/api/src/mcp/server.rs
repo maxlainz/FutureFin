@@ -529,6 +529,10 @@ pub struct CreateLiabilityParams {
     pub label: String,
     /// Categoría con scope liability (UUID de list_categories).
     pub category_id: String,
+    /// Categoría de GASTO donde vive la cuota (UUID de list_categories, scope expense).
+    /// Obligatoria: el presupuesto y la comparativa de Movimientos atribuyen ahí el
+    /// equivalente mensual del plan.
+    pub expense_category_id: String,
     /// Principal >= 0 como string decimal. Obligatorio salvo derive_principal_from_plan.
     #[serde(default)]
     pub principal: Option<String>,
@@ -1654,7 +1658,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_liability",
-        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva por amortización francesa). Mueve la proyección entera.",
+        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva por amortización francesa). Mueve la proyección entera.",
         annotations(title = "Crear pasivo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_liability(
@@ -1666,6 +1670,10 @@ impl FutureFinMcp {
         let run = || -> Result<crate::handlers::liabilities::CreateLiabilityBody, ApiError> {
             Ok(crate::handlers::liabilities::CreateLiabilityBody {
                 category_id: parse_uuid_param("category_id", &p.category_id)?,
+                expense_category_id: parse_uuid_param(
+                    "expense_category_id",
+                    &p.expense_category_id,
+                )?,
                 label: p.label.clone(),
                 type_tag: None,
                 derive_principal_from_plan: p.derive_principal_from_plan,

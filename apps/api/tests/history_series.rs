@@ -324,6 +324,7 @@ async fn series_household_sums_users_and_mine_filters() {
     let owner = app.register_and_login_owner("alice").await;
     let bob = app.register_and_approve_member(&owner, "bob", "member").await;
     let liab_cat = app.create_category(&owner, "liability", "Deuda").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
     let (_, anchor) = server_today(&app, &owner.cookie).await;
 
     // Snapshots de asset de AMBOS usuarios en la MISMA fecha (hace 1 mes).
@@ -337,7 +338,7 @@ async fn series_household_sums_users_and_mine_filters() {
     app.post_json_with_cookie(
         "/v1/liabilities",
         serde_json::json!({
-            "category_id": liab_cat, "label": "Coche", "principal": "5000",
+            "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "Coche", "principal": "5000",
             "payment_amount": "150", "payment_frequency": "monthly", "payment_end_date": future,
         }),
         &bob.cookie,

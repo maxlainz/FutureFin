@@ -49,6 +49,11 @@ pub struct LiabilityResponse {
     pub id: Uuid,
     #[schema(value_type = String, format = "uuid")]
     pub category_id: Uuid,
+    /// Categoría de GASTO donde vive la cuota (atribución en presupuesto y comparativa).
+    /// `null` solo en pasivos anteriores a 3.4.0 aún sin asignar — la API la exige al crear.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub expense_category_id: Option<Uuid>,
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_tag: Option<String>,
@@ -76,6 +81,11 @@ pub struct LiabilityResponse {
 pub struct CreateLiabilityBody {
     #[schema(value_type = String, format = "uuid")]
     pub category_id: Uuid,
+    /// Categoría de GASTO de la cuota — obligatoria desde 3.4.0 (sin `#[serde(default)]`:
+    /// ausente = rechazo). El import de backups NO pasa por aquí (INSERT directo) y los
+    /// pasivos previos conservan NULL hasta que el usuario la asigne por PATCH.
+    #[schema(value_type = String, format = "uuid")]
+    pub expense_category_id: Uuid,
     pub label: String,
     #[serde(default)]
     pub type_tag: Option<String>,
@@ -108,6 +118,11 @@ pub struct PatchLiabilityBody {
     #[serde(default)]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub category_id: Option<Uuid>,
+    /// Set-only (sin clear): asignar o cambiar la categoría de gasto de la cuota; `None` = sin
+    /// tocar. Los NULL legacy solo salen de NULL asignando — nunca se vuelve a NULL vía API.
+    #[serde(default)]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub expense_category_id: Option<Uuid>,
     pub label: Option<String>,
     pub type_tag: Option<String>,
     #[serde(default)]
@@ -134,6 +149,7 @@ pub struct PatchLiabilityBody {
 struct LiabilityRow {
     id: Uuid,
     category_id: Uuid,
+    expense_category_id: Option<Uuid>,
     label: String,
     type_tag: Option<String>,
     principal: Decimal,
@@ -312,6 +328,36 @@ async fn assert_liability_category(
     Ok(())
 }
 
+/// Espejo de `assert_liability_category` para la categoría de GASTO de la cuota (3.4.0): debe
+/// existir, ser de esta instalación y tener scope `expense` — es la categoría a la que el
+/// presupuesto y la comparativa de Movimientos atribuyen el equivalente mensual del plan.
+async fn assert_expense_category(
+    pool: &sqlx::PgPool,
+    installation_id: Uuid,
+    category_id: Uuid,
+) -> Result<(), ApiError> {
+    let ok: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM categories
+            WHERE
+                id = $1
+                AND installation_id = $2
+                AND scope = 'expense'
+        )"#,
+    )
+    .bind(category_id)
+    .bind(installation_id)
+    .fetch_one(pool)
+    .await?;
+
+    if !ok {
+        return Err(ApiError::BadRequest(
+            "expense_category_id must reference an expense category in this installation".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
     let payment_frequency = match r.payment_frequency.as_deref() {
         None => None,
@@ -320,6 +366,7 @@ fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
     Ok(LiabilityResponse {
         id: r.id,
         category_id: r.category_id,
+        expense_category_id: r.expense_category_id,
         label: r.label,
         type_tag: r.type_tag,
         principal_derived_from_plan: r.principal_derived_from_plan,
@@ -370,7 +417,7 @@ pub(crate) async fn list_liabilities_core(
     let scope = view.scope_where("");
     let today_ph = view.next_arg_index();
     let sql = format!(
-        r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
+        r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
                   sort_index, principal_derived_from_plan
            FROM liabilities
@@ -428,6 +475,7 @@ pub(crate) async fn create_liability_core(
     body: CreateLiabilityBody,
 ) -> Result<LiabilityResponse, ApiError> {
     assert_liability_category(&state.pool, iid, body.category_id).await?;
+    assert_expense_category(&state.pool, iid, body.expense_category_id).await?;
 
     let label = normalize_label(&body.label)?;
     let type_tag = normalize_type_tag(&body.type_tag)?;
@@ -477,18 +525,19 @@ pub(crate) async fn create_liability_core(
 
     let row: LiabilityRow = sqlx::query_as(
         r#"INSERT INTO liabilities (
-               installation_id, category_id, label, type_tag, principal,
+               installation_id, category_id, expense_category_id, label, type_tag, principal,
                apr_percent, payment_amount, payment_frequency,
                payment_end_date, notes, sort_index, principal_derived_from_plan,
                owner_user_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-           RETURNING id, category_id, label, type_tag, principal, apr_percent,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           RETURNING id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
                      sort_index, principal_derived_from_plan"#,
     )
     .bind(iid)
     .bind(body.category_id)
+    .bind(body.expense_category_id)
     .bind(&label)
     .bind(&type_tag)
     .bind(principal)
@@ -536,6 +585,7 @@ pub async fn patch_liability(
     }
 
     if body.category_id.is_none()
+        && body.expense_category_id.is_none()
         && body.label.is_none()
         && body.type_tag.is_none()
         && body.derive_principal_from_plan.is_none()
@@ -553,7 +603,7 @@ pub async fn patch_liability(
     }
 
     let row: Option<LiabilityRow> = sqlx::query_as(
-        r#"SELECT id, category_id, label, type_tag, principal, apr_percent,
+        r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
                   sort_index, principal_derived_from_plan
            FROM liabilities
@@ -571,6 +621,13 @@ pub async fn patch_liability(
     let new_cat = body.category_id.unwrap_or(current.category_id);
     if new_cat != current.category_id {
         assert_liability_category(&state.pool, iid, new_cat).await?;
+    }
+
+    // Set-only (sin clear): `None` conserva el valor actual — incluidos los NULL legacy, que solo
+    // salen de NULL asignando una categoría. Revalidar solo cuando cambia.
+    let new_expense_cat = body.expense_category_id.or(current.expense_category_id);
+    if body.expense_category_id.is_some() && new_expense_cat != current.expense_category_id {
+        assert_expense_category(&state.pool, iid, body.expense_category_id.unwrap()).await?;
     }
 
     let new_label = match &body.label {
@@ -646,23 +703,25 @@ pub async fn patch_liability(
     let updated: LiabilityRow = sqlx::query_as(
         r#"UPDATE liabilities
            SET category_id = $1,
-               label = $2,
-               type_tag = $3,
-               principal = $4,
-               apr_percent = $5,
-               payment_amount = $6,
-               payment_frequency = $7,
-               payment_end_date = $8,
-               notes = $9,
-               sort_index = $10,
-               principal_derived_from_plan = $11,
+               expense_category_id = $2,
+               label = $3,
+               type_tag = $4,
+               principal = $5,
+               apr_percent = $6,
+               payment_amount = $7,
+               payment_frequency = $8,
+               payment_end_date = $9,
+               notes = $10,
+               sort_index = $11,
+               principal_derived_from_plan = $12,
                updated_at = now()
-           WHERE id = $12 AND installation_id = $13
-           RETURNING id, category_id, label, type_tag, principal, apr_percent,
+           WHERE id = $13 AND installation_id = $14
+           RETURNING id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
                      sort_index, principal_derived_from_plan"#,
     )
     .bind(new_cat)
+    .bind(new_expense_cat)
     .bind(&new_label)
     .bind(&new_type_tag)
     .bind(new_principal)
