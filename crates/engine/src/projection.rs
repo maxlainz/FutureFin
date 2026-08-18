@@ -155,18 +155,28 @@ fn month_window(month_first: NaiveDate) -> (NaiveDate, NaiveDate) {
 }
 
 /// Factor de crecimiento **mensual** equivalente a una tasa anual nominal (raíz 12ª del factor
-/// anual). Tasas ausentes o ≤ 0 se tratan como crecimiento 0 (factor 1).
+/// anual). Tasas ausentes o exactamente 0 se tratan como crecimiento 0 (factor 1). Las tasas
+/// **negativas componen de verdad** (−50 % anual ⇒ factor mensual ≈ 0,9439, ×0,5 a los 12 meses);
+/// una tasa ≤ −100 % se clampa a factor 0 (pérdida total: el factor anual 1 + p/100 sería ≤ 0 y
+/// no tiene raíz 12ª real). La capa API rechaza inputs ≤ −100 con error tipado; el clamp protege
+/// frente a valores absurdos ya persistidos.
 ///
 /// `pub(crate)` porque `runway.rs` lo comparte: el runway debe usar EXACTAMENTE la misma
-/// conversión anual→mensual que la simulación, o divergiría del chart de proyección.
+/// conversión anual→mensual que la simulación, o divergiría del chart de proyección. Nota: para
+/// la inflación del gasto del runway el argumento nunca es negativo (la instalación valida
+/// 0..50), así que este cambio solo afecta al retorno esperado de los activos.
 pub(crate) fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
     let Some(p) = annual_percent else {
         return Decimal::ONE;
     };
-    if p <= Decimal::ZERO {
+    if p.is_zero() {
         return Decimal::ONE;
     }
-    (Decimal::ONE + p / Decimal::from(100)).powd(Decimal::ONE / Decimal::from(12))
+    let annual_factor = Decimal::ONE + p / Decimal::from(100);
+    if annual_factor <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    annual_factor.powd(Decimal::ONE / Decimal::from(12))
 }
 
 /// Target FIRE en el `month_index` indicado (0 = punto de partida, 12 = un año después, etc.),
@@ -646,6 +656,59 @@ mod tests {
             retirement_monthly_withdrawal: Decimal::ZERO,
             fire_target: None,
         }
+    }
+
+    #[test]
+    fn monthly_multiplier_none_and_zero_are_flat() {
+        assert_eq!(monthly_multiplier(None), Decimal::ONE);
+        assert_eq!(monthly_multiplier(Some(Decimal::ZERO)), Decimal::ONE);
+    }
+
+    /// −50 % anual ⇒ factor anual 0,5 ⇒ factor mensual 0,5^(1/12) ≈ 0,94387. El test fija la
+    /// propiedad definitoria: componer el factor 12 veces reconstruye 0,5 (tolerancia 1e−9 por
+    /// el powd de Decimal).
+    #[test]
+    fn negative_return_composes_downward() {
+        let m = monthly_multiplier(Some(Decimal::from(-50)));
+        assert!(m < Decimal::ONE && m > Decimal::ZERO);
+        let annual = m.powd(Decimal::from(12));
+        let expected = Decimal::new(5, 1); // 0.5
+        assert!(
+            (annual - expected).abs() < Decimal::new(1, 9),
+            "0.94387…^12 debe reconstruir 0.5, obtenido {annual}"
+        );
+    }
+
+    /// El factor anual 1 + p/100 es ≤ 0 a partir de −100 %: sin raíz 12ª real, se clampa a
+    /// pérdida total (factor 0). La capa API rechaza estos valores; el clamp cubre datos ya
+    /// persistidos.
+    #[test]
+    fn minus_100_or_less_clamps_to_zero_factor() {
+        assert_eq!(monthly_multiplier(Some(Decimal::from(-100))), Decimal::ZERO);
+        assert_eq!(monthly_multiplier(Some(Decimal::from(-150))), Decimal::ZERO);
+    }
+
+    /// Las tasas positivas conservan exactamente la fórmula previa al cambio:
+    /// 10 % anual ⇒ 1,1^(1/12) = 1,0079741… (valor capturado antes del refactor).
+    #[test]
+    fn positive_rates_unchanged() {
+        let m = monthly_multiplier(Some(Decimal::from(10)));
+        assert_eq!(m.round_dp(7), Decimal::new(1_007_974_1, 7));
+    }
+
+    /// Nivel simulación: un activo de 10.000 € al −50 % anual, sin flujos, termina el año en
+    /// ≈ 5.000 € (antes del fix quedaba plano en 10.000).
+    #[test]
+    fn negative_asset_return_decays_value_in_simulation() {
+        let a = mk_asset(1, Decimal::from(10_000), true, Some(Decimal::from(-50)));
+        let inp = base_input(12, Decimal::ZERO, Decimal::ZERO, vec![a], vec![]);
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth[0], Decimal::from(10_000));
+        let final_nw = out.net_worth[12];
+        assert!(
+            (final_nw - Decimal::from(5_000)).abs() < Decimal::new(1, 2),
+            "esperado ≈ 5000 tras 12 meses a −50 % anual, obtenido {final_nw}"
+        );
     }
 
     #[test]

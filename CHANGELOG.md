@@ -4,6 +4,26 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed — **cambio de comportamiento**: las rentabilidades negativas componen de verdad en el engine
+
+- `monthly_multiplier` (engine) trataba cualquier tasa anual ≤ 0 como crecimiento 0: un activo
+  guardado con retorno esperado −5 % se proyectaba **plano**, y un what-if pesimista era imposible.
+  Ahora una tasa negativa compone su factor real — la raíz 12ª de `1 + p/100` — mientras el factor
+  anual sea positivo (−100 < p < 0); `p ≤ −100` se clampa a factor 0 (pérdida total; la capa API
+  rechaza esos inputs con error tipado allí donde se aceptan overrides). `None` y `0` siguen siendo
+  factor 1, y las tasas positivas conservan la fórmula exacta anterior (regresión pinneada:
+  10 % anual ⇒ 1,0079741…).
+- **Números trabajados**: 10.000 € al −50 % anual ⇒ factor mensual 0,5^(1/12) ≈ 0,94387 ⇒ ≈ 5.000 €
+  a los 12 meses (antes: 10.000 € intactos). 12.000 € líquidos al −5 % con gasto 1.000 €/mes ⇒ el
+  runway baja de 12,0 meses exactos a ≈ 11,7 (el saldo decrece mientras se consume).
+- **Radio**: afecta a toda proyección persistida con activos de tasa negativa (pasan de plano a
+  decrecer) y al runway de `/v1/summary` (un retorno negativo ahora lo **acorta**). El colapso de
+  la **inflación** ≤ 0 en el target FIRE se mantiene intacto (deflación sostenida sigue fuera del
+  modelo), y la inflación del gasto del runway nunca es negativa (la instalación valida 0..50).
+  Sin impacto en la paridad Rust↔TS: `fire.ts` no duplica el multiplicador mensual.
+
 ## [3.2.0] - 2026-08-17
 
 Dos cambios sobre la misma base: las estadísticas de movimientos. `schema_version` del `.ffbackup`
