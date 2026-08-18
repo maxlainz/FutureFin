@@ -780,19 +780,54 @@ pub async fn delete_transaction(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    delete_transaction_core(&state, iid, user.id.0, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Lectura de un movimiento PROPIO por id (owner-guard → 404). La usa el preview de la tool MCP
+/// `delete_transaction` — cero SQL en el módulo mcp.
+pub(crate) async fn get_transaction_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<TransactionResponse, ApiError> {
+    let owned: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM transactions
+           WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if owned.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    load_txn(pool, id).await
+}
+
+/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_transaction`.
+/// Hard delete con owner-guard → 404; invalidación COND post-delete dentro.
+pub(crate) async fn delete_transaction_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
     let res = sqlx::query(
         r#"DELETE FROM transactions WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
     )
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
+    .bind(user_id)
     .execute(&state.pool)
     .await?;
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -907,19 +942,32 @@ pub async fn delete_import(
                 .into(),
         ));
     }
+    delete_import_core(&state, iid, user.id.0, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Core sin HTTP: lo comparten el handler DELETE (que exige `?confirm=true`) y la tool MCP
+/// `delete_import` (patrón preview/confirm). Borra el lote Y sus transacciones en cascada →
+/// invalidación COND dentro.
+pub(crate) async fn delete_import_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
     let res = sqlx::query(
         r#"DELETE FROM transaction_imports
            WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
     )
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
+    .bind(user_id)
     .execute(&state.pool)
     .await?;
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
     // El borrado del lote cascadea a sus transacciones → cambia el conjunto.
-    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+    Ok(())
 }

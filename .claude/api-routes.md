@@ -347,7 +347,17 @@ Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` 
   effects}` como ÉXITO — para un LLM el preview es información, no fallo — y solo ejecuta con
   confirm; NONE). Todos los anteriores excepto delete_recurring_rule invalidan FULL. La capa API
   valida además `expected_annual_return_percent > −100` en create/patch de assets (el engine
-  clampa ≤ −100 a pérdida total). Regresión: `apps/api/tests/mcp_write.rs`.
+  clampa ≤ −100 a pérdida total). Tramo 3 (destructivas, todas preview/confirm):
+  `delete_transaction` (preview = el movimiento completo; owner-guard), `delete_planning_flow`,
+  `delete_budget_entry`, `delete_asset` (preview con contadores de desvinculación:
+  `linked_asset_id`/`account_asset_id` → SET NULL), `delete_liability` (ídem
+  `linked_liability_id`), `delete_snapshot` (preview con `items_deleted`; NONE), `delete_import`
+  (preview con `transactions_deleted`; cascada; COND — mismo contrato que el `?confirm=true`
+  HTTP) y **`update_fire_settings`** (SOLO owner; merge campo a campo vía
+  `patch_fire_settings_core` — jamás deserializa a `FireSettings` con su `#[serde(default)]` a
+  nivel de struct, el bug del reset silencioso; sin confirm devuelve `{before, after}` validado
+  incluyendo `annual_inflation_assumption_percent`; FULL). Regresión:
+  `apps/api/tests/mcp_write.rs`.
 - **NO está en OpenAPI a propósito**: no es un recurso REST — es JSON-RPC cuyo contrato define la
   spec MCP y que se autodescribe vía `tools/list`.
 - **Límite conocido de 3.0.0 — resuelto en 3.1.0**: el conector de claude.ai exige OAuth 2.1, que

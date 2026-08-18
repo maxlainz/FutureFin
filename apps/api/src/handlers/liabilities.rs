@@ -707,6 +707,34 @@ pub async fn delete_liability(
         return Err(ApiError::Forbidden);
     }
 
+    delete_liability_core(&state, iid, user.id.0, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Nº de transacciones cuyo `linked_liability_id` pasará a NULL al borrar el pasivo (preview
+/// de la tool MCP `delete_liability`).
+pub(crate) async fn liability_delete_effects(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    id: Uuid,
+) -> Result<i64, ApiError> {
+    Ok(sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint FROM transactions
+           WHERE installation_id = $1 AND linked_liability_id = $2"#,
+    )
+    .bind(iid)
+    .bind(id)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_liability`.
+pub(crate) async fn delete_liability_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
     let res =
         sqlx::query(r#"DELETE FROM liabilities WHERE id = $1 AND installation_id = $2"#)
             .bind(id)
@@ -718,8 +746,8 @@ pub async fn delete_liability(
         return Err(ApiError::NotFound);
     }
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    Ok(())
 }
 
 pub fn liabilities_router() -> Router {

@@ -727,6 +727,17 @@ pub async fn delete_budget_entry(
         return Err(ApiError::Forbidden);
     }
 
+    delete_budget_entry_core(&state, iid, user.id.0, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_budget_entry`.
+pub(crate) async fn delete_budget_entry_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
     let res = sqlx::query(r#"DELETE FROM budget_entries WHERE id = $1 AND installation_id = $2"#)
         .bind(id)
         .bind(iid)
@@ -737,8 +748,8 @@ pub async fn delete_budget_entry(
         return Err(ApiError::NotFound);
     }
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    Ok(())
 }
 
 pub fn budget_router() -> Router {

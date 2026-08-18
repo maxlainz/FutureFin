@@ -43,6 +43,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   (HTTP y MCP): el engine clampa ≤ −100 a pérdida total, pero los inputs nuevos absurdos se
   rechazan con error tipado (misma cota que los overrides de `simulate_projection`).
 
+### Added — MCP: tools de escritura, tramo 3 (destructivas + configuración FIRE) — issue #3 completo
+
+- Los 7 deletes con **preview/confirm**: `delete_transaction` (preview = el movimiento completo),
+  `delete_planning_flow`, `delete_budget_entry`, `delete_asset` y `delete_liability` (preview con
+  los contadores de desvinculación — los movimientos vinculados quedan con el link a NULL, no se
+  borran), `delete_snapshot` (`items_deleted`) y `delete_import` (`transactions_deleted`; borra el
+  lote y sus transacciones en cascada, mismo contrato que el `?confirm=true` HTTP). Sin
+  `confirm: true` ninguna toca nada.
+- **`update_fire_settings`** — el mayor radio del catálogo, SOLO para el owner: SWR, inflación
+  asumida, fuente del ahorro (A/B/C), modo del objetivo, importe manual, impuestos y tramos.
+  Opera **campo a campo sobre el estado actual** vía `patch_fire_settings_core`: jamás
+  deserializa a `FireSettings` (cuyo `#[serde(default)]` a nivel de struct resetearía los campos
+  ausentes — el bug que un PATCH parcial por HTTP sí dispara), y sin confirm devuelve el
+  `{before, after}` ya validado. Regresión explícita: cambiar solo `swr_pct` deja los
+  `tax_brackets` personalizados intactos.
+- Con esto el issue #3 queda completo: 23 tools de escritura + 20 de lectura/simulación = 43
+  tools en el catálogo, todas sobre cores compartidas con HTTP y con el contrato de cache
+  pinneado por tests en ambos caminos.
+
 ### Changed — Ajustes: pestaña dedicada «MCP» (y «Acceso» pasa a «Usuarios»)
 
 - Todo lo relacionado con el servidor MCP vive ahora en una sub-tab propia de Ajustes: panel
