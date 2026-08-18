@@ -26,7 +26,8 @@ use crate::handlers::installation::{installation_naive_today, require_installati
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::schema::{
-    BlockActualAvg, CategoryComparisonLine, SummaryTotals, TransactionsSummaryResponse,
+    BlockActualAvg, CategoryComparisonLine, CategoryMonthPoint, CategoryMonthlySeriesEntry,
+    CategoryMonthlySeriesResponse, SummaryTotals, TransactionsSummaryResponse,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Query};
@@ -629,5 +630,203 @@ pub(crate) async fn transactions_summary_core(
             savings_avg,
             net_actual,
         },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Serie mensual por categoría (`GET /v1/transactions/category-series`)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_CATEGORY_SERIES_WINDOW: u32 = 12;
+const MAX_CATEGORY_SERIES_WINDOW: u32 = 60;
+
+#[derive(Debug, Deserialize)]
+pub struct CategorySeriesQuery {
+    #[serde(default)]
+    pub view: Option<String>,
+    /// `expense` | `income` (obligatorio).
+    pub kind: String,
+    /// Limita la respuesta a una categoría (omitido = todas las del `kind` con datos).
+    #[serde(default)]
+    pub category_id: Option<Uuid>,
+    /// Amplitud de la ventana en meses (default 12, clamp 1..=60). El último mes es el actual.
+    #[serde(default)]
+    pub window_months: Option<u32>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/transactions/category-series",
+    tag = "transactions",
+    params(
+        ("view" = Option<String>, Query, description = "`mine` | household."),
+        ("kind" = String, Query, description = "`expense` | `income`."),
+        ("category_id" = Option<Uuid>, Query, description = "Limita a una categoría."),
+        ("window_months" = Option<u32>, Query, description = "Ventana en meses (default 12, clamp 1..=60)."),
+    ),
+    responses(
+        (status = 200, description = "Serie mensual por categoría (cero-rellena, magnitudes ≥ 0)", body = CategoryMonthlySeriesResponse),
+        (status = 400, description = "kind inválido"),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Not an installation member"),
+        (status = 404, description = "Installation missing"),
+    )
+)]
+pub async fn get_category_series(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Query(q): Query<CategorySeriesQuery>,
+) -> Result<Json<CategoryMonthlySeriesResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let out = category_monthly_series_core(
+        &state.pool,
+        iid,
+        user.id.0,
+        view,
+        &q.kind,
+        q.category_id,
+        q.window_months,
+    )
+    .await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_category_monthly_series`.
+///
+/// Emite, por categoría del `kind` con ≥1 movimiento en la ventana, un punto por CADA mes
+/// (cero-relleno) con la magnitud ≥ 0 de la convención de la comparativa (gasto = `−Σ`,
+/// ingreso = `+Σ`). El dato ya se materializaba en memoria para la comparativa; ningún endpoint
+/// emitía la serie mes a mes.
+pub(crate) async fn category_monthly_series_core(
+    pool: &PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+    kind: &str,
+    category_id: Option<Uuid>,
+    window_months: Option<u32>,
+) -> Result<CategoryMonthlySeriesResponse, ApiError> {
+    let kind = match kind.trim() {
+        "expense" => "expense",
+        "income" => "income",
+        _ => {
+            return Err(ApiError::BadRequest(
+                "kind must be `expense` or `income`".into(),
+            ))
+        }
+    };
+    let window = window_months
+        .unwrap_or(DEFAULT_CATEGORY_SERIES_WINDOW)
+        .clamp(1, MAX_CATEGORY_SERIES_WINDOW);
+
+    let today = installation_naive_today(pool, iid).await?;
+    // Ventana: `window` meses civiles ascendentes que TERMINAN en el mes en curso (parcial).
+    let (sy, sm) = shift_month(today.year(), today.month(), -(window as i32 - 1));
+    let window_start = first_of_month(sy, sm);
+    let (ny, nm) = shift_month(today.year(), today.month(), 1);
+    let month_end = first_of_month(ny, nm);
+    let month_labels: Vec<String> = (0..window)
+        .map(|i| {
+            let (y, m) = shift_month(sy, sm, i as i32);
+            ym_string(y, m)
+        })
+        .collect();
+
+    let scope = view.scope_where("t");
+    let mut arg = view.next_arg_index();
+    let mut sql = format!(
+        "SELECT to_char(t.op_date, 'YYYY-MM') AS ym, t.category_id AS category_id,
+                SUM(t.amount) AS total
+         FROM transactions t
+         WHERE {scope} AND t.kind = ${arg} AND t.op_date >= ${d1} AND t.op_date < ${d2}",
+        d1 = arg + 1,
+        d2 = arg + 2
+    );
+    arg += 3;
+    if category_id.is_some() {
+        sql.push_str(&format!(" AND t.category_id = ${arg}"));
+    }
+    sql.push_str(" GROUP BY ym, t.category_id");
+
+    let mut query = view
+        .bind_scope_as(
+            sqlx::query_as::<_, (String, Option<Uuid>, Decimal)>(&sql),
+            iid,
+            user_id,
+        )
+        .bind(kind)
+        .bind(window_start)
+        .bind(month_end);
+    if let Some(cid) = category_id {
+        query = query.bind(cid);
+    }
+    let rows: Vec<(String, Option<Uuid>, Decimal)> = query.fetch_all(pool).await?;
+
+    // Magnitud ≥ 0: gasto guarda cargos negativos → se niega; ingreso queda tal cual.
+    let sign = if kind == "expense" {
+        -Decimal::ONE
+    } else {
+        Decimal::ONE
+    };
+    let mut by_cat: HashMap<Option<Uuid>, HashMap<String, Decimal>> = HashMap::new();
+    for (ym, cat, total) in rows {
+        *by_cat
+            .entry(cat)
+            .or_default()
+            .entry(ym)
+            .or_insert(Decimal::ZERO) += sign * total;
+    }
+    // Escala fija de 2 decimales (mismo criterio que los KPIs del cashflow): "25.00", no "25.0000".
+    let money = |d: Decimal| -> Decimal {
+        let mut v = d.round_dp(2);
+        v.rescale(2);
+        v
+    };
+
+    let cat_names: HashMap<Uuid, String> = {
+        let rows: Vec<(Uuid, String)> =
+            sqlx::query_as(r#"SELECT id, name FROM categories WHERE installation_id = $1"#)
+                .bind(iid)
+                .fetch_all(pool)
+                .await?;
+        rows.into_iter().collect()
+    };
+
+    let mut series: Vec<CategoryMonthlySeriesEntry> = by_cat
+        .into_iter()
+        .map(|(cat, by_month)| {
+            let months = month_labels
+                .iter()
+                .map(|ym| CategoryMonthPoint {
+                    month: ym.clone(),
+                    total: money(by_month.get(ym).copied().unwrap_or(Decimal::ZERO)),
+                })
+                .collect();
+            CategoryMonthlySeriesEntry {
+                category_id: cat,
+                category_name: cat.and_then(|c| cat_names.get(&c).cloned()),
+                months,
+            }
+        })
+        .collect();
+    // Nombre ASC; la pseudo-categoría sin nombre (movimientos sin categorizar) al final.
+    series.sort_by(|a, b| match (&a.category_name, &b.category_name) {
+        (Some(x), Some(y)) => x.cmp(y).then_with(|| a.category_id.cmp(&b.category_id)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.category_id.cmp(&b.category_id),
+    });
+
+    Ok(CategoryMonthlySeriesResponse {
+        view: if view == LedgerView::Mine {
+            "mine".into()
+        } else {
+            "household".into()
+        },
+        kind: kind.into(),
+        window_months: window,
+        series,
     })
 }

@@ -83,7 +83,7 @@ use crate::handlers::transactions::rules::{
     __path_create_rule, __path_delete_rule, __path_list_rules, __path_patch_rule,
 };
 #[allow(unused_imports)]
-use crate::handlers::transactions::summary::__path_get_transactions_summary;
+use crate::handlers::transactions::summary::{__path_get_category_series, __path_get_transactions_summary};
 use axum::Json;
 use utoipa::OpenApi;
 
@@ -156,6 +156,7 @@ use utoipa::OpenApi;
         materialize_recurring,
         delete_recurring_rule,
         get_transactions_summary,
+        get_category_series,
         export_user_backup,
         import_user_backup_preview,
         import_user_backup_apply,
@@ -267,6 +268,9 @@ use utoipa::OpenApi;
         crate::handlers::transactions::schema::BlockActualAvg,
         crate::handlers::transactions::schema::SummaryTotals,
         crate::handlers::transactions::TransactionsSummaryResponse,
+        crate::handlers::transactions::schema::CategoryMonthPoint,
+        crate::handlers::transactions::schema::CategoryMonthlySeriesEntry,
+        crate::handlers::transactions::schema::CategoryMonthlySeriesResponse,
         crate::handlers::backup_user::ExportRequest,
         crate::handlers::backup_user::ImportRequest,
         crate::handlers::backup_user::ImportPreviewResponse,

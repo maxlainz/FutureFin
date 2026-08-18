@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — MCP: 9 tools de lectura nuevas + endpoint de serie mensual por categoría
+
+- El catálogo pasa de 10 a 19 tools de lectura, cerrando los huecos de superficie del dominio:
+  `list_allocation_rules` (la cascada como reglas — antes solo era visible su resultado resuelto
+  por activo), `list_categories` (resolver nombre→id, prerrequisito de la escritura),
+  `get_category_monthly_series`, `get_history_cashflow` (`window_months`, `include_curve` opt-in),
+  `list_recurring_rules` y `list_categorization_rules` (own-user, sin `view`),
+  `list_transaction_months`, `list_snapshots` (`include_items` opt-in) y
+  `list_transaction_imports`; `list_transactions` gana el filtro `import_id` que el HTTP ya tenía.
+  Cada tool llama a la misma fn `_core` que su endpoint (paridad byte a byte pinneada en tests).
+- **Nuevo endpoint** `GET /v1/transactions/category-series` (`kind` expense|income,
+  `category_id?`, `window_months` 1..=60 default 12): serie mensual **cero-rellena** por categoría
+  con magnitudes ≥ 0 (Decimal-string, escala 2). El dato ya se materializaba en memoria para la
+  comparativa; ningún endpoint lo emitía mes a mes. La tool `get_category_monthly_series` es su
+  espejo exacto.
+
 ### Changed — MCP: annotations, verbosidad e identidad en las 10 tools existentes
 
 - **Tool annotations en todo el catálogo** (`#[tool(annotations(...))]` de rmcp): `title` legible,
