@@ -101,7 +101,7 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
 5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW).
 6. If `net_cash <= 0` (deficit): drain `surplus_cash` first, then drain liquid assets (lowest-return first).
-7. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar.
+7. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar. `monthly_multiplier` = raíz 12ª del factor anual `1 + p/100`; `None` y `0` → factor 1; **las tasas negativas componen de verdad** (−50 % anual ⇒ ×0,5 en 12 meses); `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs con error tipado).
 8. Reduce liability principals by payments made.
 
 ## Output
@@ -234,9 +234,11 @@ Model (each rule exists for a reason — do not "simplify" one away):
   (every asset funds the expense in proportion to its weight). Slightly **conservative** versus the
   engine's real drain, which empties the lowest-return liquids first and therefore keeps the
   high-return ones longer. Deliberate: the KPI must not promise more than the simulation.
-- **Rates ≤ 0 → zero growth**: inherited from `monthly_multiplier` (shared with the simulation via
-  `pub(crate)`, so the runway uses *exactly* the engine's annual→monthly conversion). The engine does
-  not model losses; a negative expected return behaves like no return.
+- **Negative rates compound**: inherited from `monthly_multiplier` (shared with the simulation via
+  `pub(crate)`, so the runway uses *exactly* the engine's annual→monthly conversion). A negative
+  expected return (−100 < r < 0) now decays the balance for real and **shortens** the runway;
+  `r ≤ −100` clamps to factor 0. The expense-inflation argument is never negative here (the
+  installation validates 0..50).
 - **SWR threshold (the infinite case, v2.3.0)**: `Indefinite` ⟺ the grossed-up annual withdrawal does
   not exceed the SWR applied to the starting balance, `annual_expense_for_swr ≤ A·(swr_pct/100)`.
   Compared **without dividing** — `annual_expense_for_swr·100 ≤ A·swr_pct` — so the boundary is

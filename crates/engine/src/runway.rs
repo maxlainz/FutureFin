@@ -45,8 +45,10 @@ pub enum RunwayOutcome {
 ///   activo aporta al gasto en proporción a su peso), ligeramente **conservador** frente al drain
 ///   real del engine, que vacía primero los líquidos de menor rentabilidad y por tanto conserva
 ///   más tiempo los de rentabilidad alta.
-/// - **Tasas ≤ 0 → crecimiento 0**: herencia documentada de [`monthly_multiplier`], que devuelve
-///   factor 1 tanto para `None` como para tasas no positivas (el engine no modela pérdidas).
+/// - **Tasas negativas componen**: herencia documentada de [`monthly_multiplier`] — `None` y 0
+///   siguen siendo factor 1, pero una rentabilidad negativa (−100 < r < 0) decrece el saldo de
+///   verdad y por tanto **acorta** el runway (≤ −100 se clampa a factor 0). La inflación del
+///   gasto nunca es negativa aquí (la instalación valida 0..50).
 /// - **Umbral SWR (caso infinito)**: el runway es `Indefinite` ⟺ la retirada anual no supera el
 ///   SWR sobre el saldo inicial: `annual_expense_for_swr ≤ A·(swr_pct/100)`. Se compara sin
 ///   dividir — `annual_expense_for_swr·100 ≤ A·swr_pct` — para que la frontera sea **exacta** en
@@ -252,14 +254,27 @@ mod tests {
         );
     }
 
-    /// El engine no modela pérdidas: una rentabilidad negativa se trata como crecimiento 0, luego
-    /// −5% da exactamente el mismo runway que «sin rentabilidad» (12 meses).
+    /// Desde el fix de `monthly_multiplier` las pérdidas componen: −5% anual decrece el saldo
+    /// mientras se consume, así que el runway es ESTRICTAMENTE menor que los 12 meses de la
+    /// división simple (antes del cambio −5% y «sin tasa» eran idénticos: 12 exactos).
     #[test]
-    fn negative_return_treated_as_zero_growth() {
-        let negativo = runway(&[(d(12_000), Some(d(-5)))], d(1_000), Decimal::ZERO, swr());
-        let sin_tasa = runway(&[(d(12_000), None)], d(1_000), Decimal::ZERO, swr());
-        assert_eq!(negativo, sin_tasa);
-        assert_eq!(negativo, RunwayOutcome::Months(d(12)));
+    fn negative_return_shortens_runway() {
+        let negativo = months(runway(
+            &[(d(12_000), Some(d(-5)))],
+            d(1_000),
+            Decimal::ZERO,
+            swr(),
+        ));
+        let sin_tasa = months(runway(&[(d(12_000), None)], d(1_000), Decimal::ZERO, swr()));
+        assert_eq!(sin_tasa, d(12));
+        assert!(
+            negativo < sin_tasa,
+            "esperado < 12 meses con retorno −5%, obtenido {negativo}"
+        );
+        assert!(
+            negativo > d(11),
+            "−5% anual apenas recorta unos días sobre 12 meses, obtenido {negativo}"
+        );
     }
 
     /// Sin gasto el runway no está definido (ni siquiera «infinito»): `NoExpenseBase`. Este test
