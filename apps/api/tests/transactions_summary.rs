@@ -61,6 +61,7 @@ async fn summary_numbers_windows_and_no_double_count() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let super_cat = app.create_category(&owner, "expense", "Super").await;
+    let vivienda_cat = app.create_category(&owner, "expense", "Vivienda").await;
     let nomina_cat = app.create_category(&owner, "income", "Nómina").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
 
@@ -82,12 +83,14 @@ async fn summary_numbers_windows_and_no_double_count() {
         assert_eq!(r.status, http::StatusCode::CREATED, "budget: {r:?}");
     }
 
-    // Pasivo con cuota 500/mes (plan vivo) → derived_debt_line.budget = 500 (solo lado budget).
+    // Pasivo con cuota 500/mes (plan vivo), atribuida a la categoría de gasto «Vivienda» (3.4.0):
+    // el lado budget de Vivienda gana 500 sin tocar el resto de líneas.
     let future = date_in(today.year() + 4, 1, 15);
     let r = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "Hipoteca", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": vivienda_cat,
+                    "label": "Hipoteca", "principal": "100000",
                     "payment_amount": "500", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )
@@ -135,6 +138,14 @@ async fn summary_numbers_windows_and_no_double_count() {
     approx(parse_dec(&sc["budget"]), 0.0);
     approx(parse_dec(&sc["avg"]), 0.0);
 
+    // Vivienda: la cuota atribuida materializa la fila aunque no tenga movimientos ni partidas
+    // (budget = 500 del plan; actual/avg 0 — aún sin recibos vinculados a esa categoría).
+    let viv = line(&b["expense_categories"], "Vivienda");
+    approx(parse_dec(&viv["actual"]), 0.0);
+    approx(parse_dec(&viv["budget"]), 500.0);
+    approx(parse_dec(&viv["avg"]), 0.0);
+    approx(parse_dec(&viv["delta_vs_budget"]), -500.0);
+
     // Ingreso Nómina: actual 2000, budget 2000, avg 1000/2=500 (denominador ponderado 2).
     let nom = line(&b["income_categories"], "Nómina");
     approx(parse_dec(&nom["actual"]), 2000.0);
@@ -142,7 +153,8 @@ async fn summary_numbers_windows_and_no_double_count() {
     approx(parse_dec(&nom["avg"]), 500.0);
     approx(parse_dec(&nom["delta_vs_budget"]), 0.0);
 
-    // Sin línea derivada de cuotas de pasivo: la key desaparece del JSON.
+    // Sin línea derivada SINTÉTICA de cuotas: la key sigue fuera del JSON (la cuota entra
+    // atribuida a su categoría de gasto, no como fila aparte sin pareja).
     assert!(b.get("derived_debt_line").is_none(), "derived_debt_line eliminada");
 
     // Savings block: actual 200, avg 100/2=50.
@@ -157,7 +169,7 @@ async fn summary_numbers_windows_and_no_double_count() {
     let t = &b["totals"];
     approx(parse_dec(&t["expense_actual"]), 180.0);
     approx(parse_dec(&t["expense_avg"]), 75.0);
-    approx(parse_dec(&t["expense_budget"]), 300.0); // sólo 300 Super (sin derived)
+    approx(parse_dec(&t["expense_budget"]), 800.0); // 300 Super + 500 cuota atribuida a Vivienda
     approx(parse_dec(&t["income_actual"]), 2000.0);
     approx(parse_dec(&t["income_budget"]), 2000.0);
     approx(parse_dec(&t["savings_actual"]), 200.0);
@@ -324,23 +336,25 @@ async fn summary_avg_window_invalid_400() {
     assert!(bad.json()["message"].as_str().unwrap().contains("avg_window must be one of"));
 }
 
-/// La comparativa no añade la línea derivada de cuotas: la key no está y `expense_budget` es sólo
-/// la suma del presupuesto de categorías de gasto (aunque haya un pasivo activo).
+/// Sin fila derivada SINTÉTICA (la key `derived_debt_line` de la v1.6-1.8 sigue eliminada): la
+/// cuota entra atribuida a su categoría de gasto (3.4.0), sumándose al budget de ESA fila —
+/// aquí a «Luz», que además tiene partida manual de 120 → budget 620 (el caso «partida propia +
+/// cuota en la misma categoría» queda visible en la fila, no silencioso en un total sin pareja).
 #[tokio::test]
-async fn summary_no_derived_debt_line() {
+async fn summary_no_synthetic_derived_line_cuota_lives_in_its_category() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let luz_cat = app.create_category(&owner, "expense", "Luz").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
     budget(&app, &owner.cookie, &luz_cat, "120").await;
 
-    // Pasivo activo con cuota 500/mes: NO debe sumar a expense_budget de la comparativa.
     let today = server_today(&app, &owner.cookie).await;
     let future = date_in(today.year() + 4, 1, 15);
     let r = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "Hipoteca", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": luz_cat,
+                    "label": "Hipoteca", "principal": "100000",
                     "payment_amount": "500", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )
@@ -348,6 +362,118 @@ async fn summary_no_derived_debt_line() {
     assert_eq!(r.status, http::StatusCode::CREATED, "liability: {r:?}");
 
     let b = app.get_with_cookie("/v1/transactions/summary", &owner.cookie).await.json();
-    assert!(b.get("derived_debt_line").is_none(), "derived_debt_line eliminada");
-    approx(parse_dec(&b["totals"]["expense_budget"]), 120.0); // sólo Luz, sin +500 derivado
+    assert!(b.get("derived_debt_line").is_none(), "derived_debt_line eliminada (v1.8.0)");
+    let luz = line(&b["expense_categories"], "Luz");
+    approx(parse_dec(&luz["budget"]), 620.0); // 120 partida manual + 500 cuota atribuida
+    approx(parse_dec(&b["totals"]["expense_budget"]), 620.0);
+}
+
+/// Emparejamiento completo (el caso hipoteca real): recibo importado en la categoría X + pasivo
+/// atribuido a X → la fila se iguala y el Δ pasa a ser informativo (revisión de tipo, etc.).
+/// PREDICCIÓN: Real 512 (recibo), Budget 500 (plan), Δ +12; totales igual de equilibrados.
+#[tokio::test]
+async fn summary_budget_pairs_categorized_cuota() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let hipoteca_cat = app.create_category(&owner, "expense", "Hipoteca").await;
+    let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let future = date_in(today.year() + 4, 1, 15);
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({ "category_id": liab_cat, "expense_category_id": hipoteca_cat,
+                    "label": "Piso", "principal": "100000",
+                    "payment_amount": "500", "payment_frequency": "monthly", "payment_end_date": future }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "liability: {r:?}");
+
+    // Recibo real del último mes completo, categorizado en Hipoteca (512 ≠ 500: revisión de tipo).
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(y1, m1, 2), "RECIBO PRESTAMO", "-512", "expense", Some(&hipoteca_cat)).await;
+
+    let b = app.get_with_cookie("/v1/transactions/summary", &owner.cookie).await.json();
+    let hip = line(&b["expense_categories"], "Hipoteca");
+    approx(parse_dec(&hip["actual"]), 512.0);
+    approx(parse_dec(&hip["budget"]), 500.0);
+    approx(parse_dec(&hip["delta_vs_budget"]), 12.0);
+    approx(parse_dec(&b["totals"]["expense_actual"]), 512.0);
+    approx(parse_dec(&b["totals"]["expense_budget"]), 500.0);
+}
+
+/// La atribución es month-aware: un plan que terminó ANTES del mes seleccionado no inyecta budget
+/// ese mes; en un mes en que aún vivía, sí (fin de plan >= primer día del mes seleccionado).
+#[tokio::test]
+async fn summary_cuota_respects_month_activity() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let hipoteca_cat = app.create_category(&owner, "expense", "Hipoteca").await;
+    let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    // Plan terminado el día 15 del mes -2: activo para el mes -2, inactivo para el mes -1.
+    let (y2, m2) = shift_month(today.year(), today.month(), -2);
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    let end = date_in(y2, m2, 15);
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({ "category_id": liab_cat, "expense_category_id": hipoteca_cat,
+                    "label": "Coche", "principal": "1000",
+                    "payment_amount": "200", "payment_frequency": "monthly", "payment_end_date": end }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "liability: {r:?}");
+    // Un movimiento por mes para que ambos meses existan en el selector.
+    manual(&app, &owner.cookie, &date_in(y2, m2, 3), "Gasto A", "-10", "expense", Some(&hipoteca_cat)).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 3), "Gasto B", "-10", "expense", Some(&hipoteca_cat)).await;
+
+    let b2 = app
+        .get_with_cookie(&format!("/v1/transactions/summary?year={y2}&month={m2}"), &owner.cookie)
+        .await
+        .json();
+    approx(parse_dec(&line(&b2["expense_categories"], "Hipoteca")["budget"]), 200.0);
+
+    let b1 = app
+        .get_with_cookie(&format!("/v1/transactions/summary?year={y1}&month={m1}"), &owner.cookie)
+        .await
+        .json();
+    approx(parse_dec(&line(&b1["expense_categories"], "Hipoteca")["budget"]), 0.0);
+}
+
+/// Pasivo legacy sin categoría de gasto (NULL, anterior a 3.4.0 — la API ya no permite crearlo,
+/// se inserta por SQL directo): la comparativa queda EXACTAMENTE como antes (status quo).
+#[tokio::test]
+async fn summary_null_expense_category_is_status_quo() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let luz_cat = app.create_category(&owner, "expense", "Luz").await;
+    let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+    budget(&app, &owner.cookie, &luz_cat, "120").await;
+
+    // INSERT directo (bypass de la obligatoriedad del create, como una fila pre-migración).
+    let liab_cat_id = uuid::Uuid::parse_str(&liab_cat).unwrap();
+    let iid: uuid::Uuid =
+        sqlx::query_scalar("SELECT installation_id FROM categories WHERE id = $1")
+            .bind(liab_cat_id)
+            .fetch_one(&app.state.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"INSERT INTO liabilities (installation_id, category_id, label, principal,
+               payment_amount, payment_frequency, principal_derived_from_plan)
+           VALUES ($1, $2, 'Legacy', 50000, 400, 'monthly', false)"#,
+    )
+    .bind(iid)
+    .bind(liab_cat_id)
+    .execute(&app.state.pool)
+    .await
+    .unwrap();
+
+    let b = app.get_with_cookie("/v1/transactions/summary", &owner.cookie).await.json();
+    approx(parse_dec(&b["totals"]["expense_budget"]), 120.0); // sin atribución → solo Luz
 }

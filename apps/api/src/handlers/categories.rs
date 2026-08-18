@@ -472,6 +472,22 @@ pub async fn delete_category(
         .execute(&mut *tx)
         .await?;
 
+        // `liabilities.expense_category_id` (3.4.0) es SET NULL — no cuenta en
+        // `category_reference_count` ni bloquea el borrado — pero cuando el usuario remapea una
+        // categoría de gasto, la atribución de las cuotas debe seguirla en vez de degradarse a
+        // NULL por el FK al borrar.
+        if scope_src == "expense" {
+            sqlx::query(
+                r#"UPDATE liabilities SET expense_category_id = $1, updated_at = now()
+                   WHERE installation_id = $2 AND expense_category_id = $3"#,
+            )
+            .bind(target)
+            .bind(iid)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
         let del = sqlx::query(r#"DELETE FROM categories WHERE id = $1 AND installation_id = $2"#)
             .bind(id)
             .bind(iid)

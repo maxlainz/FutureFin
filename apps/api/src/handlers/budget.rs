@@ -55,6 +55,11 @@ pub struct DerivedBudgetLineResponse {
     pub liability_id: Uuid,
     #[schema(value_type = String, format = "uuid")]
     pub category_id: Uuid,
+    /// Categoría de GASTO donde la comparativa de Movimientos atribuye esta cuota (3.4.0).
+    /// `null` en pasivos aún sin asignar (anteriores a 3.4.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub expense_category_id: Option<Uuid>,
     pub label: String,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
@@ -160,6 +165,7 @@ pub(crate) struct BudgetEntryJoinRow {
 pub(crate) struct LiabilityDerivedRow {
     id: Uuid,
     category_id: Uuid,
+    expense_category_id: Option<Uuid>,
     label: String,
     payment_amount: Decimal,
     payment_frequency: String,
@@ -275,7 +281,7 @@ async fn fetch_budget_rows_and_derived_liabilities(
     let derived_scope = view.scope_where("");
     let today_ph = view.next_arg_index();
     let derived_sql = format!(
-        r#"SELECT id, category_id, label, payment_amount, payment_frequency
+        r#"SELECT id, category_id, expense_category_id, label, payment_amount, payment_frequency
            FROM liabilities
            WHERE {derived_scope}
              AND payment_amount IS NOT NULL
@@ -454,6 +460,7 @@ pub(crate) async fn budget_snapshot_core(
         derived_from_liabilities.push(DerivedBudgetLineResponse {
             liability_id: d.id,
             category_id: d.category_id,
+            expense_category_id: d.expense_category_id,
             label: d.label,
             amount: d.payment_amount,
             frequency: pf,

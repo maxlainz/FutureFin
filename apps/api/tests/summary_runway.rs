@@ -74,10 +74,12 @@ async fn liquid_asset_with_return(
 }
 
 /// Pasivo activo (fin de pago dentro de 5 años) con cuota mensual.
+#[allow(clippy::too_many_arguments)]
 async fn active_liability(
     app: &TestApp,
     cookie: &str,
     cat: &str,
+    exp_cat: &str,
     label: &str,
     payment: &str,
     today: NaiveDate,
@@ -89,7 +91,7 @@ async fn active_liability(
     let l = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": cat, "label": label, "principal": "50000",
+            json!({ "category_id": cat, "expense_category_id": exp_cat, "label": label, "principal": "50000",
                     "payment_amount": payment, "payment_frequency": "monthly",
                     "payment_end_date": future }),
             cookie,
@@ -217,7 +219,8 @@ async fn runway_pre_change_baseline_liquid_over_expense() {
     let l = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L1", "principal": "50000",
+            json!({ "category_id": liab_cat, "expense_category_id": expense_cat,
+                    "label": "L1", "principal": "50000",
                     "payment_amount": "200", "payment_frequency": "monthly",
                     "payment_end_date": future }),
             &owner.cookie,
@@ -289,7 +292,7 @@ async fn runway_with_return_exceeds_plain_division() {
     liquid_asset_with_return(&app, &owner.cookie, &asset_cat, "Cuenta B", "3000", "5").await;
     budget(&app, &owner.cookie, &expense_cat, "1000").await;
     let today = server_today(&app, &owner.cookie).await;
-    active_liability(&app, &owner.cookie, &liab_cat, "L1", "200", today).await;
+    active_liability(&app, &owner.cookie, &liab_cat, &expense_cat, "L1", "200", today).await;
 
     let h = health(&app, &owner.cookie).await;
     assert_eq!(dec(&h["liquid_assets_total"]), d(12_000));
@@ -320,7 +323,7 @@ async fn runway_with_inflation_is_shorter_than_without() {
     liquid_asset(&app, &owner.cookie, &asset_cat, "Cuenta A", "12000").await;
     budget(&app, &owner.cookie, &expense_cat, "1000").await;
     let today = server_today(&app, &owner.cookie).await;
-    active_liability(&app, &owner.cookie, &liab_cat, "L1", "200", today).await;
+    active_liability(&app, &owner.cookie, &liab_cat, &expense_cat, "L1", "200", today).await;
 
     // Antes del PATCH (inflación 0 por defecto) el runway es la división simple: 10 exactos.
     let sin_inflacion = health(&app, &owner.cookie).await;
@@ -512,8 +515,8 @@ async fn mode_b_runway_uses_effective_expense_base() {
     budget(&app, &owner.cookie, &expense_cat, "8000").await;
 
     let today = server_today(&app, &owner.cookie).await;
-    let l1 = active_liability(&app, &owner.cookie, &liab_cat, "L1", "500", today).await;
-    active_liability(&app, &owner.cookie, &liab_cat, "L2", "300", today).await;
+    let l1 = active_liability(&app, &owner.cookie, &liab_cat, &expense_cat, "L1", "500", today).await;
+    active_liability(&app, &owner.cookie, &liab_cat, &expense_cat, "L2", "300", today).await;
 
     let (y1, m1) = shift_month(today.year(), today.month(), -1);
     manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None).await;
@@ -577,7 +580,7 @@ async fn mode_b_zero_months_falls_back_to_budget_runway() {
     liquid_asset(&app, &owner.cookie, &asset_cat, "Cuenta A", "12000").await;
     budget(&app, &owner.cookie, &expense_cat, "1000").await;
     let today = server_today(&app, &owner.cookie).await;
-    active_liability(&app, &owner.cookie, &liab_cat, "L1", "200", today).await;
+    active_liability(&app, &owner.cookie, &liab_cat, &expense_cat, "L1", "200", today).await;
 
     // Única transacción en el mes en curso (parcial) → fuera de la ventana → 0 meses reales.
     manual(

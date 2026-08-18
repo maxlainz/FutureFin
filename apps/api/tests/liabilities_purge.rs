@@ -16,6 +16,7 @@ async fn expired_liability_is_hidden_from_listing_but_persists_in_db() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let cat_id = app.create_category(&owner, "liability", "Préstamo").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
     let today = Utc::now().date_naive();
     let past = (today - Duration::days(5)).format("%Y-%m-%d").to_string();
@@ -27,6 +28,7 @@ async fn expired_liability_is_hidden_from_listing_but_persists_in_db() {
             "/v1/liabilities",
             serde_json::json!({
                 "category_id": cat_id,
+                "expense_category_id": exp_cat,
                 "label": "Tarjeta cerrada",
                 "principal": "1000",
                 "payment_amount": "100",
@@ -48,6 +50,7 @@ async fn expired_liability_is_hidden_from_listing_but_persists_in_db() {
             "/v1/liabilities",
             serde_json::json!({
                 "category_id": cat_id,
+                "expense_category_id": exp_cat,
                 "label": "Hipoteca",
                 "principal": "50000",
                 "payment_amount": "300",
@@ -86,6 +89,7 @@ async fn summary_excludes_expired_liability_principal_and_breakdown() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("bob").await;
     let cat_id = app.create_category(&owner, "liability", "Préstamo").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
     let today = Utc::now().date_naive();
     let past = (today - Duration::days(2)).format("%Y-%m-%d").to_string();
@@ -95,6 +99,7 @@ async fn summary_excludes_expired_liability_principal_and_breakdown() {
         "/v1/liabilities",
         serde_json::json!({
             "category_id": cat_id,
+                "expense_category_id": exp_cat,
             "label": "Vencido",
             "principal": "9999",
             "payment_amount": "100",
@@ -108,6 +113,7 @@ async fn summary_excludes_expired_liability_principal_and_breakdown() {
         "/v1/liabilities",
         serde_json::json!({
             "category_id": cat_id,
+                "expense_category_id": exp_cat,
             "label": "Activo",
             "principal": "100",
             "payment_amount": "10",
@@ -163,6 +169,7 @@ async fn projection_excludes_expired_liability_principal() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("carol").await;
     let cat_id = app.create_category(&owner, "liability", "Préstamo").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
     let today = Utc::now().date_naive();
     let past = (today - Duration::days(30)).format("%Y-%m-%d").to_string();
@@ -172,6 +179,7 @@ async fn projection_excludes_expired_liability_principal() {
         "/v1/liabilities",
         serde_json::json!({
             "category_id": cat_id,
+                "expense_category_id": exp_cat,
             "label": "Vencido",
             "principal": "9999",
             "payment_amount": "100",
@@ -185,6 +193,7 @@ async fn projection_excludes_expired_liability_principal() {
         "/v1/liabilities",
         serde_json::json!({
             "category_id": cat_id,
+                "expense_category_id": exp_cat,
             "label": "Activo",
             "principal": "50000",
             "payment_amount": "300",
@@ -232,5 +241,147 @@ async fn projection_excludes_expired_liability_principal() {
     assert!(
         (first_nw - starting).abs() < 0.001,
         "points[0] debe arrancar en starting_net_worth, got {first_nw}"
+    );
+}
+
+/// 3.4.0: `expense_category_id` es obligatoria al crear (la categoría de gasto donde vive la
+/// cuota) y debe ser de scope `expense`. Los pasivos legacy con NULL solo existen pre-migración.
+#[tokio::test]
+async fn liability_create_requires_expense_category() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("dave").await;
+    let cat_id = app.create_category(&owner, "liability", "Préstamo").await;
+
+    // Sin el campo → rechazo del deserializador (4xx, nunca 201).
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            serde_json::json!({
+                "category_id": cat_id,
+                "label": "Sin categoría de cuota",
+                "principal": "1000",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert!(
+        r.status.is_client_error(),
+        "crear sin expense_category_id debe fallar, got {:?}",
+        r.status
+    );
+
+    // Con scope equivocado (liability) → 400 con mensaje claro.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            serde_json::json!({
+                "category_id": cat_id,
+                "expense_category_id": cat_id,
+                "label": "Scope equivocado",
+                "principal": "1000",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+
+    assert_eq!(app.count_rows("liabilities").await, 0, "nada creado");
+}
+
+/// Borrado/remap de la categoría de gasto de la cuota: el remap la sigue (misma transacción que
+/// el resto de tablas); un borrado sin otras referencias no se bloquea (SET NULL, como las
+/// categorization_rules) y degrada la atribución a «sin asignar».
+#[tokio::test]
+async fn expense_category_remap_and_set_null() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("erin").await;
+    let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let cat_a = app.create_category(&owner, "expense", "Vivienda A").await;
+    let cat_b = app.create_category(&owner, "expense", "Vivienda B").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            serde_json::json!({
+                "category_id": liab_cat,
+                "expense_category_id": cat_a,
+                "label": "Hipoteca",
+                "principal": "50000",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let liab_id = r.json()["id"].as_str().unwrap().to_string();
+
+    // cat_a tiene una referencia CONTADA (transacción) → el borrado exige remap_to.
+    let t = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({ "op_date": "2026-01-10", "concept": "Recibo", "amount": "-500",
+                                "kind": "expense", "category_id": cat_a }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(t.status, http::StatusCode::CREATED, "{t:?}");
+
+    let del = app
+        .delete_with_cookie(
+            &format!("/v1/categories/{cat_a}?remap_to={cat_b}"),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(del.status, http::StatusCode::NO_CONTENT, "remap: {del:?}");
+
+    let liabs = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    let row = liabs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == liab_id.as_str())
+        .expect("liability");
+    assert_eq!(
+        row["expense_category_id"].as_str().unwrap(),
+        cat_b,
+        "el remap debe arrastrar expense_category_id"
+    );
+
+    // cat_b ahora solo la referencian la transacción remapeada... y el pasivo (que NO cuenta).
+    // Borra la transacción para dejar a cat_b sin referencias contadas → borrado directo → SET NULL.
+    let txns = app
+        .get_with_cookie("/v1/transactions?month=2026-01", &owner.cookie)
+        .await
+        .json();
+    let txn_id = txns["items"]
+        .as_array()
+        .or_else(|| txns.as_array())
+        .and_then(|a| a.first())
+        .and_then(|t| t["id"].as_str())
+        .expect("txn id")
+        .to_string();
+    let dtx = app
+        .delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie)
+        .await;
+    assert!(dtx.status.is_success(), "delete txn: {dtx:?}");
+
+    let del_b = app
+        .delete_with_cookie(&format!("/v1/categories/{cat_b}"), &owner.cookie)
+        .await;
+    assert_eq!(
+        del_b.status,
+        http::StatusCode::NO_CONTENT,
+        "el pasivo (SET NULL) no debe bloquear el borrado: {del_b:?}"
+    );
+
+    let liabs = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    let row = liabs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == liab_id.as_str())
+        .expect("liability");
+    assert!(
+        row.get("expense_category_id").is_none(),
+        "borrar la categoría degrada la atribución a NULL (campo omitido): {row:?}"
     );
 }

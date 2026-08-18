@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Categoría de gasto de la cuota: el pasivo publica su cuota en el presupuesto (arregla el Δ rojo de Movimientos)
+
+- **El problema**: el recibo real de la hipoteca cuenta como gasto del mes en su categoría, pero
+  el presupuesto por categorías no contenía la cuota (la derivada vivía en un panel aparte, sin
+  categoría de gasto, y la comparativa la excluía desde v1.8.0 para no contarla dos veces) →
+  `Real − Presupuesto` con lados desiguales → **siempre +cuota en rojo**, aunque gastases clavado.
+- **La solución (formulación del owner)**: los movimientos no se tocan — ya llevan categoría. Es
+  el pasivo el que declara **`expense_category_id`** (categoría de GASTO de su cuota) y su
+  equivalente mensual entra en el lado Budget de ESA categoría, en Presupuesto y en la comparativa
+  → `Hipoteca · Real 512 · Budget 500 · Δ +12` (Δ informativo por fin: revisión de tipo,
+  amortización extra). El lado Real cae solo: las reglas de import ya aprenden categorías.
+- **Obligatoria al crear** un pasivo desde ahora (HTTP y tool MCP `create_liability` — **API
+  breaking interno** del create); en PATCH es set-only. **Los pasivos existentes quedan `NULL`**
+  («sin asignar», comportamiento previo intacto — cero breaking de números) y se asignan desde el
+  formulario de Pasivos (marcador «sin categoría de cuota» en la tabla). Migración
+  `20260818150000_liabilities_expense_category.sql` (columna nullable, FK `ON DELETE SET NULL`;
+  el remap de categorías de gasto la arrastra; no bloquea borrados).
+- La atribución en la comparativa es **month-aware** (pasivo activo en el mes seleccionado) y una
+  categoría solo-cuota materializa su fila (budget = plan, actual = 0). Letra pequeña documentada:
+  presupuestar a mano la cuota en la misma categoría infla su Budget — visible en la fila y
+  autocorregible, frente al doble conteo silencioso pre-v1.8.0.
+- Backup `.ffbackup`: campo aditivo `expense_category_ref` (por `(scope, name)`, `#[serde(default)]`,
+  **sin bump** de `CURRENT_SCHEMA_VERSION`); los backups viejos importan con `NULL`. Fix incluido:
+  `fetch_categories_used` ahora también exporta la categoría usada solo por `expense_category_id`
+  (sin él, esos backups no importaban). Engine, Resumen y modos B/C intactos.
+
 ### Fixed — Coherencia del predicado «pasivo activo» (**cambia números**)
 
 - **La línea derivada del presupuesto ahora incluye los pasivos sin fecha fin** (`/v1/budget`,
