@@ -356,7 +356,7 @@ fn validate_show_age_mode(mode: &str) -> Result<(), ApiError> {
     }
 }
 
-fn validate_annual_inflation_assumption(pct: Decimal) -> Result<(), ApiError> {
+pub(crate) fn validate_annual_inflation_assumption(pct: Decimal) -> Result<(), ApiError> {
     if pct.is_sign_negative() || pct > Decimal::from(50) {
         return Err(ApiError::BadRequest(
             "annual_inflation_assumption_percent must be between 0 and 50".into(),
