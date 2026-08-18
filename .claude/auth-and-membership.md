@@ -93,13 +93,15 @@ delegar acceso *después* de ese login. Los tres esquemas conviven así:
 `oauth::access::require_oauth_access_token` devuelve solo `{user_id, grant_id, token_id}`: **el token
 no congela nada**. Membership y rol se re-resuelven en cada request (`require_installation_member`),
 así que degradar a `viewer`, revocar la membership o expulsar al usuario corta o recorta el acceso al
-instante, sin esperar a que el token caduque. Y como todas las tools MCP son de solo lectura, un
-`ffo_` nunca puede hacer más de lo que su dueño ya puede leer.
+instante, sin esperar a que el token caduque. Un `ffo_` nunca puede hacer más de lo que su dueño
+ya puede hacer: las lecturas siguen su rol, y las tools de escritura re-comprueban por request
+`role_can_write` + el toggle vivo `installation.mcp_write_enabled` (`require_mcp_write`) — apagar
+el toggle en Ajustes → MCP corta la escritura de TODOS los tokens en la siguiente llamada.
 
 **Revocación — un solo punto de corte**: la query de auth hace JOIN con `oauth_grants` y exige
 `g.revoked_at IS NULL`, así que marcar **una fila** (el grant) mata todos los access y refresh tokens
 de esa app sin tocarlos, igual que borrar una sesión. Se revoca desde tres sitios, y los tres
-escriben `revoked_reason`: el panel (Ajustes → Acceso → Conexiones, `user_panel`), el propio cliente
+escriben `revoked_reason`: el panel (Ajustes → MCP → Conexiones, `user_panel`), el propio cliente
 (`POST /oauth/revoke` con un `ffr_`, `rfc7009`) y **el servidor por su cuenta** al detectar reuso de
 un code o de un refresh ya consumido (`code_reuse` / `refresh_token_reuse`, OAuth 2.1 §4.3.1/§7.5).
 El panel se monta **siempre**, incluso con `FUTUREFIN_MCP_ENABLED=0`: apagar MCP no puede dejarte sin

@@ -25,7 +25,8 @@ pub async fn protected_resource(
     })))
 }
 
-/// RFC 8414. Sin `scopes_supported` a propósito: MCP v1 es read-only entero y no hay
+/// RFC 8414. Sin `scopes_supported` a propósito: el acceso se granula por el rol vivo del
+/// usuario + el toggle `installation.mcp_write_enabled` (comprobados por request), y no hay
 /// scopes con función. `S256` es el único PKCE admitido (claude.ai rechaza `plain`).
 pub async fn authorization_server(
     Extension(state): Extension<Arc<AppState>>,

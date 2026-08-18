@@ -265,7 +265,7 @@ Handlers should just `?` any `sqlx::Error`; never write per-call `.map_err(...)`
 
 ## MCP (`/mcp`, Streamable HTTP)
 
-Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` con el SDK oficial
+Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los issues #2/#3), módulo `apps/api/src/mcp/` con el SDK oficial
 `rmcp` 3.1 (spec 2026-07-28 sessionless + `LocalSessionManager` para clientes legacy con
 `Mcp-Session-Id`). Mismo binario y puerto que el API; se monta en el router raíz junto a `/health`
 (gana siempre al fallback SPA). Kill-switch: `FUTUREFIN_MCP_ENABLED=0` → el router ni se monta (404).
@@ -280,7 +280,7 @@ Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` 
   `http::request::Parts` hasta el `RequestContext` de cada tool. Fallo → 401/403 JSON
   `{error, message}`; **solo el 401** añade `WWW-Authenticate` (ver la nota del challenge en la
   sección OAuth).
-- **Tools v1 (10, todas read-only)**: `get_summary`, `get_projection` (density **hybrid fija**,
+- **Tools de lectura (20)**: `get_summary`, `get_projection` (density **hybrid fija**,
   `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler;
   `months` declara su rango real 12..840 en el schema y solo la variante sin `months` sale de
   cache), `get_budget`, `get_transactions_summary`, `list_transactions` (**paginación en SQL**:
@@ -380,7 +380,7 @@ no acepta un Bearer pegado a mano. FutureFin es a la vez **authorization server 
 | Method | Path | Notas |
 |--------|------|-------|
 | GET | `/.well-known/oauth-protected-resource[/mcp]` | RFC 9728. `{resource: "{base}/mcp", authorization_servers: [base], bearer_methods_supported: ["header"]}`. Sin SELECT y sin mutación: solo refleja la URL pública. |
-| GET | `/.well-known/oauth-authorization-server[/mcp]` | RFC 8414. `issuer`, `authorization_endpoint` (`{base}/oauth/authorize`), `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `code_challenge_methods_supported: ["S256"]` (único), `grant_types_supported: [authorization_code, refresh_token]`, `authorization_response_iss_parameter_supported: true`. **Sin `scopes_supported`** a propósito: MCP v1 es read-only entero, no hay scopes con función. |
+| GET | `/.well-known/oauth-authorization-server[/mcp]` | RFC 8414. `issuer`, `authorization_endpoint` (`{base}/oauth/authorize`), `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `code_challenge_methods_supported: ["S256"]` (único), `grant_types_supported: [authorization_code, refresh_token]`, `authorization_response_iss_parameter_supported: true`. **Sin `scopes_supported`** a propósito: el acceso no se granula por scopes sino por el rol vivo del usuario + el toggle `installation.mcp_write_enabled` (las tools de escritura lo comprueban por request) — un scope congelado en el token sería MENOS revocable que el gate vivo. |
 | POST | `/oauth/register` | DCR (RFC 7591), **público y sin autenticación**. Body `{redirect_uris (1..5, requerido), client_name?, client_uri?, token_endpoint_auth_method?, grant_types?, response_types?}` → **201** `{client_id ("ffc_…"), client_id_issued_at, client_secret? ("ffcs_…"), client_secret_expires_at? (0 = no caduca), …}`. `token_endpoint_auth_method` omitido ⇒ `client_secret_basic` (default RFC 7591 §2) y se emite secreto; `none` ⇒ cliente público sin secreto (el caso de claude.ai). Errores `invalid_client_metadata` / `invalid_redirect_uri`. |
 | POST | `/oauth/token` | `grant_type=authorization_code` (PKCE **S256 obligatorio**) o `grant_type=refresh_token` (rotación). Form-urlencoded. → `{access_token ("ffo_…"), token_type: "Bearer", expires_in: 3600, refresh_token ("ffr_…"), scope?}` + `Cache-Control: no-store`. |
 | POST | `/oauth/revoke` | RFC 7009. Un `ffr_…` revoca el **grant entero** (§2.1: "desconectar" en claude corta todo); un `ffo_…` revoca solo su fila. Token desconocido → **200** igualmente (§2.2). |

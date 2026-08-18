@@ -113,10 +113,10 @@ src/
 │   │                                #   Overlay fino de cash-flow (v1.6.0): props cashflow/cashflowDaily/onRequestDailyCashflow — pinta la curva
 │   │                                #   fina (fine.grid por month_fraction real, deflactada igual) sobre la zona pasada; daily lazy al hacer zoom histórico
 │   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills («Usuarios» owner-only, «MCP» con tokens/conexiones/toggle de escritura) + ThemeToggle en "Datos y sistema"
-│   ├── ApiTokensPanel.tsx        # Ajustes → Acceso: tokens de API (MCP). Self-fetch (patrón HistorySettingsPanel); crear (modal
+│   ├── ApiTokensPanel.tsx        # Ajustes → MCP: tokens de API (MCP). Self-fetch (patrón HistorySettingsPanel); crear (modal
 │   │                             #   label + caducidad), secreto mostrado UNA vez con copiar, tabla (prefix/último uso/vigencia),
 │   │                             #   revocar con modal de confirmación. Visible para cualquier miembro (v3.0.0).
-│   ├── OAuthConnectionsPanel.tsx # Ajustes → Acceso, sección «Conexiones», justo debajo de ApiTokensPanel (v3.1.0). Calco del
+│   ├── OAuthConnectionsPanel.tsx # Ajustes → MCP, sección «Conexiones», justo debajo de ApiTokensPanel (v3.1.0). Calco del
 │   │                             #   patrón ApiTokensPanel: sin props, self-fetch GET /v1/oauth/connections; tabla
 │   │                             #   Aplicación (client_name + host verificado) / Conectada / Último uso; revocar =
 │   │                             #   DELETE /v1/oauth/connections/{id} tras Modal de confirmación → corte inmediato.

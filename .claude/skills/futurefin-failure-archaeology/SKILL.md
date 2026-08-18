@@ -196,8 +196,10 @@ Vocabulary used below (defined once):
   mechanism — FutureFin acting as OAuth *client* of an external IdP so users could sign in with
   it. That rejection stands: Argon2id username+password remains the only way a person
   authenticates. v3.1.0's embedded OAuth 2.1 (`apps/api/src/oauth/`) is the OPPOSITE role —
-  FutureFin as *authorization server* issuing delegated read-only MCP credentials to client apps
-  (claude.ai) after a normal password login + consent. Adopting it does not reopen this entry.
+  FutureFin as *authorization server* issuing delegated MCP credentials to client apps
+  (claude.ai) after a normal password login + consent (read-only at birth; desde los issues #2/#3
+  también escriben, gobernadas por el rol vivo + `installation.mcp_write_enabled`). Adopting it
+  does not reopen this entry.
 
 ### 2.11 Embedding PostgreSQL in the image — five traps found on the way (v3.0.0)
 
