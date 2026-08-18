@@ -17,27 +17,32 @@
 
 use crate::error::{ApiError, ErrorBody};
 use crate::handlers::allocation_rules::{list_allocation_rules_core, patch_allocation_rule_core};
+use crate::handlers::assets::{asset_delete_effects, delete_asset_core};
+use crate::handlers::liabilities::{delete_liability_core, liability_delete_effects};
 use crate::handlers::assets::{create_asset_core, list_assets_core, patch_asset_core};
 use crate::handlers::budget::{
-    budget_snapshot_core, create_budget_entry_core, patch_budget_entry_core,
+    budget_snapshot_core, create_budget_entry_core, delete_budget_entry_core,
+    patch_budget_entry_core,
 };
 use crate::handlers::categories::{create_category_core, list_categories_core};
 use crate::handlers::history::{
-    capture_snapshots_core, history_cashflow_core, history_series_core, list_snapshots_core,
+    capture_snapshots_core, delete_snapshot_core, history_cashflow_core, history_series_core,
+    list_snapshots_core,
 };
 use crate::handlers::installation::{installation_access_core, settings_user_core};
 use crate::handlers::liabilities::{create_liability_core, list_liabilities_core};
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::planning::{
-    create_planning_flow_core, list_planning_flows_core, patch_planning_flow_core,
+    create_planning_flow_core, delete_planning_flow_core, list_planning_flows_core,
+    patch_planning_flow_core,
 };
 use crate::handlers::projection::{
     projection_series_cached, simulate_projection_core, SimulationSpec,
 };
 use crate::handlers::summary::summary_core;
 use crate::handlers::transactions::crud::{
-    create_transaction_core, list_imports_core, list_months_core, list_transactions_core,
-    patch_transaction_core,
+    create_transaction_core, delete_import_core, delete_transaction_core, get_transaction_core,
+    list_imports_core, list_months_core, list_transactions_core, patch_transaction_core,
 };
 use crate::handlers::transactions::recurring::{
     delete_recurring_rule_core, list_recurring_rules_core, materialize_recurring_core,
@@ -615,6 +620,53 @@ pub struct DeleteRecurringRuleParams {
     /// UUID de la plantilla (de list_recurring_rules).
     pub id: String,
     /// Sin confirm=true la tool NO borra: devuelve un preview de la plantilla.
+    #[serde(default)]
+    pub confirm: Option<bool>,
+}
+
+/// Params comunes de los deletes con preview/confirm del tramo 3.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteByIdParams {
+    /// UUID del recurso a borrar.
+    pub id: String,
+    /// Sin confirm=true la tool NO borra: devuelve un preview con los efectos.
+    #[serde(default)]
+    pub confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TaxBracketParam {
+    /// Umbral superior del tramo como string decimal; null/omitido SOLO en el último tramo.
+    #[serde(default)]
+    pub up_to: Option<String>,
+    /// Porcentaje del tramo (0–99), string decimal.
+    pub pct: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateFireSettingsParams {
+    /// SWR en % (0–4), string decimal.
+    #[serde(default)]
+    pub swr_pct: Option<String>,
+    /// Inflación anual asumida en % (0–50), string decimal.
+    #[serde(default)]
+    pub annual_inflation_assumption_percent: Option<String>,
+    /// "budget" (A) | "transactions_avg" (B) | "budget_income_real_expense" (C).
+    #[serde(default)]
+    pub savings_source: Option<String>,
+    /// "manual" | "annual_expense" | "current_income".
+    #[serde(default)]
+    pub fire_number_mode: Option<String>,
+    /// Objetivo manual > 0, string decimal (requerido con mode=manual).
+    #[serde(default)]
+    pub fire_number_manual_amount: Option<String>,
+    #[serde(default)]
+    pub taxes_enabled: Option<bool>,
+    /// Tramos fiscales COMPLETOS (sustituyen a los actuales; umbrales crecientes, solo el
+    /// último sin up_to).
+    #[serde(default)]
+    pub tax_brackets: Option<Vec<TaxBracketParam>>,
+    /// Sin confirm=true NO se persiste nada: devuelve el before/after validado (preview).
     #[serde(default)]
     pub confirm: Option<bool>,
 }
@@ -1877,6 +1929,413 @@ impl FutureFinMcp {
             delete_recurring_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id)
                 .await?;
             Ok(serde_json::json!({"id": rule_id, "deleted": true}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_transaction",
+        description = "Borra un movimiento PROPIO (hard delete; movimientos de otro usuario → not_found). Sin confirm=true no borra: devuelve el movimiento completo como preview.",
+        annotations(title = "Borrar movimiento", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_transaction(
+        &self,
+        Parameters(p): Parameters<DeleteByIdParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let txn_id = match parse_uuid_param("id", &p.id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let txn =
+                get_transaction_core(&self.state.pool, id.installation_id, id.user_id, txn_id)
+                    .await?;
+            if !p.confirm.unwrap_or(false) {
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_transaction",
+                    "effects": {"transaction": txn},
+                }));
+            }
+            delete_transaction_core(&self.state, id.installation_id, id.user_id, txn_id).await?;
+            Ok(serde_json::json!({"id": txn_id, "deleted": true}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_fire_settings",
+        description = "Cambia la configuración FIRE de la instalación — SOLO el owner: SWR, inflación asumida, fuente del ahorro (modo A budget | B transactions_avg | C budget_income_real_expense), modo del objetivo, importe manual, impuestos y tramos. Merge campo a campo sobre el estado actual: los campos omitidos NUNCA se resetean. Sin confirm=true no persiste nada — devuelve el before/after validado. Es el mayor radio de todas las tools: mueve la proyección entera; considera enseñar antes el impacto con simulate_projection.",
+        annotations(title = "Configurar FIRE", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_fire_settings(
+        &self,
+        Parameters(p): Parameters<UpdateFireSettingsParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let build = || -> Result<crate::handlers::installation::FireSettingsPatch, ApiError> {
+            let mut patch = crate::handlers::installation::FireSettingsPatch::default();
+            patch.swr_pct = p
+                .swr_pct
+                .as_deref()
+                .map(|v| parse_decimal_param("swr_pct", v))
+                .transpose()?;
+            patch.annual_inflation_assumption_percent = p
+                .annual_inflation_assumption_percent
+                .as_deref()
+                .map(|v| parse_decimal_param("annual_inflation_assumption_percent", v))
+                .transpose()?;
+            patch.fire_number_manual_amount = p
+                .fire_number_manual_amount
+                .as_deref()
+                .map(|v| parse_decimal_param("fire_number_manual_amount", v))
+                .transpose()?;
+            patch.taxes_enabled = p.taxes_enabled;
+            // Enums: reusar el Deserialize custom (misma lista de variantes y aliases que HTTP).
+            patch.savings_source = p
+                .savings_source
+                .as_ref()
+                .map(|s| {
+                    serde_json::from_value(serde_json::Value::String(s.trim().to_string()))
+                        .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))
+                })
+                .transpose()?;
+            patch.fire_number_mode = p
+                .fire_number_mode
+                .as_ref()
+                .map(|s| {
+                    serde_json::from_value(serde_json::Value::String(s.trim().to_string()))
+                        .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))
+                })
+                .transpose()?;
+            patch.tax_brackets = p
+                .tax_brackets
+                .as_ref()
+                .map(|brackets| {
+                    brackets
+                        .iter()
+                        .map(|b| {
+                            Ok(crate::handlers::installation::TaxBracket {
+                                up_to: b
+                                    .up_to
+                                    .as_deref()
+                                    .map(|v| parse_decimal_param("tax_brackets.up_to", v))
+                                    .transpose()?,
+                                pct: parse_decimal_param("tax_brackets.pct", &b.pct)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, ApiError>>()
+                })
+                .transpose()?;
+            Ok(patch)
+        };
+        let patch = match build() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            // El PATCH de instalación es owner-only también por HTTP.
+            if id.role != crate::handlers::membership::MembershipRole::Owner {
+                return Err(ApiError::Forbidden);
+            }
+            let apply = p.confirm.unwrap_or(false);
+            let outcome = crate::handlers::installation::patch_fire_settings_core(
+                &self.state,
+                id.installation_id,
+                id.user_id,
+                patch,
+                apply,
+            )
+            .await?;
+            if apply {
+                Ok(serde_json::json!({"applied": true, "outcome": outcome}))
+            } else {
+                Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "update_fire_settings",
+                    "effects": outcome,
+                }))
+            }
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_planning_flow",
+        description = "Borra una entrada de «Próximos». Sin confirm=true devuelve el flujo como preview. Mueve la proyección entera.",
+        annotations(title = "Borrar próximo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_planning_flow(
+        &self,
+        Parameters(p): Parameters<DeleteByIdParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let flow_id = match parse_uuid_param("id", &p.id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let flow = list_planning_flows_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                LedgerView::Household,
+            )
+            .await?
+            .into_iter()
+            .find(|f| f.id == flow_id)
+            .ok_or(ApiError::NotFound)?;
+            if !p.confirm.unwrap_or(false) {
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_planning_flow",
+                    "effects": {"flow": flow},
+                }));
+            }
+            delete_planning_flow_core(&self.state, id.installation_id, id.user_id, flow_id)
+                .await?;
+            Ok(serde_json::json!({"id": flow_id, "deleted": true}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_budget_entry",
+        description = "Borra una partida del presupuesto. Sin confirm=true devuelve la partida como preview. En modo A mueve la proyección entera.",
+        annotations(title = "Borrar partida de presupuesto", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_budget_entry(
+        &self,
+        Parameters(p): Parameters<DeleteByIdParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let entry_id = match parse_uuid_param("id", &p.id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let entry = budget_snapshot_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                LedgerView::Household,
+            )
+            .await?
+            .entries
+            .into_iter()
+            .find(|e| e.id == entry_id)
+            .ok_or(ApiError::NotFound)?;
+            if !p.confirm.unwrap_or(false) {
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_budget_entry",
+                    "effects": {"entry": entry},
+                }));
+            }
+            delete_budget_entry_core(&self.state, id.installation_id, id.user_id, entry_id)
+                .await?;
+            Ok(serde_json::json!({"id": entry_id, "deleted": true}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_asset",
+        description = "Borra un activo del hogar. Sin confirm=true devuelve un preview con los efectos colaterales: los movimientos y lotes de import vinculados quedan desvinculados (SET NULL), no se borran. Mueve la proyección entera.",
+        annotations(title = "Borrar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_asset(
+        &self,
+        Parameters(p): Parameters<DeleteByIdParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let asset_id = match parse_uuid_param("id", &p.id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let asset = list_assets_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                LedgerView::Household,
+            )
+            .await?
+            .into_iter()
+            .find(|a| a.id == asset_id)
+            .ok_or(ApiError::NotFound)?;
+            if !p.confirm.unwrap_or(false) {
+                let effects =
+                    asset_delete_effects(&self.state.pool, id.installation_id, asset_id).await?;
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_asset",
+                    "effects": {
+                        "asset": {"id": asset.id, "name": asset.name, "current_value": asset.current_value.to_string()},
+                        "unlinked": effects,
+                    },
+                }));
+            }
+            delete_asset_core(&self.state, id.installation_id, id.user_id, asset_id).await?;
+            Ok(serde_json::json!({"id": asset_id, "deleted": true}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_liability",
+        description = "Borra un pasivo del hogar. Sin confirm=true devuelve un preview con los efectos: los movimientos vinculados quedan desvinculados (SET NULL). Mueve la proyección entera.",
+        annotations(title = "Borrar pasivo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_liability(
+        &self,
+        Parameters(p): Parameters<DeleteByIdParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let liab_id = match parse_uuid_param("id", &p.id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let liab = list_liabilities_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                LedgerView::Household,
+            )
+            .await?
+            .into_iter()
+            .find(|l| l.id == liab_id)
+            .ok_or(ApiError::NotFound)?;
+            if !p.confirm.unwrap_or(false) {
+                let unlinked =
+                    liability_delete_effects(&self.state.pool, id.installation_id, liab_id)
+                        .await?;
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_liability",
+                    "effects": {
+                        "liability": {"id": liab.id, "label": liab.label, "principal": liab.principal.to_string()},
+                        "transactions_unlinked": unlinked,
+                    },
+                }));
+            }
+            delete_liability_core(&self.state, id.installation_id, id.user_id, liab_id).await?;
+            Ok(serde_json::json!({"id": liab_id, "deleted": true}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_snapshot",
+        description = "Borra un snapshot PROPIO del histórico (sus items caen en cascada). Sin confirm=true devuelve la cabecera + nº de items como preview. No afecta a la proyección.",
+        annotations(title = "Borrar snapshot", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_snapshot(
+        &self,
+        Parameters(p): Parameters<DeleteByIdParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let snap_id = match parse_uuid_param("id", &p.id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let snap =
+                list_snapshots_core(&self.state.pool, id.installation_id, id.user_id, None, None)
+                    .await?
+                    .into_iter()
+                    .find(|s| s.id == snap_id)
+                    .ok_or(ApiError::NotFound)?;
+            if !p.confirm.unwrap_or(false) {
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_snapshot",
+                    "effects": {
+                        "snapshot": {
+                            "id": snap.id,
+                            "kind": snap.kind,
+                            "snapshot_date": snap.snapshot_date_ymd,
+                            "total": snap.total.to_string(),
+                            "items_deleted": snap.items.len(),
+                        },
+                    },
+                }));
+            }
+            delete_snapshot_core(&self.state.pool, id.installation_id, id.user_id, snap_id)
+                .await?;
+            Ok(serde_json::json!({"id": snap_id, "deleted": true}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_import",
+        description = "Borra un lote de import Y TODAS sus transacciones en cascada. Sin confirm=true devuelve un preview con el lote (fuente, fichero, txn_count). Mismo contrato que el ?confirm=true del endpoint HTTP.",
+        annotations(title = "Borrar lote de import", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_import(
+        &self,
+        Parameters(p): Parameters<DeleteByIdParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let import_id = match parse_uuid_param("id", &p.id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let batch = list_imports_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                LedgerView::Household,
+            )
+            .await?
+            .into_iter()
+            .find(|b| b.id == import_id)
+            .ok_or(ApiError::NotFound)?;
+            if !p.confirm.unwrap_or(false) {
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_import",
+                    "effects": {"transactions_deleted": batch.txn_count, "import": batch},
+                }));
+            }
+            delete_import_core(&self.state, id.installation_id, id.user_id, import_id).await?;
+            Ok(serde_json::json!({"id": import_id, "deleted": true}))
         }
         .await;
         to_tool_result(res)

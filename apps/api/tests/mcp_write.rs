@@ -780,3 +780,303 @@ async fn delete_recurring_rule_previews_then_deletes() {
     .await;
     tool_error(&envelope, "not_found");
 }
+
+// ---------------------------------------------------------------------------
+// Tramo 3 — deletes con preview/confirm + update_fire_settings
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // Tramos fiscales personalizados por HTTP (objeto completo, como hace la SPA).
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({"fire_settings": {
+                "fire_number_mode": "annual_expense",
+                "fire_number_manual_amount": null,
+                "swr_pct": "4",
+                "taxes_enabled": true,
+                "tax_brackets": [{"up_to": "10000", "pct": "10"}, {"up_to": null, "pct": "25"}],
+                "savings_source": "budget"
+            }}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    // Preview (sin confirm): before/after validado, nada persiste.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_fire_settings", json!({"swr_pct": "3.0"})),
+    )
+    .await;
+    let preview = tool_json(&envelope);
+    assert_eq!(preview["preview"], true);
+    assert_eq!(preview["effects"]["before"]["swr_pct"], "4");
+    assert_eq!(preview["effects"]["after"]["swr_pct"], "3.0");
+    let stored = app.get_with_cookie("/v1/installation", &owner.cookie).await;
+    assert_eq!(stored.json()["installation"]["fire_settings"]["swr_pct"], "4");
+
+    // Confirm: cambia SOLO swr — los tax_brackets personalizados sobreviven (el bug del
+    // #[serde(default)] que un PATCH parcial por HTTP sí dispararía).
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_fire_settings", json!({"swr_pct": "3.0", "confirm": true})),
+    )
+    .await;
+    let applied = tool_json(&envelope);
+    assert_eq!(applied["applied"], true);
+    let stored = app.get_with_cookie("/v1/installation", &owner.cookie).await;
+    let fs = stored.json()["installation"]["fire_settings"].clone();
+    assert_eq!(fs["swr_pct"], "3.0");
+    assert_eq!(
+        fs["tax_brackets"].as_array().unwrap().len(),
+        2,
+        "los tramos personalizados NO se resetean: {fs}"
+    );
+    assert_eq!(fs["tax_brackets"][0]["pct"], "10");
+
+    // Cotas del PATCH real re-aplicadas.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_fire_settings", json!({"swr_pct": "5", "confirm": true})),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+
+    // Member (escritor) NO puede: el gate es Owner, no role_can_write.
+    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+    let member_token = create_token_for(&app, &member.cookie).await;
+    let envelope = mcp_post(
+        &app,
+        &member_token,
+        tool_call("update_fire_settings", json!({"swr_pct": "3.5", "confirm": true})),
+    )
+    .await;
+    tool_error(&envelope, "forbidden");
+
+    // Cambiar savings_source por MCP invalida la proyección (FULL).
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+    warm(&app, &owner.cookie, &key).await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_fire_settings",
+            json!({"savings_source": "transactions_avg", "confirm": true}),
+        ),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    assert_invalidated(&app, &key, "update_fire_settings").await;
+}
+
+#[tokio::test]
+async fn destructive_deletes_preview_then_execute() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat_exp = app.create_category(&owner, "expense", "Comida").await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+
+    // Transacción vinculada a un asset → el preview de delete_asset cuenta el SET NULL.
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_ast, "name": "Fondo", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+    let txn = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-07-01", "concept": "aporte", "amount": "-200.00",
+                   "kind": "savings", "linked_asset_id": asset_id}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(txn.status, http::StatusCode::CREATED, "{txn:?}");
+    let txn_id = txn.json()["id"].as_str().unwrap().to_string();
+
+    // delete_transaction: preview trae el movimiento completo; confirm borra.
+    let envelope = mcp_post(&app, &token, tool_call("delete_transaction", json!({"id": txn_id}))).await;
+    let preview = tool_json(&envelope);
+    assert_eq!(preview["preview"], true);
+    assert_eq!(preview["effects"]["transaction"]["concept"], "aporte");
+    assert_eq!(app.count_rows("transactions").await, 1);
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_transaction", json!({"id": txn_id, "confirm": true})),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    assert_eq!(app.count_rows("transactions").await, 0);
+
+    // Re-crear la transacción vinculada para el preview del asset.
+    let txn = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-07-02", "concept": "aporte2", "amount": "-100.00",
+                   "kind": "savings", "linked_asset_id": asset_id}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(txn.status, http::StatusCode::CREATED);
+
+    // delete_asset: preview con efectos (1 transacción a desvincular); confirm borra el asset
+    // y la transacción sobrevive desvinculada.
+    let envelope = mcp_post(&app, &token, tool_call("delete_asset", json!({"id": asset_id}))).await;
+    let preview = tool_json(&envelope);
+    assert_eq!(preview["effects"]["unlinked"]["transactions_unlinked"], 1, "{preview}");
+    assert_eq!(app.count_rows("assets").await, 1);
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_asset", json!({"id": asset_id, "confirm": true})),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    assert_eq!(app.count_rows("assets").await, 0);
+    assert_eq!(app.count_rows("transactions").await, 1, "la transacción sobrevive");
+    let unlinked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM transactions WHERE linked_asset_id IS NULL",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(unlinked, 1, "desvinculada, no borrada");
+
+    // delete_snapshot: capture + preview (items_deleted) + confirm.
+    let asset2 = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_ast, "name": "Otro", "current_value": "500"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(asset2.status, http::StatusCode::CREATED);
+    let snap = tool_json(
+        &mcp_post(&app, &token, tool_call("capture_snapshot", json!({"kinds": ["asset"]}))).await,
+    );
+    let snap_id = snap["snapshots"][0]["id"].as_str().unwrap().to_string();
+    let envelope = mcp_post(&app, &token, tool_call("delete_snapshot", json!({"id": snap_id}))).await;
+    let preview = tool_json(&envelope);
+    assert_eq!(preview["effects"]["snapshot"]["items_deleted"], 1, "{preview}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_snapshot", json!({"id": snap_id, "confirm": true})),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    assert_eq!(app.count_rows("history_snapshots").await, 0);
+
+    // delete_budget_entry y delete_planning_flow: preview → confirm.
+    let entry = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("create_budget_entry", json!({"category_id": cat_exp, "amount": "100"})),
+        )
+        .await,
+    );
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_budget_entry", json!({"id": entry["id"]})),
+    )
+    .await;
+    assert_eq!(tool_json(&envelope)["preview"], true);
+    assert_eq!(app.count_rows("budget_entries").await, 1);
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_budget_entry", json!({"id": entry["id"], "confirm": true})),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    assert_eq!(app.count_rows("budget_entries").await, 0);
+
+    let flow = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_planning_flow",
+                json!({"title": "Viaje", "category_id": cat_exp, "expected_amount": "600"}),
+            ),
+        )
+        .await,
+    );
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_planning_flow", json!({"id": flow["id"], "confirm": true})),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    assert_eq!(app.count_rows("planning_flows").await, 0);
+}
+
+#[tokio::test]
+async fn delete_import_previews_txn_count_and_cascades() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // Import CSV de 2 filas por HTTP (preview → confirm, patrón de transactions_projection_cache).
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+               01/06/2026;01/06/2026;SUPER;-10,00;EUR\n\
+               02/06/2026;02/06/2026;LUZ;-20,00;EUR\n";
+    let b64 = B64.encode(csv);
+    let p = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/preview",
+            json!({"source": "myinvestor", "file_b64": b64}),
+            &owner.cookie,
+        )
+        .await;
+    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    let c = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/confirm",
+            json!({"source": "myinvestor", "file_b64": b64, "file_sha256": sha,
+                   "decisions": [{"kind": "expense"}, {"kind": "expense"}], "learn_rules": false}),
+            &owner.cookie,
+        )
+        .await;
+    assert!(c.status.is_success(), "{c:?}");
+    assert_eq!(app.count_rows("transactions").await, 2);
+
+    let batches = tool_json(
+        &mcp_post(&app, &token, tool_call("list_transaction_imports", json!({}))).await,
+    );
+    let import_id = batches[0]["id"].as_str().unwrap().to_string();
+
+    let envelope = mcp_post(&app, &token, tool_call("delete_import", json!({"id": import_id}))).await;
+    let preview = tool_json(&envelope);
+    assert_eq!(preview["effects"]["transactions_deleted"], 2, "{preview}");
+    assert_eq!(app.count_rows("transactions").await, 2, "el preview no borra");
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_import", json!({"id": import_id, "confirm": true})),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    assert_eq!(app.count_rows("transactions").await, 0, "cascada del lote");
+    assert_eq!(app.count_rows("transaction_imports").await, 0);
+}

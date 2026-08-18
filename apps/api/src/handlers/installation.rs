@@ -552,6 +552,123 @@ pub(crate) async fn installation_access_core(
     Ok(Some(installation_access_from_row(r)?))
 }
 
+/// Cambios campo a campo de la tool MCP `update_fire_settings`. NUNCA se deserializa a
+/// `FireSettings` directamente: su `#[serde(default)]` a nivel de struct resetearía los campos
+/// ausentes a defaults (un PATCH «solo swr» borraría los tramos fiscales personalizados) — este
+/// DTO existe para esquivar exactamente ese bug.
+#[derive(Debug, Default)]
+pub(crate) struct FireSettingsPatch {
+    pub swr_pct: Option<Decimal>,
+    pub taxes_enabled: Option<bool>,
+    pub tax_brackets: Option<Vec<TaxBracket>>,
+    pub fire_number_mode: Option<FireNumberMode>,
+    pub fire_number_manual_amount: Option<Decimal>,
+    pub savings_source: Option<SavingsSource>,
+    /// Columna aparte de la instalación (no vive en el JSONB), pero es un eje FIRE más.
+    pub annual_inflation_assumption_percent: Option<Decimal>,
+}
+
+impl FireSettingsPatch {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.swr_pct.is_none()
+            && self.taxes_enabled.is_none()
+            && self.tax_brackets.is_none()
+            && self.fire_number_mode.is_none()
+            && self.fire_number_manual_amount.is_none()
+            && self.savings_source.is_none()
+            && self.annual_inflation_assumption_percent.is_none()
+    }
+}
+
+/// Before/after del merge (el preview de la tool los enseña; el apply además persiste).
+#[derive(Debug, Serialize)]
+pub(crate) struct FireSettingsPatchOutcome {
+    pub before: FireSettings,
+    pub after: FireSettings,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub annual_inflation_before: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub annual_inflation_after: Decimal,
+}
+
+/// Core de la tool MCP `update_fire_settings` (no hay endpoint HTTP equivalente: el PATCH de la
+/// SPA envía siempre el objeto completo). Lee el estado actual, aplica SOLO los campos presentes
+/// del patchset, re-valida con las mismas cotas del PATCH real y — con `apply = true` — escribe
+/// el objeto COMPLETO e invalida FULL. Con `apply = false` valida y devuelve el before/after sin
+/// tocar nada (preview).
+pub(crate) async fn patch_fire_settings_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    patchset: FireSettingsPatch,
+    apply: bool,
+) -> Result<FireSettingsPatchOutcome, ApiError> {
+    if patchset.is_empty() {
+        return Err(ApiError::BadRequest(
+            "provide at least one FIRE setting to change".into(),
+        ));
+    }
+    let (stored, inflation_before): (Option<SqlxJson<FireSettings>>, Decimal) = sqlx::query_as(
+        r#"SELECT fire_settings, annual_inflation_assumption_percent
+           FROM installation WHERE id = $1"#,
+    )
+    .bind(iid)
+    .fetch_one(&state.pool)
+    .await?;
+    let before = resolve_fire_settings(stored.map(|j| j.0));
+
+    let mut after = before.clone();
+    if let Some(v) = patchset.swr_pct {
+        after.swr_pct = v;
+    }
+    if let Some(v) = patchset.taxes_enabled {
+        after.taxes_enabled = v;
+    }
+    if let Some(v) = patchset.tax_brackets {
+        after.tax_brackets = v;
+    }
+    if let Some(v) = patchset.fire_number_mode {
+        after.fire_number_mode = v;
+    }
+    if let Some(v) = patchset.fire_number_manual_amount {
+        after.fire_number_manual_amount = Some(v);
+    }
+    if let Some(v) = patchset.savings_source {
+        after.savings_source = v;
+    }
+    validate_fire_settings(&after)?;
+
+    let annual_inflation_after = match patchset.annual_inflation_assumption_percent {
+        Some(v) => {
+            validate_annual_inflation_assumption(v)?;
+            v
+        }
+        None => inflation_before,
+    };
+
+    if apply {
+        sqlx::query(
+            r#"UPDATE installation
+               SET fire_settings = $1, annual_inflation_assumption_percent = $2
+               WHERE id = $3"#,
+        )
+        .bind(SqlxJson(after.clone()))
+        .bind(annual_inflation_after)
+        .bind(iid)
+        .execute(&state.pool)
+        .await?;
+        // FULL: así es como un cambio de modo A↔B/C o de SWR surte efecto en la proyección.
+        refresh_projection_after_mutation(state.clone(), iid, user_id);
+    }
+
+    Ok(FireSettingsPatchOutcome {
+        before,
+        after,
+        annual_inflation_before: inflation_before,
+        annual_inflation_after,
+    })
+}
+
 /// Identidad mínima del usuario del token para la tool MCP `get_settings` (el endpoint HTTP
 /// `GET /v1/installation` NO la incluye — la sesión web ya conoce a su usuario).
 #[derive(Debug, Serialize)]
