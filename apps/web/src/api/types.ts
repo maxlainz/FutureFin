@@ -56,6 +56,8 @@ export type InstallationSnapshot = {
   show_age_mode: string;
   /** Ausente en clientes antiguos; usar `defaultFireSettingsApi`. */
   fire_settings?: FireSettingsApi;
+  /** Kill-switch vivo de las tools de escritura MCP. Ausente en backends antiguos → `true`. */
+  mcp_write_enabled?: boolean;
 };
 
 export type InstallationAccess = {

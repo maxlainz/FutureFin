@@ -17,7 +17,8 @@ import type {
   UserResponse,
 } from "../api/types";
 import { Modal, ModalFormError } from "../components/Modal";
-import { RowEditIcon, RowTrashIcon } from "../components/icons";
+import { PlugIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
+import { Switch } from "../components/Switch";
 import { AccountCard } from "../components/AccountCard";
 import { ApiTokensPanel } from "./ApiTokensPanel";
 import { HistorySettingsPanel } from "./HistorySettingsPanel";
@@ -79,6 +80,9 @@ export function SettingsView({
   calendarTz,
   onHistoryMutated,
   isOwner,
+  mcpWriteEnabled,
+  mcpWriteSaving,
+  onToggleMcpWrite,
   settingsSubTab,
   navigateSettingsSubTab,
   visibleSettingsSubTabs,
@@ -167,6 +171,10 @@ export function SettingsView({
   calendarTz: string;
   onHistoryMutated: () => void;
   isOwner: boolean;
+  /** Kill-switch vivo de la escritura vía MCP (Ajustes → MCP; editable solo por el owner). */
+  mcpWriteEnabled: boolean;
+  mcpWriteSaving: boolean;
+  onToggleMcpWrite: (enabled: boolean) => void;
   settingsSubTab: SettingsSubTabId;
   navigateSettingsSubTab: (id: SettingsSubTabId) => void;
   visibleSettingsSubTabs: SettingsSubTabId[];
@@ -327,7 +335,7 @@ export function SettingsView({
       {settingsSubTab === "access" && isOwner ? (
         <section className="panel">
           <h3 className="panel-title">Aprobar acceso</h3>
-          {/* (sección owner-only; los tokens de API van en su propio panel abajo) */}
+          {/* Pestaña «Usuarios» (owner-only). Todo lo relacionado con MCP vive en su pestaña. */}
           {pendingUsersBusy ? (
             <p className="muted bordered-top">Cargando…</p>
           ) : pendingUsers.length === 0 ? (
@@ -369,9 +377,47 @@ export function SettingsView({
         </section>
       ) : null}
 
-      {settingsSubTab === "access" && hasMembership ? <ApiTokensPanel /> : null}
+      {settingsSubTab === "mcp" && hasMembership ? (
+        <section className="panel">
+          <h3 className="panel-title">
+            <PlugIcon className="panel-title-icon" /> Servidor MCP
+          </h3>
+          <p className="muted">
+            Conecta Claude u otro asistente a tus finanzas: el servidor MCP embebido vive en{" "}
+            <code>https://tu-host/mcp</code> y acepta tokens de API (abajo) o el conector OAuth de
+            claude.ai. Las herramientas de lectura están siempre disponibles para cualquier
+            miembro; la escritura respeta el rol (los visores nunca escriben) y el interruptor de
+            esta página.
+          </p>
+          <div className="bordered-top">
+            <div className="mcp-write-toggle-row">
+              <Switch
+                checked={mcpWriteEnabled}
+                onChange={onToggleMcpWrite}
+                disabled={!isOwner || mcpWriteSaving}
+                label="Permitir escritura vía MCP"
+                ariaLabel="Permitir que las herramientas MCP escriban en esta instalación"
+              />
+              {isOwner ? (
+                <p className="muted tight">
+                  {mcpWriteSaving ? "Guardando…" : "Guardado automático."} Al desactivarlo, las
+                  herramientas de escritura se cortan al instante (las de lectura siguen
+                  funcionando).
+                </p>
+              ) : (
+                <p className="muted tight">
+                  <strong>{mcpWriteEnabled ? "Activada" : "Desactivada"}</strong> · solo el owner
+                  puede cambiarlo.
+                </p>
+              )}
+            </div>
+          </div>
+        </section>
+      ) : null}
 
-      {settingsSubTab === "access" && hasMembership ? <OAuthConnectionsPanel /> : null}
+      {settingsSubTab === "mcp" && hasMembership ? <ApiTokensPanel /> : null}
+
+      {settingsSubTab === "mcp" && hasMembership ? <OAuthConnectionsPanel /> : null}
 
       {settingsSubTab === "calendar" && hasMembership ? (
         <section className="panel">

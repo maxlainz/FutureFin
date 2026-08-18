@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — Ajustes: pestaña dedicada «MCP» (y «Acceso» pasa a «Usuarios»)
+
+- Todo lo relacionado con el servidor MCP vive ahora en una sub-tab propia de Ajustes: panel
+  «Servidor MCP» (endpoint + explicación del modelo de permisos), el toggle owner-only
+  **«Permitir escritura vía MCP»** (autosave, respaldado por `mcp_write_enabled`; los demás roles
+  lo ven en solo lectura), los «Tokens de API (MCP)» y las «Conexiones» OAuth. La antigua
+  «Acceso» queda como **«Usuarios»** (aprobar pendientes), visible solo para el owner; su slug
+  `/ajustes/acceso` se conserva para URLs guardadas.
+- El switch de la barra de Proyección se extrajo al componente compartido `components/Switch.tsx`
+  (clases `.ff-switch*`, tokens del tema; `variant="chart"` mantiene el label small-caps) y lo
+  reutiliza el toggle nuevo. Primer test de `lib/navigation.ts` (mapeo slug↔id de sub-tabs).
+- Copy actualizado en tokens, conexiones y consentimiento OAuth: el acceso ya no promete «solo
+  lectura» — hereda el rol vivo y respeta el interruptor de escritura.
+
 ### Added — Kill-switch de escritura MCP: `installation.mcp_write_enabled`
 
 - Columna nueva (`20260818120000`, `BOOLEAN NOT NULL DEFAULT TRUE`) + campo en el snapshot y en el

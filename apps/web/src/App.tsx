@@ -514,14 +514,18 @@ export default function App() {
   );
 
   const hasMembership = installation !== null;
+  const isInstallationOwner = installation?.role === "owner";
 
   const visibleSettingsSubTabs = useMemo<SettingsSubTabId[]>(() => {
     const out: SettingsSubTabId[] = [];
-    // «Acceso» es de cualquier miembro desde los tokens de API (MCP); la sección de
-    // aprobar usuarios pendientes sigue siendo owner-only dentro del tab.
+    // «Usuarios» (aprobar acceso) es owner-only; «MCP» (tokens de API, conexiones OAuth y el
+    // toggle de escritura) es de cualquier miembro — los tokens son per-user, viewer incluido.
+    if (isInstallationOwner) {
+      out.push("access");
+    }
     if (hasMembership) {
       out.push(
-        "access",
+        "mcp",
         "calendar",
         "projection",
         "retirement",
@@ -531,7 +535,7 @@ export default function App() {
     }
     out.push("data");
     return out;
-  }, [hasMembership]);
+  }, [hasMembership, isInstallationOwner]);
 
   const defaultSettingsSubTab: SettingsSubTabId =
     visibleSettingsSubTabs[0] ?? "data";
@@ -1836,6 +1840,29 @@ export default function App() {
     }
   }
 
+  const [mcpWriteSaving, setMcpWriteSaving] = useState(false);
+  async function saveInstallationMcpWrite(enabled: boolean) {
+    if (installation?.role !== "owner") return;
+    setInstallationError(null);
+    setMcpWriteSaving(true);
+    try {
+      const res = await fetch("/v1/installation", {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mcp_write_enabled: enabled }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorMessageFromResponse(res));
+      }
+      setInstallation((await res.json()) as InstallationAccess);
+    } catch (e: unknown) {
+      setInstallationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMcpWriteSaving(false);
+    }
+  }
+
   async function approvePendingUser(userId: string) {
     const role = approveRoles[userId] ?? "member";
     setApproveBusy(true);
@@ -3031,7 +3058,7 @@ export default function App() {
             <div className="workspace-header">
               <h2 className="workspace-title">Acceso pendiente</h2>
               <p className="workspace-sub">
-                <strong>Ajustes → Acceso</strong>
+                <strong>Ajustes → Usuarios</strong>
               </p>
             </div>
           </div>
@@ -3468,6 +3495,9 @@ export default function App() {
               void loadCashflowSeries();
             }}
             isOwner={installation?.role === "owner"}
+            mcpWriteEnabled={installation?.installation.mcp_write_enabled ?? true}
+            mcpWriteSaving={mcpWriteSaving}
+            onToggleMcpWrite={(enabled) => void saveInstallationMcpWrite(enabled)}
             settingsSubTab={settingsSubTab}
             navigateSettingsSubTab={navigateSettingsSubTab}
             visibleSettingsSubTabs={visibleSettingsSubTabs}
