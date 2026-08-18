@@ -337,7 +337,17 @@ Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` 
   concreto duplicado). **Contrato de cache por tool**: COND (`invalidate_projection_if_savings_
   uses_transactions`, solo modos B/C) = transaction C/U + materialize; NONE = capture_snapshot
   (D12), create_category, create_categorization_rule; FULL (`refresh_projection_after_mutation`)
-  = planning C/U. Regresión: `apps/api/tests/mcp_write.rs`.
+  = planning C/U. Tramo 2: `update_asset_value` (subset current_value + retorno esperado con
+  before/after; sin owner-check — contrato del ledger), `create_asset`, `create_liability`
+  (principal explícito o `derive_principal_from_plan`), `create_budget_entry` /
+  `update_budget_entry` (exclusión `ends_at_retirement` ⊕ `expense_end_date`),
+  `update_allocation_rule` (subset amount/cap/enabled — sin create/delete/reorder; la invariante
+  del sink vive en la core compartida) y `delete_recurring_rule` (**estrena el patrón
+  preview/confirm**: sin `confirm: true` la tool devuelve `{preview, confirm_required, action,
+  effects}` como ÉXITO — para un LLM el preview es información, no fallo — y solo ejecuta con
+  confirm; NONE). Todos los anteriores excepto delete_recurring_rule invalidan FULL. La capa API
+  valida además `expected_annual_return_percent > −100` en create/patch de assets (el engine
+  clampa ≤ −100 a pérdida total). Regresión: `apps/api/tests/mcp_write.rs`.
 - **NO está en OpenAPI a propósito**: no es un recurso REST — es JSON-RPC cuyo contrato define la
   spec MCP y que se autodescribe vía `tools/list`.
 - **Límite conocido de 3.0.0 — resuelto en 3.1.0**: el conector de claude.ai exige OAuth 2.1, que

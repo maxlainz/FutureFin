@@ -365,8 +365,34 @@ pub async fn create_asset(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = create_asset_core(&state, iid, user.id.0, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+}
 
+/// Rentabilidad esperada válida: > −100 %. El engine clampa ≤ −100 a pérdida total, pero la
+/// capa API rechaza inputs nuevos absurdos (misma cota que los overrides de simulate_projection).
+fn assert_return_percent(pct: Option<Decimal>) -> Result<(), ApiError> {
+    if let Some(p) = pct {
+        if p <= Decimal::from(-100) {
+            return Err(ApiError::BadRequest(
+                "expected_annual_return_percent must be greater than -100".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_asset`.
+/// Invalidación FULL dentro. Sin owner-check en el ledger de assets (contrato del módulo:
+/// cualquier member edita cualquier fila del hogar).
+pub(crate) async fn create_asset_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    body: CreateAssetBody,
+) -> Result<AssetResponse, ApiError> {
     assert_asset_category(&state.pool, iid, body.category_id).await?;
+    assert_return_percent(body.expected_annual_return_percent)?;
 
     let name = normalize_name(&body.name)?;
     assert_non_negative(body.current_value, "current_value")?;
@@ -398,27 +424,27 @@ pub async fn create_asset(
     .bind(body.expected_annual_return_percent)
     .bind(&notes)
     .bind(sort_index)
-    .bind(user.id.0)
+    .bind(user_id)
     .fetch_one(&state.pool)
     .await?;
 
     let today = installation_naive_today(&state.pool, iid).await?;
     let ctx =
-        assets_projection_context(&state.pool, iid, user.id.0, LedgerView::Household, today).await?;
+        assets_projection_context(&state.pool, iid, user_id, LedgerView::Household, today).await?;
     let n = ctx.nominals.get(&row.id).copied().unwrap_or(Decimal::ZERO);
     let targets = fetch_asset_resolved_targets(
         &state.pool,
         iid,
         LedgerView::Household,
-        user.id.0,
+        user_id,
         ctx.income_monthly,
         ctx.expense_with_debt,
     )
     .await?;
     let t = targets.get(&row.id).copied();
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok((axum::http::StatusCode::CREATED, Json(row_to_response(row, n, t))))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    Ok(row_to_response(row, n, t))
 }
 
 #[utoipa::path(
@@ -448,7 +474,20 @@ pub async fn patch_asset(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = patch_asset_core(&state, iid, user.id.0, id, body).await?;
+    Ok(Json(resp))
+}
 
+/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_asset_value` (que expone
+/// solo un subset de campos). Invalidación FULL dentro. Sin owner-check (contrato del módulo).
+pub(crate) async fn patch_asset_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: PatchAssetBody,
+) -> Result<AssetResponse, ApiError> {
+    assert_return_percent(body.expected_annual_return_percent)?;
     if body.category_id.is_none()
         && body.name.is_none()
         && body.current_value.is_none()
@@ -545,21 +584,21 @@ pub async fn patch_asset(
 
     let today = installation_naive_today(&state.pool, iid).await?;
     let ctx =
-        assets_projection_context(&state.pool, iid, user.id.0, LedgerView::Household, today).await?;
+        assets_projection_context(&state.pool, iid, user_id, LedgerView::Household, today).await?;
     let n = ctx.nominals.get(&updated.id).copied().unwrap_or(Decimal::ZERO);
     let targets = fetch_asset_resolved_targets(
         &state.pool,
         iid,
         LedgerView::Household,
-        user.id.0,
+        user_id,
         ctx.income_monthly,
         ctx.expense_with_debt,
     )
     .await?;
     let t = targets.get(&updated.id).copied();
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(Json(row_to_response(updated, n, t)))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    Ok(row_to_response(updated, n, t))
 }
 
 #[utoipa::path(
