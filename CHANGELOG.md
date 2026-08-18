@@ -6,6 +6,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Kill-switch de escritura MCP: `installation.mcp_write_enabled`
+
+- Columna nueva (`20260818120000`, `BOOLEAN NOT NULL DEFAULT TRUE`) + campo en el snapshot y en el
+  `PATCH /v1/installation` (owner-only, como todo el PATCH). Es un **ajuste en DB con toggle en la
+  GUI** (Ajustes → MCP), no una env var: `require_mcp_write` (mcp/auth.rs) lo lee en vivo en cada
+  llamada de escritura, así que apagarlo corta la escritura en el siguiente request — misma
+  filosofía que el rol vivo. Con el toggle apagado las tools de escritura devuelven un error
+  tipado `mcp_write_disabled` que el LLM puede explicar (viaja como `bad_request`, la única
+  variante que propaga mensaje); un `viewer` recibe `forbidden`. `FUTUREFIN_MCP_ENABLED` sigue
+  siendo el kill-switch de `/mcp` entero. Fuera del `.ffbackup` (settings de instalación, no
+  datos financieros).
+
 ### Added — MCP: `simulate_projection` (what-if de proyección/FIRE sin persistir)
 
 - La capacidad que faltaba para un asistente conversacional: «¿y si me compro X?», «¿y si gasto

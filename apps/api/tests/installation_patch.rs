@@ -93,3 +93,62 @@ async fn patch_installation_accepts_valid_fire_mode_change() {
     let body = resp.json();
     assert_eq!(body["installation"]["fire_settings"]["fire_number_mode"], "current_income");
 }
+
+#[tokio::test]
+async fn mcp_write_enabled_defaults_true_and_owner_can_toggle() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // Default TRUE en el snapshot desde el primer GET.
+    let resp = app.get_with_cookie("/v1/installation", &owner.cookie).await;
+    assert_eq!(resp.status, http::StatusCode::OK);
+    assert_eq!(
+        resp.json()["installation"]["mcp_write_enabled"], true,
+        "default de la migración"
+    );
+
+    // El owner lo apaga; la respuesta del PATCH ya lo refleja.
+    let resp = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({"mcp_write_enabled": false}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(resp.status, http::StatusCode::OK, "{resp:?}");
+    assert_eq!(resp.json()["installation"]["mcp_write_enabled"], false);
+
+    // Y persiste (GET posterior).
+    let resp = app.get_with_cookie("/v1/installation", &owner.cookie).await;
+    assert_eq!(resp.json()["installation"]["mcp_write_enabled"], false);
+
+    // Re-encender funciona igual.
+    let resp = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({"mcp_write_enabled": true}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(resp.json()["installation"]["mcp_write_enabled"], true);
+}
+
+#[tokio::test]
+async fn mcp_write_enabled_patch_is_owner_only() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+
+    let resp = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({"mcp_write_enabled": false}),
+            &member.cookie,
+        )
+        .await;
+    assert_eq!(
+        resp.status,
+        http::StatusCode::FORBIDDEN,
+        "el PATCH de instalación entero es owner-only: {resp:?}"
+    );
+}

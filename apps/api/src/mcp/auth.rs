@@ -119,3 +119,33 @@ async fn authenticate(
         credential,
     })
 }
+
+/// Gate de TODA tool de escritura MCP: rol con permiso de escritura + kill-switch vivo
+/// `installation.mcp_write_enabled`. Se ejecuta por request (misma filosofía que el resto de la
+/// identidad: revocar o apagar el toggle = corte en la siguiente llamada, sin reinicios).
+///
+/// Errores: `viewer` → `Forbidden` (código `forbidden`; la variante no lleva mensaje y
+/// `sanitised_message` lo fija). Toggle apagado → `BadRequest` con prefijo `mcp_write_disabled:`
+/// — BadRequest es la única variante que propaga el mensaje al wire, y el LLM necesita leer el
+/// MOTIVO para poder explicárselo al usuario en vez de reintentar a ciegas.
+pub(crate) async fn require_mcp_write(
+    pool: &sqlx::PgPool,
+    id: &McpIdentity,
+) -> Result<(), ApiError> {
+    if !crate::handlers::membership::role_can_write(id.role.as_str()) {
+        return Err(ApiError::Forbidden);
+    }
+    let enabled: bool =
+        sqlx::query_scalar(r#"SELECT mcp_write_enabled FROM installation WHERE id = $1"#)
+            .bind(id.installation_id)
+            .fetch_one(pool)
+            .await?;
+    if !enabled {
+        return Err(ApiError::BadRequest(
+            "mcp_write_disabled: la escritura vía MCP está desactivada en esta instalación \
+             (Ajustes → MCP, solo el owner puede activarla)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
