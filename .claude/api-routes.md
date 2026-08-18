@@ -280,11 +280,20 @@ Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` 
   `{error, message}`; **solo el 401** añade `WWW-Authenticate` (ver la nota del challenge en la
   sección OAuth).
 - **Tools v1 (10, todas read-only)**: `get_summary`, `get_projection` (density **hybrid fija**,
-  `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler),
-  `get_budget`, `get_transactions_summary`, `list_transactions` (truncado a `limit` 1..500 def 100,
-  responde `{total_count, truncated, transactions}`), `get_history`, `list_assets`,
-  `list_liabilities`, `list_planning_flows`, `get_settings`. Todas menos `get_settings` aceptan
-  `view: "household"|"mine"` (misma semántica que `?view=`).
+  `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler;
+  `months` declara su rango real 12..840 en el schema y solo la variante sin `months` sale de
+  cache), `get_budget`, `get_transactions_summary`, `list_transactions` (**paginación en SQL**:
+  `limit` 1..500 def 100 + `offset`, filtros `month/kind/category_id/import_id`, responde
+  `{total_count, offset, truncated, transactions}`; el endpoint HTTP conserva su contrato sin
+  paginar), `get_history` (`window_months` 1..1200 + `include_asset_series` opt-in default false;
+  los mismos knobs existen en `GET /v1/history/series` con `include_asset_series` default true),
+  `list_assets`, `list_liabilities`, `list_planning_flows`, `get_settings` (incluye bloque
+  `user {id, username, birth_date}` del usuario del token — el endpoint HTTP NO lo lleva). Todas
+  menos `get_settings` aceptan `view: "household"|"mine"` (misma semántica que `?view=`).
+- **Tool annotations**: toda tool declara `annotations` (macro `#[tool(annotations(...))]` de
+  rmcp): `title` legible, `open_world_hint = false` (el servidor solo toca su propia DB) y
+  `read_only_hint = true` en las lecturas. Sin ellas un cliente conforme al spec asume el peor
+  caso (escritura destructiva). Test: `tools_list_exposes_annotations_on_every_tool`.
 - **Cero deriva handler↔tool**: cada tool llama a la MISMA core fn que el endpoint HTTP
   (`summary_core`, `projection_series_cached`, `budget_snapshot_core`, `transactions_summary_core`,
   `list_transactions_core`, `history_series_core`, `list_assets_core`, `list_liabilities_core`,
