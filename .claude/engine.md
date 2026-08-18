@@ -50,7 +50,7 @@ pub struct ProjectionInput {
     pub expense_regular_monthly: Decimal,
     pub assets: Vec<SimAsset>,
     pub allocation_rules: Vec<AllocationRule>,   // cascade, in priority order
-    pub liabilities: Vec<ProjectionLiabilityInput>,
+    pub liabilities: Vec<ProjectionLiabilityInput>,   // see per-mode contract note below
     pub planning_monthly_cash_adjustment: Vec<Decimal>,
     pub retirement_start_month: Option<u32>,
     pub income_retirement_monthly: Decimal,
@@ -64,6 +64,16 @@ pub struct FireTarget {
     pub annual_inflation_percent: Decimal, // 0 = target plano; > 0 = target móvil
 }
 ```
+
+**Per-mode liability contract (handler-side, engine unchanged — reform 3.4.0):** the engine always
+subtracts every input liability's `principal` from net worth each month, and only charges cash /
+amortizes when `monthly_payment > 0` and the plan is active. The HANDLER exploits that: in mode A it
+passes the real payment plan (debt service charged, principal amortizes, cuota freed at
+`payment_end_date`); in the real modes B/C (`savings_source.uses_transactions()`) it zeroes
+`monthly_payment` in memory, so the principal becomes a **constant** net-worth subtraction across the
+whole horizon — paid cuotas already live inside the raw 12m expense average. The projection input
+query also filters expired liabilities (`payment_end_date IS NULL OR >= today`), same predicate as
+`/v1/summary`. See `build_installation_projection_input` in `apps/api/src/handlers/projection.rs`.
 
 ## Inflación y target FIRE móvil
 - Ingresos, gastos y aportaciones se mantienen **constantes en euros nominales** a lo largo de la simulación (filosofía «haciendo lo que hago ahora, ¿qué tal voy?»). No se inflan.
