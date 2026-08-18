@@ -4,7 +4,7 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.3.0] - 2026-08-18
 
 ### Added — MCP: tools de escritura, tramo 1 (el MCP deja de ser solo lectura)
 
