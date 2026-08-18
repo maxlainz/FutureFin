@@ -1,7 +1,8 @@
 //! `/v1/summary` sigue el toggle `savings_source` (Fase 5):
 //! - Modo A (`budget`): KPIs desde el presupuesto; `savings_source == "budget"`, months 0.
 //! - Modo B (`transactions_avg`) con datos: income/expense_regular/net/savings_rate desde el promedio
-//!   real 12m con resta híbrida de cuotas; campos nuevos correctos.
+//!   real 12m CRUDO (reforma 3.4.0: las cuotas viven dentro del gasto; sin resta híbrida ni debt
+//!   service re-sumado); campos nuevos correctos.
 //! - Modo B sin datos: fallback silencioso al presupuesto (números = modo A, `budget`, months 0).
 //! - Scoping household vs mine.
 
@@ -165,11 +166,11 @@ async fn mode_a_summary_is_budget_based() {
 }
 
 // ---------------------------------------------------------------------------
-// Modo B con datos — promedio real + resta híbrida
+// Modo B con datos — promedio real crudo (reforma 3.4.0: sin resta híbrida)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn mode_b_summary_uses_avg_with_hybrid_subtraction() {
+async fn mode_b_summary_uses_raw_avg() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let income_cat = app.create_category(&owner, "income", "Nómina").await;
@@ -240,15 +241,17 @@ async fn mode_b_summary_uses_avg_with_hybrid_subtraction() {
 
     set_mode_b(&app, &owner.cookie).await;
 
-    // resta híbrida = 400 (L1 real) + 300 (L2 nominal) = 700; expense_eff = 1500 − 700 = 800.
-    // debt_service nominal = 500 (L1) + 300 (L2) = 800; el `net` resta las cuotas para casar con el
-    // modo A (que las incluye) y con la pendiente del chart: net = 3000 − 800 − 800 = 1400.
-    // savings_rate = 1400/3000 ≈ 0.4667.
+    // Reforma 3.4.0: promedio CRUDO — las cuotas (vinculadas o no) ya viven dentro del gasto real,
+    // así que ni se restan ni se re-suman como debt service. expense_reg = expense_avg = 1500,
+    // expense_der = 0, expense_tot = 1500; net = 3000 − 1500 = 1500; savings_rate = 0.5.
+    // (Antes: resta híbrida 700 + debt service 800 → expense_reg 800, net 1400.)
     let h = health(&app, &owner.cookie, "/v1/summary").await;
     approx(parse_dec(&h["income_monthly_equivalent"]), 3000.0);
-    approx(parse_dec(&h["expense_regular_monthly_equivalent"]), 800.0);
-    approx(parse_dec(&h["net_monthly_equivalent"]), 1400.0);
-    approx(parse_dec(&h["savings_rate"]), 1400.0 / 3000.0);
+    approx(parse_dec(&h["expense_regular_monthly_equivalent"]), 1500.0);
+    approx(parse_dec(&h["expense_derived_monthly_equivalent"]), 0.0);
+    approx(parse_dec(&h["expense_total_monthly_equivalent"]), 1500.0);
+    approx(parse_dec(&h["net_monthly_equivalent"]), 1500.0);
+    approx(parse_dec(&h["savings_rate"]), 0.5);
     assert_eq!(h["savings_source"], "transactions_avg");
     assert_eq!(h["savings_source_months_with_data"].as_u64().unwrap(), 1);
 }
@@ -427,10 +430,9 @@ async fn mode_b_summary_pseudo_empty_month_excluded() {
 // ---------------------------------------------------------------------------
 
 /// Modo C (`budget_income_real_expense`): el income del summary es el del PRESUPUESTO (no el de las
-/// transacciones), el gasto es el real (expense_eff con resta híbrida) y el net = income_presupuesto −
-/// expense_eff − debt_service. Budget income 5000; real M-1: income 3000 (ignorado), expense 1500
-/// (400 → L1); L1 nominal 500 (avg real 400), L2 nominal 300 → expense_eff = 1500 − 700 = 800,
-/// debt_service = 800, net = 5000 − 800 − 800 = 3400.
+/// transacciones) y el gasto es el promedio real CRUDO (reforma 3.4.0 — las cuotas viven dentro).
+/// Budget income 5000; real M-1: income 3000 (ignorado), expense 1500 (400 vinculados a L1, da
+/// igual) → net = 5000 − 1500 = 3500. (Antes: resta híbrida + debt service → 3400.)
 #[tokio::test]
 async fn mode_c_income_not_overwritten() {
     let app = TestApp::spawn().await;
@@ -501,8 +503,9 @@ async fn mode_c_income_not_overwritten() {
 
     let h = health(&app, &owner.cookie, "/v1/summary").await;
     approx(parse_dec(&h["income_monthly_equivalent"]), 5000.0); // presupuesto, NO las txns (3000)
-    approx(parse_dec(&h["expense_regular_monthly_equivalent"]), 800.0);
-    approx(parse_dec(&h["net_monthly_equivalent"]), 3400.0);
+    approx(parse_dec(&h["expense_regular_monthly_equivalent"]), 1500.0);
+    approx(parse_dec(&h["expense_derived_monthly_equivalent"]), 0.0);
+    approx(parse_dec(&h["net_monthly_equivalent"]), 3500.0);
     assert_eq!(h["savings_source"], "budget_income_real_expense");
     assert_eq!(h["savings_source_months_with_data"].as_u64().unwrap(), 1);
 }
@@ -593,7 +596,7 @@ async fn mode_b_expected_is_budget_net_not_override() {
 }
 
 /// Modo C: el «real» del KPI es idéntico al de los modos A/B con la misma data — es bruto y no
-/// sigue el modo (ni la resta híbrida ni el income de presupuesto lo tocan).
+/// sigue el modo (el income de presupuesto no lo toca).
 #[tokio::test]
 async fn mode_c_actual_is_raw() {
     let app = TestApp::spawn().await;

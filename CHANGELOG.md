@@ -4,6 +4,39 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed — Modos B/C: promedio real crudo; los pasivos solo restan patrimonio (**breaking de números**)
+
+- **Reforma de las cuotas de pasivo en los modos reales** (`savings_source ∈ {transactions_avg,
+  budget_income_real_expense}`), decisión de producto del owner: el promedio de gasto 12m se usa
+  **crudo** — las cuotas pagadas ya viven dentro de los movimientos (amortización incluida) — y
+  los pasivos **no tocan la caja de la simulación**: su principal pendiente resta el patrimonio
+  como **constante** en todo el horizonte (sin cargo mensual, sin amortización proyectada, sin
+  escalón al vencer el plan). El modo A (presupuesto) no cambia: budget + cuota derivada
+  time-limited, contada exactamente una vez.
+- Se elimina la **resta híbrida** (`effective_avg_income_expense` + `per_liability_linked_avg`):
+  su corrección dependía de un vínculo (`linked_liability_id`) manual, invisible y que las reglas
+  no aprenden, y su clamp `max(0, …)` podía tragarse gasto ajeno con histórico parcial.
+  `linked_liability_id` queda como metadata (sin consumidor numérico).
+- **Por qué cambian los números en B/C** (ejemplo: hipoteca 500 €/mes nominal, cuota real media
+  450 € dentro del gasto): antes `net = income − (gasto − 450) − 500`; ahora
+  `net = income − gasto`. La fecha FIRE proyectada es **conservadora** cuando un préstamo vence
+  dentro del horizonte (la cuota sigue pesando en el promedio y el equity amortizado no aflora);
+  a cambio desaparecen la dependencia del vínculo y el descuadre del KPI «real vs esperado». La
+  realidad entra en cada recomputación (promedio y principal actualizados).
+- `GET /v1/summary` en B/C: `expense_derived_monthly_equivalent` pasa a **0**,
+  `expense_total_monthly_equivalent = expense_avg`, `net = income − expense_avg`; las identidades
+  `expense_total = expense_reg + expense_der` y `net = income − expense_total` siguen valiendo en
+  los tres modos. El runway usa el gasto crudo (burn rate real, cuotas incluidas). Tipos y
+  nullabilidad del API intactos — **breaking de números**, no de contrato.
+- El engine **no cambia** (cero diffs en `crates/engine`): el handler anula `monthly_payment` en
+  memoria en los modos reales y el engine, que ya restaba el principal de todo pasivo de entrada,
+  produce la resta constante por sí solo.
+- Tests: `mode_b_raw_avg_ignores_liability_links`, `mode_b_liability_static_nw_subtraction`
+  (NW(k) = k·delta − principal en toda la serie), `mode_b_no_step_up_at_liability_end` (pin del
+  coste aceptado), espejos de summary/runway actualizados con números predichos a mano.
+
 ## [3.3.0] - 2026-08-18
 
 ### Added — MCP: tools de escritura, tramo 1 (el MCP deja de ser solo lectura)

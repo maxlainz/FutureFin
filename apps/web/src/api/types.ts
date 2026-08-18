@@ -151,8 +151,8 @@ export type FinancialHealthMetrics = {
   /** KPI «ahorro real vs esperado»: neto mensual del PRESUPUESTO (cuotas derivadas incluidas),
    *  capturado antes del override B/C — no sigue el modo. Ausente en backends antiguos. */
   savings_expected_monthly_equivalent?: string;
-  /** Promedio bruto `income − expense` de los últimos 12 meses civiles completos (sin resta
-   *  híbrida de cuotas). Omitido cuando no hay meses con datos. */
+  /** Promedio bruto `income − expense` de los últimos 12 meses civiles completos (las cuotas
+   *  pagadas cuentan como gasto). Omitido cuando no hay meses con datos. */
   savings_actual_monthly_avg_12m?: string | null;
   /** Meses «reales» que sustentan el promedio anterior (0 = sin movimientos); a diferencia de
    *  `savings_source_months_with_data`, trae su valor real en los tres modos. */

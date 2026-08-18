@@ -9,7 +9,7 @@ use crate::handlers::installation::{
     resolve_fire_settings, FireNumberMode, FireSettings, SavingsSource, TaxBracket,
 };
 use crate::handlers::person_view::LedgerView;
-use crate::handlers::transactions::summary::{effective_avg_income_expense, transactions_12m_avg};
+use crate::handlers::transactions::summary::transactions_12m_avg;
 use crate::handlers::session::require_session_user;
 use crate::state::{AppState, Density, ProjectionCacheKey};
 use axum::extract::{Extension, Query};
@@ -292,7 +292,6 @@ struct AllocationRuleEngineRow {
 
 #[derive(Debug, FromRow)]
 struct LiabEngineRow {
-    id: Uuid,
     principal: Decimal,
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
@@ -694,7 +693,8 @@ pub(crate) struct BuiltProjection {
     pub savings_source_months_with_data: u32,
     /// Servicio de deuda mensual de los pasivos **activos** (`payment_end_date` nula o ≥ hoy), con
     /// la cuota nominal normalizada a mensual. No entra en `expense_regular_monthly` (el engine
-    /// amortiza los pasivos aparte); lo consumen los caps `months_expense` de `assets.rs`.
+    /// amortiza los pasivos aparte); lo consumen los caps `months_expense` de `assets.rs`. En modo
+    /// real (B/C con datos) es **0 por contrato**: la cuota ya vive dentro del promedio de gasto.
     pub debt_service_monthly: Decimal,
 }
 
@@ -727,22 +727,22 @@ pub(crate) async fn build_installation_projection_input(
     let (income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries) =
         ledger_regular_monthly_income_and_expense(pool, iid, session_user_id, view, today).await?;
 
-    // Liabilities: se cargan aquí (antes que en modo A, donde estaban más abajo) para que el modo B
-    // pueda reusar las filas al restar las cuotas de `expense_avg` sin una segunda query.
+    // Liabilities: una sola carga para todos los consumidores (debt service de modo A, caps de
+    // assets.rs y el input del engine). En modo real (B/C) se les anula la cuota más abajo.
     let liab_scope = view.scope_where("");
     let liab_sql = format!(
-        r#"SELECT id, principal, payment_amount, payment_frequency, payment_end_date
+        r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
            FROM liabilities WHERE {liab_scope}"#
     );
-    let liabs: Vec<LiabEngineRow> = view
+    let mut liabs: Vec<LiabEngineRow> = view
         .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)
         .fetch_all(pool)
         .await?;
 
     // Fuente del ahorro: presupuesto (modo A) vs modos que derivan de las transacciones (modo B
     // `transactions_avg`, modo C `budget_income_real_expense`). Ambos toman el gasto del promedio real
-    // 12m (con resta híbrida de cuotas) y anulan `end_adj`; difieren solo en el income (B → promedio
-    // real; C → presupuesto). `months_with_data == 0` → fallback silencioso a modo A.
+    // 12m CRUDO (las cuotas de pasivo viven dentro) y anulan `end_adj`; difieren solo en el income
+    // (B → promedio real; C → presupuesto). `months_with_data == 0` → fallback silencioso a modo A.
     let savings_source = fire_settings
         .map(|fs| fs.savings_source)
         .unwrap_or_default();
@@ -762,32 +762,18 @@ pub(crate) async fn build_installation_projection_input(
         SavingsSource::TransactionsAvg | SavingsSource::BudgetIncomeRealExpense => {
             let avg = transactions_12m_avg(pool, iid, session_user_id, view, today).await?;
             if avg.months_with_data > 0 {
-                // Resta híbrida por liability activa: su avg real vinculado si existe, si no su
-                // cuota nominal (weekly ×52/12). Clamp global `expense_eff ≥ 0`. Fórmula compartida
-                // con `summary.rs` vía `effective_avg_income_expense` (punto de verdad único).
-                let active_liabs: Vec<(Uuid, Decimal)> = liabs
-                    .iter()
-                    .filter(|row| liability_is_active(row.payment_end_date, today))
-                    .map(|row| {
-                        (
-                            row.id,
-                            liability_monthly_payment(
-                                row.payment_amount,
-                                row.payment_frequency.as_deref(),
-                            ),
-                        )
-                    })
-                    .collect();
-                let (income_eff, expense_eff) =
-                    effective_avg_income_expense(&avg, &active_liabs);
+                // Contrato de los modos reales (reforma 3.4.0): el promedio de gasto se usa CRUDO —
+                // las cuotas de pasivo ya viven dentro de los movimientos (amortización incluida),
+                // así que no se restan aquí ni se vuelven a cargar como debt service (ver el bloque
+                // que anula `payment_amount` más abajo). Mismo contrato en `summary.rs`.
                 // Modo C: income del presupuesto; modo B: income del promedio real.
                 let income = match savings_source {
                     SavingsSource::BudgetIncomeRealExpense => income_reg,
-                    _ => income_eff,
+                    _ => avg.income_avg,
                 };
                 EffectiveInputs {
                     income,
-                    expense: expense_eff,
+                    expense: avg.expense_avg,
                     expense_from_avg: true,
                     effective_source: savings_source,
                     months_with_data: avg.months_with_data,
@@ -825,9 +811,23 @@ pub(crate) async fn build_installation_projection_input(
     let effective_savings_source = inputs.effective_source;
     let savings_source_months_with_data = inputs.months_with_data;
 
+    // Modo real (B/C con datos): la cuota ya está dentro del promedio de gasto, así que los
+    // pasivos NO tocan la caja de la simulación. Se anula `payment_amount` EN MEMORIA en un único
+    // punto y todo lo que cuelga de las filas hereda el contrato: `debt_service_monthly` queda a 0
+    // (caps `months_expense` sin cuota), y el input del engine lleva `monthly_payment = 0` — con lo
+    // que el engine ni cobra caja ni amortiza, y el principal queda como **resta constante** del
+    // net worth en todo el horizonte (decisión de producto 3.4.0: sin amortización proyectada; la
+    // realidad entra en cada recomputación vía promedio y principal actualizados).
+    if expense_from_avg {
+        for row in &mut liabs {
+            row.payment_amount = None;
+        }
+    }
+
     // Servicio de deuda mensual de los pasivos activos (mismo filtro `payment_end_date` que las
     // lecturas SQL). No es un input del engine (que amortiza los pasivos por su cuenta): lo exporta
-    // `BuiltProjection` para los caps `months_expense` de `assets.rs`.
+    // `BuiltProjection` para los caps `months_expense` de `assets.rs`. En modo real es 0 por el
+    // bloque anterior.
     let debt_service_monthly: Decimal = liabs
         .iter()
         .filter(|r| liability_is_active(r.payment_end_date, today))

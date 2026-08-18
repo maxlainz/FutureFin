@@ -87,7 +87,7 @@ modes** (gate `SavingsSource::uses_transactions()`):
 
 - **Mode B `transactions_avg`** (shipped v2.0.0): income **and** expense come from the real 12m average.
 - **Mode C `budget_income_real_expense`** (shipped v2.1.0): income from the **budget**, expense from the real
-  12m average — same `expense_eff` as B. For a stable salary whose spending you want measured for real.
+  12m average — same raw `expense_avg` as B. For a stable salary whose spending you want measured for real.
 
 They change **where the pre-retirement income/expense scalars come from**, and therefore both the FIRE
 need and the simulation's monthly net. The gross-up, SWR, moving-target and drain formulas are
@@ -105,16 +105,21 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
   M−1 with recurring salary 3000 → `months_with_data = 1`, `income_avg = 2000` (before the fix: months=2,
   avg=2500). Helper `transactions_12m_avg` (`handlers/transactions/summary.rs`), single-source `real_months`
   predicate/CTE.
-- **Hybrid liability subtraction**: `expense_eff = max(0, expense_avg − Σ per active liability)`,
-  where each active liability (filtered by `payment_end_date`) contributes its **real linked-txn
-  average** (`linked_liability_id`) if any exist, otherwise its **nominal monthly payment**
-  (`liability_monthly_payment`). Single source of truth `effective_avg_income_expense`, shared by
-  `projection.rs` and `summary.rs`. The engine still receives liabilities as `debt_service`, so the
-  saving **steps up automatically when a loan ends** (verified by test).
-- **Target**: `annual_expense` uses `expense_eff` as the base (mode A used `expense_retirement`);
+- **Liabilities in real modes (reform 3.4.0 — the hybrid subtraction is GONE)**: the expense
+  average is used **raw** — paid cuotas already live inside the imported movements (amortization
+  included), so nothing is subtracted and no debt service is re-charged. Liabilities do NOT touch
+  the simulation's cash in B/C: the handler zeroes `monthly_payment` in memory before building the
+  engine input, so each active liability's `principal` is a **constant subtraction** from net worth
+  across the whole horizon (no amortization, no step at `payment_end_date`). Accepted product
+  trade-off (owner, 2026-08-18): the projection is conservative — the cuota keeps weighing on the
+  average past the loan's end and the amortized equity never surfaces — in exchange for a simple
+  model with no dependency on the invisible `linked_liability_id` (now pure metadata). Reality
+  flows in through each recomputation (updated average + updated principal). Pinned by
+  `mode_b_liability_static_nw_subtraction` and `mode_b_no_step_up_at_liability_end`.
+- **Target**: `annual_expense` uses the raw `expense_avg` as the base (mode A used `expense_retirement`);
   `current_income` uses `income_eff` (`income_avg`) in mode B, and the **budget income** (`income_reg`)
   in mode C; `manual` is unchanged. This is a **deliberate, semantic change of base** — mode A's
-  `expense_retirement` is a budget line, B/C's `expense_eff` is measured spending net of debt service.
+  `expense_retirement` is a budget line, B/C's `expense_avg` is measured spending (cuotas included).
   `end_adj` (budget end-date adjustments) is zeroed in both B and C; `planning_flows` (`flow_adj`) still
   apply. In `projection.rs` this lives in `EffectiveInputs`: B|C share the avg/liability branch and only
   differ in the income scalar (mode C → `income_reg`, mode B → `income_eff`); flag `expense_from_avg`.
@@ -124,11 +129,11 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
   fund it is budget-based — an accepted, intentional asymmetry.
 - **Everything downstream follows the mode too (v2.2.0)** — B/C are no longer "only the projection
   scalars":
-  - `GET /v1/summary` `financial_health`: `expense_derived_monthly_equivalent` = **debt service** of
-    active liabilities and `expense_total_monthly_equivalent` = `expense_eff + debt_service`. Before
-    v2.2.0 those two kept budget values while `expense_reg`/`net` were already real, so
-    `expense_total = expense_reg + expense_der` and `net = income − expense_total` were **broken in
-    B/C**; they now hold in all three modes.
+  - `GET /v1/summary` `financial_health`: since reform 3.4.0, `expense_derived_monthly_equivalent`
+    = **0** in B/C (the cuota is ordinary spending inside the average) and
+    `expense_total_monthly_equivalent` = `expense_avg`. The v2.2.0 identities
+    `expense_total = expense_reg + expense_der` and `net = income − expense_total` keep holding in
+    all three modes.
   - `runway_months` follows `expense_total`, hence the real base in B/C (see §2c).
   - `GET/POST/PATCH /v1/assets`: allocation caps `months_expense` / `income_multiple` resolve with the
     **effective** scalars (`assets_projection_context`), so the € target matches the month-1
@@ -211,7 +216,7 @@ full contract in `.claude/engine.md` §Runway.
   decided **before** the threshold, or a zero expense would satisfy `0 ≤ A·swr` and report an
   undefined runway as infinite.
 - **Follows `savings_source`**: the expense base is `expense_total_monthly_equivalent`, so in B/C with
-  data it is real spending + debt service (§2b), not budget.
+  data it is the raw real spending average (§2b, cuotas included), not budget.
 - **Reduces exactly to `A/g`** with return and inflation 0 **and the SWR threshold unmet** (single
   final division, no tolerances) — that is how the pre-change regression test stayed valid across
   both changes (`runway_pre_change_baseline_liquid_over_expense` is still exact).
@@ -439,9 +444,9 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 
 - Single target formula + signature: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs`
 - Trigger uses k−1 / nw_prev: `grep -n "fire_target_at_month_index(input.fire_target" crates/engine/src/projection.rs`
-- FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes `expense_eff` — see §2b)
-- Mode B (`savings_source`) base + hybrid subtraction: `grep -n "savings_source\|transactions_12m_avg\|effective_avg_income_expense\|use_avg" apps/api/src/handlers/projection.rs`
-- Mode B/C reach into summary/assets/series (v2.2.0): `grep -n "expense_der = debt_service\|expense_tot = expense_eff" apps/api/src/handlers/summary.rs`; `grep -n "assets_projection_context" apps/api/src/handlers/{projection,assets}.rs`
+- FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes the raw `expense_avg` — see §2b)
+- Mode B (`savings_source`) base + liability zeroing: `grep -n "savings_source\|transactions_12m_avg\|expense_from_avg\|payment_amount = None" apps/api/src/handlers/projection.rs`
+- Mode B/C reach into summary/assets/series: `grep -n "expense_der = Decimal::ZERO\|expense_tot = avg.expense_avg" apps/api/src/handlers/summary.rs`; `grep -n "assets_projection_context" apps/api/src/handlers/{projection,assets}.rs`
 - Runway model + cap: `grep -n "pub fn liquid_runway_months\|MAX_RUNWAY_MONTHS\|RunwayOutcome" crates/engine/src/runway.rs` and `grep -n "liquid_runway_months\|runway_is_indefinite" apps/api/src/handlers/summary.rs`
 - Runway infinite case is the SWR threshold, not the cap (v2.3.0): `grep -n "swr_pct" crates/engine/src/runway.rs` (the `Indefinite` branch must compare `annual_expense_for_swr * 100 <= balance_0 * swr_pct`) and `grep -n "annual_expense_gross\|gross_up_net_annual_fire" apps/api/src/handlers/summary.rs` (the handler must reuse the target's gross-up)
 - Frontend reads the mode from `financial_health` (not the root): `grep -n "savings_source" apps/web/src/api/types.ts apps/web/src/views/{SummaryView,RetirementView}.tsx`

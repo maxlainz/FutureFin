@@ -273,7 +273,8 @@ C added Unreleased).** The blanket "transactions are never a projection input" r
 `transactions_projection_cache.rs`). In the **modes that use transactions** — `transactions_avg` (mode B)
 and `budget_income_real_expense` (mode C), i.e. `SavingsSource::uses_transactions()` — the projection
 derives the monthly saving from the **weighted 12-month average** of transactions
-(`transactions_12m_avg` + `effective_avg_income_expense`; mode C keeps the budget income and only takes
+(`transactions_12m_avg`, raw since the 3.4.0 reform — paid cuotas count as ordinary spending and
+liabilities only subtract their principal from net worth; mode C keeps the budget income and only takes
 the real expense), so **transactions ARE an engine input** and every mutation that changes the
 transaction set (`crud.rs` create/batch/patch/delete + delete_import, `import.rs` confirm, `recurring.rs`
 materialize) **must** invalidate the projection cache — via
