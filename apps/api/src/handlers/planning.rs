@@ -248,7 +248,18 @@ pub async fn create_planning_flow(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = create_planning_flow_core(&state, iid, user.id.0, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+}
 
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_planning_flow`.
+/// Invalidación FULL post-insert dentro (los planning flows son inputs del engine).
+pub(crate) async fn create_planning_flow_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    body: CreatePlanningFlowBody,
+) -> Result<PlanningFlowResponse, ApiError> {
     assert_budget_category(&state.pool, iid, body.category_id).await?;
 
     if body.expected_amount <= Decimal::ZERO {
@@ -278,7 +289,7 @@ pub async fn create_planning_flow(
     .bind(body.due_date)
     .bind(&notes)
     .bind(sort_index)
-    .bind(user.id.0)
+    .bind(user_id)
     .bind(show_in_chart)
     .fetch_one(&state.pool)
     .await?;
@@ -295,11 +306,8 @@ pub async fn create_planning_flow(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(row_to_response(row)?),
-    ))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    row_to_response(row)
 }
 
 #[utoipa::path(
@@ -329,7 +337,19 @@ pub async fn patch_planning_flow(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = patch_planning_flow_core(&state, iid, user.id.0, id, body).await?;
+    Ok(Json(resp))
+}
 
+/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_planning_flow`.
+/// `due_date` es tri-state (`patch_due_date_from_json`); invalidación FULL dentro.
+pub(crate) async fn patch_planning_flow_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: PatchPlanningFlowBody,
+) -> Result<PlanningFlowResponse, ApiError> {
     if body.category_id.is_none()
         && body.title.is_none()
         && body.expected_amount.is_none()
@@ -435,8 +455,8 @@ pub async fn patch_planning_flow(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(Json(row_to_response(updated)?))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    row_to_response(updated)
 }
 
 #[utoipa::path(

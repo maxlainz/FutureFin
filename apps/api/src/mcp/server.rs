@@ -1,7 +1,14 @@
-//! Servidor MCP de FutureFin: 10 tools de SOLO LECTURA sobre las mismas core fns que
+//! Servidor MCP de FutureFin: tools de lectura Y escritura sobre las mismas core fns que
 //! sirven los handlers HTTP (`*_core` / `projection_series_cached`). Cero SQL propio y
-//! cero tipos de respuesta paralelos: cada tool serializa el MISMO struct serde que el
-//! endpoint (Decimal-as-string intacto), así handler y tool no pueden divergir.
+//! cero validación paralela: cada tool de lectura serializa el MISMO struct serde que el
+//! endpoint (Decimal-as-string intacto) y cada tool de escritura llama a la misma core de
+//! mutación (que lleva DENTRO la invalidación de cache), así handler y tool no pueden
+//! divergir. Las escrituras devuelven respuestas compactas `{id, resumen}`, no el response
+//! HTTP entero.
+//!
+//! Gate de escritura: TODA tool de escritura pasa primero por `require_mcp_write` (rol
+//! vivo con `role_can_write` + kill-switch `installation.mcp_write_enabled` leído por
+//! request). Las lecturas no lo consultan.
 //!
 //! Errores: los de dominio/validación devuelven `CallToolResult{is_error:true}` con el
 //! mismo JSON `{error, message}` del wire HTTP (el LLM puede leerlo y corregir el input);
@@ -12,25 +19,34 @@ use crate::error::{ApiError, ErrorBody};
 use crate::handlers::allocation_rules::list_allocation_rules_core;
 use crate::handlers::assets::list_assets_core;
 use crate::handlers::budget::budget_snapshot_core;
-use crate::handlers::categories::list_categories_core;
-use crate::handlers::history::{history_cashflow_core, history_series_core, list_snapshots_core};
+use crate::handlers::categories::{create_category_core, list_categories_core};
+use crate::handlers::history::{
+    capture_snapshots_core, history_cashflow_core, history_series_core, list_snapshots_core,
+};
 use crate::handlers::installation::{installation_access_core, settings_user_core};
 use crate::handlers::liabilities::list_liabilities_core;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::planning::list_planning_flows_core;
+use crate::handlers::planning::{
+    create_planning_flow_core, list_planning_flows_core, patch_planning_flow_core,
+};
 use crate::handlers::projection::{
     projection_series_cached, simulate_projection_core, SimulationSpec,
 };
 use crate::handlers::summary::summary_core;
 use crate::handlers::transactions::crud::{
-    list_imports_core, list_months_core, list_transactions_core,
+    create_transaction_core, list_imports_core, list_months_core, list_transactions_core,
+    patch_transaction_core,
 };
-use crate::handlers::transactions::recurring::list_recurring_rules_core;
-use crate::handlers::transactions::rules::list_categorization_rules_core;
+use crate::handlers::transactions::recurring::{
+    list_recurring_rules_core, materialize_recurring_core,
+};
+use crate::handlers::transactions::rules::{
+    create_categorization_rule_core, list_categorization_rules_core,
+};
 use crate::handlers::transactions::summary::{
     category_monthly_series_core, transactions_summary_core,
 };
-use crate::mcp::auth::McpIdentity;
+use crate::mcp::auth::{require_mcp_write, McpIdentity};
 use crate::state::{AppState, Density};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -309,11 +325,164 @@ pub struct SimulateParams {
     pub asset_return_overrides: Option<Vec<AssetReturnOverrideParam>>,
 }
 
-/// Parsea un string decimal de un parámetro de simulación con error tipado.
+/// Parsea un string decimal de un parámetro de tool con error tipado.
 fn parse_decimal_param(name: &str, raw: &str) -> Result<rust_decimal::Decimal, ApiError> {
     raw.trim()
         .parse::<rust_decimal::Decimal>()
         .map_err(|_| ApiError::BadRequest(format!("{name} must be a decimal string")))
+}
+
+fn parse_uuid_param(name: &str, raw: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(raw.trim()).map_err(|_| ApiError::BadRequest(format!("{name} must be a UUID")))
+}
+
+fn parse_opt_uuid_param(name: &str, raw: &Option<String>) -> Result<Option<Uuid>, ApiError> {
+    raw.as_ref().map(|r| parse_uuid_param(name, r)).transpose()
+}
+
+fn parse_date_param(name: &str, raw: &str) -> Result<chrono::NaiveDate, ApiError> {
+    raw.trim()
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("{name} must be YYYY-MM-DD")))
+}
+
+// ---------------------------------------------------------------------------
+// Params de las tools de escritura (issue #3). Importes SIEMPRE strings decimales; UUIDs y
+// fechas como strings (se parsean con error tipado). Las validaciones de dominio viven en las
+// core fns compartidas con los handlers HTTP.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateTransactionParams {
+    /// Fecha de la operación "YYYY-MM-DD".
+    pub op_date: String,
+    pub concept: String,
+    /// Importe FIRMADO como string decimal: gasto negativo ("-23.50"), ingreso positivo,
+    /// aportación de ahorro negativa. Nunca 0.
+    pub amount: String,
+    /// "expense" | "income" | "savings" (savings SIN categoría).
+    pub kind: String,
+    /// Categoría (UUID de list_categories; el scope debe casar con el kind).
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// Activo vinculado (destino de una aportación savings).
+    #[serde(default)]
+    pub linked_asset_id: Option<String>,
+    /// Pasivo vinculado (cuota de un préstamo).
+    #[serde(default)]
+    pub linked_liability_id: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// true = crea además la plantilla recurrente mensual (y backfillea los meses cerrados
+    /// desde op_date). Fechas demasiado antiguas se rechazan.
+    #[serde(default)]
+    pub recurring: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateTransactionParams {
+    /// UUID del movimiento (propio) a editar.
+    pub id: String,
+    #[serde(default)]
+    pub op_date: Option<String>,
+    #[serde(default)]
+    pub concept: Option<String>,
+    /// Importe firmado como string decimal (nunca 0).
+    #[serde(default)]
+    pub amount: Option<String>,
+    /// "expense" | "income" | "savings".
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// true = quitar la categoría.
+    #[serde(default)]
+    pub clear_category: Option<bool>,
+    #[serde(default)]
+    pub linked_asset_id: Option<String>,
+    #[serde(default)]
+    pub clear_linked_asset: Option<bool>,
+    #[serde(default)]
+    pub linked_liability_id: Option<String>,
+    #[serde(default)]
+    pub clear_linked_liability: Option<bool>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub clear_notes: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CaptureSnapshotParams {
+    /// Qué capturar: ["asset"], ["liability"] o ambos. Omitido = ambos.
+    #[serde(default)]
+    pub kinds: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreatePlanningFlowParams {
+    pub title: String,
+    /// Categoría income|expense (UUID de list_categories).
+    pub category_id: String,
+    /// Importe > 0 como string decimal (el signo lo da el scope de la categoría).
+    pub expected_amount: String,
+    /// "YYYY-MM-DD" opcional. Sin fecha, el flujo se reparte en los próximos 90 días.
+    #[serde(default)]
+    pub due_date: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// Mostrar como marcador en el chart (requiere due_date).
+    #[serde(default)]
+    pub show_in_chart: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdatePlanningFlowParams {
+    /// UUID del flujo (de list_planning_flows).
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// Importe > 0 como string decimal.
+    #[serde(default)]
+    pub expected_amount: Option<String>,
+    /// "YYYY-MM-DD". Incompatible con clear_due_date.
+    #[serde(default)]
+    pub due_date: Option<String>,
+    /// true = borrar la fecha (el flujo pasa a repartirse en 90 días y sale del chart).
+    #[serde(default)]
+    pub clear_due_date: Option<bool>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub show_in_chart: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateCategoryParams {
+    /// "asset" | "liability" | "income" | "expense".
+    pub scope: String,
+    pub name: String,
+    #[serde(default)]
+    pub sort_index: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateCategorizationRuleParams {
+    /// Patrón a buscar en el concepto normalizado (p.ej. "MERCADONA").
+    pub pattern: String,
+    /// "substring" (default) | "prefix" | "exact".
+    #[serde(default)]
+    pub match_kind: Option<String>,
+    /// Banco de origen ("myinvestor" | "n26"…); omitido = agnóstica (cualquier banco).
+    #[serde(default)]
+    pub source: Option<String>,
+    /// "expense" | "income" | "savings" (savings sin categoría).
+    pub assign_kind: String,
+    /// Categoría a asignar (UUID; scope acorde al assign_kind).
+    #[serde(default)]
+    pub assign_category_id: Option<String>,
 }
 
 const LIST_TRANSACTIONS_DEFAULT_LIMIT: usize = 100;
@@ -830,6 +999,355 @@ impl FutureFinMcp {
         to_tool_result(res)
     }
 
+    // -----------------------------------------------------------------------
+    // Tools de ESCRITURA (issue #3). Toda tool de escritura pasa primero por
+    // `require_mcp_write` (rol vivo + toggle `mcp_write_enabled`), llama a la MISMA core fn
+    // que su handler HTTP (la invalidación de cache vive dentro de la core) y devuelve una
+    // respuesta compacta, no el response HTTP entero.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        name = "create_transaction",
+        description = "Registra un movimiento manual («apunta 23,50 € de cena de ayer»): fecha, concepto, importe FIRMADO como string decimal (gasto negativo, ingreso positivo, aportación de ahorro negativa), kind (expense|income|savings; savings SIN categoría), categoría opcional (el scope debe casar con el kind) y links opcionales a activo/pasivo. Con recurring=true crea además la plantilla recurrente mensual y rellena los meses cerrados intermedios. OJO: reenviar el mismo movimiento crea OTRO movimiento (los duplicados manuales son legítimos) — no repitas la llamada si ya respondió ok.",
+        annotations(title = "Crear movimiento", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn create_transaction(
+        &self,
+        Parameters(p): Parameters<CreateTransactionParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<crate::handlers::transactions::schema::CreateTransactionBody, ApiError> {
+            Ok(crate::handlers::transactions::schema::CreateTransactionBody {
+                op_date: parse_date_param("op_date", &p.op_date)?,
+                value_date: None,
+                concept: p.concept.clone(),
+                amount: parse_decimal_param("amount", &p.amount)?,
+                kind: p.kind.clone(),
+                category_id: parse_opt_uuid_param("category_id", &p.category_id)?,
+                linked_asset_id: parse_opt_uuid_param("linked_asset_id", &p.linked_asset_id)?,
+                linked_liability_id: parse_opt_uuid_param(
+                    "linked_liability_id",
+                    &p.linked_liability_id,
+                )?,
+                notes: p.notes.clone(),
+                recurrence: if p.recurring.unwrap_or(false) {
+                    Some(crate::handlers::transactions::schema::RecurrenceSpec {})
+                } else {
+                    None
+                },
+            })
+        };
+        let body = match run() {
+            Ok(b) => b,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let t = create_transaction_core(&self.state, id.installation_id, id.user_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": t.id,
+                "resumen": format!("{} · {} · {} ({})", t.op_date, t.concept, t.amount, t.kind.as_deref().unwrap_or("-")),
+                "category_name": t.category_name,
+                "recurring_rule_id": t.recurring_rule_id,
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_transaction",
+        description = "Corrige o recategoriza un movimiento PROPIO («eso era comida, no ocio»): cualquier campo es opcional; los flags clear_* ponen a null. Movimientos de otro usuario → not_found. En importadas la huella de dedup queda anclada al CSV original.",
+        annotations(title = "Editar movimiento", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_transaction(
+        &self,
+        Parameters(p): Parameters<UpdateTransactionParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<(Uuid, crate::handlers::transactions::schema::PatchTransactionBody), ApiError> {
+            let txn_id = parse_uuid_param("id", &p.id)?;
+            let body = crate::handlers::transactions::schema::PatchTransactionBody {
+                op_date: p.op_date.as_deref().map(|d| parse_date_param("op_date", d)).transpose()?,
+                value_date: None,
+                clear_value_date: None,
+                concept: p.concept.clone(),
+                amount: p
+                    .amount
+                    .as_deref()
+                    .map(|a| parse_decimal_param("amount", a))
+                    .transpose()?,
+                kind: p.kind.clone(),
+                category_id: parse_opt_uuid_param("category_id", &p.category_id)?,
+                clear_category: p.clear_category,
+                linked_asset_id: parse_opt_uuid_param("linked_asset_id", &p.linked_asset_id)?,
+                clear_linked_asset: p.clear_linked_asset,
+                linked_liability_id: parse_opt_uuid_param(
+                    "linked_liability_id",
+                    &p.linked_liability_id,
+                )?,
+                clear_linked_liability: p.clear_linked_liability,
+                notes: p.notes.clone(),
+                clear_notes: p.clear_notes,
+            };
+            Ok((txn_id, body))
+        };
+        let (txn_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let t = patch_transaction_core(&self.state, id.installation_id, id.user_id, txn_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": t.id,
+                "resumen": format!("{} · {} · {} ({})", t.op_date, t.concept, t.amount, t.kind.as_deref().unwrap_or("-")),
+                "category_name": t.category_name,
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "capture_snapshot",
+        description = "«Guarda una foto de mi patrimonio hoy»: captura un snapshot del histórico con los activos y/o pasivos VIVOS del usuario del token. Upsert por día civil — recapturar el mismo día SOBRESCRIBE la foto de ese día con el ledger actual. No afecta a la proyección (los snapshots no son inputs del engine).",
+        annotations(title = "Capturar snapshot", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn capture_snapshot(
+        &self,
+        Parameters(p): Parameters<CaptureSnapshotParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let out = capture_snapshots_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                crate::handlers::history::CaptureBody { kinds: p.kinds.clone() },
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "snapshot_date": out.snapshots.first().map(|s| s.snapshot_date_ymd.clone()),
+                "snapshots": out
+                    .snapshots
+                    .iter()
+                    .map(|s| serde_json::json!({"id": s.id, "kind": s.kind, "total": s.total.to_string(), "items": s.items.len()}))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "materialize_recurring",
+        description = "«Ponme al día los recurrentes»: materializa las instancias pendientes de las plantillas recurrentes del usuario del token hasta el último mes cerrado. Idempotente por cursor (repetirla no duplica) y nunca crea fechas futuras.",
+        annotations(title = "Materializar recurrentes", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn materialize_recurring(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            materialize_recurring_core(&self.state, id.installation_id, id.user_id).await
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "create_planning_flow",
+        description = "Añade una entrada a «Próximos» («apunta que en octubre pago 800 € de IRPF»): título, categoría income/expense, importe > 0 (string decimal) y fecha opcional. Alimenta directamente la proyección — usa simulate_projection si quieres enseñar el impacto antes.",
+        annotations(title = "Crear próximo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn create_planning_flow(
+        &self,
+        Parameters(p): Parameters<CreatePlanningFlowParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<crate::handlers::planning::CreatePlanningFlowBody, ApiError> {
+            Ok(crate::handlers::planning::CreatePlanningFlowBody {
+                category_id: parse_uuid_param("category_id", &p.category_id)?,
+                title: p.title.clone(),
+                expected_amount: parse_decimal_param("expected_amount", &p.expected_amount)?,
+                due_date: p
+                    .due_date
+                    .as_deref()
+                    .map(|d| parse_date_param("due_date", d))
+                    .transpose()?,
+                notes: p.notes.clone(),
+                sort_index: None,
+                show_in_chart: p.show_in_chart,
+            })
+        };
+        let body = match run() {
+            Ok(b) => b,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let f = create_planning_flow_core(&self.state, id.installation_id, id.user_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": f.id,
+                "resumen": format!("{} · {} ({:?}){}", f.title, f.expected_amount, f.direction,
+                    f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_planning_flow",
+        description = "Edita una entrada de «Próximos»: cualquier campo es opcional; clear_due_date=true borra la fecha (y desmarca show_in_chart). Alimenta la proyección.",
+        annotations(title = "Editar próximo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_planning_flow(
+        &self,
+        Parameters(p): Parameters<UpdatePlanningFlowParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<(Uuid, crate::handlers::planning::PatchPlanningFlowBody), ApiError> {
+            let flow_id = parse_uuid_param("id", &p.id)?;
+            if p.due_date.is_some() && p.clear_due_date == Some(true) {
+                return Err(ApiError::BadRequest(
+                    "provide either due_date or clear_due_date, not both".into(),
+                ));
+            }
+            // Tri-state del PATCH HTTP: omitido = sin cambio; null = borrar; string = fijar.
+            let due_date = if p.clear_due_date == Some(true) {
+                Some(serde_json::Value::Null)
+            } else if let Some(d) = &p.due_date {
+                parse_date_param("due_date", d)?;
+                Some(serde_json::Value::String(d.trim().to_string()))
+            } else {
+                None
+            };
+            Ok((
+                flow_id,
+                crate::handlers::planning::PatchPlanningFlowBody {
+                    category_id: parse_opt_uuid_param("category_id", &p.category_id)?,
+                    title: p.title.clone(),
+                    expected_amount: p
+                        .expected_amount
+                        .as_deref()
+                        .map(|a| parse_decimal_param("expected_amount", a))
+                        .transpose()?,
+                    due_date,
+                    notes: p.notes.clone(),
+                    sort_index: None,
+                    show_in_chart: p.show_in_chart,
+                },
+            ))
+        };
+        let (flow_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let f = patch_planning_flow_core(&self.state, id.installation_id, id.user_id, flow_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": f.id,
+                "resumen": format!("{} · {} ({:?}){}", f.title, f.expected_amount, f.direction,
+                    f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "create_category",
+        description = "Crea una categoría («crea la categoría Mascotas»): scope (asset|liability|income|expense) + nombre. Duplicado en el mismo scope → resource conflict. Desbloquea la categorización cuando falta la categoría.",
+        annotations(title = "Crear categoría", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn create_category(
+        &self,
+        Parameters(p): Parameters<CreateCategoryParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<crate::handlers::categories::CreateCategoryBody, ApiError> {
+            Ok(crate::handlers::categories::CreateCategoryBody {
+                scope: crate::handlers::categories::CategoryScope::parse(&p.scope)?,
+                name: p.name.clone(),
+                sort_index: p.sort_index,
+            })
+        };
+        let body = match run() {
+            Ok(b) => b,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let c = create_category_core(&self.state.pool, id.installation_id, body).await?;
+            Ok(serde_json::json!({"id": c.id, "scope": c.scope, "name": c.name}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "create_categorization_rule",
+        description = "Crea una regla de categorización («a partir de ahora, todo lo de MERCADONA es supermercado»): pattern + match_kind (substring default | prefix | exact), source opcional (null = cualquier banco), assign_kind y categoría opcional (savings sin categoría). Solo afecta a imports FUTUROS — nunca recategoriza movimientos existentes. Duplicado (source, pattern) → resource conflict.",
+        annotations(title = "Crear regla de categorización", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn create_categorization_rule(
+        &self,
+        Parameters(p): Parameters<CreateCategorizationRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<crate::handlers::transactions::schema::CreateRuleBody, ApiError> {
+            Ok(crate::handlers::transactions::schema::CreateRuleBody {
+                match_kind: p.match_kind.clone(),
+                pattern: p.pattern.clone(),
+                source: p.source.clone(),
+                assign_kind: Some(p.assign_kind.clone()),
+                assign_category_id: parse_opt_uuid_param(
+                    "assign_category_id",
+                    &p.assign_category_id,
+                )?,
+            })
+        };
+        let body = match run() {
+            Ok(b) => b,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let r = create_categorization_rule_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                body,
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "id": r.id,
+                "resumen": format!("{} «{}» → {} {}", r.match_kind, r.pattern,
+                    r.assign_kind.as_deref().unwrap_or("-"),
+                    r.assign_category_name.as_deref().unwrap_or("(sin categoría)")),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
     #[tool(
         name = "list_transaction_imports",
         description = "Lotes de import CSV (fuente bancaria, fichero original, cuenta vinculada, nº de movimientos, orden created_at DESC). Usa el id como filtro import_id en list_transactions para auditar un lote.",
@@ -856,12 +1374,16 @@ impl ServerHandler for FutureFinMcp {
                 Implementation::new("futurefin", self.state.version).with_title("FutureFin"),
             )
             .with_instructions(
-                "Datos financieros del hogar FutureFin (solo lectura). Los importes monetarios \
-                 son strings decimales en la divisa base de la instalación (EUR salvo que \
-                 get_settings diga otra cosa); las series de charts (projection/history) usan \
-                 números. `view=\"mine\"` filtra a los datos del usuario del token; por defecto \
-                 se devuelve el agregado del hogar. Empieza por get_summary para el estado \
-                 actual y get_settings para el contexto de configuración.",
+                "Finanzas del hogar FutureFin: lectura, simulación (simulate_projection, sin \
+                 persistir) y escritura. Los importes monetarios son strings decimales en la \
+                 divisa base de la instalación (EUR salvo que get_settings diga otra cosa); las \
+                 series de charts (projection/history) usan números. `view=\"mine\"` filtra a \
+                 los datos del usuario del token; por defecto se devuelve el agregado del hogar. \
+                 Empieza por get_summary para el estado actual y get_settings para el contexto. \
+                 Las tools de escritura respetan el rol del token (los viewers no escriben) y el \
+                 ajuste `mcp_write_enabled` de la instalación (con la escritura desactivada \
+                 devuelven `mcp_write_disabled` — explícaselo al usuario, no reintentes); las \
+                 destructivas piden `confirm: true` y sin él devuelven un preview.",
             )
     }
 }

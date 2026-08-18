@@ -352,6 +352,18 @@ pub async fn materialize_recurring(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = materialize_recurring_core(&state, iid, user.id.0).await?;
+    Ok(Json(resp))
+}
+
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `materialize_recurring`.
+/// Idempotente por cursor (`last_materialized_month`), serializado con `FOR UPDATE`, y con la
+/// invalidación COND post-commit dentro.
+pub(crate) async fn materialize_recurring_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+) -> Result<MaterializeResponse, ApiError> {
     let today = installation_naive_today(&state.pool, iid).await?;
 
     let mut tx = state.pool.begin().await?;
@@ -367,23 +379,23 @@ pub async fn materialize_recurring(
            FOR UPDATE"#,
     )
     .bind(iid)
-    .bind(user.id.0)
+    .bind(user_id)
     .fetch_all(&mut *tx)
     .await?;
 
     let rules_processed = rules.len() as u32;
     let mut materialized = 0u32;
     for rule in &rules {
-        materialized += materialize_rule(&mut tx, iid, user.id.0, rule, today).await?;
+        materialized += materialize_rule(&mut tx, iid, user_id, rule, today).await?;
     }
 
     tx.commit().await?;
 
-    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
-    Ok(Json(MaterializeResponse {
+    invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+    Ok(MaterializeResponse {
         rules_processed,
         materialized,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
