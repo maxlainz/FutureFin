@@ -580,6 +580,21 @@ async fn liability_create_with_derived_principal() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let cat = app.create_category(&owner, "liability", "Préstamos").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
+
+    // 3.4.0: `expense_category_id` es obligatoria — con scope equivocado, mismo 400 que HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_liability",
+            json!({"label": "Coche", "category_id": cat, "expense_category_id": cat,
+                   "principal": "1000"}),
+        ),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(body["message"].as_str().unwrap().contains("expense_category_id"));
 
     // Modo derive sin plan completo → mismos 400 que HTTP.
     let envelope = mcp_post(
@@ -587,7 +602,8 @@ async fn liability_create_with_derived_principal() {
         &token,
         tool_call(
             "create_liability",
-            json!({"label": "Coche", "category_id": cat, "derive_principal_from_plan": true, "payment_amount": "300"}),
+            json!({"label": "Coche", "category_id": cat, "expense_category_id": exp_cat,
+                   "derive_principal_from_plan": true, "payment_amount": "300"}),
         ),
     )
     .await;
@@ -600,7 +616,8 @@ async fn liability_create_with_derived_principal() {
         &token,
         tool_call(
             "create_liability",
-            json!({"label": "Coche", "category_id": cat, "derive_principal_from_plan": true,
+            json!({"label": "Coche", "category_id": cat, "expense_category_id": exp_cat,
+                   "derive_principal_from_plan": true,
                    "payment_amount": "300", "payment_frequency": "monthly",
                    "payment_end_date": "2028-12-01", "apr_percent": "5"}),
         ),

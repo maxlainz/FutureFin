@@ -53,6 +53,7 @@ async fn capture_creates_both_kinds_with_copied_terms() {
     let owner = app.register_and_login_owner("alice").await;
     let asset_cat = app.create_category(&owner, "asset", "Cash").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
     app.post_json_with_cookie(
         "/v1/assets",
@@ -67,7 +68,7 @@ async fn capture_creates_both_kinds_with_copied_terms() {
     app.post_json_with_cookie(
         "/v1/liabilities",
         serde_json::json!({
-            "category_id": liab_cat,
+            "category_id": liab_cat, "expense_category_id": liab_exp_cat,
             "label": "Hipoteca",
             "principal": "5000",
             "apr_percent": "3.5",
@@ -159,6 +160,7 @@ async fn capture_excludes_shared_and_expired_rows() {
     let owner = app.register_and_login_owner("alice").await;
     let asset_cat = app.create_category(&owner, "asset", "Cash").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
     let iid = installation_id(&app).await;
 
     // Asset propio.
@@ -186,7 +188,7 @@ async fn capture_excludes_shared_and_expired_rows() {
     app.post_json_with_cookie(
         "/v1/liabilities",
         serde_json::json!({
-            "category_id": liab_cat, "label": "Vencido", "principal": "1000",
+            "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "Vencido", "principal": "1000",
             "payment_amount": "100", "payment_frequency": "monthly", "payment_end_date": past,
         }),
         &owner.cookie,
@@ -196,7 +198,7 @@ async fn capture_excludes_shared_and_expired_rows() {
     app.post_json_with_cookie(
         "/v1/liabilities",
         serde_json::json!({
-            "category_id": liab_cat, "label": "Vivo", "principal": "4000",
+            "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "Vivo", "principal": "4000",
             "payment_amount": "150", "payment_frequency": "monthly", "payment_end_date": future,
         }),
         &owner.cookie,
@@ -926,6 +928,7 @@ async fn prefill_live_when_no_snapshots() {
     let owner = app.register_and_login_owner("alice").await;
     let asset_cat = app.create_category(&owner, "asset", "Cash").await;
     let liab_cat = app.create_category(&owner, "liability", "Deuda").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
     let today = server_today(&app, &owner.cookie).await;
 
     let a_created = app
@@ -942,7 +945,7 @@ async fn prefill_live_when_no_snapshots() {
         .post_json_with_cookie(
             "/v1/liabilities",
             serde_json::json!({
-                "category_id": liab_cat, "label": "Hipoteca", "principal": "5000",
+                "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "Hipoteca", "principal": "5000",
                 "apr_percent": "3.5", "payment_amount": "200", "payment_frequency": "monthly",
                 "payment_end_date": future,
             }),

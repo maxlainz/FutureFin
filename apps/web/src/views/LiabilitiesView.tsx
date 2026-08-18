@@ -42,8 +42,11 @@ export function LiabilitiesView({
   liabilities,
   liabilitiesBusy,
   liabilityCategories,
+  liabilityExpenseCategories,
   liabilityFormCategoryId,
   setLiabilityFormCategoryId,
+  liabilityFormExpenseCategoryId,
+  setLiabilityFormExpenseCategoryId,
   liabilityFormLabel,
   setLiabilityFormLabel,
   liabilityFormTypeTag,
@@ -81,8 +84,12 @@ export function LiabilitiesView({
   liabilities: LiabilityApiRow[];
   liabilitiesBusy: boolean;
   liabilityCategories: CategoryRow[];
+  /** Categorías scope `expense` para la categoría de la cuota (obligatoria al crear, 3.4.0). */
+  liabilityExpenseCategories: CategoryRow[];
   liabilityFormCategoryId: string;
   setLiabilityFormCategoryId: Dispatch<SetStateAction<string>>;
+  liabilityFormExpenseCategoryId: string;
+  setLiabilityFormExpenseCategoryId: Dispatch<SetStateAction<string>>;
   liabilityFormLabel: string;
   setLiabilityFormLabel: Dispatch<SetStateAction<string>>;
   liabilityFormTypeTag: string;
@@ -212,6 +219,17 @@ export function LiabilitiesView({
         </div>
       ) : null}
 
+      {hasMembership &&
+      canEdit &&
+      liabilityCategories.length > 0 &&
+      liabilityExpenseCategories.length === 0 &&
+      !liabilitiesBusy ? (
+        <div className="banner info-banner">
+          Para crear un pasivo necesitas una categoría de <strong>gasto</strong>{" "}
+          donde atribuir su cuota · <strong>Ajustes → Categorías</strong>
+        </div>
+      ) : null}
+
       {!canEdit && hasMembership ? (
         <p className="muted tight">Solo lectura.</p>
       ) : null}
@@ -248,6 +266,28 @@ export function LiabilitiesView({
                   maxLength={200}
                   placeholder="p. ej. Préstamo coche"
                 />
+              </label>
+              <label className="field">
+                <span className="checkbox-label-with-hint">
+                  Categoría de la cuota (gasto)
+                  <InlineHint title="El presupuesto y la comparativa de Movimientos atribuyen ahí la cuota del plan — no la dupliques como partida propia." />
+                </span>
+                <select
+                  value={liabilityFormExpenseCategoryId}
+                  onChange={(e) =>
+                    setLiabilityFormExpenseCategoryId(e.target.value)
+                  }
+                  required={!editingLiabilityId}
+                >
+                  {editingLiabilityId && !liabilityFormExpenseCategoryId ? (
+                    <option value="">Sin asignar (elige una)</option>
+                  ) : null}
+                  {liabilityExpenseCategories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label className="field">
                 <span>Tipo (opc.)</span>
@@ -499,6 +539,15 @@ export function LiabilitiesView({
                             >
                               <td>
                                 {row.label}
+                                {!row.expense_category_id ? (
+                                  <span
+                                    className="muted"
+                                    title="Edítalo y asígnale una categoría de gasto para que el presupuesto y Movimientos emparejen su cuota."
+                                  >
+                                    {" "}
+                                    · sin categoría de cuota
+                                  </span>
+                                ) : null}
                                 {isMobile ? (
                                   <span className="cell-subline">
                                     TAE {aprLabel} · Cuota{" "}

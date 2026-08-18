@@ -124,6 +124,11 @@ pub type BackupAsset = BackupAssetV3;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackupLiability {
     pub category_ref: CategoryRef,
+    /// Categoría de GASTO de la cuota (3.4.0). Aditivo con `default`: los backups anteriores no
+    /// llevan el campo → `None` → el pasivo importa sin asignar (SIN bump de schema_version,
+    /// mismo patrón que `savings_source`).
+    #[serde(default)]
+    pub expense_category_ref: Option<CategoryRef>,
     pub label: String,
     #[serde(default)]
     pub type_tag: Option<String>,

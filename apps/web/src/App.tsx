@@ -351,7 +351,12 @@ export default function App() {
   const [liabilityCategories, setLiabilityCategories] = useState<
     CategoryRow[]
   >([]);
+  const [liabilityExpenseCategories, setLiabilityExpenseCategories] = useState<
+    CategoryRow[]
+  >([]);
   const [liabilityFormCategoryId, setLiabilityFormCategoryId] = useState("");
+  const [liabilityFormExpenseCategoryId, setLiabilityFormExpenseCategoryId] =
+    useState("");
   const [liabilityFormLabel, setLiabilityFormLabel] = useState("");
   const [liabilityFormTypeTag, setLiabilityFormTypeTag] = useState("");
   const [liabilityFormPrincipal, setLiabilityFormPrincipal] = useState("");
@@ -826,8 +831,9 @@ export default function App() {
     setLiabilitiesBusy(true);
     setLiabilitiesError(null);
     try {
-      const [catRes, libRes] = await Promise.all([
+      const [catRes, expCatRes, libRes] = await Promise.all([
         fetch("/v1/categories?scope=liability", defaultFetchInit),
+        fetch("/v1/categories?scope=expense", defaultFetchInit),
         fetch(
           `/v1/liabilities${ledgerViewQs(ledgerPersonScope)}`,
           defaultFetchInit,
@@ -840,6 +846,13 @@ export default function App() {
       } else {
         setLiabilityCategories((await catRes.json()) as CategoryRow[]);
       }
+      if (expCatRes.status === 403 || expCatRes.status === 404) {
+        setLiabilityExpenseCategories([]);
+      } else if (!expCatRes.ok) {
+        throw new Error(await errorMessageFromResponse(expCatRes));
+      } else {
+        setLiabilityExpenseCategories((await expCatRes.json()) as CategoryRow[]);
+      }
       if (libRes.status === 403 || libRes.status === 404) {
         setLiabilities([]);
       } else if (!libRes.ok) {
@@ -850,6 +863,7 @@ export default function App() {
     } catch (e: unknown) {
       setLiabilities([]);
       setLiabilityCategories([]);
+      setLiabilityExpenseCategories([]);
       setLiabilitiesError(e instanceof Error ? e.message : String(e));
     } finally {
       setLiabilitiesBusy(false);
@@ -2186,6 +2200,7 @@ export default function App() {
   function resetLiabilityForm() {
     setEditingLiabilityId(null);
     setLiabilityFormCategoryId(liabilityCategories[0]?.id ?? "");
+    setLiabilityFormExpenseCategoryId(liabilityExpenseCategories[0]?.id ?? "");
     setLiabilityFormLabel("");
     setLiabilityFormTypeTag("");
     setLiabilityFormPrincipal("");
@@ -2200,6 +2215,13 @@ export default function App() {
   async function submitLiabilityForm(ev: FormEvent) {
     ev.preventDefault();
     if (!liabilityFormCategoryId || !liabilityFormLabel.trim()) {
+      return;
+    }
+    // Obligatoria al crear (3.4.0); en edición un legacy puede seguir sin asignar.
+    if (!editingLiabilityId && !liabilityFormExpenseCategoryId) {
+      setLiabilitiesError(
+        "Elige la categoría de gasto de la cuota (crea una en Ajustes → Categorías si no tienes).",
+      );
       return;
     }
     const payAmt = liabilityFormPaymentAmount.trim();
@@ -2230,6 +2252,11 @@ export default function App() {
         category_id: liabilityFormCategoryId,
         label: liabilityFormLabel.trim(),
       };
+      // Create: siempre (el backend la exige). PATCH: set-only — solo si hay valor elegido (los
+      // legacy sin asignar no envían nada y conservan NULL hasta que el usuario elija una).
+      if (liabilityFormExpenseCategoryId) {
+        base.expense_category_id = liabilityFormExpenseCategoryId;
+      }
       base.derive_principal_from_plan = liabilityFormDerivePrincipal;
       if (!liabilityFormDerivePrincipal) {
         base.principal = liabilityFormPrincipal.trim();
@@ -2318,6 +2345,7 @@ export default function App() {
   function beginEditLiability(row: LiabilityApiRow) {
     setEditingLiabilityId(row.id);
     setLiabilityFormCategoryId(row.category_id);
+    setLiabilityFormExpenseCategoryId(row.expense_category_id ?? "");
     setLiabilityFormLabel(row.label);
     setLiabilityFormTypeTag(row.type_tag ?? "");
     setLiabilityFormPrincipal(formatEditableDecimalString(row.principal));
@@ -3219,8 +3247,11 @@ export default function App() {
             liabilities={liabilities}
             liabilitiesBusy={liabilitiesBusy}
             liabilityCategories={liabilityCategories}
+            liabilityExpenseCategories={liabilityExpenseCategories}
             liabilityFormCategoryId={liabilityFormCategoryId}
             setLiabilityFormCategoryId={setLiabilityFormCategoryId}
+            liabilityFormExpenseCategoryId={liabilityFormExpenseCategoryId}
+            setLiabilityFormExpenseCategoryId={setLiabilityFormExpenseCategoryId}
             liabilityFormLabel={liabilityFormLabel}
             setLiabilityFormLabel={setLiabilityFormLabel}
             liabilityFormTypeTag={liabilityFormTypeTag}

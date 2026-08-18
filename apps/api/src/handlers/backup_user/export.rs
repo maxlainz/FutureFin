@@ -512,10 +512,12 @@ async fn fetch_liabilities(
     iid: Uuid,
     user_id: Uuid,
 ) -> Result<(Vec<BackupLiability>, HashMap<Uuid, usize>), ApiError> {
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(
         Uuid,
         String,
         String,
+        Option<String>,
         String,
         Option<String>,
         Decimal,
@@ -527,11 +529,13 @@ async fn fetch_liabilities(
         Option<String>,
         i32,
     )> = sqlx::query_as(
-        r#"SELECT l.id, c.scope, c.name AS cat_name, l.label, l.type_tag, l.principal,
+        r#"SELECT l.id, c.scope, c.name AS cat_name, ec.name AS expense_cat_name, l.label,
+                  l.type_tag, l.principal,
                   l.principal_derived_from_plan, l.apr_percent, l.payment_amount,
                   l.payment_frequency, l.payment_end_date, l.notes, l.sort_index
            FROM liabilities l
            JOIN categories c ON c.id = l.category_id
+           LEFT JOIN categories ec ON ec.id = l.expense_category_id
            WHERE l.installation_id = $1 AND l.owner_user_id = $2
            ORDER BY l.sort_index ASC, l.label ASC"#,
     )
@@ -548,16 +552,21 @@ async fn fetch_liabilities(
             id_to_index.insert(r.0, i);
             BackupLiability {
                 category_ref: CategoryRef { scope: r.1, name: r.2 },
-                label: r.3,
-                type_tag: r.4,
-                principal: r.5,
-                principal_derived_from_plan: r.6,
-                apr_percent: r.7,
-                payment_amount: r.8,
-                payment_frequency: r.9,
-                payment_end_date: r.10,
-                notes: r.11,
-                sort_index: r.12,
+                // La categoría de gasto siempre tiene scope 'expense' (validación de la API).
+                expense_category_ref: r.3.map(|name| CategoryRef {
+                    scope: "expense".into(),
+                    name,
+                }),
+                label: r.4,
+                type_tag: r.5,
+                principal: r.6,
+                principal_derived_from_plan: r.7,
+                apr_percent: r.8,
+                payment_amount: r.9,
+                payment_frequency: r.10,
+                payment_end_date: r.11,
+                notes: r.12,
+                sort_index: r.13,
             }
         })
         .collect();
@@ -740,6 +749,7 @@ async fn fetch_categories_used(
              AND (
                 EXISTS (SELECT 1 FROM assets a WHERE a.category_id = c.id AND a.owner_user_id = $2)
                 OR EXISTS (SELECT 1 FROM liabilities l WHERE l.category_id = c.id AND l.owner_user_id = $2)
+                OR EXISTS (SELECT 1 FROM liabilities le WHERE le.expense_category_id = c.id AND le.owner_user_id = $2)
                 OR EXISTS (SELECT 1 FROM budget_entries b WHERE b.category_id = c.id AND b.owner_user_id = $2)
                 OR EXISTS (SELECT 1 FROM planning_flows p WHERE p.category_id = c.id AND p.owner_user_id = $2)
                 OR EXISTS (SELECT 1 FROM transactions t WHERE t.category_id = c.id AND t.owner_user_id = $2)

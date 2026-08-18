@@ -31,8 +31,16 @@ async fn server_today(app: &TestApp, cookie: &str) -> NaiveDate {
     NaiveDate::parse_from_str(resp.json()["anchor_date_ymd"].as_str().unwrap(), "%Y-%m-%d").unwrap()
 }
 
-async fn create_liability(app: &TestApp, cookie: &str, cat: &str, label: &str, body_extra: Value) {
-    let mut body = json!({ "category_id": cat, "label": label, "principal": "10000" });
+async fn create_liability(
+    app: &TestApp,
+    cookie: &str,
+    cat: &str,
+    exp_cat: &str,
+    label: &str,
+    body_extra: Value,
+) {
+    let mut body = json!({ "category_id": cat, "expense_category_id": exp_cat, "label": label,
+                           "principal": "10000" });
     for (k, v) in body_extra.as_object().unwrap() {
         body[k] = v.clone();
     }
@@ -53,11 +61,9 @@ async fn derived_line_includes_null_end_date() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
-    create_liability(
-        &app,
-        &owner.cookie,
-        &cat,
+    create_liability(&app, &owner.cookie, &cat, &exp_cat,
         "Sin fecha fin",
         json!({ "payment_amount": "500", "payment_frequency": "monthly" }),
     )
@@ -67,6 +73,11 @@ async fn derived_line_includes_null_end_date() {
     let derived = body["derived_from_liabilities"].as_array().unwrap();
     assert_eq!(derived.len(), 1, "el pasivo sin fecha fin debe derivar línea: {body:?}");
     approx(parse_dec(&derived[0]["monthly_equivalent"]), 500.0);
+    assert_eq!(
+        derived[0]["expense_category_id"].as_str().unwrap(),
+        exp_cat,
+        "la línea derivada expone la categoría de gasto de la cuota (3.4.0)"
+    );
     approx(parse_dec(&body["totals"]["expense_derived_monthly_equivalent"]), 500.0);
     approx(parse_dec(&body["totals"]["expense_total_monthly_equivalent"]), 500.0);
 }
@@ -78,23 +89,18 @@ async fn derived_line_excludes_expired_but_includes_end_today() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
     let today = server_today(&app, &owner.cookie).await;
     let past = (today - Duration::days(5)).format("%Y-%m-%d").to_string();
     let today_s = today.format("%Y-%m-%d").to_string();
 
-    create_liability(
-        &app,
-        &owner.cookie,
-        &cat,
+    create_liability(&app, &owner.cookie, &cat, &exp_cat,
         "Vencido",
         json!({ "payment_amount": "700", "payment_frequency": "monthly", "payment_end_date": past }),
     )
     .await;
-    create_liability(
-        &app,
-        &owner.cookie,
-        &cat,
+    create_liability(&app, &owner.cookie, &cat, &exp_cat,
         "Termina hoy",
         json!({ "payment_amount": "200", "payment_frequency": "monthly", "payment_end_date": today_s }),
     )
@@ -113,8 +119,9 @@ async fn derived_line_requires_payment_plan() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
-    create_liability(&app, &owner.cookie, &cat, "Solo principal", json!({})).await;
+    create_liability(&app, &owner.cookie, &cat, &exp_cat, "Solo principal", json!({})).await;
 
     let body = budget_snapshot(&app, &owner.cookie, "/v1/budget").await;
     assert!(
@@ -130,11 +137,9 @@ async fn derived_line_weekly_monthly_equivalent() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
-    create_liability(
-        &app,
-        &owner.cookie,
-        &cat,
+    create_liability(&app, &owner.cookie, &cat, &exp_cat,
         "Semanal",
         json!({ "payment_amount": "70", "payment_frequency": "weekly" }),
     )
@@ -152,19 +157,14 @@ async fn derived_line_household_vs_mine_scoping() {
     let owner = app.register_and_login_owner("alice").await;
     let member = app.register_and_approve_member(&owner, "bob", "member").await;
     let cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
-    create_liability(
-        &app,
-        &owner.cookie,
-        &cat,
+    create_liability(&app, &owner.cookie, &cat, &exp_cat,
         "Del owner",
         json!({ "payment_amount": "500", "payment_frequency": "monthly" }),
     )
     .await;
-    create_liability(
-        &app,
-        &member.cookie,
-        &cat,
+    create_liability(&app, &member.cookie, &cat, &exp_cat,
         "Del member",
         json!({ "payment_amount": "300", "payment_frequency": "monthly" }),
     )

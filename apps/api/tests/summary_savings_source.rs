@@ -187,7 +187,7 @@ async fn mode_b_summary_uses_raw_avg() {
     let l1 = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L1", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": expense_cat, "label": "L1", "principal": "100000",
                     "payment_amount": "500", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )
@@ -199,7 +199,7 @@ async fn mode_b_summary_uses_raw_avg() {
     let l2 = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L2", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": expense_cat, "label": "L2", "principal": "100000",
                     "payment_amount": "300", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )
@@ -449,7 +449,7 @@ async fn mode_c_income_not_overwritten() {
     let l1 = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L1", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": expense_cat, "label": "L1", "principal": "100000",
                     "payment_amount": "500", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )
@@ -460,7 +460,7 @@ async fn mode_c_income_not_overwritten() {
     let l2 = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L2", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": expense_cat, "label": "L2", "principal": "100000",
                     "payment_amount": "300", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )

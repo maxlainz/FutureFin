@@ -295,6 +295,7 @@ async fn mode_b_raw_avg_ignores_liability_links() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
     let today = server_today(&app, &owner.cookie).await;
     let future = date_in(today.year() + 5, 1, 15);
@@ -304,7 +305,7 @@ async fn mode_b_raw_avg_ignores_liability_links() {
     let l1 = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L1", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "L1", "principal": "100000",
                     "payment_amount": "500", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )
@@ -316,7 +317,7 @@ async fn mode_b_raw_avg_ignores_liability_links() {
     let l2 = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L2", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "L2", "principal": "100000",
                     "payment_amount": "300", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )
@@ -327,7 +328,7 @@ async fn mode_b_raw_avg_ignores_liability_links() {
     let l3 = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L3", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "L3", "principal": "100000",
                     "payment_amount": "700", "payment_frequency": "monthly", "payment_end_date": past }),
             &owner.cookie,
         )
@@ -356,6 +357,7 @@ async fn mode_b_liability_static_nw_subtraction() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
     let today = server_today(&app, &owner.cookie).await;
     let future = date_in(today.year() + 5, 1, 15);
@@ -363,7 +365,7 @@ async fn mode_b_liability_static_nw_subtraction() {
     let r = app
         .post_json_with_cookie(
             "/v1/liabilities",
-            json!({ "category_id": liab_cat, "label": "L", "principal": "100000",
+            json!({ "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "L", "principal": "100000",
                     "payment_amount": "1000", "payment_frequency": "monthly", "payment_end_date": future }),
             &owner.cookie,
         )
@@ -468,6 +470,7 @@ async fn mode_b_no_step_up_at_liability_end() {
         let owner = app.register_and_login_owner(username).await;
         let asset_cat = app.create_category(&owner, "asset", "Bolsa").await;
         let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
         let asset = app
             .post_json_with_cookie(
@@ -494,7 +497,7 @@ async fn mode_b_no_step_up_at_liability_end() {
         let liab = app
             .post_json_with_cookie(
                 "/v1/liabilities",
-                json!({ "category_id": liab_cat, "label": "L", "principal": "300000",
+                json!({ "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "L", "principal": "300000",
                         "payment_amount": "1000", "payment_frequency": "monthly", "payment_end_date": end }),
                 &owner.cookie,
             )
