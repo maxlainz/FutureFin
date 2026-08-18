@@ -484,6 +484,17 @@ pub async fn delete_planning_flow(
         return Err(ApiError::Forbidden);
     }
 
+    delete_planning_flow_core(&state, iid, user.id.0, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_planning_flow`.
+pub(crate) async fn delete_planning_flow_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
     let res =
         sqlx::query(r#"DELETE FROM planning_flows WHERE id = $1 AND installation_id = $2"#)
             .bind(id)
@@ -495,8 +506,8 @@ pub async fn delete_planning_flow(
         return Err(ApiError::NotFound);
     }
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    Ok(())
 }
 
 pub fn planning_router() -> Router {

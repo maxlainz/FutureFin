@@ -626,6 +626,52 @@ pub async fn delete_asset(
         return Err(ApiError::Forbidden);
     }
 
+    delete_asset_core(&state, iid, user.id.0, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Efectos colaterales de borrar un activo, para el preview de la tool MCP: los links de
+/// transacciones (`linked_asset_id`) y lotes de import (`account_asset_id`) pasan a NULL.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct AssetDeleteEffects {
+    pub transactions_unlinked: i64,
+    pub imports_unlinked: i64,
+}
+
+pub(crate) async fn asset_delete_effects(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    id: Uuid,
+) -> Result<AssetDeleteEffects, ApiError> {
+    let transactions_unlinked: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint FROM transactions
+           WHERE installation_id = $1 AND linked_asset_id = $2"#,
+    )
+    .bind(iid)
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    let imports_unlinked: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint FROM transaction_imports
+           WHERE installation_id = $1 AND account_asset_id = $2"#,
+    )
+    .bind(iid)
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    Ok(AssetDeleteEffects {
+        transactions_unlinked,
+        imports_unlinked,
+    })
+}
+
+/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_asset`.
+pub(crate) async fn delete_asset_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
     let res =
         sqlx::query(r#"DELETE FROM assets WHERE id = $1 AND installation_id = $2"#)
             .bind(id)
@@ -637,8 +683,8 @@ pub async fn delete_asset(
         return Err(ApiError::NotFound);
     }
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    Ok(())
 }
 
 pub fn assets_router() -> Router {
