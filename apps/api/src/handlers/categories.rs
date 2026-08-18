@@ -32,7 +32,7 @@ impl CategoryScope {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, ApiError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, ApiError> {
         match s.trim() {
             "asset" => Ok(Self::Asset),
             "liability" => Ok(Self::Liability),
@@ -249,7 +249,18 @@ pub async fn create_category(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = create_category_core(&state.pool, iid, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+}
 
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_category`. Las categorías
+/// no invalidan la cache de proyección (contrato histórico: ningún handler del módulo lo hace).
+/// 409 en duplicado (unique instalación+scope+nombre) vía el mapeo global de sqlx.
+pub(crate) async fn create_category_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    body: CreateCategoryBody,
+) -> Result<CategoryResponse, ApiError> {
     let name = normalize_name(&body.name)?;
     let sort_index = body.sort_index.unwrap_or(0);
 
@@ -262,13 +273,10 @@ pub async fn create_category(
     .bind(body.scope.as_str())
     .bind(&name)
     .bind(sort_index)
-    .fetch_one(&state.pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok((
-        axum::http::StatusCode::CREATED,
-        Json(row_to_response(row)?),
-    ))
+    row_to_response(row)
 }
 
 #[utoipa::path(

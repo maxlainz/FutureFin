@@ -416,7 +416,19 @@ pub async fn capture_snapshots(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = capture_snapshots_core(&state.pool, iid, user.id.0, body).await?;
+    Ok(Json(resp))
+}
 
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `capture_snapshot`. Upsert por día
+/// civil (recapturar el mismo día SOBRESCRIBE la foto con el ledger vivo). Contrato D12: los
+/// snapshots no son inputs del engine → nunca invalida la cache de proyección.
+pub(crate) async fn capture_snapshots_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    body: CaptureBody,
+) -> Result<CaptureResponse, ApiError> {
     // Resolver kinds: default ambos; validar; deduplicar preservando orden.
     let requested = match body.kinds {
         None => vec!["asset".to_string(), "liability".to_string()],
@@ -437,9 +449,9 @@ pub async fn capture_snapshots(
         }
     }
 
-    let today = installation_naive_today(&state.pool, iid).await?;
+    let today = installation_naive_today(pool, iid).await?;
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = pool.begin().await?;
     let mut out = Vec::with_capacity(kinds.len());
     for kind in kinds {
         // Upsert de cabecera: la captura del mismo día sobrescribe silenciosamente.
@@ -452,7 +464,7 @@ pub async fn capture_snapshots(
                RETURNING id"#,
         )
         .bind(iid)
-        .bind(user.id.0)
+        .bind(user_id)
         .bind(&kind)
         .bind(today)
         .fetch_one(&mut *tx)
@@ -476,7 +488,7 @@ pub async fn capture_snapshots(
             )
             .bind(snapshot_id)
             .bind(iid)
-            .bind(user.id.0)
+            .bind(user_id)
             .execute(&mut *tx)
             .await?;
         } else {
@@ -493,7 +505,7 @@ pub async fn capture_snapshots(
             )
             .bind(snapshot_id)
             .bind(iid)
-            .bind(user.id.0)
+            .bind(user_id)
             .bind(today)
             .execute(&mut *tx)
             .await?;
@@ -504,7 +516,7 @@ pub async fn capture_snapshots(
     tx.commit().await?;
 
     // Nota: NO se invalida la cache de proyección (ver doc del módulo).
-    Ok(Json(CaptureResponse { snapshots: out }))
+    Ok(CaptureResponse { snapshots: out })
 }
 
 #[utoipa::path(

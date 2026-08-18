@@ -164,6 +164,11 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
     assert_eq!(
         names,
         vec![
+            "capture_snapshot",
+            "create_categorization_rule",
+            "create_category",
+            "create_planning_flow",
+            "create_transaction",
             "get_budget",
             "get_category_monthly_series",
             "get_history",
@@ -183,7 +188,10 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "list_transaction_imports",
             "list_transaction_months",
             "list_transactions",
+            "materialize_recurring",
             "simulate_projection",
+            "update_planning_flow",
+            "update_transaction",
         ],
         "catálogo congelado: cada tool nueva se añade aquí a conciencia"
     );
@@ -493,9 +501,24 @@ async fn tools_list_exposes_annotations_on_every_tool() {
             ann["openWorldHint"], false,
             "el servidor solo toca su propia DB ({name})"
         );
-        // Lecturas → readOnlyHint true. Las tools de escritura (issue #3) declaran false y
-        // este assert se ramifica por tool cuando existan.
-        assert_eq!(ann["readOnlyHint"], true, "tool {name}");
+        // Escrituras (issue #3): readOnlyHint false + hints de destructividad/idempotencia
+        // coherentes con la tabla del issue. Todo lo demás es lectura.
+        let is_write = name.starts_with("create_")
+            || name.starts_with("update_")
+            || name.starts_with("delete_")
+            || matches!(name, "capture_snapshot" | "materialize_recurring");
+        if is_write {
+            assert_eq!(ann["readOnlyHint"], false, "tool {name}");
+            let expect_destructive =
+                name.starts_with("update_") || name.starts_with("delete_");
+            assert_eq!(ann["destructiveHint"], expect_destructive, "tool {name}");
+            let expect_idempotent = name.starts_with("update_")
+                || name.starts_with("delete_")
+                || matches!(name, "capture_snapshot" | "materialize_recurring");
+            assert_eq!(ann["idempotentHint"], expect_idempotent, "tool {name}");
+        } else {
+            assert_eq!(ann["readOnlyHint"], true, "tool {name}");
+        }
     }
 }
 

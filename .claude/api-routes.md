@@ -324,6 +324,20 @@ Servidor MCP embebido de **solo lectura** (v3.0.0), módulo `apps/api/src/mcp/` 
   Decimal-as-string intacto. Paridad congelada en `apps/api/tests/mcp_http.rs`.
 - **Errores**: dominio/validación → `CallToolResult{is_error:true}` con el JSON `{error, message}`
   de `ErrorBody`; `Db`/`Unavailable` → `ErrorData::internal_error` sanitizado (detalle a tracing).
+- **Tools de escritura (issue #3)** — todas pasan primero por `require_mcp_write` (mcp/auth.rs:
+  `role_can_write` con el rol vivo + kill-switch `installation.mcp_write_enabled` leído por
+  request; viewer → `forbidden`, toggle apagado → `bad_request` con prefijo `mcp_write_disabled:`),
+  llaman a la MISMA core fn de mutación que su handler HTTP (la invalidación de cache vive DENTRO
+  de la core, post-commit) y devuelven respuestas compactas `{id, resumen}`. Tramo 1:
+  `create_transaction` (con `recurring` opcional; reenvíos idénticos crean OTRO movimiento —
+  ordinal de huella, mismo contrato que HTTP), `update_transaction` (owner-guard → `not_found`),
+  `capture_snapshot` (upsert por día civil — sobrescribe), `materialize_recurring` (idempotente
+  por cursor), `create_planning_flow` / `update_planning_flow` (tri-state `clear_due_date`),
+  `create_category`, `create_categorization_rule` (solo imports futuros; conflict con `source`
+  concreto duplicado). **Contrato de cache por tool**: COND (`invalidate_projection_if_savings_
+  uses_transactions`, solo modos B/C) = transaction C/U + materialize; NONE = capture_snapshot
+  (D12), create_category, create_categorization_rule; FULL (`refresh_projection_after_mutation`)
+  = planning C/U. Regresión: `apps/api/tests/mcp_write.rs`.
 - **NO está en OpenAPI a propósito**: no es un recurso REST — es JSON-RPC cuyo contrato define la
   spec MCP y que se autodescribe vía `tools/list`.
 - **Límite conocido de 3.0.0 — resuelto en 3.1.0**: el conector de claude.ai exige OAuth 2.1, que

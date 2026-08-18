@@ -6,6 +6,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — MCP: tools de escritura, tramo 1 (el MCP deja de ser solo lectura)
+
+- Primeras 8 tools de escritura: `create_transaction` («apunta 23,50 € de cena de ayer», con
+  `recurring` opcional que crea la plantilla y backfillea meses cerrados), `update_transaction`
+  (recategorizar/corregir, owner-guard → not_found), `capture_snapshot` («guarda una foto de mi
+  patrimonio hoy», upsert por día civil que sobrescribe), `materialize_recurring` (idempotente
+  por cursor), `create_planning_flow`/`update_planning_flow` («en octubre pago 800 € de IRPF»),
+  `create_category` y `create_categorization_rule` («todo lo de MERCADONA es supermercado», solo
+  imports futuros).
+- **Cero deriva con HTTP**: cada tool llama a la misma core fn de mutación que su handler
+  (extraídas en este cambio: `create_transaction_core`, `patch_transaction_core`,
+  `capture_snapshots_core`, `materialize_recurring_core`, `create_planning_flow_core`,
+  `patch_planning_flow_core`, `create_category_core`, `create_categorization_rule_core`), y la
+  invalidación de cache vive DENTRO de la core — el contrato FULL/COND/NONE no puede divergir
+  entre caminos (regresión por el camino MCP en `mcp_write.rs`).
+- Toda tool de escritura pasa por `require_mcp_write` (rol vivo + toggle) y devuelve una
+  respuesta compacta `{id, resumen}`; annotations con `readOnlyHint=false` y hints de
+  destructividad/idempotencia según la tabla del issue. `get_info` y las instrucciones del
+  servidor ya no anuncian «solo lectura».
+
 ### Changed — Ajustes: pestaña dedicada «MCP» (y «Acceso» pasa a «Usuarios»)
 
 - Todo lo relacionado con el servidor MCP vive ahora en una sub-tab propia de Ajustes: panel

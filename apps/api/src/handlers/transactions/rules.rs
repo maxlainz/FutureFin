@@ -304,7 +304,19 @@ pub async fn create_rule(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = create_categorization_rule_core(&state.pool, iid, user.id.0, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+}
 
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_categorization_rule`.
+/// Las reglas NUNCA invalidan la cache (solo afectan a imports futuros — regresión pinneada).
+/// 409 en duplicado `(source, pattern)` vía el mapeo global de sqlx.
+pub(crate) async fn create_categorization_rule_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    body: CreateRuleBody,
+) -> Result<RuleResponse, ApiError> {
     let match_kind = normalize_match_kind(body.match_kind.as_deref().unwrap_or("substring"))?;
     let pattern = normalize_pattern(&body.pattern)?;
     let source = normalize_source(&body.source);
@@ -317,7 +329,7 @@ pub async fn create_rule(
         }
     };
     if let Some(k) = &assign_kind {
-        validate_rule_assignment(&state.pool, iid, k, body.assign_category_id).await?;
+        validate_rule_assignment(pool, iid, k, body.assign_category_id).await?;
     }
 
     let id: Uuid = sqlx::query_scalar(
@@ -328,17 +340,17 @@ pub async fn create_rule(
            RETURNING id"#,
     )
     .bind(iid)
-    .bind(user.id.0)
+    .bind(user_id)
     .bind(&match_kind)
     .bind(&pattern)
     .bind(source.as_deref())
     .bind(assign_kind.as_deref())
     .bind(body.assign_category_id)
-    .fetch_one(&state.pool)
+    .fetch_one(pool)
     .await?;
 
-    let row = load_rule_row(&state.pool, id).await?;
-    Ok((axum::http::StatusCode::CREATED, Json(row_to_response(row))))
+    let row = load_rule_row(pool, id).await?;
+    Ok(row_to_response(row))
 }
 
 async fn load_rule_row(pool: &sqlx::PgPool, id: Uuid) -> Result<RuleRow, ApiError> {
