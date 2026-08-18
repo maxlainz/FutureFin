@@ -589,6 +589,48 @@ pub struct TransactionsSummaryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Serie mensual por categoría (`GET /v1/transactions/category-series` + tool MCP)
+// ---------------------------------------------------------------------------
+
+/// Un mes de la serie de una categoría. Magnitudes ≥ 0 (misma convención de signos que la
+/// comparativa: gasto = `−Σ(amount)`, ingreso = `+Σ(amount)`); un reembolso puede dejarla
+/// negativa.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CategoryMonthPoint {
+    /// `YYYY-MM`.
+    pub month: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub total: Decimal,
+}
+
+/// Serie de una categoría: un punto por cada mes de la ventana (cero-relleno — los meses sin
+/// movimientos emiten `"0"` para que todas las series estén alineadas).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CategoryMonthlySeriesEntry {
+    /// `null` = movimientos sin categoría.
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub category_id: Option<Uuid>,
+    pub category_name: Option<String>,
+    pub months: Vec<CategoryMonthPoint>,
+}
+
+/// Respuesta de la serie mensual por categoría. El último mes de la ventana es el mes civil en
+/// curso (parcial).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CategoryMonthlySeriesResponse {
+    /// `household` | `mine`.
+    pub view: String,
+    /// `expense` | `income`.
+    pub kind: String,
+    /// Amplitud efectiva de la ventana (1..=60).
+    pub window_months: u32,
+    /// Solo categorías con ≥1 movimiento del `kind` en la ventana (orden: nombre ASC, la
+    /// pseudo-categoría `null` al final).
+    pub series: Vec<CategoryMonthlySeriesEntry>,
+}
+
+// ---------------------------------------------------------------------------
 // Recurring-rule DTOs (§B3)
 // ---------------------------------------------------------------------------
 

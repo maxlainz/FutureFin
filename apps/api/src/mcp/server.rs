@@ -9,17 +9,25 @@
 //! del contrato de `error.rs`.
 
 use crate::error::{ApiError, ErrorBody};
+use crate::handlers::allocation_rules::list_allocation_rules_core;
 use crate::handlers::assets::list_assets_core;
 use crate::handlers::budget::budget_snapshot_core;
-use crate::handlers::history::history_series_core;
+use crate::handlers::categories::list_categories_core;
+use crate::handlers::history::{history_cashflow_core, history_series_core, list_snapshots_core};
 use crate::handlers::installation::{installation_access_core, settings_user_core};
 use crate::handlers::liabilities::list_liabilities_core;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::planning::list_planning_flows_core;
 use crate::handlers::projection::projection_series_cached;
 use crate::handlers::summary::summary_core;
-use crate::handlers::transactions::crud::list_transactions_core;
-use crate::handlers::transactions::summary::transactions_summary_core;
+use crate::handlers::transactions::crud::{
+    list_imports_core, list_months_core, list_transactions_core,
+};
+use crate::handlers::transactions::recurring::list_recurring_rules_core;
+use crate::handlers::transactions::rules::list_categorization_rules_core;
+use crate::handlers::transactions::summary::{
+    category_monthly_series_core, transactions_summary_core,
+};
 use crate::mcp::auth::McpIdentity;
 use crate::state::{AppState, Density};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -179,6 +187,63 @@ pub struct ListTransactionsParams {
     /// Desplazamiento de paginación (movimientos a saltar, orden fecha DESC). Default 0.
     #[serde(default)]
     pub offset: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CategoriesParams {
+    /// Filtra por scope: "asset" | "liability" | "income" | "expense". Omitido = todas.
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CategorySeriesParams {
+    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// "expense" | "income".
+    pub kind: String,
+    /// Limita la serie a una categoría (UUID de list_categories). Omitido = todas las del
+    /// kind con datos.
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// Ventana en meses (1–60, default 12). El último mes es el actual (parcial).
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 60))]
+    pub window_months: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CashflowParams {
+    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    #[serde(default)]
+    pub view: Option<String>,
+    /// Meses de ventana (1–120, default 24).
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 120))]
+    pub window_months: Option<i64>,
+    /// Incluir la curva fina por activo (payload de chart). Default false: el agregado
+    /// mensual es lo útil para analizar.
+    #[serde(default)]
+    pub include_curve: Option<bool>,
+    /// "weekly" (default) | "daily". "daily" exige window_months <= 6. Solo aplica con
+    /// include_curve.
+    #[serde(default)]
+    pub resolution: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SnapshotsParams {
+    /// Filtra por año del snapshot (1900–3000). Omitido = todos.
+    #[serde(default)]
+    #[schemars(range(min = 1900, max = 3000))]
+    pub year: Option<i32>,
+    /// Filtra por tipo: "asset" | "liability". Omitido = ambos.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Incluir el detalle por ítem de cada snapshot. Default false (solo cabecera y total).
+    #[serde(default)]
+    pub include_items: Option<bool>,
 }
 
 const LIST_TRANSACTIONS_DEFAULT_LIMIT: usize = 100;
@@ -442,6 +507,198 @@ impl FutureFinMcp {
             Err(e) => Err(e),
         };
         to_tool_result(res)
+    }
+
+    #[tool(
+        name = "list_allocation_rules",
+        description = "Cascada de asignación del ahorro mensual: reglas ordenadas por prioridad (kind fixed|percent|remainder, importe, cap opcional, enabled) y el activo destino de cada una. Explica por qué el ahorro va donde va; list_assets muestra el resultado resuelto por activo.",
+        annotations(title = "Reglas de asignación", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_allocation_rules(
+        &self,
+        Parameters(p): Parameters<ViewParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let view = resolve_view(&p.view);
+        to_tool_result(
+            list_allocation_rules_core(&self.state.pool, id.installation_id, id.user_id, view)
+                .await,
+        )
+    }
+
+    #[tool(
+        name = "list_categories",
+        description = "Catálogo de categorías de la instalación: id, scope (asset|liability|income|expense), nombre y orden. Úsalo para resolver nombre→id antes de filtrar o crear movimientos.",
+        annotations(title = "Categorías", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_categories(
+        &self,
+        Parameters(p): Parameters<CategoriesParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        to_tool_result(
+            list_categories_core(&self.state.pool, id.installation_id, p.scope.as_deref()).await,
+        )
+    }
+
+    #[tool(
+        name = "get_category_monthly_series",
+        description = "Evolución mensual del gasto o ingreso por categoría: un punto por mes (cero-relleno, magnitudes >= 0 como strings decimales) para cada categoría con datos en la ventana. Responde «¿cómo evoluciona mi gasto en X?». El último mes es el actual (parcial).",
+        annotations(title = "Serie mensual por categoría", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_category_monthly_series(
+        &self,
+        Parameters(p): Parameters<CategorySeriesParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let view = resolve_view(&p.view);
+        let category_id = match &p.category_id {
+            Some(raw) => match Uuid::parse_str(raw.trim()) {
+                Ok(u) => Some(u),
+                Err(_) => {
+                    return to_tool_outcome(ApiError::BadRequest(
+                        "category_id must be a UUID".into(),
+                    ))
+                }
+            },
+            None => None,
+        };
+        to_tool_result(
+            category_monthly_series_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                view,
+                &p.kind,
+                category_id,
+                p.window_months,
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        name = "get_history_cashflow",
+        description = "Flujo de caja mensual real por tipo (expense/income/savings + net, strings decimales, meses firmados hacia atrás desde el actual): la mejor fuente para «¿cuánto entra y sale de verdad cada mes?». La curva fina por activo es opt-in (include_curve).",
+        annotations(title = "Cash-flow histórico", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_history_cashflow(
+        &self,
+        Parameters(p): Parameters<CashflowParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let view = resolve_view(&p.view);
+        to_tool_result(
+            history_cashflow_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                view,
+                p.window_months,
+                p.resolution.as_deref(),
+                p.include_curve.unwrap_or(false),
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        name = "list_recurring_rules",
+        description = "Plantillas de movimientos recurrentes del usuario del token (nómina, gimnasio…): concepto, importe, kind, categoría y el cursor last_materialized_month (si es anterior al último mes cerrado hay materialización pendiente). Siempre own-user, sin view.",
+        annotations(title = "Recurrentes", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_recurring_rules(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        to_tool_result(
+            list_recurring_rules_core(&self.state.pool, id.installation_id, id.user_id).await,
+        )
+    }
+
+    #[tool(
+        name = "list_categorization_rules",
+        description = "Reglas de categorización aprendidas del usuario del token: patrón (substring|prefix|exact), banco de origen opcional y asignación (kind + categoría). Explican cómo se categorizó un concepto y evitan crear duplicados. Solo afectan a imports futuros. Siempre own-user, sin view.",
+        annotations(title = "Reglas de categorización", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_categorization_rules(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        to_tool_result(
+            list_categorization_rules_core(&self.state.pool, id.installation_id, id.user_id)
+                .await,
+        )
+    }
+
+    #[tool(
+        name = "list_transaction_months",
+        description = "Meses con movimientos (YYYY-MM, orden DESC) con su nº de transacciones e is_complete (false solo para el mes civil en curso). Orienta las consultas: evita pedir mes a mes a ciegas.",
+        annotations(title = "Meses con datos", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_transaction_months(
+        &self,
+        Parameters(p): Parameters<ViewParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let view = resolve_view(&p.view);
+        to_tool_result(
+            list_months_core(&self.state.pool, id.installation_id, id.user_id, view).await,
+        )
+    }
+
+    #[tool(
+        name = "list_snapshots",
+        description = "Snapshots del histórico de patrimonio del usuario del token (cabecera: fecha, kind asset|liability, source capture|backfill, total). El detalle por ítem es opt-in con include_items. Siempre own-user, sin view.",
+        annotations(title = "Snapshots", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_snapshots(
+        &self,
+        Parameters(p): Parameters<SnapshotsParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let res = list_snapshots_core(
+            &self.state.pool,
+            id.installation_id,
+            id.user_id,
+            p.year,
+            p.kind.as_deref(),
+        )
+        .await
+        .map(|mut snaps| {
+            if !p.include_items.unwrap_or(false) {
+                for s in &mut snaps {
+                    s.items.clear();
+                }
+            }
+            snaps
+        });
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "list_transaction_imports",
+        description = "Lotes de import CSV (fuente bancaria, fichero original, cuenta vinculada, nº de movimientos, orden created_at DESC). Usa el id como filtro import_id en list_transactions para auditar un lote.",
+        annotations(title = "Lotes de import", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_transaction_imports(
+        &self,
+        Parameters(p): Parameters<ViewParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let view = resolve_view(&p.view);
+        to_tool_result(
+            list_imports_core(&self.state.pool, id.installation_id, id.user_id, view).await,
+        )
     }
 }
 

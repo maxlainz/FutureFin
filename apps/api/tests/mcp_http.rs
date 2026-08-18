@@ -165,17 +165,26 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
         names,
         vec![
             "get_budget",
+            "get_category_monthly_series",
             "get_history",
+            "get_history_cashflow",
             "get_projection",
             "get_settings",
             "get_summary",
             "get_transactions_summary",
+            "list_allocation_rules",
             "list_assets",
+            "list_categories",
+            "list_categorization_rules",
             "list_liabilities",
             "list_planning_flows",
+            "list_recurring_rules",
+            "list_snapshots",
+            "list_transaction_imports",
+            "list_transaction_months",
             "list_transactions",
         ],
-        "catálogo v1 congelado"
+        "catálogo congelado: cada tool nueva se añade aquí a conciencia"
     );
 }
 
@@ -629,4 +638,191 @@ async fn list_transactions_offset_paginates_in_sql() {
     assert_eq!(page2_rows.len(), 1);
     let ids1: Vec<&str> = page1_rows.iter().map(|t| t["id"].as_str().unwrap()).collect();
     assert!(!ids1.contains(&page2_rows[0]["id"].as_str().unwrap()));
+}
+
+#[tokio::test]
+async fn new_read_tools_match_http_endpoints() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // Datos: categorías de varios scopes + un movimiento (para months/imports vacío no rompe).
+    let cat_exp = app.create_category(&owner, "expense", "Comida").await;
+    let _cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({
+                "op_date": "2026-07-10",
+                "amount": "-25.00",
+                "kind": "expense",
+                "concept": "mercado",
+                "category_id": cat_exp,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    // Paridad byte a byte tool ↔ endpoint para los listados extraídos en este cambio.
+    for (tool, path, args) in [
+        ("list_categories", "/v1/categories", serde_json::json!({})),
+        (
+            "list_allocation_rules",
+            "/v1/allocation-rules",
+            serde_json::json!({}),
+        ),
+        (
+            "list_transaction_months",
+            "/v1/transactions/months",
+            serde_json::json!({}),
+        ),
+        (
+            "list_transaction_imports",
+            "/v1/transactions/imports",
+            serde_json::json!({}),
+        ),
+        (
+            "list_recurring_rules",
+            "/v1/transactions/recurring",
+            serde_json::json!({}),
+        ),
+        (
+            "list_categorization_rules",
+            "/v1/transactions/rules",
+            serde_json::json!({}),
+        ),
+        (
+            "get_history_cashflow",
+            "/v1/history/cashflow",
+            serde_json::json!({"include_curve": true}),
+        ),
+        (
+            "get_category_monthly_series",
+            "/v1/transactions/category-series?kind=expense",
+            serde_json::json!({"kind": "expense"}),
+        ),
+    ] {
+        let via_http = app.get_with_cookie(path, &owner.cookie).await;
+        assert_eq!(via_http.status, http::StatusCode::OK, "{path}");
+        let envelope = mcp_post(&app, &token, tool_call_body(tool, args)).await;
+        assert_eq!(
+            tool_text_json(&envelope),
+            via_http.json(),
+            "paridad {tool} ↔ {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn category_series_shapes_and_validates() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat = app.create_category(&owner, "expense", "Comida").await;
+    for (date, amount) in [("2026-06-05", "-40.00"), ("2026-07-10", "-25.00")] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                serde_json::json!({
+                    "op_date": date,
+                    "amount": amount,
+                    "kind": "expense",
+                    "concept": "mercado",
+                    "category_id": cat,
+                }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_category_monthly_series",
+            serde_json::json!({"kind": "expense", "window_months": 6}),
+        ),
+    )
+    .await;
+    let series = tool_text_json(&envelope);
+    assert_eq!(series["kind"], "expense");
+    assert_eq!(series["window_months"], 6);
+    let entries = series["series"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{series}");
+    let months = entries[0]["months"].as_array().unwrap();
+    assert_eq!(months.len(), 6, "cero-relleno: un punto por mes de la ventana");
+    // Magnitud ≥ 0 como string decimal (gasto −25 → "25.00").
+    let julio = months.iter().find(|m| m["month"] == "2026-07").unwrap();
+    assert_eq!(julio["total"], "25.00");
+
+    // kind inválido → tool error tipado.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_category_monthly_series",
+            serde_json::json!({"kind": "savings"}),
+        ),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+}
+
+#[tokio::test]
+async fn list_snapshots_items_are_opt_in_and_year_validates() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat = app.create_category(&owner, "asset", "Fondo").await;
+    let created = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": cat, "name": "F", "current_value": "5000"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED);
+    let captured = app
+        .post_json_with_cookie(
+            "/v1/history/snapshots/capture",
+            serde_json::json!({}),
+            &owner.cookie,
+        )
+        .await;
+    assert!(captured.status.is_success(), "{captured:?}");
+
+    // Default: cabecera con total pero items vacíos.
+    let envelope =
+        mcp_post(&app, &token, tool_call_body("list_snapshots", serde_json::json!({}))).await;
+    let snaps = tool_text_json(&envelope);
+    let arr = snaps.as_array().unwrap();
+    assert!(!arr.is_empty());
+    assert!(arr[0]["items"].as_array().unwrap().is_empty(), "{snaps}");
+    assert!(arr[0]["total"].is_string());
+
+    // include_items → detalle presente.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_snapshots", serde_json::json!({"include_items": true})),
+    )
+    .await;
+    let snaps = tool_text_json(&envelope);
+    assert!(!snaps.as_array().unwrap()[0]["items"].as_array().unwrap().is_empty());
+
+    // Año fuera de rango → mismo error tipado que HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_snapshots", serde_json::json!({"year": 1800})),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true);
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
+    let body: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(body["error"], "bad_request");
 }

@@ -47,7 +47,7 @@ pub use crud::{
 pub use import::{import_confirm, import_preview};
 pub use recurring::{delete_recurring_rule, list_recurring_rules, materialize_recurring};
 pub use rules::{create_rule, delete_rule, list_rules, patch_rule};
-pub use summary::get_transactions_summary;
+pub use summary::{get_category_series, get_transactions_summary};
 
 pub use schema::{
     BatchCreateBody, CategoryComparisonLine, CreateRuleBody, CreateTransactionBody,
@@ -260,6 +260,7 @@ pub fn transactions_router() -> Router {
         .route("/batch", post(create_batch))
         .route("/months", get(list_months))
         .route("/summary", get(get_transactions_summary))
+        .route("/category-series", get(get_category_series))
         .route(
             "/import/preview",
             post(import_preview).layer(DefaultBodyLimit::max(import_limit)),
