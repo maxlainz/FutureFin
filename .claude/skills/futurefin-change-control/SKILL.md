@@ -23,9 +23,9 @@ dropped `day_of_month` from backed-up recurring rules, the first non-additive bu
 still import via `payload_v6_to_v7`; `mcp_write_enabled` is an installation setting, outside the
 backup). All paths below are from the repo root. (Previously stamped 2026-08-17 at v3.2.0 with
 37/23; 2026-08-17 at v3.1.0 with 36/23 and schema 6; 2026-08-16 at v3.0.0 with 34/20; and
-2026-07-06 at v1.5.0: 32 migrations, 11 test files.) `apps/api/Cargo.toml` reads `3.3.0` and
-`CHANGELOG.md` carries its `## [3.3.0] - 2026-08-18` section, so the Section 4 version/CHANGELOG
-gates for this release are satisfied.
+2026-07-06 at v1.5.0: 32 migrations, 11 test files.) `apps/api/Cargo.toml` reads `3.4.0` and
+`CHANGELOG.md` carries its `## [3.4.0] - 2026-08-18` section, so the Section 4 version/CHANGELOG
+gates for this release are satisfied (v3.4.0 tagged and published 2026-08-18).
 
 Vocabulary (defined once): **installation** = the singleton row all financial data belongs to
 (one per deployment). **scope / view** = `?view=mine` filters ledger queries by
@@ -379,7 +379,7 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (**3.3.0** on 2026-08-18; el tren 3.4.0 está en `dev` sin bump aún)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**3.4.0** on 2026-08-18 — released y tag `v3.4.0` publicado desde `main`)
 - Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**39** on 2026-08-18 — la 39ª es `20260818150000_liabilities_expense_category`)
 - Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**26** on 2026-08-18 — nuevo `budget_derived.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (253)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
