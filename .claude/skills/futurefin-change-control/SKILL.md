@@ -16,9 +16,9 @@ description: >
 # FutureFin Change Control
 
 How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-18 for
-v3.3.0** (MCP escritura completa — issue #3 — + `simulate_projection` + kill-switch
-`mcp_write_enabled`): **38** migration files in `apps/api/migrations/`, **25** integration-test
-files in `apps/api/tests/`, `.ffbackup` `CURRENT_SCHEMA_VERSION` = **7** (unchanged — v3.2.0
+the 3.4.0 train** (reforma de cuotas por modo + `liabilities.expense_category_id`): **39**
+migration files in `apps/api/migrations/` (la 39ª es `20260818150000_liabilities_expense_category`),
+**26** integration-test files in `apps/api/tests/` (nuevo `budget_derived.rs`), `.ffbackup` `CURRENT_SCHEMA_VERSION` = **7** (unchanged — v3.2.0
 dropped `day_of_month` from backed-up recurring rules, the first non-additive bump; older files
 still import via `payload_v6_to_v7`; `mcp_write_enabled` is an installation setting, outside the
 backup). All paths below are from the repo root. (Previously stamped 2026-08-17 at v3.2.0 with
@@ -379,9 +379,9 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (**3.3.0** on 2026-08-18)
-- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**38** on 2026-08-18 — la 38ª es `20260818120000_installation_mcp_write_enabled`, issue #3)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**25** on 2026-08-18 — nuevas `mcp_simulate.rs` y `mcp_write.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (242)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**3.3.0** on 2026-08-18; el tren 3.4.0 está en `dev` sin bump aún)
+- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**39** on 2026-08-18 — la 39ª es `20260818150000_liabilities_expense_category`)
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**26** on 2026-08-18 — nuevo `budget_derived.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (253)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
 - Compose topology (one service since 3.0.0):
