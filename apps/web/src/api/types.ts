@@ -464,6 +464,18 @@ export type TransactionApi = {
   notes?: string;
   /** Presente si el movimiento fue materializado por una regla recurrente. */
   recurring_rule_id?: string;
+  /** Contrapartida de la conciliación de transferencia. Presente ⇒ el movimiento está CONCILIADO
+   *  (pata de un traspaso interno): sigue en el listado pero el servidor ya lo excluye de todos
+   *  los totales/promedios. Los cuatro campos siguientes solo llegan con contrapartida viva. */
+  transfer_counterpart_id?: string;
+  /** Instante de la conciliación (ISO). */
+  transfer_reconciled_at?: string;
+  /** `auto` (pase del matcher) | `manual` (par conciliado a mano). */
+  transfer_reconciled_source?: "auto" | "manual";
+  /** Concepto de la contrapartida (denormalizado: puede estar en otro mes). */
+  transfer_counterpart_concept?: string;
+  /** `YYYY-MM-DD` de la contrapartida (denormalizado). */
+  transfer_counterpart_op_date?: string;
   created_at: string;
   updated_at: string;
 };
@@ -594,6 +606,21 @@ export type ImportConfirmResponseApi = {
   skipped_already_imported: number;
   discarded: number;
   rules_learned: number;
+  /** Pares auto-conciliados tras el import (cruzando TODO el dataset, no solo este lote). */
+  reconciled_pairs: number;
+};
+
+/** Respuesta de `POST /v1/transactions/reconcile` (pase de auto-conciliación). Idempotente. */
+export type ReconcileRunResponseApi = {
+  pairs_created: number;
+  /** `pairs_created × 2` (las dos patas de cada par). */
+  transactions_reconciled: number;
+};
+
+/** Las dos patas tras conciliar (`POST`) o desconciliar (`DELETE`) `/v1/transactions/{id}/reconcile`. */
+export type ReconcilePairResponseApi = {
+  transaction: TransactionApi;
+  counterpart: TransactionApi;
 };
 
 /** Regla de categorización aprendida/manual. */

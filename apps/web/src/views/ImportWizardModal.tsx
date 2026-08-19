@@ -3,8 +3,9 @@
  *
  * Paso 1 (select): fuente (Auto/MyInvestor/N26) + archivo `.csv` → `POST /import/preview`.
  * Paso 2 (review): banner-resumen, barra de acciones masivas (filtros + incluir/excluir + asignar
- * kind/categoría en masa), tabla preview (filas dup/transfer/divisa atenuadas y desmarcadas por
- * defecto, selects kind/categoría por fila, editor de vínculos plegable) y footer con resumen
+ * kind/categoría en masa), tabla preview (filas dup/divisa atenuadas y desmarcadas por defecto —
+ * las posibles transferencias entran incluidas desde 3.5.0 y solo llevan su hint textual; selects
+ * kind/categoría por fila, editor de vínculos plegable) y footer con resumen
  * dinámico + select de cuenta origen del batch → `POST /import/confirm` con `decisions[]` paralelo.
  *
  * Stateless: el confirm reenvía `file_b64` + `file_sha256` del preview. Perf: filas memoizadas y
@@ -415,7 +416,7 @@ export function ImportWizardModal({
                 ) : null}
                 {state.preview.suggested_transfer_count > 0 ? (
                   <span className="import-chip">
-                    {state.preview.suggested_transfer_count} transferencias
+                    {state.preview.suggested_transfer_count} posibles transferencias
                   </span>
                 ) : null}
                 {state.preview.precategorized_count > 0 ? (
@@ -642,10 +643,9 @@ const PreviewRowMemo = memo(function PreviewRow({
   onToggleLinks,
 }: PreviewRowProps) {
   const cats = categoriesForKind(draft.kind, incomeCategories, expenseCategories);
-  const muted =
-    row.status === "already_imported" ||
-    row.suggested_transfer ||
-    row.currency_warning;
+  // Las transferencias sugeridas YA NO se atenúan (3.5.0): entran incluidas por defecto y se
+  // sacan del gasto por conciliación, no por descarte. Conservan su hint textual.
+  const muted = row.status === "already_imported" || row.currency_warning;
   const amountNum = Number(row.amount);
   const amountClass = amountNum < 0 ? "num-neg" : amountNum > 0 ? "num-pos" : "";
   const statusHints: string[] = [];

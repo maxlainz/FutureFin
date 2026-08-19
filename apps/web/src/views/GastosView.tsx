@@ -4,8 +4,10 @@
  * recibe props finas de App. Sus mutaciones nunca tocan la cache de proyección (las transacciones
  * no son inputs del engine); `onCashflowMutated` avisa a App para refrescar el overlay del chart.
  *
- * Estructura: KPIs → toolbar (mes + ventana + acciones) → Comparativa (tabla + barras + cash-flow)
- * → Movimientos (tabla con edición inline optimista + modal de edición completa + borrado).
+ * Estructura: KPIs → toolbar (mes + ventana + acciones, incl. «Conciliar ahora») → Comparativa
+ * (tabla + barras + cash-flow) → Movimientos (tabla con edición inline optimista + modal de
+ * edición completa + borrado). Las conciliadas (traspasos internos) se listan atenuadas con tag
+ * «conciliada» y se desconcilian desde el modal; el servidor ya las excluye de los totales.
  */
 
 import {
@@ -18,7 +20,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { apiDelete, apiGet, apiPatch, apiPost } from "../api/client";
+import { apiDelete, apiDeleteJson, apiGet, apiPatch, apiPost } from "../api/client";
 import type {
   AssetApiRow,
   CategoryComparisonLineApi,
@@ -27,6 +29,8 @@ import type {
   InstallationAccess,
   LiabilityApiRow,
   PatchTransactionRequest,
+  ReconcilePairResponseApi,
+  ReconcileRunResponseApi,
   RecurringMaterializeResponse,
   TransactionApi,
   TransactionKindApi,
@@ -69,6 +73,7 @@ import {
   defaultSelectedMonth,
   formatDeltaCurrency,
   groupTransactionsByCategory,
+  isReconciled,
   kpiBudgetTrend,
   monthLabelEs,
   naturalSortDir,
@@ -151,6 +156,7 @@ export function GastosView({
   const [deleteTarget, setDeleteTarget] = useState<TransactionApi | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [deletingRecurring, setDeletingRecurring] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   /** Materialización de recurrentes: una sola vez por montaje de la vista. */
   const materializedOnce = useRef(false);
 
@@ -406,6 +412,29 @@ export function GastosView({
       setDeletingRecurring(false);
     }
   }, [deleteTarget, handleMutated]);
+
+  /** Pase de auto-conciliación bajo demanda. Idempotente: sin pares nuevos no recarga nada. */
+  const runReconcileNow = useCallback(async () => {
+    setReconciling(true);
+    setRowError(null);
+    try {
+      const res = await apiPost<ReconcileRunResponseApi>(
+        "/v1/transactions/reconcile",
+        {},
+      );
+      const pairs = res?.pairs_created ?? 0;
+      setNotice(
+        pairs > 0
+          ? `${pairs} par${pairs === 1 ? "" : "es"} conciliado${pairs === 1 ? "" : "s"}.`
+          : "Sin transferencias que conciliar.",
+      );
+      if (pairs > 0) await handleMutated();
+    } catch (e) {
+      setRowError(e instanceof Error ? e.message : "No se pudo conciliar.");
+    } finally {
+      setReconciling(false);
+    }
+  }, [handleMutated]);
 
   // Materializa las reglas recurrentes pendientes una sola vez por montaje. Silencioso:
   // si falla, el pasado/presente queda igual. Refresca solo si generó algún movimiento.
@@ -678,6 +707,14 @@ export function GastosView({
     const amountClass = amountNum < 0 ? "num-neg" : amountNum > 0 ? "num-pos" : "";
     const cats = categoriesForKind(kind, incomeCategories, expenseCategories);
     const hasLink = !!(t.linked_asset_id || t.linked_liability_id);
+    const reconciled = isReconciled(t);
+    const reconciledTitle = reconciled
+      ? `Conciliada con «${t.transfer_counterpart_concept ?? "—"}» (${
+          t.transfer_counterpart_op_date
+            ? formatDateDmy(t.transfer_counterpart_op_date)
+            : "—"
+        })`
+      : undefined;
     const rowTappable = isMobile && canEdit;
     const openEdit = () => {
       setRowError(null);
@@ -688,7 +725,11 @@ export function GastosView({
     return (
       <tr
         key={t.id}
-        className={rowTappable ? "row-tappable" : undefined}
+        className={
+          [rowTappable ? "row-tappable" : "", reconciled ? "exp-row-reconciled" : ""]
+            .filter(Boolean)
+            .join(" ") || undefined
+        }
         role={rowTappable ? "button" : undefined}
         tabIndex={rowTappable ? 0 : undefined}
         onClick={rowTappable ? openEdit : undefined}
@@ -711,6 +752,7 @@ export function GastosView({
               {categoryLabel} · {KIND_LABEL_ES[kind]}
               {t.import_id ? null : " · efectivo"}
               {t.recurring_rule_id ? " · recurrente" : null}
+              {reconciled ? " · conciliada" : null}
               {hasLink ? (
                 <>
                   {" · "}
@@ -727,6 +769,15 @@ export function GastosView({
                 <span className="exp-source-tag exp-recurring-tag">
                   {" "}
                   <RefreshIcon /> recurrente
+                </span>
+              ) : null}
+              {reconciled ? (
+                <span
+                  className="exp-source-tag exp-reconciled-tag"
+                  title={reconciledTitle}
+                >
+                  {" "}
+                  <LinkIcon /> conciliada
                 </span>
               ) : null}
             </>
@@ -1028,6 +1079,16 @@ export function GastosView({
                   <RefreshIcon />
                   Recurrentes
                 </button>
+                <button
+                  type="button"
+                  className="btn ghost expenses-action-btn"
+                  disabled={reconciling}
+                  title="Empareja traspasos entre tus cuentas y los saca de los totales"
+                  onClick={() => void runReconcileNow()}
+                >
+                  <LinkIcon />
+                  {reconciling ? "Conciliando…" : "Conciliar ahora"}
+                </button>
               </div>
             ) : null}
           </div>
@@ -1235,9 +1296,20 @@ export function GastosView({
             liabilities={liabilities}
             currencyIso={currencyIso}
             onImported={(res) => {
-              setNotice(
-                `${res.imported} importados · ${res.skipped_already_imported + res.discarded} excluidos`,
-              );
+              // El aviso post-confirm vive aquí (el wizard se cierra al confirmar): añade los
+              // pares auto-conciliados solo cuando los hay.
+              const parts = [
+                `${res.imported} importados`,
+                `${res.skipped_already_imported + res.discarded} excluidos`,
+              ];
+              if (res.reconciled_pairs > 0) {
+                parts.push(
+                  `${res.reconciled_pairs} par${res.reconciled_pairs === 1 ? "" : "es"} conciliado${
+                    res.reconciled_pairs === 1 ? "" : "s"
+                  } automáticamente`,
+                );
+              }
+              setNotice(parts.join(" · "));
               void handleMutated();
             }}
           />
@@ -1279,6 +1351,11 @@ export function GastosView({
               setEditTarget(null);
               setNotice("Movimiento actualizado.");
               refreshDerived();
+            }}
+            onUnreconciled={() => {
+              setEditTarget(null);
+              setNotice("Movimiento desconciliado.");
+              void handleMutated();
             }}
           />
           <Modal
@@ -1365,6 +1442,7 @@ function EditTransactionModal({
   liabilities,
   categoryFitsKind,
   onSaved,
+  onUnreconciled,
 }: {
   target: TransactionApi | null;
   onClose: () => void;
@@ -1378,6 +1456,8 @@ function EditTransactionModal({
   liabilities: LiabilityApiRow[];
   categoryFitsKind: (categoryId: string, kind: TransactionKindApi) => boolean;
   onSaved: (updated: TransactionApi) => void;
+  /** Par roto: la vista cierra el modal y recarga (ambas patas vuelven a los totales). */
+  onUnreconciled: (pair: ReconcilePairResponseApi | null) => void;
 }) {
   const [opDate, setOpDate] = useState("");
   const [valueDate, setValueDate] = useState("");
@@ -1389,6 +1469,7 @@ function EditTransactionModal({
   const [linkedLiabilityId, setLinkedLiabilityId] = useState("");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
+  const [unreconciling, setUnreconciling] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1404,6 +1485,7 @@ function EditTransactionModal({
     setNotes(target.notes ?? "");
     setFormError(null);
     setSaving(false);
+    setUnreconciling(false);
   }, [target]);
 
   if (!target) {
@@ -1411,7 +1493,26 @@ function EditTransactionModal({
   }
 
   const isManual = !target.import_id;
+  const reconciled = isReconciled(target);
   const cats = categoriesForKind(kind, incomeCategories, expenseCategories);
+
+  /** Rompe el par (`DELETE /reconcile`): ambas patas vuelven a contar en los totales y el pase
+   *  automático no las re-empareja (el backend persiste el rechazo). */
+  async function unreconcile() {
+    if (!target) return;
+    setFormError(null);
+    setUnreconciling(true);
+    try {
+      const pair = await apiDeleteJson<ReconcilePairResponseApi>(
+        `/v1/transactions/${target.id}/reconcile`,
+      );
+      onUnreconciled(pair);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "No se pudo desconciliar.");
+    } finally {
+      setUnreconciling(false);
+    }
+  }
 
   function changeKind(newKind: TransactionKindApi) {
     setKind(newKind);
@@ -1478,6 +1579,25 @@ function EditTransactionModal({
             Movimiento importado: editarlo no afecta a la detección de duplicados
             del CSV (la huella original se conserva).
           </p>
+        ) : null}
+        {reconciled ? (
+          <div className="banner info-banner tight-banner exp-reconciled-note">
+            <span>
+              Conciliada con «{target.transfer_counterpart_concept ?? "—"}» (
+              {target.transfer_counterpart_op_date
+                ? formatDateDmy(target.transfer_counterpart_op_date)
+                : "—"}
+              ). Fuera de los totales.
+            </span>
+            <button
+              type="button"
+              className="btn ghost text"
+              disabled={saving || unreconciling}
+              onClick={() => void unreconcile()}
+            >
+              {unreconciling ? "Desconciliando…" : "Desconciliar"}
+            </button>
+          </div>
         ) : null}
         <div className="asset-form-grid">
           <label className="field">

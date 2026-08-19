@@ -91,3 +91,14 @@ export async function apiDelete(url: string): Promise<void> {
   });
   await ensureOk(res);
 }
+
+/** DELETE que SÍ devuelve cuerpo (p. ej. `/v1/transactions/{id}/reconcile` → las dos patas).
+ *  `null` cuando la respuesta es 204 o no es JSON, igual que el resto de wrappers. */
+export async function apiDeleteJson<T>(url: string): Promise<T | null> {
+  const res = await fetch(url, {
+    ...defaultFetchInit,
+    method: "DELETE",
+  });
+  await ensureOk(res);
+  return parseJsonIfPresent<T>(res);
+}

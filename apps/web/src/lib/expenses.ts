@@ -130,13 +130,15 @@ export type ImportRowDraft = {
 };
 
 /**
- * Semilla del draft a partir de la fila del preview. Filas nuevas normales quedan incluidas;
- * duplicados (`already_imported`), transferencias sugeridas y avisos de divisa quedan
- * DESMARCADOS (atenuados en UI) para que el usuario los revise antes de incluirlos.
+ * Semilla del draft a partir de la fila del preview. Filas nuevas quedan incluidas — las
+ * TRANSFERENCIAS SUGERIDAS incluidas (3.5.0): una pata de traspaso es un movimiento real y debe
+ * guardarse; sacarla del gasto es trabajo de la CONCILIACIÓN (el par queda enlazado y el servidor
+ * lo excluye de totales/promedios), no del descarte en el import. Solo los duplicados
+ * (`already_imported`) y los avisos de divisa quedan DESMARCADOS (atenuados en UI) para que el
+ * usuario los revise antes de incluirlos.
  */
 export function initialDraftForRow(row: ImportPreviewRowApi): ImportRowDraft {
-  const include =
-    row.status === "new" && !row.suggested_transfer && !row.currency_warning;
+  const include = row.status === "new" && !row.currency_warning;
   return {
     include,
     kind: row.suggested_kind,
@@ -362,6 +364,19 @@ export function capitalizeSource(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Conciliación de transferencias (3.5.0)
+// ---------------------------------------------------------------------------
+
+/**
+ * ¿El movimiento está conciliado (pata de un traspaso interno)? La FUENTE DE VERDAD es la
+ * presencia de la contrapartida: el servidor solo serializa `transfer_reconciled_at`/`_source` y
+ * los campos denormalizados de la contrapartida cuando el enlace está vivo.
+ */
+export function isReconciled(t: TransactionApi): boolean {
+  return t.transfer_counterpart_id != null;
+}
+
+// ---------------------------------------------------------------------------
 // Tabla de movimientos — búsqueda, ordenación y agrupación por categoría.
 // ---------------------------------------------------------------------------
 
@@ -449,7 +464,8 @@ export type TransactionGroup = {
   /** Kind del grupo (una categoría solo tiene un scope → lo hereda de sus filas). */
   kind: TransactionKindApi;
   rows: TransactionApi[];
-  /** Suma FIRMADA de los `amount` del grupo (los deltas se compensan por signo). */
+  /** Suma FIRMADA de los `amount` del grupo (los deltas se compensan por signo), EXCLUIDAS las
+   *  conciliadas — que sí siguen en `rows`. Ver `groupTransactionsByCategory`. */
   subtotal: number;
 };
 
@@ -459,6 +475,11 @@ export type TransactionGroup = {
  * categoría va con los ingresos, un gasto con los gastos). El nombre visible sale de
  * `categoryNameById` (categoría viva), con fallback al `category_name` cacheado en la fila. NO
  * ordena: devuelve los grupos en orden de primera aparición (ordénalos con `sortTransactionGroups`).
+ *
+ * Las CONCILIADAS siguen apareciendo en `rows` (el usuario debe verlas) pero NO suman al
+ * `subtotal`: el servidor ya las excluye de los totales/promedios de la comparativa, y esa
+ * comparativa se pinta en la misma pantalla — si el subtotal las contase, ambas cifras
+ * divergirían sin explicación visible.
  */
 export function groupTransactionsByCategory(
   rows: TransactionApi[],
@@ -485,7 +506,7 @@ export function groupTransactionsByCategory(
       groups.set(key, g);
     }
     g.rows.push(r);
-    g.subtotal += parseDisplayDecimal(r.amount) ?? 0;
+    if (!isReconciled(r)) g.subtotal += parseDisplayDecimal(r.amount) ?? 0;
   }
   return [...groups.values()];
 }
