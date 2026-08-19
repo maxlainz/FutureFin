@@ -20,6 +20,7 @@ use crate::handlers::transactions::schema::{
     compute_fingerprint, derive_rule_pattern, normalize_kind, ImportConfirmBody,
     ImportConfirmResponse, ImportPreviewBody, ImportPreviewResponse, PreviewRow,
 };
+use crate::handlers::transactions::reconcile::auto_reconcile_after_mutation;
 use crate::handlers::transactions::{
     assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
     invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal,
@@ -409,6 +410,14 @@ pub async fn import_confirm(
 
     tx.commit().await?;
 
+    // Pase de auto-conciliación sobre TODO el dataset del owner (no solo este lote): la
+    // contrapartida de una pata recién importada puede venir de un import anterior. Best-effort
+    // (0 si falla) y ANTES de la única invalidación de cache.
+    let reconciled_pairs = if imported > 0 {
+        auto_reconcile_after_mutation(&state, iid, user.id.0).await
+    } else {
+        0
+    };
     invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     Ok(Json(ImportConfirmResponse {
         import_id: final_import_id,
@@ -416,5 +425,6 @@ pub async fn import_confirm(
         skipped_already_imported: skipped,
         discarded,
         rules_learned: learned_patterns.len() as u32,
+        reconciled_pairs,
     }))
 }
