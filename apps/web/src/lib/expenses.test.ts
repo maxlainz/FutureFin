@@ -18,6 +18,7 @@ import {
   deltaToneClass,
   groupTransactionsByCategory,
   initialDraftForRow,
+  isReconciled,
   kpiBudgetTrend,
   monthLabelEs,
   monthShortLabelEs,
@@ -152,10 +153,21 @@ describe("initialDraftForRow", () => {
         .include,
     ).toBe(false);
   });
-  it("suggested transfer is excluded", () => {
+  it("suggested transfer is INCLUDED (3.5.0): la exclusión del gasto es cosa de la conciliación", () => {
     expect(
       initialDraftForRow(previewRow({ index: 2, suggested_transfer: true }))
         .include,
+    ).toBe(true);
+  });
+  it("a duplicate that is also a suggested transfer stays excluded (dup manda)", () => {
+    expect(
+      initialDraftForRow(
+        previewRow({
+          index: 2,
+          status: "already_imported",
+          suggested_transfer: true,
+        }),
+      ).include,
     ).toBe(false);
   });
   it("currency warning is excluded", () => {
@@ -266,6 +278,18 @@ describe("summarizeDecisions", () => {
       toDiscard: 1,
     });
   });
+  it("con los drafts POR DEFECTO, una transferencia sugerida cuenta como importada", () => {
+    const rows = [
+      previewRow({ index: 0 }),
+      previewRow({ index: 1, suggested_transfer: true }),
+      previewRow({ index: 2, currency_warning: true }),
+    ];
+    expect(summarizeDecisions(rows, rows.map(initialDraftForRow))).toEqual({
+      toImport: 2,
+      toSkip: 0,
+      toDiscard: 1,
+    });
+  });
 });
 
 describe("rowMatchesFilter", () => {
@@ -293,6 +317,15 @@ describe("rowMatchesFilter", () => {
         "transfers",
       ),
     ).toBe(true);
+    expect(rowMatchesFilter(previewRow({ index: 1 }), d, "transfers")).toBe(false);
+  });
+  it("el filtro transfers sigue funcionando con el draft por defecto (ahora incluido)", () => {
+    const row = previewRow({ index: 0, suggested_transfer: true });
+    const def = initialDraftForRow(row);
+    expect(def.include).toBe(true);
+    expect(rowMatchesFilter(row, def, "transfers")).toBe(true);
+    expect(rowMatchesFilter(row, def, "new")).toBe(true);
+    expect(rowMatchesFilter(row, def, "duplicates")).toBe(false);
   });
   it("uncategorized filter ignores savings", () => {
     expect(
@@ -599,6 +632,17 @@ describe("compareTransactions / sortTransactions", () => {
   });
 });
 
+describe("isReconciled", () => {
+  it("la contrapartida presente es la fuente de verdad", () => {
+    expect(
+      isReconciled(txn({ id: "1", transfer_counterpart_id: "abc" })),
+    ).toBe(true);
+  });
+  it("sin contrapartida no está conciliada", () => {
+    expect(isReconciled(txn({ id: "1" }))).toBe(false);
+  });
+});
+
 describe("groupTransactionsByCategory", () => {
   const names = new Map<string, string>([
     ["c1", "Alimentación"],
@@ -654,6 +698,31 @@ describe("groupTransactionsByCategory", () => {
       txn({ id: "2", category_id: "c1", amount: "-30.0000" }),
     ];
     expect(groupTransactionsByCategory(rows, names)[0].subtotal).toBeCloseTo(70);
+  });
+  it("las conciliadas siguen en rows pero NO suman al subtotal", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", category_id: "c1", amount: "-40.0000" }),
+      txn({
+        id: "2",
+        category_id: "c1",
+        amount: "-1000.0000",
+        transfer_counterpart_id: "cp",
+        transfer_counterpart_concept: "TRASPASO",
+        transfer_counterpart_op_date: "2026-06-16",
+      }),
+    ];
+    const g = groupTransactionsByCategory(rows, names)[0];
+    expect(g.rows.map((r) => r.id)).toEqual(["1", "2"]);
+    expect(g.subtotal).toBeCloseTo(-40);
+  });
+  it("un grupo entero de conciliadas queda con subtotal 0 (y sus filas visibles)", () => {
+    const rows: TransactionApi[] = [
+      txn({ id: "1", category_id: "c2", amount: "-500.0000", transfer_counterpart_id: "x" }),
+      txn({ id: "2", category_id: "c2", amount: "500.0000", transfer_counterpart_id: "y" }),
+    ];
+    const g = groupTransactionsByCategory(rows, names)[0];
+    expect(g.rows).toHaveLength(2);
+    expect(g.subtotal).toBe(0);
   });
   it("falls back to the row's cached category_name when the id is unknown", () => {
     const rows: TransactionApi[] = [

@@ -2604,6 +2604,29 @@ fieldset.retirement-config-stack {
   margin-right: 0.15rem;
 }
 
+/* Tag «conciliada» (reusa .exp-source-tag): mismo icono a escala del texto que el recurrente. */
+.exp-reconciled-tag svg {
+  width: 0.8em;
+  height: 0.8em;
+  vertical-align: -0.1em;
+  margin-right: 0.15rem;
+}
+
+/* Fila de un traspaso conciliado: atenuada, porque no cuenta en ningún total (mismo recurso que
+   .import-row--muted del wizard). */
+.exp-row-reconciled td {
+  opacity: 0.6;
+}
+
+/* Bloque «Conciliada con …» del modal de edición: texto + botón Desconciliar en una línea. */
+.exp-reconciled-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+}
+
 .exp-cat-edit {
   display: inline-flex;
   align-items: center;

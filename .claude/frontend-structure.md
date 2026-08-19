@@ -15,7 +15,8 @@ src/
 │   └── theme.css                 # design tokens (--ff-*, --proj-*) con variantes claro/[data-theme=dark]
 │
 ├── api/
-│   ├── client.ts                 # fetch wrappers: apiGet/Post/Put/Patch/Delete + defaultFetchInit + errorMessageFromResponse
+│   ├── client.ts                 # fetch wrappers: apiGet/Post/Put/Patch/Delete (+ apiDeleteJson para los DELETE con
+│   │                             #   cuerpo, p. ej. /v1/transactions/{id}/reconcile) + defaultFetchInit + errorMessageFromResponse
 │   ├── client.test.ts            # mocks `globalThis.fetch`, asserts credentials/Content-Type/204
 │   └── types.ts                  # all *Api / *Response / *Row types (mirror of Rust handler structs)
 │
@@ -44,7 +45,9 @@ src/
 │   │                             #   deltaToneClass/formatDeltaCurrency (rojo/verde solo en deltas), significanceThreshold (1% del ingreso real)/trendArrow/significantDeltaTone
 │   │                             #   (umbral de significancia de las flechas ↑↓), AVG_WINDOWS + avgWindowLabel (pills 3m/6m/12m/YTD/Todo), capitalizeSource, y los helpers de la tabla de
 │   │                             #   movimientos: normalizeSearchText/transactionMatchesQuery (búsqueda sin acentos), compareTransactions/sortTransactions + naturalSortDir (TxnSortKey/
-│   │                             #   TxnSortDir; importe por |magnitud|, tiebreak estable), groupTransactionsByCategory/sortTransactionGroups (orden fijo: kind → |subtotal| desc). Test: expenses.test.ts
+│   │                             #   TxnSortDir; importe por |magnitud|, tiebreak estable), groupTransactionsByCategory/sortTransactionGroups (orden fijo: kind → |subtotal| desc; el subtotal
+│   │                             #   EXCLUYE las conciliadas, que sí siguen en rows — si no, divergiría de la comparativa del servidor en la misma pantalla) e isReconciled (3.5.0: fuente de
+│   │                             #   verdad = transfer_counterpart_id presente). Test: expenses.test.ts
 │   ├── files.ts                  # readFileAsBase64(File): base64 en trozos de 32 KiB. Compartido por el import .ffbackup (App.tsx) y el wizard de CSV
 │   ├── responsive.ts             # MOBILE_MAX_WIDTH (640 = bp:mobile), isMobileWidth (puro, test en node) y useIsMobile()
 │   │                             #   (matchMedia, lectura síncrona inicial). Gatea el patrón «columnas esenciales» de TODAS las
@@ -98,10 +101,15 @@ src/
 │   │                             #   (subtotal firmado por grupo; orden de grupos FIJO: secciones por kind ingresos → ahorro → gastos y |subtotal| desc dentro de cada sección,
 │   │                             #   «Sin categoría» va con su kind) y **cabeceras ordenables** (fecha/concepto/importe; importe por magnitud; la clave activa solo ordena las filas
 │   │                             #   dentro de cada grupo) — helpers puros en lib/expenses.ts —, edición inline optimista + modal (fecha/importe/concepto editables también en importadas: el backend ancla la huella al CSV) + tag «recurrente» +
-│   │                             #   borrado con dos opciones (solo este / y detener repetición). Materializa recurrentes en silencio al montar (solo canEdit). `onCashflowMutated` avisa a App.
+│   │                             #   borrado con dos opciones (solo este / y detener repetición) + **conciliación de transferencias** (3.5.0): badge «conciliada» (`.exp-reconciled-tag`,
+│   │                             #   tooltip con la contrapartida) y fila atenuada (`.exp-row-reconciled`) cuando `isReconciled`, botón «Conciliar ahora» en la toolbar
+│   │                             #   (POST /v1/transactions/reconcile) y «Desconciliar» en el modal de edición (DELETE /v1/transactions/{id}/reconcile) → `handleMutated`.
+│   │                             #   Materializa recurrentes en silencio al montar (solo canEdit). `onCashflowMutated` avisa a App.
 │   ├── ImportWizardModal.tsx     # wizard import CSV en 2 pasos (useReducer). Paso 1 = archivo → select «Cuenta origen (activo)» (movido desde el footer; ahora también en el preview) →
 │   │                             #   formato en <details> plegado (autodetección por defecto). Paso 2 = banner con fuente capitalizada + chips de conteos, bulk bar con cluster único
-│   │                             #   «Asignar a visibles», footer «{X} se importarán · {Y} excluidas ({Z} duplicadas)», columna «Tipo». /import/confirm con decisions[] paralelo. Stateless (sha256)
+│   │                             #   «Asignar a visibles», footer «{X} se importarán · {Y} excluidas ({Z} duplicadas)», columna «Tipo». /import/confirm con decisions[] paralelo. Stateless (sha256).
+│   │                             #   3.5.0: las «posibles transferencias» ya NO se atenúan ni se desmarcan (entran incluidas; la exclusión del gasto la hace la conciliación) — solo dup/divisa;
+│   │                             #   el aviso post-confirm (con `reconciled_pairs`) lo pinta GastosView en su callback `onImported`
 │   ├── ManualCashEntryModal.tsx  # alta manual de efectivo: grid multifila (magnitud + kind fija el signo) + checkbox «Repetir cada mes» por fila (→ recurrence:{}) → POST /v1/transactions/batch
 │   ├── RecurringRulesModal.tsx   # modal «Recurrentes» (botón en la toolbar de Movimientos): lista GET /v1/transactions/recurring y permite «Detener» (DELETE) cada regla
 │   │                             #   (conserva las instancias ya materializadas). Patrón ManualCashEntryModal: fetch al abrir, toda la lógica de presentación aquí (nada en lib/)
