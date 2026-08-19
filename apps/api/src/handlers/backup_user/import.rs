@@ -63,6 +63,9 @@ pub struct ImportCounts {
     pub categorization_rules: u32,
     /// Recurring-transaction rules in the backup (schema_version ≥ 6; 0 for older files).
     pub recurring_transaction_rules: u32,
+    /// Pares de transferencia RECHAZADOS (desconciliados a mano) en el backup
+    /// (schema_version ≥ 8; 0 para ficheros anteriores).
+    pub transfer_match_rejections: u32,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -162,6 +165,18 @@ pub async fn import_user_backup_apply(
     //    cascade to its transactions, but we delete both explicitly before assets/liabilities so
     //    the SET NULL FKs (linked_asset_id/linked_liability_id) never fire mid-wipe and the whole
     //    order stays deterministic. categorization_rules follow (their FK to categories is SET NULL).
+    //    The transfer self-FK (transfer_counterpart_id, ON DELETE SET NULL) is cleared FIRST so the
+    //    bulk delete never fires referential UPDATEs against rows queued for deletion in the same
+    //    statement — cheap determinism. transfer_match_rejections then fall via ON DELETE CASCADE.
+    sqlx::query(
+        r#"UPDATE transactions SET transfer_counterpart_id = NULL
+           WHERE installation_id = $1 AND owner_user_id = $2
+             AND transfer_counterpart_id IS NOT NULL"#,
+    )
+    .bind(iid)
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         r#"DELETE FROM transactions WHERE installation_id = $1 AND owner_user_id = $2"#,
     )
@@ -246,6 +261,12 @@ pub async fn import_user_backup_apply(
 
     tx.commit().await?;
 
+    // Pase de auto-conciliación post-commit (3.5.0): no-op para backups v8 (ya vienen en punto
+    // fijo y con sus rechazos restaurados); para ficheros ≤v7 re-empareja retroactivamente los
+    // pares que correspondan. Best-effort, ANTES de la invalidación de cache de abajo.
+    crate::handlers::transactions::reconcile::auto_reconcile_after_mutation(&state, iid, user.id.0)
+        .await;
+
     // A full replace rewrites assets/liabilities/budget — all projection-engine inputs — so the
     // in-memory projection cache would otherwise stay stale for up to its TTL. Invalidate it now.
     crate::handlers::projection::refresh_projection_after_mutation(state.clone(), iid, user.id.0);
@@ -324,6 +345,7 @@ async fn compute_counts(
         transactions: payload.transactions.len() as u32,
         categorization_rules: payload.categorization_rules.len() as u32,
         recurring_transaction_rules: payload.recurring_transaction_rules.len() as u32,
+        transfer_match_rejections: payload.transfer_match_rejections.len() as u32,
     })
 }
 
@@ -780,6 +802,7 @@ async fn insert_payload(
     // Insert transactions: all refs resolved to fresh UUIDs, fingerprint recomputed (never
     // exported), CHECK-backed fields validated in Rust → 400 (not a 500 from the constraint).
     let mut transactions = 0u32;
+    let mut new_txn_ids: Vec<Uuid> = Vec::with_capacity(payload.transactions.len());
     for t in &payload.transactions {
         if t.currency != "EUR" {
             return Err(ApiError::BadRequest(
@@ -835,6 +858,11 @@ async fn insert_payload(
         let amount = t.amount.round_dp(4);
         let fingerprint =
             crate::handlers::transactions::schema::compute_fingerprint(&t.source, t.op_date, amount, concept);
+        // Pasada 1 (v8): insertar SIEMPRE con transfer_counterpart_id NULL guardando el UUID
+        // nuevo por índice — la FK es auto-referencial y la contrapartida puede aparecer más
+        // adelante en el vec. Los pares se enlazan en la pasada 2, tras insertar todas.
+        let txn_id = Uuid::new_v4();
+        new_txn_ids.push(txn_id);
         sqlx::query(
             r#"INSERT INTO transactions
                    (id, installation_id, owner_user_id, import_id, source, op_date, value_date,
@@ -842,7 +870,7 @@ async fn insert_payload(
                     linked_asset_id, linked_liability_id, notes, recurring_rule_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)"#,
         )
-        .bind(Uuid::new_v4())
+        .bind(txn_id)
         .bind(iid)
         .bind(user_id)
         .bind(import_id_ref)
@@ -863,6 +891,61 @@ async fn insert_payload(
         .execute(&mut **tx)
         .await?;
         transactions += 1;
+    }
+
+    // Pasada 2 (v8): enlazar los pares conciliados. Cada pata trae su propio índice (relación
+    // simétrica en el payload) → cada fila se actualiza una vez. Un índice fuera de rango → 400
+    // con rollback; un payload corrupto con enlaces no-inyectivos revienta contra el índice
+    // UNIQUE parcial (→ 409, nunca datos asimétricos).
+    for (i, t) in payload.transactions.iter().enumerate() {
+        let Some(ci) = t.transfer_counterpart_index else {
+            continue;
+        };
+        let counterpart_id = *new_txn_ids.get(ci).ok_or_else(|| {
+            ApiError::BadRequest("transaction.transfer_counterpart_index out of bounds".into())
+        })?;
+        sqlx::query(
+            r#"UPDATE transactions
+               SET transfer_counterpart_id = $1,
+                   transfer_reconciled_at = COALESCE($2, now()),
+                   transfer_reconciled_source = COALESCE($3, 'auto')
+               WHERE id = $4"#,
+        )
+        .bind(counterpart_id)
+        .bind(t.transfer_reconciled_at)
+        .bind(t.transfer_reconciled_source.as_deref())
+        .bind(new_txn_ids[i])
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // Pasada 3 (v8): rechazos del auto-matcher, en orden canónico sobre los UUIDs nuevos.
+    let mut transfer_match_rejections = 0u32;
+    for r in &payload.transfer_match_rejections {
+        let a = *new_txn_ids.get(r.transaction_a_index).ok_or_else(|| {
+            ApiError::BadRequest("transfer_match_rejection.transaction_a_index out of bounds".into())
+        })?;
+        let b = *new_txn_ids.get(r.transaction_b_index).ok_or_else(|| {
+            ApiError::BadRequest("transfer_match_rejection.transaction_b_index out of bounds".into())
+        })?;
+        if a == b {
+            return Err(ApiError::BadRequest(
+                "transfer_match_rejection indices must reference two distinct transactions".into(),
+            ));
+        }
+        sqlx::query(
+            r#"INSERT INTO transfer_match_rejections
+                   (installation_id, owner_user_id, transaction_a_id, transaction_b_id)
+               VALUES ($1, $2, LEAST($3::uuid, $4::uuid), GREATEST($3::uuid, $4::uuid))
+               ON CONFLICT (transaction_a_id, transaction_b_id) DO NOTHING"#,
+        )
+        .bind(iid)
+        .bind(user_id)
+        .bind(a)
+        .bind(b)
+        .execute(&mut **tx)
+        .await?;
+        transfer_match_rejections += 1;
     }
 
     // Insert categorization rules.
@@ -929,6 +1012,7 @@ async fn insert_payload(
         transactions,
         categorization_rules,
         recurring_transaction_rules,
+        transfer_match_rejections,
     })
 }
 
