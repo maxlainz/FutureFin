@@ -4,8 +4,9 @@
 //! seguir verdes DESPUÉS de él (sin rentabilidad ni inflación el runway compuesto se reduce
 //! exactamente a la división simple):
 //! - `runway_months == liquid_assets_total / expense_total_monthly_equivalent` (modo A).
-//! - `expense_derived_monthly_equivalent` = cuotas de pasivos activos.
-//! - `expense_total_monthly_equivalent` = gasto de presupuesto + cuotas derivadas.
+//! - `expense_derived_monthly_equivalent` = **0 en los tres modos** desde la 3.7.0 (las cuotas de
+//!   pasivo dejaron de ser un bloque aparte y son gasto del presupuesto como cualquier partida).
+//! - `expense_total_monthly_equivalent` = gasto de presupuesto, cuotas ya incluidas dentro.
 //! - sin gasto (`expense_total == 0`) el campo `runway_months` **no se serializa**.
 //!
 //! El resto cubre el comportamiento compuesto (todos con el número o la desigualdad PREDICHOS en
@@ -230,8 +231,10 @@ async fn runway_pre_change_baseline_liquid_over_expense() {
 
     let h = health(&app, &owner.cookie).await;
     assert_eq!(dec(&h["liquid_assets_total"]), d(12_000));
-    assert_eq!(dec(&h["expense_regular_monthly_equivalent"]), d(1_000));
-    assert_eq!(dec(&h["expense_derived_monthly_equivalent"]), d(200));
+    // 3.7.0: la cuota de 200 vive DENTRO del gasto regular (1.000 presupuestados + 200 de cuota).
+    // El total (1.200) y el runway no se mueven — la fusión reparte, no suma.
+    assert_eq!(dec(&h["expense_regular_monthly_equivalent"]), d(1_200));
+    assert_eq!(dec(&h["expense_derived_monthly_equivalent"]), Decimal::ZERO);
     assert_eq!(dec(&h["expense_total_monthly_equivalent"]), d(1_200));
     // 12.000 / 1.200 = 10 meses exactos.
     assert_eq!(dec(&h["runway_months"]), d(10));
@@ -541,7 +544,7 @@ async fn mode_b_runway_uses_effective_expense_base() {
 
     assert_eq!(income, d(3_000));
     assert_eq!(expense_reg, d(1_500));
-    assert_eq!(expense_der, Decimal::ZERO, "modo real: la cuota ya vive dentro del gasto, derived = 0");
+    assert_eq!(expense_der, Decimal::ZERO, "la cuota vive dentro del gasto; derived = 0 en los tres modos");
     assert_eq!(expense_tot, d(1_500));
     assert_eq!(net, d(1_500));
     // Identidades del panel, válidas en los tres modos.
@@ -595,7 +598,7 @@ async fn mode_b_zero_months_falls_back_to_budget_runway() {
     .await;
 
     let modo_a = health(&app, &owner.cookie).await;
-    assert_eq!(dec(&modo_a["expense_derived_monthly_equivalent"]), d(200));
+    assert_eq!(dec(&modo_a["expense_derived_monthly_equivalent"]), Decimal::ZERO);
     assert_eq!(dec(&modo_a["expense_total_monthly_equivalent"]), d(1_200));
     assert_eq!(dec(&modo_a["runway_months"]), d(10));
 

@@ -25,14 +25,48 @@ pub enum BudgetCategoryScope {
     Expense,
 }
 
+/// Procedencia de una línea del presupuesto.
+///
+/// Hasta la 3.6.0 las cuotas de pasivo vivían en un bloque aparte (`derived_from_liabilities`)
+/// que se sumaba por debajo del presupuesto; desde la 3.7.0 son una partida más de `entries`,
+/// atribuida a la categoría de gasto que declara el pasivo (`expense_category_id`), y este
+/// campo es lo que distingue una fila editable de una derivada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetEntrySource {
+    /// Fila persistida en `budget_entries`: la escribe el usuario y admite PATCH/DELETE.
+    Manual,
+    /// Cuota derivada del plan de pago de un pasivo activo. **Solo lectura**: no existe en
+    /// `budget_entries`, así que `PATCH`/`DELETE /v1/budget/entries/{id}` responden 404. Se
+    /// edita en `/v1/liabilities`.
+    Liability,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BudgetEntryResponse {
+    /// Id de la fila de `budget_entries` (`source = manual`) o del pasivo que genera la cuota
+    /// (`source = liability`). Único en ambos casos — los UUID no colisionan entre tablas.
     #[schema(value_type = String, format = "uuid")]
     pub id: Uuid,
-    #[schema(value_type = String, format = "uuid")]
-    pub category_id: Uuid,
+    /// Categoría de la partida. Ausente **solo** en cuotas de pasivos sin `expense_category_id`
+    /// asignada (pasivos anteriores a la 3.4.0 y backups viejos importados): siguen contando en
+    /// los totales, pero no tienen categoría donde sentarse hasta que se les asigne una.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub category_id: Option<Uuid>,
     pub scope: BudgetCategoryScope,
-    /// Importe mensual (el presupuesto persistido es solo mensual).
+    /// Procedencia: `manual` (editable) o `liability` (cuota derivada, solo lectura).
+    pub source: BudgetEntrySource,
+    /// Pasivo que genera la cuota; presente ⟺ `source = liability` (mismo valor que `id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub liability_id: Option<Uuid>,
+    /// Etiqueta del pasivo (p. ej. «Hipoteca»); presente ⟺ `source = liability`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Importe mensual (el presupuesto persistido es solo mensual). En una cuota derivada es el
+    /// **equivalente mensual** del plan (`weekly` → ×52/12); el importe y la frecuencia crudos
+    /// viven en `/v1/liabilities`.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub amount: Decimal,
@@ -50,28 +84,6 @@ pub struct BudgetEntryResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct DerivedBudgetLineResponse {
-    #[schema(value_type = String, format = "uuid")]
-    pub liability_id: Uuid,
-    #[schema(value_type = String, format = "uuid")]
-    pub category_id: Uuid,
-    /// Categoría de GASTO donde la comparativa de Movimientos atribuye esta cuota (3.4.0).
-    /// `null` en pasivos aún sin asignar (anteriores a 3.4.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = Option<String>, format = "uuid")]
-    pub expense_category_id: Option<Uuid>,
-    pub label: String,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub amount: Decimal,
-    pub frequency: PaymentFrequency,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub monthly_equivalent: Decimal,
-    pub notes: String,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
 pub struct BudgetTotalsResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
@@ -80,16 +92,23 @@ pub struct BudgetTotalsResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub income_retirement_monthly_equivalent: Decimal,
+    /// Gasto mensual del plan: partidas persistidas **+ cuotas de pasivos activos**. Desde la
+    /// 3.7.0 las cuotas son una partida más de `entries`, así que este total es exactamente la
+    /// suma de los `entries` de scope `expense` — antes excluía las cuotas, que se sumaban
+    /// aparte en el desaparecido `expense_derived_monthly_equivalent`.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_regular_monthly_equivalent: Decimal,
-    /// Sum of expense entries that continue after retirement (`ends_at_retirement = false`).
+    /// Suma de las partidas de gasto que continúan tras la jubilación (`ends_at_retirement =
+    /// false`). Cuenta **solo partidas persistidas**: una cuota de pasivo tiene fecha de fin de
+    /// plan, así que por definición no es gasto post-jubilación. Es el campo que consume el
+    /// cálculo FIRE (`RetirementView`) — no lo confundas con `expense_regular_*` (incidente de
+    /// la divergencia 2–3× en la previa del formulario, v1.3.0).
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_retirement_monthly_equivalent: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub expense_derived_monthly_equivalent: Decimal,
+    /// Idéntico a `expense_regular_monthly_equivalent` desde la 3.7.0 (ya no hay una componente
+    /// derivada que sumarle). Se mantiene por compatibilidad de contrato.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_total_monthly_equivalent: Decimal,
@@ -100,8 +119,9 @@ pub struct BudgetTotalsResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BudgetSnapshotResponse {
+    /// Partidas del presupuesto: las persistidas (`source = manual`) **y** las cuotas de los
+    /// pasivos activos (`source = liability`, solo lectura, atribuidas a su categoría de gasto).
     pub entries: Vec<BudgetEntryResponse>,
-    pub derived_from_liabilities: Vec<DerivedBudgetLineResponse>,
     pub totals: BudgetTotalsResponse,
 }
 
@@ -164,11 +184,11 @@ pub(crate) struct BudgetEntryJoinRow {
 #[derive(Debug, FromRow)]
 pub(crate) struct LiabilityDerivedRow {
     id: Uuid,
-    category_id: Uuid,
     expense_category_id: Option<Uuid>,
     label: String,
     payment_amount: Decimal,
     payment_frequency: String,
+    payment_end_date: Option<NaiveDate>,
 }
 
 pub(crate) fn monthly_equivalent(amount: Decimal, frequency: &str) -> Decimal {
@@ -192,14 +212,48 @@ fn row_to_entry_response(r: BudgetEntryJoinRow) -> Result<BudgetEntryResponse, A
     let scope = scope_to_budget_enum(&r.scope)?;
     Ok(BudgetEntryResponse {
         id: r.id,
-        category_id: r.category_id,
+        category_id: Some(r.category_id),
         scope,
+        source: BudgetEntrySource::Manual,
+        liability_id: None,
+        label: None,
         amount: r.amount,
         notes: r.notes,
         sort_index: r.sort_index,
         persists_after_retirement: r.persists_after_retirement,
         ends_at_retirement: r.ends_at_retirement,
         expense_end_date: r.expense_end_date,
+    })
+}
+
+/// Cuota de un pasivo activo publicada como partida de gasto del presupuesto (3.7.0).
+///
+/// `category_id` es la **categoría de gasto** que declara el pasivo (`expense_category_id`), la
+/// misma con la que la comparativa de Movimientos empareja los recibos reales — por eso la cuota
+/// cae junto a las partidas manuales de esa categoría en vez de en un bloque aparte. Queda `None`
+/// en pasivos anteriores a la 3.4.0 (y en los importados de backups viejos): esas cuotas siguen
+/// sumando en los totales, y la UI las marca «sin categoría de cuota» hasta que se les asigne una
+/// — nunca se descartan, porque hacerlo bajaría el gasto presupuestado en silencio.
+///
+/// `sort_index = 0` y las banderas de jubilación a `false` son valores fijos: una cuota no es
+/// ordenable ni marcable por el usuario, y su fin lo fija el plan de pago (`expense_end_date`).
+fn liability_row_to_entry(d: LiabilityDerivedRow) -> Result<BudgetEntryResponse, ApiError> {
+    // Misma validación que antes de la fusión: una frecuencia desconocida es un 400 explícito,
+    // no una fila muda que descuadra el total.
+    PaymentFrequency::parse(&d.payment_frequency)?;
+    Ok(BudgetEntryResponse {
+        id: d.id,
+        category_id: d.expense_category_id,
+        scope: BudgetCategoryScope::Expense,
+        source: BudgetEntrySource::Liability,
+        liability_id: Some(d.id),
+        label: Some(d.label),
+        amount: monthly_equivalent(d.payment_amount, &d.payment_frequency),
+        notes: None,
+        sort_index: 0,
+        persists_after_retirement: false,
+        ends_at_retirement: false,
+        expense_end_date: d.payment_end_date,
     })
 }
 
@@ -281,7 +335,8 @@ async fn fetch_budget_rows_and_derived_liabilities(
     let derived_scope = view.scope_where("");
     let today_ph = view.next_arg_index();
     let derived_sql = format!(
-        r#"SELECT id, category_id, expense_category_id, label, payment_amount, payment_frequency
+        r#"SELECT id, expense_category_id, label, payment_amount, payment_frequency,
+                  payment_end_date
            FROM liabilities
            WHERE {derived_scope}
              AND payment_amount IS NOT NULL
@@ -325,28 +380,28 @@ pub(crate) fn ledger_budget_totals_from_parts(
         }
     }
 
-    let mut expense_der = Decimal::ZERO;
+    // Las cuotas de los pasivos activos son gasto del plan como cualquier otra partida: se suman
+    // DENTRO de `expense_reg`, no como una componente aparte. `expense_retirement_m` no las
+    // recibe a propósito (una cuota termina con su plan; ver el doc del campo).
     for d in derived_raw {
         PaymentFrequency::parse(&d.payment_frequency)?;
-        let me = monthly_equivalent(d.payment_amount, &d.payment_frequency);
-        expense_der += me;
+        expense_reg += monthly_equivalent(d.payment_amount, &d.payment_frequency);
     }
 
-    let expense_tot = expense_reg + expense_der;
-    let net = income_m - expense_tot;
+    let net = income_m - expense_reg;
 
     Ok(BudgetTotalsResponse {
         income_monthly_equivalent: income_m,
         income_retirement_monthly_equivalent: income_retirement_m,
         expense_regular_monthly_equivalent: expense_reg,
         expense_retirement_monthly_equivalent: expense_retirement_m,
-        expense_derived_monthly_equivalent: expense_der,
-        expense_total_monthly_equivalent: expense_tot,
+        expense_total_monthly_equivalent: expense_reg,
         net_monthly_equivalent: net,
     })
 }
 
-/// Same totals as `GET /v1/budget` (persisted entries + liability-derived lines with plan end after today).
+/// Los mismos totales que `GET /v1/budget` (partidas persistidas + cuotas de pasivos activos,
+/// ya fundidas dentro de `expense_regular_monthly_equivalent`).
 pub(crate) async fn ledger_budget_totals_for_summary(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -360,6 +415,13 @@ pub(crate) async fn ledger_budget_totals_for_summary(
 }
 
 /// Persisted budget rows only (no liability-derived lines), for projection / FIRE expense bases.
+///
+/// **No fundas aquí las cuotas de pasivo.** La fusión de la 3.7.0 es de presentación y de totales
+/// de `/v1/budget`; el engine cobra la cuota por su lado desde `ProjectionLiabilityInput`
+/// (`monthly_payment`, con amortización y fecha de fin de plan), así que sumarla también a esta
+/// base la contaría dos veces en toda la proyección del modo A — en silencio, que es el modo de
+/// fallo caro de este repo. Clavado por `apps/api/tests/budget_derived.rs`
+/// (`liability_quota_stays_out_of_the_engine_expense_base`).
 ///
 /// Returns `(income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries)`:
 /// - `income_retirement`: sum of income entries with `persists_after_retirement = true`.
@@ -408,10 +470,10 @@ pub(crate) async fn ledger_regular_monthly_income_and_expense(
     path = "/v1/budget",
     tag = "budget",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = persisted budget rows attributed to the signed-in user (derived liability lines filtered the same); omit = household."),
+        ("view" = Option<String>, Query, description = "`mine` = partidas atribuidas al usuario de la sesión (las cuotas de pasivo se filtran igual); omitido = hogar."),
     ),
     responses(
-        (status = 200, description = "Budget snapshot: persisted entries, liability-derived lines (plan end > today), monthly-normalized totals", body = BudgetSnapshotResponse),
+        (status = 200, description = "Presupuesto: partidas persistidas y cuotas de pasivos activos en una sola lista (`entries`, discriminadas por `source`), con los totales normalizados a equivalente mensual.", body = BudgetSnapshotResponse),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Not an installation member"),
         (status = 404, description = "Installation missing"),
@@ -448,32 +510,16 @@ pub(crate) async fn budget_snapshot_core(
 
     let totals = ledger_budget_totals_from_parts(&rows, &derived_raw)?;
 
-    let mut entries = Vec::with_capacity(rows.len());
+    let mut entries = Vec::with_capacity(rows.len() + derived_raw.len());
     for r in rows {
         entries.push(row_to_entry_response(r)?);
     }
 
-    let mut derived_from_liabilities = Vec::with_capacity(derived_raw.len());
     for d in derived_raw {
-        let pf = PaymentFrequency::parse(&d.payment_frequency)?;
-        let me = monthly_equivalent(d.payment_amount, &d.payment_frequency);
-        derived_from_liabilities.push(DerivedBudgetLineResponse {
-            liability_id: d.id,
-            category_id: d.category_id,
-            expense_category_id: d.expense_category_id,
-            label: d.label,
-            amount: d.payment_amount,
-            frequency: pf,
-            monthly_equivalent: me,
-            notes: "Derived from payment plan".into(),
-        });
+        entries.push(liability_row_to_entry(d)?);
     }
 
-    Ok(BudgetSnapshotResponse {
-        entries,
-        derived_from_liabilities,
-        totals,
-    })
+    Ok(BudgetSnapshotResponse { entries, totals })
 }
 
 #[utoipa::path(

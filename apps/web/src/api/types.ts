@@ -124,11 +124,16 @@ export type AllocationRuleApiRow = {
 export type FinancialHealthMetrics = {
   income_monthly_equivalent: string;
   expense_regular_monthly_equivalent: string;
+  /** **Siempre `"0"` desde la 3.7.0**, en los tres modos: las cuotas de pasivo son gasto del
+   *  presupuesto como cualquier otra partida, ya no una componente que se suma aparte. */
   expense_derived_monthly_equivalent: string;
   expense_total_monthly_equivalent: string;
   net_monthly_equivalent: string;
   savings_rate: string | null;
+  /** **Idéntico a `net_monthly_equivalent` desde la 3.7.0** (no queda deuda derivada que
+   *  excluir). El Resumen solo pinta su paréntesis cuando difiere, así que se apaga solo. */
   monthly_net_excluding_derived_debt: string;
+  /** **Idéntico a `savings_rate` desde la 3.7.0** — ver `monthly_net_excluding_derived_debt`. */
   savings_rate_excluding_derived_debt: string | null;
   liquid_assets_total: string;
   /** El valor `1200` es el tope del bucle del servidor y significa «al menos 100 años» (un
@@ -178,43 +183,46 @@ export type SummaryResponse = {
 export type BudgetTotalsApi = {
   income_monthly_equivalent: string;
   income_retirement_monthly_equivalent: string;
+  /** Gasto del plan: partidas manuales **+ cuotas de pasivos activos** (3.7.0). Es exactamente la
+   *  suma de los `entries` de scope `expense`. */
   expense_regular_monthly_equivalent: string;
   /** Suma de entradas con `ends_at_retirement = false` — gastos que persisten tras jubilación.
-   *  Es el campo correcto para el cálculo FIRE (alinea con el servidor). */
+   *  Solo partidas manuales: una cuota termina con su plan de pago. Es el campo correcto para el
+   *  cálculo FIRE (alinea con el servidor). */
   expense_retirement_monthly_equivalent: string;
-  expense_derived_monthly_equivalent: string;
+  /** Idéntico a `expense_regular_monthly_equivalent` desde la 3.7.0. */
   expense_total_monthly_equivalent: string;
   net_monthly_equivalent: string;
 };
 
+/** Procedencia de una partida: `manual` la escribe el usuario, `liability` la deriva el plan de
+ *  pago de un pasivo activo (solo lectura — se edita en Pasivos). */
+export type BudgetEntrySourceApi = "manual" | "liability";
+
 export type BudgetEntryApiRow = {
+  /** Id de la partida persistida, o del pasivo cuando `source = "liability"`. */
   id: string;
-  category_id: string;
+  /** Ausente solo en cuotas de pasivos sin categoría de gasto asignada (pre-3.4.0). */
+  category_id?: string;
   scope: "income" | "expense";
-  /** Importe mensual */
+  source: BudgetEntrySourceApi;
+  /** Presente ⟺ `source = "liability"` (mismo valor que `id`). */
+  liability_id?: string;
+  /** Etiqueta del pasivo; presente ⟺ `source = "liability"`. */
+  label?: string;
+  /** Importe mensual. En una cuota, el equivalente mensual del plan (`weekly` → ×52/12). */
   amount: string;
   notes: string | null;
   sort_index: number;
   persists_after_retirement: boolean;
   ends_at_retirement: boolean;
+  /** En una cuota, el fin del plan de pago (`null` = plan indefinido). */
   expense_end_date: string | null;
 };
 
-export type DerivedBudgetLineApi = {
-  liability_id: string;
-  category_id: string;
-  /** Categoría de GASTO donde la comparativa atribuye la cuota; ausente = sin asignar (pre-3.4.0). */
-  expense_category_id?: string;
-  label: string;
-  amount: string;
-  frequency: "monthly" | "weekly";
-  monthly_equivalent: string;
-  notes: string;
-};
-
 export type BudgetSnapshotApi = {
+  /** Partidas manuales y cuotas de pasivo en una sola lista, discriminadas por `source`. */
   entries: BudgetEntryApiRow[];
-  derived_from_liabilities: DerivedBudgetLineApi[];
   totals: BudgetTotalsApi;
 };
 

@@ -806,7 +806,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_budget",
-        description = "Presupuesto mensual: entradas de ingreso/gasto persistidas, cuotas derivadas de los pasivos activos y totales normalizados a equivalente mensual.",
+        description = "Presupuesto mensual: una sola lista de partidas de ingreso/gasto normalizadas a equivalente mensual. Cada partida trae `source`: `manual` (la escribe el usuario) o `liability` (cuota de un pasivo activo, solo lectura, atribuida a la categoría de gasto que declara el pasivo — se edita con update_liability). Los totales de gasto ya incluyen las cuotas: `expense_regular_monthly_equivalent` es la suma de las partidas de gasto.",
         annotations(title = "Presupuesto", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_budget(
@@ -954,7 +954,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_liabilities",
-        description = "Pasivos activos (deudas/préstamos): principal, TAE, cuota y frecuencia de pago, fecha fin del plan. Los pasivos con plan de pago ya vencido se filtran.",
+        description = "Pasivos activos (deudas/préstamos): principal, TAE, cuota y frecuencia de pago, fecha fin del plan. Los pasivos con plan de pago ya vencido se filtran. La cuota de cada uno aparece además como partida de gasto en get_budget.",
         annotations(title = "Pasivos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_liabilities(

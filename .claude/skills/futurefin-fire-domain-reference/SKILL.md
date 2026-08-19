@@ -129,11 +129,13 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
   fund it is budget-based — an accepted, intentional asymmetry.
 - **Everything downstream follows the mode too (v2.2.0)** — B/C are no longer "only the projection
   scalars":
-  - `GET /v1/summary` `financial_health`: since reform 3.4.0, `expense_derived_monthly_equivalent`
-    = **0** in B/C (the cuota is ordinary spending inside the average) and
+  - `GET /v1/summary` `financial_health`: `expense_derived_monthly_equivalent` = **0 in all three
+    modes** since 3.7.0 — in B/C because the cuota is ordinary spending inside the average
+    (reform 3.4.0), in A because it is now an ordinary budget entry inside
+    `expense_regular_monthly_equivalent` (the derived block was merged into `entries`). In B/C
     `expense_total_monthly_equivalent` = `expense_avg`. The v2.2.0 identities
     `expense_total = expense_reg + expense_der` and `net = income − expense_total` keep holding in
-    all three modes.
+    all three modes (the first one degenerately).
   - `runway_months` follows `expense_total`, hence the real base in B/C (see §2c).
   - `GET/POST/PATCH /v1/assets`: allocation caps `months_expense` / `income_multiple` resolve with the
     **effective** scalars (`assets_projection_context`), so the € target matches the month-1

@@ -28,7 +28,7 @@ itself. Counts and the test-file inventory re-counted **2026-08-17 for v3.1.0**:
 that the MCP/OAuth releases added (`api_tokens.rs`, `mcp_http.rs`, `oauth_flow.rs`) had been missing
 from § 2's inventory, and every total here was one release behind. Re-synced **2026-08-19
 (post-3.5.0)**: the 3.4.0/3.5.0 trains had repeated the same pattern (four rows missing —
-`budget_derived.rs`, `transactions_reconcile.rs`, `mcp_write.rs`, `mcp_simulate.rs` — and a
+`budget_liability_quotas.rs`, `transactions_reconcile.rs`, `mcp_write.rs`, `mcp_simulate.rs` — and a
 stale `mcp_http.rs` row still describing the 10-tool catalog); all rows and counts now match
 the code, and § 2's table carries a standing "tests.md wins on disagreement" note.
 
@@ -155,7 +155,7 @@ fix this table in the same change.
 | `mcp_write.rs` | 17 | MCP write tools: viewer → `forbidden`, the live `mcp_write_enabled` toggle (cuts the next write without restart, reads survive), MCP-created rows indistinguishable via HTTP, the **FULL/COND/NONE cache contract through the MCP path** (`warm`/`assert_invalidated` helpers), preview/confirm on every destructive tool (preview is SUCCESS and does not execute), `update_fire_settings` owner-gate + field-by-field merge, reconcile tools (3.5.0), and the post-3.5.0 CRUD-parity test (`update_asset` full body incl. `clear_purchase_price`, `update_liability` editing the SAME row via `patch_liability_core`, both FULL, shared 400s, toggle cutting both) |
 | `mcp_simulate.rs` | 6 | `simulate_projection`: baseline ≡ `get_projection`, the discriminating override pair (real expense moves the target, neutral adjustments don't), `one_off_expense` by date ≡ by month_index, return override sinks final NW, bounds re-validated, and **cache neutrality** (simulating never creates nor touches cache entries) |
 | `transactions_reconcile.rs` | 19 | Transfer reconciliation (3.5.0): deterministic auto-pass (±5-day window with exact 5/6 boundary, cross-import pair, greedy with multiple candidates, fixed-point idempotence, distinct owners never), unreconcile persists the anti-resurrection rejection, PATCH of `amount`/`op_date` breaks the pair WITHOUT rejection, deleting a leg/batch unreconciles the survivor, manual pairing without window + its 400s, viewer 403, owner-guard 404 |
-| `budget_derived.rs` | 5 | Liability-derived lines in `GET /v1/budget` (3.4.0): NULL end date derives, expired doesn't, `>=` boundary (ends today counts), no payment plan → no line, weekly ×52/12, household/mine scoping, `expense_category_id` exposed |
+| `budget_liability_quotas.rs` | 10 | Liability quotas inside `GET /v1/budget` (renamed from `budget_derived.rs` in 3.7.0, when the quota became an ordinary `entries` row): entry shape (`source`, `liability_id`, `label`, expense category) and coexistence with the manual entry of the same category; totals (`expense_regular` = sum of expense entries, no `expense_derived`); quota excluded from `expense_retirement_*`; **quota excluded from the engine expense base** (`monthly_delta_assumption` — hand-predicted double-count regression); active-liability predicate (NULL end date derives, expired doesn't, `>=` boundary, no payment plan → nothing), weekly ×52/12, household/mine scoping, quota without `expense_category_id` still counts |
 
 ### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; **321 en 13 ficheros a 2026-08-19**)
 
