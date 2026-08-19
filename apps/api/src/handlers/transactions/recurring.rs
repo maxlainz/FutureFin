@@ -24,6 +24,7 @@ use crate::handlers::transactions::crud::PreparedTxn;
 use crate::handlers::transactions::schema::{
     compute_fingerprint, MaterializeResponse, RecurringRuleResponse, SOURCE_MANUAL,
 };
+use crate::handlers::transactions::reconcile::auto_reconcile_after_mutation;
 use crate::handlers::transactions::{
     invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal,
 };
@@ -391,6 +392,9 @@ pub(crate) async fn materialize_recurring_core(
 
     tx.commit().await?;
 
+    if materialized > 0 {
+        auto_reconcile_after_mutation(state, iid, user_id).await;
+    }
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     Ok(MaterializeResponse {
         rules_processed,
