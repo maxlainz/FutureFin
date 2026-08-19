@@ -1,6 +1,6 @@
 //! Versioned DTO + migration layer for `.ffbackup` payloads.
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
 
@@ -269,6 +269,25 @@ pub struct BackupTransaction {
     /// movimientos sueltos (schema_version ≥ 6).
     #[serde(default)]
     pub recurring_rule_index: Option<usize>,
+    /// Índice (en `transactions` de este payload) de la contrapartida de la conciliación de
+    /// transferencia; `None` = movimiento sin conciliar. SIMÉTRICO: ambas patas se apuntan
+    /// (schema_version ≥ 8). Los payloads anteriores deserializan con `None`.
+    #[serde(default)]
+    pub transfer_counterpart_index: Option<usize>,
+    #[serde(default)]
+    pub transfer_reconciled_at: Option<DateTime<Utc>>,
+    /// `auto` | `manual` (schema_version ≥ 8).
+    #[serde(default)]
+    pub transfer_reconciled_source: Option<String>,
+}
+
+/// Un par RECHAZADO por el usuario al desconciliar a mano (schema_version ≥ 8), por índices en
+/// `transactions` de este payload. Sin exportarlos, un restore resucitaría todos los rechazos en
+/// el primer pase de auto-conciliación post-import.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupTransferMatchRejection {
+    pub transaction_a_index: usize,
+    pub transaction_b_index: usize,
 }
 
 /// A learned/user categorization rule exported inside a `.ffbackup` (schema_version ≥ 5).
@@ -486,8 +505,37 @@ pub struct BackupPayloadV7 {
     pub recurring_transaction_rules: Vec<BackupRecurringRule>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayloadV8 {
+    pub user: BackupUser,
+    pub categories_used: Vec<BackupCategory>,
+    pub assets: Vec<BackupAssetV3>,
+    #[serde(default)]
+    pub allocation_rules: Vec<BackupAllocationRule>,
+    pub liabilities: Vec<BackupLiability>,
+    pub budget_entries: Vec<BackupBudgetEntry>,
+    pub planning_flows: Vec<BackupPlanningFlow>,
+    #[serde(default)]
+    pub ui_preferences: UiPreferences,
+    pub installation_snapshot_informative: InstallationSnapshotInformative,
+    #[serde(default)]
+    pub snapshots: Vec<BackupSnapshot>,
+    #[serde(default)]
+    pub transaction_imports: Vec<BackupTransactionImport>,
+    #[serde(default)]
+    pub transactions: Vec<BackupTransaction>,
+    #[serde(default)]
+    pub categorization_rules: Vec<BackupCategorizationRule>,
+    #[serde(default)]
+    pub recurring_transaction_rules: Vec<BackupRecurringRule>,
+    /// Pares desconciliados A MANO (schema_version ≥ 8): la memoria anti-resurrección del
+    /// auto-matcher. Empty when migrating from an older backup.
+    #[serde(default)]
+    pub transfer_match_rejections: Vec<BackupTransferMatchRejection>,
+}
+
 /// Alias for the current-version payload. Export and import code work against this type.
-pub type BackupPayload = BackupPayloadV7;
+pub type BackupPayload = BackupPayloadV8;
 
 #[derive(Debug)]
 pub enum AnyPayload {
@@ -498,6 +546,7 @@ pub enum AnyPayload {
     V5(BackupPayloadV5),
     V6(BackupPayloadV6),
     V7(BackupPayloadV7),
+    V8(BackupPayloadV8),
 }
 
 pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, String> {
@@ -536,6 +585,11 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
             let p: BackupPayloadV7 = serde_json::from_slice(bytes)
                 .map_err(|e| format!("payload v7 malformed: {e}"))?;
             Ok(AnyPayload::V7(p))
+        }
+        8 => {
+            let p: BackupPayloadV8 = serde_json::from_slice(bytes)
+                .map_err(|e| format!("payload v8 malformed: {e}"))?;
+            Ok(AnyPayload::V8(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
             "schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
@@ -696,21 +750,47 @@ fn payload_v6_to_v7(p: BackupPayloadV6) -> BackupPayloadV7 {
     }
 }
 
+fn payload_v7_to_v8(p: BackupPayloadV7) -> BackupPayloadV8 {
+    // La conciliación de transferencias no existía antes de v8 → las transacciones llegan sin
+    // counterpart (los `#[serde(default)]` ya lo garantizan) y los rechazos empiezan vacíos.
+    // Tras importar un backup ≤v7, el pase post-import re-concilia lo que corresponda.
+    BackupPayloadV8 {
+        user: p.user,
+        categories_used: p.categories_used,
+        assets: p.assets,
+        allocation_rules: p.allocation_rules,
+        liabilities: p.liabilities,
+        budget_entries: p.budget_entries,
+        planning_flows: p.planning_flows,
+        ui_preferences: p.ui_preferences,
+        installation_snapshot_informative: p.installation_snapshot_informative,
+        snapshots: p.snapshots,
+        transaction_imports: p.transaction_imports,
+        transactions: p.transactions,
+        categorization_rules: p.categorization_rules,
+        recurring_transaction_rules: p.recurring_transaction_rules,
+        transfer_match_rejections: Vec::new(),
+    }
+}
+
 pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
     match any {
-        AnyPayload::V1(p) => payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(
-            payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p))),
+        AnyPayload::V1(p) => payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(
+            payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p)))),
         ))),
-        AnyPayload::V2(p) => payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(
-            payload_v3_to_v4(payload_v2_to_v3(p)),
+        AnyPayload::V2(p) => payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(
+            payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(p))),
         ))),
-        AnyPayload::V3(p) => {
-            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(p))))
+        AnyPayload::V3(p) => payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(
+            payload_v4_to_v5(payload_v3_to_v4(p)),
+        ))),
+        AnyPayload::V4(p) => {
+            payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(p))))
         }
-        AnyPayload::V4(p) => payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(p))),
-        AnyPayload::V5(p) => payload_v6_to_v7(payload_v5_to_v6(p)),
-        AnyPayload::V6(p) => payload_v6_to_v7(p),
-        AnyPayload::V7(p) => p,
+        AnyPayload::V5(p) => payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(p))),
+        AnyPayload::V6(p) => payload_v7_to_v8(payload_v6_to_v7(p)),
+        AnyPayload::V7(p) => payload_v7_to_v8(p),
+        AnyPayload::V8(p) => p,
     }
 }
 
@@ -1158,6 +1238,113 @@ mod tests {
             reser[0].get("day_of_month").is_none(),
             "v7 rules must not carry day_of_month"
         );
+    }
+
+    #[test]
+    fn migrate_v7_fills_empty_transfer_rejections() {
+        // Un v7 (sin claves de conciliación) parsea y migra a v8 con rechazos vacíos y
+        // transacciones sin counterpart.
+        let raw = serde_json::json!({
+            "user": { "username": "iris", "birth_date": null },
+            "categories_used": [],
+            "assets": [],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "snapshots": [],
+            "transaction_imports": [],
+            "transactions": [
+                {
+                    "import_index": null, "source": "manual", "op_date": "2026-06-05",
+                    "concept": "Efectivo", "amount": "-20.0000", "currency": "EUR",
+                    "kind": "expense", "fingerprint_ordinal": 0
+                }
+            ],
+            "categorization_rules": [],
+            "recurring_transaction_rules": []
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let any = parse_payload(7, &bytes).unwrap();
+        let v8 = migrate_to_current(any);
+        assert!(
+            v8.transfer_match_rejections.is_empty(),
+            "v7→v8 must default transfer_match_rejections to empty"
+        );
+        assert!(v8.transactions[0].transfer_counterpart_index.is_none());
+        assert!(v8.transactions[0].transfer_reconciled_source.is_none());
+    }
+
+    #[test]
+    fn v8_transfer_pairing_round_trip() {
+        let raw = serde_json::json!({
+            "user": { "username": "juan", "birth_date": null },
+            "categories_used": [],
+            "assets": [],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "snapshots": [],
+            "transaction_imports": [],
+            "transactions": [
+                {
+                    "import_index": null, "source": "manual", "op_date": "2026-06-10",
+                    "concept": "Salida", "amount": "-100.0000", "currency": "EUR",
+                    "kind": "expense", "fingerprint_ordinal": 0,
+                    "transfer_counterpart_index": 1,
+                    "transfer_reconciled_at": "2026-06-12T10:00:00Z",
+                    "transfer_reconciled_source": "auto"
+                },
+                {
+                    "import_index": null, "source": "manual", "op_date": "2026-06-11",
+                    "concept": "Entrada", "amount": "100.0000", "currency": "EUR",
+                    "kind": "income", "fingerprint_ordinal": 0,
+                    "transfer_counterpart_index": 0,
+                    "transfer_reconciled_at": "2026-06-12T10:00:00Z",
+                    "transfer_reconciled_source": "auto"
+                },
+                {
+                    "import_index": null, "source": "manual", "op_date": "2026-06-20",
+                    "concept": "Gasto suelto", "amount": "-50.0000", "currency": "EUR",
+                    "kind": "expense", "fingerprint_ordinal": 0
+                },
+                {
+                    "import_index": null, "source": "manual", "op_date": "2026-06-21",
+                    "concept": "Reembolso rechazado", "amount": "50.0000", "currency": "EUR",
+                    "kind": "income", "fingerprint_ordinal": 0
+                }
+            ],
+            "categorization_rules": [],
+            "recurring_transaction_rules": [],
+            "transfer_match_rejections": [
+                { "transaction_a_index": 2, "transaction_b_index": 3 }
+            ]
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let any = parse_payload(8, &bytes).unwrap();
+        let v8 = migrate_to_current(any);
+
+        // Par simétrico por índices.
+        assert_eq!(v8.transactions[0].transfer_counterpart_index, Some(1));
+        assert_eq!(v8.transactions[1].transfer_counterpart_index, Some(0));
+        assert_eq!(
+            v8.transactions[0].transfer_reconciled_source.as_deref(),
+            Some("auto")
+        );
+        // El par rechazado viaja por índices.
+        assert_eq!(v8.transfer_match_rejections.len(), 1);
+        assert_eq!(v8.transfer_match_rejections[0].transaction_a_index, 2);
+        assert_eq!(v8.transfer_match_rejections[0].transaction_b_index, 3);
+
+        // Round-trip de serialización: los campos de conciliación se conservan.
+        let reser = serde_json::to_value(&v8.transactions).unwrap();
+        assert_eq!(reser[0]["transfer_counterpart_index"], 1);
+        assert_eq!(reser[1]["transfer_reconciled_source"], "auto");
     }
 
     #[test]

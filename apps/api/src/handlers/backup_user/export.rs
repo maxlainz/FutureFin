@@ -23,8 +23,9 @@ use super::crypto::{encrypt_payload, frame_file};
 use super::schema::{
     BackupAllocationRule, BackupAsset, BackupBudgetEntry, BackupCategorizationRule, BackupCategory,
     BackupLiability, BackupPayload, BackupPlanningFlow, BackupRecurringRule, BackupSnapshot,
-    BackupSnapshotItem, BackupTransaction, BackupTransactionImport, BackupUser, CategoryRef,
-    InstallationSnapshotInformative, UiPreferences, CURRENT_SCHEMA_VERSION,
+    BackupSnapshotItem, BackupTransaction, BackupTransactionImport, BackupTransferMatchRejection,
+    BackupUser, CategoryRef, InstallationSnapshotInformative, UiPreferences,
+    CURRENT_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -172,7 +173,7 @@ async fn build_payload(
         &liability_id_to_index,
     )
     .await?;
-    let transactions = fetch_transactions(
+    let (transactions, txn_id_to_index) = fetch_transactions(
         pool,
         iid,
         user_id,
@@ -183,6 +184,8 @@ async fn build_payload(
     )
     .await?;
     let categorization_rules = fetch_categorization_rules(pool, iid, user_id).await?;
+    let transfer_match_rejections =
+        fetch_transfer_match_rejections(pool, iid, user_id, &txn_id_to_index).await?;
 
     Ok(BackupPayload {
         user,
@@ -199,6 +202,7 @@ async fn build_payload(
         transactions,
         categorization_rules,
         recurring_transaction_rules,
+        transfer_match_rejections,
     })
 }
 
@@ -300,6 +304,10 @@ async fn fetch_transaction_imports(
 
 /// Dated transactions (schema_version ≥ 5). The fingerprint is NOT exported (recomputed on
 /// import); `fingerprint_ordinal` is. Category is denormalized to `(scope, name)`.
+///
+/// Two passes since v8: (1) build the `transaction_id → index` map from the stable ordering,
+/// (2) resolve `transfer_counterpart_id` into `transfer_counterpart_index` against that map.
+/// The map is also returned so `transfer_match_rejections` can serialize against it.
 #[allow(clippy::too_many_arguments)]
 async fn fetch_transactions(
     pool: &PgPool,
@@ -309,28 +317,35 @@ async fn fetch_transactions(
     asset_id_to_index: &HashMap<Uuid, usize>,
     liability_id_to_index: &HashMap<Uuid, usize>,
     recurring_rule_id_to_index: &HashMap<Uuid, usize>,
-) -> Result<Vec<BackupTransaction>, ApiError> {
-    type Row = (
-        Option<Uuid>,   // import_id
-        String,         // source
-        NaiveDate,      // op_date
-        Option<NaiveDate>, // value_date
-        String,         // concept
-        Decimal,        // amount
-        String,         // currency
-        Option<String>, // kind
-        Option<String>, // cat_scope
-        Option<String>, // cat_name
-        i32,            // fingerprint_ordinal
-        Option<Uuid>,   // linked_asset_id
-        Option<Uuid>,   // linked_liability_id
-        Option<String>, // notes
-        Option<Uuid>,   // recurring_rule_id
-    );
+) -> Result<(Vec<BackupTransaction>, HashMap<Uuid, usize>), ApiError> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        import_id: Option<Uuid>,
+        source: String,
+        op_date: NaiveDate,
+        value_date: Option<NaiveDate>,
+        concept: String,
+        amount: Decimal,
+        currency: String,
+        kind: Option<String>,
+        cat_scope: Option<String>,
+        cat_name: Option<String>,
+        fingerprint_ordinal: i32,
+        linked_asset_id: Option<Uuid>,
+        linked_liability_id: Option<Uuid>,
+        notes: Option<String>,
+        recurring_rule_id: Option<Uuid>,
+        transfer_counterpart_id: Option<Uuid>,
+        transfer_reconciled_at: Option<chrono::DateTime<chrono::Utc>>,
+        transfer_reconciled_source: Option<String>,
+    }
     let rows: Vec<Row> = sqlx::query_as(
-        r#"SELECT t.import_id, t.source, t.op_date, t.value_date, t.concept, t.amount, t.currency,
-                  t.kind, c.scope AS cat_scope, c.name AS cat_name, t.fingerprint_ordinal,
-                  t.linked_asset_id, t.linked_liability_id, t.notes, t.recurring_rule_id
+        r#"SELECT t.id, t.import_id, t.source, t.op_date, t.value_date, t.concept, t.amount,
+                  t.currency, t.kind, c.scope AS cat_scope, c.name AS cat_name,
+                  t.fingerprint_ordinal, t.linked_asset_id, t.linked_liability_id, t.notes,
+                  t.recurring_rule_id, t.transfer_counterpart_id, t.transfer_reconciled_at,
+                  t.transfer_reconciled_source
            FROM transactions t
            LEFT JOIN categories c ON c.id = t.category_id
            WHERE t.installation_id = $1 AND t.owner_user_id = $2
@@ -341,30 +356,87 @@ async fn fetch_transactions(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    // Pasada 1: mapa id → índice (mismo orden estable que el vec resultante).
+    let txn_id_to_index: HashMap<Uuid, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.id, i))
+        .collect();
+
+    // Pasada 2: DTOs con el counterpart resuelto por índice.
+    let transactions = rows
         .into_iter()
         .map(|r| {
-            let category_ref = match (r.8, r.9) {
+            let category_ref = match (r.cat_scope, r.cat_name) {
                 (Some(scope), Some(name)) => Some(CategoryRef { scope, name }),
                 _ => None,
             };
+            // Solo se exporta un par si la contrapartida está en el propio export (siempre, salvo
+            // estados asimétricos imposibles por construcción — defensivo).
+            let transfer_counterpart_index = r
+                .transfer_counterpart_id
+                .and_then(|id| txn_id_to_index.get(&id).copied());
             BackupTransaction {
-                import_index: r.0.and_then(|id| import_id_to_index.get(&id).copied()),
-                source: r.1,
-                op_date: r.2,
-                value_date: r.3,
-                concept: r.4,
-                amount: r.5,
-                currency: r.6,
-                kind: r.7,
+                import_index: r.import_id.and_then(|id| import_id_to_index.get(&id).copied()),
+                source: r.source,
+                op_date: r.op_date,
+                value_date: r.value_date,
+                concept: r.concept,
+                amount: r.amount,
+                currency: r.currency,
+                kind: r.kind,
                 category_ref,
-                fingerprint_ordinal: r.10,
-                linked_asset_index: r.11.and_then(|a| asset_id_to_index.get(&a).copied()),
-                linked_liability_index: r.12.and_then(|l| liability_id_to_index.get(&l).copied()),
-                notes: r.13,
+                fingerprint_ordinal: r.fingerprint_ordinal,
+                linked_asset_index: r
+                    .linked_asset_id
+                    .and_then(|a| asset_id_to_index.get(&a).copied()),
+                linked_liability_index: r
+                    .linked_liability_id
+                    .and_then(|l| liability_id_to_index.get(&l).copied()),
+                notes: r.notes,
                 recurring_rule_index: r
-                    .14
+                    .recurring_rule_id
                     .and_then(|id| recurring_rule_id_to_index.get(&id).copied()),
+                transfer_reconciled_at: transfer_counterpart_index
+                    .and(r.transfer_reconciled_at),
+                transfer_reconciled_source: transfer_counterpart_index
+                    .is_some()
+                    .then_some(r.transfer_reconciled_source)
+                    .flatten(),
+                transfer_counterpart_index,
+            }
+        })
+        .collect();
+    Ok((transactions, txn_id_to_index))
+}
+
+/// Pares rechazados por el usuario al desconciliar (schema_version ≥ 8), por índices del vec
+/// `transactions`. Un rechazo cuya pata no esté en el mapa (imposible por FK, defensivo) se omite.
+async fn fetch_transfer_match_rejections(
+    pool: &PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    txn_id_to_index: &HashMap<Uuid, usize>,
+) -> Result<Vec<BackupTransferMatchRejection>, ApiError> {
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        r#"SELECT transaction_a_id, transaction_b_id
+           FROM transfer_match_rejections
+           WHERE installation_id = $1 AND owner_user_id = $2
+           ORDER BY created_at ASC, id ASC"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(a, b)| {
+            match (txn_id_to_index.get(&a), txn_id_to_index.get(&b)) {
+                (Some(&ai), Some(&bi)) => Some(BackupTransferMatchRejection {
+                    transaction_a_index: ai,
+                    transaction_b_index: bi,
+                }),
+                _ => None,
             }
         })
         .collect())
