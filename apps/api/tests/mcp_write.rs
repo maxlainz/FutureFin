@@ -344,6 +344,156 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
 }
 
 #[tokio::test]
+async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+
+    let cat_asset = app.create_category(&owner, "asset", "Fondos").await;
+    let cat_asset2 = app.create_category(&owner, "asset", "Cash").await;
+    let cat_liab = app.create_category(&owner, "liability", "Hipotecas").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vivienda").await;
+
+    // Seed por las tools de alta (mismas cores que HTTP, ya cubiertas en esta suite).
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_asset",
+            json!({"name": "Fondo indexado", "category_id": cat_asset, "current_value": "10000", "purchase_price": "9000"}),
+        ),
+    )
+    .await;
+    let asset_id = tool_json(&envelope)["id"].as_str().unwrap().to_string();
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_liability",
+            json!({"label": "Hipoteca", "category_id": cat_liab, "expense_category_id": cat_exp, "principal": "120000", "apr_percent": "3.10"}),
+        ),
+    )
+    .await;
+    let liability_id = tool_json(&envelope)["id"].as_str().unwrap().to_string();
+
+    // --- update_asset: body completo (rename + recategorizar + iliquidez + borrar el precio
+    // de compra) y contrato FULL — misma core `patch_asset_core` que el PATCH HTTP. ------------
+    warm(&app, &owner.cookie, &key).await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_asset",
+            json!({"asset_id": asset_id, "name": "Fondo global", "category_id": cat_asset2, "is_liquid": false, "clear_purchase_price": true}),
+        ),
+    )
+    .await;
+    let updated = tool_json(&envelope);
+    assert!(updated["resumen"].as_str().unwrap().contains("Fondo global"), "{updated}");
+    assert!(updated["resumen"].as_str().unwrap().contains("ilíquido"), "{updated}");
+    assert_invalidated(&app, &key, "update_asset").await;
+
+    let listed = app.get_with_cookie("/v1/assets", &owner.cookie).await;
+    assert_eq!(listed.status, http::StatusCode::OK);
+    let rows = listed.json();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == asset_id.as_str())
+        .expect("activo editado por MCP visible por HTTP")
+        .clone();
+    assert_eq!(row["name"], "Fondo global");
+    assert_eq!(row["is_liquid"], false);
+    assert_eq!(row["category_id"], cat_asset2.as_str());
+    assert!(
+        row.get("purchase_price").is_none_or(serde_json::Value::is_null),
+        "clear_purchase_price debía borrar el precio de compra: {row}"
+    );
+
+    // purchase_price y clear_purchase_price a la vez es contradictorio → 400 sin tocar nada.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_asset",
+            json!({"asset_id": asset_id, "purchase_price": "1", "clear_purchase_price": true}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+
+    // --- update_liability: la asimetría que empujaba a borrar y recrear. Edita TAE y plan de
+    // pago sobre la MISMA fila (misma core `patch_liability_core` que el PATCH) + FULL. --------
+    warm(&app, &owner.cookie, &key).await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_liability",
+            json!({"liability_id": liability_id, "apr_percent": "2.10", "payment_amount": "650", "payment_frequency": "monthly"}),
+        ),
+    )
+    .await;
+    let updated = tool_json(&envelope);
+    assert_eq!(updated["id"], liability_id.as_str());
+    assert_invalidated(&app, &key, "update_liability").await;
+
+    let listed = app.get_with_cookie("/v1/liabilities", &owner.cookie).await;
+    assert_eq!(listed.status, http::StatusCode::OK);
+    let rows = listed.json();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == liability_id.as_str())
+        .expect("pasivo editado por MCP visible por HTTP")
+        .clone();
+    let apr: rust_decimal::Decimal = row["apr_percent"].as_str().unwrap().parse().unwrap();
+    assert_eq!(apr, "2.10".parse::<rust_decimal::Decimal>().unwrap());
+    let cuota: rust_decimal::Decimal = row["payment_amount"].as_str().unwrap().parse().unwrap();
+    assert_eq!(cuota, "650".parse::<rust_decimal::Decimal>().unwrap());
+
+    // Error de dominio compartido con el PATCH: sin ningún campo → 400 de la core.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_liability", json!({"liability_id": liability_id})),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(
+        body["message"].as_str().unwrap().contains("at least one field"),
+        "{body}"
+    );
+
+    // Y ambas tools pasan por require_mcp_write: toggle OFF → cortadas en vivo.
+    let r = app
+        .patch_json_with_cookie("/v1/installation", json!({"mcp_write_enabled": false}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK);
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_liability", json!({"liability_id": liability_id, "apr_percent": "1.90"})),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(body["message"].as_str().unwrap().starts_with("mcp_write_disabled"), "{body}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_asset", json!({"asset_id": asset_id, "name": "x"})),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(body["message"].as_str().unwrap().starts_with("mcp_write_disabled"), "{body}");
+}
+
+#[tokio::test]
 async fn recurring_create_and_materialize_are_idempotent() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
