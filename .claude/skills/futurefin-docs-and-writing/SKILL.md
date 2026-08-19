@@ -46,7 +46,7 @@ current drift is a duplicated or orphaned fact).
 | File | Owns (authoritative for) | Audience |
 |---|---|---|
 | `CLAUDE.md` | Commands (dev, test, build, deploy), architecture summary, UI conventions, git workflow/release steps, index of `.claude/*.md` | AI sessions |
-| `.claude/api-routes.md` | Full route map, auth pattern, view-scoping pattern, error mapping, projection response shape/cache/density | AI sessions |
+| `.claude/api-routes.md` | Full route map, auth pattern, view-scoping pattern, error mapping, projection response shape/cache/density, **the MCP tool catalog (§MCP: per-tool semantics, cache class, preview/confirm)** | AI sessions |
 | `.claude/data-model.md` | Tables, columns, invariants, `fire_settings` JSONB shape, `.ffbackup` schema notes | AI sessions |
 | `.claude/engine.md` | Engine public API, `ProjectionInput`/`Output`, simulation loop, inflation model, handler↔engine boundary notes | AI sessions |
 | `.claude/auth-and-membership.md` | Auth flow, roles table, cookie attrs, pending users, key auth functions | AI sessions |
@@ -68,7 +68,8 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 
 | You changed… | Update |
 |---|---|
-| Route added/removed/renamed, auth requirement, query param | `.claude/api-routes.md` (+ `openapi.rs` schemas in code) |
+| Route added/removed/renamed, auth requirement, query param | `.claude/api-routes.md` (+ `openapi.rs` schemas in code) **and the MCP parity evaluation** (futurefin-mcp-parity §1: tool, recorded omission, or n/a) |
+| MCP tool added/changed/omitted | `.claude/api-routes.md` §MCP (catalog) + CLAUDE.md counters (module map + MCP paragraph) + `.claude/tests.md` suite rows + futurefin-mcp-parity §3 register |
 | Response/request field, serialization format (Decimal-string vs f64 boundary) | `.claude/api-routes.md`; if FIRE/projection shape: `.claude/engine.md` handler-notes section |
 | Table/column/constraint, new migration | `.claude/data-model.md` (+ CHANGELOG "Migración / compatibilidad" note if data-affecting — template §4.3) |
 | Engine input/output struct, simulation-loop step, inflation semantics | `.claude/engine.md` (+ `futurefin-fire-domain-reference` skill if FIRE math) |
@@ -222,7 +223,7 @@ rule; v1.2.0 is the precedent).
 - Every skill in `.claude/skills/` ends with a **Provenance and maintenance** section: one-line
   read-only commands that re-verify its volatile facts. When you touch a skill's area, run its
   provenance lines; any mismatch means the skill must be updated **in the same PR** as the change.
-  Rule re-checked 2026-08-16: all 15 skills comply —
+  Rule re-checked 2026-08-19: all 16 skills comply (the 16th is `futurefin-mcp-parity`) —
   `for f in .claude/skills/*/SKILL.md; do grep -qi '^## .*Provenance' "$f" || echo "MISSING: $f"; done`
   prints nothing. A new skill without that section is incomplete.
 - Skills date-stamp volatile facts ("as of 2026-07-02, v1.4.3"). When you re-verify, refresh the

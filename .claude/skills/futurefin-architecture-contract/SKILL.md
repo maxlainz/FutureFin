@@ -363,6 +363,10 @@ non-cookie credential. The decision mirrors D3 (sessions-in-DB, not JWT), delibe
   response type is the D2/D8 dual-branch drift bug reborn — don't.
 - `/mcp` is **deliberately not in OpenAPI** (JSON-RPC, self-described via `tools/list`), and
   `FUTUREFIN_MCP_ENABLED=0` unmounts the router entirely.
+- This decision governs **how** a tool is built, never **whether** it should exist. The catalog is
+  a derived surface of the HTTP API, so every API-surface change owes a parity evaluation (tool
+  added/updated, deliberate omission recorded, or n/a) — that discipline, its rubric and the
+  omission register live in `.claude/skills/futurefin-mcp-parity/SKILL.md`.
 
 **Breaks if violated**: storing the secret (or a reversible form) turns a DB leak into credential
 theft; caching role/installation in the token resurrects stale-privilege bugs the session design

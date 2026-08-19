@@ -55,7 +55,7 @@ a real Postgres (Section 6); they are **not** run in CI, so running them locally
 | Class | Examples | Mandatory gates |
 |---|---|---|
 | **Engine math** | `crates/engine/src/projection.rs`, FIRE target, cascade, retirement drain, inflation | `cargo test -p futurefin-engine`; integration tests (esp. `projection_marker.rs`, `fire_parity.rs`, `projection_cache.rs`); if tax brackets / gross-up / target formula changed → regenerate `apps/api/tests/fixtures/fire-parity.json` expected values and BOTH suites green (Section 2.5); update `.claude/engine.md`; CHANGELOG entry with before/after numeric example. Errors here are **silent** (plausible-but-wrong numbers) — this is the owner's stated hardest problem; show worked numbers as review evidence, not just green tests. |
-| **API contract** | Handler request/response fields, status codes, routes | Breaking-change policy check (Section 5); update `#[utoipa::path]` annotations (OpenAPI is generated); update `.claude/api-routes.md`; integration tests covering the new/changed shape; CHANGELOG (with a "breaking" note if applicable). |
+| **API contract** | Handler request/response fields, status codes, routes, MCP tools | Breaking-change policy check (Section 5); update `#[utoipa::path]` annotations (OpenAPI is generated); update `.claude/api-routes.md`; **MCP parity evaluation** (`.claude/skills/futurefin-mcp-parity/SKILL.md` §1 — the change must end in tool added/updated, deliberate omission recorded in that skill's register, or n/a; never silent); integration tests covering the new/changed shape (for a tool: the mcp_write quartet + frozen catalog); CHANGELOG (with a "breaking" note if applicable). |
 | **DB migration** | New file in `apps/api/migrations/` | Section 3 in full (never edit shipped; data-loss sign-off; grep for query drift); integration tests — every test applies ALL migrations to a fresh schema, so a broken migration fails everything; update `.claude/data-model.md`; if exported tables change shape → check `apps/api/src/handlers/backup_user/` (Section 5) and the export SQL. |
 | **UI-visual** | Anything in `apps/web/src/` that renders | `npm run typecheck:web && npm run lint:web && npm run build:web && npm test --workspace futurefin-web`; verify **light AND dark theme** before merging (owner-mandated); tokens only, no hex (Section 2.4); icons only in `components/icons.tsx`; small charts via `MiniProjection`; update `.claude/design-system.md` / `.claude/frontend-structure.md` if conventions moved; CHANGELOG. |
 | **Docs-only** | `CLAUDE.md`, `.claude/*.md`, `README.md`, CHANGELOG wording | No test gates. Gate = accuracy: verify every command/path/claim against the code before writing it (docs have drifted before — eight errata were found and fixed on 2026-07-02; prefer commands over frozen counts, e.g. `ls apps/api/migrations \| wc -l`). Record unfixable drift in futurefin-docs-and-writing §7. |
@@ -358,6 +358,9 @@ Then, per change class:
       migration discipline, breaking-note…).
 - [ ] `.claude/` doc of record for the touched area updated (api-routes / data-model / engine /
       design-system / tests / env-and-config…). CLAUDE.md: "Keep these files up to date".
+- [ ] If routes/handlers or `apps/api/src/mcp/` changed: the MCP parity evaluation ran and its
+      outcome is recorded (futurefin-mcp-parity §1), and that skill's §5 counters still agree
+      with the code (`grep -c '#\[tool(' apps/api/src/mcp/server.rs` vs the doc counters).
 - [ ] `CHANGELOG.md` entry under `[Unreleased]` (or the release version), root-cause style —
       say WHY, not just what; mark breaking changes explicitly.
 - [ ] No non-negotiable (Section 2) violated; no gate routed around.
@@ -382,7 +385,7 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
 
 - Current version: `grep '^version' apps/api/Cargo.toml` (**3.5.0** on 2026-08-19)
 - Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**40** on 2026-08-19 — la 40ª es `20260819120000_transactions_transfer_reconciliation`)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**27** on 2026-08-19 — nuevo `transactions_reconcile.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (283)
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**27** on 2026-08-19 — nuevo `transactions_reconcile.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (284 on 2026-08-19 tras el test de `update_asset`/`update_liability`; 283 at 3.5.0)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
 - Compose topology (one service since 3.0.0):

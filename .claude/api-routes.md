@@ -287,7 +287,9 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `http::request::Parts` hasta el `RequestContext` de cada tool. Fallo → 401/403 JSON
   `{error, message}`; **solo el 401** añade `WWW-Authenticate` (ver la nota del challenge en la
   sección OAuth).
-- **Tools de lectura (20)**: `get_summary`, `get_projection` (density **hybrid fija**,
+- **Tools de lectura — 19 en total: las 10 iniciales en este bullet, las 9 del issue #2 en el
+  siguiente** (la vigésima con `read_only_hint = true` es `simulate_projection`, que tiene bullet
+  propio): `get_summary`, `get_projection` (density **hybrid fija**,
   `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler;
   `months` declara su rango real 12..840 en el schema y solo la variante sin `months` sale de
   cache), `get_budget`, `get_transactions_summary`, `list_transactions` (**paginación en SQL**:
@@ -367,11 +369,26 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `reconcile_transfers` (pase explícito, idempotente — `reconcile_now_core`; COND solo si enlaza
   algo) y `unreconcile_transfer` (rompe el par + rechazo persistido — `unreconcile_core`; COND;
   sin preview/confirm: no son destructivas). `reconcile_pair` manual se omite a conciencia
-  (footgun para un LLM; follow-up). Catálogo total: **45 tools**, congelado en
-  `tools_list_returns_exactly_the_v1_catalog`. Regresión:
+  (footgun para un LLM; el registro de omisiones deliberadas vive en la skill
+  `futurefin-mcp-parity`). Paridad CRUD del ledger (tras 3.5.0): `update_asset` (body completo
+  del PATCH vía la misma `patch_asset_core` — rename, categoría, liquidez, precio de compra con
+  `clear_purchase_price` materializando el null del tri-state; `update_asset_value` queda como
+  subset de valoración) y `update_liability` (cerraba la única asimetría create/delete-sin-update
+  del catálogo, que empujaba al agente al borrar-y-recrear destructivo; merge campo a campo vía
+  `patch_liability_core` extraída del PATCH, re-derivación del principal si
+  `derive_principal_from_plan` queda activo). Ambas FULL, sin preview/confirm (editar no
+  destruye filas). Catálogo total: **47 tools** (20 con `read_only_hint = true` + 27 de
+  escritura; recuento reproducible: `grep -c '#\[tool(' apps/api/src/mcp/server.rs`), congelado
+  en `tools_list_returns_exactly_the_v1_catalog`. Regresión:
   `apps/api/tests/mcp_write.rs`.
 - **NO está en OpenAPI a propósito**: no es un recurso REST — es JSON-RPC cuyo contrato define la
   spec MCP y que se autodescribe vía `tools/list`.
+- **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
+  cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
+  mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,
+  el recipe de añadir/actualizar una tool y el registro de omisiones y gaps pendientes viven en
+  [`futurefin-mcp-parity`](skills/futurefin-mcp-parity/SKILL.md); la gate está en
+  `futurefin-change-control` §1 (clase "API contract").
 - **Límite conocido de 3.0.0 — resuelto en 3.1.0**: el conector de claude.ai exige OAuth 2.1, que
   entonces estaba fuera de scope. Desde 3.1.0 el authorization server va embebido (sección
   siguiente) y `/mcp` acepta **dos** esquemas Bearer: `ffp_…` (token de API, pegado a mano) y
