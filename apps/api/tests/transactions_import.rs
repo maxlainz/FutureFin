@@ -26,13 +26,14 @@ async fn preview(app: &TestApp, cookie: &str, source: &str, file_b64: &str) -> R
     .await
 }
 
-/// Construye `decisions[]` paralelo a las filas del preview: descarta las transferencias
-/// sugeridas, propaga kind/categoría sugeridos.
+/// Construye `decisions[]` paralelo a las filas del preview propagando kind/categoría sugeridos.
+/// Desde 3.5.0 el default del wizard INCLUYE también las transferencias sugeridas (nada se
+/// descarta en silencio; la exclusión del gasto pasa por la conciliación) — este helper refleja
+/// ese default. El descarte explícito sigue existiendo (ver `learned_rules_precategorize`).
 fn decisions_from_preview(rows: &[Value]) -> Vec<Value> {
     rows.iter()
         .map(|r| {
             json!({
-                "discard": r["suggested_transfer"].as_bool().unwrap_or(false),
                 "kind": r["suggested_kind"],
                 "category_id": r["suggested_category_id"],
             })
@@ -107,7 +108,7 @@ async fn myinvestor_autodetect_and_suggestions() {
         row_by_concept(rows, "Aportacion automatica cartera")["suggested_kind"],
         "savings"
     );
-    // Transferencias internas → sugeridas descarte.
+    // Transferencias internas → el HINT sigue marcándolas (informativo desde 3.5.0)…
     assert_eq!(
         row_by_concept(rows, "Transferencia desde MyInvestor")["suggested_transfer"],
         true
@@ -115,25 +116,25 @@ async fn myinvestor_autodetect_and_suggestions() {
     assert_eq!(row_by_concept(rows, "Enviada desde N26")["suggested_transfer"], true);
     assert_eq!(row_by_concept(rows, "estalvi")["suggested_transfer"], true);
 
-    // Confirmar descartando transferencias.
+    // …pero el confirm con el default nuevo las IMPORTA TODAS (nada se descarta en silencio;
+    // la exclusión del gasto pasa por la conciliación).
     let decisions = decisions_from_preview(rows);
-    let discard_count = decisions.iter().filter(|d| d["discard"] == true).count() as u64;
     let sha = body["file_sha256"].as_str().unwrap();
     let cresp = confirm(&app, &owner.cookie, "auto", &b64, sha, decisions, true).await;
     assert_eq!(cresp.status, http::StatusCode::OK, "confirm: {cresp:?}");
     let cbody = cresp.json();
-    assert_eq!(cbody["imported"].as_u64(), Some(n - discard_count));
-    assert_eq!(cbody["discarded"].as_u64(), Some(discard_count));
+    assert_eq!(cbody["imported"].as_u64(), Some(n), "todas las filas importadas");
+    assert_eq!(cbody["discarded"].as_u64(), Some(0));
+    assert!(cbody["reconciled_pairs"].is_u64(), "reconciled_pairs presente");
     assert!(cbody["import_id"].is_string(), "import_id presente");
 
-    // Re-preview del mismo archivo → todo ya importado (salvo lo descartado, que nunca entró).
+    // Re-preview del mismo archivo → TODO ya importado (las transferencias también entraron).
     let re = preview(&app, &owner.cookie, "auto", &b64).await;
     let rbody = re.json();
-    let non_discarded = n - discard_count;
     assert_eq!(
         rbody["already_imported_count"].as_u64(),
-        Some(non_discarded),
-        "las no-descartadas deben aparecer ya importadas"
+        Some(n),
+        "todas las filas deben aparecer ya importadas"
     );
     // Re-confirmar sin forzar → 0 nuevos.
     let re_rows = rbody["rows"].as_array().unwrap();

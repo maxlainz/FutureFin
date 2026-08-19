@@ -375,3 +375,134 @@ async fn mode_c_mutation_invalidates_projection_cache() {
     assert_eq!(created.status, http::StatusCode::CREATED);
     assert_invalidated(&app, &key, "modo C create").await;
 }
+
+// ---------------------------------------------------------------------------
+// Conciliación (3.5.0): mismas reglas COND que el resto de mutaciones
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mode_a_reconcile_endpoints_do_not_touch_projection_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+
+    // Par a >5 días para que el pase automático NO lo enlace: la conciliación será manual.
+    let a = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-01", "concept": "Salida", "amount": "-100", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let b = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-20", "concept": "Entrada", "amount": "100", "kind": "income" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
+
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+    warm(&app, &owner.cookie, &key).await;
+
+    // Conciliar par + desconciliar + pase explícito: en modo A nada invalida.
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/{a_id}/reconcile"),
+            json!({ "counterpart_id": b_id }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "pair: {r:?}");
+    let u = app
+        .delete_with_cookie(&format!("/v1/transactions/{a_id}/reconcile"), &owner.cookie)
+        .await;
+    assert_eq!(u.status, http::StatusCode::OK, "unreconcile: {u:?}");
+    let p = app
+        .post_json_with_cookie("/v1/transactions/reconcile", json!({}), &owner.cookie)
+        .await;
+    assert_eq!(p.status, http::StatusCode::OK, "pass: {p:?}");
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        present(&app, &key).await,
+        "modo A: conciliar/desconciliar NO debe invalidar (las transacciones no son inputs)"
+    );
+}
+
+#[tokio::test]
+async fn mode_b_reconcile_endpoints_invalidate_projection_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    let a = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-01", "concept": "Salida", "amount": "-100", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let b = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-20", "concept": "Entrada", "amount": "100", "kind": "income" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
+
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+
+    // 1. Conciliar par manual → invalida (cambia qué cuenta en el promedio 12m).
+    warm(&app, &owner.cookie, &key).await;
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/{a_id}/reconcile"),
+            json!({ "counterpart_id": b_id }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "pair: {r:?}");
+    assert_invalidated(&app, &key, "reconcile pair").await;
+
+    // 2. Desconciliar → invalida.
+    warm(&app, &owner.cookie, &key).await;
+    let u = app
+        .delete_with_cookie(&format!("/v1/transactions/{a_id}/reconcile"), &owner.cookie)
+        .await;
+    assert_eq!(u.status, http::StatusCode::OK, "unreconcile: {u:?}");
+    assert_invalidated(&app, &key, "unreconcile").await;
+
+    // 3. Pase explícito sin pares nuevos (el rechazo bloquea el re-emparejado) → NO invalida.
+    warm(&app, &owner.cookie, &key).await;
+    let p = app
+        .post_json_with_cookie("/v1/transactions/reconcile", json!({}), &owner.cookie)
+        .await;
+    assert_eq!(p.json()["pairs_created"].as_u64(), Some(0), "sin pares nuevos: {p:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        present(&app, &key).await,
+        "modo B: un pase que no enlaza nada no debe tirar la cache caliente"
+    );
+}

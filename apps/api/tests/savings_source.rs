@@ -936,3 +936,63 @@ async fn mode_c_zero_months_falls_back_to_budget() {
     let delta = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
     approx(delta, 3000.0); // presupuesto 5000 − 2000, sin tocar por la txn del mes parcial
 }
+
+// ---------------------------------------------------------------------------
+// Conciliación de transferencias (3.5.0) — el promedio del engine excluye conciliadas
+// ---------------------------------------------------------------------------
+
+/// Modo B con un par de traspaso a CABALLO de dos meses (salida −700 a fin del mes −2, entrada
+/// +700 a inicio del mes −1, Δ ≤ 5 días → auto-conciliado). El caso cruza numerador Y denominador:
+///
+/// - Conciliadas: el mes −2 queda solo-conciliado → NO cuenta (months_with_data = 1) y las patas
+///   no suman → delta = income_avg − expense_avg = 3000 − 1000 = **2000**.
+/// - Tras DESCONCILIAR: ambos meses cuentan (months = 2) y las patas vuelven →
+///   delta = (3000+700)/2 − (1000+700)/2 = 1850 − 850 = **1000**.
+///
+/// Números predichos ANTES de ejecutar (norma del repo).
+#[tokio::test]
+async fn mode_b_avg_excludes_reconciled_pair() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (y1, m1) = shift_month(today.year(), today.month(), -1);
+    let (y2, m2) = shift_month(today.year(), today.month(), -2);
+
+    // Mes −1: datos reales.
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Sueldo", "3000", "income", None, None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Gasto", "-1000", "expense", None, None).await;
+    // Par de traspaso a caballo de los dos meses (últimos días de −2, primeros de −1): Δ ≤ 5 días.
+    let last_day_m2 = date_in(y2, m2, 28);
+    let first_day_m1 = date_in(y1, m1, 1);
+    manual(&app, &owner.cookie, &last_day_m2, "Traspaso salida", "-700", "expense", None, None).await;
+    manual(&app, &owner.cookie, &first_day_m1, "Traspaso entrada", "700", "income", None, None).await;
+
+    set_mode_b(&app, &owner.cookie).await;
+    // Conciliadas: el mes −2 queda solo-conciliado (no cuenta) → months=1, delta = 3000−1000.
+    let d1 = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(d1, 2000.0);
+
+    // Desconciliar el par → ambos meses cuentan: delta = (3700 − 1700) / 2 = 1000.
+    let list = app
+        .get_with_cookie(&format!("/v1/transactions?month={y1}-{m1:02}"), &owner.cookie)
+        .await
+        .json();
+    let in_leg = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["concept"] == "Traspaso entrada")
+        .unwrap()
+        .clone();
+    assert!(in_leg["transfer_counterpart_id"].is_string(), "precondición: conciliada");
+    let u = app
+        .delete_with_cookie(
+            &format!("/v1/transactions/{}/reconcile", in_leg["id"].as_str().unwrap()),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(u.status, http::StatusCode::OK, "unreconcile: {u:?}");
+    let d2 = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(d2, 1000.0);
+}
