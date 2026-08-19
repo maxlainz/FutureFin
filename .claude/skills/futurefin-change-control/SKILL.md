@@ -15,17 +15,17 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-18 for
-the 3.4.0 train** (reforma de cuotas por modo + `liabilities.expense_category_id`): **39**
-migration files in `apps/api/migrations/` (la 39ª es `20260818150000_liabilities_expense_category`),
-**26** integration-test files in `apps/api/tests/` (nuevo `budget_derived.rs`), `.ffbackup` `CURRENT_SCHEMA_VERSION` = **7** (unchanged — v3.2.0
-dropped `day_of_month` from backed-up recurring rules, the first non-additive bump; older files
-still import via `payload_v6_to_v7`; `mcp_write_enabled` is an installation setting, outside the
-backup). All paths below are from the repo root. (Previously stamped 2026-08-17 at v3.2.0 with
-37/23; 2026-08-17 at v3.1.0 with 36/23 and schema 6; 2026-08-16 at v3.0.0 with 34/20; and
-2026-07-06 at v1.5.0: 32 migrations, 11 test files.) `apps/api/Cargo.toml` reads `3.4.0` and
-`CHANGELOG.md` carries its `## [3.4.0] - 2026-08-18` section, so the Section 4 version/CHANGELOG
-gates for this release are satisfied (v3.4.0 tagged and published 2026-08-18).
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-19 for
+the 3.5.0 train** (conciliación de transferencias): **40** migration files in
+`apps/api/migrations/` (la 40ª es `20260819120000_transactions_transfer_reconciliation`), **27**
+integration-test files in `apps/api/tests/` (nuevo `transactions_reconcile.rs`), `.ffbackup`
+`CURRENT_SCHEMA_VERSION` = **8** (v8 añade el par conciliado por índice + los rechazos del
+auto-matcher; los ficheros antiguos siguen importando vía `payload_v7_to_v8`). All paths below
+are from the repo root. (Previously stamped 2026-08-18 at v3.4.0 with 39/26 and schema 7;
+2026-08-17 at v3.2.0 with 37/23; 2026-08-17 at v3.1.0 with 36/23 and schema 6; 2026-08-16 at
+v3.0.0 with 34/20; and 2026-07-06 at v1.5.0: 32 migrations, 11 test files.) `apps/api/Cargo.toml`
+reads `3.5.0` and `CHANGELOG.md` carries its `## [3.5.0] - 2026-08-19` section, so the Section 4
+version/CHANGELOG gates for this release are satisfied (pending tag from `main`).
 
 Vocabulary (defined once): **installation** = the singleton row all financial data belongs to
 (one per deployment). **scope / view** = `?view=mine` filters ledger queries by
@@ -312,13 +312,14 @@ No breaking change ships without a version bump + a CHANGELOG entry explicitly m
   documented even the removal of a consumer-less field (`fire_number_expense_adjustment_pct`)
   and the new strict 422 as the only non-bit-exact changes.
 - **`.ffbackup` schema**: any shape change to exported user data requires bumping
-  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **7**: v4
+  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **8**: v4
   added `snapshots` via `payload_v3_to_v4` (v1.5.0), v5 added transactions/imports/rules (v1.6.0),
   v6 added `recurring_transaction_rules` + `BackupTransaction.recurring_rule_index` via
-  `payload_v5_to_v6` (v1.8.0), and v7 — the first NON-additive bump — dropped `day_of_month` from
-  recurring rules via `payload_v6_to_v7` (3.2.0)) and extending the `migrate_to_current` chain so
-  ALL older versions still import (v1..v6 remain importable today; dropped fields are discarded on
-  import — the documented v1.1.0 pattern). `parse_payload` rejects versions
+  `payload_v5_to_v6` (v1.8.0), v7 — the first NON-additive bump — dropped `day_of_month` from
+  recurring rules via `payload_v6_to_v7` (3.2.0), and v8 added the reconciled transfer pairing +
+  `transfer_match_rejections` via `payload_v7_to_v8` (3.5.0)) and extending the
+  `migrate_to_current` chain so ALL older versions still import (v1..v7 remain importable today;
+  dropped fields are discarded on import — the documented v1.1.0 pattern). `parse_payload` rejects versions
   newer than the server supports — keep that. Never break import of an old backup; it is users'
   only recovery path.
 - **Engine input struct** (`ProjectionInput` and friends in `crates/engine`): field
@@ -379,9 +380,9 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (**3.4.0** on 2026-08-18 — released y tag `v3.4.0` publicado desde `main`)
-- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**39** on 2026-08-18 — la 39ª es `20260818150000_liabilities_expense_category`)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**26** on 2026-08-18 — nuevo `budget_derived.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (253)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**3.5.0** on 2026-08-19)
+- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**40** on 2026-08-19 — la 40ª es `20260819120000_transactions_transfer_reconciliation`)
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**27** on 2026-08-19 — nuevo `transactions_reconcile.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (283)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
 - Compose topology (one service since 3.0.0):
