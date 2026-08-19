@@ -202,27 +202,41 @@ export function budgetCategoryMap(
   return m;
 }
 
+/**
+ * Orden del presupuesto: bloques de categoría por total descendente, y dentro de cada bloque la
+ * partida manual primero y la **cuota de pasivo justo detrás** (3.7.0) — que es lo que hace que la
+ * cuota se lea como una segunda línea de su categoría en vez de como un bloque aparte.
+ *
+ * Las cuotas de pasivos sin categoría de gasto asignada (anteriores a 3.4.0) no tienen bloque: se
+ * agrupan bajo la clave vacía y caen al final de la lista, nunca se descartan.
+ */
 export function sortBudgetEntriesMacStyle(
   entries: BudgetEntryApiRow[],
   categoryById: Map<string, CategoryRow>,
 ): BudgetEntryApiRow[] {
   const monthlyEq = (e: BudgetEntryApiRow) =>
     Number(String(e.amount).replace(",", "."));
+  const catKey = (e: BudgetEntryApiRow) => e.category_id ?? "";
   const byCatTotal = new Map<string, number>();
   for (const e of entries) {
-    const k = e.category_id;
+    const k = catKey(e);
     byCatTotal.set(k, (byCatTotal.get(k) ?? 0) + monthlyEq(e));
   }
   const catName = (id: string) => categoryById.get(id)?.name ?? id;
+  const sourceRank = (e: BudgetEntryApiRow) =>
+    e.source === "liability" ? 1 : 0;
   return [...entries].sort((a, b) => {
-    const ta = byCatTotal.get(a.category_id) ?? 0;
-    const tb = byCatTotal.get(b.category_id) ?? 0;
+    const ka = catKey(a);
+    const kb = catKey(b);
+    if ((ka === "") !== (kb === "")) return ka === "" ? 1 : -1;
+    const ta = byCatTotal.get(ka) ?? 0;
+    const tb = byCatTotal.get(kb) ?? 0;
     if (tb !== ta) return tb - ta;
-    const cmp = catName(a.category_id).localeCompare(
-      catName(b.category_id),
-      "es",
-    );
+    const cmp = catName(ka).localeCompare(catName(kb), "es");
     if (cmp !== 0) return cmp;
+    const sa = sourceRank(a);
+    const sb = sourceRank(b);
+    if (sa !== sb) return sa - sb;
     const ea = monthlyEq(a);
     const eb = monthlyEq(b);
     if (eb !== ea) return eb - ea;

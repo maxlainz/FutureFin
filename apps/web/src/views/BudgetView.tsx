@@ -20,7 +20,6 @@ import {
   parseDisplayDecimal,
 } from "../lib/format";
 import {
-  PAYMENT_FREQ_LABEL,
   budgetCategoryMap,
   type LedgerPersonScope,
   sortBudgetEntriesMacStyle,
@@ -35,8 +34,14 @@ const BUDGET_SCOPE_LABEL: Record<BudgetScopeToggle, string> = {
   expense: "Gasto",
 };
 
-function budgetDerivedCatLabel(categories: CategoryRow[], id: string): string {
-  return categories.find((x) => x.id === id)?.name ?? id.slice(0, 8);
+/** Etiqueta de la categoría de una partida. Solo una cuota de pasivo anterior a la 3.4.0 puede
+ *  venir sin categoría: se marca en vez de esconderse, porque sí cuenta en el total. */
+function budgetEntryCatLabel(
+  categoryById: Map<string, CategoryRow>,
+  row: BudgetEntryApiRow,
+): string {
+  if (!row.category_id) return "Sin categoría";
+  return categoryById.get(row.category_id)?.name ?? row.category_id.slice(0, 8);
 }
 
 export function BudgetView({
@@ -53,7 +58,6 @@ export function BudgetView({
   budgetLoading,
   budgetIncomeCategories,
   budgetExpenseCategories,
-  budgetLiabilityCategories,
   budgetFormScope,
   setBudgetFormScope,
   budgetFormCategoryId,
@@ -113,7 +117,6 @@ export function BudgetView({
   budgetLoading: boolean;
   budgetIncomeCategories: CategoryRow[];
   budgetExpenseCategories: CategoryRow[];
-  budgetLiabilityCategories: CategoryRow[];
   budgetFormScope: BudgetScopeToggle;
   setBudgetFormScope: Dispatch<SetStateAction<BudgetScopeToggle>>;
   budgetFormCategoryId: string;
@@ -182,8 +185,6 @@ export function BudgetView({
       ? sortBudgetEntriesMacStyle(budgetEntriesRaw, categoryMapForSort)
       : [];
 
-  const derivedLines = budgetSnapshot?.derived_from_liabilities ?? [];
-
   const formCats =
     budgetFormScope === "income"
       ? budgetIncomeCategories
@@ -217,7 +218,10 @@ export function BudgetView({
     : 0;
 
   const incomeEntries = sortedEntries.filter((e) => e.scope === "income");
+  // Incluye las cuotas de pasivo (`source === "liability"`), que el servidor sirve como una
+  // partida de gasto más desde la 3.7.0 y el orden coloca detrás de la manual de su categoría.
   const expenseEntries = sortedEntries.filter((e) => e.scope === "expense");
+  const hasQuotaEntries = expenseEntries.some((e) => e.source === "liability");
 
   return (
     <div className="workspace budget-page">
@@ -676,8 +680,7 @@ export function BudgetView({
                           }
                         >
                           <td>
-                            {categoryMapForSort.get(row.category_id)?.name ??
-                              row.category_id.slice(0, 8)}
+                            {budgetEntryCatLabel(categoryMapForSort, row)}
                           </td>
                           <td className="num">
                             {formatCurrencyAmount(row.amount, currencyIso)}
@@ -748,7 +751,7 @@ export function BudgetView({
                       <tr>
                         <th>Categoría</th>
                         <th className="num">Importe mensual</th>
-                        {canEdit ? (
+                        {!isMobile && canEdit ? (
                           <th className="asset-actions-cell">
                             <span className="sr-only">Acciones</span>
                           </th>
@@ -757,7 +760,10 @@ export function BudgetView({
                     </thead>
                     <tbody>
                       {expenseEntries.map((row) => {
-                        const rowTappable = isMobile && canEdit;
+                        // La cuota deriva del plan de pago del pasivo: no es editable aquí, así
+                        // que ni abre el modal en móvil ni ofrece acciones en escritorio.
+                        const isQuota = row.source === "liability";
+                        const rowTappable = isMobile && canEdit && !isQuota;
                         return (
                           <tr
                             key={row.id}
@@ -779,8 +785,15 @@ export function BudgetView({
                             }
                           >
                             <td>
-                              {categoryMapForSort.get(row.category_id)?.name ??
-                                row.category_id.slice(0, 8)}
+                              {budgetEntryCatLabel(categoryMapForSort, row)}
+                              {isQuota ? (
+                                <span
+                                  className="chip budget-quota-chip"
+                                  title="Cuota del plan de pago de un pasivo. Se edita en Pasivos."
+                                >
+                                  Cuota · {row.label}
+                                </span>
+                              ) : null}
                             </td>
                             <td className="num">
                               {formatCurrencyAmount(row.amount, currencyIso)}
@@ -792,26 +805,28 @@ export function BudgetView({
                             </td>
                             {!isMobile && canEdit ? (
                               <td className="asset-actions-cell">
-                                <div className="budget-row-actions">
-                                  <button
-                                    type="button"
-                                    className="btn ghost icon-btn"
-                                    aria-label="Editar línea"
-                                    disabled={budgetSaving}
-                                    onClick={() => beginEditBudgetEntry(row)}
-                                  >
-                                    <RowEditIcon />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="btn ghost danger icon-btn"
-                                    aria-label="Eliminar línea"
-                                    disabled={budgetSaving}
-                                    onClick={() => deleteBudgetEntryRow(row.id)}
-                                  >
-                                    <RowTrashIcon />
-                                  </button>
-                                </div>
+                                {isQuota ? null : (
+                                  <div className="budget-row-actions">
+                                    <button
+                                      type="button"
+                                      className="btn ghost icon-btn"
+                                      aria-label="Editar línea"
+                                      disabled={budgetSaving}
+                                      onClick={() => beginEditBudgetEntry(row)}
+                                    >
+                                      <RowEditIcon />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn ghost danger icon-btn"
+                                      aria-label="Eliminar línea"
+                                      disabled={budgetSaving}
+                                      onClick={() => deleteBudgetEntryRow(row.id)}
+                                    >
+                                      <RowTrashIcon />
+                                    </button>
+                                  </div>
+                                )}
                               </td>
                             ) : null}
                           </tr>
@@ -821,93 +836,12 @@ export function BudgetView({
                   </table>
                 </div>
               )}
-            </section>
-
-            <section className="panel budget-col">
-              <h3 className="panel-title">Derivado de pasivos</h3>
-              {derivedLines.length === 0 ? (
-                <p className="muted bordered-top">
-                  No hay cuotas derivadas en este momento.
-                </p>
-              ) : (
-                <div className="table-scroll bordered-top">
-                  <table className="assets-table">
-                    <thead>
-                      <tr>
-                        <th>Concepto</th>
-                        {isMobile ? null : <th>Categoría pasivo</th>}
-                        {isMobile ? null : <th>Categoría gasto</th>}
-                        {isMobile ? null : <th className="num">Cuota</th>}
-                        {isMobile ? null : <th>Frec.</th>}
-                        <th className="num">Equiv. mensual</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {derivedLines.map((row) => (
-                        <tr key={row.liability_id}>
-                          <td>
-                            {row.label}
-                            {isMobile ? (
-                              <span className="cell-subline">
-                                {budgetDerivedCatLabel(
-                                  budgetLiabilityCategories,
-                                  row.category_id,
-                                )}{" "}
-                                · {formatCurrencyAmount(row.amount, currencyIso)} ·{" "}
-                                {PAYMENT_FREQ_LABEL[row.frequency]}
-                              </span>
-                            ) : null}
-                          </td>
-                          {isMobile ? null : (
-                            <td>
-                              {budgetDerivedCatLabel(
-                                budgetLiabilityCategories,
-                                row.category_id,
-                              )}
-                            </td>
-                          )}
-                          {isMobile ? null : (
-                            <td>
-                              {row.expense_category_id ? (
-                                budgetDerivedCatLabel(
-                                  budgetExpenseCategories,
-                                  row.expense_category_id,
-                                )
-                              ) : (
-                                <span
-                                  className="muted"
-                                  title="Asigna la categoría de gasto en Pasivos para que Movimientos empareje la cuota."
-                                >
-                                  Sin asignar
-                                </span>
-                              )}
-                            </td>
-                          )}
-                          {isMobile ? null : (
-                            <td className="num">
-                              {formatCurrencyAmount(row.amount, currencyIso)}
-                            </td>
-                          )}
-                          {isMobile ? null : (
-                            <td>{PAYMENT_FREQ_LABEL[row.frequency]}</td>
-                          )}
-                          <td className="num">
-                            {formatCurrencyAmount(
-                              row.monthly_equivalent,
-                              currencyIso,
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              {derivedLines.length > 0 ? (
+              {hasQuotaEntries ? (
                 <p className="muted tight">
-                  Estas cuotas ya cuentan en el total y, con categoría de gasto
-                  asignada, en el presupuesto de esa categoría — no las
-                  dupliques como partida propia.
+                  Las líneas marcadas «Cuota» las genera el plan de pago de un
+                  pasivo y ya cuentan en el total. Se editan en{" "}
+                  <strong>Pasivos</strong>; no las dupliques como partida
+                  propia.
                 </p>
               ) : null}
             </section>

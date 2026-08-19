@@ -224,7 +224,7 @@ use utoipa::OpenApi;
         crate::handlers::summary::TypeTagBreakdownLine,
         crate::handlers::budget::BudgetSnapshotResponse,
         crate::handlers::budget::BudgetEntryResponse,
-        crate::handlers::budget::DerivedBudgetLineResponse,
+        crate::handlers::budget::BudgetEntrySource,
         crate::handlers::budget::BudgetTotalsResponse,
         crate::handlers::budget::CreateBudgetEntryBody,
         crate::handlers::budget::PatchBudgetEntryBody,

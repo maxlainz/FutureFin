@@ -384,9 +384,6 @@ export default function App() {
   const [budgetExpenseCategories, setBudgetExpenseCategories] = useState<
     CategoryRow[]
   >([]);
-  const [budgetLiabilityCategories, setBudgetLiabilityCategories] = useState<
-    CategoryRow[]
-  >([]);
   const [budgetLoading, setBudgetLoading] = useState(false);
   const [budgetError, setBudgetError] = useState<string | null>(null);
   const [budgetSaving, setBudgetSaving] = useState(false);
@@ -874,11 +871,10 @@ export default function App() {
     setBudgetLoading(true);
     setBudgetError(null);
     try {
-      const [budRes, incRes, expRes, libCatRes] = await Promise.all([
+      const [budRes, incRes, expRes] = await Promise.all([
         fetch(`/v1/budget${ledgerViewQs(ledgerPersonScope)}`, defaultFetchInit),
         fetch("/v1/categories?scope=income", defaultFetchInit),
         fetch("/v1/categories?scope=expense", defaultFetchInit),
-        fetch("/v1/categories?scope=liability", defaultFetchInit),
       ]);
 
       if (budRes.status === 403 || budRes.status === 404) {
@@ -890,9 +886,6 @@ export default function App() {
         setBudgetSnapshot({
           ...raw,
           entries: Array.isArray(raw.entries) ? raw.entries : [],
-          derived_from_liabilities: Array.isArray(raw.derived_from_liabilities)
-            ? raw.derived_from_liabilities
-            : [],
         });
       }
 
@@ -911,19 +904,10 @@ export default function App() {
       } else {
         setBudgetExpenseCategories((await expRes.json()) as CategoryRow[]);
       }
-
-      if (libCatRes.status === 403 || libCatRes.status === 404) {
-        setBudgetLiabilityCategories([]);
-      } else if (!libCatRes.ok) {
-        throw new Error(await errorMessageFromResponse(libCatRes));
-      } else {
-        setBudgetLiabilityCategories((await libCatRes.json()) as CategoryRow[]);
-      }
     } catch (e: unknown) {
       setBudgetSnapshot(null);
       setBudgetIncomeCategories([]);
       setBudgetExpenseCategories([]);
-      setBudgetLiabilityCategories([]);
       setBudgetError(e instanceof Error ? e.message : String(e));
     } finally {
       setBudgetLoading(false);
@@ -1153,9 +1137,6 @@ export default function App() {
           setRetirementBudgetSnapshot({
             ...raw,
             entries: Array.isArray(raw.entries) ? raw.entries : [],
-            derived_from_liabilities: Array.isArray(raw.derived_from_liabilities)
-              ? raw.derived_from_liabilities
-              : [],
           });
         }
         if (projRes) {
@@ -1590,7 +1571,6 @@ export default function App() {
       setBudgetSnapshot(null);
       setBudgetIncomeCategories([]);
       setBudgetExpenseCategories([]);
-      setBudgetLiabilityCategories([]);
       setBudgetError(null);
       setEditingBudgetEntryId(null);
       setBudgetFormScope("expense");
@@ -2512,9 +2492,12 @@ export default function App() {
   }
 
   function beginEditBudgetEntry(row: BudgetEntryApiRow) {
+    // Una cuota de pasivo no existe en `budget_entries`: PATCH/DELETE sobre su id darían 404. La
+    // tabla ya no ofrece la acción, y este guardarraíl impide que un futuro llamante la abra.
+    if (row.source === "liability") return;
     setEditingBudgetEntryId(row.id);
     setBudgetFormScope(row.scope);
-    setBudgetFormCategoryId(row.category_id);
+    setBudgetFormCategoryId(row.category_id ?? "");
     setBudgetFormAmount(formatEditableDecimalString(row.amount));
     setBudgetFormNotes(row.notes ?? "");
     setBudgetFormPersistsAfterRetirement(row.persists_after_retirement);
@@ -3313,7 +3296,6 @@ export default function App() {
             budgetLoading={budgetLoading}
             budgetIncomeCategories={budgetIncomeCategories}
             budgetExpenseCategories={budgetExpenseCategories}
-            budgetLiabilityCategories={budgetLiabilityCategories}
             budgetFormScope={budgetFormScope}
             setBudgetFormScope={setBudgetFormScope}
             budgetFormCategoryId={budgetFormCategoryId}

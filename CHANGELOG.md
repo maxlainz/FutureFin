@@ -6,6 +6,96 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-08-19
+
+### Changed — La cuota del pasivo es una partida más del presupuesto (**API breaking** de `/v1/budget`)
+
+- **El problema**: `GET /v1/budget` servía las cuotas de los pasivos en un bloque aparte
+  (`derived_from_liabilities`) que se sumaba por debajo del presupuesto en
+  `totals.expense_derived_monthly_equivalent`. Desde la 3.4.0 el pasivo ya declara su
+  **categoría de gasto** (`expense_category_id`) y la comparativa de Movimientos empareja ahí su
+  recibo real, así que el bloque había dejado de tener razón de ser: era el único sitio donde la
+  cuota se leía como «algo que se añade al presupuesto» en vez de como gasto presupuestado. Y
+  arrastraba una incoherencia visible desde fuera — `expense_total_monthly_equivalent` existía en
+  `/v1/budget` y en `/v1/summary` midiendo cosas distintas (en los modos B/C el de summary es el
+  gasto real promedio, mientras el de budget sumaba una componente derivada que summary ya no
+  usaba), sin forma de saber cuál era la buena.
+- **La solución (formulación del owner)**: el bloque derivado **deja de existir como concepto de
+  flujo**. Las cuotas de los pasivos activos entran en `entries` como una partida de gasto más,
+  atribuida a la categoría de gasto que declara el pasivo, **no editable** para no confundirse con
+  la partida que el usuario presupueste en esa misma categoría. Presupuesto y realidad siguen sin
+  cuadrar — eso es la información de valor, no un bug — pero ya no hay dos conceptos de gasto.
+- **Contrato nuevo de `GET /v1/budget`**: cada `entries[]` trae `source` (`"manual"` |
+  `"liability"`); una cuota añade `liability_id` y `label`, su `id` es el del pasivo, su
+  `category_id` es el `expense_category_id` del pasivo, su `amount` es el **equivalente mensual**
+  del plan (`weekly` → ×52/12) y su `expense_end_date` es el fin del plan. `PATCH`/`DELETE
+  /v1/budget/entries/{id}` sobre una cuota devuelven 404: se editan con `PATCH /v1/liabilities/{id}`.
+- **Breaking**: se retiran `derived_from_liabilities` y `totals.expense_derived_monthly_equivalent`
+  de `/v1/budget`, y `entries[].category_id` pasa a **opcional**. `expense_regular_monthly_equivalent`
+  absorbe las cuotas (es ya la suma exacta de los `entries` de gasto) y
+  `expense_total_monthly_equivalent` vale lo mismo. **Ninguna cifra de cabecera se mueve**: el
+  gasto total y el neto del presupuesto son los de siempre — la fusión reparte, no suma.
+- **Pasivos sin categoría de cuota asignada** (anteriores a la 3.4.0, y los que importa un
+  `.ffbackup` viejo): su partida **sigue existiendo y sigue sumando**, omitiendo `category_id` y
+  marcada «Sin categoría de cuota» en la UI, al final de la lista. Descartarlas habría bajado el
+  gasto presupuestado en silencio — el modo de fallo caro de este repo.
+- **El engine NO cambia** (cero diffs en `crates/engine`, cero en la base de gasto de la
+  proyección). `ledger_regular_monthly_income_and_expense` sigue devolviendo solo lo persistido:
+  el engine cobra la cuota por su lado (`ProjectionLiabilityInput::monthly_payment`, con
+  amortización y fecha fin), así que fundirla también ahí la contaría dos veces en todo el
+  horizonte del modo A, en silencio. Clavado con cifras predichas a mano por
+  `liability_quota_stays_out_of_the_engine_expense_base` (`monthly_delta_assumption` = 3.000 −
+  1.000 = **2.000**, no 1.800; y NW(12) = 2.000·12 − 100.000 = **−76.000**, la cuota cobrada una
+  sola vez).
+- `expense_retirement_monthly_equivalent` tampoco recibe la cuota: termina con su plan de pago, así
+  que no es gasto post-jubilación. Es el campo que alimenta la previa FIRE de `RetirementView`, con
+  incidente propio (v1.3.0, divergencia 2–3×).
+
+### Changed — `/v1/summary`: tres campos quedan degenerados (contrato intacto)
+
+- `expense_derived_monthly_equivalent` pasa a ser **0 en los tres modos** (antes ya lo era en B/C
+  por la reforma 3.4.0; ahora también en A, porque la cuota vive dentro del gasto del presupuesto),
+  y `monthly_net_excluding_derived_debt` / `savings_rate_excluding_derived_debt` pasan a ser
+  **idénticos** a `net_monthly_equivalent` / `savings_rate`: ya no queda deuda derivada que
+  excluir. Los tres se **mantienen** en el JSON por compatibilidad — no son breaking.
+- Ninguna cifra de cabecera se mueve en ningún modo: en A el gasto total sigue siendo el mismo
+  (cambia solo su reparto entre `expense_regular` y `expense_derived`) y en B/C nada cambia. La UI
+  del Resumen se adapta sola: el paréntesis «excluyendo deuda derivada» de las KPIs de ahorro solo
+  se pinta cuando los dos valores difieren, así que se apaga sin tocar una línea de frontend.
+
+### Changed — Presupuesto (UI)
+
+- Desaparece el panel «Derivado de pasivos». Las cuotas salen dentro de la tabla de **Gastos**,
+  cada una como **segunda línea de su categoría** (el orden coloca la partida manual primero y la
+  cuota justo detrás), con el distintivo «Cuota · <pasivo>», sin acciones de editar/borrar y sin
+  ser pulsables en móvil. Nota al pie cuando hay alguna, apuntando a Pasivos para editarlas.
+- Incidental, en la misma tabla: la cabecera de Gastos pintaba la columna de acciones en móvil
+  aunque el cuerpo no emite esa celda (columna de más sin nada debajo). Ahora usa la misma
+  condición que la tabla de Ingresos.
+- El presupuesto deja de pedir `/v1/categories?scope=liability`: solo lo usaba el bloque retirado
+  (una petición menos por carga de la pestaña).
+
+### MCP
+
+- **Tools actualizadas** (evaluación de paridad de `futurefin-mcp-parity` §1 → «tool actualizada»;
+  el catálogo sigue en **47**, sin altas ni bajas): `get_budget` hereda el contrato nuevo por la
+  core compartida, y su descripción —que hablaba de «cuotas derivadas» como bloque— pasa a
+  explicar `source` y que los totales ya incluyen las cuotas. `list_liabilities` menciona que la
+  cuota aparece además como partida en `get_budget`.
+
+### Tests
+
+- `budget_derived.rs` → **`budget_liability_quotas.rs`** (5 → 10 tests): forma de la partida y
+  convivencia con la manual de la misma categoría, totales sin componente derivada, la cuota fuera
+  de `expense_retirement_*`, **la cuota fuera de la base de gasto del engine**, el predicado de
+  pasivo activo intacto (fecha fin NULL, vencido, borde `>=`, sin plan), semanal ×52/12, scoping, y
+  la cuota sin `expense_category_id` que sigue sumando.
+- `summary_runway.rs`: actualizado el reparto de modo A (regular 1.000 → 1.200, derived 200 → 0)
+  con el total y el runway sin moverse — la evidencia de que la fusión no suma.
+- Nuevo `apps/web/src/lib/ledger.test.ts` (4 tests): el orden que coloca la cuota detrás de la
+  partida manual de su categoría, incluso cuando su importe es mayor, y manda al final las cuotas
+  sin categoría.
+
 ## [3.6.0] - 2026-08-19
 
 ### MCP — Disciplina de paridad con la API HTTP + cierre de la asimetría CRUD del ledger

@@ -21,8 +21,8 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-/// MVP aggregates (budget ↔ summary): monthly equivalents from budget entries + liability-derived lines,
-/// runway on liquid assets, raw sums for upcoming flows.
+/// Agregados budget ↔ summary: equivalentes mensuales del presupuesto (cuotas de pasivo ya
+/// incluidas dentro desde la 3.7.0), runway sobre los activos líquidos y sumas de Próximos.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str")]
@@ -31,16 +31,17 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_regular_monthly_equivalent: Decimal,
-    /// Cuotas mensuales derivadas de los pasivos **activos** (`payment_end_date` nula o futura).
-    /// En modo A son la línea derivada del presupuesto; en los modos B/C (con datos) es **0**: las
-    /// cuotas pagadas ya viven dentro del promedio real de gasto (reforma 3.4.0), así que no hay
-    /// componente derivada y `expense_total = expense_regular + expense_derived` sigue valiendo en
-    /// los tres modos.
+    /// **Siempre `0` desde la 3.7.0**, en los tres modos. Se mantiene por compatibilidad de
+    /// contrato: al fundirse las cuotas de pasivo dentro del presupuesto (ya no son un bloque que
+    /// se suma aparte), no queda ninguna componente «derivada» que reportar. En modo A la cuota
+    /// vive dentro de `expense_regular_monthly_equivalent`; en los modos B/C, dentro del promedio
+    /// real de gasto (reforma 3.4.0). La identidad
+    /// `expense_total = expense_regular + expense_derived` sigue valiendo — degenerada.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_derived_monthly_equivalent: Decimal,
-    /// Gasto mensual total: presupuesto regular + cuotas derivadas en modo A; **gasto real promedio
-    /// 12m crudo** (cuotas incluidas dentro) en los modos B/C con datos.
+    /// Gasto mensual total: el del presupuesto (cuotas de pasivo incluidas) en modo A; **gasto real
+    /// promedio 12m crudo** (cuotas incluidas dentro) en los modos B/C con datos.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_total_monthly_equivalent: Decimal,
@@ -52,7 +53,10 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub savings_rate: Option<Decimal>,
-    /// Income − recurring expenses (excludes liability-derived payment rows).
+    /// **Idéntico a `net_monthly_equivalent` desde la 3.7.0**, en los tres modos: ya no existe una
+    /// componente derivada que excluir (las cuotas son gasto del presupuesto como cualquier otro).
+    /// Se mantiene por compatibilidad; la UI del Resumen solo pinta su paréntesis cuando difiere de
+    /// su gemelo, así que se apaga sola.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub monthly_net_excluding_derived_debt: Decimal,
@@ -344,11 +348,16 @@ pub(crate) async fn summary_core(
 
     // Base presupuesto (modo A). Los modos B/C con datos sustituyen TODA la base de gasto por el
     // promedio real 12m (y el modo B también el income): `expense_reg` = promedio real crudo (las
-    // cuotas de pasivo ya van dentro), `expense_der` = 0 y `expense_tot` = el mismo promedio. El
-    // runway se calcula sobre `expense_tot`, así que también sigue el modo.
+    // cuotas de pasivo ya van dentro) y `expense_tot` = el mismo promedio. El runway se calcula
+    // sobre `expense_tot`, así que también sigue el modo.
+    //
+    // `expense_der` es 0 en los TRES modos desde la 3.7.0: en modo A porque el presupuesto ya trae
+    // la cuota dentro de `expense_regular_monthly_equivalent` (fusión de las partidas derivadas);
+    // en B/C porque el promedio real la contiene (reforma 3.4.0). Sumarla aquí volvería a ser el
+    // doble conteo que 3.4.0 quitó de los modos reales.
     let mut income_m = budget_totals.income_monthly_equivalent;
     let mut expense_reg = budget_totals.expense_regular_monthly_equivalent;
-    let mut expense_der = budget_totals.expense_derived_monthly_equivalent;
+    let expense_der = Decimal::ZERO;
     let mut expense_tot = budget_totals.expense_total_monthly_equivalent;
     let mut net_m = budget_totals.net_monthly_equivalent;
 
@@ -382,10 +391,9 @@ pub(crate) async fn summary_core(
         // promedio de gasto (los movimientos importados las contienen, amortización incluida), así
         // que NO se restan ni se vuelven a sumar como servicio de deuda. Los pasivos solo restan
         // su principal en `net_worth`. Se mantienen las dos identidades de siempre:
-        //   expense_total = expense_regular + expense_derived   (derived = 0 en modo real)
+        //   expense_total = expense_regular + expense_derived   (derived = 0 en los tres modos)
         //   net           = income − expense_total
         expense_reg = avg.expense_avg;
-        expense_der = Decimal::ZERO;
         expense_tot = avg.expense_avg;
         net_m = income_m - avg.expense_avg;
         effective_savings_source = source;

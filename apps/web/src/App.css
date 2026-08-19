@@ -590,6 +590,14 @@
   color: var(--ff-muted);
 }
 
+/* Marca de una partida derivada del plan de pago de un pasivo (3.7.0). Reutiliza `.chip`
+   (grayscale, tokens) — la cuota es una fila más del presupuesto, no un elemento a destacar:
+   nada de acento aquí (design-system §«Reglas para añadir UI nueva», regla 4). */
+.budget-quota-chip {
+  margin-left: 0.4rem;
+  white-space: nowrap;
+}
+
 .budget-row-actions {
   display: inline-flex;
   flex-wrap: nowrap;
