@@ -4,6 +4,63 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### MCP — Disciplina de paridad con la API HTTP + cierre de la asimetría CRUD del ledger
+
+- **El problema (deriva silenciosa, no un bug)**: el catálogo `/mcp` es una superficie
+  **derivada** de la API HTTP, pero nada obligaba a mantenerlo al día. Un endpoint nuevo podía
+  mergear sin que nadie se preguntara si merecía tool: no falla ningún test, `tools/list` sigue
+  pareciendo completo a cualquier tamaño, y el cliente MCP simplemente nunca se entera de que la
+  funcionalidad existe. La norma que sí existía (architecture-contract D14, «las tools llaman a
+  las mismas core fns») gobierna **cómo** se implementa una tool ya decidida — jamás **si** debe
+  existir. La auditoría ruta a ruta lo confirmó: ~83 % de cobertura sobre las rutas de datos
+  financieros, con los huecos concentrados exactamente en los handlers que aún no tenían `*_core`
+  extraída (la deuda era de la capa handler, no de la capa MCP).
+- **La norma nueva**: todo cambio de la superficie de API debe terminar en **exactamente uno** de
+  tres desenlaces — tool añadida/actualizada, omisión deliberada registrada, o n/a — nunca en
+  silencio. Vive en la skill nueva
+  [`futurefin-mcp-parity`](.claude/skills/futurefin-mcp-parity/SKILL.md), que posee el proceso y
+  el juicio (rúbrica de pertinencia, registro de omisiones deliberadas y de gaps pendientes,
+  recipe paso a paso de añadir/actualizar una tool, contadores reproducibles) sin duplicar
+  ningún fact con dueño: D14 sigue siendo el porqué, `.claude/api-routes.md` §MCP el catálogo.
+  Anclada en los tres choke points por los que se pasa de verdad: `futurefin-change-control` §1
+  (clase «API contract») y su checklist pre-merge, `.claude/adding-handler.md` (paso 7 nuevo, más
+  el split extractor+`*_core` en Key patterns como prerrequisito) y la tabla de routing de
+  CLAUDE.md.
+- **`update_liability` (tool nueva)** — la asimetría que la auditoría destapó: el catálogo tenía
+  `create_liability` y `delete_liability` pero **no** editar. Ante «el TIN de mi hipoteca ha
+  bajado al 2,1 %» el agente solo tenía un camino: borrar y recrear, que pone a NULL el
+  `linked_liability_id` de todos los movimientos asociados y pierde el `expense_category_id` de
+  la cuota (3.4.0). Una tool ausente no es neutral: **empuja hacia la alternativa destructiva**.
+  Se extrae `patch_liability_core` del handler `PATCH /v1/liabilities/{id}` (merge campo a campo,
+  re-derivación del principal si `derive_principal_from_plan` sigue activo, invalidación FULL
+  dentro) y la tool la reutiliza — cero SQL nuevo.
+- **`update_asset` (tool nueva)**: `patch_asset_core` ya aceptaba el body completo, pero
+  `update_asset_value` escribía `None` en seis campos, así que por MCP no se podía renombrar un
+  activo, recategorizarlo ni marcarlo (i)líquido — y `is_liquid` no es cosmético: gobierna el
+  runway y el disparador SWR de `runway_is_indefinite`. `update_asset_value` se mantiene intacta
+  como subset de valoración (su descripción ahora remite a la hermana). El tri-state
+  omitir/null del PATCH, que un JSON Schema no puede expresar, se modela con
+  `clear_purchase_price` (precedentes: `clear_cap`, `clear_due_date`).
+- **Catálogo 45 → 47 tools**, ambas FULL y sin preview/confirm (editar campos no destruye filas).
+  Regresión: `update_asset_and_update_liability_share_cores_and_invalidate_full` en
+  `apps/api/tests/mcp_write.rs` (17 tests) cubre el cuarteto que este repo exige a toda tool de
+  escritura — core compartida (la fila editada por MCP es indistinguible por HTTP), contrato de
+  cache, error de dominio compartido y el toggle `mcp_write_enabled` cortándolas en vivo — más
+  el catálogo congelado en `mcp_http.rs`.
+- **Deriva documental corregida de paso** (todos los contadores congelados sin fecha de esta
+  biblioteca han estado mal al menos una vez — docs-and-writing §7): `.claude/api-routes.md`
+  decía «Tools de lectura (20)» sobre una enumeración de 10; `.claude/tests.md` decía que
+  `mcp_http.rs` congela «el catálogo de 19 tools de lectura» cuando congela las 47 completas; y
+  `futurefin-validation-and-qa` arrastraba cuatro filas ausentes (`mcp_write.rs`,
+  `mcp_simulate.rs`, `transactions_reconcile.rs`, `budget_derived.rs`), una fila de `mcp_http.rs`
+  que aún describía «the 10-tool catalog» y todos los totales una release atrás (206/23 → 284/27,
+  36 → 40 migraciones, engine 56 → 61, Vitest 309/12 → 321/13, `lib/navigation.test.ts` sin
+  documentar en ninguno de los dos sitios). Su tabla lleva ahora una nota permanente de que
+  `tests.md` gana en caso de desacuerdo. Los diez contadores por fichero de la tabla suman ahora
+  exactamente los 284 del código (`grep -c '#\[tokio::test\]' apps/api/tests/*.rs`).
+
 ## [3.5.0] - 2026-08-19
 
 ### Added — Conciliación de transferencias: nada se descarta, solo se oculta lo conciliado (arregla el gasto que desaparecía)
