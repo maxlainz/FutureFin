@@ -56,7 +56,12 @@ compose exec -T "$SERVICE" \
 echo "Backup OK ($(du -h "$outfile" | cut -f1))"
 
 echo "Retención: conservar últimos ${KEEP_BACKUPS} backups"
-mapfile -t files < <(ls -1t "${BACKUP_DIR}"/futurefin-postgres-*.sql.gz 2>/dev/null || true)
+# `mapfile` es de bash 4+: en el bash 3.2 que trae macOS la retención moría con
+# "mapfile: command not found" y los backups viejos se acumulaban en silencio.
+files=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] && files+=("$f")
+done < <(ls -1t "${BACKUP_DIR}"/futurefin-postgres-*.sql.gz 2>/dev/null || true)
 if (( ${#files[@]} > KEEP_BACKUPS )); then
   for ((i=KEEP_BACKUPS; i<${#files[@]}; i++)); do
     rm -f "${files[$i]}"

@@ -62,6 +62,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   documentar en ninguno de los dos sitios). Su tabla lleva ahora una nota permanente de que
   `tests.md` gana en caso de desacuerdo. Los diez contadores por fichero de la tabla suman ahora
   exactamente los 284 del código (`grep -c '#\[tokio::test\]' apps/api/tests/*.rs`).
+### Fixed — `restore-postgres.sh` abortaba en macOS antes de tocar la base
+
+- **Encontrado ejecutando el drill C de la release** (restore real, exigido por llevar migración
+  nueva): `scripts/restore-postgres.sh` moría en el paso 1/6 con `SERVICE…: unbound variable`. La
+  causa: `"$SERVICE…"` pega el carácter `…` (multibyte) al nombre de la variable y el **bash 3.2
+  que trae macOS** se traga esos bytes dentro del identificador; con `set -u` eso es un aborto. En
+  Linux (bash 5) funcionaba, así que el fallo solo aparecía restaurando desde el Mac — justo el
+  escenario de «me llevo el backup a casa». Arreglado con `${SERVICE}…` / `${POSTGRES_DB}…`.
+- **`backup-postgres.sh`**: `mapfile` también es de bash 4+, así que en macOS la retención fallaba
+  con `mapfile: command not found` **después** de escribir el backup — el dump salía bien y los
+  backups viejos se acumulaban en silencio. Sustituido por un `while read` portable.
+- Sin cambios de comportamiento en Linux. `shellcheck -S warning` limpio sobre entrypoint y
+  scripts; drill C re-ejecutado de punta a punta: censo antes = censo después (2 transacciones,
+  1 rechazo, 1 usuario, 40 migraciones) y el stack vuelve a `/v1/ready`.
+
 - **Nota de publicación**: 3.5.0 se cerró en este CHANGELOG pero nunca llegó a tener tag ni
   imagen — las dos tools llegaron antes de publicarla. 3.6.0 es por tanto la primera imagen del
   tren y **contiene también toda la 3.5.0** (conciliación de transferencias incluida); no existe
