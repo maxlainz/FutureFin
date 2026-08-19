@@ -445,3 +445,88 @@ async fn daily_resolution_produces_daily_grid() {
     assert_eq!(last, today, "último punto de la rejilla = hoy");
     assert_eq!((last - prev).num_days(), 1, "paso diario");
 }
+
+// ---------------------------------------------------------------------------
+// 6. Conciliación (3.5.0): months[] excluye conciliadas; la curva fina NO
+// ---------------------------------------------------------------------------
+
+/// EL TEST DE LA ASIMETRÍA. Un traspaso conciliado (pata −500 importada con `account_asset_id`,
+/// contrapartida manual +500 a 2 días) debe:
+///   - desaparecer de `months[]` (no es gasto ni ingreso), y
+///   - seguir moldeando la curva fina EXACTAMENTE igual que en
+///     `fine_series_passes_through_snapshots_and_is_shaped` (el saldo de la cuenta bajó de
+///     verdad): mismos números predichos 1187.5 (antes del cargo) y 750 (en el cargo).
+/// Si alguien «arregla» la curva fina excluyendo conciliadas, este test cae — a propósito.
+#[tokio::test]
+async fn reconciled_excluded_from_months_but_not_from_fine_curve() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cuenta").await;
+    let (today, _anchor) = server_anchor(&app, &owner.cookie).await;
+
+    let created = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({ "category_id": cat, "name": "Cuenta N26", "current_value": "1000" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let asset_id = created.json()["id"].as_str().unwrap().to_string();
+
+    let d1 = today - Duration::days(70);
+    let d2 = today - Duration::days(14);
+    let charge_date = today - Duration::days(42); // punto de rejilla weekly (−6 semanas).
+    let counterpart_date = today - Duration::days(40); // Δ = 2 días → auto-conciliable.
+    backfill(&app, &owner, "asset", d1,
+        json!([{ "item_id": asset_id, "label": "Cuenta N26", "value": "1000" }])).await;
+    backfill(&app, &owner, "asset", d2,
+        json!([{ "item_id": asset_id, "label": "Cuenta N26", "value": "1000" }])).await;
+
+    // Contrapartida manual +500 primero; el confirm del import cruza toda la BD y las concilia.
+    let in_leg = manual_txn(&app, &owner, counterpart_date, "500", "income", json!({})).await;
+    import_one_row_myinvestor(&app, &owner, charge_date, "-500", &asset_id).await;
+
+    // Precondición: el par quedó conciliado (la pata manual apunta a la importada).
+    let month_qs = counterpart_date.format("%Y-%m").to_string();
+    let list = app
+        .get_with_cookie(&format!("/v1/transactions?month={month_qs}"), &owner.cookie)
+        .await
+        .json();
+    let in_leg_now = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == in_leg["id"])
+        .expect("pata manual en el listado")
+        .clone();
+    assert!(
+        in_leg_now["transfer_counterpart_id"].is_string(),
+        "precondición: par conciliado tras el import: {in_leg_now:?}"
+    );
+
+    let (body, _, _) = get_cashflow(&app, &owner.cookie, "?window_months=6").await;
+
+    // months[]: ni el −500 (expense) ni el +500 (income) cuentan.
+    let mi_of = |d: NaiveDate| -> i32 {
+        (d.year() - today.year()) * 12 + (d.month() as i32 - today.month() as i32)
+    };
+    assert_eq!(month_at(&body, mi_of(charge_date))["expense"], "0.00", "pata de salida excluida");
+    assert_eq!(month_at(&body, mi_of(counterpart_date))["income"], "0.00", "pata de entrada excluida");
+
+    // Curva fina: MISMOS números que el test sin conciliar — el saldo real de la cuenta manda.
+    let fine = body.get("fine").expect("fine presente (vínculo + snapshots)");
+    let grid = fine["grid"].as_array().unwrap();
+    let values = fine["asset_series"].as_array().unwrap()[0]["values"].as_array().unwrap();
+    let idx_of = |date: NaiveDate| -> usize {
+        grid.iter()
+            .position(|p| ymd(&p["date_ymd"]) == date)
+            .unwrap_or_else(|| panic!("fecha {date} no está en la rejilla"))
+    };
+    let val = |date: NaiveDate| -> f64 { values[idx_of(date)].as_f64().unwrap() };
+    assert_close(val(d1), 1000.0, "fine en d1 = Va");
+    assert_close(val(d2), 1000.0, "fine en d2 = Vb");
+    let before = today - Duration::days(49);
+    assert_close(val(before), 1187.5, "interior antes del cargo (la conciliada sigue moldeando)");
+    assert_close(val(charge_date), 750.0, "interior en el cargo (salto por el delta conciliado)");
+}

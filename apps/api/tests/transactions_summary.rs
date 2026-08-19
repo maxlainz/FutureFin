@@ -477,3 +477,109 @@ async fn summary_null_expense_category_is_status_quo() {
     let b = app.get_with_cookie("/v1/transactions/summary", &owner.cookie).await.json();
     approx(parse_dec(&b["totals"]["expense_budget"]), 120.0); // sin atribución → solo Luz
 }
+
+// ---------------------------------------------------------------------------
+// Conciliación de transferencias (3.5.0): las conciliadas no son gasto ni ingreso
+// ---------------------------------------------------------------------------
+
+/// Un par conciliado (−500/+500 a 2 días) desaparece de los totales del mes; al desconciliarlo
+/// vuelve. Predicho: gasto 800 → 1300, ingreso 2000 → 2500.
+#[tokio::test]
+async fn reconciled_excluded_from_month_totals() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -2);
+
+    manual(&app, &owner.cookie, &date_in(sy, sm, 1), "Sueldo", "2000", "income", None).await;
+    manual(&app, &owner.cookie, &date_in(sy, sm, 5), "Alquiler", "-800", "expense", None).await;
+    // Par de transferencia: salida −500 (día 10) + entrada +500 (día 12) → auto-conciliado.
+    manual(&app, &owner.cookie, &date_in(sy, sm, 10), "Traspaso salida", "-500", "expense", None).await;
+    manual(&app, &owner.cookie, &date_in(sy, sm, 12), "Traspaso entrada", "500", "income", None).await;
+
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=3");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+    approx(parse_dec(&b["totals"]["expense_actual"]), 800.0); // el −500 conciliado NO cuenta
+    approx(parse_dec(&b["totals"]["income_actual"]), 2000.0); // el +500 conciliado NO cuenta
+    approx(parse_dec(&b["totals"]["net_actual"]), 1200.0);
+
+    // Desconciliar → ambas patas vuelven a los totales.
+    let list = app
+        .get_with_cookie(&format!("/v1/transactions?month={sy}-{sm:02}"), &owner.cookie)
+        .await
+        .json();
+    let out_leg = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["concept"] == "Traspaso salida")
+        .unwrap()
+        .clone();
+    assert!(out_leg["transfer_counterpart_id"].is_string(), "precondición: conciliada");
+    let u = app
+        .delete_with_cookie(
+            &format!("/v1/transactions/{}/reconcile", out_leg["id"].as_str().unwrap()),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(u.status, http::StatusCode::OK, "unreconcile: {u:?}");
+
+    let b2 = app.get_with_cookie(&url, &owner.cookie).await.json();
+    approx(parse_dec(&b2["totals"]["expense_actual"]), 1300.0);
+    approx(parse_dec(&b2["totals"]["income_actual"]), 2500.0);
+    approx(parse_dec(&b2["totals"]["net_actual"]), 1200.0); // el neto no cambia: el par suma cero
+}
+
+/// Un mes cuyo único contenido es un par conciliado NO cuenta en `months_with_data` (misma lógica
+/// que los meses pseudovacíos): denominador 1 (solo sel−2), avg de Super = 200/1 = 200.
+#[tokio::test]
+async fn reconciled_only_month_not_counted_in_months_with_data() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -2);
+    let (y1, m1) = shift_month(sy, sm, -1);
+    let (y2, m2) = shift_month(sy, sm, -2);
+
+    manual(&app, &owner.cookie, &date_in(sy, sm, 5), "Super mes sel", "-100", "expense", Some(&super_cat)).await;
+    // sel−1: SOLO un par conciliado.
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Salida", "-300", "expense", None).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Entrada", "300", "income", None).await;
+    // sel−2: gasto real.
+    manual(&app, &owner.cookie, &date_in(y2, m2, 8), "Super real", "-200", "expense", Some(&super_cat)).await;
+
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=3");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+    assert_eq!(b["months_with_data"].as_u64(), Some(1), "el mes solo-conciliadas no cuenta: {b:?}");
+    approx(parse_dec(&line(&b["expense_categories"], "Super")["avg"]), 200.0);
+}
+
+/// La serie mensual por categoría excluye las conciliadas: Super real −100 + pata −40 conciliada
+/// (con categoría) → el punto del mes vale 100, no 140.
+#[tokio::test]
+async fn reconciled_excluded_from_category_series() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+    let today = server_today(&app, &owner.cookie).await;
+    let d1 = date_in(today.year(), today.month(), 1);
+
+    manual(&app, &owner.cookie, &d1, "Super real", "-100", "expense", Some(&super_cat)).await;
+    // Par conciliado cuya pata de salida lleva categoría Super (la categoría se conserva pero no cuenta).
+    manual(&app, &owner.cookie, &d1, "Traspaso salida", "-40", "expense", Some(&super_cat)).await;
+    manual(&app, &owner.cookie, &d1, "Traspaso entrada", "40", "income", None).await;
+
+    let resp = app
+        .get_with_cookie("/v1/transactions/category-series?kind=expense&window_months=1", &owner.cookie)
+        .await;
+    assert_eq!(resp.status, http::StatusCode::OK, "series: {resp:?}");
+    let b = resp.json();
+    let series = b["series"].as_array().unwrap();
+    let super_entry = series
+        .iter()
+        .find(|s| s["category_name"] == "Super")
+        .unwrap_or_else(|| panic!("no Super series: {b:?}"));
+    let months = super_entry["months"].as_array().unwrap();
+    approx(parse_dec(&months.last().unwrap()["total"]), 100.0);
+}

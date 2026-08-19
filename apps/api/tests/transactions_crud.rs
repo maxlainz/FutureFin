@@ -465,3 +465,54 @@ async fn delete_import_cascades_and_requires_confirm() {
     assert_eq!(app.count_rows("transactions").await, 0, "cascade a transacciones");
     assert_eq!(app.count_rows("transaction_imports").await, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Conciliación (3.5.0): los listados NO filtran conciliadas
+// ---------------------------------------------------------------------------
+
+/// Un mes cuyo único contenido es un par conciliado sigue apareciendo en `/months` (con sus 2
+/// filas) y en el listado — la exclusión es SOLO de agregados de flujo. Si `/months` filtrara,
+/// el selector ocultaría un mes cuyas filas sí se listan → estado imposible en la UI.
+#[tokio::test]
+async fn list_months_counts_reconciled_rows() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // Par −80/+80 a 1 día → auto-conciliado en el alta de la segunda pata.
+    let r1 = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-03-10", "concept": "Salida", "amount": "-80", "kind": "expense" }),
+    )
+    .await;
+    assert_eq!(r1.status, http::StatusCode::CREATED);
+    let r2 = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-03-11", "concept": "Entrada", "amount": "80", "kind": "income" }),
+    )
+    .await;
+    assert!(r2.json()["transfer_counterpart_id"].is_string(), "precondición: conciliadas");
+
+    let months = app.get_with_cookie("/v1/transactions/months", &owner.cookie).await.json();
+    let march = months
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["month"] == "2026-03")
+        .unwrap_or_else(|| panic!("mes solo-conciliadas ausente del selector: {months:?}"));
+    assert_eq!(march["txn_count"].as_i64(), Some(2), "las dos patas cuentan en el selector");
+
+    // Y el listado del mes las devuelve, con los campos de contrapartida presentes.
+    let list = app
+        .get_with_cookie("/v1/transactions?month=2026-03", &owner.cookie)
+        .await
+        .json();
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "conciliadas visibles en el listado");
+    for t in rows {
+        assert!(t["transfer_counterpart_id"].is_string());
+        assert_eq!(t["transfer_reconciled_source"], "auto");
+        assert!(t["transfer_counterpart_concept"].is_string());
+        assert!(t["transfer_counterpart_op_date"].is_string());
+    }
+}
