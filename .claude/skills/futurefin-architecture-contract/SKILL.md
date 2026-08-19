@@ -272,12 +272,15 @@ C added Unreleased).** The blanket "transactions are never a projection input" r
 `fire_settings.savings_source = budget` (mode A, the default — unchanged, still guarded by
 `transactions_projection_cache.rs`). In the **modes that use transactions** — `transactions_avg` (mode B)
 and `budget_income_real_expense` (mode C), i.e. `SavingsSource::uses_transactions()` — the projection
-derives the monthly saving from the **weighted 12-month average** of transactions
+derives the monthly saving from the **weighted 12-month average** of **non-reconciled** transactions
 (`transactions_12m_avg`, raw since the 3.4.0 reform — paid cuotas count as ordinary spending and
 liabilities only subtract their principal from net worth; mode C keeps the budget income and only takes
-the real expense), so **transactions ARE an engine input** and every mutation that changes the
+the real expense; since 3.5.0 reconciled transfer legs — `transfer_counterpart_id IS NOT NULL` — are
+excluded from numerator AND denominator: an internal transfer is not income or expense), so
+**transactions ARE an engine input** and every mutation that changes the
 transaction set (`crud.rs` create/batch/patch/delete + delete_import, `import.rs` confirm, `recurring.rs`
-materialize) **must** invalidate the projection cache — via
+materialize, and since 3.5.0 `reconcile.rs` — reconciling/unreconciling changes WHAT counts in the
+average) **must** invalidate the projection cache — via
 `invalidate_projection_if_savings_uses_transactions` (mod.rs), which reads
 `projection_savings_source(pool, iid)`, checks `uses_transactions()`, and only then calls
 `refresh_projection_after_mutation`. It is **best-effort post-commit**: the write is already persisted, so

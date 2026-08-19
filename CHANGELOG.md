@@ -4,6 +4,64 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [3.5.0] - 2026-08-19
+
+### Added — Conciliación de transferencias: nada se descarta, solo se oculta lo conciliado (arregla el gasto que desaparecía)
+
+- **El bug (reporte del owner)**: las transferencias se ELIMINABAN del gasto aunque fueran gasto
+  real. La raíz: la marca «transferencia» solo existía como sugerencia efímera del preview del
+  import (`suggested_transfer`, heurística por tokens `TRANSFERENCIA/TRASPASO/AHORRO/…` o par
+  opuesto dentro del MISMO CSV), la UI desmarcaba esas filas por defecto y el confirm las
+  descartaba **antes del INSERT** — sin dejar huella. El alquiler pagado por transferencia, un
+  envío a un tercero: fuera del gasto, en silencio, y re-ofrecidos como «nuevos» en cada
+  re-import. No existía conciliación alguna entre extractos distintos.
+- **El modelo nuevo (conciliar ≠ borrar)**: todas las filas se importan con su kind natural. Un
+  movimiento solo deja de contar como gasto/ingreso cuando está **CONCILIADO** con su
+  contrapartida — la otra pata del mismo traspaso, normalmente de otro extracto. El **pase
+  automático** (determinista, punto fijo) empareja importes exactamente opuestos, misma divisa,
+  mismo usuario, a **≤5 días**, cruzando TODA la base tras cada mutación y tras cada import
+  (`ImportConfirmResponse.reconciled_pairs`); también bajo demanda con
+  `POST /v1/transactions/reconcile` (botón «Conciliar ahora»). Conciliado ⇒ **visible** en
+  Movimientos con badge «Conciliada» (contrapartida en el tooltip), **excluido** de: totales del
+  mes, comparativa por categoría, `MIN(op_date)` de la ventana «Todo», serie por categoría,
+  promedio real 12m del engine (modos B/C — numerador Y denominador: un mes solo-conciliadas es
+  un mes vacío) y `months[]` del cashflow.
+- **Asimetría deliberada del cashflow**: la curva fina **SÍ** cuenta las conciliadas — modela el
+  SALDO de cada cuenta y un traspaso interno mueve saldo real; excluirlas haría divergir la curva
+  de los snapshots anclados (test `reconciled_excluded_from_months_but_not_from_fine_curve`).
+- **Desconciliar como válvula**: un falso positivo (p. ej. un reembolso que casualmente cuadra a
+  ≤5 días — esperado y documentado) se rompe con «Desconciliar» (modal de edición /
+  `DELETE /v1/transactions/{id}/reconcile`) y queda **rechazado**: el pase automático no lo
+  resucita (`transfer_match_rejections`). Un PATCH que cambia importe/fecha rompe el par SIN
+  rechazo (revertir re-empareja); borrar una pata desconcilia la otra
+  (`transfer_counterpart_id`, self-FK `ON DELETE SET NULL` — migración
+  `20260819120000_transactions_transfer_reconciliation.sql`, aditiva pura). Conciliación manual
+  de un par por API (`POST /v1/transactions/{id}/reconcile`): sin ventana de fecha, pero exige
+  importes exactamente opuestos — conciliar jamás altera el neto del hogar.
+- **Vía retroactiva**: las filas descartadas en su día no dejaron huella → **re-importar los
+  CSVs antiguos** las recupera (las ya importadas se detectan como duplicadas) y el pase las
+  concilia contra lo que ya haya; «Conciliar ahora» cubre los pares que ya estuvieran metidos a
+  mano. Letra pequeña de la pata `savings`: si importas AMBAS cuentas de una aportación, sus dos
+  patas se concilian y `savings_actual` baja — la subida del activo sigue visible por snapshots
+  y curva fina; desconcilia si prefieres contarla.
+- **Cambio de comportamiento del import (no de contrato)**: las filas sugeridas como
+  transferencia llegan **marcadas** al preview (el hint «Transferencia» se mantiene, ya
+  informativo) y el descarte explícito sigue disponible. `suggested_transfer` no cambia de forma.
+- **MCP**: tools nuevas `reconcile_transfers` y `unreconcile_transfer` (catálogo 43 → **45**),
+  mismas cores que HTTP; `list_transactions` expone los campos de conciliación.
+- **Backup `.ffbackup` v7 → v8**: las transacciones llevan su par por índice
+  (`transfer_counterpart_index`, simétrico) y el payload añade `transfer_match_rejections` — sin
+  exportar los rechazos, un restore los resucitaría todos en el primer pase. Import en tres
+  pasadas (la self-FK puede apuntar hacia delante); un backup ≤v7 importa intacto y el pase
+  post-import re-concilia retroactivamente sus pares. Cadena v1→…→v8 completa.
+- **Cache de proyección**: conciliar/desconciliar cambia qué cuenta en el promedio → invalida
+  COND (solo modos B/C); un pase sin pares nuevos no tira la cache caliente. Regresión ampliada
+  en `transactions_projection_cache.rs`.
+- **Tests**: suite nueva `transactions_reconcile.rs` (19) + regresión en import/summary/
+  savings_source/cashflow/backup/MCP con números predichos antes de ejecutar (p. ej. modo B:
+  delta 2000 conciliado → 1000 al desconciliar; curva fina 1187.5/750 idéntica con y sin
+  conciliar).
+
 ## [3.4.0] - 2026-08-18
 
 ### Added — Categoría de gasto de la cuota: el pasivo publica su cuota en el presupuesto (arregla el Δ rojo de Movimientos)
