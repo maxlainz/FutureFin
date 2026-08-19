@@ -770,3 +770,160 @@ async fn viewer_cannot_import_403() {
     let preview = import_preview(&app, &viewer.cookie, "AAAA").await;
     assert_eq!(preview.status, http::StatusCode::FORBIDDEN, "viewer preview must be 403: {preview:?}");
 }
+
+// ---------------------------------------------------------------------------
+// v8: conciliación de transferencias en el backup
+// ---------------------------------------------------------------------------
+
+/// Roundtrip v8 completo: un par conciliado y un par RECHAZADO (desconciliado a mano) sobreviven
+/// a export → import. La aserción clave es la anti-resurrección: tras el restore, un pase
+/// explícito devuelve `pairs_created: 0` — el rechazo viajó dentro del backup.
+#[tokio::test]
+async fn v8_transfer_pairing_and_rejections_round_trip() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // Par conciliado A↔B (auto en el alta de la segunda pata).
+    let a = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({ "op_date": "2026-06-10", "concept": "Salida", "amount": "-100", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let b = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({ "op_date": "2026-06-11", "concept": "Entrada", "amount": "100", "kind": "income" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    assert_eq!(b["transfer_counterpart_id"], a["id"], "precondición: A↔B conciliadas");
+
+    // Par C↔D conciliado y luego RECHAZADO a mano.
+    let c = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({ "op_date": "2026-06-15", "concept": "Gasto real", "amount": "-50", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let d = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({ "op_date": "2026-06-16", "concept": "Reembolso", "amount": "50", "kind": "income" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    assert_eq!(d["transfer_counterpart_id"], c["id"], "precondición: C↔D conciliadas");
+    let u = app
+        .delete_with_cookie(
+            &format!("/v1/transactions/{}/reconcile", c["id"].as_str().unwrap()),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(u.status, http::StatusCode::OK, "unreconcile: {u:?}");
+
+    // Export → import (wipe + restore con UUIDs frescos).
+    let b64 = export_ffbackup_b64(&app, &owner.cookie).await;
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "apply: {applied:?}");
+    let counts = applied.json();
+    assert_eq!(counts["imported"]["transactions"].as_u64(), Some(4));
+    assert_eq!(counts["imported"]["transfer_match_rejections"].as_u64(), Some(1));
+
+    // A↔B siguen conciliadas (source preservado); C y D siguen sueltas.
+    let list = app
+        .get_with_cookie("/v1/transactions?month=2026-06", &owner.cookie)
+        .await
+        .json();
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    let by_concept = |name: &str| {
+        rows.iter()
+            .find(|t| t["concept"] == name)
+            .unwrap_or_else(|| panic!("no row '{name}'"))
+    };
+    let salida = by_concept("Salida");
+    let entrada = by_concept("Entrada");
+    assert_eq!(salida["transfer_counterpart_id"], entrada["id"], "A↔B restauradas simétricas");
+    assert_eq!(salida["transfer_reconciled_source"], "auto", "source preservado");
+    assert!(by_concept("Gasto real")["transfer_counterpart_id"].is_null());
+    assert!(by_concept("Reembolso")["transfer_counterpart_id"].is_null());
+
+    // ANTI-RESURRECCIÓN: el pase explícito no re-empareja C↔D (rechazo restaurado del backup).
+    let pass = app
+        .post_json_with_cookie("/v1/transactions/reconcile", serde_json::json!({}), &owner.cookie)
+        .await;
+    assert_eq!(
+        pass.json()["pairs_created"].as_u64(),
+        Some(0),
+        "los rechazos del backup deben impedir el re-emparejado: {pass:?}"
+    );
+}
+
+/// Un backup v7 (sin claves de conciliación) importa limpio, y el pase post-import re-concilia
+/// RETROACTIVAMENTE los pares opuestos que trae — la vía retro para ficheros antiguos.
+#[tokio::test]
+async fn v7_backup_imports_and_reconciles_retroactively() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [
+            {
+                "import_index": null, "source": "manual", "op_date": "2026-06-10",
+                "concept": "Salida traspaso", "amount": "-80.0000", "currency": "EUR",
+                "kind": "expense", "fingerprint_ordinal": 0
+            },
+            {
+                "import_index": null, "source": "manual", "op_date": "2026-06-11",
+                "concept": "Entrada traspaso", "amount": "80.0000", "currency": "EUR",
+                "kind": "income", "fingerprint_ordinal": 0
+            }
+        ],
+        "categorization_rules": [],
+        "recurring_transaction_rules": []
+    });
+    let b64 = craft_ffbackup_b64(7, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v7 import: {applied:?}");
+    assert_eq!(applied.json()["imported"]["transactions"].as_u64(), Some(2));
+    assert_eq!(
+        applied.json()["imported"]["transfer_match_rejections"].as_u64(),
+        Some(0),
+        "v7 no trae rechazos"
+    );
+
+    // El pase post-commit del apply ya debió conciliar el par (−80/+80 a 1 día). Polling corto:
+    // el pase corre tras el commit pero dentro del mismo handler → ya visible aquí.
+    let list = app
+        .get_with_cookie("/v1/transactions?month=2026-06", &owner.cookie)
+        .await
+        .json();
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for t in rows {
+        assert!(
+            t["transfer_counterpart_id"].is_string(),
+            "el pase retro post-import debe conciliar el par v7: {t:?}"
+        );
+        assert_eq!(t["transfer_reconciled_source"], "auto");
+    }
+}
