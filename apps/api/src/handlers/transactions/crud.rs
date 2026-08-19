@@ -11,6 +11,7 @@ use crate::handlers::installation::{installation_naive_today, require_installati
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
+use crate::handlers::transactions::reconcile::{auto_reconcile_after_mutation, unlink_pair_no_rejection};
 use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::schema::{
     compute_fingerprint, normalize_concept_field, normalize_kind, normalize_notes, BatchCreateBody,
@@ -155,7 +156,7 @@ async fn insert_manual_with_recurrence(
     Ok(id)
 }
 
-async fn load_txn(pool: &sqlx::PgPool, id: Uuid) -> Result<TransactionResponse, ApiError> {
+pub(super) async fn load_txn(pool: &sqlx::PgPool, id: Uuid) -> Result<TransactionResponse, ApiError> {
     let sql = format!("{TXN_SELECT} WHERE t.id = $1");
     let row: TxnRow = sqlx::query_as(&sql).bind(id).fetch_one(pool).await?;
     Ok(row_to_response(row))
@@ -229,6 +230,8 @@ pub(crate) async fn create_transaction_core(
     .await?;
     tx.commit().await?;
 
+    // Pase de auto-conciliación ANTES de invalidar: una sola invalidación cubre alta + pase.
+    auto_reconcile_after_mutation(state, iid, user_id).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     load_txn(&state.pool, id).await
 }
@@ -315,6 +318,7 @@ pub async fn create_batch(
     }
     tx.commit().await?;
 
+    auto_reconcile_after_mutation(&state, iid, user.id.0).await;
     invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
@@ -709,10 +713,19 @@ pub(crate) async fn patch_transaction_core(
     assert_asset_in_installation(&state.pool, iid, new_linked_asset).await?;
     assert_liability_in_installation(&state.pool, iid, new_linked_liability).await?;
 
+    // ¿El PATCH toca los campos que definen el emparejado de transferencia? Un par cuyos importes
+    // ya no se cancelan (o cuyas fechas se separan) dejaría dinero real oculto → se rompe DENTRO
+    // de la misma transacción, SIN registrar rechazo (no es una decisión del usuario sobre el par:
+    // volver al valor original re-empareja en el siguiente pase).
+    let pairing_changed = new_op_date != current.op_date || new_amount != current.amount;
+
     // Huella: en manuales se recomputa cuando cambian op_date/amount/concept (y toma un ordinal
     // libre); en importadas NUNCA se recomputa → queda anclada a la del CSV original para que el
     // dedup del re-import siga funcionando pese a la edición.
     let mut tx = state.pool.begin().await?;
+    if pairing_changed {
+        unlink_pair_no_rejection(&mut tx, iid, user_id, id).await?;
+    }
     let (new_fp, new_ordinal) = if !is_imported {
         let fp = compute_fingerprint(&current.source, new_op_date, new_amount, &new_concept);
         if fp == current.fingerprint {
@@ -750,6 +763,10 @@ pub(crate) async fn patch_transaction_core(
     .await?;
     tx.commit().await?;
 
+    // Los nuevos amount/op_date pueden abrir (o reabrir) un emparejado → pase antes de invalidar.
+    if pairing_changed {
+        auto_reconcile_after_mutation(state, iid, user_id).await;
+    }
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     load_txn(&state.pool, id).await
 }
@@ -826,6 +843,9 @@ pub(crate) async fn delete_transaction_core(
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    // La FK ON DELETE SET NULL ya desconcilió a la posible superviviente; el pase le busca otra
+    // contrapartida (punto fijo) antes de la única invalidación.
+    auto_reconcile_after_mutation(state, iid, user_id).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     Ok(())
 }
@@ -967,7 +987,9 @@ pub(crate) async fn delete_import_core(
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    // El borrado del lote cascadea a sus transacciones → cambia el conjunto.
+    // El borrado del lote cascadea a sus transacciones → cambia el conjunto. Las contrapartidas
+    // supervivientes de otros lotes quedaron sueltas (FK SET NULL) → pase antes de invalidar.
+    auto_reconcile_after_mutation(state, iid, user_id).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     Ok(())
 }

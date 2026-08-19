@@ -75,6 +75,10 @@ use crate::handlers::transactions::crud::{
 #[allow(unused_imports)]
 use crate::handlers::transactions::import::{__path_import_confirm, __path_import_preview};
 #[allow(unused_imports)]
+use crate::handlers::transactions::reconcile::{
+    __path_reconcile_now, __path_reconcile_pair, __path_unreconcile_transaction,
+};
+#[allow(unused_imports)]
 use crate::handlers::transactions::recurring::{
     __path_delete_recurring_rule, __path_list_recurring_rules, __path_materialize_recurring,
 };
@@ -155,6 +159,9 @@ use utoipa::OpenApi;
         list_recurring_rules,
         materialize_recurring,
         delete_recurring_rule,
+        reconcile_now,
+        reconcile_pair,
+        unreconcile_transaction,
         get_transactions_summary,
         get_category_series,
         export_user_backup,
@@ -264,6 +271,9 @@ use utoipa::OpenApi;
         crate::handlers::transactions::RecurrenceSpec,
         crate::handlers::transactions::RecurringRuleResponse,
         crate::handlers::transactions::MaterializeResponse,
+        crate::handlers::transactions::ReconcileRunResponse,
+        crate::handlers::transactions::ReconcilePairBody,
+        crate::handlers::transactions::ReconcilePairResponse,
         crate::handlers::transactions::CategoryComparisonLine,
         crate::handlers::transactions::schema::BlockActualAvg,
         crate::handlers::transactions::schema::SummaryTotals,

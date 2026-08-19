@@ -15,13 +15,22 @@
 //! promedio real 12m → las transacciones **SÍ son inputs del engine**, así que toda mutación que
 //! cambie el conjunto de transacciones **debe invalidar** la cache. Ese gating vive en
 //! `invalidate_projection_if_savings_uses_transactions` (abajo, sobre `SavingsSource::uses_transactions`)
-//! y lo llaman las mutaciones de `crud.rs`/`import.rs`/`recurring.rs` tras commitear. `rules.rs`, los
-//! previews y el borrado de una regla recurrente (sus instancias sobreviven, el conjunto no cambia)
-//! **nunca** invalidan. Regresión de ambos casos: `transactions_projection_cache.rs`.
+//! y lo llaman las mutaciones de `crud.rs`/`import.rs`/`recurring.rs`/`reconcile.rs` tras commitear
+//! (conciliar/desconciliar cambia QUÉ cuenta en el promedio → también es mutación del conjunto).
+//! `rules.rs`, los previews y el borrado de una regla recurrente (sus instancias sobreviven, el
+//! conjunto no cambia) **nunca** invalidan. Regresión de ambos casos: `transactions_projection_cache.rs`.
+//!
+//! ## Conciliación de transferencias (3.5.0)
+//! Un movimiento **conciliado** (`transfer_counterpart_id IS NOT NULL`) es una pata de una
+//! transferencia interna enlazada a su contrapartida: sigue visible en los listados pero queda
+//! excluido de todos los agregados de flujo (`summary.rs`, `history/cashflow` months). El pase de
+//! auto-conciliación (`reconcile.rs`) corre post-commit tras toda mutación del conjunto, en
+//! best-effort, ANTES de la invalidación de cache (una sola invalidación cubre mutación + pase).
 
 pub mod crud;
 pub mod csv_presets;
 pub mod import;
+pub mod reconcile;
 pub mod recurring;
 pub mod rules;
 pub mod schema;
@@ -45,6 +54,7 @@ pub use crud::{
     list_months, list_transactions, patch_transaction,
 };
 pub use import::{import_confirm, import_preview};
+pub use reconcile::{reconcile_now, reconcile_pair, unreconcile_transaction};
 pub use recurring::{delete_recurring_rule, list_recurring_rules, materialize_recurring};
 pub use rules::{create_rule, delete_rule, list_rules, patch_rule};
 pub use summary::{get_category_series, get_transactions_summary};
@@ -53,8 +63,8 @@ pub use schema::{
     BatchCreateBody, CategoryComparisonLine, CreateRuleBody, CreateTransactionBody,
     ImportBatchResponse, ImportConfirmBody, ImportConfirmResponse, ImportDecision, ImportPreviewBody,
     ImportPreviewResponse, MaterializeResponse, MonthEntry, PatchRuleBody, PatchTransactionBody,
-    PreviewRow, RecurrenceSpec, RecurringRuleResponse, RuleResponse, TransactionResponse,
-    TransactionsSummaryResponse,
+    PreviewRow, RecurrenceSpec, ReconcilePairBody, ReconcilePairResponse, ReconcileRunResponse,
+    RecurringRuleResponse, RuleResponse, TransactionResponse, TransactionsSummaryResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -78,6 +88,11 @@ pub struct TxnRow {
     pub linked_liability_id: Option<Uuid>,
     pub notes: Option<String>,
     pub recurring_rule_id: Option<Uuid>,
+    pub transfer_counterpart_id: Option<Uuid>,
+    pub transfer_reconciled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub transfer_reconciled_source: Option<String>,
+    pub transfer_counterpart_concept: Option<String>,
+    pub transfer_counterpart_op_date: Option<NaiveDate>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -85,11 +100,19 @@ pub struct TxnRow {
 pub const TXN_SELECT: &str = r#"SELECT t.id, t.import_id, t.source, t.op_date, t.value_date,
               t.concept, t.amount, t.currency, t.kind, t.category_id,
               c.name AS category_name, t.linked_asset_id, t.linked_liability_id,
-              t.notes, t.recurring_rule_id, t.created_at, t.updated_at
+              t.notes, t.recurring_rule_id,
+              t.transfer_counterpart_id, t.transfer_reconciled_at, t.transfer_reconciled_source,
+              tc.concept AS transfer_counterpart_concept,
+              tc.op_date AS transfer_counterpart_op_date,
+              t.created_at, t.updated_at
        FROM transactions t
-       LEFT JOIN categories c ON c.id = t.category_id"#;
+       LEFT JOIN categories c ON c.id = t.category_id
+       LEFT JOIN transactions tc ON tc.id = t.transfer_counterpart_id"#;
 
 pub fn row_to_response(r: TxnRow) -> TransactionResponse {
+    // Fuente de verdad de «conciliada» = counterpart presente. El ON DELETE SET NULL de la FK no
+    // limpia reconciled_at/source, así que esos campos solo se serializan con contrapartida viva.
+    let reconciled = r.transfer_counterpart_id.is_some();
     TransactionResponse {
         id: r.id,
         import_id: r.import_id,
@@ -106,6 +129,14 @@ pub fn row_to_response(r: TxnRow) -> TransactionResponse {
         linked_liability_id: r.linked_liability_id,
         notes: r.notes,
         recurring_rule_id: r.recurring_rule_id,
+        transfer_counterpart_id: r.transfer_counterpart_id,
+        transfer_reconciled_at: r.transfer_reconciled_at.filter(|_| reconciled),
+        transfer_reconciled_source: r.transfer_reconciled_source.filter(|_| reconciled),
+        transfer_counterpart_concept: r.transfer_counterpart_concept.filter(|_| reconciled),
+        transfer_counterpart_op_date: r
+            .transfer_counterpart_op_date
+            .filter(|_| reconciled)
+            .map(|d| d.format("%Y-%m-%d").to_string()),
         created_at: r.created_at,
         updated_at: r.updated_at,
     }
@@ -277,5 +308,11 @@ pub fn transactions_router() -> Router {
         .route("/recurring", get(list_recurring_rules))
         .route("/recurring/materialize", post(materialize_recurring))
         .route("/recurring/{id}", delete(delete_recurring_rule))
+        // Conciliación de transferencias: el segmento estático antes que `/{id}`.
+        .route("/reconcile", post(reconcile_now))
+        .route(
+            "/{id}/reconcile",
+            post(reconcile_pair).delete(unreconcile_transaction),
+        )
         .route("/{id}", patch(patch_transaction).delete(delete_transaction))
 }

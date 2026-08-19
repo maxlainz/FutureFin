@@ -189,6 +189,27 @@ pub struct TransactionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub recurring_rule_id: Option<Uuid>,
+    /// Contrapartida de la conciliación de transferencia. Presente ⇒ el movimiento está
+    /// CONCILIADO: sigue visible en Movimientos pero excluido de TODOS los agregados de flujo
+    /// (totales del mes, comparativa por categoría, promedio real 12m del engine en modos B/C,
+    /// serie por categoría y `months[]` de `/v1/history/cashflow`; NO de la curva fina — un
+    /// traspaso mueve saldo real entre cuentas propias). `ON DELETE SET NULL` → borrar una pata
+    /// desconcilia la otra.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub transfer_counterpart_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "date-time")]
+    pub transfer_reconciled_at: Option<DateTime<Utc>>,
+    /// `auto` (pase del matcher) | `manual` (par conciliado a mano).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_reconciled_source: Option<String>,
+    /// Concepto de la contrapartida (denormalizado: puede estar en otro mes, evita un round-trip).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_counterpart_concept: Option<String>,
+    /// `YYYY-MM-DD` de la contrapartida (denormalizado).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_counterpart_op_date: Option<String>,
     #[schema(value_type = String, format = "date-time")]
     pub created_at: DateTime<Utc>,
     #[schema(value_type = String, format = "date-time")]
@@ -427,6 +448,38 @@ pub struct ImportConfirmResponse {
     pub skipped_already_imported: u32,
     pub discarded: u32,
     pub rules_learned: u32,
+    /// Pares conciliados por el pase automático post-commit (sobre TODO el dataset del owner,
+    /// no solo este lote — la contrapartida puede venir de un import anterior). `0` también si
+    /// el pase best-effort falló (la mutación ya está persistida; el siguiente pase lo recoge).
+    pub reconciled_pairs: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile DTOs (conciliación de transferencias, 3.5.0)
+// ---------------------------------------------------------------------------
+
+/// Resultado de un pase de auto-conciliación (`POST /v1/transactions/reconcile`).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReconcileRunResponse {
+    /// Pares nuevos enlazados en este pase. Idempotente: un segundo pase inmediato devuelve 0.
+    pub pairs_created: u32,
+    /// `pairs_created × 2` (las dos patas de cada par).
+    pub transactions_reconciled: u32,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ReconcilePairBody {
+    /// La otra pata del par. Debe ser del mismo usuario, con importe exactamente opuesto y misma
+    /// divisa; la ventana de ±5 días NO aplica a la conciliación manual.
+    #[schema(value_type = String, format = "uuid")]
+    pub counterpart_id: Uuid,
+}
+
+/// Las dos patas tras conciliar o desconciliar un par.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReconcilePairResponse {
+    pub transaction: TransactionResponse,
+    pub counterpart: TransactionResponse,
 }
 
 // ---------------------------------------------------------------------------
