@@ -46,7 +46,10 @@ if [[ "$CONFIRM" != "--yes" ]]; then
   [[ "$answer" == "si" ]] || { echo "Cancelado."; exit 1; }
 fi
 
-echo "1/6 Parando el servicio $SERVICE…"
+# Llaves obligatorias antes de «…»: el bash 3.2 de macOS traga los bytes del
+# carácter multibyte dentro del nombre de la variable ("SERVICE…: unbound
+# variable" con set -u) y aborta el restore antes de tocar nada.
+echo "1/6 Parando el servicio ${SERVICE}…"
 compose stop "$SERVICE"
 
 echo "2/6 Arrancando PostgreSQL en modo rescate (db-only)…"
@@ -69,7 +72,7 @@ echo "   censo ANTES:"
 docker exec "$RESTORE_NAME" psql -X -tA -h "$SOCK" -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "SELECT count(*) || ' filas en ' || count(distinct table_name) || ' tablas (aprox)' FROM information_schema.columns WHERE table_schema='public'" 2>/dev/null || echo "   (base vacía o inexistente)"
 
-echo "3/6 Recreando la base $POSTGRES_DB…"
+echo "3/6 Recreando la base ${POSTGRES_DB}…"
 docker exec "$RESTORE_NAME" psql -X -h "$SOCK" -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 \
   -c "DROP DATABASE IF EXISTS \"$POSTGRES_DB\";" \
   -c "CREATE DATABASE \"$POSTGRES_DB\" OWNER \"$POSTGRES_USER\";"
