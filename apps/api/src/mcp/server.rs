@@ -30,7 +30,9 @@ use crate::handlers::history::{
     list_snapshots_core,
 };
 use crate::handlers::installation::{installation_access_core, settings_user_core};
-use crate::handlers::liabilities::{create_liability_core, list_liabilities_core};
+use crate::handlers::liabilities::{
+    create_liability_core, list_liabilities_core, patch_liability_core,
+};
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::planning::{
     create_planning_flow_core, delete_planning_flow_core, list_planning_flows_core,
@@ -506,6 +508,37 @@ pub struct UpdateAssetValueParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateAssetParams {
+    /// UUID del activo (de list_assets).
+    pub asset_id: String,
+    /// Nuevo nombre.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Nueva categoría con scope asset (UUID de list_categories).
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// Valor actual >= 0, string decimal.
+    #[serde(default)]
+    pub current_value: Option<String>,
+    /// Precio de compra >= 0 (base de coste), string decimal. Incompatible con
+    /// clear_purchase_price.
+    #[serde(default)]
+    pub purchase_price: Option<String>,
+    /// true = borrar el precio de compra.
+    #[serde(default)]
+    pub clear_purchase_price: Option<bool>,
+    /// Líquido = drenable para gastos. Gobierna el runway y el disparador SWR de
+    /// runway_is_indefinite — cámbialo con cuidado.
+    #[serde(default)]
+    pub is_liquid: Option<bool>,
+    /// Rentabilidad anual esperada en % (> -100; negativos componen pérdidas), string decimal.
+    #[serde(default)]
+    pub expected_annual_return_percent: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateAssetParams {
     pub name: String,
     /// Categoría con scope asset (UUID de list_categories).
@@ -548,6 +581,43 @@ pub struct CreateLiabilityParams {
     #[serde(default)]
     pub payment_amount: Option<String>,
     /// "monthly" | "weekly" (obligatoria si hay payment_amount).
+    #[serde(default)]
+    pub payment_frequency: Option<String>,
+    /// "YYYY-MM-DD" — fin del plan de pago.
+    #[serde(default)]
+    pub payment_end_date: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateLiabilityParams {
+    /// UUID del pasivo (de list_liabilities).
+    pub liability_id: String,
+    /// Nuevo label.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Nueva categoría con scope liability (UUID de list_categories).
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// Categoría de GASTO de la cuota (UUID de list_categories, scope expense). Set-only:
+    /// asignar o cambiar; no se puede volver a NULL.
+    #[serde(default)]
+    pub expense_category_id: Option<String>,
+    /// Principal >= 0, string decimal. Ignorado si el principal queda derivado del plan.
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// true = derivar el principal del plan de pago (cuota + frecuencia + fecha fin,
+    /// amortización francesa); false = volver a principal explícito.
+    #[serde(default)]
+    pub derive_principal_from_plan: Option<bool>,
+    /// TAE en % >= 0, string decimal.
+    #[serde(default)]
+    pub apr_percent: Option<String>,
+    /// Cuota como string decimal (> 0 si se pasa).
+    #[serde(default)]
+    pub payment_amount: Option<String>,
+    /// "monthly" | "weekly".
     #[serde(default)]
     pub payment_frequency: Option<String>,
     /// "YYYY-MM-DD" — fin del plan de pago.
@@ -1585,7 +1655,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_asset_value",
-        description = "Actualiza la valoración de un activo («mi fondo vale ahora 52.300 €»): current_value y/o expected_annual_return_percent (> -100; negativos componen pérdidas). Subset deliberado del PATCH completo. Sin owner-check: cualquier member edita cualquier activo del hogar (contrato del ledger). Devuelve valor anterior y nuevo. Mueve la proyección entera.",
+        description = "Actualiza la valoración de un activo («mi fondo vale ahora 52.300 €»): current_value y/o expected_annual_return_percent (> -100; negativos componen pérdidas). Subset deliberado del PATCH completo — para el resto de campos (nombre, categoría, liquidez…) usa update_asset. Sin owner-check: cualquier member edita cualquier activo del hogar (contrato del ledger). Devuelve valor anterior y nuevo. Mueve la proyección entera.",
         annotations(title = "Actualizar valor de activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_asset_value(
@@ -1646,6 +1716,75 @@ impl FutureFinMcp {
                 "name": a.name,
                 "valor_anterior": before.map(|v| v.to_string()),
                 "valor_nuevo": a.current_value.to_string(),
+                "expected_annual_return_percent": a.expected_annual_return_percent.map(|v| v.to_string()),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_asset",
+        description = "Edita cualquier campo de un activo: nombre, categoría (scope asset), valor actual, precio de compra (clear_purchase_price lo borra), liquidez (is_liquid gobierna el runway y el disparador SWR) y rentabilidad esperada. Para solo actualizar la valoración basta update_asset_value. Sin owner-check: cualquier member edita cualquier activo del hogar. Mueve la proyección entera.",
+        annotations(title = "Editar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_asset(
+        &self,
+        Parameters(p): Parameters<UpdateAssetParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<(Uuid, crate::handlers::assets::PatchAssetBody), ApiError> {
+            if p.purchase_price.is_some() && p.clear_purchase_price.unwrap_or(false) {
+                return Err(ApiError::BadRequest(
+                    "purchase_price and clear_purchase_price are incompatible".into(),
+                ));
+            }
+            // El PATCH distingue omitir (sin cambio) de null (borrar): clear_purchase_price
+            // materializa ese null que el JSON Schema de la tool no puede expresar.
+            let purchase_price = if p.clear_purchase_price.unwrap_or(false) {
+                Some(serde_json::Value::Null)
+            } else {
+                p.purchase_price.clone().map(serde_json::Value::String)
+            };
+            Ok((
+                parse_uuid_param("asset_id", &p.asset_id)?,
+                crate::handlers::assets::PatchAssetBody {
+                    category_id: p
+                        .category_id
+                        .as_deref()
+                        .map(|v| parse_uuid_param("category_id", v))
+                        .transpose()?,
+                    name: p.name.clone(),
+                    current_value: p
+                        .current_value
+                        .as_deref()
+                        .map(|v| parse_decimal_param("current_value", v))
+                        .transpose()?,
+                    purchase_price,
+                    is_liquid: p.is_liquid,
+                    expected_annual_return_percent: p
+                        .expected_annual_return_percent
+                        .as_deref()
+                        .map(|v| parse_decimal_param("expected_annual_return_percent", v))
+                        .transpose()?,
+                    notes: p.notes.clone(),
+                    sort_index: None,
+                },
+            ))
+        };
+        let (asset_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let a = patch_asset_core(&self.state, id.installation_id, id.user_id, asset_id, body)
+                .await?;
+            Ok(serde_json::json!({
+                "id": a.id,
+                "resumen": format!("{} · {} ({})", a.name, a.current_value,
+                    if a.is_liquid { "líquido" } else { "ilíquido" }),
                 "expected_annual_return_percent": a.expected_annual_return_percent.map(|v| v.to_string()),
             }))
         }
@@ -1759,6 +1898,88 @@ impl FutureFinMcp {
             require_mcp_write(&self.state.pool, &id).await?;
             let l = create_liability_core(&self.state, id.installation_id, id.user_id, body)
                 .await?;
+            Ok(serde_json::json!({
+                "id": l.id,
+                "resumen": format!("{} · principal {}", l.label, l.principal),
+                "principal_derived_from_plan": l.principal_derived_from_plan,
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_liability",
+        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %»): label, categorías, TAE, plan de pago (cuota + frecuencia monthly|weekly + fecha fin), principal explícito o re-derivado del plan (derive_principal_from_plan). Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección entera.",
+        annotations(title = "Editar pasivo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_liability(
+        &self,
+        Parameters(p): Parameters<UpdateLiabilityParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<(Uuid, crate::handlers::liabilities::PatchLiabilityBody), ApiError> {
+            Ok((
+                parse_uuid_param("liability_id", &p.liability_id)?,
+                crate::handlers::liabilities::PatchLiabilityBody {
+                    category_id: p
+                        .category_id
+                        .as_deref()
+                        .map(|v| parse_uuid_param("category_id", v))
+                        .transpose()?,
+                    expense_category_id: p
+                        .expense_category_id
+                        .as_deref()
+                        .map(|v| parse_uuid_param("expense_category_id", v))
+                        .transpose()?,
+                    label: p.label.clone(),
+                    type_tag: None,
+                    derive_principal_from_plan: p.derive_principal_from_plan,
+                    principal: p
+                        .principal
+                        .as_deref()
+                        .map(|v| parse_decimal_param("principal", v))
+                        .transpose()?,
+                    apr_percent: p
+                        .apr_percent
+                        .as_deref()
+                        .map(|v| parse_decimal_param("apr_percent", v))
+                        .transpose()?,
+                    payment_amount: p
+                        .payment_amount
+                        .as_deref()
+                        .map(|v| parse_decimal_param("payment_amount", v))
+                        .transpose()?,
+                    payment_frequency: p
+                        .payment_frequency
+                        .as_deref()
+                        .map(crate::handlers::liabilities::PaymentFrequency::parse)
+                        .transpose()?,
+                    payment_end_date: p
+                        .payment_end_date
+                        .as_deref()
+                        .map(|d| parse_date_param("payment_end_date", d))
+                        .transpose()?,
+                    notes: p.notes.clone(),
+                    sort_index: None,
+                },
+            ))
+        };
+        let (liability_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let l = patch_liability_core(
+                &self.state,
+                id.installation_id,
+                id.user_id,
+                liability_id,
+                body,
+            )
+            .await?;
             Ok(serde_json::json!({
                 "id": l.id,
                 "resumen": format!("{} · principal {}", l.label, l.principal),

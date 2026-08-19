@@ -478,8 +478,9 @@ pub async fn patch_asset(
     Ok(Json(resp))
 }
 
-/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_asset_value` (que expone
-/// solo un subset de campos). Invalidación FULL dentro. Sin owner-check (contrato del módulo).
+/// Core sin HTTP: lo comparten el handler PATCH y las tools MCP `update_asset` (body completo)
+/// y `update_asset_value` (subset de valoración). Invalidación FULL dentro. Sin owner-check
+/// (contrato del módulo).
 pub(crate) async fn patch_asset_core(
     state: &Arc<AppState>,
     iid: Uuid,
