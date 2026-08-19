@@ -583,7 +583,20 @@ pub async fn patch_liability(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = patch_liability_core(&state, iid, user.id.0, id, body).await?;
+    Ok(Json(resp))
+}
 
+/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_liability`. Merge campo a
+/// campo sobre la fila actual; si `derive_principal_from_plan` queda activo, el principal se
+/// rederiva del plan de pago. Invalidación FULL dentro. Sin owner-check (contrato del ledger).
+pub(crate) async fn patch_liability_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: PatchLiabilityBody,
+) -> Result<LiabilityResponse, ApiError> {
     if body.category_id.is_none()
         && body.expense_category_id.is_none()
         && body.label.is_none()
@@ -737,8 +750,8 @@ pub async fn patch_liability(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
-    Ok(Json(row_to_response(updated)?))
+    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    row_to_response(updated)
 }
 
 #[utoipa::path(
