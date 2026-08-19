@@ -16,7 +16,8 @@ description: >
 # FutureFin Change Control
 
 How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-19 for
-the 3.5.0 train** (conciliación de transferencias): **40** migration files in
+the 3.6.0 train** (conciliación de transferencias + paridad MCP; 3.5.0 se cerró en el CHANGELOG
+pero nunca se tagueó — 3.6.0 es la imagen que lo publica todo): **40** migration files in
 `apps/api/migrations/` (la 40ª es `20260819120000_transactions_transfer_reconciliation`), **27**
 integration-test files in `apps/api/tests/` (nuevo `transactions_reconcile.rs`), `.ffbackup`
 `CURRENT_SCHEMA_VERSION` = **8** (v8 añade el par conciliado por índice + los rechazos del
@@ -24,8 +25,8 @@ auto-matcher; los ficheros antiguos siguen importando vía `payload_v7_to_v8`). 
 are from the repo root. (Previously stamped 2026-08-18 at v3.4.0 with 39/26 and schema 7;
 2026-08-17 at v3.2.0 with 37/23; 2026-08-17 at v3.1.0 with 36/23 and schema 6; 2026-08-16 at
 v3.0.0 with 34/20; and 2026-07-06 at v1.5.0: 32 migrations, 11 test files.) `apps/api/Cargo.toml`
-reads `3.5.0` and `CHANGELOG.md` carries its `## [3.5.0] - 2026-08-19` section, so the Section 4
-version/CHANGELOG gates for this release are satisfied (pending tag from `main`).
+reads `3.6.0` and `CHANGELOG.md` carries its `## [3.6.0] - 2026-08-19` section, so the Section 4
+version/CHANGELOG gates for this release are satisfied.
 
 Vocabulary (defined once): **installation** = the singleton row all financial data belongs to
 (one per deployment). **scope / view** = `?view=mine` filters ledger queries by
@@ -383,7 +384,7 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (**3.5.0** on 2026-08-19)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**3.6.0** on 2026-08-19; 3.5.0 nunca se publicó)
 - Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**40** on 2026-08-19 — la 40ª es `20260819120000_transactions_transfer_reconciliation`)
 - Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**27** on 2026-08-19 — nuevo `transactions_reconcile.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (284 on 2026-08-19 tras el test de `update_asset`/`update_liability`; 283 at 3.5.0)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and

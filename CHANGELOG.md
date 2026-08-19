@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-08-19
+
 ### MCP — Disciplina de paridad con la API HTTP + cierre de la asimetría CRUD del ledger
 
 - **El problema (deriva silenciosa, no un bug)**: el catálogo `/mcp` es una superficie
@@ -60,8 +62,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   documentar en ninguno de los dos sitios). Su tabla lleva ahora una nota permanente de que
   `tests.md` gana en caso de desacuerdo. Los diez contadores por fichero de la tabla suman ahora
   exactamente los 284 del código (`grep -c '#\[tokio::test\]' apps/api/tests/*.rs`).
+- **Nota de publicación**: 3.5.0 se cerró en este CHANGELOG pero nunca llegó a tener tag ni
+  imagen — las dos tools llegaron antes de publicarla. 3.6.0 es por tanto la primera imagen del
+  tren y **contiene también toda la 3.5.0** (conciliación de transferencias incluida); no existe
+  ni existirá un `maxlainz/futurefin:3.5.0`. Bump minor, no patch: dos tools nuevas son
+  superficie pública aditiva.
 
 ## [3.5.0] - 2026-08-19
+
+> Versión **no publicada como imagen**: sus cambios se distribuyen dentro de 3.6.0 (ver arriba).
 
 ### Added — Conciliación de transferencias: nada se descarta, solo se oculta lo conciliado (arregla el gasto que desaparecía)
 

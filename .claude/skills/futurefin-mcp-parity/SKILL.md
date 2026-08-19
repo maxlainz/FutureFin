@@ -25,7 +25,7 @@ Bearer-authenticated wrapper over the same `*_core` fn its HTTP handler uses. De
 rot silently — an endpoint gains a field, a handler changes semantics, a new feature ships
 HTTP-only — unless something forces the question at merge time. This skill is that something.
 
-Volatile facts date-stamped **2026-08-19, post-3.5.0 train** (47 tools; recount with the
+Volatile facts date-stamped **2026-08-19, tren 3.6.0** (47 tools; recount with the
 commands in §5 before trusting any number here).
 
 ## When NOT to use this skill
