@@ -1598,12 +1598,16 @@ pub(crate) async fn history_cashflow_core(
     let month_end = add_months_signed(anchor, 1); // exclusivo: incluye el mes 0 completo.
 
     // ---- Agregado mensual firmado por kind --------------------------------------------------
+    // Transferencias conciliadas FUERA (es el mismo KPI de flujo que la comparativa: un traspaso
+    // interno no es gasto ni ingreso). ASIMETRÍA DELIBERADA con la curva fina de abajo, que SÍ
+    // las incluye — NO «arreglar» esto igualando ambas: ver el comentario de las patas.
     let m_scope = view.scope_where("t");
     let m_arg = view.next_arg_index();
     let months_sql = format!(
         "SELECT to_char(t.op_date, 'YYYY-MM') AS ym, t.kind AS kind, SUM(t.amount) AS total
          FROM transactions t
          WHERE {m_scope} AND t.op_date >= ${m_arg} AND t.op_date < ${end}
+           AND t.transfer_counterpart_id IS NULL
          GROUP BY ym, t.kind",
         end = m_arg + 1
     );
@@ -1658,6 +1662,12 @@ pub(crate) async fn history_cashflow_core(
     // (una aportación −200 sube el destino en +200). Una savings importada aparece en AMBAS
     // (partida doble correcta: baja la cuenta, sube el destino). Deltas ya normalizados aquí; el
     // engine solo los suma.
+    //
+    // Las transferencias CONCILIADAS **SÍ cuentan aquí**, a propósito (asimetría con `months[]`):
+    // la curva fina modela el SALDO de cada cuenta, y un traspaso interno mueve saldo real (sale
+    // de X, entra en Y) aunque no sea gasto ni ingreso. Excluirlas haría divergir la curva de los
+    // snapshots a los que está anclada y el anclaje absorbería la diferencia como un salto falso.
+    // Test que fija la asimetría: `history_cashflow.rs::reconciled_excluded_from_months_but_not_from_fine_curve`.
     let mut cashflow: HashMap<(Uuid, Uuid), Vec<CashFlowEntry>> = HashMap::new();
     if include_fine {
         let acc_scope = view.scope_where("t");
