@@ -181,8 +181,14 @@ pub(crate) async fn transactions_12m_avg(
     // el mes de una transacción `recurring_rule_id IS NULL` dentro del tramo `[window_start, window_end)`.
     // El predicado se reutiliza tal cual en `months_sql`; su forma de CTE en `kind_sql`/`liab_sql`.
     // Mismos `${arg}`/`${end}` en todas → mismos binds `window_start`/`window_end`.
+    //
+    // Las transferencias CONCILIADAS (`transfer_counterpart_id IS NOT NULL`, 3.5.0) quedan fuera
+    // también del denominador: aportan 0 al numerador (abajo), así que un mes cuyo único contenido
+    // son patas conciliadas hundiría el promedio exactamente igual que un mes vacío — la misma
+    // lógica por la que los meses solo-recurrentes («pseudovacíos») no cuentan.
     let real_months_predicate = format!(
-        "{scope} AND t.op_date >= ${arg} AND t.op_date < ${end} AND t.recurring_rule_id IS NULL"
+        "{scope} AND t.op_date >= ${arg} AND t.op_date < ${end} AND t.recurring_rule_id IS NULL \
+         AND t.transfer_counterpart_id IS NULL"
     );
     let real_months_cte = format!(
         "WITH real_months AS (
@@ -219,13 +225,15 @@ pub(crate) async fn transactions_12m_avg(
 
     // Suma firmada por kind (solo income/expense), restringida a los meses REALES (CTE `real_months`,
     // misma definición que `months_sql`): un mes solo-recurrente no aporta ni al numerador ni al
-    // denominador.
+    // denominador. Las conciliadas tampoco suman: un par conciliado es dinero que nunca salió del
+    // hogar → no es gasto ni ingreso de la simulación (este promedio alimenta el engine en B/C).
     let kind_sql = format!(
         "{real_months_cte}
          SELECT t.kind AS kind, SUM(t.amount) AS total
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.kind IN ('income', 'expense')
+           AND t.transfer_counterpart_id IS NULL
            AND to_char(t.op_date, 'YYYY-MM') IN (SELECT ym FROM real_months)
          GROUP BY t.kind"
     );
@@ -369,9 +377,13 @@ pub(crate) async fn transactions_summary_core(
         // Enero del año del mes seleccionado; con month == 1 coincide con el mes seleccionado → tramo vacío.
         AvgWindow::Ytd => first_of_month(year, 1),
         // Primer día del mes de MIN(op_date) del scope; si NULL o ≥ mes seleccionado → tramo vacío.
+        // Las conciliadas no anclan la ventana: «Todo» no debe arrancar en un mes sin datos visibles.
         AvgWindow::All => {
             let scope = view.scope_where("t");
-            let sql = format!("SELECT MIN(t.op_date) FROM transactions t WHERE {scope}");
+            let sql = format!(
+                "SELECT MIN(t.op_date) FROM transactions t WHERE {scope} \
+                 AND t.transfer_counterpart_id IS NULL"
+            );
             let min_op: Option<NaiveDate> = view
                 .bind_scope_scalar(
                     sqlx::query_scalar::<_, Option<NaiveDate>>(&sql),
@@ -401,6 +413,8 @@ pub(crate) async fn transactions_summary_core(
     let in_window = |ym: &str| ym >= window_start_ym.as_str() && ym < selected_ym.as_str();
 
     // ---- Actuals + ventana: transacciones agregadas por (ym, kind, category) ----------------
+    // Las transferencias conciliadas siguen VISIBLES en el listado de Movimientos, pero no son
+    // gasto ni ingreso → fuera de todos los buckets (actuals, promedio y months_with_data).
     let scope = view.scope_where("t");
     let arg = view.next_arg_index();
     let sql = format!(
@@ -408,6 +422,7 @@ pub(crate) async fn transactions_summary_core(
                 t.category_id AS category_id, SUM(t.amount) AS total
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
+           AND t.transfer_counterpart_id IS NULL
          GROUP BY ym, t.kind, t.category_id",
         end = arg + 1
     );
@@ -720,11 +735,13 @@ pub(crate) async fn category_monthly_series_core(
 
     let scope = view.scope_where("t");
     let mut arg = view.next_arg_index();
+    // Conciliadas fuera: la serie por categoría es un agregado de flujo (misma regla que summary).
     let mut sql = format!(
         "SELECT to_char(t.op_date, 'YYYY-MM') AS ym, t.category_id AS category_id,
                 SUM(t.amount) AS total
          FROM transactions t
-         WHERE {scope} AND t.kind = ${arg} AND t.op_date >= ${d1} AND t.op_date < ${d2}",
+         WHERE {scope} AND t.kind = ${arg} AND t.op_date >= ${d1} AND t.op_date < ${d2}
+           AND t.transfer_counterpart_id IS NULL",
         d1 = arg + 1,
         d2 = arg + 2
     );
