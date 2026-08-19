@@ -200,7 +200,9 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "list_transaction_months",
             "list_transactions",
             "materialize_recurring",
+            "reconcile_transfers",
             "simulate_projection",
+            "unreconcile_transfer",
             "update_allocation_rule",
             "update_asset_value",
             "update_budget_entry",
@@ -521,7 +523,11 @@ async fn tools_list_exposes_annotations_on_every_tool() {
         let is_write = name.starts_with("create_")
             || name.starts_with("update_")
             || name.starts_with("delete_")
-            || matches!(name, "capture_snapshot" | "materialize_recurring");
+            || matches!(
+                name,
+                "capture_snapshot" | "materialize_recurring" | "reconcile_transfers"
+                    | "unreconcile_transfer"
+            );
         if is_write {
             assert_eq!(ann["readOnlyHint"], false, "tool {name}");
             let expect_destructive =
@@ -529,7 +535,10 @@ async fn tools_list_exposes_annotations_on_every_tool() {
             assert_eq!(ann["destructiveHint"], expect_destructive, "tool {name}");
             let expect_idempotent = name.starts_with("update_")
                 || name.starts_with("delete_")
-                || matches!(name, "capture_snapshot" | "materialize_recurring");
+                || matches!(
+                    name,
+                    "capture_snapshot" | "materialize_recurring" | "reconcile_transfers"
+                );
             assert_eq!(ann["idempotentHint"], expect_idempotent, "tool {name}");
         } else {
             assert_eq!(ann["readOnlyHint"], true, "tool {name}");

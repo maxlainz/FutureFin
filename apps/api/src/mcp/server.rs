@@ -44,6 +44,7 @@ use crate::handlers::transactions::crud::{
     create_transaction_core, delete_import_core, delete_transaction_core, get_transaction_core,
     list_imports_core, list_months_core, list_transactions_core, patch_transaction_core,
 };
+use crate::handlers::transactions::reconcile::{reconcile_now_core, unreconcile_core};
 use crate::handlers::transactions::recurring::{
     delete_recurring_rule_core, list_recurring_rules_core, materialize_recurring_core,
 };
@@ -620,6 +621,12 @@ pub struct UpdateAllocationRuleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UnreconcileTransferParams {
+    /// UUID de una de las dos patas del par conciliado (de list_transactions).
+    pub transaction_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DeleteRecurringRuleParams {
     /// UUID de la plantilla (de list_recurring_rules).
     pub id: String,
@@ -773,7 +780,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_transactions",
-        description = "Movimientos (gastos, ingresos, ahorro) con filtros por mes, tipo, categoría y lote de import, orden fecha descendente. Paginado en SQL: devuelve total_count y truncated; usa limit (max 500) y offset para pedir más páginas.",
+        description = "Movimientos (gastos, ingresos, ahorro) con filtros por mes, tipo, categoría y lote de import, orden fecha descendente. Paginado en SQL: devuelve total_count y truncated; usa limit (max 500) y offset para pedir más páginas. Un movimiento con transfer_counterpart_id es una pata de transferencia CONCILIADA: sigue visible aquí pero está excluido de todos los agregados (summary, promedio, series).",
         annotations(title = "Movimientos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_transactions(
@@ -1349,6 +1356,44 @@ impl FutureFinMcp {
         let res = async {
             require_mcp_write(&self.state.pool, &id).await?;
             materialize_recurring_core(&self.state, id.installation_id, id.user_id).await
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "reconcile_transfers",
+        description = "«Concíliame las transferencias»: pase de auto-conciliación sobre todos los movimientos del usuario del token — empareja importes exactamente opuestos (misma divisa) a ≤5 días, aunque vengan de extractos distintos. Un par conciliado sigue visible pero deja de contar como gasto/ingreso en todos los agregados. Idempotente (repetirla devuelve pairs_created 0); nunca re-empareja pares desconciliados a mano.",
+        annotations(title = "Conciliar transferencias", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn reconcile_transfers(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            reconcile_now_core(&self.state, id.installation_id, id.user_id).await
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "unreconcile_transfer",
+        description = "Desconcilia un par de transferencia («esto no era un traspaso, es un gasto real»): rompe el enlace de ambas patas — vuelven a contar como gasto/ingreso — y persiste el rechazo para que el pase automático no las re-empareje. Pasa el UUID de cualquiera de las dos patas; devuelve ambas ya sueltas. 400 not_reconciled si el movimiento no tiene contrapartida.",
+        annotations(title = "Desconciliar transferencia", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn unreconcile_transfer(
+        &self,
+        Parameters(p): Parameters<UnreconcileTransferParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let txn_id = parse_uuid_param("transaction_id", &p.transaction_id)?;
+            unreconcile_core(&self.state, id.installation_id, id.user_id, txn_id).await
         }
         .await;
         to_tool_result(res)

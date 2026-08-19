@@ -1097,3 +1097,87 @@ async fn delete_import_previews_txn_count_and_cascades() {
     assert_eq!(app.count_rows("transactions").await, 0, "cascada del lote");
     assert_eq!(app.count_rows("transaction_imports").await, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Conciliación de transferencias (3.5.0): tools reconcile_transfers / unreconcile_transfer
+// ---------------------------------------------------------------------------
+
+/// Las dos tools nuevas respetan el toggle vivo y el rol, comparten core con HTTP (cero deriva)
+/// y siguen el contrato de cache COND: en modo B, desconciliar por MCP invalida.
+#[tokio::test]
+async fn reconcile_tools_share_core_and_respect_write_gates() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // Par auto-conciliable creado por HTTP (−120/+120 a 1 día). El alta de la segunda pata ya
+    // concilia → el pase MCP debe ser punto fijo (0 pares).
+    let a = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-10", "concept": "Salida", "amount": "-120", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let b = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-11", "concept": "Entrada", "amount": "120", "kind": "income" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    assert_eq!(b["transfer_counterpart_id"], a["id"], "precondición: conciliadas");
+
+    let envelope = mcp_post(&app, &token, tool_call("reconcile_transfers", json!({}))).await;
+    let body = tool_json(&envelope);
+    assert_eq!(body["pairs_created"].as_u64(), Some(0), "punto fijo vía MCP: {body}");
+
+    // Desconciliar por MCP (modo B para verificar la invalidación COND).
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+    warm(&app, &owner.cookie, &key).await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("unreconcile_transfer", json!({"transaction_id": a["id"]})),
+    )
+    .await;
+    let body = tool_json(&envelope);
+    assert!(body["transaction"]["transfer_counterpart_id"].is_null(), "{body}");
+    assert!(body["counterpart"]["transfer_counterpart_id"].is_null(), "{body}");
+    assert_invalidated(&app, &key, "unreconcile_transfer").await;
+
+    // La fila desconciliada por MCP es indistinguible por HTTP (mismo core).
+    let list = app
+        .get_with_cookie("/v1/transactions?month=2026-06", &owner.cookie)
+        .await
+        .json();
+    for t in list.as_array().unwrap() {
+        assert!(t["transfer_counterpart_id"].is_null(), "sueltas también por HTTP: {t}");
+    }
+
+    // Repetir el desconcilie → 400 not_reconciled compartido con HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("unreconcile_transfer", json!({"transaction_id": a["id"]})),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(body["message"].as_str().unwrap().contains("not_reconciled"), "{body}");
+
+    // Toggle vivo: con la escritura MCP apagada, el pase se corta con mcp_write_disabled.
+    let r = app
+        .patch_json_with_cookie("/v1/installation", json!({"mcp_write_enabled": false}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let envelope = mcp_post(&app, &token, tool_call("reconcile_transfers", json!({}))).await;
+    let body = tool_error(&envelope, "bad_request");
+    assert!(
+        body["message"].as_str().unwrap().contains("mcp_write_disabled"),
+        "{body}"
+    );
+}
