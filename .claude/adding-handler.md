@@ -103,6 +103,7 @@ touch apps/api/migrations/$(date +%Y%m%d%H%M%S)_add_foo.sql
 ```
 
 ## Key patterns
+- **Split extractor+auth vs `*_core`**: keep session/membership/role checks in the handler fn and move everything else (validation, SQL, response building, cache invalidation post-commit) into a `pub(crate) async fn foo_core(state, iid, user_id, …)`. That core is what an MCP tool reuses — a handler written monolithically forces the extraction later (see `patch_liability_core`, extracted when `update_liability` shipped). Architecture rationale: `futurefin-architecture-contract` D14.
 - All monetary `Decimal` fields need `#[serde(with = "rust_decimal::serde::str")]` for JSON serialization as string
 - Optional decimals: `#[serde(with = "rust_decimal::serde::str_option")]`
 - `?view=mine` support: add `Query(q): Query<LedgerViewQuery>`, then `let view = q.resolve()`, then build SQL via `view.scope_where("alias")` + bind via `view.bind_scope_as(query_as(&sql), iid, user.id.0)`. **Never** hand-write a `match view { Household => sql_a, Mine => sql_b }` block — the two branches drift (we already had a bug where the `Mine` branch had `$3` and `$2` swapped).
@@ -129,3 +130,13 @@ async fn create_foo_succeeds() {
 }
 ```
 Run with `TEST_DATABASE_URL=postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test cargo test --workspace`.
+
+## 7. Evaluate the MCP surface (mandatory)
+
+The MCP catalog (`apps/api/src/mcp/server.rs`) is a derived surface of this API: a new or
+changed endpoint must end in exactly one of **tool added/updated**, **deliberate omission
+recorded**, or **n/a** — never silence. The decision rubric, the omission register and the
+add-a-tool recipe live in
+[`futurefin-mcp-parity`](skills/futurefin-mcp-parity/SKILL.md); the gate is enforced by
+`futurefin-change-control` §1 (class "API contract"). If the answer is "tool", the `*_core`
+split from Key patterns above is the prerequisite.
