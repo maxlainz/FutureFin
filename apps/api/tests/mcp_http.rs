@@ -181,6 +181,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "delete_recurring_rule",
             "delete_snapshot",
             "delete_transaction",
+            "get_allocation_resolution",
             "get_budget",
             "get_category_monthly_series",
             "get_history",
@@ -812,6 +813,67 @@ async fn list_transactions_search_filters_match_http_and_paginate() {
     )
     .await;
     assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+}
+
+/// Paridad byte a byte de `get_allocation_resolution` (3.8.0) contra su GET. Es una tool de
+/// lectura: no hay cuarteto de escritura, la garantía es que devuelve exactamente el struct del
+/// endpoint.
+#[tokio::test]
+async fn get_allocation_resolution_matches_http_endpoint() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat_inc = app.create_category(&owner, "income", "Nomina").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vida").await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    for (cat, amount) in [(&cat_inc, "3000"), (&cat_exp, "1000")] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/budget/entries",
+                serde_json::json!({"category_id": cat, "amount": amount}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": cat_ast, "name": "Indexado",
+                               "current_value": "1000", "is_liquid": true}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+    let r = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            serde_json::json!({"target_asset_id": asset_id, "kind": "remainder"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let http = app
+        .get_with_cookie("/v1/allocation-rules/resolution", &owner.cookie)
+        .await;
+    assert_eq!(http.status, http::StatusCode::OK, "{http:?}");
+    let tool = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("get_allocation_resolution", serde_json::json!({})),
+        )
+        .await,
+    );
+    assert_eq!(tool, http.json(), "la tool debe devolver el struct del endpoint intacto");
+
+    // Y no toca la cache de proyección: construye su propio input, no pasa por `*_cached`.
+    assert!(
+        app.state.projection_cache.read().await.is_empty(),
+        "get_allocation_resolution no debe poblar la cache de proyección"
+    );
 }
 
 #[tokio::test]
