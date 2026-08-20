@@ -339,7 +339,20 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `new_read_tools_match_http_endpoints`.
 - **`simulate_projection` (what-if puro, issue #2)**: simula baseline + escenario con overrides y
   devuelve KPIs (`jubilacion_month_index`, `final_net_worth`, `fire_target_base`, runway) +
-  `deltas`; series decimadas opt-in (`include_series`). Overrides: `one_off_expense`
+  `deltas`; series decimadas opt-in (`include_series`). Desde **3.8.0** cada lado añade la salud
+  financiera del **mes 1**: `income_monthly`, `expense_total_monthly`, `debt_service_monthly`,
+  `net_monthly` y `savings_rate` (6 dp, misma precisión que `/v1/summary`), con sus cuatro deltas.
+  Cuesta **cero simulaciones extra** — son valores que ya vivían en el `ProjectionInput` de cada
+  lado y no se serializaban, y esa ausencia obligaba a calcular el impacto a mano desde el chat.
+  **Definiciones, que no son las ingenuas**: `expense_total_monthly` = `expense_regular_monthly +
+  debt_service_monthly`, la misma base que alimentan el runway y el target FIRE — en modo A la
+  cuota de pasivo vive fuera de `expense_regular_monthly` por diseño (`budget.rs`) y entra por el
+  servicio de deuda, así que la suma es lo único que cuadra con `expense_total_monthly_equivalent`
+  de `/v1/summary` en los tres modos. Y `net_monthly` = `income − expense_total`, que **no** es el
+  `net_cash_month` que reparte la cascada: ese lleva además el tramo de planning flows del mes en
+  curso. `savings_rate_delta` se recalcula desde los componentes exactos, no restando los dos
+  ratios ya redondeados. Identidades pinneadas en
+  `sim_kpis_match_summary_financial_health_in_all_three_modes`. Overrides: `one_off_expense`
   (`amount` + exactamente uno de `month_index`/`date`; mismo mapeo fecha→mes que un planning flow
   real), `extra_monthly_expense` (gasto REAL: entra antes del target/caps vía `SimOverrides`
   dentro de `build_installation_projection_input`), `extra_monthly_cash_adjustment` y
