@@ -1006,3 +1006,172 @@ async fn apply_rule_cross_user_is_404() {
         .await;
     assert_eq!(r.status, http::StatusCode::NOT_FOUND, "{r:?}");
 }
+
+// ---------------------------------------------------------------------------
+// PATCH /v1/transactions/batch — reclasificación en lote (3.8.0)
+// ---------------------------------------------------------------------------
+
+/// Todo o nada: un id ajeno en medio del lote deja CERO filas tocadas, y el 404 nombra al culpable.
+/// Un resultado parcial obligaría al llamante a reconciliar estado, que es justo lo que un lote
+/// viene a evitar.
+#[tokio::test]
+async fn batch_patch_is_all_or_nothing_and_names_the_culprit() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bob = app.register_and_approve_member(&owner, "bob", "member").await;
+    let cat = app.create_category(&owner, "expense", "Compras").await;
+
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let r = create_manual(
+            &app,
+            &owner.cookie,
+            json!({ "op_date": format!("2026-06-{:02}", 10 + i), "concept": format!("COMPRA {i}"),
+                    "amount": "-10", "kind": "expense" }),
+        )
+        .await;
+        ids.push(r.json()["id"].as_str().unwrap().to_string());
+    }
+    // Un movimiento de Bob: existe, pero no es de Alice.
+    let ajeno = create_manual(
+        &app,
+        &bob.cookie,
+        json!({ "op_date": "2026-06-20", "concept": "DE BOB", "amount": "-99", "kind": "expense" }),
+    )
+    .await;
+    let ajeno_id = ajeno.json()["id"].as_str().unwrap().to_string();
+
+    // El id ajeno va en MEDIO del lote: si la implementación escribiera y luego fallara, las
+    // primeras filas ya estarían modificadas.
+    let mut mixed = ids.clone();
+    mixed.insert(2, ajeno_id.clone());
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/transactions/batch",
+            json!({ "ids": mixed, "category_id": cat }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::NOT_FOUND, "{r:?}");
+    let msg = r.json()["message"].as_str().unwrap().to_string();
+    assert!(msg.contains(&ajeno_id), "el 404 debe nombrar el id culpable: {msg}");
+
+    // CERO filas tocadas.
+    let rows = app
+        .get_with_cookie("/v1/transactions?view=mine", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert!(
+            t["category_id"].is_null(),
+            "ninguna fila debía tocarse tras el 404: {t}"
+        );
+    }
+
+    // Y el lote correcto sí aplica, en una sola llamada.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/transactions/batch",
+            json!({ "ids": ids, "category_id": cat, "notes": "revisado" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let out = r.json();
+    assert_eq!(out["updated"], 5, "{out}");
+    assert_eq!(out["resumen"].as_array().unwrap().len(), 5, "{out}");
+    assert_eq!(out["resumen_truncated"], false, "{out}");
+    let rows = app
+        .get_with_cookie("/v1/transactions?view=mine", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert_eq!(t["category_id"], json!(cat), "{t}");
+        assert_eq!(t["notes"], "revisado", "{t}");
+    }
+}
+
+/// El lote es equivalente a N PATCH individuales para los campos que admite, y rechaza los que no.
+#[tokio::test]
+async fn batch_patch_matches_individual_patches_and_rejects_rewrites() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Compras").await;
+
+    let a = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "UNO", "amount": "-10", "kind": "income" }),
+    )
+    .await;
+    let b = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-11", "concept": "DOS", "amount": "-20", "kind": "income" }),
+    )
+    .await;
+    let a_id = a.json()["id"].as_str().unwrap().to_string();
+    let b_id = b.json()["id"].as_str().unwrap().to_string();
+
+    // A por la vía individual, B por el lote: el resultado debe ser indistinguible.
+    let indiv = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{a_id}"),
+            json!({ "kind": "expense", "category_id": cat }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(indiv.status, http::StatusCode::OK, "{indiv:?}");
+    let lote = app
+        .patch_json_with_cookie(
+            "/v1/transactions/batch",
+            json!({ "ids": [b_id], "kind": "expense", "category_id": cat }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(lote.status, http::StatusCode::OK, "{lote:?}");
+
+    let rows = app
+        .get_with_cookie("/v1/transactions", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert_eq!(t["kind"], "expense", "{t}");
+        assert_eq!(t["category_id"], json!(cat), "{t}");
+    }
+
+    // Campos de reescritura: no existen en el body del lote, así que serde los ignora y el lote
+    // queda «sin nada que actualizar» → 400 explícito, nunca un cambio parcial silencioso.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/transactions/batch",
+            json!({ "ids": [a_id], "amount": "-999", "op_date": "2020-01-01" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    let rows = app
+        .get_with_cookie("/v1/transactions", &owner.cookie)
+        .await
+        .json();
+    let a_row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(a_id))
+        .unwrap();
+    assert_eq!(a_row["amount"], "-10.0000", "el importe no se toca por lote: {a_row}");
+    assert_eq!(a_row["op_date"], "2026-06-10", "{a_row}");
+
+    // Validaciones de exclusión mutua y de lote vacío.
+    for body in [
+        json!({ "ids": [a_id], "category_id": cat, "clear_category": true }),
+        json!({ "ids": [a_id], "notes": "x", "clear_notes": true }),
+        json!({ "ids": [], "kind": "expense" }),
+    ] {
+        let r = app
+            .patch_json_with_cookie("/v1/transactions/batch", body.clone(), &owner.cookie)
+            .await;
+        assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{body}: {r:?}");
+    }
+}

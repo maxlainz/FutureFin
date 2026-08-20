@@ -45,6 +45,12 @@ pub enum ApiError {
     Unavailable,
     #[error("not found")]
     NotFound,
+    /// 404 que SÍ propaga mensaje al wire. Existe para las operaciones de lote, donde un «not
+    /// found» pelado obligaría al llamante a buscar a ciegas cuál de los N ids falló — justo el
+    /// trabajo de reconciliación que un lote todo-o-nada viene a evitar. El mensaje solo nombra
+    /// ids que el llamante ya envió: no revela nada que no supiera.
+    #[error("{0}")]
+    NotFoundWith(String),
 }
 
 /// Mapea automáticamente los SQLSTATE más comunes a respuestas HTTP coherentes, evitando que
@@ -72,7 +78,7 @@ impl ApiError {
             ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
-            ApiError::NotFound => StatusCode::NOT_FOUND,
+            ApiError::NotFound | ApiError::NotFoundWith(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict => StatusCode::CONFLICT,
             ApiError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -86,6 +92,7 @@ impl ApiError {
             ApiError::Unauthorized => "authentication required".into(),
             ApiError::Forbidden => "forbidden".into(),
             ApiError::NotFound => "not found".into(),
+            ApiError::NotFoundWith(s) => s.clone(),
             ApiError::Conflict => "resource conflict".into(),
             ApiError::Unavailable => "dependency unavailable".into(),
             ApiError::Db(err) => {
@@ -101,7 +108,7 @@ impl ApiError {
             ApiError::Unprocessable(_) => ErrorCode::Unprocessable,
             ApiError::Unauthorized => ErrorCode::Unauthorized,
             ApiError::Forbidden => ErrorCode::Forbidden,
-            ApiError::NotFound => ErrorCode::NotFound,
+            ApiError::NotFound | ApiError::NotFoundWith(_) => ErrorCode::NotFound,
             ApiError::Conflict => ErrorCode::Conflict,
             ApiError::Unavailable => ErrorCode::Unavailable,
             ApiError::Db(_) => ErrorCode::Internal,

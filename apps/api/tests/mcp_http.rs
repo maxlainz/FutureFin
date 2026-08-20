@@ -212,6 +212,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "update_liability",
             "update_planning_flow",
             "update_transaction",
+            "update_transactions",
         ],
         "catálogo congelado: cada tool nueva se añade aquí a conciencia"
     );

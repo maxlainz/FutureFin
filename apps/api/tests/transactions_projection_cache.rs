@@ -568,6 +568,76 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
     }
 }
 
+/// Contrato de cache del PATCH en lote: **COND**, igual que el PATCH individual — invalida en los
+/// modos que leen transacciones y no en modo A.
+///
+/// Lo que motivó el lote fue el coste: 16 recategorizaciones seguidas en modo C tiraban la cache 16
+/// veces. Que la invalidación ocurra **una sola vez** es una propiedad estructural de la core (la
+/// llamada está fuera del bucle, después del commit) y no es observable desde fuera: el estado
+/// final de la cache es el mismo tirándola una vez que cinco. Este test fija lo que sí se puede
+/// observar —que invalida, y solo en los modos correctos—; la unicidad la sostiene la revisión del
+/// código, no una aserción que no podría fallar.
+#[tokio::test]
+async fn batch_patch_invalidates_once_for_the_whole_batch() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    set_mode(&app, &owner.cookie, "budget_income_real_expense").await;
+
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({ "op_date": format!("2026-06-{:02}", 10 + i),
+                        "concept": format!("COMPRA {i}"), "amount": "-10", "kind": "income" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+        ids.push(r.json()["id"].as_str().unwrap().to_string());
+    }
+
+    let iid = installation_id(&app).await;
+    let key = household_key(iid);
+    warm(&app, &owner.cookie, &key).await;
+
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/transactions/batch",
+            json!({ "ids": ids, "kind": "expense", "category_id": compras }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["updated"], 5, "{:?}", r.json());
+    assert_invalidated(&app, &key, "batch patch en modo C").await;
+
+    // Y en modo A sigue sin invalidar: el contrato es COND, no incondicional.
+    set_mode(&app, &owner.cookie, "budget").await;
+    warm(&app, &owner.cookie, &key).await;
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/transactions/batch",
+            json!({ "ids": ids, "notes": "revisado" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        present(&app, &key).await,
+        "modo A: el lote tampoco invalida (las transacciones no son inputs del engine)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Conciliación (3.5.0): mismas reglas COND que el resto de mutaciones
 // ---------------------------------------------------------------------------

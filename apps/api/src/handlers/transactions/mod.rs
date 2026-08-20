@@ -53,7 +53,7 @@ use uuid::Uuid;
 // Re-exports para el wiring de openapi.rs.
 pub use crud::{
     create_batch, create_transaction, delete_import, delete_transaction, list_imports,
-    list_months, list_transactions, patch_transaction,
+    list_months, list_transactions, patch_batch, patch_transaction,
 };
 pub use import::{import_confirm, import_preview};
 pub use reconcile::{reconcile_now, reconcile_pair, unreconcile_transaction};
@@ -290,7 +290,7 @@ pub fn transactions_router() -> Router {
     let import_limit = crate::routes::BACKUP_IMPORT_BODY_LIMIT_BYTES;
     Router::new()
         .route("/", get(list_transactions).post(create_transaction))
-        .route("/batch", post(create_batch))
+        .route("/batch", post(create_batch).patch(patch_batch))
         .route("/months", get(list_months))
         .route("/summary", get(get_transactions_summary))
         .route("/category-series", get(get_category_series))
