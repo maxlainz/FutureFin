@@ -1454,6 +1454,30 @@ pub(crate) struct SimKpis {
     #[serde(with = "rust_decimal::serde::str_option")]
     pub runway_months: Option<Decimal>,
     pub runway_is_indefinite: bool,
+    /// Ingreso mensual efectivo del lado (`ProjectionInput::income_regular_monthly`): presupuesto
+    /// en modos A y C, promedio real 12m en modo B.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub income_monthly: Decimal,
+    /// Gasto mensual **total** = gasto regular + servicio de deuda. Es la MISMA base que alimenta
+    /// el runway y el target FIRE de este lado, y la que cuadra con
+    /// `expense_total_monthly_equivalent` de `/v1/summary` en los tres modos. Ojo: no es
+    /// `input.expense_regular_monthly` a secas — en modo A la cuota de pasivo vive deliberadamente
+    /// fuera de esa base (`budget.rs`, para no contarla dos veces en la proyección) y entra aquí
+    /// por `debt_service_monthly`.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub expense_total_monthly: Decimal,
+    /// Cuota mensual de los pasivos activos. 0 en los modos B y C por contrato (ahí las cuotas ya
+    /// son movimientos reales dentro del promedio de gasto).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub debt_service_monthly: Decimal,
+    /// `income_monthly − expense_total_monthly`. Es el neto recurrente, NO el `net_cash_month` que
+    /// reparte la cascada: ese incluye además el tramo de planning flows del mes en curso.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub net_monthly: Decimal,
+    /// `net_monthly / income_monthly`, redondeado a 6 decimales igual que en `/v1/summary` (misma
+    /// precisión en las dos superficies). `None` si no hay ingreso.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub savings_rate: Option<Decimal>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1466,6 +1490,16 @@ pub(crate) struct SimDeltas {
     pub fire_target_base_delta: Option<Decimal>,
     #[serde(with = "rust_decimal::serde::str_option")]
     pub runway_months_delta: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub income_monthly_delta: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub expense_total_monthly_delta: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub net_monthly_delta: Decimal,
+    /// Diferencia de tasas calculada sobre los ratios **sin redondear** y redondeada al final:
+    /// restar dos valores ya recortados a 6 dp propagaría el error de presentación al delta.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub savings_rate_delta: Option<Decimal>,
 }
 
 /// Series decimadas (hybrid) opt-in — números f64 como el resto de series de chart.
@@ -1532,14 +1566,29 @@ fn sim_kpis(
         futurefin_engine::RunwayOutcome::NoExpenseBase => (None, false),
     };
 
+    let income_monthly = input.income_regular_monthly;
+    let net_monthly = income_monthly - monthly_expense;
+    let savings_rate = (income_monthly > Decimal::ZERO)
+        .then(|| (net_monthly / income_monthly).round_dp(SIM_RATIO_DP));
+
     SimKpis {
         jubilacion_month_index,
         final_net_worth,
         fire_target_base: input.fire_target.as_ref().map(|ft| ft.base_amount),
         runway_months,
         runway_is_indefinite,
+        income_monthly,
+        expense_total_monthly: monthly_expense,
+        debt_service_monthly,
+        net_monthly,
+        savings_rate,
     }
 }
+
+/// Decimales de `SimKpis::savings_rate`. Debe seguir siendo el mismo que el `RATIO_DP` de
+/// `handlers/summary.rs`: si divergen, se reabre la incoherencia de precisión entre superficies que
+/// el redondeo de 3.8.0 vino a cerrar (le pasó a `runway_months` durante dos versiones).
+const SIM_RATIO_DP: u32 = 6;
 
 /// What-if de proyección/FIRE sin persistir nada. Ensambla el baseline y el escenario con el
 /// MISMO contexto (`resolve_projection_context`: today, horizonte, inflación, fire_settings) y
@@ -1767,6 +1816,20 @@ pub(crate) async fn simulate_projection_core(
         runway_months_delta: match (baseline.runway_months, scenario.runway_months) {
             (Some(b), Some(s)) => Some(s - b),
             _ => None,
+        },
+        income_monthly_delta: scenario.income_monthly - baseline.income_monthly,
+        expense_total_monthly_delta: scenario.expense_total_monthly - baseline.expense_total_monthly,
+        net_monthly_delta: scenario.net_monthly - baseline.net_monthly,
+        // Se recalcula desde `net`/`income` (que viajan EXACTOS) en vez de restar los dos
+        // `savings_rate` ya redondeados.
+        savings_rate_delta: {
+            let raw = |k: &SimKpis| {
+                (k.income_monthly > Decimal::ZERO).then(|| k.net_monthly / k.income_monthly)
+            };
+            match (raw(&baseline), raw(&scenario)) {
+                (Some(b), Some(s)) => Some((s - b).round_dp(SIM_RATIO_DP)),
+                _ => None,
+            }
         },
     };
 
