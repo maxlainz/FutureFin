@@ -15,8 +15,12 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-19 for
-the 3.7.0 train** (fusión de la cuota de pasivo en el presupuesto: `budget_derived.rs` renombrado
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-20 for
+the 3.8.0 train** (issue #4, ergonomía MCP: **28** integration-test files in `apps/api/tests/`
+— el nuevo es `allocation_resolution.rs` —, **40** migraciones **sin cambios** (ningún bloque
+del tren añade columnas), `.ffbackup` sigue en **8**, y el catálogo MCP pasa de 47 a **50**
+tools. `apps/api/Cargo.toml` sigue en `3.7.0`: el tren vive en `dev` sin release). Antes,
+**2026-08-19 for the 3.7.0 train** (fusión de la cuota de pasivo en el presupuesto: `budget_derived.rs` renombrado
 a `budget_liability_quotas.rs`, 5 → 10 tests; **40** migraciones y **27** ficheros de test sin
 cambios; `.ffbackup` sigue en **8** — la reforma no toca datos almacenados). Antes, **2026-08-19 for
 the 3.6.0 train** (conciliación de transferencias + paridad MCP; 3.5.0 se cerró en el CHANGELOG
