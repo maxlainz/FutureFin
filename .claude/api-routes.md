@@ -93,6 +93,12 @@ Cap kinds (all optional; `cap_kind`/`cap_value` are paired):
 - `months_expense` — N × (monthly expense + debt service); evaluated per-month against current state.
 - `income_multiple` — N × monthly income.
 
+**`contribution_nominal_monthly` en `/v1/assets`**: aporte del **primer mes** resuelto por la cascada
+de reglas de asignación, no un importe mensual estable — la cascada reparte `net_cash_month`, que
+incluye el tramo de los planning flows sin fecha del mes en curso (`importe/90` por día natural), así
+que el valor decrece cada día y salta el día 1 de cada mes. Desde 3.8.0 se sirve redondeado a **4
+decimales** (política monetaria de la casa; antes salían los 28 dígitos de la división).
+
 **Base de los caps en `/v1/assets` (v2.2.0)**: el `contribution_target_amount` que devuelven `GET/POST/PATCH /v1/assets` resuelve `months_expense` / `income_multiple` con los escalares **efectivos** del engine — o sea, en modo B/C con datos el gasto/income salen del promedio real 12m, no del presupuesto (antes se resolvían siempre con presupuesto y el objetivo no casaba ni con la aportación del mes 1 mostrada en la misma respuesta ni con la proyección). Un único `assets_projection_context` (`handlers/projection.rs`) devuelve `{nominals, income_monthly, expense_with_debt}` de **un solo** `build_installation_projection_input` por request; sustituye a `first_month_asset_contribution_nominals_map` + `monthly_income_expense_debt_for_view` (eliminados).
 
 ### Liabilities (`/v1/liabilities/`)
@@ -123,6 +129,15 @@ Campos de `financial_health` relacionados con el modo y el runway:
 - `savings_actual_months_with_data` (`u32`) — meses reales que sustentan el promedio anterior; a diferencia de `savings_source_months_with_data`, trae su valor real en los tres modos.
 API no breaking (aditivo); `/v1/summary` no tiene cache → sin contrato de invalidación; esto **no** convierte las transacciones en input del engine (D12a intacto — en modo A la proyección sigue ignorándolas).
 - `runway_months` (Decimal-string, opcional) — meses que los activos **líquidos** cubren `expense_total_monthly_equivalent`, **componiendo** la rentabilidad esperada de esos líquidos (media ponderada por valor de los multiplicadores mensuales) y la inflación del gasto (`installation.annual_inflation_assumption_percent`, clampada a ≥ 0). Lo calcula `futurefin_engine::liquid_runway_months` (ver [`engine.md`](engine.md) §Runway). **No** es `liquid_assets_total / expense_total`, salvo que rentabilidad e inflación sean 0 (y el umbral SWR no se cumpla), caso en el que se reduce exactamente a esa división. Como sigue `expense_total`, en B/C se calcula sobre la base de gasto real. Se **omite** del JSON (`skip_serializing_if`) cuando es `None`: sin base de gasto (`expense_total == 0`) o runway indefinido. El valor `1200` (`MAX_RUNWAY_MONTHS`) **no** es un centinela de infinito sino un **suelo**: significa «al menos 100 años» (el bucle agotó el tope sin cumplir el umbral SWR) y la UI lo pinta «+100 años».
+- **Precisión de salida (3.8.0)** — los ratios se sirven **redondeados** (`round_ratio`, en la core;
+  nunca en la capa MCP, que devuelve la struct intacta). `savings_rate`,
+  `savings_rate_excluding_derived_debt`, `upcoming_coverage_ratio` y `debt_to_assets_ratio` a **6
+  decimales de fracción** (= 4 decimales de porcentaje, muy por encima del único decimal que pinta
+  la UI); `runway_months` a **1 decimal**, alineado con `simulate_projection`, que ya redondeaba
+  así. Antes salían los hasta 28 dígitos que produce cada división de `rust_decimal`
+  (`"0.2435991666666666666666666667"`). Es un cambio de **presentación**: el gross-up, el umbral SWR
+  y el propio runway se calculan con la precisión completa y solo el resultado publicado se recorta,
+  así que ninguna cifra derivada se mueve. Los importes monetarios (4 decimales) no cambian.
 - `runway_is_indefinite` (`bool`) — desde **v2.3.0** lo decide el **umbral SWR**, no sobrevivir el cap: `true` ⟺ la retirada anual bruta no supera el SWR sobre el saldo líquido, es decir `gross_up(expense_total × 12) × 100 ≤ liquid_assets_total × swr_pct`, con `swr_pct`/`tax_brackets`/`taxes_enabled` de `installation.fire_settings` (pestaña Jubilación) y el **mismo** `gross_up_net_annual_fire` del target FIRE. Entonces `runway_months` no viaja. Con `swr_pct ≤ 0` nunca es `true`. Con `expense_total == 0` es `false` (no hay base de gasto, no es que esté cubierto). El disparador es deliberadamente independiente de rentabilidad e inflación (que gobiernan solo el caso finito). La UI muestra «Infinito (dentro del SWR 3,5 %)» en el primer caso y oculta la tarjeta en el segundo. **API no breaking**: tipo y nullabilidad de ambos campos son los de v2.2.0.
 
 ### Budget (`/v1/budget/`)
