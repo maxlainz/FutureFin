@@ -159,6 +159,17 @@ export function isZeroMoneyMetric(s: string | null | undefined): boolean {
   return n === null || n === 0;
 }
 
+/**
+ * Ocultar KPI cuando el servidor NO mandó dato. Distinto de `isZeroMoneyMetric`: aquí un `0`
+ * explícito **es** dato y la tarjeta se pinta. Úsalo en las métricas cuyo cero es informativo —
+ * el runway es el caso de libro: desde 3.8.0 el backend lo publica con 1 decimal, así que un
+ * runway por debajo de 0,05 meses llega como `"0.0"`, y es justo cuando más importa verlo.
+ */
+export function isAbsentMetric(s: string | null | undefined): boolean {
+  if (s == null || String(s).trim() === "") return true;
+  return parseDisplayDecimal(String(s)) === null;
+}
+
 /** Ocultar KPI de fracción (tasa, ratio 0–1) cuando falta o es 0. */
 export function isZeroFractionMetric(ratio: string | null | undefined): boolean {
   if (ratio == null || String(ratio).trim() === "") return true;

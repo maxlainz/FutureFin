@@ -9,6 +9,11 @@
 //! - `expense_total_monthly_equivalent` = gasto de presupuesto, cuotas ya incluidas dentro.
 //! - sin gasto (`expense_total == 0`) el campo `runway_months` **no se serializa**.
 //!
+//! **Precisión (3.8.0)**: el wire publica `runway_months` con **1 decimal** — la misma precisión
+//! que `simulate_projection` ya usaba, para que el número no dependa de la puerta de entrada. La
+//! reducción exacta a `A/g` sigue siendo una propiedad del engine (`liquid_runway_months` no
+//! redondea); aquí se comprueba a la precisión que se publica, con `.round_dp(1)` en el esperado.
+//!
 //! El resto cubre el comportamiento compuesto (todos con el número o la desigualdad PREDICHOS en
 //! el comentario de cada test): rentabilidad que alarga, inflación que acorta, el caso indefinido
 //! decidido por el **umbral SWR** (v2.3.0: infinito ⟺ `gross_up(12·gasto) ≤ líquidos·swr/100`,
@@ -410,8 +415,9 @@ async fn runway_indefinite_at_exact_swr_threshold() {
     assert_eq!(h["runway_is_indefinite"], false);
     assert_eq!(
         dec(&h["runway_months"]),
-        d(240_000) / d(701),
-        "justo bajo el umbral la reducción exacta a A/g sigue intacta"
+        (d(240_000) / d(701)).round_dp(1),
+        "justo bajo el umbral la reducción exacta a A/g sigue intacta (el wire publica 1 decimal \
+         desde 3.8.0; el engine conserva la división completa)"
     );
 }
 
@@ -441,8 +447,8 @@ async fn runway_gross_up_raises_threshold() {
     assert_eq!(con_impuestos["runway_is_indefinite"], false);
     assert_eq!(
         dec(&con_impuestos["runway_months"]),
-        d(270_000) / d(700),
-        "finito por gross-up: sin rentabilidad ni inflación, división exacta"
+        (d(270_000) / d(700)).round_dp(1),
+        "finito por gross-up: sin rentabilidad ni inflación, división exacta (publicada a 1 decimal)"
     );
 
     set_fire_settings(&app, &owner.cookie, json!({ "taxes_enabled": false })).await;

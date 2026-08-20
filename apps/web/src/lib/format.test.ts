@@ -16,6 +16,7 @@ import {
   formatPercentAmount,
   formatPercentDisplay,
   formatPercentDisplaySigned,
+  isAbsentMetric,
   isZeroFractionMetric,
   isZeroMoneyMetric,
   lastUsedLabel,
@@ -157,6 +158,23 @@ describe("isZeroMoneyMetric + isZeroFractionMetric", () => {
   it("returns false for nonzero amounts", () => {
     expect(isZeroMoneyMetric("100")).toBe(false);
     expect(isZeroFractionMetric("0.05")).toBe(false);
+  });
+});
+
+describe("isAbsentMetric", () => {
+  it("treats null/empty/unparseable as absent", () => {
+    expect(isAbsentMetric(null)).toBe(true);
+    expect(isAbsentMetric(undefined)).toBe(true);
+    expect(isAbsentMetric("")).toBe(true);
+    expect(isAbsentMetric("   ")).toBe(true);
+  });
+  it("does NOT treat an explicit zero as absent", () => {
+    // El caso que motivó el helper: el runway se publica con 1 decimal desde 3.8.0, así que
+    // «menos de 0,05 meses» llega como "0.0" y la tarjeta debe seguir pintándose.
+    expect(isAbsentMetric("0.0")).toBe(false);
+    expect(isAbsentMetric("0")).toBe(false);
+    expect(isAbsentMetric("0,00")).toBe(false);
+    expect(isZeroMoneyMetric("0.0")).toBe(true); // el contraste con el guard antiguo
   });
 });
 

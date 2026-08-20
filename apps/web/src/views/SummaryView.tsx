@@ -22,6 +22,7 @@ import {
   formatFractionAsPercent,
   formatPercentDisplay,
   formatRunwayValue,
+  isAbsentMetric,
   isZeroFractionMetric,
   isZeroMoneyMetric,
   parseDisplayDecimal,
@@ -165,11 +166,11 @@ export function SummaryView({
   // Runway: el servidor marca `runway_is_indefinite` (y `runway_months` a null) cuando la
   // retirada anual cabe en el SWR de `fire_settings` (pestaña Jubilación) — la tarjeta sigue
   // siendo relevante (es la mejor noticia posible) y el paréntesis explica el porqué.
+  // El guard mira AUSENCIA, no cero: un runway de 0 meses es información (el peor caso posible),
+  // y desde 3.8.0 el servidor lo publica con 1 decimal, así que <0,05 meses llega como "0.0".
   const runwayIsIndefinite = fh?.runway_is_indefinite === true;
   const showRunwayTile =
-    showMetrics &&
-    fh &&
-    (runwayIsIndefinite || !isZeroMoneyMetric(fh.runway_months));
+    showMetrics && fh && (runwayIsIndefinite || !isAbsentMetric(fh.runway_months));
   const runwayParenthetical = runwayIsIndefinite
     ? runwaySwrParenthetical(installation?.installation.fire_settings)
     : avgParenthetical;
