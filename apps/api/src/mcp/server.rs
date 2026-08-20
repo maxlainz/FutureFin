@@ -52,7 +52,8 @@ use crate::handlers::transactions::recurring::{
     delete_recurring_rule_core, list_recurring_rules_core, materialize_recurring_core,
 };
 use crate::handlers::transactions::rules::{
-    create_categorization_rule_core, list_categorization_rules_core,
+    apply_categorization_rule_core, create_categorization_rule_core,
+    list_categorization_rules_core, ApplyScope,
 };
 use crate::handlers::transactions::summary::{
     category_monthly_series_core, transactions_summary_core,
@@ -512,6 +513,23 @@ pub struct CreateCategorizationRuleParams {
     /// Categoría a asignar (UUID; scope acorde al assign_kind).
     #[serde(default)]
     pub assign_category_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ApplyCategorizationRuleParams {
+    /// UUID de la regla (de list_categorization_rules).
+    pub rule_id: String,
+    /// "uncategorized" (default): solo movimientos sin categoría. "all": también reasigna los ya
+    /// categorizados — el caso «desglosar una categoría cajón».
+    #[serde(default)]
+    pub apply_to_existing: Option<String>,
+    /// Acota el backfill hacia atrás: "YYYY-MM", inclusive. Omitido = todo el histórico.
+    #[serde(default)]
+    pub from_month: Option<String>,
+    /// Sin confirm=true NO escribe: devuelve el preview con cuántos movimientos cambiarían,
+    /// desglosados por su categoría actual, y si eso movería la proyección.
+    #[serde(default)]
+    pub confirm: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1675,6 +1693,13 @@ impl FutureFinMcp {
                     "assign_category_id",
                     &p.assign_category_id,
                 )?,
+                // El backfill NO se expone en esta tool: la regla todavía no existe, así que no
+                // hay nada que previsualizar, y un `create_*` capaz de reescribir cientos de filas
+                // haría mentir a sus propias annotations (que el cliente usa para decidir si pide
+                // permiso). Para el pasado está `apply_categorization_rule`, con preview/confirm.
+                apply_to_existing: None,
+                from_month: None,
+                confirm: None,
             })
         };
         let body = match run() {
@@ -1695,6 +1720,72 @@ impl FutureFinMcp {
                 "resumen": format!("{} «{}» → {} {}", r.match_kind, r.pattern,
                     r.assign_kind.as_deref().unwrap_or("-"),
                     r.assign_category_name.as_deref().unwrap_or("(sin categoría)")),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "apply_categorization_rule",
+        description = "Aplica una regla de categorización a los movimientos YA EXISTENTES (backfill). Es lo que create_categorization_rule NO hace: esa solo afecta a imports futuros. apply_to_existing: \"uncategorized\" (default, solo los sin categoría) o \"all\" (también reasigna los ya categorizados — el caso «desglosar una categoría cajón»). from_month acota hacia atrás. Usa la MISMA precedencia que el import (source-específica > exact > prefix > substring > patrón más largo), así que un movimiento donde gana OTRA regla no se toca y se reporta en matched_by_other_rule; una regla de un banco concreto no toca movimientos de otro origen y eso sale en skipped_by_source (un matched:0 con skipped_by_source>0 NO es «nada que hacer»). Las patas de transferencia conciliadas se excluyen. Sin confirm=true devuelve un preview sin escribir. OJO: si would_change_kind > 0 la proyección se mueve en los modos B y C, porque el kind decide qué suma el promedio real 12m.",
+        annotations(title = "Aplicar regla al histórico", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn apply_categorization_rule(
+        &self,
+        Parameters(p): Parameters<ApplyCategorizationRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let rule_id = match parse_uuid_param("rule_id", &p.rule_id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let scope = match ApplyScope::parse(p.apply_to_existing.as_deref().unwrap_or("uncategorized"))
+        {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let confirm = p.confirm.unwrap_or(false);
+            let out = apply_categorization_rule_core(
+                &self.state,
+                id.installation_id,
+                id.user_id,
+                rule_id,
+                scope,
+                p.from_month.as_deref(),
+                !confirm,
+            )
+            .await?;
+            if !confirm {
+                // El aviso de proyección se calcula aquí y no en la core: la core no debe saber
+                // cómo se presenta su resultado.
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "apply_categorization_rule",
+                    "effects": {
+                        "would_match": out.matched,
+                        "already_correct": out.already_correct,
+                        "would_change_kind": out.would_change_kind,
+                        "skipped_by_source": out.skipped_by_source,
+                        "matched_by_other_rule": out.matched_by_other_rule,
+                        "skipped_reconciled": out.skipped_reconciled,
+                        "by_current_category": out.by_current_category,
+                        "sample": out.sample,
+                        "moves_projection_in_modes_b_and_c": out.would_change_kind > 0,
+                    },
+                }));
+            }
+            Ok(serde_json::json!({
+                "updated": out.matched,
+                "already_correct": out.already_correct,
+                "skipped_by_source": out.skipped_by_source,
+                "matched_by_other_rule": out.matched_by_other_rule,
+                "skipped_reconciled": out.skipped_reconciled,
+                "resumen": out.sample,
             }))
         }
         .await;

@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Backfill de reglas de categorización (`apply_categorization_rule`, tool 48)
+
+- **El problema**: crear una regla solo afectaba a imports futuros y la tool lo decía con
+  honestidad, pero el trabajo se duplicaba — creabas la regla para el futuro y recategorizabas el
+  pasado a mano igualmente. Desglosar una categoría cajón costó 16 llamadas casi idénticas.
+- **La solución**: `POST /v1/transactions/rules/{id}/apply` + tool `apply_categorization_rule`, con
+  `apply_to_existing` (`uncategorized` | `all`), `from_month` y preview/confirm. El eje también
+  existe en el body de `POST /v1/transactions/rules` para el round-trip único de la SPA; el default
+  es `none`, así que el contrato histórico no se mueve.
+- **Precedencia completa, no la regla suelta**: el backfill evalúa el conjunto ENTERO de reglas y
+  solo escribe las filas cuya ganadora es la invocada, de modo que el pasado queda como habría
+  quedado importando hoy. Las filas donde la regla casa pero pierde se reportan en
+  `matched_by_other_rule` en vez de desaparecer del informe.
+- **El no-op invisible, delatado**: `match_rule` descarta las reglas cuyo `source` no coincide con
+  el del movimiento, así que una regla aprendida de MyInvestor no toca movimientos manuales — sin
+  error y sin aviso. El backfill respeta esa semántica (una regla nunca hace en diferido lo que no
+  haría en vivo) pero **cuenta** esas filas en `skipped_by_source`: un `matched: 0` con
+  `skipped_by_source > 0` no es «no hay nada que hacer».
+- **Contrato de cache separado en dos rutas**: crear la regla sigue siendo NONE; aplicarla es
+  **COND** y solo si escribe algo, porque cambiar el `kind` de filas históricas cambia
+  `transactions_12m_avg`, que es input del engine en los modos B y C. `would_change_kind` aparece en
+  el preview justo por eso. `applying_a_rule_invalidates_cond_but_creating_it_still_does_not`
+  recorre los tres modos y los tres momentos (crear / preview / backfill); verificado que cae si el
+  backfill deja de invalidar y también si invalida cuando no ha tocado ninguna fila.
+- Las patas de transferencia conciliadas se excluyen (`skipped_reconciled`): están fuera de todos
+  los agregados de flujo. No se recalculan huellas ni se toca la conciliación — ni `kind` ni
+  `category_id` entran en la huella de dedup ni en el emparejado.
+- **Omisión deliberada**: la tool `create_categorization_rule` no expone `apply_to_existing`. En el
+  momento del preview la regla aún no existe, así que no habría nada que simular; y un `create_*`
+  capaz de reescribir cientos de filas haría mentir a sus propias annotations, que es lo que el
+  cliente MCP usa para decidir si pide permiso. Desde el chat: crear y luego aplicar, con un único
+  gate de confirmación.
+
 ### Added — Búsqueda en `GET /v1/transactions` (concepto, importe y rango de fechas)
 
 - **El problema, medido**: el listado admitía cuatro ejes (`month`, `kind`, `category_id`,

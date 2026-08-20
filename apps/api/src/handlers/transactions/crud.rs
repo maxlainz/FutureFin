@@ -378,6 +378,11 @@ pub(crate) struct TxnFilters<'a> {
 }
 
 /// Parsea `YYYY-MM` → (primer día del mes, primer día del mes siguiente).
+/// Primer día del mes `YYYY-MM`. Lo comparte el backfill de reglas (`from_month`).
+pub(crate) fn parse_month_start(raw: &str) -> Result<NaiveDate, ApiError> {
+    parse_month(raw).map(|(start, _)| start)
+}
+
 fn parse_month(raw: &str) -> Result<(NaiveDate, NaiveDate), ApiError> {
     let mut parts = raw.trim().splitn(2, '-');
     let year: i32 = parts

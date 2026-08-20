@@ -9,14 +9,16 @@ use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::schema::{
-    fold_diacritics_upper, normalize_concept, normalize_kind, CreateRuleBody, PatchRuleBody,
-    RuleResponse,
+    fold_diacritics_upper, normalize_concept, normalize_kind, ApplyRuleBody, CreateRuleBody,
+    PatchRuleBody, RuleResponse,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Path};
 use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
+use utoipa::ToSchema;
 use sqlx::{FromRow, PgConnection};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -304,13 +306,36 @@ pub async fn create_rule(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let scope = ApplyScope::parse(body.apply_to_existing.as_deref().unwrap_or("none"))?;
+    let confirm = body.confirm.unwrap_or(false);
+    if scope != ApplyScope::None && !confirm {
+        return Err(ApiError::BadRequest(
+            "confirm must be true to apply a new rule to existing transactions".into(),
+        ));
+    }
+    let from_month = body.from_month.clone();
     let resp = create_categorization_rule_core(&state.pool, iid, user.id.0, body).await?;
+    // El backfill va DESPUÉS del INSERT y por su propia core, que es quien decide la invalidación:
+    // crear la regla sigue siendo NONE, aplicarla es COND. Dos rutas, dos contratos de cache.
+    if scope != ApplyScope::None {
+        apply_categorization_rule_core(
+            &state,
+            iid,
+            user.id.0,
+            resp.id,
+            scope,
+            from_month.as_deref(),
+            false,
+        )
+        .await?;
+    }
     Ok((axum::http::StatusCode::CREATED, Json(resp)))
 }
 
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_categorization_rule`.
-/// Las reglas NUNCA invalidan la cache (solo afectan a imports futuros — pinneado por
-/// `creating_a_categorization_rule_never_invalidates_projection_cache`, en los tres modos).
+/// **Solo hace INSERT**: no recategoriza nada, así que NUNCA invalida la cache (pinneado por
+/// `creating_a_categorization_rule_never_invalidates_projection_cache`, en los tres modos). El
+/// backfill retroactivo es `apply_categorization_rule_core`, otra ruta y otra clase de cache.
 /// 409 en duplicado `(source, pattern)` vía el mapeo global de sqlx.
 pub(crate) async fn create_categorization_rule_core(
     pool: &sqlx::PgPool,
@@ -352,6 +377,286 @@ pub(crate) async fn create_categorization_rule_core(
 
     let row = load_rule_row(pool, id).await?;
     Ok(row_to_response(row))
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/transactions/rules/{id}/apply — backfill retroactivo
+// ---------------------------------------------------------------------------
+
+#[utoipa::path(
+    post,
+    path = "/v1/transactions/rules/{id}/apply",
+    tag = "transactions",
+    params(("id" = Uuid, Path, description = "Id de la regla")),
+    request_body = ApplyRuleBody,
+    responses(
+        (status = 200, description = "Backfill aplicado (o preview si falta `confirm`)", body = ApplyRuleOutcome),
+        (status = 400, description = "Validación / falta confirm"),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Viewer or not a member"),
+        (status = 404, description = "Regla inexistente o de otro usuario"),
+    )
+)]
+pub async fn apply_rule(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ApplyRuleBody>,
+) -> Result<Json<ApplyRuleOutcome>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
+    if !role_can_write(role.as_str()) {
+        return Err(ApiError::Forbidden);
+    }
+    let scope = ApplyScope::parse(body.apply_to_existing.as_deref().unwrap_or("uncategorized"))?;
+    let confirm = body.confirm.unwrap_or(false);
+    if scope != ApplyScope::None && !confirm {
+        // Por HTTP el preview se pide explícitamente con `apply_to_existing` + sin confirm es un
+        // 400: el formulario de la SPA ya enseña el impacto antes de llamar. La tool MCP, en
+        // cambio, devuelve el preview (patrón de la casa para las destructivas).
+        return Err(ApiError::BadRequest(
+            "confirm must be true to apply a rule to existing transactions".into(),
+        ));
+    }
+    let out = apply_categorization_rule_core(
+        &state,
+        iid,
+        user.id.0,
+        id,
+        scope,
+        body.from_month.as_deref(),
+        false,
+    )
+    .await?;
+    Ok(Json(out))
+}
+
+
+/// Alcance del backfill de una regla sobre los movimientos ya existentes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApplyScope {
+    /// No toca nada (default de `create_categorization_rule`: contrato histórico intacto).
+    None,
+    /// Solo movimientos sin categoría.
+    Uncategorized,
+    /// También reasigna los ya categorizados — el caso «desglosar una categoría cajón».
+    All,
+}
+
+impl ApplyScope {
+    pub(crate) fn parse(raw: &str) -> Result<Self, ApiError> {
+        match raw.trim() {
+            "none" => Ok(Self::None),
+            "uncategorized" => Ok(Self::Uncategorized),
+            "all" => Ok(Self::All),
+            other => Err(ApiError::BadRequest(format!(
+                "apply_to_existing must be none, uncategorized or all (got {other})"
+            ))),
+        }
+    }
+}
+
+/// Resultado del backfill. En `dry_run` los contadores describen lo que PASARÍA y no se escribe
+/// nada; con `dry_run = false`, `updated` son las filas realmente modificadas.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApplyRuleOutcome {
+    /// Filas que cambiarían (o han cambiado).
+    pub matched: i64,
+    /// Filas donde la regla gana pero la asignación ya es la correcta: no se tocan.
+    pub already_correct: i64,
+    /// De las que cambiarían, cuántas cambian de `kind`. **No es decorativo**: el `kind` decide
+    /// qué suma el promedio real 12m, así que un valor > 0 significa que la proyección se mueve
+    /// en los modos B y C.
+    pub would_change_kind: i64,
+    /// Filas donde el patrón de ESTA regla casa pero su `source` no coincide con el del
+    /// movimiento, así que no aplica (misma semántica que en el import). Sin este contador un
+    /// `matched: 0` se lee como «no hay nada que hacer», que es justo lo que no es.
+    pub skipped_by_source: i64,
+    /// Filas donde esta regla casa pero PIERDE la precedencia frente a otra regla.
+    pub matched_by_other_rule: i64,
+    /// Patas de transferencia conciliadas: se excluyen (están fuera de todos los agregados de
+    /// flujo, recategorizarlas no significa nada).
+    pub skipped_reconciled: i64,
+    /// Desglose de las filas que cambiarían por su categoría ACTUAL.
+    pub by_current_category: Vec<ApplyRuleCategoryCount>,
+    /// Hasta 10 `resumen` de ejemplo, para verificar que se tocaría lo correcto sin releer nada.
+    pub sample: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApplyRuleCategoryCount {
+    pub category_id: Option<Uuid>,
+    pub category_name: Option<String>,
+    pub count: i64,
+}
+
+/// Aplica una regla de categorización a los movimientos YA EXISTENTES del propio usuario.
+///
+/// **Usa la precedencia completa** (`match_rule` sobre el conjunto entero de reglas), no la regla
+/// suelta: el pasado queda como habría quedado importando hoy. Una fila donde otra regla gana no
+/// se toca, y se cuenta en `matched_by_other_rule` para que el llamante no lo lea como un fallo.
+///
+/// **Invalidación COND dentro de la core**, y solo si se escribió algo: cambiar el `kind` de filas
+/// históricas cambia `transactions_12m_avg`, que es input del engine en los modos B y C. Crear la
+/// regla sigue sin invalidar (`create_categorization_rule_core`) — son dos rutas distintas.
+pub(crate) async fn apply_categorization_rule_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    rule_id: Uuid,
+    scope: ApplyScope,
+    from_month: Option<&str>,
+    dry_run: bool,
+) -> Result<ApplyRuleOutcome, ApiError> {
+    if scope == ApplyScope::None {
+        return Ok(ApplyRuleOutcome::empty());
+    }
+    let pool = &state.pool;
+
+    // Owner-guard: una regla de otro usuario es 404, nunca 403 (no se filtra su existencia).
+    let target: LoadedRule = {
+        let rules = load_rules(pool, iid, user_id).await?;
+        rules
+            .into_iter()
+            .find(|r| r.id == rule_id)
+            .ok_or(ApiError::NotFound)?
+    };
+    let assign_kind = target
+        .assign_kind
+        .clone()
+        .ok_or_else(|| ApiError::BadRequest("rule has no assign_kind to apply".into()))?;
+    // La categoría pudo cambiar de scope desde que se creó la regla: revalidar una vez, no por fila.
+    super::assert_transaction_category(pool, iid, &assign_kind, target.assign_category_id).await?;
+
+    let rules = load_rules(pool, iid, user_id).await?;
+
+    let from_date = match from_month {
+        Some(m) => Some(super::crud::parse_month_start(m)?),
+        None => None,
+    };
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        source: String,
+        concept: String,
+        op_date: chrono::NaiveDate,
+        amount: rust_decimal::Decimal,
+        kind: Option<String>,
+        category_id: Option<Uuid>,
+        category_name: Option<String>,
+        transfer_counterpart_id: Option<Uuid>,
+    }
+    let mut sql = String::from(
+        "SELECT t.id, t.source, t.concept, t.op_date, t.amount, t.kind, t.category_id, \
+         c.name AS category_name, t.transfer_counterpart_id \
+         FROM transactions t LEFT JOIN categories c ON c.id = t.category_id \
+         WHERE t.installation_id = $1 AND t.owner_user_id = $2",
+    );
+    if scope == ApplyScope::Uncategorized {
+        sql.push_str(" AND t.category_id IS NULL");
+    }
+    if from_date.is_some() {
+        sql.push_str(" AND t.op_date >= $3");
+    }
+    sql.push_str(" ORDER BY t.op_date DESC, t.id DESC");
+    let mut q = sqlx::query_as::<_, Row>(&sql).bind(iid).bind(user_id);
+    if let Some(d) = from_date {
+        q = q.bind(d);
+    }
+    let rows: Vec<Row> = q.fetch_all(pool).await?;
+
+    let mut out = ApplyRuleOutcome::empty();
+    let mut to_update: Vec<Uuid> = Vec::new();
+    let mut by_cat: Vec<(Option<Uuid>, Option<String>, i64)> = Vec::new();
+
+    for r in &rows {
+        if r.transfer_counterpart_id.is_some() {
+            out.skipped_reconciled += 1;
+            continue;
+        }
+        let winner = match_rule(&rules, &r.source, &r.concept);
+        let wins = winner.map(|w| w.id) == Some(rule_id);
+        if !wins {
+            // ¿Habría casado esta regla si no fuera por el `source`, o por la precedencia?
+            let text_matches = rule_matches(&target, &normalize_concept(&r.concept));
+            if text_matches {
+                let source_blocks = target.source.as_deref().is_some_and(|rs| rs != r.source);
+                if source_blocks {
+                    out.skipped_by_source += 1;
+                } else if winner.is_some() {
+                    out.matched_by_other_rule += 1;
+                }
+            }
+            continue;
+        }
+        if r.kind.as_deref() == Some(assign_kind.as_str())
+            && r.category_id == target.assign_category_id
+        {
+            out.already_correct += 1;
+            continue;
+        }
+        if r.kind.as_deref() != Some(assign_kind.as_str()) {
+            out.would_change_kind += 1;
+        }
+        match by_cat.iter_mut().find(|(id, _, _)| *id == r.category_id) {
+            Some((_, _, n)) => *n += 1,
+            None => by_cat.push((r.category_id, r.category_name.clone(), 1)),
+        }
+        if out.sample.len() < 10 {
+            out.sample.push(format!(
+                "{} · {} · {} ({})",
+                r.op_date,
+                r.concept,
+                r.amount,
+                r.kind.as_deref().unwrap_or("-")
+            ));
+        }
+        to_update.push(r.id);
+    }
+    out.matched = to_update.len() as i64;
+    out.by_current_category = by_cat
+        .into_iter()
+        .map(|(category_id, category_name, count)| ApplyRuleCategoryCount {
+            category_id,
+            category_name,
+            count,
+        })
+        .collect();
+
+    if dry_run || to_update.is_empty() {
+        return Ok(out);
+    }
+
+    sqlx::query(
+        r#"UPDATE transactions SET kind = $1, category_id = $2, updated_at = now()
+           WHERE id = ANY($3)"#,
+    )
+    .bind(&assign_kind)
+    .bind(target.assign_category_id)
+    .bind(&to_update)
+    .execute(pool)
+    .await?;
+
+    // El conjunto cambió de atribución → COND. No se toca la conciliación: ni `amount` ni
+    // `op_date` se han movido, así que ningún par puede haberse abierto ni cerrado.
+    super::invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+    Ok(out)
+}
+
+impl ApplyRuleOutcome {
+    fn empty() -> Self {
+        Self {
+            matched: 0,
+            already_correct: 0,
+            would_change_kind: 0,
+            skipped_by_source: 0,
+            matched_by_other_rule: 0,
+            skipped_reconciled: 0,
+            by_current_category: Vec::new(),
+            sample: Vec::new(),
+        }
+    }
 }
 
 async fn load_rule_row(pool: &sqlx::PgPool, id: Uuid) -> Result<RuleRow, ApiError> {

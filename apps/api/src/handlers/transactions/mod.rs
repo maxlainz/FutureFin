@@ -58,7 +58,7 @@ pub use crud::{
 pub use import::{import_confirm, import_preview};
 pub use reconcile::{reconcile_now, reconcile_pair, unreconcile_transaction};
 pub use recurring::{delete_recurring_rule, list_recurring_rules, materialize_recurring};
-pub use rules::{create_rule, delete_rule, list_rules, patch_rule};
+pub use rules::{apply_rule, create_rule, delete_rule, list_rules, patch_rule};
 pub use summary::{get_category_series, get_transactions_summary};
 
 pub use schema::{
@@ -306,6 +306,7 @@ pub fn transactions_router() -> Router {
         .route("/imports/{id}", delete(delete_import))
         .route("/rules", get(list_rules).post(create_rule))
         .route("/rules/{id}", patch(patch_rule).delete(delete_rule))
+        .route("/rules/{id}/apply", post(apply_rule))
         // Reglas recurrentes: los segmentos estáticos deben resolverse antes que `/{id}`.
         .route("/recurring", get(list_recurring_rules))
         .route("/recurring/materialize", post(materialize_recurring))
