@@ -16,7 +16,9 @@
 //! del contrato de `error.rs`.
 
 use crate::error::{ApiError, ErrorBody};
-use crate::handlers::allocation_rules::{list_allocation_rules_core, patch_allocation_rule_core};
+use crate::handlers::allocation_rules::{
+    allocation_resolution_core, list_allocation_rules_core, patch_allocation_rule_core,
+};
 use crate::handlers::assets::{asset_delete_effects, delete_asset_core};
 use crate::handlers::liabilities::{delete_liability_core, liability_delete_effects};
 use crate::handlers::assets::{create_asset_core, list_assets_core, patch_asset_core};
@@ -1177,6 +1179,28 @@ impl FutureFinMcp {
             simulate_projection_core(&self.state.pool, id.installation_id, id.user_id, view, spec)
                 .await,
         )
+    }
+
+    #[tool(
+        name = "get_allocation_resolution",
+        description = "La cascada de asignación RESUELTA para el mes en curso: cuánto se lleva cada regla, de qué caja sale y por qué alguna recibe 0. Responde a «¿por qué mi cartera recibe menos de lo que puse?» sin adivinar. Devuelve base_cash (lo que se reparte de verdad) desglosado en recurring_net (income − gasto − cuotas, ESTABLE) + planning_component (el tramo de los planning flows sin fecha del mes en curso, que se agota en 90 días): si base_includes_transient es true, base_cash NO es un importe mensual y cambia cada día — es la razón de que no cuadre con net_monthly_equivalent de get_summary. Por regla: amount_intent vs amount_resolved (si difieren sin skipped_reason, la regla fue RECORTADA por el cap, no saltada), cap_ceiling/cap_room y skipped_reason (no_cash = no sobra dinero; not_reached = las reglas de arriba se lo comieron; cap_full; zero_amount). Cierra con leftover_to_surplus_cash. Solo lectura, no toca la cache.",
+        annotations(title = "Cascada resuelta", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_allocation_resolution(
+        &self,
+        Parameters(p): Parameters<ViewParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let view = resolve_view(&p.view);
+        let res = allocation_resolution_core(
+            &self.state.pool,
+            id.installation_id,
+            id.user_id,
+            view,
+        )
+        .await;
+        to_tool_result(res)
     }
 
     #[tool(

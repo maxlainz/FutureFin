@@ -93,6 +93,27 @@ Cap kinds (all optional; `cap_kind`/`cap_value` are paired):
 - `months_expense` — N × (monthly expense + debt service); evaluated per-month against current state.
 - `income_multiple` — N × monthly income.
 
+**`GET /v1/allocation-rules/resolution` (3.8.0)** — la cascada **resuelta** para el mes en curso.
+Endpoint nuevo y no un envelope sobre `GET /v1/allocation-rules`: convertir aquel array en objeto
+habría roto el contrato. Construye su propio `ProjectionInput` con horizonte 1 (mismo coste que
+`GET /v1/assets`, una tanda de SELECTs) y **no pasa por la cache de proyección**, coherente con
+`assets_projection_context`.
+
+Devuelve `base_cash` —lo que la cascada reparte de verdad— **desglosado** en `recurring_net`
+(`income − expense − debt_service`, estable) y `planning_component` (el tramo de los planning flows
+sin fecha del mes en curso, que se agota en 90 días), con el flag `base_includes_transient`. Ese
+desglose es el punto: un flag de «sobreasignación» a secas habría dicho «sí» y habría sido igual de
+engañoso — la cascada **no** puede repartir de más (`take` se acota por intención, cap y caja, y el
+bucle corta al agotarse), lo que pasaba es que la base incluye un término transitorio.
+
+Por regla: `amount_intent` vs `amount_resolved` (si difieren sin `skipped_reason`, la regla fue
+**recortada** por el cap — no saltada), `cap_ceiling`/`cap_room` y `skipped_reason` ∈ {`no_cash`,
+`not_reached`, `cap_full`, `zero_amount`, `invalid_target`}. `no_cash` y `not_reached` **no se
+colapsan**: «no te sobra dinero» y «las reglas de arriba se lo comieron» tienen remedios distintos.
+Las reglas posteriores al corte por caja se emiten con `not_reached` en vez de desaparecer del
+informe. Cierra con `per_asset` y `leftover_to_surplus_cash`, y la identidad
+`Σ per_asset + leftover = base_cash` está pinneada en `allocation_resolution.rs`.
+
 **Los tres campos de aportación de `/v1/assets` son cosas distintas** — la confusión entre ellos es
 el defecto de contrato que abrió el issue #4:
 
@@ -440,6 +461,11 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `months` 12..840. **Cache-neutral por construcción**: usa `resolve_projection_context` +
   `build_…` + doble `spawn_blocking`, nunca `projection_series_cached`. No persiste nada.
   Regresión: `apps/api/tests/mcp_simulate.rs`.
+- **`get_allocation_resolution` (3.8.0, issue #4)**: la cascada resuelta del mes (read-only, cache
+  **NONE**). Cierra el _stretch_ pendiente del issue #2 («euros resueltos del mes 1 por regla +
+  cuánto acaba en `surplus_cash`») y el hueco de observabilidad que hacía imposible auditar la
+  cascada desde el chat. Paridad byte a byte con el GET en
+  `get_allocation_resolution_matches_http_endpoint`.
 - **`update_transactions` (3.8.0, issue #4)**: reclasificación en lote (1..=200 ids propios) de
   `kind` / categoría / notas. Sin preview/confirm — son ids que el llamante acaba de enumerar
   (criterio del skill §4.5) — pero `destructive_hint = true` e `idempotent_hint = true`. Devuelve

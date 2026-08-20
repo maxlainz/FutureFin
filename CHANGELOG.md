@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `GET /v1/allocation-rules/resolution` y tool `get_allocation_resolution` (tool 50)
+
+- **El hueco que cerraba el issue #4**: no había forma de auditar la cascada desde fuera. Con la
+  aportación del mes 1 sin explicar y `list_allocation_rules` devolviendo solo la *configuración*,
+  un lector razonable concluía que la cascada repartía de más. No lo hacía.
+- **La respuesta desglosa, no simplifica**: `base_cash` (lo que se reparte de verdad) separado en
+  `recurring_net` y `planning_component`, con el flag `base_includes_transient`. Un flag de
+  «sobreasignación» a secas habría dicho «sí» y habría sido igual de engañoso: el problema nunca fue
+  el reparto, sino que la base incluye un término que se agota en 90 días.
+- **Por regla**: `amount_intent` vs `amount_resolved` — si difieren sin `skipped_reason`, la regla
+  fue **recortada** por el cap, que no es lo mismo que saltada y es la pregunta más frecuente —,
+  `cap_ceiling`/`cap_room` y `skipped_reason`. Las reglas posteriores al corte por caja se emiten
+  con `not_reached` en vez de desaparecer: `no_cash` («no te sobra dinero») y `not_reached` («las
+  reglas de arriba se lo comieron») tienen remedios distintos.
+- **Endpoint nuevo, no envelope** sobre `list_allocation_rules`: convertir aquel array en un objeto
+  habría sido breaking. No pasa por la cache de proyección.
+- Los ids de regla viajan desde el constructor del `ProjectionInput` (`allocation_rule_ids`,
+  alineado posición a posición) porque el constructor **descarta** las reglas cuyo activo destino
+  queda fuera del scope: re-derivar la alineación en el handler habría sido un cruce silencioso
+  esperando a pasar.
+
 ### Added — `contribution_recurring_monthly` en `/v1/assets`: el número que sí es mensual
 
 - **El defecto de contrato** (lo que el issue #4 etiquetó como `bug`, y lo es):

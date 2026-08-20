@@ -41,8 +41,8 @@ use crate::handlers::assets::{
 };
 #[allow(unused_imports)]
 use crate::handlers::allocation_rules::{
-    __path_create_allocation_rule, __path_delete_allocation_rule, __path_list_allocation_rules,
-    __path_patch_allocation_rule, __path_reorder_allocation_rules,
+    __path_create_allocation_rule, __path_delete_allocation_rule, __path_get_allocation_resolution,
+    __path_list_allocation_rules, __path_patch_allocation_rule, __path_reorder_allocation_rules,
 };
 #[allow(unused_imports)]
 use crate::handlers::liabilities::{
@@ -116,6 +116,7 @@ use utoipa::OpenApi;
         patch_asset,
         delete_asset,
         list_allocation_rules,
+        get_allocation_resolution,
         create_allocation_rule,
         patch_allocation_rule,
         delete_allocation_rule,
@@ -213,6 +214,9 @@ use utoipa::OpenApi;
         crate::handlers::assets::CreateAssetBody,
         crate::handlers::assets::PatchAssetBody,
         crate::handlers::allocation_rules::AllocationRuleResponse,
+        crate::handlers::allocation_rules::AllocationResolutionResponse,
+        crate::handlers::allocation_rules::ResolvedRule,
+        crate::handlers::allocation_rules::ResolvedAssetContribution,
         crate::handlers::allocation_rules::CreateAllocationRuleBody,
         crate::handlers::allocation_rules::PatchAllocationRuleBody,
         crate::handlers::allocation_rules::ReorderBody,

@@ -283,6 +283,7 @@ struct AssetEngineRow {
 
 #[derive(Debug, FromRow)]
 struct AllocationRuleEngineRow {
+    id: Uuid,
     target_asset_id: Uuid,
     kind: String,
     amount: Option<Decimal>,
@@ -656,7 +657,7 @@ pub(crate) fn projection_horizon_months(
     (clamped_years * 12, "lifespan_90")
 }
 
-fn map_engine_err(e: EngineError) -> ApiError {
+pub(crate) fn map_engine_err(e: EngineError) -> ApiError {
     ApiError::BadRequest(e.to_string())
 }
 
@@ -680,6 +681,12 @@ fn fire_crossover_month(
 pub(crate) struct BuiltProjection {
     pub input: ProjectionInput,
     pub monthly_net_regular: Decimal,
+    /// Ids de las reglas de asignación **alineados posición a posición** con
+    /// `input.allocation_rules`. Imprescindible porque el constructor descarta las reglas cuyo
+    /// activo destino queda fuera del scope, así que el índice del engine NO coincide con el
+    /// orden de la tabla. Se rellena en el mismo `filter_map` que construye las reglas, para que
+    /// la alineación sea una propiedad de construcción y no algo que haya que re-derivar.
+    pub allocation_rule_ids: Vec<Uuid>,
     /// `(id, name)` por activo en el mismo orden que `input.assets` — evita un segundo SELECT.
     pub asset_id_name: Vec<(Uuid, String)>,
     /// Flujos de planificación crudos (scope + amount + due_date) — los reusa el handler para
@@ -878,7 +885,7 @@ pub(crate) async fn build_installation_projection_input(
 
     let alloc_scope = view.scope_where("");
     let alloc_sql = format!(
-        r#"SELECT target_asset_id, kind, amount, cap_kind, cap_value
+        r#"SELECT id, target_asset_id, kind, amount, cap_kind, cap_value
            FROM allocation_rules
            WHERE {alloc_scope} AND enabled = true
            ORDER BY priority ASC, id ASC"#
@@ -936,6 +943,7 @@ pub(crate) async fn build_installation_projection_input(
         .enumerate()
         .map(|(i, a)| (a.id, i))
         .collect();
+    let mut allocation_rule_ids: Vec<Uuid> = Vec::with_capacity(alloc_rows.len());
     let allocation_rules: Vec<AllocationRule> = alloc_rows
         .into_iter()
         .filter_map(|r| {
@@ -957,6 +965,9 @@ pub(crate) async fn build_installation_projection_input(
                 }
                 _ => None,
             };
+            // El push va aquí, DESPUÉS de todos los `?`/`return None`: así el vector de ids
+            // recibe exactamente las reglas que sobreviven al filtro, en el mismo orden.
+            allocation_rule_ids.push(r.id);
             Some(AllocationRule {
                 target_index,
                 kind,
@@ -994,6 +1005,7 @@ pub(crate) async fn build_installation_projection_input(
     Ok(BuiltProjection {
         input,
         monthly_net_regular,
+        allocation_rule_ids,
         asset_id_name,
         planning_rows,
         effective_savings_source,
@@ -1281,6 +1293,7 @@ pub async fn compute_projection_series_response(
     let BuiltProjection {
         input: projection_input,
         monthly_net_regular: monthly_delta_assumption,
+        allocation_rule_ids: _,
         asset_id_name,
         planning_rows,
         effective_savings_source,
