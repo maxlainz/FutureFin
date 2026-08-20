@@ -255,6 +255,32 @@ Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26
 | POST | `/v1/transactions/{id}/reconcile` | write | **Conciliación manual de un par**: body `{counterpart_id}`. Exige importes exactamente opuestos y misma divisa (conciliar jamás altera el neto) pero **sin** ventana de fecha (SEPA lento, traspaso a caballo de dos meses). Borra un rechazo previo del par; idempotente si ya están conciliadas entre sí. Guardia owner → **404**. 400: `already_reconciled`, `transfer_amounts_not_opposite`, `transfer_currency_mismatch`, `transfer_same_transaction`. → **200** `ReconcilePairResponse {transaction, counterpart}`. |
 | DELETE | `/v1/transactions/{id}/reconcile` | write | **Desconcilia** el par de `{id}` (cualquiera de las dos patas) y **persiste el rechazo** — el pase automático no lo resucita. Ambas patas vuelven a contar en los agregados. Guardia owner → **404**. 400 `not_reconciled`. → **200** `ReconcilePairResponse` (ambas ya sueltas). |
 
+**Filtros de búsqueda de `GET /v1/transactions` (3.8.0)** — aditivos: omitidos, el comportamiento es
+el de siempre byte a byte. Viven en `list_transactions_core`, así que HTTP y MCP devuelven los
+mismos 400.
+
+- `concept_contains` (1–200): subcadena del concepto, insensible a mayúsculas **y a tildes** —
+  `cafe` encuentra `CAFÉ` y viceversa, la misma semántica que el matching de reglas de
+  categorización. El plegado se replica en SQL con `translate()` sobre una tabla que incluye
+  también `a-z → A-Z`, **no** con `upper()`: `upper()` depende de la collation del cluster (bajo `C`
+  no toca los no-ASCII) y esta imagen ya cambió de collation una vez. Como el `concept` se almacena
+  sin normalizar, la expresión colapsa además los runs de whitespace con `regexp_replace`. Las dos
+  tablas —Rust y SQL— están pinneadas carácter a carácter por `sql_fold_tables_mirror_the_rust_fold`,
+  que además barre el latín extendido comprobando que nada que Rust pliegue falte en la tabla SQL.
+  Los comodines `%` y `_` del usuario se escapan (`LIKE … ESCAPE '\'`): sin eso, buscar `%`
+  devolvería el conjunto entero. Nada de `unaccent`/`pg_trgm` — son extensiones y el Postgres va
+  embebido en la imagen.
+- `min_amount` / `max_amount`: sobre el importe **con signo**, que es la trampa más probable para un
+  cliente. `max_amount=-50` son los gastos de 50 € o más; `min_amount=0`, solo entradas de dinero.
+  Banda invertida → 400 explícito en vez de un conjunto vacío silencioso.
+- `date_from` / `date_to`: `YYYY-MM-DD` **inclusivos en los dos extremos** («hasta el 31» incluye el
+  31; un `<` exclusivo es el off-by-one-day clásico). **Excluyentes con `month`** → 400 si vienen
+  juntos: son dos formas de decir lo mismo y cualquier precedencia implícita sería una trampa.
+- **Índices**: ninguno nuevo. El scope entra por `transactions_installation_op_date_idx` (household,
+  el default) o `transactions_owner_op_date_idx` (`view=mine`), y el `LIKE` se evalúa sobre el
+  subconjunto ya acotado. Para el volumen de un hogar es irrelevante; si algún día duele, un GIN
+  `pg_trgm` — que hoy no está instalado.
+
 **Conciliación de transferencias — notas (3.5.0)**: un movimiento conciliado (`transfer_counterpart_id` presente en `TransactionResponse`, junto a `transfer_reconciled_at/source` y los denormalizados `transfer_counterpart_concept/op_date`) sigue **visible** en `GET /v1/transactions` y cuenta en `/months`, pero queda **excluido de todos los agregados de flujo**: totales/promedios del summary, `MIN(op_date)` de la ventana «Todo», serie por categoría, promedio real 12m del engine (modos B/C) y `months[]` de `/v1/history/cashflow`. **Asimetría deliberada del cashflow**: la curva `fine` **SÍ** incluye conciliadas — modela el saldo real de cada cuenta y excluirlas la haría divergir de los snapshots anclados (test `reconciled_excluded_from_months_but_not_from_fine_curve`). El pase automático corre post-commit tras toda mutación del conjunto (create/batch/patch de `amount`/`op_date`, delete, delete import, materialize, import confirm, import de backup). Un PATCH que cambia `amount`/`op_date` **rompe el par sin crear rechazo** (revertir el valor re-empareja); borrar una pata desconcilia la otra vía `ON DELETE SET NULL`. El flag `suggested_transfer` del preview de import queda como **hint informativo** (ya no implica descarte).
 
 **Recurrencia — notas**: no hay `PATCH` de plantilla (para cambiarla, bórrala y recréala). Las copias mensuales se crean por dos vías, ambas transaccionales y con la misma semántica de **mes cerrado + fin de mes** (loop compartido `materialize_rule`): (a) el **backfill del alta** con `recurrence` (`POST /v1/transactions` o `/batch`), que rellena en el mismo commit los meses cerrados entre la `op_date` y el mes actual (cota 10 años → 422 `recurrence_too_old`); y (b) `POST /recurring/materialize`, para el avance de mes posterior (lo dispara el frontend al montar Movimientos; no hay cron). Ningún GET muta (los listados nunca generan instancias). El alta con `recurrence` además crea la regla-plantilla y deja enlazada la transacción de origen, que **conserva su `op_date` real** (solo las copias materializadas van a fin de mes).
@@ -320,7 +346,8 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler;
   `months` declara su rango real 12..840 en el schema y solo la variante sin `months` sale de
   cache), `get_budget`, `get_transactions_summary`, `list_transactions` (**paginación en SQL**:
-  `limit` 1..500 def 100 + `offset`, filtros `month/kind/category_id/import_id`, responde
+  `limit` 1..500 def 100 + `offset`, filtros `month/kind/category_id/import_id` +
+  **búsqueda 3.8.0** `concept_contains/min_amount/max_amount/date_from/date_to`, responde
   `{total_count, offset, truncated, transactions}`; el endpoint HTTP conserva su contrato sin
   paginar), `get_history` (`window_months` 1..1200 + `include_asset_series` opt-in default false;
   los mismos knobs existen en `GET /v1/history/series` con `include_asset_series` default true),

@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — Búsqueda en `GET /v1/transactions` (concepto, importe y rango de fechas)
+
+- **El problema, medido**: el listado admitía cuatro ejes (`month`, `kind`, `category_id`,
+  `import_id`) y ninguna búsqueda. Localizar cinco cargos de Amazon desde el chat obligaba a
+  traerse julio entero y junio entero: 419 bytes por movimiento × 93 movimientos ≈ 38 KB ≈ 10k
+  tokens por mes, para quedarse con cinco filas.
+- **La solución**: `concept_contains` (1–200), `min_amount`/`max_amount` y `date_from`/`date_to`,
+  en `list_transactions_core` para que HTTP y MCP compartan validación y devuelvan los mismos 400.
+  Aditivo puro: sin filtros, el comportamiento es el de siempre byte a byte.
+- **El plegado de tildes se replica en SQL con `translate()`, no con `upper()`**. `upper()` depende
+  de la collation del cluster —bajo `C` no toca los no-ASCII— y esta imagen ya cambió de collation
+  una vez (musl → glibc, con REINDEX de adopción en el entrypoint). Al meter también `a-z → A-Z` en
+  la misma tabla, la expresión deja de depender de la collation y equivale carácter a carácter a
+  `fold_diacritics_upper ∘ normalize_concept`. Como el `concept` se guarda sin normalizar, la
+  expresión colapsa además los runs de whitespace. `sql_fold_tables_mirror_the_rust_fold` pinnea las
+  dos tablas en las dos direcciones: cada entrada coincide, y ningún carácter que Rust pliegue falta
+  en la tabla SQL (barrido del latín extendido).
+- **Comodines escapados** (`LIKE … ESCAPE '\'`): sin eso, buscar `%` devolvía el conjunto entero.
+- **Convenciones explícitas, porque son las que un cliente falla**: los importes se comparan **con
+  signo** (`max_amount: "-50"` = gastos de 50 € o más) y las fechas son **inclusivas** en los dos
+  extremos. `month` y `date_from`/`date_to` son **excluyentes** → 400: dos formas de decir lo mismo
+  sin ganador implícito. Las bandas invertidas también son 400, no un conjunto vacío silencioso.
+- **La paginación en SQL sigue intacta**: el `COUNT(*)` comparte los filtros nuevos, así que
+  `truncated` no miente al buscar. Los filtros se agruparon en un `TxnFilters` porque el core ya
+  tomaba diez parámetros posicionales y quince habrían sido terreno de cruces que el compilador no
+  ve; `all_filters_combined_agree_with_each_axis` ejercita seis ejes a la vez y cae si el orden de
+  los binds se desincroniza del de los placeholders.
+
 ### Added — `simulate_projection` devuelve la salud financiera del mes 1
 
 - **El problema**: `SimKpis` devolvía cinco cosas (`jubilacion_month_index`, `final_net_worth`,

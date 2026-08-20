@@ -45,6 +45,7 @@ use crate::handlers::summary::summary_core;
 use crate::handlers::transactions::crud::{
     create_transaction_core, delete_import_core, delete_transaction_core, get_transaction_core,
     list_imports_core, list_months_core, list_transactions_core, patch_transaction_core,
+    TxnFilters,
 };
 use crate::handlers::transactions::reconcile::{reconcile_now_core, unreconcile_core};
 use crate::handlers::transactions::recurring::{
@@ -207,6 +208,24 @@ pub struct ListTransactionsParams {
     /// Filtra por lote de import (UUID de `list_transaction_imports`).
     #[serde(default)]
     pub import_id: Option<String>,
+    /// Busca una subcadena en el concepto (1–200 caracteres). Insensible a mayúsculas Y a tildes:
+    /// "cafe" encuentra "CAFÉ". Los comodines `%` y `_` se buscan como texto literal.
+    #[serde(default)]
+    pub concept_contains: Option<String>,
+    /// Cota INFERIOR del importe, con signo (los gastos son negativos). Decimal como string.
+    /// Ej.: min_amount "0" = solo ingresos y ahorro.
+    #[serde(default)]
+    pub min_amount: Option<String>,
+    /// Cota SUPERIOR del importe, con signo. Decimal como string. Ej.: max_amount "-50" = gastos
+    /// de 50 € o MÁS (porque -104 < -50); max_amount "0" = solo gastos.
+    #[serde(default)]
+    pub max_amount: Option<String>,
+    /// Desde esta fecha "YYYY-MM-DD", inclusive. Excluyente con `month`.
+    #[serde(default)]
+    pub date_from: Option<String>,
+    /// Hasta esta fecha "YYYY-MM-DD", inclusive. Excluyente con `month`.
+    #[serde(default)]
+    pub date_to: Option<String>,
     /// Máximo de movimientos devueltos (1–500). Default 100. La respuesta indica
     /// `total_count` y `truncated`.
     #[serde(default)]
@@ -884,16 +903,45 @@ impl FutureFinMcp {
             Ok(v) => v,
             Err(e) => return to_tool_outcome(e),
         };
+        let parse_amount = |raw: &Option<String>, field: &str| -> Result<Option<rust_decimal::Decimal>, ApiError> {
+            match raw {
+                Some(raw) => parse_decimal_param(field, raw).map(Some),
+                None => Ok(None),
+            }
+        };
+        let (min_amount, max_amount) =
+            match (parse_amount(&p.min_amount, "min_amount"), parse_amount(&p.max_amount, "max_amount")) {
+                (Ok(lo), Ok(hi)) => (lo, hi),
+                (Err(e), _) | (_, Err(e)) => return to_tool_outcome(e),
+            };
+        let parse_day = |raw: &Option<String>, field: &str| -> Result<Option<chrono::NaiveDate>, ApiError> {
+            match raw {
+                Some(raw) => parse_date_param(field, raw).map(Some),
+                None => Ok(None),
+            }
+        };
+        let (date_from, date_to) =
+            match (parse_day(&p.date_from, "date_from"), parse_day(&p.date_to, "date_to")) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => return to_tool_outcome(e),
+            };
 
         let res = list_transactions_core(
             &self.state.pool,
             id.installation_id,
             id.user_id,
             view,
-            p.month.as_deref(),
-            p.kind.as_deref(),
-            category_id,
-            import_id,
+            TxnFilters {
+                month: p.month.as_deref(),
+                kind: p.kind.as_deref(),
+                category_id,
+                import_id,
+                concept_contains: p.concept_contains.as_deref(),
+                min_amount,
+                max_amount,
+                date_from,
+                date_to,
+            },
             Some(limit as i64),
             offset,
         )
