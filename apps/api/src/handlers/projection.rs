@@ -1007,7 +1007,11 @@ pub(crate) async fn build_installation_projection_input(
 /// los escalares del mes 0).
 pub(crate) struct AssetsProjectionContext {
     /// Asset id → € nominales encaminados en el mes 1 (fixed escalado + parte del remanente).
+    /// **Incluye el tramo de planning flows del mes en curso**, así que varía día a día.
     pub nominals: HashMap<Uuid, Decimal>,
+    /// Asset id → € que la MISMA cascada encamina sobre el neto **recurrente**
+    /// (`income − expense − debt_service`, sin el tramo de planning). Estable y reproducible.
+    pub recurring_nominals: HashMap<Uuid, Decimal>,
     /// Income mensual **efectivo** del mes 0 (presupuesto en modo A/fallback; promedio real en B).
     pub income_monthly: Decimal,
     /// Gasto mensual **efectivo** + servicio de deuda de los pasivos activos.
@@ -1051,8 +1055,28 @@ pub(crate) async fn assets_projection_context(
         .zip(nominals_vec.into_iter())
         .map(|(a, n)| (a.id, n))
         .collect();
+
+    // Segunda pasada de la MISMA cascada sobre el neto recurrente: se anula el ajuste de planning
+    // del mes en curso y se vuelve a repartir. Reutilizar el engine (en vez de aproximar el
+    // reparto a mano) es lo que garantiza que los caps y la precedencia sean idénticos; el coste
+    // son microsegundos de aritmética Decimal, sin ningún SELECT extra.
+    let mut recurring_input = built.input.clone();
+    if let Some(first) = recurring_input.planning_monthly_cash_adjustment.first_mut() {
+        *first = Decimal::ZERO;
+    }
+    let recurring_vec = first_month_per_asset_contribution_nominals(&recurring_input)
+        .map_err(map_engine_err)?;
+    let recurring_nominals: HashMap<Uuid, Decimal> = built
+        .input
+        .assets
+        .iter()
+        .zip(recurring_vec.into_iter())
+        .map(|(a, n)| (a.id, n))
+        .collect();
+
     Ok(AssetsProjectionContext {
         nominals,
+        recurring_nominals,
         income_monthly: built.input.income_regular_monthly,
         // Misma semántica que el helper anterior (`expense_reg + debt_service`), pero con la base de
         // gasto EFECTIVA en vez de la del presupuesto.

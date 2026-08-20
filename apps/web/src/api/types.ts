@@ -97,8 +97,12 @@ export type AssetApiRow = {
    *  modal de snapshot en vista household. Ausente en clientes antiguos. */
   owner_user_id?: string;
   expected_annual_return_percent?: string | null;
-  /** Aporte estimado mes 1 derivado de las reglas de asignación del sobrante. */
-  contribution_nominal_monthly?: string;
+  /** Aporte del PRIMER MES resuelto por la cascada. Incluye el tramo de los planning flows sin
+   *  fecha del mes en curso, así que baja cada día y salta el día 1. El servidor lo envía
+   *  siempre; era opcional aquí por deriva del tipo. */
+  contribution_nominal_monthly: string;
+  /** La misma cascada sobre el neto recurrente (sin planning): el número estable. */
+  contribution_recurring_monthly: string;
   /** Tope absoluto en € si una regla apunta a este activo con cap_kind='amount'. */
   contribution_target_amount?: string | null;
   notes: string | null;

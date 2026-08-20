@@ -6,6 +6,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `contribution_recurring_monthly` en `/v1/assets`: el número que sí es mensual
+
+- **El defecto de contrato** (lo que el issue #4 etiquetó como `bug`, y lo es):
+  `contribution_nominal_monthly` **no es mensual**. Es la cascada del primer mes e incluye el tramo
+  transitorio de los planning flows sin fecha, así que **baja cada día** y **salta hacia arriba el
+  día 1 de cada mes**. El doc-comment interno decía «aporte estimado del primer mes»; el nombre
+  público y la descripción de la tool decían «aportación mensual objetivo». Un lector razonable que
+  lo compare con `net_monthly_equivalent` concluye que la cascada reparte de más — que es
+  exactamente lo que pasó, y no era cierto.
+- **La solución no es renombrar** (rompería a los clientes) sino **decir la verdad y dar el número
+  bueno**: se añade `contribution_recurring_monthly`, la misma cascada evaluada sobre el neto
+  recurrente (`income − expense − debt_service`, sin el tramo de planning). Estable, reproducible y
+  el único con el que tiene sentido hacer aritmética. Se calcula con una segunda pasada del engine
+  sobre el mismo input con el ajuste de planning a cero: reutilizar la cascada en vez de aproximarla
+  garantiza caps y precedencia idénticos, y no cuesta ningún SELECT extra.
+- **Descripciones corregidas**: `list_assets` fundía en una frase tres campos distintos (aporte del
+  mes 1, aporte estable y **tope** en euros) y ahora los separa nombrando la trampa del día a día;
+  `list_allocation_rules` decía que «list_assets muestra el resultado resuelto» y ahora aclara que
+  ella es la configuración y el resultado vive en `get_allocation_resolution`.
+- Errata de tipos corregida de paso: `AssetResponse.contribution_nominal_monthly` estaba declarado
+  **opcional** en el frontend cuando el servidor lo envía siempre — el mismo patrón de deriva que
+  causó el bug de `savings_source` en la v2.2.0.
+
 ### Changed — Engine: `FirstMonthAllocation` expone la resolución de la cascada (salida bit-idéntica)
 
 - **De dónde viene**: el issue #4 traía un «posible bug» de sobreasignación de la cascada.
