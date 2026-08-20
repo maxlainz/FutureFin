@@ -996,3 +996,78 @@ async fn mode_b_avg_excludes_reconciled_pair() {
     let d2 = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
     approx(d2, 1000.0);
 }
+
+/// `contribution_nominal_monthly` vs `contribution_recurring_monthly` (3.8.0): el primero incluye
+/// el tramo transitorio de los planning flows del mes en curso —y por eso baja cada día— y el
+/// segundo es la misma cascada sobre el neto recurrente, estable.
+///
+/// PREDICCIÓN: ingreso 3000, gasto 1000 → neto recurrente 2000. Un planning flow **sin fecha** de
+/// 900 € se reparte a 900/90 = 10 €/día sobre una ventana de 90 días, así que el mes en curso
+/// recibe `10 × días_restantes` (incluido hoy). El sumidero se lo lleva todo, luego:
+/// `nominal − recurrente == planning_component > 0`, y `recurrente == 2000` exacto.
+#[tokio::test]
+async fn asset_contribution_separates_recurring_from_the_planning_tranche() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let cat_inc = app.create_category(&owner, "income", "Nomina").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vida").await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    budget(&app, &owner.cookie, &cat_inc, "3000").await;
+    budget(&app, &owner.cookie, &cat_exp, "1000").await;
+
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({ "category_id": cat_ast, "name": "Indexado", "current_value": "0",
+                    "is_liquid": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+    let rule = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({ "target_asset_id": asset_id, "kind": "remainder" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+
+    // Sin planning flows los dos campos coinciden: no hay tramo transitorio que separar.
+    let a = app.get_with_cookie("/v1/assets", &owner.cookie).await.json();
+    let nominal: f64 = a[0]["contribution_nominal_monthly"].as_str().unwrap().parse().unwrap();
+    let recurring: f64 = a[0]["contribution_recurring_monthly"].as_str().unwrap().parse().unwrap();
+    assert_eq!(recurring, 2000.0, "neto recurrente = 3000 − 1000: {a}");
+    assert_eq!(nominal, recurring, "sin planning flows ambos coinciden: {a}");
+
+    // Un planning flow SIN fecha introduce el tramo /90 en el mes en curso.
+    let plan = app
+        .post_json_with_cookie(
+            "/v1/planning/flows",
+            json!({ "category_id": cat_inc, "title": "Devolucion renta",
+                    "expected_amount": "900" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(plan.status, http::StatusCode::CREATED, "{plan:?}");
+
+    let a = app.get_with_cookie("/v1/assets", &owner.cookie).await.json();
+    let nominal: f64 = a[0]["contribution_nominal_monthly"].as_str().unwrap().parse().unwrap();
+    let recurring: f64 = a[0]["contribution_recurring_monthly"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        recurring, 2000.0,
+        "el recurrente NO se mueve con los planning flows — ese es su valor: {a}"
+    );
+    assert!(
+        nominal > recurring,
+        "el nominal del mes 1 sí incorpora el tramo de planning: nominal={nominal} recurrente={recurring}"
+    );
+    // El tramo es un múltiplo exacto de 900/90 = 10 €/día (días restantes del mes, incluido hoy).
+    let tranche = nominal - recurring;
+    assert!(
+        (tranche / 10.0).fract().abs() < 1e-9 && tranche > 0.0,
+        "el tramo debe ser N × 10 €/día (900/90): {tranche}"
+    );
+}

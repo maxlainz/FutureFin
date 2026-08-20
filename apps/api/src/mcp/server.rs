@@ -1025,7 +1025,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_assets",
-        description = "Activos del hogar (o del usuario con view=mine): valor actual, liquidez, rentabilidad anual esperada y aportación mensual objetivo resuelta por las reglas de asignación.",
+        description = "Activos del hogar (o del usuario con view=mine): valor actual, liquidez, rentabilidad anual esperada y lo que la cascada de asignación encamina a cada uno. OJO a los tres campos de aportación, que son cosas distintas: contribution_recurring_monthly es la aportación mensual ESTABLE (sobre income − gasto − cuotas) y es la que debes usar para razonar o hacer cuentas; contribution_nominal_monthly es la del PRIMER MES, que incluye el tramo de los planning flows sin fecha del mes en curso (repartidos a importe/90 por día natural) y por tanto BAJA CADA DÍA y salta el día 1 de cada mes; contribution_target_amount no es una aportación sino el TOPE en euros del activo. Para el desglose regla a regla usa get_allocation_resolution.",
         annotations(title = "Activos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_assets(
@@ -1181,7 +1181,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_allocation_rules",
-        description = "Cascada de asignación del ahorro mensual: reglas ordenadas por prioridad (kind fixed|percent|remainder, importe, cap opcional, enabled) y el activo destino de cada una. Explica por qué el ahorro va donde va; list_assets muestra el resultado resuelto por activo.",
+        description = "Cascada de asignación del ahorro mensual: reglas ordenadas por prioridad (kind fixed|percent|remainder, importe, cap opcional, enabled) y el activo destino de cada una. Es la CONFIGURACIÓN, no el resultado: para ver cuánto se lleva cada regla este mes, de qué caja sale y por qué alguna recibe 0, usa get_allocation_resolution.",
         annotations(title = "Reglas de asignación", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_allocation_rules(
