@@ -754,3 +754,255 @@ async fn all_filters_combined_agree_with_each_axis() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Backfill de reglas de categorización (3.8.0)
+// ---------------------------------------------------------------------------
+
+async fn create_rule(app: &TestApp, cookie: &str, body: Value) -> common::ResponseParts {
+    app.post_json_with_cookie("/v1/transactions/rules", body, cookie).await
+}
+
+/// El backfill usa la **precedencia completa**, no la regla suelta: una fila donde gana otra regla
+/// no se toca y se reporta en `matched_by_other_rule`. Así el pasado queda como habría quedado
+/// importando hoy, que es la única semántica reproducible.
+#[tokio::test]
+async fn apply_rule_uses_full_precedence_and_reports_losers() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    let libros = app.create_category(&owner, "expense", "Libros").await;
+
+    for (date, concept) in [
+        ("2026-06-10", "WWW.AMAZON* V36T69W45"),
+        ("2026-06-11", "AMAZON PRIME VIDEO"),
+    ] {
+        let r = create_manual(
+            &app,
+            &owner.cookie,
+            json!({ "op_date": date, "concept": concept, "amount": "-20", "kind": "expense" }),
+        )
+        .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    // Regla ancha (substring "AMAZON") y regla más específica (substring "AMAZON PRIME").
+    let ancha = create_rule(
+        &app,
+        &owner.cookie,
+        json!({ "match_kind": "substring", "pattern": "AMAZON", "assign_kind": "expense",
+                "assign_category_id": compras }),
+    )
+    .await;
+    assert_eq!(ancha.status, http::StatusCode::CREATED, "{ancha:?}");
+    let ancha_id = ancha.json()["id"].as_str().unwrap().to_string();
+    let especifica = create_rule(
+        &app,
+        &owner.cookie,
+        json!({ "match_kind": "substring", "pattern": "AMAZON PRIME", "assign_kind": "expense",
+                "assign_category_id": libros }),
+    )
+    .await;
+    assert_eq!(especifica.status, http::StatusCode::CREATED, "{especifica:?}");
+
+    // Aplicar la ANCHA: solo debe tocar la fila donde gana; la otra la gana el patrón más largo.
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{ancha_id}/apply"),
+            json!({ "apply_to_existing": "all", "confirm": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let out = r.json();
+    assert_eq!(out["matched"], 1, "solo la fila donde gana la ancha: {out}");
+    assert_eq!(
+        out["matched_by_other_rule"], 1,
+        "la fila de PRIME casa con la ancha pero la gana la específica: {out}"
+    );
+
+    let list = app
+        .get_with_cookie("/v1/transactions?concept_contains=amazon", &owner.cookie)
+        .await;
+    let rows = list.json();
+    let by_concept = |c: &str| -> Value {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["concept"].as_str().unwrap() == c)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_concept("WWW.AMAZON* V36T69W45")["category_id"], json!(compras));
+    assert!(
+        by_concept("AMAZON PRIME VIDEO")["category_id"].is_null(),
+        "la fila de la regla perdedora NO debe tocarse"
+    );
+}
+
+/// Una regla de un banco concreto no toca movimientos de otro origen — misma semántica que en el
+/// import. Sin `skipped_by_source`, un `matched: 0` se leería como «no hay nada que hacer».
+#[tokio::test]
+async fn apply_rule_respects_source_and_reports_it() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Compras").await;
+
+    // Movimiento MANUAL (source = "manual").
+    let r = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "TIENDA X", "amount": "-20", "kind": "expense" }),
+    )
+    .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    // Regla específica de MyInvestor: casa por texto, pero no por origen.
+    let rule = create_rule(
+        &app,
+        &owner.cookie,
+        json!({ "match_kind": "substring", "pattern": "TIENDA", "source": "myinvestor",
+                "assign_kind": "expense", "assign_category_id": cat }),
+    )
+    .await;
+    let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{rule_id}/apply"),
+            json!({ "apply_to_existing": "all", "confirm": true }),
+            &owner.cookie,
+        )
+        .await;
+    let out = r.json();
+    assert_eq!(out["matched"], 0, "{out}");
+    assert_eq!(
+        out["skipped_by_source"], 1,
+        "el movimiento manual casa por texto pero la regla es de myinvestor: {out}"
+    );
+}
+
+/// `uncategorized` respeta lo ya clasificado; `all` reasigna. Y el preview no escribe.
+#[tokio::test]
+async fn apply_rule_scopes_and_preview_does_not_write() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cajon = app.create_category(&owner, "expense", "Other").await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+
+    // Una fila sin categoría y otra en la categoría cajón.
+    let a = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "AMAZON UNO", "amount": "-20", "kind": "expense" }),
+    )
+    .await;
+    assert_eq!(a.status, http::StatusCode::CREATED, "{a:?}");
+    let b = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-11", "concept": "AMAZON DOS", "amount": "-30",
+                "kind": "expense", "category_id": cajon }),
+    )
+    .await;
+    assert_eq!(b.status, http::StatusCode::CREATED, "{b:?}");
+
+    let rule = create_rule(
+        &app,
+        &owner.cookie,
+        json!({ "match_kind": "substring", "pattern": "AMAZON", "assign_kind": "expense",
+                "assign_category_id": compras }),
+    )
+    .await;
+    let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+
+    // Sin confirm por HTTP → 400 explícito (la SPA ya enseña el impacto antes de llamar).
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{rule_id}/apply"),
+            json!({ "apply_to_existing": "all" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+
+    // `uncategorized`: solo la que no tenía categoría.
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{rule_id}/apply"),
+            json!({ "apply_to_existing": "uncategorized", "confirm": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.json()["matched"], 1, "{:?}", r.json());
+    let rows = app
+        .get_with_cookie("/v1/transactions?concept_contains=amazon", &owner.cookie)
+        .await
+        .json();
+    let dos = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["concept"] == "AMAZON DOS")
+        .unwrap()
+        .clone();
+    assert_eq!(dos["category_id"], json!(cajon), "«all» no se ha ejecutado todavía");
+
+    // `all`: ahora sí reasigna la de la categoría cajón.
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{rule_id}/apply"),
+            json!({ "apply_to_existing": "all", "confirm": true }),
+            &owner.cookie,
+        )
+        .await;
+    let out = r.json();
+    assert_eq!(out["matched"], 1, "{out}");
+    assert_eq!(out["by_current_category"][0]["category_name"], "Other", "{out}");
+    let rows = app
+        .get_with_cookie("/v1/transactions?concept_contains=amazon", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert_eq!(t["category_id"], json!(compras), "todo en Compras: {t}");
+    }
+
+    // Idempotente: repetir no cambia nada y lo reporta como ya correcto.
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{rule_id}/apply"),
+            json!({ "apply_to_existing": "all", "confirm": true }),
+            &owner.cookie,
+        )
+        .await;
+    let out = r.json();
+    assert_eq!(out["matched"], 0, "{out}");
+    assert_eq!(out["already_correct"], 2, "{out}");
+}
+
+/// Una regla de otro usuario es 404, no 403: no se filtra su existencia.
+#[tokio::test]
+async fn apply_rule_cross_user_is_404() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bob = app.register_and_approve_member(&owner, "bob", "member").await;
+    let cat = app.create_category(&owner, "expense", "Compras").await;
+
+    let rule = create_rule(
+        &app,
+        &owner.cookie,
+        json!({ "match_kind": "substring", "pattern": "AMAZON", "assign_kind": "expense",
+                "assign_category_id": cat }),
+    )
+    .await;
+    let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{rule_id}/apply"),
+            json!({ "apply_to_existing": "all", "confirm": true }),
+            &bob.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::NOT_FOUND, "{r:?}");
+}

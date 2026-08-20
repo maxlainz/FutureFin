@@ -1331,3 +1331,161 @@ async fn reconcile_tools_share_core_and_respect_write_gates() {
         "{body}"
     );
 }
+
+/// Cuarteto de la tool `apply_categorization_rule` (3.8.0): preview no persiste, confirm ejecuta,
+/// la escritura es indistinguible de la del endpoint HTTP, el contrato de cache es COND y el
+/// toggle vivo `mcp_write_enabled` corta.
+#[tokio::test]
+async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat_ast = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat_ast, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    // Modo C: las transacciones son inputs del engine → el backfill debe invalidar.
+    app.patch_json_with_cookie(
+        "/v1/installation",
+        json!({ "fire_settings": { "savings_source": "budget_income_real_expense" } }),
+        &owner.cookie,
+    )
+    .await;
+
+    for concept in ["WWW.AMAZON* AAA", "AMAZON PRIME"] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({ "op_date": "2026-06-10", "concept": concept, "amount": "-20",
+                        "kind": "income" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    let rule = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({ "match_kind": "substring", "pattern": "AMAZON", "assign_kind": "expense",
+                    "assign_category_id": compras }),
+            &owner.cookie,
+        )
+        .await;
+    let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+
+    let iid: uuid::Uuid = sqlx::query_scalar("SELECT id FROM installation LIMIT 1")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    let key = household_key(iid);
+
+    // 1. PREVIEW: no escribe y no invalida.
+    warm(&app, &owner.cookie, &key).await;
+    let preview = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "apply_categorization_rule",
+                json!({"rule_id": rule_id, "apply_to_existing": "all"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert_eq!(preview["effects"]["would_match"], 2, "{preview}");
+    assert_eq!(preview["effects"]["would_change_kind"], 2, "{preview}");
+    assert_eq!(
+        preview["effects"]["moves_projection_in_modes_b_and_c"], true,
+        "el aviso de proyección debe salir ANTES de ejecutar: {preview}"
+    );
+    assert_eq!(preview["effects"]["sample"].as_array().unwrap().len(), 2);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(present(&app, &key).await, "el preview no debe invalidar");
+    let rows = app
+        .get_with_cookie("/v1/transactions", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert_eq!(t["kind"], "income", "el preview no debe escribir: {t}");
+    }
+
+    // 2. CONFIRM: escribe, y el resultado es indistinguible vía HTTP.
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "apply_categorization_rule",
+                json!({"rule_id": rule_id, "apply_to_existing": "all", "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["updated"], 2, "{out}");
+    assert_eq!(out["resumen"].as_array().unwrap().len(), 2, "{out}");
+    let rows = app
+        .get_with_cookie("/v1/transactions", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert_eq!(t["kind"], "expense", "{t}");
+        assert_eq!(t["category_id"], json!(compras), "{t}");
+    }
+
+    // 3. Contrato de cache: COND, y en modo C invalida.
+    assert_invalidated(&app, &key, "apply_categorization_rule por MCP").await;
+
+    // 4. Toggle vivo: con la escritura desactivada, la tool corta.
+    app.patch_json_with_cookie(
+        "/v1/installation",
+        json!({"mcp_write_enabled": false}),
+        &owner.cookie,
+    )
+    .await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "apply_categorization_rule",
+            json!({"rule_id": rule_id, "apply_to_existing": "all", "confirm": true}),
+        ),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+    assert!(
+        envelope["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("mcp_write_disabled"),
+        "{envelope}"
+    );
+
+    // 5. Un viewer nunca escribe (rol vivo, sin congelar en el token).
+    app.patch_json_with_cookie(
+        "/v1/installation",
+        json!({"mcp_write_enabled": true}),
+        &owner.cookie,
+    )
+    .await;
+    let viewer = app
+        .register_and_approve_member(&owner, "victor", "viewer")
+        .await;
+    let viewer_token = create_token_for(&app, &viewer.cookie).await;
+    let envelope = mcp_post(
+        &app,
+        &viewer_token,
+        tool_call(
+            "apply_categorization_rule",
+            json!({"rule_id": rule_id, "apply_to_existing": "all", "confirm": true}),
+        ),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+}

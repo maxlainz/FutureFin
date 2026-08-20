@@ -255,6 +255,32 @@ Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26
 | POST | `/v1/transactions/{id}/reconcile` | write | **Conciliación manual de un par**: body `{counterpart_id}`. Exige importes exactamente opuestos y misma divisa (conciliar jamás altera el neto) pero **sin** ventana de fecha (SEPA lento, traspaso a caballo de dos meses). Borra un rechazo previo del par; idempotente si ya están conciliadas entre sí. Guardia owner → **404**. 400: `already_reconciled`, `transfer_amounts_not_opposite`, `transfer_currency_mismatch`, `transfer_same_transaction`. → **200** `ReconcilePairResponse {transaction, counterpart}`. |
 | DELETE | `/v1/transactions/{id}/reconcile` | write | **Desconcilia** el par de `{id}` (cualquiera de las dos patas) y **persiste el rechazo** — el pase automático no lo resucita. Ambas patas vuelven a contar en los agregados. Guardia owner → **404**. 400 `not_reconciled`. → **200** `ReconcilePairResponse` (ambas ya sueltas). |
 
+**Backfill de reglas de categorización (3.8.0)** — `POST /v1/transactions/rules/{id}/apply`, y el
+eje `apply_to_existing` (`none` default | `uncategorized` | `all`) + `from_month` + `confirm` en
+`POST /v1/transactions/rules`. Crear una regla sigue afectando **solo a imports futuros**; aplicarla
+al pasado es esta ruta.
+
+- **Precedencia completa, no la regla suelta**: el backfill evalúa `match_rule` sobre el conjunto
+  ENTERO de reglas y solo escribe las filas cuya ganadora es `{id}` — el pasado queda como habría
+  quedado importando hoy. Las filas donde esta regla casa pero pierde salen en
+  `matched_by_other_rule`.
+- **`source` se respeta** (una regla de MyInvestor no toca movimientos manuales, igual que en el
+  import) y las filas afectadas se reportan en `skipped_by_source`. Sin ese contador, un
+  `matched: 0` se leería como «no hay nada que hacer» cuando en realidad es «esta regla no aplica a
+  este origen» — el no-op invisible es el modo de fallo caro de este repo.
+- **Las patas de transferencia conciliadas se excluyen** (`skipped_reconciled`): están fuera de
+  todos los agregados de flujo, recategorizarlas no significa nada.
+- **Cache COND, y solo si escribe**: cambiar el `kind` de filas históricas cambia
+  `transactions_12m_avg`, input del engine en B/C → `invalidate_projection_if_savings_uses_transactions`
+  dentro de la core, condicionada a que haya filas afectadas. **Crear** la regla sigue siendo NONE.
+  Los tres casos (crear / preview / backfill, en los tres modos) están en
+  `applying_a_rule_invalidates_cond_but_creating_it_still_does_not`. `would_change_kind` en el
+  preview es la señal explícita de que la proyección se moverá.
+- Por HTTP, `apply_to_existing != "none"` sin `confirm: true` es un **400** (la SPA ya enseña el
+  impacto antes de llamar); por MCP la tool devuelve el **preview**, patrón de la casa.
+- No recalcula huellas ni toca la conciliación: `kind` y `category_id` no entran en la huella de
+  dedup (`source · op_date · amount · concept`) ni en el emparejado (`op_date`, `amount`).
+
 **Filtros de búsqueda de `GET /v1/transactions` (3.8.0)** — aditivos: omitidos, el comportamiento es
 el de siempre byte a byte. Viven en `list_transactions_core`, así que HTTP y MCP devuelven los
 mismos 400.
@@ -389,6 +415,20 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `months` 12..840. **Cache-neutral por construcción**: usa `resolve_projection_context` +
   `build_…` + doble `spawn_blocking`, nunca `projection_series_cached`. No persiste nada.
   Regresión: `apps/api/tests/mcp_simulate.rs`.
+- **`apply_categorization_rule` (3.8.0, issue #4)**: backfill de una regla sobre el histórico —
+  `rule_id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`. Sin
+  `confirm` devuelve preview con `would_match` / `already_correct` / `would_change_kind` /
+  `skipped_by_source` / `matched_by_other_rule` / `skipped_reconciled` / `by_current_category` /
+  `sample` y el aviso `moves_projection_in_modes_b_and_c`. Cache **COND**. Annotations:
+  `destructive_hint = true`, `idempotent_hint = true` — declaradas **a conciencia** en
+  `tools_list_exposes_annotations_on_every_tool`, porque el resto del catálogo las deriva del
+  prefijo del nombre y `apply_` es un verbo nuevo.
+  **Omisión deliberada asociada**: la tool `create_categorization_rule` **no** expone
+  `apply_to_existing` (el body HTTP sí, para el round-trip único de la SPA). Dos razones: en el
+  momento del preview la regla todavía no existe, así que no hay nada que simular; y un `create_*`
+  capaz de reescribir cientos de filas haría mentir a sus propias annotations, que es lo que el
+  cliente MCP usa para decidir si pide permiso al humano. Desde el chat: crear y luego aplicar, con
+  un único gate de confirmación.
 - **Tool annotations**: toda tool declara `annotations` (macro `#[tool(annotations(...))]` de
   rmcp): `title` legible, `open_world_hint = false` (el servidor solo toca su propia DB) y
   `read_only_hint = true` en las lecturas. Sin ellas un cliente conforme al spec asume el peor

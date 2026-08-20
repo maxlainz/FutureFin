@@ -164,6 +164,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
     assert_eq!(
         names,
         vec![
+            "apply_categorization_rule",
             "capture_snapshot",
             "create_asset",
             "create_budget_entry",
@@ -528,18 +529,23 @@ async fn tools_list_exposes_annotations_on_every_tool() {
             || matches!(
                 name,
                 "capture_snapshot" | "materialize_recurring" | "reconcile_transfers"
-                    | "unreconcile_transfer"
+                    | "unreconcile_transfer" | "apply_categorization_rule"
             );
         if is_write {
             assert_eq!(ann["readOnlyHint"], false, "tool {name}");
-            let expect_destructive =
-                name.starts_with("update_") || name.starts_with("delete_");
+            // `apply_categorization_rule` reescribe la categoría/kind de filas históricas: es
+            // destructiva aunque no empiece por update_/delete_. Declararlo aquí es deliberado —
+            // el resto del catálogo deriva sus hints del prefijo del nombre.
+            let expect_destructive = name.starts_with("update_")
+                || name.starts_with("delete_")
+                || name == "apply_categorization_rule";
             assert_eq!(ann["destructiveHint"], expect_destructive, "tool {name}");
             let expect_idempotent = name.starts_with("update_")
                 || name.starts_with("delete_")
                 || matches!(
                     name,
                     "capture_snapshot" | "materialize_recurring" | "reconcile_transfers"
+                        | "apply_categorization_rule"
                 );
             assert_eq!(ann["idempotentHint"], expect_idempotent, "tool {name}");
         } else {

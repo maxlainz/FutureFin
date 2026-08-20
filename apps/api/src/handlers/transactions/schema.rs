@@ -567,6 +567,30 @@ pub struct CreateRuleBody {
     #[serde(default)]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub assign_category_id: Option<Uuid>,
+    /// Backfill retroactivo: `none` (default, contrato histórico: la regla solo afecta a imports
+    /// futuros) | `uncategorized` | `all`. Distinto de `none` exige `confirm: true`.
+    #[serde(default)]
+    pub apply_to_existing: Option<String>,
+    /// Acota el backfill hacia atrás (`YYYY-MM`, inclusive).
+    #[serde(default)]
+    pub from_month: Option<String>,
+    /// Obligatorio cuando `apply_to_existing != "none"`: sin él se devuelve 400 (por HTTP) o el
+    /// preview (por MCP), nunca una escritura masiva silenciosa.
+    #[serde(default)]
+    pub confirm: Option<bool>,
+}
+
+/// Body de `POST /v1/transactions/rules/{id}/apply`.
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct ApplyRuleBody {
+    /// `uncategorized` | `all` (`none` es un no-op). Default `uncategorized`.
+    #[serde(default)]
+    pub apply_to_existing: Option<String>,
+    #[serde(default)]
+    pub from_month: Option<String>,
+    /// Sin `confirm: true` se devuelve el preview y no se escribe nada.
+    #[serde(default)]
+    pub confirm: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

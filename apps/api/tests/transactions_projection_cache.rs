@@ -457,6 +457,117 @@ async fn creating_a_categorization_rule_never_invalidates_projection_cache() {
     }
 }
 
+/// El **backfill** de una regla sí es una mutación del conjunto: cambia el `kind` (y la categoría)
+/// de filas históricas, y `transactions_12m_avg` suma solo `kind IN ('income','expense')`. Por eso
+/// invalida COND — al contrario que CREAR la regla, que no toca ninguna fila. Los dos contratos
+/// conviven en el mismo módulo y este test los separa.
+#[tokio::test]
+async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
+    for (mode, should_invalidate) in [
+        ("budget", false),
+        ("transactions_avg", true),
+        ("budget_income_real_expense", true),
+    ] {
+        let app = TestApp::spawn().await;
+        let owner = app.register_and_login_owner("alice").await;
+        let cat = app.create_category(&owner, "asset", "Cash").await;
+        app.post_json_with_cookie(
+            "/v1/assets",
+            json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+            &owner.cookie,
+        )
+        .await;
+        let compras = app.create_category(&owner, "expense", "Compras").await;
+        set_mode(&app, &owner.cookie, mode).await;
+
+        // Fila mal clasificada (income) y sin categoría: el backfill la pasará a expense, que es
+        // exactamente lo que mueve el promedio real 12m — `transactions_12m_avg` suma por `kind`.
+        let seeded = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({ "op_date": "2026-06-10", "concept": "WWW.AMAZON* V36T69W45",
+                        "amount": "-104.45", "kind": "income" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(seeded.status, http::StatusCode::CREATED, "modo {mode}: {seeded:?}");
+
+        let iid = installation_id(&app).await;
+        let key = household_key(iid);
+
+        // 1. Crear la regla: NUNCA invalida, en ningún modo.
+        warm(&app, &owner.cookie, &key).await;
+        let rule = app
+            .post_json_with_cookie(
+                "/v1/transactions/rules",
+                json!({ "match_kind": "substring", "pattern": "AMAZON",
+                        "assign_kind": "expense", "assign_category_id": compras }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(rule.status, http::StatusCode::CREATED, "modo {mode}: {rule:?}");
+        let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            present(&app, &key).await,
+            "modo {mode}: crear la regla no debe invalidar"
+        );
+
+        // 2. El PREVIEW tampoco: no escribe nada.
+        let preview = app
+            .post_json_with_cookie(
+                &format!("/v1/transactions/rules/{rule_id}/apply"),
+                json!({ "apply_to_existing": "all" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(preview.status, http::StatusCode::BAD_REQUEST, "sin confirm por HTTP");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(present(&app, &key).await, "modo {mode}: el preview no invalida");
+
+        // 3. El backfill sí, y solo en los modos que leen transacciones.
+        let applied = app
+            .post_json_with_cookie(
+                &format!("/v1/transactions/rules/{rule_id}/apply"),
+                json!({ "apply_to_existing": "all", "confirm": true }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(applied.status, http::StatusCode::OK, "modo {mode}: {applied:?}");
+        assert_eq!(applied.json()["matched"], 1, "modo {mode}: {:?}", applied.json());
+        assert_eq!(
+            applied.json()["would_change_kind"], 1,
+            "modo {mode}: el cambio de kind es la señal de que la proyección se mueve"
+        );
+
+        if should_invalidate {
+            assert_invalidated(&app, &key, &format!("modo {mode} backfill")).await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            assert!(
+                present(&app, &key).await,
+                "modo A: las transacciones no son inputs del engine, tampoco tras un backfill"
+            );
+        }
+
+        // 4. Un backfill que no cambia nada (idempotente) no debe tirar la cache caliente.
+        warm(&app, &owner.cookie, &key).await;
+        let again = app
+            .post_json_with_cookie(
+                &format!("/v1/transactions/rules/{rule_id}/apply"),
+                json!({ "apply_to_existing": "all", "confirm": true }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(again.json()["matched"], 0, "modo {mode}: {:?}", again.json());
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            present(&app, &key).await,
+            "modo {mode}: un backfill sin filas afectadas no debe invalidar"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Conciliación (3.5.0): mismas reglas COND que el resto de mutaciones
 // ---------------------------------------------------------------------------
