@@ -787,9 +787,221 @@ pub async fn reorder_allocation_rules(
     Ok(Json(rows.into_iter().map(row_to_response).collect()))
 }
 
+// ---------------------------------------------------------------------------
+// GET /v1/allocation-rules/resolution — la cascada resuelta de este mes
+// ---------------------------------------------------------------------------
+
+/// Una regla de la cascada, resuelta para el mes en curso.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResolvedRule {
+    #[schema(value_type = String, format = "uuid")]
+    pub rule_id: Uuid,
+    pub priority: i32,
+    #[schema(value_type = String, format = "uuid")]
+    pub target_asset_id: Uuid,
+    pub target_asset_name: String,
+    /// `fixed` | `percent` | `remainder`
+    pub kind: String,
+    /// Lo que la regla PIDIÓ antes de aplicar cap y caja disponible.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount_intent: Decimal,
+    /// Lo que la regla se llevó de verdad. Si es menor que `amount_intent` sin `skipped_reason`,
+    /// la regla fue **recortada** (normalmente por el cap) — no saltada.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount_resolved: Decimal,
+    /// Techo absoluto del cap ya resuelto en euros (los caps relativos se evalúan con los
+    /// escalares efectivos del mes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub cap_ceiling: Option<Decimal>,
+    /// Espacio que quedaba bajo el techo al evaluar la regla.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub cap_room: Option<Decimal>,
+    /// `no_cash` | `not_reached` | `cap_full` | `zero_amount` | `invalid_target`, o ausente si la
+    /// regla recibió algo. Las razones **no se colapsan** porque tienen remedios distintos:
+    /// `no_cash` es «no te sobra dinero» y `not_reached` es «las reglas de arriba se lo comieron».
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<String>,
+}
+
+/// Aporte resuelto por activo.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResolvedAssetContribution {
+    #[schema(value_type = String, format = "uuid")]
+    pub asset_id: Uuid,
+    pub name: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+}
+
+/// Resolución completa de la cascada del mes en curso.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AllocationResolutionResponse {
+    /// Mes al que corresponde la resolución (`YYYY-MM`).
+    pub month: String,
+    /// La caja que la cascada reparte de verdad. **Incluye el tramo transitorio de planning**, así
+    /// que cambia día a día: es la explicación de por qué la aportación del mes 1 no cuadra con el
+    /// neto recurrente del summary.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub base_cash: Decimal,
+    /// `income − expense − debt_service`: la parte estable.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub recurring_net: Decimal,
+    /// El tramo de los planning flows del mes en curso (menos la retirada de jubilación si aplica).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub planning_component: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub debt_service: Decimal,
+    /// `true` cuando `planning_component != 0`: avisa de que `base_cash` lleva dentro un término
+    /// que se agota en 90 días y que por tanto **no** es un importe mensual estable.
+    pub base_includes_transient: bool,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub allocated_total: Decimal,
+    /// Lo que ninguna regla absorbió y acaba en `surplus_cash`.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub leftover_to_surplus_cash: Decimal,
+    pub rules: Vec<ResolvedRule>,
+    pub per_asset: Vec<ResolvedAssetContribution>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/allocation-rules/resolution",
+    tag = "allocation-rules",
+    params(("view" = Option<String>, Query, description = "`mine` | household.")),
+    responses(
+        (status = 200, description = "Cascada resuelta del mes en curso", body = AllocationResolutionResponse),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Not an installation member"),
+        (status = 404, description = "Installation missing"),
+    )
+)]
+pub async fn get_allocation_resolution(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Query(q): Query<LedgerViewQuery>,
+) -> Result<Json<AllocationResolutionResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
+    let out =
+        allocation_resolution_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_allocation_resolution`.
+///
+/// Endpoint **nuevo** en vez de envolver `list_allocation_rules`: convertir aquel array en un
+/// objeto habría roto el contrato. Construye su propio `ProjectionInput` con horizonte 1 (mismo
+/// coste que `GET /v1/assets`, una tanda de SELECTs) y **no** pasa por la cache de proyección —
+/// coherente con `assets_projection_context`.
+pub(crate) async fn allocation_resolution_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+) -> Result<AllocationResolutionResponse, ApiError> {
+    use crate::handlers::installation::load_fire_settings;
+    use crate::handlers::projection::{build_installation_projection_input, map_engine_err};
+
+    let today = crate::handlers::installation::installation_naive_today(pool, iid).await?;
+    let fire_settings = load_fire_settings(pool, iid).await?;
+    let built = build_installation_projection_input(
+        pool,
+        iid,
+        user_id,
+        view,
+        today,
+        1,
+        Decimal::ZERO,
+        Some(&fire_settings),
+        None,
+    )
+    .await?;
+    let alloc =
+        futurefin_engine::first_month_allocation(&built.input).map_err(map_engine_err)?;
+
+    // `priority` y `kind` no viven en el engine: se releen de la tabla y se mapean por id.
+    let meta = list_allocation_rules_core(pool, iid, user_id, view).await?;
+
+    let rules: Vec<ResolvedRule> = alloc
+        .rules
+        .iter()
+        .filter_map(|r| {
+            let rule_id = *built.allocation_rule_ids.get(r.rule_index)?;
+            let m = meta.iter().find(|m| m.id == rule_id)?;
+            let (target_asset_id, target_asset_name) =
+                built.asset_id_name.get(r.target_index).cloned()?;
+            Some(ResolvedRule {
+                rule_id,
+                priority: m.priority,
+                target_asset_id,
+                target_asset_name,
+                kind: m.kind.clone(),
+                amount_intent: r.amount_intent.round_dp(4),
+                amount_resolved: r.amount_resolved.round_dp(4),
+                cap_ceiling: r.cap_ceiling.map(|v: Decimal| v.round_dp(4)),
+                cap_room: r.cap_room.map(|v: Decimal| v.round_dp(4)),
+                skipped_reason: r.skipped_reason.map(|s| skip_reason_wire(s).to_string()),
+            })
+        })
+        .collect();
+
+    let per_asset: Vec<ResolvedAssetContribution> = built
+        .asset_id_name
+        .iter()
+        .zip(alloc.per_asset.iter())
+        .map(|((asset_id, name), amount)| ResolvedAssetContribution {
+            asset_id: *asset_id,
+            name: name.clone(),
+            amount: amount.round_dp(4),
+        })
+        .collect();
+
+    let allocated_total: Decimal = alloc.per_asset.iter().copied().sum();
+
+    Ok(AllocationResolutionResponse {
+        month: today.format("%Y-%m").to_string(),
+        base_cash: alloc.base_cash.round_dp(4),
+        recurring_net: alloc.recurring_net.round_dp(4),
+        planning_component: alloc.planning_component.round_dp(4),
+        debt_service: alloc.debt_service.round_dp(4),
+        base_includes_transient: !alloc.planning_component.is_zero(),
+        allocated_total: allocated_total.round_dp(4),
+        leftover_to_surplus_cash: alloc.leftover.round_dp(4),
+        rules,
+        per_asset,
+    })
+}
+
+/// Nombre en el wire de cada razón. Se mapea a mano (y no con `Serialize` en el engine) para que
+/// el crate del motor no acabe conociendo el formato de la API.
+fn skip_reason_wire(r: futurefin_engine::AllocationSkipReason) -> &'static str {
+    use futurefin_engine::AllocationSkipReason as R;
+    match r {
+        R::NoCash => "no_cash",
+        R::NotReached => "not_reached",
+        R::CapFull => "cap_full",
+        R::ZeroAmount => "zero_amount",
+        R::InvalidTarget => "invalid_target",
+    }
+}
+
 pub fn allocation_rules_router() -> Router {
     Router::new()
         .route("/", get(list_allocation_rules).post(create_allocation_rule))
+        .route("/resolution", get(get_allocation_resolution))
         .route("/reorder", post(reorder_allocation_rules))
         .route("/{id}", patch(patch_allocation_rule).delete(delete_allocation_rule))
 }
