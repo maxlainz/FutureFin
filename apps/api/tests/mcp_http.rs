@@ -690,6 +690,123 @@ async fn list_transactions_offset_paginates_in_sql() {
     assert!(!ids1.contains(&page2_rows[0]["id"].as_str().unwrap()));
 }
 
+/// Los filtros de búsqueda (3.8.0) por la vía MCP: mismo resultado que el GET, `total_count`
+/// coherente con el conjunto FILTRADO (no con el total del hogar) y paginación que sigue bajando a
+/// SQL. Si el `COUNT(*)` no compartiera los mismos filtros, `truncated` mentiría en cuanto se
+/// buscara algo.
+#[tokio::test]
+async fn list_transactions_search_filters_match_http_and_paginate() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    for (date, concept, amount) in [
+        ("2026-07-01", "WWW.AMAZON* AAA", "-30.00"),
+        ("2026-07-02", "WWW.AMAZON* BBB", "-40.00"),
+        ("2026-07-03", "Café Módena", "-5.00"),
+        ("2026-08-04", "AMAZON PRIME", "-8.99"),
+    ] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                serde_json::json!({ "op_date": date, "amount": amount, "kind": "expense",
+                                    "concept": concept }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    // Tool con filtro de concepto: 3 de 4, y el total_count refleja el conjunto filtrado.
+    let out = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_transactions", serde_json::json!({"concept_contains": "amazon"})),
+        )
+        .await,
+    );
+    assert_eq!(out["total_count"], 3, "{out}");
+    assert_eq!(out["transactions"].as_array().unwrap().len(), 3);
+
+    // Byte a byte con el GET equivalente.
+    let http = app
+        .get_with_cookie("/v1/transactions?concept_contains=amazon", &owner.cookie)
+        .await;
+    assert_eq!(
+        out["transactions"], http.json(),
+        "la tool debe devolver exactamente las filas del GET"
+    );
+
+    // Paginación CON filtro: el COUNT comparte los filtros, así que truncated es fiable.
+    let page1 = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body(
+                "list_transactions",
+                serde_json::json!({"concept_contains": "amazon", "limit": 2}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(page1["total_count"], 3);
+    assert_eq!(page1["truncated"], true);
+    assert_eq!(page1["transactions"].as_array().unwrap().len(), 2);
+
+    let page2 = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body(
+                "list_transactions",
+                serde_json::json!({"concept_contains": "amazon", "limit": 2, "offset": 2}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(page2["truncated"], false);
+    assert_eq!(page2["transactions"].as_array().unwrap().len(), 1);
+
+    // El plegado de tildes también por MCP.
+    let out = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_transactions", serde_json::json!({"concept_contains": "modena"})),
+        )
+        .await,
+    );
+    assert_eq!(out["total_count"], 1, "{out}");
+
+    // Importe con signo y rango de fechas combinados.
+    let out = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body(
+                "list_transactions",
+                serde_json::json!({"max_amount": "-30", "date_from": "2026-07-01",
+                                   "date_to": "2026-07-31"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["total_count"], 2, "gastos de 30 € o más en julio: {out}");
+
+    // `month` + rango a la vez → error de dominio tipado, el MISMO 400 que por HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "list_transactions",
+            serde_json::json!({"month": "2026-07", "date_from": "2026-07-01"}),
+        ),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+}
+
 #[tokio::test]
 async fn new_read_tools_match_http_endpoints() {
     let app = TestApp::spawn().await;

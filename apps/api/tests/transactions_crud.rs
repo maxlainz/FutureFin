@@ -516,3 +516,241 @@ async fn list_months_counts_reconciled_rows() {
         assert!(t["transfer_counterpart_op_date"].is_string());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Filtros de búsqueda (3.8.0): concepto, importe con signo, rango de fechas
+// ---------------------------------------------------------------------------
+
+/// Siembra cinco movimientos con conceptos, importes y fechas diversos para ejercitar los filtros.
+async fn seed_searchable(app: &TestApp, owner: &common::LoggedInOwner) {
+    for (date, concept, amount, kind) in [
+        ("2026-06-02", "Café   Módena", "-4.50", "expense"),
+        ("2026-06-10", "WWW.AMAZON* MN34OP56", "-104.45", "expense"),
+        ("2026-06-22", "AMAZON PRIME", "-8.99", "expense"),
+        ("2026-07-05", "NOMINA JULIO", "2500", "income"),
+        ("2026-07-19", "Descuento 50% dto_especial", "-20", "expense"),
+    ] {
+        let r = create_manual(
+            app,
+            &owner.cookie,
+            json!({ "op_date": date, "concept": concept, "amount": amount, "kind": kind }),
+        )
+        .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{concept}: {r:?}");
+    }
+}
+
+fn concepts(v: &Value) -> Vec<String> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["concept"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// El filtro de concepto pliega tildes **en las dos direcciones** y es insensible a mayúsculas.
+/// Es la misma semántica que el matching de reglas de categorización (`fold_diacritics_upper`),
+/// replicada en SQL con `translate` — no con `upper()`, que depende de la collation del cluster.
+#[tokio::test]
+async fn concept_contains_is_accent_and_case_insensitive_both_ways() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_searchable(&app, &owner).await;
+
+    // Sin tilde encuentra el concepto acentuado…
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=cafe", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()), vec!["Café   Módena"]);
+
+    // …y con tilde encuentra lo mismo (la columna se pliega, no el patrón solo).
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=CAFÉ", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()), vec!["Café   Módena"]);
+
+    // Búsqueda con acento distinto del almacenado: ambos pliegan a la misma letra.
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=modena", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()).len(), 1);
+
+    // El colapso de espacios también se replica: el concepto se guarda con tres espacios.
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=cafe%20modena", &owner.cookie)
+        .await;
+    assert_eq!(
+        concepts(&r.json()),
+        vec!["Café   Módena"],
+        "el espacio único del patrón debe casar con el run de espacios almacenado"
+    );
+
+    // Subcadena que aparece en dos filas, orden op_date DESC.
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=amazon", &owner.cookie)
+        .await;
+    assert_eq!(
+        concepts(&r.json()),
+        vec!["AMAZON PRIME", "WWW.AMAZON* MN34OP56"]
+    );
+}
+
+/// `%` y `_` del usuario son texto literal. Sin escape, `%` devolvería el conjunto entero.
+#[tokio::test]
+async fn concept_contains_escapes_like_wildcards() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_searchable(&app, &owner).await;
+
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=50%25%20dto", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()).len(), 1, "«50% dto» es literal: {:?}", r.json());
+
+    // Un `%` suelto NO es «todo»: solo casa con las filas que contienen el carácter.
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=%25", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()).len(), 1, "un % literal, no un comodín: {:?}", r.json());
+
+    // `_` tampoco es «cualquier carácter».
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=dto_especial", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()).len(), 1);
+    let r = app
+        .get_with_cookie("/v1/transactions?concept_contains=dtoXespecial", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()).len(), 0, "«_» no debe casar con cualquier carácter");
+}
+
+/// Los importes se comparan **con signo**: es la fuente de error más probable para un cliente.
+#[tokio::test]
+async fn amount_filters_compare_signed_values() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_searchable(&app, &owner).await;
+
+    // Gastos de 50 € o más: amount <= -50.
+    let r = app
+        .get_with_cookie("/v1/transactions?max_amount=-50", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()), vec!["WWW.AMAZON* MN34OP56"]);
+
+    // Solo entradas de dinero: amount >= 0.
+    let r = app
+        .get_with_cookie("/v1/transactions?min_amount=0", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()), vec!["NOMINA JULIO"]);
+
+    // Banda cerrada.
+    let r = app
+        .get_with_cookie("/v1/transactions?min_amount=-25&max_amount=-5", &owner.cookie)
+        .await;
+    assert_eq!(concepts(&r.json()), vec!["Descuento 50% dto_especial", "AMAZON PRIME"]);
+
+    // Banda invertida → 400 explícito, no un conjunto vacío silencioso.
+    let r = app
+        .get_with_cookie("/v1/transactions?min_amount=0&max_amount=-100", &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+}
+
+/// Rango de fechas **inclusivo** en los dos extremos, y excluyente con `month`.
+#[tokio::test]
+async fn date_range_is_inclusive_and_exclusive_with_month() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_searchable(&app, &owner).await;
+
+    // El día exacto del extremo entra: 2026-06-22 es el `date_to`.
+    let r = app
+        .get_with_cookie(
+            "/v1/transactions?date_from=2026-06-10&date_to=2026-06-22",
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(
+        concepts(&r.json()),
+        vec!["AMAZON PRIME", "WWW.AMAZON* MN34OP56"],
+        "los dos extremos son inclusivos"
+    );
+
+    // Cruzar meses es justo lo que `month` no permite.
+    let r = app
+        .get_with_cookie(
+            "/v1/transactions?date_from=2026-06-22&date_to=2026-07-05",
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(concepts(&r.json()), vec!["NOMINA JULIO", "AMAZON PRIME"]);
+
+    // `month` + rango a la vez → 400: dos formas de decir lo mismo, sin ganador implícito.
+    let r = app
+        .get_with_cookie(
+            "/v1/transactions?month=2026-06&date_from=2026-06-01",
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+
+    // Rango invertido → 400.
+    let r = app
+        .get_with_cookie(
+            "/v1/transactions?date_from=2026-07-01&date_to=2026-06-01",
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+}
+
+/// Todos los ejes a la vez. Es el test que caza un cruce entre el orden de emisión de los
+/// placeholders y el orden de los binds del macro `bind_filters!`: con un solo filtro cada query
+/// parece correcta, y solo al combinarlos se ve que los valores se aplican a la columna equivocada.
+#[tokio::test]
+async fn all_filters_combined_agree_with_each_axis() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Compras").await;
+    seed_searchable(&app, &owner).await;
+
+    // Una fila más, categorizada, que cumple TODOS los criterios.
+    let r = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-15", "concept": "AMAZON MARKETPLACE", "amount": "-60",
+                "kind": "expense", "category_id": cat }),
+    )
+    .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let url = format!(
+        "/v1/transactions?concept_contains=amazon&kind=expense&category_id={cat}\
+         &min_amount=-100&max_amount=-10&date_from=2026-06-01&date_to=2026-06-30"
+    );
+    let r = app.get_with_cookie(&url, &owner.cookie).await;
+    assert_eq!(
+        concepts(&r.json()),
+        vec!["AMAZON MARKETPLACE"],
+        "seis ejes simultáneos deben intersecar, no cruzarse: {:?}",
+        r.json()
+    );
+
+    // Y cada eje por separado, para que el fallo del combinado no sea ambiguo.
+    for (axis, expected_len) in [
+        ("concept_contains=amazon", 3),
+        ("kind=expense", 5),
+        ("min_amount=-100&max_amount=-10", 2),
+        ("date_from=2026-06-01&date_to=2026-06-30", 4),
+    ] {
+        let r = app
+            .get_with_cookie(&format!("/v1/transactions?{axis}"), &owner.cookie)
+            .await;
+        assert_eq!(
+            concepts(&r.json()).len(),
+            expected_len,
+            "eje «{axis}» solo: {:?}",
+            r.json()
+        );
+    }
+}

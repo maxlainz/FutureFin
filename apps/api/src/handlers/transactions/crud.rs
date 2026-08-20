@@ -14,9 +14,9 @@ use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::reconcile::{auto_reconcile_after_mutation, unlink_pair_no_rejection};
 use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::schema::{
-    compute_fingerprint, normalize_concept_field, normalize_kind, normalize_notes, BatchCreateBody,
-    CreateTransactionBody, ImportBatchResponse, MonthEntry, PatchTransactionBody,
-    TransactionResponse, SOURCE_MANUAL,
+    compute_fingerprint, like_needle, normalize_concept_field, normalize_kind, normalize_notes,
+    sql_fold_concept_expr, BatchCreateBody, CreateTransactionBody, ImportBatchResponse, MonthEntry,
+    PatchTransactionBody, TransactionResponse, SOURCE_MANUAL,
 };
 use crate::handlers::transactions::{
     assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
@@ -335,7 +335,7 @@ pub async fn create_batch(
 pub struct ListTxnQuery {
     #[serde(default)]
     pub view: Option<String>,
-    /// `YYYY-MM`.
+    /// `YYYY-MM`. Excluyente con `date_from`/`date_to`.
     #[serde(default)]
     pub month: Option<String>,
     #[serde(default)]
@@ -344,6 +344,37 @@ pub struct ListTxnQuery {
     pub category_id: Option<Uuid>,
     #[serde(default)]
     pub import_id: Option<Uuid>,
+    /// Subcadena del concepto, insensible a mayúsculas y a tildes.
+    #[serde(default)]
+    pub concept_contains: Option<String>,
+    /// Cota inferior del importe **con signo** (los gastos son negativos).
+    #[serde(default)]
+    pub min_amount: Option<Decimal>,
+    /// Cota superior del importe **con signo**.
+    #[serde(default)]
+    pub max_amount: Option<Decimal>,
+    /// `YYYY-MM-DD` inclusivo. Excluyente con `month`.
+    #[serde(default)]
+    pub date_from: Option<NaiveDate>,
+    /// `YYYY-MM-DD` inclusivo. Excluyente con `month`.
+    #[serde(default)]
+    pub date_to: Option<NaiveDate>,
+}
+
+/// Filtros de `list_transactions_core`, agrupados a propósito: el core ya tomaba diez parámetros
+/// posicionales y los ejes de búsqueda lo habrían llevado a quince — precisamente el terreno donde
+/// un argumento cruzado no lo detecta el compilador.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TxnFilters<'a> {
+    pub month: Option<&'a str>,
+    pub kind: Option<&'a str>,
+    pub category_id: Option<Uuid>,
+    pub import_id: Option<Uuid>,
+    pub concept_contains: Option<&'a str>,
+    pub min_amount: Option<Decimal>,
+    pub max_amount: Option<Decimal>,
+    pub date_from: Option<NaiveDate>,
+    pub date_to: Option<NaiveDate>,
 }
 
 /// Parsea `YYYY-MM` → (primer día del mes, primer día del mes siguiente).
@@ -378,6 +409,11 @@ fn parse_month(raw: &str) -> Result<(NaiveDate, NaiveDate), ApiError> {
         ("kind" = Option<String>, Query, description = "`expense` | `income` | `savings`."),
         ("category_id" = Option<Uuid>, Query, description = "Filtra por categoría."),
         ("import_id" = Option<Uuid>, Query, description = "Filtra por lote de import."),
+        ("concept_contains" = Option<String>, Query, description = "Subcadena del concepto (1–200), insensible a mayúsculas y a tildes: `cafe` encuentra `CAFÉ`. Los comodines `%` y `_` se tratan como texto literal."),
+        ("min_amount" = Option<String>, Query, description = "Cota inferior del importe CON SIGNO (los gastos son negativos)."),
+        ("max_amount" = Option<String>, Query, description = "Cota superior del importe CON SIGNO: `max_amount=-50` son los gastos de 50 € o más."),
+        ("date_from" = Option<String>, Query, description = "`YYYY-MM-DD` inclusivo. Excluyente con `month`."),
+        ("date_to" = Option<String>, Query, description = "`YYYY-MM-DD` inclusivo. Excluyente con `month`."),
     ),
     responses(
         (status = 200, description = "Transacciones (orden op_date DESC)", body = [TransactionResponse]),
@@ -403,10 +439,17 @@ pub async fn list_transactions(
         iid,
         user.id.0,
         view,
-        q.month.as_deref(),
-        q.kind.as_deref(),
-        q.category_id,
-        q.import_id,
+        TxnFilters {
+            month: q.month.as_deref(),
+            kind: q.kind.as_deref(),
+            category_id: q.category_id,
+            import_id: q.import_id,
+            concept_contains: q.concept_contains.as_deref(),
+            min_amount: q.min_amount,
+            max_amount: q.max_amount,
+            date_from: q.date_from,
+            date_to: q.date_to,
+        },
         None,
         0,
     )
@@ -421,21 +464,62 @@ pub async fn list_transactions(
 /// `COUNT` — el conjunto entero, contrato REST intacto. Con `limit = Some(n)` (la tool MCP) la
 /// paginación baja a SQL y `total_count` sale de un `COUNT(*)` con los mismos filtros: la DB ya
 /// no materializa el conjunto entero para servir una página.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn list_transactions_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
     user_id: Uuid,
     view: LedgerView,
-    month: Option<&str>,
-    kind: Option<&str>,
-    category_id: Option<Uuid>,
-    import_id: Option<Uuid>,
+    f: TxnFilters<'_>,
     limit: Option<i64>,
     offset: i64,
 ) -> Result<(Vec<TransactionResponse>, i64), ApiError> {
+    let TxnFilters {
+        month,
+        kind,
+        category_id,
+        import_id,
+        concept_contains,
+        min_amount,
+        max_amount,
+        date_from,
+        date_to,
+    } = f;
+
     let kind = match kind {
         Some(k) => Some(normalize_kind(k)?),
+        None => None,
+    };
+    // `month` y el rango libre son dos formas de decir lo mismo: aceptar ambas obligaría a definir
+    // qué gana, y cualquier respuesta sería una trampa silenciosa para el llamante.
+    if month.is_some() && (date_from.is_some() || date_to.is_some()) {
+        return Err(ApiError::BadRequest(
+            "month and date_from/date_to are mutually exclusive: use one or the other".into(),
+        ));
+    }
+    if let (Some(from), Some(to)) = (date_from, date_to) {
+        if from > to {
+            return Err(ApiError::BadRequest(
+                "date_from must not be after date_to".into(),
+            ));
+        }
+    }
+    if let (Some(lo), Some(hi)) = (min_amount, max_amount) {
+        if lo > hi {
+            return Err(ApiError::BadRequest(
+                "min_amount must not be greater than max_amount (both are signed: expenses are negative)".into(),
+            ));
+        }
+    }
+    let concept_needle = match concept_contains {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.chars().count() > 200 {
+                return Err(ApiError::BadRequest(
+                    "concept_contains must be between 1 and 200 characters".into(),
+                ));
+            }
+            Some(like_needle(trimmed))
+        }
         None => None,
     };
     let month_range = match month {
@@ -466,6 +550,32 @@ pub(crate) async fn list_transactions_core(
         filters.push_str(&format!(" AND t.import_id = ${arg}"));
         arg += 1;
     }
+    if concept_needle.is_some() {
+        // El patrón llega ya plegado y escapado desde `like_needle`; la columna se pliega con la
+        // misma tabla vía `translate` (colación-independiente, ver `schema.rs`).
+        filters.push_str(&format!(
+            " AND {} LIKE ${arg} ESCAPE '\\'",
+            sql_fold_concept_expr("t.concept")
+        ));
+        arg += 1;
+    }
+    if min_amount.is_some() {
+        filters.push_str(&format!(" AND t.amount >= ${arg}"));
+        arg += 1;
+    }
+    if max_amount.is_some() {
+        filters.push_str(&format!(" AND t.amount <= ${arg}"));
+        arg += 1;
+    }
+    if date_from.is_some() {
+        filters.push_str(&format!(" AND t.op_date >= ${arg}"));
+        arg += 1;
+    }
+    if date_to.is_some() {
+        // Inclusivo: «hasta el 31» incluye el 31. Un `<` exclusivo es el off-by-one-day clásico.
+        filters.push_str(&format!(" AND t.op_date <= ${arg}"));
+        arg += 1;
+    }
 
     let mut sql = format!("{TXN_SELECT} WHERE {scope}{filters}");
     sql.push_str(" ORDER BY t.op_date DESC, t.created_at DESC, t.id DESC");
@@ -489,6 +599,21 @@ pub(crate) async fn list_transactions_core(
             }
             if let Some(imp) = import_id {
                 query = query.bind(imp);
+            }
+            if let Some(ref n) = concept_needle {
+                query = query.bind(n.clone());
+            }
+            if let Some(lo) = min_amount {
+                query = query.bind(lo);
+            }
+            if let Some(hi) = max_amount {
+                query = query.bind(hi);
+            }
+            if let Some(from) = date_from {
+                query = query.bind(from);
+            }
+            if let Some(to) = date_to {
+                query = query.bind(to);
             }
             query
         }};

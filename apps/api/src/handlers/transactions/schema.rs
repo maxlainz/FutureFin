@@ -60,6 +60,50 @@ pub fn fold_diacritics_upper(s: &str) -> String {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Espejo SQL de `fold_diacritics_upper ∘ normalize_concept`
+// ---------------------------------------------------------------------------
+
+/// Origen del `translate()` que replica en SQL lo que hacen `normalize_concept` (ASCII-uppercase)
+/// y `fold_diacritics_upper` (acentos → ASCII en mayúscula) juntos, para el filtro de búsqueda por
+/// concepto de `GET /v1/transactions`.
+///
+/// **Por qué `translate` y no `upper()`**: `upper()` en Postgres depende de la collation del
+/// cluster — bajo `C` no toca los no-ASCII y bajo glibc/ICU sí — y esta imagen ya cambió de
+/// collation una vez (musl → glibc, con REINDEX de adopción en el entrypoint). Al mapear también
+/// `a-z → A-Z` dentro del mismo `translate`, la expresión deja de depender de la collation por
+/// completo y equivale carácter a carácter a la composición de Rust. Nada de `unaccent`/`pg_trgm`:
+/// son extensiones, y el Postgres va embebido en la imagen desde 3.0.0.
+pub const SQL_FOLD_SRC: &str =
+    "ÁÀÄÂáàäâÉÈËÊéèëêÍÌÏÎíìïîÓÒÖÔóòöôÚÙÜÛúùüûÑñabcdefghijklmnopqrstuvwxyz";
+
+/// Destino del `translate()`. Mismo número de caracteres que [`SQL_FOLD_SRC`], posición a posición
+/// (lo comprueba `sql_fold_tables_mirror_the_rust_fold`).
+pub const SQL_FOLD_DST: &str =
+    "AAAAAAAAEEEEEEEEIIIIIIIIOOOOOOOOUUUUUUUUNNABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/// Expresión SQL que normaliza una columna de concepto igual que
+/// `fold_diacritics_upper(&normalize_concept(x))`: trim + colapso de runs de whitespace + plegado.
+/// El `concept` se almacena SIN normalizar (`normalize_concept_field` solo hace trim), de ahí que
+/// el colapso de espacios tenga que ir también aquí.
+pub fn sql_fold_concept_expr(col: &str) -> String {
+    format!(
+        "translate(regexp_replace(btrim({col}), '\\s+', ' ', 'g'), '{SQL_FOLD_SRC}', '{SQL_FOLD_DST}')"
+    )
+}
+
+/// Prepara el patrón de búsqueda: lo pliega igual que la columna y **escapa los metacaracteres**
+/// de `LIKE` (`\`, `%`, `_`). Sin el escape, un concepto con `%` devolvería el mundo entero.
+/// El orden importa: la barra primero, o se duplicarían las barras del propio escape.
+pub fn like_needle(raw: &str) -> String {
+    let folded = fold_diacritics_upper(&normalize_concept(raw));
+    let escaped = folded
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
 /// Forma canónica del importe a 4 decimales fijos, independiente del formato Display:
 /// `-26.000000000` → `-26.0000`, `-3` → `-3.0000`, `-3.00` → `-3.0000`. Garantiza que
 /// `-3` y `-3.00` produzcan la MISMA huella.
@@ -742,6 +786,53 @@ mod tests {
         );
         assert_eq!(normalize_concept("estalvi"), "ESTALVI");
         assert_eq!(normalize_concept("\tSopar\n entrada "), "SOPAR ENTRADA");
+    }
+
+    /// La tabla del `translate()` SQL y la función Rust son dos implementaciones del mismo
+    /// plegado: este test las obliga a coincidir carácter a carácter. Si alguien añade una vocal
+    /// a `fold_diacritics_upper` y no a la tabla (o al revés), cae aquí y no en producción.
+    #[test]
+    fn sql_fold_tables_mirror_the_rust_fold() {
+        let src: Vec<char> = SQL_FOLD_SRC.chars().collect();
+        let dst: Vec<char> = SQL_FOLD_DST.chars().collect();
+        assert_eq!(
+            src.len(),
+            dst.len(),
+            "las dos tablas del translate deben tener la misma longitud"
+        );
+        for (&from, &to) in src.iter().zip(dst.iter()) {
+            // La composición que se replica en SQL es `fold_diacritics_upper ∘ normalize_concept`.
+            let rust = fold_diacritics_upper(&normalize_concept(&from.to_string()));
+            assert_eq!(
+                rust,
+                to.to_string(),
+                "el carácter {from:?} se pliega a {rust:?} en Rust pero a {to:?} en la tabla SQL"
+            );
+        }
+        // Y a la inversa: todo lo que Rust pliega tiene que estar en la tabla, o el SQL lo dejaría
+        // pasar sin plegar. Se barre el rango latino-1 completo, que cubre el español entero.
+        for c in ('\u{20}'..='\u{FF}').chain('Ā'..='ſ') {
+            let folded = fold_diacritics_upper(&c.to_string());
+            let unchanged = folded == c.to_string();
+            if !unchanged {
+                assert!(
+                    SQL_FOLD_SRC.contains(c),
+                    "Rust pliega {c:?} → {folded:?} pero la tabla SQL no lo contempla"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn like_needle_escapes_wildcards_and_folds() {
+        // Plegado + ASCII-uppercase, envuelto en comodines de subcadena.
+        assert_eq!(like_needle("café"), "%CAFE%");
+        assert_eq!(like_needle("  amazon  "), "%AMAZON%");
+        // `%` y `_` del usuario son texto literal, no comodines.
+        assert_eq!(like_needle("50% dto"), "%50\\% DTO%");
+        assert_eq!(like_needle("a_b"), "%A\\_B%");
+        // La barra se escapa primero: si no, se duplicarían las barras del propio escape.
+        assert_eq!(like_needle("a\\b"), "%A\\\\B%");
     }
 
     #[test]
