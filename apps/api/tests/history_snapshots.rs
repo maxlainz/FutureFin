@@ -593,7 +593,6 @@ async fn snapshot_mutations_do_not_touch_projection_cache() {
     // Calentar la cache household (monthly) con un GET.
     let warm = app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
     assert_eq!(warm.status, http::StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let iid = installation_id(&app).await;
     let key = ProjectionCacheKey {
@@ -620,9 +619,8 @@ async fn snapshot_mutations_do_not_touch_projection_cache() {
     let snap_id = created.json()["id"].as_str().unwrap().to_string();
     app.delete_with_cookie(&format!("/v1/history/snapshots/{snap_id}"), &owner.cookie).await;
 
-    // Dar margen a cualquier tarea de fondo (no debería haber ninguna que invalide).
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
+    // Sin margen que dar: desde 3.8.0 la invalidación se espera dentro del handler, así que si
+    // los snapshots invalidaran algo ya habría pasado cuando el DELETE respondió.
     let cache = app.state.projection_cache.read().await;
     assert!(
         cache.contains_key(&key),

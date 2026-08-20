@@ -15,17 +15,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{Datelike, NaiveDate};
 use common::TestApp;
-use futurefin_api::handlers::person_view::LedgerView;
-use futurefin_api::state::{Density, ProjectionCacheKey};
 use serde_json::json;
 use uuid::Uuid;
-
-async fn installation_id(app: &TestApp) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM installation LIMIT 1")
-        .fetch_one(&app.pool)
-        .await
-        .expect("installation id")
-}
 
 fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
     let zero = (year as i64) * 12 + (month as i64 - 1) + delta as i64;
@@ -36,39 +27,6 @@ fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
 async fn server_today(app: &TestApp, cookie: &str) -> NaiveDate {
     let r = app.get_with_cookie("/v1/history/series", cookie).await;
     NaiveDate::parse_from_str(r.json()["anchor_date_ymd"].as_str().unwrap(), "%Y-%m-%d").unwrap()
-}
-
-fn household_key(iid: Uuid) -> ProjectionCacheKey {
-    ProjectionCacheKey {
-        installation_id: iid,
-        view: LedgerView::Household,
-        owner_user_id: None,
-        density: Density::Monthly,
-    }
-}
-
-async fn present(app: &TestApp, key: &ProjectionCacheKey) -> bool {
-    app.state.projection_cache.read().await.contains_key(key)
-}
-
-/// Calienta la entrada household (monthly) con un GET y verifica que quedó cacheada.
-async fn warm(app: &TestApp, cookie: &str, key: &ProjectionCacheKey) {
-    let r = app.get_with_cookie("/v1/projection/series", cookie).await;
-    assert_eq!(r.status, http::StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(present(app, key).await, "la cache debería estar caliente tras el GET");
-}
-
-/// Espera (polling) a que la invalidación en background (tokio::spawn) tire la entrada.
-/// La usan los modos B y C; el `what` identifica la ruta concreta en el panic.
-async fn assert_invalidated(app: &TestApp, key: &ProjectionCacheKey, what: &str) {
-    for _ in 0..40 {
-        if !present(app, key).await {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("la mutación «{what}» debía invalidar la cache de proyección");
 }
 
 async fn set_mode(app: &TestApp, cookie: &str, source: &str) {
@@ -116,9 +74,9 @@ async fn mode_a_mutations_do_not_touch_projection_cache() {
     )
     .await;
 
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
-    warm(&app, &owner.cookie, &key).await;
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
 
     // --- Batería de mutaciones de transacciones (modo A, default) ---
     // 1. Alta manual.
@@ -180,10 +138,8 @@ async fn mode_a_mutations_do_not_touch_projection_cache() {
     app.delete_with_cookie(&format!("/v1/transactions/recurring/{rule_id}"), &owner.cookie)
         .await;
 
-    // Margen para cualquier tarea de fondo (no debería haber ninguna que invalide en modo A).
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        present(&app, &key).await,
+        app.cache_contains(&key).await,
         "modo A: las mutaciones de transacciones NO deben invalidar la cache (no son inputs del engine)"
     );
 }
@@ -205,11 +161,11 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     .await;
     set_mode(&app, &owner.cookie, "transactions_avg").await;
 
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
 
     // 1. create
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let created = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -219,10 +175,10 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         .await;
     assert_eq!(created.status, http::StatusCode::CREATED);
     let txn_id = created.json()["id"].as_str().unwrap().to_string();
-    assert_invalidated(&app, &key, "create").await;
+    app.assert_invalidated(&key, "create").await;
 
     // 2. batch
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     app.post_json_with_cookie(
         "/v1/transactions/batch",
         json!({ "transactions": [
@@ -231,20 +187,20 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         &owner.cookie,
     )
     .await;
-    assert_invalidated(&app, &key, "batch").await;
+    app.assert_invalidated(&key, "batch").await;
 
     // 3. patch
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     app.patch_json_with_cookie(
         &format!("/v1/transactions/{txn_id}"),
         json!({ "notes": "editada" }),
         &owner.cookie,
     )
     .await;
-    assert_invalidated(&app, &key, "patch").await;
+    app.assert_invalidated(&key, "patch").await;
 
     // 4. import confirm
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let (b64, sha) = preview_csv(&app, &owner.cookie, "IMPORTADA", "-9", 15).await;
     let conf = app
         .post_json_with_cookie(
@@ -255,18 +211,18 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         )
         .await;
     let import_id = conf.json()["import_id"].as_str().unwrap().to_string();
-    assert_invalidated(&app, &key, "import confirm").await;
+    app.assert_invalidated(&key, "import confirm").await;
 
     // 5. delete import (cascadea sus transacciones)
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/imports/{import_id}?confirm=true"), &owner.cookie)
         .await;
-    assert_invalidated(&app, &key, "delete import").await;
+    app.assert_invalidated(&key, "delete import").await;
 
     // 6. delete
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie).await;
-    assert_invalidated(&app, &key, "delete").await;
+    app.assert_invalidated(&key, "delete").await;
 
     // 7. materialize (regla con cursor un par de meses atrás → genera ≥1 instancia). Fechas
     // relativas al "hoy" del servidor para que el assert no dependa del reloj de la máquina.
@@ -300,20 +256,19 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         .execute(&app.pool)
         .await
         .expect("rewind cursor");
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let mat = app
         .post_json_with_cookie("/v1/transactions/recurring/materialize", json!({}), &owner.cookie)
         .await;
     assert!(mat.json()["materialized"].as_u64().unwrap() >= 1, "materialize debe generar ≥1: {mat:?}");
-    assert_invalidated(&app, &key, "materialize").await;
+    app.assert_invalidated(&key, "materialize").await;
 
     // 8. borrar la regla recurrente NO invalida (instancias sobreviven, conjunto sin cambios).
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/recurring/{rule_id}"), &owner.cookie)
         .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        present(&app, &key).await,
+        app.cache_contains(&key).await,
         "modo B: borrar una regla recurrente NO cambia el conjunto de transacciones → no debe invalidar"
     );
 }
@@ -334,18 +289,18 @@ async fn flipping_savings_source_invalidates_projection_cache() {
     )
     .await;
 
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
 
     // A → B
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     set_mode(&app, &owner.cookie, "transactions_avg").await;
-    assert_invalidated(&app, &key, "flip A→B").await;
+    app.assert_invalidated(&key, "flip A→B").await;
 
     // B → A
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     set_mode(&app, &owner.cookie, "budget").await;
-    assert_invalidated(&app, &key, "flip B→A").await;
+    app.assert_invalidated(&key, "flip B→A").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,10 +320,10 @@ async fn mode_c_mutation_invalidates_projection_cache() {
     .await;
     set_mode(&app, &owner.cookie, "budget_income_real_expense").await;
 
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
 
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let created = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -377,12 +332,12 @@ async fn mode_c_mutation_invalidates_projection_cache() {
         )
         .await;
     assert_eq!(created.status, http::StatusCode::CREATED);
-    assert_invalidated(&app, &key, "modo C create").await;
+    app.assert_invalidated(&key, "modo C create").await;
     let txn_id = created.json()["id"].as_str().unwrap().to_string();
 
     // PATCH: `patch_transaction_core` invalida de forma incondicional (no solo cuando cambian
     // importe/fecha), así que un cambio de categoría/notas también tira la cache en modo C.
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let patched = app
         .patch_json_with_cookie(
             &format!("/v1/transactions/{txn_id}"),
@@ -391,13 +346,13 @@ async fn mode_c_mutation_invalidates_projection_cache() {
         )
         .await;
     assert_eq!(patched.status, http::StatusCode::OK);
-    assert_invalidated(&app, &key, "modo C patch").await;
+    app.assert_invalidated(&key, "modo C patch").await;
 
     // DELETE: cierra la paridad con el modo B para las tres rutas más usadas desde el chat.
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie)
         .await;
-    assert_invalidated(&app, &key, "modo C delete").await;
+    app.assert_invalidated(&key, "modo C delete").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +389,9 @@ async fn creating_a_categorization_rule_never_invalidates_projection_cache() {
         )
         .await;
 
-        let iid = installation_id(&app).await;
-        let key = household_key(iid);
-        warm(&app, &owner.cookie, &key).await;
+        let iid = app.installation_id().await;
+        let key = app.household_key(iid);
+        app.warm_household(&owner.cookie, &key).await;
 
         let created = app
             .post_json_with_cookie(
@@ -448,9 +403,8 @@ async fn creating_a_categorization_rule_never_invalidates_projection_cache() {
             .await;
         assert_eq!(created.status, http::StatusCode::CREATED, "modo {mode}: {created:?}");
 
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(
-            present(&app, &key).await,
+            app.cache_contains(&key).await,
             "modo {mode}: crear una regla de categorización NO debe invalidar la cache \
              (solo afecta a imports futuros; no recategoriza nada existente)"
         );
@@ -492,11 +446,11 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
             .await;
         assert_eq!(seeded.status, http::StatusCode::CREATED, "modo {mode}: {seeded:?}");
 
-        let iid = installation_id(&app).await;
-        let key = household_key(iid);
+        let iid = app.installation_id().await;
+        let key = app.household_key(iid);
 
         // 1. Crear la regla: NUNCA invalida, en ningún modo.
-        warm(&app, &owner.cookie, &key).await;
+        app.warm_household(&owner.cookie, &key).await;
         let rule = app
             .post_json_with_cookie(
                 "/v1/transactions/rules",
@@ -507,9 +461,8 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
             .await;
         assert_eq!(rule.status, http::StatusCode::CREATED, "modo {mode}: {rule:?}");
         let rule_id = rule.json()["id"].as_str().unwrap().to_string();
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(
-            present(&app, &key).await,
+            app.cache_contains(&key).await,
             "modo {mode}: crear la regla no debe invalidar"
         );
 
@@ -522,8 +475,7 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
             )
             .await;
         assert_eq!(preview.status, http::StatusCode::BAD_REQUEST, "sin confirm por HTTP");
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(present(&app, &key).await, "modo {mode}: el preview no invalida");
+        assert!(app.cache_contains(&key).await, "modo {mode}: el preview no invalida");
 
         // 3. El backfill sí, y solo en los modos que leen transacciones.
         let applied = app
@@ -541,17 +493,16 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
         );
 
         if should_invalidate {
-            assert_invalidated(&app, &key, &format!("modo {mode} backfill")).await;
+            app.assert_invalidated(&key, &format!("modo {mode} backfill")).await;
         } else {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            assert!(
-                present(&app, &key).await,
+                assert!(
+                app.cache_contains(&key).await,
                 "modo A: las transacciones no son inputs del engine, tampoco tras un backfill"
             );
         }
 
         // 4. Un backfill que no cambia nada (idempotente) no debe tirar la cache caliente.
-        warm(&app, &owner.cookie, &key).await;
+        app.warm_household(&owner.cookie, &key).await;
         let again = app
             .post_json_with_cookie(
                 &format!("/v1/transactions/rules/{rule_id}/apply"),
@@ -560,9 +511,8 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
             )
             .await;
         assert_eq!(again.json()["matched"], 0, "modo {mode}: {:?}", again.json());
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         assert!(
-            present(&app, &key).await,
+            app.cache_contains(&key).await,
             "modo {mode}: un backfill sin filas afectadas no debe invalidar"
         );
     }
@@ -605,9 +555,9 @@ async fn batch_patch_invalidates_once_for_the_whole_batch() {
         ids.push(r.json()["id"].as_str().unwrap().to_string());
     }
 
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
-    warm(&app, &owner.cookie, &key).await;
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
 
     let r = app
         .patch_json_with_cookie(
@@ -618,11 +568,11 @@ async fn batch_patch_invalidates_once_for_the_whole_batch() {
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
     assert_eq!(r.json()["updated"], 5, "{:?}", r.json());
-    assert_invalidated(&app, &key, "batch patch en modo C").await;
+    app.assert_invalidated(&key, "batch patch en modo C").await;
 
     // Y en modo A sigue sin invalidar: el contrato es COND, no incondicional.
     set_mode(&app, &owner.cookie, "budget").await;
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let r = app
         .patch_json_with_cookie(
             "/v1/transactions/batch",
@@ -631,9 +581,8 @@ async fn batch_patch_invalidates_once_for_the_whole_batch() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        present(&app, &key).await,
+        app.cache_contains(&key).await,
         "modo A: el lote tampoco invalida (las transacciones no son inputs del engine)"
     );
 }
@@ -673,9 +622,9 @@ async fn mode_a_reconcile_endpoints_do_not_touch_projection_cache() {
         .json();
     let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
 
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
-    warm(&app, &owner.cookie, &key).await;
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
 
     // Conciliar par + desconciliar + pase explícito: en modo A nada invalida.
     let r = app
@@ -695,9 +644,8 @@ async fn mode_a_reconcile_endpoints_do_not_touch_projection_cache() {
         .await;
     assert_eq!(p.status, http::StatusCode::OK, "pass: {p:?}");
 
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        present(&app, &key).await,
+        app.cache_contains(&key).await,
         "modo A: conciliar/desconciliar NO debe invalidar (las transacciones no son inputs)"
     );
 }
@@ -733,11 +681,11 @@ async fn mode_b_reconcile_endpoints_invalidate_projection_cache() {
         .json();
     let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
 
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
 
     // 1. Conciliar par manual → invalida (cambia qué cuenta en el promedio 12m).
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let r = app
         .post_json_with_cookie(
             &format!("/v1/transactions/{a_id}/reconcile"),
@@ -746,25 +694,24 @@ async fn mode_b_reconcile_endpoints_invalidate_projection_cache() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "pair: {r:?}");
-    assert_invalidated(&app, &key, "reconcile pair").await;
+    app.assert_invalidated(&key, "reconcile pair").await;
 
     // 2. Desconciliar → invalida.
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let u = app
         .delete_with_cookie(&format!("/v1/transactions/{a_id}/reconcile"), &owner.cookie)
         .await;
     assert_eq!(u.status, http::StatusCode::OK, "unreconcile: {u:?}");
-    assert_invalidated(&app, &key, "unreconcile").await;
+    app.assert_invalidated(&key, "unreconcile").await;
 
     // 3. Pase explícito sin pares nuevos (el rechazo bloquea el re-emparejado) → NO invalida.
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let p = app
         .post_json_with_cookie("/v1/transactions/reconcile", json!({}), &owner.cookie)
         .await;
     assert_eq!(p.json()["pairs_created"].as_u64(), Some(0), "sin pares nuevos: {p:?}");
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        present(&app, &key).await,
+        app.cache_contains(&key).await,
         "modo B: un pase que no enlaza nada no debe tirar la cache caliente"
     );
 }

@@ -371,6 +371,9 @@ async fn simulate_never_touches_the_projection_cache() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     seed(&app, &owner).await;
+    // El warm-up post-login puebla la cache en background: hay que esperarlo y limpiar, o la
+    // aserción de «cache vacía» culpa a `simulate_projection` de lo que hizo el login.
+    app.settle_login_warmup(app.installation_id().await).await;
 
     // 1. Simular con la cache vacía no crea ninguna entrada.
     let _ = tool_json(

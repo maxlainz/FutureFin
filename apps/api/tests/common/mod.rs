@@ -12,7 +12,8 @@ use axum::body::Body;
 use axum::extract::Extension;
 use axum::Router;
 use futurefin_api::routes;
-use futurefin_api::state::AppState;
+use futurefin_api::handlers::person_view::LedgerView;
+use futurefin_api::state::{AppState, Density, ProjectionCacheKey};
 use http::Request;
 use http_body_util::BodyExt;
 use sqlx::postgres::PgPoolOptions;
@@ -86,6 +87,87 @@ pub struct LoggedInOwner {
 
 #[allow(dead_code)]
 impl TestApp {
+    // -----------------------------------------------------------------------
+    // Cache de proyección
+    //
+    // Desde 3.8.0 la invalidación se **espera dentro del handler**
+    // (`refresh_projection_after_mutation`), así que tras una mutación el estado de la cache es
+    // final y **no hay que dormir para observarlo**. El único `tokio::spawn` que sigue tocando la
+    // cache es el warm-up post-login (D7: el login no espera al recompute) — para eso, y solo para
+    // eso, está `settle_login_warmup`.
+    // -----------------------------------------------------------------------
+
+    /// Id de la instalación singleton.
+    pub async fn installation_id(&self) -> Uuid {
+        sqlx::query_scalar("SELECT id FROM installation LIMIT 1")
+            .fetch_one(&self.pool)
+            .await
+            .expect("installation id")
+    }
+
+    /// Clave de cache de la vista household en densidad `monthly` (la que sirve `GET
+    /// /v1/projection/series` sin parámetros).
+    pub fn household_key(&self, installation_id: Uuid) -> ProjectionCacheKey {
+        ProjectionCacheKey {
+            installation_id,
+            view: LedgerView::Household,
+            owner_user_id: None,
+            density: Density::Monthly,
+        }
+    }
+
+    /// ¿Está la entrada en la cache?
+    pub async fn cache_contains(&self, key: &ProjectionCacheKey) -> bool {
+        self.state.projection_cache.read().await.contains_key(key)
+    }
+
+    /// Calienta la entrada con un GET y comprueba que quedó cacheada.
+    ///
+    /// **Sin sleep a propósito**: `projection_series_cached` inserta y DESPUÉS responde, y el
+    /// cliente de test es in-process, así que al volver el GET la entrada ya está. El sleep que
+    /// había aquí no daba margen — se lo daba a una invalidación pendiente para colarse justo
+    /// antes del assert (en `current_thread` la tarea spawneada solo corre cuando el test cede, y
+    /// el sleep era el único punto donde cedía). Era la causa del flake, no su remedio.
+    pub async fn warm_household(&self, cookie: &str, key: &ProjectionCacheKey) {
+        let r = self.get_with_cookie("/v1/projection/series", cookie).await;
+        assert_eq!(r.status, http::StatusCode::OK);
+        assert!(
+            self.cache_contains(key).await,
+            "la cache debería estar caliente tras el GET"
+        );
+    }
+
+    /// La mutación debía invalidar: se comprueba en el acto, sin poll ni margen.
+    pub async fn assert_invalidated(&self, key: &ProjectionCacheKey, what: &str) {
+        assert!(
+            !self.cache_contains(key).await,
+            "la mutación «{what}» debía invalidar la cache de proyección"
+        );
+    }
+
+    /// Espera a que el warm-up post-login aterrice y **deja la cache vacía**.
+    ///
+    /// Obligatorio antes de cualquier aserción sobre el CONTENIDO o el TAMAÑO de la cache: el
+    /// warm-up de `POST /v1/auth/login` corre en `tokio::spawn` por diseño y puebla household ×
+    /// {monthly, hybrid} en cuanto el test cede, así que un `assert!(cache.is_empty())` sin esto es
+    /// una carrera — y falla de forma intermitente culpando al código que se estaba probando.
+    ///
+    /// Es una espera **acotada por un evento**, no un margen a ojo: sale en cuanto las dos
+    /// entradas aparecen, y el tope solo se agota si el warm-up realmente no llegó.
+    pub async fn settle_login_warmup(&self, installation_id: Uuid) {
+        // El warm-up inserta household × {monthly, hybrid}: se espera a que aparezcan las dos.
+        for _ in 0..200 {
+            if self.state.projection_cache.read().await.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // ...y se limpia: a partir de aquí solo puebla la cache quien el test decida.
+        self.state
+            .invalidate_projection_by_installation(installation_id)
+            .await;
+    }
+
     /// Registra al primer usuario (queda como owner por bootstrap), hace login y devuelve la cookie.
     pub async fn register_and_login_owner(&self, username: &str) -> LoggedInOwner {
         let password = "correct horse battery staple";
@@ -111,6 +193,23 @@ impl TestApp {
             .await;
         assert_eq!(login.status, http::StatusCode::OK, "login failed: {login:?}");
         let cookie = login.session_cookie().expect("login sets ff_session");
+
+        // El login dispara el warm-up de la proyección en `tokio::spawn` (D7: no espera al
+        // recompute). Se drena AQUÍ, en el helper que lo provoca, para que ningún test tenga que
+        // acordarse: si aterriza más tarde repuebla la cache y hace fallar al assert de al lado
+        // —culpando a la mutación que se estaba probando—, que es de dónde venían la mitad de los
+        // fallos intermitentes de esta suite.
+        //
+        // `fetch_optional`: el warm-up solo ocurre si el usuario es miembro de la instalación, así
+        // que un registro sin bootstrap (o un usuario pending) no tiene nada que drenar y no debe
+        // pagar la espera.
+        if let Ok(Some(iid)) =
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM installation LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await
+        {
+            self.settle_login_warmup(iid).await;
+        }
 
         LoggedInOwner {
             username: username.to_string(),

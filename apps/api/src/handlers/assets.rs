@@ -465,7 +465,7 @@ pub(crate) async fn create_asset_core(
     .await?;
     let t = targets.get(&row.id).copied();
 
-    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    refresh_projection_after_mutation(&state, iid, user_id).await;
     Ok(row_to_response(row, n, rec, t))
 }
 
@@ -625,7 +625,7 @@ pub(crate) async fn patch_asset_core(
     .await?;
     let t = targets.get(&updated.id).copied();
 
-    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    refresh_projection_after_mutation(&state, iid, user_id).await;
     Ok(row_to_response(updated, n, rec, t))
 }
 
@@ -711,7 +711,7 @@ pub(crate) async fn delete_asset_core(
         return Err(ApiError::NotFound);
     }
 
-    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    refresh_projection_after_mutation(&state, iid, user_id).await;
     Ok(())
 }
 
