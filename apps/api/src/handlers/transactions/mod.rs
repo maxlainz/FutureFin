@@ -273,7 +273,7 @@ pub(crate) async fn invalidate_projection_if_savings_uses_transactions(
 ) {
     match projection_savings_source(&state.pool, iid).await {
         Ok(s) if s.uses_transactions() => {
-            refresh_projection_after_mutation(state.clone(), iid, user_id)
+            refresh_projection_after_mutation(state, iid, user_id).await
         }
         Ok(_) => {}
         Err(e) => {

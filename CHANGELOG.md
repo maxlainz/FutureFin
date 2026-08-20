@@ -16,6 +16,36 @@ DELETE), y tres documentos afirmaban que «crear una regla de categorización no
 estaba pinneado por una regresión **que no existía** — la «regla» del test de modo A era la
 *recurrente*. El contrato era correcto en el código; su red de seguridad, imaginaria.
 
+### Fixed — La invalidación de la cache de proyección se espera (cierra una lectura obsoleta)
+
+- **El bug de producción**: `refresh_projection_after_mutation` lanzaba la invalidación en un
+  `tokio::spawn`, así que el orden real era `commit → responder → (en algún momento) invalidar`. Un
+  GET que cayera en esa ventana servía la proyección **vieja**: el usuario edita algo, recarga
+  rápido y la cifra no se mueve. Ahora se espera dentro del handler, de modo que cuando la mutación
+  responde el estado de la cache ya es final. El coste es un `retain` sobre un `HashMap` pequeño
+  bajo un lock sin contención — microsegundos.
+- **El bug de los tests, que es el mismo**: cuatro tests de integración fallaban de forma
+  intermitente (4 de 6 pasadas completas en rojo, con tests distintos cada vez). La causa no era
+  falta de margen sino **el propio `sleep`**: bajo el runtime `current_thread` que usa todo
+  `#[tokio::test]`, una tarea `spawn`-eada solo corre cuando el test cede, y el `sleep` era el único
+  punto donde cedía. Es decir, el sleep no daba margen: se lo daba a una invalidación pendiente para
+  colarse justo antes del assert. **Los 25 sleeps de la suite de integración han desaparecido.**
+- **Los 15 asserts «esto NO debe invalidar» ahora prueban algo**. Un sleep fijo no puede demostrar
+  una ausencia; con la invalidación esperada, son exactos. Verificado con mutantes: invalidar en
+  modo A donde no toca los tumba, y quitar la invalidación del PATCH tumba los positivos.
+- **El test de cache dejó de usar cronómetro**. `projection_series_caches_repeated_gets` comparaba
+  `hit*2 < miss` y era el test más flaky del repo — con un household de un activo el miss ya baja a
+  ~13 ms. Además tenía una rama de escape (`hit <= 5 ms`) por la que pasaba casi siempre, así que ni
+  medía lo que decía. Lo sustituye `projection_series_serves_the_second_get_from_the_cache`, que
+  **envenena la entrada cacheada con un centinela** y comprueba que el segundo GET lo devuelve:
+  prueba binaria de que el read path leyó de la cache, sin reloj.
+- El **warm-up post-login sigue en `tokio::spawn`** (D7: el login no espera al recompute). Es el
+  único background que queda tocando la cache, y los tests que asertan sobre su contenido usan ahora
+  `TestApp::settle_login_warmup`, una espera **por evento** y no un margen a ojo. Ese warm-up era la
+  causa real de que `simulate_never_touches_the_projection_cache` fallara culpando a `simulate`.
+- Helpers de test deduplicados: `warm`/`present`/`assert_invalidated`/`household_key` (2 copias
+  idénticas + 1 inline) e `installation_id` (**4** copias) pasan a métodos de `TestApp`.
+
 ### Added — `GET /v1/allocation-rules/resolution` y tool `get_allocation_resolution` (tool 50)
 
 - **El hueco que cerraba el issue #4**: no había forma de auditar la cascada desde fuera. Con la

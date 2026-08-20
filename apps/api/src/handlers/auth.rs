@@ -351,10 +351,11 @@ pub async fn patch_me(
     if birth_changed {
         if let Ok((iid, _)) = require_installation_member(&state.pool, user.id.0).await {
             crate::handlers::projection::refresh_projection_after_mutation(
-                state.clone(),
+                &state,
                 iid,
                 user.id.0,
-            );
+            )
+            .await;
         }
     }
 

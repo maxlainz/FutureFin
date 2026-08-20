@@ -180,10 +180,16 @@ owner sign-off (the v1.1.0 `allocation_rules` drop was explicitly signed off and
 - **Key**: `{installation_id, view, owner_user_id (Some only for view=mine), density}`.
 - **TTL**: `PROJECTION_CACHE_TTL = 60 min`, **sliding** — refreshed on every hit; expired entries
   removed lazily on access.
-- **Invalidation**: every mutating handler calls
-  `refresh_projection_after_mutation` (`handlers/projection.rs`), which spawns
+- **Invalidation**: every mutating handler calls and **awaits**
+  `refresh_projection_after_mutation` (`handlers/projection.rs`), which runs
   `invalidate_projection_by_installation` — drops ALL entries for the installation (household +
   every member's mine). Logout drops that user's `mine` entries only.
+  Until 3.8.0 this was a `tokio::spawn`, which left a real window: the order was
+  `commit → respond → (eventually) invalidate`, so a GET landing in between served the stale
+  projection — the user edits something and the figure does not move. Awaiting it costs a `retain`
+  over a small `HashMap` under an uncontended lock (microseconds) and makes the cache state final
+  by the time the mutation responds. As a side effect it removed every timing-dependent sleep from
+  the integration tests.
 - **Warm-up**: post-**login** only (`warm_up_household_projection`, both densities, household
   view, spawned; failures logged, never propagated).
 - **Deliberately NO warm-up after mutation**: two consecutive mutations M1, M2 could spawn two

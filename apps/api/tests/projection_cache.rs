@@ -1,6 +1,7 @@
 //! Tests del cache in-memory de `/v1/projection/series` (plan v3 + v5).
 //!
-//! Verifican: (1) hit ≥10× más rápido que miss y mismo body, (2) mutación
+//! Verifican: (1) el segundo GET se sirve DESDE la cache (probado con un centinela, no con un
+//! cronómetro), (2) mutación
 //! invalida el cache y los datos nuevos se reflejan, (3) logout invalida
 //! solo las entries `view=mine` del usuario (las `view=household`
 //! sobreviven).
@@ -10,12 +11,20 @@ mod common;
 use common::TestApp;
 use futurefin_api::handlers::person_view::LedgerView;
 use futurefin_api::state::{Density, ProjectionCacheKey};
-use std::time::Instant;
 use uuid::Uuid;
 
-/// El segundo GET debe ser cache hit y notablemente más rápido que el primero.
+/// El segundo GET se sirve **desde la cache**, y se demuestra sin medir tiempo.
+///
+/// Antes esto se comprobaba cronometrando (`hit*2 < miss`), y era el test más flaky del repo: con
+/// un household de un activo el miss ya baja a ~13 ms, así que bajo carga el margen desaparece y
+/// el test fallaba sin que nada estuviera roto. Peor: la aserción tenía una rama de escape
+/// (`hit <= 5ms`) por la que pasaba casi siempre, así que ni siquiera medía lo que decía medir.
+///
+/// La prueba directa es **envenenar la entrada cacheada**: se sustituye por una copia con un
+/// centinela y se comprueba que el siguiente GET lo devuelve. Si el read path recomputara en vez
+/// de leer la cache, el centinela no aparecería. Binario, determinista y sin reloj.
 #[tokio::test]
-async fn projection_series_caches_repeated_gets() {
+async fn projection_series_serves_the_second_get_from_the_cache() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let asset_cat = app.create_category(&owner, "asset", "Cash").await;
@@ -32,39 +41,47 @@ async fn projection_series_caches_repeated_gets() {
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "create asset: {r:?}");
 
-    // Pequeña espera para que el warm-up post-login termine (no nos importa el
-    // primer GET aquí; lo que medimos es hit vs miss).
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let iid = app.installation_id().await;
+    // Espera al warm-up post-login y deja la cache vacía: si aterrizara más tarde, repoblaría la
+    // entrada y pisaría el centinela.
+    app.settle_login_warmup(iid).await;
+    let key = app.household_key(iid);
 
-    // El warm-up debería haber poblado view=household. Forzamos una mutación
-    // adicional para invalidar lo que tenga, y luego medimos dos GETs limpios.
-    app.state
-        .invalidate_projection_by_installation(installation_id_of(&app, &owner.cookie).await)
-        .await;
-
-    let t0 = Instant::now();
+    // 1. MISS: puebla la cache.
     let r1 = app
         .get_with_cookie("/v1/projection/series", &owner.cookie)
         .await;
-    let miss_ms = t0.elapsed().as_millis();
     assert_eq!(r1.status, http::StatusCode::OK);
+    assert!(app.cache_contains(&key).await, "el primer GET debe dejar la entrada");
 
-    let t1 = Instant::now();
+    // 2. Envenenar: misma clave, respuesta con un centinela imposible de recomputar.
+    const SENTINEL: &str = "SENTINEL-cache-hit";
+    let poisoned = {
+        let cache = app.state.projection_cache.read().await;
+        let mut resp = (*cache.get(&key).expect("entrada recién insertada").response).clone();
+        resp.model_note = SENTINEL.to_string();
+        resp
+    };
+    app.state
+        .projection_cache_insert(key.clone(), std::sync::Arc::new(poisoned))
+        .await;
+
+    // 3. HIT: si el body trae el centinela, salió de la cache y no de un recompute.
     let r2 = app
         .get_with_cookie("/v1/projection/series", &owner.cookie)
         .await;
-    let hit_ms = t1.elapsed().as_millis();
     assert_eq!(r2.status, http::StatusCode::OK);
-
-    // Bodies idénticos: el cache no muta nada.
-    assert_eq!(r1.body, r2.body, "responses divergen entre miss y hit");
-
-    // Hit notablemente más rápido. En CI o cold cache puede ser flaky, por eso
-    // tolerancia: aceptamos si hit es <50% del miss o <5ms absoluto.
-    assert!(
-        hit_ms * 2 < miss_ms.max(2) || hit_ms <= 5,
-        "hit ({hit_ms}ms) no es notablemente más rápido que miss ({miss_ms}ms) — cache no funciona"
+    assert_eq!(
+        r2.json()["model_note"], SENTINEL,
+        "el segundo GET debía servirse de la cache; recomputó"
     );
+
+    // 4. Y el cache no muta nada: tras invalidar, el body vuelve a ser el original byte a byte.
+    app.state.invalidate_projection_by_installation(iid).await;
+    let r3 = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await;
+    assert_eq!(r3.body, r1.body, "miss y re-miss deben coincidir byte a byte");
 }
 
 /// Una mutación debe invalidar el cache: siguiente GET refleja datos nuevos.
@@ -109,9 +126,6 @@ async fn projection_cache_invalidates_on_asset_mutation() {
         )
         .await;
     assert_eq!(r2.status, http::StatusCode::CREATED);
-
-    // Esperar a que el tokio::spawn de invalidación termine.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let r3 = app
         .get_with_cookie("/v1/projection/series", &owner.cookie)
@@ -279,9 +293,9 @@ async fn projection_hybrid_and_monthly_cache_separately() {
     )
     .await;
 
-    // Esperar al warm-up post-login (background `tokio::spawn` de ambas
-    // densidades para view=household).
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // Espera al warm-up post-login (el `tokio::spawn` de ambas densidades) y limpia, para que
+    // los GETs de abajo sean los que pueblan la cache y no una carrera con él.
+    app.settle_login_warmup(app.installation_id().await).await;
 
     // Hit explícito para asegurar entries: ambas viewn=household, density=monthly + hybrid.
     app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
@@ -317,7 +331,6 @@ async fn projection_hybrid_and_monthly_cache_separately() {
         &owner.cookie,
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     {
         let cache = app.state.projection_cache.read().await;
         assert!(!cache.contains_key(&key_monthly), "monthly debe haberse invalidado");

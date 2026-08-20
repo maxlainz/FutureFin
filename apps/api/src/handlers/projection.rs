@@ -1957,16 +1957,26 @@ pub async fn warm_up_household_projection(
 /// hace compute on-demand — paga ~500 ms una vez tras una mutación, luego
 /// cache. El warm-up proactivo se mantiene solo en login (sin
 /// invalidaciones concurrentes).
-pub fn refresh_projection_after_mutation(
-    state: Arc<AppState>,
+///
+/// **Se espera, no se lanza en background** (antes era un `tokio::spawn`). Dos razones:
+///
+/// 1. **Cerraba una ventana de lectura obsoleta real**: con el spawn el orden era
+///    `commit → responder → (algún momento después) invalidar`, así que un GET que cayera en
+///    medio servía la proyección vieja. El usuario lo ve como «he editado y la cifra no cambia».
+///    Esperando la invalidación, cuando la mutación responde el estado de la cache ya es final.
+/// 2. El coste es un `retain` sobre un `HashMap` pequeño bajo un `RwLock` sin contención —
+///    microsegundos. El spawn no compraba latencia apreciable y a cambio hacía el efecto
+///    observable solo «en algún momento», lo que volvía no deterministas todos los tests de cache
+///    (y obligaba a sembrarlos de sleeps que a su vez abrían la ventana que hacía fallar al de
+///    al lado).
+pub async fn refresh_projection_after_mutation(
+    state: &AppState,
     installation_id: Uuid,
     _user_id: Uuid,
 ) {
-    tokio::spawn(async move {
-        state
-            .invalidate_projection_by_installation(installation_id)
-            .await;
-    });
+    state
+        .invalidate_projection_by_installation(installation_id)
+        .await;
 }
 
 #[cfg(test)]

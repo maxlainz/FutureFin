@@ -870,6 +870,18 @@ async fn get_allocation_resolution_matches_http_endpoint() {
     assert_eq!(tool, http.json(), "la tool debe devolver el struct del endpoint intacto");
 
     // Y no toca la cache de proyección: construye su propio input, no pasa por `*_cached`.
+    // `settle_login_warmup` primero: el warm-up del login puebla la cache en background y sin
+    // esperarlo esta aserción es una carrera (culpaba a la tool de lo que hizo el login).
+    app.settle_login_warmup(app.installation_id().await).await;
+    let tool_again = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("get_allocation_resolution", serde_json::json!({})),
+        )
+        .await,
+    );
+    assert_eq!(tool_again, http.json(), "estable entre llamadas");
     assert!(
         app.state.projection_cache.read().await.is_empty(),
         "get_allocation_resolution no debe poblar la cache de proyección"

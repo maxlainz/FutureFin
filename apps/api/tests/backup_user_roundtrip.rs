@@ -521,8 +521,8 @@ async fn backup_import_invalidates_projection_cache() {
     let applied = import_apply(&app, &owner.cookie, &backup).await;
     assert_eq!(applied.status, http::StatusCode::OK, "import: {applied:?}");
 
-    // The background invalidation (tokio::spawn) needs a moment.
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // Since 3.8.0 the invalidation is awaited inside the handler: by the time the import
+    // responded, the cache state is already final.
     {
         let cache = app.state.projection_cache.read().await;
         assert!(

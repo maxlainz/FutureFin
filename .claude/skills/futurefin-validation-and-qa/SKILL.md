@@ -337,8 +337,22 @@ v3.1.0 `request()` also injects `Host: futurefin.test` when absent — `oneshot`
 one and the OAuth endpoints derive their issuer from it. Full signatures and rationale:
 [`.claude/tests.md`](../../tests.md) §Test infrastructure.
 `app.state` exposes `AppState` internals (e.g. `projection_cache`) — see `projection_cache.rs`
-for asserting cache keys directly. Mutation-triggered background work runs in `tokio::spawn`;
-sleep ~100 ms before asserting its effects (pattern in `projection_cache.rs`).
+for asserting cache keys directly.
+
+**Never sleep to wait for a mutation's effects (3.8.0).** Cache invalidation is now **awaited
+inside the handler**, so when a mutation responds the cache state is final: assert it straight
+away. The old guidance here said to sleep ~100 ms, and that was actively harmful — under the
+`current_thread` runtime every `#[tokio::test]` uses, a `spawn`ed task only runs when the test
+yields, and `sleep` was the only place it did. The sleep was not a safety margin; it was the
+window that let a *previous* pending invalidation delete the entry right before the assert. Four
+different tests were failing intermittently because of it. Use the shared helpers on `TestApp`:
+`warm_household`, `cache_contains`, `assert_invalidated`, `household_key`, `installation_id`.
+
+The **one** remaining background task that touches the cache is the post-login warm-up (D7: login
+must not wait for the recompute). Any assertion about the cache's **contents or size** must call
+`app.settle_login_warmup(iid)` first — it waits for the warm-up to land and clears the cache, so
+the test starts from a state nothing can repopulate. It is a bounded wait **for an event**, not a
+guessed margin: it returns as soon as the entries appear.
 
 ### Engine unit test
 
