@@ -34,7 +34,12 @@ pub struct AssetResponse {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub expected_annual_return_percent: Option<Decimal>,
-    /// Aporte estimado del primer mes derivado de las reglas de asignación del sobrante.
+    /// Aporte del **primer mes** resuelto por la cascada de reglas de asignación. Ojo al nombre:
+    /// NO es un importe mensual estable — la cascada reparte `net_cash_month`, que incluye el
+    /// tramo de los planning flows sin fecha del mes en curso (repartidos a `importe/90` por día
+    /// natural), así que el valor **decrece cada día** y **salta el día 1 de cada mes**. Para el
+    /// número estable —el que una persona quiere decir con «mi aportación mensual»— usa
+    /// `contribution_recurring_monthly`. Se sirve redondeado a 4 decimales (política monetaria).
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub contribution_nominal_monthly: Decimal,
@@ -224,7 +229,8 @@ fn row_to_response(
         purchase_price: r.purchase_price,
         is_liquid: r.is_liquid,
         expected_annual_return_percent: r.expected_annual_return_percent,
-        contribution_nominal_monthly,
+        // Presentación: la cascada trabaja con la precisión completa, aquí solo se publica.
+        contribution_nominal_monthly: contribution_nominal_monthly.round_dp(4),
         contribution_target_amount,
         notes: r.notes,
         sort_index: r.sort_index,

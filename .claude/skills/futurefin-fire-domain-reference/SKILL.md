@@ -221,7 +221,11 @@ full contract in `.claude/engine.md` §Runway.
   data it is the raw real spending average (§2b, cuotas included), not budget.
 - **Reduces exactly to `A/g`** with return and inflation 0 **and the SWR threshold unmet** (single
   final division, no tolerances) — that is how the pre-change regression test stayed valid across
-  both changes (`runway_pre_change_baseline_liquid_over_expense` is still exact).
+  both changes (`runway_pre_change_baseline_liquid_over_expense` is still exact). Since 3.8.0 the
+  exactness is an **engine** property: `handlers/summary.rs` publishes the value rounded to 1
+  decimal (matching `sim_kpis`, which already did), so the two threshold tests assert
+  `(A/g).round_dp(1)` — same rigour, published precision. Call `liquid_runway_months` directly if
+  you need every digit.
 
 ## 3. Tax gross-up through capital-gains brackets
 

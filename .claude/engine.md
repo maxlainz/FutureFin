@@ -270,7 +270,15 @@ Model (each rule exists for a reason — do not "simplify" one away):
   loop avoids it and costs microseconds.
 - **Exact reduction to `A / g`** (when the SWR threshold is *not* met, i.e. the finite branch): with
   return and inflation 0, `m = m_inf = 1` and the final fractional month reconstructs `A/g` with a
-  single division — bit-exact, so the pre-change baseline test asserts it without tolerances.
+  single division — bit-exact **inside the engine**, which is where the property lives.
+  Since 3.8.0 the HTTP surface publishes `runway_months` rounded to **1 decimal**
+  (`handlers/summary.rs`, aligned with `sim_kpis` in `handlers/projection.rs`, which already did),
+  so the baseline tests assert `(A/g).round_dp(1)`: still no tolerance, just the published
+  precision. Anything that needs the full value must call `liquid_runway_months` directly.
+
+  Wire-side consequence worth knowing: a runway below `0,05` months now serializes as `"0.0"`
+  instead of a long non-zero decimal. `SummaryView` no longer keys the Runway tile off a
+  zero-check for exactly this reason — a runway of zero months is information, not missing data.
 - Edge cases: `monthly_expense <= 0` → `NoExpenseBase` (not "infinite"); total balance ≤ 0 →
   `Months(0)`.
 

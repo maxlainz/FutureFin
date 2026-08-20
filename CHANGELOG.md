@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — Precisión de salida de los ratios (`/v1/summary`, `/v1/assets`)
+
+- **El problema**: `rust_decimal` produce hasta 28 dígitos significativos en cada división y
+  `serde::str` los serializaba enteros. Una sola respuesta de `GET /v1/summary` traía
+  `"savings_rate": "0.2435991666666666666666666667"`, `"debt_to_assets_ratio":
+  "0.0393680052666227781435154707"` y `"runway_months": "6.768981939754142082836931204"`. Además
+  había una **incoherencia entre superficies**: el mismo `runway_months` salía con 1 decimal por
+  `simulate_projection` y con 28 por `/v1/summary`.
+- **La solución**: redondeo **en las cores** (nunca en la capa MCP, que devuelve la struct del
+  endpoint intacta). `savings_rate`, `savings_rate_excluding_derived_debt`,
+  `upcoming_coverage_ratio` y `debt_to_assets_ratio` a **6 decimales** de fracción — 4 decimales de
+  porcentaje, `0,0001 %` de resolución, muy por encima del único decimal que pinta la UI.
+  `runway_months` a **1 decimal**, alineado con `sim_kpis`. `contribution_nominal_monthly` de
+  `/v1/assets` a **4 decimales** (política monetaria de la casa).
+- **Es presentación, no semántica**: el gross-up, el umbral SWR y el propio runway se siguen
+  calculando con la precisión completa; solo se recorta el valor publicado. Ninguna cifra derivada
+  se mueve. Los dos `savings_rate` comparten `dp` a propósito: desde 3.7.0 son idénticos por
+  construcción y el frontend se apoya en esa igualdad para decidir si pinta el paréntesis.
+- **El invariante del runway sigue vivo, matizado**: la reducción exacta a `A/g` es una propiedad
+  del **engine** (`liquid_runway_months` no redondea). Las dos aserciones de frontera de
+  `summary_runway.rs` pasan a comparar contra `(A/g).round_dp(1)` — el mismo rigor, a la precisión
+  que se publica.
+- **Borde de contrato, documentado**: con 1 decimal, un runway inferior a `0,05` meses serializa
+  `"0.0"`. El guard de la tarjeta de Runway (`SummaryView`) miraba **cero**, así que la tarjeta
+  habría desaparecido justo en el escenario donde el dato más importa (líquidos casi nulos con
+  gasto alto). Ahora mira **ausencia** (`isAbsentMetric`): el servidor omite el campo cuando no hay
+  dato — rama indefinida o sin base de gasto — y un cero explícito es información, no falta de ella.
+  El borde equivalente de `isZeroFractionMetric` (un ratio inferior a `5e-7` pasa a leerse como
+  cero) queda anotado y sin cambio: una tasa de ahorro de 0,00005 % no es un caso real.
+
 ## [3.7.0] - 2026-08-19
 
 ### Changed — La cuota del pasivo es una partida más del presupuesto (**API breaking** de `/v1/budget`)

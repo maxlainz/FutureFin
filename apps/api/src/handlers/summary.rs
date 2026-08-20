@@ -18,6 +18,27 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::FromRow;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Precisión de salida de los ratios
+// ---------------------------------------------------------------------------
+
+/// Decimales de fracción con los que se sirven los ratios (`savings_rate`,
+/// `upcoming_coverage_ratio`, `debt_to_assets_ratio`…). 6 decimales de fracción = 4 decimales de
+/// porcentaje (`0,0001 %` de resolución), muy por encima del único decimal que pinta la UI.
+/// `rust_decimal` produce hasta 28 dígitos por división y `serde::str` los serializaba todos.
+const RATIO_DP: u32 = 6;
+
+/// Decimales de `runway_months`. Alineado con `sim_kpis` (`handlers/projection.rs`), que ya
+/// redondeaba a 1: el mismo número no puede tener dos precisiones según la superficie.
+const RUNWAY_DP: u32 = 1;
+
+/// Redondeo de **presentación** de un ratio. Se aplica SIEMPRE en el último paso (al construir la
+/// respuesta) y nunca sobre un valor que alimente otro cálculo: el gross-up, el umbral SWR y el
+/// runway se computan con la precisión completa y solo el resultado publicado se recorta.
+fn round_ratio(r: Decimal) -> Decimal {
+    r.round_dp(RATIO_DP)
+}
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -408,14 +429,17 @@ pub(crate) async fn summary_core(
 
     let monthly_net_excluding_derived_debt = income_m - expense_reg;
 
+    // Los ratios se sirven redondeados: son PRESENTACIÓN, no entran en ningún cálculo posterior
+    // (ver `round_ratio`). Los dos comparten `dp` a propósito — desde 3.7.0 son idénticos por
+    // construcción y el frontend se apoya en `srx !== sr` para decidir si pinta el paréntesis.
     let savings_rate = if income_m > Decimal::ZERO {
-        Some(net_m / income_m)
+        Some(round_ratio(net_m / income_m))
     } else {
         None
     };
 
     let savings_rate_excluding_derived_debt = if income_m > Decimal::ZERO {
-        Some(monthly_net_excluding_derived_debt / income_m)
+        Some(round_ratio(monthly_net_excluding_derived_debt / income_m))
     } else {
         None
     };
@@ -438,7 +462,9 @@ pub(crate) async fn summary_core(
         fire.swr_pct,
         annual_expense_gross,
     ) {
-        RunwayOutcome::Months(m) => (Some(m), false),
+        // 1 decimal, alineado con `sim_kpis` (`handlers/projection.rs`): el mismo número no puede
+        // publicarse con dos precisiones según por qué puerta entres. El engine sigue exacto.
+        RunwayOutcome::Months(m) => (Some(m.round_dp(RUNWAY_DP)), false),
         RunwayOutcome::Indefinite => (None, true),
         RunwayOutcome::NoExpenseBase => (None, false),
     };
@@ -447,7 +473,7 @@ pub(crate) async fn summary_core(
         planning_flow_totals_in_out(pool, iid, user_id, view).await?;
 
     let upcoming_coverage_ratio = if upcoming_outflows_total > Decimal::ZERO {
-        Some(upcoming_inflows_total / upcoming_outflows_total)
+        Some(round_ratio(upcoming_inflows_total / upcoming_outflows_total))
     } else {
         None
     };
@@ -477,7 +503,7 @@ pub(crate) async fn summary_core(
     let net_worth = total_assets - total_liabilities;
 
     let debt_to_assets_ratio = if total_assets > Decimal::ZERO {
-        Some(total_liabilities / total_assets)
+        Some(round_ratio(total_liabilities / total_assets))
     } else {
         None
     };
