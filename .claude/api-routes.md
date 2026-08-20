@@ -255,6 +255,18 @@ Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26
 | POST | `/v1/transactions/{id}/reconcile` | write | **Conciliación manual de un par**: body `{counterpart_id}`. Exige importes exactamente opuestos y misma divisa (conciliar jamás altera el neto) pero **sin** ventana de fecha (SEPA lento, traspaso a caballo de dos meses). Borra un rechazo previo del par; idempotente si ya están conciliadas entre sí. Guardia owner → **404**. 400: `already_reconciled`, `transfer_amounts_not_opposite`, `transfer_currency_mismatch`, `transfer_same_transaction`. → **200** `ReconcilePairResponse {transaction, counterpart}`. |
 | DELETE | `/v1/transactions/{id}/reconcile` | write | **Desconcilia** el par de `{id}` (cualquiera de las dos patas) y **persiste el rechazo** — el pase automático no lo resucita. Ambas patas vuelven a contar en los agregados. Guardia owner → **404**. 400 `not_reconciled`. → **200** `ReconcilePairResponse` (ambas ya sueltas). |
 
+**`PATCH /v1/transactions/batch` (3.8.0)** — reclasificación en lote, 1..=200 ids **propios**.
+Conjunto de campos **cerrado**: `kind`, `category_id`/`clear_category`, `notes`/`clear_notes`. No
+admite `amount`, `op_date`, `concept` ni `value_date`, y ese es justo el punto: ninguno de los
+campos admitidos entra en la huella de dedup (`source · op_date · amount · concept`) ni en el
+emparejado de transferencias (`op_date`, `amount`), así que el lote no recomputa huellas, no rompe
+pares y no dispara el pase de auto-conciliación. El lote **clasifica**; para reescribir está el
+PATCH de uno en uno. **Todo o nada** en una única transacción: un id ajeno o inexistente ⇒ 404
+nombrando hasta 5 culpables y cero filas tocadas (un resultado parcial obligaría al llamante a
+reconciliar estado, que es lo que un lote viene a evitar). **Una sola invalidación COND** al final,
+fuera del bucle: 16 recategorizaciones seguidas en modo C tiraban la cache 16 veces. El 404 con
+mensaje usa `ApiError::NotFoundWith`, variante nueva que solo nombra ids que el llamante ya envió.
+
 **Backfill de reglas de categorización (3.8.0)** — `POST /v1/transactions/rules/{id}/apply`, y el
 eje `apply_to_existing` (`none` default | `uncategorized` | `all`) + `from_month` + `confirm` en
 `POST /v1/transactions/rules`. Crear una regla sigue afectando **solo a imports futuros**; aplicarla
@@ -415,6 +427,10 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `months` 12..840. **Cache-neutral por construcción**: usa `resolve_projection_context` +
   `build_…` + doble `spawn_blocking`, nunca `projection_series_cached`. No persiste nada.
   Regresión: `apps/api/tests/mcp_simulate.rs`.
+- **`update_transactions` (3.8.0, issue #4)**: reclasificación en lote (1..=200 ids propios) de
+  `kind` / categoría / notas. Sin preview/confirm — son ids que el llamante acaba de enumerar
+  (criterio del skill §4.5) — pero `destructive_hint = true` e `idempotent_hint = true`. Devuelve
+  `resumen` de hasta 20 movimientos + `resumen_truncated`. Cache **COND**, una sola vez por lote.
 - **`apply_categorization_rule` (3.8.0, issue #4)**: backfill de una regla sobre el histórico —
   `rule_id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`. Sin
   `confirm` devuelve preview con `would_match` / `already_correct` / `would_change_kind` /

@@ -1489,3 +1489,120 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
     .await;
     assert_eq!(envelope["result"]["isError"], true, "{envelope}");
 }
+
+/// Cuarteto de `update_transactions` (3.8.0): escritura indistinguible del PATCH HTTP en lote,
+/// todo-o-nada, contrato COND y toggle vivo.
+#[tokio::test]
+async fn update_transactions_batch_shares_core_and_respects_gates() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat_ast = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat_ast, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    app.patch_json_with_cookie(
+        "/v1/installation",
+        json!({ "fire_settings": { "savings_source": "transactions_avg" } }),
+        &owner.cookie,
+    )
+    .await;
+
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({ "op_date": format!("2026-06-{:02}", 10 + i),
+                        "concept": format!("COMPRA {i}"), "amount": "-10", "kind": "income" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+        ids.push(r.json()["id"].as_str().unwrap().to_string());
+    }
+
+    let iid: uuid::Uuid = sqlx::query_scalar("SELECT id FROM installation LIMIT 1")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    let key = household_key(iid);
+    warm(&app, &owner.cookie, &key).await;
+
+    // 1. Escritura por la tool.
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_transactions",
+                json!({"ids": ids, "kind": "expense", "category_id": compras}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["updated"], 3, "{out}");
+    assert_eq!(out["resumen"].as_array().unwrap().len(), 3, "{out}");
+    assert_eq!(out["resumen_truncated"], false, "{out}");
+
+    // 2. Indistinguible vía HTTP.
+    let rows = app
+        .get_with_cookie("/v1/transactions", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert_eq!(t["kind"], "expense", "{t}");
+        assert_eq!(t["category_id"], json!(compras), "{t}");
+    }
+
+    // 3. Cache COND en modo B.
+    assert_invalidated(&app, &key, "update_transactions por MCP").await;
+
+    // 4. Todo o nada con un id inventado: cero filas tocadas y el error lo nombra.
+    let fake = uuid::Uuid::new_v4().to_string();
+    let mut mixed = ids.clone();
+    mixed.push(fake.clone());
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_transactions",
+            json!({"ids": mixed, "notes": "no debería aplicarse"}),
+        ),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains(&fake), "el error debe nombrar el id culpable: {text}");
+    let rows = app
+        .get_with_cookie("/v1/transactions", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert!(t["notes"].is_null(), "ninguna nota debía escribirse: {t}");
+    }
+
+    // 5. Toggle vivo.
+    app.patch_json_with_cookie(
+        "/v1/installation",
+        json!({"mcp_write_enabled": false}),
+        &owner.cookie,
+    )
+    .await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_transactions", json!({"ids": ids, "notes": "x"})),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+    assert!(envelope["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("mcp_write_disabled"));
+}

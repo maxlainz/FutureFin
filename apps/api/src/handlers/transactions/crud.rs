@@ -15,8 +15,8 @@ use crate::handlers::transactions::reconcile::{auto_reconcile_after_mutation, un
 use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::schema::{
     compute_fingerprint, like_needle, normalize_concept_field, normalize_kind, normalize_notes,
-    sql_fold_concept_expr, BatchCreateBody, CreateTransactionBody, ImportBatchResponse, MonthEntry,
-    PatchTransactionBody, TransactionResponse, SOURCE_MANUAL,
+    sql_fold_concept_expr, BatchCreateBody, BatchPatchBody, CreateTransactionBody,
+    ImportBatchResponse, MonthEntry, PatchTransactionBody, TransactionResponse, SOURCE_MANUAL,
 };
 use crate::handlers::transactions::{
     assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
@@ -36,6 +36,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const MAX_BATCH: usize = 1000;
+
+/// Tope del PATCH en lote. Mucho más bajo que `MAX_BATCH` porque aquí el llamante enumera los ids
+/// uno a uno (los acaba de listar), y 200 ya cubre de sobra el caso «desglosar una categoría cajón»
+/// sin convertir un error de cliente en una reescritura masiva.
+const MAX_PATCH_BATCH: usize = 200;
 
 // ---------------------------------------------------------------------------
 // Prepared (validated) transaction ready to insert
@@ -643,6 +648,233 @@ pub(crate) async fn list_transactions_core(
     };
 
     Ok((rows.into_iter().map(row_to_response).collect(), total_count))
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /v1/transactions/batch — reclasificación en lote
+// ---------------------------------------------------------------------------
+
+/// Resultado del PATCH en lote.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct BatchPatchResponse {
+    pub updated: i64,
+    /// Hasta 20 `resumen` («fecha · concepto · importe (kind)»), para verificar que se tocó lo
+    /// correcto sin releer nada. Con más ítems se trunca y se marca `resumen_truncated`.
+    pub resumen: Vec<String>,
+    pub resumen_truncated: bool,
+}
+
+const BATCH_RESUMEN_MAX: usize = 20;
+
+#[utoipa::path(
+    patch,
+    path = "/v1/transactions/batch",
+    tag = "transactions",
+    request_body = BatchPatchBody,
+    responses(
+        (status = 200, description = "Lote actualizado", body = BatchPatchResponse),
+        (status = 400, description = "Validación (lote vacío, tope, sin campos)"),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Viewer or not a member"),
+        (status = 404, description = "Algún id no existe o no es del usuario (cero filas tocadas)"),
+    )
+)]
+pub async fn patch_batch(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Json(body): Json<BatchPatchBody>,
+) -> Result<Json<BatchPatchResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
+    if !role_can_write(role.as_str()) {
+        return Err(ApiError::Forbidden);
+    }
+    let out = patch_transactions_batch_core(&state, iid, user.id.0, body).await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_transactions`.
+///
+/// **Todo o nada** en una única transacción (mismo criterio que `create_batch`): un id ajeno o
+/// inexistente ⇒ 404 nombrándolo y cero filas tocadas. Un resultado parcial obligaría al llamante a
+/// reconciliar estado, que es justo lo que un lote viene a evitar.
+///
+/// **Una sola invalidación COND** al final, fuera del bucle: el caso real —16 recategorizaciones
+/// seguidas en modo C— tiraba la cache de proyección 16 veces.
+///
+/// El conjunto de campos es cerrado (`kind`, `category_id`, `notes`): ninguno entra en la huella de
+/// dedup (`source · op_date · amount · concept`) ni en el emparejado de transferencias
+/// (`op_date`, `amount`), así que el lote no recomputa huellas, no rompe pares y no dispara el pase
+/// de auto-conciliación. Eso es lo que lo hace seguro, y por eso no admite `amount`/`op_date`.
+pub(crate) async fn patch_transactions_batch_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    body: BatchPatchBody,
+) -> Result<BatchPatchResponse, ApiError> {
+    if body.ids.is_empty() {
+        return Err(ApiError::BadRequest("ids must not be empty".into()));
+    }
+    if body.ids.len() > MAX_PATCH_BATCH {
+        return Err(ApiError::BadRequest(format!(
+            "batch must contain at most {MAX_PATCH_BATCH} ids"
+        )));
+    }
+    let clear_category = body.clear_category.unwrap_or(false);
+    let clear_notes = body.clear_notes.unwrap_or(false);
+    if body.kind.is_none()
+        && body.category_id.is_none()
+        && !clear_category
+        && body.notes.is_none()
+        && !clear_notes
+    {
+        return Err(ApiError::BadRequest(
+            "nothing to update: provide kind, category_id/clear_category or notes/clear_notes".into(),
+        ));
+    }
+    if body.category_id.is_some() && clear_category {
+        return Err(ApiError::BadRequest(
+            "category_id and clear_category are mutually exclusive".into(),
+        ));
+    }
+    if body.notes.is_some() && clear_notes {
+        return Err(ApiError::BadRequest(
+            "notes and clear_notes are mutually exclusive".into(),
+        ));
+    }
+    let kind = match &body.kind {
+        Some(k) => Some(normalize_kind(k)?),
+        None => None,
+    };
+    let notes = match &body.notes {
+        Some(n) => Some(normalize_notes(&Some(n.clone()))?.unwrap_or_default()),
+        None => None,
+    };
+
+    // Deduplicar preservando el orden: repetir un id no debe contarlo dos veces en `updated`.
+    let mut ids: Vec<Uuid> = Vec::with_capacity(body.ids.len());
+    for id in &body.ids {
+        if !ids.contains(id) {
+            ids.push(*id);
+        }
+    }
+
+    let mut tx = state.pool.begin().await?;
+
+    // Carga + owner-guard ANTES de escribir: si falta uno, no se ha tocado nada todavía.
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        op_date: NaiveDate,
+        concept: String,
+        amount: Decimal,
+        kind: Option<String>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        r#"SELECT id, op_date, concept, amount, kind FROM transactions
+           WHERE id = ANY($1) AND installation_id = $2 AND owner_user_id = $3"#,
+    )
+    .bind(&ids)
+    .bind(iid)
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if rows.len() != ids.len() {
+        let found: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+        let missing: Vec<String> = ids
+            .iter()
+            .filter(|id| !found.contains(id))
+            .take(5)
+            .map(|id| id.to_string())
+            .collect();
+        // 404 y no 403: un movimiento de otro usuario no revela su existencia, igual que el PATCH
+        // individual. Se nombran hasta 5 ids para que el llamante no tenga que buscar a ciegas.
+        return Err(ApiError::NotFoundWith(format!(
+            "{} of {} ids are unknown or not yours (e.g. {}); nothing was updated",
+            ids.len() - rows.len(),
+            ids.len(),
+            missing.join(", ")
+        )));
+    }
+
+    // El par (kind, categoría) resultante se valida UNA vez por fila afectada: la categoría podría
+    // no encajar con el kind que quede tras el merge.
+    let effective_category = if clear_category {
+        None
+    } else {
+        body.category_id
+    };
+    if kind.is_some() || body.category_id.is_some() || clear_category {
+        for r in &rows {
+            let k = kind.clone().or_else(|| r.kind.clone());
+            match k {
+                Some(k) => {
+                    assert_transaction_category(&state.pool, iid, &k, effective_category).await?
+                }
+                None if effective_category.is_some() => {
+                    return Err(ApiError::BadRequest(
+                        "category requires a kind: set kind in the same batch".into(),
+                    ))
+                }
+                None => {}
+            }
+        }
+    }
+
+    let mut sets: Vec<String> = Vec::new();
+    let mut arg = 1;
+    if kind.is_some() {
+        sets.push(format!("kind = ${arg}"));
+        arg += 1;
+    }
+    if body.category_id.is_some() || clear_category {
+        sets.push(format!("category_id = ${arg}"));
+        arg += 1;
+    }
+    if notes.is_some() || clear_notes {
+        sets.push(format!("notes = ${arg}"));
+        arg += 1;
+    }
+    let sql = format!(
+        "UPDATE transactions SET {}, updated_at = now() WHERE id = ANY(${arg})",
+        sets.join(", ")
+    );
+    let mut q = sqlx::query(&sql);
+    if let Some(k) = &kind {
+        q = q.bind(k);
+    }
+    if body.category_id.is_some() || clear_category {
+        q = q.bind(effective_category);
+    }
+    if notes.is_some() || clear_notes {
+        q = q.bind(if clear_notes { None } else { notes.clone() });
+    }
+    let done = q.bind(&ids).execute(&mut *tx).await?;
+    tx.commit().await?;
+
+    // UNA sola invalidación para todo el lote (post-commit), no una por ítem.
+    invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+
+    let mut resumen: Vec<String> = rows
+        .iter()
+        .take(BATCH_RESUMEN_MAX)
+        .map(|r| {
+            format!(
+                "{} · {} · {} ({})",
+                r.op_date,
+                r.concept,
+                r.amount,
+                kind.as_deref().or(r.kind.as_deref()).unwrap_or("-")
+            )
+        })
+        .collect();
+    let resumen_truncated = rows.len() > BATCH_RESUMEN_MAX;
+    resumen.shrink_to_fit();
+    Ok(BatchPatchResponse {
+        updated: done.rows_affected() as i64,
+        resumen,
+        resumen_truncated,
+    })
 }
 
 // ---------------------------------------------------------------------------

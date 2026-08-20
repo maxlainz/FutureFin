@@ -44,8 +44,8 @@ use crate::handlers::projection::{
 use crate::handlers::summary::summary_core;
 use crate::handlers::transactions::crud::{
     create_transaction_core, delete_import_core, delete_transaction_core, get_transaction_core,
-    list_imports_core, list_months_core, list_transactions_core, patch_transaction_core,
-    TxnFilters,
+    list_imports_core, list_months_core, list_transactions_core,
+    patch_transaction_core, patch_transactions_batch_core, TxnFilters,
 };
 use crate::handlers::transactions::reconcile::{reconcile_now_core, unreconcile_core};
 use crate::handlers::transactions::recurring::{
@@ -513,6 +513,28 @@ pub struct CreateCategorizationRuleParams {
     /// Categoría a asignar (UUID; scope acorde al assign_kind).
     #[serde(default)]
     pub assign_category_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateTransactionsParams {
+    /// UUIDs de los movimientos a reclasificar (1..=200), todos PROPIOS. Todo o nada: si alguno no
+    /// existe o no es tuyo, no se toca ninguno y el error nombra los culpables.
+    pub ids: Vec<String>,
+    /// "expense" | "income" | "savings".
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// UUID de la categoría a asignar a TODOS los movimientos del lote.
+    #[serde(default)]
+    pub category_id: Option<String>,
+    /// true = deja los movimientos sin categoría (excluyente con category_id).
+    #[serde(default)]
+    pub clear_category: Option<bool>,
+    /// Nota a poner en todos los movimientos del lote.
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// true = borra la nota (excluyente con notes).
+    #[serde(default)]
+    pub clear_notes: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1720,6 +1742,54 @@ impl FutureFinMcp {
                 "resumen": format!("{} «{}» → {} {}", r.match_kind, r.pattern,
                     r.assign_kind.as_deref().unwrap_or("-"),
                     r.assign_category_name.as_deref().unwrap_or("(sin categoría)")),
+            }))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_transactions",
+        description = "Reclasifica VARIOS movimientos propios de una vez (1..=200 ids): categoría, kind y/o notas. Es el lote de «clasificar», no de «reescribir»: NO admite amount, op_date ni concept — para eso está update_transaction de uno en uno. Todo o nada: un id ajeno o inexistente y no se toca ninguno (el error los nombra). Devuelve `resumen` de hasta 20 movimientos para verificar que se tocó lo correcto. En los modos de ahorro que leen transacciones invalida la cache de proyección UNA sola vez, no una por ítem.",
+        annotations(title = "Reclasificar movimientos en lote", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_transactions(
+        &self,
+        Parameters(p): Parameters<UpdateTransactionsParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let build = || -> Result<crate::handlers::transactions::schema::BatchPatchBody, ApiError> {
+            let mut ids = Vec::with_capacity(p.ids.len());
+            for (i, raw) in p.ids.iter().enumerate() {
+                ids.push(parse_uuid_param(&format!("ids[{i}]"), raw)?);
+            }
+            Ok(crate::handlers::transactions::schema::BatchPatchBody {
+                ids,
+                kind: p.kind.clone(),
+                category_id: parse_opt_uuid_param("category_id", &p.category_id)?,
+                clear_category: p.clear_category,
+                notes: p.notes.clone(),
+                clear_notes: p.clear_notes,
+            })
+        };
+        let body = match build() {
+            Ok(b) => b,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            let out = patch_transactions_batch_core(
+                &self.state,
+                id.installation_id,
+                id.user_id,
+                body,
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "updated": out.updated,
+                "resumen": out.resumen,
+                "resumen_truncated": out.resumen_truncated,
             }))
         }
         .await;

@@ -68,7 +68,7 @@ use crate::handlers::categories::{
 use crate::handlers::projection::__path_get_projection_series;
 #[allow(unused_imports)]
 use crate::handlers::transactions::crud::{
-    __path_create_batch, __path_create_transaction, __path_delete_import,
+    __path_create_batch, __path_create_transaction, __path_delete_import, __path_patch_batch,
     __path_delete_transaction, __path_list_imports, __path_list_months, __path_list_transactions,
     __path_patch_transaction,
 };
@@ -146,6 +146,7 @@ use utoipa::OpenApi;
         import_confirm,
         create_transaction,
         create_batch,
+        patch_batch,
         list_transactions,
         list_months,
         patch_transaction,
@@ -267,6 +268,8 @@ use utoipa::OpenApi;
         crate::handlers::transactions::ImportConfirmBody,
         crate::handlers::transactions::ImportConfirmResponse,
         crate::handlers::transactions::RuleResponse,
+        crate::handlers::transactions::crud::BatchPatchResponse,
+        crate::handlers::transactions::schema::BatchPatchBody,
         crate::handlers::transactions::rules::ApplyRuleOutcome,
         crate::handlers::transactions::rules::ApplyRuleCategoryCount,
         crate::handlers::transactions::schema::ApplyRuleBody,
