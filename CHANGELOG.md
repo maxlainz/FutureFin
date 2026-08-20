@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — Engine: `FirstMonthAllocation` expone la resolución de la cascada (salida bit-idéntica)
+
+- **De dónde viene**: el issue #4 traía un «posible bug» de sobreasignación de la cascada.
+  Investigado: **no lo había**. `distribute_contributions` acota `take` tres veces (intención de la
+  regla, hueco del cap, caja restante) y corta en seco al agotarse la caja — es imposible repartir
+  más de lo que hay. Lo que sí había era un hueco de observabilidad que hacía imposible demostrarlo
+  desde fuera: la función devolvía solo `per_asset` y **tiraba** tanto el `leftover` (que ya
+  calculaba) como la base de la que salía.
+- `first_month_allocation` devuelve ahora `per_asset`, `base_cash`, `recurring_net`,
+  `planning_component`, `debt_service`, `leftover` y una traza por regla.
+  `first_month_per_asset_contribution_nominals` queda como wrapper de un renglón, así que los **11
+  call-sites de test del engine siguen verdes sin tocar una línea**.
+- **La traza sale por un sumidero opcional** (`Option<&mut Vec<RuleOutcome>>`): el bucle de
+  proyección pasa `None` y no paga nada — corre hasta 840 veces por request y nadie lee la traza
+  ahí. Una sola implementación de la cascada: dos divergirían en silencio al primer cambio de caps,
+  y una explicación que no coincide con lo que el motor hace es peor que no tener explicación.
+- **`skipped_reason` distingue cuatro causas reales**, no dos: `NoCash` («no te sobra dinero»),
+  `NotReached` («las reglas de arriba se lo comieron»), `CapFull` y `ZeroAmount`. Tienen remedios
+  distintos y colapsarlas destruiría el diagnóstico. Las reglas posteriores al corte por caja **se
+  emiten** con `NotReached` en vez de desaparecer. Y `amount_intent` vs `amount_resolved` separa
+  «recortada por el cap» —que no es un salto, y es la pregunta más frecuente— de «saltada».
+- **Evidencia de no-cambio**: con un household sembrado (ingreso 3000, gasto 1000, cuota 450, tres
+  activos, cascada fijo-con-cap + porcentaje + sumidero y dos planning flows sin fecha), se
+  capturaron `/v1/projection/series?months=840`, `/v1/assets` y `/v1/summary` **antes y después**
+  del refactor: los 841 puntos y todas las cifras salen **idénticos** (solo cambian los UUID, por
+  ser bases distintas). El escenario reproduce además el mecanismo del issue al céntimo: el aporte
+  del mes 1 suma 1.743,33 € frente a los 1.550 € de neto recurrente, y la diferencia son los
+  193,33 € del tramo de planning del día (1.450/90 × 12 días).
+
 ### Added — `PATCH /v1/transactions/batch` y tool `update_transactions` (tool 49)
 
 - **El problema, medido**: recategorizar el desglose de una categoría cajón costó 16 llamadas casi
