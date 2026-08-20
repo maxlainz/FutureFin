@@ -10,8 +10,10 @@ pub use history::{
     HistoryTimeline, LoanTerms,
 };
 pub use projection::{
-    fire_target_at_month_index, first_month_per_asset_contribution_nominals,
-    project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
-    FireTarget, ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, SimAsset,
+    fire_target_at_month_index, first_month_allocation,
+    first_month_per_asset_contribution_nominals, project_net_worth_series, AllocationCap,
+    AllocationKind, AllocationRule, AllocationSkipReason, EngineError, FireTarget,
+    FirstMonthAllocation, ProjectionInput, ProjectionLiabilityInput, ProjectionOutput, RuleOutcome,
+    SimAsset,
 };
 pub use runway::{liquid_runway_months, RunwayOutcome, MAX_RUNWAY_MONTHS};

@@ -252,6 +252,47 @@ fn resolve_cap_ceiling(
     }
 }
 
+/// Por qué una regla de la cascada no recibió (o recibió menos de lo que pedía).
+///
+/// Las cuatro razones tienen **remedios distintos**, y por eso no se colapsan: `NoCash` es «no te
+/// sobra dinero» (toca ingresos o gastos), `NotReached` es «las reglas de arriba se lo comieron»
+/// (tocan prioridades o topes), `CapFull` es «el activo destino ya está en su techo» y `ZeroAmount`
+/// es una regla configurada a cero. Un `skipped_reason` ausente con importe cero invitaría a
+/// inventarse la causa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocationSkipReason {
+    /// La caja del mes era ≤ 0: ninguna regla llegó a evaluarse.
+    NoCash,
+    /// La cascada agotó la caja antes de llegar a esta regla.
+    NotReached,
+    /// El activo destino ya alcanzó el techo del cap.
+    CapFull,
+    /// La regla resolvió un importe de 0 (fijo a 0, o porcentaje 0).
+    ZeroAmount,
+    /// `target_index` fuera de rango. Inalcanzable desde el handler, que valida antes; el bucle
+    /// principal lo tolera en silencio y aquí se hace explícito.
+    InvalidTarget,
+}
+
+/// Traza de UNA regla en la cascada de un mes. `amount_intent` es lo que la regla pidió y
+/// `amount_resolved` lo que se llevó tras aplicar cap y caja disponible: cuando difieren sin haber
+/// `skipped_reason`, la regla fue **recortada**, que no es un salto pero es justo lo que se quiere
+/// ver al preguntar «¿por qué mi cartera recibe menos de lo que puse?».
+#[derive(Debug, Clone)]
+pub struct RuleOutcome {
+    /// Posición de la regla en `ProjectionInput::allocation_rules`. El engine no conoce UUIDs: el
+    /// handler mapea el índice a su identidad.
+    pub rule_index: usize,
+    pub target_index: usize,
+    pub amount_intent: Decimal,
+    pub amount_resolved: Decimal,
+    /// Techo absoluto resuelto del cap (`None` = sin cap).
+    pub cap_ceiling: Option<Decimal>,
+    /// Espacio que quedaba bajo el techo al evaluar la regla (`None` = sin cap).
+    pub cap_room: Option<Decimal>,
+    pub skipped_reason: Option<AllocationSkipReason>,
+}
+
 /// Cascade-distribute a positive `pool` across assets following the ordered `rules`.
 ///
 /// For each rule (in order):
@@ -264,16 +305,37 @@ fn resolve_cap_ceiling(
 ///
 /// Returns `(alloc, leftover)`: `alloc[i]` ≥ 0 added to asset `i`; `leftover` is the pool that
 /// no rule absorbed (caller routes it to `surplus_cash`).
+///
+/// `trace` es un **sumidero opcional**: con `None` no se asigna nada y el coste es idéntico al de
+/// antes de existir — importa porque el bucle de proyección llama a esta función hasta 840 veces
+/// por request y nadie lee la traza ahí. Con `Some`, se emite un [`RuleOutcome`] por regla,
+/// incluidas las que no reciben nada. Una sola implementación de la cascada: dos divergirían en
+/// silencio al primer cambio de caps, y una explicación que no coincide con lo que el motor hace es
+/// peor que no tener explicación.
 fn distribute_contributions(
     pool: Decimal,
     rules: &[AllocationRule],
     values: &[Decimal],
     monthly_expense_with_debt: Decimal,
     monthly_income: Decimal,
+    mut trace: Option<&mut Vec<RuleOutcome>>,
 ) -> (Vec<Decimal>, Decimal) {
     let n = values.len();
     let mut alloc = vec![Decimal::ZERO; n];
     if pool <= Decimal::ZERO || n == 0 {
+        if let Some(t) = trace.as_deref_mut() {
+            for (rule_index, rule) in rules.iter().enumerate() {
+                t.push(RuleOutcome {
+                    rule_index,
+                    target_index: rule.target_index,
+                    amount_intent: Decimal::ZERO,
+                    amount_resolved: Decimal::ZERO,
+                    cap_ceiling: None,
+                    cap_room: None,
+                    skipped_reason: Some(AllocationSkipReason::NoCash),
+                });
+            }
+        }
         return (alloc, pool.max(Decimal::ZERO));
     }
     let mut remaining = pool;
@@ -281,21 +343,57 @@ fn distribute_contributions(
     // rules into the same asset respect a shared ceiling).
     let mut live_values: Vec<Decimal> = values.to_vec();
 
-    for rule in rules {
+    for (rule_index, rule) in rules.iter().enumerate() {
+        // Emite la traza de una regla que no llegó a repartir y sigue.
+        macro_rules! skip {
+            ($reason:expr, $intent:expr, $ceiling:expr, $room:expr) => {{
+                if let Some(t) = trace.as_deref_mut() {
+                    t.push(RuleOutcome {
+                        rule_index,
+                        target_index: rule.target_index,
+                        amount_intent: $intent,
+                        amount_resolved: Decimal::ZERO,
+                        cap_ceiling: $ceiling,
+                        cap_room: $room,
+                        skipped_reason: Some($reason),
+                    });
+                }
+            }};
+        }
+
         if remaining <= Decimal::ZERO {
+            // La caja se agotó: esta regla y todas las siguientes quedan sin evaluar. Se emiten
+            // igualmente — omitirlas reproduciría el hueco de observabilidad que la traza cierra.
+            if let Some(t) = trace.as_deref_mut() {
+                for (i, r) in rules.iter().enumerate().skip(rule_index) {
+                    t.push(RuleOutcome {
+                        rule_index: i,
+                        target_index: r.target_index,
+                        amount_intent: Decimal::ZERO,
+                        amount_resolved: Decimal::ZERO,
+                        cap_ceiling: None,
+                        cap_room: None,
+                        skipped_reason: Some(AllocationSkipReason::NotReached),
+                    });
+                }
+            }
             break;
         }
         let target = rule.target_index;
         if target >= n {
+            skip!(
+                AllocationSkipReason::InvalidTarget,
+                Decimal::ZERO,
+                None,
+                None
+            );
             continue;
         }
         let ceiling = resolve_cap_ceiling(rule.cap, monthly_expense_with_debt, monthly_income);
-        let cap_room = match ceiling {
-            None => None,
-            Some(c) => Some((c - live_values[target]).max(Decimal::ZERO)),
-        };
+        let cap_room = ceiling.map(|c| (c - live_values[target]).max(Decimal::ZERO));
         if let Some(room) = cap_room {
             if room <= Decimal::ZERO {
+                skip!(AllocationSkipReason::CapFull, Decimal::ZERO, ceiling, cap_room);
                 continue;
             }
         }
@@ -312,22 +410,74 @@ fn distribute_contributions(
             take = take.min(room);
         }
         if take <= Decimal::ZERO {
+            skip!(AllocationSkipReason::ZeroAmount, intent, ceiling, cap_room);
             continue;
         }
         alloc[target] += take;
         live_values[target] += take;
         remaining -= take;
+        if let Some(t) = trace.as_deref_mut() {
+            t.push(RuleOutcome {
+                rule_index,
+                target_index: target,
+                amount_intent: intent,
+                amount_resolved: take,
+                cap_ceiling: ceiling,
+                cap_room,
+                skipped_reason: None,
+            });
+        }
     }
 
     (alloc, remaining.max(Decimal::ZERO))
 }
 
-/// Nominal contributions routed to each asset in the **first simulated month** (calendar month de
-/// `ref_date`): cascada de reglas sobre el sobrante recurrente del mes. Cero si el superávit
-/// es ≤ 0.
+/// Resolución completa de la cascada del **primer mes**: lo que se reparte, de dónde sale y qué
+/// queda sin repartir.
+///
+/// Existe porque `first_month_per_asset_contribution_nominals` devolvía solo `per_asset` y tiraba
+/// tanto el `leftover` —que la cascada ya calculaba— como la base. Sin esa base era imposible
+/// explicar por qué la aportación del mes 1 no cuadra con el neto recurrente del summary: la
+/// diferencia es `planning_component`, el tramo de los planning flows sin fecha que caen en el mes
+/// en curso (repartidos a `importe/90` por día natural), y eso hace que el número **cambie cada
+/// día**. Ese desajuste se leyó como una sobreasignación de la cascada, que no lo era.
+///
+/// Identidades garantizadas: `base_cash = recurring_net + planning_component` y
+/// `Σ per_asset + leftover = base_cash` cuando `base_cash > 0` (con `base_cash ≤ 0` no se reparte
+/// nada y `leftover` es 0).
+#[derive(Debug, Clone)]
+pub struct FirstMonthAllocation {
+    /// Aporte nominal por activo, en el orden de `ProjectionInput::assets`.
+    pub per_asset: Vec<Decimal>,
+    /// La caja del mes que la cascada reparte de verdad (`net_cash_month` del engine).
+    pub base_cash: Decimal,
+    /// `income − expense − debt_service`: la parte **estable**, la que una persona quiere decir
+    /// cuando dice «mi aportación mensual».
+    pub recurring_net: Decimal,
+    /// `planning_adjustment[0] − retirement_withdrawal`: la parte **transitoria** del mes en curso.
+    pub planning_component: Decimal,
+    /// Cuota de los pasivos activos ya descontada de `recurring_net`.
+    pub debt_service: Decimal,
+    /// Lo que ninguna regla absorbió y acaba en `surplus_cash`.
+    pub leftover: Decimal,
+    /// Traza regla a regla, en el orden de `ProjectionInput::allocation_rules`.
+    pub rules: Vec<RuleOutcome>,
+}
+
+/// Igual que [`first_month_allocation`] pero devolviendo solo los aportes por activo. Se mantiene
+/// como wrapper por compatibilidad: es lo que consume `GET /v1/assets`.
 pub fn first_month_per_asset_contribution_nominals(
     input: &ProjectionInput,
 ) -> Result<Vec<Decimal>, EngineError> {
+    first_month_allocation(input).map(|a| a.per_asset)
+}
+
+/// Nominal contributions routed to each asset in the **first simulated month** (calendar month de
+/// `ref_date`): cascada de reglas sobre el sobrante del mes, más la base de la que sale y la traza
+/// de cada regla. Cero si el superávit es ≤ 0.
+pub fn first_month_allocation(
+    input: &ProjectionInput,
+) -> Result<FirstMonthAllocation, EngineError> {
     if input.horizon_months < 1 {
         return Err(EngineError::InvalidHorizon);
     }
@@ -336,13 +486,21 @@ pub fn first_month_per_asset_contribution_nominals(
     }
     let n = input.assets.len();
     let mut out = vec![Decimal::ZERO; n];
-    if n == 0 {
-        return Ok(out);
-    }
     for r in &input.allocation_rules {
         if r.target_index >= n {
             return Err(EngineError::InvalidAllocationRuleTarget);
         }
+    }
+    if n == 0 {
+        return Ok(FirstMonthAllocation {
+            per_asset: out,
+            base_cash: Decimal::ZERO,
+            recurring_net: Decimal::ZERO,
+            planning_component: Decimal::ZERO,
+            debt_service: Decimal::ZERO,
+            leftover: Decimal::ZERO,
+            rules: Vec::new(),
+        });
     }
 
     let values: Vec<Decimal> = input.assets.iter().map(|a| a.value).collect();
@@ -378,27 +536,38 @@ pub fn first_month_per_asset_contribution_nominals(
         _ => Decimal::ZERO,
     };
 
-    let net_cash_month = input.income_regular_monthly
-        - input.expense_regular_monthly
-        - debt_service
-        + planning_adj
-        - retirement_withdrawal;
+    let recurring_net =
+        input.income_regular_monthly - input.expense_regular_monthly - debt_service;
+    let planning_component = planning_adj - retirement_withdrawal;
+    let net_cash_month = recurring_net + planning_component;
 
-    if net_cash_month <= Decimal::ZERO {
-        return Ok(out);
-    }
-
-    let (alloc, _leftover) = distribute_contributions(
+    let mut rules_trace: Vec<RuleOutcome> = Vec::new();
+    let (alloc, leftover) = distribute_contributions(
         net_cash_month,
         &input.allocation_rules,
         &values,
         input.expense_regular_monthly + debt_service,
         input.income_regular_monthly,
+        Some(&mut rules_trace),
     );
+    // `distribute_contributions` ya devuelve ceros y `leftover = max(pool, 0)` con caja ≤ 0, así
+    // que no hace falta el corte temprano de antes: el resultado es idéntico.
     for i in 0..n {
         out[i] = alloc[i];
     }
-    Ok(out)
+    Ok(FirstMonthAllocation {
+        per_asset: out,
+        base_cash: net_cash_month,
+        recurring_net,
+        planning_component,
+        debt_service,
+        leftover: if net_cash_month > Decimal::ZERO {
+            leftover
+        } else {
+            Decimal::ZERO
+        },
+        rules: rules_trace,
+    })
 }
 
 pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOutput, EngineError> {
@@ -533,12 +702,14 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             // In retirement any surplus stays as cash buffer; no new contributions are made.
             surplus_cash += net_cash_month;
         } else {
+            // `None`: el bucle corre hasta 840 veces por request y nadie lee la traza aquí.
             let (alloc, leftover) = distribute_contributions(
                 net_cash_month,
                 &input.allocation_rules,
                 &values,
                 expense + debt_service,
                 income,
+                None,
             );
             for i in 0..values.len() {
                 values[i] += alloc[i];
@@ -953,6 +1124,134 @@ mod tests {
         inp.planning_monthly_cash_adjustment = vec![Decimal::from(250)];
         let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom[0], Decimal::from(1250));
+    }
+
+    // -----------------------------------------------------------------------
+    // FirstMonthAllocation: identidades y traza de la cascada
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn first_month_allocation_identities_hold_with_and_without_planning() {
+        // Ingreso 3000, gasto 1000, cuota 450 → recurrente 1550. Reglas: fijo 150 con cap de 6
+        // meses de gasto, 40 % y sumidero.
+        let assets = vec![
+            mk_asset(1, Decimal::from(704), true, None),
+            mk_asset(2, Decimal::from(50_000), true, None),
+            mk_asset(3, Decimal::from(100), false, None),
+        ];
+        let rules = vec![
+            rule_fixed(0, Decimal::from(150), Some(AllocationCap::MonthsExpense(Decimal::from(6)))),
+            rule_percent(1, Decimal::from(40), None),
+            rule_remainder(2),
+        ];
+        let mut inp = base_input(1, Decimal::from(3000), Decimal::from(1000), assets, rules);
+        inp.liabilities = vec![ProjectionLiabilityInput {
+            principal: Decimal::from(100_000),
+            monthly_payment: Decimal::from(450),
+            payment_end: Some(NaiveDate::from_ymd_opt(2040, 1, 1).unwrap()),
+        }];
+
+        // (a) Sin componente de planning: base == neto recurrente.
+        let a = first_month_allocation(&inp).unwrap();
+        assert_eq!(a.debt_service, Decimal::from(450));
+        assert_eq!(a.recurring_net, Decimal::from(1550));
+        assert_eq!(a.planning_component, Decimal::ZERO);
+        assert_eq!(a.base_cash, a.recurring_net + a.planning_component);
+        assert_eq!(
+            a.per_asset.iter().sum::<Decimal>() + a.leftover,
+            a.base_cash,
+            "Σ per_asset + leftover debe cuadrar con la caja repartida"
+        );
+        // 150 fijo; 40 % de lo que queda (1400) = 560; sumidero se lleva el resto.
+        assert_eq!(a.per_asset[0], Decimal::from(150));
+        assert_eq!(a.per_asset[1], Decimal::from(560));
+        assert_eq!(a.per_asset[2], Decimal::from(840));
+        assert_eq!(a.leftover, Decimal::ZERO);
+        assert!(a.rules.iter().all(|r| r.skipped_reason.is_none()));
+
+        // (b) Con el tramo transitorio de planning: la base sube exactamente ese importe, y es lo
+        // que hace que la «aportación mensual» del mes 1 no cuadre con el neto recurrente.
+        inp.planning_monthly_cash_adjustment = vec![Decimal::from(193)];
+        let b = first_month_allocation(&inp).unwrap();
+        assert_eq!(b.planning_component, Decimal::from(193));
+        assert_eq!(b.recurring_net, a.recurring_net, "la parte estable no se mueve");
+        assert_eq!(b.base_cash, Decimal::from(1743));
+        assert_eq!(b.base_cash, b.recurring_net + b.planning_component);
+        assert_eq!(b.per_asset.iter().sum::<Decimal>() + b.leftover, b.base_cash);
+        // El wrapper de compatibilidad devuelve exactamente `per_asset`.
+        assert_eq!(first_month_per_asset_contribution_nominals(&inp).unwrap(), b.per_asset);
+    }
+
+    #[test]
+    fn first_month_allocation_traces_every_skip_reason() {
+        // Activo 0 ya en su techo (cap_full), activo 1 con regla a cero, activo 2 fijo que agota la
+        // caja, activo 3 que ya no se alcanza.
+        let assets = vec![
+            mk_asset(1, Decimal::from(1000), true, None),
+            mk_asset(2, Decimal::ZERO, true, None),
+            mk_asset(3, Decimal::ZERO, true, None),
+            mk_asset(4, Decimal::ZERO, true, None),
+        ];
+        let rules = vec![
+            rule_fixed(0, Decimal::from(100), Some(AllocationCap::Amount(Decimal::from(1000)))),
+            rule_fixed(1, Decimal::ZERO, None),
+            rule_fixed(2, Decimal::from(500), None),
+            rule_remainder(3),
+        ];
+        let inp = base_input(1, Decimal::from(500), Decimal::ZERO, assets, rules);
+        let a = first_month_allocation(&inp).unwrap();
+
+        assert_eq!(a.rules.len(), 4, "se emite una traza por regla, también las saltadas");
+        assert_eq!(a.rules[0].skipped_reason, Some(AllocationSkipReason::CapFull));
+        assert_eq!(a.rules[0].cap_ceiling, Some(Decimal::from(1000)));
+        assert_eq!(a.rules[0].cap_room, Some(Decimal::ZERO));
+        assert_eq!(a.rules[1].skipped_reason, Some(AllocationSkipReason::ZeroAmount));
+        assert_eq!(a.rules[2].skipped_reason, None);
+        assert_eq!(a.rules[2].amount_resolved, Decimal::from(500));
+        // La caja se agotó en la regla 2: la 3 nunca llegó a evaluarse. `NotReached` y `NoCash` son
+        // diagnósticos distintos («las de arriba se lo comieron» vs «no te sobra dinero») y por eso
+        // no se colapsan.
+        assert_eq!(a.rules[3].skipped_reason, Some(AllocationSkipReason::NotReached));
+        assert_eq!(a.per_asset.iter().sum::<Decimal>() + a.leftover, a.base_cash);
+    }
+
+    #[test]
+    fn first_month_allocation_reports_no_cash_for_every_rule() {
+        let assets = vec![mk_asset(1, Decimal::ZERO, true, None)];
+        let rules = vec![rule_fixed(0, Decimal::from(100), None), rule_remainder(0)];
+        // Gasto por encima del ingreso: no hay caja que repartir.
+        let inp = base_input(1, Decimal::from(500), Decimal::from(900), assets, rules);
+        let a = first_month_allocation(&inp).unwrap();
+        assert_eq!(a.base_cash, Decimal::from(-400));
+        assert_eq!(a.recurring_net, Decimal::from(-400));
+        assert_eq!(a.per_asset[0], Decimal::ZERO);
+        assert_eq!(a.leftover, Decimal::ZERO, "con caja negativa no hay sobrante");
+        assert_eq!(a.rules.len(), 2);
+        assert!(a
+            .rules
+            .iter()
+            .all(|r| r.skipped_reason == Some(AllocationSkipReason::NoCash)));
+    }
+
+    #[test]
+    fn first_month_allocation_reports_a_capped_rule_as_trimmed_not_skipped() {
+        // La regla pide 500 pero solo caben 200 bajo el techo: no es un salto, es un recorte.
+        let assets = vec![
+            mk_asset(1, Decimal::from(800), true, None),
+            mk_asset(2, Decimal::ZERO, true, None),
+        ];
+        let rules = vec![
+            rule_fixed(0, Decimal::from(500), Some(AllocationCap::Amount(Decimal::from(1000)))),
+            rule_remainder(1),
+        ];
+        let inp = base_input(1, Decimal::from(1000), Decimal::ZERO, assets, rules);
+        let a = first_month_allocation(&inp).unwrap();
+        assert_eq!(a.rules[0].skipped_reason, None, "recortada no es saltada");
+        assert_eq!(a.rules[0].amount_intent, Decimal::from(500));
+        assert_eq!(a.rules[0].amount_resolved, Decimal::from(200));
+        assert_eq!(a.rules[0].cap_room, Some(Decimal::from(200)));
+        assert_eq!(a.per_asset[0], Decimal::from(200));
+        assert_eq!(a.per_asset[1], Decimal::from(800));
     }
 
     #[test]

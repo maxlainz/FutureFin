@@ -16,8 +16,40 @@ Only `Decimal` arithmetic. Three modules:
 // Main projection: returns net_worth and contributed_capital series (len = horizon_months + 1, index 0 = today)
 pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOutput, EngineError>
 
-// Returns nominal contributions routed to each asset in the FIRST simulated month only
+// Returns nominal contributions routed to each asset in the FIRST simulated month only.
+// Thin wrapper over `first_month_allocation` since 3.8.0 — kept because `GET /v1/assets` uses it.
 pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> Result<Vec<Decimal>, EngineError>
+
+// Full resolution of the FIRST month's cascade (3.8.0): what gets distributed, where it comes
+// from, what no rule absorbed, and a per-rule trace. Added because the old function returned only
+// `per_asset` and threw away both the `leftover` (already computed) and the base — which made it
+// impossible to explain why the month-1 contribution does not match the summary's recurring net.
+// The gap is `planning_component`, and it is also why that number CHANGES EVERY DAY.
+pub struct FirstMonthAllocation {
+    pub per_asset: Vec<Decimal>,
+    pub base_cash: Decimal,            // what the cascade really distributes (`net_cash_month`)
+    pub recurring_net: Decimal,        // income − expense − debt_service (stable)
+    pub planning_component: Decimal,   // planning_adjustment[0] − retirement_withdrawal (transient)
+    pub debt_service: Decimal,
+    pub leftover: Decimal,             // ends up in `surplus_cash`
+    pub rules: Vec<RuleOutcome>,
+}
+pub fn first_month_allocation(input: &ProjectionInput) -> Result<FirstMonthAllocation, EngineError>
+
+// Per-rule trace. `amount_intent` vs `amount_resolved` separates "trimmed by a cap" (not a skip,
+// and the most-asked question) from "skipped". Skip reasons are deliberately NOT collapsed —
+// they have different remedies: NoCash = "you have no surplus" (touch income/expense);
+// NotReached = "the rules above ate it" (touch priorities/caps); CapFull = "the target asset is
+// at its ceiling"; ZeroAmount = "the rule resolves to 0"; InvalidTarget = defensive.
+pub struct RuleOutcome {
+    pub rule_index: usize,             // the engine knows no UUIDs; the handler maps identity
+    pub target_index: usize,
+    pub amount_intent: Decimal,
+    pub amount_resolved: Decimal,
+    pub cap_ceiling: Option<Decimal>,
+    pub cap_room: Option<Decimal>,
+    pub skipped_reason: Option<AllocationSkipReason>,
+}
 
 // Único helper para evaluar el target FIRE inflado en un `month_index` dado (0 = punto de
 // partida, 12 = un año después). Lo consumen tanto el motor (para `fire_reached`) como el
@@ -109,7 +141,7 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 2. Determine `in_retirement = fire_reached || k >= retirement_start_month`. `fire_reached` compara `nw_prev` contra el target FIRE del mes `k`, que es `base × (1 + inflation/100)^((k-1)/12)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares.
 3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
-5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW).
+5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
 6. If `net_cash <= 0` (deficit): drain `surplus_cash` first, then drain liquid assets (lowest-return first).
 7. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar. `monthly_multiplier` = raíz 12ª del factor anual `1 + p/100`; `None` y `0` → factor 1; **las tasas negativas componen de verdad** (−50 % anual ⇒ ×0,5 en 12 meses); `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs con error tipado).
 8. Reduce liability principals by payments made.
