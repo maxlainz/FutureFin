@@ -6,6 +6,31 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `simulate_projection` devuelve la salud financiera del mes 1
+
+- **El problema**: `SimKpis` devolvía cinco cosas (`jubilacion_month_index`, `final_net_worth`,
+  `fire_target_base`, `runway_months`, `runway_is_indefinite`). Ni gasto, ni ahorro, ni tasa de
+  ahorro. Para valorar un what-if desde el chat había que calcular el impacto sobre el gasto **a
+  mano** — y ahí es donde se coló un doble conteo de una cuota de pasivo en la sesión que originó
+  el issue #4.
+- **La solución**: cada lado (baseline y escenario) añade `income_monthly`,
+  `expense_total_monthly`, `debt_service_monthly`, `net_monthly` y `savings_rate`, con sus cuatro
+  deltas. **Coste cero**: son valores que ya estaban calculados en el `ProjectionInput` de cada
+  lado; lo único que faltaba era serializarlos.
+- **Las definiciones no son las ingenuas, y esa es la parte que importa**: `expense_total_monthly`
+  es `expense_regular_monthly + debt_service_monthly`, la misma base que alimentan el runway y el
+  target FIRE. En modo A la cuota de pasivo vive **fuera** de `expense_regular_monthly` por diseño
+  (fundirla ahí la contaría dos veces en toda la proyección, en silencio) y entra por el servicio
+  de deuda: solo la suma cuadra con `/v1/summary` en los tres modos. Y `net_monthly` es
+  `income − expense_total`, que **no** es el `net_cash_month` que reparte la cascada — ese lleva
+  además el tramo de planning flows del mes en curso.
+- **Pinneado entre superficies**: `sim_kpis_match_summary_financial_health_in_all_three_modes`
+  compara los KPIs sin overrides contra el `financial_health` de `GET /v1/summary` en los tres
+  modos, con un pasivo activo de 400 €/mes. Definir el gasto como `expense_regular_monthly` a
+  secas hace fallar el modo A por exactamente esos 400 €, no por un epsilon.
+- `savings_rate` se sirve con los mismos 6 decimales que `/v1/summary`, y `savings_rate_delta` se
+  recalcula desde los componentes exactos en vez de restar dos ratios ya redondeados.
+
 ### Changed — Precisión de salida de los ratios (`/v1/summary`, `/v1/assets`)
 
 - **El problema**: `rust_decimal` produce hasta 28 dígitos significativos en cada división y

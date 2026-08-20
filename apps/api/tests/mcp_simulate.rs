@@ -396,3 +396,123 @@ async fn simulate_never_touches_the_projection_cache() {
     );
     assert_eq!(app.state.projection_cache.read().await.len(), entries_before);
 }
+
+/// Identidad entre superficies: los KPIs de salud del `simulate_projection` sin overrides deben
+/// coincidir **exactamente** con el `financial_health` de `GET /v1/summary`, en los tres modos de
+/// `savings_source`.
+///
+/// El caso discriminante es el **modo A con un pasivo activo**: ahí `input.expense_regular_monthly`
+/// excluye deliberadamente la cuota (`budget.rs`: fundirla contaría el pasivo dos veces en toda la
+/// proyección, en silencio) y la cuota entra por `debt_service_monthly`. Si alguien implementara
+/// `expense_total_monthly` como `input.expense_regular_monthly` a secas, este test cae por
+/// exactamente el importe de la cuota — 400 €/mes — y no por un epsilon.
+///
+/// PREDICCIÓN modo A: income 3000; gasto de presupuesto 1000 en «Vida» + 400 de cuota (partida
+/// derivada del pasivo desde 3.7.0) = 1400 de gasto total; net = 1600; savings_rate = 1600/3000 =
+/// 0,533333 (6 dp). En B y C el gasto sale del promedio real y `debt_service_monthly` es 0 por
+/// contrato.
+#[tokio::test]
+async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    seed(&app, &owner).await;
+
+    // Pasivo activo: su cuota es gasto en los tres modos, pero por caminos distintos.
+    let liab_cat = app.create_category(&owner, "liability", "Deuda").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
+    let created = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({ "category_id": liab_cat, "expense_category_id": liab_exp_cat,
+                    "label": "Hipoteca", "principal": "100000", "payment_amount": "400",
+                    "payment_frequency": "monthly", "payment_end_date": "2040-01-01" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+
+    // Movimientos reales en un mes cerrado, para que B y C tengan «meses reales» y no caigan al
+    // presupuesto (el fallback también cumpliría la identidad, pero no ejercitaría el modo).
+    let exp_cat = app.create_category(&owner, "expense", "Súper").await;
+    let inc_cat = app.create_category(&owner, "income", "Sueldo").await;
+    for (concept, amount, kind, cat) in [
+        ("COMPRA SUPER", "-800", "expense", &exp_cat),
+        ("NOMINA", "2500", "income", &inc_cat),
+    ] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({ "op_date": "2026-06-10", "concept": concept, "amount": amount,
+                        "kind": kind, "category_id": cat }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    for mode in ["budget", "transactions_avg", "budget_income_real_expense"] {
+        let r = app
+            .patch_json_with_cookie(
+                "/v1/installation",
+                json!({ "fire_settings": { "savings_source": mode } }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::OK, "set mode {mode}: {r:?}");
+
+        let sim =
+            tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+        let k = &sim["baseline"];
+        let summary = app.get_with_cookie("/v1/summary", &owner.cookie).await;
+        let h = &summary.json()["financial_health"];
+
+        assert_eq!(
+            dec(&k["income_monthly"]),
+            dec(&h["income_monthly_equivalent"]),
+            "modo {mode}: income"
+        );
+        assert_eq!(
+            dec(&k["expense_total_monthly"]),
+            dec(&h["expense_total_monthly_equivalent"]),
+            "modo {mode}: gasto total (regular + servicio de deuda) — si falla por el importe \
+             exacto de la cuota, `expense_total_monthly` está leyendo `expense_regular_monthly`"
+        );
+        assert_eq!(
+            dec(&k["net_monthly"]),
+            dec(&h["net_monthly_equivalent"]),
+            "modo {mode}: neto"
+        );
+        assert_eq!(
+            dec(&k["savings_rate"]),
+            dec(&h["savings_rate"]),
+            "modo {mode}: tasa de ahorro (misma precisión en las dos superficies)"
+        );
+
+        // Identidad interna del propio KPI, en los tres modos.
+        assert_eq!(
+            dec(&k["net_monthly"]),
+            dec(&k["income_monthly"]) - dec(&k["expense_total_monthly"]),
+            "modo {mode}: net = income − expense_total"
+        );
+
+        // El servicio de deuda solo es no nulo en modo A; en B/C la cuota ya es un movimiento real.
+        let debt = dec(&k["debt_service_monthly"]);
+        if mode == "budget" {
+            assert_eq!(debt, 400.0, "modo A: la cuota viaja en debt_service_monthly");
+        } else {
+            assert_eq!(debt, 0.0, "modo {mode}: debt_service es 0 por contrato");
+        }
+
+        // Sin overrides, todos los deltas de salud son cero.
+        let d = &sim["deltas"];
+        for field in [
+            "income_monthly_delta",
+            "expense_total_monthly_delta",
+            "net_monthly_delta",
+            "savings_rate_delta",
+        ] {
+            assert_eq!(dec(&d[field]), 0.0, "modo {mode}: {field} sin overrides");
+        }
+    }
+}
