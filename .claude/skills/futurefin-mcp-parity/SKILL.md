@@ -10,7 +10,7 @@ description: >
   update a tool. Triggers: "add an MCP tool", "añadir una tool", "does this endpoint need a
   tool?", "the MCP is out of date", "el MCP se ha quedado atrás", "tools/list", "frozen catalog",
   "tools_list_returns_exactly_the_v1_catalog", "update the tool catalog", "new handler — MCP?",
-  "extract a *_core", "preview/confirm", "tool annotations", "47 tools". Do NOT use it for WHY
+  "extract a *_core", "preview/confirm", "tool annotations", "50 tools". Do NOT use it for WHY
   tools share core fns / live-role auth (futurefin-architecture-contract D14/D15), the catalog's
   per-tool semantics (.claude/api-routes.md §MCP), MCP env vars and the write toggle
   (futurefin-config-and-flags), how to run the MCP test suites (futurefin-validation-and-qa /
@@ -25,8 +25,8 @@ Bearer-authenticated wrapper over the same `*_core` fn its HTTP handler uses. De
 rot silently — an endpoint gains a field, a handler changes semantics, a new feature ships
 HTTP-only — unless something forces the question at merge time. This skill is that something.
 
-Volatile facts date-stamped **2026-08-19, tren 3.6.0** (47 tools; recount with the
-commands in §5 before trusting any number here).
+Volatile facts date-stamped **2026-08-20, tren 3.8.0** (50 tools; recount with the
+commands in §5 before trusting any number here). Previously 2026-08-19, tren 3.6.0 (47).
 
 ## When NOT to use this skill
 
@@ -132,7 +132,8 @@ the blocking reason changes (noted per row).
 | auth/session, api-tokens, OAuth protocol+consent, membership/pending-users, backup, probes | **never** | §2.1 categories | Category-level change of posture only |
 | `POST /v1/transactions/{id}/reconcile` (manual pair; `reconcile_pair_core` EXISTS) | **omit** | Hand-picking two UUIDs among hundreds; a wrong pair silently leaves all flow aggregates and moves modes B/C savings | A server-side *suggestions* tool ships (candidates with opposite amounts), reducing the LLM's choice to confirming a proposed pair |
 | `/v1/transactions/import/preview|confirm` | **omit** | §2.1 context-window abuse + untrusted third-party content | MCP gains an out-of-band attachment channel |
-| `POST /v1/transactions/batch` | **defer** | `create_transaction` loops fine; batch adds all-or-nothing tx semantics + shared fingerprint ordinals that complicate preview | Real demand for >10-item batches from chat |
+| `POST /v1/transactions/batch` (create) | **defer** | `create_transaction` loops fine; batch adds all-or-nothing tx semantics + shared fingerprint ordinals that complicate preview. **Sigue vigente en 3.8.0**: lo que se hizo tool-able fue el PATCH, no el POST | Real demand for >10-item batches from chat |
+| `POST /v1/transactions/rules` con `apply_to_existing` (el eje de backfill del body HTTP) | **omit** | En el momento del preview la regla todavía no existe, así que no hay nada que simular; y un `create_*` capaz de reescribir cientos de filas haría mentir a sus propias annotations, que es lo que el cliente MCP usa para decidir si pide permiso al humano. Desde el chat: `create_categorization_rule` → `apply_categorization_rule`, con un único gate de confirmación (3.8.0) | Que el SPA necesite el round-trip único también desde MCP, cosa que hoy no pasa |
 | `POST /v1/allocation-rules/reorder` | **omit** | Requires echoing the exact full id set; one missing id = 400; near-zero conversational value | UX rethink of the cascade |
 | `PATCH /v1/auth/me` (`birth_date`) | **defer** | Engine input but set-once identity data; marginal | Bundled into a future profile tool |
 | `GET /v1/history/snapshots/prefill` | **defer** | Only meaningful as companion of snapshot backfill | Gap #3 below is implemented |
@@ -145,11 +146,15 @@ the blocking reason changes (noted per row).
 | 1 | `create_snapshot` (backfill) + `update_snapshot` | extract from `history.rs` backfill/PUT handlers (validations `normalize_kind`, `validate_snapshot_date`, 409 on (user, kind, date)) | NONE (D12) | The strongest conversational case: recording the past |
 | 2 | `create_allocation_rule` + `delete_allocation_rule` | extract; **careful**: the sink invariant (exactly one uncapped remainder, always last) lives spread across the handler | FULL | Completes cascade control; `update_allocation_rule` exists |
 | 3 | `update_category` + `delete_category` (with `remap_to`) | extract from `categories.rs` PATCH/DELETE | NONE | delete fits preview/confirm perfectly (preview shows `refs`, forces naming the remap target) |
-| 4 | `update_categorization_rule` + `delete_categorization_rule` | extract from `rules.rs` | NONE | Self-cleanup for `create_categorization_rule` |
+| 4 | `update_categorization_rule` + `delete_categorization_rule` | extract from `rules.rs` | NONE | Self-cleanup for `create_categorization_rule`. **Subió de prioridad en 3.8.0**: ahora que una regla puede reescribir el histórico (`apply_categorization_rule`), no poder corregirla desde el chat empuja hacia borrar y recrear |
 | 5 | `update_installation_settings` (allowlist: `annual_inflation_assumption_percent`, maybe `calendar_tz`, `show_age_mode`) | partial — only the FIRE slice has a core | FULL | Inflation is a direct engine input, today read-only via MCP; NEVER include `mcp_write_enabled` |
 
 Closed since the register was created: `update_asset` and `update_liability` (post-3.5.0; the
-CRUD-symmetry incident in §2.2). When you close a row, move it to a one-line mention here —
+CRUD-symmetry incident in §2.2); and in the 3.8.0 issue-#4 train, three rows that were not even
+in this table because the endpoints did not exist yet — `apply_categorization_rule` (backfill
+retroactivo, cache COND), `update_transactions` (PATCH en lote, COND una sola vez) y
+`get_allocation_resolution` (la cascada resuelta, read-only, cache NONE; cierra además el
+_stretch_ pendiente del issue #2). When you close a row, move it to a one-line mention here —
 history matters, the table stays short.
 
 ### 3.3 Reverse direction (tools without an endpoint)
@@ -160,8 +165,11 @@ tool-without-endpoint needs the same two properties or an explicit new argument 
 
 ## 4. Recipe — add or update a tool
 
-Model commits: `82a43cb` (reconcile tools, 43→45) and the post-3.5.0 `update_asset`/
-`update_liability` commit (45→47, includes a core extraction). Steps, in order:
+Model commits: `82a43cb` (reconcile tools, 43→45), the post-3.5.0 `update_asset`/
+`update_liability` commit (45→47, includes a core extraction) and the 3.8.0 issue-#4 train
+(47→50: `apply_categorization_rule`, `update_transactions`, `get_allocation_resolution` — two
+new cores, one new engine entry point and a verb outside the `create_/update_/delete_` naming
+convention, which forced a conscious arm in the annotations test). Steps, in order:
 
 1. **Core first.** The handler logic must live in a `*_core(state|pool, iid, user_id, …)`
    shared fn — auth/extractors stay in the HTTP handler, everything else (validation, SQL,
@@ -207,14 +215,14 @@ Model commits: `82a43cb` (reconcile tools, 43→45) and the post-3.5.0 `update_a
 
 ## 5. Keeping it honest — verification and drift audit
 
-Reproducible counters (run from repo root; expected values dated 2026-08-19):
+Reproducible counters (run from repo root; expected values dated 2026-08-20):
 
 ```bash
-grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 47 — total tools
-grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 20 — reads + simulate
-grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 27 — writes
-grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 27 — MUST equal writes
-grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 9  — preview/confirm tools
+grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 50 — total tools
+grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 21 — reads + simulate
+grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 29 — writes
+grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 29 — MUST equal writes
+grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 10 — preview/confirm tools
 grep -rn 'sqlx::query' apps/api/src/mcp/                            # exactly 1 hit (auth.rs toggle)
 ```
 
@@ -243,9 +251,10 @@ Written 2026-08-19 (post-3.5.0 train, branch `dev`), sourced from: full tool inv
 `apps/api/src/routes/mod.rs` + `apps/api/src/mcp/server.rs`, and the norm inventory across
 CLAUDE.md, `.claude/api-routes.md`, architecture-contract D14/D15 and change-control. The
 `update_asset`/`update_liability` pair (45→47) shipped in the same change as this skill.
+Refreshed 2026-08-20 for the 3.8.0 issue-#4 train (47→50).
 Re-verify before trusting:
 
-- Tool counts + gate invariants: the §5 block (47/20/27/27/9/1 on 2026-08-19).
+- Tool counts + gate invariants: the §5 block (50/21/29/29/10/1 on 2026-08-20).
 - Frozen catalog still matches the code (never count quotes — run the test):
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http tools_list_returns`
 - Cores still own invalidation, MCP module still SQL-free:

@@ -539,7 +539,7 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   del catálogo, que empujaba al agente al borrar-y-recrear destructivo; merge campo a campo vía
   `patch_liability_core` extraída del PATCH, re-derivación del principal si
   `derive_principal_from_plan` queda activo). Ambas FULL, sin preview/confirm (editar no
-  destruye filas). Catálogo total: **47 tools** (20 con `read_only_hint = true` + 27 de
+  destruye filas). Catálogo total: **50 tools** (21 con `read_only_hint = true` + 29 de
   escritura; recuento reproducible: `grep -c '#\[tool(' apps/api/src/mcp/server.rs`), congelado
   en `tools_list_returns_exactly_the_v1_catalog`. Regresión:
   `apps/api/tests/mcp_write.rs`.

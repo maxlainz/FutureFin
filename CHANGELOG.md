@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Tren del **issue #4** — ergonomía del servidor MCP derivada de una sesión real de uso, más la
+resolución de la cascada. Catálogo **47 → 50 tools**. Ninguna migración: nada de esto añade
+columnas. Sin cambios de comportamiento en el engine (verificado con un diff antes/después de
+`/v1/projection/series`, ver la entrada del refactor).
+
+**Deuda de test cerrada antes de tocar nada**: el modo C solo ejercitaba `create` (ni PATCH ni
+DELETE), y tres documentos afirmaban que «crear una regla de categorización no invalida la cache»
+estaba pinneado por una regresión **que no existía** — la «regla» del test de modo A era la
+*recurrente*. El contrato era correcto en el código; su red de seguridad, imaginaria.
+
 ### Added — `GET /v1/allocation-rules/resolution` y tool `get_allocation_resolution` (tool 50)
 
 - **El hueco que cerraba el issue #4**: no había forma de auditar la cascada desde fuera. Con la
