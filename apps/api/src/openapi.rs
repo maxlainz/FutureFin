@@ -84,7 +84,7 @@ use crate::handlers::transactions::recurring::{
 };
 #[allow(unused_imports)]
 use crate::handlers::transactions::rules::{
-    __path_create_rule, __path_delete_rule, __path_list_rules, __path_patch_rule,
+    __path_apply_rule, __path_create_rule, __path_delete_rule, __path_list_rules, __path_patch_rule,
 };
 #[allow(unused_imports)]
 use crate::handlers::transactions::summary::{__path_get_category_series, __path_get_transactions_summary};
@@ -156,6 +156,7 @@ use utoipa::OpenApi;
         create_rule,
         patch_rule,
         delete_rule,
+        apply_rule,
         list_recurring_rules,
         materialize_recurring,
         delete_recurring_rule,
@@ -266,6 +267,9 @@ use utoipa::OpenApi;
         crate::handlers::transactions::ImportConfirmBody,
         crate::handlers::transactions::ImportConfirmResponse,
         crate::handlers::transactions::RuleResponse,
+        crate::handlers::transactions::rules::ApplyRuleOutcome,
+        crate::handlers::transactions::rules::ApplyRuleCategoryCount,
+        crate::handlers::transactions::schema::ApplyRuleBody,
         crate::handlers::transactions::CreateRuleBody,
         crate::handlers::transactions::PatchRuleBody,
         crate::handlers::transactions::RecurrenceSpec,
