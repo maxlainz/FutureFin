@@ -93,11 +93,24 @@ Cap kinds (all optional; `cap_kind`/`cap_value` are paired):
 - `months_expense` — N × (monthly expense + debt service); evaluated per-month against current state.
 - `income_multiple` — N × monthly income.
 
-**`contribution_nominal_monthly` en `/v1/assets`**: aporte del **primer mes** resuelto por la cascada
-de reglas de asignación, no un importe mensual estable — la cascada reparte `net_cash_month`, que
-incluye el tramo de los planning flows sin fecha del mes en curso (`importe/90` por día natural), así
-que el valor decrece cada día y salta el día 1 de cada mes. Desde 3.8.0 se sirve redondeado a **4
-decimales** (política monetaria de la casa; antes salían los 28 dígitos de la división).
+**Los tres campos de aportación de `/v1/assets` son cosas distintas** — la confusión entre ellos es
+el defecto de contrato que abrió el issue #4:
+
+- `contribution_nominal_monthly`: aporte del **primer mes** resuelto por la cascada. No es un
+  importe mensual estable pese al nombre — la cascada reparte `net_cash_month`, que incluye el tramo
+  de los planning flows sin fecha del mes en curso (`importe/90` por día natural), así que el valor
+  **decrece cada día** y **salta el día 1 de cada mes**. Un número «mensual» que cambia a diario es
+  una trampa para cualquiera que haga aritmética con él, humano o modelo.
+- `contribution_recurring_monthly` (**3.8.0**): la MISMA cascada evaluada sobre el neto
+  **recurrente** (`income − expense − debt_service`, sin el tramo de planning). Estable y
+  reproducible: es el número que una persona quiere decir cuando dice «mi aportación mensual», y el
+  único con el que tiene sentido hacer cuentas. Se calcula con una segunda pasada del engine sobre
+  el mismo input con `planning_monthly_cash_adjustment[0] = 0` — reutilizar la cascada en vez de
+  aproximarla garantiza caps y precedencia idénticos, sin ningún SELECT extra.
+- `contribution_target_amount`: **no es una aportación**, es el tope en euros del activo.
+
+Los dos primeros se sirven redondeados a **4 decimales** (política monetaria de la casa; antes
+salían los 28 dígitos de la división).
 
 **Base de los caps en `/v1/assets` (v2.2.0)**: el `contribution_target_amount` que devuelven `GET/POST/PATCH /v1/assets` resuelve `months_expense` / `income_multiple` con los escalares **efectivos** del engine — o sea, en modo B/C con datos el gasto/income salen del promedio real 12m, no del presupuesto (antes se resolvían siempre con presupuesto y el objetivo no casaba ni con la aportación del mes 1 mostrada en la misma respuesta ni con la proyección). Un único `assets_projection_context` (`handlers/projection.rs`) devuelve `{nominals, income_monthly, expense_with_debt}` de **un solo** `build_installation_projection_input` por request; sustituye a `first_month_asset_contribution_nominals_map` + `monthly_income_expense_debt_for_view` (eliminados).
 

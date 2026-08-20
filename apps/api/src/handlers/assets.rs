@@ -43,6 +43,13 @@ pub struct AssetResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub contribution_nominal_monthly: Decimal,
+    /// La MISMA cascada evaluada sobre el neto **recurrente** (`income − expense − debt_service`),
+    /// sin el tramo transitorio de los planning flows. Es el número **estable** — el que una
+    /// persona quiere decir cuando dice «mi aportación mensual» — y el único con el que tiene
+    /// sentido hacer aritmética: no cambia de un día para otro.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub contribution_recurring_monthly: Decimal,
     /// Tope absoluto en € si alguna regla de asignación apunta a este activo con
     /// `cap_kind='amount'` (el más restrictivo si hay varias). Solo se devuelve cuando es
     /// un tope concreto en euros — los topes relativos (`months_expense`, `income_multiple`)
@@ -219,6 +226,7 @@ async fn assert_asset_category(
 fn row_to_response(
     r: AssetRow,
     contribution_nominal_monthly: Decimal,
+    contribution_recurring_monthly: Decimal,
     contribution_target_amount: Option<Decimal>,
 ) -> AssetResponse {
     AssetResponse {
@@ -231,6 +239,7 @@ fn row_to_response(
         expected_annual_return_percent: r.expected_annual_return_percent,
         // Presentación: la cascada trabaja con la precisión completa, aquí solo se publica.
         contribution_nominal_monthly: contribution_nominal_monthly.round_dp(4),
+        contribution_recurring_monthly: contribution_recurring_monthly.round_dp(4),
         contribution_target_amount,
         notes: r.notes,
         sort_index: r.sort_index,
@@ -323,6 +332,7 @@ pub(crate) async fn list_assets_core(
     )
     .await?;
     let nominals = ctx.nominals;
+    let recurring = ctx.recurring_nominals;
 
     let assets_scope = view.scope_where("");
     let assets_sql = format!(
@@ -342,8 +352,9 @@ pub(crate) async fn list_assets_core(
         .into_iter()
         .map(|r| {
             let n = nominals.get(&r.id).copied().unwrap_or(Decimal::ZERO);
+            let rec = recurring.get(&r.id).copied().unwrap_or(Decimal::ZERO);
             let t = targets.get(&r.id).copied();
-            row_to_response(r, n, t)
+            row_to_response(r, n, rec, t)
         })
         .collect())
 }
@@ -438,6 +449,11 @@ pub(crate) async fn create_asset_core(
     let ctx =
         assets_projection_context(&state.pool, iid, user_id, LedgerView::Household, today).await?;
     let n = ctx.nominals.get(&row.id).copied().unwrap_or(Decimal::ZERO);
+    let rec = ctx
+        .recurring_nominals
+        .get(&row.id)
+        .copied()
+        .unwrap_or(Decimal::ZERO);
     let targets = fetch_asset_resolved_targets(
         &state.pool,
         iid,
@@ -450,7 +466,7 @@ pub(crate) async fn create_asset_core(
     let t = targets.get(&row.id).copied();
 
     refresh_projection_after_mutation(state.clone(), iid, user_id);
-    Ok(row_to_response(row, n, t))
+    Ok(row_to_response(row, n, rec, t))
 }
 
 #[utoipa::path(
@@ -593,6 +609,11 @@ pub(crate) async fn patch_asset_core(
     let ctx =
         assets_projection_context(&state.pool, iid, user_id, LedgerView::Household, today).await?;
     let n = ctx.nominals.get(&updated.id).copied().unwrap_or(Decimal::ZERO);
+    let rec = ctx
+        .recurring_nominals
+        .get(&updated.id)
+        .copied()
+        .unwrap_or(Decimal::ZERO);
     let targets = fetch_asset_resolved_targets(
         &state.pool,
         iid,
@@ -605,7 +626,7 @@ pub(crate) async fn patch_asset_core(
     let t = targets.get(&updated.id).copied();
 
     refresh_projection_after_mutation(state.clone(), iid, user_id);
-    Ok(row_to_response(updated, n, t))
+    Ok(row_to_response(updated, n, rec, t))
 }
 
 #[utoipa::path(
