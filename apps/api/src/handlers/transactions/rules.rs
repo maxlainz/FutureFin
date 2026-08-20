@@ -309,7 +309,8 @@ pub async fn create_rule(
 }
 
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_categorization_rule`.
-/// Las reglas NUNCA invalidan la cache (solo afectan a imports futuros — regresión pinneada).
+/// Las reglas NUNCA invalidan la cache (solo afectan a imports futuros — pinneado por
+/// `creating_a_categorization_rule_never_invalidates_projection_cache`, en los tres modos).
 /// 409 en duplicado `(source, pattern)` vía el mapeo global de sqlx.
 pub(crate) async fn create_categorization_rule_core(
     pool: &sqlx::PgPool,
