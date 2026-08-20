@@ -465,7 +465,7 @@ pub async fn create_allocation_rule(
     .await?;
     tx.commit().await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
+    refresh_projection_after_mutation(&state, iid, user.id.0).await;
     Ok((StatusCode::CREATED, Json(row_to_response(row))))
 }
 
@@ -630,7 +630,7 @@ pub(crate) async fn patch_allocation_rule_core(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    refresh_projection_after_mutation(&state, iid, user_id).await;
     Ok(row_to_response(updated))
 }
 
@@ -688,7 +688,7 @@ pub async fn delete_allocation_rule(
         .execute(&state.pool)
         .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
+    refresh_projection_after_mutation(&state, iid, user.id.0).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -783,7 +783,7 @@ pub async fn reorder_allocation_rules(
         .fetch_all(&state.pool)
         .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
+    refresh_projection_after_mutation(&state, iid, user.id.0).await;
     Ok(Json(rows.into_iter().map(row_to_response).collect()))
 }
 

@@ -607,7 +607,7 @@ pub(crate) async fn create_budget_entry_core(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    refresh_projection_after_mutation(&state, iid, user_id).await;
     row_to_entry_response(row)
 }
 
@@ -756,7 +756,7 @@ pub(crate) async fn patch_budget_entry_core(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    refresh_projection_after_mutation(&state, iid, user_id).await;
     row_to_entry_response(updated)
 }
 
@@ -806,7 +806,7 @@ pub(crate) async fn delete_budget_entry_core(
         return Err(ApiError::NotFound);
     }
 
-    refresh_projection_after_mutation(state.clone(), iid, user_id);
+    refresh_projection_after_mutation(&state, iid, user_id).await;
     Ok(())
 }
 

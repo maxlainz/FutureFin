@@ -658,7 +658,7 @@ pub(crate) async fn patch_fire_settings_core(
         .execute(&state.pool)
         .await?;
         // FULL: así es como un cambio de modo A↔B/C o de SWR surte efecto en la proyección.
-        refresh_projection_after_mutation(state.clone(), iid, user_id);
+        refresh_projection_after_mutation(&state, iid, user_id).await;
     }
 
     Ok(FireSettingsPatchOutcome {
@@ -817,7 +817,7 @@ pub async fn patch_my_installation(
     .fetch_one(&state.pool)
     .await?;
 
-    refresh_projection_after_mutation(state.clone(), iid, user.id.0);
+    refresh_projection_after_mutation(&state, iid, user.id.0).await;
     Ok(Json(installation_access_from_row(row)?))
 }
 

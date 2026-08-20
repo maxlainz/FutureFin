@@ -269,7 +269,7 @@ pub async fn import_user_backup_apply(
 
     // A full replace rewrites assets/liabilities/budget — all projection-engine inputs — so the
     // in-memory projection cache would otherwise stay stale for up to its TTL. Invalidate it now.
-    crate::handlers::projection::refresh_projection_after_mutation(state.clone(), iid, user.id.0);
+    crate::handlers::projection::refresh_projection_after_mutation(&state, iid, user.id.0).await;
 
     Ok(Json(ImportApplyResponse {
         imported: counts,

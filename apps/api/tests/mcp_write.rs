@@ -5,10 +5,7 @@
 mod common;
 
 use common::{LoggedInOwner, TestApp};
-use futurefin_api::handlers::person_view::LedgerView;
-use futurefin_api::state::{Density, ProjectionCacheKey};
 use serde_json::json;
-use uuid::Uuid;
 
 const PROTOCOL: &str = "2026-07-28";
 
@@ -96,43 +93,6 @@ async fn create_token_for(app: &TestApp, cookie: &str) -> String {
 
 async fn create_token(app: &TestApp, owner: &LoggedInOwner) -> String {
     create_token_for(app, &owner.cookie).await
-}
-
-async fn installation_id(app: &TestApp) -> Uuid {
-    sqlx::query_scalar("SELECT id FROM installation LIMIT 1")
-        .fetch_one(&app.pool)
-        .await
-        .expect("installation id")
-}
-
-fn household_key(iid: Uuid) -> ProjectionCacheKey {
-    ProjectionCacheKey {
-        installation_id: iid,
-        view: LedgerView::Household,
-        owner_user_id: None,
-        density: Density::Monthly,
-    }
-}
-
-async fn present(app: &TestApp, key: &ProjectionCacheKey) -> bool {
-    app.state.projection_cache.read().await.contains_key(key)
-}
-
-async fn warm(app: &TestApp, cookie: &str, key: &ProjectionCacheKey) {
-    let r = app.get_with_cookie("/v1/projection/series", cookie).await;
-    assert_eq!(r.status, http::StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(present(app, key).await, "la cache debería estar caliente tras el GET");
-}
-
-async fn assert_invalidated(app: &TestApp, key: &ProjectionCacheKey, what: &str) {
-    for _ in 0..40 {
-        if !present(app, key).await {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    panic!("la mutación MCP «{what}» debía invalidar la cache de proyección");
 }
 
 async fn set_mode(app: &TestApp, cookie: &str, source: &str) {
@@ -280,13 +240,13 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
     let cat = app.create_category(&owner, "expense", "Comida").await;
     let cat_inc = app.create_category(&owner, "income", "Nómina").await;
 
     // --- Modo A (budget): create_transaction vía MCP NO invalida (COND inactiva) -------------
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -297,9 +257,8 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
     )
     .await;
     let _ = tool_json(&envelope);
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        present(&app, &key).await,
+        app.cache_contains(&key).await,
         "modo A: las transacciones no son inputs del engine — la cache debe sobrevivir"
     );
 
@@ -307,9 +266,8 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
     let envelope = mcp_post(&app, &token, tool_call("capture_snapshot", json!({}))).await;
     let snap = tool_json(&envelope);
     assert!(snap["snapshot_date"].is_string(), "{snap}");
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert!(
-        present(&app, &key).await,
+        app.cache_contains(&key).await,
         "los snapshots no son inputs del engine — la cache debe sobrevivir"
     );
 
@@ -325,11 +283,11 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
     .await;
     let flow = tool_json(&envelope);
     assert!(flow["resumen"].as_str().unwrap().contains("IRPF"));
-    assert_invalidated(&app, &key, "create_planning_flow").await;
+    app.assert_invalidated(&key, "create_planning_flow").await;
 
     // --- Modo B: create_transaction vía MCP SÍ invalida (COND activa) -------------------------
     set_mode(&app, &owner.cookie, "transactions_avg").await;
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -340,7 +298,7 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
     )
     .await;
     let _ = tool_json(&envelope);
-    assert_invalidated(&app, &key, "create_transaction (modo B)").await;
+    app.assert_invalidated(&key, "create_transaction (modo B)").await;
 }
 
 #[tokio::test]
@@ -348,8 +306,8 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
 
     let cat_asset = app.create_category(&owner, "asset", "Fondos").await;
     let cat_asset2 = app.create_category(&owner, "asset", "Cash").await;
@@ -381,7 +339,7 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
 
     // --- update_asset: body completo (rename + recategorizar + iliquidez + borrar el precio
     // de compra) y contrato FULL — misma core `patch_asset_core` que el PATCH HTTP. ------------
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -394,7 +352,7 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     let updated = tool_json(&envelope);
     assert!(updated["resumen"].as_str().unwrap().contains("Fondo global"), "{updated}");
     assert!(updated["resumen"].as_str().unwrap().contains("ilíquido"), "{updated}");
-    assert_invalidated(&app, &key, "update_asset").await;
+    app.assert_invalidated(&key, "update_asset").await;
 
     let listed = app.get_with_cookie("/v1/assets", &owner.cookie).await;
     assert_eq!(listed.status, http::StatusCode::OK);
@@ -428,7 +386,7 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
 
     // --- update_liability: la asimetría que empujaba a borrar y recrear. Edita TAE y plan de
     // pago sobre la MISMA fila (misma core `patch_liability_core` que el PATCH) + FULL. --------
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -440,7 +398,7 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     .await;
     let updated = tool_json(&envelope);
     assert_eq!(updated["id"], liability_id.as_str());
-    assert_invalidated(&app, &key, "update_liability").await;
+    app.assert_invalidated(&key, "update_liability").await;
 
     let listed = app.get_with_cookie("/v1/liabilities", &owner.cookie).await;
     assert_eq!(listed.status, http::StatusCode::OK);
@@ -664,11 +622,11 @@ async fn asset_tools_create_update_and_reject_absurd_returns() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
     let cat = app.create_category(&owner, "asset", "Fondos").await;
 
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -681,10 +639,10 @@ async fn asset_tools_create_update_and_reject_absurd_returns() {
     let created = tool_json(&envelope);
     let asset_id = created["id"].as_str().unwrap().to_string();
     assert!(created["resumen"].as_str().unwrap().contains("Depósito"));
-    assert_invalidated(&app, &key, "create_asset").await;
+    app.assert_invalidated(&key, "create_asset").await;
 
     // update_asset_value: valor anterior/nuevo + FULL.
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -699,7 +657,7 @@ async fn asset_tools_create_update_and_reject_absurd_returns() {
     assert_eq!(num(&updated["valor_anterior"]), 10000.0);
     assert_eq!(num(&updated["valor_nuevo"]), 10500.0);
     assert_eq!(num(&updated["expected_annual_return_percent"]), -20.0);
-    assert_invalidated(&app, &key, "update_asset_value").await;
+    app.assert_invalidated(&key, "update_asset_value").await;
 
     // Cota compartida con el PATCH HTTP: retorno <= -100 → bad_request.
     let envelope = mcp_post(
@@ -783,11 +741,11 @@ async fn budget_tools_move_projection_and_validate() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
     let cat = app.create_category(&owner, "expense", "Ocio").await;
 
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -796,7 +754,7 @@ async fn budget_tools_move_projection_and_validate() {
     .await;
     let created = tool_json(&envelope);
     assert_eq!(created["amount_monthly"].as_str().unwrap().parse::<f64>().unwrap(), 150.0);
-    assert_invalidated(&app, &key, "create_budget_entry").await;
+    app.assert_invalidated(&key, "create_budget_entry").await;
 
     // «Sube el presupuesto de ocio a 250» + exclusión mutua validada.
     let envelope = mcp_post(
@@ -1030,9 +988,9 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
     tool_error(&envelope, "forbidden");
 
     // Cambiar savings_source por MCP invalida la proyección (FULL).
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
-    warm(&app, &owner.cookie, &key).await;
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -1043,7 +1001,7 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
     )
     .await;
     let _ = tool_json(&envelope);
-    assert_invalidated(&app, &key, "update_fire_settings").await;
+    app.assert_invalidated(&key, "update_fire_settings").await;
 }
 
 #[tokio::test]
@@ -1286,9 +1244,9 @@ async fn reconcile_tools_share_core_and_respect_write_gates() {
 
     // Desconciliar por MCP (modo B para verificar la invalidación COND).
     set_mode(&app, &owner.cookie, "transactions_avg").await;
-    let iid = installation_id(&app).await;
-    let key = household_key(iid);
-    warm(&app, &owner.cookie, &key).await;
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -1298,7 +1256,7 @@ async fn reconcile_tools_share_core_and_respect_write_gates() {
     let body = tool_json(&envelope);
     assert!(body["transaction"]["transfer_counterpart_id"].is_null(), "{body}");
     assert!(body["counterpart"]["transfer_counterpart_id"].is_null(), "{body}");
-    assert_invalidated(&app, &key, "unreconcile_transfer").await;
+    app.assert_invalidated(&key, "unreconcile_transfer").await;
 
     // La fila desconciliada por MCP es indistinguible por HTTP (mismo core).
     let list = app
@@ -1383,10 +1341,10 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    let key = household_key(iid);
+    let key = app.household_key(iid);
 
     // 1. PREVIEW: no escribe y no invalida.
-    warm(&app, &owner.cookie, &key).await;
+    app.warm_household(&owner.cookie, &key).await;
     let preview = tool_json(
         &mcp_post(
             &app,
@@ -1406,8 +1364,7 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         "el aviso de proyección debe salir ANTES de ejecutar: {preview}"
     );
     assert_eq!(preview["effects"]["sample"].as_array().unwrap().len(), 2);
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert!(present(&app, &key).await, "el preview no debe invalidar");
+    assert!(app.cache_contains(&key).await, "el preview no debe invalidar");
     let rows = app
         .get_with_cookie("/v1/transactions", &owner.cookie)
         .await
@@ -1440,7 +1397,7 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
     }
 
     // 3. Contrato de cache: COND, y en modo C invalida.
-    assert_invalidated(&app, &key, "apply_categorization_rule por MCP").await;
+    app.assert_invalidated(&key, "apply_categorization_rule por MCP").await;
 
     // 4. Toggle vivo: con la escritura desactivada, la tool corta.
     app.patch_json_with_cookie(
@@ -1531,8 +1488,8 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    let key = household_key(iid);
-    warm(&app, &owner.cookie, &key).await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
 
     // 1. Escritura por la tool.
     let out = tool_json(
@@ -1561,7 +1518,7 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
     }
 
     // 3. Cache COND en modo B.
-    assert_invalidated(&app, &key, "update_transactions por MCP").await;
+    app.assert_invalidated(&key, "update_transactions por MCP").await;
 
     // 4. Todo o nada con un id inventado: cero filas tocadas y el error lo nombra.
     let fake = uuid::Uuid::new_v4().to_string();
