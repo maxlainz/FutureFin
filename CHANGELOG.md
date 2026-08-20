@@ -6,6 +6,29 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `PATCH /v1/transactions/batch` y tool `update_transactions` (tool 49)
+
+- **El problema, medido**: recategorizar el desglose de una categoría cajón costó 16 llamadas casi
+  idénticas a `update_transaction`. Y no solo round-trips: `patch_transaction_core` invalida la
+  cache de proyección en toda escritura, así que en modo C **cada una de las 16 llamadas tiró la
+  cache**.
+- **La solución, deliberadamente estrecha**: el lote admite `kind`, `category_id`/`clear_category` y
+  `notes`/`clear_notes`. **No** admite `amount`, `op_date`, `concept` ni `value_date` — y eso es lo
+  que lo hace seguro: ninguno de los campos admitidos entra en la huella de dedup ni en el
+  emparejado de transferencias, así que el lote no recomputa huellas, no rompe pares conciliados y
+  no dispara el pase de auto-conciliación. El lote clasifica; para reescribir está el PATCH de uno
+  en uno.
+- **Todo o nada** en una única transacción, con la carga y el owner-guard **antes** de cualquier
+  escritura: un id ajeno o inexistente ⇒ 404 nombrando hasta 5 culpables y cero filas tocadas. El
+  test mete el id ajeno en la **posición 2 de 6** justo para que un fallo a mitad de escritura se
+  vea. Un resultado parcial obligaría al llamante a reconciliar estado, que es lo que un lote viene
+  a evitar.
+- **Una sola invalidación COND** al final, fuera del bucle.
+- Variante de error nueva `ApiError::NotFoundWith(String)`: un 404 que propaga mensaje, para que un
+  lote de 200 ids no obligue a buscar a ciegas cuál falló. Solo nombra ids que el llamante ya envió.
+- Tope 200 (no los 1000 de `create_batch`): aquí el llamante enumera los ids uno a uno, y 200 cubre
+  el caso real sin convertir un error de cliente en una reescritura masiva.
+
 ### Added — Backfill de reglas de categorización (`apply_categorization_rule`, tool 48)
 
 - **El problema**: crear una regla solo afectaba a imports futuros y la tool lo decía con

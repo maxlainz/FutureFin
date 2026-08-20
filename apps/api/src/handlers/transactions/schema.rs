@@ -580,6 +580,29 @@ pub struct CreateRuleBody {
     pub confirm: Option<bool>,
 }
 
+/// Body de `PATCH /v1/transactions/batch`. Conjunto de campos **cerrado a propósito**: sin
+/// `amount`/`op_date`/`concept`/`value_date` no hay recálculo de huella de dedup, no hay
+/// `pairing_changed` y no hay pase de auto-conciliación. El lote **clasifica**, no reescribe; para
+/// reescribir está el PATCH de uno en uno.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct BatchPatchBody {
+    /// Ids de movimientos PROPIOS (1..=200). Todo o nada: un id ajeno o inexistente → 404 y cero
+    /// filas tocadas.
+    #[schema(value_type = Vec<String>, format = "uuid")]
+    pub ids: Vec<Uuid>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub category_id: Option<Uuid>,
+    #[serde(default)]
+    pub clear_category: Option<bool>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub clear_notes: Option<bool>,
+}
+
 /// Body de `POST /v1/transactions/rules/{id}/apply`.
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct ApplyRuleBody {
