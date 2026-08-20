@@ -17,8 +17,10 @@
 //! `invalidate_projection_if_savings_uses_transactions` (abajo, sobre `SavingsSource::uses_transactions`)
 //! y lo llaman las mutaciones de `crud.rs`/`import.rs`/`recurring.rs`/`reconcile.rs` tras commitear
 //! (conciliar/desconciliar cambia QUÉ cuenta en el promedio → también es mutación del conjunto).
-//! `rules.rs`, los previews y el borrado de una regla recurrente (sus instancias sobreviven, el
-//! conjunto no cambia) **nunca** invalidan. Regresión de ambos casos: `transactions_projection_cache.rs`.
+//! **Crear** una regla de categorización, los previews y el borrado de una regla recurrente (sus
+//! instancias sobreviven, el conjunto no cambia) **nunca** invalidan. Regresión de ambos casos:
+//! `transactions_projection_cache.rs`. Ojo: **aplicar** una regla retroactivamente (backfill) sí es
+//! una mutación del conjunto y sí invalida COND — es otra ruta, con su propio test.
 //!
 //! ## Conciliación de transferencias (3.5.0)
 //! Un movimiento **conciliado** (`transfer_counterpart_id IS NOT NULL`) es una pata de una

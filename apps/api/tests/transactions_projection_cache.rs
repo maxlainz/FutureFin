@@ -4,7 +4,10 @@
 //! - Modo B (`transactions_avg`): las transacciones SÍ son inputs del engine → **cada** mutación que
 //!   cambia el conjunto (create, batch, patch, delete, import confirm, delete import, materialize)
 //!   invalida; borrar una regla recurrente NO (sus instancias sobreviven).
+//! - Modo C (`budget_income_real_expense`): paridad con B — create/patch/delete invalidan.
 //! - Flip A↔B vía PATCH /v1/installation invalida (el propio PATCH de installation refresca).
+//! - Crear una **regla de categorización** no invalida en NINGÚN modo: solo hace INSERT y afecta a
+//!   imports futuros (el backfill retroactivo es otra ruta, con su propia invalidación COND).
 
 mod common;
 
@@ -57,6 +60,7 @@ async fn warm(app: &TestApp, cookie: &str, key: &ProjectionCacheKey) {
 }
 
 /// Espera (polling) a que la invalidación en background (tokio::spawn) tire la entrada.
+/// La usan los modos B y C; el `what` identifica la ruta concreta en el panic.
 async fn assert_invalidated(app: &TestApp, key: &ProjectionCacheKey, what: &str) {
     for _ in 0..40 {
         if !present(app, key).await {
@@ -64,7 +68,7 @@ async fn assert_invalidated(app: &TestApp, key: &ProjectionCacheKey, what: &str)
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("modo B: la mutación «{what}» debía invalidar la cache de proyección");
+    panic!("la mutación «{what}» debía invalidar la cache de proyección");
 }
 
 async fn set_mode(app: &TestApp, cookie: &str, source: &str) {
@@ -374,6 +378,83 @@ async fn mode_c_mutation_invalidates_projection_cache() {
         .await;
     assert_eq!(created.status, http::StatusCode::CREATED);
     assert_invalidated(&app, &key, "modo C create").await;
+    let txn_id = created.json()["id"].as_str().unwrap().to_string();
+
+    // PATCH: `patch_transaction_core` invalida de forma incondicional (no solo cuando cambian
+    // importe/fecha), así que un cambio de categoría/notas también tira la cache en modo C.
+    warm(&app, &owner.cookie, &key).await;
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{txn_id}"),
+            json!({ "notes": "editada" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK);
+    assert_invalidated(&app, &key, "modo C patch").await;
+
+    // DELETE: cierra la paridad con el modo B para las tres rutas más usadas desde el chat.
+    warm(&app, &owner.cookie, &key).await;
+    app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie)
+        .await;
+    assert_invalidated(&app, &key, "modo C delete").await;
+}
+
+// ---------------------------------------------------------------------------
+// Reglas de categorización: crear una regla NUNCA invalida, en NINGÚN modo
+// ---------------------------------------------------------------------------
+
+/// Contrato histórico: `create_categorization_rule_core` solo hace INSERT — no recategoriza nada,
+/// así que el conjunto de transacciones no cambia y la cache sigue siendo válida incluso en los
+/// modos que sí leen transacciones. Estaba documentado en tres sitios (`rules.rs`,
+/// `transactions/mod.rs` y `.claude/tests.md`) como «regresión pinneada», pero ningún test lo
+/// ejercía: el test de modo A solo tocaba la regla **recurrente**. Este es el pin que faltaba.
+#[tokio::test]
+async fn creating_a_categorization_rule_never_invalidates_projection_cache() {
+    for mode in ["budget", "transactions_avg", "budget_income_real_expense"] {
+        let app = TestApp::spawn().await;
+        let owner = app.register_and_login_owner("alice").await;
+        let cat = app.create_category(&owner, "asset", "Cash").await;
+        app.post_json_with_cookie(
+            "/v1/assets",
+            json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+            &owner.cookie,
+        )
+        .await;
+        let expense_cat = app.create_category(&owner, "expense", "Compras").await;
+        set_mode(&app, &owner.cookie, mode).await;
+
+        // Una transacción que la regla PODRÍA recategorizar: si algún día el core hiciera backfill
+        // silencioso, este test lo delataría por la vía de la cache.
+        app.post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-10", "concept": "WWW.AMAZON* MN34OP56",
+                    "amount": "-104.45", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await;
+
+        let iid = installation_id(&app).await;
+        let key = household_key(iid);
+        warm(&app, &owner.cookie, &key).await;
+
+        let created = app
+            .post_json_with_cookie(
+                "/v1/transactions/rules",
+                json!({ "match_kind": "substring", "pattern": "AMAZON",
+                        "assign_kind": "expense", "assign_category_id": expense_cat }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(created.status, http::StatusCode::CREATED, "modo {mode}: {created:?}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            present(&app, &key).await,
+            "modo {mode}: crear una regla de categorización NO debe invalidar la cache \
+             (solo afecta a imports futuros; no recategoriza nada existente)"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
