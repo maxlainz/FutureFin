@@ -67,6 +67,8 @@ import {
   KIND_LABEL_ES,
   TRANSACTION_KINDS,
   adjacentMonthInList,
+  avgBasisDetail,
+  avgUnavailableDetail,
   avgWindowLabel,
   categoriesForKind,
   defaultSelectedMonth,
@@ -433,8 +435,19 @@ export function GastosView({
 
   const totals = summary?.totals ?? null;
   const isPartial = summary?.is_partial ?? false;
-  const monthsWithData = summary?.months_with_data ?? 0;
-  const hasAvg = monthsWithData > 0;
+  // El denominador del promedio son los meses REALES, no todos los que tienen algo: un mes cuyo
+  // único contenido son instancias recurrentes no promedia (y por eso no diluye la media).
+  const avgMonths = summary?.avg_months ?? 0;
+  const hasAvg = avgMonths > 0;
+  // Qué meses produjeron la media, o por qué no hay. La ventana pedida («6m») no es lo mismo que
+  // los meses promediados, así que la tarjeta lo dice en vez de dejarlo suponer.
+  // Va al slot `detail` (segundo), no al `parenthetical`: en gasto e ingreso el primero lo ocupa
+  // el trend, que tiene prioridad en MetricCard. Con `detail` en las cuatro, la base sale siempre
+  // a la misma altura de la fila.
+  const avgBasisText = summary
+    ? (avgBasisDetail(summary.avg_basis) ??
+      avgUnavailableDetail(summary.avg_unavailable_reason))
+    : undefined;
   const threshold = summary ? significanceThreshold(summary.totals) : 0;
   const avgLabel = avgWindowLabel(avgWindow);
 
@@ -901,6 +914,7 @@ export function GastosView({
             <MetricCard
               label={`Gasto promedio (${avgLabel})`}
               helpId="expenses.expense_avg"
+              detail={avgBasisText}
               value={
                 totals && hasAvg
                   ? formatCurrencyAmount(totals.expense_avg, currencyIso)
@@ -915,6 +929,7 @@ export function GastosView({
             <MetricCard
               label={`Ingreso promedio (${avgLabel})`}
               helpId="expenses.income_avg"
+              detail={avgBasisText}
               value={
                 totals && hasAvg
                   ? formatCurrencyAmount(totals.income_avg, currencyIso)
@@ -929,6 +944,7 @@ export function GastosView({
             <MetricCard
               label={`Traspasado a ahorro (${avgLabel})`}
               helpId="expenses.savings_transferred"
+              detail={avgBasisText}
               value={
                 totals && hasAvg
                   ? formatCurrencyAmount(totals.savings_avg, currencyIso)
@@ -939,6 +955,7 @@ export function GastosView({
             <MetricCard
               label={`% traspasado (${avgLabel})`}
               helpId="expenses.transferred_rate"
+              detail={avgBasisText}
               value={
                 savingsRateAvg !== null
                   ? formatPercentDisplay(savingsRateAvg)

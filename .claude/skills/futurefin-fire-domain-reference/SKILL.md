@@ -98,13 +98,17 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
   Denominator = `months_with_data`, but counting **only real months** — a month in the window with ≥1
   transaction `recurring_rule_id IS NULL` (any kind, same scope). A pseudo-empty month (only recurring
   instances, e.g. after backfilling recurring rules) is excluded **entirely** — neither numerator nor
-  denominator; a real month counts **whole**, including its recurring transactions. This is a
-  **deliberate divergence** from the Movimientos comparison (`GET /v1/transactions/summary`), which still
-  counts any month with data (cross-ref comment in code). Worked example (test
+  denominator; a real month counts **whole**, including its recurring transactions. Since issue #5 the Movimientos
+  comparison (`GET /v1/transactions/summary`) applies the **same real-month predicate** — the
+  divergence documented here was closed (issue #5: a recurring-only month sank every category's
+  average). They are still not identical: `transactions_avg` has per-side configurable windows
+  (`AvgWindowSpec`, `data`/`calendar` modes) while the summary is always calendar-windowed, and the
+  summary publishes its denominator as `avg_months` alongside the unchanged `months_with_data`. Worked example (test
   `pseudo_empty_month_excluded_from_avg`): real month M−2 with manual income 2000 + recurring-only month
   M−1 with recurring salary 3000 → `months_with_data = 1`, `income_avg = 2000` (before the fix: months=2,
-  avg=2500). Helper `transactions_12m_avg` (`handlers/transactions/summary.rs`), single-source `real_months`
-  predicate/CTE.
+  avg=2500). Helper `transactions_avg` (`handlers/transactions/summary.rs`); the real-month
+  predicate is the inline `COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL) AS real_txns` of its
+  single query (there is no `real_months` CTE), mirrored by `transactions_summary_core`.
 - **Liabilities in real modes (reform 3.4.0 — the hybrid subtraction is GONE)**: the expense
   average is used **raw** — paid cuotas already live inside the imported movements (amortization
   included), so nothing is subtracted and no debt service is re-charged. Liabilities do NOT touch
@@ -451,7 +455,7 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 - Single target formula + signature: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs`
 - Trigger uses k−1 / nw_prev: `grep -n "fire_target_at_month_index(input.fire_target" crates/engine/src/projection.rs`
 - FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes the raw `expense_avg` — see §2b)
-- Mode B (`savings_source`) base + liability zeroing: `grep -n "savings_source\|transactions_12m_avg\|expense_from_avg\|payment_amount = None" apps/api/src/handlers/projection.rs`
+- Mode B (`savings_source`) base + liability zeroing: `grep -n "savings_source\|transactions_avg\|expense_from_avg\|payment_amount = None" apps/api/src/handlers/projection.rs`
 - Mode B/C reach into summary/assets/series: `grep -n "expense_der = Decimal::ZERO\|expense_tot = avg.expense_avg" apps/api/src/handlers/summary.rs`; `grep -n "assets_projection_context" apps/api/src/handlers/{projection,assets}.rs`
 - Runway model + cap: `grep -n "pub fn liquid_runway_months\|MAX_RUNWAY_MONTHS\|RunwayOutcome" crates/engine/src/runway.rs` and `grep -n "liquid_runway_months\|runway_is_indefinite" apps/api/src/handlers/summary.rs`
 - Runway infinite case is the SWR threshold, not the cap (v2.3.0): `grep -n "swr_pct" crates/engine/src/runway.rs` (the `Indefinite` branch must compare `annual_expense_for_swr * 100 <= balance_0 * swr_pct`) and `grep -n "annual_expense_gross\|gross_up_net_annual_fire" apps/api/src/handlers/summary.rs` (the handler must reuse the target's gross-up)

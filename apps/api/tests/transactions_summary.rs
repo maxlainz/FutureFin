@@ -583,3 +583,156 @@ async fn reconciled_excluded_from_category_series() {
     let months = super_entry["months"].as_array().unwrap();
     approx(parse_dec(&months.last().unwrap()["total"]), 100.0);
 }
+
+/// Crea una transacción RECURRENTE (queda con `recurring_rule_id` no nulo).
+async fn recurring(
+    app: &TestApp,
+    cookie: &str,
+    date: &str,
+    concept: &str,
+    amount: &str,
+    kind: &str,
+    cat: Option<&str>,
+) {
+    let mut body = json!({ "op_date": date, "concept": concept, "amount": amount, "kind": kind,
+                           "recurrence": {} });
+    if let Some(c) = cat {
+        body["category_id"] = json!(c);
+    }
+    let r = app.post_json_with_cookie("/v1/transactions", body, cookie).await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "recurring {concept}: {r:?}");
+}
+
+/// El issue #5, reproducido: un mes cuyo único contenido son instancias recurrentes NO promedia.
+///
+/// Queda fuera del numerador Y del denominador, que es la única combinación coherente: excluirlo
+/// solo del denominador dejaría su importe arriba y dispararía las categorías presentes en él
+/// (el alquiler recurrente saldría a 1,5× su cuota real en vez de a su cuota).
+#[tokio::test]
+async fn recurring_only_month_excluded_from_avg_numerator_and_denominator() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let comer_cat = app.create_category(&owner, "expense", "Comer Fuera").await;
+    let alq_cat = app.create_category(&owner, "expense", "Alquiler").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    // Mes seleccionado = hoy − 1 (completo). Ventana avg_months=3 = sel-1, sel-2, sel-3.
+    let (sy, sm) = shift_month(today.year(), today.month(), -1);
+    let (y1, m1) = shift_month(sy, sm, -1);
+    let (y2, m2) = shift_month(sy, sm, -2);
+    let (y3, m3) = shift_month(sy, sm, -3);
+
+    // sel-1 y sel-2: meses REALES (gasto manual en Comer Fuera).
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Bar", "-200", "expense", Some(&comer_cat)).await;
+    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "Bar", "-220", "expense", Some(&comer_cat)).await;
+    // UNA regla de alquiler con origen en sel-3, que materializa 860 en sel-3, sel-2 y sel-1.
+    // sel-3 queda como mes SOLO-recurrente: es el que hasta ahora hundía todas las medias.
+    recurring(&app, &owner.cookie, &date_in(y3, m3, 1), "Alquiler", "-860", "expense", Some(&alq_cat)).await;
+
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_months=3");
+    let resp = app.get_with_cookie(&url, &owner.cookie).await;
+    assert_eq!(resp.status, http::StatusCode::OK, "summary: {resp:?}");
+    let b = resp.json();
+
+    // Las dos cifras se publican y son DISTINTAS: 3 meses tienen algo, solo 2 promedian.
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 3, "los 3 meses tienen movimientos");
+    assert_eq!(b["avg_months"].as_u64().unwrap(), 2, "solo sel-1 y sel-2 son reales");
+
+    // Comer Fuera: (200+220)/2 = 210. Con el denominador viejo habría salido 420/3 = 140.
+    let comer = line(&b["expense_categories"], "Comer Fuera");
+    approx(parse_dec(&comer["avg"]), 210.0);
+
+    // Alquiler: 1720/2 = 860 (su cuota real). Si el mes solo-recurrente siguiera en el numerador
+    // pero no en el denominador, saldría 2580/2 = 1290.
+    let alq = line(&b["expense_categories"], "Alquiler");
+    approx(parse_dec(&alq["avg"]), 860.0);
+
+    // Aditividad: Σ de las líneas == el total. Es lo que se perdería con un denominador por categoría.
+    approx(parse_dec(&b["totals"]["expense_avg"]), 1070.0);
+
+    // Base del promedio: sel-2 → sel-1, contiguos.
+    let basis = &b["avg_basis"];
+    assert_eq!(basis["months"].as_u64().unwrap(), 2);
+    assert_eq!(basis["first_month"], format!("{y2:04}-{m2:02}"));
+    assert_eq!(basis["last_month"], format!("{y1:04}-{m1:02}"));
+    assert_eq!(basis["has_gaps"], false);
+    assert!(b.get("avg_unavailable_reason").is_none(), "sí hay promedio");
+}
+
+/// Un mes real cuenta ENTERO, recurrentes incluidos: lo que decide es si el mes tiene algún
+/// movimiento real, no de qué tipo es cada importe.
+#[tokio::test]
+async fn real_month_counts_its_recurring_amounts_too() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Super").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -1);
+    let (y1, m1) = shift_month(sy, sm, -1);
+
+    // Un único mes en ventana, real, con un movimiento manual y otro recurrente en la MISMA categoría.
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Compra", "-100", "expense", Some(&cat)).await;
+    recurring(&app, &owner.cookie, &date_in(y1, m1, 1), "Cesta", "-40", "expense", Some(&cat)).await;
+
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_months=3");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+
+    assert_eq!(b["avg_months"].as_u64().unwrap(), 1);
+    approx(parse_dec(&line(&b["expense_categories"], "Super")["avg"]), 140.0);
+}
+
+/// Meses reales no contiguos → `has_gaps`, para que la UI no etiquete «abr–jun» una media de abr y jun.
+#[tokio::test]
+async fn avg_basis_reports_gaps_between_real_months() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Super").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -1);
+    let (y1, m1) = shift_month(sy, sm, -1);
+    let (y3, m3) = shift_month(sy, sm, -3);
+
+    // sel-1 y sel-3 reales; sel-2 completamente vacío.
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "A", "-100", "expense", Some(&cat)).await;
+    manual(&app, &owner.cookie, &date_in(y3, m3, 10), "B", "-200", "expense", Some(&cat)).await;
+
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_months=3");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+
+    assert_eq!(b["avg_months"].as_u64().unwrap(), 2);
+    assert_eq!(b["avg_basis"]["has_gaps"], true, "sel-1 y sel-3 no son consecutivos");
+    approx(parse_dec(&line(&b["expense_categories"], "Super")["avg"]), 150.0);
+}
+
+/// Sin meses reales no hay promedio, y la respuesta dice POR QUÉ: «solo recurrentes» y «ventana
+/// vacía» piden acciones distintas (bajar la ventana vs importar histórico).
+#[tokio::test]
+async fn window_without_real_months_reports_no_avg_and_why() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Alquiler").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -1);
+    let (y1, m1) = shift_month(sy, sm, -1);
+
+    // Ventana completamente vacía.
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_months=3");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 0);
+    assert_eq!(b["avg_months"].as_u64().unwrap(), 0);
+    assert!(b.get("avg_basis").is_none(), "sin promedio no hay base");
+    assert_eq!(b["avg_unavailable_reason"], "empty_window");
+
+    // Ahora la ventana tiene movimientos, pero TODOS recurrentes.
+    recurring(&app, &owner.cookie, &date_in(y1, m1, 1), "Alquiler", "-860", "expense", Some(&cat)).await;
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 1, "hay movimientos…");
+    assert_eq!(b["avg_months"].as_u64().unwrap(), 0, "…pero ninguno real");
+    assert!(b.get("avg_basis").is_none());
+    assert_eq!(b["avg_unavailable_reason"], "only_recurring_months");
+    // Medias a 0, nunca a un número inventado.
+    approx(parse_dec(&b["totals"]["expense_avg"]), 0.0);
+}

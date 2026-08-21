@@ -6,6 +6,106 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Dos cifras que el consumidor no podía interpretar sin recalcularlas a mano: el promedio de la
+comparativa mensual y la jubilación de las tools de proyección. Aditivo en el contrato; **cambia
+números** en la pestaña Gastos y en `get_transactions_summary`.
+
+### El promedio contaba como cero los meses sin datos reales (issue #5)
+
+`GET /v1/transactions/summary` dividía entre `months_with_data` = meses del tramo con ≥1
+movimiento **de cualquier tipo**. Un mes cuyo único contenido eran instancias recurrentes contaba
+como mes con datos, así que hundía la media de todas las demás categorías. Sobre una instalación
+real con importación completa solo de abril a julio de 2026 y el alquiler recurrente materializado
+desde noviembre, ventana `6` sobre julio:
+
+| Categoría | Antes | Ahora | Por qué |
+|---|---|---|---|
+| Comer Fuera | 110 € | **220 €** | 540,00 ÷ 6 vs 540,00 ÷ 3 |
+| Supermercado | 96 € | **192 €** | mismo denominador |
+| Alquiler | 860 € | **860 €** | su cuota real, no 1.720 € |
+
+El denominador pasa a ser `avg_months` = meses del tramo con ≥1 movimiento **real**
+(`recurring_rule_id IS NULL`) — el mismo predicado que ya usaba `transactions_avg` para alimentar
+el engine en los modos B y C. La divergencia entre ambos estaba anotada en el código como
+deliberada, «no alinear sin una decisión de producto»: la decisión se tomó.
+
+Un mes no real queda fuera del **numerador y del denominador** a la vez. Excluirlo solo del
+denominador dejaría su importe arriba y dispararía las categorías presentes en él: el alquiler de
+700 €/mes saldría a 1.720 €.
+
+El denominador sigue siendo **único para todas las líneas**, no por categoría. Así
+`Σ avg de categorías == totals.expense_avg` y el KPI «Gasto promedio» y la tasa de ahorro no se
+inflan. La contrapartida, aceptada y ahora documentada en los textos de ayuda: un mes real sin
+movimientos de una categoría concreta sí cuenta como cero para ella — es la media del hogar, no
+«cuánto gasto cuando gasto».
+
+Sigue sin cambiar: la ventana es de calendario (`"6"` = seis meses civiles anteriores), el mes
+seleccionado sigue excluido, y las transferencias conciliadas siguen fuera de todos los buckets.
+
+#### Añadido al response (aditivo)
+
+- `avg_months` — **el denominador**. `0` ⟺ no hay promedio y todas las medias son 0.
+- `months_with_data` — **sin cambios de semántica**: meses con movimientos de cualquier tipo. Se
+  mantiene porque describe lo que hay en el tramo; ya no es el denominador, y su doc lo dice.
+- `avg_basis {months, first_month, last_month, has_gaps}` — de qué meses sale la media. `has_gaps`
+  impide etiquetar «abr–jun» una media de abril y junio.
+- `avg_unavailable_reason` — `"empty_window"` (no hay nada) vs `"only_recurring_months"` (hay, pero
+  todo recurrente). Piden acciones distintas: importar histórico vs bajar la ventana.
+
+En la pestaña Gastos las tarjetas de promedio muestran la base en el paréntesis («media de abr
+2026–jun 2026»), porque «Promedio 6m» sobre tres meses de datos se lee como seis meses de datos.
+
+### La jubilación viajaba como índice de mes, sin fecha ni edad (issue #6)
+
+`simulate_projection` devolvía `jubilacion_month_index: 137` y **ninguna ancla con la que
+convertirlo**: la respuesta no llevaba ni la fecha del mes 0 ni la de nacimiento, así que el
+consumidor tenía que encadenar una llamada a `get_projection` y hacer a mano la aritmética de
+calendario y de edad — meses → fecha civil con recorte de fin de mes → años cumplidos. Es
+exactamente el cálculo en el que un LLM se equivoca en silencio.
+
+- `jubilacion_date_ymd` y `jubilacion_age` en los KPIs de `simulate_projection` **y** en
+  `GET /v1/projection/series`. El índice **no** desaparece: sigue siendo la clave para indexar las
+  series.
+- `simulate_projection` devuelve además `anchor_date_ymd`, `show_age_mode` y `viewer_birth_date`:
+  la respuesta es autocontenida. Todo sale del contexto que `simulate_projection_core` ya resolvía
+  y descartaba — **cero queries adicionales**.
+- `jubilacion_months_delta` de `deltas` se queda en meses: ahí el delta en meses es la unidad
+  natural.
+
+La fecha se calcula sumando N meses al ancla **conservando su día**, con recorte a fin de mes
+(31 ene + 1 mes = 28 feb) — exactamente `addMonthsCivil` de la web, de modo que la edad servida
+coincide con la etiqueta del chart. Anclar al día 1, como hacen los hitos, restaría un año cuando
+el cruce cae en el mes de cumpleaños; hay un test que lo demuestra. `ProjectionMilestone.reached_date_ymd`
+conserva su día 1 (contrato ya publicado): ambas fechas coinciden siempre en año y mes.
+
+`jubilacion_age` es `null` sin fecha de nacimiento resuelta, con independencia de `show_age_mode`.
+
+### Tests
+
+- `transactions_summary.rs` +4: el pin del mes solo-recurrente fuera de ambos lados (con la
+  aditividad Σ líneas == total), un mes real contando sus recurrentes, `has_gaps` con meses no
+  contiguos, y los dos motivos de «sin promedio». Los pins previos del denominador pasan sin
+  tocarlos.
+- `jubilacion_civil_tests` en `handlers/projection.rs` (8, sin DB): clamp de fin de mes incluido un
+  29 de febrero, salto de año, `mi = 0` (ya-FIRE hoy) y la prueba del año de diferencia que
+  justifica anclar al día del ancla.
+- `mcp_simulate.rs`: paridad de fecha, edad y ancla entre `simulate_projection` y `get_projection`,
+  y coherencia fecha ↔ índice.
+
+### Paridad MCP
+
+Desenlace de la evaluación de `futurefin-mcp-parity`: **tool actualizada ×3** (`get_projection`,
+`simulate_projection`, `get_transactions_summary`), ninguna omisión. Las tres comparten core con
+sus handlers HTTP, así que no hubo código MCP que tocar — solo sus descripciones, que ahora
+describirían mal el denominador y la jubilación. El catálogo sigue en **50 tools**:
+`tools_list_returns_exactly_the_v1_catalog` no se mueve.
+
+### Deriva de documentación corregida de paso
+
+`CLAUDE.md`, `.claude/api-routes.md` y la skill de FIRE llamaban `transactions_12m_avg` a un helper
+que se llama `transactions_avg`.
+
+
 ## [3.9.0] - 2026-08-21
 
 Una sola cifra de ahorro por modo, ventanas del promedio configurables por lado, y los recurrentes

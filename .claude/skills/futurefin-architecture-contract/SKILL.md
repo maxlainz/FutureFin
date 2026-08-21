@@ -279,7 +279,7 @@ C added Unreleased).** The blanket "transactions are never a projection input" r
 `transactions_projection_cache.rs`). In the **modes that use transactions** — `transactions_avg` (mode B)
 and `budget_income_real_expense` (mode C), i.e. `SavingsSource::uses_transactions()` — the projection
 derives the monthly saving from the **weighted 12-month average** of **non-reconciled** transactions
-(`transactions_12m_avg`, raw since the 3.4.0 reform — paid cuotas count as ordinary spending and
+(`transactions_avg`, raw since the 3.4.0 reform — paid cuotas count as ordinary spending and
 liabilities only subtract their principal from net worth; mode C keeps the budget income and only takes
 the real expense; since 3.5.0 reconciled transfer legs — `transfer_counterpart_id IS NOT NULL` — are
 excluded from numerator AND denominator: an internal transfer is not income or expense), so

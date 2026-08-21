@@ -305,6 +305,10 @@ export type ProjectionSeriesApi = {
   viewer_birth_date?: string | null;
   /** Primer mes en que el patrimonio neto ≥ objetivo FIRE móvil del mes en curso. `null` si no alcanzado. */
   jubilacion_month_index?: number | null;
+  /** Fecha civil del cruce (`YYYY-MM-DD`), ya resuelta en servidor. */
+  jubilacion_date_ymd?: string | null;
+  /** Años cumplidos en esa fecha; ausente sin fecha de nacimiento resuelta. */
+  jubilacion_age?: number | null;
   /** Objetivo FIRE base en euros de hoy. El target real de cada mes crece con la inflación. */
   jubilacion_target_net_worth?: string | null;
   /** Serie del target FIRE ajustado por inflación, paralela a `points`. f64[] (vacío cuando no hay FIRE). */
@@ -696,6 +700,18 @@ export type SummaryTotalsApi = {
   net_actual: string;
 };
 
+/** De qué meses sale el promedio de la comparativa mensual. */
+export type AvgBasisApi = {
+  /** Meses reales incluidos (≥ 1). */
+  months: number;
+  /** Mes más antiguo incluido (`YYYY-MM`). */
+  first_month: string;
+  /** Mes más reciente incluido (`YYYY-MM`). */
+  last_month: string;
+  /** `true` ⟺ los meses incluidos no son consecutivos. */
+  has_gaps: boolean;
+};
+
 /** Respuesta de `GET /v1/transactions/summary`. */
 export type TransactionsSummaryApi = {
   year: number;
@@ -706,8 +722,20 @@ export type TransactionsSummaryApi = {
   avg_window: string;
   /** Nº de meses que abarca la ventana del promedio. */
   window_months: number;
-  /** Nº de meses (dentro de la ventana) que tienen datos → si 0, no hay promedio. */
+  /**
+   * Nº de meses de la ventana con movimientos de cualquier tipo, recurrentes incluidos.
+   * Describe lo que hay. NO es el denominador del promedio — ese es `avg_months`.
+   */
   months_with_data: number;
+  /**
+   * Denominador del promedio: meses de la ventana con al menos un movimiento REAL (no recurrente).
+   * Si 0, no hay promedio.
+   */
+  avg_months: number;
+  /** De qué meses sale el promedio. Ausente ⟺ `avg_months === 0`. */
+  avg_basis?: AvgBasisApi;
+  /** Por qué no hay promedio, cuando no lo hay. Ausente cuando sí lo hay. */
+  avg_unavailable_reason?: "empty_window" | "only_recurring_months";
   /** `household` | `mine`. */
   view: string;
   expense_categories: CategoryComparisonLineApi[];

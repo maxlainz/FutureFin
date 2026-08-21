@@ -10,10 +10,18 @@
 //!
 //! ## Promedio ponderado (`avg`)
 //! El tramo del promedio es el rango medio-abierto `[window_start, selected)` de meses civiles,
-//! elegido con `avg_window` (`3`|`6`|`12`|`ytd`|`all`; alias legado `avg_months` 1..24). El
-//! denominador NO es el número de meses del tramo sino `months_with_data` = nº de meses del tramo
-//! con ≥1 transacción (promedio ponderado: los meses vacíos no diluyen la media). Si no hay
-//! ninguno el denominador es 1 (numerador 0 → avg 0).
+//! elegido con `avg_window` (`3`|`6`|`12`|`ytd`|`all`; alias legado `avg_months` 1..24). De ese
+//! tramo solo promedian los meses REALES (≥1 movimiento con `recurring_rule_id IS NULL`), y lo
+//! hacen enteros: un mes no real queda fuera del numerador Y del denominador. El denominador es
+//! `avg_months`; `months_with_data` (meses con ≥1 movimiento de cualquier tipo) se sigue
+//! publicando aparte porque describe lo que hay, no lo que promedia. Sin meses reales no hay
+//! promedio: `avg_months = 0`, todas las medias 0, `avg_basis = null` y `avg_unavailable_reason`
+//! dice por qué.
+//!
+//! El denominador es único para todas las líneas, no por categoría: así `Σ avg de categorías`
+//! sigue siendo `totals.expense_avg` y la tasa de ahorro promedio no se infla. La contrapartida
+//! aceptada es que un mes real sin movimientos de una categoría concreta SÍ cuenta como cero
+//! para ella — es la media del hogar, no «cuánto gasto cuando gasto».
 //!
 //! ## Cuotas de pasivo: atribuidas a su categoría de gasto (3.4.0)
 //! Desde 3.4.0 cada pasivo puede declarar `expense_category_id` (obligatorio al crear) y su
@@ -33,8 +41,9 @@ use crate::handlers::installation::{
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::schema::{
-    BlockActualAvg, CategoryComparisonLine, CategoryMonthPoint, CategoryMonthlySeriesEntry,
-    CategoryMonthlySeriesResponse, SummaryTotals, TransactionsSummaryResponse,
+    AvgBasis, BlockActualAvg, CategoryComparisonLine, CategoryMonthPoint,
+    CategoryMonthlySeriesEntry, CategoryMonthlySeriesResponse, SummaryTotals,
+    TransactionsSummaryResponse,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Query};
@@ -115,6 +124,9 @@ struct BucketRow {
     kind: Option<String>,
     category_id: Option<Uuid>,
     total: Decimal,
+    /// Movimientos NO recurrentes del bucket. Σ por mes `> 0` ⟺ el mes es real (ver
+    /// `in_avg_window`). Mismo predicado que `MonthAgg::real_txns` de `transactions_avg`.
+    real_txns: i32,
 }
 
 /// Suma raw firmada de `(ym, kind, category)`.
@@ -477,7 +489,8 @@ pub(crate) async fn transactions_summary_core(
     let arg = view.next_arg_index();
     let sql = format!(
         "SELECT to_char(t.op_date, 'YYYY-MM') AS ym, t.kind AS kind,
-                t.category_id AS category_id, SUM(t.amount) AS total
+                t.category_id AS category_id, SUM(t.amount) AS total,
+                COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL)::int AS real_txns
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.transfer_counterpart_id IS NULL
@@ -491,16 +504,16 @@ pub(crate) async fn transactions_summary_core(
         .fetch_all(pool)
         .await?;
     let mut buckets: HashMap<(String, String, Option<Uuid>), Decimal> = HashMap::new();
+    // Movimientos NO recurrentes por mes, para decidir qué meses son reales.
+    let mut real_txns_by_ym: HashMap<String, i32> = HashMap::new();
     for r in raw {
         let kind = r.kind.unwrap_or_default();
+        *real_txns_by_ym.entry(r.ym.clone()).or_insert(0) += r.real_txns;
         *buckets.entry((r.ym, kind, r.category_id)).or_insert(Decimal::ZERO) += r.total;
     }
 
-    // `months_with_data` = meses distintos del tramo con ≥1 transacción de cualquier kind/categoría.
-    // OJO — definición distinta A PROPÓSITO de la de `transactions_12m_avg` (arriba): aquí cuentan
-    // TODOS los movimientos, incluidos los recurrentes; allí solo los meses con ≥1 movimiento real
-    // (`recurring_rule_id IS NULL`). La pestaña Movimientos muestra lo que hay; la simulación usa la
-    // definición estricta. No alinear ambas sin una decisión de producto.
+    // `months_with_data` = meses distintos del tramo con ≥1 transacción de cualquier kind/categoría,
+    // recurrentes incluidos. Es lo que HAY, y por eso sigue siendo la cifra de la pestaña Movimientos.
     let months_with_data = {
         let mut set: HashSet<&String> = HashSet::new();
         for (ym, _kind, _cat) in buckets.keys() {
@@ -509,6 +522,50 @@ pub(crate) async fn transactions_summary_core(
             }
         }
         set.len() as u32
+    };
+
+    // `real_months` = meses del tramo con ≥1 movimiento REAL (`recurring_rule_id IS NULL`). Mismo
+    // predicado que `transactions_avg`: hasta 3.9.0 esta comparativa dividía entre `months_with_data`
+    // y un mes cuyo único contenido eran instancias recurrentes hundía la media de TODAS las
+    // categorías (una categoría ausente ese mes contaba como cero). Alinear ambas definiciones era
+    // una decisión de producto pendiente; se tomó. Siguen sin ser idénticas: `transactions_avg` tiene
+    // además ventanas por lado configurables, mientras que aquí la ventana es siempre de calendario.
+    let real_months: HashSet<&str> = real_txns_by_ym
+        .iter()
+        .filter(|(ym, n)| **n > 0 && in_window(ym.as_str()))
+        .map(|(ym, _)| ym.as_str())
+        .collect();
+
+    // El tramo que realmente promedia: calendario ∩ meses reales. Se aplica al NUMERADOR y al
+    // DENOMINADOR a la vez — excluir un mes solo del denominador dejaría su gasto en el numerador y
+    // dispararía las categorías presentes en él (un alquiler de 700 €/mes saldría a 1.720 €).
+    let in_avg_window = |ym: &str| in_window(ym) && real_months.contains(ym);
+
+    let avg_months = real_months.len() as u32;
+    // Base del promedio: qué meses lo produjeron. `has_gaps` impide una etiqueta mentirosa —
+    // con ventana de calendario los meses reales pueden no ser consecutivos (abr y jun reales,
+    // may solo-recurrente) y «abr–jun» fingiría un rango contiguo. Misma forma que `AvgSide`.
+    let avg_basis = if avg_months == 0 {
+        None
+    } else {
+        let mut yms: Vec<&str> = real_months.iter().copied().collect();
+        yms.sort_unstable();
+        let span = ym_ordinal(yms[yms.len() - 1]) - ym_ordinal(yms[0]) + 1;
+        Some(AvgBasis {
+            months: avg_months,
+            first_month: yms[0].to_string(),
+            last_month: yms[yms.len() - 1].to_string(),
+            has_gaps: span != avg_months as i32,
+        })
+    };
+    // Por qué no hay promedio, cuando no lo hay: distingue «no has importado nada» de «solo tienes
+    // recurrentes», que piden acciones distintas (importar vs bajar la ventana).
+    let avg_unavailable_reason: Option<String> = if avg_months > 0 {
+        None
+    } else if months_with_data == 0 {
+        Some("empty_window".into())
+    } else {
+        Some("only_recurring_months".into())
     };
 
     // ---- Presupuesto por categoría (scope income/expense) ------------------------------------
@@ -575,16 +632,20 @@ pub(crate) async fn transactions_summary_core(
     };
 
     // ---- Construcción de las líneas por categoría --------------------------------------------
-    let avg_denom = Decimal::from(months_with_data.max(1));
+    // `.max(1)` solo evita la división por cero: con `avg_months == 0` ningún mes pasa
+    // `in_avg_window`, así que todos los numeradores son 0 y las medias salen 0 igualmente.
+    let avg_denom = Decimal::from(avg_months.max(1));
 
     let build_lines = |scope_kind: &str,
                        budget_map: &HashMap<Uuid, Decimal>,
                        income_sign: bool|
      -> Vec<CategoryComparisonLine> {
         // Universo de categorías: presentes en actuals/ventana (buckets del kind) ∪ presupuesto.
+        // La ventana es la del promedio: una categoría que solo aparece en meses NO reales no
+        // materializa una fila fantasma con actual 0, budget 0 y avg 0.
         let mut cats: HashSet<Option<Uuid>> = HashSet::new();
         for (y, k, cat) in buckets.keys() {
-            if k == scope_kind && (y == &selected_ym || in_window(y.as_str())) {
+            if k == scope_kind && (y == &selected_ym || in_avg_window(y.as_str())) {
                 cats.insert(*cat);
             }
         }
@@ -598,7 +659,9 @@ pub(crate) async fn transactions_summary_core(
                 let raw_sel = bucket(&buckets, &selected_ym, scope_kind, cat);
                 let raw_win: Decimal = buckets
                     .iter()
-                    .filter(|((y, k, c), _)| k == scope_kind && *c == cat && in_window(y.as_str()))
+                    .filter(|((y, k, c), _)| {
+                        k == scope_kind && *c == cat && in_avg_window(y.as_str())
+                    })
                     .map(|(_, v)| *v)
                     .sum();
                 // income → magnitud = +suma; expense → magnitud = −suma.
@@ -642,7 +705,7 @@ pub(crate) async fn transactions_summary_core(
     let savings_actual = -bucket_all(&buckets, &selected_ym, "savings");
     let savings_win: Decimal = buckets
         .iter()
-        .filter(|((y, k, _), _)| k == "savings" && in_window(y.as_str()))
+        .filter(|((y, k, _), _)| k == "savings" && in_avg_window(y.as_str()))
         .map(|(_, v)| *v)
         .sum();
     let savings_avg = (-savings_win / avg_denom).round_dp(4);
@@ -665,6 +728,9 @@ pub(crate) async fn transactions_summary_core(
         avg_window: window.as_str(),
         window_months,
         months_with_data,
+        avg_months,
+        avg_basis,
+        avg_unavailable_reason,
         view: if view == LedgerView::Mine { "mine".into() } else { "household".into() },
         expense_categories,
         income_categories,
