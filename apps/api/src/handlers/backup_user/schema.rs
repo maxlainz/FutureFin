@@ -324,7 +324,7 @@ pub struct BackupRecurringRuleV6 {
 }
 
 /// A recurring-transaction rule as exported in schema_version 7 and 8 — rules still carried the
-/// monotonic idempotency cursor `last_materialized_month`, retired in v9 (see 3.10.0: instances
+/// monotonic idempotency cursor `last_materialized_month`, retired in v9 (see 3.9.0: instances
 /// converge on the months that actually have data, so the anchor is the ORIGIN month instead).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackupRecurringRuleV8 {
@@ -557,7 +557,7 @@ pub struct BackupPayloadV8 {
     pub transfer_match_rejections: Vec<BackupTransferMatchRejection>,
 }
 
-/// v9 (3.10.0): las reglas recurrentes cambian el cursor `last_materialized_month` por el ancla
+/// v9 (3.9.0): las reglas recurrentes cambian el cursor `last_materialized_month` por el ancla
 /// `origin_month`. Es un cambio NO aditivo, como el v6→v7 que quitó `day_of_month`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackupPayloadV9 {

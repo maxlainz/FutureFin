@@ -813,12 +813,12 @@ pub struct RecurringRuleResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MaterializeResponse {
-    /// Reglas examinadas. Desde 3.10.0 la convergencia es de ámbito **instalación**, así que
+    /// Reglas examinadas. Desde 3.9.0 la convergencia es de ámbito **instalación**, así que
     /// cuenta las reglas de toda la instalación, no solo las del usuario que llama.
     pub rules_processed: u32,
     /// Instancias nuevas creadas (meses activos que aún no tenían la suya).
     pub materialized: u32,
-    /// Instancias **podadas** (3.10.0): vivían en meses que dejaron de tener movimientos reales.
+    /// Instancias **podadas** (3.9.0): vivían en meses que dejaron de tener movimientos reales.
     pub pruned: u32,
 }
 
