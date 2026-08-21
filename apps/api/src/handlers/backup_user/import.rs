@@ -267,6 +267,11 @@ pub async fn import_user_backup_apply(
     crate::handlers::transactions::reconcile::auto_reconcile_after_mutation(&state, iid, user.id.0)
         .await;
 
+    // Un restore inserta el conjunto verbatim, incluidas instancias recurrentes de un fichero
+    // anterior a 3.10.0 que pueden vivir en meses sin datos reales. La convergencia lo deja
+    // consistente con la invariante actual (y también rellena lo que falte).
+    crate::handlers::transactions::recurring::converge_recurring_after_mutation(&state, iid).await;
+
     // A full replace rewrites assets/liabilities/budget — all projection-engine inputs — so the
     // in-memory projection cache would otherwise stay stale for up to its TTL. Invalidate it now.
     crate::handlers::projection::refresh_projection_after_mutation(&state, iid, user.id.0).await;
@@ -779,7 +784,7 @@ async fn insert_payload(
             r#"INSERT INTO recurring_transaction_rules
                    (id, installation_id, owner_user_id, concept, amount, kind, category_id,
                     linked_asset_id, linked_liability_id, notes,
-                    last_materialized_month)
+                    origin_month)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
         )
         .bind(new_id)
@@ -792,7 +797,7 @@ async fn insert_payload(
         .bind(linked_asset_id)
         .bind(linked_liability_id)
         .bind(r.notes.as_deref())
-        .bind(r.last_materialized_month)
+        .bind(r.origin_month)
         .execute(&mut **tx)
         .await?;
         new_recurring_rule_ids.push(new_id);

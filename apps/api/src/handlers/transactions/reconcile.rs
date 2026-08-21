@@ -432,6 +432,8 @@ pub(crate) async fn reconcile_pair_core(
     }
     tx.commit().await?;
 
+    // Conciliar saca un movimiento del conjunto real → puede DESACTIVAR su mes.
+    crate::handlers::transactions::recurring::converge_recurring_after_mutation(state, iid).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, owner).await;
     load_pair_response(&state.pool, a.id, b.id).await
 }
@@ -481,6 +483,8 @@ pub(crate) async fn unreconcile_core(
     .await?;
     tx.commit().await?;
 
+    // Desconciliar devuelve un movimiento al conjunto real → puede ACTIVAR su mes.
+    crate::handlers::transactions::recurring::converge_recurring_after_mutation(state, iid).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, owner).await;
     load_pair_response(&state.pool, id, counterpart_id).await
 }
@@ -495,6 +499,7 @@ pub(crate) async fn reconcile_now_core(
 ) -> Result<ReconcileRunResponse, ApiError> {
     let outcome = auto_reconcile_owner(&state.pool, iid, owner).await?;
     if outcome.pairs_created > 0 {
+        crate::handlers::transactions::recurring::converge_recurring_after_mutation(state, iid).await;
         invalidate_projection_if_savings_uses_transactions(state, iid, owner).await;
     }
     Ok(ReconcileRunResponse {
