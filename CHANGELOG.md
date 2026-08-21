@@ -4,7 +4,7 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [3.8.0] - 2026-08-21
 
 Tren del **issue #4** — ergonomía del servidor MCP derivada de una sesión real de uso, más la
 resolución de la cascada. Catálogo **47 → 50 tools**. Ninguna migración: nada de esto añade
