@@ -4,9 +4,9 @@
 //! importe firmado, kind, categoría y enlaces. Las reglas tienen resolución **MENSUAL** (sin día
 //! configurable desde 3.2.0).
 //!
-//! # Convergencia (3.10.0) — las instancias siguen a los datos reales
+//! # Convergencia (3.9.0) — las instancias siguen a los datos reales
 //!
-//! Desde 3.10.0 no hay cursor. El estado objetivo es una **invariante declarativa**:
+//! Desde 3.9.0 no hay cursor. El estado objetivo es una **invariante declarativa**:
 //!
 //! > una instancia de la regla R existe en el mes M ⟺ M es un mes **activo** de la instalación y
 //! > `M >= R.origin_month`.
@@ -36,7 +36,7 @@
 //! exención la convergencia borraría lo que el usuario acaba de teclear. La inserción, en cambio,
 //! sí considera el mes de origen (`>= origin_month`) y se apoya en la comprobación de existencia
 //! para no duplicarlo: así un mes de origen que quedó sin instancia (la limpieza histórica de la
-//! migración 3.10.0 no eximía a nadie) vuelve a materializar si algún día recibe datos.
+//! migración 3.9.0 no eximía a nadie) vuelve a materializar si algún día recibe datos.
 //!
 //! Cache de proyección (contrato en `transactions/mod.rs`): la convergencia crea/borra instancias
 //! reales → siempre corre **antes** de la invalidación, para que una sola invalidación cubra la
@@ -342,7 +342,7 @@ pub(crate) async fn converge_recurring_for_installation(
     // `op_date` = último día del mes (contrato 3.2.0: la instancia de M cuenta en las
     // estadísticas de M). El filtro es `>=`, no `>`: la comprobación de existencia ya evita
     // duplicar el origen, y así un mes de origen que quedó sin instancia (la limpieza histórica
-    // de 3.10.0 no eximía a nadie) vuelve a materializar si algún día recibe datos.
+    // de 3.9.0 no eximía a nadie) vuelve a materializar si algún día recibe datos.
     let mut created = 0u32;
     for rule in &rules {
         for m in months.iter().filter(|m| **m >= rule.origin_month) {
@@ -462,7 +462,7 @@ pub async fn materialize_recurring(
 
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `materialize_recurring`.
 ///
-/// Desde 3.10.0 es una **pasada de convergencia bajo demanda**: el endpoint sobrevive como red de
+/// Desde 3.9.0 es una **pasada de convergencia bajo demanda**: el endpoint sobrevive como red de
 /// auto-reparación (una convergencia post-commit best-effort que falló, un `.ffbackup` restaurado
 /// de una versión anterior, una regla creada después de los datos), y en régimen estacionario es
 /// un no-op. Idempotente **por existencia**, no por cursor.

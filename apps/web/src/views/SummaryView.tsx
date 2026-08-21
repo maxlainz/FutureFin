@@ -84,7 +84,7 @@ export function SummaryView({
 
   const fh = summary?.financial_health;
 
-  // 3.10.0 — UNA sola cifra de ahorro por modo: la que usa la proyección.
+  // 3.9.0 — UNA sola cifra de ahorro por modo: la que usa la proyección.
   //
   // Antes convivían tres (el neto del modo, el neto del presupuesto y el promedio real bruto) y
   // en modo C ninguna era derivable de las otras. Ahora la tarjeta enseña el neto EFECTIVO como

@@ -686,7 +686,7 @@ async fn backup_recurring_rules_round_trip() {
     let (oy, om) = shift_month(today.year(), today.month(), -2);
     let origin = NaiveDate::from_ymd_opt(oy, om, 1).unwrap().format("%Y-%m-%d").to_string();
 
-    // 3.10.0: solo los meses ACTIVOS materializan → sembramos un movimiento real en M-1 antes.
+    // 3.9.0: solo los meses ACTIVOS materializan → sembramos un movimiento real en M-1 antes.
     let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
     let iid = app.installation_id().await;
     sqlx::query(

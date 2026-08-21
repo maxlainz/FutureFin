@@ -550,7 +550,7 @@ async fn mode_b_runway_uses_effective_expense_base() {
     assert_eq!(expense_reg, d(1_500));
     assert_eq!(expense_tot, d(1_500));
     assert_eq!(net, d(1_500));
-    // Identidad del panel tras retirar `expense_derived` (3.10.0): era degenerada desde la 3.7.0
+    // Identidad del panel tras retirar `expense_derived` (3.9.0): era degenerada desde la 3.7.0
     // (siempre 0 en los tres modos), así que `expense_total == expense_regular` la sustituye.
     assert_eq!(
         expense_tot, expense_reg,

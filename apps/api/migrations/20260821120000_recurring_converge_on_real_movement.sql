@@ -1,4 +1,4 @@
--- Los recurrentes de un mes existen ⟺ ese mes tiene datos reales (3.10.0).
+-- Los recurrentes de un mes existen ⟺ ese mes tiene datos reales (3.9.0).
 --
 -- ANTES: `POST /materialize` avanzaba un cursor monotónico (`last_materialized_month`) y escribía
 -- una instancia por cada mes civil cerrado, hubiera o no movimientos reales en él. Eso producía
