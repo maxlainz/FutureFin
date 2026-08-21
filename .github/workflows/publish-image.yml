@@ -1,19 +1,25 @@
 name: Publish Docker image
 
-# Publishes on explicit semver tags (v1.0.0, v1.2.3, …).
-# GHCR always; Docker Hub if DOCKERHUB_USERNAME + DOCKERHUB_TOKEN secrets are set.
+# FALLBACK MANUAL. El camino normal de publicación es `./scripts/publish-image-local.sh`.
 #
-# Tags published per registry:
+# Por qué ya NO se dispara con el tag: los runners son amd64, así que la mitad arm64 se
+# construye EMULADA bajo QEMU y un release tardaba ~1,5-2 h. En agosto de 2026 eso fueron 958
+# de los ~1460 min consumidos (el 66 % de la cuota) para un build cuyo cómputo real son ~3,5
+# min. Publicando en local con containerd image store salen las dos arquitecturas de una vez y
+# el gasto aquí es cero.
+#
+# Úsalo cuando no puedas publicar desde tu máquina (otro equipo, sin Docker, sin credenciales).
+# Hace exactamente lo mismo que el script: mismas registries, mismos tags y el mismo Release.
+#
+# Tags publicados por registry:
 #   vX.Y.Z  →  :1.0.0  :1.0  :1  :latest
 #
-# Required secrets:
-#   (none)              — GHCR uses GITHUB_TOKEN automatically
-#   DOCKERHUB_USERNAME  — Docker Hub user or org (optional)
-#   DOCKERHUB_TOKEN     — Docker Hub access token  (optional)
+# Secretos:
+#   (ninguno)           — GHCR usa GITHUB_TOKEN automáticamente
+#   DOCKERHUB_USERNAME  — usuario u org de Docker Hub (opcional)
+#   DOCKERHUB_TOKEN     — token de acceso de Docker Hub (opcional)
 
 on:
-  push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       tag:
@@ -102,10 +108,11 @@ jobs:
       # CHANGELOG vía `scripts/changelog-section.sh` — misma fuente de verdad que
       # el backfill manual de 3.0.0…3.8.0, para que no haya dos formatos.
       - name: Publish GitHub Release
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          # `github.ref_name` sería la RAMA en un workflow_dispatch, no el tag: el tag es el
+          # input, el mismo que resuelve el checkout de arriba.
+          TAG: ${{ github.event.inputs.tag }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "el Release $TAG ya existe — no lo toco"

@@ -31,6 +31,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   (recupera lo que un pase perdió, recorre todos los owners, **nunca resucita** un par que el
   usuario desconcilió, y es no-op con todo conciliado), verificados con mutantes.
 
+### Changed — La imagen se publica en local; el tag deja de disparar builds
+
+- **El problema, con números**: en agosto de 2026 el repo (privado) llevaba ~1460 de sus 2000 min
+  mensuales de Actions, y **958 se los comía `publish-image.yml`** — 10 publicaciones a ~96 min. No
+  porque el build sea pesado: el cómputo real son **~3,5 min** (el stage de Rust, 72 s). Los
+  runners de GitHub son amd64, así que la mitad **arm64 se construía emulada bajo QEMU**. Se pagaba
+  cuota por emulación, no por trabajo.
+- **La solución**: `scripts/publish-image-local.sh`. Con el containerd image store de Docker
+  Desktop, `docker buildx --platform linux/amd64,linux/arm64 --push` produce el índice multi-arch y
+  lo sube a GHCR y Docker Hub en una pasada, con los mismos tags que el workflow (`:X.Y.Z`, `:X.Y`,
+  `:X`, `:latest`) y creando el mismo GitHub Release desde el CHANGELOG. Gasto en Actions: **cero**.
+- **Verifica antes de publicar, no después**: árbol limpio, HEAD == commit del tag, `Cargo.toml`
+  coincide con la versión pedida y el CHANGELOG tiene su sección. Y **solo mueve `:latest` si el
+  tag es el más alto** — reconstruir una versión vieja no puede degradar el tag que la gente usa.
+  Tras publicar inspecciona el manifiesto: comprobar que el comando salió 0 no es comprobar que se
+  publicaron las dos arquitecturas.
+- **`publish-image.yml` pasa a `workflow_dispatch`**: sigue existiendo como fallback para publicar
+  desde otra máquina, y hace exactamente lo mismo. Su paso de Release ahora lee el tag del input
+  (`github.ref_name` sería la rama en un dispatch, no el tag).
+- **`docker-stack` deja de correr en push a `main`** (~90 min/mes: 12 de las 49 ejecuciones del mes
+  eran de `main`). No es un debilitamiento: `main` es espejo completo de `dev` por contrato, así
+  que ese job ya se ejecutó sobre el mismo árbol. Sigue corriendo en `dev`, en PRs y a mano.
+- Coste total esperado: de ~1460 min/mes a ~410.
+
 ### Fixed — El barrido de conciliación no invalidaba la cache de proyección
 
 - **El bug**: `sweep_all_owners` recibía un `PgPool`, no el `AppState`, así que **estructuralmente

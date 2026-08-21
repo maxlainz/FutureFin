@@ -48,6 +48,14 @@ jobs:
   # externa (watchtower sobre compose 2.x), automigración, pg_upgrade 15→16 y apagado
   # ordenado. Es la ÚNICA evidencia automatizada de «sin pérdida de datos»: no debilitar.
   docker-stack:
+    # NO corre en push a `main`, y no es un debilitamiento: `main` es un espejo COMPLETO de
+    # `dev` (CLAUDE.md §Releases), así que todo commit llega ahí por un merge de un `dev` que
+    # ya pasó este job sobre EL MISMO árbol — `git diff dev main` es vacío por contrato. Se
+    # mantiene en push a `dev`, en PRs a cualquier rama y en ejecuciones manuales. Ahorra ~90
+    # min/mes de cuota (12 de las 49 ejecuciones de agosto de 2026 eran de `main`) volviendo a
+    # verificar bits idénticos. Si alguna vez se empuja a `main` algo que no venga de `dev`,
+    # lánzalo a mano: `gh workflow run ci.yml --ref main`.
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
