@@ -239,7 +239,6 @@ async fn runway_pre_change_baseline_liquid_over_expense() {
     // 3.7.0: la cuota de 200 vive DENTRO del gasto regular (1.000 presupuestados + 200 de cuota).
     // El total (1.200) y el runway no se mueven — la fusión reparte, no suma.
     assert_eq!(dec(&h["expense_regular_monthly_equivalent"]), d(1_200));
-    assert_eq!(dec(&h["expense_derived_monthly_equivalent"]), Decimal::ZERO);
     assert_eq!(dec(&h["expense_total_monthly_equivalent"]), d(1_200));
     // 12.000 / 1.200 = 10 meses exactos.
     assert_eq!(dec(&h["runway_months"]), d(10));
@@ -540,24 +539,22 @@ async fn mode_b_runway_uses_effective_expense_base() {
 
     let h = health(&app, &owner.cookie).await;
     assert_eq!(h["savings_source"], "transactions_avg");
-    assert_eq!(h["savings_source_months_with_data"].as_u64().unwrap(), 1);
+    assert_eq!(h["savings_expense_basis"]["months_with_data"].as_u64().unwrap(), 1);
 
     let income = dec(&h["income_monthly_equivalent"]);
     let expense_reg = dec(&h["expense_regular_monthly_equivalent"]);
-    let expense_der = dec(&h["expense_derived_monthly_equivalent"]);
     let expense_tot = dec(&h["expense_total_monthly_equivalent"]);
     let net = dec(&h["net_monthly_equivalent"]);
 
     assert_eq!(income, d(3_000));
     assert_eq!(expense_reg, d(1_500));
-    assert_eq!(expense_der, Decimal::ZERO, "la cuota vive dentro del gasto; derived = 0 en los tres modos");
     assert_eq!(expense_tot, d(1_500));
     assert_eq!(net, d(1_500));
-    // Identidades del panel, válidas en los tres modos.
+    // Identidad del panel tras retirar `expense_derived` (3.10.0): era degenerada desde la 3.7.0
+    // (siempre 0 en los tres modos), así que `expense_total == expense_regular` la sustituye.
     assert_eq!(
-        expense_tot,
-        expense_reg + expense_der,
-        "expense_total = expense_regular + expense_derived"
+        expense_tot, expense_reg,
+        "sin componente derivada, expense_total = expense_regular"
     );
     assert_eq!(net, income - expense_tot, "net = income − expense_total");
 
@@ -604,7 +601,6 @@ async fn mode_b_zero_months_falls_back_to_budget_runway() {
     .await;
 
     let modo_a = health(&app, &owner.cookie).await;
-    assert_eq!(dec(&modo_a["expense_derived_monthly_equivalent"]), Decimal::ZERO);
     assert_eq!(dec(&modo_a["expense_total_monthly_equivalent"]), d(1_200));
     assert_eq!(dec(&modo_a["runway_months"]), d(10));
 
@@ -612,7 +608,7 @@ async fn mode_b_zero_months_falls_back_to_budget_runway() {
 
     let modo_b = health(&app, &owner.cookie).await;
     assert_eq!(modo_b["savings_source"], "budget", "fallback ⇒ fuente efectiva budget");
-    assert_eq!(modo_b["savings_source_months_with_data"].as_u64().unwrap(), 0);
+    assert_eq!(modo_b["savings_expense_basis"]["months_with_data"].as_u64().unwrap(), 0);
     assert_eq!(
         modo_b, modo_a,
         "sin meses reales el modo B debe devolver exactamente el bloque del modo A"
