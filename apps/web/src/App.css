@@ -1590,6 +1590,68 @@
   margin-bottom: 0;
 }
 
+/* Popover de ayuda (3.10.0). El icono reutiliza `.inline-hint-icon`, ya tokenizado; aquí solo se
+   convierte en botón y se ancla el panel. Diálogo NO modal: sin backdrop y sin atrapar el foco. */
+/* Etiqueta de campo con su interrogante al lado. `baseline` y no `center` para que el icono se
+   apoye en la línea del texto, como el patrón `.checkbox-label-with-hint` ya establecido. */
+.label-with-help {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.help-popover {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.help-popover__trigger {
+  background: none;
+  border: 1px solid var(--ff-line-soft);
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.help-popover__trigger svg {
+  width: 0.72rem;
+  height: 0.72rem;
+}
+.help-popover__trigger:hover,
+.help-popover__trigger[aria-expanded="true"] {
+  color: var(--ff-accent);
+  border-color: var(--ff-accent);
+}
+.help-popover__panel {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  z-index: 40;
+  width: min(19rem, calc(100vw - 2rem));
+  padding: 0.65rem 0.75rem;
+  background: var(--ff-paper);
+  border: 1px solid var(--ff-line);
+  border-radius: var(--ff-radius-panel);
+  box-shadow: var(--ff-shadow-elev);
+  text-align: left;
+  white-space: normal;
+}
+.help-popover__title {
+  margin: 0 0 0.3rem;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--ff-ink);
+}
+.help-popover__body {
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--ff-ink-soft);
+}
+
 .inline-hint-icon {
   display: inline-flex;
   align-items: center;
