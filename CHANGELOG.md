@@ -6,6 +6,31 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — La conciliación de transferencias deja de tener botón y gana una red de reintento
+
+- **El malentendido que lo motivó**: «Conciliar ahora» parecía una tarea manual que se hace una vez
+  al mes. No lo era: el pase automático ya corría **tras cada mutación** — alta, lote, edición de
+  importe/fecha, borrado, **confirm de import CSV**, materialización de recurrentes e import de
+  `.ffbackup`. Por eso su mensaje habitual era «Sin transferencias que conciliar».
+- **El hueco real, que sí existía**: esos pases son **best-effort por diseño** (un fallo se loguea y
+  no convierte una escritura ya persistida en un 5xx, porque el cliente reintentaría y duplicaría el
+  movimiento). El precio era que un fallo puntual dejaba el par sin conciliar **para siempre y en
+  silencio**: nada lo reintentaba, y el usuario no podía enterarse para pedir el pase manual.
+- **La solución**: `sweep_all_owners` + la **primera tarea periódica del binario**
+  (`FUTUREFIN_RECONCILE_SWEEP_HOURS`, default **24 h**, `0` la desactiva). Recorre cada
+  `(installation, owner)` con movimientos sin conciliar y repite el mismo algoritmo. Un owner que
+  falla no aborta el barrido: se cuenta y se reintenta a la siguiente pasada. La primera pasada va
+  **tras el primer intervalo**, no al arrancar, y la tarea se **aborta antes de cerrar el pool** en
+  el apagado ordenado.
+- En una instalación sana el barrido no encuentra nada — el pase es de punto fijo — y loguea a
+  `debug`; solo sube a `info` si concilió algo o si algún owner falló.
+- **Se retira el botón «Conciliar ahora»** de Movimientos. `POST /v1/transactions/reconcile` y la
+  tool MCP `reconcile_transfers` **siguen existiendo**: la recuperación manual no se pierde, solo
+  deja de ocupar sitio en una barra de acciones para algo que ya es automático.
+- Sin migración y sin cambio de contrato de API. Tests: 4 nuevos en `transactions_reconcile.rs`
+  (recupera lo que un pase perdió, recorre todos los owners, **nunca resucita** un par que el
+  usuario desconcilió, y es no-op con todo conciliado), verificados con mutantes.
+
 ### Added — Los GitHub Releases se publican solos desde el CHANGELOG
 
 - **El desajuste**: en GitHub convivían tres listas de versiones que no coincidían. Tags había 38;

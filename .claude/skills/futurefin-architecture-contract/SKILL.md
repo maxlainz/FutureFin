@@ -345,6 +345,30 @@ converts a two-process namespace into an exposed service for zero security gain;
 `/dev/tcp` fallback makes a container with a dead database report healthy — the exact failure the
 healthcheck exists to catch.
 
+### D16. Transfer reconciliation is continuous, with a periodic retry net (v3.8.1)
+El pase de conciliación (`handlers/transactions/reconcile.rs`) corre **tras cada mutación** del
+conjunto de transacciones: alta, alta en lote, PATCH de `amount`/`op_date`, borrado, borrado de
+lote, confirm de import CSV, materialización de recurrentes e import de `.ffbackup`.
+
+- **Los pases post-mutación son best-effort a propósito**: un fallo se loguea y NO convierte una
+  escritura ya persistida en un 5xx (el cliente reintentaría y duplicaría el movimiento — el
+  `fingerprint_ordinal` no lo impide). El precio es que ese par se queda sin conciliar de forma
+  **permanente y silenciosa**, porque nada lo reintenta y el usuario no puede enterarse.
+- **La red de reintento** es `sweep_all_owners`, lanzado por la **única tarea periódica del
+  binario** (`main.rs::spawn_reconcile_sweep`, `FUTUREFIN_RECONCILE_SWEEP_HOURS`, default 24 h,
+  0 = off). Recorre cada `(installation, owner)` con movimientos sin conciliar; un owner que falla
+  no aborta el barrido (se cuenta y se reintenta a la siguiente). Se **aborta antes de cerrar el
+  pool** en el apagado ordenado.
+- **Primera pasada tras el primer intervalo, no al arrancar**: en el arranque no ha pasado nada
+  que conciliar y competir con migraciones y warm-up no compra nada.
+- **La UI no tiene botón** desde 3.8.1: con el pase en cada mutación más el barrido, «Conciliar
+  ahora» no tenía trabajo (su mensaje habitual ya era «Sin transferencias que conciliar»). La ruta
+  `POST /v1/transactions/reconcile` y la tool MCP `reconcile_transfers` **se mantienen** como
+  recuperación manual.
+**Breaks if violated**: hacer que el pase post-mutación propague su error convierte una mutación
+correcta en 5xx y provoca duplicados por reintento del cliente; quitar el barrido devuelve el fallo
+silencioso permanente.
+
 ### D14. Second auth scheme: per-user Bearer API tokens, hash-only, live role (v3.0.0)
 The embedded MCP server (`/mcp`, module `apps/api/src/mcp/`, official `rmcp` SDK) needed a
 non-cookie credential. The decision mirrors D3 (sessions-in-DB, not JWT), deliberately:
