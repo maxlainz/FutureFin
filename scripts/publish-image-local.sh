@@ -23,11 +23,13 @@ cd "$repo_root"
 
 DRY_RUN=0
 ASSUME_YES=0
+SKIP_DOCKERHUB=0
 VERSION=""
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     --yes|-y)  ASSUME_YES=1 ;;
+    --skip-dockerhub) SKIP_DOCKERHUB=1 ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     -*)        echo "opción desconocida: $arg" >&2; exit 2 ;;
     *)         VERSION="$arg" ;;
@@ -82,7 +84,37 @@ major="${VERSION%%.*}"
 rest="${VERSION#*.}"
 minor="${rest%%.*}"
 
-IMAGES=("ghcr.io/maxlainz/futurefin" "docker.io/maxlainz/futurefin")
+# --- Registries: publicar solo donde hay credenciales, y NUNCA en silencio -----
+# Un push parcial es una trampa: si solo sube GHCR, quien haga `docker pull
+# maxlainz/futurefin:latest` (el default de docker-compose.yml) se queda con la imagen
+# ANTERIOR sin que nada avise. Por eso falta de login = abortar, salvo que lo pidas explícito.
+registry_authed() {
+  python3 - "$1" <<'PYEOF'
+import json, os, sys
+key = sys.argv[1]
+path = os.path.expanduser("~/.docker/config.json")
+auths = json.load(open(path)).get("auths", {}) if os.path.exists(path) else {}
+sys.exit(0 if any(key in k for k in auths) else 1)
+PYEOF
+}
+
+IMAGES=()
+registry_authed "ghcr.io" && IMAGES+=("ghcr.io/maxlainz/futurefin")   || echo "AVISO: sin login en ghcr.io — se omite esa registry."
+
+if registry_authed "index.docker.io" || registry_authed "docker.io"; then
+  IMAGES+=("docker.io/maxlainz/futurefin")
+elif [ "$SKIP_DOCKERHUB" -eq 1 ]; then
+  echo "AVISO: sin login en Docker Hub y --skip-dockerhub activo → se publica SOLO en GHCR."
+  echo "       Quien despliegue con el default de docker-compose.yml (maxlainz/futurefin)"
+  echo "       seguirá recibiendo la imagen anterior hasta que publiques ahí."
+else
+  die "sin login en Docker Hub. Haz 'docker login docker.io -u maxlainz' (usa un access
+       token, no la contraseña), o repite con --skip-dockerhub para publicar solo en GHCR
+       asumiendo que el tag de Docker Hub se queda atrás."
+fi
+
+[ "${#IMAGES[@]}" -gt 0 ] || die "no hay ninguna registry autenticada: nada que publicar"
+
 TAG_ARGS=()
 for img in "${IMAGES[@]}"; do
   TAG_ARGS+=(-t "$img:$VERSION" -t "$img:$major.$minor" -t "$img:$major")
