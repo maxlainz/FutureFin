@@ -1302,7 +1302,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_recurring_rules",
-        description = "Plantillas de movimientos recurrentes del usuario del token (nómina, gimnasio…): concepto, importe, kind, categoría y el cursor last_materialized_month (si es anterior al último mes cerrado hay materialización pendiente). Siempre own-user, sin view.",
+        description = "Plantillas de movimientos recurrentes del usuario del token (nómina, gimnasio…): concepto, importe, kind, categoría y el ancla origin_month (mes en que arrancó la regla). Las instancias existen en los meses con datos reales desde ese ancla — un mes sin movimientos no genera recurrentes. Siempre own-user, sin view.",
         annotations(title = "Recurrentes", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_recurring_rules(
@@ -2401,7 +2401,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "delete_recurring_rule",
-        description = "Retira una plantilla recurrente («deja de apuntarme el gimnasio»). Solo borra la PLANTILLA: las instancias ya materializadas sobreviven. Sin confirm=true no borra nada — devuelve un preview con la plantilla y su cursor last_materialized_month.",
+        description = "Retira una plantilla recurrente («deja de apuntarme el gimnasio»). Solo borra la PLANTILLA: las instancias ya materializadas sobreviven. Sin confirm=true no borra nada — devuelve un preview con la plantilla y su ancla origin_month.",
         annotations(title = "Borrar recurrente", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn delete_recurring_rule(

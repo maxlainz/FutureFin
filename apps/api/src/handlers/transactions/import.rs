@@ -418,6 +418,12 @@ pub async fn import_confirm(
     } else {
         0
     };
+    // Un import ACTIVA meses (les mete su primer movimiento real) → convergencia antes de la
+    // única invalidación: los recurrentes de esos meses nacen aquí.
+    if imported > 0 {
+        crate::handlers::transactions::recurring::converge_recurring_after_mutation(&state, iid)
+            .await;
+    }
     invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     Ok(Json(ImportConfirmResponse {
         import_id: final_import_id,

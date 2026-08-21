@@ -226,12 +226,12 @@ async fn fetch_recurring_rules(
         Option<Uuid>,   // linked_asset_id
         Option<Uuid>,   // linked_liability_id
         Option<String>, // notes
-        NaiveDate,      // last_materialized_month
+        NaiveDate,      // origin_month
     );
     let rows: Vec<Row> = sqlx::query_as(
         r#"SELECT r.id, r.concept, r.amount, r.kind, c.scope AS cat_scope, c.name AS cat_name,
                   r.linked_asset_id, r.linked_liability_id, r.notes,
-                  r.last_materialized_month
+                  r.origin_month
            FROM recurring_transaction_rules r
            LEFT JOIN categories c ON c.id = r.category_id
            WHERE r.installation_id = $1 AND r.owner_user_id = $2
@@ -260,7 +260,7 @@ async fn fetch_recurring_rules(
                 linked_asset_index: r.6.and_then(|a| asset_id_to_index.get(&a).copied()),
                 linked_liability_index: r.7.and_then(|l| liability_id_to_index.get(&l).copied()),
                 notes: r.8,
-                last_materialized_month: r.9,
+                origin_month: r.9,
             }
         })
         .collect();

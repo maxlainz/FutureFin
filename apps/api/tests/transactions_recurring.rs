@@ -24,12 +24,12 @@ fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
     )
 }
 
-/// Rebobina una regla al estado "recién creada, SIN backfill": borra sus instancias fuera del mes de
-/// origen `(oy, om)` y devuelve el cursor al primer día de ese mes. Necesario desde el fix del
-/// backfill-en-create (un alta con fecha pasada ya materializa los meses cerrados intermedios en el
-/// commit del alta): para volver a ejercitar el ENDPOINT `materialize` dejamos sólo el origen
-/// pendiente.
-async fn rewind_rule_to_origin(app: &TestApp, rule_id: &str, oy: i32, om: u32) {
+/// Deja una regla con SOLO su instancia de origen: borra las instancias fuera del mes `(oy, om)`.
+/// Desde 3.10.0 no hay cursor que rebobinar — la convergencia es idempotente por existencia, así
+/// que basta con quitar las filas. Se usa para volver a ejercitar el ENDPOINT `materialize` desde
+/// un estado conocido. OJO: la convergencia post-mutación las recrearía si sus meses siguen
+/// activos, por eso el borrado va por SQL directo y no por la API.
+async fn keep_only_origin_instance(app: &TestApp, rule_id: &str, oy: i32, om: u32) {
     let rid = Uuid::parse_str(rule_id).unwrap();
     let origin_start = NaiveDate::from_ymd_opt(oy, om, 1).unwrap();
     let (ny, nm) = shift_month(oy, om, 1);
@@ -43,15 +43,29 @@ async fn rewind_rule_to_origin(app: &TestApp, rule_id: &str, oy: i32, om: u32) {
     .bind(next_start)
     .execute(&app.pool)
     .await
-    .expect("delete backfilled instances");
+    .expect("delete non-origin instances");
+}
+
+/// ACTIVA un mes: le mete un movimiento REAL (no recurrente, no conciliado) por SQL directo.
+/// Desde 3.10.0 un mes solo materializa sus recurrentes si está activo, así que casi todos los
+/// escenarios necesitan sembrar esto primero. Por SQL y no por la API para no disparar la
+/// convergencia post-commit antes de tiempo (los tests quieren observar CUÁNDO ocurre).
+async fn activate_month_raw(app: &TestApp, owner_id: Uuid, y: i32, m: u32) {
+    let iid = app.installation_id().await;
+    let op = NaiveDate::from_ymd_opt(y, m, 15).unwrap();
     sqlx::query(
-        "UPDATE recurring_transaction_rules SET last_materialized_month = $1 WHERE id = $2",
+        "INSERT INTO transactions (installation_id, owner_user_id, source, op_date, concept, \
+         amount, currency, kind, fingerprint, fingerprint_ordinal) \
+         VALUES ($1, $2, 'manual', $3, $4, -1, 'EUR', 'expense', $5, 0)",
     )
-    .bind(origin_start)
-    .bind(rid)
+    .bind(iid)
+    .bind(owner_id)
+    .bind(op)
+    .bind(format!("Activador {y}-{m:02}"))
+    .bind(format!("fp-activator-{y}-{m:02}"))
     .execute(&app.pool)
     .await
-    .expect("rewind cursor");
+    .expect("insert activator movement");
 }
 
 /// Nº de días del mes civil `(year, month)`.
@@ -132,7 +146,7 @@ async fn create_with_recurrence_single_creates_rule_and_instance() {
     );
     // Cursor = primer día del mes de op_date (la instancia de origen no se re-materializa).
     assert_eq!(
-        rb[0]["last_materialized_month"].as_str().unwrap(),
+        rb[0]["origin_month"].as_str().unwrap(),
         date_in(today.year(), today.month(), 1)
     );
 }
@@ -243,14 +257,14 @@ async fn recurrence_op_date_within_bound_created() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn materialize_fills_from_origin_and_is_idempotent() {
+async fn materialize_only_fills_active_months_and_is_idempotent() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let today = server_today(&app, &owner.cookie).await;
     let (oy, om) = shift_month(today.year(), today.month(), -3);
 
-    // Regla con origen 3 meses atrás. El alta con fecha pasada YA backfillea los meses CERRADOS
-    // intermedios (M-2, M-1) dentro del mismo commit del create; el mes en curso jamás entra.
+    // Regla con origen 3 meses atrás. Desde 3.10.0 el alta NO backfillea: los meses intermedios
+    // están vacíos, y un mes vacío no genera recurrentes. Solo queda la instancia de origen.
     let r = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -263,62 +277,86 @@ async fn materialize_fills_from_origin_and_is_idempotent() {
     let rule_id = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
     assert_eq!(
         app.count_rows("transactions").await,
-        3,
-        "origen + 2 backfilleadas (M-2, M-1) en el create; el mes en curso fuera"
-    );
-
-    // Rebobinamos (borra M-2/M-1, cursor → origen) para volver a ejercitar el ENDPOINT materialize.
-    rewind_rule_to_origin(&app, &rule_id, oy, om).await;
-    assert_eq!(
-        app.count_rows("transactions").await,
         1,
-        "sólo el origen tras rebobinar"
+        "solo el origen: sin datos reales en M-2/M-1 no hay nada que materializar"
     );
 
-    // El endpoint materializa M-2 y M-1 (meses cerrados), cada una fechada a fin de mes.
+    // Activamos M-2 y M-1 con un movimiento real cada uno.
+    for back in [2i32, 1] {
+        let (my, mm) = shift_month(today.year(), today.month(), -back);
+        activate_month_raw(&app, owner.user_id, my, mm).await;
+    }
+    assert_eq!(app.count_rows("transactions").await, 3, "origen + 2 activadores");
+
+    // Ahora sí: el endpoint materializa M-2 y M-1, cada una fechada a fin de mes.
     let mat = materialize(&app, &owner.cookie).await;
     assert_eq!(mat.status, http::StatusCode::OK, "materialize: {mat:?}");
     assert_eq!(mat.json()["rules_processed"].as_u64().unwrap(), 1);
     assert_eq!(
         mat.json()["materialized"].as_u64().unwrap(),
         2,
-        "M-2 y M-1; el mes en curso jamás"
+        "M-2 y M-1 (activos); el mes en curso jamás"
     );
-    assert_eq!(
-        app.count_rows("transactions").await,
-        3,
-        "origen + 2 materializadas"
-    );
+    assert_eq!(mat.json()["pruned"].as_u64().unwrap(), 0);
+    assert_eq!(app.count_rows("transactions").await, 5);
     for back in [2i32, 1] {
         let (my, mm) = shift_month(today.year(), today.month(), -back);
         let l = list_month(&app, &owner.cookie, &format!("{my:04}-{mm:02}")).await;
-        assert_eq!(l.as_array().unwrap().len(), 1, "instancia M-{back}");
+        assert_eq!(l.as_array().unwrap().len(), 2, "activador + instancia M-{back}");
+        let inst = l
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["recurring_rule_id"].as_str() == Some(rule_id.as_str()))
+            .expect("la instancia recurrente del mes");
         assert_eq!(
-            l[0]["op_date"].as_str().unwrap(),
+            inst["op_date"].as_str().unwrap(),
             end_of_month(my, mm),
             "fechada el último día de su mes"
         );
     }
 
-    // Idempotente: 2ª llamada no genera nada.
+    // Idempotente por EXISTENCIA (ya no por cursor): 2ª llamada no genera ni poda nada.
     let mat2 = materialize(&app, &owner.cookie).await;
+    assert_eq!(mat2.json()["materialized"].as_u64().unwrap(), 0, "idempotente");
+    assert_eq!(mat2.json()["pruned"].as_u64().unwrap(), 0);
+    assert_eq!(app.count_rows("transactions").await, 5);
+
+    // Y el borrado del activador de M-1 PODA su instancia: el mes deja de estar activo.
+    keep_only_origin_instance(&app, &rule_id, oy, om).await;
+    let (my, mm) = shift_month(today.year(), today.month(), -1);
+    sqlx::query("DELETE FROM transactions WHERE op_date >= $1 AND op_date < $2 AND recurring_rule_id IS NULL")
+        .bind(NaiveDate::from_ymd_opt(my, mm, 1).unwrap())
+        .bind(NaiveDate::from_ymd_opt(my, mm, days_in_month(my, mm)).unwrap() + chrono::Duration::days(1))
+        .execute(&app.pool)
+        .await
+        .expect("borrar el activador de M-1");
+    let mat3 = materialize(&app, &owner.cookie).await;
     assert_eq!(
-        mat2.json()["materialized"].as_u64().unwrap(),
-        0,
-        "idempotente"
+        mat3.json()["materialized"].as_u64().unwrap(),
+        1,
+        "M-2 sigue activo y recupera su instancia"
     );
-    assert_eq!(app.count_rows("transactions").await, 3);
+    assert_eq!(
+        mat3.json()["pruned"].as_u64().unwrap(),
+        0,
+        "M-1 ya no tenía instancia que podar (la borró keep_only_origin_instance)"
+    );
 }
 
 #[tokio::test]
-async fn create_with_past_date_backfills_instances() {
+async fn create_with_past_date_only_fills_months_that_have_real_data() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let today = server_today(&app, &owner.cookie).await;
     let (oy, om) = shift_month(today.year(), today.month(), -4);
 
-    // Alta manual con recurrencia y fecha ~4 meses atrás. NO llamamos a materialize: el backfill
-    // debe ocurrir dentro del propio create, con las instancias fechadas a fin de mes.
+    // INVERSIÓN DELIBERADA DE CONTRATO (3.10.0). Antes, un alta con fecha pasada backfilleaba
+    // TODOS los meses cerrados intermedios en el mismo commit. Ahora las instancias siguen a los
+    // datos: sembramos un movimiento real solo en M-2, así que solo M-2 debe recibir la suya.
+    let (ay, am) = shift_month(today.year(), today.month(), -2);
+    activate_month_raw(&app, owner.user_id, ay, am).await;
+
     let r = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -329,20 +367,31 @@ async fn create_with_past_date_backfills_instances() {
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
 
-    // Meses cerrados intermedios M-3, M-2, M-1: una instancia (último día) en cada uno.
-    for back in [3i32, 2, 1] {
+    // M-2 (activo) recibe su instancia en el mismo request, vía la convergencia post-commit.
+    let l2 = list_month(&app, &owner.cookie, &format!("{ay:04}-{am:02}")).await;
+    assert_eq!(l2.as_array().unwrap().len(), 2, "activador + instancia: {l2:?}");
+    let inst = l2
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| !t["recurring_rule_id"].is_null())
+        .expect("instancia recurrente en M-2");
+    assert_eq!(inst["op_date"].as_str().unwrap(), end_of_month(ay, am));
+
+    // M-3 y M-1 están VACÍOS: sin movimientos reales no se genera relleno sintético.
+    for back in [3i32, 1] {
         let (my, mm) = shift_month(today.year(), today.month(), -back);
         let l = list_month(&app, &owner.cookie, &format!("{my:04}-{mm:02}")).await;
         assert_eq!(
             l.as_array().unwrap().len(),
-            1,
-            "mes M-{back} backfilleado: {l:?}"
+            0,
+            "mes M-{back} sin datos reales debe quedar VACÍO: {l:?}"
         );
-        assert_eq!(l[0]["op_date"].as_str().unwrap(), end_of_month(my, mm));
     }
-    // El origen (M-4) sigue presente con su fecha real (día 15).
+
+    // El origen (M-4) sigue presente con su fecha real (día 15): la poda lo exime siempre.
     let origin = list_month(&app, &owner.cookie, &format!("{oy:04}-{om:02}")).await;
-    assert_eq!(origin.as_array().unwrap().len(), 1, "origen M-4");
+    assert_eq!(origin.as_array().unwrap().len(), 1, "origen M-4 exento de la poda");
     assert_eq!(origin[0]["op_date"].as_str().unwrap(), date_in(oy, om, 15));
 
     // Mes en curso: JAMÁS se materializa (sea cual sea el día de ejecución).
@@ -350,26 +399,15 @@ async fn create_with_past_date_backfills_instances() {
     let cur = list_month(&app, &owner.cookie, &cur_ym).await;
     assert_eq!(cur.as_array().unwrap().len(), 0, "mes en curso vacío");
 
-    // Total = origen + 3 meses cerrados intermedios.
-    assert_eq!(
-        app.count_rows("transactions").await,
-        4,
-        "backfill hecho en el create"
-    );
+    // Total = origen + activador de M-2 + instancia de M-2.
+    assert_eq!(app.count_rows("transactions").await, 3);
 
-    // Un materialize posterior no crea nada (el cursor ya avanzó durante el create).
+    // Un materialize posterior es no-op: ya está convergido.
     let mat = materialize(&app, &owner.cookie).await;
     assert_eq!(mat.status, http::StatusCode::OK, "materialize: {mat:?}");
-    assert_eq!(
-        mat.json()["materialized"].as_u64().unwrap(),
-        0,
-        "backfill ya hecho en el create"
-    );
-    assert_eq!(
-        app.count_rows("transactions").await,
-        4,
-        "sin cambios tras materialize"
-    );
+    assert_eq!(mat.json()["materialized"].as_u64().unwrap(), 0, "ya convergido");
+    assert_eq!(mat.json()["pruned"].as_u64().unwrap(), 0);
+    assert_eq!(app.count_rows("transactions").await, 3);
 }
 
 /// Las instancias van fechadas al último día natural de su mes: 28/29 en febrero, 30 en abril.
@@ -380,7 +418,11 @@ async fn closed_month_instances_dated_end_of_month() {
     let today = server_today(&app, &owner.cookie).await;
     let year = today.year() - 1; // año natural completamente en el pasado.
 
-    // Regla con origen 31 de enero del año pasado; el create backfillea todos los meses cerrados.
+    // 3.10.0: solo los meses ACTIVOS materializan, así que los sembramos primero.
+    for m in [2u32, 4, 12] {
+        activate_month_raw(&app, owner.user_id, year, m).await;
+    }
+
     let r = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -393,25 +435,25 @@ async fn closed_month_instances_dated_end_of_month() {
     materialize(&app, &owner.cookie).await;
 
     // Febrero: último día (28 o 29 según bisiesto).
-    let feb_day = if NaiveDate::from_ymd_opt(year, 2, 29).is_some() {
-        29
-    } else {
-        28
-    };
-    let feb = list_month(&app, &owner.cookie, &format!("{year:04}-02")).await;
-    assert_eq!(feb.as_array().unwrap().len(), 1, "una instancia en febrero");
-    assert_eq!(
-        feb[0]["op_date"].as_str().unwrap(),
-        date_in(year, 2, feb_day)
-    );
+    let feb_day = if NaiveDate::from_ymd_opt(year, 2, 29).is_some() { 29 } else { 28 };
+    for (m, day) in [(2u32, feb_day), (4, 30), (12, 31)] {
+        let l = list_month(&app, &owner.cookie, &format!("{year:04}-{m:02}")).await;
+        let inst = l
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| !t["recurring_rule_id"].is_null())
+            .unwrap_or_else(|| panic!("instancia recurrente en {year}-{m:02}: {l:?}"));
+        assert_eq!(
+            inst["op_date"].as_str().unwrap(),
+            date_in(year, m, day),
+            "fechada al último día natural de su mes"
+        );
+    }
 
-    // Abril: día 30. Diciembre: día 31.
-    let apr = list_month(&app, &owner.cookie, &format!("{year:04}-04")).await;
-    assert_eq!(apr.as_array().unwrap().len(), 1, "una instancia en abril");
-    assert_eq!(apr[0]["op_date"].as_str().unwrap(), date_in(year, 4, 30));
-    let dec = list_month(&app, &owner.cookie, &format!("{year:04}-12")).await;
-    assert_eq!(dec.as_array().unwrap().len(), 1, "una instancia en diciembre");
-    assert_eq!(dec[0]["op_date"].as_str().unwrap(), date_in(year, 12, 31));
+    // Un mes NO activo del mismo año no recibe instancia (marzo).
+    let mar = list_month(&app, &owner.cookie, &format!("{year:04}-03")).await;
+    assert_eq!(mar.as_array().unwrap().len(), 0, "marzo sin datos reales: vacío");
 }
 
 /// El mes en curso jamás se materializa — ni siquiera cuando hoy es su último día. Sus recurrentes
@@ -425,6 +467,11 @@ async fn materialize_never_includes_current_month() {
     let (oy, om) = shift_month(today.year(), today.month(), -2);
     let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
 
+    // Activamos M-1 Y el mes EN CURSO: el mes abierto tiene datos reales y aun así no debe
+    // recibir su recurrente. Es la aserción que discrimina «cerrado» de «con datos».
+    activate_month_raw(&app, owner.user_id, m1y, m1m).await;
+    activate_month_raw(&app, owner.user_id, today.year(), today.month()).await;
+
     let r = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -436,57 +483,64 @@ async fn materialize_never_includes_current_month() {
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
     let rule_id = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
 
-    // Rebobinamos al origen para ejercitar el ENDPOINT materialize (el create ya backfilleó M-1).
-    rewind_rule_to_origin(&app, &rule_id, oy, om).await;
+    keep_only_origin_instance(&app, &rule_id, oy, om).await;
 
-    // Materializa sólo M-1 (cerrado), fechada a su fin de mes; el mes en curso queda fuera.
     let mat = materialize(&app, &owner.cookie).await;
     assert_eq!(mat.status, http::StatusCode::OK, "materialize: {mat:?}");
     assert_eq!(
         mat.json()["materialized"].as_u64().unwrap(),
         1,
-        "sólo M-1; el mes en curso jamás"
+        "sólo M-1; el mes en curso jamás, aunque tenga datos reales"
     );
     let l = list_month(&app, &owner.cookie, &format!("{m1y:04}-{m1m:02}")).await;
-    assert_eq!(l.as_array().unwrap().len(), 1);
+    let inst = l
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| !t["recurring_rule_id"].is_null())
+        .expect("instancia en M-1");
     assert_eq!(
-        l[0]["op_date"].as_str().unwrap(),
+        inst["op_date"].as_str().unwrap(),
         end_of_month(m1y, m1m),
         "instancia del mes cerrado fechada a su último día"
     );
 
-    // El cursor se queda en el mes anterior (no avanzó al mes en curso).
+    // El mes en curso solo tiene su activador, ninguna instancia sintética.
+    let cur = list_month(
+        &app,
+        &owner.cookie,
+        &format!("{:04}-{:02}", today.year(), today.month()),
+    )
+    .await;
+    assert_eq!(cur.as_array().unwrap().len(), 1, "solo el activador: {cur:?}");
+    assert!(
+        cur[0]["recurring_rule_id"].is_null(),
+        "el mes abierto nunca muestra movimientos sintéticos"
+    );
+
+    // El ANCLA no se mueve: no es un cursor, no avanza con la materialización.
     let rules = app
         .get_with_cookie("/v1/transactions/recurring", &owner.cookie)
         .await;
     assert_eq!(
-        rules.json()[0]["last_materialized_month"].as_str().unwrap(),
-        date_in(m1y, m1m, 1),
-        "cursor en el mes anterior"
+        rules.json()[0]["origin_month"].as_str().unwrap(),
+        date_in(oy, om, 1),
+        "origin_month es un ancla inmóvil"
     );
-
-    // El mes en curso no tiene ninguna instancia.
-    let cur_ym = format!("{:04}-{:02}", today.year(), today.month());
-    let cur = list_month(&app, &owner.cookie, &cur_ym).await;
-    assert_eq!(cur.as_array().unwrap().len(), 0, "mes en curso vacío");
-
-    // 2ª llamada tampoco lo crea (idempotente).
-    let mat2 = materialize(&app, &owner.cookie).await;
-    assert_eq!(
-        mat2.json()["materialized"].as_u64().unwrap(),
-        0,
-        "sigue sin crear el mes en curso"
-    );
-    let cur2 = list_month(&app, &owner.cookie, &cur_ym).await;
-    assert_eq!(cur2.as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
-async fn deleted_instance_is_not_recreated() {
+async fn deleted_instance_is_recreated_while_its_month_stays_active() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let today = server_today(&app, &owner.cookie).await;
     let (oy, om) = shift_month(today.year(), today.month(), -3);
+    let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
+
+    // INVERSIÓN DELIBERADA DE CONTRATO (3.10.0). Con el cursor, borrar una instancia la borraba
+    // PARA SIEMPRE. Con idempotencia por existencia, la regla es la fuente de verdad: mientras su
+    // mes siga activo, la instancia vuelve. Para quitarla de verdad se borra la PLANTILLA.
+    activate_month_raw(&app, owner.user_id, m1y, m1m).await;
 
     app.post_json_with_cookie(
         "/v1/transactions",
@@ -499,27 +553,51 @@ async fn deleted_instance_is_not_recreated() {
     assert_eq!(
         app.count_rows("transactions").await,
         3,
-        "origen + M-2 + M-1"
+        "origen + activador M-1 + instancia M-1"
     );
 
-    // Borra la instancia de M-1.
-    let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
+    // Borra la instancia de M-1 por la API.
     let l = list_month(&app, &owner.cookie, &format!("{m1y:04}-{m1m:02}")).await;
-    assert_eq!(l.as_array().unwrap().len(), 1);
-    let del_id = l[0]["id"].as_str().unwrap().to_string();
+    let del_id = l
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| !t["recurring_rule_id"].is_null())
+        .expect("instancia en M-1")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let d = app
         .delete_with_cookie(&format!("/v1/transactions/{del_id}"), &owner.cookie)
         .await;
     assert_eq!(d.status, http::StatusCode::NO_CONTENT);
-    assert_eq!(app.count_rows("transactions").await, 2);
 
-    // Re-materializar NO recrea la borrada (el cursor ya pasó ese mes).
-    let mat2 = materialize(&app, &owner.cookie).await;
-    assert_eq!(mat2.json()["materialized"].as_u64().unwrap(), 0);
+    // La convergencia post-commit del PROPIO delete ya la ha repuesto: el mes sigue activo.
     assert_eq!(
         app.count_rows("transactions").await,
-        2,
-        "la borrada no reaparece"
+        3,
+        "la instancia vuelve en el mismo request: la plantilla manda"
+    );
+
+    // Y si el mes deja de estar activo (se borra su último movimiento real), se PODA.
+    let act_id = list_month(&app, &owner.cookie, &format!("{m1y:04}-{m1m:02}"))
+        .await
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["recurring_rule_id"].is_null())
+        .expect("activador en M-1")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let d2 = app
+        .delete_with_cookie(&format!("/v1/transactions/{act_id}"), &owner.cookie)
+        .await;
+    assert_eq!(d2.status, http::StatusCode::NO_CONTENT);
+    assert_eq!(
+        app.count_rows("transactions").await,
+        1,
+        "sin movimientos reales el mes queda vacío: solo sobrevive el origen (exento)"
     );
 }
 
@@ -529,6 +607,8 @@ async fn delete_rule_keeps_instances_and_nullifies_link() {
     let owner = app.register_and_login_owner("alice").await;
     let today = server_today(&app, &owner.cookie).await;
     let (oy, om) = shift_month(today.year(), today.month(), -2);
+    let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
+    activate_month_raw(&app, owner.user_id, m1y, m1m).await;
 
     let r = app
         .post_json_with_cookie(
@@ -539,8 +619,9 @@ async fn delete_rule_keeps_instances_and_nullifies_link() {
         )
         .await;
     let rule_id = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
-    materialize(&app, &owner.cookie).await; // origen(M-2) + M-1 = 2 transacciones (M fuera).
-    assert_eq!(app.count_rows("transactions").await, 2);
+    materialize(&app, &owner.cookie).await;
+    // origen(M-2) + activador(M-1) + instancia(M-1) = 3; el mes en curso fuera.
+    assert_eq!(app.count_rows("transactions").await, 3);
 
     // Borrar la regla: 204 y las instancias sobreviven con recurring_rule_id NULL.
     let d = app
@@ -552,7 +633,7 @@ async fn delete_rule_keeps_instances_and_nullifies_link() {
     assert_eq!(d.status, http::StatusCode::NO_CONTENT);
     assert_eq!(
         app.count_rows("transactions").await,
-        2,
+        3,
         "instancias conservadas"
     );
     let still_linked: i64 =
@@ -562,10 +643,17 @@ async fn delete_rule_keeps_instances_and_nullifies_link() {
             .expect("count linked");
     assert_eq!(still_linked, 0, "FK SET NULL: sin enlaces colgantes");
 
+    // Y sin plantilla no hay nada que converger: las huérfanas no se podan ni se recrean.
+    let mat = materialize(&app, &owner.cookie).await;
+    assert_eq!(mat.json()["rules_processed"].as_u64().unwrap(), 0);
+    assert_eq!(mat.json()["materialized"].as_u64().unwrap(), 0);
+    assert_eq!(mat.json()["pruned"].as_u64().unwrap(), 0);
+    assert_eq!(app.count_rows("transactions").await, 3);
+
     let rules = app
         .get_with_cookie("/v1/transactions/recurring", &owner.cookie)
         .await;
-    assert_eq!(rules.json().as_array().unwrap().len(), 0, "regla borrada");
+    assert_eq!(rules.json().as_array().unwrap().len(), 0, "plantilla borrada");
 }
 
 #[tokio::test]
@@ -602,7 +690,7 @@ async fn dedup_preexisting_manual_takes_next_ordinal_without_409() {
 
     // Rebobinamos las instancias recurrentes al origen (el create ya había backfilleado M-1, con la
     // colisión ya resuelta). El manual pre-existente (M-1, sin regla) sobrevive al rebobinado.
-    rewind_rule_to_origin(&app, &rule_id, oy, om).await;
+    keep_only_origin_instance(&app, &rule_id, oy, om).await;
 
     let mat = materialize(&app, &owner.cookie).await;
     assert_eq!(
@@ -666,7 +754,7 @@ async fn viewer_cannot_materialize_or_delete_403() {
 }
 
 #[tokio::test]
-async fn cross_user_isolation() {
+async fn cross_user_isolation_survives_installation_wide_convergence() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let bob = app
@@ -674,6 +762,7 @@ async fn cross_user_isolation() {
         .await;
     let today = server_today(&app, &owner.cookie).await;
     let (oy, om) = shift_month(today.year(), today.month(), -2);
+    let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
 
     let r = app
         .post_json_with_cookie(
@@ -684,20 +773,13 @@ async fn cross_user_isolation() {
         )
         .await;
     let alice_rule = r.json()["recurring_rule_id"].as_str().unwrap().to_string();
-    // El alta con fecha pasada backfillea; rebobinamos al origen para que la parte de aislamiento
-    // (Bob no toca las reglas de Alice) parta de "cursor intacto en el origen, sólo la instancia de
-    // origen de Alice".
-    rewind_rule_to_origin(&app, &alice_rule, oy, om).await;
+    keep_only_origin_instance(&app, &alice_rule, oy, om).await;
 
-    // Bob no ve las reglas de Alice.
+    // Bob no ve las reglas de Alice (el listado es own-user, sin `?view`).
     let bl = app
         .get_with_cookie("/v1/transactions/recurring", &bob.cookie)
         .await;
-    assert_eq!(
-        bl.json().as_array().unwrap().len(),
-        0,
-        "bob no ve reglas de alice"
-    );
+    assert_eq!(bl.json().as_array().unwrap().len(), 0, "bob no ve reglas de alice");
 
     // Bob no puede borrar la regla de Alice → 404.
     let bd = app
@@ -708,29 +790,51 @@ async fn cross_user_isolation() {
         .await;
     assert_eq!(bd.status, http::StatusCode::NOT_FOUND, "cross-user delete");
 
-    // El materialize de Bob no toca las reglas de Alice.
+    // CAMBIO DE CONTRATO (3.10.0): la convergencia es de ámbito INSTALACIÓN, así que el
+    // materialize de BOB sí procesa la regla de Alice. Es deliberado — la activación de un mes
+    // también es de instalación, y con ámbito por owner un conviviente que solo tiene nómina
+    // recurrente y no importa CSV se quedaría sin ella para siempre.
+    let m1_activator_owner = bob.user_id; // el movimiento real lo mete BOB
+    activate_month_raw(&app, m1_activator_owner, m1y, m1m).await;
     let bm = materialize(&app, &bob.cookie).await;
     assert_eq!(bm.status, http::StatusCode::OK);
     assert_eq!(
         bm.json()["rules_processed"].as_u64().unwrap(),
-        0,
-        "bob no procesa reglas de alice"
-    );
-    assert_eq!(bm.json()["materialized"].as_u64().unwrap(), 0);
-
-    // La regla de Alice sigue sin materializar (cursor intacto) y sólo existe su origen.
-    let al = app
-        .get_with_cookie("/v1/transactions/recurring", &owner.cookie)
-        .await;
-    assert_eq!(
-        al.json()[0]["last_materialized_month"].as_str().unwrap(),
-        date_in(oy, om, 1),
-        "cursor de alice intacto"
-    );
-    assert_eq!(
-        app.count_rows("transactions").await,
         1,
-        "sólo el origen de alice"
+        "ámbito instalación: bob procesa también la regla de alice"
+    );
+    assert_eq!(
+        bm.json()["materialized"].as_u64().unwrap(),
+        1,
+        "el mes que activó bob materializa la recurrente de alice"
+    );
+
+    // Pero la instancia creada es DE ALICE: el scoping per-owner no se rompe.
+    let bob_mine = app
+        .get_with_cookie(
+            &format!("/v1/transactions?month={m1y:04}-{m1m:02}&view=mine"),
+            &bob.cookie,
+        )
+        .await;
+    let bob_rows = bob_mine.json();
+    assert_eq!(
+        bob_rows.as_array().unwrap().len(),
+        1,
+        "bob solo ve su propio activador: {bob_rows:?}"
+    );
+    assert!(bob_rows[0]["recurring_rule_id"].is_null());
+
+    let alice_mine = app
+        .get_with_cookie(
+            &format!("/v1/transactions?month={m1y:04}-{m1m:02}&view=mine"),
+            &owner.cookie,
+        )
+        .await;
+    let alice_rows = alice_mine.json();
+    assert_eq!(alice_rows.as_array().unwrap().len(), 1, "alice ve su instancia");
+    assert_eq!(
+        alice_rows[0]["recurring_rule_id"].as_str().unwrap(),
+        alice_rule
     );
 }
 
