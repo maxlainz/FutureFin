@@ -570,7 +570,7 @@ async fn sweep_recovers_pairs_a_failed_pass_left_behind() {
     let broken = fetch_txn(&app, &owner.cookie, "2026-06", &a_id).await;
     assert!(broken["transfer_counterpart_id"].is_null(), "{broken}");
 
-    let out = sweep_all_owners(&app.pool).await.expect("sweep");
+    let out = sweep_all_owners(&app.state).await.expect("sweep");
     assert_eq!(out.pairs_created, 1, "{out:?}");
     assert_eq!(out.owners_failed, 0, "{out:?}");
 
@@ -582,7 +582,7 @@ async fn sweep_recovers_pairs_a_failed_pass_left_behind() {
     );
 
     // Punto fijo: repetirlo no crea nada. Es el caso NORMAL en una instalación sana.
-    let again = sweep_all_owners(&app.pool).await.expect("sweep 2");
+    let again = sweep_all_owners(&app.state).await.expect("sweep 2");
     assert_eq!(again.pairs_created, 0, "{again:?}");
     assert_eq!(again.owners_failed, 0, "{again:?}");
 }
@@ -603,7 +603,7 @@ async fn sweep_covers_every_owner_independently() {
     let b2 = create_txn(&app, &bob.cookie, "2026-06-13", "B entrada", "70", "income").await;
     unlink_silently(&app, &[&id_of(&a1), &id_of(&a2), &id_of(&b1), &id_of(&b2)]).await;
 
-    let out = sweep_all_owners(&app.pool).await.expect("sweep");
+    let out = sweep_all_owners(&app.state).await.expect("sweep");
     assert_eq!(out.owners_scanned, 2, "un owner por miembro con patas sueltas: {out:?}");
     assert_eq!(out.pairs_created, 2, "{out:?}");
 
@@ -637,7 +637,7 @@ async fn sweep_never_resurrects_a_user_rejected_pair() {
         .await;
     assert_eq!(del.status, http::StatusCode::OK, "{del:?}");
 
-    let out = sweep_all_owners(&app.pool).await.expect("sweep");
+    let out = sweep_all_owners(&app.state).await.expect("sweep");
     assert_eq!(out.pairs_created, 0, "el rechazo del usuario manda sobre el barrido: {out:?}");
     let row = fetch_txn(&app, &owner.cookie, "2026-06", &a_id).await;
     assert!(row["transfer_counterpart_id"].is_null(), "{row}");
@@ -651,7 +651,7 @@ async fn sweep_is_a_noop_when_everything_is_reconciled() {
     create_txn(&app, &owner.cookie, "2026-06-10", "Salida", "-40", "expense").await;
     create_txn(&app, &owner.cookie, "2026-06-11", "Entrada", "40", "income").await;
 
-    let out = sweep_all_owners(&app.pool).await.expect("sweep");
+    let out = sweep_all_owners(&app.state).await.expect("sweep");
     assert_eq!(
         out.owners_scanned, 0,
         "sin patas sueltas no hay owner que revisar: {out:?}"
