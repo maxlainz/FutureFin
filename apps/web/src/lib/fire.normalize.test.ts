@@ -4,13 +4,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { FireSettingsApi } from "../api/types";
+import type { FireSettingsApi, SavingsAvgBasisApi } from "../api/types";
 import {
   defaultFireSettingsApi,
   normalizeInstallationFireSettings,
   parseSavingsSource,
   runwaySwrParenthetical,
-  savingsAvgParenthetical,
+  savingsBasisParenthetical,
   savingsSourceUsesTransactions,
 } from "./fire";
 
@@ -115,30 +115,55 @@ describe("savingsSourceUsesTransactions", () => {
   });
 });
 
-describe("savingsAvgParenthetical", () => {
-  it("modo budget (A) → sin paréntesis", () => {
-    expect(savingsAvgParenthetical("budget", 6)).toBeUndefined();
+describe("savingsBasisParenthetical", () => {
+  const avg = (over: Partial<SavingsAvgBasisApi> = {}): SavingsAvgBasisApi => ({
+    basis: "average",
+    months_with_data: 3,
+    window_months: 3,
+    window_mode: "calendar",
+    first_month: "2026-05",
+    last_month: "2026-07",
+    has_gaps: false,
+    ...over,
   });
 
-  it("transactions_avg (modo B) con 6 meses", () => {
-    expect(savingsAvgParenthetical("transactions_avg", 6)).toBe(
-      "promedio de 6 meses",
-    );
+  it("lado que salió del presupuesto → sin paréntesis", () => {
+    expect(
+      savingsBasisParenthetical({
+        basis: "budget",
+        months_with_data: 0,
+        window_months: 0,
+        has_gaps: false,
+      }),
+    ).toBeUndefined();
   });
 
-  it("budget_income_real_expense (modo C) con 1 mes → singular", () => {
-    expect(savingsAvgParenthetical("budget_income_real_expense", 1)).toBe(
-      "promedio de 1 mes",
-    );
+  it("rango contiguo → «media de may–jul 2026»", () => {
+    expect(savingsBasisParenthetical(avg())).toBe("media de may 2026–jul 2026");
   });
 
-  it("fuente ausente → sin paréntesis", () => {
-    expect(savingsAvgParenthetical(undefined, 6)).toBeUndefined();
+  it("un solo mes → no repite el rango", () => {
+    expect(
+      savingsBasisParenthetical(
+        avg({ months_with_data: 1, first_month: "2026-07", last_month: "2026-07" }),
+      ),
+    ).toBe("media de jul 2026");
   });
 
-  it("0 meses (fallback del servidor a budget) o meses ausentes → sin paréntesis", () => {
-    expect(savingsAvgParenthetical("transactions_avg", 0)).toBeUndefined();
-    expect(savingsAvgParenthetical("transactions_avg", undefined)).toBeUndefined();
+  it("con huecos NO finge un rango contiguo", () => {
+    expect(
+      savingsBasisParenthetical(
+        avg({ months_with_data: 3, first_month: "2024-01", last_month: "2026-07", has_gaps: true }),
+      ),
+    ).toBe("media de 3 meses con datos, hasta jul 2026");
+  });
+
+  it("sin meses con datos → sin paréntesis", () => {
+    expect(savingsBasisParenthetical(avg({ months_with_data: 0 }))).toBeUndefined();
+  });
+
+  it("ausente → sin paréntesis", () => {
+    expect(savingsBasisParenthetical(undefined)).toBeUndefined();
   });
 });
 
@@ -161,5 +186,48 @@ describe("runwaySwrParenthetical", () => {
     expect(
       runwaySwrParenthetical({ ...defaultFireSettingsApi(), swr_pct: "" }),
     ).toBe("dentro del SWR 3,5 %");
+  });
+});
+
+describe("ventanas del promedio — round-trip obligatorio", () => {
+  // TRAMPA QUE FIJA ESTE TEST: `PATCH /v1/installation` manda el objeto fire_settings COMPLETO y
+  // el `#[serde(default)]` del servidor rellena lo ausente con los DEFAULTS. Si `normalize` no
+  // devolviera las cuatro ventanas, guardar cualquier otro ajuste (el SWR, un tramo fiscal) las
+  // resetearía a 3/12 en silencio — sin error, sin aviso, y con la proyección moviéndose.
+  it("conserva las cuatro ventanas del servidor", () => {
+    const out = normalizeInstallationFireSettings({
+      swr_pct: "3.5",
+      savings_source: "transactions_avg",
+      income_avg_window_months: 6,
+      income_avg_window_mode: "data",
+      expense_avg_window_months: 24,
+      expense_avg_window_mode: "calendar",
+    } as unknown as FireSettingsApi);
+    expect(out.income_avg_window_months).toBe(6);
+    expect(out.income_avg_window_mode).toBe("data");
+    expect(out.expense_avg_window_months).toBe(24);
+    expect(out.expense_avg_window_mode).toBe("calendar");
+  });
+
+  it("ausentes → defaults 3/12 en calendario", () => {
+    const out = normalizeInstallationFireSettings({
+      swr_pct: "3.5",
+    } as unknown as FireSettingsApi);
+    expect(out.income_avg_window_months).toBe(3);
+    expect(out.expense_avg_window_months).toBe(12);
+    expect(out.income_avg_window_mode).toBe("calendar");
+    expect(out.expense_avg_window_mode).toBe("calendar");
+  });
+
+  it("valores fuera de cota o basura → el default del lado, nunca 0", () => {
+    const out = normalizeInstallationFireSettings({
+      swr_pct: "3.5",
+      income_avg_window_months: 0,
+      expense_avg_window_months: 999,
+      income_avg_window_mode: "monte_carlo",
+    } as unknown as FireSettingsApi);
+    expect(out.income_avg_window_months).toBe(3);
+    expect(out.expense_avg_window_months).toBe(12);
+    expect(out.income_avg_window_mode).toBe("calendar");
   });
 });

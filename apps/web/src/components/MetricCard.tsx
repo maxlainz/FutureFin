@@ -9,6 +9,7 @@ export function MetricCard({
   suffix,
   parenthetical,
   trend,
+  detail,
   action,
   tone = "default",
 }: {
@@ -22,6 +23,13 @@ export function MetricCard({
    * (baseline intacta). Si se pasa, tiene prioridad sobre `parenthetical`.
    */
   trend?: ReactNode;
+  /**
+   * SEGUNDO slot reservado, bajo el de trend/paréntesis. Existe porque una tarjeta puede
+   * necesitar las dos cosas a la vez (p.ej. «▼ −55 € vs plan» + «24,4 % de tus ingresos») y
+   * `trend` gana el primero. Igual que aquel, se renderiza SIEMPRE — con `&nbsp;` cuando está
+   * vacío — para que la baseline siga alineada entre KPIs de la misma fila.
+   */
+  detail?: string;
   /** Botón/icono opcional en la esquina superior derecha (p.ej. engranaje de config). */
   action?: ReactNode;
   /** Variante visual: hero (acento más marcado), accent / accent-2 (tinte suave). */
@@ -36,6 +44,7 @@ export function MetricCard({
           ? " metric-card--accent-2"
           : "";
   const showParen = parenthetical != null && parenthetical !== "";
+  const showDetail = detail != null && detail !== "";
   const hasTrend = trend != null && trend !== false;
   const slotFilled = hasTrend || showParen;
   return (
@@ -56,6 +65,11 @@ export function MetricCard({
         aria-hidden={slotFilled ? undefined : true}
       >
         {hasTrend ? trend : showParen ? `(${parenthetical})` : " "}
+      </div>
+      {/* Segundo slot, también SIEMPRE presente: una tarjeta puede necesitar trend y detalle
+          a la vez, y `trend` gana el primero. Reservarlo mantiene la baseline por fila. */}
+      <div className="metric-value-detail" aria-hidden={showDetail ? undefined : true}>
+        {showDetail ? `(${detail})` : " "}
       </div>
     </article>
   );

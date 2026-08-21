@@ -44,7 +44,19 @@ export type FireSettingsApi = {
   tax_brackets: TaxBracketApi[];
   /** Ausente en clientes/backups antiguos → tratar como `budget`. */
   savings_source?: SavingsSourceApi;
+  /** Ventana del promedio de INGRESO en meses (1–60). Solo la usa el modo `transactions_avg`. */
+  income_avg_window_months?: number;
+  income_avg_window_mode?: AvgWindowModeApi;
+  /** Ventana del promedio de GASTO en meses (1–60). La usan `transactions_avg` y
+   *  `budget_income_real_expense`. */
+  expense_avg_window_months?: number;
+  expense_avg_window_mode?: AvgWindowModeApi;
 };
+
+/** Cómo se cuentan los meses de una ventana del promedio real.
+ *  `calendar` = los meses con datos dentro de los últimos N civiles.
+ *  `data` = los N meses CON DATOS más recientes, saltando los vacíos. */
+export type AvgWindowModeApi = "data" | "calendar";
 
 export type InstallationSnapshot = {
   id: string;
@@ -125,20 +137,30 @@ export type AllocationRuleApiRow = {
   owner_user_id?: string | null;
 };
 
+/** De dónde sale UN lado (ingreso o gasto) del ahorro efectivo, y con qué base exacta. */
+export type SavingsAvgBasisApi = {
+  /** `"budget"` = este lado salió del presupuesto (el modo no lo promedia, o cayó por falta de
+   *  datos). `"average"` = promedio real de transacciones. */
+  basis: "budget" | "average";
+  /** Denominador realmente usado. `0` ⟺ `basis === "budget"`. */
+  months_with_data: number;
+  /** Ventana configurada tras el clamp: permite decir «pediste 12, hay 7». */
+  window_months: number;
+  window_mode?: "data" | "calendar";
+  /** Mes más antiguo incluido, `YYYY-MM`. */
+  first_month?: string;
+  /** Mes más reciente incluido, `YYYY-MM`. */
+  last_month?: string;
+  /** `true` ⟺ los meses incluidos NO son consecutivos: no se pueden pintar como un rango. */
+  has_gaps: boolean;
+};
+
 export type FinancialHealthMetrics = {
   income_monthly_equivalent: string;
   expense_regular_monthly_equivalent: string;
-  /** **Siempre `"0"` desde la 3.7.0**, en los tres modos: las cuotas de pasivo son gasto del
-   *  presupuesto como cualquier otra partida, ya no una componente que se suma aparte. */
-  expense_derived_monthly_equivalent: string;
   expense_total_monthly_equivalent: string;
   net_monthly_equivalent: string;
   savings_rate: string | null;
-  /** **Idéntico a `net_monthly_equivalent` desde la 3.7.0** (no queda deuda derivada que
-   *  excluir). El Resumen solo pinta su paréntesis cuando difiere, así que se apaga solo. */
-  monthly_net_excluding_derived_debt: string;
-  /** **Idéntico a `savings_rate` desde la 3.7.0** — ver `monthly_net_excluding_derived_debt`. */
-  savings_rate_excluding_derived_debt: string | null;
   liquid_assets_total: string;
   /** El valor `1200` es el tope del bucle del servidor y significa «al menos 100 años» (un
    *  suelo, no una medida exacta). */
@@ -155,17 +177,13 @@ export type FinancialHealthMetrics = {
    *  configurado usaba transacciones —`transactions_avg` o `budget_income_real_expense`—
    *  pero no había meses con datos). Ausente en backends antiguos → `budget`. */
   savings_source?: SavingsSourceApi;
-  /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
-  savings_source_months_with_data?: number;
-  /** KPI «ahorro real vs esperado»: neto mensual del PRESUPUESTO (cuotas derivadas incluidas),
-   *  capturado antes del override B/C — no sigue el modo. Ausente en backends antiguos. */
+  /** Procedencia del lado INGRESO del ahorro efectivo. */
+  savings_income_basis?: SavingsAvgBasisApi;
+  /** Procedencia del lado GASTO. */
+  savings_expense_basis?: SavingsAvgBasisApi;
+  /** Neto mensual del PRESUPUESTO, capturado ANTES del override B/C — no sigue el modo. Es el
+   *  denominador del delta «vs plan» de la tarjeta de ahorro. */
   savings_expected_monthly_equivalent?: string;
-  /** Promedio bruto `income − expense` de los últimos 12 meses civiles completos (las cuotas
-   *  pagadas cuentan como gasto). Omitido cuando no hay meses con datos. */
-  savings_actual_monthly_avg_12m?: string | null;
-  /** Meses «reales» que sustentan el promedio anterior (0 = sin movimientos); a diferencia de
-   *  `savings_source_months_with_data`, trae su valor real en los tres modos. */
-  savings_actual_months_with_data?: number;
 };
 
 export type CategoryBreakdownLineApi = {
