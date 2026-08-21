@@ -144,6 +144,35 @@ async fn baseline_without_overrides_matches_get_projection_and_scenario() {
         "sim: {sim} proj jubilación: {:?}",
         proj["jubilacion_month_index"]
     );
+    // La jubilación se sirve ya legible: índice de mes + fecha civil + edad, y las tres coinciden
+    // entre ambas superficies (issue #6 — el consumidor no debe hacer aritmética de calendario).
+    assert_eq!(
+        sim["baseline"]["jubilacion_date_ymd"], proj["jubilacion_date_ymd"],
+        "fecha de jubilación: sim {sim}"
+    );
+    assert_eq!(
+        sim["baseline"]["jubilacion_age"], proj["jubilacion_age"],
+        "edad de jubilación: sim {sim}"
+    );
+    // La respuesta de simulate es AUTOCONTENIDA: trae el ancla sin encadenar get_projection.
+    assert_eq!(sim["anchor_date_ymd"], proj["anchor_date_ymd"], "{sim}");
+    assert_eq!(sim["show_age_mode"], proj["show_age_mode"], "{sim}");
+    assert_eq!(sim["viewer_birth_date"], proj["viewer_birth_date"], "{sim}");
+    // Y la fecha es coherente con el índice: ancla + N meses, conservando el día del ancla.
+    if let Some(mi) = sim["baseline"]["jubilacion_month_index"].as_u64() {
+        let anchor = sim["anchor_date_ymd"].as_str().unwrap();
+        let date = sim["baseline"]["jubilacion_date_ymd"].as_str().unwrap();
+        let (ay, am): (i32, u32) = (anchor[0..4].parse().unwrap(), anchor[5..7].parse().unwrap());
+        let zero = ay * 12 + am as i32 - 1 + mi as i32;
+        let expected_ym = format!("{:04}-{:02}", zero.div_euclid(12), zero.rem_euclid(12) + 1);
+        assert_eq!(&date[0..7], expected_ym, "ancla {anchor} + {mi} meses");
+        // El día se conserva salvo recorte a fin de mes; con ancla ≤ 28 el recorte nunca aplica,
+        // así que el assert no depende del día en que corra el test. El clamp está pinneado en
+        // los tests unitarios de `jubilacion_civil`.
+        if anchor[8..10].parse::<u32>().unwrap() <= 28 {
+            assert_eq!(&date[8..10], &anchor[8..10], "conserva el día del ancla");
+        }
+    }
     assert_eq!(sim["horizon_months"], proj["months"]);
     // Los puntos del chart van como números f64 (decisión histórica del wire); el KPI del
     // simulate como Decimal-string → comparar con tolerancia relativa.

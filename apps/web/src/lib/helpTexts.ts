@@ -100,25 +100,31 @@ export const HELP_TEXTS = {
   "expenses.expense_avg": {
     title: "Gasto promedio",
     body:
-      "Media de tu gasto en la ventana elegida arriba. El denominador son los meses CON datos, " +
-      "no los del calendario: un mes sin movimientos no baja la media, simplemente no cuenta.",
+      "Media de tu gasto en la ventana elegida arriba. El denominador NO son los meses del " +
+      "calendario: son los meses con movimientos reales. Un mes vacío, o uno cuyo único " +
+      "contenido son movimientos recurrentes, queda fuera entero —ni suma ni divide—, así que " +
+      "no hunde la media mientras no tengas histórico. El paréntesis dice de qué meses sale.",
   },
   "expenses.income_avg": {
     title: "Ingreso promedio",
-    body: "Media de tus ingresos en la ventana elegida, contando solo los meses con datos.",
+    body:
+      "Media de tus ingresos en la ventana elegida, con el mismo denominador que el gasto " +
+      "promedio: solo los meses con movimientos reales.",
   },
   "expenses.savings_transferred": {
     title: "Traspasado a ahorro",
     body:
       "Dinero que moviste a cuentas o productos de ahorro, según los movimientos marcados como " +
       "ahorro. NO es ingresos menos gastos: es solo lo que apartaste de forma explícita, así que " +
-      "no tiene por qué coincidir con el ahorro del Resumen.",
+      "no tiene por qué coincidir con el ahorro del Resumen. Promediado sobre los mismos meses " +
+      "reales que el gasto y el ingreso.",
   },
   "expenses.transferred_rate": {
     title: "Porcentaje traspasado",
     body:
-      "Qué parte de tus ingresos moviste a ahorro de forma explícita. Ojo: no es tu tasa de " +
-      "ahorro — esa vive en el Resumen y sale de ingresos menos gastos.",
+      "Qué parte de tus ingresos moviste a ahorro de forma explícita, sobre los mismos meses " +
+      "reales que promedian las tarjetas de al lado. Ojo: no es tu tasa de ahorro — esa vive en " +
+      "el Resumen y sale de ingresos menos gastos.",
   },
 } as const satisfies Record<string, HelpText>;
 

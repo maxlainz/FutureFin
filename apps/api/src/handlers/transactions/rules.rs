@@ -497,7 +497,7 @@ pub struct ApplyRuleCategoryCount {
 /// se toca, y se cuenta en `matched_by_other_rule` para que el llamante no lo lea como un fallo.
 ///
 /// **Invalidación COND dentro de la core**, y solo si se escribió algo: cambiar el `kind` de filas
-/// históricas cambia `transactions_12m_avg`, que es input del engine en los modos B y C. Crear la
+/// históricas cambia `transactions_avg`, que es input del engine en los modos B y C. Crear la
 /// regla sigue sin invalidar (`create_categorization_rule_core`) — son dos rutas distintas.
 pub(crate) async fn apply_categorization_rule_core(
     state: &Arc<AppState>,

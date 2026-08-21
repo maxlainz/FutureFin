@@ -851,7 +851,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection",
-        description = "Proyección de patrimonio y jubilación (FIRE): serie futura de patrimonio neto (~82 puntos, mes 0-12 mensual y anual después), objetivo FIRE por mes, mes estimado de jubilación (jubilacion_month_index), hitos de patrimonio y supuestos usados. Los valores de las series son números en euros nominales. Omite `months` salvo necesidad: sin él la respuesta sale de cache; con él se recomputa entera.",
+        description = "Proyección de patrimonio y jubilación (FIRE): serie futura de patrimonio neto (~82 puntos, mes 0-12 mensual y anual después), objetivo FIRE por mes, jubilación estimada — `jubilacion_month_index` para indexar las series, y ya resueltas en servidor `jubilacion_date_ymd` (fecha civil) y `jubilacion_age` (años cumplidos; null sin fecha de nacimiento) —, hitos de patrimonio y supuestos usados. Los valores de las series son números en euros nominales. Omite `months` salvo necesidad: sin él la respuesta sale de cache; con él se recomputa entera.",
         annotations(title = "Proyección FIRE", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection(
@@ -900,7 +900,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_transactions_summary",
-        description = "Comparativa del mes: gasto/ingreso real por categoría vs presupuesto vs promedio ponderado de meses anteriores. Sin year/month usa el último mes completo.",
+        description = "Comparativa del mes: gasto/ingreso real por categoría vs presupuesto vs promedio ponderado de meses anteriores. El promedio divide entre `avg_months` = meses del tramo con al menos un movimiento REAL: un mes cuyo único contenido son instancias recurrentes queda fuera del numerador y del denominador, así que no hunde la media. `months_with_data` se devuelve aparte (meses con movimientos de cualquier tipo) y NO es el denominador. `avg_basis` dice de qué meses sale la media y si tienen huecos; si `avg_months` es 0 no hay promedio y `avg_unavailable_reason` explica por qué. Sin year/month usa el último mes completo.",
         annotations(title = "Comparativa mensual", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_transactions_summary(
@@ -1123,7 +1123,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "simulate_projection",
-        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo) y devuelve KPIs + deltas de cada lado. KPIs: mes de jubilación, patrimonio final, target FIRE, runway, y la salud financiera del **mes 1** — income_monthly, expense_total_monthly (gasto regular + servicio de deuda: la misma base del runway y del target, la que cuadra con get_summary en los tres modos), debt_service_monthly, net_monthly (= income − expense_total; NO es lo que reparte la cascada, que además lleva el tramo de planning flows del mes) y savings_rate. Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
+        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo) y devuelve KPIs + deltas de cada lado. La respuesta es autocontenida: trae `anchor_date_ymd` (mes 0), `show_age_mode` y `viewer_birth_date`, sin necesidad de encadenar get_projection. KPIs: jubilación como índice de mes MÁS `jubilacion_date_ymd` y `jubilacion_age` ya calculados, patrimonio final, target FIRE, runway, y la salud financiera del **mes 1** — income_monthly, expense_total_monthly (gasto regular + servicio de deuda: la misma base del runway y del target, la que cuadra con get_summary en los tres modos), debt_service_monthly, net_monthly (= income − expense_total; NO es lo que reparte la cascada, que además lleva el tramo de planning flows del mes) y savings_rate. Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
         annotations(title = "Simular escenario", read_only_hint = true, open_world_hint = false)
     )]
     async fn simulate_projection(

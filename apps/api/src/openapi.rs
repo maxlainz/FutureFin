@@ -288,6 +288,7 @@ use utoipa::OpenApi;
         crate::handlers::transactions::CategoryComparisonLine,
         crate::handlers::transactions::schema::BlockActualAvg,
         crate::handlers::transactions::schema::SummaryTotals,
+        crate::handlers::transactions::schema::AvgBasis,
         crate::handlers::transactions::TransactionsSummaryResponse,
         crate::handlers::transactions::schema::CategoryMonthPoint,
         crate::handlers::transactions::schema::CategoryMonthlySeriesEntry,

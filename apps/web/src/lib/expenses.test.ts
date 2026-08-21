@@ -9,6 +9,8 @@ import type {
 } from "../api/types";
 import {
   adjacentMonthInList,
+  avgBasisDetail,
+  avgUnavailableDetail,
   avgWindowLabel,
   buildConfirmDecisions,
   capitalizeSource,
@@ -508,6 +510,69 @@ describe("avgWindowLabel", () => {
   });
   it("falls back to the id for unknown windows", () => {
     expect(avgWindowLabel("weird")).toBe("weird");
+  });
+});
+
+describe("avgBasisDetail", () => {
+  it("names the contiguous range the average came from", () => {
+    expect(
+      avgBasisDetail({
+        months: 3,
+        first_month: "2026-04",
+        last_month: "2026-06",
+        has_gaps: false,
+      }),
+    ).toBe("3 meses · abr–jun 2026");
+  });
+
+  it("keeps both years when the range crosses one", () => {
+    expect(
+      avgBasisDetail({
+        months: 3,
+        first_month: "2025-11",
+        last_month: "2026-01",
+        has_gaps: false,
+      }),
+    ).toBe("3 meses · nov 2025–ene 2026");
+  });
+
+  it("collapses a single month instead of repeating it", () => {
+    expect(
+      avgBasisDetail({
+        months: 1,
+        first_month: "2026-04",
+        last_month: "2026-04",
+        has_gaps: false,
+      }),
+    ).toBe("1 mes · abr 2026");
+  });
+
+  it("refuses to fake a contiguous range when there are gaps", () => {
+    // abr y jun (may fuera) NO son «abr–jun»: se dice cuántos meses y hasta cuándo.
+    expect(
+      avgBasisDetail({
+        months: 2,
+        first_month: "2026-04",
+        last_month: "2026-06",
+        has_gaps: true,
+      }),
+    ).toBe("2 meses con datos · hasta jun 2026");
+  });
+
+  it("has nothing to say without a basis", () => {
+    expect(avgBasisDetail(undefined)).toBeUndefined();
+  });
+});
+
+describe("avgUnavailableDetail", () => {
+  it("distinguishes no data from only-recurring data", () => {
+    expect(avgUnavailableDetail("empty_window")).toBe("sin datos en la ventana");
+    expect(avgUnavailableDetail("only_recurring_months")).toBe(
+      "sin meses con movimientos reales",
+    );
+  });
+  it("says nothing when there IS an average", () => {
+    expect(avgUnavailableDetail(undefined)).toBeUndefined();
   });
 });
 

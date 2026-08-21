@@ -417,7 +417,7 @@ async fn creating_a_categorization_rule_never_invalidates_projection_cache() {
 }
 
 /// El **backfill** de una regla sí es una mutación del conjunto: cambia el `kind` (y la categoría)
-/// de filas históricas, y `transactions_12m_avg` suma solo `kind IN ('income','expense')`. Por eso
+/// de filas históricas, y `transactions_avg` suma solo `kind IN ('income','expense')`. Por eso
 /// invalida COND — al contrario que CREAR la regla, que no toca ninguna fila. Los dos contratos
 /// conviven en el mismo módulo y este test los separa.
 #[tokio::test]
@@ -440,7 +440,7 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
         set_mode(&app, &owner.cookie, mode).await;
 
         // Fila mal clasificada (income) y sin categoría: el backfill la pasará a expense, que es
-        // exactamente lo que mueve el promedio real 12m — `transactions_12m_avg` suma por `kind`.
+        // exactamente lo que mueve el promedio real 12m — `transactions_avg` suma por `kind`.
         let seeded = app
             .post_json_with_cookie(
                 "/v1/transactions",

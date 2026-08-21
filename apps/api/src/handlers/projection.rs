@@ -241,6 +241,14 @@ pub struct ProjectionSeriesResponse {
     /// Primer mes en que el patrimonio neto ≥ objetivo FIRE móvil del mes en curso. `null` si no hay objetivo o no se alcanza.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jubilacion_month_index: Option<u32>,
+    /// Fecha civil del cruce (`YYYY-MM-DD`) = `anchor_date_ymd` + `jubilacion_month_index` meses,
+    /// conservando el día del ancla con recorte a fin de mes. `null` ⟺ no hay cruce.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jubilacion_date_ymd: Option<String>,
+    /// Años cumplidos en `jubilacion_date_ymd`. `null` si no hay cruce o no hay fecha de
+    /// nacimiento resuelta (independiente de `show_age_mode`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jubilacion_age: Option<u32>,
     /// Objetivo FIRE base en euros de hoy (gross-up de impuestos aplicado). Sirve como referencia
     /// y como anclaje del target móvil — el target en cada mes es este valor × `(1 + inflación%)^(meses/12)`.
     /// `null` cuando no hay configuración FIRE válida.
@@ -628,6 +636,34 @@ fn age_completed_years(today: NaiveDate, birth: NaiveDate) -> i32 {
         y -= 1;
     }
     y
+}
+
+/// Lectura civil de un índice de mes de la proyección: `(fecha YYYY-MM-DD, años cumplidos)`.
+///
+/// Convierte el «mes 137» —único dato que teníamos— en las dos cifras que de verdad se leen. El
+/// índice NO se sustituye: sigue siendo la clave para indexar las series.
+///
+/// **Regla de calendario**: se suman `mi` meses al ancla CONSERVANDO su día, con recorte a fin de
+/// mes (31 ene + 1 mes = 28 feb). Es exactamente `addMonthsCivil` de la web
+/// (`apps/web/src/lib/dates.ts`), y por eso `age` coincide con la etiqueta «N a» del chart.
+/// Anclar al día 1 en su lugar restaría UN AÑO a la edad cuando el cruce cae en el mes de
+/// cumpleaños y el nacimiento no es día 1 — una discrepancia silenciosa y anual.
+///
+/// `mi` se suma entero (no `mi − 1`): el mes 0 es el estado de HOY y el mes `k` nombra la frontera
+/// en la que el cruce ya es cierto. Misma convención que los hitos y que la web.
+///
+/// Nota: `ProjectionMilestone::reached_date_ymd` sí ancla al día 1 (contrato ya publicado, se deja
+/// como está). Ambas coinciden siempre en año y mes; solo difieren en el día.
+fn jubilacion_civil(
+    today: NaiveDate,
+    birth: Option<NaiveDate>,
+    mi: Option<u32>,
+) -> (Option<String>, Option<u32>) {
+    // `mi == 0` es válido (ya-FIRE hoy) → fecha = hoy. Nunca tratarlo como «no alcanzado».
+    let Some(mi) = mi else { return (None, None) };
+    let at = proj_add_months(today, mi);
+    let age = birth.map(|b| age_completed_years(at, b).max(0) as u32);
+    (Some(at.format("%Y-%m-%d").to_string()), age)
 }
 
 /// Máximo años hasta los 90 años de edad por fecha de nacimiento; acotado [5, 70]; sin DOB → 30 años.
@@ -1525,6 +1561,13 @@ pub async fn compute_projection_series_response(
             }
             _ => (Vec::new(), None, None),
         };
+    // Lectura civil del cruce, resuelta en servidor: el índice suelto obliga al consumidor a hacer
+    // aritmética de calendario y de edad, que es donde se equivoca en silencio.
+    let (jubilacion_date_ymd, jubilacion_age) = jubilacion_civil(
+        today,
+        resolved_birth_for_demographics,
+        jubilacion_month_index,
+    );
 
     Ok(ProjectionSeriesResponse {
         points,
@@ -1546,6 +1589,8 @@ pub async fn compute_projection_series_response(
         milestones_real,
         compound_outpaces_true_savings_month_index,
         jubilacion_month_index,
+        jubilacion_date_ymd,
+        jubilacion_age,
         jubilacion_target_net_worth,
         fire_target_series,
         asset_series,
@@ -1584,8 +1629,16 @@ pub(crate) struct SimulationSpec {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SimKpis {
-    /// Mes del cruce con el target FIRE (None = no se alcanza en el horizonte).
+    /// Mes del cruce con el target FIRE (None = no se alcanza en el horizonte). Es la clave para
+    /// indexar las series; la lectura humana son los dos campos siguientes.
     pub jubilacion_month_index: Option<u32>,
+    /// Fecha civil del cruce (`YYYY-MM-DD`) = `anchor_date_ymd` + el índice, conservando el día
+    /// del ancla con recorte a fin de mes. `null` ⟺ no hay cruce.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jubilacion_date_ymd: Option<String>,
+    /// Años cumplidos en esa fecha. `null` si no hay cruce o no hay fecha de nacimiento resuelta.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jubilacion_age: Option<u32>,
     #[serde(with = "rust_decimal::serde::str")]
     pub final_net_worth: Decimal,
     /// Base del target FIRE (euros de hoy; el target servido crece con la inflación).
@@ -1655,6 +1708,15 @@ pub(crate) struct SimSeries {
 pub(crate) struct SimulateProjectionResponse {
     pub horizon_months: u32,
     pub view: String,
+    /// Mes 0 de la simulación (`YYYY-MM-DD`), en el calendario de la instalación. Va aquí para que
+    /// la respuesta sea autocontenida: sin ancla, convertir un índice de mes obligaba a encadenar
+    /// una llamada a `get_projection`.
+    pub anchor_date_ymd: String,
+    /// `dates` | `ages`: preferencia de la instalación para presentar el eje temporal.
+    pub show_age_mode: String,
+    /// Fecha de nacimiento con la que se resolvieron las edades. `null` si no hay ninguna.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer_birth_date: Option<String>,
     pub baseline: SimKpis,
     pub scenario: SimKpis,
     pub deltas: SimDeltas,
@@ -1677,8 +1739,12 @@ fn sim_kpis(
     debt_service_monthly: Decimal,
     inflation_annual_percent: Decimal,
     fs: &FireSettings,
+    today: NaiveDate,
+    birth_date: Option<NaiveDate>,
 ) -> SimKpis {
     let jubilacion_month_index = fire_crossover_month(input.fire_target.as_ref(), &output.net_worth);
+    let (jubilacion_date_ymd, jubilacion_age) =
+        jubilacion_civil(today, birth_date, jubilacion_month_index);
     let final_net_worth = output.net_worth.last().copied().unwrap_or(Decimal::ZERO);
 
     // Runway: misma fórmula que `/v1/summary` (gasto total = regular + servicio de deuda;
@@ -1714,6 +1780,8 @@ fn sim_kpis(
 
     SimKpis {
         jubilacion_month_index,
+        jubilacion_date_ymd,
+        jubilacion_age,
         final_net_worth,
         fire_target_base: input.fire_target.as_ref().map(|ft| ft.base_amount),
         runway_months,
@@ -1934,6 +2002,8 @@ pub(crate) async fn simulate_projection_core(
         baseline_built.debt_service_monthly,
         ctx.inflation_annual_percent,
         &ctx.fire_settings,
+        ctx.today,
+        ctx.birth_date,
     );
     let scenario = sim_kpis(
         &scenario_input,
@@ -1941,6 +2011,8 @@ pub(crate) async fn simulate_projection_core(
         scenario_built.debt_service_monthly,
         inflation_eff,
         &fs_eff,
+        ctx.today,
+        ctx.birth_date,
     );
 
     let deltas = SimDeltas {
@@ -1998,6 +2070,9 @@ pub(crate) async fn simulate_projection_core(
         } else {
             "household".into()
         },
+        anchor_date_ymd: ctx.today.format("%Y-%m-%d").to_string(),
+        show_age_mode: ctx.show_age_mode.clone(),
+        viewer_birth_date: ctx.birth_date.map(|d| d.format("%Y-%m-%d").to_string()),
         baseline,
         scenario,
         deltas,
@@ -2459,5 +2534,84 @@ mod gross_up_tests {
             Decimal::ZERO,
             "net negativo se clipea a 0"
         );
+    }
+}
+
+#[cfg(test)]
+mod jubilacion_civil_tests {
+    use super::*;
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn sin_cruce_no_hay_ni_fecha_ni_edad() {
+        let (date, age) = jubilacion_civil(d(2026, 8, 21), Some(d(1990, 5, 10)), None);
+        assert_eq!(date, None);
+        assert_eq!(age, None);
+    }
+
+    #[test]
+    fn mes_cero_es_hoy_y_no_se_trata_como_no_alcanzado() {
+        // Ya-FIRE hoy: `Some(0)` es un cruce válido, no un «no alcanzado».
+        let (date, age) = jubilacion_civil(d(2026, 8, 21), Some(d(1990, 5, 10)), Some(0));
+        assert_eq!(date.as_deref(), Some("2026-08-21"));
+        assert_eq!(age, Some(36));
+    }
+
+    #[test]
+    fn conserva_el_dia_del_ancla_igual_que_add_months_civil() {
+        // 137 meses = 11 años y 5 meses.
+        let (date, _) = jubilacion_civil(d(2026, 8, 21), None, Some(137));
+        assert_eq!(date.as_deref(), Some("2038-01-21"));
+    }
+
+    #[test]
+    fn recorta_a_fin_de_mes_cuando_el_dia_no_existe() {
+        // Mismo clamp que `addMonthsCivil` (pinned en apps/web/src/lib/dates.test.ts):
+        // 31 ene + 1 mes = 28 feb, y 2028 es bisiesto → 29 feb.
+        let (date, _) = jubilacion_civil(d(2026, 1, 31), None, Some(1));
+        assert_eq!(date.as_deref(), Some("2026-02-28"));
+        let (date, _) = jubilacion_civil(d(2027, 8, 31), None, Some(6));
+        assert_eq!(date.as_deref(), Some("2028-02-29"));
+    }
+
+    #[test]
+    fn salta_de_ano_correctamente() {
+        let (date, _) = jubilacion_civil(d(2026, 8, 21), None, Some(5));
+        assert_eq!(date.as_deref(), Some("2027-01-21"));
+        let (date, _) = jubilacion_civil(d(2026, 12, 15), None, Some(13));
+        assert_eq!(date.as_deref(), Some("2028-01-15"));
+    }
+
+    #[test]
+    fn sin_fecha_de_nacimiento_hay_fecha_pero_no_edad() {
+        let (date, age) = jubilacion_civil(d(2026, 8, 21), None, Some(12));
+        assert_eq!(date.as_deref(), Some("2027-08-21"));
+        assert_eq!(age, None);
+    }
+
+    #[test]
+    fn la_edad_son_anos_cumplidos_en_la_fecha_del_cruce() {
+        let birth = d(1990, 5, 10);
+        // Cruce el 2038-01-21: el cumpleaños de mayo aún no ha llegado ese año → 47, no 48.
+        let (_, age) = jubilacion_civil(d(2026, 8, 21), Some(birth), Some(137));
+        assert_eq!(age, Some(47));
+        // Cruce el 2038-06-21: cumpleaños ya pasado → 48.
+        let (_, age) = jubilacion_civil(d(2026, 8, 21), Some(birth), Some(142));
+        assert_eq!(age, Some(48));
+    }
+
+    #[test]
+    fn anclar_al_dia_1_restaria_un_ano_en_el_mes_del_cumpleanos() {
+        // La razón de conservar el día del ancla. Cruce en mayo, nacimiento el día 10:
+        // con el día 21 del ancla el cumpleaños YA pasó; con día 1 aún no.
+        let birth = d(1990, 5, 10);
+        let today = d(2026, 8, 21);
+        let (_, age) = jubilacion_civil(today, Some(birth), Some(129)); // 2037-05-21
+        assert_eq!(age, Some(47), "con el día del ancla, el cumpleaños ya pasó");
+        let dia_1 = age_completed_years(proj_add_months(proj_month_first(today), 129), birth);
+        assert_eq!(dia_1, 46, "anclado al día 1 saldría un año menos");
     }
 }

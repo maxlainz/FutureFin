@@ -6,6 +6,7 @@
  */
 
 import type {
+  AvgBasisApi,
   CategoryRow,
   ImportDecisionApi,
   ImportPreviewRowApi,
@@ -13,7 +14,9 @@ import type {
   TransactionApi,
   TransactionKindApi,
   TransactionMonthApi,
+  TransactionsSummaryApi,
 } from "../api/types";
+import { formatYearMonth } from "./fire";
 import {
   DISPLAY_NUMBER_LOCALE,
   formatCurrencyNumber,
@@ -348,6 +351,51 @@ export const AVG_WINDOWS: { id: string; pill: string; label: string }[] = [
 /** Etiqueta de una ventana del promedio; el propio `id` si no está en `AVG_WINDOWS`. */
 export function avgWindowLabel(id: string): string {
   return AVG_WINDOWS.find((w) => w.id === id)?.label ?? id;
+}
+
+/**
+ * De qué meses sale el promedio de la comparativa, en corto.
+ *
+ * La ventana pedida y los meses que de verdad promedian no coinciden: `avg_window: "6"` son seis
+ * meses de CALENDARIO, pero solo promedian los que tienen algún movimiento real. Sin esta
+ * etiqueta el usuario lee «Promedio 6m» y supone seis meses de datos.
+ *
+ * Va al slot `detail` de `MetricCard`, no a `parenthetical`: en las tarjetas de gasto e ingreso
+ * el primer slot lo ocupa el `trend`, que tiene prioridad. Usando `detail` en las cuatro, la base
+ * aparece siempre a la misma altura.
+ *
+ * `has_gaps` evita una etiqueta mentirosa: abril y junio (con mayo vacío) no son «abr–jun».
+ * El texto es compacto a propósito — el slot es `nowrap` con `overflow: hidden`.
+ *
+ * `undefined` cuando no hay base que explicar — el caller usa `avgUnavailableDetail`.
+ */
+export function avgBasisDetail(basis: AvgBasisApi | undefined): string | undefined {
+  if (!basis || basis.months < 1) return undefined;
+  const n = basis.months;
+  const meses = `${n} ${n === 1 ? "mes" : "meses"}`;
+  const first = formatYearMonth(basis.first_month);
+  const last = formatYearMonth(basis.last_month);
+  if (basis.has_gaps) {
+    return last ? `${meses} con datos · hasta ${last}` : `${meses} con datos`;
+  }
+  if (!first || !last) return meses;
+  if (first === last) return `${meses} · ${first}`;
+  // Mismo año → «abr–jun 2026» en vez de «abr 2026–jun 2026»: el slot no admite más ancho.
+  const sameYear = basis.first_month.slice(0, 4) === basis.last_month.slice(0, 4);
+  const range = sameYear ? `${first.split(" ")[0]}–${last}` : `${first}–${last}`;
+  return `${meses} · ${range}`;
+}
+
+/**
+ * Por qué no hay promedio. Ocupa el mismo slot que `avgBasisDetail` para que la tarjeta nunca
+ * enseñe un guion sin explicación.
+ */
+export function avgUnavailableDetail(
+  reason: TransactionsSummaryApi["avg_unavailable_reason"],
+): string | undefined {
+  if (reason === "only_recurring_months") return "sin meses con movimientos reales";
+  if (reason === "empty_window") return "sin datos en la ventana";
+  return undefined;
 }
 
 /**

@@ -709,6 +709,20 @@ pub struct SummaryTotals {
     pub net_actual: Decimal,
 }
 
+/// De qué meses sale el promedio. `has_gaps` viaja con el rango a propósito: sin él, una UI
+/// etiquetaría «abr–jun» una media de abril y junio, fingiendo un tramo contiguo que no existe.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AvgBasis {
+    /// Meses reales incluidos. Coincide siempre con `avg_months` (≥ 1: si fuese 0 no hay basis).
+    pub months: u32,
+    /// Mes más antiguo INCLUIDO (`YYYY-MM`).
+    pub first_month: String,
+    /// Mes más reciente INCLUIDO (`YYYY-MM`).
+    pub last_month: String,
+    /// `true` ⟺ los meses incluidos NO son consecutivos.
+    pub has_gaps: bool,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TransactionsSummaryResponse {
     pub year: i32,
@@ -720,9 +734,21 @@ pub struct TransactionsSummaryResponse {
     /// Nº de meses civiles del tramo `[window_start, selected)` (Months(n)=n; Ytd=month−1;
     /// All=amplitud; puede ser 0).
     pub window_months: u32,
-    /// Nº de meses del tramo con ≥1 transacción de cualquier kind/categoría. Es el denominador
-    /// del promedio ponderado (`max(months_with_data, 1)`).
+    /// Nº de meses del tramo con ≥1 transacción de cualquier kind/categoría, **recurrentes
+    /// incluidos**. Describe lo que hay en el tramo. NO es el denominador — ese es `avg_months`.
     pub months_with_data: u32,
+    /// **El denominador del promedio**: nº de meses del tramo con ≥1 movimiento REAL
+    /// (`recurring_rule_id IS NULL`). Los meses no reales quedan fuera del numerador y del
+    /// denominador. `0` ⟺ no hay promedio (todas las medias son 0).
+    pub avg_months: u32,
+    /// Procedencia del promedio. `null` ⟺ `avg_months == 0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_basis: Option<AvgBasis>,
+    /// Por qué no hay promedio, cuando `avg_months == 0`: `"empty_window"` (el tramo no tiene
+    /// ningún movimiento) | `"only_recurring_months"` (los tiene, pero todos recurrentes).
+    /// `null` cuando sí hay promedio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_unavailable_reason: Option<String>,
     /// `household` | `mine`.
     pub view: String,
     pub expense_categories: Vec<CategoryComparisonLine>,
