@@ -21,7 +21,10 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # `contents: write` es lo que permite crear el GitHub Release del tag; el
+  # checkout sigue usando `persist-credentials: false`, así que el token solo
+  # viaja como GH_TOKEN al paso que publica las notas.
+  contents: write
   packages: write
 
 jobs:
@@ -93,3 +96,23 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Solo después de que la imagen esté publicada: un Release que anuncie una
+      # versión inexistente es peor que no tener Release. Las notas salen del
+      # CHANGELOG vía `scripts/changelog-section.sh` — misma fuente de verdad que
+      # el backfill manual de 3.0.0…3.8.0, para que no haya dos formatos.
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "el Release $TAG ya existe — no lo toco"
+            exit 0
+          fi
+          ./scripts/changelog-section.sh "$TAG" > "${RUNNER_TEMP}/release-notes.md"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "${RUNNER_TEMP}/release-notes.md" \
+            --verify-tag
