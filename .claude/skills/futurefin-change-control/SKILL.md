@@ -237,6 +237,21 @@ GHCR (always) and Docker Hub `maxlainz/futurefin` (if secrets set), tags `:X.Y.Z
 (`cargo build` or `cargo update -p futurefin-api` regenerates `Cargo.lock`) — a tag whose
 `Cargo.lock` disagrees with `Cargo.toml` breaks `--locked` builds in CI.
 
+**El GitHub Release lo publica el workflow, no tú.** Tras empujar la imagen, `publish-image.yml`
+crea el Release del tag con las notas extraídas del CHANGELOG por `scripts/changelog-section.sh`
+(idempotente; solo en `push` de tag, así que un `workflow_dispatch` de reconstrucción no reescribe
+notas). Consecuencia práctica: **la sección `## [X.Y.Z]` debe existir ANTES de taguear** o el paso
+falla — el job `rust` de CI lo comprueba antes con `./scripts/audit-releases.sh --version`. Para
+ver la coherencia de las tres listas (CHANGELOG · tags · Releases) ejecuta
+`./scripts/audit-releases.sh` sin argumentos.
+
+**Nunca crees un tag `vX.Y.Z` para una versión histórica sin publicar.** Empujarlo dispara
+`publish-image.yml` — también en la versión antigua del workflow que viva en ese commit —, y esa
+publicación incluye `type=raw,value=latest`: reconstruir una versión vieja **sobrescribe `:latest`**
+en Docker Hub y GHCR con código antiguo. Las 12 versiones documentadas sin tag (`1.0.11`–`1.0.20`,
+`1.4.4`, `3.5.0`) se quedan sin Release por eso, y porque las diez de la serie `1.0.1x` nunca
+existieron como versión en `Cargo.toml`.
+
 ### 4.2 Before tagging: full local Docker-stack test (owner-mandated)
 
 Since 3.0.0 the image *is* the stack — one container, PostgreSQL inside it. Three drills, in
@@ -407,6 +422,8 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
   `grep -n 'db-only' apps/api/docker-entrypoint.sh`
 - Shellcheck gate reproduces locally: `shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh .claude/skills/futurefin-diagnostics-and-tooling/scripts/*.sh`
 - Publish trigger + registries: `cat .github/workflows/publish-image.yml`
+- Coherencia CHANGELOG/tags/Releases: `./scripts/audit-releases.sh` (38 tags = 38 Releases el 2026-08-21;
+  12 secciones sin tag, todas deliberadas)
 - Backup schema version + chain: `grep -n 'CURRENT_SCHEMA_VERSION\|migrate_to_current' apps/api/src/handlers/backup_user/schema.rs`
 - Scope helpers exist: `grep -n 'pub fn scope_where\|bind_scope' apps/api/src/handlers/person_view.rs`
 - f64 wire exception boundary: `grep -n 'f64' .claude/api-routes.md`
