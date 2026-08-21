@@ -16,6 +16,8 @@ import type {
   InstallationAccess,
   UserResponse,
 } from "../api/types";
+import { HelpPopover } from "../components/HelpPopover";
+import { HELP_TEXTS } from "../lib/helpTexts";
 import { Modal, ModalFormError } from "../components/Modal";
 import { PlugIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
 import { Switch } from "../components/Switch";
@@ -464,7 +466,13 @@ export function SettingsView({
             onSubmit={saveInstallationProjection}
           >
             <label className="field">
-              <span>Inflación anual %</span>
+              <span className="label-with-help">
+                Inflación anual %
+                <HelpPopover
+                  title={HELP_TEXTS["settings.inflation"].title}
+                  body={HELP_TEXTS["settings.inflation"].body}
+                />
+              </span>
               <input
                 value={projectionInflationPctDraft}
                 onChange={(e) =>
@@ -509,7 +517,13 @@ export function SettingsView({
                 del <select> sea solo su título y un clic en la ayuda no abra el desplegable;
                 aria-describedby lo asocia igualmente para lectores de pantalla. */}
             <label className="field">
-              <span>Fuente del ahorro de la simulación</span>
+              <span className="label-with-help">
+                Fuente del ahorro de la simulación
+                <HelpPopover
+                  title={HELP_TEXTS["settings.savings_source"].title}
+                  body={HELP_TEXTS["settings.savings_source"].body}
+                />
+              </span>
               <select
                 aria-describedby="savings-source-help"
                 value={fireTaxDraft.savings_source ?? "budget"}
@@ -579,7 +593,25 @@ export function SettingsView({
                   .map(([side, label]) => (
                     <div className="field-row" key={side}>
                       <label className="field">
-                        <span>{label}: meses</span>
+                        <span className="label-with-help">
+                          {label}: meses
+                          <HelpPopover
+                            title={
+                              HELP_TEXTS[
+                                side === "income"
+                                  ? "settings.income_window"
+                                  : "settings.expense_window"
+                              ].title
+                            }
+                            body={
+                              HELP_TEXTS[
+                                side === "income"
+                                  ? "settings.income_window"
+                                  : "settings.expense_window"
+                              ].body
+                            }
+                          />
+                        </span>
                         <input
                           inputMode="numeric"
                           value={String(
@@ -600,7 +632,13 @@ export function SettingsView({
                         />
                       </label>
                       <label className="field">
-                        <span>{label}: cómo se cuentan</span>
+                        <span className="label-with-help">
+                          {label}: cómo se cuentan
+                          <HelpPopover
+                            title={HELP_TEXTS["settings.window_mode"].title}
+                            body={HELP_TEXTS["settings.window_mode"].body}
+                          />
+                        </span>
                         <select
                           value={
                             side === "income"

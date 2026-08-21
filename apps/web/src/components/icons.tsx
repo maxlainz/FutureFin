@@ -278,3 +278,14 @@ export function UploadIcon(props: IconProps) {
     </IconBase>
   );
 }
+
+/** Interrogante en círculo: abre la descripción de una métrica o de un ajuste (`HelpPopover`). */
+export function QuestionIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <circle cx="8" cy="8" r="6.25" />
+      <path d="M6.4 6.15a1.65 1.65 0 1 1 2.15 1.57c-.4.14-.55.42-.55.78v.4" />
+      <path d="M8 11.7h.007" strokeWidth={1.8} />
+    </IconBase>
+  );
+}

@@ -179,7 +179,8 @@ export function SummaryView({
       <div className="metric-grid workspace-kpi-strip">
         {!showMetrics ? (
           <>
-            <MetricCard label="Patrimonio neto" value={nw} />
+            <MetricCard label="Patrimonio neto"
+                  helpId="summary.net_worth" value={nw} />
             <MetricCard label="Activos totales" value={ta} />
             <MetricCard label="Pasivos totales" value={tl} />
             <MetricCard label="Ratio deuda / activos" value={dta} />
@@ -187,7 +188,8 @@ export function SummaryView({
         ) : (
           <>
             {!isZeroMoneyMetric(summary.net_worth) ? (
-              <MetricCard label="Patrimonio neto" value={nw} />
+              <MetricCard label="Patrimonio neto"
+                  helpId="summary.net_worth" value={nw} />
             ) : null}
             {!isZeroMoneyMetric(summary.total_assets) ? (
               <MetricCard label="Activos totales" value={ta} />
@@ -210,6 +212,7 @@ export function SummaryView({
               {showSavingsTile ? (
                 <MetricCard
                   label="Ahorro mensual"
+                  helpId="summary.savings"
                   value={savingsPrimary}
                   trend={savingsPlanTrend}
                   detail={savingsRateDetail}
@@ -218,6 +221,7 @@ export function SummaryView({
               {!isZeroMoneyMetric(summary.financial_health.liquid_assets_total) ? (
                 <MetricCard
                   label="Activos líquidos"
+                  helpId="summary.liquid_assets"
                   value={formatCurrencyAmount(
                     summary.financial_health.liquid_assets_total,
                     currencyIso,
@@ -230,6 +234,7 @@ export function SummaryView({
               {showRunwayTile ? (
                 <MetricCard
                   label="Runway"
+                  helpId="summary.runway"
                   value={formatRunwayValue(
                     summary.financial_health.runway_months,
                     summary.financial_health.runway_is_indefinite,

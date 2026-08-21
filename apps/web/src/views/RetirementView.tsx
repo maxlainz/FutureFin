@@ -14,6 +14,8 @@ import type {
   SummaryResponse,
   UserResponse,
 } from "../api/types";
+import { HelpPopover } from "../components/HelpPopover";
+import { HELP_TEXTS } from "../lib/helpTexts";
 import { MetricCard } from "../components/MetricCard";
 import {
   MiniProjection,
@@ -656,7 +658,13 @@ export function RetirementView({
         <div className="stack bordered-top retirement-config-stack">
           <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
             <label className="field">
-              <span>Retirada anual (SWR)</span>
+              <span className="label-with-help">
+                Retirada anual (SWR)
+                <HelpPopover
+                  title={HELP_TEXTS["settings.swr"].title}
+                  body={HELP_TEXTS["settings.swr"].body}
+                />
+              </span>
               <input
                 type="range"
                 min={0}
