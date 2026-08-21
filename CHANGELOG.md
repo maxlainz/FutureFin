@@ -54,6 +54,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   eran de `main`). No es un debilitamiento: `main` es espejo completo de `dev` por contrato, así
   que ese job ya se ejecutó sobre el mismo árbol. Sigue corriendo en `dev`, en PRs y a mano.
 - Coste total esperado: de ~1460 min/mes a ~410.
+- **Nunca publica parcialmente en silencio**: comprueba antes qué registries tienen credenciales
+  y **aborta** si falta el login de Docker Hub. Publicar solo en GHCR dejaría a quien despliega
+  con el default de `docker-compose.yml` (`maxlainz/futurefin`) recibiendo la imagen anterior sin
+  que nada avise. Con `--skip-dockerhub` se acepta ese escenario de forma explícita.
 
 ### Fixed — El barrido de conciliación no invalidaba la cache de proyección
 
