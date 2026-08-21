@@ -361,13 +361,26 @@ lote, confirm de import CSV, materialización de recurrentes e import de `.ffbac
   pool** en el apagado ordenado.
 - **Primera pasada tras el primer intervalo, no al arrancar**: en el arranque no ha pasado nada
   que conciliar y competir con migraciones y warm-up no compra nada.
+- **El barrido obedece D12a como cualquier otra mutación.** Toma `Arc<AppState>` (no un `PgPool`)
+  y, por cada owner cuyo pase **crea pares**, llama a
+  `invalidate_projection_if_savings_uses_transactions`: conciliar cambia QUÉ cuenta en el promedio
+  12m, así que en modos B/C es una mutación de inputs del engine. La invalidación va **condicionada
+  a `pairs_created > 0`** — en una instalación sana el barrido no encuentra nada y desalojar una
+  cache caliente cada 24 h a cambio de nada sería peor que el bug. El gating por modo vive dentro
+  del helper, así que en modo A no invalida jamás. Regresión (los cuatro casos, verificados con
+  mutantes): `apps/api/tests/transactions_projection_cache.rs::*_sweep_*`.
+  **Incidente**: la primera versión del barrido (3.8.1, antes de mergear) recibía solo el pool, así
+  que estructuralmente NO podía invalidar. Un par recuperado por el barrido dejaba la proyección
+  cacheada obsoleta y, con el TTL deslizante de D7, un usuario que la mirase una vez por hora la
+  mantenía viva indefinidamente.
 - **La UI no tiene botón** desde 3.8.1: con el pase en cada mutación más el barrido, «Conciliar
   ahora» no tenía trabajo (su mensaje habitual ya era «Sin transferencias que conciliar»). La ruta
   `POST /v1/transactions/reconcile` y la tool MCP `reconcile_transfers` **se mantienen** como
   recuperación manual.
 **Breaks if violated**: hacer que el pase post-mutación propague su error convierte una mutación
 correcta en 5xx y provoca duplicados por reintento del cliente; quitar el barrido devuelve el fallo
-silencioso permanente.
+silencioso permanente; darle solo el pool (o invalidar sin mirar `pairs_created`) rompe D12a por un
+lado o desaloja la cache a diario por el otro.
 
 ### D14. Second auth scheme: per-user Bearer API tokens, hash-only, live role (v3.0.0)
 The embedded MCP server (`/mcp`, module `apps/api/src/mcp/`, official `rmcp` SDK) needed a

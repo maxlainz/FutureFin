@@ -207,7 +207,11 @@ pub struct SweepOutcome {
 ///
 /// Solo mira owners con al menos un movimiento **sin conciliar**: en una instalación al día la
 /// consulta no devuelve nada y el barrido no toca la base.
-pub async fn sweep_all_owners(pool: &PgPool) -> Result<SweepOutcome, ApiError> {
+///
+/// Toma `AppState` y no un `PgPool` porque conciliar es una mutación de inputs del engine en los
+/// modos B/C: cada owner cuyo pase crea pares invalida la cache de proyección (D12a), igual que
+/// lo hace el camino HTTP.
+pub async fn sweep_all_owners(state: &Arc<AppState>) -> Result<SweepOutcome, ApiError> {
     #[derive(FromRow)]
     struct OwnerRow {
         installation_id: Uuid,
@@ -218,7 +222,7 @@ pub async fn sweep_all_owners(pool: &PgPool) -> Result<SweepOutcome, ApiError> {
            FROM transactions
            WHERE transfer_counterpart_id IS NULL"#,
     )
-    .fetch_all(pool)
+    .fetch_all(&state.pool)
     .await?;
 
     let mut out = SweepOutcome {
@@ -226,8 +230,28 @@ pub async fn sweep_all_owners(pool: &PgPool) -> Result<SweepOutcome, ApiError> {
         ..Default::default()
     };
     for o in owners {
-        match auto_reconcile_owner(pool, o.installation_id, o.owner_user_id).await {
-            Ok(r) => out.pairs_created += r.pairs_created,
+        match auto_reconcile_owner(&state.pool, o.installation_id, o.owner_user_id).await {
+            Ok(r) => {
+                out.pairs_created += r.pairs_created;
+                // D12a: conciliar cambia QUÉ cuenta en el promedio 12m (las patas conciliadas
+                // salen del numerador y del denominador), así que en los modos que usan
+                // transacciones el barrido es una mutación de inputs del engine como cualquier
+                // otra y DEBE invalidar. Sin esto, un par recuperado aquí dejaba la proyección
+                // cacheada obsoleta: el TTL es deslizante (D7), así que un usuario que la mire
+                // una vez por hora la mantiene viva indefinidamente.
+                //
+                // Solo si el pase creó pares: el caso normal en una instalación sana es 0, y
+                // desalojar una cache caliente cada 24 h a cambio de nada sería peor que el bug.
+                // El gating por `savings_source` vive dentro del helper — en modo A no invalida.
+                if r.pairs_created > 0 {
+                    invalidate_projection_if_savings_uses_transactions(
+                        state,
+                        o.installation_id,
+                        o.owner_user_id,
+                    )
+                    .await;
+                }
+            }
             Err(e) => {
                 out.owners_failed += 1;
                 tracing::warn!(
