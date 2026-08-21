@@ -67,7 +67,7 @@ a real Postgres (Section 6); they are **not** run in CI, so running them locally
 | **DB migration** | New file in `apps/api/migrations/` | Section 3 in full (never edit shipped; data-loss sign-off; grep for query drift); integration tests — every test applies ALL migrations to a fresh schema, so a broken migration fails everything; update `.claude/data-model.md`; if exported tables change shape → check `apps/api/src/handlers/backup_user/` (Section 5) and the export SQL. |
 | **UI-visual** | Anything in `apps/web/src/` that renders | `npm run typecheck:web && npm run lint:web && npm run build:web && npm test --workspace futurefin-web`; verify **light AND dark theme** before merging (owner-mandated); tokens only, no hex (Section 2.4); icons only in `components/icons.tsx`; small charts via `MiniProjection`; update `.claude/design-system.md` / `.claude/frontend-structure.md` if conventions moved; CHANGELOG. |
 | **Docs-only** | `CLAUDE.md`, `.claude/*.md`, `README.md`, CHANGELOG wording | No test gates. Gate = accuracy: verify every command/path/claim against the code before writing it (docs have drifted before — eight errata were found and fixed on 2026-07-02; prefer commands over frozen counts, e.g. `ls apps/api/migrations \| wc -l`). Record unfixable drift in futurefin-docs-and-writing §7. |
-| **Infra-release** | `Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose*.yml`, `.github/workflows/*`, version bump, tag | CI green on `dev` — **including the `docker-stack` job, which since 3.0.0 is the only automated evidence of "no data loss"; never merge on a red or skipped one**; full local Docker-stack test (Section 4.2) before tagging, **plus the V2→V3 upgrade drill with real seeded data** (4.2, step B) — the published image now carries the database, so a bad entrypoint destroys installations that never ran your code path in CI; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. Any edit to `docker-entrypoint.sh` also needs `shellcheck -S warning` clean (CI gates it). |
+| **Infra-release** | `Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose*.yml`, `.github/workflows/*`, version bump, tag | CI green on `dev` — **including the `docker-stack` job, which since 3.0.0 is the only automated evidence of "no data loss"; never merge on a red one**. Desde 2026-08-21 ese job **no corre en push a `main`** (`if: github.event_name != 'push' || github.ref != 'refs/heads/main'`): `main` es espejo completo de `dev`, así que el mismo árbol ya lo pasó ahí. La evidencia sigue existiendo, solo que se produce en `dev` — si empujas a `main` algo que NO venga de `dev`, lánzalo a mano (`gh workflow run ci.yml --ref main`); full local Docker-stack test (Section 4.2) before tagging, **plus the V2→V3 upgrade drill with real seeded data** (4.2, step B) — the published image now carries the database, so a bad entrypoint destroys installations that never ran your code path in CI; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. Any edit to `docker-entrypoint.sh` also needs `shellcheck -S warning` clean (CI gates it). |
 
 CI (`.github/workflows/ci.yml`, runs on push/PR to `main` and `dev`) covers three jobs:
 - `rust` — `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked`.
@@ -231,9 +231,15 @@ branch-exclusive files). CLAUDE.md, "Releases":
 > 4. Push tag `vX.Y.Z` **desde `main`** → el workflow `publish-image.yml` (que vive en `main`) publica la imagen.
 > 5. Volver a `dev` (`git checkout dev`) y seguir; mantener `dev` al día con `main`.
 
-The tag push triggers `.github/workflows/publish-image.yml`: multi-arch (amd64+arm64) image to
-GHCR (always) and Docker Hub `maxlainz/futurefin` (if secrets set), tags `:X.Y.Z`, `:X.Y`,
-`:X`, `:latest`. Version bump: edit `version` in `apps/api/Cargo.toml`, then sync the lockfile
+**La imagen se publica EN LOCAL desde 2026-08-21**: `./scripts/publish-image-local.sh` construye
+amd64+arm64 de una vez (containerd image store), sube a GHCR y Docker Hub `maxlainz/futurefin`
+con los tags `:X.Y.Z`, `:X.Y`, `:X`, `:latest`, y crea el GitHub Release. **El tag ya NO dispara
+ningún build**: `publish-image.yml` pasó a `workflow_dispatch` (fallback manual) porque los
+runners son amd64 y la mitad arm64 iba emulada bajo QEMU — 958 de los ~1460 min consumidos en
+agosto de 2026, el 66 % de la cuota, para un build cuyo cómputo real son ~3,5 min. El script
+verifica antes de publicar que el árbol está limpio, que HEAD es el commit del tag, que
+`Cargo.toml` coincide con la versión y que el CHANGELOG tiene su sección; y solo mueve `:latest`
+si el tag es el más alto. Version bump: edit `version` in `apps/api/Cargo.toml`, then sync the lockfile
 (`cargo build` or `cargo update -p futurefin-api` regenerates `Cargo.lock`) — a tag whose
 `Cargo.lock` disagrees with `Cargo.toml` breaks `--locked` builds in CI.
 
