@@ -239,7 +239,7 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         .await;
     assert_eq!(rec.status, http::StatusCode::CREATED);
     let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
-    // 3.10.0: ya no hay cursor que rebobinar. Para que el ENDPOINT materialize vuelva a generar
+    // 3.9.0: ya no hay cursor que rebobinar. Para que el ENDPOINT materialize vuelva a generar
     // ≥1 instancia, dejamos la regla sin instancias por SQL y ACTIVAMOS un mes cerrado con un
     // movimiento real (sin datos reales no se materializa nada).
     let rid = Uuid::parse_str(&rule_id).unwrap();

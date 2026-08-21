@@ -255,7 +255,7 @@ fn fold_side(
 /// fuera (es parcial y hundiría la media). Dentro de ese tramo, cada lado elige sus meses según
 /// `AvgWindowSpec`.
 ///
-/// **Mes real** = mes con ≥1 transacción `recurring_rule_id IS NULL`. Desde 3.10.0 los recurrentes
+/// **Mes real** = mes con ≥1 transacción `recurring_rule_id IS NULL`. Desde 3.9.0 los recurrentes
 /// solo existen en meses activos, así que en régimen normal «mes real» ≡ «mes con datos»; el
 /// predicado se conserva porque sigue siendo correcto en los casos residuales (p. ej. el mes de
 /// origen de una regla, exento de la poda). Las patas de transferencia CONCILIADAS quedan fuera

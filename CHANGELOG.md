@@ -6,7 +6,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [3.10.0] - 2026-08-21
+## [3.9.0] - 2026-08-21
 
 Una sola cifra de ahorro por modo, ventanas del promedio configurables por lado, y los recurrentes
 siguiendo a los datos reales. **Breaking de números y de contrato**; migración destructiva firmada

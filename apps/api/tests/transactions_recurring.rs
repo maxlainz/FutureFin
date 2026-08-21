@@ -25,7 +25,7 @@ fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
 }
 
 /// Deja una regla con SOLO su instancia de origen: borra las instancias fuera del mes `(oy, om)`.
-/// Desde 3.10.0 no hay cursor que rebobinar — la convergencia es idempotente por existencia, así
+/// Desde 3.9.0 no hay cursor que rebobinar — la convergencia es idempotente por existencia, así
 /// que basta con quitar las filas. Se usa para volver a ejercitar el ENDPOINT `materialize` desde
 /// un estado conocido. OJO: la convergencia post-mutación las recrearía si sus meses siguen
 /// activos, por eso el borrado va por SQL directo y no por la API.
@@ -47,7 +47,7 @@ async fn keep_only_origin_instance(app: &TestApp, rule_id: &str, oy: i32, om: u3
 }
 
 /// ACTIVA un mes: le mete un movimiento REAL (no recurrente, no conciliado) por SQL directo.
-/// Desde 3.10.0 un mes solo materializa sus recurrentes si está activo, así que casi todos los
+/// Desde 3.9.0 un mes solo materializa sus recurrentes si está activo, así que casi todos los
 /// escenarios necesitan sembrar esto primero. Por SQL y no por la API para no disparar la
 /// convergencia post-commit antes de tiempo (los tests quieren observar CUÁNDO ocurre).
 async fn activate_month_raw(app: &TestApp, owner_id: Uuid, y: i32, m: u32) {
@@ -263,7 +263,7 @@ async fn materialize_only_fills_active_months_and_is_idempotent() {
     let today = server_today(&app, &owner.cookie).await;
     let (oy, om) = shift_month(today.year(), today.month(), -3);
 
-    // Regla con origen 3 meses atrás. Desde 3.10.0 el alta NO backfillea: los meses intermedios
+    // Regla con origen 3 meses atrás. Desde 3.9.0 el alta NO backfillea: los meses intermedios
     // están vacíos, y un mes vacío no genera recurrentes. Solo queda la instancia de origen.
     let r = app
         .post_json_with_cookie(
@@ -351,7 +351,7 @@ async fn create_with_past_date_only_fills_months_that_have_real_data() {
     let today = server_today(&app, &owner.cookie).await;
     let (oy, om) = shift_month(today.year(), today.month(), -4);
 
-    // INVERSIÓN DELIBERADA DE CONTRATO (3.10.0). Antes, un alta con fecha pasada backfilleaba
+    // INVERSIÓN DELIBERADA DE CONTRATO (3.9.0). Antes, un alta con fecha pasada backfilleaba
     // TODOS los meses cerrados intermedios en el mismo commit. Ahora las instancias siguen a los
     // datos: sembramos un movimiento real solo en M-2, así que solo M-2 debe recibir la suya.
     let (ay, am) = shift_month(today.year(), today.month(), -2);
@@ -418,7 +418,7 @@ async fn closed_month_instances_dated_end_of_month() {
     let today = server_today(&app, &owner.cookie).await;
     let year = today.year() - 1; // año natural completamente en el pasado.
 
-    // 3.10.0: solo los meses ACTIVOS materializan, así que los sembramos primero.
+    // 3.9.0: solo los meses ACTIVOS materializan, así que los sembramos primero.
     for m in [2u32, 4, 12] {
         activate_month_raw(&app, owner.user_id, year, m).await;
     }
@@ -537,7 +537,7 @@ async fn deleted_instance_is_recreated_while_its_month_stays_active() {
     let (oy, om) = shift_month(today.year(), today.month(), -3);
     let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
 
-    // INVERSIÓN DELIBERADA DE CONTRATO (3.10.0). Con el cursor, borrar una instancia la borraba
+    // INVERSIÓN DELIBERADA DE CONTRATO (3.9.0). Con el cursor, borrar una instancia la borraba
     // PARA SIEMPRE. Con idempotencia por existencia, la regla es la fuente de verdad: mientras su
     // mes siga activo, la instancia vuelve. Para quitarla de verdad se borra la PLANTILLA.
     activate_month_raw(&app, owner.user_id, m1y, m1m).await;
@@ -790,7 +790,7 @@ async fn cross_user_isolation_survives_installation_wide_convergence() {
         .await;
     assert_eq!(bd.status, http::StatusCode::NOT_FOUND, "cross-user delete");
 
-    // CAMBIO DE CONTRATO (3.10.0): la convergencia es de ámbito INSTALACIÓN, así que el
+    // CAMBIO DE CONTRATO (3.9.0): la convergencia es de ámbito INSTALACIÓN, así que el
     // materialize de BOB sí procesa la regla de Alice. Es deliberado — la activación de un mes
     // también es de instalación, y con ámbito por owner un conviviente que solo tiene nómina
     // recurrente y no importa CSV se quedaría sin ella para siempre.

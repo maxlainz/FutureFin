@@ -535,7 +535,7 @@ async fn mode_b_expected_is_budget_net_not_override() {
 
     // Sin pasivos: net del modo B = 3000 − 2250 = 750 ≠ esperado 2000.
     // `savings_expected_monthly_equivalent` es el ÚNICO campo que sobrevive de la comparativa
-    // (3.10.0 retiró `savings_actual_*`): alimenta el delta «vs plan» de la tarjeta de ahorro, y
+    // (3.9.0 retiró `savings_actual_*`): alimenta el delta «vs plan» de la tarjeta de ahorro, y
     // se captura ANTES del override, así que no sigue al modo.
     let h = health(&app, &owner.cookie, "/v1/summary").await;
     approx(parse_dec(&h["net_monthly_equivalent"]), 750.0);

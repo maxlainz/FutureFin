@@ -80,7 +80,7 @@ Si retiras una métrica, **retira su texto**; no lo dejes «por si vuelve». El 
 
 ## 6. Provenance and maintenance
 
-Introducido en 3.10.0 junto al popover de ayuda. Re-verificación:
+Introducido en 3.9.0 junto al popover de ayuda. Re-verificación:
 
 ```bash
 # Entradas del catálogo y consumidores

@@ -278,13 +278,13 @@ async fn mode_b_weighted_avg_excludes_savings_and_partial_month() {
     let delta_a = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
     approx(delta_a, 2000.0);
 
-    // Modo B con ventanas SIMÉTRICAS 12/12 (el comportamiento anterior a 3.10.0, reproducible):
+    // Modo B con ventanas SIMÉTRICAS 12/12 (el comportamiento anterior a 3.9.0, reproducible):
     // income_avg = (2400+1200)/2 = 1800; expense_avg = (900+300)/2 = 600 → delta 1200.
     set_windows(&app, &owner.cookie, "transactions_avg", 12, 12).await;
     let delta_sym = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
     approx(delta_sym, 1200.0);
 
-    // Ventanas ASIMÉTRICAS 3/12 (el default de 3.10.0): el ingreso solo mira los últimos 3 meses
+    // Ventanas ASIMÉTRICAS 3/12 (el default de 3.9.0): el ingreso solo mira los últimos 3 meses
     // civiles, así que el mes −6 sale de SU ventana pero sigue contando para el gasto.
     // income_avg = 2400 (solo −1); expense_avg = (900+300)/2 = 600 → delta 1800.
     // Este es el par discriminante: con una sola ventana los dos casos darían lo mismo.
@@ -707,7 +707,7 @@ async fn assets_cap_targets_follow_savings_source_mode() {
 }
 
 /// `GET /v1/projection/series` reporta la fuente **efectiva** (tras el fallback) y la PROCEDENCIA
-/// de cada lado (3.10.0: `savings_income_basis` / `savings_expense_basis`), para que la web
+/// de cada lado (3.9.0: `savings_income_basis` / `savings_expense_basis`), para que la web
 /// etiquete la pendiente sin un fetch extra y sepa decir el rango real que usó.
 ///
 /// PREDICCIÓN: modo A → `"budget"` y ambos lados `basis: "budget"`; modo B **sin** meses reales →

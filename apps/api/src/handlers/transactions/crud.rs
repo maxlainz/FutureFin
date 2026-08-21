@@ -134,7 +134,7 @@ pub(super) async fn insert_manual(
 /// de origen. Secuencia compartida por `create_transaction` y el bucle de `create_batch` (el
 /// manejo del `ordinal` queda fuera: se pasa ya resuelto).
 ///
-/// **Ya no backfillea aquí** (3.10.0): las instancias de los meses intermedios las crea la
+/// **Ya no backfillea aquí** (3.9.0): las instancias de los meses intermedios las crea la
 /// convergencia post-commit, y solo en los meses **activos**. Un alta con fecha pasada en meses
 /// sin movimientos reales ya no genera relleno sintético — que es justo el objetivo del cambio.
 async fn insert_manual_with_recurrence(

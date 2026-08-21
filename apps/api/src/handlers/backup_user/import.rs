@@ -268,7 +268,7 @@ pub async fn import_user_backup_apply(
         .await;
 
     // Un restore inserta el conjunto verbatim, incluidas instancias recurrentes de un fichero
-    // anterior a 3.10.0 que pueden vivir en meses sin datos reales. La convergencia lo deja
+    // anterior a 3.9.0 que pueden vivir en meses sin datos reales. La convergencia lo deja
     // consistente con la invariante actual (y también rellena lo que falte).
     crate::handlers::transactions::recurring::converge_recurring_after_mutation(&state, iid).await;
 
