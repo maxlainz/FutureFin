@@ -17,8 +17,16 @@
 //! (`transfer_match_rejections`). Desambiguación greedy con orden TOTAL (Δfecha, fechas, ids) →
 //! el resultado es función del contenido de la BD, no del plan de Postgres ni del reloj.
 //! Corre post-commit tras toda mutación (best-effort vía `auto_reconcile_after_mutation`: un
-//! fallo se loguea y NO convierte la mutación exitosa en 5xx) y bajo demanda vía
-//! `POST /v1/transactions/reconcile`.
+//! fallo se loguea y NO convierte la mutación exitosa en 5xx), en el **barrido periódico**
+//! (`sweep_all_owners`, ver abajo) y bajo demanda vía `POST /v1/transactions/reconcile`.
+//!
+//! ## El barrido periódico (3.8.1)
+//! Los pases post-mutación son best-effort **por diseño**: si fallan, escriben un `warn` y la
+//! mutación sigue siendo un 2xx. El precio es que ese par se queda sin conciliar **para siempre**,
+//! porque nada lo reintenta — y el usuario no tiene forma de enterarse, así que tampoco va a pedir
+//! el pase manual. `sweep_all_owners` es ese reintento: recorre cada `(installation, owner)` con
+//! movimientos sin conciliar y vuelve a pasar el mismo algoritmo. En una instalación sana no
+//! encuentra nada (el pase es de punto fijo), y eso es exactamente lo que se espera de él.
 //!
 //! ## Manual
 //! Conciliar un par a mano exige importes exactamente opuestos y misma divisa (el par debe seguir
@@ -178,6 +186,62 @@ pub(crate) async fn auto_reconcile_owner(
 /// `pairs_created` (0 si el pase falló). Llamar SIEMPRE antes de
 /// `invalidate_projection_if_savings_uses_transactions`, para que una sola invalidación cubra
 /// mutación + pase.
+/// Resultado de un barrido completo.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepOutcome {
+    /// `(installation, owner)` con movimientos sin conciliar que se han revisado.
+    pub owners_scanned: u32,
+    pub pairs_created: u32,
+    /// Owners cuyo pase falló. No abortan el barrido: se registran y se reintentarán al siguiente.
+    pub owners_failed: u32,
+}
+
+/// Reintenta la conciliación de **todos** los owners con movimientos sin conciliar.
+///
+/// Existe porque los pases post-mutación se tragan sus errores (ver el doc del módulo): sin este
+/// barrido, un fallo puntual deja un par sin conciliar de forma permanente y silenciosa.
+///
+/// **Un owner que falla no aborta el barrido.** Cada `(installation, owner)` es independiente, así
+/// que un error en uno —un lock, una fila que desaparece a mitad— no debe impedir que los demás se
+/// concilien; se cuenta en `owners_failed` y se reintenta en la pasada siguiente.
+///
+/// Solo mira owners con al menos un movimiento **sin conciliar**: en una instalación al día la
+/// consulta no devuelve nada y el barrido no toca la base.
+pub async fn sweep_all_owners(pool: &PgPool) -> Result<SweepOutcome, ApiError> {
+    #[derive(FromRow)]
+    struct OwnerRow {
+        installation_id: Uuid,
+        owner_user_id: Uuid,
+    }
+    let owners: Vec<OwnerRow> = sqlx::query_as(
+        r#"SELECT DISTINCT installation_id, owner_user_id
+           FROM transactions
+           WHERE transfer_counterpart_id IS NULL"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = SweepOutcome {
+        owners_scanned: owners.len() as u32,
+        ..Default::default()
+    };
+    for o in owners {
+        match auto_reconcile_owner(pool, o.installation_id, o.owner_user_id).await {
+            Ok(r) => out.pairs_created += r.pairs_created,
+            Err(e) => {
+                out.owners_failed += 1;
+                tracing::warn!(
+                    installation_id = %o.installation_id,
+                    owner_user_id = %o.owner_user_id,
+                    error = ?e,
+                    "periodic reconcile sweep failed for owner; will retry next run"
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) async fn auto_reconcile_after_mutation(state: &Arc<AppState>, iid: Uuid, owner: Uuid) -> u32 {
     match auto_reconcile_owner(&state.pool, iid, owner).await {
         Ok(o) => {

@@ -522,3 +522,139 @@ async fn reconcile_cross_user_transaction_404() {
         .await;
     assert_eq!(r.status, http::StatusCode::NOT_FOUND, "cross-user: {r:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Barrido periódico (3.8.1): la red de reintento de los pases que fallaron
+// ---------------------------------------------------------------------------
+
+use futurefin_api::handlers::transactions::reconcile::sweep_all_owners;
+
+/// Simula lo que deja atrás un pase post-mutación fallido: el par existe y encaja, pero nadie lo
+/// enlazó. **Sin registrar rechazo** — un fallo del pase no es una decisión del usuario.
+async fn unlink_silently(app: &TestApp, ids: &[&str]) {
+    for id in ids {
+        sqlx::query(
+            "UPDATE transactions
+             SET transfer_counterpart_id = NULL,
+                 transfer_reconciled_at = NULL,
+                 transfer_reconciled_source = NULL
+             WHERE id = $1::uuid",
+        )
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("unlink");
+    }
+}
+
+/// El caso que justifica el barrido: un pase best-effort falló, el par se quedó suelto y **nada
+/// lo reintentaba**. El usuario no puede enterarse, así que tampoco iba a pedir el pase manual.
+#[tokio::test]
+async fn sweep_recovers_pairs_a_failed_pass_left_behind() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let a = create_txn(&app, &owner.cookie, "2026-06-10", "Salida", "-250", "expense").await;
+    let b = create_txn(&app, &owner.cookie, "2026-06-11", "Entrada", "250", "income").await;
+    let (a_id, b_id) = (id_of(&a), id_of(&b));
+
+    // El alta ya los concilió (el pase corre en cada mutación).
+    let after_create = fetch_txn(&app, &owner.cookie, "2026-06", &a_id).await;
+    assert!(
+        !after_create["transfer_counterpart_id"].is_null(),
+        "precondición: el alta debería haberlos conciliado: {after_create}"
+    );
+
+    // Ahora se simula el pase perdido.
+    unlink_silently(&app, &[&a_id, &b_id]).await;
+    let broken = fetch_txn(&app, &owner.cookie, "2026-06", &a_id).await;
+    assert!(broken["transfer_counterpart_id"].is_null(), "{broken}");
+
+    let out = sweep_all_owners(&app.pool).await.expect("sweep");
+    assert_eq!(out.pairs_created, 1, "{out:?}");
+    assert_eq!(out.owners_failed, 0, "{out:?}");
+
+    let fixed = fetch_txn(&app, &owner.cookie, "2026-06", &a_id).await;
+    assert_eq!(
+        fixed["transfer_counterpart_id"].as_str(),
+        Some(b_id.as_str()),
+        "el barrido debe re-enlazar el par: {fixed}"
+    );
+
+    // Punto fijo: repetirlo no crea nada. Es el caso NORMAL en una instalación sana.
+    let again = sweep_all_owners(&app.pool).await.expect("sweep 2");
+    assert_eq!(again.pairs_created, 0, "{again:?}");
+    assert_eq!(again.owners_failed, 0, "{again:?}");
+}
+
+/// Recorre TODOS los owners, no solo uno: cada miembro del hogar concilia sus propias patas y el
+/// fallo de uno no puede dejar al otro sin reintento.
+#[tokio::test]
+async fn sweep_covers_every_owner_independently() {
+    let app = TestApp::spawn().await;
+    let alice = app.register_and_login_owner("alice").await;
+    let bob = app
+        .register_and_approve_member(&alice, "bob", "member")
+        .await;
+
+    let a1 = create_txn(&app, &alice.cookie, "2026-06-10", "A salida", "-100", "expense").await;
+    let a2 = create_txn(&app, &alice.cookie, "2026-06-11", "A entrada", "100", "income").await;
+    let b1 = create_txn(&app, &bob.cookie, "2026-06-12", "B salida", "-70", "expense").await;
+    let b2 = create_txn(&app, &bob.cookie, "2026-06-13", "B entrada", "70", "income").await;
+    unlink_silently(&app, &[&id_of(&a1), &id_of(&a2), &id_of(&b1), &id_of(&b2)]).await;
+
+    let out = sweep_all_owners(&app.pool).await.expect("sweep");
+    assert_eq!(out.owners_scanned, 2, "un owner por miembro con patas sueltas: {out:?}");
+    assert_eq!(out.pairs_created, 2, "{out:?}");
+
+    for (cookie, id, expected) in [
+        (&alice.cookie, id_of(&a1), id_of(&a2)),
+        (&bob.cookie, id_of(&b1), id_of(&b2)),
+    ] {
+        let row = fetch_txn(&app, cookie, "2026-06", &id).await;
+        assert_eq!(row["transfer_counterpart_id"].as_str(), Some(expected.as_str()), "{row}");
+    }
+}
+
+/// El barrido **no resucita** un par que el usuario desconcilió a mano: el rechazo manda. Es la
+/// diferencia entre «el pase falló» y «no son la misma transferencia».
+#[tokio::test]
+async fn sweep_never_resurrects_a_user_rejected_pair() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let a = create_txn(&app, &owner.cookie, "2026-06-10", "Salida", "-300", "expense").await;
+    let b = create_txn(&app, &owner.cookie, "2026-06-11", "Entrada", "300", "income").await;
+    let a_id = id_of(&a);
+    assert_eq!(
+        fetch_txn(&app, &owner.cookie, "2026-06", &a_id).await["transfer_counterpart_id"].as_str(),
+        Some(id_of(&b).as_str())
+    );
+
+    // Desconciliar por la API persiste el rechazo anti-resurrección.
+    let del = app
+        .delete_with_cookie(&format!("/v1/transactions/{a_id}/reconcile"), &owner.cookie)
+        .await;
+    assert_eq!(del.status, http::StatusCode::OK, "{del:?}");
+
+    let out = sweep_all_owners(&app.pool).await.expect("sweep");
+    assert_eq!(out.pairs_created, 0, "el rechazo del usuario manda sobre el barrido: {out:?}");
+    let row = fetch_txn(&app, &owner.cookie, "2026-06", &a_id).await;
+    assert!(row["transfer_counterpart_id"].is_null(), "{row}");
+}
+
+/// Instalación al día: el barrido no encuentra owners con patas sueltas y no toca la base.
+#[tokio::test]
+async fn sweep_is_a_noop_when_everything_is_reconciled() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    create_txn(&app, &owner.cookie, "2026-06-10", "Salida", "-40", "expense").await;
+    create_txn(&app, &owner.cookie, "2026-06-11", "Entrada", "40", "income").await;
+
+    let out = sweep_all_owners(&app.pool).await.expect("sweep");
+    assert_eq!(
+        out.owners_scanned, 0,
+        "sin patas sueltas no hay owner que revisar: {out:?}"
+    );
+    assert_eq!(out.pairs_created, 0, "{out:?}");
+}

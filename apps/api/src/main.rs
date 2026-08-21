@@ -106,6 +106,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http::HeaderValue::from_static("DENY"),
     ));
 
+    let reconcile_sweep = spawn_reconcile_sweep(shutdown_pool.clone());
+
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port()));
     tracing::info!("listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -115,9 +117,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     tracing::info!("http server stopped");
+    // El barrido se aborta ANTES de cerrar el pool: si no, una pasada en vuelo consultaría un
+    // pool cerrado y ensuciaría el apagado con un error que no significa nada.
+    if let Some(task) = reconcile_sweep {
+        task.abort();
+        tracing::info!("reconcile sweep stopped");
+    }
     shutdown_pool.close().await;
     tracing::info!("database pool closed");
     Ok(())
+}
+
+/// Horas entre barridos de conciliación. `FUTUREFIN_RECONCILE_SWEEP_HOURS`, default 24,
+/// **0 = desactivado**. Fuera de 0..=168 se ignora y se usa el default (misma política laxa que
+/// `SESSION_TTL_DAYS`: un valor absurdo no debe tumbar el arranque de una app de escritorio).
+fn reconcile_sweep_hours() -> u64 {
+    std::env::var("FUTUREFIN_RECONCILE_SWEEP_HOURS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&h| h <= 168)
+        .unwrap_or(24)
+}
+
+/// Barrido periódico de conciliación de transferencias — la **primera tarea periódica** del
+/// binario.
+///
+/// Por qué existe: los pases post-mutación son best-effort y se tragan sus errores para no
+/// convertir una escritura ya persistida en un 5xx. El precio es que un fallo puntual deja el par
+/// sin conciliar de forma permanente y **silenciosa**. Esto lo reintenta.
+///
+/// La primera pasada corre **tras el primer intervalo, no al arrancar**: en el arranque no ha
+/// pasado nada que conciliar (el estado quedó como lo dejó el último proceso) y competir con las
+/// migraciones y el warm-up por la BD no compra nada.
+fn spawn_reconcile_sweep(pool: sqlx::PgPool) -> Option<tokio::task::JoinHandle<()>> {
+    let hours = reconcile_sweep_hours();
+    if hours == 0 {
+        tracing::info!("reconcile sweep disabled (FUTUREFIN_RECONCILE_SWEEP_HOURS=0)");
+        return None;
+    }
+    tracing::info!(every_hours = hours, "reconcile sweep scheduled");
+    Some(tokio::spawn(async move {
+        let period = std::time::Duration::from_secs(hours * 3600);
+        let mut ticker = tokio::time::interval(period);
+        // `interval` dispara inmediatamente en el primer tick: se consume aquí para que la
+        // primera pasada real sea a `period`.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&pool).await {
+                Ok(o) if o.pairs_created > 0 || o.owners_failed > 0 => tracing::info!(
+                    owners_scanned = o.owners_scanned,
+                    pairs_created = o.pairs_created,
+                    owners_failed = o.owners_failed,
+                    "reconcile sweep done"
+                ),
+                // El caso normal en una instalación sana: nada que conciliar. A `debug` para no
+                // llenar el log de una línea diaria que no dice nada.
+                Ok(o) => tracing::debug!(owners_scanned = o.owners_scanned, "reconcile sweep: nothing to do"),
+                Err(e) => tracing::warn!(error = ?e, "reconcile sweep failed; retrying next run"),
+            }
+        }
+    }))
 }
 
 async fn shutdown_signal() {

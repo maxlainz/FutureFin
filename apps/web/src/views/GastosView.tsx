@@ -4,7 +4,7 @@
  * recibe props finas de App. Sus mutaciones nunca tocan la cache de proyección (las transacciones
  * no son inputs del engine); `onCashflowMutated` avisa a App para refrescar el overlay del chart.
  *
- * Estructura: KPIs → toolbar (mes + ventana + acciones, incl. «Conciliar ahora») → Comparativa
+ * Estructura: KPIs → toolbar (mes + ventana + acciones) → Comparativa
  * (tabla + barras + cash-flow) → Movimientos (tabla con edición inline optimista + modal de
  * edición completa + borrado). Las conciliadas (traspasos internos) se listan atenuadas con tag
  * «conciliada» y se desconcilian desde el modal; el servidor ya las excluye de los totales.
@@ -30,7 +30,6 @@ import type {
   LiabilityApiRow,
   PatchTransactionRequest,
   ReconcilePairResponseApi,
-  ReconcileRunResponseApi,
   RecurringMaterializeResponse,
   TransactionApi,
   TransactionKindApi,
@@ -156,7 +155,6 @@ export function GastosView({
   const [deleteTarget, setDeleteTarget] = useState<TransactionApi | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [deletingRecurring, setDeletingRecurring] = useState(false);
-  const [reconciling, setReconciling] = useState(false);
   /** Materialización de recurrentes: una sola vez por montaje de la vista. */
   const materializedOnce = useRef(false);
 
@@ -412,29 +410,6 @@ export function GastosView({
       setDeletingRecurring(false);
     }
   }, [deleteTarget, handleMutated]);
-
-  /** Pase de auto-conciliación bajo demanda. Idempotente: sin pares nuevos no recarga nada. */
-  const runReconcileNow = useCallback(async () => {
-    setReconciling(true);
-    setRowError(null);
-    try {
-      const res = await apiPost<ReconcileRunResponseApi>(
-        "/v1/transactions/reconcile",
-        {},
-      );
-      const pairs = res?.pairs_created ?? 0;
-      setNotice(
-        pairs > 0
-          ? `${pairs} par${pairs === 1 ? "" : "es"} conciliado${pairs === 1 ? "" : "s"}.`
-          : "Sin transferencias que conciliar.",
-      );
-      if (pairs > 0) await handleMutated();
-    } catch (e) {
-      setRowError(e instanceof Error ? e.message : "No se pudo conciliar.");
-    } finally {
-      setReconciling(false);
-    }
-  }, [handleMutated]);
 
   // Materializa las reglas recurrentes pendientes una sola vez por montaje. Silencioso:
   // si falla, el pasado/presente queda igual. Refresca solo si generó algún movimiento.
@@ -1078,16 +1053,6 @@ export function GastosView({
                 >
                   <RefreshIcon />
                   Recurrentes
-                </button>
-                <button
-                  type="button"
-                  className="btn ghost expenses-action-btn"
-                  disabled={reconciling}
-                  title="Empareja traspasos entre tus cuentas y los saca de los totales"
-                  onClick={() => void runReconcileNow()}
-                >
-                  <LinkIcon />
-                  {reconciling ? "Conciliando…" : "Conciliar ahora"}
                 </button>
               </div>
             ) : null}
