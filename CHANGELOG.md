@@ -31,6 +31,38 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   (recupera lo que un pase perdió, recorre todos los owners, **nunca resucita** un par que el
   usuario desconcilió, y es no-op con todo conciliado), verificados con mutantes.
 
+### Fixed — El barrido de conciliación no invalidaba la cache de proyección
+
+- **El bug**: `sweep_all_owners` recibía un `PgPool`, no el `AppState`, así que **estructuralmente
+  no podía** invalidar la cache de proyección. Pero concilia exactamente igual que el camino HTTP,
+  y conciliar cambia QUÉ cuenta en el promedio 12m (las patas conciliadas salen del numerador **y**
+  del denominador). En modos B/C eso es una mutación de inputs del engine: el par recuperado movía
+  la proyección y la entrada cacheada se quedaba con la cifra vieja.
+- **Por qué no se cerraba solo**: el TTL de la cache es **deslizante** (D7) —
+  `projection_cache_get` hace `e.last_used = Instant::now()` en cada hit—, así que un usuario que
+  mire su proyección una vez por hora mantiene viva la entrada obsoleta **indefinidamente**. No era
+  una ventana de 60 minutos.
+- **El arreglo**: el barrido toma `Arc<AppState>` y llama a
+  `invalidate_projection_if_savings_uses_transactions` por cada owner cuyo pase **crea pares**,
+  igual que hace el camino HTTP desde 3.5.0. El gating por `savings_source` vive dentro del helper,
+  así que en modo A sigue sin invalidar nada.
+- **Condicionado a `pairs_created > 0` a propósito**: en una instalación sana el barrido no
+  encuentra nada, y desalojar una cache caliente cada 24 h a cambio de nada habría sido peor que el
+  bug que arregla.
+- **Cuatro regresiones, verificadas con tres mutantes** (`transactions_projection_cache.rs`): B y C
+  invalidan al recuperar un par, A nunca, y un barrido que visita al owner sin enlazar nada no tira
+  la cache. Quitar la invalidación tumba B y C; invalidar siempre tumba el de cache caliente;
+  saltarse el gating por modo tumba el de A. La primera versión del test de cache caliente **pasaba
+  en vacío** —con todo conciliado el barrido no visita a nadie y el guard no se ejercita—; ahora
+  deja un movimiento impar y asserta `owners_scanned == 1`.
+
+### Fixed — `FUTUREFIN_RECONCILE_SWEEP_HOURS` faltaba en el doc de récord de env vars
+
+- Estaba en el CHANGELOG y en dos skills, pero no en [`.claude/env-and-config.md`](.claude/env-and-config.md),
+  que CLAUDE.md designa como catálogo de env vars. Añadida con su tope real: se parsea como `u64` y
+  se **descarta si supera 168** (una semana), así que un valor no parseable, negativo o `>168` cae
+  al default de 24 sin avisar.
+
 ### Added — Los GitHub Releases se publican solos desde el CHANGELOG
 
 - **El desajuste**: en GitHub convivían tres listas de versiones que no coincidían. Tags había 38;

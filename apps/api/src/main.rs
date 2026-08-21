@@ -72,6 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "server config"
     );
 
+    // Clon para la tarea periódica: `state` se mueve al Extension del router justo debajo,
+    // y el barrido necesita el AppState (no solo el pool) para invalidar la cache de proyección.
+    let sweep_state = state.clone();
+
     let api = Router::new()
         .merge(routes::app_router(&state))
         .layer(Extension(state))
@@ -106,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http::HeaderValue::from_static("DENY"),
     ));
 
-    let reconcile_sweep = spawn_reconcile_sweep(shutdown_pool.clone());
+    let reconcile_sweep = spawn_reconcile_sweep(sweep_state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port()));
     tracing::info!("listening on http://{}", addr);
@@ -149,7 +153,7 @@ fn reconcile_sweep_hours() -> u64 {
 /// La primera pasada corre **tras el primer intervalo, no al arrancar**: en el arranque no ha
 /// pasado nada que conciliar (el estado quedó como lo dejó el último proceso) y competir con las
 /// migraciones y el warm-up por la BD no compra nada.
-fn spawn_reconcile_sweep(pool: sqlx::PgPool) -> Option<tokio::task::JoinHandle<()>> {
+fn spawn_reconcile_sweep(state: std::sync::Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     let hours = reconcile_sweep_hours();
     if hours == 0 {
         tracing::info!("reconcile sweep disabled (FUTUREFIN_RECONCILE_SWEEP_HOURS=0)");
@@ -164,7 +168,7 @@ fn spawn_reconcile_sweep(pool: sqlx::PgPool) -> Option<tokio::task::JoinHandle<(
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            match futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&pool).await {
+            match futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&state).await {
                 Ok(o) if o.pairs_created > 0 || o.owners_failed > 0 => tracing::info!(
                     owners_scanned = o.owners_scanned,
                     pairs_created = o.pairs_created,

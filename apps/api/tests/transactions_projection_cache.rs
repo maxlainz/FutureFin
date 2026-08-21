@@ -715,3 +715,173 @@ async fn mode_b_reconcile_endpoints_invalidate_projection_cache() {
         "modo B: un pase que no enlaza nada no debe tirar la cache caliente"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Barrido periódico (`sweep_all_owners`, 3.8.1)
+// ---------------------------------------------------------------------------
+// El barrido concilia exactamente igual que el camino HTTP, así que debe obedecer el MISMO
+// contrato de cache: en B/C invalida cuando recupera un par, en A nunca, y en ningún modo tira
+// una cache caliente si no encontró nada (el caso normal, una vez al día).
+
+/// Simula el pase best-effort que falló: deja las patas sueltas sin pasar por ningún handler.
+async fn unlink_silently(app: &TestApp, ids: &[&str]) {
+    for id in ids {
+        sqlx::query(
+            "UPDATE transactions
+             SET transfer_counterpart_id = NULL,
+                 transfer_reconciled_at = NULL,
+                 transfer_reconciled_source = NULL
+             WHERE id = $1::uuid",
+        )
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .expect("unlink");
+    }
+}
+
+/// Crea un par que el alta concilia sola y lo deja suelto. Devuelve `(iid, key)`.
+async fn pair_left_behind(
+    app: &TestApp,
+    owner: &common::LoggedInOwner,
+) -> (Uuid, futurefin_api::state::ProjectionCacheKey) {
+    let cat = app.create_category(owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    let a = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-01", "concept": "Salida", "amount": "-100", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let b = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": "2026-06-03", "concept": "Entrada", "amount": "100", "kind": "income" }),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let (a_id, b_id) = (
+        a["id"].as_str().unwrap().to_string(),
+        b["id"].as_str().unwrap().to_string(),
+    );
+    unlink_silently(app, &[&a_id, &b_id]).await;
+
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    (iid, key)
+}
+
+/// El bug que esto fija: `sweep_all_owners` recibía solo el pool, así que no podía invalidar.
+/// Un par recuperado por el barrido cambiaba el promedio 12m —y con él la proyección— dejando
+/// la entrada cacheada obsoleta; con el TTL deslizante (D7) un usuario que mirase su proyección
+/// una vez por hora la mantenía viva indefinidamente.
+#[tokio::test]
+async fn mode_b_sweep_invalidates_when_it_recovers_a_pair() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (_iid, key) = pair_left_behind(&app, &owner).await;
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    app.warm_household(&owner.cookie, &key).await;
+    let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)
+        .await
+        .expect("sweep");
+    assert_eq!(out.pairs_created, 1, "precondición: debe recuperar el par: {out:?}");
+
+    app.assert_invalidated(&key, "sweep recovered a pair (mode B)").await;
+}
+
+/// Modo C tiene la misma dependencia del promedio real de gasto que B.
+#[tokio::test]
+async fn mode_c_sweep_invalidates_when_it_recovers_a_pair() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (_iid, key) = pair_left_behind(&app, &owner).await;
+    set_mode(&app, &owner.cookie, "budget_income_real_expense").await;
+
+    app.warm_household(&owner.cookie, &key).await;
+    let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)
+        .await
+        .expect("sweep");
+    assert_eq!(out.pairs_created, 1, "{out:?}");
+
+    app.assert_invalidated(&key, "sweep recovered a pair (mode C)").await;
+}
+
+/// Modo A: las transacciones no son inputs del engine, así que ni el barrido invalida.
+/// Espejo exacto de `mode_a_reconcile_endpoints_do_not_touch_projection_cache`.
+#[tokio::test]
+async fn mode_a_sweep_does_not_touch_projection_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (_iid, key) = pair_left_behind(&app, &owner).await;
+    // Sin set_mode: modo A es el default.
+
+    app.warm_household(&owner.cookie, &key).await;
+    let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)
+        .await
+        .expect("sweep");
+    assert_eq!(out.pairs_created, 1, "{out:?}");
+
+    assert!(
+        app.cache_contains(&key).await,
+        "modo A: el barrido NO debe invalidar (las transacciones no son inputs del engine)"
+    );
+}
+
+/// El caso normal, una vez al día en una instalación sana: el barrido SÍ visita al owner (tiene
+/// movimientos sin conciliar) pero no encuentra pareja para ninguno. Invalidar ahí desalojaría una
+/// cache caliente a cambio de nada — sería peor que el bug que arreglamos.
+///
+/// Ojo con la versión ingenua de este test: si se dejan todos los movimientos conciliados, la
+/// query del barrido no devuelve NINGÚN owner, el bucle no se ejecuta y el test pasa aunque la
+/// invalidación fuese incondicional. Por eso queda un movimiento **impar** (sin contrapartida
+/// posible): así el owner se visita de verdad y el guard `pairs_created > 0` es lo único que
+/// sostiene el assert. Verificado con mutante (`if true` → este test cae).
+#[tokio::test]
+async fn mode_b_sweep_does_not_evict_a_hot_cache_when_it_finds_nothing() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    // Un solo movimiento: nunca tendrá contrapartida, así que el owner se escanea y no se
+    // concilia nada — el estado estable de una instalación sana.
+    app.post_json_with_cookie(
+        "/v1/transactions",
+        json!({ "op_date": "2026-06-01", "concept": "Compra", "amount": "-100", "kind": "expense" }),
+        &owner.cookie,
+    )
+    .await;
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
+
+    let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)
+        .await
+        .expect("sweep");
+    assert_eq!(
+        out.owners_scanned, 1,
+        "el test solo prueba algo si el barrido visita al owner: {out:?}"
+    );
+    assert_eq!(out.pairs_created, 0, "{out:?}");
+
+    assert!(
+        app.cache_contains(&key).await,
+        "un barrido que no enlaza nada no debe tirar la cache caliente"
+    );
+}
