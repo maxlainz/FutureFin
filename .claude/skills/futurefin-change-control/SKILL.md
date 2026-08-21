@@ -19,7 +19,7 @@ How changes are classified, gated and reviewed in this repo. Counts refreshed **
 the 3.8.0 train** (issue #4, ergonomía MCP: **28** integration-test files in `apps/api/tests/`
 — el nuevo es `allocation_resolution.rs` —, **40** migraciones **sin cambios** (ningún bloque
 del tren añade columnas), `.ffbackup` sigue en **8**, y el catálogo MCP pasa de 47 a **50**
-tools. `apps/api/Cargo.toml` sigue en `3.7.0`: el tren vive en `dev` sin release). Antes,
+tools. `apps/api/Cargo.toml` pasa a `3.8.0`, la versión que publica el tren). Antes,
 **2026-08-19 for the 3.7.0 train** (fusión de la cuota de pasivo en el presupuesto: `budget_derived.rs` renombrado
 a `budget_liability_quotas.rs`, 5 → 10 tests; **40** migraciones y **27** ficheros de test sin
 cambios; `.ffbackup` sigue en **8** — la reforma no toca datos almacenados). Antes, **2026-08-19 for
@@ -391,9 +391,9 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (**3.7.0** on 2026-08-19; 3.5.0 nunca se publicó)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**3.8.0** on 2026-08-21; 3.5.0 nunca se publicó)
 - Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**40** on 2026-08-19 — la 40ª es `20260819120000_transactions_transfer_reconciliation`)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**27** on 2026-08-19 — sin altas en 3.7.0; `budget_derived.rs` se renombró a `budget_liability_quotas.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (289 on 2026-08-19 tras la fusión de la cuota; 284 at 3.6.0, 283 at 3.5.0)
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**28** on 2026-08-21 — el alta de 3.8.0 es `allocation_resolution.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (312 on 2026-08-21 tras el tren del issue #4; 289 at 3.7.0, 284 at 3.6.0, 283 at 3.5.0)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
 - Compose topology (one service since 3.0.0):
