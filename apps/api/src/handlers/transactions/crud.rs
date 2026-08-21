@@ -130,11 +130,13 @@ pub(super) async fn insert_manual(
 }
 
 /// Inserta un movimiento manual y, si `is_recurring`, crea su regla recurrente (resolución
-/// mensual), enlaza el movimiento a ella y backfillea las instancias de los meses cerrados
-/// intermedios — todo en el MISMO commit `tx`. Devuelve el id del movimiento de origen. Secuencia
-/// compartida por `create_transaction` y el bucle de `create_batch` (el manejo del `ordinal` queda
-/// fuera: se pasa ya resuelto). `today` debe ser `Some` cuando `is_recurring` (invariante de los
-/// callers).
+/// mensual) y enlaza el movimiento a ella, en el MISMO commit `tx`. Devuelve el id del movimiento
+/// de origen. Secuencia compartida por `create_transaction` y el bucle de `create_batch` (el
+/// manejo del `ordinal` queda fuera: se pasa ya resuelto).
+///
+/// **Ya no backfillea aquí** (3.10.0): las instancias de los meses intermedios las crea la
+/// convergencia post-commit, y solo en los meses **activos**. Un alta con fecha pasada en meses
+/// sin movimientos reales ya no genera relleno sintético — que es justo el objetivo del cambio.
 async fn insert_manual_with_recurrence(
     tx: &mut PgConnection,
     iid: Uuid,
@@ -142,23 +144,14 @@ async fn insert_manual_with_recurrence(
     p: &PreparedTxn,
     ordinal: i32,
     is_recurring: bool,
-    today: Option<NaiveDate>,
 ) -> Result<Uuid, ApiError> {
-    let cursor = recurring::month_start_of(p.op_date);
     let rule_id = if is_recurring {
-        Some(recurring::insert_rule(&mut *tx, iid, owner, p, cursor).await?)
+        let origin_month = recurring::month_start_of(p.op_date);
+        Some(recurring::insert_rule(&mut *tx, iid, owner, p, origin_month).await?)
     } else {
         None
     };
-    let id = insert_manual(&mut *tx, iid, owner, p, ordinal, rule_id).await?;
-    // Backfill: un alta con fecha pasada deja creadas TODAS las instancias de meses cerrados
-    // intermedios en el mismo commit (antes solo aparecían cuando el frontend llamaba a
-    // materialize al montar).
-    if let Some(rule_id) = rule_id {
-        let today = today.expect("today computed when recurrence present");
-        recurring::backfill_new_rule(&mut *tx, iid, owner, rule_id, p, cursor, today).await?;
-    }
-    Ok(id)
+    insert_manual(&mut *tx, iid, owner, p, ordinal, rule_id).await
 }
 
 pub(super) async fn load_txn(pool: &sqlx::PgPool, id: Uuid) -> Result<TransactionResponse, ApiError> {
@@ -223,20 +216,15 @@ pub(crate) async fn create_transaction_core(
 
     let mut tx = state.pool.begin().await?;
     let ordinal = next_fingerprint_ordinal(&mut tx, iid, user_id, &prepared.fingerprint).await?;
-    let id = insert_manual_with_recurrence(
-        &mut tx,
-        iid,
-        user_id,
-        &prepared,
-        ordinal,
-        is_recurring,
-        today,
-    )
-    .await?;
+    let id =
+        insert_manual_with_recurrence(&mut tx, iid, user_id, &prepared, ordinal, is_recurring)
+            .await?;
     tx.commit().await?;
 
-    // Pase de auto-conciliación ANTES de invalidar: una sola invalidación cubre alta + pase.
+    // Orden contractual: conciliar (cambia QUÉ cuenta como real) → converger (cambia el CONJUNTO)
+    // → invalidar. Una sola invalidación cubre las tres.
     auto_reconcile_after_mutation(state, iid, user_id).await;
+    recurring::converge_recurring_after_mutation(state, iid).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     load_txn(&state.pool, id).await
 }
@@ -308,22 +296,16 @@ pub async fn create_batch(
             Some(&o) => o,
             None => next_fingerprint_ordinal(&mut tx, iid, user.id.0, &p.fingerprint).await?,
         };
-        let id = insert_manual_with_recurrence(
-            &mut tx,
-            iid,
-            user.id.0,
-            p,
-            ord,
-            b.recurrence.is_some(),
-            today,
-        )
-        .await?;
+        let id =
+            insert_manual_with_recurrence(&mut tx, iid, user.id.0, p, ord, b.recurrence.is_some())
+                .await?;
         next_ord.insert(p.fingerprint.clone(), ord + 1);
         ids.push(id);
     }
     tx.commit().await?;
 
     auto_reconcile_after_mutation(&state, iid, user.id.0).await;
+        recurring::converge_recurring_after_mutation(&state, iid).await;
     invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
@@ -1128,6 +1110,7 @@ pub(crate) async fn patch_transaction_core(
     // Los nuevos amount/op_date pueden abrir (o reabrir) un emparejado → pase antes de invalidar.
     if pairing_changed {
         auto_reconcile_after_mutation(state, iid, user_id).await;
+        recurring::converge_recurring_after_mutation(state, iid).await;
     }
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     load_txn(&state.pool, id).await
@@ -1208,6 +1191,7 @@ pub(crate) async fn delete_transaction_core(
     // La FK ON DELETE SET NULL ya desconcilió a la posible superviviente; el pase le busca otra
     // contrapartida (punto fijo) antes de la única invalidación.
     auto_reconcile_after_mutation(state, iid, user_id).await;
+    recurring::converge_recurring_after_mutation(state, iid).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     Ok(())
 }
@@ -1352,6 +1336,7 @@ pub(crate) async fn delete_import_core(
     // El borrado del lote cascadea a sus transacciones → cambia el conjunto. Las contrapartidas
     // supervivientes de otros lotes quedaron sueltas (FK SET NULL) → pase antes de invalidar.
     auto_reconcile_after_mutation(state, iid, user_id).await;
+    recurring::converge_recurring_after_mutation(state, iid).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     Ok(())
 }

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
 
@@ -323,14 +323,37 @@ pub struct BackupRecurringRuleV6 {
     pub last_materialized_month: NaiveDate,
 }
 
-/// A recurring-transaction rule exported inside a `.ffbackup` (schema_version ≥ 7 — since v7 rules
-/// are month-resolution only: no `day_of_month`, instances are dated at end-of-month by the
-/// materializer).
+/// A recurring-transaction rule as exported in schema_version 7 and 8 — rules still carried the
+/// monotonic idempotency cursor `last_materialized_month`, retired in v9 (see 3.10.0: instances
+/// converge on the months that actually have data, so the anchor is the ORIGIN month instead).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupRecurringRuleV8 {
+    pub concept: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub amount: Decimal,
+    pub kind: String,
+    #[serde(default)]
+    pub category_ref: Option<CategoryRef>,
+    #[serde(default)]
+    pub linked_asset_index: Option<usize>,
+    #[serde(default)]
+    pub linked_liability_index: Option<usize>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub last_materialized_month: NaiveDate,
+}
+
+/// A recurring-transaction rule exported inside a `.ffbackup` (schema_version ≥ 9).
 ///
 /// Category is denormalized to `(scope, name)` (like transactions); `linked_asset_index` /
 /// `linked_liability_index` are positions into this payload's `assets` / `liabilities` vecs
-/// (`None` when the FK was already SET NULL at export). `last_materialized_month` (first day of a
-/// month) is carried verbatim so a re-materialize after import does not regenerate past instances.
+/// (`None` when the FK was already SET NULL at export).
+///
+/// `origin_month` (first day of a month) is the rule's ANCHOR, not a cursor: convergence
+/// materializes from that month onward into every ACTIVE month, and its prune never removes the
+/// instance living in it. It replaces v8's `last_materialized_month`, which was monotonic — the
+/// opposite of what convergence needs (a CSV for an old month imported today must still
+/// materialize it).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackupRecurringRule {
     pub concept: String,
@@ -345,7 +368,7 @@ pub struct BackupRecurringRule {
     pub linked_liability_index: Option<usize>,
     #[serde(default)]
     pub notes: Option<String>,
-    pub last_materialized_month: NaiveDate,
+    pub origin_month: NaiveDate,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, ToSchema)]
@@ -502,7 +525,7 @@ pub struct BackupPayloadV7 {
     pub categorization_rules: Vec<BackupCategorizationRule>,
     /// Recurring-transaction rules (month-resolution since v7: `day_of_month` was dropped).
     #[serde(default)]
-    pub recurring_transaction_rules: Vec<BackupRecurringRule>,
+    pub recurring_transaction_rules: Vec<BackupRecurringRuleV8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -527,15 +550,44 @@ pub struct BackupPayloadV8 {
     #[serde(default)]
     pub categorization_rules: Vec<BackupCategorizationRule>,
     #[serde(default)]
-    pub recurring_transaction_rules: Vec<BackupRecurringRule>,
+    pub recurring_transaction_rules: Vec<BackupRecurringRuleV8>,
     /// Pares desconciliados A MANO (schema_version ≥ 8): la memoria anti-resurrección del
     /// auto-matcher. Empty when migrating from an older backup.
     #[serde(default)]
     pub transfer_match_rejections: Vec<BackupTransferMatchRejection>,
 }
 
+/// v9 (3.10.0): las reglas recurrentes cambian el cursor `last_materialized_month` por el ancla
+/// `origin_month`. Es un cambio NO aditivo, como el v6→v7 que quitó `day_of_month`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayloadV9 {
+    pub user: BackupUser,
+    pub categories_used: Vec<BackupCategory>,
+    pub assets: Vec<BackupAssetV3>,
+    #[serde(default)]
+    pub allocation_rules: Vec<BackupAllocationRule>,
+    pub liabilities: Vec<BackupLiability>,
+    pub budget_entries: Vec<BackupBudgetEntry>,
+    pub planning_flows: Vec<BackupPlanningFlow>,
+    #[serde(default)]
+    pub ui_preferences: UiPreferences,
+    pub installation_snapshot_informative: InstallationSnapshotInformative,
+    #[serde(default)]
+    pub snapshots: Vec<BackupSnapshot>,
+    #[serde(default)]
+    pub transaction_imports: Vec<BackupTransactionImport>,
+    #[serde(default)]
+    pub transactions: Vec<BackupTransaction>,
+    #[serde(default)]
+    pub categorization_rules: Vec<BackupCategorizationRule>,
+    #[serde(default)]
+    pub recurring_transaction_rules: Vec<BackupRecurringRule>,
+    #[serde(default)]
+    pub transfer_match_rejections: Vec<BackupTransferMatchRejection>,
+}
+
 /// Alias for the current-version payload. Export and import code work against this type.
-pub type BackupPayload = BackupPayloadV8;
+pub type BackupPayload = BackupPayloadV9;
 
 #[derive(Debug)]
 pub enum AnyPayload {
@@ -547,6 +599,7 @@ pub enum AnyPayload {
     V6(BackupPayloadV6),
     V7(BackupPayloadV7),
     V8(BackupPayloadV8),
+    V9(BackupPayloadV9),
 }
 
 pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, String> {
@@ -590,6 +643,11 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
             let p: BackupPayloadV8 = serde_json::from_slice(bytes)
                 .map_err(|e| format!("payload v8 malformed: {e}"))?;
             Ok(AnyPayload::V8(p))
+        }
+        9 => {
+            let p: BackupPayloadV9 = serde_json::from_slice(bytes)
+                .map_err(|e| format!("payload v9 malformed: {e}"))?;
+            Ok(AnyPayload::V9(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
             "schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
@@ -736,7 +794,7 @@ fn payload_v6_to_v7(p: BackupPayloadV6) -> BackupPayloadV7 {
         recurring_transaction_rules: p
             .recurring_transaction_rules
             .into_iter()
-            .map(|r| BackupRecurringRule {
+            .map(|r| BackupRecurringRuleV8 {
                 concept: r.concept,
                 amount: r.amount,
                 kind: r.kind,
@@ -773,24 +831,96 @@ fn payload_v7_to_v8(p: BackupPayloadV7) -> BackupPayloadV8 {
     }
 }
 
-pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
-    match any {
-        AnyPayload::V1(p) => payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(
-            payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p)))),
-        ))),
-        AnyPayload::V2(p) => payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(
-            payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(p))),
-        ))),
-        AnyPayload::V3(p) => payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(
-            payload_v4_to_v5(payload_v3_to_v4(p)),
-        ))),
-        AnyPayload::V4(p) => {
-            payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(p))))
+/// v8 → v9: el cursor `last_materialized_month` se sustituye por el ancla `origin_month`.
+///
+/// El cursor NO es el origen — es el mes más reciente ya materializado, así que usarlo tal cual
+/// impediría materializar todo lo anterior. La reconstrucción correcta es el mes de la instancia
+/// MÁS ANTIGUA de la regla dentro del propio payload (`recurring_rule_index` apunta a su posición
+/// en `recurring_transaction_rules`); si la regla no tiene ninguna instancia en el fichero, el
+/// cursor es la única cota disponible. Es la misma regla que aplica la migración de base de datos
+/// `20260821120000_recurring_converge_on_real_movement`, para que importar un backup y actualizar
+/// una instalación produzcan el mismo ancla.
+fn payload_v8_to_v9(p: BackupPayloadV8) -> BackupPayloadV9 {
+    use chrono::Datelike;
+    use std::collections::HashMap;
+    let mut earliest: HashMap<usize, NaiveDate> = HashMap::new();
+    for t in &p.transactions {
+        if let Some(ix) = t.recurring_rule_index {
+            let month = NaiveDate::from_ymd_opt(t.op_date.year(), t.op_date.month(), 1)
+                .expect("valid first-of-month");
+            earliest
+                .entry(ix)
+                .and_modify(|m| {
+                    if month < *m {
+                        *m = month;
+                    }
+                })
+                .or_insert(month);
         }
-        AnyPayload::V5(p) => payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(p))),
-        AnyPayload::V6(p) => payload_v7_to_v8(payload_v6_to_v7(p)),
-        AnyPayload::V7(p) => payload_v7_to_v8(p),
-        AnyPayload::V8(p) => p,
+    }
+    let recurring_transaction_rules = p
+        .recurring_transaction_rules
+        .into_iter()
+        .enumerate()
+        .map(|(ix, r)| BackupRecurringRule {
+            concept: r.concept,
+            amount: r.amount,
+            kind: r.kind,
+            category_ref: r.category_ref,
+            linked_asset_index: r.linked_asset_index,
+            linked_liability_index: r.linked_liability_index,
+            notes: r.notes,
+            origin_month: earliest
+                .get(&ix)
+                .copied()
+                .map(|m| m.min(r.last_materialized_month))
+                .unwrap_or(r.last_materialized_month),
+        })
+        .collect();
+    BackupPayloadV9 {
+        user: p.user,
+        categories_used: p.categories_used,
+        assets: p.assets,
+        allocation_rules: p.allocation_rules,
+        liabilities: p.liabilities,
+        budget_entries: p.budget_entries,
+        planning_flows: p.planning_flows,
+        ui_preferences: p.ui_preferences,
+        installation_snapshot_informative: p.installation_snapshot_informative,
+        snapshots: p.snapshots,
+        transaction_imports: p.transaction_imports,
+        transactions: p.transactions,
+        categorization_rules: p.categorization_rules,
+        recurring_transaction_rules,
+        transfer_match_rejections: p.transfer_match_rejections,
+    }
+}
+
+pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
+    // Cadena completa v1..v9: TODOS los backups antiguos siguen importando (regla de
+    // change-control §5 — un backup es la única vía de recuperación de un usuario).
+    match any {
+        AnyPayload::V1(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(
+            payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(
+                payload_v1_to_v2(p),
+            )))),
+        ))),
+        AnyPayload::V2(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(
+            payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(p)))),
+        ))),
+        AnyPayload::V3(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(
+            payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(p))),
+        ))),
+        AnyPayload::V4(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(
+            payload_v5_to_v6(payload_v4_to_v5(p)),
+        ))),
+        AnyPayload::V5(p) => {
+            payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(p))))
+        }
+        AnyPayload::V6(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(p))),
+        AnyPayload::V7(p) => payload_v8_to_v9(payload_v7_to_v8(p)),
+        AnyPayload::V8(p) => payload_v8_to_v9(p),
+        AnyPayload::V9(p) => p,
     }
 }
 
@@ -1224,8 +1354,11 @@ mod tests {
             rule.category_ref.as_ref().map(|c| c.name.as_str()),
             Some("Nómina")
         );
+        // v9: el cursor se convirtió en ancla. Aquí ambos coinciden (la única instancia del
+        // payload vive en el mes del cursor), así que este caso NO discrimina entre coger el
+        // origen y coger el cursor — de eso se encarga `v8_to_v9_anchors_on_earliest_instance`.
         assert_eq!(
-            rule.last_materialized_month,
+            rule.origin_month,
             NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()
         );
         // The transaction points back at the rule by index.
@@ -1377,5 +1510,69 @@ mod tests {
         assert_eq!(v4.assets[0].name, "Fondo");
         assert!(v4.allocation_rules.is_empty());
         assert!(v4.snapshots.is_empty());
+    }
+
+    /// v8 → v9 ancla en la instancia MÁS ANTIGUA, no en el cursor. Es el caso discriminante: el
+    /// cursor (mes más reciente materializado) va por delante del origen, así que copiarlo tal
+    /// cual dejaría la regla sin poder materializar los meses intermedios tras el import.
+    #[test]
+    fn v8_to_v9_anchors_on_earliest_instance_not_on_the_cursor() {
+        let payload = serde_json::json!({
+            "user": {"username": "u", "birth_date": null},
+            "categories_used": [],
+            "assets": [], "liabilities": [], "budget_entries": [], "planning_flows": [],
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "transactions": [
+                {"import_index": null, "source": "manual", "op_date": "2026-03-31",
+                 "value_date": null, "concept": "Nomina", "amount": "2000.0000",
+                 "currency": "EUR", "kind": "income", "category_ref": null,
+                 "linked_asset_index": null, "linked_liability_index": null, "notes": null,
+                 "fingerprint": "fp-mar", "fingerprint_ordinal": 0, "recurring_rule_index": 0},
+                {"import_index": null, "source": "manual", "op_date": "2026-06-30",
+                 "value_date": null, "concept": "Nomina", "amount": "2000.0000",
+                 "currency": "EUR", "kind": "income", "category_ref": null,
+                 "linked_asset_index": null, "linked_liability_index": null, "notes": null,
+                 "fingerprint": "fp-jun", "fingerprint_ordinal": 0, "recurring_rule_index": 0}
+            ],
+            "recurring_transaction_rules": [
+                {"concept": "Nomina", "amount": "2000.0000", "kind": "income",
+                 "category_ref": null, "linked_asset_index": null,
+                 "linked_liability_index": null, "notes": null,
+                 "last_materialized_month": "2026-06-01"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let v9 = migrate_to_current(parse_payload(8, &bytes).unwrap());
+
+        // Cursor = junio; instancia más antigua = marzo. El ancla debe ser MARZO.
+        assert_eq!(
+            v9.recurring_transaction_rules[0].origin_month,
+            NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            "el ancla debe salir de la instancia más antigua, no del cursor"
+        );
+    }
+
+    /// Sin instancias en el payload (el usuario las borró a mano), el cursor es la única cota.
+    #[test]
+    fn v8_to_v9_falls_back_to_the_cursor_when_the_rule_has_no_instances() {
+        let payload = serde_json::json!({
+            "user": {"username": "u", "birth_date": null},
+            "categories_used": [],
+            "assets": [], "liabilities": [], "budget_entries": [], "planning_flows": [],
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "transactions": [],
+            "recurring_transaction_rules": [
+                {"concept": "Nomina", "amount": "2000.0000", "kind": "income",
+                 "category_ref": null, "linked_asset_index": null,
+                 "linked_liability_index": null, "notes": null,
+                 "last_materialized_month": "2026-06-01"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let v9 = migrate_to_current(parse_payload(8, &bytes).unwrap());
+        assert_eq!(
+            v9.recurring_transaction_rules[0].origin_month,
+            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()
+        );
     }
 }

@@ -711,7 +711,7 @@ export type RecurringRuleApi = {
   linked_liability_id?: string;
   notes?: string;
   /** YYYY-MM-DD del último mes materializado. */
-  last_materialized_month: string;
+  origin_month: string;
   created_at: string;
   updated_at: string;
 };

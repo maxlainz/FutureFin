@@ -239,23 +239,28 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         .await;
     assert_eq!(rec.status, http::StatusCode::CREATED);
     let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
-    // El alta con fecha pasada ya backfillea los meses cerrados; rebobinamos por SQL (cursor a un mes previo
-    // al origen, sin instancias) para que el ENDPOINT materialize vuelva a generar ≥1 y podamos
-    // probar que invalida en modo B.
+    // 3.10.0: ya no hay cursor que rebobinar. Para que el ENDPOINT materialize vuelva a generar
+    // ≥1 instancia, dejamos la regla sin instancias por SQL y ACTIVAMOS un mes cerrado con un
+    // movimiento real (sin datos reales no se materializa nada).
     let rid = Uuid::parse_str(&rule_id).unwrap();
     sqlx::query("DELETE FROM transactions WHERE recurring_rule_id = $1")
         .bind(rid)
         .execute(&app.pool)
         .await
         .expect("clear rule instances");
-    let (cy, cm) = shift_month(oy, om, -1);
-    let cursor = NaiveDate::from_ymd_opt(cy, cm, 1).unwrap();
-    sqlx::query("UPDATE recurring_transaction_rules SET last_materialized_month = $1 WHERE id = $2")
-        .bind(cursor)
-        .bind(rid)
-        .execute(&app.pool)
-        .await
-        .expect("rewind cursor");
+    let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
+    let iid = app.installation_id().await;
+    sqlx::query(
+        "INSERT INTO transactions (installation_id, owner_user_id, source, op_date, concept, \
+         amount, currency, kind, fingerprint, fingerprint_ordinal) \
+         VALUES ($1, $2, 'manual', $3, 'Activador', -1, 'EUR', 'expense', 'fp-activador', 0)",
+    )
+    .bind(iid)
+    .bind(owner.user_id)
+    .bind(NaiveDate::from_ymd_opt(m1y, m1m, 15).unwrap())
+    .execute(&app.pool)
+    .await
+    .expect("activate month");
     app.warm_household(&owner.cookie, &key).await;
     let mat = app
         .post_json_with_cookie("/v1/transactions/recurring/materialize", json!({}), &owner.cookie)

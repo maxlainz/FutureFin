@@ -802,8 +802,9 @@ pub struct RecurringRuleResponse {
     pub linked_liability_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
-    /// Cursor de idempotencia: primer día del mes más reciente ya materializado (`YYYY-MM-DD`).
-    pub last_materialized_month: String,
+    /// Ancla de la regla: primer día del mes en que arrancó (`YYYY-MM-DD`). La convergencia
+    /// materializa de este mes en adelante y su poda nunca retira la instancia que vive en él.
+    pub origin_month: String,
     #[schema(value_type = String, format = "date-time")]
     pub created_at: DateTime<Utc>,
     #[schema(value_type = String, format = "date-time")]
@@ -812,10 +813,13 @@ pub struct RecurringRuleResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MaterializeResponse {
-    /// Reglas del usuario examinadas.
+    /// Reglas examinadas. Desde 3.10.0 la convergencia es de ámbito **instalación**, así que
+    /// cuenta las reglas de toda la instalación, no solo las del usuario que llama.
     pub rules_processed: u32,
-    /// Transacciones nuevas generadas.
+    /// Instancias nuevas creadas (meses activos que aún no tenían la suya).
     pub materialized: u32,
+    /// Instancias **podadas** (3.10.0): vivían en meses que dejaron de tener movimientos reales.
+    pub pruned: u32,
 }
 
 #[cfg(test)]

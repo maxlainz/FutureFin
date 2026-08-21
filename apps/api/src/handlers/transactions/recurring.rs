@@ -2,19 +2,46 @@
 //!
 //! Una regla es una **plantilla** per-user (nómina, alquiler, aportación mensual…): concepto,
 //! importe firmado, kind, categoría y enlaces. Las reglas tienen resolución **MENSUAL** (sin día
-//! configurable desde 3.2.0): `POST /materialize` genera las transacciones reales pendientes en
-//! `transactions` (`source='manual'`, `recurring_rule_id` de la regla), una por cada mes civil
-//! **cerrado** desde el cursor `last_materialized_month`, con `op_date` = **último día** de su mes
-//! (así la instancia cuenta en las estadísticas del mes al que pertenece). El mes en curso jamás
-//! se materializa — ni siquiera en su último día: sus recurrentes aparecen en la primera llamada
-//! con el servidor ya en el mes siguiente, de modo que el mes abierto no muestra movimientos
-//! sintéticos que distorsionen sus estadísticas. El cursor es la única fuente de idempotencia:
-//! re-materializar no duplica ni recrea instancias borradas (el cursor ya pasó ese mes).
+//! configurable desde 3.2.0).
 //!
-//! Cache de proyección (contrato en `transactions/mod.rs`): `materialize` crea instancias reales →
-//! invalida solo en modo `transactions_avg`. En cambio, **borrar una regla NO invalida** en ningún
-//! modo: la FK `ON DELETE SET NULL` conserva las instancias ya materializadas, así que el conjunto
-//! de transacciones (y por tanto el promedio) no cambia.
+//! # Convergencia (3.10.0) — las instancias siguen a los datos reales
+//!
+//! Desde 3.10.0 no hay cursor. El estado objetivo es una **invariante declarativa**:
+//!
+//! > una instancia de la regla R existe en el mes M ⟺ M es un mes **activo** de la instalación y
+//! > `M >= R.origin_month`.
+//!
+//! **Mes activo** = mes civil **cerrado** con ≥1 movimiento *real* — `recurring_rule_id IS NULL` y
+//! no conciliado (una pata de transferencia conciliada es dinero que nunca salió del hogar: no
+//! activa nada). El mes en curso nunca se materializa, así que el mes abierto no muestra
+//! movimientos sintéticos que distorsionen sus estadísticas.
+//!
+//! `converge_recurring_for_installation` lleva el ledger a ese estado — **crea** lo que falta y
+//! **poda** lo que sobra — y corre post-commit tras cada mutación de transacciones. Consecuencias:
+//!
+//! * Un mes sin CSV ni altas manuales queda **genuinamente vacío**: desaparece la categoría de
+//!   meses «pseudovacíos» (solo recurrentes) que el promedio del engine tenía que excluir aparte.
+//! * **Idempotencia por existencia**, no por cursor: el cursor era monotónico, justo lo contrario
+//!   de lo que hace falta (un CSV de marzo-2025 importado en abril-2026 dispara un mes que el
+//!   cursor ya había pasado). La garantía dura la da el índice único parcial
+//!   `transactions_recurring_rule_month_uniq` — el `FOR UPDATE` sobre las reglas no basta, porque
+//!   bajo READ COMMITTED no re-evalúa un `NOT EXISTS` que mira `transactions`.
+//! * **Borrar una instancia a mano ya no la borra para siempre**: se recrea mientras su mes siga
+//!   activo. Para quitarla de verdad hay que borrar la **plantilla**. Decisión firmada del owner.
+//! * La activación es de **ámbito instalación** (no por owner): en un hogar donde A importa CSV y
+//!   B solo tiene una nómina recurrente, con ámbito por owner B perdería toda su nómina.
+//!
+//! El mes de **origen** está exento de la poda: su instancia es el movimiento con el que se dio de
+//! alta la recurrencia y lleva `recurring_rule_id`, así que no cuenta como movimiento real — sin la
+//! exención la convergencia borraría lo que el usuario acaba de teclear. La inserción, en cambio,
+//! sí considera el mes de origen (`>= origin_month`) y se apoya en la comprobación de existencia
+//! para no duplicarlo: así un mes de origen que quedó sin instancia (la limpieza histórica de la
+//! migración 3.10.0 no eximía a nadie) vuelve a materializar si algún día recibe datos.
+//!
+//! Cache de proyección (contrato en `transactions/mod.rs`): la convergencia crea/borra instancias
+//! reales → siempre corre **antes** de la invalidación, para que una sola invalidación cubra la
+//! mutación y su convergencia. **Borrar una regla NO invalida** en ningún modo: la FK
+//! `ON DELETE SET NULL` conserva las instancias, así que el conjunto de transacciones no cambia.
 
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
@@ -93,19 +120,20 @@ pub(super) fn assert_recurrence_not_too_old(
 // Inserción de la regla (usado por crud.rs en el alta con recurrencia)
 // ---------------------------------------------------------------------------
 
-/// Inserta una regla recurrente derivada de una transacción preparada y devuelve su id. El cursor
-/// `last_materialized_month` (primer día de mes) evita que la instancia de origen se re-materialice.
+/// Inserta una regla recurrente derivada de una transacción preparada y devuelve su id.
+/// `origin_month` (primer día del mes de la transacción de origen) es el **ancla**: la
+/// convergencia materializa de ese mes en adelante y nunca poda la instancia que vive en él.
 pub(super) async fn insert_rule(
     conn: &mut PgConnection,
     iid: Uuid,
     owner: Uuid,
     p: &PreparedTxn,
-    last_materialized_month: NaiveDate,
+    origin_month: NaiveDate,
 ) -> Result<Uuid, ApiError> {
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO recurring_transaction_rules
                (installation_id, owner_user_id, concept, amount, kind, category_id,
-                linked_asset_id, linked_liability_id, notes, last_materialized_month)
+                linked_asset_id, linked_liability_id, notes, origin_month)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING id"#,
     )
@@ -118,7 +146,7 @@ pub(super) async fn insert_rule(
     .bind(p.linked_asset_id)
     .bind(p.linked_liability_id)
     .bind(p.notes.as_deref())
-    .bind(last_materialized_month)
+    .bind(origin_month)
     .fetch_one(&mut *conn)
     .await?;
     Ok(id)
@@ -139,7 +167,7 @@ struct RuleRow {
     linked_asset_id: Option<Uuid>,
     linked_liability_id: Option<Uuid>,
     notes: Option<String>,
-    last_materialized_month: NaiveDate,
+    origin_month: NaiveDate,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -155,7 +183,7 @@ fn row_to_response(r: RuleRow) -> RecurringRuleResponse {
         linked_asset_id: r.linked_asset_id,
         linked_liability_id: r.linked_liability_id,
         notes: r.notes,
-        last_materialized_month: r.last_materialized_month.format("%Y-%m-%d").to_string(),
+        origin_month: r.origin_month.format("%Y-%m-%d").to_string(),
         created_at: r.created_at,
         updated_at: r.updated_at,
     }
@@ -163,7 +191,7 @@ fn row_to_response(r: RuleRow) -> RecurringRuleResponse {
 
 const RULE_SELECT: &str = r#"SELECT r.id, r.concept, r.amount, r.kind, r.category_id,
               c.name AS category_name, r.linked_asset_id, r.linked_liability_id,
-              r.notes, r.last_materialized_month, r.created_at, r.updated_at
+              r.notes, r.origin_month, r.created_at, r.updated_at
        FROM recurring_transaction_rules r
        LEFT JOIN categories c ON c.id = r.category_id"#;
 
@@ -211,10 +239,13 @@ pub(crate) async fn list_recurring_rules_core(
 // POST /v1/transactions/recurring/materialize
 // ---------------------------------------------------------------------------
 
-/// Fila mínima de una regla para el bucle de materialización.
+/// Fila mínima de una regla para el bucle de convergencia. Lleva `owner_user_id` porque la
+/// convergencia es de **instalación** (la activación de un mes lo es) mientras que las reglas y
+/// sus instancias son per-owner.
 #[derive(Debug, FromRow)]
 struct RuleCore {
     id: Uuid,
+    owner_user_id: Uuid,
     concept: String,
     amount: Decimal,
     kind: String,
@@ -222,115 +253,187 @@ struct RuleCore {
     linked_asset_id: Option<Uuid>,
     linked_liability_id: Option<Uuid>,
     notes: Option<String>,
-    last_materialized_month: NaiveDate,
+    origin_month: NaiveDate,
 }
 
-/// Materializa las instancias pendientes de UNA regla desde su cursor `last_materialized_month`
-/// hasta el último mes civil **cerrado** (el mes en curso queda siempre fuera). Cada instancia se
-/// fecha en el **último día de su mes** — la atribución mensual de las estadísticas es `op_date`,
-/// así que la instancia de M cuenta en M pero solo existe con el servidor ya en M+1. Cada
-/// instancia toma un ordinal MAX+1 (nunca 409 frente a un manual idéntico) y el cursor avanza sólo
-/// si insertó algo (idempotente). Devuelve cuántas instancias creó. Compartida por el endpoint
-/// `materialize` y por el backfill del alta con fecha pasada (`crud.rs`, vía `backfill_new_rule`).
-/// Privada: `RuleCore` no sale del módulo; los callers externos entran por `backfill_new_rule`.
-async fn materialize_rule(
+/// Meses **activos** de la instalación: meses civiles **cerrados** (el mes en curso queda fuera)
+/// con ≥1 movimiento *real* — `recurring_rule_id IS NULL` y no conciliado. Definición ÚNICA de
+/// «mes con datos» del modelo de convergencia. Orden ascendente.
+async fn active_months(
     conn: &mut PgConnection,
     iid: Uuid,
-    owner: Uuid,
-    rule: &RuleCore,
     today: NaiveDate,
-) -> Result<u32, ApiError> {
+) -> Result<Vec<NaiveDate>, ApiError> {
     let current_month = first_of_month(today.year(), today.month());
-    let mut cursor = rule.last_materialized_month;
-    let mut materialized = 0u32;
-
-    // Avanza mes a mes desde el cursor mientras el mes esté CERRADO (estrictamente anterior al mes
-    // civil actual). Como el último día de un mes cerrado siempre es < today, aquí no puede
-    // generarse una fecha futura — el ledger sigue siendo histórico por construcción.
-    loop {
-        let (ny, nm) = shift_month(cursor.year(), cursor.month(), 1);
-        let next_month = first_of_month(ny, nm);
-        if next_month >= current_month {
-            break;
-        }
-        let op_date = NaiveDate::from_ymd_opt(ny, nm, days_in_month(ny, nm)).expect("valid op date");
-
-        let fp = compute_fingerprint(SOURCE_MANUAL, op_date, rule.amount, &rule.concept);
-        // Ordinal MAX+1 dentro de la tx: una instancia manual idéntica preexistente jamás produce un
-        // 409 (la copia toma el siguiente ordinal).
-        let ordinal = next_fingerprint_ordinal(&mut *conn, iid, owner, &fp).await?;
-
-        sqlx::query(
-            r#"INSERT INTO transactions
-                   (installation_id, owner_user_id, import_id, source, op_date, value_date,
-                    concept, amount, currency, kind, category_id, fingerprint,
-                    fingerprint_ordinal, linked_asset_id, linked_liability_id, notes,
-                    recurring_rule_id)
-               VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, 'EUR', $7, $8, $9, $10, $11, $12, $13, $14)"#,
-        )
-        .bind(iid)
-        .bind(owner)
-        .bind(SOURCE_MANUAL)
-        .bind(op_date)
-        .bind(&rule.concept)
-        .bind(rule.amount)
-        .bind(&rule.kind)
-        .bind(rule.category_id)
-        .bind(&fp)
-        .bind(ordinal)
-        .bind(rule.linked_asset_id)
-        .bind(rule.linked_liability_id)
-        .bind(rule.notes.as_deref())
-        .bind(rule.id)
-        .execute(&mut *conn)
-        .await?;
-
-        cursor = next_month;
-        materialized += 1;
-    }
-
-    // Avanza el cursor sólo si generó algo (idempotente: 2ª llamada → 0 nuevas).
-    if cursor != rule.last_materialized_month {
-        sqlx::query(
-            r#"UPDATE recurring_transaction_rules
-               SET last_materialized_month = $1, updated_at = now()
-               WHERE id = $2"#,
-        )
-        .bind(cursor)
-        .bind(rule.id)
-        .execute(&mut *conn)
-        .await?;
-    }
-
-    Ok(materialized)
+    let months: Vec<NaiveDate> = sqlx::query_scalar(
+        r#"SELECT DISTINCT date_trunc('month', op_date::timestamp)::date AS m
+           FROM transactions
+           WHERE installation_id = $1
+             AND op_date < $2
+             AND recurring_rule_id IS NULL
+             AND transfer_counterpart_id IS NULL
+           ORDER BY m"#,
+    )
+    .bind(iid)
+    .bind(current_month)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(months)
 }
 
-/// Backfill de una regla recién creada desde un alta manual con fecha pasada: reconstruye la vista
-/// mínima de la regla a partir del `PreparedTxn` de la instancia de origen y delega en
-/// `materialize_rule`, dejando materializados todos los meses intermedios hasta hoy en el MISMO
-/// commit del alta. El cursor arranca en el mes de origen, así que la instancia de origen (ya
-/// insertada por el caller) nunca se duplica. Devuelve cuántas instancias intermedias creó.
-pub(super) async fn backfill_new_rule(
+/// Último día del mes al que pertenece `month_start`.
+fn last_day_of_month(month_start: NaiveDate) -> NaiveDate {
+    let (y, m) = (month_start.year(), month_start.month());
+    NaiveDate::from_ymd_opt(y, m, days_in_month(y, m)).expect("valid last day of month")
+}
+
+/// Lleva las instancias recurrentes de la instalación al estado que definen las reglas:
+/// una instancia de R existe en el mes M ⟺ M es **activo** y `M >= R.origin_month`.
+/// Crea lo que falta, poda lo que sobra. Idempotente. Devuelve `(creadas, podadas)`.
+///
+/// Ámbito **instalación**: la activación de un mes lo es (ver el doc del módulo), así que
+/// converger solo al owner que acaba de mutar dejaría sin materializar las reglas de sus
+/// convivientes en un mes que ya está activo.
+pub(crate) async fn converge_recurring_for_installation(
     conn: &mut PgConnection,
     iid: Uuid,
-    owner: Uuid,
-    rule_id: Uuid,
-    p: &PreparedTxn,
-    cursor: NaiveDate,
     today: NaiveDate,
-) -> Result<u32, ApiError> {
-    let rule = RuleCore {
-        id: rule_id,
-        concept: p.concept.clone(),
-        amount: p.amount,
-        kind: p.kind.clone(),
-        category_id: p.category_id,
-        linked_asset_id: p.linked_asset_id,
-        linked_liability_id: p.linked_liability_id,
-        notes: p.notes.clone(),
-        last_materialized_month: cursor,
+) -> Result<(u32, u32), ApiError> {
+    // `FOR UPDATE` serializa convergencias concurrentes de la misma instalación. NO basta por sí
+    // solo: bajo READ COMMITTED no re-evalúa la comprobación de existencia de abajo (que mira
+    // `transactions`, no esta tabla), así que la garantía dura la da el índice único parcial
+    // `transactions_recurring_rule_month_uniq` + el `ON CONFLICT` de la inserción.
+    let rules: Vec<RuleCore> = sqlx::query_as(
+        r#"SELECT id, owner_user_id, concept, amount, kind, category_id,
+                  linked_asset_id, linked_liability_id, notes, origin_month
+           FROM recurring_transaction_rules
+           WHERE installation_id = $1
+           ORDER BY created_at ASC, id ASC
+           FOR UPDATE"#,
+    )
+    .bind(iid)
+    .fetch_all(&mut *conn)
+    .await?;
+    if rules.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let months = active_months(&mut *conn, iid, today).await?;
+
+    // (1) PODA: instancias fuera de los meses activos. El mes de ORIGEN queda exento — su
+    // instancia es el movimiento con el que se dio de alta la recurrencia y lleva
+    // `recurring_rule_id`, así que no cuenta como movimiento real: sin la exención la
+    // convergencia borraría lo que el usuario acaba de teclear.
+    let pruned = sqlx::query(
+        r#"DELETE FROM transactions t
+           USING recurring_transaction_rules r
+           WHERE t.recurring_rule_id = r.id
+             AND r.installation_id = $1
+             AND date_trunc('month', t.op_date::timestamp)::date <> r.origin_month
+             AND NOT (date_trunc('month', t.op_date::timestamp)::date = ANY($2))"#,
+    )
+    .bind(iid)
+    .bind(&months)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected() as u32;
+
+    // (2) ALTA: cada mes activo desde el origen de la regla que aún no tenga instancia suya.
+    // `op_date` = último día del mes (contrato 3.2.0: la instancia de M cuenta en las
+    // estadísticas de M). El filtro es `>=`, no `>`: la comprobación de existencia ya evita
+    // duplicar el origen, y así un mes de origen que quedó sin instancia (la limpieza histórica
+    // de 3.10.0 no eximía a nadie) vuelve a materializar si algún día recibe datos.
+    let mut created = 0u32;
+    for rule in &rules {
+        for m in months.iter().filter(|m| **m >= rule.origin_month) {
+            let exists: Option<Uuid> = sqlx::query_scalar(
+                r#"SELECT id FROM transactions
+                   WHERE recurring_rule_id = $1
+                     AND op_date >= $2
+                     AND op_date < ($2::date + INTERVAL '1 month')::date"#,
+            )
+            .bind(rule.id)
+            .bind(m)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if exists.is_some() {
+                continue;
+            }
+
+            let op_date = last_day_of_month(*m);
+            let fp = compute_fingerprint(SOURCE_MANUAL, op_date, rule.amount, &rule.concept);
+            // Ordinal MAX+1: una instancia manual idéntica preexistente jamás produce un 409.
+            let ordinal =
+                next_fingerprint_ordinal(&mut *conn, iid, rule.owner_user_id, &fp).await?;
+
+            // `ON CONFLICT` con el índice INFERIDO POR TARGET (incluida su cláusula `WHERE`),
+            // nunca un `DO NOTHING` pelado: sin el target se tragaría también los conflictos de
+            // `transactions_unique_fingerprint` y perdería instancias legítimas en silencio.
+            let n = sqlx::query(
+                r#"INSERT INTO transactions
+                       (installation_id, owner_user_id, import_id, source, op_date, value_date,
+                        concept, amount, currency, kind, category_id, fingerprint,
+                        fingerprint_ordinal, linked_asset_id, linked_liability_id, notes,
+                        recurring_rule_id)
+                   VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, 'EUR', $7, $8, $9, $10, $11, $12, $13, $14)
+                   ON CONFLICT (recurring_rule_id, date_trunc('month', op_date::timestamp))
+                       WHERE recurring_rule_id IS NOT NULL
+                   DO NOTHING"#,
+            )
+            .bind(iid)
+            .bind(rule.owner_user_id)
+            .bind(SOURCE_MANUAL)
+            .bind(op_date)
+            .bind(&rule.concept)
+            .bind(rule.amount)
+            .bind(&rule.kind)
+            .bind(rule.category_id)
+            .bind(&fp)
+            .bind(ordinal)
+            .bind(rule.linked_asset_id)
+            .bind(rule.linked_liability_id)
+            .bind(rule.notes.as_deref())
+            .bind(rule.id)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
+            created += n as u32;
+        }
+    }
+
+    Ok((created, pruned))
+}
+
+/// Pasada de convergencia **best-effort post-commit**, calcada de
+/// `auto_reconcile_after_mutation`: un fallo se loguea y NUNCA convierte una escritura ya
+/// persistida en un 5xx (el cliente reintentaría y duplicaría el movimiento).
+///
+/// ORDEN CONTRACTUAL en todos los puntos de enganche:
+/// `commit → auto_reconcile (cambia QUÉ es real) → converge (cambia el CONJUNTO) → invalidar`.
+/// Converge **antes** de invalidar, o la cache se repuebla desde un conjunto pre-convergencia.
+pub(crate) async fn converge_recurring_after_mutation(state: &Arc<AppState>, iid: Uuid) {
+    let today = match installation_naive_today(&state.pool, iid).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = ?e, "post-commit recurring converge skipped (no calendar)");
+            return;
+        }
     };
-    materialize_rule(conn, iid, owner, &rule, today).await
+    let mut conn = match state.pool.acquire().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = ?e, "post-commit recurring converge skipped (no connection)");
+            return;
+        }
+    };
+    match converge_recurring_for_installation(&mut conn, iid, today).await {
+        Ok((created, pruned)) => {
+            if created > 0 || pruned > 0 {
+                tracing::info!(created, pruned, "recurring converge pass changed instances");
+            }
+        }
+        Err(e) => tracing::warn!(error = ?e, "post-commit recurring converge skipped"),
+    }
 }
 
 #[utoipa::path(
@@ -358,8 +461,14 @@ pub async fn materialize_recurring(
 }
 
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `materialize_recurring`.
-/// Idempotente por cursor (`last_materialized_month`), serializado con `FOR UPDATE`, y con la
-/// invalidación COND post-commit dentro.
+///
+/// Desde 3.10.0 es una **pasada de convergencia bajo demanda**: el endpoint sobrevive como red de
+/// auto-reparación (una convergencia post-commit best-effort que falló, un `.ffbackup` restaurado
+/// de una versión anterior, una regla creada después de los datos), y en régimen estacionario es
+/// un no-op. Idempotente **por existencia**, no por cursor.
+///
+/// La convergencia es de ámbito instalación, así que `rules_processed` cuenta las reglas de la
+/// instalación entera, no solo las del usuario que llama.
 pub(crate) async fn materialize_recurring_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -369,36 +478,23 @@ pub(crate) async fn materialize_recurring_core(
 
     let mut tx = state.pool.begin().await?;
 
-    // `FOR UPDATE` serializa llamadas concurrentes: dos materializaciones simultáneas no pueden
-    // avanzar el mismo cursor a la vez (la segunda espera a que la primera commitee).
-    let rules: Vec<RuleCore> = sqlx::query_as(
-        r#"SELECT id, concept, amount, kind, category_id,
-                  linked_asset_id, linked_liability_id, notes, last_materialized_month
-           FROM recurring_transaction_rules
-           WHERE installation_id = $1 AND owner_user_id = $2
-           ORDER BY created_at ASC, id ASC
-           FOR UPDATE"#,
-    )
-    .bind(iid)
-    .bind(user_id)
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let rules_processed = rules.len() as u32;
-    let mut materialized = 0u32;
-    for rule in &rules {
-        materialized += materialize_rule(&mut tx, iid, user_id, rule, today).await?;
-    }
+    let rules_processed: i64 =
+        sqlx::query_scalar(r#"SELECT count(*) FROM recurring_transaction_rules WHERE installation_id = $1"#)
+            .bind(iid)
+            .fetch_one(&mut *tx)
+            .await?;
+    let (materialized, pruned) = converge_recurring_for_installation(&mut tx, iid, today).await?;
 
     tx.commit().await?;
 
-    if materialized > 0 {
+    if materialized > 0 || pruned > 0 {
         auto_reconcile_after_mutation(state, iid, user_id).await;
     }
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     Ok(MaterializeResponse {
-        rules_processed,
+        rules_processed: rules_processed.max(0) as u32,
         materialized,
+        pruned,
     })
 }
 
