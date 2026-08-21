@@ -17,7 +17,6 @@ import {
   METRIC_DASH,
   formatCurrencyAmount,
   formatCurrencyNumber,
-  formatCurrencyOrDash,
   formatDebtToAssetsPct,
   formatFractionAsPercent,
   formatPercentDisplay,
@@ -27,7 +26,8 @@ import {
   isZeroMoneyMetric,
   parseDisplayDecimal,
 } from "../lib/format";
-import { runwaySwrParenthetical, savingsAvgParenthetical } from "../lib/fire";
+import { runwaySwrParenthetical } from "../lib/fire";
+import { formatDeltaCurrency } from "../lib/expenses";
 
 type LedgerPersonScope = "household" | "mine";
 
@@ -84,106 +84,68 @@ export function SummaryView({
 
   const fh = summary?.financial_health;
 
-  // Modos B y C (promedio): el ahorro y la tasa vienen ya en base promedio ponderado desde
-  // el servidor. En esos modos los paréntesis «sin deuda» pierden sentido (la base ya es
-  // real) → los sustituimos por «promedio de N meses». En modo presupuesto: sin cambios.
-  // La fuente efectiva vive dentro de `financial_health` (no en la raíz del summary).
-  const avgParenthetical = showMetrics
-    ? savingsAvgParenthetical(
-        fh?.savings_source,
-        fh?.savings_source_months_with_data,
-      )
-    : undefined;
-  const isAvgMode = avgParenthetical !== undefined;
-
-  const savingsMoneyParen =
-    showMetrics && fh
-      ? formatCurrencyAmount(fh.monthly_net_excluding_derived_debt, currencyIso)
-      : "";
-  const savingsMoneyPrimary =
+  // 3.10.0 — UNA sola cifra de ahorro por modo: la que usa la proyección.
+  //
+  // Antes convivían tres (el neto del modo, el neto del presupuesto y el promedio real bruto) y
+  // en modo C ninguna era derivable de las otras. Ahora la tarjeta enseña el neto EFECTIVO como
+  // valor, su tasa como detalle —misma base SIEMPRE, así que no pueden contradecirse— y el
+  // contraste con el plan como tendencia. Cada base concreta se explica en el popup de ayuda.
+  const savingsPrimary =
     showMetrics && fh
       ? formatCurrencyAmount(fh.net_monthly_equivalent, currencyIso)
       : METRIC_DASH;
-  const showSavingsMoneyTile =
-    showMetrics &&
-    fh &&
-    (!isZeroMoneyMetric(fh.net_monthly_equivalent) ||
-      !isZeroMoneyMetric(fh.monthly_net_excluding_derived_debt));
-  const savingsMoneyParenthetical = isAvgMode
-    ? avgParenthetical
-    : showSavingsMoneyTile &&
-        savingsMoneyPrimary !== savingsMoneyParen &&
-        savingsMoneyParen !== ""
-      ? savingsMoneyParen
-      : undefined;
+  const showSavingsTile =
+    showMetrics && fh !== undefined && !isZeroMoneyMetric(fh.net_monthly_equivalent);
 
-  let savingsRatePrimary = METRIC_DASH;
-  let savingsRateParenthetical: string | undefined;
-  if (showMetrics && fh) {
-    const sr = formatFractionAsPercent(fh.savings_rate);
-    const srx = formatFractionAsPercent(fh.savings_rate_excluding_derived_debt);
-    const showPctTile =
-      !isZeroFractionMetric(fh.savings_rate) ||
-      !isZeroFractionMetric(fh.savings_rate_excluding_derived_debt);
-    if (showPctTile) {
-      if (sr !== METRIC_DASH) {
-        savingsRatePrimary = sr;
-        savingsRateParenthetical = isAvgMode
-          ? avgParenthetical
-          : srx !== METRIC_DASH && srx !== sr
-            ? srx
-            : undefined;
-      } else {
-        savingsRatePrimary = srx;
-        if (isAvgMode) savingsRateParenthetical = avgParenthetical;
-      }
-    }
-  }
-  const showSavingsRateTile =
-    showMetrics && fh && savingsRatePrimary !== METRIC_DASH;
+  // Detalle: la tasa de ahorro, que por construcción comparte numerador y denominador con la
+  // cifra de arriba (`net / income` del MISMO modo). El bug que abrió este rediseño era
+  // justamente una tasa que mezclaba el neto híbrido con el ingreso del presupuesto.
+  const savingsRateDetail = (() => {
+    if (!showMetrics || !fh) return undefined;
+    const pct = formatFractionAsPercent(fh.savings_rate);
+    return pct === METRIC_DASH ? undefined : `${pct} de tus ingresos`;
+  })();
 
-  // KPI «Ahorro real vs esperado»: real = promedio bruto 12m de movimientos (ausente sin datos),
-  // esperado = neto del presupuesto (capturado pre-override B/C, no sigue el modo). Se muestra
-  // también con esperado ≤ 0 («de −300 € esperados»); solo se oculta cuando faltan los dos lados.
-  const savingsExpected = fh?.savings_expected_monthly_equivalent ?? null;
-  const hasSavingsActual =
-    (fh?.savings_actual_months_with_data ?? 0) > 0 &&
-    fh?.savings_actual_monthly_avg_12m != null;
-  const showSavingsVsExpectedTile =
-    showMetrics &&
-    fh !== undefined &&
-    savingsExpected !== null &&
-    (hasSavingsActual || !isZeroMoneyMetric(savingsExpected));
-  const savingsVsExpectedValue = formatCurrencyOrDash(
-    hasSavingsActual ? fh?.savings_actual_monthly_avg_12m : null,
-    currencyIso,
-  );
-  const savingsVsExpectedParenthetical =
-    savingsExpected !== null
-      ? `de ${formatCurrencyAmount(savingsExpected, currencyIso)} esperados`
-      : undefined;
+  // Tendencia vs plan: solo cuando el neto efectivo NO es ya el del presupuesto (en modo A son
+  // el mismo número y compararlo consigo mismo no dice nada).
+  const savingsPlanTrend = (() => {
+    if (!showMetrics || !fh?.savings_expected_monthly_equivalent) return undefined;
+    const net = parseDisplayDecimal(fh.net_monthly_equivalent);
+    const plan = parseDisplayDecimal(fh.savings_expected_monthly_equivalent);
+    if (net === null || plan === null) return undefined;
+    const delta = net - plan;
+    if (Math.abs(delta) < 0.5) return undefined;
+    const tone = delta > 0 ? "num-pos" : "num-neg";
+    return (
+      <span className="metric-trend">
+        <span className={`metric-trend-arrow ${tone}`} aria-hidden>
+          {delta > 0 ? "\u25B2" : "\u25BC"}
+        </span>
+        <span className={`metric-trend-delta ${tone}`}>
+          {formatDeltaCurrency(delta, currencyIso)}
+        </span>
+        <span className="metric-trend-label">vs plan</span>
+      </span>
+    );
+  })();
 
   // Runway: el servidor marca `runway_is_indefinite` (y `runway_months` a null) cuando la
   // retirada anual cabe en el SWR de `fire_settings` (pestaña Jubilación) — la tarjeta sigue
   // siendo relevante (es la mejor noticia posible) y el paréntesis explica el porqué.
-  // El guard mira AUSENCIA, no cero: un runway de 0 meses es información (el peor caso posible),
-  // y desde 3.8.0 el servidor lo publica con 1 decimal, así que <0,05 meses llega como "0.0".
+  // El guard mira AUSENCIA, no cero: un runway de 0 meses es información (el peor caso posible).
   const runwayIsIndefinite = fh?.runway_is_indefinite === true;
   const showRunwayTile =
     showMetrics && fh && (runwayIsIndefinite || !isAbsentMetric(fh.runway_months));
   const runwayParenthetical = runwayIsIndefinite
     ? runwaySwrParenthetical(installation?.installation.fire_settings)
-    : avgParenthetical;
+    : undefined;
 
   const financialHealthHasAnyTile =
     showMetrics &&
     fh &&
-    (showSavingsMoneyTile ||
-      showSavingsRateTile ||
-      showSavingsVsExpectedTile ||
+    (showSavingsTile ||
       !isZeroMoneyMetric(fh.liquid_assets_total) ||
-      showRunwayTile ||
-      !isZeroFractionMetric(fh.upcoming_coverage_ratio));
+      showRunwayTile);
 
   const liquidAssetsPctOfTotalAssets =
     showMetrics && summary && fh
@@ -245,25 +207,12 @@ export function SummaryView({
         {showMetrics ? (
           financialHealthHasAnyTile ? (
             <div className="metric-grid bordered-top">
-              {showSavingsMoneyTile ? (
+              {showSavingsTile ? (
                 <MetricCard
-                  label="Ahorro mensual neto"
-                  value={savingsMoneyPrimary}
-                  parenthetical={savingsMoneyParenthetical}
-                />
-              ) : null}
-              {showSavingsRateTile ? (
-                <MetricCard
-                  label="Tasa de ahorro"
-                  value={savingsRatePrimary}
-                  parenthetical={savingsRateParenthetical}
-                />
-              ) : null}
-              {showSavingsVsExpectedTile ? (
-                <MetricCard
-                  label="Ahorro real vs esperado"
-                  value={savingsVsExpectedValue}
-                  parenthetical={savingsVsExpectedParenthetical}
+                  label="Ahorro mensual"
+                  value={savingsPrimary}
+                  trend={savingsPlanTrend}
+                  detail={savingsRateDetail}
                 />
               ) : null}
               {!isZeroMoneyMetric(summary.financial_health.liquid_assets_total) ? (

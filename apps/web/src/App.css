@@ -775,6 +775,24 @@
   line-height: 1.2;
 }
 
+/* Segundo slot reservado de un KPI (3.10.0): cuelga bajo el de trend/paréntesis y existe porque
+   una tarjeta puede necesitar los dos a la vez — «▼ −55 € vs plan» arriba y «24,4 % de tus
+   ingresos» aquí. Igual que su hermano, reserva altura SIEMPRE para no desalinear la baseline
+   entre KPIs de la misma fila. Un punto más tenue que el primero: es información secundaria. */
+.metric-value-detail {
+  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--ff-ink-soft);
+  opacity: 0.85; /* un punto más tenue que el primer slot, sin inventar un token nuevo */
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 1.05em; /* reserva el slot incluso vacío */
+  line-height: 1.2;
+}
+
 /* Tendencia «promedio vs presupuesto» dentro del slot reservado de un KPI (banda de Movimientos).
    Hereda el color muted; solo la flecha y la cifra delta se colorean con num-pos/num-neg. Fuente
    sans (no la monoespaciada del paréntesis) para leerse como micro-copy y permitir wrap sin romper
@@ -1097,6 +1115,18 @@
   margin-top: 1rem;
   padding-top: 1rem;
   border-top: 1px solid var(--ff-line-soft);
+}
+
+/* Dos campos en la misma fila (ventanas del promedio: meses + semántica). Colapsa a una columna
+   en móvil, donde apilar es lo único legible. Tokens y gap heredados de `.stack`/`.field`. */
+.field-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+.field-row > .field {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .field {
@@ -3141,6 +3171,13 @@ fieldset.retirement-config-stack {
 
 /* ---- A1. KPI strip → grid (auto-fit, sin scroll-X) ---- */
 @media (max-width: 720px) { /* bp:struct 720 */
+  /* Ventanas del promedio: dos campos por fila en desktop, apilados en móvil (regla de oro:
+     cero scroll-X). */
+  .field-row {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
   .metric-grid.workspace-kpi-strip {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr));

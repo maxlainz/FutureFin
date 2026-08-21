@@ -11,7 +11,9 @@
 import type {
   FireNumberModeApi,
   FireSettingsApi,
+  AvgWindowModeApi,
   ProjectionPointApi,
+  SavingsAvgBasisApi,
   SavingsSourceApi,
   TaxBracketApi,
 } from "../api/types";
@@ -37,6 +39,10 @@ export function defaultFireSettingsApi(): FireSettingsApi {
       pct: b.pct,
     })),
     savings_source: "budget",
+    income_avg_window_months: 3,
+    income_avg_window_mode: "calendar",
+    expense_avg_window_months: 12,
+    expense_avg_window_mode: "calendar",
   };
 }
 
@@ -97,7 +103,26 @@ export function normalizeInstallationFireSettings(
           }))
         : base.tax_brackets,
     savings_source: parseSavingsSource(raw.savings_source),
+    // Round-trip OBLIGATORIO de las cuatro ventanas. El PATCH manda el objeto COMPLETO y el
+    // `#[serde(default)]` del servidor rellena lo ausente con los defaults: si la SPA no las
+    // devolviera, guardar cualquier otro ajuste las resetearía en silencio.
+    income_avg_window_months: clampWindowMonths(raw?.income_avg_window_months, 3),
+    income_avg_window_mode: parseAvgWindowMode(raw?.income_avg_window_mode),
+    expense_avg_window_months: clampWindowMonths(raw?.expense_avg_window_months, 12),
+    expense_avg_window_mode: parseAvgWindowMode(raw?.expense_avg_window_mode),
   };
+}
+
+/** Allow-list de la semántica de ventana; cualquier otra cosa → `calendar` (el default). */
+export function parseAvgWindowMode(v: unknown): AvgWindowModeApi {
+  return v === "data" ? "data" : "calendar";
+}
+
+/** Meses de una ventana, acotados a 1–60 igual que el servidor. */
+export function clampWindowMonths(v: unknown, fallback: number): number {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 60) return fallback;
+  return n;
 }
 
 /**
@@ -111,21 +136,44 @@ export function savingsSourceUsesTransactions(s?: SavingsSourceApi): boolean {
   return s === "transactions_avg" || s === "budget_income_real_expense";
 }
 
+const MONTH_ABBR = [
+  "ene", "feb", "mar", "abr", "may", "jun",
+  "jul", "ago", "sep", "oct", "nov", "dic",
+];
+
+/** `"2026-07"` → `"jul 2026"`. Devuelve la cadena tal cual si no tiene la forma esperada. */
+export function formatYearMonth(ym: string | undefined): string | undefined {
+  if (!ym || ym.length < 7) return undefined;
+  const y = ym.slice(0, 4);
+  const m = Number(ym.slice(5, 7));
+  if (!Number.isInteger(m) || m < 1 || m > 12) return ym;
+  return `${MONTH_ABBR[m - 1]} ${y}`;
+}
+
 /**
- * Paréntesis de UI que explica la base de una métrica derivada del promedio de movimientos.
- * Devuelve `"promedio de N meses"` (singular `"promedio de 1 mes"`) solo en los modos que usan
- * transacciones (B `transactions_avg` y C `budget_income_real_expense`) y con al menos un mes
- * con datos; `undefined` en modo `budget` o cuando el servidor cayó al fallback (0 meses).
- * Punto único compartido por Resumen y el chart de proyección.
+ * Prosa que explica de dónde sale un lado del ahorro, a partir de su `SavingsAvgBasisApi`.
+ * Punto ÚNICO compartido por el Resumen, el chart de proyección y los textos de ayuda.
+ *
+ * `undefined` cuando el lado salió del presupuesto (no hay promedio que explicar).
+ *
+ * La distinción por `has_gaps` es la que impide una etiqueta mentirosa: doce meses con datos
+ * dispersos en tres años NO son «media de ene–dic 2025», así que en ese caso se dice cuántos
+ * meses son y hasta cuándo llegan, sin fingir un rango contiguo.
  */
-export function savingsAvgParenthetical(
-  source: SavingsSourceApi | undefined,
-  months: number | undefined,
+export function savingsBasisParenthetical(
+  basis: SavingsAvgBasisApi | undefined,
 ): string | undefined {
-  if (!savingsSourceUsesTransactions(source)) return undefined;
-  const n = months ?? 0;
-  if (!Number.isFinite(n) || n < 1) return undefined;
-  return `promedio de ${n} ${n === 1 ? "mes" : "meses"}`;
+  if (!basis || basis.basis !== "average" || basis.months_with_data < 1) return undefined;
+  const n = basis.months_with_data;
+  const last = formatYearMonth(basis.last_month);
+  const first = formatYearMonth(basis.first_month);
+  if (basis.has_gaps) {
+    return last
+      ? `media de ${n} ${n === 1 ? "mes" : "meses"} con datos, hasta ${last}`
+      : `media de ${n} ${n === 1 ? "mes" : "meses"} con datos`;
+  }
+  if (!first || !last) return `media de ${n} ${n === 1 ? "mes" : "meses"}`;
+  return first === last ? `media de ${first}` : `media de ${first}–${last}`;
 }
 
 /**

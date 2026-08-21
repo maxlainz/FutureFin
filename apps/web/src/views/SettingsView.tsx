@@ -29,6 +29,7 @@ import {
   DEFAULT_ES_TAX_BRACKETS_API,
   normalizeInstallationFireSettings,
   parseSavingsSource,
+  savingsSourceUsesTransactions,
 } from "../lib/fire";
 import {
   SETTINGS_SUBTAB_LABEL,
@@ -520,7 +521,7 @@ export function SettingsView({
                 }
               >
                 <option value="budget">Presupuesto</option>
-                <option value="transactions_avg">Promedio 12 meses</option>
+                <option value="transactions_avg">Movimientos reales</option>
                 <option value="budget_income_real_expense">
                   Ingresos de presupuesto + gasto real
                 </option>
@@ -533,27 +534,109 @@ export function SettingsView({
                 No depende de tus movimientos.
               </small>
               <small className="muted">
-                <strong>Promedio 12 meses</strong>: el ahorro sale del promedio
-                ponderado de los últimos 12 meses de movimientos (denominador =
-                meses con datos). Las cuotas de préstamos cuentan como un gasto
-                más — ya están en tus movimientos — y los pasivos solo restan su
-                principal pendiente al patrimonio. Los meses sin movimientos
-                reales (solo recurrentes) no cuentan en el promedio. Sin datos,
+                <strong>Movimientos reales</strong>: el ahorro sale de tus
+                movimientos, promediando el ingreso y el gasto por separado con
+                las ventanas de abajo. Las cuotas de préstamos cuentan como un
+                gasto más — ya están en tus movimientos — y los pasivos solo
+                restan su principal pendiente al patrimonio. Sin datos, ese lado
                 cae al presupuesto.
               </small>
               <small className="muted">
                 <strong>Ingresos de presupuesto + gasto real</strong>: la
                 simulación toma tus ingresos del presupuesto y el gasto medio
-                real de los últimos 12 meses (mismo promedio ponderado, cuotas
-                incluidas). Útil si tu nómina es estable pero quieres que el
-                gasto refleje lo que gastas de verdad. Sin datos, cae al
-                presupuesto.
+                real (ventana de gasto de abajo). Útil si tu nómina es estable
+                pero quieres que el gasto refleje lo que gastas de verdad. Ojo:
+                acierta solo mientras mantengas el presupuesto de ingresos al
+                día, y si se desvía no hay nada que te avise.
               </small>
               <small className="muted">
                 El Resumen, la proyección y el target FIRE siguen el modo
                 elegido.
               </small>
             </div>
+
+            {savingsSourceUsesTransactions(fireTaxDraft.savings_source) ? (
+              <div className="stack">
+                <p className="muted tight">
+                  <strong>Ventanas del promedio.</strong> Se configuran por
+                  separado porque las dos series se comportan distinto: un
+                  ingreso cambia a escalones (una subida de sueldo) y conviene
+                  mirarlo corto para captarla pronto, mientras que el gasto es
+                  irregular mes a mes y una ventana larga evita que una compra
+                  grande redefina tu gasto habitual.
+                </p>
+                {(
+                  [
+                    ["income", "Ingreso"] as const,
+                    ["expense", "Gasto"] as const,
+                  ] as const
+                )
+                  .filter(
+                    ([side]) =>
+                      side === "expense" ||
+                      fireTaxDraft.savings_source === "transactions_avg",
+                  )
+                  .map(([side, label]) => (
+                    <div className="field-row" key={side}>
+                      <label className="field">
+                        <span>{label}: meses</span>
+                        <input
+                          inputMode="numeric"
+                          value={String(
+                            side === "income"
+                              ? (fireTaxDraft.income_avg_window_months ?? 3)
+                              : (fireTaxDraft.expense_avg_window_months ?? 12),
+                          )}
+                          onChange={(e) => {
+                            const n = Number(e.target.value.trim());
+                            if (!Number.isInteger(n) || n < 1 || n > 60) return;
+                            setFireTaxDraft((p) => ({
+                              ...p,
+                              [side === "income"
+                                ? "income_avg_window_months"
+                                : "expense_avg_window_months"]: n,
+                            }));
+                          }}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>{label}: cómo se cuentan</span>
+                        <select
+                          value={
+                            side === "income"
+                              ? (fireTaxDraft.income_avg_window_mode ??
+                                "calendar")
+                              : (fireTaxDraft.expense_avg_window_mode ??
+                                "calendar")
+                          }
+                          onChange={(e) =>
+                            setFireTaxDraft((p) => ({
+                              ...p,
+                              [side === "income"
+                                ? "income_avg_window_mode"
+                                : "expense_avg_window_mode"]:
+                                e.target.value === "data" ? "data" : "calendar",
+                            }))
+                          }
+                        >
+                          <option value="calendar">
+                            Meses de calendario
+                          </option>
+                          <option value="data">Meses con datos</option>
+                        </select>
+                      </label>
+                    </div>
+                  ))}
+                <small className="muted">
+                  <strong>Meses de calendario</strong>: mira hacia atrás ese
+                  número de meses y promedia los que tengan datos — si dejaste
+                  de importar, la media se apoya en menos meses.{" "}
+                  <strong>Meses con datos</strong>: coge siempre ese número de
+                  meses con movimientos, saltando los vacíos, aunque para
+                  reunirlos haya que ir más atrás en el tiempo.
+                </small>
+              </div>
+            ) : null}
             <p className="muted tight">
               {fireTaxSaving ? "Guardando…" : "Guardado automático."}
             </p>
