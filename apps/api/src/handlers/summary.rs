@@ -345,17 +345,19 @@ pub(crate) async fn summary_core(
     // cuotas de pasivo ya van dentro) y `expense_tot` = el mismo promedio. El runway se calcula
     // sobre `expense_tot`, así que también sigue el modo.
     //
-    // `expense_der` es 0 en los TRES modos desde la 3.7.0: en modo A porque el presupuesto ya trae
-    // la cuota dentro de `expense_regular_monthly_equivalent` (fusión de las partidas derivadas);
-    // en B/C porque el promedio real la contiene (reforma 3.4.0). Sumarla aquí volvería a ser el
-    // doble conteo que 3.4.0 quitó de los modos reales.
+    // Base de presupuesto (modo A). La cuota de pasivo ya vive dentro de
+    // `expense_regular_monthly_equivalent` desde la 3.7.0, así que no hay componente derivada que
+    // sumar aquí — hacerlo sería el doble conteo que 3.4.0 quitó de los modos reales.
+    //
+    // `expense_tot` y `net_m` se derivan más abajo de la resolución compartida, así que aquí solo
+    // se declaran los dos que ENTRAN en ella.
     let mut income_m = budget_totals.income_monthly_equivalent;
     let mut expense_reg = budget_totals.expense_regular_monthly_equivalent;
-    let mut expense_tot = budget_totals.expense_total_monthly_equivalent;
-    let mut net_m = budget_totals.net_monthly_equivalent;
+    let expense_tot;
+    let net_m;
 
-    // Denominador del KPI «ahorro real vs esperado»: siempre el neto del presupuesto, capturado
-    // ANTES del override B/C (los modos con datos reescriben `net_m` con la base real).
+    // Denominador del delta «vs plan» de la tarjeta de ahorro: siempre el neto del presupuesto,
+    // capturado ANTES del override B/C — no sigue al modo.
     let savings_expected_monthly_equivalent = budget_totals.net_monthly_equivalent;
 
     // El promedio real solo se consulta en los modos que lo usan. Antes se calculaba SIEMPRE

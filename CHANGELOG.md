@@ -6,6 +6,129 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.10.0] - 2026-08-21
+
+Una sola cifra de ahorro por modo, ventanas del promedio configurables por lado, y los recurrentes
+siguiendo a los datos reales. **Breaking de números y de contrato**; migración destructiva firmada
+por el owner; `.ffbackup` sube a **9**.
+
+### El problema
+
+El Resumen enseñaba **tres** cifras de ahorro simultáneas, todas aritméticamente correctas y
+mutuamente irreconciliables. Sobre datos reales de una instalación:
+
+| KPI | Ingreso | Gasto | Neto |
+|---|---|---|---|
+| «Ahorro mensual neto» | 3.000 (presupuesto) | 1.890,00 (real) | **610,00** |
+| «…de 786 € esperados» | 3.000 (presupuesto) | 2.214 (presupuesto) | **786,00** |
+| «Ahorro real» | 2.410,00 (real) | 1.890,00 (real) | **520,00** |
+
+En modo C la cifra que proyectaba el motor (610,00 €) no aparecía en **ninguno** de los dos lados
+de la comparativa. En modo A la tarjeta duplicaba el denominador y en modo B el numerador, así que
+nunca aportaba información propia. Y `savings_rate` (24,4 %) mezclaba bases —neto híbrido sobre
+ingreso de presupuesto—, ni 26,2 % (plan) ni 21,6 % (real). Nadie mentía: ninguna tarjeta decía
+cuál era su base.
+
+### Added — ventanas del promedio real configurables por lado
+
+- Cuatro ejes nuevos en `installation.fire_settings`: `income_avg_window_months` /
+  `income_avg_window_mode` (default **3 / calendar**) y `expense_avg_window_months` /
+  `expense_avg_window_mode` (default **12 / calendar**), cotas 1–60. El modo A no usa ninguna, el
+  B las dos y el C solo las de gasto.
+- **Por qué asimétricas**: el ingreso es una serie con **escalón** (una subida de sueldo) y el
+  gasto es ruidoso pero estacionario. Un promedio plano de 12 meses es el estimador equivocado
+  para el primero — arrastra los meses previos a la subida durante un año — y el correcto para el
+  segundo. Con ventanas por lado se expresa «ingreso reciente contra gasto histórico» **sin
+  mezclar plan y realidad**, que era el defecto del modo C.
+- Semántica configurable: `calendar` (los meses con datos dentro de los últimos N civiles) o
+  `data` (los N meses **con datos** más recientes, saltando los vacíos).
+- Panel nuevo en **Ajustes → Proyección**, visible solo en los modos que promedian.
+- Tool MCP `update_fire_settings` actualizada (paridad: *tool updated*; el catálogo sigue en 50).
+
+### Changed — los recurrentes convergen a los meses con datos (**breaking**)
+
+- El cursor monotónico `last_materialized_month` se sustituye por el ancla `origin_month` y una
+  **invariante declarativa**: *una instancia de R existe en el mes M ⟺ M es un mes **activo** de
+  la instalación y `M >= R.origin_month`*. **Mes activo** = mes civil cerrado con ≥1 movimiento
+  real no conciliado.
+- El cursor era monotónico, justo lo contrario de lo que hace falta: un CSV de marzo-2025
+  importado en abril-2026 dispara un mes que el cursor ya había pasado. Y materializar meses sin
+  datos producía meses «pseudovacíos» que el promedio del motor tenía que excluir aparte.
+- **Cambios de comportamiento visibles**: borrar una instancia a mano ya **no** la borra para
+  siempre (vuelve mientras su mes siga activo; para quitarla se borra la plantilla); el alta con
+  fecha pasada ya **no** backfillea meses vacíos; `materialize` pasa a ser una convergencia bajo
+  demanda de ámbito instalación y devuelve además `pruned`.
+- **Migración destructiva** (`20260821120000_recurring_converge_on_real_movement`): borra las
+  instancias recurrentes alojadas en meses sin movimientos reales, **incluida la del mes de
+  origen**. Es **FIRE-neutral por construcción** — esos meses ya estaban excluidos por completo
+  del promedio que alimenta el motor, así que proyección, target FIRE y runway no se mueven ni un
+  decimal. Lo que cambia a propósito es el promedio de la pestaña Movimientos y el listado
+  visible. El entrypoint escribe su backup pre-migración automático antes.
+- Idempotencia **por existencia**, respaldada por un índice UNIQUE parcial. El cast `::timestamp`
+  de su expresión es obligatorio: `date_trunc(text, timestamptz)` es STABLE y no es indexable.
+
+### Changed — una sola cifra de ahorro por modo
+
+- Salud financiera pasa de **cinco tarjetas a tres**. La de ahorro enseña el neto **efectivo** del
+  modo (el que usa la proyección) como valor, su tasa como detalle y el contraste con el plan como
+  tendencia. Valor y tasa comparten base **por construcción**: no pueden contradecirse.
+- `MetricCard` gana un **segundo slot** (`detail`), también siempre reservado, para no romper la
+  alineación de baseline entre KPIs de una fila.
+- Los KPIs de Movimientos se renombran: «Ahorro promedio» → **«Traspasado a ahorro»** y «Tasa de
+  ahorro» → **«% traspasado»**. Eran el bucket de movimientos marcados como ahorro —dinero
+  apartado explícitamente, no ingresos menos gastos— con el mismo rótulo que conceptos distintos
+  del Resumen, y 11 puntos de diferencia.
+
+### Added — popover de ayuda y catálogo de definiciones
+
+- Cada métrica y cada ajuste que dependa de una base o de una ventana estrena un interrogante que
+  abre su descripción. `HelpPopover` es un diálogo **no modal** anclado, con cierre por Escape y
+  clic fuera, clampado al viewport.
+- **`apps/web/src/lib/helpTexts.ts` es la fuente de verdad en prosa** de cada métrica: qué mide,
+  con qué base, con qué ventana. Si el código y el texto discrepan, uno de los dos es un bug.
+- Skill nueva **`futurefin-metric-definitions`** con esa disciplina, enganchada a la tabla de
+  enrutado de CLAUDE.md y a la §1 de `futurefin-change-control`: tocar la semántica de una métrica
+  debe acabar en exactamente uno de {texto actualizado, entrada añadida/retirada, n/a razonado}.
+- Test de cobertura en las **dos** direcciones: ni iconos sin texto ni textos huérfanos.
+
+### Removed — vestigios del contrato (**breaking de API**)
+
+De `financial_health`: `expense_derived_monthly_equivalent` (siempre 0 en los tres modos desde
+3.7.0), `monthly_net_excluding_derived_debt` y `savings_rate_excluding_derived_debt` (idénticos a
+sus gemelos por construcción) y `savings_actual_monthly_avg_12m` / `savings_actual_months_with_data`
+(la comparativa que desaparece). **`savings_expected_monthly_equivalent` se queda**: alimenta el
+delta «vs plan».
+
+`savings_source_months_with_data` → **`savings_income_basis`** y **`savings_expense_basis`** en
+`/v1/summary` y `/v1/projection/series`: con dos ventanas no existe *un* número de meses, y servir
+uno solo mal-etiquetaría la mitad de la UI. Cada bloque trae `basis`, meses usados, ventana
+configurada, rango real y `has_gaps` — este último impide pintar «media de ene–dic 2025» sobre
+doce meses dispersos en tres años.
+
+**Ganancia colateral**: los `savings_actual_*` eran el único consumidor del promedio real en modo
+A. Al retirarlos, el promedio pasa dentro del gate del modo y el **modo A por defecto deja de
+tocar el ledger** en el endpoint más caliente de la app.
+
+### Compatibilidad
+
+- **`.ffbackup` 8 → 9**: `BackupRecurringRule.last_materialized_month` → `origin_month`. La
+  migración `payload_v8_to_v9` ancla en la instancia **más antigua** del payload, no en el cursor
+  (que iba por delante del origen, así que copiarlo impediría materializar los meses intermedios).
+  Los ficheros v1..v8 siguen importando.
+- **Los números se mueven** para quien esté en modo B: la ventana de ingreso pasa de 12 a 3 meses
+  por defecto. En modo C no cambia nada (el gasto ya usaba 12). Poner ambas ventanas a 12 con
+  semántica `calendar` reproduce exactamente el comportamiento anterior.
+- Sin cambios en el login, las rutas ni el catálogo MCP.
+
+### Tests
+
+421 de integración/unitarios en Rust y 334 en el frontend. El del promedio ponderado pasa a ser el
+**discriminante de las ventanas** (12/12 → 1200, 3/12 → 1800 sobre los mismos datos: con una sola
+ventana ambos casos darían lo mismo). Dos unitarios nuevos fijan que la migración v8→v9 ancla en la
+instancia más antigua y no en el cursor — el fixture v6 existente tenía ambos en el mismo mes y por
+tanto no discriminaba. Seis tests que probaban el KPI retirado se van con él.
+
+
 ### Changed — La conciliación de transferencias deja de tener botón y gana una red de reintento
 
 - **El malentendido que lo motivó**: «Conciliar ahora» parecía una tarea manual que se hace una vez
