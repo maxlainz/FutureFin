@@ -4,6 +4,39 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added — Los GitHub Releases se publican solos desde el CHANGELOG
+
+- **El desajuste**: en GitHub convivían tres listas de versiones que no coincidían. Tags había 38;
+  Releases, **dos** (`v2.2.0` y `v2.3.0`, creados a mano en agosto de 2026). `publish-image.yml`
+  solo construía y empujaba la imagen — no tenía ningún paso que creara el Release —, así que de
+  3.0.0 en adelante toda versión se publicaba en Docker Hub y GHCR sin dejar rastro en la pestaña
+  de Releases. No era una decisión: era que nada lo hacía.
+- **La solución**: un paso final en `publish-image.yml`, **después** del push de la imagen (un
+  Release que anuncie una versión que no llegó a publicarse es peor que no tenerlo), que redacta
+  las notas con `scripts/changelog-section.sh` y llama a `gh release create`. El workflow pasa a
+  `contents: write`; el checkout mantiene `persist-credentials: false`, así que el token solo
+  viaja como `GH_TOKEN` a ese paso.
+- **El CHANGELOG es la única fuente de las notas.** El script extrae la sección de la versión
+  comparando la cabecera de forma literal (`index($0, want) == 1`), no por regex: así ni los
+  puntos de la versión actúan como comodines ni `1.0.1` se traga la sección de `1.0.10`. Si la
+  versión no tiene sección **falla loud** (exit 1) en vez de publicar unas notas vacías — el mismo
+  criterio que las migraciones (§2.7 de `futurefin-change-control`).
+- **Idempotente y acotado**: si el Release ya existe no lo toca, y solo actúa en `push` de tag —
+  un `workflow_dispatch` para reconstruir una imagen antigua no reescribe notas.
+- **Backfill**: creados a posteriori los Releases de `v3.0.0`, `v3.1.0`, `v3.2.0`, `v3.3.0`,
+  `v3.4.0`, `v3.6.0`, `v3.7.0` y `v3.8.0` con ese mismo script, para que las notas históricas y
+  las futuras tengan un solo formato. `v3.5.0` no lo tiene porque nunca se tagueó.
+- No toca la imagen: ni `scripts/` ni `.github/` entran en el build (el `.dockerignore` excluye
+  `.github` y el Dockerfile nunca copia `scripts/`), así que este cambio no exige republicar.
+
+### Known — Dos versiones publicadas sin sección propia en este CHANGELOG
+
+- `1.0.5` y `2.2.0` tienen tag (y `2.2.0` además Release e imagen) pero nunca se les escribió su
+  cabecera `## [...]`; a la 2.2.0 se la menciona *dentro* de otras entradas como si existiera. Por
+  eso el paso automático las rechazaría: quedan pendientes de reconstruir desde su diff.
+
 ## [3.8.0] - 2026-08-21
 
 Tren del **issue #4** — ergonomía del servidor MCP derivada de una sesión real de uso, más la
