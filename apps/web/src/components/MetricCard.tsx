@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 import { METRIC_DASH } from "../lib/format";
+import { HelpPopover } from "./HelpPopover";
+import { HELP_TEXTS, type HelpTextId } from "../lib/helpTexts";
 
 export type MetricCardTone = "default" | "hero" | "accent" | "accent-2";
 
@@ -10,6 +12,7 @@ export function MetricCard({
   parenthetical,
   trend,
   detail,
+  helpId,
   action,
   tone = "default",
 }: {
@@ -30,6 +33,12 @@ export function MetricCard({
    * vacío — para que la baseline siga alineada entre KPIs de la misma fila.
    */
   detail?: string;
+  /**
+   * Id del catálogo de descripciones. Pinta el interrogante en el slot `action` — esquina
+   * superior derecha, FUERA del flujo del label, así que no puede desalinear la baseline ni
+   * competir con un `trend` por el slot reservado.
+   */
+  helpId?: HelpTextId;
   /** Botón/icono opcional en la esquina superior derecha (p.ej. engranaje de config). */
   action?: ReactNode;
   /** Variante visual: hero (acento más marcado), accent / accent-2 (tinte suave). */
@@ -51,7 +60,17 @@ export function MetricCard({
     <article className={`metric-card${toneClass}`}>
       <div className="metric-card__header">
         <div className="metric-label">{label}</div>
-        {action ? <div className="metric-card__action">{action}</div> : null}
+        {action ?? helpId ? (
+          <div className="metric-card__action">
+            {action}
+            {helpId ? (
+              <HelpPopover
+                title={HELP_TEXTS[helpId].title}
+                body={HELP_TEXTS[helpId].body}
+              />
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <div className="metric-value-row">
         <span className="metric-value">{value}</span>

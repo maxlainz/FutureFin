@@ -900,6 +900,7 @@ export function GastosView({
           >
             <MetricCard
               label={`Gasto promedio (${avgLabel})`}
+              helpId="expenses.expense_avg"
               value={
                 totals && hasAvg
                   ? formatCurrencyAmount(totals.expense_avg, currencyIso)
@@ -913,6 +914,7 @@ export function GastosView({
             />
             <MetricCard
               label={`Ingreso promedio (${avgLabel})`}
+              helpId="expenses.income_avg"
               value={
                 totals && hasAvg
                   ? formatCurrencyAmount(totals.income_avg, currencyIso)
@@ -925,7 +927,8 @@ export function GastosView({
               }
             />
             <MetricCard
-              label={`Ahorro promedio (${avgLabel})`}
+              label={`Traspasado a ahorro (${avgLabel})`}
+              helpId="expenses.savings_transferred"
               value={
                 totals && hasAvg
                   ? formatCurrencyAmount(totals.savings_avg, currencyIso)
@@ -934,7 +937,8 @@ export function GastosView({
               tone="accent-2"
             />
             <MetricCard
-              label={`Tasa de ahorro (${avgLabel})`}
+              label={`% traspasado (${avgLabel})`}
+              helpId="expenses.transferred_rate"
               value={
                 savingsRateAvg !== null
                   ? formatPercentDisplay(savingsRateAvg)
