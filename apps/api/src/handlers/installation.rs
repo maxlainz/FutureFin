@@ -90,6 +90,50 @@ impl<'de> Deserialize<'de> for SavingsSource {
     }
 }
 
+/// Semántica de la ventana del promedio real de transacciones.
+///
+/// NO confundir con `AvgWindow` (`handlers/transactions/summary.rs`), que es el tramo POR REQUEST
+/// de la comparativa de la pestaña Movimientos: ejes distintos, uno es configuración de la
+/// simulación y el otro un query param.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AvgWindowMode {
+    /// Los N meses CON DATOS más recientes, saltando los vacíos. Garantiza N observaciones aunque
+    /// haya huecos; a cambio puede alcanzar meses lejanos (la UI publica el rango real usado).
+    Data,
+    /// Solo los meses con datos dentro de los últimos N meses CIVILES. Horizonte acotado; puede
+    /// devolver menos de N meses, o ninguno (→ ese lado cae al presupuesto).
+    #[default]
+    Calendar,
+}
+
+impl<'de> Deserialize<'de> for AvgWindowMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "data" => Ok(Self::Data),
+            "calendar" => Ok(Self::Calendar),
+            _ => Err(D::Error::unknown_variant(&s, &["data", "calendar"])),
+        }
+    }
+}
+
+/// Cotas de las ventanas del promedio (meses). El suelo es 1 — una ventana de 0 meses dejaría el
+/// promedio sin denominador y caería al presupuesto con la UI diciendo lo contrario.
+pub const MIN_AVG_WINDOW_MONTHS: u32 = 1;
+pub const MAX_AVG_WINDOW_MONTHS: u32 = 60;
+
+/// Ventana ya resuelta y CLAMPADA de un lado del promedio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvgWindowSpec {
+    pub months: u32,
+    pub mode: AvgWindowMode,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TaxBracket {
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -115,6 +159,36 @@ pub struct FireSettings {
     /// Fuente del ahorro de la simulación. Ausente en JSON → `budget` (cubierto por el
     /// `#[serde(default)]` a nivel struct, que rellena los campos faltantes desde `default_fire_settings`).
     pub savings_source: SavingsSource,
+    /// Ventana del promedio de INGRESO, en meses. Solo la usa el modo B (`transactions_avg`); el
+    /// modo C toma el ingreso del presupuesto y el modo A no promedia nada.
+    pub income_avg_window_months: u32,
+    /// Semántica de la ventana de ingreso.
+    pub income_avg_window_mode: AvgWindowMode,
+    /// Ventana del promedio de GASTO, en meses. La usan los modos B y C.
+    pub expense_avg_window_months: u32,
+    /// Semántica de la ventana de gasto.
+    pub expense_avg_window_mode: AvgWindowMode,
+}
+
+impl FireSettings {
+    /// Ventana de ingreso ya clampada. Punto ÚNICO: nadie construye un `AvgWindowSpec` a mano.
+    pub(crate) fn income_window(&self) -> AvgWindowSpec {
+        AvgWindowSpec {
+            months: self
+                .income_avg_window_months
+                .clamp(MIN_AVG_WINDOW_MONTHS, MAX_AVG_WINDOW_MONTHS),
+            mode: self.income_avg_window_mode,
+        }
+    }
+    /// Ventana de gasto ya clampada.
+    pub(crate) fn expense_window(&self) -> AvgWindowSpec {
+        AvgWindowSpec {
+            months: self
+                .expense_avg_window_months
+                .clamp(MIN_AVG_WINDOW_MONTHS, MAX_AVG_WINDOW_MONTHS),
+            mode: self.expense_avg_window_mode,
+        }
+    }
 }
 
 impl Default for FireSettings {
@@ -131,6 +205,14 @@ pub(crate) fn default_fire_settings() -> FireSettings {
         taxes_enabled: true,
         tax_brackets: default_es_tax_brackets(),
         savings_source: SavingsSource::Budget,
+        // Ingreso corto (captura una subida de sueldo sin esperar un año), gasto largo (suaviza
+        // los picos: una compra grande no debe redefinir tu gasto estructural). `calendar` en
+        // ambos porque es lo que reproduce el comportamiento previo del lado gasto: así el
+        // upgrade mueve UN solo eje (la ventana de ingreso), no dos.
+        income_avg_window_months: 3,
+        income_avg_window_mode: AvgWindowMode::Calendar,
+        expense_avg_window_months: 12,
+        expense_avg_window_mode: AvgWindowMode::Calendar,
     }
 }
 
@@ -159,11 +241,26 @@ fn default_es_tax_brackets() -> Vec<TaxBracket> {
     ]
 }
 
+/// Resuelve el `FireSettings` almacenado aplicando defaults **y clamps**.
+///
+/// El clamp vive AQUÍ y no solo en `validate_fire_settings` a propósito: la validación corre
+/// únicamente en las dos rutas de ESCRITURA (`PATCH /v1/installation` y la tool MCP), mientras que
+/// esta función está en los tres caminos de LECTURA del JSONB. Un valor fuera de rango que llegara
+/// por otra vía (restore, edición directa de la BD, un fichero de otra versión) produciría una
+/// ventana de 0 meses → promedio sin denominador → fallback silencioso al presupuesto con la UI
+/// diciendo que está en modo real. Clampar en el consumo lo hace imposible.
 pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSettings {
-    match stored {
+    let mut fs = match stored {
         None => default_fire_settings(),
         Some(fs) => fs,
-    }
+    };
+    fs.income_avg_window_months = fs
+        .income_avg_window_months
+        .clamp(MIN_AVG_WINDOW_MONTHS, MAX_AVG_WINDOW_MONTHS);
+    fs.expense_avg_window_months = fs
+        .expense_avg_window_months
+        .clamp(MIN_AVG_WINDOW_MONTHS, MAX_AVG_WINDOW_MONTHS);
+    fs
 }
 
 pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> {
@@ -186,6 +283,16 @@ pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> 
             }
         }
         FireNumberMode::AnnualExpense | FireNumberMode::CurrentIncome => {}
+    }
+    for (label, months) in [
+        ("income_avg_window_months", fs.income_avg_window_months),
+        ("expense_avg_window_months", fs.expense_avg_window_months),
+    ] {
+        if !(MIN_AVG_WINDOW_MONTHS..=MAX_AVG_WINDOW_MONTHS).contains(&months) {
+            return Err(ApiError::BadRequest(format!(
+                "{label} must be between {MIN_AVG_WINDOW_MONTHS} and {MAX_AVG_WINDOW_MONTHS} (months)"
+            )));
+        }
     }
     if fs.taxes_enabled {
         validate_tax_brackets(&fs.tax_brackets)?;
@@ -564,6 +671,10 @@ pub(crate) struct FireSettingsPatch {
     pub fire_number_mode: Option<FireNumberMode>,
     pub fire_number_manual_amount: Option<Decimal>,
     pub savings_source: Option<SavingsSource>,
+    pub income_avg_window_months: Option<u32>,
+    pub income_avg_window_mode: Option<AvgWindowMode>,
+    pub expense_avg_window_months: Option<u32>,
+    pub expense_avg_window_mode: Option<AvgWindowMode>,
     /// Columna aparte de la instalación (no vive en el JSONB), pero es un eje FIRE más.
     pub annual_inflation_assumption_percent: Option<Decimal>,
 }
@@ -576,6 +687,10 @@ impl FireSettingsPatch {
             && self.fire_number_mode.is_none()
             && self.fire_number_manual_amount.is_none()
             && self.savings_source.is_none()
+            && self.income_avg_window_months.is_none()
+            && self.income_avg_window_mode.is_none()
+            && self.expense_avg_window_months.is_none()
+            && self.expense_avg_window_mode.is_none()
             && self.annual_inflation_assumption_percent.is_none()
     }
 }
@@ -635,6 +750,18 @@ pub(crate) async fn patch_fire_settings_core(
     }
     if let Some(v) = patchset.savings_source {
         after.savings_source = v;
+    }
+    if let Some(v) = patchset.income_avg_window_months {
+        after.income_avg_window_months = v;
+    }
+    if let Some(v) = patchset.income_avg_window_mode {
+        after.income_avg_window_mode = v;
+    }
+    if let Some(v) = patchset.expense_avg_window_months {
+        after.expense_avg_window_months = v;
+    }
+    if let Some(v) = patchset.expense_avg_window_mode {
+        after.expense_avg_window_mode = v;
     }
     validate_fire_settings(&after)?;
 

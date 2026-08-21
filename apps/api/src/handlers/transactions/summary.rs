@@ -27,7 +27,9 @@
 //! autocorregible, no silencioso).
 
 use crate::error::ApiError;
-use crate::handlers::installation::{installation_naive_today, require_installation_member};
+use crate::handlers::installation::{
+    installation_naive_today, require_installation_member, AvgWindowMode, AvgWindowSpec,
+};
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::schema::{
@@ -139,124 +141,180 @@ fn bucket_all(
         .sum()
 }
 
-/// Promedio ponderado mensual de las transacciones de los 12 meses civiles COMPLETOS anteriores a
-/// hoy (ventana medio-abierta `[first_of_month(today) − 12m, first_of_month(today))`). A diferencia
-/// del summary de Movimientos, esta ventana **incluye** el último mes completo y excluye solo el mes
-/// en curso (parcial). Lo consumen la proyección y `/v1/summary` en los modos que derivan el ahorro
-/// de las transacciones (`transactions_avg` y `budget_income_real_expense`).
+/// Un lado (ingreso o gasto) del promedio real: la magnitud, SU denominador y la procedencia
+/// exacta de los meses que la produjeron.
 ///
-/// Signos (magnitudes ≥ 0, como en el summary): `income` guardado positivo → `income_avg`;
-/// `expense` guardado negativo → `expense_avg = −Σ`. `savings` y `kind NULL` NO cuentan para
-/// income/expense.
-///
-/// **Meses reales, no pseudovacíos**: a diferencia del summary de Movimientos, el denominador
-/// `months_with_data` cuenta solo los meses del tramo con ≥1 transacción **real** (`recurring_rule_id
-/// IS NULL`, cualquier kind, mismo scope). Un mes vacío o «pseudovacío» (solo instancias recurrentes
-/// materializadas, p. ej. tras un backfill) queda excluido POR COMPLETO del promedio — ni denominador
-/// ni numerador —; un mes real cuenta entero, incluidas sus transacciones recurrentes. Así un backfill
-/// de recurrentes no infraestima el gasto/ingreso medio. `0` meses reales → todo a cero, el llamante
-/// decide el fallback.
-pub(crate) struct TransactionsAvg {
-    pub income_avg: Decimal,
-    pub expense_avg: Decimal,
+/// Media y denominador viajan JUNTOS a propósito. Con una sola ventana daba igual exponer el
+/// denominador suelto; con dos ventanas, cruzar «numerador de ingreso ÷ denominador de gasto» pasa
+/// a ser un error posible — y silencioso, porque el resultado sigue siendo un número plausible.
+#[derive(Debug, Clone)]
+pub(crate) struct AvgSide {
+    /// Magnitud ≥ 0 (los signos se normalizan como en el summary).
+    pub avg: Decimal,
+    /// Meses REALES que entraron en la media. `0` ⟺ no hay base (el caller cae al presupuesto).
     pub months_with_data: u32,
+    /// Ventana configurada tras el clamp, para poder decir «pediste 12, hay 7».
+    pub window: AvgWindowSpec,
+    /// Mes más antiguo INCLUIDO (`YYYY-MM`). `None` ⟺ `months_with_data == 0`.
+    pub first_month: Option<String>,
+    /// Mes más reciente INCLUIDO (`YYYY-MM`).
+    pub last_month: Option<String>,
+    /// `true` ⟺ los meses incluidos NO son consecutivos. Es lo que impide que la UI etiquete
+    /// «media de ene–dic 2025» una ventana de 12 meses dispersos en tres años.
+    pub has_gaps: bool,
 }
 
-pub(crate) async fn transactions_12m_avg(
+impl AvgSide {
+    fn empty(window: AvgWindowSpec) -> Self {
+        Self {
+            avg: Decimal::ZERO,
+            months_with_data: 0,
+            window,
+            first_month: None,
+            last_month: None,
+            has_gaps: false,
+        }
+    }
+}
+
+/// Promedio real por lado, cada uno con SU ventana.
+pub(crate) struct TransactionsAvg {
+    pub income: AvgSide,
+    pub expense: AvgSide,
+}
+
+/// Agregado mensual crudo que devuelve la query única.
+#[derive(Debug, FromRow)]
+struct MonthAgg {
+    ym: String,
+    /// Movimientos NO recurrentes del mes. `> 0` ⟺ el mes es real.
+    real_txns: i32,
+    income_sum: Decimal,
+    expense_sum: Decimal,
+}
+
+/// Tope del barrido físico en modo `data`: acota lo que se escanea y mantiene sana la etiqueta de
+/// rango. Mismo espíritu que `MAX_RECURRENCE_BACKFILL_YEARS`.
+const MAX_AVG_LOOKBACK_MONTHS: i32 = 120;
+
+/// Ordinal de mes de un `YYYY-MM`, para detectar huecos.
+fn ym_ordinal(ym: &str) -> i32 {
+    let y: i32 = ym[..4].parse().unwrap_or(0);
+    let m: i32 = ym[5..7].parse().unwrap_or(1);
+    y * 12 + (m - 1)
+}
+
+/// Elige los meses de un lado a partir de los agregados (que vienen en orden DESC).
+///
+/// `filter` y no `take_while`: si alguien cambiara el `ORDER BY` de la query, `take_while`
+/// truncaría en silencio y el promedio saldría de menos meses de los debidos.
+fn select_side<'a>(rows: &'a [MonthAgg], spec: AvgWindowSpec, today: NaiveDate) -> Vec<&'a MonthAgg> {
+    let real = rows.iter().filter(|r| r.real_txns > 0);
+    match spec.mode {
+        AvgWindowMode::Data => real.take(spec.months as usize).collect(),
+        AvgWindowMode::Calendar => {
+            let (sy, sm) = shift_month(today.year(), today.month(), -(spec.months as i32));
+            let floor = ym_string(sy, sm); // comparación lexicográfica ≡ cronológica en YYYY-MM
+            real.filter(|r| r.ym >= floor).collect()
+        }
+    }
+}
+
+/// Pliega los meses elegidos en un `AvgSide`.
+///
+/// EXACTITUD: suma exacta primero, UNA sola división al final. Promediar cocientes por mes
+/// introduciría redondeo y rompería la identidad con el comportamiento anterior.
+fn fold_side(
+    sel: &[&MonthAgg],
+    spec: AvgWindowSpec,
+    pick: impl Fn(&MonthAgg) -> Decimal,
+    negate: bool,
+) -> AvgSide {
+    if sel.is_empty() {
+        return AvgSide::empty(spec);
+    }
+    let n = sel.len() as u32;
+    let sum: Decimal = sel.iter().map(|r| pick(r)).sum();
+    let sum = if negate { -sum } else { sum };
+    let mut yms: Vec<&str> = sel.iter().map(|r| r.ym.as_str()).collect();
+    yms.sort_unstable();
+    let span = ym_ordinal(yms[yms.len() - 1]) - ym_ordinal(yms[0]) + 1;
+    AvgSide {
+        avg: sum / Decimal::from(n),
+        months_with_data: n,
+        window: spec,
+        first_month: Some(yms[0].to_string()),
+        last_month: Some(yms[yms.len() - 1].to_string()),
+        has_gaps: span != n as i32,
+    }
+}
+
+/// Promedio real de ingreso y gasto, cada lado con su propia ventana.
+///
+/// Ventana física medio-abierta `[floor, first_of_month(today))`: el mes EN CURSO queda siempre
+/// fuera (es parcial y hundiría la media). Dentro de ese tramo, cada lado elige sus meses según
+/// `AvgWindowSpec`.
+///
+/// **Mes real** = mes con ≥1 transacción `recurring_rule_id IS NULL`. Desde 3.10.0 los recurrentes
+/// solo existen en meses activos, así que en régimen normal «mes real» ≡ «mes con datos»; el
+/// predicado se conserva porque sigue siendo correcto en los casos residuales (p. ej. el mes de
+/// origen de una regla, exento de la poda). Las patas de transferencia CONCILIADAS quedan fuera
+/// del numerador Y del denominador: un mes cuyo único contenido son transferencias internas no es
+/// un mes con flujo.
+///
+/// Signos (magnitudes ≥ 0, como en el summary): `income` positivo → `income_avg = Σ`;
+/// `expense` negativo → `expense_avg = −Σ`. `savings` y `kind NULL` NO entran.
+pub(crate) async fn transactions_avg(
     pool: &PgPool,
     installation_id: Uuid,
     session_user_id: Uuid,
     view: LedgerView,
     today: NaiveDate,
+    income: AvgWindowSpec,
+    expense: AvgWindowSpec,
 ) -> Result<TransactionsAvg, ApiError> {
+    // En modo `data` hay que barrer hondo (los meses con datos pueden estar dispersos); en
+    // `calendar` basta con la mayor de las dos ventanas.
+    let lookback = if income.mode == AvgWindowMode::Data || expense.mode == AvgWindowMode::Data {
+        MAX_AVG_LOOKBACK_MONTHS
+    } else {
+        income.months.max(expense.months) as i32
+    };
     let window_end = first_of_month(today.year(), today.month());
-    let (sy, sm) = shift_month(today.year(), today.month(), -12);
-    let window_start = first_of_month(sy, sm);
+    let (fy, fm) = shift_month(today.year(), today.month(), -lookback);
+    let window_floor = first_of_month(fy, fm);
 
     let scope = view.scope_where("t");
     let arg = view.next_arg_index();
     let end = arg + 1;
 
-    // Definición ÚNICA de «mes real» (fuente de verdad compartida por las tres queries de abajo):
-    // el mes de una transacción `recurring_rule_id IS NULL` dentro del tramo `[window_start, window_end)`.
-    // El predicado se reutiliza tal cual en `months_sql`; su forma de CTE en `kind_sql`/`liab_sql`.
-    // Mismos `${arg}`/`${end}` en todas → mismos binds `window_start`/`window_end`.
-    //
-    // Las transferencias CONCILIADAS (`transfer_counterpart_id IS NOT NULL`, 3.5.0) quedan fuera
-    // también del denominador: aportan 0 al numerador (abajo), así que un mes cuyo único contenido
-    // son patas conciliadas hundiría el promedio exactamente igual que un mes vacío — la misma
-    // lógica por la que los meses solo-recurrentes («pseudovacíos») no cuentan.
-    let real_months_predicate = format!(
-        "{scope} AND t.op_date >= ${arg} AND t.op_date < ${end} AND t.recurring_rule_id IS NULL \
-         AND t.transfer_counterpart_id IS NULL"
-    );
-    let real_months_cte = format!(
-        "WITH real_months AS (
-             SELECT DISTINCT to_char(t.op_date, 'YYYY-MM') AS ym
-             FROM transactions t
-             WHERE {real_months_predicate}
-         )"
-    );
-
-    // `months_with_data`: meses REALES distintos del tramo, i.e. con ≥1 transacción `recurring_rule_id
-    // IS NULL` (cualquier kind, incluidos `savings` y `kind NULL`). Los meses solo-recurrentes
-    // («pseudovacíos», p. ej. tras un backfill de recurrentes) no cuentan.
-    let months_sql = format!(
-        "SELECT COUNT(DISTINCT to_char(t.op_date, 'YYYY-MM'))::int
+    // UNA sola query (antes eran dos): el `COUNT(*) FILTER` hace que el bit «este mes es real»
+    // viaje con la fila, sustituyendo a la vez al conteo de meses y al CTE `real_months` que
+    // restringía el numerador. No hace falta `DISTINCT`: el `GROUP BY ym` ya colapsa por mes.
+    let sql = format!(
+        "SELECT to_char(t.op_date, 'YYYY-MM') AS ym,
+                COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL)::int AS real_txns,
+                COALESCE(SUM(t.amount) FILTER (WHERE t.kind = 'income'), 0)::numeric AS income_sum,
+                COALESCE(SUM(t.amount) FILTER (WHERE t.kind = 'expense'), 0)::numeric AS expense_sum
          FROM transactions t
-         WHERE {real_months_predicate}"
-    );
-    let months_with_data: i32 = view
-        .bind_scope_scalar(sqlx::query_scalar(&months_sql), installation_id, session_user_id)
-        .bind(window_start)
-        .bind(window_end)
-        .fetch_one(pool)
-        .await?;
-    let months_with_data = months_with_data.max(0) as u32;
-
-    if months_with_data == 0 {
-        return Ok(TransactionsAvg {
-            income_avg: Decimal::ZERO,
-            expense_avg: Decimal::ZERO,
-            months_with_data: 0,
-        });
-    }
-    let denom = Decimal::from(months_with_data);
-
-    // Suma firmada por kind (solo income/expense), restringida a los meses REALES (CTE `real_months`,
-    // misma definición que `months_sql`): un mes solo-recurrente no aporta ni al numerador ni al
-    // denominador. Las conciliadas tampoco suman: un par conciliado es dinero que nunca salió del
-    // hogar → no es gasto ni ingreso de la simulación (este promedio alimenta el engine en B/C).
-    let kind_sql = format!(
-        "{real_months_cte}
-         SELECT t.kind AS kind, SUM(t.amount) AS total
-         FROM transactions t
-         WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
-           AND t.kind IN ('income', 'expense')
+         WHERE {scope}
+           AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.transfer_counterpart_id IS NULL
-           AND to_char(t.op_date, 'YYYY-MM') IN (SELECT ym FROM real_months)
-         GROUP BY t.kind"
+         GROUP BY 1
+         ORDER BY 1 DESC"
     );
-    let kind_rows: Vec<(Option<String>, Decimal)> = view
-        .bind_scope_as(sqlx::query_as(&kind_sql), installation_id, session_user_id)
-        .bind(window_start)
+    let rows: Vec<MonthAgg> = view
+        .bind_scope_as(sqlx::query_as(&sql), installation_id, session_user_id)
+        .bind(window_floor)
         .bind(window_end)
         .fetch_all(pool)
         .await?;
-    let mut income_sum = Decimal::ZERO;
-    let mut expense_sum = Decimal::ZERO;
-    for (kind, total) in kind_rows {
-        match kind.as_deref() {
-            Some("income") => income_sum += total,
-            Some("expense") => expense_sum += total,
-            _ => {}
-        }
-    }
 
+    let inc_sel = select_side(&rows, income, today);
+    let exp_sel = select_side(&rows, expense, today);
     Ok(TransactionsAvg {
-        income_avg: income_sum / denom,
-        expense_avg: (-expense_sum) / denom,
-        months_with_data,
+        income: fold_side(&inc_sel, income, |r| r.income_sum, false),
+        expense: fold_side(&exp_sel, expense, |r| r.expense_sum, true),
     })
 }
 

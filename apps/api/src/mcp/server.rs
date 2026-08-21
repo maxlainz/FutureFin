@@ -793,9 +793,25 @@ pub struct UpdateFireSettingsParams {
     /// Inflación anual asumida en % (0–50), string decimal.
     #[serde(default)]
     pub annual_inflation_assumption_percent: Option<String>,
-    /// "budget" (A) | "transactions_avg" (B) | "budget_income_real_expense" (C).
+    /// "budget" (A: plan) | "transactions_avg" (B: ingreso y gasto reales) |
+    /// "budget_income_real_expense" (C: ingreso del plan + gasto real).
     #[serde(default)]
     pub savings_source: Option<String>,
+    /// Ventana del promedio de INGRESO en meses (1–60). Solo la usa el modo B.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 60))]
+    pub income_avg_window_months: Option<u32>,
+    /// Semántica de la ventana de ingreso: "data" (los N meses CON DATOS más recientes, saltando
+    /// huecos) | "calendar" (solo los meses con datos dentro de los últimos N civiles).
+    #[serde(default)]
+    pub income_avg_window_mode: Option<String>,
+    /// Ventana del promedio de GASTO en meses (1–60). La usan los modos B y C.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 60))]
+    pub expense_avg_window_months: Option<u32>,
+    /// Semántica de la ventana de gasto: "data" | "calendar".
+    #[serde(default)]
+    pub expense_avg_window_mode: Option<String>,
     /// "manual" | "annual_expense" | "current_income".
     #[serde(default)]
     pub fire_number_mode: Option<String>,
@@ -1079,7 +1095,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_settings",
-        description = "Ajustes de la instalación: divisa base, zona horaria, inflación anual asumida y configuración FIRE (modo del objetivo, SWR, tramos fiscales, fuente del ahorro), el rol del usuario del token y su identidad (user: id, username, birth_date — la DOB que fija el horizonte de proyección).",
+        description = "Ajustes de la instalación: divisa base, zona horaria, inflación anual asumida y configuración FIRE (modo del objetivo, SWR, tramos fiscales, fuente del ahorro y las ventanas del promedio real: income_avg_window_months/mode y expense_avg_window_months/mode), el rol del usuario del token y su identidad (user: id, username, birth_date — la DOB que fija el horizonte de proyección).",
         annotations(title = "Ajustes", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_settings(
@@ -2478,7 +2494,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_fire_settings",
-        description = "Cambia la configuración FIRE de la instalación — SOLO el owner: SWR, inflación asumida, fuente del ahorro (modo A budget | B transactions_avg | C budget_income_real_expense), modo del objetivo, importe manual, impuestos y tramos. Merge campo a campo sobre el estado actual: los campos omitidos NUNCA se resetean. Sin confirm=true no persiste nada — devuelve el before/after validado. Es el mayor radio de todas las tools: mueve la proyección entera; considera enseñar antes el impacto con simulate_projection.",
+        description = "Cambia la configuración FIRE de la instalación — SOLO el owner: SWR, inflación asumida, fuente del ahorro (modo A budget (plan) | B transactions_avg (ingreso y gasto reales) | C budget_income_real_expense (ingreso del plan + gasto real)), modo del objetivo, importe manual, impuestos y tramos. Merge campo a campo sobre el estado actual: los campos omitidos NUNCA se resetean. Sin confirm=true no persiste nada — devuelve el before/after validado. Es el mayor radio de todas las tools: mueve la proyección entera; considera enseñar antes el impacto con simulate_projection. Las ventanas del promedio real (income_avg_window_months/mode, expense_avg_window_months/mode) se configuran aquí: el modo B usa las dos, el C solo las de gasto y el A ninguna.",
         annotations(title = "Configurar FIRE", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_fire_settings(
@@ -2514,6 +2530,27 @@ impl FutureFinMcp {
                         .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))
                 })
                 .transpose()?;
+            patch.income_avg_window_months = p.income_avg_window_months;
+            patch.expense_avg_window_months = p.expense_avg_window_months;
+            for (label, src, dst) in [
+                (
+                    "income_avg_window_mode",
+                    &p.income_avg_window_mode,
+                    &mut patch.income_avg_window_mode,
+                ),
+                (
+                    "expense_avg_window_mode",
+                    &p.expense_avg_window_mode,
+                    &mut patch.expense_avg_window_mode,
+                ),
+            ] {
+                if let Some(v) = src.as_ref() {
+                    *dst = Some(
+                        serde_json::from_value(serde_json::Value::String(v.trim().to_string()))
+                            .map_err(|e| ApiError::BadRequest(format!("{label}: {e}")))?,
+                    );
+                }
+            }
             patch.fire_number_mode = p
                 .fire_number_mode
                 .as_ref()
