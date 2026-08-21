@@ -232,14 +232,14 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 ## Git workflow
 
 **Branches:**
-- `main` — rama de producción y de publicación. La imagen Docker se construye y publica **desde `main`** (el workflow `publish-image.yml` vive aquí). Es la rama por defecto.
+- `main` — rama de producción y de publicación. La imagen Docker se construye y publica **desde `main`**, con `./scripts/publish-image-local.sh` desde tu máquina (el workflow `publish-image.yml` vive aquí como fallback manual). Es la rama por defecto.
 - `dev` — desarrollo activo, **ramificada de `main`**. `main` es un **espejo completo de `dev`**: contiene exactamente lo mismo (CLAUDE.md, .claude/, .github/, workflows, código). No hay divergencia de `.gitignore` ni archivos exclusivos de una rama.
 
 **Releases:**
 1. Desarrollar en `dev`, hacer commit y push.
 2. Bumpar versión en `apps/api/Cargo.toml` (sincronizar `Cargo.lock`) y añadir entrada en `CHANGELOG.md`.
 3. **Merge completo `dev` → `main`** (`git checkout main && git merge dev`). Nunca copias parciales de archivos: `main` debe quedar idéntico a `dev`.
-4. Push tag `vX.Y.Z` **desde `main`** → el workflow `publish-image.yml` (que vive en `main`) publica la imagen.
+4. Push tag `vX.Y.Z` **desde `main`**, y publicar la imagen **en local**: `./scripts/publish-image-local.sh`. Construye amd64+arm64 de una vez, sube a GHCR y Docker Hub con los tags `:X.Y.Z`, `:X.Y`, `:X`, `:latest`, y crea el GitHub Release con las notas del CHANGELOG. El tag **ya no dispara ningún build**: los runners son amd64 y la mitad arm64 iba emulada (~1,5-2 h por release, el 66 % de la cuota mensual) para un cómputo real de ~3,5 min. `publish-image.yml` queda como **fallback manual** (`workflow_dispatch`) para cuando no puedas publicar desde tu máquina.
 5. Volver a `dev` (`git checkout dev`) y seguir; mantener `dev` al día con `main`.
 
 Tags published: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere secrets `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` en GitHub repo.
