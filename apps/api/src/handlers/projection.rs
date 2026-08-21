@@ -9,7 +9,8 @@ use crate::handlers::installation::{
     resolve_fire_settings, FireNumberMode, FireSettings, SavingsSource, TaxBracket,
 };
 use crate::handlers::person_view::LedgerView;
-use crate::handlers::transactions::summary::transactions_12m_avg;
+use crate::handlers::installation::AvgWindowMode;
+use crate::handlers::transactions::summary::{transactions_avg, AvgSide, TransactionsAvg};
 use crate::handlers::session::require_session_user;
 use crate::state::{AppState, Density, ProjectionCacheKey};
 use axum::extract::{Extension, Query};
@@ -259,7 +260,10 @@ pub struct ProjectionSeriesResponse {
     pub savings_source: SavingsSource,
     /// Meses reales usados por el promedio cuando `savings_source` deriva de transacciones; `0` en
     /// modo `budget` (configurado o por fallback).
-    pub savings_source_months_with_data: u32,
+    /// Procedencia del lado INGRESO del ahorro efectivo (ventana, meses usados, rango real).
+    pub savings_income_basis: SavingsAvgBasis,
+    /// Procedencia del lado GASTO.
+    pub savings_expense_basis: SavingsAvgBasis,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -678,6 +682,135 @@ fn fire_crossover_month(
     None
 }
 
+// ---------------------------------------------------------------------------
+// Resolución compartida de los inputs de ahorro (proyección ↔ /v1/summary)
+// ---------------------------------------------------------------------------
+
+/// Procedencia de UN lado del ahorro. Sustituye al escalar `savings_source_months_with_data`: con
+/// dos ventanas no existe *un* número de meses, y servir uno solo mal-etiquetaría la mitad de la
+/// UI (un «3» mientras el otro lado promedió 12).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SavingsAvgBasis {
+    /// `budget` = este lado salió del presupuesto (el modo no lo promedia, o cayó por falta de
+    /// datos). `average` = promedio real de transacciones.
+    pub basis: &'static str,
+    /// Denominador REALMENTE usado. `0` ⟺ `basis == "budget"`.
+    pub months_with_data: u32,
+    /// Ventana configurada tras el clamp (permite decir «pediste 12, hay 7»). `0` si no aplica.
+    pub window_months: u32,
+    /// `"data"` | `"calendar"`; ausente cuando el lado no promedia.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_mode: Option<&'static str>,
+    /// Mes más antiguo incluido (`YYYY-MM`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_month: Option<String>,
+    /// Mes más reciente incluido (`YYYY-MM`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_month: Option<String>,
+    /// `true` ⟺ los meses incluidos NO son consecutivos: la UI no puede pintarlos como un rango.
+    pub has_gaps: bool,
+}
+
+impl SavingsAvgBasis {
+    pub(crate) fn budget() -> Self {
+        Self {
+            basis: "budget",
+            months_with_data: 0,
+            window_months: 0,
+            window_mode: None,
+            first_month: None,
+            last_month: None,
+            has_gaps: false,
+        }
+    }
+    fn from_side(side: &AvgSide) -> Self {
+        Self {
+            basis: "average",
+            months_with_data: side.months_with_data,
+            window_months: side.window.months,
+            window_mode: Some(match side.window.mode {
+                AvgWindowMode::Data => "data",
+                AvgWindowMode::Calendar => "calendar",
+            }),
+            first_month: side.first_month.clone(),
+            last_month: side.last_month.clone(),
+            has_gaps: side.has_gaps,
+        }
+    }
+}
+
+/// Inputs regulares efectivos del mes 0, con el override de modo y el fallback ya resueltos.
+pub(crate) struct EffectiveSavingsInputs {
+    pub income: Decimal,
+    pub expense: Decimal,
+    /// `true` ⟺ el GASTO viene del promedio real. Gobierna la anulación de `payment_amount` de los
+    /// pasivos, el zeroing de `end_adj` y la base del target FIRE — las tres son afirmaciones
+    /// sobre la base de GASTO. Cablearlo al lado ingreso haría desaparecer la cuota del horizonte
+    /// entero en modo B con datos de ingreso y sin datos de gasto.
+    pub expense_from_avg: bool,
+    /// Fuente efectiva. Colapsa a `Budget` **⟺ AMBOS** lados cayeron al presupuesto — es lo que
+    /// preserva la garantía de que en ese caso el bloque es idéntico al modo A.
+    pub effective_source: SavingsSource,
+    pub income_basis: SavingsAvgBasis,
+    pub expense_basis: SavingsAvgBasis,
+}
+
+/// Resolución ÚNICA del override B/C y del fallback POR LADO, compartida por la proyección y
+/// `/v1/summary`. **Pura**: sin BD y sin reloj, así que las combinaciones de modo × fallback son
+/// testeables sin Postgres.
+///
+/// Los escalares de presupuesto entran como PARÁMETROS porque los dos call-sites usan bases
+/// distintas: `projection.rs` sin cuotas de pasivo (`budget.rs` avisa del doble conteo) y
+/// `summary.rs` con ellas. Buscarlos aquí dentro reintroduciría esa divergencia.
+///
+/// **El fallback es POR LADO, no todo-o-nada.** Con `income = 3` y `expense = 12`, un hogar que
+/// deja de importar cuatro meses tendría 0 meses de ingreso y 8 de gasto: tirar 8 meses de gasto
+/// realmente medido para volver al presupuesto sería peor que la asimetría. Y deja de ser
+/// silencioso porque cada lado publica su `basis`.
+pub(crate) fn resolve_effective_savings_inputs(
+    source: SavingsSource,
+    budget_income: Decimal,
+    budget_expense: Decimal,
+    avg: Option<&TransactionsAvg>,
+) -> EffectiveSavingsInputs {
+    // `match` exhaustivo a propósito (sin `_ =>`): una variante nueva del enum debe romper la
+    // compilación aquí en vez de heredar el comportamiento de otra en silencio.
+    let (use_income_avg, use_expense_avg) = match source {
+        SavingsSource::Budget => (false, false),
+        SavingsSource::TransactionsAvg => (true, true),
+        SavingsSource::BudgetIncomeRealExpense => (false, true),
+    };
+    let inc_side = avg.map(|a| &a.income).filter(|_| use_income_avg);
+    let exp_side = avg.map(|a| &a.expense).filter(|_| use_expense_avg);
+    let inc_ok = inc_side.map(|s| s.months_with_data > 0).unwrap_or(false);
+    let exp_ok = exp_side.map(|s| s.months_with_data > 0).unwrap_or(false);
+
+    EffectiveSavingsInputs {
+        income: match inc_side.filter(|_| inc_ok) {
+            Some(s) => s.avg,
+            None => budget_income,
+        },
+        expense: match exp_side.filter(|_| exp_ok) {
+            Some(s) => s.avg,
+            None => budget_expense,
+        },
+        expense_from_avg: exp_ok,
+        effective_source: if inc_ok || exp_ok {
+            source
+        } else {
+            SavingsSource::Budget
+        },
+        income_basis: match inc_side.filter(|_| inc_ok) {
+            Some(s) => SavingsAvgBasis::from_side(s),
+            None => SavingsAvgBasis::budget(),
+        },
+        expense_basis: match exp_side.filter(|_| exp_ok) {
+            Some(s) => SavingsAvgBasis::from_side(s),
+            None => SavingsAvgBasis::budget(),
+        },
+    }
+}
+
 pub(crate) struct BuiltProjection {
     pub input: ProjectionInput,
     pub monthly_net_regular: Decimal,
@@ -697,7 +830,8 @@ pub(crate) struct BuiltProjection {
     pub effective_savings_source: SavingsSource,
     /// Meses reales que alimentaron el promedio cuando la fuente efectiva usa transacciones; `0` en
     /// modo A y en el fallback.
-    pub savings_source_months_with_data: u32,
+    pub savings_income_basis: SavingsAvgBasis,
+    pub savings_expense_basis: SavingsAvgBasis,
     /// Servicio de deuda mensual de los pasivos **activos** (`payment_end_date` nula o ≥ hoy), con
     /// la cuota nominal normalizada a mensual. No entra en `expense_regular_monthly` (el engine
     /// amortiza los pasivos aparte); lo consumen los caps `months_expense` de `assets.rs`. En modo
@@ -754,63 +888,29 @@ pub(crate) async fn build_installation_projection_input(
         .fetch_all(pool)
         .await?;
 
-    // Fuente del ahorro: presupuesto (modo A) vs modos que derivan de las transacciones (modo B
-    // `transactions_avg`, modo C `budget_income_real_expense`). Ambos toman el gasto del promedio real
-    // 12m CRUDO (las cuotas de pasivo viven dentro) y anulan `end_adj`; difieren solo en el income
-    // (B → promedio real; C → presupuesto). `months_with_data == 0` → fallback silencioso a modo A.
+    // Fuente del ahorro efectiva: resuelta por la core compartida con `/v1/summary` (ver
+    // `resolve_effective_savings_inputs`), de modo que el KPI y el gráfico no puedan divergir.
     let savings_source = fire_settings
         .map(|fs| fs.savings_source)
         .unwrap_or_default();
-    // Inputs regulares efectivos del mes 0. Con `expense_from_avg == false` (modo A o fallback) son
-    // EXACTAMENTE los escalares del presupuesto (income_reg, expense_reg); en modo B/C con datos, el
-    // gasto sale del promedio real (y en B también el income).
-    struct EffectiveInputs {
-        income: Decimal,
-        expense: Decimal,
-        expense_from_avg: bool,
-        /// Fuente efectiva tras el fallback (modo B/C sin meses reales → `Budget`).
-        effective_source: SavingsSource,
-        /// Meses reales del promedio; `0` en modo A y en el fallback.
-        months_with_data: u32,
-    }
-    let inputs: EffectiveInputs = match savings_source {
-        SavingsSource::TransactionsAvg | SavingsSource::BudgetIncomeRealExpense => {
-            let avg = transactions_12m_avg(pool, iid, session_user_id, view, today).await?;
-            if avg.months_with_data > 0 {
-                // Contrato de los modos reales (reforma 3.4.0): el promedio de gasto se usa CRUDO —
-                // las cuotas de pasivo ya viven dentro de los movimientos (amortización incluida),
-                // así que no se restan aquí ni se vuelven a cargar como debt service (ver el bloque
-                // que anula `payment_amount` más abajo). Mismo contrato en `summary.rs`.
-                // Modo C: income del presupuesto; modo B: income del promedio real.
-                let income = match savings_source {
-                    SavingsSource::BudgetIncomeRealExpense => income_reg,
-                    _ => avg.income_avg,
-                };
-                EffectiveInputs {
-                    income,
-                    expense: avg.expense_avg,
-                    expense_from_avg: true,
-                    effective_source: savings_source,
-                    months_with_data: avg.months_with_data,
-                }
-            } else {
-                EffectiveInputs {
-                    income: income_reg,
-                    expense: expense_reg,
-                    expense_from_avg: false,
-                    effective_source: SavingsSource::Budget,
-                    months_with_data: 0,
-                }
-            }
-        }
-        SavingsSource::Budget => EffectiveInputs {
-            income: income_reg,
-            expense: expense_reg,
-            expense_from_avg: false,
-            effective_source: SavingsSource::Budget,
-            months_with_data: 0,
-        },
+    let avg = if savings_source.uses_transactions() {
+        let fs = fire_settings.expect("uses_transactions implies fire_settings present");
+        Some(
+            transactions_avg(
+                pool,
+                iid,
+                session_user_id,
+                view,
+                today,
+                fs.income_window(),
+                fs.expense_window(),
+            )
+            .await?,
+        )
+    } else {
+        None
     };
+    let inputs = resolve_effective_savings_inputs(savings_source, income_reg, expense_reg, avg.as_ref());
     // Overrides what-if pre-target: el gasto extra entra ANTES de derivar el target FIRE y las
     // bases de caps (semántica «gasto real»); el gasto de jubilación explícito sustituye al
     // derivado. Sin overrides (`None`, todos los callers no-simulación) nada cambia.
@@ -824,7 +924,8 @@ pub(crate) async fn build_installation_projection_input(
 
     let expense_from_avg = inputs.expense_from_avg;
     let effective_savings_source = inputs.effective_source;
-    let savings_source_months_with_data = inputs.months_with_data;
+    let savings_income_basis = inputs.income_basis;
+    let savings_expense_basis = inputs.expense_basis;
 
     // Modo real (B/C con datos): la cuota ya está dentro del promedio de gasto, así que los
     // pasivos NO tocan la caja de la simulación. Se anula `payment_amount` EN MEMORIA en un único
@@ -1009,7 +1110,8 @@ pub(crate) async fn build_installation_projection_input(
         asset_id_name,
         planning_rows,
         effective_savings_source,
-        savings_source_months_with_data,
+        savings_income_basis,
+        savings_expense_basis,
         debt_service_monthly,
     })
 }
@@ -1297,7 +1399,8 @@ pub async fn compute_projection_series_response(
         asset_id_name,
         planning_rows,
         effective_savings_source,
-        savings_source_months_with_data,
+        savings_income_basis,
+        savings_expense_basis,
         debt_service_monthly: _,
     } = built;
 
@@ -1451,7 +1554,8 @@ pub async fn compute_projection_series_response(
             Density::Hybrid => "hybrid".into(),
         },
         savings_source: effective_savings_source,
-        savings_source_months_with_data,
+        savings_income_basis,
+        savings_expense_basis,
     })
 }
 

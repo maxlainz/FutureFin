@@ -101,7 +101,25 @@ async fn set_mode_b(app: &TestApp, cookie: &str) {
     assert_eq!(r.status, http::StatusCode::OK, "set mode B: {r:?}");
 }
 
-/// PATCH mode C (`budget_income_real_expense`): income del presupuesto + gasto real 12m.
+/// PATCH de las ventanas del promedio real (ambas en modo `calendar`).
+async fn set_windows(app: &TestApp, cookie: &str, source: &str, income_m: u32, expense_m: u32) {
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": {
+                "savings_source": source,
+                "income_avg_window_months": income_m,
+                "income_avg_window_mode": "calendar",
+                "expense_avg_window_months": expense_m,
+                "expense_avg_window_mode": "calendar",
+            }}),
+            cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "set windows: {r:?}");
+}
+
+/// PATCH mode C (`budget_income_real_expense`): income del presupuesto + gasto real.
 async fn set_mode_c(app: &TestApp, cookie: &str) {
     let r = app
         .patch_json_with_cookie(
@@ -260,12 +278,25 @@ async fn mode_b_weighted_avg_excludes_savings_and_partial_month() {
     let delta_a = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
     approx(delta_a, 2000.0);
 
-    // Modo B: income_avg = (2400+1200)/2 = 1800; expense_avg = (900+300)/2 = 600 → delta 1200.
-    set_mode_b(&app, &owner.cookie).await;
-    let delta_b = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
-    approx(delta_b, 1200.0);
+    // Modo B con ventanas SIMÉTRICAS 12/12 (el comportamiento anterior a 3.10.0, reproducible):
+    // income_avg = (2400+1200)/2 = 1800; expense_avg = (900+300)/2 = 600 → delta 1200.
+    set_windows(&app, &owner.cookie, "transactions_avg", 12, 12).await;
+    let delta_sym = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_sym, 1200.0);
 
-    assert!((delta_a - delta_b).abs() > 100.0, "modo B debe cambiar la pendiente frente a A");
+    // Ventanas ASIMÉTRICAS 3/12 (el default de 3.10.0): el ingreso solo mira los últimos 3 meses
+    // civiles, así que el mes −6 sale de SU ventana pero sigue contando para el gasto.
+    // income_avg = 2400 (solo −1); expense_avg = (900+300)/2 = 600 → delta 1800.
+    // Este es el par discriminante: con una sola ventana los dos casos darían lo mismo.
+    set_windows(&app, &owner.cookie, "transactions_avg", 3, 12).await;
+    let delta_asym = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    approx(delta_asym, 1800.0);
+
+    assert!((delta_a - delta_sym).abs() > 100.0, "modo B debe cambiar la pendiente frente a A");
+    assert!(
+        (delta_asym - delta_sym).abs() > 100.0,
+        "la ventana de ingreso debe mover la cifra de forma independiente a la de gasto"
+    );
 }
 
 /// `months_with_data == 0` → fallback silencioso al presupuesto (modo A efectivo).
@@ -675,11 +706,13 @@ async fn assets_cap_targets_follow_savings_source_mode() {
     );
 }
 
-/// `GET /v1/projection/series` reporta la fuente **efectiva** (tras el fallback) y los meses reales
-/// que la alimentaron, para que la web etiquete la pendiente sin un fetch extra.
+/// `GET /v1/projection/series` reporta la fuente **efectiva** (tras el fallback) y la PROCEDENCIA
+/// de cada lado (3.10.0: `savings_income_basis` / `savings_expense_basis`), para que la web
+/// etiquete la pendiente sin un fetch extra y sepa decir el rango real que usó.
 ///
-/// PREDICCIÓN: modo A → `"budget"` / 0; modo B **sin** meses reales → `"budget"` / 0 (fallback);
-/// modo B con un mes real → `"transactions_avg"` / 1.
+/// PREDICCIÓN: modo A → `"budget"` y ambos lados `basis: "budget"`; modo B **sin** meses reales →
+/// `"budget"` y ambos en `budget` (fallback); modo B con un mes real → `"transactions_avg"` y
+/// ambos lados `basis: "average"` con `months_with_data == 1`.
 #[tokio::test]
 async fn projection_series_reports_effective_savings_source() {
     async fn source(app: &TestApp, cookie: &str) -> (String, u64) {
@@ -688,9 +721,12 @@ async fn projection_series_reports_effective_savings_source() {
             .await;
         assert_eq!(resp.status, http::StatusCode::OK, "projection: {resp:?}");
         let body = resp.json();
+        // El lado GASTO gobierna el contrato del modo (es el que decide `expense_from_avg`).
         (
             body["savings_source"].as_str().expect("savings_source").to_string(),
-            body["savings_source_months_with_data"].as_u64().expect("months"),
+            body["savings_expense_basis"]["months_with_data"]
+                .as_u64()
+                .expect("expense months"),
         )
     }
 
