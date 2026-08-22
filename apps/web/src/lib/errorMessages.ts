@@ -368,6 +368,15 @@ export const ERROR_MESSAGES: Record<string, string> = {
   asset_not_in_scope:
     "Uno de los activos de la simulación no existe o no se ve en esta vista. Recarga la página.",
 
+  // ── Parámetros de consulta ────────────────────────────────────────────────────────────
+  // La app nunca los provoca: manda siempre valores válidos. Existen porque desde 4.0.0 la API
+  // rechaza el valor desconocido en vez de caer al default en silencio, y alguien que llame a la
+  // API a mano (o un agente por MCP) sí puede verlos.
+  invalid_view: "Esa vista no existe. Elige «solo lo mío» o «todo el hogar».",
+  invalid_resolution:
+    "Esa resolución no es válida. El detalle del gráfico puede ser semanal o diario.",
+  invalid_density: "Esa densidad de la serie no es válida. Puede ser mensual o híbrida.",
+
   // ── Tokens, conexiones y sistema ──────────────────────────────────────────────────────
   token_label_length: "El nombre del token debe tener entre 1 y 64 caracteres.",
   token_expiry_out_of_range:

@@ -1074,3 +1074,50 @@ async fn list_snapshots_items_are_opt_in_and_year_validates() {
     let body: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(body["error"], "bad_request");
 }
+
+/// REGRESIÓN (issue #7 §4) — `view` desconocido por MCP devuelve tool-error, no el hogar entero.
+///
+/// Éste era el repro literal del issue: `list_transactions {"view":"no-existe-esta-vista"}` →
+/// 200 con `total_count` del **hogar completo**. La tool no valida por su cuenta — comparte
+/// `LedgerViewQuery::resolve` con el HTTP —, así que lo que fija este test es que el rechazo
+/// **llegue** al cliente MCP como tool-error legible y no como un 200 con otros datos.
+#[tokio::test]
+async fn unknown_view_is_a_tool_error_not_the_whole_household() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("mcp_view_owner").await;
+    let token = create_token(&app, &owner).await;
+
+    for bad in ["no-existe-esta-vista", "MINE", "self"] {
+        for tool in ["list_transactions", "get_summary", "get_history_cashflow"] {
+            let resp = mcp_post(
+                &app,
+                &token,
+                tool_call_body(tool, serde_json::json!({"view": bad})),
+            )
+            .await;
+            assert_eq!(
+                resp["result"]["isError"], true,
+                "{tool} con view={bad} debería ser tool-error: {resp}"
+            );
+            let body: serde_json::Value = serde_json::from_str(
+                resp["result"]["content"][0]["text"].as_str().expect("texto"),
+            )
+            .expect("json de error");
+            assert_eq!(body["code"], "invalid_view", "{tool} view={bad}: {body}");
+        }
+    }
+
+    // Y los válidos siguen sirviendo, `household` explícito incluido.
+    for good in ["mine", "household"] {
+        let resp = mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_transactions", serde_json::json!({"view": good})),
+        )
+        .await;
+        assert_ne!(
+            resp["result"]["isError"], true,
+            "view={good} debería seguir sirviendo: {resp}"
+        );
+    }
+}

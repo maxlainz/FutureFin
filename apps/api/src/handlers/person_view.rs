@@ -1,6 +1,8 @@
 //! Optional query `view=mine` scopes ledger reads to rows attributed to the signed-in user.
-//! Omitting `view` or any other value means **household** (full installation).
+//! Omitting `view` (o `view=household`) means **household** (full installation); cualquier otro
+//! valor es un error — ver [`LedgerViewQuery::resolve`].
 
+use crate::error::ApiError;
 use serde::Deserialize;
 use sqlx::postgres::PgArguments;
 use sqlx::query::{Query, QueryAs, QueryScalar};
@@ -20,10 +22,23 @@ pub enum LedgerView {
 }
 
 impl LedgerViewQuery {
-    pub fn resolve(&self) -> LedgerView {
+    /// `mine` → Mine; ausente, vacío o `household` → Household. **Cualquier otro valor es un
+    /// error**, no un household silencioso.
+    ///
+    /// Hasta 4.0.0 el brazo comodín se comía el valor desconocido y devolvía el hogar entero. Con
+    /// la SPA como único cliente eso nunca se notó — nunca manda otra cosa que `mine` o nada —,
+    /// pero un agente MCP que escriba `"MINE"` o `"self"` recibía los datos de todo el hogar
+    /// creyendo haber pedido solo los suyos, y respondería sobre ellos sin ninguna señal de que
+    /// se le ignoró el filtro (issue #7). No es una frontera de autorización — el mismo token
+    /// podía pedir `household` a la cara (D2) —, pero sí una respuesta sobre otra población que
+    /// la pedida, que es peor que un error.
+    pub fn resolve(&self) -> Result<LedgerView, ApiError> {
         match self.view.as_deref().map(str::trim) {
-            Some("mine") => LedgerView::Mine,
-            _ => LedgerView::Household,
+            None | Some("") | Some("household") => Ok(LedgerView::Household),
+            Some("mine") => Ok(LedgerView::Mine),
+            Some(_) => Err(ApiError::BadRequest(
+                "invalid_view: view must be 'mine' or 'household'".into(),
+            )),
         }
     }
 }
@@ -121,6 +136,28 @@ mod tests {
             LedgerView::Mine.scope_where(""),
             "installation_id = $1 AND owner_user_id = $2"
         );
+    }
+
+    /// Los tres valores aceptados y el rechazo del resto. El brazo `Some(_)` es el que cierra la
+    /// clase entera: antes de 4.0.0 cualquier cadena desconocida caía a Household en silencio.
+    #[test]
+    fn resolve_accepts_only_mine_household_and_absence() {
+        let v = |s: Option<&str>| LedgerViewQuery { view: s.map(str::to_string) }.resolve();
+
+        assert_eq!(v(None).unwrap(), LedgerView::Household);
+        assert_eq!(v(Some("")).unwrap(), LedgerView::Household);
+        assert_eq!(v(Some("  ")).unwrap(), LedgerView::Household);
+        assert_eq!(v(Some("household")).unwrap(), LedgerView::Household);
+        assert_eq!(v(Some(" mine ")).unwrap(), LedgerView::Mine);
+
+        // Mayúsculas incluidas: `"MINE"` era el caso exacto del issue — devolvía el hogar entero.
+        for bad in ["MINE", "Mine", "HOUSEHOLD", "self", "no-existe-esta-vista", "mía"] {
+            let err = v(Some(bad)).expect_err(bad);
+            assert!(
+                matches!(&err, ApiError::BadRequest(m) if m.starts_with("invalid_view: ")),
+                "`{bad}` debería dar invalid_view, dio {err:?}"
+            );
+        }
     }
 
     #[test]

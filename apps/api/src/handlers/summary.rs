@@ -288,7 +288,7 @@ pub async fn get_summary(
 ) -> Result<Json<SummaryResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = summary_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = summary_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 

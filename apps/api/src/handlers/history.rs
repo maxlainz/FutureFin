@@ -1273,7 +1273,7 @@ pub async fn get_history_series(
     let user = require_session_user(&jar, &state.pool).await?;
     // Solo lectura: cualquier miembro (viewer incluido) puede pedir la serie.
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve()?;
     let out = history_series_core(
         &state.pool,
         iid,
@@ -1551,7 +1551,7 @@ pub async fn get_history_cashflow(
     let user = require_session_user(&jar, &state.pool).await?;
     // Solo lectura: cualquier miembro (viewer incluido).
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve()?;
     let out = history_cashflow_core(
         &state.pool,
         iid,
@@ -1584,7 +1584,18 @@ pub(crate) async fn history_cashflow_core(
     let window_months: i32 = window_months
         .unwrap_or(DEFAULT_CASHFLOW_WINDOW_MONTHS)
         .clamp(1, MAX_CASHFLOW_WINDOW_MONTHS) as i32;
-    let daily = matches!(resolution.map(str::trim), Some("daily"));
+    // `resolution` desconocido es un error, no un weekly silencioso: la respuesta ecoa
+    // `resolution` y `resolution:"hourly"` devolvía 200 diciendo "weekly" (issue #7 §4, misma
+    // clase que `view`).
+    let daily = match resolution.map(str::trim) {
+        None | Some("") | Some("weekly") => false,
+        Some("daily") => true,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "invalid_resolution: resolution must be 'weekly' or 'daily'".into(),
+            ))
+        }
+    };
     if daily && window_months > MAX_DAILY_WINDOW_MONTHS {
         return Err(ApiError::BadRequest(format!(
             "daily_window_too_large: resolution=daily requires window_months <= {MAX_DAILY_WINDOW_MONTHS}"

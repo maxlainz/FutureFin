@@ -44,10 +44,16 @@ pub struct ProjectionSeriesQuery {
     pub density: Option<String>,
 }
 
-fn resolve_density(q: &ProjectionSeriesQuery) -> Density {
+/// `hybrid` o `monthly` (default). Cualquier otro valor es un error, no un `monthly` silencioso:
+/// pedir una densidad que no existe y recibir 841 puntos sin aviso es la misma clase de fallo que
+/// `view` (issue #7 §4). Solo alcanzable por HTTP — la tool MCP fuerza `Hybrid`.
+fn resolve_density(q: &ProjectionSeriesQuery) -> Result<Density, ApiError> {
     match q.density.as_deref().map(str::trim) {
-        Some("hybrid") => Density::Hybrid,
-        _ => Density::Monthly,
+        None | Some("") | Some("monthly") => Ok(Density::Monthly),
+        Some("hybrid") => Ok(Density::Hybrid),
+        Some(_) => Err(ApiError::BadRequest(
+            "invalid_density: density must be 'monthly' or 'hybrid'".into(),
+        )),
     }
 }
 
@@ -163,13 +169,6 @@ fn compute_fire_target_nw(
     if swr <= Decimal::ZERO { return None; }
     let gross = gross_up_net_annual_fire(need_annual, &fire.tax_brackets, fire.taxes_enabled);
     Some(gross / (swr / Decimal::from(100u32)))
-}
-
-fn resolve_ledger_view(q: &ProjectionSeriesQuery) -> LedgerView {
-    match q.view.as_deref().map(str::trim) {
-        Some("mine") => LedgerView::Mine,
-        _ => LedgerView::Household,
-    }
 }
 
 /// Serializa un Decimal como f64 (~15 dígitos de precisión, suficiente para
@@ -1256,8 +1255,13 @@ pub async fn get_projection_series(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
 
-    let view = resolve_ledger_view(&q);
-    let density = resolve_density(&q);
+    // Parseo compartido con el resto del ledger: este handler tenía su propia copia del `match`
+    // y por eso se le pasó por alto el rechazo de `view` desconocido. Un solo parser, un solo sitio.
+    let view = crate::handlers::person_view::LedgerViewQuery {
+        view: q.view.clone(),
+    }
+    .resolve()?;
+    let density = resolve_density(&q)?;
     let response =
         projection_series_cached(&state, user.id.0, iid, view, q.months, density).await?;
     Ok(Json(response))

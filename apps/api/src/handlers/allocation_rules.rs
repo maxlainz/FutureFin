@@ -334,7 +334,7 @@ pub async fn list_allocation_rules(
 ) -> Result<Json<Vec<AllocationRuleResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_allocation_rules_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_allocation_rules_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 
@@ -728,7 +728,7 @@ pub async fn reorder_allocation_rules(
     }
 
     // Load all current rules in this scope; the request must list exactly the same set.
-    let view = q.resolve();
+    let view = q.resolve()?;
     let scope = view.scope_where("");
     let current_sql = format!("SELECT id FROM allocation_rules WHERE {scope}");
     let current: Vec<Uuid> = view
@@ -896,7 +896,7 @@ pub async fn get_allocation_resolution(
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
     let out =
-        allocation_resolution_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+        allocation_resolution_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 

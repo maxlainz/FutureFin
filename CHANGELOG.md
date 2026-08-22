@@ -62,6 +62,32 @@ nueva: con `DATABASE_URL` heredada y volumen vacío el contenedor **aborta sin i
 el volumen se queda intacto. El escenario 2 mantiene la ruta 2.x → volumen reutilizado, pero su
 paso intermedio ahora comprueba el rechazo en vez del modo compatibilidad.
 
+### Auditoría del servidor MCP: once hallazgos, arreglados (issues #7 y #8)
+
+Una auditoría caja-negra del servidor MCP contra una instalación real ejercitó las 50 herramientas
+y encontró once cosas: cifras que no cuadraban entre sí, escrituras que se aceptaban sin validar,
+y campos cuyo nombre invitaba a leerlos al revés. Nada de esto afecta a quien usa la app por la
+web; afecta a quien le pregunta por sus finanzas a Claude. Se arreglan todos antes de publicar,
+porque 4.0.0 es la única versión en la que se puede cambiar el contrato sin romperle nada a nadie.
+
+#### Un filtro de vista mal escrito devolvía los datos de todo el hogar
+
+`?view=` aceptaba **cualquier** valor y, si no era exactamente `mine`, servía el hogar completo sin
+decir nada. La app nunca lo notó —manda siempre `mine` o nada—, pero un asistente que escribiera
+`"MINE"` en mayúsculas recibía los movimientos de todos los miembros creyendo haber pedido solo los
+suyos, y respondía sobre ellos. No era un agujero de permisos (cualquier miembro puede pedir el
+hogar entero a la cara, y siempre ha podido), pero sí una respuesta sobre gente distinta de la que
+se preguntó, sin ninguna señal.
+
+Ahora `view` admite `mine`, `household` o nada, y **rechaza el resto**. Dos parámetros más tenían el
+mismo defecto y van con él: `resolution` del cash-flow (pedir `hourly` devolvía un gráfico semanal
+diciendo «semanal») y `density` de la proyección (pedir una densidad inexistente devolvía la serie
+completa, diez veces más grande que la pedida).
+
+La causa de fondo era la duplicación: `/v1/projection/series` tenía **su propia copia** del parseo
+en vez de usar el compartido, y por eso el arreglo se le habría escapado. Esa copia se ha borrado.
+Regresión sobre las 14 rutas con `?view=`: `apps/api/tests/query_param_validation.rs`.
+
 ### La app no se podía usar recién instalada
 
 Un hogar nuevo nacía con **cero categorías** —la migración original lo decía con todas las letras:

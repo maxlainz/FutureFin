@@ -372,8 +372,10 @@ if !role_can_write(role.as_str()) { return Err(ApiError::Forbidden); }
 
 For any endpoint that accepts `?view=mine`, **do not** write two `match view { Household => sqlx::query_as("…installation_id = $1…"), Mine => sqlx::query_as("…installation_id = $1 AND owner_user_id = $2…") }` branches. Use the helpers in `handlers/person_view.rs`:
 
+**Desde 4.0.0 `resolve()` es falible.** Valores aceptados: `mine`, `household`, ausente o vacío. Cualquier otro → `400 invalid_view`. Antes el brazo comodín devolvía **household** (el hogar entero) en silencio, así que un cliente que escribiera `"MINE"` recibía datos de otros miembros creyendo haber pedido los suyos (issue #7 §4). No era un fallo de autorización — D2 sigue vigente: cualquier miembro puede pedir `household` a la cara — pero sí una respuesta sobre otra población que la pedida. **No reimplementes el parseo**: `projection.rs` tenía su propia copia del `match` y por eso se le escapó el arreglo; ahora delega como todos. Misma clase, arreglados a la vez: `resolution` de `/v1/history/cashflow` (`invalid_resolution`) y `density` de `/v1/projection/series` (`invalid_density`). Regresión: `apps/api/tests/query_param_validation.rs`.
+
 ```rust
-let view = q.resolve(); // Query<LedgerViewQuery>
+let view = q.resolve()?; // Query<LedgerViewQuery> — falible desde 4.0.0
 let scope = view.scope_where("a"); // table alias optional; "" = no prefix
 let today_ph = view.next_arg_index(); // 2 (Household) or 3 (Mine)
 let sql = format!(

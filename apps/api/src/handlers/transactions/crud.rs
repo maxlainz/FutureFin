@@ -425,7 +425,7 @@ pub async fn list_transactions(
     let view = LedgerViewQuery {
         view: q.view.clone(),
     }
-    .resolve();
+    .resolve()?;
     let (out, _total) = list_transactions_core(
         &state.pool,
         iid,
@@ -882,7 +882,7 @@ pub async fn list_months(
 ) -> Result<Json<Vec<MonthEntry>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_months_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_months_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 
@@ -1232,7 +1232,7 @@ pub async fn list_imports(
 ) -> Result<Json<Vec<ImportBatchResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_imports_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_imports_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 
