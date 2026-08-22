@@ -1,0 +1,73 @@
+name: Mejora
+description: Proponer una funcionalidad nueva o un cambio en una que ya existe.
+title: "[mejora]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        FutureFin lo mantiene una sola persona y se usa en un solo hogar, así que una propuesta
+        entra por lo que resuelve, no por lo que añade. Cuéntanos el problema antes que la
+        solución: muchas veces el problema tiene arreglo con algo que ya está.
+
+        Este repositorio es público: no ilustres la propuesta con tus números reales. Los
+        ejemplos inventados funcionan igual de bien.
+
+  - type: textarea
+    id: problema
+    attributes:
+      label: Qué problema tienes
+      description: Qué intentas hacer hoy con la app, y dónde te quedas atascado.
+      placeholder: |
+        Tengo dos hipotecas y quiero ver cuánto ahorraría amortizando antes una u otra, pero
+        tengo que crear dos escenarios a mano y compararlos de memoria.
+    validations:
+      required: true
+
+  - type: textarea
+    id: propuesta
+    attributes:
+      label: Qué propones
+      description: Cómo funcionaría desde el punto de vista de quien usa la app.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternativas
+    attributes:
+      label: Qué has probado o descartado
+      description: >
+        Otras formas de resolverlo, dentro o fuera de la app, y por qué no te sirven. Si ya lo
+        haces con una hoja de cálculo, cuenta cómo.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Qué zona de la app tocaría
+      description: Una aproximación basta; no hace falta acertar.
+      options:
+        - Resumen y patrimonio
+        - Proyección y jubilación (FIRE)
+        - Presupuesto y reglas de reparto
+        - Movimientos, importación de CSV y categorías
+        - Histórico
+        - Copias de seguridad
+        - Usuarios y hogar compartido
+        - Integración con Claude (MCP / OAuth)
+        - Despliegue, Docker y operación
+        - Otra o no lo sé
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmaciones
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: He buscado si ya hay un issue abierto con esta propuesta.
+          required: true
+        - label: Los ejemplos que doy son inventados, no mis datos reales.
+          required: true

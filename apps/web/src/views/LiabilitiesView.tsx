@@ -4,6 +4,7 @@ import type {
   InstallationAccess,
   LiabilityApiRow,
 } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { MetricCard } from "../components/MetricCard";
 import { InlineHint, Modal, ModalFormError } from "../components/Modal";
 import { SnapshotButton } from "../components/SnapshotButton";
@@ -71,6 +72,7 @@ export function LiabilitiesView({
   deleteLiabilityRow,
   beginEditLiability,
   onSaveSnapshot,
+  onOpenCategorySettings,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -115,10 +117,21 @@ export function LiabilitiesView({
   beginEditLiability: (row: LiabilityApiRow) => void;
   /** Captura un snapshot de pasivos de hoy. `true` = guardado; lanza `Error` si falla. */
   onSaveSnapshot?: () => Promise<void>;
+  /**
+   * Lleva a `Ajustes → Categorías`. Única salida cuando faltan las categorías que un pasivo
+   * necesita: la suya y la de gasto donde se atribuye la cuota.
+   */
+  onOpenCategorySettings?: () => void;
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
   const isMobile = useIsMobile();
+
+  // Crear un pasivo exige DOS categorías: la suya y la de gasto donde cae la cuota (el select
+  // de la cuota es `required` en el alta). Sin alguna de las dos el formulario no se puede
+  // completar, así que el botón queda inerte y el estado vacío lo explica.
+  const liabilityCreationBlocked =
+    liabilityCategories.length === 0 || liabilityExpenseCategories.length === 0;
 
   const derivePreview = liabilityDerivedPrincipalPreview(
     liabilityFormPaymentAmount,
@@ -173,7 +186,10 @@ export function LiabilitiesView({
         <div className="banner info-banner">Sin acceso al hogar.</div>
       ) : null}
 
-      {hasMembership ? (
+      {/* Política de ceros: se decide por bloque. Con pasivos se pintan las cuatro cifras
+          aunque alguna valga 0 €; sin ninguno la banda entera desaparece en favor del estado
+          vacío de abajo. */}
+      {hasMembership && (liabilitiesBusy || liabilities.length > 0) ? (
         <div className="metric-grid workspace-kpi-strip">
           <MetricCard
             label="Principal total"
@@ -210,23 +226,6 @@ export function LiabilitiesView({
                 : METRIC_DASH
             }
           />
-        </div>
-      ) : null}
-
-      {hasMembership && liabilityCategories.length === 0 && !liabilitiesBusy ? (
-        <div className="banner info-banner">
-          <strong>Pasivos</strong> · <strong>Ajustes → Categorías</strong>
-        </div>
-      ) : null}
-
-      {hasMembership &&
-      canEdit &&
-      liabilityCategories.length > 0 &&
-      liabilityExpenseCategories.length === 0 &&
-      !liabilitiesBusy ? (
-        <div className="banner info-banner">
-          Para crear un pasivo necesitas una categoría de <strong>gasto</strong>{" "}
-          donde atribuir su cuota · <strong>Ajustes → Categorías</strong>
         </div>
       ) : null}
 
@@ -446,11 +445,19 @@ export function LiabilitiesView({
                   onSave={onSaveSnapshot}
                 />
               ) : null}
-              {canEdit && hasMembership && liabilityCategories.length > 0 ? (
+              {/* Siempre visible mientras se pueda editar (misma razón que en Activos):
+                  ocultarlo sin categorías dejaba al usuario sin salida. */}
+              {canEdit && hasMembership ? (
                 <button
                   type="button"
                   className="btn primary icon-btn ledger-toolbar-add"
                   aria-label="Nuevo pasivo"
+                  title={
+                    liabilityCreationBlocked
+                      ? "Necesitas una categoría de pasivo y otra de gasto antes de crear uno"
+                      : "Nuevo pasivo"
+                  }
+                  disabled={liabilityCreationBlocked}
                   onClick={() => openNewLiabilityModal()}
                 >
                   <PlusIcon />
@@ -458,12 +465,25 @@ export function LiabilitiesView({
               ) : null}
             </div>
           </div>
-          {liabilitiesBusy ? (
-            <p className="muted">Cargando…</p>
-          ) : liabilities.length === 0 ? (
-            <p className="muted">No hay pasivos en esta instalación.</p>
-          ) : null}
+          {liabilitiesBusy ? <p className="muted">Cargando…</p> : null}
         </div>
+        {!liabilitiesBusy && hasMembership && liabilities.length === 0 ? (
+          liabilityCreationBlocked ? (
+            <EmptyState
+              title="Faltan categorías para tus deudas"
+              description="Un pasivo necesita su propia categoría (hipoteca, préstamo) y una categoría de gasto donde atribuir la cuota. Créalas y vuelve aquí."
+              actionLabel={canEdit ? "Crear categorías" : undefined}
+              onAction={canEdit ? onOpenCategorySettings : undefined}
+            />
+          ) : (
+            <EmptyState
+              title="Sin pasivos"
+              description="Aquí anotas lo que debes: hipoteca, préstamos, financiaciones. FutureFin resta su principal del patrimonio y lleva su cuota al presupuesto."
+              actionLabel={canEdit ? "Añadir pasivo" : undefined}
+              onAction={canEdit ? openNewLiabilityModal : undefined}
+            />
+          )
+        ) : null}
         {!liabilitiesBusy && liabilities.length > 0 ? (
           <div className="ledger-by-category-stack">
             {groupRowsByCategoryOrdered(liabilities, liabilityCategories, {

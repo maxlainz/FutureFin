@@ -10,5 +10,15 @@
     "lint:web": "npm run lint --workspace futurefin-web",
     "typecheck:web": "npm run typecheck --workspace futurefin-web",
     "preview:web": "npm run preview --workspace futurefin-web"
-  }
+  },
+  "description": "FutureFin — finanzas del hogar y planificación FIRE, autoalojado",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maxlainz/FutureFin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maxlainz/FutureFin/issues"
+  },
+  "homepage": "https://github.com/maxlainz/FutureFin#readme"
 }

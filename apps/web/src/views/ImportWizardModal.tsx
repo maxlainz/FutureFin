@@ -651,7 +651,9 @@ const PreviewRowMemo = memo(function PreviewRow({
   const statusHints: string[] = [];
   if (row.status === "already_imported") statusHints.push("Duplicado");
   if (row.suggested_transfer) statusHints.push("Transferencia");
-  if (row.currency_warning) statusHints.push("Divisa ≠ EUR");
+  // La divisa del hogar es configurable desde 3.10.0: nombrarla evita decir «≠ EUR» a quien
+  // lleva sus cuentas en libras.
+  if (row.currency_warning) statusHints.push(`Divisa ≠ ${currencyIso}`);
 
   // En móvil kind/categoría/vínculos migran a la fila expandible. colSpan
   // dinámico: primera celda vacía (bajo el checkbox) + resto de columnas.

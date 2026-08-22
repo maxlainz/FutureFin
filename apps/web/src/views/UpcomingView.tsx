@@ -5,6 +5,7 @@ import type {
   PlanningFlowApiRow,
   PlanningFlowDirectionApi,
 } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import { PlanningDirectionChart } from "../components/charts/PlanningDirectionChart";
@@ -57,6 +58,7 @@ export function UpcomingView({
   submitPlanningFlowForm,
   deletePlanningFlowRow,
   beginEditPlanningFlow,
+  onOpenCategorySettings,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -90,6 +92,11 @@ export function UpcomingView({
   submitPlanningFlowForm: (e: FormEvent) => void;
   deletePlanningFlowRow: (id: string) => void;
   beginEditPlanningFlow: (row: PlanningFlowApiRow) => void;
+  /**
+   * Lleva a `Ajustes → Categorías`. Única salida cuando no queda ninguna categoría de ingreso
+   * ni de gasto donde anotar un movimiento previsto.
+   */
+  onOpenCategorySettings?: () => void;
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
@@ -119,6 +126,14 @@ export function UpcomingView({
         ? "Cargando…"
         : `Importes · ${currency}`;
 
+  // Política de ceros: la unidad es el BLOQUE. Con flujos planificados se pintan las tres
+  // cifras aunque alguna valga 0 €; sin ninguno, la banda y la distribución desaparecen y
+  // habla el estado vacío de la lista (tres ceros no explican para qué sirve la pestaña).
+  const planningIsEmpty = !planningLoading && planningFlows.length === 0;
+  const noPlanningCategories =
+    planningIncomeCategories.length === 0 &&
+    planningExpenseCategories.length === 0;
+
   const flowsNetTotal = !planningLoading
     ? planningFlows.reduce((acc, f) => {
         const amt = parseDisplayDecimal(f.expected_amount) ?? 0;
@@ -146,7 +161,7 @@ export function UpcomingView({
         </div>
       ) : null}
 
-      {hasMembership ? (
+      {hasMembership && !planningIsEmpty ? (
         <div className="metric-grid workspace-kpi-strip planning-direction-strip">
           <MetricCard
             label="Entradas (suma)"
@@ -175,13 +190,11 @@ export function UpcomingView({
         </div>
       ) : null}
 
-      {hasMembership ? (
+      {hasMembership && !planningIsEmpty ? (
         <section className="panel">
           <h3 className="panel-title">Distribución</h3>
           {planningLoading ? (
             <p className="muted bordered-top">Cargando…</p>
-          ) : planningFlows.length === 0 ? (
-            <p className="muted bordered-top">Sin datos.</p>
           ) : planningInflowSum + planningOutflowSum > 0 ? (
             <PlanningDirectionChart
               inflow={planningInflowSum}
@@ -195,16 +208,6 @@ export function UpcomingView({
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
-      ) : null}
-
-      {hasMembership &&
-      planningIncomeCategories.length === 0 &&
-      planningExpenseCategories.length === 0 &&
-      !planningLoading ? (
-        <div className="banner info-banner">
-          <strong>Ingresos/Gastos</strong> ·{" "}
-          <strong>Ajustes → Categorías</strong>
-        </div>
       ) : null}
 
       {!canEdit && hasMembership ? (
@@ -352,14 +355,19 @@ export function UpcomingView({
       <section className="panel">
         <div className="panel-head-row">
           <h3 className="panel-title">Lista</h3>
-          {canEdit &&
-          hasMembership &&
-          (planningIncomeCategories.length > 0 ||
-            planningExpenseCategories.length > 0) ? (
+          {/* Siempre visible mientras se pueda editar (misma razón que en Activos):
+              ocultarlo sin categorías dejaba al usuario sin salida. */}
+          {canEdit && hasMembership ? (
             <button
               type="button"
               className="btn primary icon-btn ledger-toolbar-add"
-              aria-label="Nuevo flujo planificado"
+              aria-label="Nuevo movimiento previsto"
+              title={
+                noPlanningCategories
+                  ? "Necesitas una categoría de ingreso o de gasto"
+                  : "Nuevo movimiento previsto"
+              }
+              disabled={noPlanningCategories}
               onClick={() => openNewPlanningModal()}
             >
               <PlusIcon />
@@ -369,9 +377,25 @@ export function UpcomingView({
         {planningLoading ? (
           <p className="muted bordered-top">Cargando…</p>
         ) : planningFlows.length === 0 ? (
-          <p className="muted bordered-top">
-            No hay flujos planificados en esta instalación.
-          </p>
+          !hasMembership ? (
+            <p className="muted bordered-top">Sin acceso.</p>
+          ) : noPlanningCategories ? (
+            <EmptyState
+              embedded
+              title="Faltan categorías"
+              description="Cada movimiento previsto se anota en una categoría de ingreso o de gasto. No queda ninguna, así que créalas antes de planificar."
+              actionLabel={canEdit ? "Crear categorías" : undefined}
+              onAction={canEdit ? onOpenCategorySettings : undefined}
+            />
+          ) : (
+            <EmptyState
+              embedded
+              title="Sin movimientos previstos"
+              description="Aquí apuntas lo puntual que ya sabes que llega: la paga extra, el seguro del coche, una reforma. FutureFin lo coloca en la proyección en su fecha."
+              actionLabel={canEdit ? "Añadir movimiento previsto" : undefined}
+              onAction={canEdit ? openNewPlanningModal : undefined}
+            />
+          )
         ) : (
           <div className="table-scroll bordered-top">
             <table className="assets-table">

@@ -1,0 +1,87 @@
+version: 2
+
+updates:
+  # Workspace de Cargo: apps/api + crates/domain + crates/engine.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Madrid
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - dependencies
+    groups:
+      cargo-menores:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Workspace de npm: la raíz declara apps/web.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Madrid
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - dependencies
+    groups:
+      npm-menores:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Acciones usadas por los workflows de .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Madrid
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+    labels:
+      - dependencies
+    groups:
+      actions-menores:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Imágenes base del Dockerfile de la aplicación (build de Rust, build de Node, runtime).
+  # Las bases van pineadas por digest: revisa el diff antes de aceptar.
+  - package-ecosystem: docker
+    directory: "/apps/api"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Madrid
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(docker)"
+    labels:
+      - dependencies
+    groups:
+      docker-menores:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

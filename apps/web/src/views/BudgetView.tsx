@@ -9,6 +9,7 @@ import type {
   CategoryRow,
   InstallationAccess,
 } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import { GearIcon, PlusIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
@@ -103,6 +104,7 @@ export function BudgetView({
   deleteRule,
   moveRule,
   beginEditRule,
+  onOpenCategorySettings,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -162,6 +164,11 @@ export function BudgetView({
   deleteRule: (id: string) => void;
   moveRule: (id: string, dir: "up" | "down") => void;
   beginEditRule: (r: AllocationRuleApiRow) => void;
+  /**
+   * Lleva a `Ajustes → Categorías`. Única salida cuando el hogar se ha quedado sin categorías
+   * de ingreso ni de gasto y por tanto no puede haber presupuesto.
+   */
+  onOpenCategorySettings?: () => void;
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
@@ -217,6 +224,14 @@ export function BudgetView({
       ) ?? 0
     : 0;
 
+  // Política de ceros: la unidad es el BLOQUE. Con líneas de presupuesto se pintan las tres
+  // KPIs aunque alguna valga 0 €; sin ninguna, la banda, la distribución y las dos columnas
+  // dejan paso a un único estado vacío (tres ceros y dos tablas vacías no explican nada).
+  const budgetIsEmpty =
+    hasMembership && !budgetLoading && sortedEntries.length === 0;
+  const noBudgetCategories =
+    budgetIncomeCategories.length === 0 && budgetExpenseCategories.length === 0;
+
   const incomeEntries = sortedEntries.filter((e) => e.scope === "income");
   // Incluye las cuotas de pasivo (`source === "liability"`), que el servidor sirve como una
   // partida de gasto más desde la 3.7.0 y el orden coloca detrás de la manual de su categoría.
@@ -248,17 +263,27 @@ export function BudgetView({
         <div className="banner info-banner">Sin acceso al hogar.</div>
       ) : null}
 
-      {hasMembership &&
-      budgetIncomeCategories.length === 0 &&
-      budgetExpenseCategories.length === 0 &&
-      !budgetLoading ? (
-        <div className="banner info-banner">
-          <strong>Ingresos/Gastos</strong> ·{" "}
-          <strong>Ajustes → Categorías</strong>
-        </div>
+      {budgetIsEmpty ? (
+        noBudgetCategories ? (
+          <EmptyState
+            title="Faltan categorías"
+            description="El presupuesto ordena lo que entra y lo que sale por categoría. No queda ninguna, así que crea las que uses y vuelve aquí."
+            actionLabel={canEdit ? "Crear categorías" : undefined}
+            onAction={canEdit ? onOpenCategorySettings : undefined}
+          />
+        ) : (
+          <EmptyState
+            title="Sin presupuesto"
+            description="Aquí planificas tu mes: cuánto entra y cuánto sale de forma recurrente. La diferencia es el ahorro con el que FutureFin proyecta tu patrimonio."
+            actionLabel={canEdit ? "Añadir ingreso" : undefined}
+            onAction={canEdit ? () => openNewBudgetModal("income") : undefined}
+            secondaryLabel={canEdit ? "Añadir gasto" : undefined}
+            onSecondary={canEdit ? () => openNewBudgetModal("expense") : undefined}
+          />
+        )
       ) : null}
 
-      {hasMembership ? (
+      {hasMembership && !budgetIsEmpty ? (
         <div
           className="metric-grid workspace-kpi-strip metric-grid--budget-summary"
           aria-label="Resumen del presupuesto"
@@ -283,7 +308,7 @@ export function BudgetView({
         </div>
       ) : null}
 
-      {hasMembership ? (
+      {hasMembership && !budgetIsEmpty ? (
         <section className="panel">
           <h3 className="panel-title">Distribución</h3>
           {budgetLoading ? (
@@ -622,16 +647,22 @@ export function BudgetView({
           <h3 className="panel-title">Detalle</h3>
           <p className="muted bordered-top">Cargando líneas de presupuesto…</p>
         </section>
-      ) : (
+      ) : budgetIsEmpty ? null : (
         <div className="budget-two-col">
           <section className="panel budget-col">
             <div className="panel-head-row">
               <h3 className="panel-title">Ingresos</h3>
-              {canEdit && hasMembership && budgetIncomeCategories.length > 0 ? (
+              {canEdit && hasMembership ? (
                 <button
                   type="button"
                   className="btn primary icon-btn ledger-toolbar-add"
                   aria-label="Nueva línea de ingreso"
+                  title={
+                    budgetIncomeCategories.length === 0
+                      ? "Necesitas una categoría de ingreso"
+                      : "Nueva línea de ingreso"
+                  }
+                  disabled={budgetIncomeCategories.length === 0}
                   onClick={() => openNewBudgetModal("income")}
                 >
                   <PlusIcon />
@@ -639,9 +670,21 @@ export function BudgetView({
               ) : null}
             </div>
             {incomeEntries.length === 0 ? (
-              <p className="muted bordered-top">
-                No hay líneas de ingreso en el presupuesto.
-              </p>
+              <EmptyState
+                embedded
+                title="Sin ingresos"
+                description="Apunta tu nómina y cualquier otra entrada que se repita cada mes."
+                actionLabel={
+                  canEdit && budgetIncomeCategories.length > 0
+                    ? "Añadir ingreso"
+                    : undefined
+                }
+                onAction={
+                  canEdit && budgetIncomeCategories.length > 0
+                    ? () => openNewBudgetModal("income")
+                    : undefined
+                }
+              />
             ) : (
               <div className="table-scroll table-scroll--budget-lines bordered-top">
                 <table className="assets-table assets-table--budget-lines">
@@ -727,13 +770,17 @@ export function BudgetView({
             <section className="panel budget-col">
               <div className="panel-head-row">
                 <h3 className="panel-title">Gastos</h3>
-                {canEdit &&
-                hasMembership &&
-                budgetExpenseCategories.length > 0 ? (
+                {canEdit && hasMembership ? (
                   <button
                     type="button"
                     className="btn primary icon-btn ledger-toolbar-add"
                     aria-label="Nueva línea de gasto"
+                    title={
+                      budgetExpenseCategories.length === 0
+                        ? "Necesitas una categoría de gasto"
+                        : "Nueva línea de gasto"
+                    }
+                    disabled={budgetExpenseCategories.length === 0}
                     onClick={() => openNewBudgetModal("expense")}
                   >
                     <PlusIcon />
@@ -741,9 +788,21 @@ export function BudgetView({
                 ) : null}
               </div>
               {expenseEntries.length === 0 ? (
-                <p className="muted bordered-top">
-                  No hay líneas de gasto recurrentes en el presupuesto.
-                </p>
+                <EmptyState
+                  embedded
+                  title="Sin gastos"
+                  description="Apunta los gastos fijos del mes: alquiler, suministros, seguros. Las cuotas de tus pasivos aparecen aquí solas."
+                  actionLabel={
+                    canEdit && budgetExpenseCategories.length > 0
+                      ? "Añadir gasto"
+                      : undefined
+                  }
+                  onAction={
+                    canEdit && budgetExpenseCategories.length > 0
+                      ? () => openNewBudgetModal("expense")
+                      : undefined
+                  }
+                />
               ) : (
                 <div className="table-scroll table-scroll--budget-lines bordered-top">
                   <table className="assets-table assets-table--budget-lines">

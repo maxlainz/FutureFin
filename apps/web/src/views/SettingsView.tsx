@@ -52,6 +52,7 @@ export function SettingsView({
   user,
   themePref,
   onChangeTheme,
+  onReopenOnboarding,
   onLogout,
   onEditAccount,
   authBusy,
@@ -66,6 +67,8 @@ export function SettingsView({
   calendarTzDraft,
   setCalendarTzDraft,
   calendarTzSaving,
+  currencySaving,
+  onChangeCurrency,
   saveInstallationCalendarTz,
   projectionInflationPctDraft,
   setProjectionInflationPctDraft,
@@ -142,6 +145,8 @@ export function SettingsView({
   user: UserResponse;
   themePref: ThemePref;
   onChangeTheme: (next: ThemePref) => void;
+  /** Vuelve a abrir el asistente de primera vez. Solo lo recibe el propietario. */
+  onReopenOnboarding?: () => void;
   onLogout: () => void;
   onEditAccount: () => void;
   authBusy: boolean;
@@ -156,6 +161,9 @@ export function SettingsView({
   calendarTzDraft: string;
   setCalendarTzDraft: Dispatch<SetStateAction<string>>;
   calendarTzSaving: boolean;
+  currencySaving?: boolean;
+  /** Cambia la divisa base del hogar (owner-only). */
+  onChangeCurrency?: (code: string) => void;
   saveInstallationCalendarTz: (e: FormEvent) => void;
   projectionInflationPctDraft: string;
   setProjectionInflationPctDraft: Dispatch<SetStateAction<string>>;
@@ -381,7 +389,7 @@ export function SettingsView({
         </section>
       ) : null}
 
-      {settingsSubTab === "mcp" && hasMembership ? (
+      {settingsSubTab === "integrations" && hasMembership ? (
         <section className="panel">
           <h3 className="panel-title">
             <PlugIcon className="panel-title-icon" /> Servidor MCP
@@ -419,11 +427,42 @@ export function SettingsView({
         </section>
       ) : null}
 
-      {settingsSubTab === "mcp" && hasMembership ? <ApiTokensPanel /> : null}
+      {settingsSubTab === "integrations" && hasMembership ? <ApiTokensPanel /> : null}
 
-      {settingsSubTab === "mcp" && hasMembership ? <OAuthConnectionsPanel /> : null}
+      {settingsSubTab === "integrations" && hasMembership ? <OAuthConnectionsPanel /> : null}
 
-      {settingsSubTab === "calendar" && hasMembership ? (
+      {settingsSubTab === "general" && hasMembership ? (
+        <section className="panel">
+          <h3 className="panel-title">Divisa</h3>
+          {isOwner && onChangeCurrency ? (
+            <div className="stack bordered-top">
+              <label className="field">
+                <span>Divisa del hogar</span>
+                <select
+                  value={installation?.installation.base_currency ?? "EUR"}
+                  disabled={currencySaving}
+                  onChange={(e) => onChangeCurrency(e.target.value)}
+                >
+                  <option value="EUR">Euro (€)</option>
+                  <option value="USD">Dólar estadounidense ($)</option>
+                  <option value="GBP">Libra esterlina (£)</option>
+                </select>
+              </label>
+              <p className="muted compact">
+                Una sola por hogar: FutureFin no convierte entre divisas. Cambiarla cambia el
+                símbolo con el que se muestran tus importes, <strong>no los reconvierte</strong>.
+              </p>
+            </div>
+          ) : (
+            <p className="muted bordered-top">
+              <strong>{installation?.installation.base_currency ?? "EUR"}</strong> · solo el
+              propietario puede cambiarla
+            </p>
+          )}
+        </section>
+      ) : null}
+
+      {settingsSubTab === "general" && hasMembership ? (
         <section className="panel">
           <h3 className="panel-title">Zona horaria del calendario</h3>
           {isOwner ? (
@@ -458,7 +497,7 @@ export function SettingsView({
         </section>
       ) : null}
 
-      {settingsSubTab === "projection" && hasMembership ? (
+      {settingsSubTab === "plan" && hasMembership ? (
         isOwner ? (
         <section className="panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
@@ -689,7 +728,7 @@ export function SettingsView({
         )
       ) : null}
 
-      {settingsSubTab === "retirement" && hasMembership ? (
+      {settingsSubTab === "plan" && hasMembership ? (
         isOwner ? (
           <section className="panel">
             <h3 className="panel-title">Fiscalidad (IRPF ahorro)</h3>
@@ -883,7 +922,7 @@ export function SettingsView({
         />
       ) : null}
 
-      {settingsSubTab === "data" ? (
+      {settingsSubTab === "general" ? (
         <>
           <section className="panel">
             <div className="panel-head-row">
@@ -898,9 +937,74 @@ export function SettingsView({
             </div>
           </section>
 
+          {isOwner && onReopenOnboarding ? (
+            <section className="panel">
+              <h3 className="panel-title">Configuración inicial</h3>
+              <p className="muted compact bordered-top">
+                Repasa la divisa, la zona horaria y los supuestos de tu plan con el asistente de
+                bienvenida. No borra nada: solo vuelve a preguntarte.
+              </p>
+              <div className="bordered-top" style={{ paddingTop: "0.7rem" }}>
+                <button type="button" className="btn" onClick={onReopenOnboarding}>
+                  Abrir el asistente
+                </button>
+              </div>
+            </section>
+          ) : null}
+
+          <section className="panel">
+            <h3 className="panel-title">Instalación</h3>
+            {installationBusy ? (
+              <p className="muted">Cargando…</p>
+            ) : installation ? (
+              <dl className="settings-meta-dl">
+                <div>
+                  <dt>Moneda base</dt>
+                  <dd>{installation.installation.base_currency}</dd>
+                </div>
+                <div>
+                  <dt>Tu rol</dt>
+                  <dd>{roleLabel(installation.role)}</dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="muted tight">Sin acceso.</p>
+            )}
+          </section>
+
+          <section className="panel">
+            <h3 className="panel-title">Estado del sistema</h3>
+            {healthError ? (
+              <p className="error compact">
+                No se puede contactar con la API. {healthError}
+              </p>
+            ) : health ? (
+              <dl className="health-dl">
+                <div>
+                  <dt>Servicio</dt>
+                  <dd>{health.service}</dd>
+                </div>
+                <div>
+                  <dt>Versión</dt>
+                  <dd>{health.version}</dd>
+                </div>
+                <div>
+                  <dt>Estado</dt>
+                  <dd>{healthStatusLabel(health.status)}</dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="muted">Comprobando…</p>
+            )}
+          </section>
+        </>
+      ) : null}
+
+      {settingsSubTab === "data" ? (
+        <>
           {hasMembership ? (
             <section className="panel">
-              <h3 className="panel-title">Backup personal (.ffbackup)</h3>
+              <h3 className="panel-title">Copia de seguridad personal (.ffbackup)</h3>
               <p className="muted compact bordered-top">
                 Exporta o restaura un archivo cifrado con tu contraseña que
                 contiene solo tus datos: activos, pasivos, presupuesto,
@@ -931,51 +1035,6 @@ export function SettingsView({
             </section>
           ) : null}
 
-          <section className="panel">
-            <h3 className="panel-title">Instalación</h3>
-            {installationBusy ? (
-              <p className="muted">Cargando…</p>
-            ) : installation ? (
-              <dl className="settings-meta-dl">
-                <div>
-                  <dt>Moneda base</dt>
-                  <dd>{installation.installation.base_currency}</dd>
-                </div>
-                <div>
-                  <dt>Tu rol</dt>
-                  <dd>{roleLabel(installation.role)}</dd>
-                </div>
-              </dl>
-            ) : (
-              <p className="muted tight">Sin acceso.</p>
-            )}
-          </section>
-
-          <section className="panel dev-panel">
-            <h3 className="panel-title">Estado del sistema</h3>
-            {healthError ? (
-              <p className="error compact">
-                <code>/v1/health</code>: {healthError}
-              </p>
-            ) : health ? (
-              <dl className="health-dl">
-                <div>
-                  <dt>Servicio</dt>
-                  <dd>{health.service}</dd>
-                </div>
-                <div>
-                  <dt>Versión API</dt>
-                  <dd>{health.version}</dd>
-                </div>
-                <div>
-                  <dt>Estado</dt>
-                  <dd>{healthStatusLabel(health.status)}</dd>
-                </div>
-              </dl>
-            ) : (
-              <p className="muted">Comprobando…</p>
-            )}
-          </section>
         </>
       ) : null}
 
