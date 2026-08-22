@@ -1685,7 +1685,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": f.id,
-                "resumen": format!("{} · {} ({:?}){}", f.title, f.expected_amount, f.direction,
+                "resumen": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
                     f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
             }))
         }
@@ -1747,7 +1747,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": f.id,
-                "resumen": format!("{} · {} ({:?}){}", f.title, f.expected_amount, f.direction,
+                "resumen": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
                     f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
             }))
         }

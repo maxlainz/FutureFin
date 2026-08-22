@@ -648,3 +648,71 @@ async fn projection_milestones_share_one_format() {
         );
     }
 }
+
+/// REGRESIÓN (issue #8 §8) — la jubilación se publica como `null`, no desapareciendo; y
+/// `fire_target_series` es paralela a `points` en las dos densidades.
+///
+/// Con `skip_serializing_if` el campo se esfumaba cuando el horizonte no alcanzaba el objetivo, así
+/// que un consumidor no podía distinguir «no se alcanza» de «esta versión no lo publica» — y la
+/// descripción de la tool lo prometía sin condiciones, mientras `simulate_projection` sí devolvía
+/// `null` para el mismo dato.
+///
+/// La segunda mitad fija lo que antes se cumplía por casualidad: `fire_target_series` no lleva
+/// `month_index` propio, el consumidor la alinea **por posición**, y hasta 4.0.0 se construía con
+/// un `map` sobre los índices mientras `points` usaba `filter_map`. Coincidían solo porque
+/// `density_month_indices` nunca emite un índice fuera de rango.
+#[tokio::test]
+async fn retirement_fields_are_explicit_null_and_fire_series_is_parallel_to_points() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    seed(&app, &owner).await;
+
+    // Horizonte corto: no se alcanza el objetivo FIRE.
+    let short = tool_json(
+        &mcp_post(&app, &token, tool_call("get_projection", json!({"months": 12}))).await,
+    );
+    for field in [
+        "jubilacion_month_index",
+        "jubilacion_date_ymd",
+        "jubilacion_age",
+    ] {
+        assert!(
+            short.get(field).is_some(),
+            "`{field}` debe viajar aunque no haya cruce, como `null`: {short}"
+        );
+        assert!(short[field].is_null(), "`{field}` debería ser null: {short}");
+    }
+
+    // Y el paralelismo, en las dos densidades (la tool fuerza hybrid; monthly va por HTTP).
+    for (label, body) in [
+        ("mcp/hybrid", short.clone()),
+        (
+            "mcp/hybrid-default",
+            tool_json(&mcp_post(&app, &token, tool_call("get_projection", json!({}))).await),
+        ),
+        (
+            "http/monthly",
+            app.get_with_cookie("/v1/projection/series?density=monthly", &owner.cookie)
+                .await
+                .json(),
+        ),
+        (
+            "http/hybrid",
+            app.get_with_cookie("/v1/projection/series?density=hybrid", &owner.cookie)
+                .await
+                .json(),
+        ),
+    ] {
+        let points = body["points"].as_array().expect("points").len();
+        let fire = body["fire_target_series"].as_array().expect("series").len();
+        assert_eq!(fire, points, "{label}: la serie FIRE debe ser paralela a points");
+        for a in body["asset_series"].as_array().expect("asset_series") {
+            assert_eq!(
+                a["values"].as_array().expect("values").len(),
+                points,
+                "{label}: los valores por activo también van paralelos a points"
+            );
+        }
+    }
+}

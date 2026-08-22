@@ -87,6 +87,25 @@ recategorización en lote, ni las reglas lo impiden. El importador de CSV y la r
 copia `.ffbackup` tampoco validan nada: traen el signo real del banco, y una copia que se niega a
 restaurar es peor que una fila rara.
 
+#### «No llegas a jubilarte» y «no te lo puedo decir» se veían igual
+
+Cuando el horizonte de la proyección no alcanzaba el objetivo, los campos de la jubilación
+**desaparecían** de la respuesta en vez de venir vacíos. Para quien la lee eso es ambiguo: no
+distingue «no se alcanza» de «esta versión no publica el dato». Ahora vienen siempre, vacíos cuando
+no hay cruce — que es lo que ya hacía el simulador, así que las dos superficies dejan de
+contradecirse. Y el objetivo FIRE dice en su descripción que está **en euros de hoy**: el objetivo
+del año en que te jubiles es bastante mayor, y el nombre solo no lo dejaba claro.
+
+De paso se ata algo que se cumplía por casualidad: la serie del objetivo FIRE se alinea con la del
+patrimonio **por posición**, y las dos se construían por caminos distintos que coincidían de milagro.
+Ahora la segunda se deriva de la primera, así que no pueden desalinearse.
+
+#### Las herramientas de escritura contestaban en inglés
+
+Crear o editar un flujo planificado devolvía `Coche · 123.45 (Outflow)` —el nombre interno del
+código— mientras leerlo devolvía `outflow`. Dos formas del mismo valor en el mismo sitio. Ahora hay
+una.
+
 #### Cifras con veintidós decimales
 
 Preguntarle a Claude por tu patrimonio a treinta años devolvía

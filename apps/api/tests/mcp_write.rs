@@ -926,6 +926,40 @@ async fn allocation_rule_update_never_drops_a_half_cap_silently() {
     assert_eq!(http_empty.json()["code"], "patch_empty");
 }
 
+/// REGRESIÓN (issue #8 §11b) — el `resumen` de un flujo planificado habla el idioma del wire.
+///
+/// `PlanningFlowDirection` solo tenía `Debug`, y un `{:?}` en el `format!` publicaba el
+/// identificador de Rust: las escrituras devolvían `"… (Outflow)"` —inglés y capitalizado— mientras
+/// las lecturas devolvían `"direction":"outflow"`. Dos formas del mismo valor en el mismo catálogo.
+#[tokio::test]
+async fn planning_flow_summary_uses_the_wire_form_of_the_direction() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // El sentido lo da el scope de la categoría, no un parámetro: una categoría de gasto produce
+    // un `outflow`.
+    let cat = app.create_category(&owner, "expense", "Coche").await;
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_planning_flow",
+                json!({"title": "Coche", "category_id": cat, "expected_amount": "123.45"}),
+            ),
+        )
+        .await,
+    );
+    let resumen = out["resumen"].as_str().expect("resumen");
+    assert!(resumen.contains("(outflow)"), "{resumen}");
+    assert!(!resumen.contains("Outflow"), "el Debug de Rust no debe salir al wire: {resumen}");
+
+    // Y coincide con lo que devuelve la lectura para la misma fila.
+    let flows = tool_json(&mcp_post(&app, &token, tool_call("list_planning_flows", json!({}))).await);
+    assert_eq!(flows[0]["direction"], "outflow", "{flows}");
+}
+
 #[tokio::test]
 async fn delete_recurring_rule_previews_then_deletes() {
     let app = TestApp::spawn().await;
