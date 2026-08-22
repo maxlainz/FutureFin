@@ -47,6 +47,27 @@ pub struct ProjectionSeriesQuery {
 /// `hybrid` o `monthly` (default). Cualquier otro valor es un error, no un `monthly` silencioso:
 /// pedir una densidad que no existe y recibir 841 puntos sin aviso es la misma clase de fallo que
 /// `view` (issue #7 §4). Solo alcanzable por HTTP — la tool MCP fuerza `Hybrid`.
+/// Escala de salida de los importes: 4 decimales, la misma de `NUMERIC(18,4)` en la base y la que
+/// ya publican `net_worth` y compañía.
+///
+/// Aplica **solo a la copia que se serializa**, nunca a la que entra al motor. El engine capitaliza
+/// con `annual_factor.powd(1/12)` —una raíz duodécima irracional— y el target FIRE sale de
+/// `gross / (swr/100)`; ninguna de las dos se redondeaba, así que la escala saturaba en los ~28
+/// dígitos significativos de `rust_decimal` y salían al wire cosas como
+/// `"69946992.976753373554690255548"` (issue #8 §7). Eso es ruido y tokens, y empuja al consumidor
+/// a presentar cifras con precisión falsa.
+///
+/// Redondear la copia que alimenta al motor movería el cruce FIRE: `fire_target_base` es
+/// `FireTarget.base_amount`. Por eso el redondeo vive aquí, en la construcción de la respuesta.
+///
+/// Precedente: 3.8.0 hizo exactamente esto con los ratios (`round_ratio`, 6 dp) y el runway (1 dp)
+/// y dejó fuera los importes de proyección y FIRE. Esto cierra el hueco.
+fn money_out(d: Decimal) -> Decimal {
+    let mut v = d.round_dp(4);
+    v.rescale(4);
+    v
+}
+
 fn resolve_density(q: &ProjectionSeriesQuery) -> Result<Density, ApiError> {
     match q.density.as_deref().map(str::trim) {
         None | Some("") | Some("monthly") => Ok(Density::Monthly),
@@ -475,6 +496,11 @@ fn projection_next_milestones(from: Decimal, count: usize) -> Vec<Decimal> {
     let mut current = from;
     for _ in 0..count {
         let next = projection_next_milestone(current);
+        // Los tres pasos son `1`, `2.5` y `5` por magnitud: `2.5 × 10⁴` hereda la escala 1 del
+        // literal y salía `"25000.0"` en el mismo array que `"50000"` y `"100000"`. Un hito es un
+        // umbral redondo; se publica con escala 0 y el array deja de mezclar formatos (issue #8 §7).
+        let mut next = next.round_dp(0);
+        next.rescale(0);
         out.push(next);
         current = next;
     }
@@ -1561,7 +1587,7 @@ pub async fn compute_projection_series_response(
                             .unwrap_or(0.0)
                     })
                     .collect();
-                (series, crossed_at, Some(ft.base_amount.to_string()))
+                (series, crossed_at, Some(money_out(ft.base_amount).to_string()))
             }
             _ => (Vec::new(), None, None),
         };
@@ -1786,14 +1812,14 @@ fn sim_kpis(
         jubilacion_month_index,
         jubilacion_date_ymd,
         jubilacion_age,
-        final_net_worth,
-        fire_target_base: input.fire_target.as_ref().map(|ft| ft.base_amount),
+        final_net_worth: money_out(final_net_worth),
+        fire_target_base: input.fire_target.as_ref().map(|ft| money_out(ft.base_amount)),
         runway_months,
         runway_is_indefinite,
-        income_monthly,
-        expense_total_monthly: monthly_expense,
-        debt_service_monthly,
-        net_monthly,
+        income_monthly: money_out(income_monthly),
+        expense_total_monthly: money_out(monthly_expense),
+        debt_service_monthly: money_out(debt_service_monthly),
+        net_monthly: money_out(net_monthly),
         savings_rate,
     }
 }
@@ -2025,18 +2051,20 @@ pub(crate) async fn simulate_projection_core(
             (Some(b), Some(s)) => Some(s as i64 - b as i64),
             _ => None,
         },
-        final_net_worth_delta: scenario.final_net_worth - baseline.final_net_worth,
+        final_net_worth_delta: money_out(scenario.final_net_worth - baseline.final_net_worth),
         fire_target_base_delta: match (baseline.fire_target_base, scenario.fire_target_base) {
-            (Some(b), Some(s)) => Some(s - b),
+            (Some(b), Some(s)) => Some(money_out(s - b)),
             _ => None,
         },
         runway_months_delta: match (baseline.runway_months, scenario.runway_months) {
             (Some(b), Some(s)) => Some(s - b),
             _ => None,
         },
-        income_monthly_delta: scenario.income_monthly - baseline.income_monthly,
-        expense_total_monthly_delta: scenario.expense_total_monthly - baseline.expense_total_monthly,
-        net_monthly_delta: scenario.net_monthly - baseline.net_monthly,
+        income_monthly_delta: money_out(scenario.income_monthly - baseline.income_monthly),
+        expense_total_monthly_delta: money_out(
+            scenario.expense_total_monthly - baseline.expense_total_monthly,
+        ),
+        net_monthly_delta: money_out(scenario.net_monthly - baseline.net_monthly),
         // Se recalcula desde `net`/`income` (que viajan EXACTOS) en vez de restar los dos
         // `savings_rate` ya redondeados.
         savings_rate_delta: {
