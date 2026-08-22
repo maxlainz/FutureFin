@@ -53,7 +53,7 @@ RUN rm /usr/share/postgresql/15/postgresql.conf.sample \
     && cp /usr/share/postgresql/postgresql.conf.sample /usr/share/postgresql/15/postgresql.conf.sample
 
 # --- Runtime ---
-FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252 AS runtime
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gosu locales \
