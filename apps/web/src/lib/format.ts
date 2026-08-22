@@ -45,8 +45,86 @@ export function formatEditableDecimalString(raw: string | null | undefined): str
  * valor —con un placeholder que invita a usar coma— lo rechazaba el backend con un error en
  * inglés. Lo mismo en pasivos con el principal y la TAE.
  */
+export class DecimalInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DecimalInputError";
+  }
+}
+
+/**
+ * Normaliza un importe tecleado en es-ES al formato que espera la API (punto decimal, sin
+ * separador de miles).
+ *
+ * Antes esto era `raw.replace(",", ".")`, y **perdía tres órdenes de magnitud sin decir nada**:
+ * `250.000` (doscientos cincuenta mil, escritura española normal) pasaba tal cual, y
+ * `Decimal::from_str("250.000")` lo lee como **250**. Sin error, con el modal cerrándose
+ * normalmente y el patrimonio, la proyección, el número FIRE y el runway ya mal. El asistente
+ * de primera vez llegaba a sugerirlo: su placeholder era literalmente `1.500`.
+ *
+ * Reglas, en orden:
+ * 1. Con coma → la coma es el decimal y los puntos son miles (`1.234,56` → `1234.56`).
+ * 2. Sin coma, con los puntos separando grupos de exactamente 3 dígitos → son miles
+ *    (`250.000` → `250000`, `1.234.567` → `1234567`).
+ * 3. Sin coma, un solo punto que no forma grupo de miles → es el decimal (`2.5` → `2.5`,
+ *    `2100.00` → `2100.00`). Este caso importa: los campos de porcentaje (rentabilidad, TAE,
+ *    inflación) se teclean así de forma natural.
+ * 4. Cualquier otra cosa (dos comas, `1.23.4`, letras) → `DecimalInputError`. Adivinar aquí es
+ *    exactamente lo que causó el fallo original.
+ */
 export function toApiDecimalString(raw: string | null | undefined): string {
-  return String(raw ?? "").trim().replace(",", ".");
+  const t = String(raw ?? "").trim();
+  if (t === "") return "";
+
+  const m = /^([+-]?)([0-9.,]+)$/.exec(t);
+  if (!m) {
+    throw new DecimalInputError(
+      "El importe solo admite números, puntos de millar y una coma decimal.",
+    );
+  }
+  const [, sign, body] = m;
+
+  const comas = (body.match(/,/g) ?? []).length;
+  if (comas > 1) {
+    throw new DecimalInputError("El importe no puede llevar más de una coma decimal.");
+  }
+
+  const esMiles = (s: string): boolean => {
+    if (!s.includes(".")) return false;
+    const g = s.split(".");
+    return (
+      g.length > 1 &&
+      // Sin cero a la izquierda: `0.075` es setenta y cinco milésimas, no un grupo de millar.
+      /^[1-9][0-9]{0,2}$/.test(g[0]) &&
+      g.slice(1).every((x) => /^[0-9]{3}$/.test(x))
+    );
+  };
+
+  if (comas === 1) {
+    const [entera, decimal] = body.split(",");
+    if (!/^[0-9]*$/.test(decimal)) {
+      throw new DecimalInputError("La parte decimal solo admite dígitos.");
+    }
+    if (entera.includes(".") && !esMiles(entera)) {
+      throw new DecimalInputError(
+        "Los puntos de millar deben separar grupos de tres dígitos (por ejemplo 1.234,56).",
+      );
+    }
+    const limpia = entera.replace(/\./g, "");
+    if (!/^[0-9]+$/.test(limpia)) {
+      throw new DecimalInputError("El importe no es un número válido.");
+    }
+    return `${sign}${limpia}${decimal === "" ? "" : `.${decimal}`}`;
+  }
+
+  if (!body.includes(".")) return `${sign}${body}`;
+  if (esMiles(body)) return `${sign}${body.replace(/\./g, "")}`;
+  if ((body.match(/\./g) ?? []).length === 1 && /^[0-9]+\.[0-9]+$/.test(body)) {
+    return `${sign}${body}`;
+  }
+  throw new DecimalInputError(
+    "No se entiende el importe. Usa la coma para los decimales (por ejemplo 1.234,56).",
+  );
 }
 
 /** Importes sin decimales. Miles con punto a partir de 10.000. */

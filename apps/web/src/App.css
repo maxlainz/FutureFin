@@ -771,6 +771,12 @@
   color: var(--ff-ink-soft);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  /* Mismo recorte que `.metric-value-detail`: con `nowrap` y sin él, un paréntesis largo (los
+     hay de más de 40 caracteres) se derramaba fuera de la tarjeta, y en ≤720 —donde la banda
+     deja de ser `overflow-x: auto` y pasa a grid— podía empujar la página entera, que es la
+     regla de oro responsive. */
+  overflow: hidden;
+  text-overflow: ellipsis;
   min-height: 1.1em; /* reserva el slot incluso cuando el contenido está vacío */
   line-height: 1.2;
 }

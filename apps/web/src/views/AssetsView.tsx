@@ -154,7 +154,12 @@ export function AssetsView({
   const assetTargetReachMap = useMemo<Map<string, string | null>>(() => {
     const out = new Map<string, string | null>();
     const seriesList = projectionSeries?.asset_series ?? [];
-    if (seriesList.length === 0) return out;
+    // `values` es paralelo a `points`, y con `density=hybrid` el servidor DIEZMA la serie
+    // (meses 0..12, 24, 36…): la posición 13 del array es el mes 24, no el 13. El mes real vive
+    // en `points[i].month_index` — usar la posición como offset de meses adelantaba la fecha en
+    // que un activo alcanza su objetivo hasta varios años.
+    const pts = projectionSeries?.points ?? [];
+    if (seriesList.length === 0 || pts.length === 0) return out;
     const anchorStr =
       anchorDateYmd != null && anchorDateYmd.trim() !== ""
         ? anchorDateYmd.trim()
@@ -168,23 +173,29 @@ export function AssetsView({
       if (target == null || target <= 0) continue;
       const series = seriesList.find((s) => s.asset_id === a.id);
       if (!series) continue;
-      let reachedIndex: number | null = null;
+      let reachedMonth: number | null = null;
       for (let i = 0; i < series.values.length; i++) {
         const v = parseDisplayDecimal(String(series.values[i] ?? ""));
         if (v != null && v >= target) {
-          reachedIndex = i;
+          reachedMonth = pts[i]?.month_index ?? null;
           break;
         }
       }
-      if (reachedIndex == null) {
+      if (reachedMonth == null) {
         out.set(a.id, null);
         continue;
       }
-      const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, reachedIndex);
+      const at = addMonthsCivil(anchor.y, anchor.m, anchor.d, reachedMonth);
       out.set(a.id, formatProjectionHoverMonthYear(at));
     }
     return out;
-  }, [projectionSeries?.asset_series, assets, anchorDateYmd, calendarTz]);
+  }, [
+    projectionSeries?.asset_series,
+    projectionSeries?.points,
+    assets,
+    anchorDateYmd,
+    calendarTz,
+  ]);
 
   return (
     <div className="workspace">
@@ -401,7 +412,11 @@ export function AssetsView({
           </div>
           {assetsBusy ? <p className="muted">Cargando…</p> : null}
         </div>
-        {!assetsBusy && hasMembership && assets.length === 0 ? (
+        {/* `formError` gatea el estado vacío: cuando el loader falla vacía lista Y categorías, y
+            sin este gate la vista acusaba al usuario de no tener categorías («no queda ninguna»)
+            justo cuando el problema era que no se había podido leer nada. El error ya se pinta
+            en la banda global de App.tsx; aquí basta con no contradecirlo. */}
+        {!assetsBusy && !formError && hasMembership && assets.length === 0 ? (
           assetCategories.length === 0 ? (
             <EmptyState
               title="Falta una categoría de activo"
