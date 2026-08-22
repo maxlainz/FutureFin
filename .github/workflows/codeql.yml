@@ -1,0 +1,63 @@
+name: CodeQL
+
+# Análisis estático de seguridad. Complementa a `secrets-scan` (que mira datos personales en el
+# árbol) y a Dependabot (que mira dependencias de terceros): esto mira EL CÓDIGO PROPIO.
+#
+# No es un gate de merge — corre en su propio workflow y publica en la pestaña Security. Ponerlo
+# como check obligatorio bloquearía el push directo a `main` que hace `scripts/release-to-main.sh`.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    # Lunes 05:00 UTC, antes de que Dependabot abra lo suyo a las 06:00 Europe/Madrid: así el
+    # cron pilla los avisos que no dependen de que nadie empuje código esa semana.
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+# Por defecto solo lectura, como en ci.yml. `security-events: write` es lo mínimo que necesita
+# el paso `analyze` para subir los resultados.
+permissions:
+  contents: read
+
+# Un análisis por rama: los push seguidos cancelan el anterior en vez de encolarse.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analizar ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      # Que el fallo de un lenguaje no oculte el resultado de los otros dos.
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          # Los propios workflows son superficie de ataque: este repo guarda DOCKERHUB_TOKEN.
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Inicializar CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Analizar
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:${{ matrix.language }}'
