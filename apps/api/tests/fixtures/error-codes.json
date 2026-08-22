@@ -81,6 +81,7 @@
     "kinds_empty",
     "label_empty",
     "label_too_long",
+    "limit_out_of_range",
     "linked_asset_not_found",
     "linked_liability_not_found",
     "mcp_write_disabled",

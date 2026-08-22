@@ -759,6 +759,18 @@ pub struct UpdateAllocationRuleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListCategorizationRulesParams {
+    /// Máximo de reglas devueltas (1–200). Default 50. La respuesta indica `total_count` y
+    /// `truncated`.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: Option<u32>,
+    /// Desplazamiento de paginación (reglas a saltar, orden por última edición DESC). Default 0.
+    #[serde(default)]
+    pub offset: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct UnreconcileTransferParams {
     /// UUID de una de las dos patas del par conciliado (de list_transactions).
     pub transaction_id: String,
@@ -838,6 +850,10 @@ pub struct UpdateFireSettingsParams {
 
 const LIST_TRANSACTIONS_DEFAULT_LIMIT: usize = 100;
 const LIST_TRANSACTIONS_MAX_LIMIT: usize = 500;
+/// Reglas por página. Más bajo que el de movimientos porque cada regla es prosa (patrón, banco,
+/// categoría) y el conjunto entero llegó a pesar ~11 KB en una instalación real (issue #8 §9).
+const LIST_RULES_DEFAULT_LIMIT: usize = 50;
+const LIST_RULES_MAX_LIMIT: usize = 200;
 
 #[tool_router]
 impl FutureFinMcp {
@@ -1382,18 +1398,40 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_categorization_rules",
-        description = "Reglas de categorización aprendidas del usuario del token: patrón (substring|prefix|exact), banco de origen opcional y asignación (kind + categoría). Explican cómo se categorizó un concepto y evitan crear duplicados. Solo afectan a imports futuros. Siempre own-user, sin view.",
+        description = "Reglas de categorización aprendidas del usuario del token: patrón (substring|prefix|exact), banco de origen opcional y asignación (kind + categoría). Explican cómo se categorizó un concepto y evitan crear duplicados. Solo afectan a imports futuros (para reescribir el pasado, apply_categorization_rule). Siempre own-user, sin view. Paginada: el conjunto crece con cada import, así que la respuesta trae total_count/truncated y admite limit (1–200, default 50) y offset.",
         annotations(title = "Reglas de categorización", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_categorization_rules(
         &self,
+        Parameters(p): Parameters<ListCategorizationRulesParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        to_tool_result(
-            list_categorization_rules_core(&self.state.pool, id.installation_id, id.user_id)
-                .await,
+        let limit = p.limit.unwrap_or(LIST_RULES_DEFAULT_LIMIT as u32) as usize;
+        if limit == 0 || limit > LIST_RULES_MAX_LIMIT {
+            return to_tool_outcome(ApiError::BadRequest(format!(
+                "limit_out_of_range: limit must be between 1 and {LIST_RULES_MAX_LIMIT}"
+            )));
+        }
+        let offset = p.offset.unwrap_or(0) as i64;
+        let res = list_categorization_rules_core(
+            &self.state.pool,
+            id.installation_id,
+            id.user_id,
+            Some(limit as i64),
+            offset,
         )
+        .await
+        .map(|(page, total_count)| {
+            let truncated = offset + (page.len() as i64) < total_count;
+            serde_json::json!({
+                "total_count": total_count,
+                "offset": offset,
+                "truncated": truncated,
+                "rules": page,
+            })
+        });
+        to_tool_result(res)
     }
 
     #[tool(

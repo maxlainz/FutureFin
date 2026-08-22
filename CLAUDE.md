@@ -149,7 +149,7 @@ cargo test -p futurefin-engine -- <name> # single test
 
 # Integration tests (require a running Postgres):
 # 1) Start a dedicated test DB once (port 5433 to avoid clashing with dev):
-docker run -d --name ff-test-db \
+docker run -d --name ff-test-db --shm-size=1g \
   -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=futurefin_test \
   -e POSTGRES_DB=futurefin_test -p 5433:5432 postgres:16.4-alpine
 # 2) Run the full workspace test suite (each test gets its own schema, see .claude/tests.md):

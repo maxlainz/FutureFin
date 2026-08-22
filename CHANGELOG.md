@@ -87,6 +87,14 @@ recategorización en lote, ni las reglas lo impiden. El importador de CSV y la r
 copia `.ffbackup` tampoco validan nada: traen el signo real del banco, y una copia que se niega a
 restaurar es peor que una fila rara.
 
+#### Las reglas de categorización se enviaban todas de golpe
+
+Es la única lista que **crece con el uso**: cada import aprende una regla por concepto nuevo, así
+que una instalación con dos años de extractos tenía ya un centenar. Preguntarle a Claude por ellas
+le gastaba una parte notable de su memoria de trabajo sin que nadie lo pidiera. Ahora vienen por
+páginas, con el total y un aviso de si quedan más. La API web sigue devolviéndolas todas: ahí no
+molestan y cambiar el formato habría roto la pantalla.
+
 #### «No llegas a jubilarte» y «no te lo puedo decir» se veían igual
 
 Cuando el horizonte de la proyección no alcanzaba el objetivo, los campos de la jubilación
