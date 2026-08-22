@@ -262,6 +262,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "El tipo de tope no es válido. Usa un importe, meses de gasto o un múltiplo del ingreso.",
   cap_pair_incomplete:
     "El tope está a medias. Indica el tipo y su valor, o quita los dos.",
+  cap_set_and_clear:
+    "Estás poniendo y quitando el tope a la vez. Elige una de las dos cosas.",
   cap_type_invalid:
     "El tope no tiene el formato esperado. Vuelve a configurarlo desde el formulario.",
   target_asset_not_found:

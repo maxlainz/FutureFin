@@ -34,6 +34,7 @@
     "budget_entry_category_scope_unsupported",
     "cap_kind_invalid",
     "cap_pair_incomplete",
+    "cap_set_and_clear",
     "cap_type_invalid",
     "cap_value_negative",
     "category_in_use",

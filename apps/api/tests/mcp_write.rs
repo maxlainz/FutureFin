@@ -838,6 +838,94 @@ async fn allocation_rule_update_respects_sink_invariant() {
     assert_eq!(out["despues"]["enabled"], false);
 }
 
+/// REGRESIÓN (issue #7 §5) — `cap_value` sin `cap_kind` ya no se evapora con un 200.
+///
+/// El repro literal del issue: `{rule_id, enabled: true, cap_value: "99999"}` devolvía 200 con
+/// `antes == despues`. La guardia de «al menos un campo» enumeraba a mano `amount`/`cap_kind`/
+/// `clear_cap`/`enabled` y no nombraba `cap_value`, y el mapeo del cap solo lo leía si venía
+/// `cap_kind`: con `enabled` presente la llamada pasaba la guardia y el tope se perdía por el
+/// camino. Un agente que tradujera «ponle un tope de 99.999 € a la cartera» recibía un éxito y le
+/// decía al usuario «hecho», sin que nada hubiera cambiado.
+#[tokio::test]
+async fn allocation_rule_update_never_drops_a_half_cap_silently() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "asset", "Fondos").await;
+
+    let asset_id = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat, "name": "Fondo", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rule_id = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({"target_asset_id": asset_id, "kind": "remainder"}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Las dos medias parejas dan el MISMO error. Antes solo lo daba una de las dos.
+    for half in [
+        json!({"rule_id": rule_id, "enabled": true, "cap_value": "99999"}),
+        json!({"rule_id": rule_id, "enabled": true, "cap_kind": "amount"}),
+        json!({"rule_id": rule_id, "cap_value": "99999"}),
+        json!({"rule_id": rule_id, "cap_kind": "amount"}),
+    ] {
+        let envelope = mcp_post(
+            &app,
+            &token,
+            tool_call("update_allocation_rule", half.clone()),
+        )
+        .await;
+        let body = tool_error(&envelope, "bad_request");
+        assert_eq!(body["code"], "cap_pair_incomplete", "{half}: {body}");
+    }
+
+    // Poner y quitar el tope a la vez tampoco se resuelve por ti.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_allocation_rule",
+            json!({"rule_id": rule_id, "cap_kind": "amount", "cap_value": "1", "clear_cap": true}),
+        ),
+    )
+    .await;
+    assert_eq!(tool_error(&envelope, "bad_request")["code"], "cap_set_and_clear");
+
+    // Y un cuerpo sin nada que actualizar da `patch_empty` — la guardia vive ahora en la core, así
+    // que HTTP y MCP responden lo mismo.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_allocation_rule", json!({"rule_id": rule_id})),
+    )
+    .await;
+    assert_eq!(tool_error(&envelope, "bad_request")["code"], "patch_empty");
+
+    let http_empty = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{rule_id}"),
+            json!({}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(http_empty.status, http::StatusCode::BAD_REQUEST, "{http_empty:?}");
+    assert_eq!(http_empty.json()["code"], "patch_empty");
+}
+
 #[tokio::test]
 async fn delete_recurring_rule_previews_then_deletes() {
     let app = TestApp::spawn().await;
