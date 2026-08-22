@@ -7,7 +7,7 @@ de seguridad; no hay ramas de mantenimiento hacia atrás.
 
 | Versión | Soporte |
 |---|---|
-| La última menor publicada (**3.9.x** a 22 de agosto de 2026) | Sí |
+| La última menor publicada — la de arriba del todo en [releases](https://github.com/maxlainz/FutureFin/releases) | Sí |
 | Cualquier versión anterior | No |
 
 La última versión está en las [releases del repositorio](https://github.com/maxlainz/FutureFin/releases).
@@ -79,9 +79,26 @@ Se guardan como hash **Argon2id** (versión 0x13) con salt aleatorio por usuario
 con los parámetros recomendados por OWASP: 19 MiB de memoria, 2 iteraciones, paralelismo 1, salida
 de 32 bytes. La política de contraseñas es solo de longitud: entre 12 y 256 caracteres.
 
-**No hay límite de intentos en el acceso**: ni contador, ni retardo progresivo, ni captcha. El
-único freno frente a la fuerza bruta es el coste del propio Argon2id. Si la instalación es
-accesible desde fuera de tu red, pon el límite en el proxy inverso.
+**Puedes cambiar tu contraseña** con `POST /v1/auth/password` (`{current_password, new_password}`).
+Hasta la 4.0.0 no se podía: el hash solo se escribía al registrarse, así que una cookie robada o una
+contraseña filtrada en otro servicio daban acceso hasta que caducara la sesión, sin nada que
+hacer. El cambio **revoca en la misma transacción** las demás sesiones abiertas, los tokens de API
+(`ffp_…`) y las concesiones OAuth de tu usuario; la sesión desde la que lo pides sobrevive. Es el
+comportamiento seguro por defecto: si cambias la contraseña porque sospechas un compromiso, dejar
+viva una credencial que no caduca haría el cambio decorativo. **Todavía no tiene botón en la
+interfaz**: se llama por API.
+
+Verificar la contraseña cuesta Argon2id, así que se hace **fuera del reactor** (`spawn_blocking`) en
+los cinco sitios donde se usa. Antes corría en línea y bastaban unas pocas peticiones simultáneas de
+registro —endpoint sin autenticación por diseño— para dejar el proceso entero sin responder, sonda
+de salud incluida. Y el acceso verifica **siempre** contra un hash de descarte aunque el usuario no
+exista, para que un usuario inexistente no responda en 1 ms y uno existente en 80: esa diferencia
+enumeraba quién tiene cuenta.
+
+**No hay límite de intentos en el acceso**: ni contador, ni retardo progresivo, ni captcha. Sigue
+siendo cierto en la 4.0.0 — no hay ningún middleware de rate limiting en el binario. El único freno
+frente a la fuerza bruta es el coste del propio Argon2id. Si la instalación es accesible desde fuera
+de tu red, pon el límite en el proxy inverso.
 
 ### Copias de seguridad `.ffbackup`
 
@@ -94,7 +111,19 @@ descifrar.
 **La contraseña es la de tu cuenta.** El servidor la verifica contra tu hash y deriva de ella la
 clave. Consecuencia práctica: un `.ffbackup` queda atado a la contraseña que tenías **cuando lo
 generaste**. Si la cambias después, los ficheros antiguos siguen necesitando la anterior — no se
-recifran solos. Guárdala si guardas backups viejos.
+recifran solos. Guárdala si guardas backups viejos. Desde la 4.0.0 esto **importa de verdad**,
+porque ya se puede cambiar la contraseña: si la rotas por sospecha de compromiso, tu copia antigua
+se sigue abriendo con la contraseña filtrada. Si eso te preocupa, exporta una copia nueva después
+del cambio y destruye la vieja.
+
+**Al importar, un `.ffbackup` es un fichero que trae quien sea.** El manifiesto viaja en claro y
+fuera de la parte autenticada, así que sus parámetros de derivación de clave los elige quien
+fabrica el fichero. Desde la 4.0.0 están **acotados** (memoria ≤ 256 MiB, iteraciones ≤ 10,
+paralelismo ≤ 4) y el texto en claro descomprimido tiene un techo de 128 MiB. Antes no: un fichero
+de 200 bytes pidiendo 8 GB de memoria se llevaba por delante el contenedor entero —con el
+PostgreSQL embebido dentro— **desde el endpoint de vista previa**, que ni siquiera escribe nada. El
+cifrado no defiende de esto: quien ataca cifra con su propia contraseña, así que su bomba pasa la
+autenticación intacta.
 
 Los respaldos automáticos previos a cada migración que escribe el contenedor en el volumen
 `ffdata` son otra cosa: son volcados de `pg_dump` **sin cifrar**. Protege ese volumen como
@@ -119,10 +148,12 @@ precisamente porque el secreto no es una contraseña humana, sino 256 bits aleat
 credencial congela nada: el rol y la pertenencia a la instalación se resuelven de nuevo en cada
 petición, y la escritura por MCP exige además el interruptor de la propia instalación.
 
-El registro dinámico de clientes OAuth (`POST /oauth/register`) está abierto sin autenticación,
-como exige el RFC 7591. Registrar un cliente no concede acceso a nada por sí solo: la puerta sigue
-siendo tu inicio de sesión y la pantalla de consentimiento. Contra el flood hay recolección de
-clientes sin autorización a las 24 horas y un tope duro.
+El registro dinámico de clientes OAuth (`POST /oauth/register`) **sigue abierto sin
+autenticación** en la 4.0.0, como exige el RFC 7591. Registrar un cliente no concede acceso a nada
+por sí solo: la puerta sigue siendo tu inicio de sesión y la pantalla de consentimiento. Contra el
+flood hay recolección perezosa —en el propio POST— de los clientes de más de 24 horas que no tienen
+ninguna autorización concedida, y un tope duro de 1.000 clientes registrados, pasado el cual el
+registro responde «vuelve más tarde» en vez de crecer sin fin.
 
 ### `?view=mine` no es una frontera de autorización
 
@@ -137,6 +168,16 @@ Las únicas fronteras reales son:
 |---|---|
 | Pertenencia a la instalación | Quien no está aprobado recibe 403 en todo endpoint de datos |
 | Rol (`owner`, `member`, `viewer`) | `viewer` solo lee; `owner` además administra usuarios y ajustes |
+
+**Y desde la 4.0.0 la pertenencia se puede retirar.** Quien es propietario puede degradar el rol de
+un miembro o revocarle el acceso (`PATCH` / `DELETE /v1/installation/members/{user_id}`); antes esta
+página prometía que la membresía era el corte real y no había ninguna forma de accionarlo salvo
+entrar a la base de datos a mano. El corte es **inmediato y completo**: en la misma transacción se
+borra la membresía, se cierran sus sesiones, se revocan sus tokens de API y se revocan sus
+concesiones OAuth. Ninguna credencial congela el rol, así que la siguiente petición ya llega sin
+acceso. **Los datos de esa persona no se borran**: siguen atribuidos a su usuario y los recupera
+intactos si se la vuelve a aprobar. Hay una guardia contra dejar la instalación sin ningún
+propietario. Todavía no tiene interfaz: se hace por API.
 
 **No uses FutureFin esperando privacidad entre miembros del mismo hogar.** Si dos personas no
 deben verse las cuentas, necesitan dos instalaciones.

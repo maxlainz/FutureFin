@@ -103,6 +103,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "El CSV no se ha podido leer. Compruébalo y vuelve a exportarlo de tu banco.",
   csv_date_invalid:
     "Hay una fecha que no se entiende en el CSV. Exporta el extracto otra vez sin modificarlo.",
+  csv_amount_ambiguous:
+    "Un importe del archivo usa el punto como separador decimal y este formato espera coma. Comprueba que el archivo es del banco que has elegido.",
   csv_amount_invalid:
     "Hay un importe que no se entiende en el CSV. Exporta el extracto otra vez sin modificarlo.",
   currency_mismatch:

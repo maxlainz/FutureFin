@@ -47,6 +47,7 @@
     "category_wrong_scope",
     "concept_contains_length",
     "confirm_required",
+    "csv_amount_ambiguous",
     "csv_amount_invalid",
     "csv_date_invalid",
     "csv_parse_error",
