@@ -664,6 +664,16 @@ pub async fn delete_asset(
 pub(crate) struct AssetDeleteEffects {
     pub transactions_unlinked: i64,
     pub imports_unlinked: i64,
+    /// Reglas de la cascada que se BORRAN con el activo (`ON DELETE CASCADE`).
+    ///
+    /// Es el único efecto irreversible del borrado, y era el único que el preview no contaba:
+    /// enseñaba «los movimientos quedan desvinculados» —cierto, `SET NULL`—, el usuario
+    /// confirmaba, y desaparecían además las reglas de reparto que apuntaban a ese activo.
+    /// A partir de ahí el ahorro mensual se reparte de otra manera, en silencio.
+    pub allocation_rules_deleted: i64,
+    /// De esas reglas, cuántas eran `remainder` sin tope — el sumidero de la cascada. Perderlo
+    /// cambia a dónde va todo el sobrante, no solo una parte.
+    pub allocation_remainder_rules_deleted: i64,
 }
 
 pub(crate) async fn asset_delete_effects(
@@ -687,9 +697,22 @@ pub(crate) async fn asset_delete_effects(
     .bind(id)
     .fetch_one(pool)
     .await?;
+    let (allocation_rules_deleted, allocation_remainder_rules_deleted): (i64, i64) =
+        sqlx::query_as(
+            r#"SELECT COUNT(*)::bigint,
+                      COUNT(*) FILTER (WHERE kind = 'remainder' AND cap_kind IS NULL)::bigint
+               FROM allocation_rules
+               WHERE installation_id = $1 AND target_asset_id = $2"#,
+        )
+        .bind(iid)
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
     Ok(AssetDeleteEffects {
         transactions_unlinked,
         imports_unlinked,
+        allocation_rules_deleted,
+        allocation_remainder_rules_deleted,
     })
 }
 

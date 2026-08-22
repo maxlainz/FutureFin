@@ -891,7 +891,7 @@ pub struct HistorySeriesResponse {
     /// no porque no haya deuda: los timelines se agrupan a partir de los snapshots existentes, y un
     /// kind sin ninguna cabecera no tiene timeline ni fallback a las filas vivas. Sin este flag,
     /// «no lo he fotografiado» y «no debo nada» son indistinguibles, y el `net_worth` histórico de
-    /// alguien con hipoteca se lee como si no la tuviera (issue #7 §2). La deuda viva está en
+    /// alguien con hipoteca se lee como si no la tuviera (auditoría MCP §2). La deuda viva está en
     /// `GET /v1/liabilities` y en `GET /v1/summary`.
     pub liabilities_snapshotted: bool,
 }
@@ -1379,7 +1379,7 @@ pub(crate) async fn history_series_core(
     // `today`. Es el único punto cuyo mes está a medias, y evaluarlo el día 1 dejaba la serie hasta
     // 30 días por detrás del patrimonio vivo: con dos snapshots del mes en curso, la curva
     // terminaba 1.640 € por debajo de dos fotos reales del propio usuario, una tomada hoy, y los
-    // activos que solo aparecían en la foto más reciente valían 0 en TODA la ventana (issue #7 §2).
+    // activos que solo aparecían en la foto más reciente valían 0 en TODA la ventana (auditoría MCP §2).
     // Un solo hecho explicaba los tres síntomas.
     //
     // `today >= anchor` por construcción (`anchor` es su primero-de-mes), así que la rejilla sigue
@@ -1477,7 +1477,7 @@ pub(crate) async fn history_series_core(
 /// llamaba `net` y era `expense + income + savings`, mientras `get_transactions_summary.net_actual`
 /// se llama igual y **no** incluye el ahorro: dos cosas distintas con el mismo nombre en el mismo
 /// catálogo. Un abril con 3.710,97 € movidos a inversión salía `net: -3075.26` y se leía como «perdí
-/// 3.075 €» cuando había sido un mes excelente (issue #8 §6). La asimetría de signos entre las dos
+/// 3.075 €» cuando había sido un mes excelente (auditoría MCP §6). La asimetría de signos entre las dos
 /// tools no obliga a elegir convención aquí: `income + expense` con `expense ≤ 0` es literalmente el
 /// mismo número que `income_mag − expense_mag`. Lo que faltaba era que el nombre lo dijera.
 #[derive(Debug, Serialize, ToSchema)]
@@ -1644,7 +1644,7 @@ pub(crate) async fn history_cashflow_core(
         .unwrap_or(DEFAULT_CASHFLOW_WINDOW_MONTHS)
         .clamp(1, MAX_CASHFLOW_WINDOW_MONTHS) as i32;
     // `resolution` desconocido es un error, no un weekly silencioso: la respuesta ecoa
-    // `resolution` y `resolution:"hourly"` devolvía 200 diciendo "weekly" (issue #7 §4, misma
+    // `resolution` y `resolution:"hourly"` devolvía 200 diciendo "weekly" (auditoría MCP §4, misma
     // clase que `view`).
     let daily = match resolution.map(str::trim) {
         None | Some("") | Some("weekly") => false,

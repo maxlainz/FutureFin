@@ -264,7 +264,7 @@ pub async fn list_rules(
 /// Hace falta aquí y no en los otros listados porque **éste es el único que crece con el uso
 /// normal**: `learn_rule` inserta una regla por concepto distinto en cada import con
 /// `learn_rules = true`. Una instalación con dos años de extractos devolvía ~100 reglas y ~11 KB
-/// de una tacada — una porción notable de la ventana de contexto de un agente (issue #8 §9).
+/// de una tacada — una porción notable de la ventana de contexto de un agente (auditoría MCP §9).
 pub(crate) async fn list_categorization_rules_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -744,7 +744,7 @@ pub(crate) async fn patch_rule_core(
     // Destructuring EXHAUSTIVO y **sin `..`**: añadir un campo al body deja de compilar hasta que
     // alguien decida si cuenta como «algo que actualizar» y si colisiona con algún `clear_*`. Es la
     // red que le faltó a `cap_value` en `update_allocation_rule`, donde el campo existía, nadie lo
-    // leía, y la llamada devolvía 200 sin hacer nada (issue #7 §5).
+    // leía, y la llamada devolvía 200 sin hacer nada (auditoría MCP §5).
     let PatchRuleBody {
         match_kind,
         pattern,
@@ -779,7 +779,7 @@ pub(crate) async fn patch_rule_core(
 
     // Poner y borrar el mismo campo a la vez: error, no «gana el clear». Hasta 4.0.0 el `clear`
     // ganaba en silencio, que es la misma clase de fallo que `cap_value` — un 200 y no lo que
-    // pediste. El propio issue #7 elogia que `due_date` + `clear_due_date` juntos den error.
+    // pediste. El propio auditoría MCP elogia que `due_date` + `clear_due_date` juntos den error.
     for (campo, puesto, borrado) in [
         ("source", source.is_some(), set(clear_source)),
         ("assign_kind", assign_kind.is_some(), set(clear_assign_kind)),

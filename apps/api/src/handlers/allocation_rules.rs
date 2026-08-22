@@ -515,7 +515,7 @@ pub(crate) async fn patch_allocation_rule_core(
     // alguien decida si cuenta como «algo que actualizar». Ésta era una de las dos únicas cores de
     // PATCH del repo sin `patch_empty` (`assets.rs`, `budget.rs`, `liabilities.rs`, `planning.rs` e
     // `installation.rs` sí lo tienen), y por eso la tool MCP tuvo que escribirse su propia guardia
-    // a mano — donde se olvidó `cap_value` y el campo se evaporaba con un 200 (issue #7 §5). Una
+    // a mano — donde se olvidó `cap_value` y el campo se evaporaba con un 200 (auditoría MCP §5). Una
     // guardia que enumera campos siempre puede olvidarse uno; ésta la verifica el compilador.
     {
         let PatchAllocationRuleBody {

@@ -603,7 +603,7 @@ async fn recurring(
     assert_eq!(r.status, http::StatusCode::CREATED, "recurring {concept}: {r:?}");
 }
 
-/// El issue #5, reproducido: un mes cuyo único contenido son instancias recurrentes NO promedia.
+/// El auditoría MCP, reproducido: un mes cuyo único contenido son instancias recurrentes NO promedia.
 ///
 /// Queda fuera del numerador Y del denominador, que es la única combinación coherente: excluirlo
 /// solo del denominador dejaría su importe arriba y dispararía las categorías presentes en él

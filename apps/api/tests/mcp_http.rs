@@ -576,9 +576,19 @@ async fn tools_list_exposes_annotations_on_every_tool() {
             // `apply_categorization_rule` reescribe la categoría/kind de filas históricas: es
             // destructiva aunque no empiece por update_/delete_. Declararlo aquí es deliberado —
             // el resto del catálogo deriva sus hints del prefijo del nombre.
+            // `materialize_recurring` no empieza por update_/delete_ pero PODA instancias
+            // (`pruned` en la respuesta) y su ámbito es la instalación entera, así que puede
+            // borrar movimientos de otro miembro. Con `destructiveHint: false` un cliente MCP
+            // conforme no pedía permiso al humano antes de invocarla.
             let expect_destructive = name.starts_with("update_")
                 || name.starts_with("delete_")
-                || name == "apply_categorization_rule";
+                || matches!(
+                    name,
+                    // `unreconcile_transfer` no borra filas, pero persiste un rechazo que solo
+                    // se limpia volviendo a conciliar el par a mano — y esa acción NO está
+                    // expuesta como tool. Desde el chat es irreversible.
+                    "apply_categorization_rule" | "materialize_recurring" | "unreconcile_transfer"
+                );
             assert_eq!(ann["destructiveHint"], expect_destructive, "tool {name}");
             let expect_idempotent = name.starts_with("update_")
                 || name.starts_with("delete_")
@@ -1113,7 +1123,7 @@ async fn list_snapshots_items_are_opt_in_and_year_validates() {
     assert_eq!(body["error"], "bad_request");
 }
 
-/// REGRESIÓN (issue #7 §4) — `view` desconocido por MCP devuelve tool-error, no el hogar entero.
+/// REGRESIÓN (auditoría MCP §4) — `view` desconocido por MCP devuelve tool-error, no el hogar entero.
 ///
 /// Éste era el repro literal del issue: `list_transactions {"view":"no-existe-esta-vista"}` →
 /// 200 con `total_count` del **hogar completo**. La tool no valida por su cuenta — comparte
@@ -1160,7 +1170,7 @@ async fn unknown_view_is_a_tool_error_not_the_whole_household() {
     }
 }
 
-/// REGRESIÓN (issue #8 §9) — la tool pagina; el GET sigue devolviendo el conjunto entero.
+/// REGRESIÓN (auditoría MCP §9) — la tool pagina; el GET sigue devolviendo el conjunto entero.
 ///
 /// Es la única lista del catálogo que **crece con el uso normal**: `learn_rule` inserta una regla
 /// por concepto distinto en cada import con `learn_rules = true`, así que una instalación con dos

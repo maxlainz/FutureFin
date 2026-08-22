@@ -29,7 +29,7 @@ impl LedgerViewQuery {
     /// la SPA como único cliente eso nunca se notó — nunca manda otra cosa que `mine` o nada —,
     /// pero un agente MCP que escriba `"MINE"` o `"self"` recibía los datos de todo el hogar
     /// creyendo haber pedido solo los suyos, y respondería sobre ellos sin ninguna señal de que
-    /// se le ignoró el filtro (issue #7). No es una frontera de autorización — el mismo token
+    /// se le ignoró el filtro (auditoría MCP). No es una frontera de autorización — el mismo token
     /// podía pedir `household` a la cara (D2) —, pero sí una respuesta sobre otra población que
     /// la pedida, que es peor que un error.
     pub fn resolve(&self) -> Result<LedgerView, ApiError> {

@@ -1,6 +1,6 @@
 //! `GET /v1/allocation-rules/resolution` (3.8.0): la cascada RESUELTA del mes en curso.
 //!
-//! Cierra el hueco de observabilidad del issue #4: sin este endpoint era imposible, desde el chat,
+//! Cierra el hueco de observabilidad del auditoría MCP: sin este endpoint era imposible, desde el chat,
 //! distinguir «la cascada reparte de más» (falso) de «la base incluye un tramo transitorio de
 //! planning que cambia cada día» (lo que realmente pasaba).
 

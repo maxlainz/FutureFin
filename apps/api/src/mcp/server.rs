@@ -100,7 +100,7 @@ fn identity(ctx: &RequestContext<RoleServer>) -> Result<McpIdentity, ErrorData> 
 
 /// Misma semántica que `?view=` en HTTP, parseo compartido: `"mine"` → Mine, `"household"` u
 /// omitido → Household, **cualquier otra cosa → `invalid_view`**. Un LLM que escriba `"MINE"` o
-/// `"self"` recibe un error, no el hogar entero en silencio (issue #7).
+/// `"self"` recibe un error, no el hogar entero en silencio (auditoría MCP).
 fn resolve_view(view: &Option<String>) -> Result<LedgerView, ApiError> {
     LedgerViewQuery { view: view.clone() }.resolve()
 }
@@ -774,7 +774,7 @@ pub struct CreateLiabilityParams {
     #[serde(default)]
     pub principal: Option<String>,
     /// true = derivar el principal del plan de pago (exige payment_amount + payment_frequency
-    /// + payment_end_date; amortización francesa hacia atrás).
+    /// + payment_end_date; principal = cuota × nº de pagos pendientes, SIN descontar intereses).
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
     /// TAE en % >= 0, string decimal.
@@ -811,7 +811,7 @@ pub struct UpdateLiabilityParams {
     #[serde(default)]
     pub principal: Option<String>,
     /// true = derivar el principal del plan de pago (cuota + frecuencia + fecha fin,
-    /// amortización francesa); false = volver a principal explícito.
+    /// principal = cuota × nº de pagos, sin descuento); false = volver a principal explícito.
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
     /// TAE en % >= 0, string decimal.
@@ -1025,7 +1025,7 @@ pub struct UpdateFireSettingsParams {
 const LIST_TRANSACTIONS_DEFAULT_LIMIT: usize = 100;
 const LIST_TRANSACTIONS_MAX_LIMIT: usize = 500;
 /// Reglas por página. Más bajo que el de movimientos porque cada regla es prosa (patrón, banco,
-/// categoría) y el conjunto entero llegó a pesar ~11 KB en una instalación real (issue #8 §9).
+/// categoría) y el conjunto entero llegó a pesar ~11 KB en una instalación real (auditoría MCP §9).
 const LIST_RULES_DEFAULT_LIMIT: usize = 50;
 const LIST_RULES_MAX_LIMIT: usize = 200;
 
@@ -1033,7 +1033,7 @@ const LIST_RULES_MAX_LIMIT: usize = 200;
 impl FutureFinMcp {
     #[tool(
         name = "get_summary",
-        description = "Resumen financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingresos/gastos mensuales, tasa de ahorro, runway de líquidos) y desgloses por categoría. Importes como strings decimales. OJO: `financial_health` trae DOS cifras de ahorro mensual y no son intercambiables. `net_monthly_equivalent` es el ahorro REAL del modo activo (`savings_source`) y es el que usa el motor — cuadra con `monthly_delta_assumption` de get_projection y con `recurring_net` de get_allocation_resolution, y es el denominador de `savings_rate`. `savings_expected_monthly_equivalent` es el ahorro que sale del PRESUPUESTO, siempre, sin seguir al modo: existe solo para el delta «real vs plan». En modo A (budget) coinciden por construcción; en B y C difieren, y elegir mal desplaza la respuesta. Para razonar o hacer cuentas usa `net_monthly_equivalent`.",
+        description = "Resumen financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingresos/gastos mensuales, tasa de ahorro, runway de líquidos) y desgloses por categoría. Importes como strings decimales. OJO: `financial_health` trae DOS cifras de ahorro mensual y no son intercambiables. `net_monthly_equivalent` es el ahorro REAL del modo activo (`savings_source`) y es el que usa el motor — cuadra con `recurring_net` de get_allocation_resolution y con `net_monthly` de simulate_projection, y es el NUMERADOR de `savings_rate` (el denominador es `income_monthly_equivalent`). No lo compares directamente con `monthly_delta_assumption` de get_projection: en modo A esa cifra es la misma ANTES de restar el servicio de deuda, así que con cualquier pasivo con plan de pago difieren exactamente en la cuota. `savings_expected_monthly_equivalent` es el ahorro que sale del PRESUPUESTO, siempre, sin seguir al modo: existe solo para el delta «real vs plan». En modo A (budget) coinciden por construcción; en B y C difieren, y elegir mal desplaza la respuesta. Para razonar o hacer cuentas usa `net_monthly_equivalent`. `savings_rate` y `debt_to_assets_ratio` son FRACCIONES, no porcentajes: 0.35 es 35 %. `runway_months` null significa DOS cosas distintas — míralo junto a `runway_is_indefinite`: con `true` los líquidos cubren el gasto indefinidamente (no es falta de datos); con `false` es que no hay base de gasto. Y 1200 es el SUELO de la escala («al menos 100 años»), no una medida.",
         annotations(title = "Resumen financiero", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_summary(
@@ -1812,8 +1812,8 @@ impl FutureFinMcp {
 
     #[tool(
         name = "materialize_recurring",
-        description = "«Ponme al día los recurrentes»: materializa las instancias pendientes de las plantillas recurrentes del usuario del token hasta el último mes cerrado. Idempotente por cursor (repetirla no duplica) y nunca crea fechas futuras.",
-        annotations(title = "Materializar recurrentes", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+        description = "«Ponme al día los recurrentes»: hace converger las instancias de las plantillas recurrentes con los meses que tienen datos reales. Nunca crea fechas futuras. TRES cosas que conviene saber antes de llamarla: (1) el ámbito es LA INSTALACIÓN ENTERA, no solo el usuario del token — toca también las plantillas de los demás miembros del hogar; (2) además de crear, PODA: borra las instancias de los meses que han dejado de tener movimientos reales (el campo `pruned` de la respuesta dice cuántas), así que sí destruye datos; (3) es idempotente por existencia, no por cursor: repetirla converge al mismo estado, pero ese estado depende de qué meses son reales AHORA. Pide confirmación al usuario antes de ejecutarla.",
+        annotations(title = "Materializar recurrentes", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn materialize_recurring(
         &self,
@@ -1848,8 +1848,8 @@ impl FutureFinMcp {
 
     #[tool(
         name = "unreconcile_transfer",
-        description = "Desconcilia un par de transferencia («esto no era un traspaso, es un gasto real»): rompe el enlace de ambas patas — vuelven a contar como gasto/ingreso — y persiste el rechazo para que el pase automático no las re-empareje. Pasa el UUID de cualquiera de las dos patas; devuelve ambas ya sueltas. 400 not_reconciled si el movimiento no tiene contrapartida.",
-        annotations(title = "Desconciliar transferencia", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+        description = "Desconcilia un par de transferencia («esto no era un traspaso, es un gasto real»): rompe el enlace de ambas patas — vuelven a contar como gasto/ingreso — y persiste el rechazo para que el pase automático no las re-empareje. Pasa el UUID de cualquiera de las dos patas; devuelve ambas ya sueltas. 400 not_reconciled si el movimiento no tiene contrapartida. AVISO: desde el chat esto es una PUERTA DE UN SOLO SENTIDO. El rechazo que persiste solo lo limpia volver a conciliar el par a mano, y esa acción no está expuesta como tool: si te equivocas de par, las dos patas cuentan como gasto/ingreso para siempre y en los modos B/C eso desplaza el promedio, el número FIRE y el runway. Confirma con el usuario qué par exacto vas a soltar antes de llamarla.",
+        annotations(title = "Desconciliar transferencia", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn unreconcile_transfer(
         &self,
@@ -2360,7 +2360,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_liability",
-        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva por amortización francesa). Mueve la proyección entera.",
+        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva como cuota × nº de pagos pendientes, una SUMA SIN DESCONTAR INTERESES — no es amortización francesa: para una hipoteca a 20 años sale bastante por encima del capital pendiente real, así que si el usuario conoce su capital pendiente, pásalo en `principal` en vez de derivarlo). Mueve la proyección entera.",
         annotations(title = "Crear pasivo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_liability(
@@ -2854,7 +2854,7 @@ impl FutureFinMcp {
                     },
                 }));
             }
-            delete_recurring_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id)
+            delete_recurring_rule_core(&self.state, id.installation_id, id.user_id, rule_id)
                 .await?;
             Ok(serde_json::json!({"id": rule_id, "deleted": true}))
         }
@@ -3068,7 +3068,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "delete_asset",
-        description = "Borra un activo del hogar. Sin confirm=true devuelve un preview con los efectos colaterales: los movimientos y lotes de import vinculados quedan desvinculados (SET NULL), no se borran. Mueve la proyección entera.",
+        description = "Borra un activo del hogar. Sin confirm=true devuelve un preview con los efectos colaterales. Los movimientos y lotes de import vinculados quedan DESVINCULADOS (SET NULL), no se borran. Pero las reglas de reparto que apuntan a este activo SÍ se borran con él, y eso no tiene vuelta atrás: `allocation_rules_deleted` dice cuántas y `allocation_remainder_rules_deleted` cuántas de ellas eran el sumidero de la cascada (`remainder` sin tope). Si ese número no es cero, dilo explícitamente antes de confirmar: a partir del borrado el sobrante mensual se reparte de otra manera. Mueve la proyección entera.",
         annotations(title = "Borrar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn delete_asset(
