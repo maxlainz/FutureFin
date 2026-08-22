@@ -87,6 +87,21 @@ recategorización en lote, ni las reglas lo impiden. El importador de CSV y la r
 copia `.ffbackup` tampoco validan nada: traen el signo real del banco, y una copia que se niega a
 restaurar es peor que una fila rara.
 
+#### Un mes excelente se leía como una pérdida
+
+En la pestaña Movimientos, el tooltip de la gráfica mensual decía «Neto». Ese neto **incluía el
+dinero que moviste a ahorro o inversión**, así que un mes en el que ingresaste 2.853 €, gastaste
+2.218 € y aportaste 3.711 € a tu cartera salía como **−3.075 €**. Es aritméticamente correcto —esa
+es la caja que se movió— pero se lee justo al revés de lo que pasó.
+
+Peor: la comparativa mensual tenía otra cifra llamada también «neto» que **no** incluía el ahorro.
+Dos números distintos con el mismo nombre.
+
+Ahora hay dos cifras y cada nombre dice su fórmula: **«Ingresos − gastos»** (lo que quedó tras
+consumir, que es lo que responde a «¿fue buen mes?») y **«Variación de caja»** (incluye los
+traspasos). El tooltip enseña las dos, la primera delante, y la palabra «Neto» a secas desaparece de
+la interfaz. La primera coincide al céntimo con la de la comparativa.
+
 #### Las reglas de categorización se enviaban todas de golpe
 
 Es la única lista que **crece con el uso**: cada import aprende una regla por concepto nuevo, así

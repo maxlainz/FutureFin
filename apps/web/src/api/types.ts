@@ -784,10 +784,18 @@ export type RecurringMaterializeResponse = {
 export type CashflowMonthApi = {
   month_index: number;
   date_ymd: string;
+  /** ≤ 0 */
   expense: string;
+  /** ≥ 0 */
   income: string;
+  /** ≤ 0 */
   savings: string;
-  net: string;
+  /** `expense + income + savings`: variación de caja. **Incluye** los traspasos a ahorro, así que
+   *  un mes con una aportación grande sale negativo sin ser una pérdida. */
+  cash_delta: string;
+  /** `income + expense`: ingresos menos gastos, **sin** ahorro. Misma cifra que
+   *  `totals.net_actual` de la comparativa mensual. Es la que responde a «¿fue buen mes?». */
+  income_minus_expense: string;
 };
 
 /** Punto del grid fino del cash-flow histórico. `month_fraction` es el eje X real
