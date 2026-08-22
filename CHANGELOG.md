@@ -6,6 +6,66 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-08-22
+
+**Qué cambia para ti: nada.** La aplicación es bit a bit la misma que la 4.0.0 — no se toca el
+motor, ni la API, ni la interfaz, ni el esquema. Esta versión existe porque `main` es la única
+rama desde la que se publica, y varios arreglos de la infraestructura del repositorio no surtían
+efecto mientras vivieran solo en `dev`. **No hay imagen nueva que descargar.**
+
+### El problema
+
+Abrir el repositorio en público dejó al descubierto cuatro cosas que funcionaban «hacia dentro»
+pero no hacia fuera:
+
+- **Los PRs de Dependabot iban contra `main`.** `.github/dependabot.yml` no declaraba
+  `target-branch`, así que Dependabot usaba la rama por defecto — que aquí es la de publicación,
+  no la de desarrollo. Los 22 PRs de agosto salieron todos con `base=main`: mergear uno dejaba el
+  bump fuera de `dev`, con CI compilando contra la versión vieja, y el siguiente que regenerase un
+  lockfile lo revertía en silencio. Ahora las cuatro entradas (cargo, npm, github-actions, docker)
+  apuntan a `dev`.
+
+  Dos límites que el fichero deja escritos porque no son evidentes: `target-branch` solo redirige
+  las *version updates* —las **security updates** van siempre contra la rama por defecto— y
+  Dependabot lee la configuración desde la rama por defecto, así que un cambio ahí no entra en
+  vigor hasta la release siguiente. Esta.
+
+- **Nadie analizaba el código propio.** `secrets-scan` mira datos personales en el árbol y
+  Dependabot mira dependencias de terceros; `code-scanning/alerts` respondía «no analysis found».
+  Nuevo workflow `codeql.yml` sobre `rust`, `javascript-typescript` y `actions` — los workflows
+  también son superficie de ataque, y este repositorio guarda `DOCKERHUB_TOKEN`. Va aparte de
+  `ci.yml` y **no** como check obligatorio a propósito: exigirlo bloquearía el push directo a
+  `main` que hace `scripts/release-to-main.sh`.
+
+- **La documentación decía que `main` es un espejo de `dev`**, y actuar en consecuencia destruye
+  trabajo. Desde la 4.0.0 `main` no publica `CLAUDE.md` ni `.claude/`, así que arrastra commits que
+  solo borran esas rutas y que `dev` no debe recibir jamás: un `git merge main` desde `dev`
+  borraría la documentación interna entera. `CLAUDE.md` y la skill `futurefin-change-control`
+  —que repetía el error palabra por palabra, en la sección que se consulta *antes* de mergear—
+  documentan ahora que el flujo es de una sola dirección, y el comando que distingue «`dev` está
+  atrasada» de «`main` solo lleva sus borrados de release».
+
+- **El sync de la descripción de Docker Hub** moría con un «Forbidden» sin explicar por qué y podía
+  dispararse desde cualquier rama, saltándose el `main-guard`. Y el borrado de documentación
+  interna de `scripts/release-to-main.sh` era un **no-op silencioso**: capturaba la lista de
+  ficheros *después* del `git rm --cached`, cuando el índice ya no los tenía, así que el commit
+  salía bien y los ficheros se quedaban sueltos en el árbol de `main`.
+
+### Ajustes de GitHub (no viven en git)
+
+Sin commit que los pruebe; se verifican con `gh api repos/<owner>/<repo> --jq
+'.security_and_analysis'` y `gh api repos/<owner>/<repo>/rulesets`:
+
+- Dependabot alerts, Dependabot security updates, secret scanning y **push protection**: activados.
+  Las alertas salieron al momento: 15 abiertas, las 15 con `scope: development`. Cero en runtime —
+  las únicas dependencias de producción del frontend son `react` y `react-dom`, así que **ninguna
+  llega a la imagen**. Secret scanning: 0 alertas.
+- `main` protegida con un ruleset de `deletion` + `non_fast_forward`. Deliberadamente **sin checks
+  obligatorios**: bloquearían el push directo del script de release. Protege lo irreversible, no
+  el mergear en rojo.
+- Actions: aprobación requerida para **todos** los colaboradores externos (estaba en «solo los
+  que contribuyen por primera vez»).
+
 ## [4.0.0] - 2026-08-22
 
 **Qué cambia para ti** — FutureFin **se abre en público** y esta versión es la que se puede
