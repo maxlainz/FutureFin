@@ -97,8 +97,10 @@ fn identity(ctx: &RequestContext<RoleServer>) -> Result<McpIdentity, ErrorData> 
         .ok_or_else(|| ErrorData::internal_error("missing request identity", None))
 }
 
-/// Misma semántica que `?view=` en HTTP: `"mine"` → Mine, cualquier otra cosa → Household.
-fn resolve_view(view: &Option<String>) -> LedgerView {
+/// Misma semántica que `?view=` en HTTP, parseo compartido: `"mine"` → Mine, `"household"` u
+/// omitido → Household, **cualquier otra cosa → `invalid_view`**. Un LLM que escriba `"MINE"` o
+/// `"self"` recibe un error, no el hogar entero en silencio (issue #7).
+fn resolve_view(view: &Option<String>) -> Result<LedgerView, ApiError> {
     LedgerViewQuery { view: view.clone() }.resolve()
 }
 
@@ -136,14 +138,16 @@ fn to_tool_outcome(e: ApiError) -> Result<CallToolResult, ErrorData> {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ViewParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo ("household").
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`) — no cae a "household" en silencio.
     #[serde(default)]
     pub view: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ProjectionParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Horizonte en meses (12–840; fuera de rango se clampa). Omitido = horizonte derivado de
@@ -161,7 +165,8 @@ pub struct ProjectionParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct HistoryParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Limita la serie a los últimos N meses (1–1200). Omitido = desde el snapshot más
@@ -177,7 +182,8 @@ pub struct HistoryParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TransactionsSummaryParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Año del mes seleccionado. Se pasa junto con `month`; omitidos = último mes completo.
@@ -193,7 +199,8 @@ pub struct TransactionsSummaryParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTransactionsParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Filtra por mes "YYYY-MM" (op_date dentro del mes).
@@ -245,7 +252,8 @@ pub struct CategoriesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CategorySeriesParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// "expense" | "income".
@@ -262,7 +270,8 @@ pub struct CategorySeriesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CashflowParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Meses de ventana (1–120, default 24).
@@ -315,7 +324,8 @@ pub struct AssetReturnOverrideParam {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SimulateParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Horizonte en meses (12–840). Omitido = horizonte de la instalación.
@@ -842,7 +852,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(summary_core(&self.state.pool, id.installation_id, id.user_id, view).await)
     }
 
@@ -857,7 +870,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         let res = projection_series_cached(
             &self.state,
             id.user_id,
@@ -889,7 +905,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             budget_snapshot_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )
@@ -906,7 +925,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             transactions_summary_core(
                 &self.state.pool,
@@ -933,7 +955,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
 
         let limit = p.limit.map(|l| l as usize).unwrap_or(LIST_TRANSACTIONS_DEFAULT_LIMIT);
         if limit == 0 || limit > LIST_TRANSACTIONS_MAX_LIMIT {
@@ -1024,7 +1049,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             history_series_core(
                 &self.state.pool,
@@ -1049,7 +1077,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_assets_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )
@@ -1066,7 +1097,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_liabilities_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )
@@ -1083,7 +1117,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_planning_flows_core(&self.state.pool, id.installation_id, id.user_id, view)
                 .await,
@@ -1129,7 +1166,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
 
         // Parseo de strings → tipos (las cotas de dominio se validan en el core).
         let build_spec = || -> Result<SimulationSpec, ApiError> {
@@ -1205,7 +1245,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         let res = allocation_resolution_core(
             &self.state.pool,
             id.installation_id,
@@ -1227,7 +1270,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_allocation_rules_core(&self.state.pool, id.installation_id, id.user_id, view)
                 .await,
@@ -1261,7 +1307,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         let category_id = match &p.category_id {
             Some(raw) => match Uuid::parse_str(raw.trim()) {
                 Ok(u) => Some(u),
@@ -1298,7 +1347,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             history_cashflow_core(
                 &self.state.pool,
@@ -1355,7 +1407,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_months_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )
@@ -2893,7 +2948,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_imports_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )

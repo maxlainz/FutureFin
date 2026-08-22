@@ -486,7 +486,7 @@ pub async fn get_budget_snapshot(
 ) -> Result<Json<BudgetSnapshotResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = budget_snapshot_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = budget_snapshot_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 

@@ -191,7 +191,7 @@ pub async fn list_planning_flows(
 ) -> Result<Json<Vec<PlanningFlowResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_planning_flows_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_planning_flows_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 

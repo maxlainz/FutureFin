@@ -356,7 +356,7 @@ pub async fn get_transactions_summary(
 ) -> Result<Json<TransactionsSummaryResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve()?;
     let out = transactions_summary_core(
         &state.pool,
         iid,
@@ -802,7 +802,7 @@ pub async fn get_category_series(
 ) -> Result<Json<CategoryMonthlySeriesResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve()?;
     let out = category_monthly_series_core(
         &state.pool,
         iid,

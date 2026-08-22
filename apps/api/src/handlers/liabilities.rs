@@ -401,7 +401,7 @@ pub async fn list_liabilities(
 ) -> Result<Json<Vec<LiabilityResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_liabilities_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_liabilities_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 
