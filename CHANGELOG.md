@@ -236,6 +236,31 @@ La causa de fondo era la duplicación: `/v1/projection/series` tenía **su propi
 en vez de usar el compartido, y por eso el arreglo se le habría escapado. Esa copia se ha borrado.
 Regresión sobre las 14 rutas con `?view=`: `apps/api/tests/query_param_validation.rs`.
 
+### Simular escenarios: la herramienta solo sabía empeorar el plan (issue #27)
+
+`simulate_projection` es con lo que se contesta «¿y si…?» sobre tu plan. Hasta ahora solo respondía
+bien a «¿y si gasto más?»: los tres ajustes mensuales rechazaban cualquier valor negativo, no había
+forma de tocar una categoría concreta, ni de cambiar la fuente del ahorro, ni de ponerle fecha a un
+cambio, ni de tocar el ingreso, ni de comparar dos escenarios de una vez. Y la cifra final llegaba
+en euros nominales a décadas vista, que no dicen nada.
+
+**La descripción de la herramienta era incorrecta, no solo incompleta.** Decía que el gasto extra
+«mueve también el target FIRE», y eso solo es cierto con el número FIRE calculado por gasto anual:
+si lo calculas por ingreso actual o pones un importe fijo, el objetivo no mira el gasto y el delta
+sale 0. Quien lo leía veía un cero y pensaba en un fallo. Ahora la descripción condiciona esa frase
+al modo, y cada lado de la respuesta dice con qué modo se calculó.
+
+**Los dos mandos que eran el mismo.** «Ahorro extra» y «ajuste de caja» escriben la misma variable
+con el signo cambiado, así que pedir 40 € de ahorro extra es exactamente lo mismo que un ajuste de
+caja de −40 €. Eso ya funcionaba, pero no estaba dicho en ninguna parte — y tampoco lo estaba su
+consecuencia incómoda: con cualquiera de los dos, los deltas de gasto, neto, tasa de ahorro y
+runway salen **cero exacto**, porque un ajuste de caja entra en la caja del mes y no en la base de
+gasto. Media respuesta a cero sin explicación parecía un error; ahora se dice que es el contrato, y
+se señala cuál es el eje que sí mueve esas cifras.
+
+Además, la cota «cero o más» de esos dos ejes vivía solo en la prosa de la descripción. Ahora viaja
+también en el esquema de la herramienta, donde un cliente la lee como restricción y no como texto.
+
 ### La app no se podía usar recién instalada
 
 Un hogar nuevo nacía con **cero categorías** —la migración original lo decía con todas las letras:
