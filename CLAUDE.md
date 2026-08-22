@@ -248,23 +248,25 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 - `main` — rama de producción y de publicación. La imagen Docker se construye y publica **desde `main`** (el workflow `publish-image.yml` vive aquí). Es la rama por defecto.
 - `dev` — desarrollo activo, **ramificada de `main`**.
 
-> ### ⚠️ El modelo de ramas cambia en 4.0.0 — y el guard ya está puesto
+> ### ⚠️ `main` NO es un espejo de `dev` — y nunca mergees `main` → `dev`
 >
-> Hasta ahora `main` era un **espejo completo de `dev`**, `CLAUDE.md` y `.claude/` incluidos. Al
-> hacer público el repositorio eso deja de valer: **`main` no publicará documentación interna**.
-> `.claude/` y `CLAUDE.md` viven solo en `dev`.
+> Desde la 4.0.0 (ya ejecutado) **`main` no publica documentación interna**: `.claude/` y
+> `CLAUDE.md` viven **solo en `dev`**. El job `main-guard` de `ci.yml` lo verifica en cada push a
+> `main` y en cada PR contra `main`; hoy `origin/main` tiene **0** ficheros de esas rutas.
 >
-> El job `main-guard` de `ci.yml` **ya lo comprueba**, y hoy `origin/main` tiene 30 ficheros de
-> `.claude/` más `CLAUDE.md`. Es decir: **el primer push a `main` saldrá en rojo** hasta que se
-> haga la limpieza. No es un fallo del guard, es una dependencia de orden — el guard implementa
-> una política que aún no está en vigor.
+> La consecuencia contraintuitiva: `main` acumula commits que `dev` no tiene, y que **no debe
+> tener** — son exclusivamente los borrados de `.claude/` y `CLAUDE.md` que hace cada release.
+> Hoy son 4 commits, 28 ficheros, 10.527 líneas, **cero fuera de esas dos rutas**. Por eso:
 >
-> El release a `main` pasará a hacerse con un script que mergea `dev` y después retira esas rutas
-> (`git merge --no-ff --no-commit dev`, `git rm -r --cached --ignore-unmatch .claude CLAUDE.md`,
-> abortar si queda algún conflicto fuera de esas rutas, y commit). Los conflictos
-> «modificado/borrado» de `.claude/` se resuelven **siempre** borrando.
+> **Nunca hagas `git merge main` estando en `dev`.** Borraría toda la documentación interna de
+> `dev` de un tirón. Que `git rev-list --count origin/dev..origin/main` devuelva un número > 0 es
+> el estado NORMAL y esperado, no un descuido que haya que corregir. Verifica antes de creerte
+> que `dev` está atrasada:
 >
-> Hasta que eso se ejecute: **no mergees a `main`**.
+> ```bash
+> git diff --name-only origin/dev...origin/main | grep -vE '^(\.claude/|CLAUDE\.md)'
+> # vacío = `main` no tiene nada que a `dev` le falte
+> ```
 
 **Releases:**
 
@@ -276,9 +278,9 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 
 1. Desarrollar en `dev`, hacer commit y push.
 2. Bumpar versión en `apps/api/Cargo.toml` (sincronizar `Cargo.lock`) y añadir entrada en `CHANGELOG.md`.
-3. **Merge completo `dev` → `main`** (`git checkout main && git merge dev`). Nunca copias parciales de archivos: `main` debe quedar idéntico a `dev`.
-4. Push tag `vX.Y.Z` **desde `main`** → el workflow `publish-image.yml` (que vive en `main`) publica la imagen.
-5. Volver a `dev` (`git checkout dev`) y seguir; mantener `dev` al día con `main`.
+3. **Publicar `dev` en `main`** con `./scripts/release-to-main.sh X.Y.Z "<una frase>"`. Nunca a mano y nunca con copias parciales: el script mergea `dev` entero y después retira `CLAUDE.md` y `.claude/`, que son la ÚNICA diferencia admisible entre las dos ramas.
+4. Push tag `vX.Y.Z` **desde `main`** → `publish-image.yml` publica la imagen (multi-arch: ~2 h) y, al terminar, **crea él solo el GitHub Release** con las notas del CHANGELOG. La sección `## [X.Y.Z]` debe existir ANTES de taguear.
+5. Volver a `dev` (`git checkout dev`) y seguir. **`dev` no se «pone al día» con `main`**: el flujo es de una sola dirección (`dev` → `main`). Ver el aviso de arriba.
 
 Tags published: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere secrets `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` en GitHub repo.
 

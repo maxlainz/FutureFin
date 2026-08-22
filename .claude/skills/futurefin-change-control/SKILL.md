@@ -247,7 +247,7 @@ Owner-confirmed rules, previously unwritten — now they ARE written:
 
 ## 4. Release discipline
 
-### 4.1 dev→main mirror flow (quoted from CLAUDE.md — follow verbatim)
+### 4.1 dev→main release flow (quoted from CLAUDE.md — follow verbatim)
 
 **The merge commit needs its own message.** A bare `git merge dev` writes `Merge branch 'dev'`,
 which breaks the repo's Conventional Commits convention *and* is the first thing a visitor sees on
@@ -256,14 +256,19 @@ the public branch. Always:
 first commit on public `main` said `Merge branch 'dev'` and had to be amended after the tag was
 already pushed.
 
-`main` is the production/publishing branch and a **full mirror** of `dev` (no divergence, no
-branch-exclusive files). CLAUDE.md, "Releases":
+`main` is the production/publishing branch. It is **NOT a full mirror of `dev`** — that was true
+until 4.0.0 and is now wrong in a way that destroys work if you act on it: `main` deliberately does
+not publish `CLAUDE.md` nor `.claude/`, so it carries release commits that delete those paths and
+that `dev` must never receive. **Never `git merge main` from `dev`.** A non-zero
+`git rev-list --count origin/dev..origin/main` is the normal state; check what actually diverges
+with `git diff --name-only origin/dev...origin/main | grep -vE '^(\.claude/|CLAUDE\.md)'` — empty
+means `dev` lacks nothing. CLAUDE.md, "Releases":
 
 > 1. Desarrollar en `dev`, hacer commit y push.
 > 2. Bumpar versión en `apps/api/Cargo.toml` (sincronizar `Cargo.lock`) y añadir entrada en `CHANGELOG.md`.
-> 3. **Merge completo `dev` → `main`** (`git checkout main && git merge dev`). Nunca copias parciales de archivos: `main` debe quedar idéntico a `dev`.
-> 4. Push tag `vX.Y.Z` **desde `main`** → el workflow `publish-image.yml` (que vive en `main`) publica la imagen.
-> 5. Volver a `dev` (`git checkout dev`) y seguir; mantener `dev` al día con `main`.
+> 3. **Publicar `dev` en `main`** con `./scripts/release-to-main.sh X.Y.Z "<una frase>"`. Nunca a mano y nunca con copias parciales: el script mergea `dev` entero y después retira `CLAUDE.md` y `.claude/`, que son la ÚNICA diferencia admisible entre las dos ramas.
+> 4. Push tag `vX.Y.Z` **desde `main`** → `publish-image.yml` publica la imagen (multi-arch: ~2 h) y, al terminar, **crea él solo el GitHub Release** con las notas del CHANGELOG. La sección `## [X.Y.Z]` debe existir ANTES de taguear.
+> 5. Volver a `dev` (`git checkout dev`) y seguir. **`dev` no se «pone al día» con `main`**: el flujo es de una sola dirección (`dev` → `main`).
 
 The tag push triggers `.github/workflows/publish-image.yml`: multi-arch (amd64+arm64) image to
 GHCR (always) and Docker Hub `maxlainz/futurefin` (if secrets set), tags `:X.Y.Z`, `:X.Y`,
@@ -484,4 +489,10 @@ removed the external-database mode from the entrypoint (`exec_api_external`, `au
 - Fixture + both consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
 - Strict enum precedent: `grep -n "impl<'de> Deserialize" apps/api/src/handlers/installation.rs`
 - npm script names: `grep -n '"typecheck:web"\|"lint:web"\|"build:web"' package.json`
-- Release-flow wording drift: `grep -n 'Merge completo' CLAUDE.md`
+- Release-flow wording drift: `grep -n 'NO es un espejo' CLAUDE.md` (debe imprimir algo; si
+  vuelve a aparecer «espejo completo» o «mantener `dev` al día con `main`», alguien revirtió
+  el modelo de ramas de 4.0.0 a mano)
+- Ramas protegidas y ajustes de seguridad de GitHub (viven fuera del repo, no en git):
+  `gh api repos/maxlainz/FutureFin/rulesets --jq '.[].name'` (**Proteger main**) y
+  `gh api repos/maxlainz/FutureFin --jq '.security_and_analysis'` (secret scanning + push
+  protection **enabled**)
