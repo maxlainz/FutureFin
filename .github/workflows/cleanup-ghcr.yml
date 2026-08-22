@@ -3,7 +3,12 @@ name: Cleanup GHCR (keep releases)
 on:
   schedule:
     - cron: "0 3 * * 1"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Solo listar lo que se borraría, sin borrar nada"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -18,9 +23,11 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           PACKAGE_TYPE: container
           PACKAGE_NAME: futurefin
-          KEEP_LATEST_DEV: "0"
           KEEP_SHA_DAYS: "30"
-          KEEP_OTHER_DAYS: "60"
+          # Las ejecuciones programadas borran de verdad; las manuales, por defecto,
+          # solo enseñan lo que harían. Este workflow es irreversible: una versión
+          # borrada de GHCR no se recupera, hay que republicar la imagen.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
@@ -65,61 +72,71 @@ jobs:
 
           now_s="$(date -u +%s)"
 
-          # Calcula qué IDs borrar. Mantiene:
-          # - Cualquier versión con tag vX.Y.Z o tag latest
-          # - Las últimas KEEP_LATEST_DEV versiones con tag dev
-          # Borra:
-          # - sha-* si es más vieja que KEEP_SHA_DAYS y no tiene release/stable
-          # - lo demás si es más vieja que KEEP_OTHER_DAYS
+          # ────────────────────────────────────────────────────────────────────
+          # POR QUÉ NO SE TOCA NUNCA UNA VERSIÓN SIN TAG
+          #
+          # Este workflow borraba «versiones sin tag de más de 60 días». En un
+          # package de UNA sola arquitectura eso sería basura; en uno multi-arch
+          # —y este se publica para linux/amd64 y linux/arm64— es exactamente lo
+          # contrario. Cada tag publicado (`:3.0.0`, `:latest`…) es un índice OCI
+          # que NO contiene capas: apunta a un manifest hijo por arquitectura, y
+          # esos hijos aparecen en la API de GHCR como versiones SIN TAG.
+          #
+          # O sea: las versiones sin tag son las tripas de las releases vivas.
+          # Borrarlas deja `:3.0.0`, `:2.3.0`… apuntando a manifests inexistentes
+          # y `docker pull` falla con un 404 de manifest desconocido, en tags que
+          # llevaban meses publicados y que nadie ha vuelto a tocar. Silencioso
+          # hasta que un usuario intenta instalar o hacer rollback.
+          #
+          # No había explotado por dos razones, ninguna de ellas de diseño:
+          #   1. La versión sin tag más antigua era del 18/08/2026, aún dentro de
+          #      la ventana de 60 días.
+          #   2. El jq anterior era, de hecho, un no-op: enlazaba
+          #      `( .[0:0] | .[].id ) as $dev_keep_ids` sobre un flujo VACÍO (no
+          #      existe ninguna versión con tag `dev`), y en jq un `as` sobre un
+          #      flujo vacío anula toda la expresión que va detrás. Y si llegaba a
+          #      producir algo, la precedencia rota de
+          #      `(.id | IN(...)) | not and (.id | IN(...)) | not` reventaba con
+          #      «Cannot index boolean with string "id"» — error que el
+          #      `2>/dev/null || true` del final se tragaba entero.
+          # Es decir: la salvaguarda era un accidente. Ahora es explícita.
+          #
+          # REGLA: solo se borran versiones cuyos tags son TODOS `sha-*` y que
+          # superan KEEP_SHA_DAYS. Una versión sin tag jamás se toca. Una versión
+          # con cualquier tag que no sea `sha-*` (vX.Y.Z, latest, dev, lo que sea)
+          # tampoco.
+          #
+          # Nota: hoy publish-image.yml solo emite `type=semver` y `latest`, nunca
+          # `type=sha`, así que en la práctica esto no borra nada. Es intencionado:
+          # el workflow queda como red de seguridad para el día en que se añadan
+          # tags `sha-*`, y mientras tanto no destruye nada. Si algún día hay que
+          # limpiar de verdad, se hace añadiendo tags `sha-*` a la publicación, no
+          # ampliando el criterio de borrado.
+          #
+          # (La consulta trae como mucho `per_page` versiones: si el package crece
+          # por encima de 100, las más antiguas no se examinan. Con la regla actual
+          # eso solo significa borrar menos, nunca borrar de más.)
+          # ────────────────────────────────────────────────────────────────────
+          #
+          # Sin `2>/dev/null || true`: si jq falla queremos enterarnos, no seguir
+          # con una lista vacía creyendo que no había nada que borrar.
           ids_to_delete="$(
-            echo "${versions_json}" | jq -r --arg keepDev "${KEEP_LATEST_DEV}" --arg keepShaDays "${KEEP_SHA_DAYS}" --arg keepOtherDays "${KEEP_OTHER_DAYS}" --argjson now "${now_s}" '
-              def is_release_tag:
-                any(.metadata.container.tags[]?; test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"));
-              def is_latest_tag:
-                any(.metadata.container.tags[]?; . == "latest");
-              def has_tag(t):
-                any(.metadata.container.tags[]?; . == t);
-              def has_sha_tag:
-                any(.metadata.container.tags[]?; test("^sha-[0-9a-f]+$"));
-
-              # Precomputar releases a mantener
-              [ .[] | select(is_release_tag or is_latest_tag) | .id ] as $release_ids
-              |
-              # Dev entries: {id, created_at}
-              [ .[] | select(has_tag("dev")) | {id: .id, created_at: .created_at} ]
-              | sort_by(.created_at) | reverse
-              | ( .[0: ( ($keepDev|tonumber) )] | .[].id ) as $dev_keep_ids
-              |
-              # Flatten de todos y filtrado
-              (
-                [ .[] | {
-                    id: .id,
+            echo "${versions_json}" | jq -r --arg keepShaDays "${KEEP_SHA_DAYS}" --argjson now "${now_s}" '
+              [ .[]
+                | { id: .id,
                     created_at: .created_at,
-                    tags: (.metadata.container.tags // [])
-                  } ]
-              ) as $all
-              |
-              $all
-              | map(select( (.id | IN($release_ids)) | not
-                             and ( .id | IN($dev_keep_ids)) | not ))
-              | .[]
-              | . as $item
-              | (
-                  ($item.created_at | fromdateiso8601) as $created
-                  | ($now - $created) / 86400 | floor as $age_days
-                  | {
-                      id: $item.id,
-                      tags: $item.tags,
-                      age_days: $age_days
-                    }
-                )
-              | select(
-                  (any(.tags[]?; test("^sha-")) and (.age_days|tonumber) > ($keepShaDays|tonumber))
-                  or
-                  ((all(.tags[]?; test("^sha-")|not) ) and (.age_days|tonumber) > ($keepOtherDays|tonumber))
-                )
-              | .id
-            ' 2>/dev/null || true
+                    tags: (.metadata.container.tags // []) }
+              ]
+              # 1. Nunca una versión sin tag: son los manifests hijos por
+              #    arquitectura de los tags publicados.
+              | map(select((.tags | length) > 0))
+              # 2. Solo si TODOS sus tags son `sha-*`. Basta un tag de release,
+              #    `latest` o cualquier otro para que quede fuera.
+              | map(select(all(.tags[]; test("^sha-[0-9a-f]+$"))))
+              # 3. Y solo si supera la ventana de retención.
+              | map(select((($now - (.created_at | fromdateiso8601)) / 86400 | floor) > ($keepShaDays | tonumber)))
+              | .[].id
+            '
           )"
 
           if [[ -z "${ids_to_delete}" ]]; then
@@ -127,7 +144,12 @@ jobs:
             exit 0
           fi
 
-          echo "Borrando IDs: ${ids_to_delete//$'\n'/, }"
+          echo "Candidatas (tags 'sha-*' de más de ${KEEP_SHA_DAYS} días): ${ids_to_delete//$'\n'/, }"
+
+          if [[ "${DRY_RUN}" == "1" ]]; then
+            echo "DRY_RUN=1 — no se borra nada."
+            exit 0
+          fi
 
           # Borrar cada versión.
           # Si una eliminación falla (permisos/admin), continuamos.
@@ -146,4 +168,3 @@ jobs:
           done <<< "${ids_to_delete}"
 
           echo "Cleanup GHCR completado (best-effort)."
-

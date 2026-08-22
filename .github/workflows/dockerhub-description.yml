@@ -1,0 +1,61 @@
+name: Sync Docker Hub description
+
+# `maxlainz/futurefin` es público y lleva miles de descargas con la descripción
+# VACÍA: quien llega desde el buscador de Docker Hub no ve ni qué es la imagen ni
+# cómo arrancarla, y no hay ningún enlace de vuelta al repositorio. Este workflow
+# publica `.github/dockerhub-README.md` como página del repositorio de Docker Hub.
+#
+# Fichero aparte y no el README.md del repo a propósito: el de GitHub da por hecho
+# el contexto del repositorio (capturas relativas, badges, enlaces a docs/…), que
+# en Docker Hub aparecen rotos. Este es la versión corta y con enlaces absolutos.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/dockerhub-README.md"
+      - ".github/workflows/dockerhub-description.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dockerhub-description:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # El contexto `secrets` no está disponible en las expresiones `if:`, así que
+      # la presencia de las credenciales se resuelve en bash y se propaga como
+      # output. Sin esto, un fork sin secretos fallaría el job en cada push a main.
+      - name: ¿Hay credenciales de Docker Hub?
+        id: creds
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "Sin secretos de Docker Hub: no hay nada que sincronizar."
+          fi
+
+      # `password` admite el token de acceso personal de Docker Hub, pero debe
+      # tener permisos de escritura sobre el repositorio (los tokens de solo
+      # lectura devuelven 401 aquí aunque sirvan para `docker push`).
+      # El repositorio de destino sale de la misma variable que publish-image.yml,
+      # para que ambos workflows no puedan apuntar a sitios distintos.
+      - name: Publicar la descripción
+        if: steps.creds.outputs.ok == 'true'
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ vars.DOCKERHUB_IMAGE || 'maxlainz/futurefin' }}
+          short-description: "Finanzas del hogar y planificación FIRE, autoalojadas en un solo contenedor con PostgreSQL incluido."
+          readme-filepath: .github/dockerhub-README.md
