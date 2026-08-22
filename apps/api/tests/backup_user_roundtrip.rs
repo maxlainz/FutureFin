@@ -570,7 +570,7 @@ async fn backup_v5_transactions_round_trip() {
 
     // Import one CSV expense row (categorized as Super, batch linked to the Cash account).
     let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
-               15/06/2026;15/06/2026;CONSUM BARNA;-9;EUR\n";
+               15/06/2026;15/06/2026;SUPERMERCADO ALMENDRO;-9;EUR\n";
     let b64 = B64.encode(csv);
     let p = app
         .post_json_with_cookie(
