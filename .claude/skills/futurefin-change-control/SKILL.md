@@ -241,6 +241,13 @@ Owner-confirmed rules, previously unwritten — now they ARE written:
 
 ### 4.1 dev→main mirror flow (quoted from CLAUDE.md — follow verbatim)
 
+**The merge commit needs its own message.** A bare `git merge dev` writes `Merge branch 'dev'`,
+which breaks the repo's Conventional Commits convention *and* is the first thing a visitor sees on
+the public branch. Always:
+`git merge --no-ff dev -m "chore(release): X.Y.Z — <one line>"`. Caught the hard way on 4.0.0: the
+first commit on public `main` said `Merge branch 'dev'` and had to be amended after the tag was
+already pushed.
+
 `main` is the production/publishing branch and a **full mirror** of `dev` (no divergence, no
 branch-exclusive files). CLAUDE.md, "Releases":
 
