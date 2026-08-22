@@ -382,6 +382,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   invalid_resolution:
     "Esa resolución no es válida. El detalle del gráfico puede ser semanal o diario.",
   invalid_density: "Esa densidad de la serie no es válida. Puede ser mensual o híbrida.",
+  limit_out_of_range:
+    "El número de resultados por página está fuera del rango permitido.",
 
   // ── Tokens, conexiones y sistema ──────────────────────────────────────────────────────
   token_label_length: "El nombre del token debe tener entre 1 y 64 caracteres.",

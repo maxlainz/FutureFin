@@ -888,6 +888,11 @@ async fn get_allocation_resolution_matches_http_endpoint() {
     );
 }
 
+/// Nota: `list_categorization_rules` **no** está en este bucle desde 4.0.0. La tool pagina y
+/// envuelve la respuesta en `{total_count, offset, truncated, rules}` mientras el GET sigue
+/// devolviendo el array entero (contrato REST intacto), así que ya no son byte-idénticas —
+/// exactamente como `list_transactions`, que tampoco está aquí. La paridad de contenido la cubre
+/// `list_categorization_rules_paginates_without_changing_the_http_contract`.
 #[tokio::test]
 async fn new_read_tools_match_http_endpoints() {
     let app = TestApp::spawn().await;
@@ -933,11 +938,6 @@ async fn new_read_tools_match_http_endpoints() {
         (
             "list_recurring_rules",
             "/v1/transactions/recurring",
-            serde_json::json!({}),
-        ),
-        (
-            "list_categorization_rules",
-            "/v1/transactions/rules",
             serde_json::json!({}),
         ),
         (
@@ -1120,4 +1120,86 @@ async fn unknown_view_is_a_tool_error_not_the_whole_household() {
             "view={good} debería seguir sirviendo: {resp}"
         );
     }
+}
+
+/// REGRESIÓN (issue #8 §9) — la tool pagina; el GET sigue devolviendo el conjunto entero.
+///
+/// Es la única lista del catálogo que **crece con el uso normal**: `learn_rule` inserta una regla
+/// por concepto distinto en cada import con `learn_rules = true`, así que una instalación con dos
+/// años de extractos devolvía ~100 reglas de una tacada. Para un agente eso es una porción notable
+/// de su ventana de contexto gastada sin pedirlo.
+#[tokio::test]
+async fn list_categorization_rules_paginates_without_changing_the_http_contract() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    for i in 0..5 {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions/rules",
+                serde_json::json!({
+                    "match_kind": "substring", "pattern": format!("COMERCIO {i}"),
+                    "assign_kind": "expense",
+                }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    // HTTP: array desnudo con las 5, sin sobre. El contrato REST no se toca.
+    let http = app
+        .get_with_cookie("/v1/transactions/rules", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(http.as_array().expect("array").len(), 5, "{http}");
+
+    // MCP: sobre con total_count, y `truncated` dice la verdad en las dos direcciones.
+    let page = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_categorization_rules", serde_json::json!({"limit": 2})),
+        )
+        .await,
+    );
+    assert_eq!(page["total_count"], 5, "{page}");
+    assert_eq!(page["offset"], 0, "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    assert_eq!(page["rules"].as_array().expect("rules").len(), 2, "{page}");
+
+    let last = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body(
+                "list_categorization_rules",
+                serde_json::json!({"limit": 2, "offset": 4}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(last["truncated"], false, "la última página no está truncada: {last}");
+    assert_eq!(last["rules"].as_array().expect("rules").len(), 1, "{last}");
+
+    // Y las reglas que sirve la página son las mismas que sirve el GET, en el mismo orden.
+    let full = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_categorization_rules", serde_json::json!({"limit": 200})),
+        )
+        .await,
+    );
+    assert_eq!(full["rules"], http, "el contenido paginado debe ser el del GET");
+
+    // Cota de `limit`.
+    let bad = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_categorization_rules", serde_json::json!({"limit": 999})),
+    )
+    .await;
+    assert_eq!(bad["result"]["isError"], true, "{bad}");
 }

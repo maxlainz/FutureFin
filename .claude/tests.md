@@ -8,13 +8,25 @@ Test setup post-refactor (May 2026). Before: 22 engine unit tests, nothing else.
 
 ```bash
 # Backend (engine + integration)
-docker run -d --name ff-test-db \
+docker run -d --name ff-test-db --shm-size=1g \
   -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=futurefin_test \
   -e POSTGRES_DB=futurefin_test -p 5433:5432 postgres:16.4-alpine
 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
   cargo test --workspace
 
 # Frontend
+> **`--shm-size=1g` no es opcional.** El default de Docker son 64 MB de `/dev/shm`, y un test que
+> revienta deja su schema `ff_test_<uuid>` sin borrar. Con unos cuantos cientos acumulados, PostgreSQL
+> empieza a fallar con `could not resize shared memory segment … No space left on device` y
+> `expected to read 5 bytes, got 0 bytes at EOF`, **en tests que no tienen nada que ver** (la primera
+> vez se fueron 12 de `oauth_flow.rs`). Parece un fallo del código y no lo es. Si ya te ha pasado:
+>
+> ```bash
+> docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
+>   "select 'drop schema \"'||schema_name||'\" cascade;' from information_schema.schemata \
+>    where schema_name like 'ff\_test\_%'" | docker exec -i ff-test-db psql -U futurefin -d futurefin_test -q
+> ```
+
 npm test --workspace futurefin-web
 ```
 

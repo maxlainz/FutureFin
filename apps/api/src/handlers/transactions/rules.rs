@@ -249,27 +249,56 @@ pub async fn list_rules(
 ) -> Result<Json<Vec<RuleResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_categorization_rules_core(&state.pool, iid, user.id.0).await?;
+    let (out, _total) = list_categorization_rules_core(&state.pool, iid, user.id.0, None, 0).await?;
     Ok(Json(out))
 }
 
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_categorization_rules`.
 /// Siempre own-user (el endpoint no acepta `?view` — no inventarlo en la tool).
+///
+/// Paginación con el mismo contrato que `list_transactions_core`: con `limit = None` (el handler
+/// HTTP) no se emite `LIMIT`/`OFFSET` ni la query de `COUNT`, así que el conjunto entero y el
+/// contrato REST quedan intactos; con `limit = Some(n)` (la tool MCP) la paginación baja a SQL y
+/// `total_count` sale de un `COUNT(*)`.
+///
+/// Hace falta aquí y no en los otros listados porque **éste es el único que crece con el uso
+/// normal**: `learn_rule` inserta una regla por concepto distinto en cada import con
+/// `learn_rules = true`. Una instalación con dos años de extractos devolvía ~100 reglas y ~11 KB
+/// de una tacada — una porción notable de la ventana de contexto de un agente (issue #8 §9).
 pub(crate) async fn list_categorization_rules_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
     user_id: Uuid,
-) -> Result<Vec<RuleResponse>, ApiError> {
-    let sql = format!(
+    limit: Option<i64>,
+    offset: i64,
+) -> Result<(Vec<RuleResponse>, i64), ApiError> {
+    let mut sql = format!(
         "{RULE_SELECT} WHERE r.installation_id = $1 AND r.owner_user_id = $2 \
          ORDER BY r.updated_at DESC, r.id ASC"
     );
-    let rows: Vec<RuleRow> = sqlx::query_as(&sql)
+    if limit.is_some() {
+        sql.push_str(" LIMIT $3 OFFSET $4");
+    }
+    let mut q = sqlx::query_as(&sql).bind(iid).bind(user_id);
+    if let Some(n) = limit {
+        q = q.bind(n).bind(offset);
+    }
+    let rows: Vec<RuleRow> = q.fetch_all(pool).await?;
+    let page: Vec<RuleResponse> = rows.into_iter().map(row_to_response).collect();
+
+    // Sin `limit` el total ES la página: nos ahorramos el COUNT y el camino HTTP no cambia.
+    let total = match limit {
+        None => page.len() as i64,
+        Some(_) => sqlx::query_scalar(
+            "SELECT COUNT(*) FROM categorization_rules \
+             WHERE installation_id = $1 AND owner_user_id = $2",
+        )
         .bind(iid)
         .bind(user_id)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().map(row_to_response).collect())
+        .fetch_one(pool)
+        .await?,
+    };
+    Ok((page, total))
 }
 
 /// Valida `(assign_kind, assign_category_id)`: savings exige categoría NULL; expense/income con
