@@ -1150,6 +1150,28 @@ pub(crate) async fn patch_transaction_core(
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
+    // Mover la fecha de una INSTANCIA recurrente la desvincula de su plantilla.
+    //
+    // Sin esto, el PATCH se persistía y acto seguido la convergencia lo BORRABA: la poda
+    // elimina toda instancia cuyo mes no sea el de origen de su regla ni un mes activo, y el
+    // mes en curso nunca es activo. El usuario corregía «la nómina cayó el 5 de agosto», el
+    // servidor guardaba, la convergencia lo destruía, `load_txn` no encontraba la fila y la
+    // respuesta era un **500 sobre una mutación que sí había ocurrido** — y su edición
+    // reaparecía revertida, con id nuevo, en el mes original. Desvincular es lo correcto: una
+    // instancia que el usuario mueve de mes deja de describir la plantilla, así que pasa a ser
+    // un movimiento suelto y la convergencia recrea la del mes de origen sin pisar nada.
+    if new_op_date != current.op_date {
+        sqlx::query(
+            r#"UPDATE transactions SET recurring_rule_id = NULL
+               WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3
+                 AND recurring_rule_id IS NOT NULL"#,
+        )
+        .bind(id)
+        .bind(iid)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     // Los nuevos amount/op_date pueden abrir (o reabrir) un emparejado → pase antes de invalidar.

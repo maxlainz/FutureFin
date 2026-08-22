@@ -75,7 +75,7 @@ async fn mode_a_mutations_do_not_touch_projection_cache() {
     .await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     app.warm_household(&owner.cookie, &key).await;
 
     // --- Batería de mutaciones de transacciones (modo A, default) ---
@@ -162,7 +162,7 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     set_mode(&app, &owner.cookie, "transactions_avg").await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
 
     // 1. create
     app.warm_household(&owner.cookie, &key).await;
@@ -268,14 +268,21 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     assert!(mat.json()["materialized"].as_u64().unwrap() >= 1, "materialize debe generar ≥1: {mat:?}");
     app.assert_invalidated(&key, "materialize").await;
 
-    // 8. borrar la regla recurrente NO invalida (instancias sobreviven, conjunto sin cambios).
+    // 8. borrar la regla recurrente SÍ invalida.
+    //
+    // Este paso asertaba lo contrario, con una premisa que no se sostiene: «no cambia el
+    // conjunto de transacciones». El conjunto no cambia, pero su CLASIFICACIÓN sí, y el
+    // promedio del engine se apoya exactamente en ella. `real_txns` cuenta
+    // `recurring_rule_id IS NULL`; el mes de origen está exento de la poda, así que puede
+    // existir una instancia en un mes sin ningún movimiento real — un mes que el promedio
+    // ignora entero, numerador y denominador. Al borrar la plantilla, la FK ON DELETE SET NULL
+    // convierte esa instancia en movimiento real y el mes entra en el promedio: el ahorro que
+    // usa el engine cambia sin que nada invalide. Con TTL deslizante, un usuario que mirase la
+    // proyección una vez por hora se quedaba con la vieja indefinidamente.
     app.warm_household(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/recurring/{rule_id}"), &owner.cookie)
         .await;
-    assert!(
-        app.cache_contains(&key).await,
-        "modo B: borrar una regla recurrente NO cambia el conjunto de transacciones → no debe invalidar"
-    );
+    app.assert_invalidated(&key, "borrar una regla recurrente").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +302,7 @@ async fn flipping_savings_source_invalidates_projection_cache() {
     .await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
 
     // A → B
     app.warm_household(&owner.cookie, &key).await;
@@ -326,7 +333,7 @@ async fn mode_c_mutation_invalidates_projection_cache() {
     set_mode(&app, &owner.cookie, "budget_income_real_expense").await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
 
     app.warm_household(&owner.cookie, &key).await;
     let created = app
@@ -395,7 +402,7 @@ async fn creating_a_categorization_rule_never_invalidates_projection_cache() {
         .await;
 
         let iid = app.installation_id().await;
-        let key = app.household_key(iid);
+        let key = app.household_key(iid, owner.user_id);
         app.warm_household(&owner.cookie, &key).await;
 
         let created = app
@@ -455,7 +462,7 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
         assert_eq!(seeded.status, http::StatusCode::CREATED, "modo {mode}: {seeded:?}");
 
         let iid = app.installation_id().await;
-        let key = app.household_key(iid);
+        let key = app.household_key(iid, owner.user_id);
 
         // 1. Crear la regla: NUNCA invalida, en ningún modo.
         app.warm_household(&owner.cookie, &key).await;
@@ -564,7 +571,7 @@ async fn batch_patch_invalidates_once_for_the_whole_batch() {
     }
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     app.warm_household(&owner.cookie, &key).await;
 
     let r = app
@@ -631,7 +638,7 @@ async fn mode_a_reconcile_endpoints_do_not_touch_projection_cache() {
     let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     app.warm_household(&owner.cookie, &key).await;
 
     // Conciliar par + desconciliar + pase explícito: en modo A nada invalida.
@@ -690,7 +697,7 @@ async fn mode_b_reconcile_endpoints_invalidate_projection_cache() {
     let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
 
     // 1. Conciliar par manual → invalida (cambia qué cuenta en el promedio 12m).
     app.warm_household(&owner.cookie, &key).await;
@@ -783,7 +790,7 @@ async fn pair_left_behind(
     unlink_silently(app, &[&a_id, &b_id]).await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     (iid, key)
 }
 
@@ -876,7 +883,7 @@ async fn mode_b_sweep_does_not_evict_a_hot_cache_when_it_finds_nothing() {
     set_mode(&app, &owner.cookie, "transactions_avg").await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     app.warm_household(&owner.cookie, &key).await;
 
     let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)

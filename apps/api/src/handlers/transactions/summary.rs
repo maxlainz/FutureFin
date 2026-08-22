@@ -380,15 +380,8 @@ pub async fn get_transactions_summary(
 /// Hace dos cosas a la vez. La primera, dar una escala única a todas las cifras del bloque, que
 /// hoy mezclaba `"-23.5000"` con `"47.00"`. La segunda, matar el `-0`: el lado gasto se publica
 /// como magnitud con `-Σ`, y `impl Neg for Decimal` voltea el bit de signo **también sobre el
-/// cero**, así que una categoría sin movimientos serializaba `"actual":"-0"` (issue #8 §7).
-fn money_out(d: Decimal) -> Decimal {
-    let mut v = d.round_dp(4);
-    if v.is_zero() {
-        v = Decimal::ZERO;
-    }
-    v.rescale(4);
-    v
-}
+/// cero**, así que una categoría sin movimientos serializaba `"actual":"-0"` (auditoría MCP §7).
+use crate::money::money_out;
 
 pub(crate) async fn transactions_summary_core(
     pool: &sqlx::PgPool,

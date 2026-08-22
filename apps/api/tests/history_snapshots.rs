@@ -598,7 +598,7 @@ async fn snapshot_mutations_do_not_touch_projection_cache() {
     let key = ProjectionCacheKey {
         installation_id: iid,
         view: LedgerView::Household,
-        owner_user_id: None,
+        owner_user_id: Some(owner.user_id),
         density: Density::Monthly,
     };
     {
