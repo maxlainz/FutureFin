@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-08-22
+
+**Qué cambia para ti: nada.** Igual que la 4.0.1, esto no toca motor, API, interfaz ni esquema, y
+**no hay imagen nueva**. Cambia cómo se desarrolla el proyecto, que es información para quien
+contribuya, no para quien lo instala.
+
+### Una sola rama
+
+Desaparece `dev`. El repositorio pasa a **GitHub Flow**: `main` es la única rama de larga vida, el
+trabajo va en ramas cortas que vuelven por Pull Request, y **los releases son tags sobre `main`**.
+
+El modelo anterior —`dev` de larga vida volcándose en `main` en cada release— venía de que `main`
+no publicaba `CLAUDE.md` ni `.claude/`. Sostener esa frontera costaba unas **244 líneas** cuya
+única función era gestionarla:
+
+- `scripts/release-to-main.sh` (126 líneas), que existía para resolver los conflictos
+  «modificado/borrado» que salían en CADA release, con comentarios documentando dos bugs que ya
+  habían mordido. Un proceso que necesita 126 líneas de defensa contra sí mismo está diciendo algo.
+- El job `main-guard` de CI (31 líneas), que vigilaba una frontera que ya no existe.
+- Las secciones de `CLAUDE.md` y de la skill `futurefin-change-control` que explicaban por qué las
+  dos ramas **no** eran espejo — y que el 2026-08-22 se descubrió que decían justo lo contrario:
+  ambas afirmaban que `main` era «un espejo completo de `dev`», cuando actuar en consecuencia
+  (`git merge main` desde `dev`) habría borrado la documentación interna entera.
+
+Y lo que más pesaba: mientras el script empujara a `main` directamente, **no se podían exigir
+checks obligatorios** en la rama publicada. El issue #28 lo pedía y hubo que dejarlo a medias.
+Ahora `main` está protegida de verdad: pull request obligatorio y CI en verde para poder mergear.
+
+La contrapartida, explícita: `CLAUDE.md` y `.claude/` vuelven a estar en la rama por defecto y se
+ven en la portada del repositorio. Se comprobó antes de decidir que el coste era de presentación y
+no de confidencialidad — con dos ramas públicas, `raw.githubusercontent.com/…/dev/CLAUDE.md` ya
+respondía `200` a cualquiera.
+
+De paso, `.github/dependabot.yml` pierde las cuatro líneas de `target-branch` que se le habían
+añadido horas antes: con una sola rama, la de por defecto ya es el destino correcto.
+
 ## [4.0.1] - 2026-08-22
 
 **Qué cambia para ti: nada.** La aplicación es bit a bit la misma que la 4.0.0 — no se toca el

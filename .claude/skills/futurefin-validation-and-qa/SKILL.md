@@ -203,9 +203,11 @@ Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/*
 
 ## 3. CI reality
 
-`.github/workflows/ci.yml` runs on push/PR to `main` and `dev`. Verified against the file on
+`.github/workflows/ci.yml` runs on push to `main` and on PRs targeting `main` — since 4.0.2 there
+is a single live branch, so that is every path into the tree. Verified against the file on
 2026-07-02; the `docker-stack` job re-read on 2026-08-16 (v3.0.0); **the whole section rewritten on
-2026-08-22 (4.0.0), when the gap this section used to describe was closed.**
+2026-08-22 (4.0.0), when the gap this section used to describe was closed**, and the branch model
+updated on 2026-08-22 (4.0.2).
 
 > **4.0.0 — the integration suite, ESLint and Vitest now RUN in CI.** Until then they did not, and
 > this skill listed them as a "local obligation" — i.e. they depended on nobody forgetting. A PR
@@ -228,9 +230,6 @@ Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/*
   healthcheck is `pg_isready -h 127.0.0.1` **deliberately**: without the host, during `initdb` the
   image runs a temporary server on the Unix socket only and `pg_isready` returns OK before the
   database exists.
-- `main-guard`: `git ls-files -- CLAUDE.md .claude` must be empty on `main`. Runs when the ref **is**
-  `main` **or the PR targets `main`** — with a bare `github.ref` check, a pull request's ref is
-  `refs/pull/N/merge` and the job skipped exactly during review.
 - `secrets-scan`: `./scripts/scan-sensitive.sh` — blocking. No IBAN, card, private key or
   provider token in tracked files. Added August 2026 after real bank exports were found in
   `apps/api/tests/fixtures/`; see [`futurefin-data-hygiene`](../futurefin-data-hygiene/SKILL.md).
@@ -492,7 +491,7 @@ claim. Re-verify volatile facts with:
 - Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**368 in 16 files on 2026-08-22**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
 - Migration count: `ls apps/api/migrations | wc -l` (**42 on 2026-08-22**; 40 on 2026-08-19)
 - CI coverage claims: read `.github/workflows/ci.yml` (jobs: `secrets-scan`, `rust`, `web`,
-  `integration`, `main-guard`, `docker-stack`). `grep -n TEST_DATABASE_URL .github/workflows/ci.yml`
+  `integration`, `docker-stack` — `main-guard` was retired with the two-branch model in 4.0.2). `grep -n TEST_DATABASE_URL .github/workflows/ci.yml`
   and `grep -n 'npm test\|lint:web' .github/workflows/ci.yml` must **print something** since 4.0.0 —
   if they ever go silent again, someone removed a gate
 - `docker-stack` step list (the § 3 table, one row per step):
