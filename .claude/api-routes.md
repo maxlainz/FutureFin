@@ -516,6 +516,23 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `minimum`/`maximum`) — declarativa: rmcp deserializa con serde_json y no valida contra el schema,
   así que describe el contrato, no lo impone. Pinneado en
   `mcp_http.rs::simulate_cash_axes_carry_their_bound_in_the_json_schema`.
+  **`extra_monthly_expense` admite signo (4.0.0, issue #27 §1)**: era el problema del título del
+  issue —la tool solo sabía empeorar el escenario— y el caso de uso más frecuente que existe.
+  Es el ÚNICO de los tres ejes mensuales con signo, porque es el único con semántica de gasto y por
+  tanto el único donde un recorte no tiene sustituto: los dos ejes de caja ya cubren ambos signos
+  entre sí. La relajación es POR EJE (`require_non_negative` sigue intacta y con sus dos call sites
+  de caja, pinneados por las dos filas de `validation_bounds_are_enforced`). **Suelo: la base
+  efectiva se clampa a 0**, no se rechaza — un error tendría que nombrar la base efectiva, que es
+  justo lo que la tool existe para revelar; a cambio el recorte aplicado se lee en
+  `expense_base_monthly`. El clamp vive DENTRO de `build_installation_projection_input` (único
+  punto donde target, bases de caps e input del engine ven el mismo número) y está **gateado a que
+  el override sea negativo**: un `.max(0)` incondicional tocaría también `GET
+  /v1/projection/series` y `GET /v1/summary`, que comparten ese ensamblado —regresión en
+  `the_expense_floor_never_leaks_into_the_read_path`. Con base 0 y `annual_expense` no hay objetivo
+  (`fire_target_absent_reason: net_need_not_positive`) y en modos B/C tampoco hay runway
+  (`NoExpenseBase`, que no es «infinito»). Riesgo a conocer: un recorte grande baja el techo de un
+  cap `months_expense` (= N × (gasto + servicio de deuda)) por debajo del valor del activo, y la
+  regla se salta entera sin error ni flag.
   **`fire_settings_overrides` (4.0.0, issue #27 §3)**: hasta 4.0.0 el ÚNICO campo de
   `FireSettings` simulable era `swr_pct`, así que preguntar «¿y si cumplo el presupuesto?» exigía
   persistir el cambio con `update_fire_settings`. Ahora se pueden simular `savings_source`,

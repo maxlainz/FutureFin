@@ -395,6 +395,135 @@ async fn average_window_override_moves_the_basis_without_persisting_it() {
 }
 
 #[tokio::test]
+async fn a_negative_expense_override_actually_cuts_and_moves_every_dependent_kpi() {
+    // Issue #27 §1, el problema del título: la herramienta solo sabía empeorar el escenario.
+    // Un recorte tiene que mover lo que un aumento mueve, con el signo contrario — y a diferencia
+    // de los ejes de caja, tiene que mover TAMBIÉN gasto total, neto, tasa de ahorro y runway.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await; // gasto 1000, ingreso 3000
+    let token = create_token(&app, &owner).await;
+
+    let sim = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("simulate_projection", json!({"extra_monthly_expense": "-200"})),
+        )
+        .await,
+    );
+    let d = &sim["deltas"];
+    assert_eq!(dec(&sim["scenario"]["expense_base_monthly"]), 800.0, "{}", sim["scenario"]);
+    assert_eq!(dec(&d["expense_total_monthly_delta"]), -200.0, "{d}");
+    assert_eq!(dec(&d["net_monthly_delta"]), 200.0, "{d}");
+    assert!(dec(&d["savings_rate_delta"]) > 0.0, "recortar sube la tasa de ahorro: {d}");
+    assert!(dec(&d["runway_months_delta"]) > 0.0, "y alarga el runway: {d}");
+    // Y el objetivo baja: menos gasto, menos patrimonio necesario (modo annual_expense).
+    assert!(dec(&d["fire_target_base_delta"]) < 0.0, "{d}");
+    assert!(
+        d["jubilacion_months_delta"].as_i64().unwrap() < 0,
+        "recortar adelanta la jubilación: {d}"
+    );
+
+    // Esos cuatro deltas son EXACTAMENTE los que salen 0 con los ejes de caja. Es la diferencia
+    // que la descripción de la tool promete, comprobada aquí en la misma llamada.
+    let caja = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("simulate_projection", json!({"extra_monthly_savings": "200"})),
+        )
+        .await,
+    );
+    for campo in [
+        "expense_total_monthly_delta",
+        "net_monthly_delta",
+        "savings_rate_delta",
+        "runway_months_delta",
+    ] {
+        assert_eq!(
+            dec(&caja["deltas"][campo]),
+            0.0,
+            "el eje de caja no mueve {campo}: {}",
+            caja["deltas"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_oversized_cut_floors_the_base_at_zero_and_says_so() {
+    // El suelo se eligió sobre rechazar porque el error tendría que nombrar un número que el
+    // llamante no puede conocer de antemano: la base efectiva es justo lo que la herramienta
+    // existe para revelar. A cambio, el recorte aplicado tiene que ser LEGIBLE en la respuesta.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await; // gasto 1000
+    let token = create_token(&app, &owner).await;
+
+    let sim = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("simulate_projection", json!({"extra_monthly_expense": "-5000"})),
+        )
+        .await,
+    );
+    let esc = &sim["scenario"];
+    assert_eq!(
+        dec(&esc["expense_base_monthly"]),
+        0.0,
+        "la base se queda en 0, nunca negativa: {esc}"
+    );
+    assert_eq!(dec(&esc["expense_retirement_base_monthly"]), 0.0, "{esc}");
+    assert_eq!(dec(&esc["expense_total_monthly"]), 0.0, "{esc}");
+    // Sin gasto no hay número FIRE en modo `annual_expense`. No es un fallo, y la razón lo dice.
+    assert!(esc["fire_target_base"].is_null(), "{esc}");
+    assert_eq!(esc["fire_target_absent_reason"], "net_need_not_positive", "{esc}");
+    assert!(esc["jubilacion_month_index"].is_null(), "{esc}");
+    // Sin base de gasto tampoco hay runway que contar (y no es «infinito»).
+    assert!(esc["runway_months"].is_null(), "{esc}");
+    assert_eq!(esc["runway_is_indefinite"], false, "{esc}");
+}
+
+#[tokio::test]
+async fn the_expense_floor_never_leaks_into_the_read_path() {
+    // El riesgo real del suelo: un `.max(0)` incondicional tocaría también
+    // `GET /v1/projection/series` y `GET /v1/summary`, porque el clamp vive DENTRO del ensamblado
+    // que comparten. Está gateado a que el override recorte; esto lo fija.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    // Sin override, los dos lados son idénticos entre sí y al GET (el mismo camino de código).
+    let sim = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    assert_eq!(sim["baseline"], sim["scenario"]);
+
+    // Con un override POSITIVO tampoco se clampa nada: el gate mira el signo, no la presencia.
+    let sube = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("simulate_projection", json!({"extra_monthly_expense": "250"})),
+        )
+        .await,
+    );
+    assert_eq!(dec(&sube["scenario"]["expense_base_monthly"]), 1250.0);
+    assert_eq!(
+        dec(&sube["baseline"]["expense_base_monthly"]),
+        1000.0,
+        "el baseline nunca ve el override"
+    );
+
+    let proj = app.get_with_cookie("/v1/summary", &owner.cookie).await;
+    assert_eq!(
+        dec(&proj.json()["financial_health"]["expense_total_monthly_equivalent"]),
+        1000.0,
+        "la ruta de lectura no se entera de ningún override ni de ningún suelo"
+    );
+}
+
+#[tokio::test]
 async fn every_side_echoes_the_context_that_produced_it() {
     // Issue #27 §8. Seis de estos valores ya se calculaban dentro de la simulación y se tiraban.
     // Sin ellos, respuestas correctas se leen como fallos: un `fire_target_base_delta: 0` es
@@ -726,7 +855,11 @@ async fn validation_bounds_are_enforced() {
             ]}),
             "-100",
         ),
-        (json!({"extra_monthly_expense": "-5"}), ">= 0"),
+        // `extra_monthly_expense` NO está aquí: desde 4.0.0 admite signo (issue #27 §1). Los dos
+        // ejes de caja siguen exigiendo `>= 0`, y esas dos filas son las que prueban que la
+        // relajación fue POR EJE y no una apertura del helper compartido.
+        (json!({"extra_monthly_cash_adjustment": "-5"}), ">= 0"),
+        (json!({"extra_monthly_savings": "-5"}), ">= 0"),
         (
             json!({"one_off_expense": {"amount": "100"}}),
             "exactly one",
