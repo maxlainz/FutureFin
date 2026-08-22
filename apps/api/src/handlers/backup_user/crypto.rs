@@ -89,7 +89,7 @@ fn gzip_decompress(zipped: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let mut dec = GzDecoder::new(zipped);
     let mut out = Vec::new();
     dec.read_to_end(&mut out)
-        .map_err(|_| CryptoError::Bad("payload decompression failed".into()))?;
+        .map_err(|_| CryptoError::Bad("backup_file_corrupt: payload decompression failed".into()))?;
     Ok(out)
 }
 
@@ -175,53 +175,53 @@ pub struct ParsedFrame {
 
 pub fn parse_frame(bytes: &[u8]) -> Result<ParsedFrame, CryptoError> {
     if bytes.len() < 4 + 1 + 4 {
-        return Err(CryptoError::Bad("file too short".into()));
+        return Err(CryptoError::Bad("backup_file_corrupt: file too short".into()));
     }
     if &bytes[0..4] != MAGIC {
-        return Err(CryptoError::Bad("not a .ffbackup file (bad magic)".into()));
+        return Err(CryptoError::Bad("backup_not_a_ffbackup_file: not a .ffbackup file (bad magic)".into()));
     }
     let fmt = bytes[4];
     if fmt > SUPPORTED_FORMAT_VERSION {
         return Err(CryptoError::Bad(format!(
-            "file format version {fmt} not supported"
+            "backup_format_version_unsupported: file format version {fmt} not supported"
         )));
     }
     let manifest_len = u32::from_le_bytes(
         bytes[5..9]
             .try_into()
-            .map_err(|_| CryptoError::Bad("malformed length prefix".into()))?,
+            .map_err(|_| CryptoError::Bad("backup_file_corrupt: malformed length prefix".into()))?,
     ) as usize;
     let start: usize = 9;
     let end = start
         .checked_add(manifest_len)
-        .ok_or_else(|| CryptoError::Bad("manifest length overflows".into()))?;
+        .ok_or_else(|| CryptoError::Bad("backup_file_corrupt: manifest length overflows".into()))?;
     if end > bytes.len() {
-        return Err(CryptoError::Bad("manifest length exceeds file".into()));
+        return Err(CryptoError::Bad("backup_file_corrupt: manifest length exceeds file".into()));
     }
     let manifest: Manifest = serde_json::from_slice(&bytes[start..end])
-        .map_err(|e| CryptoError::Bad(format!("manifest invalid: {e}")))?;
+        .map_err(|e| CryptoError::Bad(format!("backup_file_corrupt: manifest invalid: {e}")))?;
     let ciphertext = bytes[end..].to_vec();
     Ok(ParsedFrame { manifest, ciphertext })
 }
 
 pub fn decrypt_payload(parsed: &ParsedFrame, password: &str) -> Result<Vec<u8>, CryptoError> {
     if parsed.manifest.kdf.alg != "argon2id" {
-        return Err(CryptoError::Bad("unsupported KDF".into()));
+        return Err(CryptoError::Bad("backup_crypto_params_unsupported: unsupported KDF".into()));
     }
     if parsed.manifest.cipher.alg != "aes-256-gcm" {
-        return Err(CryptoError::Bad("unsupported cipher".into()));
+        return Err(CryptoError::Bad("backup_crypto_params_unsupported: unsupported cipher".into()));
     }
     if parsed.manifest.compression != "gzip" {
-        return Err(CryptoError::Bad("unsupported compression".into()));
+        return Err(CryptoError::Bad("backup_crypto_params_unsupported: unsupported compression".into()));
     }
     let salt = B64
         .decode(&parsed.manifest.kdf.salt_b64)
-        .map_err(|_| CryptoError::Bad("salt is not valid base64".into()))?;
+        .map_err(|_| CryptoError::Bad("backup_file_corrupt: salt is not valid base64".into()))?;
     let nonce = B64
         .decode(&parsed.manifest.cipher.nonce_b64)
-        .map_err(|_| CryptoError::Bad("nonce is not valid base64".into()))?;
+        .map_err(|_| CryptoError::Bad("backup_file_corrupt: nonce is not valid base64".into()))?;
     if nonce.len() != NONCE_LEN {
-        return Err(CryptoError::Bad("nonce length invalid".into()));
+        return Err(CryptoError::Bad("backup_file_corrupt: nonce length invalid".into()));
     }
 
     let params = Params::new(
@@ -230,7 +230,7 @@ pub fn decrypt_payload(parsed: &ParsedFrame, password: &str) -> Result<Vec<u8>, 
         parsed.manifest.kdf.p_cost,
         Some(parsed.manifest.kdf.out_len as usize),
     )
-    .map_err(|_| CryptoError::Bad("kdf params invalid".into()))?;
+    .map_err(|_| CryptoError::Bad("backup_file_corrupt: kdf params invalid".into()))?;
     let key = derive_key(password, &salt, &params)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| CryptoError::Internal)?;
     let aad = build_aad(

@@ -141,7 +141,7 @@ pub async fn import_user_backup_apply(
     }
     if !body.confirm_replace {
         return Err(ApiError::BadRequest(
-            "confirm_replace must be true to apply the destructive replace".into(),
+            "confirm_required: confirm_replace must be true to apply the destructive replace".into(),
         ));
     }
 
@@ -285,11 +285,11 @@ pub async fn import_user_backup_apply(
 fn decode_request(body: &ImportRequest) -> Result<(super::crypto::Manifest, BackupPayload), ApiError> {
     let bytes = B64
         .decode(body.file_b64.as_bytes())
-        .map_err(|_| ApiError::BadRequest("file_b64 is not valid base64".into()))?;
+        .map_err(|_| ApiError::BadRequest("file_b64_invalid: file_b64 is not valid base64".into()))?;
     let parsed = parse_frame(&bytes).map_err(map_crypto_to_api)?;
     if parsed.manifest.schema_version > CURRENT_SCHEMA_VERSION {
         return Err(ApiError::BadRequest(format!(
-            "backup schema_version {} not supported (server: {CURRENT_SCHEMA_VERSION})",
+            "backup_schema_version_unsupported: backup schema_version {} not supported (server: {CURRENT_SCHEMA_VERSION})",
             parsed.manifest.schema_version,
         )));
     }
@@ -303,7 +303,13 @@ fn decode_request(body: &ImportRequest) -> Result<(super::crypto::Manifest, Back
 fn map_crypto_to_api(e: super::crypto::CryptoError) -> ApiError {
     match e {
         super::crypto::CryptoError::Bad(m) => ApiError::BadRequest(m),
-        super::crypto::CryptoError::Decrypt => ApiError::Unauthorized,
+        // 400, no 401: la sesión del usuario es válida — lo que no cuadra es la contraseña DEL
+        // FICHERO. Con 401 la SPA le decía «tu sesión ha caducado» y el usuario se iba a
+        // reiniciar sesión en vez de reescribir la contraseña del backup, que es el error más
+        // frecuente de todo el flujo de import.
+        super::crypto::CryptoError::Decrypt => ApiError::BadRequest(
+            "backup_wrong_password: decryption failed (wrong password or corrupted file)".into(),
+        ),
         super::crypto::CryptoError::Internal => ApiError::Unavailable,
     }
 }
@@ -410,7 +416,7 @@ fn resolve_category<'a>(
         .copied()
         .ok_or_else(|| {
             ApiError::BadRequest(format!(
-                "backup references category ({scope}, {name}) not present in categories_used"
+                "backup_category_reference_missing: backup references category ({scope}, {name}) not present in categories_used"
             ))
         })
 }
@@ -457,7 +463,7 @@ async fn insert_payload(
     for r in &payload.allocation_rules {
         let Some(&target_id) = new_asset_ids.get(r.target_asset_index) else {
             return Err(ApiError::BadRequest(format!(
-                "allocation_rule.target_asset_index {} is out of bounds (assets={})",
+                "backup_reference_out_of_range: allocation_rule.target_asset_index {} is out of bounds (assets={})",
                 r.target_asset_index,
                 new_asset_ids.len(),
             )));
@@ -675,7 +681,7 @@ async fn insert_payload(
                         &new_asset_ids
                     };
                     *fresh_ids.get(i).ok_or_else(|| {
-                        ApiError::BadRequest("snapshot_item.ledger_index out of bounds".into())
+                        ApiError::BadRequest("backup_reference_out_of_range: snapshot_item.ledger_index out of bounds".into())
                     })?
                 }
                 None => it.item_key,
@@ -712,7 +718,7 @@ async fn insert_payload(
     for imp in &payload.transaction_imports {
         let account_asset_id = match imp.account_asset_index {
             Some(i) => Some(*new_asset_ids.get(i).ok_or_else(|| {
-                ApiError::BadRequest("transaction_import.account_asset_index out of bounds".into())
+                ApiError::BadRequest("backup_reference_out_of_range: transaction_import.account_asset_index out of bounds".into())
             })?),
             None => None,
         };
@@ -769,13 +775,13 @@ async fn insert_payload(
         };
         let linked_asset_id = match r.linked_asset_index {
             Some(i) => Some(*new_asset_ids.get(i).ok_or_else(|| {
-                ApiError::BadRequest("recurring_rule.linked_asset_index out of bounds".into())
+                ApiError::BadRequest("backup_reference_out_of_range: recurring_rule.linked_asset_index out of bounds".into())
             })?),
             None => None,
         };
         let linked_liability_id = match r.linked_liability_index {
             Some(i) => Some(*new_liability_ids.get(i).ok_or_else(|| {
-                ApiError::BadRequest("recurring_rule.linked_liability_index out of bounds".into())
+                ApiError::BadRequest("backup_reference_out_of_range: recurring_rule.linked_liability_index out of bounds".into())
             })?),
             None => None,
         };
@@ -834,7 +840,7 @@ async fn insert_payload(
         }
         let import_id_ref = match t.import_index {
             Some(i) => Some(*new_import_ids.get(i).ok_or_else(|| {
-                ApiError::BadRequest("transaction.import_index out of bounds".into())
+                ApiError::BadRequest("backup_reference_out_of_range: transaction.import_index out of bounds".into())
             })?),
             None => None,
         };
@@ -844,19 +850,19 @@ async fn insert_payload(
         };
         let linked_asset_id = match t.linked_asset_index {
             Some(i) => Some(*new_asset_ids.get(i).ok_or_else(|| {
-                ApiError::BadRequest("transaction.linked_asset_index out of bounds".into())
+                ApiError::BadRequest("backup_reference_out_of_range: transaction.linked_asset_index out of bounds".into())
             })?),
             None => None,
         };
         let linked_liability_id = match t.linked_liability_index {
             Some(i) => Some(*new_liability_ids.get(i).ok_or_else(|| {
-                ApiError::BadRequest("transaction.linked_liability_index out of bounds".into())
+                ApiError::BadRequest("backup_reference_out_of_range: transaction.linked_liability_index out of bounds".into())
             })?),
             None => None,
         };
         let recurring_rule_id = match t.recurring_rule_index {
             Some(i) => Some(*new_recurring_rule_ids.get(i).ok_or_else(|| {
-                ApiError::BadRequest("transaction.recurring_rule_index out of bounds".into())
+                ApiError::BadRequest("backup_reference_out_of_range: transaction.recurring_rule_index out of bounds".into())
             })?),
             None => None,
         };
@@ -907,7 +913,7 @@ async fn insert_payload(
             continue;
         };
         let counterpart_id = *new_txn_ids.get(ci).ok_or_else(|| {
-            ApiError::BadRequest("transaction.transfer_counterpart_index out of bounds".into())
+            ApiError::BadRequest("backup_reference_out_of_range: transaction.transfer_counterpart_index out of bounds".into())
         })?;
         sqlx::query(
             r#"UPDATE transactions
@@ -928,14 +934,14 @@ async fn insert_payload(
     let mut transfer_match_rejections = 0u32;
     for r in &payload.transfer_match_rejections {
         let a = *new_txn_ids.get(r.transaction_a_index).ok_or_else(|| {
-            ApiError::BadRequest("transfer_match_rejection.transaction_a_index out of bounds".into())
+            ApiError::BadRequest("backup_reference_out_of_range: transfer_match_rejection.transaction_a_index out of bounds".into())
         })?;
         let b = *new_txn_ids.get(r.transaction_b_index).ok_or_else(|| {
-            ApiError::BadRequest("transfer_match_rejection.transaction_b_index out of bounds".into())
+            ApiError::BadRequest("backup_reference_out_of_range: transfer_match_rejection.transaction_b_index out of bounds".into())
         })?;
         if a == b {
             return Err(ApiError::BadRequest(
-                "transfer_match_rejection indices must reference two distinct transactions".into(),
+                "backup_reference_not_distinct: transfer_match_rejection indices must reference two distinct transactions".into(),
             ));
         }
         sqlx::query(

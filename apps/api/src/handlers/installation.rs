@@ -266,19 +266,19 @@ pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSetting
 pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> {
     if fs.swr_pct < Decimal::ZERO || fs.swr_pct > Decimal::from(4u32) {
         return Err(ApiError::BadRequest(
-            "swr_pct must be between 0 and 4 (percent)".into(),
+            "swr_out_of_range: swr_pct must be between 0 and 4 (percent)".into(),
         ));
     }
     match fs.fire_number_mode {
         FireNumberMode::Manual => {
             let Some(amt) = fs.fire_number_manual_amount else {
                 return Err(ApiError::BadRequest(
-                    "fire_number_manual_amount is required when fire_number_mode is manual".into(),
+                    "fire_manual_amount_required: fire_number_manual_amount is required when fire_number_mode is manual".into(),
                 ));
             };
             if amt <= Decimal::ZERO {
                 return Err(ApiError::BadRequest(
-                    "fire_number_manual_amount must be > 0".into(),
+                    "fire_manual_amount_not_positive: fire_number_manual_amount must be > 0".into(),
                 ));
             }
         }
@@ -290,7 +290,7 @@ pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> 
     ] {
         if !(MIN_AVG_WINDOW_MONTHS..=MAX_AVG_WINDOW_MONTHS).contains(&months) {
             return Err(ApiError::BadRequest(format!(
-                "{label} must be between {MIN_AVG_WINDOW_MONTHS} and {MAX_AVG_WINDOW_MONTHS} (months)"
+                "avg_window_out_of_range: {label} must be between {MIN_AVG_WINDOW_MONTHS} and {MAX_AVG_WINDOW_MONTHS} (months)"
             )));
         }
     }
@@ -303,14 +303,14 @@ pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> 
 fn validate_tax_brackets(brackets: &[TaxBracket]) -> Result<(), ApiError> {
     if brackets.is_empty() {
         return Err(ApiError::BadRequest(
-            "tax_brackets must be non-empty when taxes_enabled is true".into(),
+            "tax_brackets_empty: tax_brackets must be non-empty when taxes_enabled is true".into(),
         ));
     }
     let last = brackets.len().saturating_sub(1);
     for (i, b) in brackets.iter().enumerate() {
         if b.pct < Decimal::ZERO || b.pct > Decimal::from(99u32) {
             return Err(ApiError::BadRequest(
-                "tax bracket pct must be between 0 and 99".into(),
+                "tax_bracket_pct_out_of_range: tax bracket pct must be between 0 and 99".into(),
             ));
         }
         let is_last = i == last;
@@ -318,27 +318,27 @@ fn validate_tax_brackets(brackets: &[TaxBracket]) -> Result<(), ApiError> {
             (None, true) => {}
             (Some(_), true) => {
                 return Err(ApiError::BadRequest(
-                    "last tax bracket must have up_to null (open-ended)".into(),
+                    "tax_brackets_last_must_be_open: last tax bracket must have up_to null (open-ended)".into(),
                 ));
             }
             (None, false) => {
                 return Err(ApiError::BadRequest(
-                    "only the last tax bracket may have up_to null".into(),
+                    "tax_brackets_open_not_last: only the last tax bracket may have up_to null".into(),
                 ));
             }
             (Some(th), false) => {
                 if *th <= Decimal::ZERO {
                     return Err(ApiError::BadRequest(
-                        "tax bracket up_to must be > 0 when set".into(),
+                        "tax_bracket_threshold_not_positive: tax bracket up_to must be > 0 when set".into(),
                     ));
                 }
                 if i > 0 {
                     let prev = brackets[i - 1].up_to.as_ref().ok_or_else(|| {
-                        ApiError::BadRequest("invalid tax_brackets ordering".into())
+                        ApiError::BadRequest("tax_brackets_ordering_invalid: invalid tax_brackets ordering".into())
                     })?;
                     if *th <= *prev {
                         return Err(ApiError::BadRequest(
-                            "tax bracket up_to values must be strictly increasing".into(),
+                            "tax_brackets_not_increasing: tax bracket up_to values must be strictly increasing".into(),
                         ));
                     }
                 }
@@ -449,13 +449,13 @@ fn normalize_currency(code: &str) -> Result<String, ApiError> {
     let trimmed = code.trim();
     if trimmed.len() != 3 || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
         return Err(ApiError::BadRequest(
-            "base_currency must be a 3-letter alphabetic code".into(),
+            "currency_format_invalid: base_currency must be a 3-letter alphabetic code".into(),
         ));
     }
     let upper = trimmed.to_ascii_uppercase();
     if !matches!(upper.as_str(), "EUR" | "USD" | "GBP") {
         return Err(ApiError::BadRequest(
-            "unsupported base_currency for MVP (use EUR, USD, or GBP)".into(),
+            "currency_unsupported: unsupported base_currency for MVP (use EUR, USD, or GBP)".into(),
         ));
     }
     Ok(upper)
@@ -466,7 +466,7 @@ fn validate_show_age_mode(mode: &str) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError::BadRequest(
-            "show_age_mode must be \"dates\" or \"ages\"".into(),
+            "show_age_mode_invalid: show_age_mode must be \"dates\" or \"ages\"".into(),
         ))
     }
 }
@@ -474,7 +474,7 @@ fn validate_show_age_mode(mode: &str) -> Result<(), ApiError> {
 pub(crate) fn validate_annual_inflation_assumption(pct: Decimal) -> Result<(), ApiError> {
     if pct.is_sign_negative() || pct > Decimal::from(50) {
         return Err(ApiError::BadRequest(
-            "annual_inflation_assumption_percent must be between 0 and 50".into(),
+            "inflation_out_of_range: annual_inflation_assumption_percent must be between 0 and 50".into(),
         ));
     }
     Ok(())
@@ -484,12 +484,12 @@ pub(crate) fn normalize_calendar_tz(raw: &str) -> Result<String, ApiError> {
     let t = raw.trim();
     if !(3..=64).contains(&t.len()) {
         return Err(ApiError::BadRequest(
-            "calendar_tz must be between 3 and 64 characters".into(),
+            "timezone_invalid: calendar_tz must be between 3 and 64 characters".into(),
         ));
     }
     let _: Tz = t.parse().map_err(|_| {
         ApiError::BadRequest(
-            "calendar_tz must be a valid IANA time zone name (e.g. Europe/Madrid, America/New_York, UTC)"
+            "timezone_invalid: calendar_tz must be a valid IANA time zone name (e.g. Europe/Madrid, America/New_York, UTC)"
                 .into(),
         )
     })?;
@@ -513,7 +513,7 @@ pub(crate) async fn installation_naive_today(
 pub(crate) fn naive_date_in_calendar_tz(tz_name: &str) -> Result<NaiveDate, ApiError> {
     let tz: Tz = tz_name.trim().parse().map_err(|_| {
         ApiError::BadRequest(
-            "installation calendar_tz is invalid; update it via PATCH /v1/installation".into(),
+            "installation_timezone_broken: installation calendar_tz is invalid; update it via PATCH /v1/installation".into(),
         )
     })?;
     Ok(Utc::now().with_timezone(&tz).date_naive())
@@ -720,7 +720,7 @@ pub(crate) async fn patch_fire_settings_core(
 ) -> Result<FireSettingsPatchOutcome, ApiError> {
     if patchset.is_empty() {
         return Err(ApiError::BadRequest(
-            "provide at least one FIRE setting to change".into(),
+            "patch_empty: provide at least one FIRE setting to change".into(),
         ));
     }
     let (stored, inflation_before): (Option<SqlxJson<FireSettings>>, Decimal) = sqlx::query_as(
@@ -854,7 +854,7 @@ pub async fn patch_my_installation(
         && body.mcp_write_enabled.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one of calendar_tz, show_age_mode, annual_inflation_assumption_percent, fire_settings, mcp_write_enabled".into(),
+            "patch_empty: provide at least one of calendar_tz, show_age_mode, annual_inflation_assumption_percent, fire_settings, mcp_write_enabled".into(),
         ));
     }
 
@@ -894,7 +894,7 @@ pub async fn patch_my_installation(
             } else {
                 let pct = Decimal::from_str(t).map_err(|_| {
                     ApiError::BadRequest(
-                        "annual_inflation_assumption_percent must be a decimal number".into(),
+                        "inflation_not_a_number: annual_inflation_assumption_percent must be a decimal number".into(),
                     )
                 })?;
                 validate_annual_inflation_assumption(pct)?;

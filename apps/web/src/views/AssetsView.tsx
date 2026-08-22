@@ -222,7 +222,7 @@ export function AssetsView({
             parenthetical={liquidPctParen}
           />
           <MetricCard
-            label="PnL vs compra"
+            label="Ganancia vs compra"
             value={
               assetMetricsReady && assetPnlMoney !== null
                 ? formatCurrencyNumber(assetPnlMoney, currencyIso)
@@ -438,7 +438,7 @@ export function AssetsView({
                           <th>Nombre</th>
                           <th
                             className="num"
-                            title="Valor actual. Cuando una regla de asignación apunta a este activo con un tope en € concreto, se muestra como Actual / Target."
+                            title="Valor actual. Cuando una regla de asignación apunta a este activo con un tope en € concreto, se muestra como Actual / Objetivo."
                           >
                             Valor
                           </th>

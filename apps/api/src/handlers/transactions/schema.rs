@@ -169,7 +169,7 @@ pub fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError>
             }
             if t.chars().count() > 4000 {
                 return Err(ApiError::BadRequest(
-                    "notes must be at most 4000 characters".into(),
+                    "transaction_notes_too_long: notes must be at most 4000 characters".into(),
                 ));
             }
             Ok(Some(t.into()))
@@ -181,11 +181,11 @@ pub fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError>
 pub fn normalize_concept_field(raw: &str) -> Result<String, ApiError> {
     let t = raw.trim();
     if t.is_empty() {
-        return Err(ApiError::BadRequest("concept must not be empty".into()));
+        return Err(ApiError::BadRequest("transaction_concept_empty: concept must not be empty".into()));
     }
     if t.chars().count() > 500 {
         return Err(ApiError::BadRequest(
-            "concept must be at most 500 characters".into(),
+            "transaction_concept_too_long: concept must be at most 500 characters".into(),
         ));
     }
     Ok(t.into())

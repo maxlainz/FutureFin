@@ -171,13 +171,13 @@ pub async fn create_api_token(
     let label = body.label.trim();
     if label.is_empty() || label.len() > 64 {
         return Err(ApiError::BadRequest(
-            "label must be between 1 and 64 characters".into(),
+            "token_label_length: label must be between 1 and 64 characters".into(),
         ));
     }
     if let Some(days) = body.expires_in_days {
         if !(1..=3650).contains(&days) {
             return Err(ApiError::BadRequest(
-                "expires_in_days must be between 1 and 3650".into(),
+                "token_expiry_out_of_range: expires_in_days must be between 1 and 3650".into(),
             ));
         }
     }

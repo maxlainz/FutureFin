@@ -9,6 +9,7 @@ import {
   formatCurrencyOrDash,
   formatDebtToAssetsPct,
   formatEditableDecimalString,
+  toApiDecimalString,
   formatFractionAsPercent,
   formatMoneyAmount,
   formatMonthsRough,
@@ -43,9 +44,16 @@ describe("parseDisplayDecimal", () => {
 });
 
 describe("formatEditableDecimalString", () => {
-  it("collapses trailing zeros from API decimals", () => {
-    expect(formatEditableDecimalString("2.500000")).toBe("2.5");
+  it("recorta ceros de la API y sirve el decimal con coma española", () => {
+    expect(formatEditableDecimalString("2.500000")).toBe("2,5");
     expect(formatEditableDecimalString("100.0000")).toBe("100");
+  });
+  it("lo que sirve vuelve a entrar: es idempotente contra parseDisplayDecimal", () => {
+    // El valor precargado en un input tiene que poder reenviarse tal cual sin que el backend
+    // lo rechace. Este es el ciclo que estaba roto en el formulario de activos.
+    const editable = formatEditableDecimalString("1234.5000");
+    expect(editable).toBe("1234,5");
+    expect(toApiDecimalString(editable)).toBe("1234.5");
   });
   it("returns empty on null/undefined/empty", () => {
     expect(formatEditableDecimalString(null)).toBe("");
@@ -248,5 +256,21 @@ describe("lastUsedLabel + tokenExpiryLabel (tokens de API)", () => {
   });
   it("tokenExpiryLabel: con expires_at anuncia la fecha", () => {
     expect(tokenExpiryLabel("2026-11-14T12:00:00Z", null)).toBe("Caduca 14/11/2026");
+  });
+});
+
+describe("toApiDecimalString", () => {
+  it("convierte la coma española al punto que exige la API", () => {
+    expect(toApiDecimalString("1234,5")).toBe("1234.5");
+    expect(toApiDecimalString("  2,75 ")).toBe("2.75");
+  });
+  it("deja intacto lo que ya viene con punto", () => {
+    expect(toApiDecimalString("2.5")).toBe("2.5");
+    expect(toApiDecimalString("100")).toBe("100");
+  });
+  it("null, undefined y vacío dan cadena vacía", () => {
+    expect(toApiDecimalString(null)).toBe("");
+    expect(toApiDecimalString(undefined)).toBe("");
+    expect(toApiDecimalString("   ")).toBe("");
   });
 });

@@ -233,7 +233,7 @@ export function SummaryView({
               ) : null}
               {showRunwayTile ? (
                 <MetricCard
-                  label="Runway"
+                  label="Autonomía"
                   helpId="summary.runway"
                   value={formatRunwayValue(
                     summary.financial_health.runway_months,

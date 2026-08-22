@@ -52,7 +52,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn decode_file_b64(file_b64: &str) -> Result<Vec<u8>, ApiError> {
     B64.decode(file_b64.trim().as_bytes())
-        .map_err(|_| ApiError::BadRequest("file_b64 is not valid base64".into()))
+        .map_err(|_| ApiError::BadRequest("file_b64_invalid: file_b64 is not valid base64".into()))
 }
 
 fn default_kind_by_sign(amount: Decimal) -> String {
@@ -285,7 +285,7 @@ pub async fn import_confirm(
             let t = f.trim();
             if t.chars().count() > 300 {
                 return Err(ApiError::BadRequest(
-                    "original_filename must be at most 300 characters".into(),
+                    "original_filename_too_long: original_filename must be at most 300 characters".into(),
                 ));
             }
             (!t.is_empty()).then(|| t.to_string())

@@ -203,7 +203,7 @@ fn scope_to_budget_enum(scope: &str) -> Result<BudgetCategoryScope, ApiError> {
         "income" => Ok(BudgetCategoryScope::Income),
         "expense" => Ok(BudgetCategoryScope::Expense),
         _ => Err(ApiError::BadRequest(
-            "budget entry category must be income or expense scope".into(),
+            "budget_entry_category_scope_unsupported: budget entry category must be income or expense scope".into(),
         )),
     }
 }
@@ -267,7 +267,7 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
             }
             if t.len() > 4000 {
                 return Err(ApiError::BadRequest(
-                    "notes must be at most 4000 characters".into(),
+                    "notes_too_long: notes must be at most 4000 characters".into(),
                 ));
             }
             Ok(Some(t.into()))
@@ -291,13 +291,13 @@ pub(crate) async fn assert_budget_category(
 
     let Some(s) = scope else {
         return Err(ApiError::BadRequest(
-            "category_id must reference a category in this installation".into(),
+            "category_not_found: category_id must reference a category in this installation".into(),
         ));
     };
 
     if !matches!(s.as_str(), "income" | "expense") {
         return Err(ApiError::BadRequest(
-            "budget entries must use a category with scope income or expense".into(),
+            "category_wrong_scope: budget entries must use a category with scope income or expense".into(),
         ));
     }
 
@@ -561,13 +561,13 @@ pub(crate) async fn create_budget_entry_core(
 
     if body.amount <= Decimal::ZERO {
         return Err(ApiError::BadRequest(
-            "amount must be greater than zero".into(),
+            "amount_not_positive: amount must be greater than zero".into(),
         ));
     }
 
     if body.ends_at_retirement && body.expense_end_date.is_some() {
         return Err(ApiError::BadRequest(
-            "ends_at_retirement and expense_end_date are mutually exclusive".into(),
+            "end_condition_conflict: ends_at_retirement and expense_end_date are mutually exclusive".into(),
         ));
     }
 
@@ -661,7 +661,7 @@ pub(crate) async fn patch_budget_entry_core(
         && body.clear_expense_end_date.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one field to update".into(),
+            "patch_empty: provide at least one field to update".into(),
         ));
     }
 
@@ -691,7 +691,7 @@ pub(crate) async fn patch_budget_entry_core(
         Some(a) => {
             if a <= Decimal::ZERO {
                 return Err(ApiError::BadRequest(
-                    "amount must be greater than zero".into(),
+                    "amount_not_positive: amount must be greater than zero".into(),
                 ));
             }
             a
@@ -715,7 +715,7 @@ pub(crate) async fn patch_budget_entry_core(
 
     if new_ends && new_expense_end_date.is_some() {
         return Err(ApiError::BadRequest(
-            "ends_at_retirement and expense_end_date are mutually exclusive".into(),
+            "end_condition_conflict: ends_at_retirement and expense_end_date are mutually exclusive".into(),
         ));
     }
 

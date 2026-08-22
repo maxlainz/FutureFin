@@ -208,7 +208,7 @@ fn normalize_match_kind(raw: &str) -> Result<String, ApiError> {
         "prefix" => Ok("prefix".into()),
         "exact" => Ok("exact".into()),
         _ => Err(ApiError::BadRequest(
-            "match_kind must be 'substring', 'prefix' or 'exact'".into(),
+            "rule_match_kind_invalid: match_kind must be 'substring', 'prefix' or 'exact'".into(),
         )),
     }
 }
@@ -216,11 +216,11 @@ fn normalize_match_kind(raw: &str) -> Result<String, ApiError> {
 fn normalize_pattern(raw: &str) -> Result<String, ApiError> {
     let n = normalize_concept(raw);
     if n.trim().is_empty() {
-        return Err(ApiError::BadRequest("pattern must not be empty".into()));
+        return Err(ApiError::BadRequest("rule_pattern_empty: pattern must not be empty".into()));
     }
     if n.chars().count() > 500 {
         return Err(ApiError::BadRequest(
-            "pattern must be at most 500 characters".into(),
+            "rule_pattern_too_long: pattern must be at most 500 characters".into(),
         ));
     }
     Ok(n)
@@ -310,7 +310,7 @@ pub async fn create_rule(
     let confirm = body.confirm.unwrap_or(false);
     if scope != ApplyScope::None && !confirm {
         return Err(ApiError::BadRequest(
-            "confirm must be true to apply a new rule to existing transactions".into(),
+            "confirm_required: confirm must be true to apply a new rule to existing transactions".into(),
         ));
     }
     let from_month = body.from_month.clone();
@@ -350,7 +350,7 @@ pub(crate) async fn create_categorization_rule_core(
         Some(k) => Some(normalize_kind(k)?),
         None => {
             return Err(ApiError::BadRequest(
-                "assign_kind is required (expense, income or savings)".into(),
+                "rule_assign_kind_required: assign_kind is required (expense, income or savings)".into(),
             ))
         }
     };
@@ -415,7 +415,7 @@ pub async fn apply_rule(
         // 400: el formulario de la SPA ya enseña el impacto antes de llamar. La tool MCP, en
         // cambio, devuelve el preview (patrón de la casa para las destructivas).
         return Err(ApiError::BadRequest(
-            "confirm must be true to apply a rule to existing transactions".into(),
+            "confirm_required: confirm must be true to apply a rule to existing transactions".into(),
         ));
     }
     let out = apply_categorization_rule_core(
@@ -450,7 +450,7 @@ impl ApplyScope {
             "uncategorized" => Ok(Self::Uncategorized),
             "all" => Ok(Self::All),
             other => Err(ApiError::BadRequest(format!(
-                "apply_to_existing must be none, uncategorized or all (got {other})"
+                "apply_to_existing_invalid: apply_to_existing must be none, uncategorized or all (got {other})"
             ))),
         }
     }
@@ -524,7 +524,7 @@ pub(crate) async fn apply_categorization_rule_core(
     let assign_kind = target
         .assign_kind
         .clone()
-        .ok_or_else(|| ApiError::BadRequest("rule has no assign_kind to apply".into()))?;
+        .ok_or_else(|| ApiError::BadRequest("rule_not_applicable: rule has no assign_kind to apply".into()))?;
     // La categoría pudo cambiar de scope desde que se creó la regla: revalidar una vez, no por fila.
     super::assert_transaction_category(pool, iid, &assign_kind, target.assign_category_id).await?;
 
@@ -742,7 +742,7 @@ pub async fn patch_rule(
         validate_rule_assignment(&state.pool, iid, k, new_assign_category).await?;
     } else if new_assign_category.is_some() {
         return Err(ApiError::BadRequest(
-            "assign_category_id requires an assign_kind".into(),
+            "rule_assign_category_requires_kind: assign_category_id requires an assign_kind".into(),
         ));
     }
 

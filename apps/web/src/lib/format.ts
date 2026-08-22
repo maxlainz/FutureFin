@@ -17,8 +17,15 @@ export function parseDisplayDecimal(s: string): number | null {
 }
 
 /**
- * Valores numéricos devueltos por la API (p. ej. `2.500000`) compactados para `<input>`
- * (`2.5`). Si no parsea a número finito, devuelve el texto recortado sin cambiar.
+ * Valores numéricos devueltos por la API (p. ej. `2.500000`) compactados para `<input>`, con
+ * **coma decimal** española (`2,5`): es lo que el usuario espera teclear, lo que sugieren los
+ * placeholders (`2,5`) y lo que acepta `parseDisplayDecimal`. Los `<input>` son de texto con
+ * `inputMode="decimal"`, no `type="number"`, así que la coma no rompe nada.
+ *
+ * Si no parsea a número finito, devuelve el texto recortado sin cambiar.
+ *
+ * IMPORTANTE: lo que se envía a la API pasa SIEMPRE por `toApiDecimalString`. La API solo acepta
+ * punto decimal.
  */
 export function formatEditableDecimalString(raw: string | null | undefined): string {
   if (raw == null) return "";
@@ -26,7 +33,20 @@ export function formatEditableDecimalString(raw: string | null | undefined): str
   if (!t) return "";
   const n = parseDisplayDecimal(t);
   if (n === null || !Number.isFinite(n)) return t;
-  return JSON.stringify(n);
+  return JSON.stringify(n).replace(".", ",");
+}
+
+/**
+ * Normaliza un decimal escrito por el usuario al formato que acepta la API: sin espacios y con
+ * punto decimal. Es el ÚNICO sitio donde se hace esa conversión.
+ *
+ * Existe porque no se hacía en todas partes: en el formulario de activos, «rentabilidad esperada»
+ * y «precio de compra» convertían la coma y «valor actual» no, así que teclear `1234,5` en el
+ * valor —con un placeholder que invita a usar coma— lo rechazaba el backend con un error en
+ * inglés. Lo mismo en pasivos con el principal y la TAE.
+ */
+export function toApiDecimalString(raw: string | null | undefined): string {
+  return String(raw ?? "").trim().replace(",", ".");
 }
 
 /** Importes sin decimales. Miles con punto a partir de 10.000. */

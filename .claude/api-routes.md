@@ -390,11 +390,46 @@ For `sqlx::query_scalar`, use `bind_scope_scalar` instead. The helpers guarantee
 
 ## Error mapping
 
+### Wire shape (3.10.0)
+
+Every non-2xx response carries three fields, not two:
+
+```json
+{ "error": "conflict", "code": "username_taken",
+  "message": "username_taken: that username is already registered" }
+```
+
+- **`error`** — HTTP class (`bad_request`, `unprocessable`, `unauthorized`, `forbidden`,
+  `not_found`, `conflict`, `unavailable`, `internal`). Published since 1.0.0, unchanged.
+- **`code`** — *stable, granular* identifier. `derive_error_code` takes it from the message's
+  `snake_code: ` prefix (3–64 chars, `[a-z][a-z0-9_]*`); without a valid prefix it falls back to
+  the HTTP class. **This is what clients branch on.**
+- **`message`** — English technical detail, for developers. The SPA never shows it as the primary
+  sentence: it translates `code` via `apps/web/src/lib/errorMessages.ts` and keeps `message` for
+  the console / a folded «Detalles técnicos».
+
+Adding a coded error = prefix the message. `ApiError::BadRequest("swr_out_of_range: swr_pct must
+be between 0 and 4".into())`. Two variants exist purely to carry a code where the plain one could
+not: `NotFoundWith` (404 with body) and `ConflictWith` (409 with body — the bare `Conflict` comes
+from the automatic 23505 mapping and cannot know *what* collided).
+
+**Gate**: `apps/api/tests/error_codes_parity.rs` extracts every code from the source into
+`tests/fixtures/error-codes.json`, and `apps/web/src/lib/errorMessages.test.ts` fails if any lacks
+Spanish copy. Regenerate with
+`UPDATE_ERROR_CODES=1 cargo test -p futurefin-api --test error_codes_parity`.
+
+The OAuth endpoints (`/oauth/*`) do **not** use this shape: they emit RFC 6749 §5.2
+`{error, error_description}` with the protocol's own codes.
+
+### SQLSTATE
+
 `impl From<sqlx::Error> for ApiError` (in `error.rs`) auto-detects:
 - `23505` (unique_violation) → `ApiError::Conflict` (409)
 - `23503` (foreign_key_violation) → `ApiError::BadRequest("referenced record missing")`
 
-Handlers should just `?` any `sqlx::Error`; never write per-call `.map_err(...)` to translate codes.
+Handlers should just `?` any `sqlx::Error`; never write per-call `.map_err(...)` to translate codes
+— **except** when the handler knows which unique index collided and can say so
+(`handlers/auth.rs` register → `username_taken`).
 
 ## MCP (`/mcp`, Streamable HTTP)
 

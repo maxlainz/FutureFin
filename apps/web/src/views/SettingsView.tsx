@@ -17,6 +17,7 @@ import type {
   UserResponse,
 } from "../api/types";
 import { HelpPopover } from "../components/HelpPopover";
+import { healthStatusLabel, roleLabel } from "../lib/enumLabels";
 import { HELP_TEXTS } from "../lib/helpTexts";
 import { Modal, ModalFormError } from "../components/Modal";
 import { PlugIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
@@ -409,7 +410,7 @@ export function SettingsView({
                 </p>
               ) : (
                 <p className="muted tight">
-                  <strong>{mcpWriteEnabled ? "Activada" : "Desactivada"}</strong> · solo el owner
+                  <strong>{mcpWriteEnabled ? "Activada" : "Desactivada"}</strong> · solo el propietario
                   puede cambiarlo.
                 </p>
               )}
@@ -942,7 +943,7 @@ export function SettingsView({
                 </div>
                 <div>
                   <dt>Tu rol</dt>
-                  <dd>{installation.role}</dd>
+                  <dd>{roleLabel(installation.role)}</dd>
                 </div>
               </dl>
             ) : (
@@ -968,7 +969,7 @@ export function SettingsView({
                 </div>
                 <div>
                   <dt>Estado</dt>
-                  <dd>{health.status}</dd>
+                  <dd>{healthStatusLabel(health.status)}</dd>
                 </div>
               </dl>
             ) : (
@@ -1113,7 +1114,7 @@ export function SettingsView({
                       <select
                         value={categoryRemapToId}
                         onChange={(e) => setCategoryRemapToId(e.target.value)}
-                        aria-label="Categoría destino para remap"
+                        aria-label="Categoría destino al reasignar"
                       >
                         {siblings.map((s) => (
                           <option key={s.id} value={s.id}>

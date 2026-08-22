@@ -53,7 +53,7 @@ pub async fn ready_check(
         }
     };
     if ok != 1 {
-        return Err(ApiError::BadRequest("unexpected readiness probe".into()));
+        return Err(ApiError::BadRequest("readiness_probe_unexpected: unexpected readiness probe".into()));
     }
     Ok(Json(HealthBody {
         status: "ok",

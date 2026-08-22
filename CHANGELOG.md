@@ -6,10 +6,112 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-**Qué cambia para ti** — nada en la app: es trabajo de repositorio, de cara a publicarlo. Se han
-sustituido los ficheros de prueba del importador de CSV, que contenían datos bancarios auténticos,
-por otros fabricados, y las tablas de ejemplo del CHANGELOG dejan de citar cifras de una
-instalación real. A partir de ahora un gate automático impide que vuelva a colarse nada parecido.
+**Qué cambia para ti** — **la app deja de hablarte en inglés cuando algo falla**. Registrarte con un
+usuario que ya existe decía «resource conflict»; ahora dice «Ese nombre de usuario ya está
+registrado. Elige otro». Son 187 mensajes traducidos. Además, escribir importes con coma
+(`1234,5`) ya funciona en todos los formularios —en activos y pasivos el servidor los rechazaba—,
+y varias etiquetas sueltas en inglés («Budget», «Target FIRE», «Runway», «Focus») pasan al
+español. Por dentro: los ficheros de prueba del importador de CSV contenían datos bancarios
+auténticos y se han sustituido por otros fabricados, con un gate automático para que no se repita.
+
+### Los errores de la API se pintaban en inglés y en jerga
+
+`ErrorBody.message` viajaba del backend a la SPA y se enseñaba **literalmente**: la cadena era
+`error.rs` → `api/client.ts` → `throw new Error(body.message)` → cada `setError(e.message)`, unos
+cincuenta sitios. El resultado eran frases como «resource conflict» al registrar un usuario
+repetido, o «currency_not_eur: row 3 has currency 'USD' (only EUR is supported)» al importar un
+CSV, en una interfaz por lo demás íntegramente en español.
+
+La API **sigue hablando inglés**: es superficie para desarrolladores, para OpenAPI y para clientes
+de terceros. Lo que cambia es que ahora manda además un **código estable** con el que traducir.
+
+#### Contrato (aditivo, no rompe nada)
+
+`ErrorBody` gana el campo `code`, junto a los ya publicados `error` y `message`:
+
+```json
+{ "error": "conflict", "code": "username_taken",
+  "message": "username_taken: that username is already registered" }
+```
+
+- `code` sale del prefijo `snake_code: ` del mensaje —una convención que **ya existía a medias** en
+  el repo (`csv_preset_unrecognized:`, `preview_confirm_mismatch`)— y que ahora se aplica en los
+  ~307 sitios de validación. Sin prefijo válido cae a la clase HTTP, que también es un código.
+- El criterio de `derive_error_code` es estrecho a propósito (3–64 caracteres, `[a-z][a-z0-9_]*`):
+  un mensaje corriente con dos puntos no debe inventar un código. Un código inventado es **peor**
+  que ninguno, porque el catálogo no lo tendrá y el usuario verá el genérico creyendo que hay
+  traducción.
+- Dos variantes nuevas de `ApiError` existen solo para poder llevar código donde antes no cabía:
+  `ConflictWith` (el `Conflict` pelado nace del mapeo automático del SQLSTATE 23505 y no sabe QUÉ
+  colisionó) y el ya existente `NotFoundWith`.
+
+#### En el cliente
+
+`ApiRequestError` sustituye al `Error` pelado y su `.message` **ya viene en español**, así que los
+~50 `setError(e.message)` muestran español sin tocar una línea. El texto técnico queda en
+`.detail` y se manda a la consola: depurar un 400 no debería obligar a abrir la pestaña de red.
+
+`apps/web/src/lib/errorMessages.ts` es el catálogo: **196 frases**, agrupadas por dónde las ve el
+usuario. Regla de estilo: frase completa, qué ha pasado y qué puede hacer, sin nombres de campo del
+API ni jerga HTTP.
+
+#### El gate
+
+Un código sin traducir no rompe nada —cae al genérico— y por eso hacía falta un test: el fallo es
+silencioso. `apps/api/tests/error_codes_parity.rs` (sin Postgres) extrae del fuente los **187
+códigos** a `tests/fixtures/error-codes.json`, y `errorMessages.test.ts` lee ese mismo JSON y falla
+si alguno se queda sin frase, o si sobra una frase para un código que ya no existe.
+
+La primera versión del extractor solo miraba los constructores de `ApiError` y **se dejaba seis
+códigos** de `backup_user/`, donde el error nace como `CryptoError` o como un `Err(String)` y solo
+se convierte más arriba. Y recortar por el primer `#[cfg(test)]` costó otros diez, porque
+`projection.rs` tiene módulos de test **en medio**. Ahora barre todo literal con forma de código,
+salta los módulos de test contando llaves, y lo que sobra se excluye a mano con su porqué escrito
+al lado: capturar de más cuesta una línea; capturar de menos no se nota.
+
+#### Fixed — la contraseña equivocada de un backup decía «tu sesión ha caducado»
+
+`CryptoError::Decrypt` mapeaba a `ApiError::Unauthorized` (401). Con el catálogo en español ese 401
+se habría leído como «Tu sesión ha caducado. Vuelve a iniciar sesión» — y el usuario se habría ido
+a reiniciar sesión en vez de reescribir la contraseña del fichero, que es el error más frecuente de
+todo el flujo de importación. Ahora es **400 `backup_wrong_password`**: la sesión es válida; lo que
+no cuadra es la contraseña del archivo.
+
+### Fixed — los importes con coma se rechazaban en la mitad de los formularios
+
+En el formulario de activos, «rentabilidad esperada» y «precio de compra» convertían la coma
+decimal antes de enviar, y «valor actual» no. Teclear `1234,5` en el valor —con `inputMode="decimal"`
+y placeholders que invitan a la coma— lo rechazaba el backend con un error en inglés. Lo mismo con
+el principal y la TAE de un pasivo, el importe del presupuesto, el de un movimiento previsto y los
+de las reglas de reparto.
+
+La conversión pasa a un único sitio, `toApiDecimalString` en `lib/format.ts`, y todo lo que se
+envía a la API pasa por él. Como contrapartida, `formatEditableDecimalString` ahora **sirve el
+valor con coma** (`2,5`, no `2.5`): es lo que el usuario espera teclear y lo que ya sugerían los
+placeholders. Los `<input>` son de texto con `inputMode="decimal"`, no `type="number"`, así que la
+coma no rompe nada. Hay un test que cierra el ciclo: lo que se precarga en un input tiene que poder
+reenviarse tal cual.
+
+### Changed — etiquetas que seguían en inglés
+
+`Focus` → **Vista cercana**, `Inflation Adjusted` → **En dinero de hoy**, `Milestone` → **Hito**,
+`Budget` → **Presupuesto**, `Target FIRE` → **Objetivo FIRE**, `Runway` → **Autonomía** (también su
+título en el catálogo de ayuda), `PnL vs compra` → **Ganancia vs compra**, `Actual / Target` →
+`Actual / Objetivo`, `YTD` → **Año** / «año en curso», `items` → `ítems`, «solo el owner» → «solo el
+propietario».
+
+Y los valores crudos de la API que se pintaban sin traducir: el rol (`owner`/`member`/`viewer`) se
+enseñaba traducido en el `<select>` de Ajustes pero **crudo** en la píldora de la cuenta y en la
+ficha de la instalación, así que el mismo usuario se veía como «Miembro» en un sitio y «member» en
+otro. Nuevo `lib/enumLabels.ts` con los rótulos, usado en los cuatro sitios (incluye el estado del
+servicio, `ok` → «Correcto»).
+
+#### Pendiente, dicho a las claras
+
+El detalle técnico se manda a la consola pero **todavía no se enseña plegado** bajo «Detalles
+técnicos»: los ~14 estados de error de `App.tsx` guardan una cadena, no el objeto, y convertirlos
+es un cambio de sesenta sitios que no toca hacer en medio de un barrido de idioma. Va con la
+reorganización de `App.tsx` del onboarding.
 
 ### Higiene de datos — los fixtures del importador eran extractos bancarios reales
 
