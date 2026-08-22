@@ -16,9 +16,9 @@ description: >
 
 # FutureFin — Docs of Record & House Writing Style
 
-Facts below verified against the repo on **2026-07-02, v1.4.3** (`apps/api/Cargo.toml`) and
-re-verified **2026-08-16 for v3.0.0** (self-contained Docker image), which is where §7's errata
-rows come from. This skill
+Facts below verified against the repo on **2026-07-02, v1.4.3** (`apps/api/Cargo.toml`),
+re-verified **2026-08-16 for v3.0.0** (self-contained Docker image) and again **2026-08-22 for
+4.0.0** (the public-release audit), which is where §7's errata rows come from. This skill
 tells you (a) which file owns which facts, (b) what to update when you change something, (c) how
 entries must be written, and (d) which documented facts are currently WRONG (standing errata).
 
@@ -57,6 +57,8 @@ current drift is a duplicated or orphaned fact).
 | `.claude/tests.md` | How to run/write backend integration tests + frontend Vitest, TestApp helpers, shared fixtures, CI status | AI sessions |
 | `CHANGELOG.md` | User-facing AND forensic history per release (Keep a Changelog 1.1.0 + SemVer). The project's memory of *why* | Users + future sessions |
 | `README.md` | Self-hoster quick start (Docker), update/rollback, env-var table (prod subset), image tag scheme | Self-hosters |
+| `SECURITY.md` | Supported versions, private disclosure channel, and the **honest** security posture of a self-hosted install: no TLS, no login rate limiting, open registration, open DCR, `?view=mine` is not an authorization boundary, what `.ffbackup` encryption does and does not protect. Every claim must be verified in code — the file says so itself. **The out-of-scope list is a contract**: adding a behavior there means "reporting this gets a link, not a fix" | Self-hosters + security reporters |
+| `docs/*.md` (`instalacion`, `actualizar`, `configuracion`, `backups`, `desarrollo`, `mcp`) | The user-facing manual the public README links to. Same accuracy bar as `.claude/*.md`; different audience (people, not sessions) | Self-hosters |
 | `.claude/skills/*/SKILL.md` | Encoded judgment + runbooks per topic (this library) | AI sessions |
 
 `CLAUDE.md` deliberately *summarizes* what the `.claude/*.md` docs detail. When you update a
@@ -74,7 +76,8 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 | Table/column/constraint, new migration | `.claude/data-model.md` (+ CHANGELOG "Migración / compatibilidad" note if data-affecting — template §4.3) |
 | Engine input/output struct, simulation-loop step, inflation semantics | `.claude/engine.md` (+ `futurefin-fire-domain-reference` skill if FIRE math) |
 | Env var added/renamed/default changed | `.claude/env-and-config.md` **and** the README env table if it's a prod/self-hoster var **and** `.env.example` |
-| Auth flow, role, cookie attr, session TTL | `.claude/auth-and-membership.md` |
+| Auth flow, role, cookie attr, session TTL | `.claude/auth-and-membership.md` **and `SECURITY.md`** if it changes what a self-hoster is exposed to (a new credential, a new revocation path, a new open endpoint) |
+| A metric's base, window, denominator, exclusions, or its name | `apps/web/src/lib/helpTexts.ts` + `futurefin-metric-definitions` (§2 gate: text updated / entry added-removed / reasoned n/a — never silent). **Also when you did not think you were touching a metric**: changing which rows enter an aggregate, or renaming a tab a help text cites, moves the meaning of a metric by ricochet — that is how six entries drifted by 4.0.0 |
 | Visual/UI: token, palette, component convention, icon | `.claude/design-system.md` (+ `frontend-structure.md` if a new component/file) |
 | Frontend module layout, new view/lib/component file | `.claude/frontend-structure.md` |
 | Test infra: TestApp helper, fixture, CI workflow, test command | `.claude/tests.md` |
@@ -235,9 +238,12 @@ rule; v1.2.0 is the precedent).
 - Every skill in `.claude/skills/` ends with a **Provenance and maintenance** section: one-line
   read-only commands that re-verify its volatile facts. When you touch a skill's area, run its
   provenance lines; any mismatch means the skill must be updated **in the same PR** as the change.
-  Rule re-checked 2026-08-19: all 16 skills comply (the 16th is `futurefin-mcp-parity`) —
-  `for f in .claude/skills/*/SKILL.md; do grep -qi '^## .*Provenance' "$f" || echo "MISSING: $f"; done`
-  prints nothing. A new skill without that section is incomplete.
+  Rule re-checked **2026-08-22: all 18 skills comply** —
+  `for f in .claude/skills/*/SKILL.md; do grep -qiE '^## ([0-9]+\. )?(Provenance|Procedencia)' "$f" || echo "MISSING: $f"; done`
+  prints nothing. **Ojo con el comando viejo**: era `grep -qi '^## .*Provenance'`, y daba un falso
+  positivo con `futurefin-data-hygiene`, cuya sección se llama «## 7. Procedencia y mantenimiento» —
+  una comprobación que marca como incumplidor a quien sí cumple enseña a ignorarla. A new skill
+  without that section is incomplete.
 - Skills date-stamp volatile facts ("as of 2026-07-02, v1.4.3"). When you re-verify, refresh the
   date even if nothing changed.
 - One home per fact across the library: if your edit would duplicate a sibling skill's topic,
@@ -267,7 +273,45 @@ or **"split-dev" as the name of the still-current workflow** (`cargo run` + Vite
 `docker-compose.split-dev.yml` *file* is gone, replaced by the standalone `docker-compose.dev.yml`.
 Nothing to record.
 
-**Swept again 2026-08-17 for v3.1.0 (embedded OAuth 2.1) — drift found and fixed, none left.**
+**Swept 2026-08-22 for 4.0.0 (public release + pre-publication audit) — the largest drift harvest so
+far, all fixed in the same change.** Every item below was a document asserting something the code
+had stopped doing:
+
+- **`.claude/tests.md` and `futurefin-validation-and-qa` both said the integration suite, ESLint and
+  Vitest do NOT run in CI.** They do since 4.0.0 (`ci.yml` job `integration` with a Postgres service;
+  job `web` runs `lint:web` and Vitest). The docs had been *right for months* and became wrong on the
+  day the gap was closed — the failure mode of every "known limitation" paragraph.
+- **The same two files claimed unit tests for `handlers/transactions/` (CSV presets, fingerprint,
+  rule precedence) that had never existed.** `csv_presets.rs` and `import.rs` carried zero `#[test]`,
+  and a money bug lived in exactly that hole (`2100.00` imported as `210000`). A row describing tests
+  that do not exist is worse than a missing row: it stops anyone from writing them.
+- **Frozen counters, again**: engine 61 → 67, integration 27 files → 33, migrations 40 → 42, Vitest
+  321/13 → 368/16, `.ffbackup` schema 8 → 9, MCP catalog 50 → 52. Third release train in a row.
+- **`futurefin-mcp-parity` said inflation was "read-only via MCP"** — `update_fire_settings` has been
+  persisting `annual_inflation_assumption_percent` for a while. The row made a covered axis look like
+  an open gap.
+- **UI names moved and the docs did not**: `Ajustes → MCP` is `Ajustes → Integraciones`,
+  `Ajustes → Proyección` is `Ajustes → Plan`, and the theme toggle lives in `Ajustes → General`, not
+  `Ajustes → Datos y sistema`. Hits in `frontend-structure.md`, `design-system.md`,
+  `auth-and-membership.md`, `data-model.md`, `config-and-flags`, `architecture-contract`,
+  `debugging-playbook`, `change-control` and `CLAUDE.md`. **The fix that sticks**: cite
+  `SETTINGS_SUBTAB_LABEL` (`apps/web/src/lib/navigation.ts`) as the source, not the label you
+  remember.
+- **`frontend-structure.md` documented a «Conciliar ahora» button** that was removed when the
+  periodic server sweep landed, and **`design-system.md` listed `--proj-jub` as a live token** with
+  zero consumers.
+- **`SECURITY.md` described `.ffbackup` behavior "if you change your password later"** for a
+  password-change endpoint that did not exist, and `auth-and-membership.md` promised that revoking a
+  membership cuts access with no way to revoke one. Both promises are now true — but they were
+  written *before* the code, which is the one direction this library must never take: a doc may lag
+  the code; it may not lead it.
+
+**Lesson added to §3.1's "prefer commands over hard counts"**: the same applies to *negative* claims.
+"X does not run in CI", "there are no unit tests for Y", "Z is read-only" all age exactly like a
+frozen number, and unlike a number nobody ever re-counts them. Write the command that proves the
+claim next to the claim.
+
+**Swept 2026-08-17 for v3.1.0 (embedded OAuth 2.1) — drift found and fixed, none left.**
 Unlike the two sweeps above, this one *did* turn something up, and it is a pattern worth naming:
 **the 3.0.0/MCP release bumped code but not the frozen counters in the skills**. Corrected in the
 same change: `futurefin-change-control`'s header (34 migrations / 20 integration-test files → 36 / 23)
@@ -299,10 +343,10 @@ v3.0.0** (§1 env-and-config row, §2 container row, §7 sweep) against `README.
 Re-verify with:
 
 - Current version: `grep -n '^version' apps/api/Cargo.toml` (and top entry of `CHANGELOG.md`).
-  **3.1.0 on 2026-08-17, with its `## [3.1.0] — 2026-08-17` CHANGELOG section already written**
+  **4.0.0 on 2026-08-22, with its `## [4.0.0] - 2026-08-22` CHANGELOG section already written**
   (release ritual §5; gates in futurefin-change-control §4)
-- Migration count: `ls apps/api/migrations | wc -l` (36 on 2026-08-17 — 35 at 3.0.0, +1 for
-  `20260817090000_oauth.sql`)
+- Migration count: `ls apps/api/migrations | wc -l` (**42 on 2026-08-22**; 36 on 2026-08-17)
+- Doc inventory: `ls .claude/*.md | wc -l` (**9**) and `ls .claude/skills | wc -l` (**18**)
 - Compose matrix matches the §1 env-and-config row: `ls docker-compose*.yml` (yml / local / dev —
   **no `split-dev`**) and `awk '/^services:/{f=1;next} /^volumes:/{f=0} f && /^  [a-z]/' docker-compose.yml` (one service)
 - §7 sweep reproducible: `grep -rn 'split-dev\|futurefin-database\|POSTGRES_PASSWORD' --include='*.md' .`
@@ -311,8 +355,12 @@ Re-verify with:
   `grep -rn projection_target_age .claude/*.md apps/api/src crates` (only the historical mention
   in data-model.md's "eliminada" note is expected); `grep -n AUTH_MODEL .claude/auth-and-membership.md`;
   `grep -n export.zip README.md`; `grep -rn mac_target_age apps/api/src .claude/*.md`
-- CI scope claim: `cat .github/workflows/ci.yml` (integration tests/Vitest still absent?)
-- Doc inventory unchanged (9 reference docs): `ls .claude/*.md | wc -l`
+- CI scope claim — **since 4.0.0 both must PRINT something** (they used to have to print nothing;
+  see §7's lesson on negative claims):
+  `grep -n TEST_DATABASE_URL .github/workflows/ci.yml` and
+  `grep -n 'npm test\|lint:web' .github/workflows/ci.yml`
+- UI names cited in docs come from the code, not from memory:
+  `grep -n -A 9 'SETTINGS_SUBTAB_LABEL' apps/web/src/lib/navigation.ts`
 - Exemplar quotes intact: `grep -n "fix definitivo del solape" CHANGELOG.md` and
   `grep -n "Fix de deflactación del chart" CHANGELOG.md`
 - Release steps unchanged: `grep -n "Merge completo" CLAUDE.md`

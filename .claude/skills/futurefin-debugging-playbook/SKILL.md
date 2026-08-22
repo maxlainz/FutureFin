@@ -55,8 +55,8 @@ Vocabulary you need (one line each; full domain detail in
    (live case in `budget.rs`, fixed v1.3.0 by the `LedgerView::scope_where` helpers).
 4. **Check both densities.** `?density=monthly` and `?density=hybrid` — index-based math is
    correct on monthly and silently wrong on hybrid (see trap 6).
-5. **Check both themes.** Light and dark (`<html data-theme>`, toggle in Ajustes → Datos y
-   sistema → Apariencia) before calling any visual bug fixed. Non-negotiable per CLAUDE.md.
+5. **Check both themes.** Light and dark (`<html data-theme>`, toggle in **Ajustes → General →
+   Apariencia**) before calling any visual bug fixed. Non-negotiable per CLAUDE.md.
 6. **Never "fix" a 4xx by loosening validation.** A 422 on `fire_number_mode`, a 409 on a
    unique key, a 413 on body size are deliberate contracts (v1.3.0 made them *stricter* on
    purpose). Fix the caller or take the change through
@@ -249,7 +249,7 @@ before decimation, so if milestones are wrong at hybrid only, suspect *client* m
 had dark text on a dark background because a color was hardcoded rather than tokenized (fixed by
 forcing the tooltip theme-independent: `#fafafa` on `rgba(10,10,10,0.92)`).
 
-**Discriminating experiment.** Toggle `data-theme` on `<html>` in devtools (or Ajustes →
+**Discriminating experiment.** Toggle `data-theme` on `<html>` in devtools (or Ajustes → General →
 Apariencia; `auto` follows `prefers-color-scheme` live). Inspect the broken element's computed
 color: if it is a raw hex not present in `apps/web/src/styles/theme.css`, that's the bug.
 

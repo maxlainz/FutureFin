@@ -177,7 +177,15 @@ owner sign-off (the v1.1.0 `allocation_rules` drop was explicitly signed off and
 
 ### D7. Projection cache: in-memory, sliding TTL, invalidate-don't-warm
 `state.rs`: `projection_cache: RwLock<HashMap<ProjectionCacheKey, ProjectionCacheEntry>>`.
-- **Key**: `{installation_id, view, owner_user_id (Some only for view=mine), density}`.
+- **Key**: `{installation_id, view, owner_user_id, density}` — **`owner_user_id` is ALWAYS `Some(_)`,
+  including `household`, since 4.0.0.** Until then it was `Some` only for `view=mine`, and that was a
+  cross-member data leak in the response: a `household` payload carries the **requester's**
+  demographics (`viewer_birth_date`, the horizon derived from their age, `jubilacion_age`, the age
+  axis), so the first member to ask left *their* projection cached for the whole household.
+  Reproduced in test: bob received alice's birth date and, with the order reversed, alice got a
+  360-month horizon instead of 648 — if her FIRE crossing fell on month 400, the app told her she
+  never retires. **Rule to keep**: anything the response derives from *who is asking* belongs in the
+  key, not just in the query. Regression: `apps/api/tests/projection_cache.rs`.
 - **TTL**: `PROJECTION_CACHE_TTL = 60 min`, **sliding** — refreshed on every hit; expired entries
   removed lazily on access.
 - **Invalidation**: every mutating handler calls and **awaits**
@@ -397,7 +405,7 @@ non-cookie credential. The decision mirrors D3 (sessions-in-DB, not JWT), delibe
 - **Any member (viewer included) may mint their own tokens** via the cookie-authed CRUD: a token
   can never do more than its owner. Since the #2/#3 MCP expansion (2026-08-18) tools also WRITE:
   every write tool re-checks `require_mcp_write` per request (`role_can_write` on the live role +
-  the DB kill-switch `installation.mcp_write_enabled`, toggle in Ajustes → MCP), so a viewer's
+  the DB kill-switch `installation.mcp_write_enabled`, toggle in Ajustes → Integraciones), so a viewer's
   token still cannot write and flipping the toggle cuts writes for ALL tokens on the next call.
   Pending users hit the same 403 gate.
 - **MCP tools call the SAME core fns as the HTTP handlers** (`summary_core`,
@@ -468,7 +476,7 @@ prefix-or-substring redirect matching (instead of exact string) is an open redir
 | I2 | `fire_target_at_month_index` is the ONLY FIRE-target formula — engine crossover and API `fire_target_series` both call it | `crates/engine/src/projection.rs` (public fn + regression test for the old off-by-one) | `grep -rn "fire_target_at_month_index" crates/ apps/api/src/` — every inflation-compounding of a FIRE target must route through it |
 | I3 | Amounts serialize as decimal strings, EXCEPT the documented f64 arrays of `/v1/projection/series` and the per-point arrays of `/v1/history/series` (D4) | ONE `pub(crate)` definition of `serialize_decimal_as_f64` in `handlers/projection.rs`, used by the projection and history responses only | `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) |
 | I4 | All routes live under `/v1/`, except root `/health`, `/openapi.json`, `/mcp` (v3.0.0) and the OAuth protocol routes (v3.1.0: `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server[/mcp]`, `/oauth/register`, `/oauth/token`, `/oauth/revoke` — root-level because RFC 8414/9728 fix the `.well-known` URLs and the metadata advertises the rest); `/mcp` + OAuth protocol mounted only when `mcp_enabled`. `/oauth/authorize` has NO backend route (SPA fallback serves it; a 405 would not fall through). Plus the SPA static fallback when `WEB_STATIC_ROOT` is set | `routes/mod.rs` (`nest("/v1", v1)` + conditional `merge(mcp)` + `merge(oauth_protocol)`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest\|mcp\|oauth" apps/api/src/routes/mod.rs` |
-| I5 | Reads never mutate (D5): expired liabilities filtered, never deleted, by GETs — since 3.4.0 the projection input query also filters them (fix C-10: an expired principal used to depress net worth forever, diverging from `/v1/summary`), pinned by `projection_excludes_expired_liability_principal` | WHERE clauses in liabilities/summary/budget/assets/projection handlers | `TEST_DATABASE_URL=... cargo test --workspace liabilities_purge` (local; not in CI) |
+| I5 | Reads never mutate (D5): expired liabilities filtered, never deleted, by GETs — since 3.4.0 the projection input query also filters them (fix C-10: an expired principal used to depress net worth forever, diverging from `/v1/summary`), pinned by `projection_excludes_expired_liability_principal` | WHERE clauses in liabilities/summary/budget/assets/projection handlers | `TEST_DATABASE_URL=... cargo test --workspace liabilities_purge` (en local; **desde 4.0.0 también en CI**, job `integration`) |
 | I6 | In charts, the stacked per-asset areas sum EXACTLY to the (visible) net-worth line at every x | `MiniProjection.tsx` rescales each asset share by `visibleNw × (asset_i / Σassets)` — necessary because raw engine `net_worth = Σassets + surplus_cash − Σprincipals − undrained`, so raw `per_asset_series` does NOT sum to NW | Read the `cumulative` block in `apps/web/src/components/charts/MiniProjection.tsx` (~lines 164–190); any new stacked chart must reuse `MiniProjection`, not re-derive |
 | I7 | `planning_monthly_cash_adjustment.len() == horizon_months`; allocation `target_index` in bounds; horizon ≥ 1 | Engine input validation → `EngineError::{InvalidPlanningAdjustments, InvalidAllocationRuleTarget, InvalidHorizon}` → 400 | `cargo test -p futurefin-engine` |
 | I8 | Engine has zero I/O/async deps (purity, §1) | `crates/engine/Cargo.toml` deps are exactly: chrono, rust_decimal, serde, thiserror, uuid | `grep -E "tokio\|sqlx\|reqwest\|axum" crates/engine/Cargo.toml` → must be empty |

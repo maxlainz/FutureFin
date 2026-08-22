@@ -15,8 +15,16 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-20 for
-the 3.8.0 train** (auditoría MCP, ergonomía MCP: **30** integration-test files in `apps/api/tests/`
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-22 for the
+4.0.0 train** (apertura pública + auditoría previa): **33** integration-test files in
+`apps/api/tests/` (nuevos `account_and_members.rs` y `openapi_contract.rs`), **42** migraciones,
+`.ffbackup` `CURRENT_SCHEMA_VERSION` = **9**, catálogo MCP en **52** tools
+(`grep -c '#[tool(' apps/api/src/mcp/server.rs`), suite en **498** (`cargo test --workspace`) y
+Vitest en **368** en 16 ficheros. `apps/api/Cargo.toml` lee `4.0.0` y `CHANGELOG.md` lleva su sección
+`## [4.0.0] - 2026-08-22`. **Cambia además una puerta**: desde 4.0.0 CI corre la integración, ESLint y
+Vitest (job `integration` con servicio Postgres + job `web`), así que «verde en CI» ya significa algo
+— pero no sustituye la verificación visual en claro y oscuro, que sigue sin automatizar. Antes,
+counts refreshed **2026-08-20 for the 3.8.0 train** (auditoría MCP, ergonomía MCP: **30** integration-test files in `apps/api/tests/`
 — el nuevo es `allocation_resolution.rs` —, **40** migraciones **sin cambios** (ningún bloque
 del tren añade columnas), `.ffbackup` sigue en **8**, y el catálogo MCP pasa de 47 a **50**
 tools. `apps/api/Cargo.toml` pasa a `3.8.0`, la versión que publica el tren). Antes,
@@ -347,7 +355,7 @@ Full flow, traps and the rebuild loop: futurefin-build-and-env §4. Operational 
 ### 4.3 Visual changes: verify light AND dark
 
 Owner-mandated, also in CLAUDE.md: before merging any visual change, check both themes
-(`Ajustes → Datos y sistema → Apariencia`, or set `<html data-theme="dark|light">` in
+(`Ajustes → General → Apariencia`, or set `<html data-theme="dark|light">` in
 devtools). Rationale in 2.4.
 
 ## 5. Breaking-change policy
@@ -447,11 +455,16 @@ removed the external-database mode from the entrypoint (`exec_api_external`, `au
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (**3.8.0** on 2026-08-21; 3.5.0 nunca se publicó)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**4.0.0** on 2026-08-22; 3.5.0 nunca se publicó)
 - Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**42** on 2026-08-22 — la 42ª es `20260822120000_installation_onboarding`)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**28** on 2026-08-21 — el alta de 3.8.0 es `allocation_resolution.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (312 on 2026-08-21 tras el tren del auditoría MCP; 289 at 3.7.0, 284 at 3.6.0, 283 at 3.5.0)
-- CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
-  `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**33** on 2026-08-22 — las cinco altas del tren 4.0.0 son `account_and_members.rs`, `openapi_contract.rs`, `query_param_validation.rs`, `error_codes_parity.rs` y `fixtures_shape.rs`; 28 on 2026-08-21); test-attribute count: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375** on 2026-08-22). Totales del runner, que es lo autoritativo: `cargo test --workspace` **498**, Vitest **368** en 16 ficheros (2026-08-22)
+- MCP catalog: `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**52** on 2026-08-22) — debe cuadrar con CLAUDE.md ×2, `.claude/api-routes.md` §MCP y `futurefin-mcp-parity` §5
+- CI actually run: `cat .github/workflows/ci.yml` (jobs: `secrets-scan` / `rust` / `web` /
+  `integration` / `main-guard` / `docker-stack`) and
+  `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list.
+  **Desde 4.0.0** `grep -n TEST_DATABASE_URL .github/workflows/ci.yml` y
+  `grep -n 'npm test\|lint:web' .github/workflows/ci.yml` deben **imprimir algo**: la integración,
+  ESLint y Vitest son gates bloqueantes. Si vuelven a salir vacíos, alguien retiró una puerta
 - Compose topology (one service since 3.0.0):
   `awk '/^services:/{f=1;next} /^volumes:/{f=0} f && /^  [a-z]/' docker-compose.yml`;
   overlays: `ls docker-compose*.yml`; frozen 2.x topologies for the drill: `ls .github/testdata/`

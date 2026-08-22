@@ -86,6 +86,24 @@ async fn changing_the_password_with_a_wrong_current_one_is_a_bad_request_not_a_l
     assert_eq!(login.status, http::StatusCode::OK, "la contraseña original debe seguir valiendo");
 }
 
+/// Repetir la contraseña actual no es rotar: revocaría las otras tres credenciales sin cambiar
+/// nada, con la apariencia de haber rotado.
+#[tokio::test]
+async fn changing_the_password_to_the_same_one_is_rejected() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/auth/password",
+            serde_json::json!({"current_password": PW, "new_password": PW}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "password_unchanged", "{}", r.json());
+}
+
 /// La política de longitud se aplica también aquí, no solo en el registro.
 #[tokio::test]
 async fn changing_the_password_enforces_the_length_policy() {
@@ -353,6 +371,49 @@ async fn the_last_owner_can_be_neither_removed_nor_demoted() {
         )
         .await;
     assert_eq!(ahora.status, http::StatusCode::NO_CONTENT, "con dos owners sí se puede: {ahora:?}");
+}
+
+/// Un `member` con permiso de escritura sobre el ledger **no** puede tocar membresías. Es el
+/// rol que tendría un atacante realista dentro del hogar: el test anterior solo prueba con un
+/// `viewer`, que no escribe nada de todas formas.
+#[tokio::test]
+async fn a_plain_member_cannot_touch_memberships() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bob = app.register_and_approve_member(&owner, "bob", "member").await;
+    let carol = app.register_and_approve_member(&owner, "carol", "viewer").await;
+
+    // Escribe en el ledger sin problema…
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    let ok = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": cat, "name": "X", "current_value": "1"}),
+            &bob.cookie,
+        )
+        .await;
+    assert_eq!(ok.status, http::StatusCode::CREATED, "un member sí escribe: {ok:?}");
+
+    // …y ninguna de las dos mutaciones de membresía le vale.
+    let sube = app
+        .patch_json_with_cookie(
+            &format!("/v1/installation/members/{}", carol.user_id),
+            serde_json::json!({"role": "owner"}),
+            &bob.cookie,
+        )
+        .await;
+    assert_eq!(sube.status, http::StatusCode::FORBIDDEN, "{sube:?}");
+    let echa = app
+        .delete_with_cookie(
+            &format!("/v1/installation/members/{}", carol.user_id),
+            &bob.cookie,
+        )
+        .await;
+    assert_eq!(echa.status, http::StatusCode::FORBIDDEN, "{echa:?}");
+
+    // Y carol sigue dentro.
+    let list = app.get_with_cookie("/v1/installation/members", &owner.cookie).await;
+    assert_eq!(list.json().as_array().expect("miembros").len(), 3, "{}", list.json());
 }
 
 /// Un usuario que no es miembro devuelve 404, no un 204 silencioso.

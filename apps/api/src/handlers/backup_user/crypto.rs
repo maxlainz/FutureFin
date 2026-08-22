@@ -37,7 +37,11 @@ const KDF_P_COST: u32 = 1;
 /// `m_cost: 8000000` pide 8 GB y se lleva por delante el contenedor entero, PostgreSQL
 /// embebido incluido. Los topes son holgados respecto a lo que exporta el servidor
 /// (19.456 / 2 / 1) para no romper ficheros de versiones futuras que suban el coste.
-const MAX_IMPORT_M_COST: u32 = 262_144; // 256 MiB
+/// 64 MiB: 3,4× lo que el servidor exporta hoy (19.456 KiB), así que un fichero de una versión
+/// futura con el coste subido sigue importándose, pero el peor caso por petición baja de
+/// ~5 s de CPU y 256 MiB a ~1,3 s y 64 MiB. El techo por sí solo no basta —acota UNA petición,
+/// no el agregado—: el import va además de uno en uno (`heavy::run_backup_crypto`).
+const MAX_IMPORT_M_COST: u32 = 65_536; // 64 MiB
 const MAX_IMPORT_T_COST: u32 = 10;
 const MAX_IMPORT_P_COST: u32 = 4;
 

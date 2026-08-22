@@ -78,14 +78,60 @@ Nunca en silencio. Es el mismo mecanismo probado de `futurefin-mcp-parity` §1.
 
 Si retiras una métrica, **retira su texto**; no lo dejes «por si vuelve». El test lo caza.
 
-## 6. Provenance and maintenance
+## 6. Estado del catálogo (2026-08-22, 4.0.0)
 
-Introducido en 3.9.0 junto al popover de ayuda. Re-verificación:
+**15 entradas** repartidas en cuatro zonas de la app. `grep -c '^  "' apps/web/src/lib/helpTexts.ts` para el recuento;
+`grep -n '^  "' …` para la lista. Por si necesitas orientarte sin abrir el fichero:
+
+| Vista | Ids |
+|---|---|
+| Resumen · salud financiera | `summary.savings`, `summary.liquid_assets`, `summary.runway`, `summary.net_worth` |
+| Jubilación | `retirement.target` **(nueva en 4.0.0)** |
+| Ajustes → Plan | `settings.savings_source`, `settings.income_window`, `settings.expense_window`, `settings.window_mode`, `settings.swr`, `settings.inflation` |
+| Movimientos | `expenses.expense_avg`, `expenses.income_avg`, `expenses.savings_transferred`, `expenses.transferred_rate` |
+
+**`retirement.target` — «Patrimonio objetivo»** (4.0.0). La métrica más cara de la app no tenía
+texto. Lo que dice, y por qué cada trozo: el objetivo es el gasto anual en jubilación **grosseado
+por impuestos si están activados** dividido entre el SWR; **la cifra grande está en euros de hoy** y
+**el paréntesis es ese mismo objetivo llevado al mes del cruce con la inflación configurada**. Ese
+último matiz es el que existía mal en la interfaz: el rótulo «Patrimonio objetivo (con inflación)»
+etiquetaba justo la cifra que NO la lleva. Si tocas la base del target, el gross-up o el SWR, esta
+entrada es la que hay que revisar (y ver `futurefin-fire-domain-reference`).
+
+### 6.1 Auditoría de 4.0.0 — seis entradas a la deriva, y el patrón que las produjo
+
+Seis de las quince (las cuatro de Movimientos, `summary.runway` y `summary.savings`) seguían
+describiendo una métrica que el código había dejado atrás **sin que nada fallara**: el test de cobertura (§5) comprueba que cada texto tiene consumidor y cada
+consumidor texto, pero **no puede comprobar que el texto sea verdad**. Esa mitad es humana, y es
+justo la que esta skill existe para forzar.
+
+| Id | Decía | Realidad (código) |
+|---|---|---|
+| `expenses.expense_avg` · `income_avg` · `savings_transferred` · `transferred_rate` | Nada sobre qué meses entran, más allá de «meses reales» | El tramo es **medio-abierto `[window_start, selected)`** (`transactions/summary.rs`: `in_window = ym >= window_start_ym && ym < selected_ym`): **el mes que estás mirando NO se promedia**. Y las **transferencias conciliadas** quedan fuera de todos los buckets desde 3.5.0 |
+| `summary.runway` | «tus activos líquidos cubrirían tu gasto», sin decir qué gasto | La base es `expense_total_monthly_equivalent`, que **sigue el modo** `savings_source`: presupuestado en A, promedio real en B/C |
+| `summary.savings` | Mandaba a «Ajustes → Proyección» | Esa sub-pestaña se llama **«Plan»** desde 3.10.0 (`SETTINGS_SUBTAB_LABEL`, `lib/navigation.ts`) |
+
+**El patrón**: ninguna de las seis fue un cambio de métrica «con su texto olvidado». Fueron
+cambios de OTRA cosa —el predicado de mes real, la conciliación, el modo de ahorro, el nombre de
+una sub-pestaña— que **movieron el significado de una métrica de rebote**. La §3 ya lo cubre en
+teoría («lo que se excluye cambia», «pasa a depender del modo»); lo que faltaba era aplicarla
+cuando el cambio no se siente como «tocar una métrica». Regla práctica: si tu cambio altera **qué
+filas entran en un agregado** o **cómo se llama algo que un texto cita**, `grep` el id en
+`helpTexts.ts` antes de cerrar.
+
+## 7. Provenance and maintenance
+
+Introducido en 3.9.0 junto al popover de ayuda. **Re-verificado y ampliado el 2026-08-22 (4.0.0)**:
+§6 (estado del catálogo, `retirement.target`) y §6.1 (las cuatro derivas de la auditoría previa a la
+publicación, ya corregidas en `helpTexts.ts`). Re-verificación:
 
 ```bash
 # Entradas del catálogo y consumidores
-grep -c '^  "' apps/web/src/lib/helpTexts.ts
+grep -c '^  "' apps/web/src/lib/helpTexts.ts        # 15 a 2026-08-22
 grep -rn 'helpId=' apps/web/src --include='*.tsx' | wc -l
+# Los dos hechos que §6.1 afirma sobre el código, sin compilar:
+grep -n 'in_window\|window_start_ym' apps/api/src/handlers/transactions/summary.rs  # tramo medio-abierto
+grep -n 'plan:' apps/web/src/lib/navigation.ts                                      # la sub-pestaña se llama «Plan»
 # Las dos direcciones de cobertura
 npm test --workspace futurefin-web -- helpTexts
 ```
