@@ -214,16 +214,20 @@ async fn series_joins_last_snapshot_to_live_values() {
     // Predicciones (timeline [d1, hoy] con observación virtual de hoy = valor vivo 400;
     // v(g) = 100 + 300·days(d1→g)/days(d1→hoy)):
     //   k=-2 (= d1) → 100 exacto.
-    //   k=-1, k=0  → interpolado hacia el valor vivo; en k=0 la serie EMPALMA con el vivo
-    //                (exactamente 400 cuando hoy es primero de mes; si no, el interpolante
-    //                evaluado en el ancla, a días de distancia de 400).
+    //   k=-1        → interpolado en su primero-de-mes.
+    //   k=0         → 400 EXACTO cualquier día del mes. Desde 4.0.0 el punto 0 se evalúa en `today`,
+    //                 que ES la fecha de la observación virtual, así que devuelve el valor vivo sin
+    //                 interpolar. Antes se evaluaba el día 1 y solo daba 400 si hoy era día 1: el
+    //                 resto del mes la serie iba por detrás del patrimonio real, y este test pasaba
+    //                 en verde 1 de cada 30 días midiendo el interpolante en vez del empalme.
     let total_days = (today - d1).num_days() as f64;
     let expect = |g: NaiveDate| -> f64 { 100.0 + 300.0 * ((g - d1).num_days() as f64) / total_days };
     let pts = body["points"].as_array().unwrap();
     assert_eq!(pts.len(), 3);
     assert_close(f64_of(&point_at(&body, -2)["assets_total"]), 100.0, "k=-2");
     assert_close(f64_of(&point_at(&body, -1)["assets_total"]), expect(add_months_signed(anchor, -1)), "k=-1");
-    assert_close(f64_of(&point_at(&body, 0)["assets_total"]), expect(anchor), "k=0 empalma con el vivo");
+    assert_close(f64_of(&point_at(&body, 0)["assets_total"]), 400.0, "k=0 = valor vivo exacto");
+    assert_close(f64_of(&point_at(&body, 0)["net_worth"]), 400.0, "k=0 net_worth = valor vivo");
 
     // Nombre: el asset vivo gana sobre el label del snapshot.
     let series = body["asset_series"].as_array().unwrap();
@@ -451,8 +455,13 @@ async fn series_single_snapshot_today() {
     assert_eq!(cap.status, http::StatusCode::OK, "{cap:?}");
 
     // Predicción: único snapshot = hoy → k_min = 0 → un solo punto {k: 0, assets 10000,
-    // liabilities 0, nw 10000}. Sin observación virtual (el último snapshot real ES hoy):
-    // el punto k=0 evalúa el valor OBSERVADO (clamp del primer mes si hoy > día 1).
+    // liabilities 0, nw 10000}. Sin observación virtual (el último snapshot real ES hoy).
+    //
+    // El número no cambia con 4.0.0 pero el MECANISMO sí, y conviene dejarlo escrito o el
+    // siguiente lector deduce mal: antes el punto se evaluaba el día 1, que cae ANTES del
+    // snapshot, y salía por el «enganche del primer mes». Ahora se evalúa en `today`, que ES la
+    // fecha del snapshot, así que sale por la rama del valor observado exacto y el enganche ya no
+    // interviene.
     let (body, anchor_date, anchor_mf) = get_series(&app, &owner.cookie, "").await;
     let pts = body["points"].as_array().unwrap();
     assert_eq!(pts.len(), 1);
@@ -478,4 +487,179 @@ async fn series_single_snapshot_today() {
     let expected_fraction = (anchor_date.day() as f64 - 1.0) / days_in_month;
     assert_close(f64_of(&markers[0]["month_fraction"]), expected_fraction, "fraction hoy");
     assert_close(f64_of(&markers[0]["total"]), 10_000.0, "marker total");
+}
+
+// ---------------------------------------------------------------------------
+// 8. REGRESIÓN (issue #7 §2) — la serie llega a sus propios snapshots
+// ---------------------------------------------------------------------------
+
+/// El repro del issue, reducido: dos snapshots del mes en curso y un activo que solo aparece en el
+/// más reciente.
+///
+/// Hasta 4.0.0 el último punto se evaluaba el **día 1**, así que (a) la curva terminaba por debajo
+/// de fotos reales del propio usuario, una de ellas tomada hoy, y (b) un activo cuya primera foto
+/// era la última disponible valía `0` en TODA la ventana, porque el segmento que contiene el día 1
+/// no lo tenía observado por la izquierda. Un solo hecho, dos síntomas.
+#[tokio::test]
+async fn series_reaches_snapshots_taken_this_month() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    let (today, anchor) = server_today(&app, &owner.cookie).await;
+
+    // Activo viejo: está en las dos fotos. Activo nuevo: solo en la de hoy.
+    let viejo = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": cat, "name": "Cartera", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let nuevo = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": cat, "name": "N26", "current_value": "230"}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Foto de hace dos meses: solo la cartera.
+    backfill(
+        &app,
+        &owner,
+        "asset",
+        add_months_signed(anchor, -2),
+        serde_json::json!([{"item_id": viejo, "label": "Cartera", "value": "800"}]),
+    )
+    .await;
+    // Foto de HOY: las dos. Es la que la serie no alcanzaba.
+    backfill(
+        &app,
+        &owner,
+        "asset",
+        today,
+        serde_json::json!([
+            {"item_id": viejo, "label": "Cartera", "value": "1000"},
+            {"item_id": nuevo, "label": "N26", "value": "230"},
+        ]),
+    )
+    .await;
+
+    let (body, _, _) = get_series(&app, &owner.cookie, "").await;
+
+    // El último punto vale EXACTAMENTE el total de la foto de hoy, y no un céntimo menos.
+    assert_close(
+        f64_of(&point_at(&body, 0)["assets_total"]),
+        1230.0,
+        "k=0 debe alcanzar el snapshot de hoy",
+    );
+
+    // Y el marker de hoy dice lo mismo que el punto: era la contradicción visible del issue.
+    let marker_hoy = body["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["date_ymd"] == serde_json::json!(today.format("%Y-%m-%d").to_string()))
+        .expect("marker de hoy");
+    assert_close(
+        f64_of(&marker_hoy["total"]),
+        f64_of(&point_at(&body, 0)["assets_total"]),
+        "el punto 0 y el marker de hoy son la misma cifra",
+    );
+
+    // El activo que solo está en la foto reciente ya no vale 0 en el último punto.
+    let (body_s, _, _) = get_series(&app, &owner.cookie, "?include_asset_series=true").await;
+    let n26 = body_s["asset_series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["asset_name"] == serde_json::json!("N26"))
+        .expect("serie de N26");
+    let values = n26["values"].as_array().unwrap();
+    assert_close(
+        f64_of(values.last().unwrap()),
+        230.0,
+        "un activo cuya primera foto es la última disponible ya no vale 0 en k=0",
+    );
+}
+
+/// `liabilities_snapshotted` distingue «no lo he fotografiado» de «no debo nada».
+///
+/// Sin snapshots de pasivo no hay timeline de ese kind y no hay fallback a las filas vivas, así que
+/// `liabilities_total` es 0 en toda la serie aunque haya una hipoteca abierta. La cifra no cambia
+/// —el histórico es lo que fotografiaste, y ése es su contrato—, pero deja de ser muda.
+#[tokio::test]
+async fn liabilities_snapshotted_tells_missing_data_from_no_debt() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat_a = app.create_category(&owner, "asset", "Cash").await;
+    let cat_l = app.create_category(&owner, "liability", "Préstamos").await;
+    let (_, anchor) = server_today(&app, &owner.cookie).await;
+
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": cat_a, "name": "Cuenta", "current_value": "5000"}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Pasivo VIVO de 548 €, sin fotografiar.
+    let cat_e = app.create_category(&owner, "expense", "Cuotas").await;
+    let liab = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            serde_json::json!({
+                "category_id": cat_l, "expense_category_id": cat_e,
+                "label": "Préstamo", "principal": "548",
+                "payment_amount": "50", "payment_frequency": "monthly",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(liab.status, http::StatusCode::CREATED, "{liab:?}");
+
+    backfill(
+        &app,
+        &owner,
+        "asset",
+        add_months_signed(anchor, -1),
+        serde_json::json!([{"item_id": asset, "label": "Cuenta", "value": "4000"}]),
+    )
+    .await;
+
+    let (body, _, _) = get_series(&app, &owner.cookie, "").await;
+    assert_eq!(
+        body["liabilities_snapshotted"],
+        serde_json::json!(false),
+        "hay deuda viva pero ningún snapshot de pasivo: {body}"
+    );
+    assert_close(
+        f64_of(&point_at(&body, 0)["liabilities_total"]),
+        0.0,
+        "la cifra NO cambia: el histórico sigue siendo lo fotografiado",
+    );
+
+    // Con una foto de pasivo, el flag se enciende.
+    backfill(
+        &app,
+        &owner,
+        "liability",
+        add_months_signed(anchor, -1),
+        serde_json::json!([{"item_id": liab.json()["id"].as_str().unwrap(), "label": "Préstamo", "value": "600"}]),
+    )
+    .await;
+    let (body2, _, _) = get_series(&app, &owner.cookie, "").await;
+    assert_eq!(body2["liabilities_snapshotted"], serde_json::json!(true), "{body2}");
 }

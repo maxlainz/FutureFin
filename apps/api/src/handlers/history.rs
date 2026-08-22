@@ -872,7 +872,10 @@ pub struct HistoryMarker {
 pub struct HistorySeriesResponse {
     /// Hoy civil de la instalación (`installation.calendar_tz`).
     pub anchor_date_ymd: String,
-    /// Primero-de-mes de `anchor_date_ymd` — la fecha del punto `month_index = 0`.
+    /// Primero-de-mes de `anchor_date_ymd` — la **etiqueta de mes** del punto `month_index = 0`.
+    /// Ese punto se **evalúa** en `anchor_date_ymd` (hoy), no aquí: los meses pasados se evalúan en
+    /// su día 1, y el mes en curso, que está a medias, en hoy — así el último punto empalma con el
+    /// patrimonio vivo y cuadra con `GET /v1/summary`.
     pub anchor_month_first_ymd: String,
     /// `household` | `mine`.
     pub view: String,
@@ -882,6 +885,15 @@ pub struct HistorySeriesResponse {
     pub asset_series: Vec<HistoryAssetSeries>,
     /// Un marcador por snapshot en scope.
     pub markers: Vec<HistoryMarker>,
+    /// `true` si el scope tiene al menos un snapshot de kind `liability`.
+    ///
+    /// Con `false`, `points[].liabilities_total` es 0 en toda la serie **por ausencia de datos**,
+    /// no porque no haya deuda: los timelines se agrupan a partir de los snapshots existentes, y un
+    /// kind sin ninguna cabecera no tiene timeline ni fallback a las filas vivas. Sin este flag,
+    /// «no lo he fotografiado» y «no debo nada» son indistinguibles, y el `net_worth` histórico de
+    /// alguien con hipoteca se lee como si no la tuviera (issue #7 §2). La deuda viva está en
+    /// `GET /v1/liabilities` y en `GET /v1/summary`.
+    pub liabilities_snapshotted: bool,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1112,6 +1124,12 @@ fn accumulate_series(
         // Observación virtual «hoy» con las filas vivas del owner, SALVO que el último
         // snapshot real sea de hoy (`<` y no `!=`: nunca romper el orden ascendente si
         // un cambio de calendar_tz dejara un snapshot "en el futuro").
+        //
+        // Desde 4.0.0 esto pasó de conveniente a IMPRESCINDIBLE. La rejilla de la serie evalúa su
+        // último punto en `today` (ver `history_series_core`), así que esta observación es el ancla
+        // de ese punto: con ella, `evaluate_item_at` cae en `a == m-1` y devuelve el valor vivo
+        // exacto. Sin ella, `e > dates[m-1]` llevaría a la rama «tras el último snapshot: 0» y el
+        // punto 0 de la serie valdría CERO. No la quites sin tocar también la rejilla.
         let append_virtual = last_real < today;
         let total_len = dates.len() + usize::from(append_virtual);
 
@@ -1304,6 +1322,11 @@ pub(crate) async fn history_series_core(
     // ---- Fetch del scope (4 queries LedgerView, pipeline compartido) ------------------------
     let scope = fetch_history_scope(pool, view, iid, user_id, today).await?;
 
+    // Sobre el scope COMPLETO, no sobre los markers recortados por `window_months`: un snapshot de
+    // pasivo anterior a la ventana sigue anclando la interpolación dentro de ella, así que
+    // `liabilities_total` sí es significativo. Con `headers` vacío da `false` sin caso especial.
+    let liabilities_snapshotted = scope.headers.iter().any(|h| h.kind == "liability");
+
     // 0 snapshots en scope → 200 con arrays vacíos.
     if scope.headers.is_empty() {
         return Ok(HistorySeriesResponse {
@@ -1313,6 +1336,7 @@ pub(crate) async fn history_series_core(
             points: Vec::new(),
             asset_series: Vec::new(),
             markers: Vec::new(),
+            liabilities_snapshotted,
         });
     }
 
@@ -1351,7 +1375,25 @@ pub(crate) async fn history_series_core(
         .into_iter()
         .filter(|m| m.month_index >= k_min)
         .collect();
-    let grid: Vec<NaiveDate> = (k_min..=0).map(|k| add_months_signed(anchor, k)).collect();
+    // La rejilla ETIQUETA meses (primeros-de-mes) pero el punto `month_index = 0` se EVALÚA en
+    // `today`. Es el único punto cuyo mes está a medias, y evaluarlo el día 1 dejaba la serie hasta
+    // 30 días por detrás del patrimonio vivo: con dos snapshots del mes en curso, la curva
+    // terminaba 1.640 € por debajo de dos fotos reales del propio usuario, una tomada hoy, y los
+    // activos que solo aparecían en la foto más reciente valían 0 en TODA la ventana (issue #7 §2).
+    // Un solo hecho explicaba los tres síntomas.
+    //
+    // `today >= anchor` por construcción (`anchor` es su primero-de-mes), así que la rejilla sigue
+    // estrictamente ascendente. `anchor` NO se toca: es la etiqueta de mes y la clave de alineación
+    // con la rejilla de la proyección — moverla rompería el empalme del chart.
+    //
+    // La otra mitad de esto es la observación virtual de más arriba: con `g = today` y
+    // `dates.last() == today`, `evaluate_item_at` cae en `a == m-1` y devuelve el valor vivo
+    // EXACTO. Sin ella, `e > dates[m-1]` llevaría a la rama «tras el último snapshot: 0» y el punto
+    // 0 valdría cero. Las dos piezas van juntas.
+    let mut grid: Vec<NaiveDate> = (k_min..=0).map(|k| add_months_signed(anchor, k)).collect();
+    if let Some(last) = grid.last_mut() {
+        *last = today;
+    }
     let grid_len = grid.len();
 
     // ---- Evaluación (sin cash-flow: serie de snapshots tier-1) ------------------------------
@@ -1406,6 +1448,7 @@ pub(crate) async fn history_series_core(
         points,
         asset_series,
         markers,
+        liabilities_snapshotted,
     })
 }
 

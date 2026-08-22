@@ -733,6 +733,41 @@ mod tests {
         assert_eq!(out[1][1], dec(0));
     }
 
+    /// La rejilla que el handler produce **desde 4.0.0**: el último punto es `today`, no su
+    /// primero-de-mes.
+    ///
+    /// Es el mismo timeline del test de arriba con la rejilla nueva, y el contraste es el arreglo:
+    /// donde antes salía un interpolado «cerca de 1600», ahora sale **1600 exacto**, porque `today`
+    /// es la fecha de la observación virtual y `evaluate_item_at` cae en la rama del último
+    /// extremo. El item borrado sigue en 0: eso no cambia.
+    #[test]
+    fn virtual_today_grid_point_evaluated_at_today_is_exact() {
+        let today = d(2025, 6, 10);
+        let tl = HistoryTimeline {
+            dates: vec![d(2025, 1, 1), today],
+            items: vec![
+                HistoryItem {
+                    source_item_id: Uuid::from_u128(1),
+                    kind: HistoryItemKind::Asset,
+                    observations: vec![obs(1000), obs(1600)],
+                    cashflow: vec![],
+                },
+                HistoryItem {
+                    source_item_id: Uuid::from_u128(2),
+                    kind: HistoryItemKind::Asset,
+                    observations: vec![obs(500), None],
+                    cashflow: vec![],
+                },
+            ],
+        };
+        let grid = vec![d(2025, 1, 1), today];
+        let out = evaluate_timeline(&tl, &grid).unwrap();
+        assert_eq!(out[0][0], dec(1000));
+        assert_eq!(out[0][1], dec(1600), "en `today` el valor vivo es EXACTO, sin interpolar");
+        assert_eq!(out[1][0], dec(500));
+        assert_eq!(out[1][1], dec(0));
+    }
+
     // ---- Aritmética de calendario ------------------------------------------------------------
 
     #[test]

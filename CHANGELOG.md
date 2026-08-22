@@ -148,6 +148,23 @@ datos**. Un movimiento con fecha futura no es un gasto, es un plan: para eso est
 la fecha no puede pasar de hoy, ni al apuntar ni al editar, y el selector de fecha del formulario de
 edición tiene el mismo tope que ya tenía el de alta.
 
+#### La curva del pasado no llegaba a tus propias fotos
+
+Si guardabas una foto de tu patrimonio este mes, la curva histórica **no llegaba hasta ella**: podía
+quedarse más de mil euros por debajo de un dato que tú mismo habías metido hoy. Y un activo que
+aparecía por primera vez en la foto más reciente salía valiendo **cero en toda la gráfica**.
+
+Los dos síntomas eran la misma causa: el último punto de la curva se calculaba a **día 1 del mes**,
+no a día de hoy. El mes en curso está a medias, así que se evalúa en la fecha de hoy — igual que ya
+hacía el detalle fino del cash-flow. La curva ahora termina exactamente donde dice tu última foto, y
+coincide con el patrimonio que ves en el Resumen. En la web no cambia nada visible: la gráfica ya
+tomaba el punto del mes actual de la proyección.
+
+De paso, algo que solo veía quien pregunta por Claude: si nunca has fotografiado tus deudas, el
+patrimonio histórico no las resta, y un cero era indistinguible de «no debo nada». La cifra sigue
+siendo la misma —el histórico es lo que tú fotografiaste— pero ahora la respuesta dice cuál de las
+dos cosas es.
+
 #### Un filtro de vista mal escrito devolvía los datos de todo el hogar
 
 `?view=` aceptaba **cualquier** valor y, si no era exactamente `mine`, servía el hogar completo sin
