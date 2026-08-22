@@ -24,7 +24,7 @@ Everything here is verified against the code as of 2026-07-02 (v1.4.3, 31 migrat
 files); the container/DB sections and `db-stats.sh` were re-verified 2026-08-16 for
 **v3.0.0** (34 migration files, self-contained image). All commands run from the repo
 root. The three scripts shipped with this skill live in
-`.claude/skills/futurefin-diagnostics-and-tooling/scripts/` and were **written against
+`scripts/diagnostics/` and were **written against
 the API contract as of 2026-07-02, verified by code reading**
 (`apps/api/src/routes/mod.rs`, `apps/api/src/handlers/projection.rs`,
 `apps/api/src/state.rs`) — not by execution. They check preconditions and fail with
@@ -264,7 +264,7 @@ registers a throwaway user on a virgin DB; `projection-diff.sh` only logs in);
 
 ```bash
 SMOKE_USER=alice SMOKE_PASS=secret \
-  bash .claude/skills/futurefin-diagnostics-and-tooling/scripts/api-timing.sh
+  bash scripts/diagnostics/api-timing.sh
 ```
 
 Measures: health probes, login latency, projection GETs (2 hits per density, plus
@@ -290,7 +290,7 @@ v1.4.0, `scripts/smoke-projection-cache.sh` comments):
 ### `scripts/projection-diff.sh`
 
 ```bash
-S=.claude/skills/futurefin-diagnostics-and-tooling/scripts/projection-diff.sh
+S=scripts/diagnostics/projection-diff.sh
 SMOKE_USER=alice SMOKE_PASS=secret bash $S                     # monthly vs hybrid
 SMOKE_USER=... SMOKE_PASS=... bash $S "" "view=mine"           # household vs mine
 SMOKE_USER=... SMOKE_PASS=... bash $S --save /tmp/base.json    # BEFORE a change
@@ -327,7 +327,7 @@ Interpretation:
 ### `scripts/db-stats.sh`
 
 ```bash
-bash .claude/skills/futurefin-diagnostics-and-tooling/scripts/db-stats.sh
+bash scripts/diagnostics/db-stats.sh
 # non-default credentials: POSTGRES_USER=... POSTGRES_DB=... DB_SERVICE=... bash .../db-stats.sh
 ```
 
@@ -401,9 +401,9 @@ trusting:
 - Entrypoint log prefix used to split the three log sources:
   `grep -n 'futurefin-entrypoint' apps/api/docker-entrypoint.sh | head -3`
 - `db-stats.sh` defaults and its two 3.0.0 queries:
-  `grep -n 'DB_SERVICE\|/var/run/postgresql\|server_version\|datcollate' .claude/skills/futurefin-diagnostics-and-tooling/scripts/db-stats.sh`
+  `grep -n 'DB_SERVICE\|/var/run/postgresql\|server_version\|datcollate' scripts/diagnostics/db-stats.sh`
 - Scripts stay shellcheck-clean (CI enforces):
-  `shellcheck -S warning .claude/skills/futurefin-diagnostics-and-tooling/scripts/*.sh`
+  `shellcheck -S warning scripts/diagnostics/*.sh`
 - Two-phase fetch + chunking: `grep -n 'fetchProjectionTwoPhase\|density=hybrid\|import("./views/ProjectionView")' apps/web/src/App.tsx`
 - Smoke script env/behavior: `sed -n '1,45p' scripts/smoke-projection-cache.sh`
 - Size/timing norms (~260→30 KB, ~5 KB hybrid, ~82 vs ~841 points, sub-ms hit,

@@ -1,0 +1,11 @@
+# Excepciones del escáner de datos sensibles (scripts/scan-sensitive.sh).
+# Una expresión regular extendida por línea. SIEMPRE con un comentario que explique
+# por qué es legítima: sin el porqué, la siguiente persona no sabrá si puede quitarla.
+
+# Placeholders del secreto de los tokens de API: nunca se persiste el secreto real,
+# solo su SHA-256. Estas cadenas documentan el formato en OpenAPI, tipos y migración.
+ffp_XXXXXXXX
+
+# Token de prueba con relleno constante en el test que comprueba que un Bearer con el
+# prefijo correcto pero sin fila en `api_tokens` recibe 401. No es un secreto: es una A repetida.
+apps/api/tests/api_tokens\.rs:.*ffp_A+

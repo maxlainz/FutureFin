@@ -23,6 +23,7 @@ The repo carries three documentation layers. Consult them in this order:
 | About to (re)introduce an old idea — check what was already tried and rejected | [`futurefin-failure-archaeology`](.claude/skills/futurefin-failure-archaeology/SKILL.md) |
 | Añadir/cambiar rutas o handlers (¿tool MCP?), añadir/actualizar una tool MCP, deriva del catálogo `/mcp` | [`futurefin-mcp-parity`](.claude/skills/futurefin-mcp-parity/SKILL.md) |
 | Tocar una métrica o un KPI: su base, su ventana, su nombre, o añadir/retirar uno | [`futurefin-metric-definitions`](.claude/skills/futurefin-metric-definitions/SKILL.md) |
+| Añadir/cambiar un fixture, ilustrar un cambio con números, capturas, datos de demo | [`futurefin-data-hygiene`](.claude/skills/futurefin-data-hygiene/SKILL.md) |
 | Env vars, compose files, query params, fire_settings axes; adding a config axis | [`futurefin-config-and-flags`](.claude/skills/futurefin-config-and-flags/SKILL.md) |
 | Setting up / building / dev-environment failures | [`futurefin-build-and-env`](.claude/skills/futurefin-build-and-env/SKILL.md) |
 | Deploy, upgrade, rollback, backups, logs, production ops | [`futurefin-run-and-operate`](.claude/skills/futurefin-run-and-operate/SKILL.md) |

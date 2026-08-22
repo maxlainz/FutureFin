@@ -2,7 +2,8 @@
 //!
 //! Cubre autodetección (MyInvestor/N26), decodificación Windows-1252, sugerencias de
 //! kind/categoría/transferencia, dedup por huella + ordinales + force, reglas aprendidas,
-//! viewer 403 y sha mismatch. Los CSV son fixtures anonimizados de los bancos reales.
+//! viewer 403 y sha mismatch. Los CSV son fixtures SINTÉTICOS: reproducen el formato exacto
+//! de cada banco, con datos inventados (ver la skill `futurefin-data-hygiene`).
 
 mod common;
 
@@ -102,7 +103,7 @@ async fn myinvestor_autodetect_and_suggestions() {
     // Nómina (positiva, sin regla) → income.
     assert_eq!(row_by_concept(rows, "Nomina Juny")["suggested_kind"], "income");
     // Cargo (negativo) → expense.
-    assert_eq!(row_by_concept(rows, "NYX")["suggested_kind"], "expense");
+    assert_eq!(row_by_concept(rows, "VENDING")["suggested_kind"], "expense");
     // Aportación cartera → savings (heurística).
     assert_eq!(
         row_by_concept(rows, "Aportacion automatica cartera")["suggested_kind"],
@@ -205,8 +206,8 @@ async fn n26_transfers_suggested() {
     let rows = body["rows"].as_array().unwrap();
 
     // Par opuesto −26 / +26 el mismo día → ambos sugeridos transferencia.
-    let sopar = row_by_concept(rows, "Sopar");
-    assert_eq!(sopar["suggested_transfer"], true, "−26 par opuesto");
+    let cena = row_by_concept(rows, "Cena");
+    assert_eq!(cena["suggested_transfer"], true, "−26 par opuesto");
     // "Cuenta de Ahorro" (partner) → transferencia.
     assert_eq!(
         row_by_concept(rows, "Cuenta de Ahorro")["suggested_transfer"],
@@ -220,7 +221,7 @@ async fn n26_transfers_suggested() {
     assert!(body["suggested_transfer_count"].as_u64().unwrap() >= 5);
 
     // El importe `-26.000000000` se normaliza a 4 dp: la fila conserva -26.0000.
-    let amt = sopar["amount"].as_str().unwrap();
+    let amt = cena["amount"].as_str().unwrap();
     assert_eq!(amt.parse::<f64>().unwrap(), -26.0);
 }
 
@@ -239,11 +240,11 @@ async fn learned_rules_precategorize() {
     let body = p.json();
     let rows = body["rows"].as_array().unwrap();
 
-    // Categorizar las filas CONSUM como Supermercado; el resto según sugerencia (descartando transferencias).
+    // Categorizar las filas SUPERMERCADO como Supermercado; el resto según sugerencia (descartando transferencias).
     let decisions: Vec<Value> = rows
         .iter()
         .map(|r| {
-            if r["concept"].as_str().unwrap_or("").contains("CONSUM") {
+            if r["concept"].as_str().unwrap_or("").contains("SUPERMERCADO") {
                 json!({ "kind": "expense", "category_id": super_cat })
             } else {
                 json!({
@@ -259,23 +260,23 @@ async fn learned_rules_precategorize() {
     assert_eq!(c.status, http::StatusCode::OK, "confirm: {c:?}");
     assert!(c.json()["rules_learned"].as_u64().unwrap() >= 1, "≥1 regla aprendida");
 
-    // GET /rules → existe una regla que asigna Supermercado con patrón derivado de CONSUM.
+    // GET /rules → existe una regla que asigna Supermercado con patrón derivado de SUPERMERCADO.
     let rules = app.get_with_cookie("/v1/transactions/rules", &owner.cookie).await;
     let rbody = rules.json();
     let arr = rbody.as_array().unwrap();
     let found = arr.iter().any(|r| {
         r["assign_category_id"] == json!(super_cat)
-            && r["pattern"].as_str().unwrap_or("").contains("CONSUM")
+            && r["pattern"].as_str().unwrap_or("").contains("SUPERMERCADO")
             && r["source"] == "n26"
     });
-    assert!(found, "regla CONSUM→Supermercado no encontrada: {rbody:?}");
+    assert!(found, "regla SUPERMERCADO→Supermercado no encontrada: {rbody:?}");
 
-    // Re-preview → las filas CONSUM llegan pre-categorizadas por la regla.
+    // Re-preview → las filas SUPERMERCADO llegan pre-categorizadas por la regla.
     let re = preview(&app, &owner.cookie, "auto", &b64).await;
     let re_rows = re.json();
-    let consum = row_by_concept(re_rows["rows"].as_array().unwrap(), "CONSUM");
-    assert_eq!(consum["suggested_category_id"], json!(super_cat), "pre-categorizada");
-    assert!(consum["matched_rule_id"].is_string(), "matched_rule_id presente");
+    let super_row = row_by_concept(re_rows["rows"].as_array().unwrap(), "SUPERMERCADO");
+    assert_eq!(super_row["suggested_category_id"], json!(super_cat), "pre-categorizada");
+    assert!(super_row["matched_rule_id"].is_string(), "matched_rule_id presente");
 }
 
 // ---------------------------------------------------------------------------

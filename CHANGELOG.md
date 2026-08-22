@@ -6,6 +6,64 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+**Qué cambia para ti** — nada en la app: es trabajo de repositorio, de cara a publicarlo. Se han
+sustituido los ficheros de prueba del importador de CSV, que contenían datos bancarios auténticos,
+por otros fabricados, y las tablas de ejemplo del CHANGELOG dejan de citar cifras de una
+instalación real. A partir de ahora un gate automático impide que vuelva a colarse nada parecido.
+
+### Higiene de datos — los fixtures del importador eran extractos bancarios reales
+
+Auditando el repositorio antes de hacerlo público se encontró que
+`apps/api/tests/fixtures/n26_junio.csv` y `myinvestor_junio.csv` no eran fixtures fabricados sino
+**exportaciones auténticas**: IBAN español completo, nombre y apellidos de una persona, nómina al
+céntimo de dos meses consecutivos, gimnasio con sucursal, calle y barrio, y el perfil completo de
+suscripciones. El IBAN estaba en el árbol de **109 commits**.
+
+La cabecera del propio fichero de tests decía «Los CSV son fixtures **anonimizados** de los bancos
+reales». Ahí está la trampa: anonimizar un export real es borrar sobre datos que siguen ahí, y no
+tiene estado final verificable; **fabricar** un fixture sí lo tiene.
+
+- Los dos CSV se han **reconstruido desde cero** conservando cada caso que los tests ejercitan: la
+  cabecera literal de cada banco, la escala rara de N26 (`-26.000000000` → 4 decimales), el decimal
+  español con coma, filas sin `Partner Name`, el par opuesto a ≤3 días, el partner «Cuenta de
+  Ahorro», los tokens `TRANSFERENCIA`/`ENVIADA DESDE`/`ESTALVI`, el hint de ahorro por
+  `APORTACION`/`CARTERA`, el sufijo numérico variable que colapsa varias filas en un solo patrón de
+  regla aprendida, y el sufijo de referencia que `derive_rule_pattern` recorta.
+- **Ningún IBAN, ni siquiera sintético**: el parser de N26 no lee esa columna, así que va vacía. Un
+  IBAN falso solo serviría para disparar el escáner para siempre.
+- `myinvestor_win1252.csv` ya era sintético (prueba de codificación) y no se ha tocado.
+- Saneados también los literales derivados de esos extractos en los tests unitarios de
+  `handlers/transactions/schema.rs` y en `handlers/backup_user/schema.rs`.
+
+### Las tablas del CHANGELOG citaban una instalación real
+
+Las entradas de 3.9.0 y del issue #5 razonaban «sobre una instalación **real**» y publicaban el
+alquiler, el ingreso mensual y la tasa de ahorro del owner. Las cifras pasan a ser inventadas y la
+fórmula sigue cuadrando: donde había `540,00 ÷ 6` vs `÷ 3` ahora hay `540,00 ÷ 6` vs `÷ 3` → 90 y
+180 €. Un ejemplo que no cuadra vale menos que ninguno.
+
+### Para que no vuelva a pasar
+
+- **`scripts/scan-sensitive.sh`** — escáner de los ficheros trackeados: IBAN, tarjetas, claves
+  privadas y tokens de GitHub/AWS/Slack/OpenAI-Anthropic/FutureFin. Excepciones en
+  `scripts/sensitive-allowlist.txt`, cada una con el porqué escrito al lado. Verificado en ambos
+  sentidos: **detecta** el IBAN del fixture antiguo y **pasa** con los nuevos.
+- **Job `secrets-scan` en CI**, bloqueante y el primero de todos.
+- **`apps/api/tests/fixtures_shape.rs`** (3 tests, **sin Postgres**): fija el contrato del material
+  de entrada del importador y que ningún fixture lleva una cadena con forma de IBAN. Falla en
+  segundos si alguien vuelve a tocar los CSV. Control negativo comprobado: falla contra el fixture
+  antiguo.
+- **Skill `futurefin-data-hygiene`**: qué no entra nunca, cómo se fabrica un fixture que siga
+  valiendo como prueba, y el procedimiento si algo se cuela (reescritura del historial, no borrado).
+- **No negociable §2.0** en `futurefin-change-control` y **§3.2b** en `futurefin-docs-and-writing`
+  (las cifras de ejemplo son inventadas pero aritméticamente coherentes).
+
+### Movido
+
+`.claude/skills/futurefin-diagnostics-and-tooling/scripts/` → **`scripts/diagnostics/`**. La rama
+publicada no va a llevar `.claude/`, y el gate de shellcheck de CI apuntaba ahí dentro; el comodín
+`scripts/*.sh` no alcanza subdirectorios, así que la ruta se lista explícitamente.
+
 Dos cifras que el consumidor no podía interpretar sin recalcularlas a mano: el promedio de la
 comparativa mensual y la jubilación de las tools de proyección. Aditivo en el contrato; **cambia
 números** en la pestaña Gastos y en `get_transactions_summary`.
@@ -15,14 +73,14 @@ números** en la pestaña Gastos y en `get_transactions_summary`.
 `GET /v1/transactions/summary` dividía entre `months_with_data` = meses del tramo con ≥1
 movimiento **de cualquier tipo**. Un mes cuyo único contenido eran instancias recurrentes contaba
 como mes con datos, así que hundía la media de todas las demás categorías. Sobre una instalación
-real con importación completa solo de abril a julio de 2026 y el alquiler recurrente materializado
+de ejemplo con importación completa solo de abril a julio de 2026 y el alquiler recurrente materializado
 desde noviembre, ventana `6` sobre julio:
 
 | Categoría | Antes | Ahora | Por qué |
 |---|---|---|---|
-| Comer Fuera | 110 € | **220 €** | 540,00 ÷ 6 vs 540,00 ÷ 3 |
-| Supermercado | 96 € | **192 €** | mismo denominador |
-| Alquiler | 860 € | **860 €** | su cuota real, no 1.720 € |
+| Comer Fuera | 90 € | **180 €** | 540,00 ÷ 6 vs 540,00 ÷ 3 |
+| Supermercado | 120 € | **240 €** | mismo denominador |
+| Alquiler | 700 € | **700 €** | su cuota real, no 1.400 € |
 
 El denominador pasa a ser `avg_months` = meses del tramo con ≥1 movimiento **real**
 (`recurring_rule_id IS NULL`) — el mismo predicado que ya usaba `transactions_avg` para alimentar
@@ -31,7 +89,7 @@ deliberada, «no alinear sin una decisión de producto»: la decisión se tomó.
 
 Un mes no real queda fuera del **numerador y del denominador** a la vez. Excluirlo solo del
 denominador dejaría su importe arriba y dispararía las categorías presentes en él: el alquiler de
-700 €/mes saldría a 1.720 €.
+700 €/mes saldría a 1.400 €.
 
 El denominador sigue siendo **único para todas las líneas**, no por categoría. Así
 `Σ avg de categorías == totals.expense_avg` y el KPI «Gasto promedio» y la tasa de ahorro no se
@@ -115,18 +173,18 @@ por el owner; `.ffbackup` sube a **9**.
 ### El problema
 
 El Resumen enseñaba **tres** cifras de ahorro simultáneas, todas aritméticamente correctas y
-mutuamente irreconciliables. Sobre datos reales de una instalación:
+mutuamente irreconciliables. Sobre una instalación de ejemplo:
 
 | KPI | Ingreso | Gasto | Neto |
 |---|---|---|---|
-| «Ahorro mensual neto» | 3.000 (presupuesto) | 1.890,00 (real) | **610,00** |
-| «…de 786 € esperados» | 3.000 (presupuesto) | 2.214 (presupuesto) | **786,00** |
+| «Ahorro mensual neto» | 2.500 (presupuesto) | 1.890,00 (real) | **610,00** |
+| «…de 650 € esperados» | 2.500 (presupuesto) | 1.850,00 (presupuesto) | **650,00** |
 | «Ahorro real» | 2.410,00 (real) | 1.890,00 (real) | **520,00** |
 
 En modo C la cifra que proyectaba el motor (610,00 €) no aparecía en **ninguno** de los dos lados
 de la comparativa. En modo A la tarjeta duplicaba el denominador y en modo B el numerador, así que
 nunca aportaba información propia. Y `savings_rate` (24,4 %) mezclaba bases —neto híbrido sobre
-ingreso de presupuesto—, ni 26,2 % (plan) ni 21,6 % (real). Nadie mentía: ninguna tarjeta decía
+ingreso de presupuesto—, ni 26,0 % (plan) ni 21,6 % (real). Nadie mentía: ninguna tarjeta decía
 cuál era su base.
 
 ### Added — ventanas del promedio real configurables por lado

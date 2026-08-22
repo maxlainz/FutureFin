@@ -4,7 +4,7 @@
 # agree, with point-count context.
 #
 # Usage (from repo root; login env same as smoke-projection-cache.sh):
-#   S=".claude/skills/futurefin-diagnostics-and-tooling/scripts/projection-diff.sh"
+#   S="scripts/diagnostics/projection-diff.sh"
 #   SMOKE_USER=alice SMOKE_PASS=secret bash $S                       # monthly vs density=hybrid
 #   SMOKE_USER=... SMOKE_PASS=... bash $S "" "view=mine"             # household vs mine
 #   SMOKE_USER=... SMOKE_PASS=... bash $S --save /tmp/base.json      # snapshot BEFORE a change

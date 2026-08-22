@@ -125,6 +125,18 @@ entries to imitate (verbatim from `CHANGELOG.md`):
 
 (Note: mechanism, the condition under which it manifested, the fix, and the no-regression claim.)
 
+### 3.2b Worked figures are INVENTED but arithmetically coherent
+
+Forensic entries carry before/after tables — that stays. What may never appear is a real
+installation's data. **Never** write "sobre una instalación **real**" or "datos reales de una
+instalación": write **«sobre una instalación de ejemplo»** and make up the numbers.
+
+Made-up does not mean sloppy: if the table says `540,00 ÷ 6` and `540,00 ÷ 3`, the cells must read
+90 and 180. An example that does not add up is worse than none — the reader stops trusting the
+whole entry. INCIDENT (August 2026): entries for 3.9.0 and the issue-#5 fix reasoned over the
+owner's live installation, publishing his rent, monthly income and savings rate in a repo about to
+go public. See [`futurefin-data-hygiene`](../futurefin-data-hygiene/SKILL.md) §4.
+
 ### 3.3 Structure and formatting rules
 
 - **Keep a Changelog 1.1.0 + SemVer** (stated at the top of CHANGELOG.md). Newest release first,
