@@ -3,6 +3,7 @@ pub mod db;
 pub mod error;
 pub mod handlers;
 pub mod mcp;
+pub mod money;
 pub mod oauth;
 pub mod openapi;
 pub mod routes;

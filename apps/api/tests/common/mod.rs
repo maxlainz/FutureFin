@@ -106,12 +106,13 @@ impl TestApp {
     }
 
     /// Clave de cache de la vista household en densidad `monthly` (la que sirve `GET
-    /// /v1/projection/series` sin parámetros).
-    pub fn household_key(&self, installation_id: Uuid) -> ProjectionCacheKey {
+    /// /v1/projection/series` sin parámetros). `user_id` es el SOLICITANTE: la clave
+    /// lo incluye también en household porque la respuesta lleva su demografía.
+    pub fn household_key(&self, installation_id: Uuid, user_id: Uuid) -> ProjectionCacheKey {
         ProjectionCacheKey {
             installation_id,
             view: LedgerView::Household,
-            owner_user_id: None,
+            owner_user_id: Some(user_id),
             density: Density::Monthly,
         }
     }
@@ -155,9 +156,25 @@ impl TestApp {
     /// Es una espera **acotada por un evento**, no un margen a ojo: sale en cuanto las dos
     /// entradas aparecen, y el tope solo se agota si el warm-up realmente no llegó.
     pub async fn settle_login_warmup(&self, installation_id: Uuid) {
-        // El warm-up inserta household × {monthly, hybrid}: se espera a que aparezcan las dos.
+        self.settle_login_warmup_for(installation_id, 1).await
+    }
+
+    /// Igual, pero esperando el warm-up de `users` usuarios distintos.
+    ///
+    /// El `len() >= 2` de la versión de un solo usuario dejó de bastar cuando la clave de cache
+    /// pasó a incluir al solicitante también en `household` (una entrada household por miembro,
+    /// porque la respuesta lleva SU demografía): con dos logins en vuelo, las dos entradas del
+    /// usuario A satisfacen la condición mientras las de B siguen en camino, se invalida, y el
+    /// warm-up de B aterriza DESPUÉS repoblando la cache que el test creía vacía.
+    pub async fn settle_login_warmup_for(&self, installation_id: Uuid, users: usize) {
+        // El warm-up inserta {monthly, hybrid} por usuario.
+        // La espera es tolerante a propósito: quien llama puede haber mutado antes (crear una
+        // categoría o un activo invalida), y entonces las entradas del warm-up ya no existen y
+        // no van a aparecer nunca. Lo que NO puede es quedarse corta cuando sí van a llegar —
+        // de ahí el conteo por usuario.
+        let esperadas = users * 2;
         for _ in 0..200 {
-            if self.state.projection_cache.read().await.len() >= 2 {
+            if self.state.projection_cache.read().await.len() >= esperadas {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;

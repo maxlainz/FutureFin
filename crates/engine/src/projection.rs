@@ -531,13 +531,40 @@ pub fn first_month_allocation(
 
     let planning_adj = input.planning_monthly_cash_adjustment[0];
 
-    let retirement_withdrawal = match input.retirement_start_month {
-        Some(start) if 1 >= start => input.retirement_monthly_withdrawal,
-        _ => Decimal::ZERO,
+    // Estado del mes 1, resuelto EXACTAMENTE como lo hace el bucle de simulación.
+    //
+    // Antes esta función solo miraba `retirement_start_month` y siempre usaba el ingreso y el
+    // gasto regulares, ignorando `fire_target`. En un hogar que ya está por encima de su número
+    // FIRE eso publicaba una aportación **con el signo contrario a la realidad**: el bucle
+    // detecta el cruce en el mes 1 (`nw_prev ≥ target(0)`), conmuta a ingreso de jubilación y
+    // drena de los activos, mientras `/v1/assets` y `/v1/allocation-rules/resolution` seguían
+    // diciendo «aportas 2.000 €/mes» y explicando regla a regla una cascada que no se ejecuta
+    // jamás. No es un caso patológico: es el estado final del público al que sirve la app.
+    //
+    // El mes 0 no tiene sobrante acumulado ni caja pendiente, así que el patrimonio de partida
+    // es Σ activos − Σ principales, igual que el primer punto de `net_worth`.
+    let nw_month_zero: Decimal = values.iter().copied().sum::<Decimal>()
+        - principals.iter().copied().sum::<Decimal>();
+    let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), 0)
+        .is_some_and(|t| nw_month_zero >= t);
+    let in_retirement = fire_reached || input.retirement_start_month.is_some_and(|s| 1 >= s);
+    let income = if in_retirement {
+        input.income_retirement_monthly
+    } else {
+        input.income_regular_monthly
+    };
+    let expense = if in_retirement {
+        input.expense_retirement_monthly
+    } else {
+        input.expense_regular_monthly
+    };
+    let retirement_withdrawal = if in_retirement {
+        input.retirement_monthly_withdrawal
+    } else {
+        Decimal::ZERO
     };
 
-    let recurring_net =
-        input.income_regular_monthly - input.expense_regular_monthly - debt_service;
+    let recurring_net = income - expense - debt_service;
     let planning_component = planning_adj - retirement_withdrawal;
     let net_cash_month = recurring_net + planning_component;
 
@@ -1480,5 +1507,59 @@ mod tests {
             (t5y - expected_5y).abs() < Decimal::new(1, 4),
             "month_index=60 → 5 años compuesto"
         );
+    }
+
+    /// REGRESIÓN — un hogar que YA está por encima de su número FIRE no aporta: drena.
+    ///
+    /// `first_month_allocation` no miraba `fire_target`, así que publicaba la cascada del mes 1
+    /// como si el hogar siguiera acumulando, mientras el bucle de simulación —que sí lo mira—
+    /// conmutaba a ingreso de jubilación y vendía activos ese mismo mes. `/v1/assets` decía
+    /// «aportas 2.000 €» sobre un activo que la proyección **reduce en 1.000 €**: 3.000 € de
+    /// error y con el signo cambiado, sostenido en todo el horizonte porque el patrimonio nunca
+    /// vuelve a bajar del target.
+    ///
+    /// Aritmética: gasto de jubilación 1.000 €/mes ⇒ necesidad anual 12.000 ⇒ con SWR 3,5 % el
+    /// target es 342.857,14 €. El activo vale 1.000.000, así que el cruce es inmediato.
+    #[test]
+    fn already_fire_at_month_zero_drains_instead_of_contributing() {
+        let mut inp = base_input(
+            3,
+            Decimal::from(3000),
+            Decimal::from(1000),
+            vec![mk_asset(1, Decimal::from(1_000_000), true, Some(Decimal::ZERO))],
+            vec![rule_remainder(0)],
+        );
+        inp.expense_retirement_monthly = Decimal::from(1000);
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from_str_exact("342857.142857").unwrap(),
+            annual_inflation_percent: Decimal::ZERO,
+        });
+
+        let out = project_net_worth_series(&inp).expect("simulación");
+        assert_eq!(
+            out.per_asset_series[0][1],
+            Decimal::from(999_000),
+            "la simulación drena 1.000 € en el mes 1: {:?}",
+            out.per_asset_series[0]
+        );
+
+        let alloc = first_month_allocation(&inp).expect("cascada del mes 1");
+        assert_eq!(
+            alloc.per_asset[0],
+            Decimal::ZERO,
+            "la aportación publicada debe ser 0, no la cascada de un hogar que ya no aporta"
+        );
+        assert_eq!(
+            alloc.recurring_net,
+            Decimal::from(-1000),
+            "el neto recurrente publicado debe ser el de jubilación (0 − 1.000), no 3.000 − 1.000"
+        );
+
+        // Y el mismo input SIN target sigue comportándose como antes: nada se ha roto para el
+        // hogar que aún acumula.
+        let mut sin_target = inp.clone();
+        sin_target.fire_target = None;
+        let alloc2 = first_month_allocation(&sin_target).expect("cascada sin target");
+        assert_eq!(alloc2.per_asset[0], Decimal::from(2000), "sin target FIRE la cascada es la de siempre");
     }
 }

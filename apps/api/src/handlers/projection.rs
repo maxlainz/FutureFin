@@ -46,7 +46,7 @@ pub struct ProjectionSeriesQuery {
 
 /// `hybrid` o `monthly` (default). Cualquier otro valor es un error, no un `monthly` silencioso:
 /// pedir una densidad que no existe y recibir 841 puntos sin aviso es la misma clase de fallo que
-/// `view` (issue #7 §4). Solo alcanzable por HTTP — la tool MCP fuerza `Hybrid`.
+/// `view` (auditoría MCP §4). Solo alcanzable por HTTP — la tool MCP fuerza `Hybrid`.
 /// Escala de salida de los importes: 4 decimales, la misma de `NUMERIC(18,4)` en la base y la que
 /// ya publican `net_worth` y compañía.
 ///
@@ -54,7 +54,7 @@ pub struct ProjectionSeriesQuery {
 /// con `annual_factor.powd(1/12)` —una raíz duodécima irracional— y el target FIRE sale de
 /// `gross / (swr/100)`; ninguna de las dos se redondeaba, así que la escala saturaba en los ~28
 /// dígitos significativos de `rust_decimal` y salían al wire cosas como
-/// `"69946992.976753373554690255548"` (issue #8 §7). Eso es ruido y tokens, y empuja al consumidor
+/// `"69946992.976753373554690255548"` (auditoría MCP §7). Eso es ruido y tokens, y empuja al consumidor
 /// a presentar cifras con precisión falsa.
 ///
 /// Redondear la copia que alimenta al motor movería el cruce FIRE: `fire_target_base` es
@@ -62,11 +62,7 @@ pub struct ProjectionSeriesQuery {
 ///
 /// Precedente: 3.8.0 hizo exactamente esto con los ratios (`round_ratio`, 6 dp) y el runway (1 dp)
 /// y dejó fuera los importes de proyección y FIRE. Esto cierra el hueco.
-fn money_out(d: Decimal) -> Decimal {
-    let mut v = d.round_dp(4);
-    v.rescale(4);
-    v
-}
+use crate::money::money_out;
 
 fn resolve_density(q: &ProjectionSeriesQuery) -> Result<Density, ApiError> {
     match q.density.as_deref().map(str::trim) {
@@ -79,7 +75,15 @@ fn resolve_density(q: &ProjectionSeriesQuery) -> Result<Density, ApiError> {
 }
 
 /// Indices a incluir en el response según la densidad. Para `Hybrid`: mes 0..12
-/// mensual + mes 24, 36, ..., months.
+/// mensual + mes 24, 36, … y **siempre el último mes del horizonte**.
+///
+/// Ese último empujón no es cosmético. El bucle anual solo emite múltiplos de 12, así que con
+/// un horizonte que no lo fuera la serie se cortaba antes de tiempo **sin decir nada**: con
+/// `?months=100&density=hybrid` el último punto era el mes 96 y los meses 97–100 no existían
+/// en `points`, ni en `fire_target_series`, ni en `asset_series[].values`. Desaparecía además
+/// el punto que cualquiera lee como «patrimonio al final». Con `?months=19` se perdía el 32 %
+/// del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12),
+/// pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que fuerza `hybrid`.
 fn density_month_indices(density: Density, months: u32) -> Vec<u32> {
     match density {
         Density::Monthly => (0..months).collect(),
@@ -90,6 +94,9 @@ fn density_month_indices(density: Density, months: u32) -> Vec<u32> {
             while k <= cap {
                 v.push(k);
                 k += 12;
+            }
+            if v.last() != Some(&cap) {
+                v.push(cap);
             }
             v
         }
@@ -166,7 +173,7 @@ pub(crate) fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBrack
 /// Por qué NO hay target FIRE. Devolver `None` a secas se tragaba tres causas muy distintas, y
 /// desde 4.0.0 la simulación puede llegar a ellas por caminos nuevos (un recorte que deja la base
 /// de gasto en 0, un override de modo a `manual` sin importe, `swr_pct: 0`). Sin la razón, esos
-/// escenarios se leen como un fallo de la herramienta (issue #27 §8).
+/// escenarios se leen como un fallo de la herramienta (auditoría de simulate_projection §8).
 pub(crate) const FIRE_ABSENT_MANUAL_AMOUNT_MISSING: &str = "manual_amount_missing";
 pub(crate) const FIRE_ABSENT_NET_NEED_NOT_POSITIVE: &str = "net_need_not_positive";
 pub(crate) const FIRE_ABSENT_SWR_NOT_POSITIVE: &str = "swr_not_positive";
@@ -284,7 +291,7 @@ pub struct ProjectionSeriesResponse {
     // podía distinguir «no se alcanza el objetivo» de «esta versión no publica el campo» — y la
     // descripción de la tool lo prometía sin condiciones. `simulate_projection` ya devolvía `null`
     // explícito en `jubilacion_month_index`, de modo que las dos superficies se contradecían para
-    // el mismo dato (issue #8 §8). Ahora las dos dicen `null`.
+    // el mismo dato (auditoría MCP §8). Ahora las dos dicen `null`.
     /// Primer mes en que el patrimonio neto ≥ objetivo FIRE móvil del mes en curso. `null` si no hay objetivo o no se alcanza.
     pub jubilacion_month_index: Option<u32>,
     /// Fecha civil del cruce (`YYYY-MM-DD`) = `anchor_date_ymd` + `jubilacion_month_index` meses,
@@ -522,7 +529,7 @@ fn projection_next_milestones(from: Decimal, count: usize) -> Vec<Decimal> {
         let next = projection_next_milestone(current);
         // Los tres pasos son `1`, `2.5` y `5` por magnitud: `2.5 × 10⁴` hereda la escala 1 del
         // literal y salía `"25000.0"` en el mismo array que `"50000"` y `"100000"`. Un hito es un
-        // umbral redondo; se publica con escala 0 y el array deja de mezclar formatos (issue #8 §7).
+        // umbral redondo; se publica con escala 0 y el array deja de mezclar formatos (auditoría MCP §7).
         let mut next = next.round_dp(0);
         next.rescale(0);
         out.push(next);
@@ -954,7 +961,7 @@ pub(crate) struct BuiltProjection {
 pub(crate) struct SimOverrides {
     /// Gasto mensual extra «real», **con signo**: se suma al gasto efectivo y al gasto de
     /// jubilación ANTES de derivar el target FIRE y las bases de caps. Negativo = recorte, que es
-    /// el caso de uso más frecuente que existe y que hasta 4.0.0 se rechazaba (issue #27 §1).
+    /// el caso de uso más frecuente que existe y que hasta 4.0.0 se rechazaba (auditoría de simulate_projection §1).
     /// Mueve las bases de caps en los tres modos; el objetivo, solo en `annual_expense`.
     pub extra_monthly_expense: Decimal,
     /// Gasto MENSUAL de jubilación (el caller ya dividió el anual entre 12): sustituye por
@@ -1336,8 +1343,9 @@ pub(crate) async fn assets_projection_context(
     path = "/v1/projection/series",
     tag = "projection",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = vista titular"),
-        ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840); omitir = edad objetivo + DOB, 5–70 años o fallback 30"),
+        ("view" = Option<String>, Query, description = "`mine` | `household`; ausente = household. Cualquier otro valor → 400 `invalid_view`"),
+        ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840); omitir = horizonte derivado (`lifespan_90` | `fallback_no_demographics`), ver `horizon_basis` en la respuesta"),
+        ("density" = Option<String>, Query, description = "`monthly` (default) | `hybrid` (mensual el primer año, anual después). Cualquier otro valor → 400 `invalid_density`"),
     ),
     responses(
         (status = 200, description = "Serie mensual motor dossier", body = ProjectionSeriesResponse),
@@ -1377,14 +1385,13 @@ pub(crate) async fn projection_series_cached(
     density: Density,
 ) -> Result<ProjectionSeriesResponse, ApiError> {
     if months_override.is_none() {
+        // `owner_user_id` va también en `household`: la respuesta lleva demografía
+        // del solicitante (`viewer_birth_date`, horizonte, `jubilacion_age`), así que
+        // una entrada household compartida servía los datos de un miembro a otro.
         let key = ProjectionCacheKey {
             installation_id: iid,
             view,
-            owner_user_id: if matches!(view, LedgerView::Mine) {
-                Some(user_id)
-            } else {
-                None
-            },
+            owner_user_id: Some(user_id),
             density,
         };
         if let Some(cached) = state.projection_cache_get(&key).await {
@@ -1651,7 +1658,7 @@ pub async fn compute_projection_series_response(
                 let crossed_at = fire_crossover_month(Some(ft), &output.net_worth);
                 // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
                 // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
-                // issue #8 §8), así que el paralelismo tiene que ser estructural. Antes `points`
+                // auditoría MCP §8), así que el paralelismo tiene que ser estructural. Antes `points`
                 // usaba `filter_map` (descarta índices fuera de rango) y esta serie un `map` que
                 // no descartaba nada: coincidían solo porque `density_month_indices` nunca emite
                 // un índice > months-1. Un cambio ahí las habría desalineado en silencio.
@@ -1682,8 +1689,10 @@ pub async fn compute_projection_series_response(
         months,
         horizon_years,
         horizon_basis,
-        starting_net_worth,
-        monthly_delta_assumption,
+        starting_net_worth: money_out(starting_net_worth),
+        // En modos B/C esto es `sum / meses reales`: sin `money_out` viajaba con ~25 decimales
+        // mientras `simulate_projection` publicaba la misma cifra con cuatro.
+        monthly_delta_assumption: money_out(monthly_delta_assumption),
         model_note:
             "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos, caja mensual consolidada (ingresos/gastos/aportaciones constantes en euros nominales), crecimiento compuesto por activo en términos nominales. El target FIRE se evalúa mes a mes ajustado por inflación para preservar el poder adquisitivo del usuario."
                 .into(),
@@ -1730,7 +1739,7 @@ pub(crate) struct SimulationSpec {
     pub extra_monthly_savings: Option<Decimal>,
     pub swr_pct: Option<Decimal>,
     pub annual_inflation_percent: Option<Decimal>,
-    /// Ejes de `fire_settings` simulables sin persistir (issue #27 §3). Se aplican con el MISMO
+    /// Ejes de `fire_settings` simulables sin persistir (auditoría de simulate_projection §3). Se aplican con el MISMO
     /// `FireSettingsPatch::apply_to` que el PATCH real, y `swr_pct` entra por aquí para que haya
     /// un solo camino.
     pub fire_settings_overrides: Option<crate::handlers::installation::FireSettingsPatch>,
@@ -1747,7 +1756,7 @@ pub(crate) struct SimKpis {
     /// Fecha civil del cruce (`YYYY-MM-DD`) = `anchor_date_ymd` + el índice, conservando el día
     /// del ancla con recorte a fin de mes. `null` ⟺ no hay cruce.
     /// Sin `skip_serializing_if`: su hermano `jubilacion_month_index` ya iba explícito y estos dos
-    /// no, así que el mismo struct desaparecía unos campos y publicaba otros (issue #8 §8).
+    /// no, así que el mismo struct desaparecía unos campos y publicaba otros (auditoría MCP §8).
     pub jubilacion_date_ymd: Option<String>,
     /// Años cumplidos en esa fecha. `null` si no hay cruce o no hay fecha de nacimiento resuelta.
     pub jubilacion_age: Option<u32>,
@@ -1792,7 +1801,7 @@ pub(crate) struct SimKpis {
     #[serde(with = "rust_decimal::serde::str_option")]
     pub savings_rate: Option<Decimal>,
 
-    // ---- Eco del contexto del lado (4.0.0, issue #27 §8) ------------------------------------
+    // ---- Eco del contexto del lado (4.0.0, auditoría de simulate_projection §8) ------------------------------------
     // Todo lo de aquí abajo se calculaba ya dentro del ensamblado y se tiraba a la basura. Sin
     // ello, media respuesta se lee como un fallo: un `fire_target_base_delta: 0` es correcto en
     // `manual` e inexplicable sin saber el modo, y un override de `savings_source` que cae en el
@@ -1976,7 +1985,7 @@ fn sim_kpis(
         swr_pct: fs.swr_pct,
         annual_inflation_percent: inflation_annual_percent,
         // `money_out` obligatorio: en modo B estas bases salen de `suma / n` y arrastran la escala
-        // que `rust_decimal` produce en una división (issue #8 §7).
+        // que `rust_decimal` produce en una división (auditoría MCP §7).
         expense_base_monthly: money_out(input.expense_regular_monthly),
         income_base_monthly: money_out(income_monthly),
         expense_retirement_base_monthly: money_out(input.expense_retirement_monthly),
@@ -2304,7 +2313,7 @@ pub async fn warm_up_household_projection(
         let key = ProjectionCacheKey {
             installation_id,
             view: LedgerView::Household,
-            owner_user_id: None,
+            owner_user_id: Some(user_id),
             density,
         };
         match compute_projection_series_response(
@@ -2818,5 +2827,38 @@ mod jubilacion_civil_tests {
         assert_eq!(age, Some(47), "con el día del ancla, el cumpleaños ya pasó");
         let dia_1 = age_completed_years(proj_add_months(proj_month_first(today), 129), birth);
         assert_eq!(dia_1, 46, "anclado al día 1 saldría un año menos");
+    }
+}
+
+#[cfg(test)]
+mod density_tail_tests {
+    use super::*;
+
+    /// REGRESIÓN — `hybrid` no puede perder la cola del horizonte.
+    ///
+    /// El bucle anual solo emitía múltiplos de 12, así que un horizonte que no lo fuera se
+    /// cortaba en silencio: `?months=100` daba como último punto el mes 96 y los meses 97–100
+    /// no existían en ninguna de las tres series. Se pierde justo el punto que se lee como
+    /// «patrimonio al final», y la tool MCP `get_projection` fuerza `hybrid`, así que era el
+    /// camino por defecto para un consumidor conversacional.
+    #[test]
+    fn hybrid_density_always_includes_the_last_month_of_the_horizon() {
+        for horizonte in [12u32, 18, 24, 25, 100, 119, 120, 121, 840] {
+            let v = density_month_indices(Density::Hybrid, horizonte + 1);
+            assert_eq!(
+                v.last(),
+                Some(&horizonte),
+                "horizonte {horizonte}: el último índice debe ser el propio horizonte, no {:?}",
+                v.last()
+            );
+            // Y sigue siendo estrictamente creciente y sin duplicados.
+            assert!(
+                v.windows(2).all(|w| w[0] < w[1]),
+                "horizonte {horizonte}: índices no crecientes: {v:?}"
+            );
+            // Los trece primeros meses siguen siendo mensuales.
+            let esperados: Vec<u32> = (0..=12u32.min(horizonte)).collect();
+            assert_eq!(v[..esperados.len()], esperados[..], "horizonte {horizonte}");
+        }
     }
 }

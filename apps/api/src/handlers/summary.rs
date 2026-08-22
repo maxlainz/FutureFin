@@ -1,4 +1,5 @@
 use crate::error::ApiError;
+use crate::money::money_out;
 use crate::handlers::budget::ledger_budget_totals_for_summary;
 use crate::handlers::installation::{
     installation_calendar_inflation_fire, require_installation_member, SavingsSource,
@@ -439,11 +440,14 @@ pub(crate) async fn summary_core(
         None
     };
 
+    // `money_out` en la construcción de la respuesta, no antes: estas cifras nacen de
+    // divisiones (`cuota semanal × 52 / 12`, `sum / meses reales`) y arrastraban ~25 decimales
+    // hasta el JSON. Los valores crudos siguen usándose arriba para ratios y runway.
     let financial_health = FinancialHealthMetrics {
-        income_monthly_equivalent: income_m,
-        expense_regular_monthly_equivalent: expense_reg,
-        expense_total_monthly_equivalent: expense_tot,
-        net_monthly_equivalent: net_m,
+        income_monthly_equivalent: money_out(income_m),
+        expense_regular_monthly_equivalent: money_out(expense_reg),
+        expense_total_monthly_equivalent: money_out(expense_tot),
+        net_monthly_equivalent: money_out(net_m),
         savings_rate,
         liquid_assets_total: liquid_assets,
         runway_months,
@@ -454,7 +458,7 @@ pub(crate) async fn summary_core(
         savings_source: effective_savings_source,
         savings_income_basis,
         savings_expense_basis,
-        savings_expected_monthly_equivalent,
+        savings_expected_monthly_equivalent: money_out(savings_expected_monthly_equivalent),
     };
 
     let net_worth = total_assets - total_liabilities;
