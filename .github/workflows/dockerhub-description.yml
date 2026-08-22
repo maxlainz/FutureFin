@@ -52,7 +52,7 @@ jobs:
       # para que ambos workflows no puedan apuntar a sitios distintos.
       - name: Publicar la descripción
         if: steps.creds.outputs.ok == 'true'
-        uses: peter-evans/dockerhub-description@v4
+        uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
