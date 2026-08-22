@@ -201,11 +201,11 @@ fn normalize_kind(raw: &str) -> Result<String, ApiError> {
 fn normalize_label(raw: &str) -> Result<String, ApiError> {
     let t = raw.trim();
     if t.is_empty() {
-        return Err(ApiError::BadRequest("label must not be empty".into()));
+        return Err(ApiError::BadRequest("label_empty: label must not be empty".into()));
     }
     if t.len() > 200 {
         return Err(ApiError::BadRequest(
-            "label must be at most 200 characters".into(),
+            "label_too_long: label must be at most 200 characters".into(),
         ));
     }
     Ok(t.into())
@@ -216,14 +216,14 @@ fn normalize_frequency(raw: &str) -> Result<String, ApiError> {
         "monthly" => Ok("monthly".into()),
         "weekly" => Ok("weekly".into()),
         _ => Err(ApiError::BadRequest(
-            "payment_frequency must be monthly or weekly".into(),
+            "payment_frequency_invalid: payment_frequency must be monthly or weekly".into(),
         )),
     }
 }
 
 fn assert_non_negative(d: Decimal, field: &'static str) -> Result<(), ApiError> {
     if d.is_sign_negative() {
-        return Err(ApiError::BadRequest(format!("{field} must be >= 0")));
+        return Err(ApiError::BadRequest(format!("negative_amount: {field} must be >= 0")));
     }
     Ok(())
 }
@@ -279,7 +279,7 @@ fn validate_and_prepare_items(
         if let Some(pa) = it.payment_amount {
             if pa <= Decimal::ZERO {
                 return Err(ApiError::BadRequest(
-                    "payment_amount must be > 0 when set".into(),
+                    "payment_amount_not_positive: payment_amount must be > 0 when set".into(),
                 ));
             }
         }
@@ -558,7 +558,7 @@ pub(crate) async fn list_snapshots_core(
     if let Some(y) = year {
         if !(1900..=3000).contains(&y) {
             return Err(ApiError::BadRequest(
-                "year must be between 1900 and 3000".into(),
+                "year_out_of_range: year must be between 1900 and 3000".into(),
             ));
         }
     }
@@ -1200,7 +1200,7 @@ fn accumulate_series(
         // `spawn_blocking` (ver get_history_cashflow).
         let evaluated = evaluate_timeline(&timeline, grid)
             // Inalcanzable con fechas ordenadas + únicas; señal de bug del servidor.
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            .map_err(|e| ApiError::BadRequest(format!("history_timeline_invalid: {e}")))?;
 
         for (item, series) in timeline.items.iter().zip(evaluated) {
             match kind {
@@ -2036,7 +2036,7 @@ pub async fn prefill_snapshot(
     };
     let is_liability = kind == "liability";
     let d = q.date.ok_or_else(|| {
-        ApiError::BadRequest("date is required and must be a valid YYYY-MM-DD date".into())
+        ApiError::BadRequest("date_required: date is required and must be a valid YYYY-MM-DD date".into())
     })?;
     let today = installation_naive_today(&state.pool, iid).await?;
     validate_snapshot_date(d, today)?;

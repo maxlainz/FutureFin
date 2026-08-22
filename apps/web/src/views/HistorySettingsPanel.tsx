@@ -30,6 +30,7 @@ import {
   formatCurrencyAmount,
   formatEditableDecimalString,
   parseDisplayDecimal,
+  toApiDecimalString,
 } from "../lib/format";
 import { formatDateDmy, parseYmdComponents, todayYmdInTimeZone } from "../lib/dates";
 import { useIsMobile } from "../lib/responsive";
@@ -268,20 +269,20 @@ export function HistorySettingsPanel({
         if (parsedValue === null || parsedValue < 0) {
           return { ok: false, error: "Cada ítem necesita un valor válido ≥ 0." };
         }
-        const payload: ItemPayload = { label, value: rawValue.replace(",", ".") };
+        const payload: ItemPayload = { label, value: toApiDecimalString(rawValue) };
         if (it.itemId) payload.item_id = it.itemId;
         if (forKind === "liability") {
           const apr = it.aprPercent.trim();
           if (apr !== "") {
             const a = parseDisplayDecimal(apr);
             if (a === null || a < 0) return { ok: false, error: "TAE inválida." };
-            payload.apr_percent = apr.replace(",", ".");
+            payload.apr_percent = toApiDecimalString(apr);
           }
           const pay = it.paymentAmount.trim();
           if (pay !== "") {
             const p = parseDisplayDecimal(pay);
             if (p === null || p < 0) return { ok: false, error: "Cuota inválida." };
-            payload.payment_amount = pay.replace(",", ".");
+            payload.payment_amount = toApiDecimalString(pay);
           }
           if (it.paymentFrequency) payload.payment_frequency = it.paymentFrequency;
         }
@@ -335,7 +336,7 @@ export function HistorySettingsPanel({
     void runCreatePrefill(formKind, formDate, true);
   }, [formKind, formDate, runCreatePrefill]);
 
-  /** «Añadir items que faltan» (modo editar): añade solo los ítems cuyo `item_id` no esté ya en
+  /** «Añadir ítems que faltan» (modo editar): añade solo los ítems cuyo `item_id` no esté ya en
    *  el grid. Nunca toca las filas existentes. Sin novedades → nota «Nada que añadir.». */
   const appendMissing = useCallback(async () => {
     setAppendLoading(true);
@@ -362,7 +363,7 @@ export function HistorySettingsPanel({
     }
   }, [formKind, formDate, formItems, mapPrefillItem]);
 
-  // Auto-descartar la nota de «Añadir items que faltan» a los pocos segundos.
+  // Auto-descartar la nota de «Añadir ítems que faltan» a los pocos segundos.
   useEffect(() => {
     if (!appendNote) return;
     const t = window.setTimeout(() => setAppendNote(null), 4000);
@@ -647,7 +648,7 @@ export function HistorySettingsPanel({
                     disabled={appendLoading}
                     onClick={() => void appendMissing()}
                   >
-                    {appendLoading ? "Buscando…" : "Añadir items que faltan"}
+                    {appendLoading ? "Buscando…" : "Añadir ítems que faltan"}
                   </button>
                   {appendNote ? (
                     <span className="muted snapshot-prefill-note">{appendNote}</span>

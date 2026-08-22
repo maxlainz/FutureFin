@@ -397,7 +397,7 @@ pub(crate) async fn transactions_summary_core(
             "all" => AvgWindow::All,
             _ => {
                 return Err(ApiError::BadRequest(
-                    "avg_window must be one of 3, 6, 12, ytd, all".into(),
+                    "avg_window_invalid: avg_window must be one of 3, 6, 12, ytd, all".into(),
                 ))
             }
         },
@@ -405,7 +405,7 @@ pub(crate) async fn transactions_summary_core(
             let n = q_avg_months.unwrap_or(DEFAULT_AVG_MONTHS);
             if n == 0 || n > MAX_AVG_MONTHS {
                 return Err(ApiError::BadRequest(format!(
-                    "avg_months must be between 1 and {MAX_AVG_MONTHS}"
+                    "avg_months_out_of_range: avg_months must be between 1 and {MAX_AVG_MONTHS}"
                 )));
             }
             AvgWindow::Months(n)
@@ -416,17 +416,17 @@ pub(crate) async fn transactions_summary_core(
     let (year, month) = match (q_year, q_month) {
         (Some(y), Some(m)) => {
             if !(1900..=3000).contains(&y) {
-                return Err(ApiError::BadRequest("year must be between 1900 and 3000".into()));
+                return Err(ApiError::BadRequest("year_out_of_range: year must be between 1900 and 3000".into()));
             }
             if !(1..=12).contains(&m) {
-                return Err(ApiError::BadRequest("month must be between 1 and 12".into()));
+                return Err(ApiError::BadRequest("month_out_of_range: month must be between 1 and 12".into()));
             }
             (y, m)
         }
         (None, None) => shift_month(today.year(), today.month(), -1),
         _ => {
             return Err(ApiError::BadRequest(
-                "year and month must be provided together".into(),
+                "year_month_incomplete: year and month must be provided together".into(),
             ))
         }
     };
@@ -836,7 +836,7 @@ pub(crate) async fn category_monthly_series_core(
         "income" => "income",
         _ => {
             return Err(ApiError::BadRequest(
-                "kind must be `expense` or `income`".into(),
+                "category_series_kind_invalid: kind must be `expense` or `income`".into(),
             ))
         }
     };

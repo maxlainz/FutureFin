@@ -258,12 +258,12 @@ pub async fn create_batch(
     }
     if body.transactions.is_empty() {
         return Err(ApiError::BadRequest(
-            "batch must contain at least one transaction".into(),
+            "batch_empty: batch must contain at least one transaction".into(),
         ));
     }
     if body.transactions.len() > MAX_BATCH {
         return Err(ApiError::BadRequest(format!(
-            "batch must contain at most {MAX_BATCH} transactions"
+            "batch_too_large: batch must contain at most {MAX_BATCH} transactions"
         )));
     }
 
@@ -375,13 +375,13 @@ fn parse_month(raw: &str) -> Result<(NaiveDate, NaiveDate), ApiError> {
     let year: i32 = parts
         .next()
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| ApiError::BadRequest("month must be YYYY-MM".into()))?;
+        .ok_or_else(|| ApiError::BadRequest("month_format_invalid: month must be YYYY-MM".into()))?;
     let month: u32 = parts
         .next()
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| ApiError::BadRequest("month must be YYYY-MM".into()))?;
+        .ok_or_else(|| ApiError::BadRequest("month_format_invalid: month must be YYYY-MM".into()))?;
     let start = NaiveDate::from_ymd_opt(year, month, 1)
-        .ok_or_else(|| ApiError::BadRequest("month must be a valid YYYY-MM".into()))?;
+        .ok_or_else(|| ApiError::BadRequest("month_format_invalid: month must be a valid YYYY-MM".into()))?;
     let (ny, nm) = if month == 12 {
         (year + 1, 1)
     } else {
@@ -485,20 +485,20 @@ pub(crate) async fn list_transactions_core(
     // qué gana, y cualquier respuesta sería una trampa silenciosa para el llamante.
     if month.is_some() && (date_from.is_some() || date_to.is_some()) {
         return Err(ApiError::BadRequest(
-            "month and date_from/date_to are mutually exclusive: use one or the other".into(),
+            "month_and_range_exclusive: month and date_from/date_to are mutually exclusive: use one or the other".into(),
         ));
     }
     if let (Some(from), Some(to)) = (date_from, date_to) {
         if from > to {
             return Err(ApiError::BadRequest(
-                "date_from must not be after date_to".into(),
+                "date_range_inverted: date_from must not be after date_to".into(),
             ));
         }
     }
     if let (Some(lo), Some(hi)) = (min_amount, max_amount) {
         if lo > hi {
             return Err(ApiError::BadRequest(
-                "min_amount must not be greater than max_amount (both are signed: expenses are negative)".into(),
+                "amount_range_inverted: min_amount must not be greater than max_amount (both are signed: expenses are negative)".into(),
             ));
         }
     }
@@ -507,7 +507,7 @@ pub(crate) async fn list_transactions_core(
             let trimmed = raw.trim();
             if trimmed.is_empty() || trimmed.chars().count() > 200 {
                 return Err(ApiError::BadRequest(
-                    "concept_contains must be between 1 and 200 characters".into(),
+                    "concept_contains_length: concept_contains must be between 1 and 200 characters".into(),
                 ));
             }
             Some(like_needle(trimmed))
@@ -695,11 +695,11 @@ pub(crate) async fn patch_transactions_batch_core(
     body: BatchPatchBody,
 ) -> Result<BatchPatchResponse, ApiError> {
     if body.ids.is_empty() {
-        return Err(ApiError::BadRequest("ids must not be empty".into()));
+        return Err(ApiError::BadRequest("batch_empty: ids must not be empty".into()));
     }
     if body.ids.len() > MAX_PATCH_BATCH {
         return Err(ApiError::BadRequest(format!(
-            "batch must contain at most {MAX_PATCH_BATCH} ids"
+            "batch_too_large: batch must contain at most {MAX_PATCH_BATCH} ids"
         )));
     }
     let clear_category = body.clear_category.unwrap_or(false);
@@ -711,17 +711,17 @@ pub(crate) async fn patch_transactions_batch_core(
         && !clear_notes
     {
         return Err(ApiError::BadRequest(
-            "nothing to update: provide kind, category_id/clear_category or notes/clear_notes".into(),
+            "nothing_to_update: nothing to update: provide kind, category_id/clear_category or notes/clear_notes".into(),
         ));
     }
     if body.category_id.is_some() && clear_category {
         return Err(ApiError::BadRequest(
-            "category_id and clear_category are mutually exclusive".into(),
+            "category_set_and_clear: category_id and clear_category are mutually exclusive".into(),
         ));
     }
     if body.notes.is_some() && clear_notes {
         return Err(ApiError::BadRequest(
-            "notes and clear_notes are mutually exclusive".into(),
+            "notes_set_and_clear: notes and clear_notes are mutually exclusive".into(),
         ));
     }
     let kind = match &body.kind {
@@ -772,7 +772,7 @@ pub(crate) async fn patch_transactions_batch_core(
         // 404 y no 403: un movimiento de otro usuario no revela su existencia, igual que el PATCH
         // individual. Se nombran hasta 5 ids para que el llamante no tenga que buscar a ciegas.
         return Err(ApiError::NotFoundWith(format!(
-            "{} of {} ids are unknown or not yours (e.g. {}); nothing was updated",
+            "transactions_not_found: {} of {} ids are unknown or not yours (e.g. {}); nothing was updated",
             ids.len() - rows.len(),
             ids.len(),
             missing.join(", ")
@@ -795,7 +795,7 @@ pub(crate) async fn patch_transactions_batch_core(
                 }
                 None if effective_category.is_some() => {
                     return Err(ApiError::BadRequest(
-                        "category requires a kind: set kind in the same batch".into(),
+                        "transaction_category_requires_kind: category requires a kind: set kind in the same batch".into(),
                     ))
                 }
                 None => {}
@@ -1050,7 +1050,9 @@ pub(crate) async fn patch_transaction_core(
         Some(k) => assert_transaction_category(&state.pool, iid, k, new_category).await?,
         None => {
             if new_category.is_some() {
-                return Err(ApiError::BadRequest("category requires a kind".into()));
+                return Err(ApiError::BadRequest(
+                    "transaction_category_requires_kind: category requires a kind".into(),
+                ));
             }
         }
     }

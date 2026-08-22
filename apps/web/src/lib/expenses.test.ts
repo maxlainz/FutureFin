@@ -505,7 +505,7 @@ describe("kpiBudgetTrend", () => {
 describe("avgWindowLabel", () => {
   it("maps known windows", () => {
     expect(avgWindowLabel("3")).toBe("3m");
-    expect(avgWindowLabel("ytd")).toBe("YTD");
+    expect(avgWindowLabel("ytd")).toBe("año en curso");
     expect(avgWindowLabel("all")).toBe("total");
   });
   it("falls back to the id for unknown windows", () => {

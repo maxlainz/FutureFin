@@ -38,7 +38,7 @@ impl CategoryScope {
             "liability" => Ok(Self::Liability),
             "income" => Ok(Self::Income),
             "expense" => Ok(Self::Expense),
-            _ => Err(ApiError::BadRequest("invalid category scope".into())),
+            _ => Err(ApiError::BadRequest("category_scope_invalid: invalid category scope".into())),
         }
     }
 }
@@ -137,12 +137,12 @@ fn normalize_name(raw: &str) -> Result<String, ApiError> {
     let t = raw.trim();
     if t.is_empty() {
         return Err(ApiError::BadRequest(
-            "name must not be empty".into(),
+            "name_empty: name must not be empty".into(),
         ));
     }
     if t.len() > 200 {
         return Err(ApiError::BadRequest(
-            "name must be at most 200 characters".into(),
+            "name_too_long: name must be at most 200 characters".into(),
         ));
     }
     Ok(t.into())
@@ -310,7 +310,7 @@ pub async fn patch_category(
 
     if body.name.is_none() && body.sort_index.is_none() {
         return Err(ApiError::BadRequest(
-            "provide name and/or sort_index".into(),
+            "patch_empty: provide name and/or sort_index".into(),
         ));
     }
 
@@ -387,23 +387,23 @@ pub async fn delete_category(
     if refs > 0 {
         let Some(target) = q.remap_to else {
             return Err(ApiError::BadRequest(
-                "category is in use; pass remap_to query parameter with another category id of the same scope"
+                "category_in_use: category is in use; pass remap_to query parameter with another category id of the same scope"
                     .into(),
             ));
         };
         if target == id {
             return Err(ApiError::BadRequest(
-                "remap_to must differ from the category being deleted".into(),
+                "remap_to_same_category: remap_to must differ from the category being deleted".into(),
             ));
         }
         let Some(scope_tgt) = category_scope_row(&state.pool, iid, target).await? else {
             return Err(ApiError::BadRequest(
-                "remap_to category was not found in this installation".into(),
+                "remap_to_not_found: remap_to category was not found in this installation".into(),
             ));
         };
         if scope_src != scope_tgt {
             return Err(ApiError::BadRequest(
-                "remap_to category must have the same scope as the deleted category".into(),
+                "remap_to_scope_mismatch: remap_to category must have the same scope as the deleted category".into(),
             ));
         }
 

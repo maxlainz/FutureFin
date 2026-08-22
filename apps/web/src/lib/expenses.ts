@@ -344,7 +344,7 @@ export const AVG_WINDOWS: { id: string; pill: string; label: string }[] = [
   { id: "3", pill: "3m", label: "3m" },
   { id: "6", pill: "6m", label: "6m" },
   { id: "12", pill: "12m", label: "12m" },
-  { id: "ytd", pill: "YTD", label: "YTD" },
+  { id: "ytd", pill: "Año", label: "año en curso" },
   { id: "all", pill: "Todo", label: "total" },
 ];
 

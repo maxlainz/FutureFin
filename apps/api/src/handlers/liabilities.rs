@@ -37,7 +37,7 @@ impl PaymentFrequency {
             "monthly" => Ok(Self::Monthly),
             "weekly" => Ok(Self::Weekly),
             _ => Err(ApiError::BadRequest(
-                "payment_frequency must be monthly or weekly".into(),
+                "payment_frequency_invalid: payment_frequency must be monthly or weekly".into(),
             )),
         }
     }
@@ -166,12 +166,12 @@ fn normalize_label(raw: &str) -> Result<String, ApiError> {
     let t = raw.trim();
     if t.is_empty() {
         return Err(ApiError::BadRequest(
-            "label must not be empty".into(),
+            "label_empty: label must not be empty".into(),
         ));
     }
     if t.len() > 200 {
         return Err(ApiError::BadRequest(
-            "label must be at most 200 characters".into(),
+            "label_too_long: label must be at most 200 characters".into(),
         ));
     }
     Ok(t.into())
@@ -187,7 +187,7 @@ fn normalize_type_tag(raw: &Option<String>) -> Result<Option<String>, ApiError> 
             }
             if t.len() > 120 {
                 return Err(ApiError::BadRequest(
-                    "type_tag must be at most 120 characters".into(),
+                    "type_tag_too_long: type_tag must be at most 120 characters".into(),
                 ));
             }
             Ok(Some(t.into()))
@@ -205,7 +205,7 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
             }
             if t.len() > 4000 {
                 return Err(ApiError::BadRequest(
-                    "notes must be at most 4000 characters".into(),
+                    "notes_too_long: notes must be at most 4000 characters".into(),
                 ));
             }
             Ok(Some(t.into()))
@@ -215,7 +215,7 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
 
 fn assert_non_negative(d: Decimal, field: &'static str) -> Result<(), ApiError> {
     if d.is_sign_negative() {
-        return Err(ApiError::BadRequest(format!("{field} must be >= 0")));
+        return Err(ApiError::BadRequest(format!("amount_negative: {field} must be >= 0")));
     }
     Ok(())
 }
@@ -229,14 +229,14 @@ fn validate_payment_pair(
         (Some(a), Some(f)) => {
             if a <= Decimal::ZERO {
                 return Err(ApiError::BadRequest(
-                    "payment_amount must be > 0 when set".into(),
+                    "payment_amount_not_positive: payment_amount must be > 0 when set".into(),
                 ));
             }
             PaymentFrequency::parse(f)?;
             Ok(())
         }
         _ => Err(ApiError::BadRequest(
-            "payment_amount and payment_frequency must both be set or both omitted"
+            "payment_pair_incomplete: payment_amount and payment_frequency must both be set or both omitted"
                 .into(),
         )),
     }
@@ -252,7 +252,7 @@ fn payment_interval_count(
 ) -> Result<u32, ApiError> {
     if end < start {
         return Err(ApiError::BadRequest(
-            "payment_end_date must be on or after today when deriving principal".into(),
+            "payment_end_date_in_past: payment_end_date must be on or after today when deriving principal".into(),
         ));
     }
     match frequency {
@@ -263,11 +263,11 @@ fn payment_interval_count(
                 n += 1;
                 if n > 1200 {
                     return Err(ApiError::BadRequest(
-                        "too many monthly payment intervals".into(),
+                        "payment_schedule_too_long: too many monthly payment intervals".into(),
                     ));
                 }
                 d = d.checked_add_months(Months::new(1)).ok_or_else(|| {
-                    ApiError::BadRequest("payment schedule date overflow".into())
+                    ApiError::BadRequest("payment_schedule_overflow: payment schedule date overflow".into())
                 })?;
             }
             Ok(n)
@@ -278,7 +278,7 @@ fn payment_interval_count(
             let intervals = ((days + 6) / 7) as u32;
             if intervals > 5200 {
                 return Err(ApiError::BadRequest(
-                    "too many weekly payment intervals".into(),
+                    "payment_schedule_too_long: too many weekly payment intervals".into(),
                 ));
             }
             Ok(intervals)
@@ -295,7 +295,7 @@ fn derive_principal_from_payment_plan(
     let n = payment_interval_count(frequency, today, payment_end_date)?;
     if n == 0 {
         return Err(ApiError::BadRequest(
-            "derived principal requires at least one payment interval".into(),
+            "payment_schedule_empty: derived principal requires at least one payment interval".into(),
         ));
     }
     Ok(payment_amount * Decimal::from(n))
@@ -322,7 +322,7 @@ async fn assert_liability_category(
 
     if !ok {
         return Err(ApiError::BadRequest(
-            "category_id must reference a liability category in this installation".into(),
+            "category_wrong_scope: category_id must reference a liability category in this installation".into(),
         ));
     }
     Ok(())
@@ -352,7 +352,7 @@ async fn assert_expense_category(
 
     if !ok {
         return Err(ApiError::BadRequest(
-            "expense_category_id must reference an expense category in this installation".into(),
+            "expense_category_wrong_scope: expense_category_id must reference an expense category in this installation".into(),
         ));
     }
     Ok(())
@@ -485,17 +485,17 @@ pub(crate) async fn create_liability_core(
     let (principal, principal_derived) = if derive {
         let amt = body.payment_amount.ok_or_else(|| {
             ApiError::BadRequest(
-                "payment_amount is required when derive_principal_from_plan is true".into(),
+                "payment_amount_required_for_derived_principal: payment_amount is required when derive_principal_from_plan is true".into(),
             )
         })?;
         let fs = freq_str.as_deref().ok_or_else(|| {
             ApiError::BadRequest(
-                "payment_frequency is required when derive_principal_from_plan is true".into(),
+                "payment_frequency_required_for_derived_principal: payment_frequency is required when derive_principal_from_plan is true".into(),
             )
         })?;
         let end = body.payment_end_date.ok_or_else(|| {
             ApiError::BadRequest(
-                "payment_end_date is required when derive_principal_from_plan is true".into(),
+                "payment_end_date_required_for_derived_principal: payment_end_date is required when derive_principal_from_plan is true".into(),
             )
         })?;
         validate_payment_pair(Some(amt), Some(fs))?;
@@ -508,7 +508,7 @@ pub(crate) async fn create_liability_core(
     } else {
         let p = body.principal.ok_or_else(|| {
             ApiError::BadRequest(
-                "principal is required unless derive_principal_from_plan is true".into(),
+                "principal_required: principal is required unless derive_principal_from_plan is true".into(),
             )
         })?;
         assert_non_negative(p, "principal")?;
@@ -611,7 +611,7 @@ pub(crate) async fn patch_liability_core(
         && body.sort_index.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one field to update".into(),
+            "patch_empty: provide at least one field to update".into(),
         ));
     }
 
@@ -687,17 +687,17 @@ pub(crate) async fn patch_liability_core(
     let new_principal = if derived_flag {
         let amt = new_pay_amt.ok_or_else(|| {
             ApiError::BadRequest(
-                "payment_amount is required when principal is derived from plan".into(),
+                "payment_amount_required_for_derived_principal: payment_amount is required when principal is derived from plan".into(),
             )
         })?;
         let fs = new_pay_freq_str.as_deref().ok_or_else(|| {
             ApiError::BadRequest(
-                "payment_frequency is required when principal is derived from plan".into(),
+                "payment_frequency_required_for_derived_principal: payment_frequency is required when principal is derived from plan".into(),
             )
         })?;
         let end = new_pay_end.ok_or_else(|| {
             ApiError::BadRequest(
-                "payment_end_date is required when principal is derived from plan".into(),
+                "payment_end_date_required_for_derived_principal: payment_end_date is required when principal is derived from plan".into(),
             )
         })?;
         let pf = PaymentFrequency::parse(fs)?;

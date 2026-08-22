@@ -26,7 +26,7 @@ impl MembershipRole {
             "owner" => Ok(Self::Owner),
             "member" => Ok(Self::Member),
             "viewer" => Ok(Self::Viewer),
-            _ => Err(ApiError::BadRequest("invalid membership role".into())),
+            _ => Err(ApiError::BadRequest("membership_role_invalid: invalid membership role".into())),
         }
     }
 }

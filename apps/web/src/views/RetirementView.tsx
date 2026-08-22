@@ -365,7 +365,7 @@ export function RetirementView({
         <>
           <div className="metric-grid workspace-kpi-strip">
             <MetricCard
-              label="Patrimonio objetivo (Actual + Inf. Adj.)"
+              label="Patrimonio objetivo (con inflación)"
               value={
                 retirementMetricsReady &&
                 fireKpis.targetNoPen !== null &&
@@ -517,7 +517,7 @@ export function RetirementView({
                   ...(hasFire
                     ? ([
                         {
-                          label: "Target FIRE",
+                          label: "Objetivo FIRE",
                           color: "var(--proj-fire)",
                           dash: true,
                         },

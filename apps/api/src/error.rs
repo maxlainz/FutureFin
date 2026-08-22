@@ -8,8 +8,51 @@ use tracing::error;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErrorBody {
+    /// Clase HTTP del error (`bad_request`, `conflict`…). Contrato publicado desde 1.0.0.
     pub error: ErrorCode,
+    /// Código ESTABLE y granular, pensado para que un cliente decida qué enseñar sin leer
+    /// `message`. Sale del prefijo `snake_code:` del mensaje cuando lo hay
+    /// (`username_taken: …` → `username_taken`); si no, cae a la clase HTTP (`bad_request`).
+    /// La SPA lo traduce con `apps/web/src/lib/errorMessages.ts` — un código sin entrada en ese
+    /// catálogo hace fallar `error_codes_have_spanish_copy`.
+    pub code: String,
+    /// Detalle técnico, en inglés y para desarrolladores. La SPA no lo enseña como frase
+    /// principal: lo pliega bajo «Detalles técnicos».
     pub message: String,
+}
+
+impl ErrorBody {
+    pub fn from_api_error(e: &ApiError) -> Self {
+        let message = e.sanitised_message();
+        let kind = e.code();
+        ErrorBody {
+            code: derive_error_code(kind, &message),
+            error: kind,
+            message,
+        }
+    }
+}
+
+/// Extrae el código estable del prefijo `snake_code: ` del mensaje. Sin prefijo válido, el código
+/// es la clase HTTP. Deliberadamente estrecho —solo `[a-z][a-z0-9_]*` de 3 a 64 caracteres— para
+/// que un mensaje corriente con dos puntos («Expected JSON: …», «Cena, entrada») no invente un
+/// código: un código inventado es peor que ninguno, porque el catálogo del front no lo tendrá y
+/// el usuario verá el fallback genérico creyendo que hay una traducción.
+fn derive_error_code(kind: ErrorCode, message: &str) -> String {
+    if let Some((prefix, _)) = message.split_once(": ") {
+        let ok = (3..=64).contains(&prefix.len())
+            && prefix.starts_with(|c: char| c.is_ascii_lowercase())
+            && prefix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        if ok {
+            return prefix.to_string();
+        }
+    }
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "internal".into())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, utoipa::ToSchema)]
@@ -39,6 +82,12 @@ pub enum ApiError {
     Forbidden,
     #[error("resource conflict")]
     Conflict,
+    /// 409 que SÍ propaga mensaje al wire, con prefijo `snake_code:`. El `Conflict` pelado nace
+    /// del mapeo automático de SQLSTATE 23505 y no sabe QUÉ colisionó; cuando el handler sí lo
+    /// sabe (un username ya registrado, un nombre de categoría repetido) debe decirlo: sin esto
+    /// la SPA solo podía enseñar «resource conflict».
+    #[error("{0}")]
+    ConflictWith(String),
     #[error("database error")]
     Db(sqlx::Error),
     #[error("service unavailable")]
@@ -79,7 +128,7 @@ impl ApiError {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::NotFound | ApiError::NotFoundWith(_) => StatusCode::NOT_FOUND,
-            ApiError::Conflict => StatusCode::CONFLICT,
+            ApiError::Conflict | ApiError::ConflictWith(_) => StatusCode::CONFLICT,
             ApiError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -94,6 +143,7 @@ impl ApiError {
             ApiError::NotFound => "not found".into(),
             ApiError::NotFoundWith(s) => s.clone(),
             ApiError::Conflict => "resource conflict".into(),
+            ApiError::ConflictWith(s) => s.clone(),
             ApiError::Unavailable => "dependency unavailable".into(),
             ApiError::Db(err) => {
                 error!(?err, "database error");
@@ -109,7 +159,7 @@ impl ApiError {
             ApiError::Unauthorized => ErrorCode::Unauthorized,
             ApiError::Forbidden => ErrorCode::Forbidden,
             ApiError::NotFound | ApiError::NotFoundWith(_) => ErrorCode::NotFound,
-            ApiError::Conflict => ErrorCode::Conflict,
+            ApiError::Conflict | ApiError::ConflictWith(_) => ErrorCode::Conflict,
             ApiError::Unavailable => ErrorCode::Unavailable,
             ApiError::Db(_) => ErrorCode::Internal,
         }
@@ -119,10 +169,69 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status();
-        let body = ErrorBody {
-            error: self.code(),
-            message: self.sanitised_message(),
-        };
-        (status, Json(body)).into_response()
+        (status, Json(ErrorBody::from_api_error(&self))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_comes_from_the_snake_prefix_when_there_is_one() {
+        assert_eq!(
+            derive_error_code(ErrorCode::BadRequest, "username_taken: ya existe"),
+            "username_taken"
+        );
+        assert_eq!(
+            derive_error_code(ErrorCode::BadRequest, "csv_preset_unrecognized: could not detect"),
+            "csv_preset_unrecognized"
+        );
+        // Dígitos y guiones bajos son válidos dentro del código.
+        assert_eq!(
+            derive_error_code(ErrorCode::Unprocessable, "swr_pct_out_of_range_0_4: fuera"),
+            "swr_pct_out_of_range_0_4"
+        );
+    }
+
+    #[test]
+    fn code_falls_back_to_the_http_class_without_a_valid_prefix() {
+        // Sin dos puntos.
+        assert_eq!(
+            derive_error_code(ErrorCode::BadRequest, "amount must be >= 0"),
+            "bad_request"
+        );
+        // Con dos puntos pero el prefijo lleva espacios: no es un código.
+        assert_eq!(
+            derive_error_code(ErrorCode::Internal, "compound marker task panic: boom"),
+            "internal"
+        );
+        // Mayúsculas: tampoco.
+        assert_eq!(
+            derive_error_code(ErrorCode::BadRequest, "Expected JSON: nope"),
+            "bad_request"
+        );
+        // Demasiado corto para ser un código con sentido.
+        assert_eq!(derive_error_code(ErrorCode::NotFound, "ab: x"), "not_found");
+        // Los errores sin mensaje propio caen a su clase.
+        assert_eq!(
+            derive_error_code(ErrorCode::Unauthorized, "authentication required"),
+            "unauthorized"
+        );
+    }
+
+    #[test]
+    fn body_carries_class_code_and_message() {
+        let b = ErrorBody::from_api_error(&ApiError::ConflictWith(
+            "username_taken: ese nombre ya está registrado".into(),
+        ));
+        assert_eq!(b.code, "username_taken");
+        assert!(matches!(b.error, ErrorCode::Conflict));
+        assert!(b.message.contains("username_taken"));
+
+        // El 409 automático del SQLSTATE 23505 sigue sin código granular: es lo correcto,
+        // no sabe qué colisionó.
+        let generic = ErrorBody::from_api_error(&ApiError::Conflict);
+        assert_eq!(generic.code, "conflict");
     }
 }

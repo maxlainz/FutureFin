@@ -10,7 +10,7 @@
  */
 
 import { useState, type FormEvent, type ReactNode } from "react";
-import { defaultFetchInit, errorMessageFromResponse } from "../api/client";
+import { apiErrorFromResponse, defaultFetchInit } from "../api/client";
 import type { UserResponse } from "../api/types";
 
 export function LoginPanel(props: {
@@ -34,7 +34,7 @@ export function LoginPanel(props: {
         body: JSON.stringify({ username, password }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const me = (await res.json()) as UserResponse;
       setPassword("");

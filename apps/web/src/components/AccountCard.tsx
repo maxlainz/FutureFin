@@ -5,6 +5,7 @@
  */
 
 import { UserIcon, XIcon } from "./icons";
+import { roleLabel } from "../lib/enumLabels";
 
 export type AccountCardRole = string | null;
 
@@ -33,7 +34,7 @@ export function AccountCard({
         <div className="ff-account-info">
           <div className="ff-account-name">{username}</div>
           <div className="ff-account-meta">
-            {role ? <span className="role-pill subtle">{role}</span> : null}
+            {role ? <span className="role-pill subtle">{roleLabel(role)}</span> : null}
             {installationName ? <span>{installationName}</span> : null}
           </div>
         </div>

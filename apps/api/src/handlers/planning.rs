@@ -102,7 +102,7 @@ fn scope_to_direction(scope: &str) -> Result<PlanningFlowDirection, ApiError> {
         "income" => Ok(PlanningFlowDirection::Inflow),
         "expense" => Ok(PlanningFlowDirection::Outflow),
         _ => Err(ApiError::BadRequest(
-            "planning flow category must be income or expense scope".into(),
+            "planning_flow_category_scope_unsupported: planning flow category must be income or expense scope".into(),
         )),
     }
 }
@@ -110,11 +110,11 @@ fn scope_to_direction(scope: &str) -> Result<PlanningFlowDirection, ApiError> {
 fn normalize_title(raw: &str) -> Result<String, ApiError> {
     let t = raw.trim();
     if t.is_empty() {
-        return Err(ApiError::BadRequest("title must not be empty".into()));
+        return Err(ApiError::BadRequest("title_empty: title must not be empty".into()));
     }
     if t.len() > 200 {
         return Err(ApiError::BadRequest(
-            "title must be at most 200 characters".into(),
+            "title_too_long: title must be at most 200 characters".into(),
         ));
     }
     Ok(t.into())
@@ -128,13 +128,13 @@ fn patch_due_date_from_json(
     }
     let s = v
         .as_str()
-        .ok_or_else(|| ApiError::BadRequest("due_date must be a string or null".into()))?;
+        .ok_or_else(|| ApiError::BadRequest("due_date_type: due_date must be a string or null".into()))?;
     let t = s.trim();
     if t.is_empty() {
         return Ok(None);
     }
     NaiveDate::parse_from_str(t, "%Y-%m-%d").map(Some).map_err(|_| {
-        ApiError::BadRequest("due_date must be YYYY-MM-DD".into())
+        ApiError::BadRequest("due_date_format: due_date must be YYYY-MM-DD".into())
     })
 }
 
@@ -147,7 +147,7 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
                 Ok(None)
             } else if t.len() > 4000 {
                 Err(ApiError::BadRequest(
-                    "notes must be at most 4000 characters".into(),
+                    "notes_too_long: notes must be at most 4000 characters".into(),
                 ))
             } else {
                 Ok(Some(t.into()))
@@ -264,7 +264,7 @@ pub(crate) async fn create_planning_flow_core(
 
     if body.expected_amount <= Decimal::ZERO {
         return Err(ApiError::BadRequest(
-            "expected_amount must be greater than zero".into(),
+            "amount_not_positive: expected_amount must be greater than zero".into(),
         ));
     }
 
@@ -359,7 +359,7 @@ pub(crate) async fn patch_planning_flow_core(
         && body.show_in_chart.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one field to update".into(),
+            "patch_empty: provide at least one field to update".into(),
         ));
     }
 
@@ -394,7 +394,7 @@ pub(crate) async fn patch_planning_flow_core(
         Some(a) => {
             if a <= Decimal::ZERO {
                 return Err(ApiError::BadRequest(
-                    "expected_amount must be greater than zero".into(),
+                    "amount_not_positive: expected_amount must be greater than zero".into(),
                 ));
             }
             a

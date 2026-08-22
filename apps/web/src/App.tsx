@@ -12,8 +12,12 @@ import {
   type FormEvent,
 } from "react";
 import "./App.css";
-import { formatEditableDecimalString, parseDisplayDecimal } from "./lib/format";
-import { apiGet, defaultFetchInit, errorMessageFromResponse } from "./api/client";
+import {
+  formatEditableDecimalString,
+  parseDisplayDecimal,
+  toApiDecimalString,
+} from "./lib/format";
+import { apiErrorFromResponse, apiGet, defaultFetchInit } from "./api/client";
 import { Modal, ModalFormError } from "./components/Modal";
 import { SnapshotPromptModal } from "./components/SnapshotPromptModal";
 import {
@@ -593,7 +597,7 @@ export default function App() {
         return;
       }
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const body = (await res.json()) as UserResponse;
       setUser(body);
@@ -615,7 +619,7 @@ export default function App() {
     try {
       const res = await fetch("/v1/installation/session-context", defaultFetchInit);
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const ctx = (await res.json()) as InstallationSessionContext;
       if (ctx.access) {
@@ -652,14 +656,14 @@ export default function App() {
       if (catRes.status === 403 || catRes.status === 404) {
         setAssetCategories([]);
       } else if (!catRes.ok) {
-        throw new Error(await errorMessageFromResponse(catRes));
+        throw await apiErrorFromResponse(catRes);
       } else {
         setAssetCategories((await catRes.json()) as CategoryRow[]);
       }
       if (astRes.status === 403 || astRes.status === 404) {
         setAssets([]);
       } else if (!astRes.ok) {
-        throw new Error(await errorMessageFromResponse(astRes));
+        throw await apiErrorFromResponse(astRes);
       } else {
         loaded = (await astRes.json()) as AssetApiRow[];
         setAssets(loaded);
@@ -686,7 +690,7 @@ export default function App() {
       if (res.status === 403 || res.status === 404) {
         setAllocationRules([]);
       } else if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       } else {
         setAllocationRules((await res.json()) as AllocationRuleApiRow[]);
       }
@@ -738,8 +742,8 @@ export default function App() {
         cap?: { kind: AllocationRuleCapKind; value: string } | null;
       };
       const base: RulePayload = {};
-      const capRaw = ruleFormCapValue.trim().replace(",", ".");
-      const amountRaw = ruleFormAmount.trim().replace(",", ".");
+      const capRaw = toApiDecimalString(ruleFormCapValue);
+      const amountRaw = toApiDecimalString(ruleFormAmount);
 
       if (editingRuleId) {
         base.target_asset_id = ruleFormTargetAsset;
@@ -772,7 +776,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(base),
       });
-      if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+      if (!res.ok) throw await apiErrorFromResponse(res);
       setRuleModalOpen(false);
       resetRuleForm();
       await loadAllocationRules();
@@ -791,7 +795,7 @@ export default function App() {
         `/v1/allocation-rules/${encodeURIComponent(id)}`,
         { ...defaultFetchInit, method: "DELETE" },
       );
-      if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+      if (!res.ok) throw await apiErrorFromResponse(res);
       await loadAllocationRules();
     } catch (e: unknown) {
       setAllocationRulesError(e instanceof Error ? e.message : String(e));
@@ -817,7 +821,7 @@ export default function App() {
           body: JSON.stringify({ ids: reordered.map((r) => r.id) }),
         },
       );
-      if (!res.ok) throw new Error(await errorMessageFromResponse(res));
+      if (!res.ok) throw await apiErrorFromResponse(res);
       await loadAllocationRules();
     } catch (e: unknown) {
       setAllocationRulesError(e instanceof Error ? e.message : String(e));
@@ -839,21 +843,21 @@ export default function App() {
       if (catRes.status === 403 || catRes.status === 404) {
         setLiabilityCategories([]);
       } else if (!catRes.ok) {
-        throw new Error(await errorMessageFromResponse(catRes));
+        throw await apiErrorFromResponse(catRes);
       } else {
         setLiabilityCategories((await catRes.json()) as CategoryRow[]);
       }
       if (expCatRes.status === 403 || expCatRes.status === 404) {
         setLiabilityExpenseCategories([]);
       } else if (!expCatRes.ok) {
-        throw new Error(await errorMessageFromResponse(expCatRes));
+        throw await apiErrorFromResponse(expCatRes);
       } else {
         setLiabilityExpenseCategories((await expCatRes.json()) as CategoryRow[]);
       }
       if (libRes.status === 403 || libRes.status === 404) {
         setLiabilities([]);
       } else if (!libRes.ok) {
-        throw new Error(await errorMessageFromResponse(libRes));
+        throw await apiErrorFromResponse(libRes);
       } else {
         setLiabilities((await libRes.json()) as LiabilityApiRow[]);
       }
@@ -880,7 +884,7 @@ export default function App() {
       if (budRes.status === 403 || budRes.status === 404) {
         setBudgetSnapshot(null);
       } else if (!budRes.ok) {
-        throw new Error(await errorMessageFromResponse(budRes));
+        throw await apiErrorFromResponse(budRes);
       } else {
         const raw = (await budRes.json()) as BudgetSnapshotApi;
         setBudgetSnapshot({
@@ -892,7 +896,7 @@ export default function App() {
       if (incRes.status === 403 || incRes.status === 404) {
         setBudgetIncomeCategories([]);
       } else if (!incRes.ok) {
-        throw new Error(await errorMessageFromResponse(incRes));
+        throw await apiErrorFromResponse(incRes);
       } else {
         setBudgetIncomeCategories((await incRes.json()) as CategoryRow[]);
       }
@@ -900,7 +904,7 @@ export default function App() {
       if (expRes.status === 403 || expRes.status === 404) {
         setBudgetExpenseCategories([]);
       } else if (!expRes.ok) {
-        throw new Error(await errorMessageFromResponse(expRes));
+        throw await apiErrorFromResponse(expRes);
       } else {
         setBudgetExpenseCategories((await expRes.json()) as CategoryRow[]);
       }
@@ -930,7 +934,7 @@ export default function App() {
       if (flowsRes.status === 403 || flowsRes.status === 404) {
         setPlanningFlows([]);
       } else if (!flowsRes.ok) {
-        throw new Error(await errorMessageFromResponse(flowsRes));
+        throw await apiErrorFromResponse(flowsRes);
       } else {
         setPlanningFlows((await flowsRes.json()) as PlanningFlowApiRow[]);
       }
@@ -938,7 +942,7 @@ export default function App() {
       if (incRes.status === 403 || incRes.status === 404) {
         setPlanningIncomeCategories([]);
       } else if (!incRes.ok) {
-        throw new Error(await errorMessageFromResponse(incRes));
+        throw await apiErrorFromResponse(incRes);
       } else {
         setPlanningIncomeCategories((await incRes.json()) as CategoryRow[]);
       }
@@ -946,7 +950,7 @@ export default function App() {
       if (expRes.status === 403 || expRes.status === 404) {
         setPlanningExpenseCategories([]);
       } else if (!expRes.ok) {
-        throw new Error(await errorMessageFromResponse(expRes));
+        throw await apiErrorFromResponse(expRes);
       } else {
         setPlanningExpenseCategories((await expRes.json()) as CategoryRow[]);
       }
@@ -974,7 +978,7 @@ export default function App() {
         if (res.status === 403 || res.status === 404) {
           setSummary(null);
         } else if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         } else {
           setSummary((await res.json()) as SummaryResponse);
         }
@@ -1076,7 +1080,7 @@ export default function App() {
         body: JSON.stringify({ kinds }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       void loadHistorySeries();
       // Los snapshots son las anclas de la serie fina del cash-flow: refrescarla también.
@@ -1131,7 +1135,7 @@ export default function App() {
         if (budRes.status === 403 || budRes.status === 404) {
           setRetirementBudgetSnapshot(null);
         } else if (!budRes.ok) {
-          throw new Error(await errorMessageFromResponse(budRes));
+          throw await apiErrorFromResponse(budRes);
         } else {
           const raw = (await budRes.json()) as BudgetSnapshotApi;
           setRetirementBudgetSnapshot({
@@ -1143,7 +1147,7 @@ export default function App() {
           if (projRes.status === 403 || projRes.status === 404) {
             setProjectionSeries(null);
           } else if (!projRes.ok) {
-            throw new Error(await errorMessageFromResponse(projRes));
+            throw await apiErrorFromResponse(projRes);
           } else {
             setProjectionSeries((await projRes.json()) as ProjectionSeriesApi);
           }
@@ -1173,7 +1177,7 @@ export default function App() {
         return;
       }
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const list = (await res.json()) as CategoryRow[];
       setCategories(list);
@@ -1195,7 +1199,7 @@ export default function App() {
         return;
       }
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const list = (await res.json()) as UserResponse[];
       setPendingUsers(list);
@@ -1681,7 +1685,7 @@ export default function App() {
           }),
         });
         if (!reg.ok) {
-          throw new Error(await errorMessageFromResponse(reg));
+          throw await apiErrorFromResponse(reg);
         }
       }
       const loginRes = await fetch("/v1/auth/login", {
@@ -1691,7 +1695,7 @@ export default function App() {
         body: JSON.stringify({ username, password }),
       });
       if (!loginRes.ok) {
-        throw new Error(await errorMessageFromResponse(loginRes));
+        throw await apiErrorFromResponse(loginRes);
       }
       const me = (await loginRes.json()) as UserResponse;
       setUser(me);
@@ -1740,7 +1744,7 @@ export default function App() {
         }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       await loadInstallation({ preserveGate: true });
     } catch (e: unknown) {
@@ -1764,7 +1768,7 @@ export default function App() {
         }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       await loadInstallation({ preserveGate: true });
     } catch (e: unknown) {
@@ -1776,7 +1780,7 @@ export default function App() {
 
   async function saveInstallationProjection(ev: FormEvent) {
     ev.preventDefault();
-    const pctTrim = projectionInflationPctDraft.trim().replace(",", ".");
+    const pctTrim = toApiDecimalString(projectionInflationPctDraft);
     const pctToSend = pctTrim === "" ? "0" : pctTrim;
     const n = Number(pctToSend);
     if (!Number.isFinite(n) || n < 0 || n > 50) {
@@ -1798,7 +1802,7 @@ export default function App() {
         }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       await loadInstallation({ preserveGate: true });
     } catch (e: unknown) {
@@ -1819,7 +1823,7 @@ export default function App() {
         body: JSON.stringify({ fire_settings: fs }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const updated = (await res.json()) as InstallationAccess;
       setInstallation(updated);
@@ -1847,7 +1851,7 @@ export default function App() {
         body: JSON.stringify({ mcp_write_enabled: enabled }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       setInstallation((await res.json()) as InstallationAccess);
     } catch (e: unknown) {
@@ -1872,7 +1876,7 @@ export default function App() {
         },
       );
       if (!res.ok && res.status !== 204) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       await loadPendingUsers();
     } catch (e: unknown) {
@@ -1902,7 +1906,7 @@ export default function App() {
         }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       setNewCatName("");
       setCategoryModalOpen(false);
@@ -1951,7 +1955,7 @@ export default function App() {
         },
       );
       if (!res.ok && res.status !== 204) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       if (editingCategoryId === row.id) {
         setEditingCategoryId(null);
@@ -1982,7 +1986,7 @@ export default function App() {
         body: JSON.stringify({ name: trimmed }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       setEditingCategoryId(null);
       setEditCategoryName("");
@@ -2066,15 +2070,15 @@ export default function App() {
       const base: Record<string, unknown> = {
         category_id: assetFormCategoryId,
         name: assetFormName.trim(),
-        current_value: assetFormValue.trim(),
+        current_value: toApiDecimalString(assetFormValue),
         is_liquid: assetFormLiquid,
       };
-      const er = assetFormExpectedReturn.trim().replace(",", ".");
+      const er = toApiDecimalString(assetFormExpectedReturn);
       if (er) {
         base.expected_annual_return_percent = er;
       }
 
-      const ppTrim = assetFormPurchase.trim().replace(",", ".");
+      const ppTrim = toApiDecimalString(assetFormPurchase);
       if (editingAssetId) {
         // PATCH: siempre enviar precio de compra — omisión antes podía dejar ambigüedad con el servidor.
         base.purchase_price = ppTrim === "" ? null : ppTrim;
@@ -2098,7 +2102,7 @@ export default function App() {
           },
         );
         if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         }
       } else {
         const res = await fetch("/v1/assets", {
@@ -2108,7 +2112,7 @@ export default function App() {
           body: JSON.stringify(base),
         });
         if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         }
         // 201 → devuelve el activo creado (con id/owner_user_id); lo necesitamos para el trigger.
         createdAsset = (await res.json()) as AssetApiRow;
@@ -2147,7 +2151,7 @@ export default function App() {
         method: "DELETE",
       });
       if (!res.ok && res.status !== 204) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       if (editingAssetId === id) {
         resetAssetForm();
@@ -2204,7 +2208,7 @@ export default function App() {
       );
       return;
     }
-    const payAmt = liabilityFormPaymentAmount.trim();
+    const payAmt = toApiDecimalString(liabilityFormPaymentAmount);
     const payFreq = liabilityFormPaymentFrequency;
     const pend = liabilityFormPaymentEnd.trim();
 
@@ -2239,13 +2243,13 @@ export default function App() {
       }
       base.derive_principal_from_plan = liabilityFormDerivePrincipal;
       if (!liabilityFormDerivePrincipal) {
-        base.principal = liabilityFormPrincipal.trim();
+        base.principal = toApiDecimalString(liabilityFormPrincipal);
       }
       const tt = liabilityFormTypeTag.trim();
       if (tt) {
         base.type_tag = tt;
       }
-      const apr = liabilityFormApr.trim();
+      const apr = toApiDecimalString(liabilityFormApr);
       if (apr) {
         base.apr_percent = apr;
       }
@@ -2272,7 +2276,7 @@ export default function App() {
           },
         );
         if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         }
       } else {
         const res = await fetch("/v1/liabilities", {
@@ -2282,7 +2286,7 @@ export default function App() {
           body: JSON.stringify(base),
         });
         if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         }
       }
       resetLiabilityForm();
@@ -2306,7 +2310,7 @@ export default function App() {
         method: "DELETE",
       });
       if (!res.ok && res.status !== 204) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       if (editingLiabilityId === id) {
         resetLiabilityForm();
@@ -2395,7 +2399,7 @@ export default function App() {
 
   async function submitBudgetForm(ev: FormEvent) {
     ev.preventDefault();
-    const amt = budgetFormAmount.trim();
+    const amt = toApiDecimalString(budgetFormAmount);
     if (!budgetFormCategoryId || !amt) {
       return;
     }
@@ -2436,7 +2440,7 @@ export default function App() {
           },
         );
         if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         }
       } else {
         if (budgetFormScope === "income") {
@@ -2455,7 +2459,7 @@ export default function App() {
           body: JSON.stringify(base),
         });
         if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         }
       }
       resetBudgetForm();
@@ -2477,7 +2481,7 @@ export default function App() {
         method: "DELETE",
       });
       if (!res.ok && res.status !== 204) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       if (editingBudgetEntryId === id) {
         resetBudgetForm();
@@ -2522,7 +2526,7 @@ export default function App() {
 
   async function submitPlanningFlowForm(ev: FormEvent) {
     ev.preventDefault();
-    const amt = planningFormAmount.trim();
+    const amt = toApiDecimalString(planningFormAmount);
     const tit = planningFormTitle.trim();
     if (!planningFormCategoryId || !amt || !tit) {
       return;
@@ -2551,7 +2555,7 @@ export default function App() {
           },
         );
         if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         }
       } else {
         const base: Record<string, unknown> = {
@@ -2576,7 +2580,7 @@ export default function App() {
           body: JSON.stringify(base),
         });
         if (!res.ok) {
-          throw new Error(await errorMessageFromResponse(res));
+          throw await apiErrorFromResponse(res);
         }
       }
       resetPlanningFlowForm();
@@ -2598,7 +2602,7 @@ export default function App() {
         method: "DELETE",
       });
       if (!res.ok && res.status !== 204) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       if (editingPlanningFlowId === id) {
         resetPlanningFlowForm();
@@ -2627,7 +2631,7 @@ export default function App() {
         }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const body = (await res.json()) as UserResponse;
       setUser(body);
@@ -2686,7 +2690,7 @@ export default function App() {
         }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -2755,7 +2759,7 @@ export default function App() {
         }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const preview = (await res.json()) as FfbackupImportPreviewResponse;
       setFfbackupImportPreview(preview);
@@ -2785,7 +2789,7 @@ export default function App() {
         }),
       });
       if (!res.ok) {
-        throw new Error(await errorMessageFromResponse(res));
+        throw await apiErrorFromResponse(res);
       }
       const body = (await res.json()) as FfbackupImportApplyResponse;
       const ui = body.ui_preferences ?? {};
