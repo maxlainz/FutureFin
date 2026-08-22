@@ -98,9 +98,9 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
   Denominator = `months_with_data`, but counting **only real months** — a month in the window with ≥1
   transaction `recurring_rule_id IS NULL` (any kind, same scope). A pseudo-empty month (only recurring
   instances, e.g. after backfilling recurring rules) is excluded **entirely** — neither numerator nor
-  denominator; a real month counts **whole**, including its recurring transactions. Since issue #5 the Movimientos
+  denominator; a real month counts **whole**, including its recurring transactions. Since auditoría MCP the Movimientos
   comparison (`GET /v1/transactions/summary`) applies the **same real-month predicate** — the
-  divergence documented here was closed (issue #5: a recurring-only month sank every category's
+  divergence documented here was closed (auditoría MCP: a recurring-only month sank every category's
   average). They are still not identical: `transactions_avg` has per-side configurable windows
   (`AvgWindowSpec`, `data`/`calendar` modes) while the summary is always calendar-windowed, and the
   summary publishes its denominator as `avg_months` alongside the unchanged `months_with_data`. Worked example (test

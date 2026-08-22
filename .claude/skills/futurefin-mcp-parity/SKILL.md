@@ -150,7 +150,7 @@ the blocking reason changes (noted per row).
 | 4 | `update_installation_settings` (allowlist: `annual_inflation_assumption_percent`, maybe `calendar_tz`, `show_age_mode`) | partial — only the FIRE slice has a core | FULL | Inflation is a direct engine input, today read-only via MCP; NEVER include `mcp_write_enabled` |
 
 Closed since the register was created: **`update_categorization_rule` + `delete_categorization_rule`
-(4.0.0, issue #8 §10 — era la fila #4; `patch_rule_core`/`delete_rule_core` extraídas de `rules.rs`,
+(4.0.0, auditoría MCP §10 — era la fila #4; `patch_rule_core`/`delete_rule_core` extraídas de `rules.rs`,
 cache NONE, preview/confirm en el borrado con la huella actual vía `apply_categorization_rule_core`
 en `dry_run`. Cerrarla dejó dos guardias nuevas en la core, `rule_patch_empty` y
 `rule_patch_conflict`: el PATCH aceptaba cuerpo vacío y dejaba que el `clear_*` ganara en silencio

@@ -62,9 +62,9 @@ nueva: con `DATABASE_URL` heredada y volumen vacío el contenedor **aborta sin i
 el volumen se queda intacto. El escenario 2 mantiene la ruta 2.x → volumen reutilizado, pero su
 paso intermedio ahora comprueba el rechazo en vez del modo compatibilidad.
 
-### Auditoría del servidor MCP: once hallazgos, arreglados (issues #7 y #8)
+### Auditoría del servidor MCP: once hallazgos, arreglados
 
-Una auditoría caja-negra del servidor MCP contra una instalación real ejercitó las 50 herramientas
+Una auditoría caja-negra del servidor MCP contra una instalación de ejemplo ejercitó las 50 herramientas
 y encontró once cosas: cifras que no cuadraban entre sí, escrituras que se aceptaban sin validar,
 y campos cuyo nombre invitaba a leerlos al revés. Nada de esto afecta a quien usa la app por la
 web; afecta a quien le pregunta por sus finanzas a Claude. Se arreglan todos antes de publicar,
@@ -91,9 +91,9 @@ restaurar es peor que una fila rara.
 
 Desde la 3.8.0 podías pedirle a Claude que creara una regla («todo lo que ponga MERCADONA es
 Supermercado») y que la aplicara a cientos de movimientos de golpe. Lo que **no** podía era
-corregirla ni retirarla — así que la única salida era crear otra encima. En una instalación real ya
-se veía el resultado: tres reglas contradictorias para la misma floristería, y `AMAZON` repartido
-entre Suscripciones, Hogar y Otros.
+corregirla ni retirarla — así que la única salida era crear otra encima. En una instalación de
+ejemplo el resultado se ve enseguida: tres reglas contradictorias para el mismo comercio, y un
+mismo cargo repartido entre Suscripciones, Hogar y Otros.
 
 Ahora existen las dos herramientas que faltaban. Borrar una regla pide confirmación y antes enseña
 **cuántos movimientos gobierna hoy** — y deja claro que borrarla **no descategoriza nada**: lo que
@@ -114,8 +114,8 @@ los meses de verdad, y si el ingreso y el gasto promedian ventanas distintas, di
 #### Un mes excelente se leía como una pérdida
 
 En la pestaña Movimientos, el tooltip de la gráfica mensual decía «Neto». Ese neto **incluía el
-dinero que moviste a ahorro o inversión**, así que un mes en el que ingresaste 2.853 €, gastaste
-2.218 € y aportaste 3.711 € a tu cartera salía como **−3.075 €**. Es aritméticamente correcto —esa
+dinero que moviste a ahorro o inversión**, así que un mes en el que ingresaste 2.400 €, gastaste
+1.800 € y aportaste 1.500 € a tu cartera salía como **−900 €**. Es aritméticamente correcto —esa
 es la caja que se movió— pero se lee justo al revés de lo que pasó.
 
 Peor: la comparativa mensual tenía otra cifra llamada también «neto» que **no** incluía el ahorro.
@@ -236,7 +236,7 @@ La causa de fondo era la duplicación: `/v1/projection/series` tenía **su propi
 en vez de usar el compartido, y por eso el arreglo se le habría escapado. Esa copia se ha borrado.
 Regresión sobre las 14 rutas con `?view=`: `apps/api/tests/query_param_validation.rs`.
 
-### Simular escenarios: la herramienta solo sabía empeorar el plan (issue #27)
+### Simular escenarios: la herramienta solo sabía empeorar el plan
 
 `simulate_projection` es con lo que se contesta «¿y si…?» sobre tu plan. Hasta ahora solo respondía
 bien a «¿y si gasto más?»: los tres ajustes mensuales rechazaban cualquier valor negativo, no había
@@ -603,7 +603,7 @@ tiene estado final verificable; **fabricar** un fixture sí lo tiene.
 
 ### Las tablas del CHANGELOG citaban una instalación real
 
-Las entradas de 3.9.0 y del issue #5 razonaban «sobre una instalación **real**» y publicaban el
+Las entradas de 3.9.0 y de la auditoría del promedio razonaban «sobre una instalación **real**» y publicaban el
 alquiler, el ingreso mensual y la tasa de ahorro del owner. Las cifras pasan a ser inventadas y la
 fórmula sigue cuadrando: donde había `540,00 ÷ 6` vs `÷ 3` ahora hay `540,00 ÷ 6` vs `÷ 3` → 90 y
 180 €. Un ejemplo que no cuadra vale menos que ninguno.
@@ -634,7 +634,7 @@ Dos cifras que el consumidor no podía interpretar sin recalcularlas a mano: el 
 comparativa mensual y la jubilación de las tools de proyección. Aditivo en el contrato; **cambia
 números** en la pestaña Gastos y en `get_transactions_summary`.
 
-### El promedio contaba como cero los meses sin datos reales (issue #5)
+### El promedio contaba como cero los meses sin datos reales
 
 `GET /v1/transactions/summary` dividía entre `months_with_data` = meses del tramo con ≥1
 movimiento **de cualquier tipo**. Un mes cuyo único contenido eran instancias recurrentes contaba
@@ -969,7 +969,7 @@ tanto no discriminaba. Seis tests que probaban el KPI retirado se van con él.
 
 ## [3.8.0] - 2026-08-21
 
-Tren del **issue #4** — ergonomía del servidor MCP derivada de una sesión real de uso, más la
+Tren de **ergonomía del servidor MCP** derivado de una sesión de uso real, más la
 resolución de la cascada. Catálogo **47 → 50 tools**. Ninguna migración: nada de esto añade
 columnas. Sin cambios de comportamiento en el engine (verificado con un diff antes/después de
 `/v1/projection/series`, ver la entrada del refactor).
@@ -1011,7 +1011,7 @@ estaba pinneado por una regresión **que no existía** — la «regla» del test
 
 ### Added — `GET /v1/allocation-rules/resolution` y tool `get_allocation_resolution` (tool 50)
 
-- **El hueco que cerraba el issue #4**: no había forma de auditar la cascada desde fuera. Con la
+- **El hueco que cerraba esa auditoría**: no había forma de auditar la cascada desde fuera. Con la
   aportación del mes 1 sin explicar y `list_allocation_rules` devolviendo solo la *configuración*,
   un lector razonable concluía que la cascada repartía de más. No lo hacía.
 - **La respuesta desglosa, no simplifica**: `base_cash` (lo que se reparte de verdad) separado en
@@ -1032,7 +1032,7 @@ estaba pinneado por una regresión **que no existía** — la «regla» del test
 
 ### Added — `contribution_recurring_monthly` en `/v1/assets`: el número que sí es mensual
 
-- **El defecto de contrato** (lo que el issue #4 etiquetó como `bug`, y lo es):
+- **El defecto de contrato** (etiquetado en su día como `bug`, y lo es):
   `contribution_nominal_monthly` **no es mensual**. Es la cascada del primer mes e incluye el tramo
   transitorio de los planning flows sin fecha, así que **baja cada día** y **salta hacia arriba el
   día 1 de cada mes**. El doc-comment interno decía «aporte estimado del primer mes»; el nombre
@@ -1055,7 +1055,7 @@ estaba pinneado por una regresión **que no existía** — la «regla» del test
 
 ### Changed — Engine: `FirstMonthAllocation` expone la resolución de la cascada (salida bit-idéntica)
 
-- **De dónde viene**: el issue #4 traía un «posible bug» de sobreasignación de la cascada.
+- **De dónde viene**: aquella auditoría traía un «posible bug» de sobreasignación de la cascada.
   Investigado: **no lo había**. `distribute_contributions` acota `take` tres veces (intención de la
   regla, hueco del cap, caja restante) y corta en seco al agotarse la caja — es imposible repartir
   más de lo que hay. Lo que sí había era un hueco de observabilidad que hacía imposible demostrarlo
@@ -1172,7 +1172,7 @@ estaba pinneado por una regresión **que no existía** — la «regla» del test
   `fire_target_base`, `runway_months`, `runway_is_indefinite`). Ni gasto, ni ahorro, ni tasa de
   ahorro. Para valorar un what-if desde el chat había que calcular el impacto sobre el gasto **a
   mano** — y ahí es donde se coló un doble conteo de una cuota de pasivo en la sesión que originó
-  el issue #4.
+  aquella auditoría.
 - **La solución**: cada lado (baseline y escenario) añade `income_monthly`,
   `expense_total_monthly`, `debt_service_monthly`, `net_monthly` y `savings_rate`, con sus cuatro
   deltas. **Coste cero**: son valores que ya estaban calculados en el `ProjectionInput` de cada
