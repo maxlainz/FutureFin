@@ -73,7 +73,7 @@ Vocabulary used below (defined once):
 - **Status**: settled. **Guard**: none automatic for raw SQL — when a migration drops a column,
   grep every handler for the column name (`grep -rn '<column>' apps/api/src/handlers/`).
   Integration tests (`apps/api/tests/`) now exist and would catch this class if the endpoint is
-  covered; they run only locally with `TEST_DATABASE_URL` (NOT in CI).
+  covered; since 4.0.0 they also run in CI (job `integration`).
 
 ### 2.2 projection_target_age removal — FIRE is the sole retirement trigger (v1.0.6)
 - **Symptom**: "contributed capital" line on the projection chart stopped growing years before
