@@ -16,7 +16,7 @@ description: >
 # FutureFin Change Control
 
 How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-20 for
-the 3.8.0 train** (issue #4, ergonomía MCP: **30** integration-test files in `apps/api/tests/`
+the 3.8.0 train** (auditoría MCP, ergonomía MCP: **30** integration-test files in `apps/api/tests/`
 — el nuevo es `allocation_resolution.rs` —, **40** migraciones **sin cambios** (ningún bloque
 del tren añade columnas), `.ffbackup` sigue en **8**, y el catálogo MCP pasa de 47 a **50**
 tools. `apps/api/Cargo.toml` pasa a `3.8.0`, la versión que publica el tren). Antes,
@@ -449,7 +449,7 @@ removed the external-database mode from the entrypoint (`exec_api_external`, `au
 
 - Current version: `grep '^version' apps/api/Cargo.toml` (**3.8.0** on 2026-08-21; 3.5.0 nunca se publicó)
 - Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**42** on 2026-08-22 — la 42ª es `20260822120000_installation_onboarding`)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**28** on 2026-08-21 — el alta de 3.8.0 es `allocation_resolution.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (312 on 2026-08-21 tras el tren del issue #4; 289 at 3.7.0, 284 at 3.6.0, 283 at 3.5.0)
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**28** on 2026-08-21 — el alta de 3.8.0 es `allocation_resolution.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (312 on 2026-08-21 tras el tren del auditoría MCP; 289 at 3.7.0, 284 at 3.6.0, 283 at 3.5.0)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
 - Compose topology (one service since 3.0.0):
