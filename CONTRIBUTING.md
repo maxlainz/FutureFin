@@ -194,6 +194,10 @@ solape de la tabla» está por debajo del listón. Si hubo intentos fallidos pre
   con «actualiza recurring.rs». El primero se puede leer dentro de un año.
 - **El cuerpo** explica el porqué y lleva `Closes #N` si cierra un issue.
 - Un cambio *breaking* se marca en el asunto o en el cuerpo, y además en el CHANGELOG.
+- **Los merges también.** Un commit de merge lleva asunto propio y, en el cuerpo, **los titulares
+  de lo que suma a esa rama**. `git merge dev` a secas escribe «Merge branch 'dev'», que no dice
+  nada y obliga a ir al historial para saber qué entró. Para publicar en `main` usa
+  `./scripts/release-to-main.sh X.Y.Z "<una frase>"`, que lo compone solo.
 
 ## 6. Pull requests
 
