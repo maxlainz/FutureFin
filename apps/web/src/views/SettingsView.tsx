@@ -292,12 +292,22 @@ export function SettingsView({
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setFireTaxSaving(true);
-      void onSaveFire(fireTaxDraft).finally(() => {
-        if (!cancelled) {
-          lastSavedFireTaxPayloadRef.current = payloadJson;
-          setFireTaxSaving(false);
-        }
-      });
+      void onSaveFire(fireTaxDraft)
+        .then(() => {
+          // La marca de «ya guardado» va en el `then`, NO en el `finally`: marcándola pasara lo
+          // que pasara, un PATCH fallido quedaba registrado como guardado, el efecto no volvía a
+          // intentarlo nunca (el payload ya coincidía con el ref) y el pie del panel seguía
+          // prometiendo «Guardado automático». El cambio se perdía en silencio. Mismo patrón que
+          // `runFireSave` en RetirementView.
+          if (!cancelled) lastSavedFireTaxPayloadRef.current = payloadJson;
+        })
+        .catch(() => {
+          // El banner de error lo pinta App.tsx (`saveFireSettingsPatch` rellena
+          // `installationError` antes de relanzar). Aquí solo hay que NO marcar como guardado.
+        })
+        .finally(() => {
+          if (!cancelled) setFireTaxSaving(false);
+        });
     }, 420);
     return () => {
       cancelled = true;

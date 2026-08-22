@@ -158,6 +158,37 @@ pub fn normalize_kind(raw: &str) -> Result<String, ApiError> {
     }
 }
 
+/// El importe tiene que ir con el signo que le toca a su `kind`: `income` positivo,
+/// `expense`/`savings` negativos.
+///
+/// La convención existe desde la primera migración (`amount NUMERIC(18,4) — firmado: negativo =
+/// cargo`) y todos los agregados dependen de ella: el lado gasto se sirve como `-Σ`, así que un
+/// gasto positivo produce un **gasto total negativo**, y en los modos B/C ese mes entra en el
+/// promedio real que alimenta la proyección — la tasa de ahorro sube y la fecha FIRE se adelanta,
+/// sin que nada lo señale. Hasta 4.0.0 la invariante solo la aplicaba un componente de React
+/// (`ManualCashEntryModal`), así que el servidor aceptaba `{amount: "23.50", kind: "expense"}` con
+/// un 201 (auditoría MCP §3).
+///
+/// **Solo se aplica a la escritura manual** (alta y edición de un movimiento suelto). El
+/// importador de CSV y el restore de `.ffbackup` quedan fuera a propósito: traen el signo real del
+/// banco, y un backup que se niega a restaurar es peor que una fila incoherente. La
+/// recategorización en lote tampoco lo aplica — no puede tocar el importe, solo reclasifica lo que
+/// ya entró por una de esas dos puertas.
+pub fn assert_amount_sign_matches_kind(amount: Decimal, kind: &str) -> Result<(), ApiError> {
+    let ok = match kind {
+        "income" => amount.is_sign_positive(),
+        "expense" | "savings" => amount.is_sign_negative(),
+        _ => true, // `normalize_kind` ya rechazó cualquier otro valor.
+    };
+    if ok {
+        return Ok(());
+    }
+    Err(ApiError::BadRequest(
+        "amount_sign_mismatch: income amounts must be positive; expense and savings negative"
+            .into(),
+    ))
+}
+
 /// Normaliza `notes`: trim, vacío → None, ≤4000 chars.
 pub fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
     match raw {
@@ -424,6 +455,7 @@ pub struct PreviewRow {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[schema(as = TransactionImportPreviewResponse)]
 pub struct ImportPreviewResponse {
     /// Preset detectado: `myinvestor` | `n26`.
     pub source: String,

@@ -20,6 +20,21 @@ export const defaultFetchInit: RequestInit = {
 };
 
 /**
+ * Qué hacer cuando el servidor responde 401 a CUALQUIER petición. Lo registra `App.tsx` al
+ * montar (→ `setUser(null)`), y por eso vive aquí y no en un catch: hasta 4.0.0 el único sitio
+ * que miraba el 401 era `refreshSession`, que solo corre al arrancar la app. Si la sesión
+ * caducaba con la pestaña abierta, cada acción devolvía «Tu sesión ha caducado» en un banner y
+ * el usuario seguía viendo su patrimonio en pantalla, sin forma de volver al login salvo
+ * recargar. Todo error de API nace en `apiErrorFromResponse`, así que este es el único punto por
+ * el que pasan los 401 de las ~50 llamadas de la app.
+ */
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  unauthorizedHandler = fn;
+}
+
+/**
  * Error de una llamada a la API. `message` está en español y es lo que se enseña; `detail`
  * guarda el texto técnico del backend (inglés) y `code` el código estable con el que se tradujo.
  */
@@ -35,6 +50,30 @@ export class ApiRequestError extends Error {
     this.code = opts.code;
     this.status = opts.status;
     this.detail = opts.detail;
+  }
+}
+
+/**
+ * `fetch` que nunca deja escapar el error crudo del navegador. Sin este envoltorio, con el API
+ * caído el `TypeError` de la plataforma llegaba tal cual a la UI y el usuario leía
+ * «Failed to fetch» — en inglés y sin decirle qué hacer, justo en el escenario en que más
+ * necesita saber que el problema no es su dato sino el servidor.
+ */
+export async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (e: unknown) {
+    const detail = e instanceof Error ? e.message : String(e);
+    console.debug(`[api] network_error ${url}: ${detail}`);
+    // `status: 0` = no hubo respuesta. Importa: el handler de 401 no debe dispararse aquí, un
+    // corte de red no es una sesión caducada.
+    return Promise.reject(
+      new ApiRequestError(messageForError("network_error", null), {
+        code: "network_error",
+        status: 0,
+        detail,
+      }),
+    );
   }
 }
 
@@ -55,6 +94,7 @@ export async function apiErrorFromResponse(res: Response): Promise<ApiRequestErr
   // El detalle técnico no se pierde aunque nadie lo pinte: sin esto, depurar un 400 desde el
   // navegador obligaría a abrir la pestaña de red y repetir la petición.
   if (detail) console.debug(`[api] ${res.status} ${code ?? "sin código"}: ${detail}`);
+  if (res.status === 401) unauthorizedHandler?.();
   return new ApiRequestError(messageForError(code, res.status), {
     code,
     status: res.status,
@@ -85,7 +125,7 @@ async function parseJsonIfPresent<T>(res: Response): Promise<T | null> {
 }
 
 export async function apiGet<T>(url: string): Promise<T> {
-  const res = await fetch(url, defaultFetchInit);
+  const res = await apiFetch(url, defaultFetchInit);
   await ensureOk(res);
   const data = await parseJsonIfPresent<T>(res);
   if (data === null) {
@@ -100,7 +140,7 @@ export async function apiGet<T>(url: string): Promise<T> {
 }
 
 export async function apiPost<T>(url: string, body: unknown): Promise<T | null> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     ...defaultFetchInit,
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -111,7 +151,7 @@ export async function apiPost<T>(url: string, body: unknown): Promise<T | null> 
 }
 
 export async function apiPatch<T>(url: string, body: unknown): Promise<T | null> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     ...defaultFetchInit,
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -122,7 +162,7 @@ export async function apiPatch<T>(url: string, body: unknown): Promise<T | null>
 }
 
 export async function apiPut<T>(url: string, body: unknown): Promise<T | null> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     ...defaultFetchInit,
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -133,7 +173,7 @@ export async function apiPut<T>(url: string, body: unknown): Promise<T | null> {
 }
 
 export async function apiDelete(url: string): Promise<void> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     ...defaultFetchInit,
     method: "DELETE",
   });
@@ -143,7 +183,7 @@ export async function apiDelete(url: string): Promise<void> {
 /** DELETE que SÍ devuelve cuerpo (p. ej. `/v1/transactions/{id}/reconcile` → las dos patas).
  *  `null` cuando la respuesta es 204 o no es JSON, igual que el resto de wrappers. */
 export async function apiDeleteJson<T>(url: string): Promise<T | null> {
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     ...defaultFetchInit,
     method: "DELETE",
   });

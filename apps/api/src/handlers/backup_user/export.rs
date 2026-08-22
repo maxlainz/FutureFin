@@ -1,4 +1,4 @@
-use crate::auth::password::verify_password;
+use crate::auth::password::verify_password_blocking;
 use crate::error::ApiError;
 use crate::handlers::installation::{resolve_fire_settings, require_installation_member, FireSettings};
 use crate::handlers::session::require_session_user;
@@ -57,7 +57,7 @@ pub async fn export_user_backup(
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
 
     let (username, birth_date, password_hash) = fetch_user_for_export(&state.pool, user.id.0).await?;
-    verify_password(&body.password, &password_hash)?;
+    verify_password_blocking(&body.password, Some(password_hash)).await?;
 
     let payload = build_payload(
         &state.pool,
@@ -74,15 +74,25 @@ pub async fn export_user_backup(
     let exported_at = now.to_rfc3339();
     let app_version = env!("CARGO_PKG_VERSION");
 
-    let enc = encrypt_payload(
-        &plaintext,
-        &body.password,
-        app_version,
-        CURRENT_SCHEMA_VERSION,
-        &user.id.0.to_string(),
-        &username,
-        &exported_at,
-    )
+    // Argon2id + AES + gzip: fuera del reactor, igual que en el import.
+    let enc = {
+        let password = body.password.clone();
+        let user_id_original = user.id.0.to_string();
+        let username_original = username.clone();
+        let exported_at_owned = exported_at.clone();
+        crate::heavy::run_backup_crypto(move || {
+            encrypt_payload(
+                &plaintext,
+                &password,
+                app_version,
+                CURRENT_SCHEMA_VERSION,
+                &user_id_original,
+                &username_original,
+                &exported_at_owned,
+            )
+        })
+        .await?
+    }
     .map_err(|e| {
         tracing::error!(?e, "ffbackup encryption");
         ApiError::Unavailable

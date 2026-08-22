@@ -249,27 +249,56 @@ pub async fn list_rules(
 ) -> Result<Json<Vec<RuleResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_categorization_rules_core(&state.pool, iid, user.id.0).await?;
+    let (out, _total) = list_categorization_rules_core(&state.pool, iid, user.id.0, None, 0).await?;
     Ok(Json(out))
 }
 
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_categorization_rules`.
 /// Siempre own-user (el endpoint no acepta `?view` — no inventarlo en la tool).
+///
+/// Paginación con el mismo contrato que `list_transactions_core`: con `limit = None` (el handler
+/// HTTP) no se emite `LIMIT`/`OFFSET` ni la query de `COUNT`, así que el conjunto entero y el
+/// contrato REST quedan intactos; con `limit = Some(n)` (la tool MCP) la paginación baja a SQL y
+/// `total_count` sale de un `COUNT(*)`.
+///
+/// Hace falta aquí y no en los otros listados porque **éste es el único que crece con el uso
+/// normal**: `learn_rule` inserta una regla por concepto distinto en cada import con
+/// `learn_rules = true`. Una instalación con dos años de extractos devolvía ~100 reglas y ~11 KB
+/// de una tacada — una porción notable de la ventana de contexto de un agente (auditoría MCP §9).
 pub(crate) async fn list_categorization_rules_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
     user_id: Uuid,
-) -> Result<Vec<RuleResponse>, ApiError> {
-    let sql = format!(
+    limit: Option<i64>,
+    offset: i64,
+) -> Result<(Vec<RuleResponse>, i64), ApiError> {
+    let mut sql = format!(
         "{RULE_SELECT} WHERE r.installation_id = $1 AND r.owner_user_id = $2 \
          ORDER BY r.updated_at DESC, r.id ASC"
     );
-    let rows: Vec<RuleRow> = sqlx::query_as(&sql)
+    if limit.is_some() {
+        sql.push_str(" LIMIT $3 OFFSET $4");
+    }
+    let mut q = sqlx::query_as(&sql).bind(iid).bind(user_id);
+    if let Some(n) = limit {
+        q = q.bind(n).bind(offset);
+    }
+    let rows: Vec<RuleRow> = q.fetch_all(pool).await?;
+    let page: Vec<RuleResponse> = rows.into_iter().map(row_to_response).collect();
+
+    // Sin `limit` el total ES la página: nos ahorramos el COUNT y el camino HTTP no cambia.
+    let total = match limit {
+        None => page.len() as i64,
+        Some(_) => sqlx::query_scalar(
+            "SELECT COUNT(*) FROM categorization_rules \
+             WHERE installation_id = $1 AND owner_user_id = $2",
+        )
         .bind(iid)
         .bind(user_id)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().map(row_to_response).collect())
+        .fetch_one(pool)
+        .await?,
+    };
+    Ok((page, total))
 }
 
 /// Valida `(assign_kind, assign_category_id)`: savings exige categoría NULL; expense/income con
@@ -694,6 +723,78 @@ pub async fn patch_rule(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let out = patch_rule_core(&state.pool, iid, user.id.0, id, body).await?;
+    Ok(Json(out))
+}
+
+/// Core sin HTTP: la comparten el handler PATCH y la tool MCP `update_categorization_rule`.
+///
+/// **Cache: NONE.** Editar una regla no recategoriza nada retroactivamente — solo cambia lo que se
+/// aplicará a imports futuros —, así que el conjunto de transacciones no se mueve y la proyección
+/// no puede cambiar en ningún modo. Por eso toma `pool` y no `&Arc<AppState>`: pasar el state
+/// sugeriría que hay invalidación que hacer. Para reescribir el pasado está
+/// `apply_categorization_rule_core`, que sí es COND.
+pub(crate) async fn patch_rule_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: PatchRuleBody,
+) -> Result<RuleResponse, ApiError> {
+    // Destructuring EXHAUSTIVO y **sin `..`**: añadir un campo al body deja de compilar hasta que
+    // alguien decida si cuenta como «algo que actualizar» y si colisiona con algún `clear_*`. Es la
+    // red que le faltó a `cap_value` en `update_allocation_rule`, donde el campo existía, nadie lo
+    // leía, y la llamada devolvía 200 sin hacer nada (auditoría MCP §5).
+    let PatchRuleBody {
+        match_kind,
+        pattern,
+        source,
+        clear_source,
+        assign_kind,
+        clear_assign_kind,
+        assign_category_id,
+        clear_assign_category,
+    } = &body;
+    let set = |b: &Option<bool>| *b == Some(true);
+
+    // Una sola tabla alimenta la guardia de patch vacío Y el texto del error, así que no pueden
+    // desincronizarse.
+    let provided: [(&str, bool); 8] = [
+        ("match_kind", match_kind.is_some()),
+        ("pattern", pattern.is_some()),
+        ("source", source.is_some()),
+        ("clear_source", set(clear_source)),
+        ("assign_kind", assign_kind.is_some()),
+        ("clear_assign_kind", set(clear_assign_kind)),
+        ("assign_category_id", assign_category_id.is_some()),
+        ("clear_assign_category", set(clear_assign_category)),
+    ];
+    if !provided.iter().any(|(_, present)| *present) {
+        let campos: Vec<&str> = provided.iter().map(|(name, _)| *name).collect();
+        return Err(ApiError::BadRequest(format!(
+            "rule_patch_empty: provide at least one of {}",
+            campos.join(", ")
+        )));
+    }
+
+    // Poner y borrar el mismo campo a la vez: error, no «gana el clear». Hasta 4.0.0 el `clear`
+    // ganaba en silencio, que es la misma clase de fallo que `cap_value` — un 200 y no lo que
+    // pediste. El propio auditoría MCP elogia que `due_date` + `clear_due_date` juntos den error.
+    for (campo, puesto, borrado) in [
+        ("source", source.is_some(), set(clear_source)),
+        ("assign_kind", assign_kind.is_some(), set(clear_assign_kind)),
+        (
+            "assign_category_id",
+            assign_category_id.is_some(),
+            set(clear_assign_category),
+        ),
+    ] {
+        if puesto && borrado {
+            return Err(ApiError::BadRequest(format!(
+                "rule_patch_conflict: {campo} and clear_{campo} are mutually exclusive"
+            )));
+        }
+    }
 
     // Guardia id + installation + owner → 404 si no es tuyo.
     let current: Option<RuleRow> = {
@@ -701,8 +802,8 @@ pub async fn patch_rule(
         sqlx::query_as(&sql)
             .bind(id)
             .bind(iid)
-            .bind(user.id.0)
-            .fetch_optional(&state.pool)
+            .bind(user_id)
+            .fetch_optional(pool)
             .await?
     };
     let Some(current) = current else {
@@ -739,7 +840,7 @@ pub async fn patch_rule(
         body.assign_category_id.or(current.assign_category_id)
     };
     if let Some(k) = &new_assign_kind {
-        validate_rule_assignment(&state.pool, iid, k, new_assign_category).await?;
+        validate_rule_assignment(pool, iid, k, new_assign_category).await?;
     } else if new_assign_category.is_some() {
         return Err(ApiError::BadRequest(
             "rule_assign_category_requires_kind: assign_category_id requires an assign_kind".into(),
@@ -759,12 +860,12 @@ pub async fn patch_rule(
     .bind(new_assign_category)
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
-    .execute(&state.pool)
+    .bind(user_id)
+    .execute(pool)
     .await?;
 
-    let row = load_rule_row(&state.pool, id).await?;
-    Ok(Json(row_to_response(row)))
+    let row = load_rule_row(pool, id).await?;
+    Ok(row_to_response(row))
 }
 
 #[utoipa::path(
@@ -789,17 +890,32 @@ pub async fn delete_rule(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    delete_rule_core(&state.pool, iid, user.id.0, id).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Core sin HTTP: la comparten el handler DELETE y la tool MCP `delete_categorization_rule`.
+///
+/// **Cache: NONE**, por el mismo motivo que `patch_rule_core`. Y borrar la regla **no descategoriza
+/// nada**: los movimientos que ya llevan categoría la conservan; la regla simplemente deja de
+/// aplicarse a los imports futuros.
+pub(crate) async fn delete_rule_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
     let res = sqlx::query(
         r#"DELETE FROM categorization_rules
            WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
     )
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
-    .execute(&state.pool)
+    .bind(user_id)
+    .execute(pool)
     .await?;
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(())
 }

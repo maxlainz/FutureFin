@@ -356,7 +356,7 @@ pub async fn get_transactions_summary(
 ) -> Result<Json<TransactionsSummaryResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve()?;
     let out = transactions_summary_core(
         &state.pool,
         iid,
@@ -375,6 +375,14 @@ pub async fn get_transactions_summary(
 /// La validación de parámetros vive AQUÍ para que ambos caminos devuelvan los mismos
 /// códigos 400 estables.
 #[allow(clippy::too_many_arguments)]
+/// Escala de salida de los importes de la comparativa: 4 decimales, la de `NUMERIC(18,4)`.
+///
+/// Hace dos cosas a la vez. La primera, dar una escala única a todas las cifras del bloque, que
+/// hoy mezclaba `"-23.5000"` con `"47.00"`. La segunda, matar el `-0`: el lado gasto se publica
+/// como magnitud con `-Σ`, y `impl Neg for Decimal` voltea el bit de signo **también sobre el
+/// cero**, así que una categoría sin movimientos serializaba `"actual":"-0"` (auditoría MCP §7).
+use crate::money::money_out;
+
 pub(crate) async fn transactions_summary_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -680,11 +688,11 @@ pub(crate) async fn transactions_summary_core(
                 CategoryComparisonLine {
                     category_id: cat,
                     category_name: name,
-                    actual,
-                    budget,
-                    avg,
-                    delta_vs_budget: actual - budget,
-                    delta_vs_avg: actual - avg,
+                    actual: money_out(actual),
+                    budget: money_out(budget),
+                    avg: money_out(avg),
+                    delta_vs_budget: money_out(actual - budget),
+                    delta_vs_avg: money_out(actual - avg),
                 }
             })
             .collect();
@@ -702,24 +710,26 @@ pub(crate) async fn transactions_summary_core(
     let income_categories = build_lines("income", &income_budget, true);
 
     // ---- Bloques savings / income (agregados) ------------------------------------------------
-    let savings_actual = -bucket_all(&buckets, &selected_ym, "savings");
+    let savings_actual = money_out(-bucket_all(&buckets, &selected_ym, "savings"));
     let savings_win: Decimal = buckets
         .iter()
         .filter(|((y, k, _), _)| k == "savings" && in_avg_window(y.as_str()))
         .map(|(_, v)| *v)
         .sum();
-    let savings_avg = (-savings_win / avg_denom).round_dp(4);
+    let savings_avg = money_out(-savings_win / avg_denom);
 
-    let income_actual: Decimal = income_categories.iter().map(|l| l.actual).sum();
-    let income_avg: Decimal = income_categories.iter().map(|l| l.avg).sum();
+    let income_actual: Decimal = money_out(income_categories.iter().map(|l| l.actual).sum());
+    let income_avg: Decimal = money_out(income_categories.iter().map(|l| l.avg).sum());
 
     // ---- Totales -----------------------------------------------------------------------------
-    let expense_actual: Decimal = expense_categories.iter().map(|l| l.actual).sum();
-    let expense_avg: Decimal = expense_categories.iter().map(|l| l.avg).sum();
+    let expense_actual: Decimal = money_out(expense_categories.iter().map(|l| l.actual).sum());
+    let expense_avg: Decimal = money_out(expense_categories.iter().map(|l| l.avg).sum());
     // Σ presupuesto de categorías de gasto — sin línea derivada de cuotas (sin doble conteo).
-    let expense_budget_total: Decimal = expense_categories.iter().map(|l| l.budget).sum();
-    let income_budget_total: Decimal = income_categories.iter().map(|l| l.budget).sum();
-    let net_actual = income_actual - expense_actual;
+    let expense_budget_total: Decimal =
+        money_out(expense_categories.iter().map(|l| l.budget).sum());
+    let income_budget_total: Decimal =
+        money_out(income_categories.iter().map(|l| l.budget).sum());
+    let net_actual = money_out(income_actual - expense_actual);
 
     Ok(TransactionsSummaryResponse {
         year,
@@ -802,7 +812,7 @@ pub async fn get_category_series(
 ) -> Result<Json<CategoryMonthlySeriesResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let view = LedgerViewQuery { view: q.view.clone() }.resolve();
+    let view = LedgerViewQuery { view: q.view.clone() }.resolve()?;
     let out = category_monthly_series_core(
         &state.pool,
         iid,

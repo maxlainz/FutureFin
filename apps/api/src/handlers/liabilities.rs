@@ -401,7 +401,7 @@ pub async fn list_liabilities(
 ) -> Result<Json<Vec<LiabilityResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_liabilities_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_liabilities_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 
@@ -467,7 +467,7 @@ pub async fn create_liability(
 
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_liability`. Dos modos:
 /// `principal` explícito o `derive_principal_from_plan` (cuota + frecuencia + fecha fin →
-/// amortización francesa hacia atrás). Invalidación FULL dentro.
+/// principal = cuota × nº de pagos pendientes, sin descontar intereses). Invalidación FULL dentro.
 pub(crate) async fn create_liability_core(
     state: &Arc<AppState>,
     iid: Uuid,

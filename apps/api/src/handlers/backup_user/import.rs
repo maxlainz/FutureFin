@@ -98,7 +98,7 @@ pub async fn import_user_backup_preview(
         return Err(ApiError::Forbidden);
     }
 
-    let (manifest, payload) = decode_request(&body)?;
+    let (manifest, payload) = decode_request(body).await?;
 
     let counts = compute_counts(&state.pool, iid, &payload).await?;
     let birth_date_will_change = compute_birth_date_change(&state.pool, user.id.0, &payload).await?;
@@ -145,7 +145,7 @@ pub async fn import_user_backup_apply(
         ));
     }
 
-    let (_manifest, payload) = decode_request(&body)?;
+    let (_manifest, payload) = decode_request(body).await?;
 
     let mut tx = state.pool.begin().await?;
 
@@ -282,7 +282,18 @@ pub async fn import_user_backup_apply(
     }))
 }
 
-fn decode_request(body: &ImportRequest) -> Result<(super::crypto::Manifest, BackupPayload), ApiError> {
+/// Descifra y parsea **fuera del reactor**: base64 de hasta 16 MiB, Argon2id, gunzip y
+/// deserialización de JSON son todo CPU pura. En un worker de Tokio, unas pocas peticiones
+/// concurrentes bastaban para dejar el proceso sin hilos y tumbar `/v1/ready`.
+async fn decode_request(
+    body: ImportRequest,
+) -> Result<(super::crypto::Manifest, BackupPayload), ApiError> {
+    crate::heavy::run_backup_crypto(move || decode_request_blocking(&body)).await?
+}
+
+fn decode_request_blocking(
+    body: &ImportRequest,
+) -> Result<(super::crypto::Manifest, BackupPayload), ApiError> {
     let bytes = B64
         .decode(body.file_b64.as_bytes())
         .map_err(|_| ApiError::BadRequest("file_b64_invalid: file_b64 is not valid base64".into()))?;

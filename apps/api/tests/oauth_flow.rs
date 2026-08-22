@@ -1048,3 +1048,105 @@ fn urlenc(s: &str) -> String {
     }
     out
 }
+
+/// REGRESIÓN — cambiar la contraseña corta también las credenciales OAuth.
+///
+/// El commit que introdujo el cambio de contraseña afirma revocar «las cuatro credenciales»
+/// (cookie, `ffp_`, `ffo_`, `ffr_`). Las dos primeras las fija `account_and_members.rs`; estas
+/// no las fijaba nada, y el corte de OAuth no es directo sino por JOIN contra `oauth_grants`:
+/// un refactor de `require_oauth_access_token` que quitara ese JOIN pasaría verde dejando vivo
+/// un access token de una cuenta que su dueño acaba de intentar recuperar.
+#[tokio::test]
+async fn changing_the_password_kills_oauth_access_and_refresh() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (client_id, tokens) = full_grant(&app, &owner).await;
+    let access = tokens["access_token"].as_str().expect("access").to_string();
+    let refresh = tokens["refresh_token"].as_str().expect("refresh").to_string();
+    assert_eq!(
+        app.mcp_initialize(Some(&access)).await.status,
+        http::StatusCode::OK,
+        "el access debe funcionar antes del cambio"
+    );
+
+    let cambio = app
+        .post_json_with_cookie(
+            "/v1/auth/password",
+            serde_json::json!({
+                "current_password": "correct horse battery staple",
+                "new_password": "una contraseña distinta y larga",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(cambio.status, http::StatusCode::NO_CONTENT, "{cambio:?}");
+
+    assert_eq!(
+        app.mcp_initialize(Some(&access)).await.status,
+        http::StatusCode::UNAUTHORIZED,
+        "el access token OAuth DEBE morir con el cambio de contraseña"
+    );
+
+    // Y el refresh no puede acuñar uno nuevo: es la mitad que de verdad importa, porque un
+    // access caduca solo y un refresh no.
+    let renovar = app
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh.as_str()),
+                ("client_id", client_id.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(
+        renovar.status,
+        http::StatusCode::BAD_REQUEST,
+        "el refresh no puede emitir un access nuevo tras el cambio: {renovar:?}"
+    );
+    assert_eq!(renovar.json()["error"], "invalid_grant", "{}", renovar.json());
+}
+
+/// REGRESIÓN — revocar la membresía corta las credenciales OAuth de esa persona.
+///
+/// Mismo razonamiento que el test de arriba, por el otro camino: el corte no toca los tokens,
+/// revoca el grant, y todo depende de que las dos consultas sigan haciendo el JOIN.
+#[tokio::test]
+async fn revoking_a_membership_kills_that_users_oauth_grant() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bob = app.register_and_approve_member(&owner, "bob", "member").await;
+    let (client_id, tokens) = full_grant(&app, &bob).await;
+    let access = tokens["access_token"].as_str().expect("access").to_string();
+    let refresh = tokens["refresh_token"].as_str().expect("refresh").to_string();
+    assert_eq!(app.mcp_initialize(Some(&access)).await.status, http::StatusCode::OK);
+
+    let out = app
+        .delete_with_cookie(
+            &format!("/v1/installation/members/{}", bob.user_id),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(out.status, http::StatusCode::NO_CONTENT, "{out:?}");
+
+    assert_eq!(
+        app.mcp_initialize(Some(&access)).await.status,
+        http::StatusCode::UNAUTHORIZED,
+        "el access del expulsado debe dejar de valer"
+    );
+    let renovar = app
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh.as_str()),
+                ("client_id", client_id.as_str()),
+            ],
+        )
+        .await;
+    assert_eq!(
+        renovar.status,
+        http::StatusCode::BAD_REQUEST,
+        "el refresh del expulsado no puede acuñar nada: {renovar:?}"
+    );
+}

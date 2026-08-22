@@ -144,7 +144,11 @@ export function ProjectionView({
   // backend ya cruza los mismos umbrales (1M, 2.5M…) sobre el patrimonio deflactado, así que el
   // marcador del chart cae sobre la curva deflactada y la KPI muestra "1M € de hoy hacia ~año".
   // La jubilación no se ve afectada por inflación (su mes de cruce es invariante).
-  const nextMilestones: ProjectionMilestoneApi[] = (() => {
+  //
+  // El `useMemo` NO es cosmético: era una IIFE, así que cada render del padre devolvía un array
+  // nuevo → `focusWindow` (memoizado sobre `milestones`) se recalculaba → su efecto reescribía
+  // `viewWindow` y borraba el pan/zoom que el usuario acababa de hacer en el chart grande.
+  const nextMilestones: ProjectionMilestoneApi[] = useMemo(() => {
     const useRealMilestones =
       inflationAdjusted &&
       projectionInflationPct > 0 &&
@@ -164,7 +168,13 @@ export function ProjectionView({
       ];
     }
     return base;
-  })();
+  }, [
+    inflationAdjusted,
+    projectionInflationPct,
+    projectionSeries?.milestones,
+    projectionSeries?.milestones_real,
+    jubilacionMiNo,
+  ]);
 
   return (
     <div className="workspace workspace--projection-fullwidth">
@@ -196,7 +206,10 @@ export function ProjectionView({
         <div className="banner error-banner">{projectionError}</div>
       ) : null}
 
-      {hasMembership && (projectionBusy || !projectionSeries) ? (
+      {/* `!projectionError`: el esqueleto significa «está cargando». Con la serie fallida encima
+          del banner de error se quedaba ahí para siempre, prometiendo un chart que no iba a
+          llegar. */}
+      {hasMembership && !projectionError && (projectionBusy || !projectionSeries) ? (
         <section className="panel">
           <h3 className="panel-title">Trayectoria proyectada</h3>
           <div className="ff-chart-skeleton" aria-hidden />

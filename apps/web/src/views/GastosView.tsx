@@ -450,7 +450,11 @@ export function GastosView({
       avgUnavailableDetail(summary.avg_unavailable_reason))
     : undefined;
   const threshold = summary ? significanceThreshold(summary.totals) : 0;
-  const avgLabel = avgWindowLabel(avgWindow);
+  // Ventana EFECTIVA (la que devuelve el servidor), no la pill recién pulsada: `avgWindow` es
+  // estado local y cambia al instante, mientras las cifras siguen siendo las del summary
+  // anterior. Durante ese fetch los KPIs pintaban el promedio de 6 meses bajo la etiqueta «12m».
+  // Sin summary todavía no hay cifras que rotular, así que ahí sí vale la pedida.
+  const avgLabel = avgWindowLabel(summary?.avg_window ?? avgWindow);
 
   const savingsRateAvg = useMemo(() => {
     if (!totals) return null;
@@ -568,7 +572,10 @@ export function GastosView({
     if (lines.length === 0) {
       return <p className="muted bordered-top">Sin datos.</p>;
     }
-    const avgLabel = avgWindowLabel(avgWindow);
+    // Sin `const avgLabel` propio: la tabla pinta cifras del mismo summary que los KPIs, así que
+    // usa exactamente la misma etiqueta (la ventana efectiva del servidor). Redeclararla aquí
+    // desde el estado local era lo que rotulaba estas columnas con una ventana que aún no había
+    // llegado.
     const totalActual = parseDisplayDecimal(total.actual) ?? 0;
     const totalBudget = parseDisplayDecimal(total.budget) ?? 0;
     const totalAvg = parseDisplayDecimal(total.avg) ?? 0;
@@ -1320,6 +1327,7 @@ export function GastosView({
             onChanged={() => void handleMutated()}
           />
           <EditTransactionModal
+            today={today}
             target={editTarget}
             onClose={() => setEditTarget(null)}
             isMobile={isMobile}
@@ -1334,9 +1342,17 @@ export function GastosView({
             liabilities={liabilities}
             categoryFitsKind={categoryFitsKind}
             onSaved={(updated) => {
-              setTransactions((ts) => ts.map((t) => (t.id === updated.id ? updated : t)));
               setEditTarget(null);
               setNotice("Movimiento actualizado.");
+              // Mover la fecha a otro mes saca el movimiento de la lista que estás mirando, y
+              // puede crear o vaciar un mes del selector. `refreshDerived` solo recalcula los
+              // agregados: la fila se quedaba pintada en un mes al que ya no pertenece y la tabla
+              // dejaba de cuadrar con los KPIs de arriba, calculados por el servidor.
+              if (updated.op_date.slice(0, 7) !== selectedMonth) {
+                void handleMutated();
+                return;
+              }
+              setTransactions((ts) => ts.map((t) => (t.id === updated.id ? updated : t)));
               refreshDerived();
             }}
             onUnreconciled={() => {
@@ -1430,6 +1446,7 @@ function EditTransactionModal({
   categoryFitsKind,
   onSaved,
   onUnreconciled,
+  today,
 }: {
   target: TransactionApi | null;
   onClose: () => void;
@@ -1445,6 +1462,10 @@ function EditTransactionModal({
   onSaved: (updated: TransactionApi) => void;
   /** Par roto: la vista cierra el modal y recarga (ambas patas vuelven a los totales). */
   onUnreconciled: (pair: ReconcilePairResponseApi | null) => void;
+  /** Hoy en la zona horaria del hogar: tope del selector de fecha. El modal de ALTA ya lo tenía
+   *  y éste no, así que se podía mover un movimiento al futuro editándolo. La API lo rechaza
+   *  desde 4.0.0 (`op_date_in_future`); el tope evita el viaje de ida y vuelta. */
+  today: string;
 }) {
   const [opDate, setOpDate] = useState("");
   const [valueDate, setValueDate] = useState("");
@@ -1592,6 +1613,7 @@ function EditTransactionModal({
             <input
               type="date"
               value={opDate}
+              max={today}
               onChange={(e) => setOpDate(e.target.value)}
             />
           </label>

@@ -85,10 +85,69 @@ fn parse_date(s: &str, fmt: &str) -> Result<NaiveDate, ApiError> {
 }
 
 /// Decimal en formato español: quitar separadores de miles `.`, coma decimal → punto.
+///
+/// El `replace('.', "")` es correcto para lo que este preset recibe —importes españoles, donde
+/// el punto SIEMPRE es separador de millar— y catastrófico para cualquier otra cosa: `2100.00`
+/// se convertía en `210000` y el movimiento entraba **cien veces más grande**, con un 200 y sin
+/// una sola señal. Ningún test lo cubría porque ningún importe de los fixtures lleva punto.
+///
+/// Un separador de millar siempre agrupa de tres en tres, así que un punto seguido de un número
+/// de dígitos distinto de tres no es un millar: es un decimal de otro formato, y eso significa
+/// que el fichero no es el que el preset cree. Se rechaza en vez de reinterpretarlo — misma
+/// disciplina que el resto de la deserialización del repo: rechazar, no caer al default.
 fn parse_spanish_decimal(s: &str) -> Result<Decimal, ApiError> {
-    let cleaned = s.trim().replace('.', "").replace(',', ".");
+    let t = s.trim();
+    let entera = t.split(',').next().unwrap_or(t);
+    let grupos: Vec<&str> = entera.split('.').collect();
+    // Un grupo de millar tiene exactamente tres dígitos y el primero no empieza por cero:
+    // `0.075` son setenta y cinco milésimas, no setenta y cinco.
+    let primero_valido = matches!(grupos[0].as_bytes().first(), Some(b'1'..=b'9'))
+        || matches!(grupos[0].as_bytes(), [b'+' | b'-', b'1'..=b'9', ..]);
+    if grupos.len() > 1
+        && (!primero_valido
+            || !grupos[1..]
+                .iter()
+                .all(|g| g.len() == 3 && g.bytes().all(|b| b.is_ascii_digit())))
+    {
+        return Err(ApiError::BadRequest(format!(
+            "csv_amount_ambiguous: amount '{s}' uses '.' as a decimal separator; this preset \
+             expects Spanish format (thousands '.', decimals ',')"
+        )));
+    }
+    let cleaned = t.replace('.', "").replace(',', ".");
     Decimal::from_str(&cleaned)
         .map_err(|_| ApiError::BadRequest(format!("csv_amount_invalid: could not parse amount '{s}'")))
+}
+
+#[cfg(test)]
+mod decimal_tests {
+    use super::*;
+
+    /// REGRESIÓN — un importe con punto decimal no puede entrar multiplicado por cien.
+    #[test]
+    fn spanish_decimal_parses_thousands_and_rejects_a_dot_decimal() {
+        for (entrada, esperado) in [
+            ("1.234,56", "1234.56"),
+            ("2.100", "2100"),
+            ("1.234.567,89", "1234567.89"),
+            ("-26,00", "-26.00"),
+            ("450,25", "450.25"),
+            ("300", "300"),
+        ] {
+            assert_eq!(
+                parse_spanish_decimal(entrada).expect(entrada).to_string(),
+                esperado,
+                "entrada {entrada}"
+            );
+        }
+        for entrada in ["2100.00", "0.075", "1.23.4"] {
+            let err = parse_spanish_decimal(entrada).unwrap_err();
+            assert!(
+                format!("{err:?}").contains("csv_amount_ambiguous"),
+                "'{entrada}' debe rechazarse, no entrar multiplicado por cien: {err:?}"
+            );
+        }
+    }
 }
 
 /// Decimal con punto decimal (N26): parseo directo (soporta `-26.000000000`).

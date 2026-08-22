@@ -263,7 +263,11 @@ export function BudgetView({
         <div className="banner info-banner">Sin acceso al hogar.</div>
       ) : null}
 
-      {budgetIsEmpty ? (
+      {/* `formError` gatea el estado vacío (y solo el estado vacío: `budgetIsEmpty` sigue
+          decidiendo el resto del layout): cuando el loader falla vacía entradas Y categorías, y
+          la vista acusaba al usuario de no tener ninguna («no queda ninguna») cuando lo que había
+          pasado es que no se pudo leer nada. El error ya se pinta en la banda global de App.tsx. */}
+      {budgetIsEmpty && !formError ? (
         noBudgetCategories ? (
           <EmptyState
             title="Faltan categorías"

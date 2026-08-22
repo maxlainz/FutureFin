@@ -241,7 +241,7 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     let cat = app.create_category(&owner, "expense", "Comida").await;
     let cat_inc = app.create_category(&owner, "income", "Nómina").await;
 
@@ -307,7 +307,7 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
 
     let cat_asset = app.create_category(&owner, "asset", "Fondos").await;
     let cat_asset2 = app.create_category(&owner, "asset", "Cash").await;
@@ -524,12 +524,12 @@ async fn category_and_rule_creation_with_conflicts() {
         &token,
         tool_call(
             "create_categorization_rule",
-            json!({"pattern": "KIWOKO", "source": "myinvestor", "assign_kind": "expense", "assign_category_id": cat_id}),
+            json!({"pattern": "TIENDA MASCOTAS NORTE", "source": "myinvestor", "assign_kind": "expense", "assign_category_id": cat_id}),
         ),
     )
     .await;
     let rule = tool_json(&envelope);
-    assert!(rule["resumen"].as_str().unwrap().contains("KIWOKO"), "{rule}");
+    assert!(rule["resumen"].as_str().unwrap().contains("TIENDA MASCOTAS NORTE"), "{rule}");
 
     // Duplicado (source, pattern) con source concreto → conflict (la UNIQUE de la tabla; con
     // source NULL Postgres no colisiona — contrato idéntico al HTTP).
@@ -538,7 +538,7 @@ async fn category_and_rule_creation_with_conflicts() {
         &token,
         tool_call(
             "create_categorization_rule",
-            json!({"pattern": "KIWOKO", "source": "myinvestor", "assign_kind": "expense", "assign_category_id": cat_id}),
+            json!({"pattern": "TIENDA MASCOTAS NORTE", "source": "myinvestor", "assign_kind": "expense", "assign_category_id": cat_id}),
         ),
     )
     .await;
@@ -623,7 +623,7 @@ async fn asset_tools_create_update_and_reject_absurd_returns() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     let cat = app.create_category(&owner, "asset", "Fondos").await;
 
     app.warm_household(&owner.cookie, &key).await;
@@ -742,7 +742,7 @@ async fn budget_tools_move_projection_and_validate() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     let cat = app.create_category(&owner, "expense", "Ocio").await;
 
     app.warm_household(&owner.cookie, &key).await;
@@ -836,6 +836,390 @@ async fn allocation_rule_update_respects_sink_invariant() {
     let out = tool_json(&envelope);
     assert_eq!(out["antes"]["enabled"], true);
     assert_eq!(out["despues"]["enabled"], false);
+}
+
+/// REGRESIÓN (auditoría MCP §5) — `cap_value` sin `cap_kind` ya no se evapora con un 200.
+///
+/// El repro literal del issue: `{rule_id, enabled: true, cap_value: "99999"}` devolvía 200 con
+/// `antes == despues`. La guardia de «al menos un campo» enumeraba a mano `amount`/`cap_kind`/
+/// `clear_cap`/`enabled` y no nombraba `cap_value`, y el mapeo del cap solo lo leía si venía
+/// `cap_kind`: con `enabled` presente la llamada pasaba la guardia y el tope se perdía por el
+/// camino. Un agente que tradujera «ponle un tope de 99.999 € a la cartera» recibía un éxito y le
+/// decía al usuario «hecho», sin que nada hubiera cambiado.
+#[tokio::test]
+async fn allocation_rule_update_never_drops_a_half_cap_silently() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "asset", "Fondos").await;
+
+    let asset_id = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat, "name": "Fondo", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rule_id = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({"target_asset_id": asset_id, "kind": "remainder"}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Las dos medias parejas dan el MISMO error. Antes solo lo daba una de las dos.
+    for half in [
+        json!({"rule_id": rule_id, "enabled": true, "cap_value": "99999"}),
+        json!({"rule_id": rule_id, "enabled": true, "cap_kind": "amount"}),
+        json!({"rule_id": rule_id, "cap_value": "99999"}),
+        json!({"rule_id": rule_id, "cap_kind": "amount"}),
+    ] {
+        let envelope = mcp_post(
+            &app,
+            &token,
+            tool_call("update_allocation_rule", half.clone()),
+        )
+        .await;
+        let body = tool_error(&envelope, "bad_request");
+        assert_eq!(body["code"], "cap_pair_incomplete", "{half}: {body}");
+    }
+
+    // Poner y quitar el tope a la vez tampoco se resuelve por ti.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_allocation_rule",
+            json!({"rule_id": rule_id, "cap_kind": "amount", "cap_value": "1", "clear_cap": true}),
+        ),
+    )
+    .await;
+    assert_eq!(tool_error(&envelope, "bad_request")["code"], "cap_set_and_clear");
+
+    // Y un cuerpo sin nada que actualizar da `patch_empty` — la guardia vive ahora en la core, así
+    // que HTTP y MCP responden lo mismo.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_allocation_rule", json!({"rule_id": rule_id})),
+    )
+    .await;
+    assert_eq!(tool_error(&envelope, "bad_request")["code"], "patch_empty");
+
+    let http_empty = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{rule_id}"),
+            json!({}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(http_empty.status, http::StatusCode::BAD_REQUEST, "{http_empty:?}");
+    assert_eq!(http_empty.json()["code"], "patch_empty");
+}
+
+/// REGRESIÓN (auditoría MCP §11b) — el `resumen` de un flujo planificado habla el idioma del wire.
+///
+/// `PlanningFlowDirection` solo tenía `Debug`, y un `{:?}` en el `format!` publicaba el
+/// identificador de Rust: las escrituras devolvían `"… (Outflow)"` —inglés y capitalizado— mientras
+/// las lecturas devolvían `"direction":"outflow"`. Dos formas del mismo valor en el mismo catálogo.
+#[tokio::test]
+async fn planning_flow_summary_uses_the_wire_form_of_the_direction() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // El sentido lo da el scope de la categoría, no un parámetro: una categoría de gasto produce
+    // un `outflow`.
+    let cat = app.create_category(&owner, "expense", "Coche").await;
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_planning_flow",
+                json!({"title": "Coche", "category_id": cat, "expected_amount": "123.45"}),
+            ),
+        )
+        .await,
+    );
+    let resumen = out["resumen"].as_str().expect("resumen");
+    assert!(resumen.contains("(outflow)"), "{resumen}");
+    assert!(!resumen.contains("Outflow"), "el Debug de Rust no debe salir al wire: {resumen}");
+
+    // Y coincide con lo que devuelve la lectura para la misma fila.
+    let flows = tool_json(&mcp_post(&app, &token, tool_call("list_planning_flows", json!({}))).await);
+    assert_eq!(flows[0]["direction"], "outflow", "{flows}");
+}
+
+/// Cuarteto de `update_categorization_rule`: core compartida, cache NONE, errores de dominio con
+/// el código del wire, y las dos puertas de escritura.
+///
+/// Cierra el hueco #4 del registro de paridad: desde 3.8.0 un agente podía CREAR una regla y
+/// aplicarla retroactivamente a cientos de movimientos, pero no corregirla ni retirarla. La
+/// asimetría empujaba a acumular reglas nuevas encima de las malas, que es lo que se ve en los
+/// la práctica ya enseñaba: una misma floristería repartida entre tres categorías.
+#[tokio::test]
+async fn update_categorization_rule_shares_core_and_rejects_ambiguous_tristate() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    // Modo B: las transacciones SÍ son inputs del engine, así que si esta tool invalidara la cache
+    // se notaría. En modo A no invalida nada nunca y el test no valdría de nada.
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    let rule_id = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({"match_kind": "substring", "pattern": "FLORISTERIA", "source": "n26",
+                   "assign_kind": "expense", "assign_category_id": compras}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Una segunda regla, para provocar la colisión de (source, pattern) más abajo.
+    app.post_json_with_cookie(
+        "/v1/transactions/rules",
+        json!({"match_kind": "substring", "pattern": "AMAZON", "source": "n26",
+               "assign_kind": "expense"}),
+        &owner.cookie,
+    )
+    .await;
+
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid, owner.user_id);
+    app.warm_household(&owner.cookie, &key).await;
+
+    // 1. Escritura por la tool + tri-estado: `clear_source` la hace agnóstica del banco.
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_categorization_rule",
+                json!({"rule_id": rule_id, "pattern": "FLORISTERIA LA GLORIETA",
+                       "clear_source": true, "clear_assign_category": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["pattern"], "FLORISTERIA LA GLORIETA", "{out}");
+    assert!(out["source"].is_null(), "clear_source debe dejarla agnóstica: {out}");
+    assert!(out["assign_category_id"].is_null(), "{out}");
+
+    // 2. Indistinguible vía HTTP: es la misma core.
+    let rows = app
+        .get_with_cookie("/v1/transactions/rules", &owner.cookie)
+        .await
+        .json();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(rule_id))
+        .expect("la regla sigue ahí");
+    assert_eq!(row["pattern"], "FLORISTERIA LA GLORIETA", "{row}");
+    assert!(row["source"].is_null(), "{row}");
+
+    // 3. Contrato de cache: NONE. Editar una regla no recategoriza nada, así que el conjunto de
+    //    transacciones no se mueve y la proyección no puede cambiar — ni siquiera en modo B.
+    assert!(
+        app.cache_contains(&key).await,
+        "editar una regla NUNCA invalida la cache de proyección"
+    );
+
+    // 4. Errores de dominio, con el código del wire.
+    for (body, code) in [
+        (json!({"rule_id": rule_id}), "rule_patch_empty"),
+        (
+            json!({"rule_id": rule_id, "source": "n26", "clear_source": true}),
+            "rule_patch_conflict",
+        ),
+        (
+            json!({"rule_id": rule_id, "assign_kind": "expense", "clear_assign_kind": true}),
+            "rule_patch_conflict",
+        ),
+        (json!({"rule_id": rule_id, "match_kind": "regex"}), "rule_match_kind_invalid"),
+    ] {
+        let envelope = mcp_post(
+            &app,
+            &token,
+            tool_call("update_categorization_rule", body.clone()),
+        )
+        .await;
+        let err = tool_error(&envelope, "bad_request");
+        assert_eq!(err["code"], code, "{body}: {err}");
+    }
+    // Colisión (source, pattern) con la otra regla → conflict, igual que HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_categorization_rule",
+            json!({"rule_id": rule_id, "pattern": "AMAZON", "source": "n26"}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "conflict");
+    // Una regla de otro (o inexistente) es 404, nunca 403.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_categorization_rule",
+            json!({"rule_id": uuid::Uuid::new_v4().to_string(), "pattern": "X"}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "not_found");
+
+    // 5. Toggle vivo y rol.
+    app.patch_json_with_cookie(
+        "/v1/installation",
+        json!({"mcp_write_enabled": false}),
+        &owner.cookie,
+    )
+    .await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_categorization_rule",
+            json!({"rule_id": rule_id, "pattern": "OTRA"}),
+        ),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+    assert!(
+        envelope["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("mcp_write_disabled"),
+        "{envelope}"
+    );
+}
+
+/// `delete_categorization_rule`: preview con la huella real, confirm que borra, y la invariante que
+/// más importa — **los movimientos conservan su categoría**.
+///
+/// Sin esa aserción el preview sería peligroso: un LLM que lea «40 movimientos» dirá al usuario «se
+/// descategorizarán 40 movimientos», que es falso. Por eso la respuesta lleva la nota, y por eso la
+/// cifra que se publica primero es `ya_conformes` y no `cambiarian`: una regla ya aplicada tiene
+/// `cambiarian: 0` y aun así gobierna decenas de filas.
+#[tokio::test]
+async fn delete_categorization_rule_previews_then_deletes() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    // Tres movimientos que la regla YA gobierna (categoría correcta): `ya_conformes = 3`,
+    // `cambiarian = 0`.
+    for i in 0..3 {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({"op_date": format!("2026-06-{:02}", 10 + i),
+                       "concept": format!("TIENDA {i}"), "amount": "-10", "kind": "expense",
+                       "category_id": compras}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let rule_id = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({"match_kind": "substring", "pattern": "TIENDA",
+                   "assign_kind": "expense", "assign_category_id": compras}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid, owner.user_id);
+    app.warm_household(&owner.cookie, &key).await;
+
+    // 1. Sin confirm: preview, no borra, y la huella cuadra con lo sembrado.
+    let preview = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("delete_categorization_rule", json!({"rule_id": rule_id})),
+        )
+        .await,
+    );
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert_eq!(preview["confirm_required"], true, "{preview}");
+    assert_eq!(preview["effects"]["regla"]["id"], json!(rule_id), "{preview}");
+    assert_eq!(preview["effects"]["huella"]["ya_conformes"], 3, "{preview}");
+    assert_eq!(
+        preview["effects"]["huella"]["cambiarian"], 0,
+        "una regla ya aplicada no cambiaría nada — por eso `ya_conformes` es la cifra útil: {preview}"
+    );
+    assert_eq!(app.count_rows("categorization_rules").await, 1, "el preview no borra");
+    assert!(app.cache_contains(&key).await, "el preview no invalida");
+
+    // 2. Con confirm: borra… y los movimientos CONSERVAN su categoría.
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "delete_categorization_rule",
+                json!({"rule_id": rule_id, "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["deleted"], true, "{out}");
+    assert_eq!(app.count_rows("categorization_rules").await, 0);
+    let rows = app
+        .get_with_cookie("/v1/transactions", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert_eq!(
+            t["category_id"],
+            json!(compras),
+            "borrar la regla NO descategoriza: {t}"
+        );
+    }
+
+    // 3. Cache NONE también al borrar (modo B, donde sí se notaría).
+    assert!(
+        app.cache_contains(&key).await,
+        "borrar una regla NUNCA invalida la cache de proyección"
+    );
+
+    // 4. Idempotencia observable: repetir con confirm da not_found.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "delete_categorization_rule",
+            json!({"rule_id": rule_id, "confirm": true}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "not_found");
 }
 
 #[tokio::test]
@@ -989,7 +1373,7 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
 
     // Cambiar savings_source por MCP invalida la proyección (FULL).
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
@@ -1245,7 +1629,7 @@ async fn reconcile_tools_share_core_and_respect_write_gates() {
     // Desconciliar por MCP (modo B para verificar la invalidación COND).
     set_mode(&app, &owner.cookie, "transactions_avg").await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     app.warm_household(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
@@ -1315,11 +1699,17 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
     )
     .await;
 
+    // Filas que la regla reclasificará a `expense`. Nacen POSITIVAS y como `income` a propósito:
+    // es el caso real de una devolución (llega en positivo, el importador la marca `income` por el
+    // signo) que se recategoriza a gasto para que **netee** contra el gasto del mes. Desde 4.0.0 el
+    // alta manual exige que el signo cuadre con el kind, pero la recategorización —en lote o por
+    // regla— sigue pudiendo dejar un `expense` positivo: es contabilidad correcta, y por eso el
+    // guard no alcanza a esta ruta (auditoría MCP §3).
     for concept in ["WWW.AMAZON* AAA", "AMAZON PRIME"] {
         let r = app
             .post_json_with_cookie(
                 "/v1/transactions",
-                json!({ "op_date": "2026-06-10", "concept": concept, "amount": "-20",
+                json!({ "op_date": "2026-06-10", "concept": concept, "amount": "20",
                         "kind": "income" }),
                 &owner.cookie,
             )
@@ -1341,7 +1731,7 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
 
     // 1. PREVIEW: no escribe y no invalida.
     app.warm_household(&owner.cookie, &key).await;
@@ -1470,13 +1860,16 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
     )
     .await;
 
+    // Positivas y `income`: el lote las pasará a `expense`, que es la reclasificación de una
+    // devolución. El alta manual ya no acepta un `income` negativo (`amount_sign_mismatch`), y el
+    // lote sigue sin poder tocar el importe — solo reclasifica.
     let mut ids = Vec::new();
     for i in 0..3 {
         let r = app
             .post_json_with_cookie(
                 "/v1/transactions",
                 json!({ "op_date": format!("2026-06-{:02}", 10 + i),
-                        "concept": format!("COMPRA {i}"), "amount": "-10", "kind": "income" }),
+                        "concept": format!("COMPRA {i}"), "amount": "10", "kind": "income" }),
                 &owner.cookie,
             )
             .await;
@@ -1488,7 +1881,7 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
     app.warm_household(&owner.cookie, &key).await;
 
     // 1. Escritura por la tool.

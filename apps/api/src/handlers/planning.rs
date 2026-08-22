@@ -26,6 +26,27 @@ pub enum PlanningFlowDirection {
     Outflow,
 }
 
+impl PlanningFlowDirection {
+    /// La forma que viaja por el wire, la misma que produce `#[serde(rename_all = "lowercase")]`.
+    ///
+    /// Existe porque el enum solo tenía `Debug`, así que un `{:?}` en un `format!` publicaba el
+    /// identificador de Rust: las tools MCP de escritura devolvían `"… (Outflow)"` —inglés y
+    /// capitalizado— mientras las de lectura devolvían `"direction":"outflow"` (auditoría MCP §11b).
+    /// Con esto, el único camino de un enum al wire vuelve a ser uno.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanningFlowDirection::Inflow => "inflow",
+            PlanningFlowDirection::Outflow => "outflow",
+        }
+    }
+}
+
+impl std::fmt::Display for PlanningFlowDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PlanningFlowResponse {
     #[schema(value_type = String, format = "uuid")]
@@ -191,7 +212,7 @@ pub async fn list_planning_flows(
 ) -> Result<Json<Vec<PlanningFlowResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_planning_flows_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_planning_flows_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 

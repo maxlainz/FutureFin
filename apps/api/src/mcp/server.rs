@@ -54,9 +54,10 @@ use crate::handlers::transactions::recurring::{
     delete_recurring_rule_core, list_recurring_rules_core, materialize_recurring_core,
 };
 use crate::handlers::transactions::rules::{
-    apply_categorization_rule_core, create_categorization_rule_core,
-    list_categorization_rules_core, ApplyScope,
+    apply_categorization_rule_core, create_categorization_rule_core, delete_rule_core,
+    list_categorization_rules_core, patch_rule_core, ApplyScope,
 };
+use crate::handlers::transactions::schema::PatchRuleBody;
 use crate::handlers::transactions::summary::{
     category_monthly_series_core, transactions_summary_core,
 };
@@ -97,8 +98,10 @@ fn identity(ctx: &RequestContext<RoleServer>) -> Result<McpIdentity, ErrorData> 
         .ok_or_else(|| ErrorData::internal_error("missing request identity", None))
 }
 
-/// Misma semántica que `?view=` en HTTP: `"mine"` → Mine, cualquier otra cosa → Household.
-fn resolve_view(view: &Option<String>) -> LedgerView {
+/// Misma semántica que `?view=` en HTTP, parseo compartido: `"mine"` → Mine, `"household"` u
+/// omitido → Household, **cualquier otra cosa → `invalid_view`**. Un LLM que escriba `"MINE"` o
+/// `"self"` recibe un error, no el hogar entero en silencio (auditoría MCP).
+fn resolve_view(view: &Option<String>) -> Result<LedgerView, ApiError> {
     LedgerViewQuery { view: view.clone() }.resolve()
 }
 
@@ -136,14 +139,16 @@ fn to_tool_outcome(e: ApiError) -> Result<CallToolResult, ErrorData> {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ViewParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo ("household").
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`) — no cae a "household" en silencio.
     #[serde(default)]
     pub view: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ProjectionParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Horizonte en meses (12–840; fuera de rango se clampa). Omitido = horizonte derivado de
@@ -161,7 +166,8 @@ pub struct ProjectionParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct HistoryParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Limita la serie a los últimos N meses (1–1200). Omitido = desde el snapshot más
@@ -177,7 +183,8 @@ pub struct HistoryParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TransactionsSummaryParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Año del mes seleccionado. Se pasa junto con `month`; omitidos = último mes completo.
@@ -193,7 +200,8 @@ pub struct TransactionsSummaryParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTransactionsParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Filtra por mes "YYYY-MM" (op_date dentro del mes).
@@ -245,7 +253,8 @@ pub struct CategoriesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CategorySeriesParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// "expense" | "income".
@@ -262,7 +271,8 @@ pub struct CategorySeriesParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CashflowParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Meses de ventana (1–120, default 24).
@@ -313,9 +323,125 @@ pub struct AssetReturnOverrideParam {
     pub expected_annual_return_percent: String,
 }
 
+/// Parsea un enum de dominio desde el string de un parámetro de tool **reusando su `Deserialize`
+/// custom**, que es donde vive la lista de variantes y sus alias. Reimplementar el `match` aquí
+/// sería la forma de que la superficie MCP aceptara —o rechazara— un valor distinto que HTTP.
+///
+/// Devuelve el error de serde CRUDO a propósito: el mensaje de la API lo compone cada call site
+/// con un literal `"<code>: {e}"`. Meter el `format!` aquí dentro dejó los códigos
+/// `savings_source` y `fire_number_mode` fuera del barrido de `error_codes_parity` —seguían
+/// emitiéndose en runtime, pero ningún literal estático los nombraba— y el fixture los dio por
+/// desaparecidos. El extractor solo ve literales; que el helper no se los coma es parte del
+/// contrato.
+fn parse_enum_param<T: serde::de::DeserializeOwned>(
+    raw: &Option<String>,
+) -> Result<Option<T>, serde_json::Error> {
+    raw.as_ref()
+        .map(|v| serde_json::from_value(serde_json::Value::String(v.trim().to_string())))
+        .transpose()
+}
+
+/// Convierte los tramos fiscales del wire (strings decimales) a los del dominio.
+fn parse_tax_brackets(
+    raw: &Option<Vec<TaxBracketParam>>,
+) -> Result<Option<Vec<crate::handlers::installation::TaxBracket>>, ApiError> {
+    raw.as_ref()
+        .map(|brackets| {
+            brackets
+                .iter()
+                .map(|b| {
+                    Ok(crate::handlers::installation::TaxBracket {
+                        up_to: b
+                            .up_to
+                            .as_deref()
+                            .map(|v| parse_decimal_param("tax_brackets.up_to", v))
+                            .transpose()?,
+                        pct: parse_decimal_param("tax_brackets.pct", &b.pct)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ApiError>>()
+        })
+        .transpose()
+}
+
+/// Ejes de `fire_settings` que `simulate_projection` puede cambiar **sin persistir**. Mismos
+/// nombres, mismos valores y mismas cotas que `update_fire_settings`: lo que se simula aquí es
+/// exactamente lo que pasaría al guardarlo allí.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FireSettingsOverrideParam {
+    /// "budget" (A: el plan) | "transactions_avg" (B: ingreso y gasto reales) |
+    /// "budget_income_real_expense" (C: ingreso del plan + gasto real). Cambiarlo arrastra tres
+    /// efectos, todos deseados: en B/C la cuota de pasivo deja de contar aparte (ya está dentro
+    /// del gasto real) y el principal queda como resta constante, los fines de partida de
+    /// presupuesto dejan de aplicarse, y la base del objetivo FIRE pasa a ser el gasto efectivo.
+    /// OJO: si pides B o C y no hay meses reales, el ensamblado cae al presupuesto y el escenario
+    /// sale idéntico al baseline — `savings_source` de la respuesta dice cuál se usó de verdad.
+    #[serde(default)]
+    pub savings_source: Option<String>,
+    /// "manual" | "annual_expense" | "current_income".
+    #[serde(default)]
+    pub fire_number_mode: Option<String>,
+    /// Objetivo manual > 0, string decimal (requerido si el modo efectivo acaba siendo "manual").
+    #[serde(default)]
+    pub fire_number_manual_amount: Option<String>,
+    /// Simular con y sin impuestos sobre la plusvalía en el gross-up del objetivo.
+    #[serde(default)]
+    pub taxes_enabled: Option<bool>,
+    /// Tramos fiscales COMPLETOS (sustituyen a los actuales; umbrales crecientes, solo el último
+    /// sin up_to).
+    #[serde(default)]
+    pub tax_brackets: Option<Vec<TaxBracketParam>>,
+    /// Ventana del promedio de INGRESO en meses (1–60). Solo la usa el modo B. Con una ventana
+    /// corta en modo "data" el ingreso proyectado es casi el último mes con datos, y un mes
+    /// atípico mueve la proyección entera: este eje existe para poder verlo sin persistirlo.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 60))]
+    pub income_avg_window_months: Option<u32>,
+    /// "data" (los N meses CON DATOS más recientes, saltando huecos) | "calendar" (solo los meses
+    /// con datos dentro de los últimos N civiles).
+    #[serde(default)]
+    pub income_avg_window_mode: Option<String>,
+    /// Ventana del promedio de GASTO en meses (1–60). La usan los modos B y C.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 60))]
+    pub expense_avg_window_months: Option<u32>,
+    /// "data" | "calendar".
+    #[serde(default)]
+    pub expense_avg_window_mode: Option<String>,
+}
+
+impl FireSettingsOverrideParam {
+    fn to_patch(&self) -> Result<crate::handlers::installation::FireSettingsPatch, ApiError> {
+        Ok(crate::handlers::installation::FireSettingsPatch {
+            swr_pct: None,
+            taxes_enabled: self.taxes_enabled,
+            tax_brackets: parse_tax_brackets(&self.tax_brackets)?,
+            fire_number_mode: parse_enum_param(&self.fire_number_mode)
+                .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))?,
+            fire_number_manual_amount: self
+                .fire_number_manual_amount
+                .as_deref()
+                .map(|v| parse_decimal_param("fire_number_manual_amount", v))
+                .transpose()?,
+            savings_source: parse_enum_param(&self.savings_source)
+                .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))?,
+            income_avg_window_months: self.income_avg_window_months,
+            income_avg_window_mode: parse_enum_param(&self.income_avg_window_mode)
+                .map_err(|e| ApiError::BadRequest(format!("income_avg_window_mode: {e}")))?,
+            expense_avg_window_months: self.expense_avg_window_months,
+            expense_avg_window_mode: parse_enum_param(&self.expense_avg_window_mode)
+                .map_err(|e| ApiError::BadRequest(format!("expense_avg_window_mode: {e}")))?,
+            annual_inflation_assumption_percent: None,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SimulateParams {
-    /// "mine" = solo los datos del usuario del token; omitido = hogar completo.
+    /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
+    /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
     pub view: Option<String>,
     /// Horizonte en meses (12–840). Omitido = horizonte de la instalación.
@@ -328,30 +454,55 @@ pub struct SimulateParams {
     /// Gasto puntual («¿y si me compro X?»): drena caja el mes indicado con la cascada real.
     #[serde(default)]
     pub one_off_expense: Option<OneOffExpenseParam>,
-    /// Gasto mensual extra REAL (>= 0, string decimal): mueve también el target FIRE y las
-    /// bases de caps — «vivir gastando más».
+    /// Gasto mensual extra REAL (string decimal): «vivir gastando más». Mueve las bases de los
+    /// caps `months_expense` en los tres modos, pero el target FIRE **solo con
+    /// `fire_number_mode = annual_expense`**: en `current_income` el objetivo se deriva del
+    /// ingreso y en `manual` es un importe fijo, así que ahí `fire_target_base_delta` sale 0 y
+    /// eso NO es un fallo. Cada lado de la respuesta echa su `fire_number_mode` para leerlo sin
+    /// adivinar. **Admite NEGATIVO** («¿y si recorto 200 al mes?»): es el único eje con signo,
+    /// porque es el único con semántica de gasto. Si el recorte se pasa de la base, la base
+    /// efectiva se queda en 0 (no se rechaza) y `expense_base_monthly` de la respuesta dice cuál
+    /// quedó. Con base 0 y `fire_number_mode = annual_expense` no hay objetivo FIRE, y
+    /// `fire_target_absent_reason` lo dice: sin gasto no hay número FIRE.
     #[serde(default)]
+    #[schemars(regex(pattern = r"^-?\d+(\.\d+)?$"))]
     pub extra_monthly_expense: Option<String>,
     /// Ajuste de caja mensual NEUTRO (>= 0, se resta): menos ahorro sin mover el target FIRE
-    /// ni los caps. Usa este para «ahorro X € menos al mes sin cambiar mi objetivo».
+    /// ni los caps. Es el MISMO mando que `extra_monthly_savings` con el signo cambiado.
     #[serde(default)]
+    #[schemars(regex(pattern = r"^\d+(\.\d+)?$"))]
     pub extra_monthly_cash_adjustment: Option<String>,
     /// Ahorro mensual extra (>= 0): más caja asignable vía la cascada, sin mover el target.
+    /// Es el mando para simular MENOS gasto en términos de caja — idéntico a un
+    /// `extra_monthly_cash_adjustment` negativo, que por eso no hace falta aceptar.
     #[serde(default)]
+    #[schemars(regex(pattern = r"^\d+(\.\d+)?$"))]
     pub extra_monthly_savings: Option<String>,
-    /// SWR en % (0–4, string decimal): «¿y si el SWR fuera 3?».
+    /// SWR en % (0–4, string decimal): «¿y si el SWR fuera 3?». **`"0"` se acepta pero no es un
+    /// escenario conservador, es «jamás»**: anula el objetivo FIRE entero (`fire_target_base` y
+    /// `jubilacion_month_index` salen `null` y la serie del target, vacía)..
     #[serde(default)]
     pub swr_pct: Option<String>,
     /// Inflación anual asumida en % (0–50, string decimal).
     #[serde(default)]
+    /// Alias aceptado: `annual_inflation_assumption_percent`, que es como se llama en
+    /// `get_settings` y en `update_fire_settings`. Sin él, el nombre que el modelo acababa de
+    /// leer se descartaba en silencio y el escenario salía idéntico al baseline.
+    #[serde(alias = "annual_inflation_assumption_percent")]
     pub annual_inflation_percent: Option<String>,
-    /// Gasto ANUAL de jubilación (> 0, string decimal): sustituye la base del target FIRE y el
-    /// gasto post-jubilación.
+    /// Gasto ANUAL de jubilación (> 0, string decimal): sustituye **siempre** el gasto
+    /// post-jubilación, y la base del target FIRE **solo con
+    /// `fire_number_mode = annual_expense`** (en `current_income` y `manual` el objetivo no mira
+    /// el gasto).
     #[serde(default)]
     pub retirement_annual_expense: Option<String>,
     /// Overrides de rentabilidad por activo.
     #[serde(default)]
     pub asset_return_overrides: Option<Vec<AssetReturnOverrideParam>>,
+    /// Ejes de la configuración FIRE simulables sin persistir: fuente del ahorro, modo del número
+    /// FIRE, impuestos y ventanas del promedio. `swr_pct` es el mismo eje y se pide arriba, suelto.
+    #[serde(default)]
+    pub fire_settings_overrides: Option<FireSettingsOverrideParam>,
 }
 
 /// Parsea un string decimal de un parámetro de tool con error tipado.
@@ -629,7 +780,7 @@ pub struct CreateLiabilityParams {
     #[serde(default)]
     pub principal: Option<String>,
     /// true = derivar el principal del plan de pago (exige payment_amount + payment_frequency
-    /// + payment_end_date; amortización francesa hacia atrás).
+    /// + payment_end_date; principal = cuota × nº de pagos pendientes, SIN descontar intereses).
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
     /// TAE en % >= 0, string decimal.
@@ -666,7 +817,7 @@ pub struct UpdateLiabilityParams {
     #[serde(default)]
     pub principal: Option<String>,
     /// true = derivar el principal del plan de pago (cuota + frecuencia + fecha fin,
-    /// amortización francesa); false = volver a principal explícito.
+    /// principal = cuota × nº de pagos, sin descuento); false = volver a principal explícito.
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
     /// TAE en % >= 0, string decimal.
@@ -735,10 +886,14 @@ pub struct UpdateAllocationRuleParams {
     /// kind=percent. (El kind y el orden no se editan desde chat.)
     #[serde(default)]
     pub amount: Option<String>,
-    /// Cap: {"kind": "amount"|"months_expense"|"income_multiple", "value": "..."}. clear_cap
-    /// lo elimina.
+    /// Tipo de tope: `"amount"` | `"months_expense"` | `"income_multiple"`. Va SUELTO, junto a
+    /// `cap_value` — no es un objeto anidado. El doc decía `{"kind": …, "value": …}`, así que
+    /// invitaba a mandar un campo `cap` que no existe: se descartaba en silencio, la llamada
+    /// devolvía 200, y el tope no se ponía.
     #[serde(default)]
     pub cap_kind: Option<String>,
+    /// Valor del tope, string decimal. La UNIDAD depende de `cap_kind`: euros con `amount`,
+    /// nº de meses de gasto con `months_expense`, múltiplo del ingreso con `income_multiple`.
     #[serde(default)]
     pub cap_value: Option<String>,
     /// true = quitar el cap.
@@ -746,6 +901,57 @@ pub struct UpdateAllocationRuleParams {
     pub clear_cap: Option<bool>,
     #[serde(default)]
     pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateCategorizationRuleParams {
+    /// UUID de la regla (de list_categorization_rules).
+    pub rule_id: String,
+    /// "substring" | "prefix" | "exact".
+    #[serde(default)]
+    pub match_kind: Option<String>,
+    /// Texto a buscar en el concepto del movimiento.
+    #[serde(default)]
+    pub pattern: Option<String>,
+    /// Banco al que se limita la regla ("myinvestor" | "n26"). Incompatible con clear_source.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// true = la regla pasa a ser agnóstica del banco.
+    #[serde(default)]
+    pub clear_source: Option<bool>,
+    /// "expense" | "income" | "savings". Incompatible con clear_assign_kind.
+    #[serde(default)]
+    pub assign_kind: Option<String>,
+    /// true = la regla deja de asignar kind (y por tanto tampoco categoría).
+    #[serde(default)]
+    pub clear_assign_kind: Option<bool>,
+    /// UUID de categoría (de list_categories). Incompatible con clear_assign_category.
+    #[serde(default)]
+    pub assign_category_id: Option<String>,
+    /// true = la regla deja de asignar categoría.
+    #[serde(default)]
+    pub clear_assign_category: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteCategorizationRuleParams {
+    /// UUID de la regla (de list_categorization_rules).
+    pub rule_id: String,
+    /// Sin confirm=true NO borra: devuelve un preview con la regla y su huella actual.
+    #[serde(default)]
+    pub confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListCategorizationRulesParams {
+    /// Máximo de reglas devueltas (1–200). Default 50. La respuesta indica `total_count` y
+    /// `truncated`.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: Option<u32>,
+    /// Desplazamiento de paginación (reglas a saltar, orden por última edición DESC). Default 0.
+    #[serde(default)]
+    pub offset: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -828,12 +1034,16 @@ pub struct UpdateFireSettingsParams {
 
 const LIST_TRANSACTIONS_DEFAULT_LIMIT: usize = 100;
 const LIST_TRANSACTIONS_MAX_LIMIT: usize = 500;
+/// Reglas por página. Más bajo que el de movimientos porque cada regla es prosa (patrón, banco,
+/// categoría) y el conjunto entero llegó a pesar ~11 KB en una instalación real (auditoría MCP §9).
+const LIST_RULES_DEFAULT_LIMIT: usize = 50;
+const LIST_RULES_MAX_LIMIT: usize = 200;
 
 #[tool_router]
 impl FutureFinMcp {
     #[tool(
         name = "get_summary",
-        description = "Resumen financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingresos/gastos mensuales, tasa de ahorro, runway de líquidos) y desgloses por categoría. Importes como strings decimales.",
+        description = "Resumen financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingresos/gastos mensuales, tasa de ahorro, runway de líquidos) y desgloses por categoría. Importes como strings decimales. OJO: `financial_health` trae DOS cifras de ahorro mensual y no son intercambiables. `net_monthly_equivalent` es el ahorro REAL del modo activo (`savings_source`) y es el que usa el motor — cuadra con `recurring_net` de get_allocation_resolution y con `net_monthly` de simulate_projection, y es el NUMERADOR de `savings_rate` (el denominador es `income_monthly_equivalent`). No lo compares directamente con `monthly_delta_assumption` de get_projection: en modo A esa cifra es la misma ANTES de restar el servicio de deuda, así que con cualquier pasivo con plan de pago difieren exactamente en la cuota. `savings_expected_monthly_equivalent` es el ahorro que sale del PRESUPUESTO, siempre, sin seguir al modo: existe solo para el delta «real vs plan». En modo A (budget) coinciden por construcción; en B y C difieren, y elegir mal desplaza la respuesta. Para razonar o hacer cuentas usa `net_monthly_equivalent`. `savings_rate` y `debt_to_assets_ratio` son FRACCIONES, no porcentajes: 0.35 es 35 %. `runway_months` null significa DOS cosas distintas — míralo junto a `runway_is_indefinite`: con `true` los líquidos cubren el gasto indefinidamente (no es falta de datos); con `false` es que no hay base de gasto. Y 1200 es el SUELO de la escala («al menos 100 años»), no una medida.",
         annotations(title = "Resumen financiero", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_summary(
@@ -842,13 +1052,16 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(summary_core(&self.state.pool, id.installation_id, id.user_id, view).await)
     }
 
     #[tool(
         name = "get_projection",
-        description = "Proyección de patrimonio y jubilación (FIRE): serie futura de patrimonio neto (~82 puntos, mes 0-12 mensual y anual después), objetivo FIRE por mes, jubilación estimada — `jubilacion_month_index` para indexar las series, y ya resueltas en servidor `jubilacion_date_ymd` (fecha civil) y `jubilacion_age` (años cumplidos; null sin fecha de nacimiento) —, hitos de patrimonio y supuestos usados. Los valores de las series son números en euros nominales. Omite `months` salvo necesidad: sin él la respuesta sale de cache; con él se recomputa entera.",
+        description = "Proyección de patrimonio y jubilación (FIRE): serie futura de patrimonio neto (~82 puntos, mes 0-12 mensual y anual después), objetivo FIRE por mes, jubilación estimada — `jubilacion_month_index` para indexar las series, y ya resueltas en servidor `jubilacion_date_ymd` (fecha civil) y `jubilacion_age` (años cumplidos; null sin fecha de nacimiento) —, hitos de patrimonio y supuestos usados. `jubilacion_target_net_worth` está en **euros de HOY**: el objetivo crece con la inflación, así que el objetivo nominal del mes en que se cruza es bastante mayor que esa cifra — no la presentes como «necesitas X para jubilarte» sin decir en qué euros está. `fire_target_series` no lleva índice propio: es **paralela por posición** a `points`. Los valores de las series son números en euros nominales. Omite `months` salvo necesidad: sin él la respuesta sale de cache; con él se recomputa entera.",
         annotations(title = "Proyección FIRE", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection(
@@ -857,7 +1070,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         let res = projection_series_cached(
             &self.state,
             id.user_id,
@@ -889,7 +1105,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             budget_snapshot_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )
@@ -897,7 +1116,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_transactions_summary",
-        description = "Comparativa del mes: gasto/ingreso real por categoría vs presupuesto vs promedio ponderado de meses anteriores. El promedio divide entre `avg_months` = meses del tramo con al menos un movimiento REAL: un mes cuyo único contenido son instancias recurrentes queda fuera del numerador y del denominador, así que no hunde la media. `months_with_data` se devuelve aparte (meses con movimientos de cualquier tipo) y NO es el denominador. `avg_basis` dice de qué meses sale la media y si tienen huecos; si `avg_months` es 0 no hay promedio y `avg_unavailable_reason` explica por qué. Sin year/month usa el último mes completo.",
+        description = "Comparativa del mes: gasto/ingreso real por categoría vs presupuesto vs promedio ponderado de meses anteriores. El promedio divide entre `avg_months` = meses del tramo con al menos un movimiento REAL: un mes cuyo único contenido son instancias recurrentes queda fuera del numerador y del denominador, así que no hunde la media. `months_with_data` se devuelve aparte (meses con movimientos de cualquier tipo) y NO es el denominador. `avg_basis` dice de qué meses sale la media y si tienen huecos; si `avg_months` es 0 no hay promedio y `avg_unavailable_reason` explica por qué. Sin year/month usa el último mes completo. Los importes son MAGNITUDES ≥ 0 (el gasto no viaja en negativo aquí) y totals.net_actual = income_actual − expense_actual, SIN el ahorro: es el mismo número que income_minus_expense de get_history_cashflow para ese mes, allí expresado con signos reales. El cash_delta de esa otra tool sí incluye el ahorro y por tanto NO es comparable con éste.",
         annotations(title = "Comparativa mensual", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_transactions_summary(
@@ -906,7 +1125,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             transactions_summary_core(
                 &self.state.pool,
@@ -933,7 +1155,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
 
         let limit = p.limit.map(|l| l as usize).unwrap_or(LIST_TRANSACTIONS_DEFAULT_LIMIT);
         if limit == 0 || limit > LIST_TRANSACTIONS_MAX_LIMIT {
@@ -1015,7 +1240,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_history",
-        description = "Serie histórica de patrimonio neto reconstruida desde los snapshots del usuario (interpolación servidor). month_index 0 = mes actual, negativos = pasado. Los valores de las series son números para el chart; los markers son los snapshots reales. Acota con window_months si solo necesitas lo reciente; asset_series es opt-in.",
+        description = "Serie histórica de patrimonio neto reconstruida desde los snapshots del usuario (interpolación servidor). month_index 0 = mes actual, EVALUADO EN EL DÍA DE HOY (los meses negativos, en su día 1), así que el último punto empalma con el patrimonio vivo y cuadra con get_summary.net_worth. Los valores de las series son números para el chart; los markers son los snapshots reales. OJO a liabilities_snapshotted: si es false, liabilities_total vale 0 en toda la serie porque no hay snapshots de pasivo, NO porque no haya deuda — el patrimonio neto histórico no la resta, y la deuda viva está en list_liabilities o get_summary. Acota con window_months si solo necesitas lo reciente; asset_series es opt-in.",
         annotations(title = "Histórico de patrimonio", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_history(
@@ -1024,7 +1249,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             history_series_core(
                 &self.state.pool,
@@ -1049,7 +1277,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_assets_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )
@@ -1066,7 +1297,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_liabilities_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )
@@ -1083,7 +1317,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_planning_flows_core(&self.state.pool, id.installation_id, id.user_id, view)
                 .await,
@@ -1120,7 +1357,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "simulate_projection",
-        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo) y devuelve KPIs + deltas de cada lado. La respuesta es autocontenida: trae `anchor_date_ymd` (mes 0), `show_age_mode` y `viewer_birth_date`, sin necesidad de encadenar get_projection. KPIs: jubilación como índice de mes MÁS `jubilacion_date_ymd` y `jubilacion_age` ya calculados, patrimonio final, target FIRE, runway, y la salud financiera del **mes 1** — income_monthly, expense_total_monthly (gasto regular + servicio de deuda: la misma base del runway y del target, la que cuadra con get_summary en los tres modos), debt_service_monthly, net_monthly (= income − expense_total; NO es lo que reparte la cascada, que además lleva el tramo de planning flows del mes) y savings_rate. Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
+        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo — y `fire_settings_overrides`: fuente del ahorro, modo del número FIRE, impuestos y ventanas del promedio, todo SIN persistir y con las mismas cotas que update_fire_settings) y devuelve KPIs + deltas de cada lado. DOS DE LOS EJES MENSUALES SON EL MISMO MANDO: `extra_monthly_savings` y `extra_monthly_cash_adjustment` escriben la misma variable con signo opuesto, así que `extra_monthly_savings` ES el ajuste de caja negativo y por eso el ajuste no acepta negativos (ambos exigen >= 0). Ojo con lo que NO mueven: los ajustes de caja entran en la caja del mes, no en la base de gasto, así que con cualquiera de los dos `expense_total_monthly_delta`, `net_monthly_delta`, `savings_rate_delta` y `runway_months_delta` salen 0 EXACTO — es el contrato, no un fallo. Si quieres que un recorte mueva también runway y target, el eje con semántica de gasto es `extra_monthly_expense`, y es el ÚNICO que admite negativo: `-200` recorta 200 al mes de verdad. Si el recorte se pasa de la base, la base efectiva se queda en 0 y `expense_base_monthly` dice cuál quedó; con base 0 y modo `annual_expense` no hay objetivo FIRE y `fire_target_absent_reason` lo explica. La respuesta es autocontenida: trae `anchor_date_ymd` (mes 0), `show_age_mode` y `viewer_birth_date`, sin necesidad de encadenar get_projection. KPIs: jubilación como índice de mes MÁS `jubilacion_date_ymd` y `jubilacion_age` ya calculados, patrimonio final NOMINAL más `final_net_worth_real` (el mismo en euros de hoy, deflactado por índice de mes con la inflación efectiva del lado: con el horizonte por defecto el nominal está a décadas vista y no dice nada), target FIRE, runway, y la salud financiera del **mes 1** — income_monthly, expense_total_monthly (gasto regular + servicio de deuda: la misma base del runway y del target, la que cuadra con get_summary en los tres modos), debt_service_monthly, net_monthly (= income − expense_total; NO es lo que reparte la cascada, que además lleva el tramo de planning flows del mes) y savings_rate. Cada lado ECHA ADEMÁS el contexto con el que se calculó, para que ningún cero haya que interpretarlo: `savings_source` efectivo (tras el fallback a presupuesto por falta de meses reales), `savings_income_basis`/`savings_expense_basis` (de dónde salió cada lado y sobre cuántos meses reales), `fire_number_mode`, `swr_pct` y `annual_inflation_percent` efectivos, las tres bases usadas (`expense_base_monthly`, `income_base_monthly`, `expense_retirement_base_monthly`) y `fire_target_absent_reason` (`manual_amount_missing` | `net_need_not_positive` | `swr_not_positive`) cuando no hay objetivo. En la raíz, `horizon_basis` dice de dónde sale el horizonte. Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
         annotations(title = "Simular escenario", read_only_hint = true, open_world_hint = false)
     )]
     async fn simulate_projection(
@@ -1129,7 +1366,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
 
         // Parseo de strings → tipos (las cotas de dominio se validan en el core).
         let build_spec = || -> Result<SimulationSpec, ApiError> {
@@ -1169,6 +1409,11 @@ impl FutureFinMcp {
                 parse_opt("annual_inflation_percent", &p.annual_inflation_percent)?;
             spec.retirement_annual_expense =
                 parse_opt("retirement_annual_expense", &p.retirement_annual_expense)?;
+            spec.fire_settings_overrides = p
+                .fire_settings_overrides
+                .as_ref()
+                .map(|o| o.to_patch())
+                .transpose()?;
             if let Some(overrides) = &p.asset_return_overrides {
                 for o in overrides {
                     let asset_id = Uuid::parse_str(o.asset_id.trim()).map_err(|_| {
@@ -1205,7 +1450,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         let res = allocation_resolution_core(
             &self.state.pool,
             id.installation_id,
@@ -1227,7 +1475,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_allocation_rules_core(&self.state.pool, id.installation_id, id.user_id, view)
                 .await,
@@ -1261,7 +1512,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         let category_id = match &p.category_id {
             Some(raw) => match Uuid::parse_str(raw.trim()) {
                 Ok(u) => Some(u),
@@ -1289,7 +1543,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_history_cashflow",
-        description = "Flujo de caja mensual real por tipo (expense/income/savings + net, strings decimales, meses firmados hacia atrás desde el actual): la mejor fuente para «¿cuánto entra y sale de verdad cada mes?». La curva fina por activo es opt-in (include_curve).",
+        description = "Flujo de caja mensual real por tipo, meses firmados hacia atrás desde el actual. Los importes van CON SU SIGNO REAL: expense ≤ 0, savings ≤ 0, income ≥ 0. Dos netos, deliberadamente distintos: cash_delta = expense + income + savings es la variación de caja e INCLUYE los traspasos a ahorro, así que un mes excelente con una aportación grande sale negativo y NO es una pérdida; income_minus_expense = income + expense son los ingresos menos los gastos SIN el ahorro, y es el mismo número que totals.net_actual de get_transactions_summary para ese mes. Para «¿fue buen mes?» usa income_minus_expense. La curva fina por activo es opt-in (include_curve).",
         annotations(title = "Cash-flow histórico", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_history_cashflow(
@@ -1298,7 +1552,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             history_cashflow_core(
                 &self.state.pool,
@@ -1330,18 +1587,40 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_categorization_rules",
-        description = "Reglas de categorización aprendidas del usuario del token: patrón (substring|prefix|exact), banco de origen opcional y asignación (kind + categoría). Explican cómo se categorizó un concepto y evitan crear duplicados. Solo afectan a imports futuros. Siempre own-user, sin view.",
+        description = "Reglas de categorización aprendidas del usuario del token: patrón (substring|prefix|exact), banco de origen opcional y asignación (kind + categoría). Explican cómo se categorizó un concepto y evitan crear duplicados. Solo afectan a imports futuros (para reescribir el pasado, apply_categorization_rule). Siempre own-user, sin view. Paginada: el conjunto crece con cada import, así que la respuesta trae total_count/truncated y admite limit (1–200, default 50) y offset.",
         annotations(title = "Reglas de categorización", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_categorization_rules(
         &self,
+        Parameters(p): Parameters<ListCategorizationRulesParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        to_tool_result(
-            list_categorization_rules_core(&self.state.pool, id.installation_id, id.user_id)
-                .await,
+        let limit = p.limit.unwrap_or(LIST_RULES_DEFAULT_LIMIT as u32) as usize;
+        if limit == 0 || limit > LIST_RULES_MAX_LIMIT {
+            return to_tool_outcome(ApiError::BadRequest(format!(
+                "limit_out_of_range: limit must be between 1 and {LIST_RULES_MAX_LIMIT}"
+            )));
+        }
+        let offset = p.offset.unwrap_or(0) as i64;
+        let res = list_categorization_rules_core(
+            &self.state.pool,
+            id.installation_id,
+            id.user_id,
+            Some(limit as i64),
+            offset,
         )
+        .await
+        .map(|(page, total_count)| {
+            let truncated = offset + (page.len() as i64) < total_count;
+            serde_json::json!({
+                "total_count": total_count,
+                "offset": offset,
+                "truncated": truncated,
+                "rules": page,
+            })
+        });
+        to_tool_result(res)
     }
 
     #[tool(
@@ -1355,7 +1634,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_months_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )
@@ -1540,8 +1822,8 @@ impl FutureFinMcp {
 
     #[tool(
         name = "materialize_recurring",
-        description = "«Ponme al día los recurrentes»: materializa las instancias pendientes de las plantillas recurrentes del usuario del token hasta el último mes cerrado. Idempotente por cursor (repetirla no duplica) y nunca crea fechas futuras.",
-        annotations(title = "Materializar recurrentes", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+        description = "«Ponme al día los recurrentes»: hace converger las instancias de las plantillas recurrentes con los meses que tienen datos reales. Nunca crea fechas futuras. TRES cosas que conviene saber antes de llamarla: (1) el ámbito es LA INSTALACIÓN ENTERA, no solo el usuario del token — toca también las plantillas de los demás miembros del hogar; (2) además de crear, PODA: borra las instancias de los meses que han dejado de tener movimientos reales (el campo `pruned` de la respuesta dice cuántas), así que sí destruye datos; (3) es idempotente por existencia, no por cursor: repetirla converge al mismo estado, pero ese estado depende de qué meses son reales AHORA. Pide confirmación al usuario antes de ejecutarla.",
+        annotations(title = "Materializar recurrentes", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn materialize_recurring(
         &self,
@@ -1576,8 +1858,8 @@ impl FutureFinMcp {
 
     #[tool(
         name = "unreconcile_transfer",
-        description = "Desconcilia un par de transferencia («esto no era un traspaso, es un gasto real»): rompe el enlace de ambas patas — vuelven a contar como gasto/ingreso — y persiste el rechazo para que el pase automático no las re-empareje. Pasa el UUID de cualquiera de las dos patas; devuelve ambas ya sueltas. 400 not_reconciled si el movimiento no tiene contrapartida.",
-        annotations(title = "Desconciliar transferencia", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+        description = "Desconcilia un par de transferencia («esto no era un traspaso, es un gasto real»): rompe el enlace de ambas patas — vuelven a contar como gasto/ingreso — y persiste el rechazo para que el pase automático no las re-empareje. Pasa el UUID de cualquiera de las dos patas; devuelve ambas ya sueltas. 400 not_reconciled si el movimiento no tiene contrapartida. AVISO: desde el chat esto es una PUERTA DE UN SOLO SENTIDO. El rechazo que persiste solo lo limpia volver a conciliar el par a mano, y esa acción no está expuesta como tool: si te equivocas de par, las dos patas cuentan como gasto/ingreso para siempre y en los modos B/C eso desplaza el promedio, el número FIRE y el runway. Confirma con el usuario qué par exacto vas a soltar antes de llamarla.",
+        annotations(title = "Desconciliar transferencia", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn unreconcile_transfer(
         &self,
@@ -1630,7 +1912,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": f.id,
-                "resumen": format!("{} · {} ({:?}){}", f.title, f.expected_amount, f.direction,
+                "resumen": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
                     f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
             }))
         }
@@ -1692,7 +1974,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": f.id,
-                "resumen": format!("{} · {} ({:?}){}", f.title, f.expected_amount, f.direction,
+                "resumen": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
                     f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
             }))
         }
@@ -2088,7 +2370,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_liability",
-        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva por amortización francesa). Mueve la proyección entera.",
+        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva como cuota × nº de pagos pendientes, una SUMA SIN DESCONTAR INTERESES — no es amortización francesa: para una hipoteca a 20 años sale bastante por encima del capital pendiente real, así que si el usuario conoce su capital pendiente, pásalo en `principal` en vez de derivarlo). Mueve la proyección entera.",
         annotations(title = "Crear pasivo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_liability(
@@ -2353,38 +2635,46 @@ impl FutureFinMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
         let run = || -> Result<(Uuid, crate::handlers::allocation_rules::PatchAllocationRuleBody), ApiError> {
-            if p.amount.is_none()
-                && p.cap_kind.is_none()
-                && p.clear_cap.is_none()
-                && p.enabled.is_none()
-            {
+            // Destructuring EXHAUSTIVO y **sin `..`**: si mañana se añade un parámetro, esto deja
+            // de compilar hasta que alguien lo trate. Es la red que faltaba — `cap_value` estaba
+            // declarado en el schema (así que el LLM lo veía y lo mandaba con toda la razón) pero
+            // no participaba ni en la guardia ni en la construcción del cap: con otro campo
+            // presente, la llamada devolvía 200, `antes == despues` y el tope no se ponía.
+            let UpdateAllocationRuleParams {
+                rule_id,
+                amount,
+                cap_kind,
+                cap_value,
+                clear_cap,
+                enabled,
+            } = &p;
+
+            let clearing = *clear_cap == Some(true);
+            if clearing && (cap_kind.is_some() || cap_value.is_some()) {
                 return Err(ApiError::BadRequest(
-                    "provide at least one of amount, cap_kind/cap_value, clear_cap, enabled".into(),
+                    "cap_set_and_clear: provide either a cap or clear_cap, not both".into(),
                 ));
             }
-            if p.clear_cap == Some(true) && p.cap_kind.is_some() {
-                return Err(ApiError::BadRequest(
-                    "provide either a cap or clear_cap, not both".into(),
-                ));
-            }
-            let cap = if p.clear_cap == Some(true) {
+            // Cualquiera de las dos mitades construye el objeto. Media pareja llega así a
+            // `normalize_cap_pair`, que responde `cap_pair_incomplete` — el mismo error que ya
+            // daba el caso simétrico (`cap_kind` sin `cap_value`). Simetría sin código nuevo.
+            let cap = if clearing {
                 Some(serde_json::Value::Null)
-            } else if let Some(kind) = &p.cap_kind {
-                Some(serde_json::json!({"kind": kind, "value": p.cap_value}))
+            } else if cap_kind.is_some() || cap_value.is_some() {
+                Some(serde_json::json!({"kind": cap_kind, "value": cap_value}))
             } else {
                 None
             };
+            // La guardia de patch vacío vive ahora en `patch_allocation_rule_core`, como en el
+            // resto de handlers: un solo sitio para HTTP y MCP.
             Ok((
-                parse_uuid_param("rule_id", &p.rule_id)?,
+                parse_uuid_param("rule_id", rule_id)?,
                 crate::handlers::allocation_rules::PatchAllocationRuleBody {
                     target_asset_id: None,
                     kind: None,
-                    amount: p
-                        .amount
-                        .as_ref()
-                        .map(|a| serde_json::Value::String(a.clone())),
+                    amount: amount.as_ref().map(|a| serde_json::Value::String(a.clone())),
                     cap,
-                    enabled: p.enabled,
+                    enabled: *enabled,
                     notes: None,
                 },
             ))
@@ -2407,6 +2697,134 @@ impl FutureFinMcp {
             let r = patch_allocation_rule_core(&self.state, id.installation_id, id.user_id, rule_id, body)
                 .await?;
             Ok(serde_json::json!({"id": r.id, "antes": before, "despues": r}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_categorization_rule",
+        description = "Corrige una regla de categorización existente: patrón, tipo de coincidencia, banco y asignación (kind + categoría). Tri-estado explícito: clear_source la hace agnóstica del banco, clear_assign_kind/clear_assign_category retiran la asignación; poner y borrar el mismo campo a la vez es ERROR, no se elige por ti. Editar la regla solo afecta a IMPORTS FUTUROS — para reescribir los movimientos que ya existen, usa apply_categorization_rule después. Colisión de (source, pattern) con otra regla → conflict. Si te equivocaste al crearla, corrígela aquí en vez de crear otra encima: las reglas contradictorias se acumulan y ganan por precedencia, no por acierto.",
+        annotations(title = "Editar regla de categorización", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_categorization_rule(
+        &self,
+        Parameters(p): Parameters<UpdateCategorizationRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        // Destructuring EXHAUSTIVO y sin `..`: un parámetro nuevo deja de compilar hasta que
+        // alguien lo mapee. Las guardias de patch vacío y de conflicto `clear_*` NO viven aquí sino
+        // en `patch_rule_core`, para que HTTP y MCP no puedan divergir (la lección de `cap_value`).
+        let UpdateCategorizationRuleParams {
+            rule_id,
+            match_kind,
+            pattern,
+            source,
+            clear_source,
+            assign_kind,
+            clear_assign_kind,
+            assign_category_id,
+            clear_assign_category,
+        } = p;
+        let run = || -> Result<(Uuid, PatchRuleBody), ApiError> {
+            Ok((
+                parse_uuid_param("rule_id", &rule_id)?,
+                PatchRuleBody {
+                    match_kind,
+                    pattern,
+                    source,
+                    clear_source,
+                    assign_kind,
+                    clear_assign_kind,
+                    assign_category_id: parse_opt_uuid_param(
+                        "assign_category_id",
+                        &assign_category_id,
+                    )?,
+                    clear_assign_category,
+                },
+            ))
+        };
+        let (rule_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            patch_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id, body).await
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_categorization_rule",
+        description = "Retira una regla de categorización. NO recategoriza nada: los movimientos que ya tienen categoría la conservan; la regla simplemente deja de aplicarse a los imports futuros. Sin confirm=true devuelve un preview con la regla y su huella ACTUAL — `ya_conformes` son los movimientos que hoy están como esta regla manda (una regla ya aplicada tiene `cambiarian: 0` y aun así gobierna decenas de filas: mira `ya_conformes`, no `cambiarian`). Para corregir el pasado, apply_categorization_rule con otra regla.",
+        annotations(title = "Borrar regla de categorización", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_categorization_rule(
+        &self,
+        Parameters(p): Parameters<DeleteCategorizationRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let rule_id = match parse_uuid_param("rule_id", &p.rule_id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            // Preview vía la core de listado (cero SQL propio); 404 si no es suya.
+            let rule = list_categorization_rules_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                None,
+                0,
+            )
+            .await?
+            .0
+            .into_iter()
+            .find(|r| r.id == rule_id)
+            .ok_or(ApiError::NotFound)?;
+
+            if !p.confirm.unwrap_or(false) {
+                // No existe `transactions.categorization_rule_id`, así que NO se puede saber qué
+                // movimientos categorizó esta regla históricamente — decirlo sería inventar. Lo que
+                // sí es barato y ya está probado es su huella ACTUAL, con el mismo dry-run que usa
+                // el preview de `apply_categorization_rule`: retorna antes del UPDATE y antes de la
+                // invalidación, así que su efecto lateral es cero.
+                let huella = apply_categorization_rule_core(
+                    &self.state,
+                    id.installation_id,
+                    id.user_id,
+                    rule_id,
+                    ApplyScope::All,
+                    None,
+                    true,
+                )
+                .await?;
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_categorization_rule",
+                    "effects": {
+                        "regla": rule,
+                        "huella": {
+                            // `ya_conformes` es la cifra que responde a «¿cuánto gobierna esta
+                            // regla?». `cambiarian` cuenta lo que aún NO ha aplicado, así que una
+                            // regla ya aplicada da 0 y parecería inofensiva.
+                            "ya_conformes": huella.already_correct,
+                            "cambiarian": huella.matched,
+                            "pierde_frente_a_otra_regla": huella.matched_by_other_rule,
+                            "descartados_por_source": huella.skipped_by_source,
+                        },
+                        "nota": "borrar la regla NO recategoriza ningún movimiento: los que ya tienen categoría la conservan. Solo deja de aplicarse a los imports futuros.",
+                    },
+                }));
+            }
+            delete_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id).await?;
+            Ok(serde_json::json!({"id": rule_id, "deleted": true}))
         }
         .await;
         to_tool_result(res)
@@ -2446,7 +2864,7 @@ impl FutureFinMcp {
                     },
                 }));
             }
-            delete_recurring_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id)
+            delete_recurring_rule_core(&self.state, id.installation_id, id.user_id, rule_id)
                 .await?;
             Ok(serde_json::json!({"id": rule_id, "deleted": true}))
         }
@@ -2518,63 +2936,23 @@ impl FutureFinMcp {
                 .map(|v| parse_decimal_param("fire_number_manual_amount", v))
                 .transpose()?;
             patch.taxes_enabled = p.taxes_enabled;
-            // Enums: reusar el Deserialize custom (misma lista de variantes y aliases que HTTP).
-            patch.savings_source = p
-                .savings_source
-                .as_ref()
-                .map(|s| {
-                    serde_json::from_value(serde_json::Value::String(s.trim().to_string()))
-                        .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))
-                })
-                .transpose()?;
+            // Enums y tramos: por los helpers compartidos con `simulate_projection`. La lista de
+            // variantes vive en el `Deserialize` custom del dominio y no se reimplementa aquí —
+            // dos copias se separan sin que ningún test lo note, y la superficie MCP acabaría
+            // aceptando o rechazando valores distintos que HTTP.
+            patch.savings_source = parse_enum_param(&p.savings_source)
+                .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))?;
             patch.income_avg_window_months = p.income_avg_window_months;
             patch.expense_avg_window_months = p.expense_avg_window_months;
-            for (label, src, dst) in [
-                (
-                    "income_avg_window_mode",
-                    &p.income_avg_window_mode,
-                    &mut patch.income_avg_window_mode,
-                ),
-                (
-                    "expense_avg_window_mode",
-                    &p.expense_avg_window_mode,
-                    &mut patch.expense_avg_window_mode,
-                ),
-            ] {
-                if let Some(v) = src.as_ref() {
-                    *dst = Some(
-                        serde_json::from_value(serde_json::Value::String(v.trim().to_string()))
-                            .map_err(|e| ApiError::BadRequest(format!("{label}: {e}")))?,
-                    );
-                }
-            }
-            patch.fire_number_mode = p
-                .fire_number_mode
-                .as_ref()
-                .map(|s| {
-                    serde_json::from_value(serde_json::Value::String(s.trim().to_string()))
-                        .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))
-                })
-                .transpose()?;
-            patch.tax_brackets = p
-                .tax_brackets
-                .as_ref()
-                .map(|brackets| {
-                    brackets
-                        .iter()
-                        .map(|b| {
-                            Ok(crate::handlers::installation::TaxBracket {
-                                up_to: b
-                                    .up_to
-                                    .as_deref()
-                                    .map(|v| parse_decimal_param("tax_brackets.up_to", v))
-                                    .transpose()?,
-                                pct: parse_decimal_param("tax_brackets.pct", &b.pct)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, ApiError>>()
-                })
-                .transpose()?;
+            patch.income_avg_window_mode =
+                parse_enum_param(&p.income_avg_window_mode)
+                    .map_err(|e| ApiError::BadRequest(format!("income_avg_window_mode: {e}")))?;
+            patch.expense_avg_window_mode =
+                parse_enum_param(&p.expense_avg_window_mode)
+                    .map_err(|e| ApiError::BadRequest(format!("expense_avg_window_mode: {e}")))?;
+            patch.fire_number_mode = parse_enum_param(&p.fire_number_mode)
+                .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))?;
+            patch.tax_brackets = parse_tax_brackets(&p.tax_brackets)?;
             Ok(patch)
         };
         let patch = match build() {
@@ -2700,7 +3078,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "delete_asset",
-        description = "Borra un activo del hogar. Sin confirm=true devuelve un preview con los efectos colaterales: los movimientos y lotes de import vinculados quedan desvinculados (SET NULL), no se borran. Mueve la proyección entera.",
+        description = "Borra un activo del hogar. Sin confirm=true devuelve un preview con los efectos colaterales. Los movimientos y lotes de import vinculados quedan DESVINCULADOS (SET NULL), no se borran. Pero las reglas de reparto que apuntan a este activo SÍ se borran con él, y eso no tiene vuelta atrás: `allocation_rules_deleted` dice cuántas y `allocation_remainder_rules_deleted` cuántas de ellas eran el sumidero de la cascada (`remainder` sin tope). Si ese número no es cero, dilo explícitamente antes de confirmar: a partir del borrado el sobrante mensual se reparte de otra manera. Mueve la proyección entera.",
         annotations(title = "Borrar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn delete_asset(
@@ -2893,7 +3271,10 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let view = resolve_view(&p.view);
+        let view = match resolve_view(&p.view) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
         to_tool_result(
             list_imports_core(&self.state.pool, id.installation_id, id.user_id, view).await,
         )

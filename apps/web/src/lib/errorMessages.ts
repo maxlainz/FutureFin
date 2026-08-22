@@ -34,8 +34,12 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Algo ha fallado en el servidor. Inténtalo de nuevo en unos segundos.",
 
   // ── Generados por el propio cliente, no por la API ────────────────────────────────
+  // No vienen del fixture del backend: van declarados en `CLIENT_ONLY` dentro de
+  // `errorMessages.test.ts`, que si no los denunciaría como entradas huérfanas.
   empty_json_body:
     "La respuesta del servidor no es válida. Comprueba que la API está en marcha.",
+  network_error:
+    "No se ha podido conectar con el servidor. Comprueba tu conexión y que FutureFin sigue en marcha.",
 
   // ── Cuenta y acceso ───────────────────────────────────────────────────────────────────
   username_taken: "Ese nombre de usuario ya está registrado. Elige otro.",
@@ -55,6 +59,12 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Otro registro ha creado el hogar justo antes que el tuyo. Vuelve a intentarlo.",
   membership_role_invalid:
     "Ese rol no existe. Elige propietario, miembro o visor.",
+  password_unchanged:
+    "La contraseña nueva es la misma que la actual. Elige una distinta.",
+  current_password_invalid:
+    "La contraseña actual no es correcta. Vuelve a escribirla.",
+  last_owner:
+    "El hogar no puede quedarse sin ningún propietario. Nombra antes a otro propietario.",
 
   // ── Copia de seguridad (.ffbackup) ────────────────────────────────────────────────────
   backup_wrong_password:
@@ -71,6 +81,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La copia declara un formato que FutureFin no reconoce. Usa otra copia.",
   backup_crypto_params_unsupported:
     "La copia está cifrada con un método que este servidor no reconoce. Comprueba que la generó FutureFin.",
+  backup_file_too_large:
+    "El contenido de la copia es demasiado grande para importarlo. Si la generó FutureFin, avísanos.",
   backup_payload_malformed:
     "El contenido de la copia no tiene la forma esperada. El archivo está dañado; usa otra copia.",
   backup_category_reference_missing:
@@ -93,6 +105,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "El CSV no se ha podido leer. Compruébalo y vuelve a exportarlo de tu banco.",
   csv_date_invalid:
     "Hay una fecha que no se entiende en el CSV. Exporta el extracto otra vez sin modificarlo.",
+  csv_amount_ambiguous:
+    "Un importe del archivo usa el punto como separador decimal y este formato espera coma. Comprueba que el archivo es del banco que has elegido.",
   csv_amount_invalid:
     "Hay un importe que no se entiende en el CSV. Exporta el extracto otra vez sin modificarlo.",
   currency_mismatch:
@@ -110,6 +124,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
   transactions_not_found:
     "Alguno de los movimientos ya no existe, así que no se ha cambiado nada. Recarga la lista e inténtalo otra vez.",
   amount_zero: "El importe no puede ser cero.",
+  amount_sign_mismatch:
+    "El signo del importe no cuadra con el tipo: los ingresos van en positivo, y los gastos y los traspasos a ahorro en negativo.",
+  op_date_in_future:
+    "No puedes apuntar un movimiento con fecha futura. Si es algo que aún no ha pasado, va en «Próximos».",
   batch_empty: "No has seleccionado ningún movimiento. Elige al menos uno.",
   batch_too_large:
     "Has seleccionado demasiados movimientos de una vez. Divídelos en tandas más pequeñas.",
@@ -154,6 +172,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La regla necesita saber qué asignar. Elige gasto, ingreso o ahorro.",
   rule_assign_category_requires_kind:
     "Para que la regla asigne una categoría hay que indicar también el tipo.",
+  rule_patch_empty:
+    "No has indicado ningún cambio en la regla. Modifica algo antes de guardar.",
+  rule_patch_conflict:
+    "Estás poniendo y quitando el mismo dato de la regla a la vez. Elige una de las dos cosas.",
   rule_not_applicable:
     "Esa regla no asigna ningún tipo, así que no se puede aplicar a los movimientos que ya tienes. Edítala primero.",
   apply_to_existing_invalid:
@@ -258,6 +280,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "El tipo de tope no es válido. Usa un importe, meses de gasto o un múltiplo del ingreso.",
   cap_pair_incomplete:
     "El tope está a medias. Indica el tipo y su valor, o quita los dos.",
+  cap_set_and_clear:
+    "Estás poniendo y quitando el tope a la vez. Elige una de las dos cosas.",
   cap_type_invalid:
     "El tope no tiene el formato esperado. Vuelve a configurarlo desde el formulario.",
   target_asset_not_found:
@@ -284,6 +308,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa ventana del promedio no es válida. Elige 3, 6 o 12 meses, el año en curso o todo el histórico.",
   avg_window_out_of_range:
     "La ventana del promedio está fuera de rango. Elige un número de meses admitido.",
+  income_avg_window_mode:
+    "Esa forma de contar los meses del promedio de ingresos no es válida. Elige entre los últimos meses con datos o los últimos meses del calendario.",
+  expense_avg_window_mode:
+    "Esa forma de contar los meses del promedio de gastos no es válida. Elige entre los últimos meses con datos o los últimos meses del calendario.",
   avg_months_out_of_range:
     "El número de meses del promedio está fuera del rango permitido.",
   tax_brackets_empty:
@@ -368,6 +396,17 @@ export const ERROR_MESSAGES: Record<string, string> = {
   asset_not_in_scope:
     "Uno de los activos de la simulación no existe o no se ve en esta vista. Recarga la página.",
 
+  // ── Parámetros de consulta ────────────────────────────────────────────────────────────
+  // La app nunca los provoca: manda siempre valores válidos. Existen porque desde 4.0.0 la API
+  // rechaza el valor desconocido en vez de caer al default en silencio, y alguien que llame a la
+  // API a mano (o un agente por MCP) sí puede verlos.
+  invalid_view: "Esa vista no existe. Elige «solo lo mío» o «todo el hogar».",
+  invalid_resolution:
+    "Esa resolución no es válida. El detalle del gráfico puede ser semanal o diario.",
+  invalid_density: "Esa densidad de la serie no es válida. Puede ser mensual o híbrida.",
+  limit_out_of_range:
+    "El número de resultados por página está fuera del rango permitido.",
+
   // ── Tokens, conexiones y sistema ──────────────────────────────────────────────────────
   token_label_length: "El nombre del token debe tener entre 1 y 64 caracteres.",
   token_expiry_out_of_range:
@@ -401,6 +440,16 @@ const STATUS_MESSAGES: Record<number, string> = {
 };
 
 const FALLBACK = "Algo ha fallado. Inténtalo de nuevo en unos segundos.";
+
+/**
+ * Un 401 al ENVIAR el formulario de acceso no es una sesión caducada: es que el usuario o la
+ * contraseña no cuadran. La frase genérica de `unauthorized` («Tu sesión ha caducado. Vuelve a
+ * iniciar sesión.») dejaba a quien se equivocaba tecleando mirando un mensaje que no describía
+ * su problema y que le pedía hacer exactamente lo que estaba haciendo.
+ *
+ * Deliberadamente NO distingue cuál de los dos falla: decirlo confirmaría qué usuarios existen.
+ */
+export const LOGIN_INVALID_CREDENTIALS = "Usuario o contraseña incorrectos.";
 
 /**
  * Traduce un error de la API a la frase que ve el usuario. Prioridad: código estable → código de

@@ -12,7 +12,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 enseñar. La app ya se puede usar recién instalada: un hogar nuevo nace con categorías, te recibe
 un asistente que pregunta lo imprescindible, y cada pantalla vacía explica qué va ahí. Los errores
 te hablan en español. La divisa se puede cambiar. Borrar algo pregunta antes. Ajustes está
-reorganizado.
+reorganizado. **Ya puedes cambiar tu contraseña y retirarle el acceso a alguien del hogar**: dos
+cosas que la documentación daba por hechas y que no existían.
+
+Y antes de publicar se auditó todo —seguridad, matemática, contrato de la API, interfaz, CI—, de
+donde salieron 28 arreglos. El más caro para ti: **teclear `250.000` guardaba 250 €**, sin avisar.
+Están todos contados más abajo.
 
 **Lo único que puede requerir acción por tu parte**: si tu instalación usa una **base de datos
 externa** (`DATABASE_URL` apuntando fuera del contenedor), 4.0.0 ya no la soporta. Tus datos no
@@ -61,6 +66,377 @@ El escenario 3 de CI dejaba de tener sentido —probaba la automigración— y p
 nueva: con `DATABASE_URL` heredada y volumen vacío el contenedor **aborta sin inicializar nada** y
 el volumen se queda intacto. El escenario 2 mantiene la ruta 2.x → volumen reutilizado, pero su
 paso intermedio ahora comprueba el rechazo en vez del modo compatibilidad.
+
+### Auditoría completa previa a la publicación: 28 hallazgos, arreglados
+
+Antes de taguear 4.0.0 se auditó el repositorio entero —seguridad, matemática del motor,
+contrato de la API y del MCP, frontend, CI y tests— con la app ya pública. Salieron 28 cosas
+que había que arreglar antes de publicar la imagen. Ninguna rompía un test: casi todas
+producían números plausibles o mensajes creíbles.
+
+#### Tus datos financieros estaban publicados en los issues
+
+Cinco issues cerrados eran auditorías del servidor MCP hechas contra una instalación real, y
+publicaban patrimonio neto, ingreso mensual, tasa de ahorro, deuda viva, el nombre de un
+prestamista y comercios concretos. Cerrado no es privado. Se borraron, y con ellos las
+referencias del código y del propio CHANGELOG. Se comprobaron además los 2.029 objetos del
+historial de git: sin IBAN, sin tarjetas, sin correos.
+
+#### Un importe con separador de miles se guardaba mil veces más pequeño
+
+Teclear `250.000` en el valor de un activo —escritura española normal— lo guardaba como
+**250 €**. Sin error: el formulario se cerraba y el patrimonio, la proyección, el número FIRE
+y el runway quedaban mal en silencio. El conversor solo cambiaba la primera coma por un punto
+y dejaba los puntos intactos, y `250.000` es un decimal válido para el servidor. El asistente
+de primera vez llegaba a sugerirlo: su ejemplo era literalmente `1.500`.
+
+Ahora la app entiende la escritura española completa (`1.234,56`, `250.000`) y **rechaza lo
+ambiguo en vez de adivinar**, que es exactamente lo que causó el fallo.
+
+#### La proyección de un miembro se le servía a otro
+
+La memoria intermedia que evita recalcular la proyección guardaba una sola copia por hogar,
+pero la respuesta lleva datos de **quien la pide**: su fecha de nacimiento, su horizonte y su
+edad de jubilación. El primer miembro que abría la proyección dejaba la suya cacheada para
+todos. En un hogar de dos personas con edades distintas, la segunda veía el horizonte de la
+primera — y si el suyo era más largo, la app podía decirle «no llegas a jubilarte» sobre un
+plan que sí llega.
+
+#### Si ya has llegado a tu número FIRE, la app decía que seguías aportando
+
+La pantalla de Activos publicaba una aportación mensual («aportas 2.000 €») para un hogar que
+la simulación, en ese mismo mes, está **vendiendo** activos para vivir. Signo contrario, y
+sostenido en todo el horizonte. La función que calcula la aportación del primer mes no miraba
+el objetivo FIRE; el motor sí. No es un caso raro: es el estado final del público de la app.
+
+#### `?months` no múltiplo de 12 perdía el final de la gráfica
+
+Con densidad `hybrid` la serie solo emitía múltiplos de 12, así que pedir 100 meses devolvía
+96: los cuatro últimos no existían, y con ellos desaparecía el punto que cualquiera lee como
+«patrimonio al final». Invisible desde la web, pero la herramienta `get_projection` del MCP
+usa siempre esa densidad.
+
+#### Faltaban dos palancas que la documentación daba por hechas
+
+**No se podía cambiar la contraseña.** Una cookie robada, una sesión abierta en un ordenador
+compartido o una filtración en otro servicio daban treinta días de acceso sin que pudieras
+hacer nada. Ahora `Ajustes` permite cambiarla, y hacerlo **cierra las demás sesiones y revoca
+los tokens de API y las conexiones OAuth**: si cambias la contraseña por miedo, dejar viva una
+credencial que no caduca haría el cambio decorativo. *Aviso*: un `.ffbackup` exportado antes
+sigue necesitando la contraseña con la que se generó.
+
+**No se podía retirar el acceso a nadie.** Aprobar al usuario equivocado concedía acceso
+permanente a todas las finanzas del hogar; el único remedio era entrar en la base de datos a
+mano. Ahora el propietario puede ver los miembros, cambiarles el rol y revocarlos, con la
+garantía de que el hogar nunca se queda sin propietario. Revocar **no borra los datos** de esa
+persona: si se la vuelve a aprobar, los recupera.
+
+#### Un fichero de copia de seguridad podía tumbar el servidor
+
+El manifiesto de un `.ffbackup` viaja sin firmar, y de él salían los parámetros de la función
+que deriva la clave. Un fichero de 200 bytes podía pedir 8 GB de memoria y llevarse por
+delante el contenedor entero —con la base de datos dentro— desde el endpoint de
+previsualización, que ni siquiera escribe. Se acotan esos parámetros y el tamaño de lo
+descomprimido. En la misma línea, el cifrado de contraseñas ya no bloquea el servidor: cuatro
+peticiones simultáneas de registro bastaban para dejar la aplicación sin responder.
+
+#### El asistente conversacional creía cosas falsas
+
+El servidor MCP describe cada herramienta al modelo, y varias descripciones mentían.
+`get_summary` afirmaba una igualdad entre dos cifras que no se cumple con ninguna hipoteca.
+`materialize_recurring` se presentaba como inocua y **borra movimientos**, del hogar entero,
+no solo tuyos — con la etiqueta que los clientes usan para decidir si te piden permiso puesta
+en «no destructiva». `unreconcile_transfer` es irreversible desde el chat y decía no serlo. Y
+`create_liability` prometía amortización francesa cuando suma cuotas sin descontar intereses:
+una hipoteca de 850 €/mes hasta 2049 entraba como 234.600 € en vez de unos 185.000.
+
+**Breaking de contrato**: el campo `months_with_data` de `savings_income_basis` /
+`savings_expense_basis` pasa a llamarse **`avg_months`** en `/v1/summary`,
+`/v1/projection/series` y `simulate_projection` — significaba lo contrario que el campo del
+mismo nombre de `/v1/transactions/summary`. La previsualización de `delete_asset` añade
+`allocation_rules_deleted` y `allocation_remainder_rules_deleted`: borrar un activo **borra**
+las reglas de reparto que apuntan a él, y era el único efecto irreversible que no se contaba.
+`simulate_projection` acepta `annual_inflation_assumption_percent` como alias y rechaza los
+campos desconocidos en vez de ignorarlos.
+
+#### Un tag mal puesto podía degradar instalaciones ajenas
+
+`:latest` se movía **siempre**, también al reconstruir una versión antigua. Con
+`FUTUREFIN_TAG:-latest` en el compose, quien actualiza automáticamente habría recibido una
+versión anterior sobre un volumen ya migrado. Ahora `:latest`, `:X` y `:X.Y` solo se mueven si
+el tag es el más alto del repositorio, y antes de construir se comprueba que el tag coincide
+con la versión del binario y que existe su sección en este archivo. Además, un `pg_upgrade`
+interrumpido en el peor momento ya se puede reanudar: el código que lo hacía era inalcanzable
+justo en el único caso para el que existía.
+
+#### Y en la interfaz
+
+Un fallo del servidor al cargar la proyección no se veía (la pestaña se quedaba en blanco para
+siempre) o se veía en inglés; con la API caída salía «Failed to fetch»; una sesión caducada a
+media navegación no te devolvía al acceso; una contraseña incorrecta decía «tu sesión ha
+caducado» en la pantalla donde por definición no hay sesión; el guardado automático de Ajustes
+daba por guardado lo que había fallado; guardar cualquier ajuste borraba lo que estuvieras
+tecleando en inflación; mover un movimiento a otro mes lo dejaba en la tabla del mes viejo; y
+con la API caída cuatro pantallas te acusaban de haber borrado tus categorías.
+
+#### Lo que queda escrito para que no vuelva a pasar
+
+Tests de regresión nuevos para todos los hallazgos con consecuencia numérica, cada uno
+verificado en rojo antes de arreglar. Una gate nueva (`tests/openapi_contract.rs`) que valida
+el propio documento OpenAPI: no había ninguna, y por eso la especificación pública podía
+declarar la API entera como si no necesitara autenticación —81 operaciones— sin que nada
+protestara.
+
+### Auditoría del servidor MCP: once hallazgos, arreglados
+
+Una auditoría caja-negra del servidor MCP contra una instalación de ejemplo ejercitó las 50 herramientas
+y encontró once cosas: cifras que no cuadraban entre sí, escrituras que se aceptaban sin validar,
+y campos cuyo nombre invitaba a leerlos al revés. Nada de esto afecta a quien usa la app por la
+web; afecta a quien le pregunta por sus finanzas a Claude. Se arreglan todos antes de publicar,
+porque 4.0.0 es la única versión en la que se puede cambiar el contrato sin romperle nada a nadie.
+
+#### Un gasto se podía apuntar en positivo, y eso adelantaba la fecha de jubilación
+
+Los importes van firmados: los ingresos en positivo, los gastos y los traspasos a ahorro en
+negativo. Esa regla la aplicaba **la pantalla**, no el servidor — así que apuntar un gasto por la
+API o por Claude con el importe en positivo se aceptaba sin rechistar. Y como el total de gastos se
+calcula cambiándole el signo a la suma, un solo gasto positivo dejaba el **gasto total del mes en
+negativo**. Si tu ahorro sale de los movimientos reales (modos B y C), ese mes entraba en el
+promedio que alimenta la proyección: la tasa de ahorro subía, la fecha de jubilación se adelantaba,
+y nada lo señalaba.
+
+Ahora el servidor lo rechaza al apuntar un movimiento y al cambiarle el importe. **Reclasificar
+sigue siendo libre**, y es deliberado: una devolución llega del banco en positivo y pasarla a
+«gasto» es lo correcto —netea contra el gasto del mes—, así que ni la edición del tipo, ni la
+recategorización en lote, ni las reglas lo impiden. El importador de CSV y la restauración de una
+copia `.ffbackup` tampoco validan nada: traen el signo real del banco, y una copia que se niega a
+restaurar es peor que una fila rara.
+
+#### No se podía corregir una regla de categorización desde el chat
+
+Desde la 3.8.0 podías pedirle a Claude que creara una regla («todo lo que ponga MERCADONA es
+Supermercado») y que la aplicara a cientos de movimientos de golpe. Lo que **no** podía era
+corregirla ni retirarla — así que la única salida era crear otra encima. En una instalación de
+ejemplo el resultado se ve enseguida: tres reglas contradictorias para el mismo comercio, y un
+mismo cargo repartido entre Suscripciones, Hogar y Otros.
+
+Ahora existen las dos herramientas que faltaban. Borrar una regla pide confirmación y antes enseña
+**cuántos movimientos gobierna hoy** — y deja claro que borrarla **no descategoriza nada**: lo que
+ya está categorizado se queda como está, la regla simplemente deja de aplicarse a los imports
+futuros.
+
+De paso, editar una regla dejó de aceptar dos cosas que antes pasaban en silencio: mandar un cambio
+vacío (ahora avisa de que no has cambiado nada) y poner y quitar el mismo dato a la vez (antes ganaba
+el «quitar» sin decírtelo).
+
+#### El pie del gráfico decía «prom. 0 meses»
+
+Encontrado de camino, no estaba en los issues. Desde la 3.9.0 el gráfico de proyección leía un dato
+que el servidor había dejado de enviar al hacerse configurables las ventanas del promedio, así que
+en los modos que usan tus movimientos reales el pie ponía siempre **«prom. 0 meses»**. Ahora dice
+los meses de verdad, y si el ingreso y el gasto promedian ventanas distintas, dice las dos.
+
+#### Un mes excelente se leía como una pérdida
+
+En la pestaña Movimientos, el tooltip de la gráfica mensual decía «Neto». Ese neto **incluía el
+dinero que moviste a ahorro o inversión**, así que un mes en el que ingresaste 2.400 €, gastaste
+1.800 € y aportaste 1.500 € a tu cartera salía como **−900 €**. Es aritméticamente correcto —esa
+es la caja que se movió— pero se lee justo al revés de lo que pasó.
+
+Peor: la comparativa mensual tenía otra cifra llamada también «neto» que **no** incluía el ahorro.
+Dos números distintos con el mismo nombre.
+
+Ahora hay dos cifras y cada nombre dice su fórmula: **«Ingresos − gastos»** (lo que quedó tras
+consumir, que es lo que responde a «¿fue buen mes?») y **«Variación de caja»** (incluye los
+traspasos). El tooltip enseña las dos, la primera delante, y la palabra «Neto» a secas desaparece de
+la interfaz. La primera coincide al céntimo con la de la comparativa.
+
+**API breaking**: en `GET /v1/history/cashflow` y en la tool `get_history_cashflow`, el campo
+`net` de cada mes pasa a llamarse **`cash_delta`** —que es lo que siempre fue: la caja que se
+movió, traspasos incluidos— y se añade **`income_minus_expense`**, que sí responde a «¿cuánto
+me quedó?» y coincide con `totals.net_actual` de `get_transactions_summary`. El nombre viejo
+no se conserva a propósito: un campo llamado `net` que significa dos cosas distintas en dos
+respuestas es exactamente lo que hacía que un mes excelente se leyera como una pérdida, y
+mantener el alias habría dejado vivo el malentendido.
+
+#### Las reglas de categorización se enviaban todas de golpe
+
+Es la única lista que **crece con el uso**: cada import aprende una regla por concepto nuevo, así
+que una instalación con dos años de extractos tenía ya un centenar. Preguntarle a Claude por ellas
+le gastaba una parte notable de su memoria de trabajo sin que nadie lo pidiera. Ahora vienen por
+páginas, con el total y un aviso de si quedan más. La API web sigue devolviéndolas todas: ahí no
+molestan y cambiar el formato habría roto la pantalla.
+
+#### «No llegas a jubilarte» y «no te lo puedo decir» se veían igual
+
+Cuando el horizonte de la proyección no alcanzaba el objetivo, los campos de la jubilación
+**desaparecían** de la respuesta en vez de venir vacíos. Para quien la lee eso es ambiguo: no
+distingue «no se alcanza» de «esta versión no publica el dato». Ahora vienen siempre, vacíos cuando
+no hay cruce — que es lo que ya hacía el simulador, así que las dos superficies dejan de
+contradecirse. Y el objetivo FIRE dice en su descripción que está **en euros de hoy**: el objetivo
+del año en que te jubiles es bastante mayor, y el nombre solo no lo dejaba claro.
+
+De paso se ata algo que se cumplía por casualidad: la serie del objetivo FIRE se alinea con la del
+patrimonio **por posición**, y las dos se construían por caminos distintos que coincidían de milagro.
+Ahora la segunda se deriva de la primera, así que no pueden desalinearse.
+
+#### Las herramientas de escritura contestaban en inglés
+
+Crear o editar un flujo planificado devolvía `Coche · 123.45 (Outflow)` —el nombre interno del
+código— mientras leerlo devolvía `outflow`. Dos formas del mismo valor en el mismo sitio. Ahora hay
+una.
+
+#### Cifras con veintidós decimales
+
+Preguntarle a Claude por tu patrimonio a treinta años devolvía
+`69946992.976753373554690255548 €`. No era un error de cálculo —el número es correcto— sino de
+presentación: la proyección compone un interés mensual que sale de una raíz duodécima, y nadie
+recortaba el resultado antes de mandarlo. Además de ruido, empujaba a presentar cifras con una
+precisión que no existe.
+
+Los importes salen ahora con **cuatro decimales**, la misma escala que usa la base de datos. El
+recorte se aplica solo a la cifra que se envía, nunca a la que entra en el cálculo: el objetivo FIRE
+es también un número interno del motor y redondearlo movería la fecha de jubilación. Con el mismo
+arreglo se van dos rarezas: una categoría sin movimientos publicaba su importe como `-0`, y la lista
+de hitos mezclaba `25000.0` con `50000` y `100000`.
+
+#### Poner un tope a una regla de reparto podía no hacer nada, y decir que sí
+
+Pedirle a Claude «ponle un tope de 99.999 € a la cartera» devolvía **éxito** y no cambiaba nada: el
+tope se manda en dos mitades —el tipo y el valor— y si solo llegaba el valor, se descartaba por el
+camino sin que nada lo notara. El caso simétrico (solo el tipo) sí daba error, así que la mitad de
+las veces funcionaba y la otra mitad mentía.
+
+Ahora cualquiera de las dos mitades a solas da el mismo error, y poner y quitar el tope a la vez
+también. La causa de fondo se arregla en su sitio: la comprobación de «no me has pedido cambiar
+nada» estaba escrita a mano en la capa de Claude en vez de vivir en el código compartido con la
+API, y ahí es donde se olvidó el campo. Ahora vive donde el resto, y el compilador se niega a
+construir el proyecto si alguien añade un campo nuevo y no lo tiene en cuenta.
+
+#### Se podían apuntar movimientos con fecha futura
+
+`2099-12-31` se aceptaba, y el listado de meses lo publicaba como `2099-12`, **mes cerrado y con
+datos**. Un movimiento con fecha futura no es un gasto, es un plan: para eso está «Próximos». Ahora
+la fecha no puede pasar de hoy, ni al apuntar ni al editar, y el selector de fecha del formulario de
+edición tiene el mismo tope que ya tenía el de alta.
+
+#### La curva del pasado no llegaba a tus propias fotos
+
+Si guardabas una foto de tu patrimonio este mes, la curva histórica **no llegaba hasta ella**: podía
+quedarse más de mil euros por debajo de un dato que tú mismo habías metido hoy. Y un activo que
+aparecía por primera vez en la foto más reciente salía valiendo **cero en toda la gráfica**.
+
+Los dos síntomas eran la misma causa: el último punto de la curva se calculaba a **día 1 del mes**,
+no a día de hoy. El mes en curso está a medias, así que se evalúa en la fecha de hoy — igual que ya
+hacía el detalle fino del cash-flow. La curva ahora termina exactamente donde dice tu última foto, y
+coincide con el patrimonio que ves en el Resumen. En la web no cambia nada visible: la gráfica ya
+tomaba el punto del mes actual de la proyección.
+
+De paso, algo que solo veía quien pregunta por Claude: si nunca has fotografiado tus deudas, el
+patrimonio histórico no las resta, y un cero era indistinguible de «no debo nada». La cifra sigue
+siendo la misma —el histórico es lo que tú fotografiaste— pero ahora la respuesta dice cuál de las
+dos cosas es.
+
+#### Dos cifras de ahorro sin decir cuál es cuál
+
+El resumen que Claude recibe trae **dos** ahorros mensuales, y no son intercambiables: uno es el
+ahorro real del modo que tengas activo —el que usa la proyección— y el otro es siempre el que sale
+de tu presupuesto, que existe solo para poder decirte «vas por encima del plan». En el modo por
+defecto valen lo mismo; en los modos que usan tus movimientos reales pueden diferir un 14 %. Nada lo
+explicaba, así que elegir el equivocado desplazaba la respuesta.
+
+No cambia ningún cálculo: cambia lo que la herramienta dice de sí misma. Ahora nombra las dos, dice
+cuál usa el motor, y cuál es solo el contraste con el plan. En la misma línea, dos aclaraciones más:
+el objetivo FIRE se devuelve **en euros de hoy** (el del año en que te jubiles es bastante mayor), y
+poner la tasa de retirada a cero no es un escenario conservador — es «jamás», y anula el objetivo
+entero.
+
+#### Un filtro de vista mal escrito devolvía los datos de todo el hogar
+
+`?view=` aceptaba **cualquier** valor y, si no era exactamente `mine`, servía el hogar completo sin
+decir nada. La app nunca lo notó —manda siempre `mine` o nada—, pero un asistente que escribiera
+`"MINE"` en mayúsculas recibía los movimientos de todos los miembros creyendo haber pedido solo los
+suyos, y respondía sobre ellos. No era un agujero de permisos (cualquier miembro puede pedir el
+hogar entero a la cara, y siempre ha podido), pero sí una respuesta sobre gente distinta de la que
+se preguntó, sin ninguna señal.
+
+Ahora `view` admite `mine`, `household` o nada, y **rechaza el resto**. Dos parámetros más tenían el
+mismo defecto y van con él: `resolution` del cash-flow (pedir `hourly` devolvía un gráfico semanal
+diciendo «semanal») y `density` de la proyección (pedir una densidad inexistente devolvía la serie
+completa, diez veces más grande que la pedida).
+
+La causa de fondo era la duplicación: `/v1/projection/series` tenía **su propia copia** del parseo
+en vez de usar el compartido, y por eso el arreglo se le habría escapado. Esa copia se ha borrado.
+Regresión sobre las 14 rutas con `?view=`: `apps/api/tests/query_param_validation.rs`.
+
+### Simular escenarios: la herramienta solo sabía empeorar el plan
+
+`simulate_projection` es con lo que se contesta «¿y si…?» sobre tu plan. Hasta ahora solo respondía
+bien a «¿y si gasto más?»: los tres ajustes mensuales rechazaban cualquier valor negativo, no había
+forma de tocar una categoría concreta, ni de cambiar la fuente del ahorro, ni de ponerle fecha a un
+cambio, ni de tocar el ingreso, ni de comparar dos escenarios de una vez. Y la cifra final llegaba
+en euros nominales a décadas vista, que no dicen nada.
+
+De esa lista, esta versión cierra **los deltas negativos y los ejes de `fire_settings`**. Siguen
+pendientes, dichos a las claras: recortar una categoría concreta, ponerle fecha de inicio o fin a
+un cambio, tocar el ingreso, y comparar varios escenarios en una sola llamada.
+
+**La descripción de la herramienta era incorrecta, no solo incompleta.** Decía que el gasto extra
+«mueve también el target FIRE», y eso solo es cierto con el número FIRE calculado por gasto anual:
+si lo calculas por ingreso actual o pones un importe fijo, el objetivo no mira el gasto y el delta
+sale 0. Quien lo leía veía un cero y pensaba en un fallo. Ahora la descripción condiciona esa frase
+al modo, y cada lado de la respuesta dice con qué modo se calculó.
+
+**Los dos mandos que eran el mismo.** «Ahorro extra» y «ajuste de caja» escriben la misma variable
+con el signo cambiado, así que pedir 40 € de ahorro extra es exactamente lo mismo que un ajuste de
+caja de −40 €. Eso ya funcionaba, pero no estaba dicho en ninguna parte — y tampoco lo estaba su
+consecuencia incómoda: con cualquiera de los dos, los deltas de gasto, neto, tasa de ahorro y
+runway salen **cero exacto**, porque un ajuste de caja entra en la caja del mes y no en la base de
+gasto. Media respuesta a cero sin explicación parecía un error; ahora se dice que es el contrato, y
+se señala cuál es el eje que sí mueve esas cifras.
+
+Además, la cota «cero o más» de esos dos ejes vivía solo en la prosa de la descripción. Ahora viaja
+también en el esquema de la herramienta, donde un cliente la lee como restricción y no como texto.
+
+**Cada lado dice ahora con qué se calculó.** La simulación devolvía cifras sin decir de dónde
+salían, y eso convertía respuestas correctas en aparentes fallos. El caso claro: si calculas tu
+número FIRE con un importe fijo, ningún cambio de gasto puede moverlo — el delta del objetivo sale
+0 y es exacto, pero sin saber el modo parece que la herramienta ignoró lo que le pediste. Ahora
+cada lado devuelve el modo del número FIRE, la fuente del ahorro que acabó usando, sobre cuántos
+meses reales promedió cada mitad, el SWR y la inflación efectivos, y las tres bases de gasto e
+ingreso con las que trabajó. Cuando no hay objetivo FIRE, dice **por qué** no lo hay —importe
+manual sin poner, la pensión ya cubre el gasto, o SWR a cero— en vez de devolver tres huecos sin
+causa. Seis de esos valores ya se calculaban por dentro y se tiraban.
+
+**La cifra final ya se puede leer.** El patrimonio al final de la simulación llegaba en euros
+nominales de dentro de cuarenta o cincuenta años, que es una cifra grande y vacía. Ahora viene
+acompañado del mismo importe **en euros de hoy**, descontada la inflación que se haya asumido en
+ese lado. Si no asumes inflación, las dos cifras son idénticas.
+
+**Ahora se puede preguntar «¿y si cambio de forma de calcular?» sin cambiarla.** De toda tu
+configuración FIRE, lo único que la simulación dejaba tocar era la tasa de retirada segura. Todo lo
+demás —de dónde sale el ahorro (tu presupuesto o tus movimientos reales), cómo se fija el número
+FIRE, si cuentan los impuestos, sobre cuántos meses se promedia cada lado— había que **guardarlo**
+para poder verlo, y luego deshacerlo. Ahora se simula sin tocar nada.
+
+Simular un cambio de estos usa exactamente el mismo código que hacerlo de verdad, para que lo que
+te enseña la simulación sea lo que pasará si lo guardas. Y si pides promediar tus movimientos reales
+pero no hay meses con datos suficientes, la respuesta te dice que acabó usando el presupuesto en
+lugar de devolverte en silencio el mismo escenario de partida.
+
+De paso: dos mensajes de error de los ajustes del promedio se devolvían sin traducir. Ya están en
+español.
+
+**Ya se puede simular un recorte.** Era el problema de fondo: los tres ajustes mensuales
+rechazaban cualquier valor negativo, así que la pregunta más frecuente que existe —«¿cuánto
+adelantaría mi jubilación si gasto 200 menos al mes?»— no se podía hacer. Ahora el gasto mensual
+extra admite signo, y un recorte mueve todo lo que movía un aumento: gasto total, ahorro neto, tasa
+de ahorro, runway, objetivo FIRE y fecha de jubilación.
+
+Si pides un recorte mayor que tu gasto, no se rechaza: la base se queda en cero y la respuesta dice
+en qué cifra quedó, para que veas cuánto se aplicó de verdad. Con gasto cero y el número FIRE
+calculado por gasto anual no hay objetivo que alcanzar — y también eso se dice, en lugar de
+devolver huecos.
 
 ### La app no se podía usar recién instalada
 
@@ -149,19 +525,11 @@ va a **Ajustes → Plan**, donde está el ajuste del que habla.
 objetivo manual, mientras el pie del panel seguía prometiendo «Guardado automático». El usuario
 movía el control, leía que se había guardado, y se iba con el cambio perdido. Ahora sale un aviso.
 
-### Fixed — la contraseña equivocada de un backup decía «tu sesión ha caducado»
-
-`CryptoError::Decrypt` mapeaba a `Unauthorized` (401), que con el catálogo español se habría leído
-como «Tu sesión ha caducado. Vuelve a iniciar sesión» — y habría mandado al usuario a reiniciar
-sesión en vez de reescribir la contraseña del fichero, que es el error más frecuente de todo el
-flujo de importación. Ahora es **400 `backup_wrong_password`**: la sesión es válida; lo que no
-cuadra es la contraseña del archivo.
-
 ### CI: lo que nunca se ejecutaba, y una limpieza que era un no-op por accidente
 
 CI corría `cargo build`, los tests del engine, typecheck y build de la web, más el escenario
 Docker. **No corría** ESLint, ni Vitest, ni los tests de integración contra Postgres — que son
-**la mayor parte de la suite**: 447 de los tests del proyecto. Con colaboradores externos eso no
+**la mayor parte de la suite**. Con colaboradores externos eso no
 aguanta: quien manda una PR no va a levantar un Postgres a mano.
 
 - Job `integration` nuevo, con `services: postgres:16.4-alpine` y `cargo test --workspace`. El
@@ -276,14 +644,14 @@ de terceros. Lo que cambia es que ahora manda además un **código estable** con
 ~50 `setError(e.message)` muestran español sin tocar una línea. El texto técnico queda en
 `.detail` y se manda a la consola: depurar un 400 no debería obligar a abrir la pestaña de red.
 
-`apps/web/src/lib/errorMessages.ts` es el catálogo: **196 frases**, agrupadas por dónde las ve el
+`apps/web/src/lib/errorMessages.ts` es el catálogo, agrupado por dónde las ve el
 usuario. Regla de estilo: frase completa, qué ha pasado y qué puede hacer, sin nombres de campo del
 API ni jerga HTTP.
 
 #### El gate
 
 Un código sin traducir no rompe nada —cae al genérico— y por eso hacía falta un test: el fallo es
-silencioso. `apps/api/tests/error_codes_parity.rs` (sin Postgres) extrae del fuente los **187
+silencioso. `apps/api/tests/error_codes_parity.rs` (sin Postgres) extrae del fuente **todos los
 códigos** a `tests/fixtures/error-codes.json`, y `errorMessages.test.ts` lee ese mismo JSON y falla
 si alguno se queda sin frase, o si sobra una frase para un código que ya no existe.
 
@@ -364,7 +732,7 @@ tiene estado final verificable; **fabricar** un fixture sí lo tiene.
 
 ### Las tablas del CHANGELOG citaban una instalación real
 
-Las entradas de 3.9.0 y del issue #5 razonaban «sobre una instalación **real**» y publicaban el
+Las entradas de 3.9.0 y de la auditoría del promedio razonaban «sobre una instalación **real**» y publicaban el
 alquiler, el ingreso mensual y la tasa de ahorro del owner. Las cifras pasan a ser inventadas y la
 fórmula sigue cuadrando: donde había `540,00 ÷ 6` vs `÷ 3` ahora hay `540,00 ÷ 6` vs `÷ 3` → 90 y
 180 €. Un ejemplo que no cuadra vale menos que ninguno.
@@ -395,7 +763,7 @@ Dos cifras que el consumidor no podía interpretar sin recalcularlas a mano: el 
 comparativa mensual y la jubilación de las tools de proyección. Aditivo en el contrato; **cambia
 números** en la pestaña Gastos y en `get_transactions_summary`.
 
-### El promedio contaba como cero los meses sin datos reales (issue #5)
+### El promedio contaba como cero los meses sin datos reales
 
 `GET /v1/transactions/summary` dividía entre `months_with_data` = meses del tramo con ≥1
 movimiento **de cualquier tipo**. Un mes cuyo único contenido eran instancias recurrentes contaba
@@ -482,8 +850,7 @@ conserva su día 1 (contrato ya publicado): ambas fechas coinciden siempre en a�
 Desenlace de la evaluación de `futurefin-mcp-parity`: **tool actualizada ×3** (`get_projection`,
 `simulate_projection`, `get_transactions_summary`), ninguna omisión. Las tres comparten core con
 sus handlers HTTP, así que no hubo código MCP que tocar — solo sus descripciones, que ahora
-describirían mal el denominador y la jubilación. El catálogo sigue en **50 tools**:
-`tools_list_returns_exactly_the_v1_catalog` no se mueve.
+describirían mal el denominador y la jubilación.
 
 ### Deriva de documentación corregida de paso
 
@@ -730,7 +1097,7 @@ tanto no discriminaba. Seis tests que probaban el KPI retirado se van con él.
 
 ## [3.8.0] - 2026-08-21
 
-Tren del **issue #4** — ergonomía del servidor MCP derivada de una sesión real de uso, más la
+Tren de **ergonomía del servidor MCP** derivado de una sesión de uso real, más la
 resolución de la cascada. Catálogo **47 → 50 tools**. Ninguna migración: nada de esto añade
 columnas. Sin cambios de comportamiento en el engine (verificado con un diff antes/después de
 `/v1/projection/series`, ver la entrada del refactor).
@@ -772,7 +1139,7 @@ estaba pinneado por una regresión **que no existía** — la «regla» del test
 
 ### Added — `GET /v1/allocation-rules/resolution` y tool `get_allocation_resolution` (tool 50)
 
-- **El hueco que cerraba el issue #4**: no había forma de auditar la cascada desde fuera. Con la
+- **El hueco que cerraba esa auditoría**: no había forma de auditar la cascada desde fuera. Con la
   aportación del mes 1 sin explicar y `list_allocation_rules` devolviendo solo la *configuración*,
   un lector razonable concluía que la cascada repartía de más. No lo hacía.
 - **La respuesta desglosa, no simplifica**: `base_cash` (lo que se reparte de verdad) separado en
@@ -793,7 +1160,7 @@ estaba pinneado por una regresión **que no existía** — la «regla» del test
 
 ### Added — `contribution_recurring_monthly` en `/v1/assets`: el número que sí es mensual
 
-- **El defecto de contrato** (lo que el issue #4 etiquetó como `bug`, y lo es):
+- **El defecto de contrato** (etiquetado en su día como `bug`, y lo es):
   `contribution_nominal_monthly` **no es mensual**. Es la cascada del primer mes e incluye el tramo
   transitorio de los planning flows sin fecha, así que **baja cada día** y **salta hacia arriba el
   día 1 de cada mes**. El doc-comment interno decía «aporte estimado del primer mes»; el nombre
@@ -816,7 +1183,7 @@ estaba pinneado por una regresión **que no existía** — la «regla» del test
 
 ### Changed — Engine: `FirstMonthAllocation` expone la resolución de la cascada (salida bit-idéntica)
 
-- **De dónde viene**: el issue #4 traía un «posible bug» de sobreasignación de la cascada.
+- **De dónde viene**: aquella auditoría traía un «posible bug» de sobreasignación de la cascada.
   Investigado: **no lo había**. `distribute_contributions` acota `take` tres veces (intención de la
   regla, hueco del cap, caja restante) y corta en seco al agotarse la caja — es imposible repartir
   más de lo que hay. Lo que sí había era un hueco de observabilidad que hacía imposible demostrarlo
@@ -933,7 +1300,7 @@ estaba pinneado por una regresión **que no existía** — la «regla» del test
   `fire_target_base`, `runway_months`, `runway_is_indefinite`). Ni gasto, ni ahorro, ni tasa de
   ahorro. Para valorar un what-if desde el chat había que calcular el impacto sobre el gasto **a
   mano** — y ahí es donde se coló un doble conteo de una cuota de pasivo en la sesión que originó
-  el issue #4.
+  aquella auditoría.
 - **La solución**: cada lado (baseline y escenario) añade `income_monthly`,
   `expense_total_monthly`, `debt_service_monthly`, `net_monthly` y `savings_rate`, con sus cuatro
   deltas. **Coste cero**: son valores que ya estaban calculados en el `ProjectionInput` de cada

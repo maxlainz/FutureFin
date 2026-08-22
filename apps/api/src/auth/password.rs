@@ -4,6 +4,7 @@ use argon2::{
     Argon2,
 };
 use rand_core::OsRng;
+use std::sync::OnceLock;
 
 pub fn hash_password(password: &str) -> Result<String, ApiError> {
     validate_password_strength(password)?;
@@ -22,6 +23,51 @@ pub fn verify_password(password: &str, stored: &str) -> Result<(), ApiError> {
         .verify_password(password.as_bytes(), &parsed)
         .map_err(|_| ApiError::Unauthorized)?;
     Ok(())
+}
+
+/// Argon2id cuesta ~40-80 ms de CPU **pura**. Ejecutarlo en un worker del reactor de Tokio
+/// deja ese hilo bloqueado: con `num_cpus` peticiones concurrentes a `/v1/auth/register` —
+/// endpoint sin autenticación por diseño — se para el proceso entero, `GET /v1/ready`
+/// incluido, y el healthcheck del contenedor lo marca unhealthy. `spawn_blocking` lo manda al
+/// pool de blocking, aislado del reactor. Pero ese pool tiene 512 hilos por defecto, así que
+/// mandarlo ahí sin más subía el techo de Argon2 concurrente de `num_cpus` a 512 — de ~38 MiB
+/// a ~9,5 GiB de reserva— y convertía una caída recuperable en un OOM-kill del contenedor con
+/// PostgreSQL dentro. Por eso va por `heavy::run_password_kdf`, que además lo acota.
+pub async fn hash_password_blocking(password: &str) -> Result<String, ApiError> {
+    let password = password.to_owned();
+    crate::heavy::run_password_kdf(move || hash_password(&password)).await?
+}
+
+/// Verifica fuera del reactor y **sin oráculo de timing**: cuando el usuario no existe
+/// (`stored = None`) se verifica igualmente contra un hash constante antes de devolver 401.
+/// Sin eso, un usuario inexistente responde en ~1 ms y uno existente con contraseña mala en
+/// ~40-80 ms — dos órdenes de magnitud, medibles por red, que enumeran quién tiene cuenta.
+pub async fn verify_password_blocking(
+    password: &str,
+    stored: Option<String>,
+) -> Result<(), ApiError> {
+    let password = password.to_owned();
+    crate::heavy::run_password_kdf(move || match stored {
+        Some(hash) => verify_password(&password, &hash),
+        None => {
+            let _ = verify_password(&password, dummy_hash());
+            Err(ApiError::Unauthorized)
+        }
+    })
+    .await?
+}
+
+/// Hash PHC de descarte con los mismos parámetros que los reales, para que la rama
+/// «usuario inexistente» cueste lo mismo que la rama «contraseña incorrecta».
+fn dummy_hash() -> &'static str {
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    DUMMY.get_or_init(|| {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(b"timing-equalizer, never a real credential", &salt)
+            .expect("hashing a constant with default params cannot fail")
+            .to_string()
+    })
 }
 
 fn validate_password_strength(password: &str) -> Result<(), ApiError> {

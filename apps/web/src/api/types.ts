@@ -147,7 +147,8 @@ export type SavingsAvgBasisApi = {
    *  datos). `"average"` = promedio real de transacciones. */
   basis: "budget" | "average";
   /** Denominador realmente usado. `0` ⟺ `basis === "budget"`. */
-  months_with_data: number;
+  /** Denominador realmente usado: los meses que se promediaron. */
+  avg_months: number;
   /** Ventana configurada tras el clamp: permite decir «pediste 12, hay 7». */
   window_months: number;
   window_mode?: "data" | "calendar";
@@ -324,8 +325,12 @@ export type ProjectionSeriesApi = {
    *  servidor a `budget` cuando el modo con transacciones no tenía meses con datos).
    *  Ausente en backends antiguos → `budget`. */
   savings_source?: SavingsSourceApi;
-  /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
-  savings_source_months_with_data?: number;
+  /** Procedencia del lado INGRESO del promedio. Sustituye al escalar
+   *  `savings_source_months_with_data`, que el backend dejó de enviar en 3.9.0 al hacerse las
+   *  ventanas configurables por lado: con dos ventanas no existe *un* número de meses. */
+  savings_income_basis?: SavingsAvgBasisApi;
+  /** Procedencia del lado GASTO del promedio. */
+  savings_expense_basis?: SavingsAvgBasisApi;
 };
 
 export type FfbackupImportCounts = {
@@ -420,6 +425,10 @@ export type HistorySeriesApi = {
   points: HistoryPointApi[];
   asset_series: HistoryAssetSeriesApi[];
   markers: HistoryMarkerApi[];
+  /** `false` ⇒ `points[].liabilities_total` vale 0 por falta de snapshots de pasivo, no porque no
+   *  haya deuda. El chart no lo usa (descarta el punto `month_index >= 0` y el pasado sale de los
+   *  snapshots que haya); existe para el consumidor MCP, que lee la cifra sin contexto. */
+  liabilities_snapshotted: boolean;
 };
 
 /** Ítem de un snapshot (CRUD Decimal-as-string). Los términos solo aplican a pasivos. */
@@ -780,10 +789,18 @@ export type RecurringMaterializeResponse = {
 export type CashflowMonthApi = {
   month_index: number;
   date_ymd: string;
+  /** ≤ 0 */
   expense: string;
+  /** ≥ 0 */
   income: string;
+  /** ≤ 0 */
   savings: string;
-  net: string;
+  /** `expense + income + savings`: variación de caja. **Incluye** los traspasos a ahorro, así que
+   *  un mes con una aportación grande sale negativo sin ser una pérdida. */
+  cash_delta: string;
+  /** `income + expense`: ingresos menos gastos, **sin** ahorro. Misma cifra que
+   *  `totals.net_actual` de la comparativa mensual. Es la que responde a «¿fue buen mes?». */
+  income_minus_expense: string;
 };
 
 /** Punto del grid fino del cash-flow histórico. `month_fraction` es el eje X real

@@ -24,7 +24,7 @@ type Fixture = { http_classes: string[]; codes: string[] };
 const fixture = JSON.parse(readFileSync(FIXTURE_PATH, "utf8")) as Fixture;
 
 /** Códigos que nacen en el cliente y por tanto no están en el fixture del backend. */
-const CLIENT_ONLY = new Set(["empty_json_body"]);
+const CLIENT_ONLY = new Set(["empty_json_body", "network_error"]);
 
 describe("catálogo de errores", () => {
   it("el fixture trae códigos y clases", () => {

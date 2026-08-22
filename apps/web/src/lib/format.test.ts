@@ -10,6 +10,7 @@ import {
   formatDebtToAssetsPct,
   formatEditableDecimalString,
   toApiDecimalString,
+  DecimalInputError,
   formatFractionAsPercent,
   formatMoneyAmount,
   formatMonthsRough,
@@ -272,5 +273,49 @@ describe("toApiDecimalString", () => {
     expect(toApiDecimalString(null)).toBe("");
     expect(toApiDecimalString(undefined)).toBe("");
     expect(toApiDecimalString("   ")).toBe("");
+  });
+});
+
+describe("toApiDecimalString — separador de miles (regresión: 250.000 se guardaba como 250 €)", () => {
+  it("con coma: los puntos son miles y la coma es el decimal", () => {
+    expect(toApiDecimalString("1.234,56")).toBe("1234.56");
+    expect(toApiDecimalString("1.234.567,89")).toBe("1234567.89");
+    expect(toApiDecimalString("-1.500,25")).toBe("-1500.25");
+    expect(toApiDecimalString("1234,5")).toBe("1234.5");
+  });
+
+  it("sin coma: los grupos de tres dígitos son miles", () => {
+    expect(toApiDecimalString("250.000")).toBe("250000");
+    expect(toApiDecimalString("1.500")).toBe("1500");
+    expect(toApiDecimalString("1.234.567")).toBe("1234567");
+  });
+
+  it("sin coma: un punto que no forma grupo de miles es el decimal (campos de porcentaje)", () => {
+    expect(toApiDecimalString("2.5")).toBe("2.5");
+    expect(toApiDecimalString("2100.00")).toBe("2100.00");
+    expect(toApiDecimalString("0.075")).toBe("0.075");
+  });
+
+  it("deja pasar los enteros y el vacío", () => {
+    expect(toApiDecimalString("100")).toBe("100");
+    expect(toApiDecimalString("")).toBe("");
+    expect(toApiDecimalString(null)).toBe("");
+  });
+
+  it("rechaza lo ambiguo en vez de adivinar", () => {
+    expect(() => toApiDecimalString("1.23.4")).toThrow(DecimalInputError);
+    expect(() => toApiDecimalString("1,2,3")).toThrow(DecimalInputError);
+    expect(() => toApiDecimalString("12.34,5")).toThrow(DecimalInputError);
+    expect(() => toApiDecimalString("mil euros")).toThrow(DecimalInputError);
+  });
+
+  it("el mensaje de rechazo está en español y dice qué hacer", () => {
+    try {
+      toApiDecimalString("1.23.4");
+      throw new Error("debería haber lanzado");
+    } catch (e) {
+      expect(e).toBeInstanceOf(DecimalInputError);
+      expect((e as Error).message).toMatch(/coma/i);
+    }
   });
 });

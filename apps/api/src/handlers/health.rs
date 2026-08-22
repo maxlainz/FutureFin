@@ -17,6 +17,7 @@ pub struct HealthBody {
 #[utoipa::path(
     get,
     path = "/v1/health",
+    security(()),
     tag = "health",
     responses(
         (status = 200, description = "Process up", body = HealthBody),
@@ -33,6 +34,7 @@ pub async fn health_check(Extension(state): Extension<Arc<AppState>>) -> Json<He
 #[utoipa::path(
     get,
     path = "/v1/ready",
+    security(()),
     tag = "health",
     responses(
         (status = 200, description = "Dependencies reachable", body = HealthBody),

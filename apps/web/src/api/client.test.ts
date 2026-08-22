@@ -7,6 +7,7 @@ import {
   apiErrorFromResponse,
   ApiRequestError,
   defaultFetchInit,
+  setUnauthorizedHandler,
 } from "./client";
 
 const originalFetch = globalThis.fetch;
@@ -103,6 +104,50 @@ describe("apiGet", () => {
     );
     await expect(apiGet("/v1/secret")).rejects.toThrow(
       "Tu sesión ha caducado. Vuelve a iniciar sesión.",
+    );
+  });
+});
+
+describe("setUnauthorizedHandler", () => {
+  it("solo el 401 avisa al handler global", async () => {
+    let avisos = 0;
+    setUnauthorizedHandler(() => {
+      avisos += 1;
+    });
+    try {
+      await apiErrorFromResponse(mockResponse({ status: 403, body: { code: "forbidden" } }));
+      expect(avisos).toBe(0);
+      await apiErrorFromResponse(mockResponse({ status: 401, body: { code: "unauthorized" } }));
+      expect(avisos).toBe(1);
+    } finally {
+      setUnauthorizedHandler(null);
+    }
+  });
+});
+
+describe("fallo de red", () => {
+  it("traduce el TypeError del navegador y no filtra «Failed to fetch»", async () => {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const err = await apiGet("/v1/test").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiRequestError);
+    const api = err as ApiRequestError;
+    expect(api.message).toBe(
+      "No se ha podido conectar con el servidor. Comprueba tu conexión y que FutureFin sigue en marcha.",
+    );
+    expect(api.message).not.toContain("Failed to fetch");
+    expect(api.code).toBe("network_error");
+    // Sin respuesta no hay status: `0`. Importa porque el handler global de 401 no debe
+    // confundir un corte de red con una sesión caducada.
+    expect(api.status).toBe(0);
+    expect(api.detail).toBe("Failed to fetch");
+  });
+
+  it("también en los métodos con cuerpo", async () => {
+    const fetchMock = vi.mocked(globalThis.fetch);
+    fetchMock.mockRejectedValueOnce(new TypeError("NetworkError when attempting to fetch"));
+    await expect(apiPost("/v1/things", { name: "x" })).rejects.toThrow(
+      "No se ha podido conectar con el servidor. Comprueba tu conexión y que FutureFin sigue en marcha.",
     );
   });
 });

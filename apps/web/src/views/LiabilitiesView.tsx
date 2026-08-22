@@ -467,7 +467,10 @@ export function LiabilitiesView({
           </div>
           {liabilitiesBusy ? <p className="muted">Cargando…</p> : null}
         </div>
-        {!liabilitiesBusy && hasMembership && liabilities.length === 0 ? (
+        {/* `formError` gatea el estado vacío: un fallo del loader vacía lista Y categorías, y sin
+            este gate la vista culpaba al usuario («faltan categorías») de un error de carga. El
+            error ya se pinta en la banda global de App.tsx. */}
+        {!liabilitiesBusy && !formError && hasMembership && liabilities.length === 0 ? (
           liabilityCreationBlocked ? (
             <EmptyState
               title="Faltan categorías para tus deudas"

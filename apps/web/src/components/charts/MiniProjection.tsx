@@ -13,6 +13,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ProjectionSeriesApi } from "../../api/types";
 import {
   ASSET_LINE_COLORS,
+  lastPointIndexAtOrBeforeMonth,
   projectionXTickLabel,
 } from "../../lib/projection-chart";
 
@@ -48,8 +49,9 @@ export function MiniProjection({
    */
   zoomY?: boolean;
   /**
-   * Última posición (mes) incluida en la ventana visible. Si está fuera de
-   * rango se ignora. Tiene prioridad sobre `months` cuando ambas se pasan.
+   * Último MES (`month_index`, no posición del array) incluido en la ventana
+   * visible. Si está fuera de rango se ignora. Tiene prioridad sobre `months`
+   * cuando ambas se pasan.
    */
   clampToMonth?: number | null;
   /**
@@ -83,24 +85,36 @@ export function MiniProjection({
     return () => ro.disconnect();
   }, []);
 
-  // Todo el compute (parseo de series, escalas, stacks, jubMonth y funciones
+  // Todo el compute (parseo de series, escalas, stacks, jubPos y funciones
   // de proyección xAt/yAt) se memoiza en una sola pasada. Se recalcula solo
   // si cambian props o el ancho medido. Sin esto, recomputaba O(assets ×
   // months) en cada render del padre (Resumen / Jubilación).
   const computed = useMemo(() => {
     if (!series || series.points.length === 0) return null;
 
+    // Con `density=hybrid` el servidor DIEZMA la serie (meses 0..12, 24, 36…), así que la
+    // POSICIÓN en el array deja de ser el mes: el mes real vive en `point.month_index`. Tratar
+    // una por otro recortaba la ventana por el sitio equivocado (`clampToMonth` es un mes, no un
+    // índice: con 82 puntos, «jubilación + 12» no recortaba nada) y repartía el eje X a
+    // distancias iguales, comprimiendo los 12 primeros meses y estirando las décadas.
+    const monthAt = (i: number) => series.points[i]?.month_index ?? i;
+
     let total: number;
     if (clampToMonth != null && Number.isFinite(clampToMonth)) {
-      const idx = Math.max(0, Math.min(clampToMonth, series.points.length - 1));
-      total = idx + 1;
+      total = lastPointIndexAtOrBeforeMonth(series.points, clampToMonth) + 1;
     } else if (months) {
-      total = Math.min(months, series.points.length);
+      // `months` es un número de MESES visibles (12 = el primer año), no de puntos.
+      total = lastPointIndexAtOrBeforeMonth(series.points, months - 1) + 1;
     } else {
       total = series.points.length;
     }
-    total = Math.max(2, total);
+    total = Math.max(2, Math.min(total, series.points.length));
     const points = series.points.slice(0, total);
+    const monthStart = points[0]?.month_index ?? 0;
+    const monthEnd = points[points.length - 1]?.month_index ?? monthStart;
+    const monthSpan = monthEnd - monthStart;
+    /** Meses que abarca la ventana visible (para las etiquetas del eje). */
+    const visibleMonths = monthSpan + 1;
 
     const nw = points.map((p) => p.net_worth);
     const fire =
@@ -135,8 +149,10 @@ export function MiniProjection({
     const pw = W - padX * 2;
     const ph = H - padY * 2 - axisH;
 
-    const xAt = (i: number) =>
-      padX + (total <= 1 ? pw / 2 : (i / (total - 1)) * pw);
+    /** X de un MES concreto (no de una posición): el reparto es temporal, no posicional. */
+    const xAtMonth = (m: number) =>
+      padX + (monthSpan <= 0 ? pw / 2 : ((m - monthStart) / monthSpan) * pw);
+    const xAt = (i: number) => xAtMonth(monthAt(i));
     const yAt = (v: number) => {
       const range = vmax - vmin || 1;
       const clamped = zoomY ? v : Math.max(0, v);
@@ -189,11 +205,12 @@ export function MiniProjection({
       }
     }
 
-    let jubMonth: number | null = null;
+    // POSICIÓN del cruce, no mes: se usa para indexar `nw`, y `xAt` ya la traduce a su mes.
+    let jubPos: number | null = null;
     if (showJub && fire) {
       for (let i = 0; i < total; i++) {
         if ((nw[i] ?? 0) >= (fire[i] ?? Infinity)) {
-          jubMonth = i;
+          jubPos = i;
           break;
         }
       }
@@ -201,6 +218,9 @@ export function MiniProjection({
 
     return {
       total,
+      monthStart,
+      monthSpan,
+      visibleMonths,
       nw,
       fire,
       W,
@@ -210,12 +230,13 @@ export function MiniProjection({
       pw,
       ph,
       xAt,
+      xAtMonth,
       yAt,
       pointsStr,
       stackPath,
       cumulative,
       stackBase,
-      jubMonth,
+      jubPos,
     };
   }, [
     series,
@@ -246,6 +267,9 @@ export function MiniProjection({
 
   const {
     total,
+    monthStart,
+    monthSpan,
+    visibleMonths,
     nw,
     fire,
     W,
@@ -255,12 +279,13 @@ export function MiniProjection({
     pw,
     ph,
     xAt,
+    xAtMonth,
     yAt,
     pointsStr,
     stackPath,
     cumulative,
     stackBase,
-    jubMonth,
+    jubPos,
   } = computed;
 
   return (
@@ -330,19 +355,19 @@ export function MiniProjection({
       />
 
       {/* Marcador jubilación: línea vertical + punto en NW */}
-      {jubMonth != null ? (
+      {jubPos != null ? (
         <g>
           <line
-            x1={xAt(jubMonth)}
-            x2={xAt(jubMonth)}
+            x1={xAt(jubPos)}
+            x2={xAt(jubPos)}
             y1={padY}
             y2={padY + ph}
             stroke="var(--ff-accent)"
             strokeWidth={1.5}
           />
           <circle
-            cx={xAt(jubMonth)}
-            cy={yAt(nw[jubMonth] ?? 0)}
+            cx={xAt(jubPos)}
+            cy={yAt(nw[jubPos] ?? 0)}
             r={3.5}
             fill="var(--ff-accent)"
             stroke="var(--ff-frame)"
@@ -351,15 +376,15 @@ export function MiniProjection({
         </g>
       ) : null}
 
-      {/* Eje X: ticks distribuidos según `total` con etiqueta edad/fecha */}
+      {/* Eje X: ~5 ticks equidistantes en MESES (no en posiciones del array: con `hybrid` la
+          quinta posición es el mes 4 y la última el mes 840, y las etiquetas mentían). */}
       {xAxis ? (
         (() => {
-          // Repartimos ~5 ticks equidistantes incluyendo extremos.
           const tickCount = Math.min(5, total);
           const ticks: number[] = [];
           for (let i = 0; i < tickCount; i++) {
-            const t = Math.round(((tickCount - 1 === 0 ? 0 : i / (tickCount - 1))) * (total - 1));
-            ticks.push(t);
+            const frac = tickCount - 1 === 0 ? 0 : i / (tickCount - 1);
+            ticks.push(Math.round(monthStart + frac * monthSpan));
           }
           const yBase = padY + ph + 12;
           return (
@@ -367,7 +392,7 @@ export function MiniProjection({
               {ticks.map((m, i) => (
                 <text
                   key={i}
-                  x={xAt(m)}
+                  x={xAtMonth(m)}
                   y={yBase}
                   textAnchor={
                     i === 0 ? "start" : i === ticks.length - 1 ? "end" : "middle"
@@ -376,7 +401,7 @@ export function MiniProjection({
                   fill="var(--proj-tick)"
                   fontSize="10"
                 >
-                  {projectionXTickLabel(m, total, xAxis)}
+                  {projectionXTickLabel(m, visibleMonths, xAxis)}
                 </text>
               ))}
             </g>
