@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
-    branches: [main, dev]
+    branches: [main]
   workflow_dispatch:
 
 # El token de este workflow no necesita escribir nada: solo construye y prueba. Sin este
@@ -160,41 +160,6 @@ jobs:
           TEST_DATABASE_URL: postgres://futurefin:futurefin_test@127.0.0.1:5432/futurefin_test
         run: cargo test --workspace --locked
 
-  # `main` es la rama que se publica: desde 4.0.0 la documentación interna para
-  # modelos (`CLAUDE.md` y todo `.claude/`) vive solo en `dev` y no se publica.
-  # El merge dev→main es completo por norma (CLAUDE.md § Git workflow), así que es
-  # muy fácil arrastrarlos sin querer; este guard lo convierte en un fallo ruidoso
-  # en vez de en algo que se descubre leyendo el repo público.
-  #
-  # Solo corre cuando el ref ES `main`: en `dev` esos ficheros son legítimos y
-  # obligatorios, y hacerlo fallar ahí sería exactamente lo contrario de lo que
-  # queremos.
-  main-guard:
-    # También en los PR contra `main`: con `github.ref` a secas, en un pull_request el ref es
-    # `refs/pull/N/merge` y el job se SALTABA — justo en el momento de la revisión, que es
-    # cuando serviría. Cuando sí corría (push a main) la rama pública ya llevaba los ficheros:
-    # CI solo lo contaba después. En un PR el checkout da el merge commit, así que
-    # `git ls-files` ve el árbol resultante.
-    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: '`main` no publica documentación interna'
-        run: |
-          set -euo pipefail
-          # `git ls-files` y no `ls`: lo que importa es lo que la rama PUBLICA
-          # (ficheros trackeados), no lo que quede suelto en el runner.
-          offenders="$(git ls-files -- CLAUDE.md .claude)"
-          if [ -n "$offenders" ]; then
-            echo "ERROR: main contiene documentación interna que no debe publicarse:"
-            echo "$offenders"
-            echo
-            echo "Viven solo en 'dev'. Sácalos de main y vuelve a empujar."
-            exit 1
-          fi
-          echo "OK: main no lleva CLAUDE.md ni .claude/"
 
   # Imagen autocontenida (3.x): construye y ejercita los caminos críticos del contenedor
   # único — arranque desde cero, preservación de datos V2→V3 (uid + colación), compat

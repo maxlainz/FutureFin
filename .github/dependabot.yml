@@ -1,21 +1,17 @@
 version: 2
 
-# `target-branch: dev` en TODAS las entradas: sin él Dependabot usa la rama por defecto, que aquí
-# es `main` — la rama de publicación, no la de desarrollo. Un bump mergeado en `main` no llega
-# nunca a `dev`: CI en `dev` sigue compilando contra la versión vieja y el siguiente que regenere
-# un lockfile lo revierte en silencio. Pasó: los 22 PRs de agosto de 2026 salieron todos con
-# `base=main`.
-#
-# OJO — esto solo redirige las *version updates*. Las **security updates** (las que abre Dependabot
-# al publicarse un CVE) van SIEMPRE contra la rama por defecto y no admiten `target-branch`; esas
-# hay que atenderlas a mano en `main`. Y Dependabot lee ESTE fichero desde la rama por defecto,
-# así que un cambio aquí no surte efecto hasta que llegue a `main` en la siguiente release.
+# Sin `target-branch`: el repositorio tiene UNA rama viva (`main`, la de por defecto), que es
+# adonde Dependabot apunta por omisión. La opción estuvo aquí mientras existió `dev`, para que
+# los bumps no acabaran en la rama de publicación sin pasar por la de desarrollo; al unificar
+# las ramas dejó de tener sentido. Si algún día vuelve a haber dos ramas vivas, vuelve a hacer
+# falta — y recuerda entonces sus dos límites: solo redirige las *version updates* (las
+# security updates van siempre a la rama por defecto) y Dependabot lee este fichero desde la
+# rama por defecto, así que el cambio no entra en vigor hasta que llegue a ella.
 
 updates:
   # Workspace de Cargo: apps/api + crates/domain + crates/engine.
   - package-ecosystem: cargo
     directory: "/"
-    target-branch: "dev"
     schedule:
       interval: weekly
       day: monday
@@ -37,7 +33,6 @@ updates:
   # Workspace de npm: la raíz declara apps/web.
   - package-ecosystem: npm
     directory: "/"
-    target-branch: "dev"
     schedule:
       interval: weekly
       day: monday
@@ -59,7 +54,6 @@ updates:
   # Acciones usadas por los workflows de .github/workflows/.
   - package-ecosystem: github-actions
     directory: "/"
-    target-branch: "dev"
     schedule:
       interval: weekly
       day: monday
@@ -82,7 +76,6 @@ updates:
   # Las bases van pineadas por digest: revisa el diff antes de aceptar.
   - package-ecosystem: docker
     directory: "/apps/api"
-    target-branch: "dev"
     schedule:
       interval: weekly
       day: monday
