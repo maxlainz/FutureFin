@@ -141,6 +141,8 @@
     "rule_kind_invalid",
     "rule_match_kind_invalid",
     "rule_not_applicable",
+    "rule_patch_conflict",
+    "rule_patch_empty",
     "rule_pattern_empty",
     "rule_pattern_too_long",
     "savings_no_category",

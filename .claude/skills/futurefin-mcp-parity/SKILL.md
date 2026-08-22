@@ -10,7 +10,7 @@ description: >
   update a tool. Triggers: "add an MCP tool", "añadir una tool", "does this endpoint need a
   tool?", "the MCP is out of date", "el MCP se ha quedado atrás", "tools/list", "frozen catalog",
   "tools_list_returns_exactly_the_v1_catalog", "update the tool catalog", "new handler — MCP?",
-  "extract a *_core", "preview/confirm", "tool annotations", "50 tools". Do NOT use it for WHY
+  "extract a *_core", "preview/confirm", "tool annotations", "52 tools". Do NOT use it for WHY
   tools share core fns / live-role auth (futurefin-architecture-contract D14/D15), the catalog's
   per-tool semantics (.claude/api-routes.md §MCP), MCP env vars and the write toggle
   (futurefin-config-and-flags), how to run the MCP test suites (futurefin-validation-and-qa /
@@ -25,8 +25,9 @@ Bearer-authenticated wrapper over the same `*_core` fn its HTTP handler uses. De
 rot silently — an endpoint gains a field, a handler changes semantics, a new feature ships
 HTTP-only — unless something forces the question at merge time. This skill is that something.
 
-Volatile facts date-stamped **2026-08-20, tren 3.8.0** (50 tools; recount with the
-commands in §5 before trusting any number here). Previously 2026-08-19, tren 3.6.0 (47).
+Volatile facts date-stamped **2026-08-22, tren 4.0.0** (52 tools; recount with the
+commands in §5 before trusting any number here). Previously 2026-08-20, tren 3.8.0 (50) y
+2026-08-19, tren 3.6.0 (47).
 
 ## When NOT to use this skill
 
@@ -146,10 +147,14 @@ the blocking reason changes (noted per row).
 | 1 | `create_snapshot` (backfill) + `update_snapshot` | extract from `history.rs` backfill/PUT handlers (validations `normalize_kind`, `validate_snapshot_date`, 409 on (user, kind, date)) | NONE (D12) | The strongest conversational case: recording the past |
 | 2 | `create_allocation_rule` + `delete_allocation_rule` | extract; **careful**: the sink invariant (exactly one uncapped remainder, always last) lives spread across the handler | FULL | Completes cascade control; `update_allocation_rule` exists |
 | 3 | `update_category` + `delete_category` (with `remap_to`) | extract from `categories.rs` PATCH/DELETE | NONE | delete fits preview/confirm perfectly (preview shows `refs`, forces naming the remap target) |
-| 4 | `update_categorization_rule` + `delete_categorization_rule` | extract from `rules.rs` | NONE | Self-cleanup for `create_categorization_rule`. **Subió de prioridad en 3.8.0**: ahora que una regla puede reescribir el histórico (`apply_categorization_rule`), no poder corregirla desde el chat empuja hacia borrar y recrear |
-| 5 | `update_installation_settings` (allowlist: `annual_inflation_assumption_percent`, maybe `calendar_tz`, `show_age_mode`) | partial — only the FIRE slice has a core | FULL | Inflation is a direct engine input, today read-only via MCP; NEVER include `mcp_write_enabled` |
+| 4 | `update_installation_settings` (allowlist: `annual_inflation_assumption_percent`, maybe `calendar_tz`, `show_age_mode`) | partial — only the FIRE slice has a core | FULL | Inflation is a direct engine input, today read-only via MCP; NEVER include `mcp_write_enabled` |
 
-Closed since the register was created: `update_asset` and `update_liability` (post-3.5.0; the
+Closed since the register was created: **`update_categorization_rule` + `delete_categorization_rule`
+(4.0.0, issue #8 §10 — era la fila #4; `patch_rule_core`/`delete_rule_core` extraídas de `rules.rs`,
+cache NONE, preview/confirm en el borrado con la huella actual vía `apply_categorization_rule_core`
+en `dry_run`. Cerrarla dejó dos guardias nuevas en la core, `rule_patch_empty` y
+`rule_patch_conflict`: el PATCH aceptaba cuerpo vacío y dejaba que el `clear_*` ganara en silencio
+sobre el campo puesto)**; `update_asset` and `update_liability` (post-3.5.0; the
 CRUD-symmetry incident in §2.2); and in the 3.8.0 issue-#4 train, three rows that were not even
 in this table because the endpoints did not exist yet — `apply_categorization_rule` (backfill
 retroactivo, cache COND), `update_transactions` (PATCH en lote, COND una sola vez) y
@@ -215,14 +220,14 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
 
 ## 5. Keeping it honest — verification and drift audit
 
-Reproducible counters (run from repo root; expected values dated 2026-08-20):
+Reproducible counters (run from repo root; expected values dated 2026-08-22, tren 4.0.0):
 
 ```bash
-grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 50 — total tools
+grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 52 — total tools
 grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 21 — reads + simulate
-grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 29 — writes
-grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 29 — MUST equal writes
-grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 10 — preview/confirm tools
+grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 31 — writes
+grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 31 — MUST equal writes
+grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 11 — preview/confirm tools
 grep -rn 'sqlx::query' apps/api/src/mcp/                            # exactly 1 hit (auth.rs toggle)
 ```
 

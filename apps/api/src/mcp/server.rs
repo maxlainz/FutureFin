@@ -54,9 +54,10 @@ use crate::handlers::transactions::recurring::{
     delete_recurring_rule_core, list_recurring_rules_core, materialize_recurring_core,
 };
 use crate::handlers::transactions::rules::{
-    apply_categorization_rule_core, create_categorization_rule_core,
-    list_categorization_rules_core, ApplyScope,
+    apply_categorization_rule_core, create_categorization_rule_core, delete_rule_core,
+    list_categorization_rules_core, patch_rule_core, ApplyScope,
 };
+use crate::handlers::transactions::schema::PatchRuleBody;
 use crate::handlers::transactions::summary::{
     category_monthly_series_core, transactions_summary_core,
 };
@@ -349,7 +350,9 @@ pub struct SimulateParams {
     /// Ahorro mensual extra (>= 0): más caja asignable vía la cascada, sin mover el target.
     #[serde(default)]
     pub extra_monthly_savings: Option<String>,
-    /// SWR en % (0–4, string decimal): «¿y si el SWR fuera 3?».
+    /// SWR en % (0–4, string decimal): «¿y si el SWR fuera 3?». **`"0"` se acepta pero no es un
+    /// escenario conservador, es «jamás»**: anula el objetivo FIRE entero (`fire_target_base` y
+    /// `jubilacion_month_index` salen `null` y la serie del target, vacía)..
     #[serde(default)]
     pub swr_pct: Option<String>,
     /// Inflación anual asumida en % (0–50, string decimal).
@@ -759,6 +762,45 @@ pub struct UpdateAllocationRuleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateCategorizationRuleParams {
+    /// UUID de la regla (de list_categorization_rules).
+    pub rule_id: String,
+    /// "substring" | "prefix" | "exact".
+    #[serde(default)]
+    pub match_kind: Option<String>,
+    /// Texto a buscar en el concepto del movimiento.
+    #[serde(default)]
+    pub pattern: Option<String>,
+    /// Banco al que se limita la regla ("myinvestor" | "n26"). Incompatible con clear_source.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// true = la regla pasa a ser agnóstica del banco.
+    #[serde(default)]
+    pub clear_source: Option<bool>,
+    /// "expense" | "income" | "savings". Incompatible con clear_assign_kind.
+    #[serde(default)]
+    pub assign_kind: Option<String>,
+    /// true = la regla deja de asignar kind (y por tanto tampoco categoría).
+    #[serde(default)]
+    pub clear_assign_kind: Option<bool>,
+    /// UUID de categoría (de list_categories). Incompatible con clear_assign_category.
+    #[serde(default)]
+    pub assign_category_id: Option<String>,
+    /// true = la regla deja de asignar categoría.
+    #[serde(default)]
+    pub clear_assign_category: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteCategorizationRuleParams {
+    /// UUID de la regla (de list_categorization_rules).
+    pub rule_id: String,
+    /// Sin confirm=true NO borra: devuelve un preview con la regla y su huella actual.
+    #[serde(default)]
+    pub confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListCategorizationRulesParams {
     /// Máximo de reglas devueltas (1–200). Default 50. La respuesta indica `total_count` y
     /// `truncated`.
@@ -859,7 +901,7 @@ const LIST_RULES_MAX_LIMIT: usize = 200;
 impl FutureFinMcp {
     #[tool(
         name = "get_summary",
-        description = "Resumen financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingresos/gastos mensuales, tasa de ahorro, runway de líquidos) y desgloses por categoría. Importes como strings decimales.",
+        description = "Resumen financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingresos/gastos mensuales, tasa de ahorro, runway de líquidos) y desgloses por categoría. Importes como strings decimales. OJO: `financial_health` trae DOS cifras de ahorro mensual y no son intercambiables. `net_monthly_equivalent` es el ahorro REAL del modo activo (`savings_source`) y es el que usa el motor — cuadra con `monthly_delta_assumption` de get_projection y con `recurring_net` de get_allocation_resolution, y es el denominador de `savings_rate`. `savings_expected_monthly_equivalent` es el ahorro que sale del PRESUPUESTO, siempre, sin seguir al modo: existe solo para el delta «real vs plan». En modo A (budget) coinciden por construcción; en B y C difieren, y elegir mal desplaza la respuesta. Para razonar o hacer cuentas usa `net_monthly_equivalent`.",
         annotations(title = "Resumen financiero", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_summary(
@@ -877,7 +919,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection",
-        description = "Proyección de patrimonio y jubilación (FIRE): serie futura de patrimonio neto (~82 puntos, mes 0-12 mensual y anual después), objetivo FIRE por mes, jubilación estimada — `jubilacion_month_index` para indexar las series, y ya resueltas en servidor `jubilacion_date_ymd` (fecha civil) y `jubilacion_age` (años cumplidos; null sin fecha de nacimiento) —, hitos de patrimonio y supuestos usados. Los valores de las series son números en euros nominales. Omite `months` salvo necesidad: sin él la respuesta sale de cache; con él se recomputa entera.",
+        description = "Proyección de patrimonio y jubilación (FIRE): serie futura de patrimonio neto (~82 puntos, mes 0-12 mensual y anual después), objetivo FIRE por mes, jubilación estimada — `jubilacion_month_index` para indexar las series, y ya resueltas en servidor `jubilacion_date_ymd` (fecha civil) y `jubilacion_age` (años cumplidos; null sin fecha de nacimiento) —, hitos de patrimonio y supuestos usados. `jubilacion_target_net_worth` está en **euros de HOY**: el objetivo crece con la inflación, así que el objetivo nominal del mes en que se cruza es bastante mayor que esa cifra — no la presentes como «necesitas X para jubilarte» sin decir en qué euros está. `fire_target_series` no lleva índice propio: es **paralela por posición** a `points`. Los valores de las series son números en euros nominales. Omite `months` salvo necesidad: sin él la respuesta sale de cache; con él se recomputa entera.",
         annotations(title = "Proyección FIRE", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection(
@@ -2508,6 +2550,134 @@ impl FutureFinMcp {
             let r = patch_allocation_rule_core(&self.state, id.installation_id, id.user_id, rule_id, body)
                 .await?;
             Ok(serde_json::json!({"id": r.id, "antes": before, "despues": r}))
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "update_categorization_rule",
+        description = "Corrige una regla de categorización existente: patrón, tipo de coincidencia, banco y asignación (kind + categoría). Tri-estado explícito: clear_source la hace agnóstica del banco, clear_assign_kind/clear_assign_category retiran la asignación; poner y borrar el mismo campo a la vez es ERROR, no se elige por ti. Editar la regla solo afecta a IMPORTS FUTUROS — para reescribir los movimientos que ya existen, usa apply_categorization_rule después. Colisión de (source, pattern) con otra regla → conflict. Si te equivocaste al crearla, corrígela aquí en vez de crear otra encima: las reglas contradictorias se acumulan y ganan por precedencia, no por acierto.",
+        annotations(title = "Editar regla de categorización", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_categorization_rule(
+        &self,
+        Parameters(p): Parameters<UpdateCategorizationRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        // Destructuring EXHAUSTIVO y sin `..`: un parámetro nuevo deja de compilar hasta que
+        // alguien lo mapee. Las guardias de patch vacío y de conflicto `clear_*` NO viven aquí sino
+        // en `patch_rule_core`, para que HTTP y MCP no puedan divergir (la lección de `cap_value`).
+        let UpdateCategorizationRuleParams {
+            rule_id,
+            match_kind,
+            pattern,
+            source,
+            clear_source,
+            assign_kind,
+            clear_assign_kind,
+            assign_category_id,
+            clear_assign_category,
+        } = p;
+        let run = || -> Result<(Uuid, PatchRuleBody), ApiError> {
+            Ok((
+                parse_uuid_param("rule_id", &rule_id)?,
+                PatchRuleBody {
+                    match_kind,
+                    pattern,
+                    source,
+                    clear_source,
+                    assign_kind,
+                    clear_assign_kind,
+                    assign_category_id: parse_opt_uuid_param(
+                        "assign_category_id",
+                        &assign_category_id,
+                    )?,
+                    clear_assign_category,
+                },
+            ))
+        };
+        let (rule_id, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            patch_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id, body).await
+        }
+        .await;
+        to_tool_result(res)
+    }
+
+    #[tool(
+        name = "delete_categorization_rule",
+        description = "Retira una regla de categorización. NO recategoriza nada: los movimientos que ya tienen categoría la conservan; la regla simplemente deja de aplicarse a los imports futuros. Sin confirm=true devuelve un preview con la regla y su huella ACTUAL — `ya_conformes` son los movimientos que hoy están como esta regla manda (una regla ya aplicada tiene `cambiarian: 0` y aun así gobierna decenas de filas: mira `ya_conformes`, no `cambiarian`). Para corregir el pasado, apply_categorization_rule con otra regla.",
+        annotations(title = "Borrar regla de categorización", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn delete_categorization_rule(
+        &self,
+        Parameters(p): Parameters<DeleteCategorizationRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let rule_id = match parse_uuid_param("rule_id", &p.rule_id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let res = async {
+            require_mcp_write(&self.state.pool, &id).await?;
+            // Preview vía la core de listado (cero SQL propio); 404 si no es suya.
+            let rule = list_categorization_rules_core(
+                &self.state.pool,
+                id.installation_id,
+                id.user_id,
+                None,
+                0,
+            )
+            .await?
+            .0
+            .into_iter()
+            .find(|r| r.id == rule_id)
+            .ok_or(ApiError::NotFound)?;
+
+            if !p.confirm.unwrap_or(false) {
+                // No existe `transactions.categorization_rule_id`, así que NO se puede saber qué
+                // movimientos categorizó esta regla históricamente — decirlo sería inventar. Lo que
+                // sí es barato y ya está probado es su huella ACTUAL, con el mismo dry-run que usa
+                // el preview de `apply_categorization_rule`: retorna antes del UPDATE y antes de la
+                // invalidación, así que su efecto lateral es cero.
+                let huella = apply_categorization_rule_core(
+                    &self.state,
+                    id.installation_id,
+                    id.user_id,
+                    rule_id,
+                    ApplyScope::All,
+                    None,
+                    true,
+                )
+                .await?;
+                return Ok(serde_json::json!({
+                    "preview": true,
+                    "confirm_required": true,
+                    "action": "delete_categorization_rule",
+                    "effects": {
+                        "regla": rule,
+                        "huella": {
+                            // `ya_conformes` es la cifra que responde a «¿cuánto gobierna esta
+                            // regla?». `cambiarian` cuenta lo que aún NO ha aplicado, así que una
+                            // regla ya aplicada da 0 y parecería inofensiva.
+                            "ya_conformes": huella.already_correct,
+                            "cambiarian": huella.matched,
+                            "pierde_frente_a_otra_regla": huella.matched_by_other_rule,
+                            "descartados_por_source": huella.skipped_by_source,
+                        },
+                        "nota": "borrar la regla NO recategoriza ningún movimiento: los que ya tienen categoría la conservan. Solo deja de aplicarse a los imports futuros.",
+                    },
+                }));
+            }
+            delete_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id).await?;
+            Ok(serde_json::json!({"id": rule_id, "deleted": true}))
         }
         .await;
         to_tool_result(res)

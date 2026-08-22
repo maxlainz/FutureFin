@@ -324,8 +324,12 @@ export type ProjectionSeriesApi = {
    *  servidor a `budget` cuando el modo con transacciones no tenía meses con datos).
    *  Ausente en backends antiguos → `budget`. */
   savings_source?: SavingsSourceApi;
-  /** Nº de meses con datos usados por el promedio (0 en modo `budget`). */
-  savings_source_months_with_data?: number;
+  /** Procedencia del lado INGRESO del promedio. Sustituye al escalar
+   *  `savings_source_months_with_data`, que el backend dejó de enviar en 3.9.0 al hacerse las
+   *  ventanas configurables por lado: con dos ventanas no existe *un* número de meses. */
+  savings_income_basis?: SavingsAvgBasisApi;
+  /** Procedencia del lado GASTO del promedio. */
+  savings_expense_basis?: SavingsAvgBasisApi;
 };
 
 export type FfbackupImportCounts = {
