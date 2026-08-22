@@ -253,9 +253,10 @@ algo así, lee [backups.md](backups.md).
 - **`docker ps` dice `unhealthy`** → mira los logs. `/v1/health` OK + `/v1/ready` 503 significa que
   la API vive pero la base de datos no contesta.
 - **El puerto 8080 está ocupado** → cambia `APP_PORT` en el `.env` y `docker compose up -d`.
-- **Aparece un aviso enorme de `DEPRECATED` sobre una base de datos externa** → tienes
-  `DATABASE_URL` definida en el `.env`. Ver [configuracion.md](configuracion.md) y
-  [actualizar.md](actualizar.md).
+- **Se para diciendo que `DATABASE_URL` apunta a una base de datos EXTERNA** → desde la 4.0.0 la
+  imagen solo usa su PostgreSQL embebido. Si tus datos ya están dentro, quita esa variable del
+  compose; si todavía no los has migrado, la ruta exacta está en
+  [actualizar.md](actualizar.md#vengo-de-2x-o-tengo-una-base-de-datos-externa).
 
 ## Siguientes pasos
 

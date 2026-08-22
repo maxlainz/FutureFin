@@ -535,18 +535,19 @@ prefix-or-substring redirect matching (instead of exact string) is an open redir
     auto-updates must set `WATCHTOWER_TIMEOUT=60s` or every unattended update kills the postmaster
     mid-checkpoint.
   - **The entrypoint NEVER deletes a cluster.** Old or partial clusters are moved aside with `mv`
-    (`$PGDATA/pgdata_old_<major>` after pg_upgrade, `$STATE_DIR/failed-automigration-<ts>` after an
-    interrupted automigration). The only `rm`s in the script are its own backups under retention
+    (`$PGDATA/pgdata_old_<major>` after pg_upgrade; before 4.0.0 also
+    `$STATE_DIR/failed-automigration-<ts>` after an interrupted automigration). The only `rm`s in the script are its own backups under retention
     and the pg_upgrade staging directory once its contents are safely copied in. A "cleanup" patch
     that turns any of those `mv`s into `rm -rf` is a data-loss patch.
   - **A dead process is a restart, not a repair.** `supervise` tears the other process down and
     exits 1 so `restart: unless-stopped` recovers the container. A restart loop here is a real
     incident, not self-healing.
-  - **The weak point proper**: ~630 lines of bash now sit on the data path (adoption `chown`,
-    collation REINDEX, pre-migration `pg_dump`, `pg_upgrade` swap, one-shot automigration). CI
+  - **The weak point proper**: hundreds of lines of bash sit on the data path (adoption `chown`,
+    collation REINDEX, pre-migration `pg_dump`, `pg_upgrade` swap; 4.0.0 removed the external-DB
+    mode and its one-shot automigration, which shortened it). CI
     gates it with `shellcheck -S warning` and the `docker-stack` job exercises fresh install,
-    watchtower-style recreate, clean shutdown, V2→V3 adoption, external-DB compat, one-shot
-    automigration and pg_upgrade 15→16 — but a bug in it loses data in a way **no Rust test can
+    watchtower-style recreate, clean shutdown, 2.x adoption, the two external-`DATABASE_URL`
+    refusals and pg_upgrade 15→16 — but a bug in it loses data in a way **no Rust test can
     catch**. Treat every edit to `docker-entrypoint.sh` / `Dockerfile` / `docker-compose.yml` as
     Infra-release class (futurefin-change-control §1) and never merge one on a red or skipped
     `docker-stack` job.
@@ -607,7 +608,8 @@ Re-verify volatile claims with:
 - **W8 — API graceful shutdown**: `grep -n 'with_graceful_shutdown\|pool closed\|draining connections' apps/api/src/main.rs`.
 - **W8 — CI coverage of the container paths**: `grep -n '^      - name:' .github/workflows/ci.yml`
   (job `docker-stack`: image sanity + no-volume guard, fresh install, watchtower-style recreate,
-  clean shutdown, V2→V3 adoption, external compat, automigration, pg_upgrade 15→16) and
+  clean shutdown, 2.x adoption, the two external-`DATABASE_URL` refusals — 4.0.0 replaced the old
+  compat/automigration scenarios with them — and pg_upgrade 15→16) and
   `ls .github/testdata/`.
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new

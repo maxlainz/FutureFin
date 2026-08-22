@@ -10,8 +10,9 @@ description: >
   like "connection refused 5432", "DATABASE_URL must be set", "no persistent volume is mounted",
   "Port 8080 is in use", Vite proxy ECONNREFUSED, "migration ... was previously applied but has
   been modified" (checksum mismatch, VersionMismatch), stale UI being served, `docker compose up`
-  pulling instead of using a local image, a dev `.env` accidentally flipping the production image
-  into external-database mode, `ldd` "not found" failures during the image build, or leftover
+  pulling instead of using a local image, a stray DATABASE_URL making the production image refuse
+  to start ("ya no habla con bases de datos externas"), `ldd` "not found" failures during the image
+  build, or leftover
   ff_test_* schemas. Do NOT use for: the catalog of env vars / entrypoint vars / query params /
   fire_settings axes (futurefin-config-and-flags), production deploy/upgrade/rollback/backups
   (futurefin-run-and-operate), or writing/extending tests (futurefin-validation-and-qa).
@@ -79,10 +80,12 @@ RUST_LOG=futurefin_api=info,tower_http=info
 set `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` in `.env`, the dev compose picks them up and
 your `DATABASE_URL` must be updated to match — they must agree.
 
-> **Do not leave the dev `DATABASE_URL` uncommented if you also run the production compose on this
-> machine.** The 3.0.0 image reads a `DATABASE_URL` as "I want an *external* database" and enters
-> the deprecated external mode (or, with an empty volume, starts a one-shot automigration). Keep
-> the dev and prod `.env` files separate — see trap T10.
+> **Be careful with the dev `DATABASE_URL` if you also run the production compose on this
+> machine.** The image reads any `DATABASE_URL` not pointing at `/var/run/postgresql` as "an
+> *external* database", and since 4.0.0 those are gone: with a populated volume it ignores the
+> variable with a warning, with an empty one it **refuses to start**. Keep the dev and prod `.env`
+> files separate — see trap T10, which also explains why a `.env` alone is usually not enough to
+> leak it into the container.
 
 Start the dev Postgres — a **standalone** compose file, not an override (see trap T4):
 
@@ -202,8 +205,10 @@ CI (`.github/workflows/ci.yml`, job `docker-stack`) proves far more than a healt
 `shellcheck -S warning` over the entrypoint and scripts, an image-sanity step (both PG majors
 report `--version`, the `com.futurefin.postgres.majors=15,16` label is `15,16`, and a volume-less
 `docker run` **must abort** with "no persistent volume"), a fresh install polled on `/v1/ready`, a
-Watchtower-style `--force-recreate`, an ordered-shutdown check, a real 2.x stack upgraded to 3.x
-reusing the volume, external-DB compat, one-shot automigration, and a 15→16 `pg_upgrade`. It is
+Watchtower-style `--force-recreate`, an ordered-shutdown check, a real 2.x stack upgraded reusing
+the volume, the **refusal** paths of the retired external mode (the current image over an untouched
+2.x compose, and a leftover `DATABASE_URL` with an empty volume — both must exit non-zero and leave
+the volume untouched), and a 15→16 `pg_upgrade`. It is
 the only automated evidence of "no data loss" — do not weaken it. If your local stack passes step
 4, you match the first CI scenario only.
 
@@ -368,26 +373,30 @@ compose (`docker-compose.yml` mounts `pgdata` and `ffdata`) or add `-v` yourself
 it starts with a warning and the data dies with the container. CI asserts this abort happens, so
 do not "fix" it by relaxing the guard.
 
-**T10 — A dev `.env` turns the production image into an external-database install.** (New in
-3.0.0.) Symptom: you start the local/production stack and the logs print a big `DEPRECATED`
-banner about an external database, or it refuses to start with "DATABASE_URL is set and the
-embedded volume is empty, but the external database does not answer" — possibly after starting a
-one-shot **automigration** from a database you didn't mean to migrate. Cause: `DATABASE_URL` is
-uncommented in the `.env` you passed to compose. The 3.0.0 image treats any `DATABASE_URL` that
-doesn't point at `/var/run/postgresql` as "use an external database"; with a mounted but empty
-`pgdata` it dumps that external DB and restores it into the embedded one, once. Fix: keep separate
-`.env` files — the dev one (with `PORT=8081` + `DATABASE_URL` for split-dev) and the prod/local
-one (only `FUTUREFIN_IMAGE`/`FUTUREFIN_TAG`/`APP_PORT`, everything else commented) — and pass the
-right one with `--env-file`. To force the embedded database regardless of a stray variable, set
-`FUTUREFIN_DB_MODE=embedded`.
+**T10 — A stray `DATABASE_URL` reaches the production image.** (New in 3.0.0; **behaviour changed
+in 4.0.0**.) Symptom: the container logs `DATABASE_URL está definida pero FutureFin 4.0.0 solo usa
+la base embebida… se ignora` and carries on, or — with a volume that has no cluster yet — it exits
+non-zero with the boxed `ya no habla con bases de datos externas` message. Cause: the image treats
+any `DATABASE_URL` that doesn't point at `/var/run/postgresql` as external, and external databases
+were retired in 4.0.0 (up to 3.9.0 the same input entered the deprecated compat mode, or triggered
+a one-shot automigration from a database you didn't mean to migrate).
+
+**How it actually gets in**, verified 2026-08-22: *not* through a `.env` sitting next to the
+production compose — none of this repo's compose files declare `env_file:` or list `DATABASE_URL`
+under `environment:` (`grep -n 'env_file\|DATABASE_URL' docker-compose*.yml` prints nothing), and
+Compose does not inject `.env` into containers. It gets in through a compose that declares it (the
+2.x one does), a `docker run -e DATABASE_URL=…`, or your own edit. Fix: remove it from whatever is
+passing it. Keeping separate `.env` files — the dev one (`PORT=8081` + `DATABASE_URL`) and the
+prod/local one (`FUTUREFIN_IMAGE`/`FUTUREFIN_TAG`/`APP_PORT`) passed with `--env-file` — is still
+good hygiene. `FUTUREFIN_DB_MODE=embedded` no longer buys you anything: it is a synonym of `auto`.
 
 ## 8. When NOT to use this skill
 
 - Cataloging or adding **env vars, entrypoint `FUTUREFIN_*` vars, compose knobs, query params,
   `fire_settings` axes** → `.claude/skills/futurefin-config-and-flags/SKILL.md` (this skill only
   touches the vars needed to boot a dev environment or build the image).
-- **Production** deploy, upgrade, rollback, the 2.x → 3.x migration path, automigration,
-  `pg_upgrade`, backups, logs, health monitoring →
+- **Production** deploy, upgrade, rollback, the 2.x migration path, getting someone off an
+  external database, `pg_upgrade`, backups, logs, health monitoring →
   `.claude/skills/futurefin-run-and-operate/SKILL.md`.
 - **Writing or extending tests**, TestApp harness, parity fixtures, evidence standards →
   `.claude/skills/futurefin-validation-and-qa/SKILL.md` (here you only learn how to *run* them).
@@ -396,7 +405,9 @@ right one with `--env-file`. To force the embedded database regardless of a stra
 ## 9. Provenance and maintenance
 
 Written 2026-07-02 against v1.4.3; **fully re-verified 2026-08-16 against v3.0.0** (self-contained
-image) from: `CLAUDE.md`, `README.md`, `.env.example`, `rust-toolchain.toml`, `package.json` +
+image); trap **T10, the split-dev `DATABASE_URL` note and the CI paragraph re-verified 2026-08-22
+against v4.0.0**, which removed the external-database mode from `apps/api/docker-entrypoint.sh`.
+Sources: `CLAUDE.md`, `README.md`, `.env.example`, `rust-toolchain.toml`, `package.json` +
 `apps/web/package.json`, `apps/api/Cargo.toml`, `apps/api/Dockerfile`,
 **`apps/api/docker-entrypoint.sh`**, `apps/web/vite.config.ts`, `apps/api/src/{main.rs,db.rs}`,
 `docker-compose{,.local,.dev}.yml`, `.github/workflows/ci.yml`, `.claude/env-and-config.md`,
@@ -411,8 +422,8 @@ self-contained image). Re-verify before trusting volatile facts — every comman
 - Production stack is one service, two volumes, `/v1/ready` healthcheck: `cat docker-compose.yml`
 - Image stages, `ldd` gate, locale, users, label, absence of `VOLUME`:
   `grep -n '^FROM\|^ENV\|^LABEL\|^HEALTHCHECK\|localedef\|ldd\|llvmjit\|useradd\|VOLUME' apps/api/Dockerfile`
-- Entrypoint modes, guards and defaults:
-  `grep -n 'FUTUREFIN_[A-Z_]*:-\|no persistent volume\|invalid FUTUREFIN_DB_MODE\|export DATABASE_URL' apps/api/docker-entrypoint.sh`
+- Entrypoint modes, guards and defaults (incl. the 4.0.0 external-DB refusal):
+  `grep -n 'FUTUREFIN_[A-Z_]*:-\|no persistent volume\|invalid FUTUREFIN_DB_MODE\|refuse_external_database\|export DATABASE_URL' apps/api/docker-entrypoint.sh`
 - Node versions: `grep node-version .github/workflows/ci.yml` and `grep 'FROM node' apps/api/Dockerfile`
 - Vite proxy paths + port defaults: `grep -n 'FUTUREFIN_API_PORT\|WEB_DEV_PORT\|proxy' apps/web/vite.config.ts`
 - API port default + env loading + connect timeout: `grep -n 'fn port\|fn load_env\|FUTUREFIN_DB_CONNECT_TIMEOUT_SECS' -A 5 apps/api/src/main.rs`

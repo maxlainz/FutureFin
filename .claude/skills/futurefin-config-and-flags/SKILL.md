@@ -16,8 +16,9 @@ description: >
   annual_inflation_assumption_percent, the fire_settings JSONB with swr_pct and tax_brackets
   bounds, and mcp_write_enabled — the live kill-switch of the MCP write tools). Load this skill when you need to know what an option is called, its default, its
   validation bounds, WHICH FILE parses it (Rust binary vs entrypoint vs compose), whether it is
-  prod or dev-only, why production needs no env var at all since 3.0.0, why setting DATABASE_URL
-  flips the image into deprecated external-DB mode, why a setting change returns 400, why an env
+  prod or dev-only, why production needs no env var at all since 3.0.0, why setting DATABASE_URL in
+  the container now makes it either ignore the variable or refuse to start (external databases were
+  RETIRED in 4.0.0), why a setting change returns 400, why an env
   var "isn't taking effect" (.env precedence), why CORS panics at startup, or when ADDING a new
   env var / installation setting / query param. Do NOT load it for step-by-step environment setup
   (use futurefin-build-and-env), deployment/upgrade/backup operations (futurefin-run-and-operate),
@@ -42,7 +43,8 @@ deliberate exception (§1.1). No new installation setting, no new query param.
 **self-contained** — PostgreSQL 16 runs *inside* the single `futurefin` container over a Unix
 socket (`/var/run/postgresql`, no TCP), so the compose service `futurefin-database` is gone,
 **no environment variable is required in production** (an empty `.env` works), `DATABASE_URL` is
-no longer composed for you (setting it now means "use an external database", deprecated), and a
+no longer composed for you (**4.0.0 retired external databases altogether** — setting it now is
+either ignored or a hard startup refusal, §1.2), and a
 new family of `FUTUREFIN_*` variables is parsed by the container **entrypoint**, not by the Rust
 binary (§1.2). `docker-compose.split-dev.yml` was replaced by the standalone
 `docker-compose.dev.yml` (§3).
@@ -54,9 +56,10 @@ Vocabulary used below:
   `FIRE number = annual expenses / (SWR/100)`.
 - **split-dev** — the two-process dev mode: `cargo run` API on :8081 + Vite dev server on :8080,
   against the standalone dev Postgres of `docker-compose.dev.yml` on 127.0.0.1:5432.
-- **Embedded / external DB** — embedded = the PostgreSQL inside the image (default since 3.0.0);
-  external = a separate Postgres reached via `DATABASE_URL` (2.x behavior, **deprecated**,
-  removed in 4.0.0).
+- **Embedded / external DB** — embedded = the PostgreSQL inside the image (the only option since
+  4.0.0); external = a separate Postgres reached via `DATABASE_URL` (2.x behavior, deprecated in
+  3.0.0, **removed in 4.0.0**: the container no longer speaks to one). `DATABASE_URL` itself is
+  alive and **required in split-dev**, where `cargo run` talks to `docker-compose.dev.yml`.
 - **Nominal vs real** — nominal = future euros; real = deflated to today's purchasing power.
 
 ## When NOT to use this skill
@@ -83,8 +86,8 @@ entrypoint (`apps/api/docker-entrypoint.sh`, Docker image only), **§1.3** compo
 
 | Variable | Default | Bounds / parsing | Prod or dev | Notes |
 |---|---|---|---|---|
-| `DATABASE_URL` | **none — the binary still panics with `expect` if unset** | any Postgres URL | both | **Changed in 3.0.0.** In the image you no longer set it: the entrypoint exports `postgres:///$POSTGRES_DB?host=/var/run/postgresql&user=$POSTGRES_USER` (Unix socket) right before launching the binary. Setting it yourself in production switches the image to **external-DB mode** — deprecated, removed in 4.0.0, and with an empty mounted volume it triggers the one-shot automigration instead (§1.2). In split-dev you still set it by hand in `.env`: `postgres://futurefin:futurefin@127.0.0.1:5432/futurefin`. |
-| `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS` | `30` | u64, **1–600**; out of range or unparseable → **silently** 30 | both (new in 3.0.0) | Total budget for `db::connect_with_retry` (`apps/api/src/db.rs`), which retries with backoff 0.5s → 1s → 2s → 4s → 4s… instead of crash-looping. Matters in external-DB compat mode, where no `depends_on: service_healthy` guarantees ordering; with the embedded DB the entrypoint already waited on `pg_isready`. |
+| `DATABASE_URL` | **none — the binary still panics with `expect` if unset** | any Postgres URL | both | **Changed in 3.0.0, narrowed in 4.0.0.** In the image you never set it: the entrypoint `export`s `postgres:///$POSTGRES_DB?host=/var/run/postgresql&user=$POSTGRES_USER` (Unix socket) right before launching the binary, overwriting whatever was there. Setting it yourself no longer selects anything — **external DBs were removed in 4.0.0**: a URL not containing `/var/run/postgresql` is *ignored with a warning* when the volume already holds a cluster, and makes the entrypoint **abort** (`refuse_external_database`, exit 1) when it does not (§1.2). In split-dev you still set it by hand in `.env`: `postgres://futurefin:futurefin@127.0.0.1:5432/futurefin`. |
+| `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS` | `30` | u64, **1–600**; out of range or unparseable → **silently** 30 | both (new in 3.0.0) | Total budget for `db::connect_with_retry` (`apps/api/src/db.rs`), which retries with backoff 0.5s → 1s → 2s → 4s → 4s… instead of crash-looping. In the container it rarely matters — the entrypoint has already waited on `pg_isready` before starting the API. It does matter in split-dev, where `cargo run` can start before `docker-compose.dev.yml`'s Postgres is accepting connections. |
 | `PORT` | `8080` | u16; unparseable → silently falls back to 8080 | both | API listen port, binds `0.0.0.0`. Use `8081` in split-dev so Vite can take 8080. Container always runs with `PORT=8080` — since 3.0.0 that comes **only** from the Dockerfile `ENV` (the prod compose no longer restates it); the host side is `APP_PORT`. |
 | `SESSION_TTL_DAYS` | `30` | integer **1–400**; out-of-range or unparseable → **silently** 30 | both | Session cookie/DB row lifetime. Stored in `AppState.session_ttl_days`. |
 | `COOKIE_SECURE` | `false` | true only for exact strings `1`, `true`, `TRUE`, `yes`, `YES` (`parse_bool_env`). `True`, `Yes`, `on` etc. parse as **false** | prod (behind HTTPS) | Sets the `Secure` attribute on the `ff_session` cookie. |
@@ -103,24 +106,24 @@ Not env-configurable (hardcoded constants — changing them is a code change):
 
 ### 1.2 Container entrypoint (parsed in `apps/api/docker-entrypoint.sh`) — new in 3.0.0
 
-The entrypoint is PID 1 in the image: it decides embedded vs external DB, initializes/adopts/
-upgrades the cluster, takes the automatic pre-migration backup, launches the postmaster and the
-API, and shuts both down in order. **None of these variables is required** — the defaults below
+The entrypoint is PID 1 in the image: it initializes/adopts/upgrades the cluster, takes the
+automatic pre-migration backup, launches the postmaster and the API, and shuts both down in order.
+Since 4.0.0 it no longer *chooses* a database — the embedded one is the only one — but it still
+inspects `DATABASE_URL` to catch leftovers from 3.x (see `FUTUREFIN_DB_MODE` below). **None of these variables is required** — the defaults below
 are exactly what production runs with an empty `.env`.
 
 | Variable | Default | Values / bounds | Notes |
 |---|---|---|---|
-| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded` \| `external`; anything else **aborts** at startup (`invalid FUTUREFIN_DB_MODE`) | `auto` = embedded unless `DATABASE_URL` points somewhere other than the socket; then, with a **mounted but empty** volume it runs the one-shot automigration (dump external → restore embedded → row census verification), with an existing cluster the **embedded DB wins** and a warning is logged, and with **no** volume mounted it silently stays external (the watchtower-over-2.x-compose case). `external` forces the deprecated path and never automigrates. |
+| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded` (**synonyms since 4.0.0**); `external` **aborts** with a migration message; anything else aborts with `invalid FUTUREFIN_DB_MODE` | Both live values mean "the embedded cluster". `external` is still *recognized* only so a 3.x compose gets a useful abort instead of a cryptic one. What still varies is the handling of a leftover `DATABASE_URL` pointing outside `/var/run/postgresql`: **cluster present** → warn + ignore ("quítala de tu compose"); **no cluster** → `refuse_external_database` prints the boxed migration instructions (start 3.9.0 once with that same URL and volume, drop `DATABASE_URL`, come back) and exits 1 **before touching anything** — the volume is left untouched, which CI asserts. Note this check runs *before* the no-volume guard, so the watchtower-over-2.x-compose case shows the external message, not "no persistent volume". |
 | `FUTUREFIN_MODE` | `serve` (or `argv[1]`) | `serve` \| `db-only` | `db-only` = rescue mode: PostgreSQL up, API **not** started, restore instructions printed. Any other `argv` is `exec`'d verbatim (`docker run … pg_dump --version`). |
 | `FUTUREFIN_PREMIGRATION_BACKUP` | `on` | `on` = enabled; any other value disables it | Automatic `pg_dump` + gzip into `$FUTUREFIN_BACKUP_DIR` whenever the app version changed or migrations are pending. A **failing** backup aborts startup on purpose ("refusing to start with pending migrations and no safety net") — set it to `off` only to bypass deliberately. |
 | `FUTUREFIN_BACKUP_KEEP` | `10` | integer | The newest N automatic backups are never pruned. |
 | `FUTUREFIN_BACKUP_KEEP_DAYS` | `90` | integer (days) | Beyond the newest `KEEP`, files older than this are deleted. Plus an emergency prune when the volume drops under 256 MB free, which never goes below 3 files. |
 | `FUTUREFIN_ALLOW_EPHEMERAL_DB` | `0` | `1` = allow | Guard against silent data loss: if `$PGDATA` is **not a real mountpoint** the container **aborts** ("no persistent volume is mounted"). `1` runs with a throwaway DB that dies with the container — never for real data. |
-| `FUTUREFIN_EXTERNAL_WAIT_SECS` | `60` | seconds | How long automigration waits for the external DB to answer `pg_isready` before refusing to start empty. |
 | `FUTUREFIN_API_STOP_TIMEOUT` | `15` | seconds | SIGTERM grace for the API before escalating to SIGKILL. |
 | `FUTUREFIN_PG_STOP_TIMEOUT` | `30` | seconds | SIGINT (**fast** shutdown — never SIGTERM, which is *smart* and can hang) grace for the postmaster before SIGQUIT. Keep compose's `stop_grace_period: 60s` above `API_STOP_TIMEOUT + PG_STOP_TIMEOUT`. |
 | `FUTUREFIN_STATE_DIR` | `/var/lib/futurefin` (Dockerfile `ENV`) | path | Volume `ffdata`: `state/` files, automatic backups, pg_upgrade staging. |
-| `FUTUREFIN_BACKUP_DIR` | `$FUTUREFIN_STATE_DIR/backups` | path | Where `pre-migration-*`, `pre-pgupgrade-*` and `pre-automigration-*` dumps land. |
+| `FUTUREFIN_BACKUP_DIR` | `$FUTUREFIN_STATE_DIR/backups` | path | Where `pre-migration-*` and `pre-pgupgrade-*` dumps land. (`pre-automigration-*` files only exist on volumes that migrated from an external DB under 3.x; 4.0.0 writes none but prunes them like the rest.) |
 | `FUTUREFIN_PG_LISTEN` | empty = socket only | postgres `listen_addresses` | **Debug only.** Setting it opens TCP inside the container; production is socket-only by design. |
 | `FUTUREFIN_PG_LOG_LEVEL` | unset | postgres `log_min_messages` (e.g. `debug1`) | Debug only. |
 | `POSTGRES_USER` | `futurefin` | role name | Compat with 2.x: set it only if your 2.x install customized it, otherwise the adopted cluster's superuser won't match and startup dies with a clear message. |
@@ -157,11 +160,13 @@ mountpoint guard above depends on that.
 commented out** — production runs with an empty `.env` or none at all. It documents the optional
 prod knobs (`FUTUREFIN_TAG`, `APP_PORT`, `FUTUREFIN_IMAGE`, the two backup-retention vars, and since
 3.1.0 `FUTUREFIN_MCP_ENABLED` + `FUTUREFIN_PUBLIC_URL`), the
-2.x compat trio (`POSTGRES_USER`/`POSTGRES_DB`/`POSTGRES_PASSWORD`), the deprecated external-DB
-pair (`DATABASE_URL`, `FUTUREFIN_DB_MODE=external`) and the dev block (`PORT=8081`,
-`DATABASE_URL`, `RUST_LOG`) — with an explicit warning not to leave the dev `DATABASE_URL`
-uncommented next to the production compose, because the image would read it as "I want an
-external database".
+2.x compat trio (`POSTGRES_USER`/`POSTGRES_DB`/`POSTGRES_PASSWORD`) and the dev block (`PORT=8081`,
+`DATABASE_URL`, `RUST_LOG`). Since 4.0.0 the external-DB pair is gone from it, replaced by a note
+saying external databases were retired and that a leftover `DATABASE_URL` makes the container stop
+and explain how to migrate (via 3.9.0). The warning about not leaving the dev `DATABASE_URL` next
+to the production compose stands, but keep it honest: **none of this repo's compose files pass
+`DATABASE_URL` into the container** (no `env_file:`, no `DATABASE_URL:` entry), so it only reaches
+the image through a compose that declares it (the 2.x one does) or `docker run -e`.
 
 ## 2. `.env` loading order and precedence
 
@@ -381,7 +386,7 @@ binary.
 3. Log it: the binary's startup `tracing::info!(... , "server config")` line, or an entrypoint
    `log ...` line, so deployments are auditable.
 4. `.env.example` — add it, **commented out** (production must keep working with an empty `.env`),
-   with the default noted and in the right block (prod / 2.x compat / external-DB / dev).
+   with the default noted and in the right block (prod / 2.x compat / dev).
 5. If production-relevant *and* it must reach the container: `docker-compose.yml` `environment:`
    block. Compose-only knobs (image, tag, host port) stay in the `${VAR:-default}` interpolations.
    Do **not** reintroduce a `${VAR:?…}` hard requirement — 3.0.0's contract is that production
@@ -424,14 +429,17 @@ and if the endpoint is the cached projection route, extend `ProjectionCacheKey` 
 Env/compose/entrypoint rows re-verified **2026-08-16 against v3.0.0**, the two OAuth-related
 rows (`FUTUREFIN_PUBLIC_URL`, `FUTUREFIN_MCP_ENABLED`) **2026-08-17 against v3.1.0**, and the
 `mcp_write_enabled` installation-setting row **2026-08-18** (issue #3; re-verify with
-`grep -n "mcp_write_enabled" apps/api/src/handlers/installation.rs apps/api/src/mcp/auth.rs`);
-the rest of the tables carry their own dates inline. Every row is re-verifiable — run these from the repo root when
+`grep -n "mcp_write_enabled" apps/api/src/handlers/installation.rs apps/api/src/mcp/auth.rs`).
+**§1.2 and every `DATABASE_URL` claim re-verified 2026-08-22 against v4.0.0**, which RETIRED the
+external-database mode (`exec_api_external`, `automigrate_*`, `FUTUREFIN_DB_MODE=external` and
+`FUTUREFIN_EXTERNAL_WAIT_SECS` are gone from `apps/api/docker-entrypoint.sh`).
+The rest of the tables carry their own dates inline. Every row is re-verifiable — run these from the repo root when
 auditing for drift (all confirmed working on 2026-08-17):
 
 - Env parsing, defaults, bounds, load order: `grep -n "env::var\|unwrap_or\|contains(&d)\|load_env" apps/api/src/main.rs`
 - DB connect budget + retry backoff: `grep -n "FUTUREFIN_DB_CONNECT_TIMEOUT_SECS" -A 6 apps/api/src/main.rs` and `grep -n "connect_with_retry" -A 20 apps/api/src/db.rs`
 - **Entrypoint variables and their defaults (§1.2)**: `grep -n 'FUTUREFIN_[A-Z_]*:-\|FUTUREFIN_MODE\|FUTUREFIN_PG_LISTEN\|FUTUREFIN_PG_LOG_LEVEL' apps/api/docker-entrypoint.sh` (the whole config block is lines ~17–34)
-- Entrypoint guards and abort messages (mountpoint guard, invalid db_mode, embedded-wins warning): `grep -n 'no persistent volume\|invalid FUTUREFIN_DB_MODE\|already contains an embedded cluster\|DEPRECATED' apps/api/docker-entrypoint.sh`
+- Entrypoint guards and abort messages (mountpoint guard, invalid/retired db_mode, leftover-`DATABASE_URL` warn + refusal): `grep -n 'no persistent volume\|invalid FUTUREFIN_DB_MODE\|ya no existe\|refuse_external_database\|se ignora' apps/api/docker-entrypoint.sh`
 - Socket `DATABASE_URL` the entrypoint exports: `grep -n 'export DATABASE_URL' apps/api/docker-entrypoint.sh`
 - CORS default origin list + panic + MCP headers: `grep -n "CORS_ORIGINS" -A 6 apps/api/src/main.rs` and `grep -n "mcp-session-id\|AUTHORIZATION" apps/api/src/main.rs`
 - MCP kill-switch (added 2026-08-16, v3.0.0; widened to OAuth 2026-08-17, v3.1.0): `grep -n "FUTUREFIN_MCP_ENABLED" apps/api/src/main.rs` and `grep -n "mcp_enabled" apps/api/src/routes/mod.rs apps/api/src/state.rs apps/api/src/handlers/oauth_consent.rs` — the last hit must show `oauth_consent_router(mcp_enabled)` gating ONLY `/authorize-details` + `/authorize`, with `/connections` mounted unconditionally

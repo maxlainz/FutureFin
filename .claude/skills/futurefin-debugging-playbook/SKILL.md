@@ -82,8 +82,8 @@ Vocabulary you need (one line each; full domain detail in
 | Table columns overlap / content hidden under action buttons | Inspect the `<td>`'s computed `display` | `display` other than `table-cell` set on a `<td>` | Trap 8 |
 | `docker ps` shows container `unhealthy` | `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/v1/ready` | `/v1/ready` 503 = embedded Postgres really down (3.0.0 dropped the `/dev/tcp` fallback that used to mask it); or `FUTUREFIN_MODE=db-only` | Trap 9 |
 | Container exits immediately, FATAL `no persistent volume is mounted at /var/lib/postgresql/data` | `docker inspect -f '{{json .Mounts}}' futurefin` | Deliberate anti-data-loss guard: nothing mounted at `$PGDATA` | Trap 12a |
-| FATAL `DATABASE_URL is set and the embedded volume is empty, but the external database does not answer` | `docker compose config \| grep -n DATABASE_URL` | A leftover `DATABASE_URL` (typically a dev `.env` sitting next to the prod compose) with an empty volume | Trap 12b |
-| Boxed `DEPRECATED … base de datos EXTERNA` warning, app otherwise fine | `docker inspect -f '{{json .Mounts}}' futurefin` | External-compat mode: 2.x compose running the 3.x image (e.g. after watchtower) | Trap 12c |
+| Boxed `DATABASE_URL apunta a una base de datos EXTERNA…` and the container **exits** | `docker compose config \| grep -n DATABASE_URL` | A leftover `DATABASE_URL` pointing outside the container with no embedded cluster in the volume. External DBs were retired in 4.0.0 | Trap 12b |
+| `WARN: DATABASE_URL está definida … se ignora`, app otherwise fine | `docker compose config \| grep -n DATABASE_URL` | Same leftover variable, but the volume already holds the embedded cluster — harmless, just stale config | Trap 12c |
 | FATAL `pre-migration backup FAILED` | Check free space/permissions on the `ffdata` volume | The automatic pre-migration dump could not be written; startup aborts **on purpose** | Trap 12d |
 | FATAL `cannot connect as role 'futurefin'` while adopting a 2.x cluster | Recall the `POSTGRES_USER` of the 2.x install | Adopted cluster whose superuser role is not `futurefin` | Trap 12e |
 | `pg_upgrade needed: PostgreSQL 15 -> 16` followed by a failure | Read the pg_upgrade logs inside the `ffdata` volume | Major upgrade aborted; old cluster preserved untouched (nothing is ever deleted) | Trap 12f |
@@ -365,7 +365,7 @@ standalone `docker compose -f docker-compose.dev.yml up -d` (project `futurefin-
 The entrypoint (`apps/api/docker-entrypoint.sh`) prefixes every line with
 `[futurefin-entrypoint]` and refuses to start in situations where continuing could lose data.
 **These aborts are features.** Golden rule of the entrypoint: it NEVER deletes a cluster — old
-or partial clusters are moved aside (`$PGDATA/pgdata_old_<major>`,
+or partial clusters are moved aside (`$PGDATA/pgdata_old_<major>`; before 4.0.0 also
 `/var/lib/futurefin/failed-automigration-<ts>`), never removed. So a failed start is recoverable
 by construction; do not "clean up" volumes to make an error go away.
 
@@ -378,24 +378,28 @@ die with the container. Discriminating experiment: the same image with
 throwaway containers (CI, a quick `--version` probe); it logs a loud warning. CI pins this
 behavior in the "Image sanity (PG majors, label, no-volume guard)" step.
 
-**12b. `FATAL: DATABASE_URL is set and the embedded volume is empty, but the external database
-does not answer`.** First move: `docker compose config | grep -n DATABASE_URL` — the usual cause
-is a dev `.env` sitting next to the production compose, or a leftover 2.x variable. With a
-`DATABASE_URL` pointing outside the container **and** an empty `$PGDATA`, the entrypoint assumes
-you are migrating from an external database and waits `FUTUREFIN_EXTERNAL_WAIT_SECS` (60 s) for
-it; it refuses to silently start with an empty database. Discriminating experiment: unset
+**12b. Boxed `DATABASE_URL apunta a una base de datos EXTERNA y este volumen no contiene todavía
+una base embebida`, container exits non-zero.** (Changed in 4.0.0; up to 3.9.0 the same input
+either started an automigration or ran in external-compat mode.) First move:
+`docker compose config | grep -n DATABASE_URL` — the usual causes are a compose that still
+declares it (a 2.x one does; **none of this repo's compose files do**), a `docker run -e`, or a
+2.x leftover. External databases were **retired in 4.0.0**: with such a URL and no cluster in
+`$PGDATA`, the entrypoint refuses rather than start on an empty database, which would read as
+total data loss. Nothing is written to the volume. Discriminating experiment: unset
 `DATABASE_URL` → the container initializes a fresh cluster (`initializing fresh PostgreSQL 16
-cluster`) and starts. Fix: either remove `DATABASE_URL` (fresh install) or bring the external DB
-up one last time so the one-shot automigration can dump→restore→detach.
+cluster`) and starts; and `docker run --rm -v <thevolume>:/d alpine ls -A /d` shows it is still
+empty. Fix: if the data is already inside that volume there is nothing to migrate — just remove
+the variable; if it really lives in an external server, run 3.9.0 once to migrate it
+(run-and-operate §4.3, `docs/actualizar.md` §«Vengo de 2.x…»); if you wanted a fresh install,
+remove the variable.
 
-**12c. Boxed `DEPRECATED … base de datos EXTERNA` warning (app works).** First move:
-`docker inspect -f '{{json .Mounts}}' futurefin`. You are in external-compat mode: a 2.x compose
-(no volume on the app container, `DATABASE_URL` pointing at `futurefin-database`) running the
-3.x image — the classic watchtower/`:latest` case. The entrypoint deliberately does NOT migrate
-here (writing to the ephemeral layer would be worse) and just runs the API against the external
-DB. Discriminating experiment: the log shows the boxed warning and **no** `starting embedded
-PostgreSQL` line. It is supported, not broken — but migrate when you can (replace the compose
-with the 3.x one; CI covers exactly this transition). The mode disappears in 4.0.0.
+**12c. `WARN: DATABASE_URL está definida pero FutureFin 4.0.0 solo usa la base embebida, que ya
+tiene tus datos — se ignora` (app works).** Same leftover variable as 12b, but `$PGDATA` already
+holds a cluster, so the entrypoint ignores it and carries on. Discriminating experiment: the log
+continues into `starting embedded PostgreSQL 16` and `/v1/ready` answers. Nothing is broken — it
+is stale config. Fix: delete the line from whatever is passing it. (Before 4.0.0 this same
+situation printed a boxed `DEPRECATED … base de datos EXTERNA` banner and, in the no-volume
+variant, actually served from the remote DB; that mode is gone.)
 
 **12d. `FATAL: pre-migration backup FAILED`.** First move: check the `ffdata` volume
 (`docker run --rm -v futurefin_ffdata:/d alpine df -h /d`) and its permissions. Before applying
@@ -423,7 +427,8 @@ and re-runs on the next boot). Discriminating experiment:
 major is live, `pgdata_old_15/` shows the swap already happened. A mandatory
 `pre-pgupgrade-15-to-16-*.sql.gz` dump is written before anything is touched. If the image does
 not bundle your old major at all the entrypoint says so and names the two escape routes
-(stepwise upgrade with an older FutureFin, or dump + external automigration). CI pins the whole
+(stepwise upgrade with an older FutureFin, or dump with the official `postgres:<N>` image and
+restore into a fresh volume with `scripts/restore-postgres.sh`). CI pins the whole
 path in the "pg_upgrade 15→16 (seeded PG15 volume)" step.
 
 ## Where the evidence lives
@@ -491,8 +496,10 @@ path in the "pg_upgrade 15→16 (seeded PG15 volume)" step.
 
 Written 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); traps 9 and 12, the container/DB
 evidence sections and the vocabulary entry rewritten 2026-08-16 for **v3.0.0** (self-contained
-image). All mechanisms verified by reading code, not by running services. Re-verify before
-trusting:
+image); **traps 12b/12c and their two symptom-table rows rewritten 2026-08-22 for v4.0.0**, which
+removed the external-database mode from the entrypoint (the old FATAL `…the external database does
+not answer` and the boxed `DEPRECATED` banner can no longer occur). All mechanisms verified by
+reading code, not by running services. Re-verify before trusting:
 
 - Error mapping (23505→409, 23503→400): `grep -n "23505\|23503" apps/api/src/error.rs`
 - Body limits (1 MiB / 16 MiB): `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`
@@ -512,9 +519,10 @@ trusting:
   `grep -n 'log "\|warn "' apps/api/docker-entrypoint.sh`; API side
   `grep -n "futurefin starting\|database connected\|migrations applied\|server config\|serving web UI\|listening\|http server stopped\|database pool closed\|shutdown signal" apps/api/src/main.rs`
 - The exact FATAL strings of trap 12:
-  `grep -n "no persistent volume\|does not answer\|pre-migration backup FAILED\|cannot connect as role\|pg_upgrade needed\|DEPRECATED" apps/api/docker-entrypoint.sh`
+  `grep -n "no persistent volume\|refuse_external_database\|se ignora\|pre-migration backup FAILED\|cannot connect as role\|pg_upgrade needed" apps/api/docker-entrypoint.sh`
 - Nothing is ever deleted (moved aside instead):
-  `grep -n "pgdata_old_\|failed-automigration-" apps/api/docker-entrypoint.sh`
+  `grep -n "pgdata_old_" apps/api/docker-entrypoint.sh` (`failed-automigration-` went with the
+  external mode in 4.0.0)
 - Rescue mode exists: `grep -n "db-only" apps/api/docker-entrypoint.sh`
 - Dev Postgres compose (project `futurefin-dev`, 127.0.0.1:5432, volume `devdata`):
   `grep -n "^name:\|5432\|devdata" docker-compose.dev.yml` (and `ls docker-compose*.yml` —

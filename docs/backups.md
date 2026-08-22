@@ -81,9 +81,11 @@ nada que perder.
 /var/lib/futurefin/backups/pre-migration-3.8.0-to-3.9.0-20260821T031500Z.sql.gz
 ```
 
-En el mismo directorio pueden aparecer otros dos tipos, con la misma retención:
-`pre-pgupgrade-*` (antes de un `pg_upgrade` de PostgreSQL, ese es **obligatorio**) y
-`pre-automigration-*` (antes de traerse los datos de una base externa).
+En el mismo directorio puede aparecer también un `pre-pgupgrade-*`, escrito antes de un
+`pg_upgrade` de PostgreSQL; ese es **obligatorio**. Y si vienes de una instalación 3.x que en su
+día se trajo los datos de una base externa, quedará por ahí un `pre-automigration-*` de entonces:
+la 4.0.0 ya no escribe ninguno —el modo externo se retiró—, pero los que existan se conservan y
+entran en la misma retención que los demás.
 
 **Si falla, el arranque se aborta**: `pre-migration backup FAILED — refusing to start with pending
 migrations and no safety net.` Migrar sin red no es algo que pase por accidente. Se puede desactivar
