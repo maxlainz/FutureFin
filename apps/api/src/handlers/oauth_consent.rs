@@ -80,7 +80,7 @@ pub async fn authorize_details(
     Query(params): Query<AuthorizeParams>,
 ) -> Result<Json<AuthorizeDetailsResponse>, ApiError> {
     let base = public_base_url(&state, &headers)
-        .map_err(|_| ApiError::BadRequest("cannot derive public URL".into()))?;
+        .map_err(|_| ApiError::BadRequest("public_url_underivable: cannot derive public URL".into()))?;
 
     match validate_authorize_params(&state.pool, &base, &params).await {
         Ok(v) => {
@@ -135,7 +135,7 @@ pub async fn authorize_details(
                 oauth_state.as_deref(),
                 &base,
             )
-            .map_err(|_| ApiError::BadRequest("invalid redirect_uri".into()))?;
+            .map_err(|_| ApiError::BadRequest("redirect_uri_invalid: invalid redirect_uri".into()))?;
             Ok(Json(AuthorizeDetailsResponse {
                 status: AuthorizeDetailsStatus::RedirectError,
                 client_name: None,
@@ -185,7 +185,7 @@ pub async fn authorize_decision(
     let user = require_session_user(&jar, &state.pool).await?;
     require_installation_member(&state.pool, user.id.0).await?;
     let base = public_base_url(&state, &headers)
-        .map_err(|_| ApiError::BadRequest("cannot derive public URL".into()))?;
+        .map_err(|_| ApiError::BadRequest("public_url_underivable: cannot derive public URL".into()))?;
 
     let validated = match validate_authorize_params(&state.pool, &base, &body.params).await {
         Ok(v) => v,
@@ -205,7 +205,7 @@ pub async fn authorize_decision(
                 oauth_state.as_deref(),
                 &base,
             )
-            .map_err(|_| ApiError::BadRequest("invalid redirect_uri".into()))?;
+            .map_err(|_| ApiError::BadRequest("redirect_uri_invalid: invalid redirect_uri".into()))?;
             return Ok(Json(AuthorizeDecisionResponse { redirect_to }));
         }
     };
@@ -218,7 +218,7 @@ pub async fn authorize_decision(
             validated.state.as_deref(),
             &base,
         )
-        .map_err(|_| ApiError::BadRequest("invalid redirect_uri".into()))?
+        .map_err(|_| ApiError::BadRequest("redirect_uri_invalid: invalid redirect_uri".into()))?
     } else {
         // Deny: el cliente recibe access_denied (no dejar a claude colgado esperando).
         error_redirect(
@@ -228,7 +228,7 @@ pub async fn authorize_decision(
             validated.state.as_deref(),
             &base,
         )
-        .map_err(|_| ApiError::BadRequest("invalid redirect_uri".into()))?
+        .map_err(|_| ApiError::BadRequest("redirect_uri_invalid: invalid redirect_uri".into()))?
     };
     Ok(Json(AuthorizeDecisionResponse { redirect_to }))
 }

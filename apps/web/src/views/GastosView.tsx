@@ -54,10 +54,11 @@ import {
 } from "../components/icons";
 import { MonthlyCashflowBars } from "../components/charts/CategoryComparisonBars";
 import {
-  METRIC_DASH,
   formatCurrencyAmount,
   formatPercentDisplay,
+  METRIC_DASH,
   parseDisplayDecimal,
+  toApiDecimalString,
 } from "../lib/format";
 import { formatDateDm, formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
 import { ledgerViewQs, type LedgerPersonScope } from "../lib/ledger";
@@ -583,7 +584,7 @@ export function GastosView({
             <tr>
               <th>Categoría</th>
               <th className="num">Real</th>
-              {isMobile ? null : <th className="num">Budget</th>}
+              {isMobile ? null : <th className="num">Presupuesto</th>}
               <th className="num">Δ</th>
               {isMobile ? null : <th className="num">Promedio {avgLabel}</th>}
             </tr>
@@ -607,7 +608,7 @@ export function GastosView({
                     )}
                     {isMobile ? (
                       <span className="cell-subline">
-                        Budget {formatCurrencyAmount(l.budget, currencyIso)} · Prom{" "}
+                        Presup. {formatCurrencyAmount(l.budget, currencyIso)} · Prom{" "}
                         {avgLabel}{" "}
                         {hasAvg
                           ? formatCurrencyAmount(l.avg, currencyIso)
@@ -638,7 +639,7 @@ export function GastosView({
                 Total
                 {isMobile ? (
                   <span className="cell-subline">
-                    Budget {formatCurrencyAmount(total.budget, currencyIso)} · Prom{" "}
+                    Presup. {formatCurrencyAmount(total.budget, currencyIso)} · Prom{" "}
                     {avgLabel}{" "}
                     {hasAvg
                       ? formatCurrencyAmount(total.avg, currencyIso)
@@ -1529,7 +1530,7 @@ function EditTransactionModal({
     }
     patch.op_date = opDate;
     patch.concept = concept.trim();
-    patch.amount = amount.trim().replace(",", ".");
+    patch.amount = toApiDecimalString(amount);
     if (kind === "savings" || !categoryId) patch.clear_category = true;
     else patch.category_id = categoryId;
     if (valueDate.trim()) patch.value_date = valueDate;

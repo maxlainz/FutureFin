@@ -36,7 +36,7 @@ export const HELP_TEXTS = {
       "totales.",
   },
   "summary.runway": {
-    title: "Runway",
+    title: "Autonomía",
     body:
       "Meses que tus activos líquidos cubrirían tu gasto si dejaras de ingresar hoy. No es una " +
       "división simple: mientras se consumen, los líquidos siguen rindiendo su rentabilidad " +

@@ -73,13 +73,13 @@ pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
     let trimmed = username.trim();
     if trimmed != username {
         return Err(ApiError::BadRequest(
-            "username must not have leading or trailing whitespace".into(),
+            "username_whitespace: username must not have leading or trailing whitespace".into(),
         ));
     }
     let len = username.chars().count();
     if !(3..=64).contains(&len) {
         return Err(ApiError::BadRequest(
-            "username must be between 3 and 64 characters".into(),
+            "username_length: username must be between 3 and 64 characters".into(),
         ));
     }
     if !username
@@ -87,7 +87,7 @@ pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
         return Err(ApiError::BadRequest(
-            "username may only contain letters, digits, '.', '_' and '-'".into(),
+            "username_charset: username may only contain letters, digits, '.', '_' and '-'".into(),
         ));
     }
     Ok(())
@@ -98,9 +98,9 @@ fn parse_me_birth_patch(v: &Value) -> Result<Option<NaiveDate>, ApiError> {
         Value::Null => Ok(None),
         Value::String(s) => NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
             .map(Some)
-            .map_err(|_| ApiError::BadRequest("birth_date must be YYYY-MM-DD".into())),
+            .map_err(|_| ApiError::BadRequest("birth_date_format: birth_date must be YYYY-MM-DD".into())),
         _ => Err(ApiError::BadRequest(
-            "birth_date must be null or a date string".into(),
+            "birth_date_type: birth_date must be null or a date string".into(),
         )),
     }
 }
@@ -109,12 +109,12 @@ fn validate_birth_date(d: NaiveDate) -> Result<(), ApiError> {
     let today = Utc::now().date_naive();
     if d > today {
         return Err(ApiError::BadRequest(
-            "birth_date cannot be in the future".into(),
+            "birth_date_future: birth_date cannot be in the future".into(),
         ));
     }
     if d.year() < 1900 {
         return Err(ApiError::BadRequest(
-            "birth_date year must be >= 1900".into(),
+            "birth_date_too_old: birth_date year must be >= 1900".into(),
         ));
     }
     Ok(())
@@ -146,7 +146,7 @@ pub async fn register(
     validate_username(&body.username)?;
     let birth_date = {
         let d = NaiveDate::parse_from_str(body.birth_date.trim(), "%Y-%m-%d")
-            .map_err(|_| ApiError::BadRequest("birth_date must be YYYY-MM-DD".into()))?;
+            .map_err(|_| ApiError::BadRequest("birth_date_format: birth_date must be YYYY-MM-DD".into()))?;
         validate_birth_date(d)?;
         d
     };
@@ -161,13 +161,26 @@ pub async fn register(
     .bind(&hash)
     .bind(birth_date)
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    // El `?` normal mapearía el SQLSTATE 23505 a un `Conflict` pelado, que llega a la SPA como
+    // «resource conflict»: el único unique de esta tabla es `username`, así que aquí SÍ sabemos
+    // qué colisionó y podemos decirlo.
+    .map_err(|e| match ApiError::from(e) {
+        ApiError::Conflict => ApiError::ConflictWith(
+            "username_taken: that username is already registered".into(),
+        ),
+        other => other,
+    })?;
 
     match bootstrap_installation_as_owner_if_empty(&mut tx, &row.id).await
     {
         Ok(()) => {}
+        // Dos primeros registros a la vez: otro creó la instalación entremedias. No es culpa de
+        // quien lo intenta y se resuelve reintentando, así que hay que poder decirlo.
         Err(ApiError::Conflict) => {
-            return Err(ApiError::Conflict);
+            return Err(ApiError::ConflictWith(
+                "installation_race: another registration created the installation first".into(),
+            ));
         }
         Err(e) => return Err(e),
     }

@@ -126,10 +126,7 @@ fn to_tool_outcome(e: ApiError) -> Result<CallToolResult, ErrorData> {
         }
         ApiError::Unavailable => Err(ErrorData::internal_error("dependency unavailable", None)),
         _ => {
-            let body = ErrorBody {
-                error: e.code(),
-                message: e.sanitised_message(),
-            };
+            let body = ErrorBody::from_api_error(&e);
             let json = serde_json::to_string(&body)
                 .unwrap_or_else(|_| r#"{"error":"internal","message":"internal error"}"#.into());
             Ok(CallToolResult::error(vec![ContentBlock::text(json)]))

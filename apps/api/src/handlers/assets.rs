@@ -133,12 +133,12 @@ fn normalize_name(raw: &str) -> Result<String, ApiError> {
     let t = raw.trim();
     if t.is_empty() {
         return Err(ApiError::BadRequest(
-            "name must not be empty".into(),
+            "name_empty: name must not be empty".into(),
         ));
     }
     if t.len() > 200 {
         return Err(ApiError::BadRequest(
-            "name must be at most 200 characters".into(),
+            "name_too_long: name must be at most 200 characters".into(),
         ));
     }
     Ok(t.into())
@@ -154,7 +154,7 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
             }
             if t.len() > 4000 {
                 return Err(ApiError::BadRequest(
-                    "notes must be at most 4000 characters".into(),
+                    "notes_too_long: notes must be at most 4000 characters".into(),
                 ));
             }
             Ok(Some(t.into()))
@@ -164,7 +164,7 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
 
 fn assert_non_negative(d: Decimal, field: &'static str) -> Result<(), ApiError> {
     if d.is_sign_negative() {
-        return Err(ApiError::BadRequest(format!("{field} must be >= 0")));
+        return Err(ApiError::BadRequest(format!("amount_negative: {field} must be >= 0")));
     }
     Ok(())
 }
@@ -183,11 +183,11 @@ fn merge_optional_decimal_patch(
             }
             let d: Decimal = if let serde_json::Value::String(s) = v {
                 s.trim().parse().map_err(|_| {
-                    ApiError::BadRequest(format!("{field} must be a valid decimal string"))
+                    ApiError::BadRequest(format!("decimal_invalid: {field} must be a valid decimal string"))
                 })?
             } else {
                 serde_json::from_value(v.clone()).map_err(|_| {
-                    ApiError::BadRequest(format!("{field} must be a valid decimal"))
+                    ApiError::BadRequest(format!("decimal_invalid: {field} must be a valid decimal"))
                 })?
             };
             assert_non_negative(d, field)?;
@@ -217,7 +217,7 @@ async fn assert_asset_category(
 
     if !ok {
         return Err(ApiError::BadRequest(
-            "category_id must reference an asset category in this installation".into(),
+            "category_wrong_scope: category_id must reference an asset category in this installation".into(),
         ));
     }
     Ok(())
@@ -392,7 +392,7 @@ fn assert_return_percent(pct: Option<Decimal>) -> Result<(), ApiError> {
     if let Some(p) = pct {
         if p <= Decimal::from(-100) {
             return Err(ApiError::BadRequest(
-                "expected_annual_return_percent must be greater than -100".into(),
+                "return_percent_too_low: expected_annual_return_percent must be greater than -100".into(),
             ));
         }
     }
@@ -521,7 +521,7 @@ pub(crate) async fn patch_asset_core(
         && body.sort_index.is_none()
     {
         return Err(ApiError::BadRequest(
-            "provide at least one field to update".into(),
+            "patch_empty: provide at least one field to update".into(),
         ));
     }
 

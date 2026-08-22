@@ -606,53 +606,53 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
     match schema_version {
         1 => {
             let p: BackupPayloadV1 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v1 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v1 malformed: {e}"))?;
             Ok(AnyPayload::V1(p))
         }
         2 => {
             let p: BackupPayloadV2 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v2 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v2 malformed: {e}"))?;
             Ok(AnyPayload::V2(p))
         }
         3 => {
             let p: BackupPayloadV3 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v3 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v3 malformed: {e}"))?;
             Ok(AnyPayload::V3(p))
         }
         4 => {
             let p: BackupPayloadV4 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v4 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v4 malformed: {e}"))?;
             Ok(AnyPayload::V4(p))
         }
         5 => {
             let p: BackupPayloadV5 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v5 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v5 malformed: {e}"))?;
             Ok(AnyPayload::V5(p))
         }
         6 => {
             let p: BackupPayloadV6 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v6 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v6 malformed: {e}"))?;
             Ok(AnyPayload::V6(p))
         }
         7 => {
             let p: BackupPayloadV7 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v7 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v7 malformed: {e}"))?;
             Ok(AnyPayload::V7(p))
         }
         8 => {
             let p: BackupPayloadV8 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v8 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v8 malformed: {e}"))?;
             Ok(AnyPayload::V8(p))
         }
         9 => {
             let p: BackupPayloadV9 = serde_json::from_slice(bytes)
-                .map_err(|e| format!("payload v9 malformed: {e}"))?;
+                .map_err(|e| format!("backup_payload_malformed: payload v9 malformed: {e}"))?;
             Ok(AnyPayload::V9(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
-            "schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
+            "backup_schema_version_unsupported: schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
         )),
-        v => Err(format!("schema_version {v} not supported")),
+        v => Err(format!("backup_schema_version_unknown: schema_version {v} not supported")),
     }
 }
 

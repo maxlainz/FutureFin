@@ -698,7 +698,7 @@ pub(crate) fn projection_horizon_months(
 }
 
 pub(crate) fn map_engine_err(e: EngineError) -> ApiError {
-    ApiError::BadRequest(e.to_string())
+    ApiError::BadRequest(format!("engine_rejected_input: {e}"))
 }
 
 /// Primer mes cuyo patrimonio cruza el target FIRE (inflado mes a mes). Se evalúa sobre TODOS
@@ -1453,10 +1453,10 @@ pub async fn compute_projection_series_response(
         }),
     );
     let output = main_join
-        .map_err(|e| ApiError::BadRequest(format!("projection task panic: {e}")))?
+        .map_err(|e| ApiError::BadRequest(format!("task_panic: projection task panic: {e}")))?
         .map_err(map_engine_err)?;
     let compound_outpaces_true_savings_month_index = marker_join
-        .map_err(|e| ApiError::BadRequest(format!("compound marker task panic: {e}")))?
+        .map_err(|e| ApiError::BadRequest(format!("task_panic: compound marker task panic: {e}")))?
         .map_err(map_engine_err)?;
 
     let starting_net_worth = output
@@ -1727,7 +1727,7 @@ pub(crate) struct SimulateProjectionResponse {
 fn require_non_negative(name: &str, v: Option<Decimal>) -> Result<Decimal, ApiError> {
     let v = v.unwrap_or(Decimal::ZERO);
     if v < Decimal::ZERO {
-        return Err(ApiError::BadRequest(format!("{name} must be >= 0")));
+        return Err(ApiError::BadRequest(format!("amount_negative: {name} must be >= 0")));
     }
     Ok(v)
 }
@@ -1820,7 +1820,7 @@ pub(crate) async fn simulate_projection_core(
     // ---- Cotas de dominio (mismas que sus ejes de settings reales) --------------------------
     if let Some(m) = spec.months {
         if !(12..=840).contains(&m) {
-            return Err(ApiError::BadRequest("months must be between 12 and 840".into()));
+            return Err(ApiError::BadRequest("months_out_of_range: months must be between 12 and 840".into()));
         }
     }
     let extra_expense = require_non_negative("extra_monthly_expense", spec.extra_monthly_expense)?;
@@ -1835,7 +1835,7 @@ pub(crate) async fn simulate_projection_core(
     if let Some(v) = spec.retirement_annual_expense {
         if v <= Decimal::ZERO {
             return Err(ApiError::BadRequest(
-                "retirement_annual_expense must be > 0".into(),
+                "retirement_expense_not_positive: retirement_annual_expense must be > 0".into(),
             ));
         }
     }
@@ -1843,7 +1843,7 @@ pub(crate) async fn simulate_projection_core(
         // −100 no tiene raíz 12ª real (el engine clamparía a pérdida total): se rechaza.
         if *pct <= Decimal::from(-100) {
             return Err(ApiError::BadRequest(format!(
-                "expected_annual_return_percent for asset {asset_id} must be greater than -100"
+                "return_percent_too_low: expected_annual_return_percent for asset {asset_id} must be greater than -100"
             )));
         }
     }
@@ -1855,17 +1855,17 @@ pub(crate) async fn simulate_projection_core(
         (None, None, None) => {}
         (Some(a), mi, d) => {
             if a <= Decimal::ZERO {
-                return Err(ApiError::BadRequest("one_off_expense.amount must be > 0".into()));
+                return Err(ApiError::BadRequest("one_off_amount_not_positive: one_off_expense.amount must be > 0".into()));
             }
             if mi.is_some() == d.is_some() {
                 return Err(ApiError::BadRequest(
-                    "one_off_expense requires exactly one of month_index or date".into(),
+                    "one_off_timing_ambiguous: one_off_expense requires exactly one of month_index or date".into(),
                 ));
             }
         }
         _ => {
             return Err(ApiError::BadRequest(
-                "one_off_expense.amount is required with month_index/date".into(),
+                "one_off_amount_required: one_off_expense.amount is required with month_index/date".into(),
             ))
         }
     }
@@ -1934,7 +1934,7 @@ pub(crate) async fn simulate_projection_core(
             (Some(k), None) => {
                 if !(1..=months).contains(&k) {
                     return Err(ApiError::BadRequest(format!(
-                        "one_off_expense.month_index must be between 1 and {months}"
+                        "one_off_month_out_of_range: one_off_expense.month_index must be between 1 and {months}"
                     )));
                 }
                 scenario_input.planning_monthly_cash_adjustment[(k - 1) as usize] -= amount;
@@ -1953,7 +1953,7 @@ pub(crate) async fn simulate_projection_core(
                 );
                 if adj.iter().all(|v| v.is_zero()) {
                     return Err(ApiError::BadRequest(
-                        "one_off_expense.date is outside the projection horizon".into(),
+                        "one_off_date_out_of_horizon: one_off_expense.date is outside the projection horizon".into(),
                     ));
                 }
                 for (slot, extra) in scenario_input
@@ -1976,7 +1976,7 @@ pub(crate) async fn simulate_projection_core(
             .position(|(id, _)| id == asset_id)
         else {
             return Err(ApiError::BadRequest(format!(
-                "unknown asset_id {asset_id} (not in scope for this view)"
+                "asset_not_in_scope: unknown asset_id {asset_id} (not in scope for this view)"
             )));
         };
         scenario_input.assets[idx].expected_annual_return_percent = Some(*pct);
@@ -1990,10 +1990,10 @@ pub(crate) async fn simulate_projection_core(
         tokio::task::spawn_blocking(move || project_net_worth_series(&scenario_sim_input)),
     );
     let baseline_out = baseline_join
-        .map_err(|e| ApiError::BadRequest(format!("projection task panic: {e}")))?
+        .map_err(|e| ApiError::BadRequest(format!("task_panic: projection task panic: {e}")))?
         .map_err(map_engine_err)?;
     let scenario_out = scenario_join
-        .map_err(|e| ApiError::BadRequest(format!("projection task panic: {e}")))?
+        .map_err(|e| ApiError::BadRequest(format!("task_panic: projection task panic: {e}")))?
         .map_err(map_engine_err)?;
 
     let baseline = sim_kpis(

@@ -259,7 +259,7 @@ export function ProjectionNetWorthChart({
   const legendLabels = useMemo(() => {
     const assetNames = merged.assetSeries.map((as) => as.asset_name);
     const labels: string[] = ["Patrimonio neto", "Capital aportado"];
-    if (hasFireTargetSeries) labels.push("Target FIRE");
+    if (hasFireTargetSeries) labels.push("Objetivo FIRE");
     labels.push(...assetNames);
     if (historyStartMonth < 0) labels.push("Histórico");
     return labels;
@@ -1328,7 +1328,7 @@ export function ProjectionNetWorthChart({
               items.push(
                 <g key="legend-fire" transform={`translate(${p[2].x}, ${p[2].y})`}>
                   <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-fire)" strokeWidth={1.5} strokeDasharray="3 4" strokeLinecap="round" opacity={0.5} />
-                  <text x={28} y={15}>Target FIRE</text>
+                  <text x={28} y={15}>Objetivo FIRE</text>
                 </g>,
               );
             }

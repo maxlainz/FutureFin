@@ -4,8 +4,9 @@ import {
   apiGet,
   apiPatch,
   apiPost,
+  apiErrorFromResponse,
+  ApiRequestError,
   defaultFetchInit,
-  errorMessageFromResponse,
 } from "./client";
 
 const originalFetch = globalThis.fetch;
@@ -44,18 +45,46 @@ describe("defaultFetchInit", () => {
   });
 });
 
-describe("errorMessageFromResponse", () => {
-  it("reads {message} from JSON body", async () => {
-    const res = mockResponse({ status: 400, body: { message: "amount must be > 0" } });
-    expect(await errorMessageFromResponse(res)).toBe("amount must be > 0");
+describe("apiErrorFromResponse", () => {
+  it("traduce el código estable al español y guarda el técnico en detail", async () => {
+    const res = mockResponse({
+      status: 409,
+      body: { code: "username_taken", message: "that username is already registered" },
+    });
+    const err = await apiErrorFromResponse(res);
+    expect(err).toBeInstanceOf(ApiRequestError);
+    expect(err.message).toBe("Ese nombre de usuario ya está registrado. Elige otro.");
+    expect(err.code).toBe("username_taken");
+    expect(err.status).toBe(409);
+    expect(err.detail).toBe("that username is already registered");
   });
-  it("falls back to HTTP status when not JSON", async () => {
-    const res = mockResponse({ status: 500, body: "boom", contentType: "text/plain" });
-    expect(await errorMessageFromResponse(res)).toBe("HTTP 500");
+
+  it("con un código desconocido cae al status, nunca al mensaje inglés", async () => {
+    const res = mockResponse({
+      status: 403,
+      body: { code: "codigo_que_no_existe_en_el_catalogo", message: "forbidden" },
+    });
+    const err = await apiErrorFromResponse(res);
+    expect(err.message).toBe("No tienes permisos para hacer esto.");
+    expect(err.message).not.toContain("forbidden");
+    // El técnico sigue disponible para depurar.
+    expect(err.detail).toBe("forbidden");
   });
-  it("falls back to HTTP status when JSON has no message", async () => {
-    const res = mockResponse({ status: 422, body: { error: "validation" } });
-    expect(await errorMessageFromResponse(res)).toBe("HTTP 422");
+
+  it("sin cuerpo JSON usa solo el código de estado", async () => {
+    const res = mockResponse({ status: 502, body: "bad gateway", contentType: "text/plain" });
+    const err = await apiErrorFromResponse(res);
+    expect(err.message).toBe(
+      "No se ha podido contactar con el servidor. Comprueba que sigue en marcha.",
+    );
+    expect(err.code).toBeNull();
+    expect(err.detail).toBeNull();
+  });
+
+  it("un status sin frase propia cae al genérico", async () => {
+    const res = mockResponse({ status: 418, body: { message: "teapot" } });
+    const err = await apiErrorFromResponse(res);
+    expect(err.message).toBe("Algo ha fallado. Inténtalo de nuevo en unos segundos.");
   });
 });
 
@@ -67,12 +96,14 @@ describe("apiGet", () => {
     expect(data).toEqual({ foo: "bar" });
     expect(fetchMock).toHaveBeenCalledWith("/v1/test", { credentials: "include" });
   });
-  it("throws with body message on 4xx", async () => {
+  it("lanza el mensaje traducido en un 4xx", async () => {
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockResolvedValueOnce(
-      mockResponse({ status: 401, body: { message: "authentication required" } }),
+      mockResponse({ status: 401, body: { code: "unauthorized", message: "authentication required" } }),
     );
-    await expect(apiGet("/v1/secret")).rejects.toThrow("authentication required");
+    await expect(apiGet("/v1/secret")).rejects.toThrow(
+      "Tu sesión ha caducado. Vuelve a iniciar sesión.",
+    );
   });
 });
 
@@ -103,8 +134,8 @@ describe("apiPost + apiPatch + apiDelete", () => {
   it("PATCH throws on conflict", async () => {
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockResolvedValueOnce(
-      mockResponse({ status: 409, body: { message: "resource conflict" } }),
+      mockResponse({ status: 409, body: { code: "conflict", message: "resource conflict" } }),
     );
-    await expect(apiPatch("/v1/things/1", {})).rejects.toThrow("resource conflict");
+    await expect(apiPatch("/v1/things/1", {})).rejects.toThrow("Ese valor ya existe. Elige otro.");
   });
 });

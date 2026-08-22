@@ -173,14 +173,14 @@ export function ProjectionView({
           <h2 className="workspace-title">Proyección</h2>
           <Switch
             variant="chart"
-            label="Focus"
+            label="Vista cercana"
             checked={focusMode}
             onChange={setFocusMode}
-            ariaLabel="Activar focus en la proyección"
+            ariaLabel="Acercar la proyección a los próximos hitos"
           />
           <Switch
             variant="chart"
-            label="Inflation Adjusted"
+            label="En dinero de hoy"
             checked={inflationAdjusted}
             onChange={setInflationAdjusted}
             ariaLabel="Mostrar la proyección ajustada a inflación (en dinero de hoy)"
@@ -213,7 +213,7 @@ export function ProjectionView({
                 return (
                   <MetricCard
                     key={`${m.target}-${m.reached_month_index}`}
-                    label={isJubilacion ? "Jubilación" : "Milestone"}
+                    label={isJubilacion ? "Jubilación" : "Hito"}
                     value={
                       isJubilacion
                         ? jubilacionTargetNoPen !== null

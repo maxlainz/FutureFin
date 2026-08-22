@@ -1,37 +1,78 @@
 /**
  * Cliente HTTP único para todas las llamadas a la API. Centraliza:
  *  - `credentials: "include"` para que el navegador envíe la cookie `ff_session`.
- *  - Extracción del mensaje de error del cuerpo JSON (`{ message: "..." }`) cuando la API
- *    responde con un código no exitoso.
+ *  - Traducción del error al español (`{ code, message }` → catálogo `lib/errorMessages`).
  *  - `Content-Type: application/json` en métodos con body.
  *
- * Los wrappers `apiGet/Post/Patch/Delete` lanzan `Error` con el mensaje del backend cuando
- * la respuesta no es 2xx, devolviendo el JSON parseado en el caso bueno.
+ * Los wrappers `apiGet/Post/Patch/Delete` lanzan `ApiRequestError` cuando la respuesta no es 2xx,
+ * devolviendo el JSON parseado en el caso bueno.
+ *
+ * IMPORTANTE: `ApiRequestError.message` ya viene EN ESPAÑOL. Todo el código que hace
+ * `setError(e instanceof Error ? e.message : "…")` —hay ~50 sitios— muestra español sin
+ * cambiar una línea. El texto técnico en inglés del backend queda en `.detail`, para
+ * enseñarlo plegado o mandarlo a la consola, nunca como frase principal.
  */
+
+import { messageForError } from "../lib/errorMessages";
 
 export const defaultFetchInit: RequestInit = {
   credentials: "include",
 };
 
-/** Lee `{message}` del cuerpo JSON; si no es JSON o no hay mensaje, devuelve `HTTP <status>`. */
-export async function errorMessageFromResponse(res: Response): Promise<string> {
+/**
+ * Error de una llamada a la API. `message` está en español y es lo que se enseña; `detail`
+ * guarda el texto técnico del backend (inglés) y `code` el código estable con el que se tradujo.
+ */
+export class ApiRequestError extends Error {
+  readonly code: string | null;
+  readonly status: number;
+  /** Mensaje técnico del backend, en inglés. Para plegar bajo «Detalles técnicos», no para leer. */
+  readonly detail: string | null;
+
+  constructor(message: string, opts: { code: string | null; status: number; detail: string | null }) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.code = opts.code;
+    this.status = opts.status;
+    this.detail = opts.detail;
+  }
+}
+
+/** Construye el error traducido de una respuesta no-2xx. */
+export async function apiErrorFromResponse(res: Response): Promise<ApiRequestError> {
+  let code: string | null = null;
+  let detail: string | null = null;
   const ct = res.headers.get("content-type") ?? "";
   if (ct.includes("application/json")) {
     try {
-      const body = (await res.json()) as { message?: string };
-      if (typeof body.message === "string" && body.message.length > 0) {
-        return body.message;
-      }
+      const body = (await res.json()) as { code?: string; message?: string };
+      if (typeof body.code === "string" && body.code.length > 0) code = body.code;
+      if (typeof body.message === "string" && body.message.length > 0) detail = body.message;
     } catch {
-      /* ignore */
+      /* cuerpo ilegible: nos quedamos con el status */
     }
   }
-  return `HTTP ${res.status}`;
+  // El detalle técnico no se pierde aunque nadie lo pinte: sin esto, depurar un 400 desde el
+  // navegador obligaría a abrir la pestaña de red y repetir la petición.
+  if (detail) console.debug(`[api] ${res.status} ${code ?? "sin código"}: ${detail}`);
+  return new ApiRequestError(messageForError(code, res.status), {
+    code,
+    status: res.status,
+    detail,
+  });
+}
+
+/**
+ * Compat: devuelve solo la frase en español. Se conserva porque hay llamadas que solo quieren
+ * el texto; si necesitas el código o el detalle, usa `apiErrorFromResponse`.
+ */
+export async function errorMessageFromResponse(res: Response): Promise<string> {
+  return (await apiErrorFromResponse(res)).message;
 }
 
 async function ensureOk(res: Response): Promise<Response> {
   if (!res.ok && res.status !== 204) {
-    throw new Error(await errorMessageFromResponse(res));
+    throw await apiErrorFromResponse(res);
   }
   return res;
 }
@@ -47,7 +88,14 @@ export async function apiGet<T>(url: string): Promise<T> {
   const res = await fetch(url, defaultFetchInit);
   await ensureOk(res);
   const data = await parseJsonIfPresent<T>(res);
-  if (data === null) throw new Error(`Expected JSON body from GET ${url}`);
+  if (data === null) {
+    // Respuesta 2xx sin JSON: o el proxy devolvió HTML, o la ruta no existe en el backend.
+    throw new ApiRequestError("La respuesta del servidor no es válida. Comprueba que la API está en marcha.", {
+      code: "empty_json_body",
+      status: res.status,
+      detail: `Expected JSON body from GET ${url}`,
+    });
+  }
   return data;
 }
 

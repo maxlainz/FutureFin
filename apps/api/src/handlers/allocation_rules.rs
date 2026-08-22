@@ -133,7 +133,7 @@ fn normalize_kind(raw: &str) -> Result<String, ApiError> {
         "percent" => Ok("percent".into()),
         "remainder" => Ok("remainder".into()),
         other => Err(ApiError::BadRequest(format!(
-            "kind must be 'fixed' | 'percent' | 'remainder', got {other:?}"
+            "rule_kind_invalid: kind must be 'fixed' | 'percent' | 'remainder', got {other:?}"
         ))),
     }
 }
@@ -143,20 +143,20 @@ fn validate_kind_amount(kind: &str, amount: Option<Decimal>) -> Result<Option<De
         "remainder" => Ok(None),
         "fixed" => {
             let v = amount.ok_or_else(|| {
-                ApiError::BadRequest("amount is required for kind=fixed".into())
+                ApiError::BadRequest("amount_required_for_kind: amount is required for kind=fixed".into())
             })?;
             if v < Decimal::ZERO {
-                return Err(ApiError::BadRequest("amount must be >= 0".into()));
+                return Err(ApiError::BadRequest("amount_negative: amount must be >= 0".into()));
             }
             Ok(Some(v))
         }
         "percent" => {
             let v = amount.ok_or_else(|| {
-                ApiError::BadRequest("amount is required for kind=percent".into())
+                ApiError::BadRequest("amount_required_for_kind: amount is required for kind=percent".into())
             })?;
             if v < Decimal::ZERO || v > Decimal::from(100) {
                 return Err(ApiError::BadRequest(
-                    "amount (percent) must be in [0, 100]".into(),
+                    "percent_out_of_range: amount (percent) must be in [0, 100]".into(),
                 ));
             }
             Ok(Some(v))
@@ -173,15 +173,15 @@ fn normalize_cap_pair(
         (None, None) => Ok((None, None)),
         (Some(k @ ("amount" | "months_expense" | "income_multiple")), Some(v)) => {
             if v < Decimal::ZERO {
-                return Err(ApiError::BadRequest("cap_value must be >= 0".into()));
+                return Err(ApiError::BadRequest("cap_value_negative: cap_value must be >= 0".into()));
             }
             Ok((Some(k.into()), Some(v)))
         }
         (Some(other), Some(_)) => Err(ApiError::BadRequest(format!(
-            "cap_kind must be 'amount' | 'months_expense' | 'income_multiple', got {other:?}"
+            "cap_kind_invalid: cap_kind must be 'amount' | 'months_expense' | 'income_multiple', got {other:?}"
         ))),
         _ => Err(ApiError::BadRequest(
-            "cap_kind and cap_value must be provided together".into(),
+            "cap_pair_incomplete: cap_kind and cap_value must be provided together".into(),
         )),
     }
 }
@@ -196,7 +196,7 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
             }
             if t.len() > 4000 {
                 return Err(ApiError::BadRequest(
-                    "notes must be at most 4000 characters".into(),
+                    "notes_too_long: notes must be at most 4000 characters".into(),
                 ));
             }
             Ok(Some(t.into()))
@@ -241,7 +241,7 @@ async fn assert_asset_in_scope(
     };
     if !ok {
         return Err(ApiError::BadRequest(
-            "target_asset_id must reference an asset in your scope".into(),
+            "target_asset_not_found: target_asset_id must reference an asset in your scope".into(),
         ));
     }
     Ok(())
@@ -539,11 +539,11 @@ pub(crate) async fn patch_allocation_rule_core(
         Some(v) => {
             let d: Decimal = if let serde_json::Value::String(s) = v {
                 s.trim().parse().map_err(|_| {
-                    ApiError::BadRequest("amount must be a valid decimal string".into())
+                    ApiError::BadRequest("decimal_invalid: amount must be a valid decimal string".into())
                 })?
             } else {
                 serde_json::from_value(v.clone()).map_err(|_| {
-                    ApiError::BadRequest("amount must be a valid decimal".into())
+                    ApiError::BadRequest("decimal_invalid: amount must be a valid decimal".into())
                 })?
             };
             validate_kind_amount(&new_kind, Some(d))?
@@ -555,17 +555,17 @@ pub(crate) async fn patch_allocation_rule_core(
         Some(v) if v.is_null() => (None, None),
         Some(v) => {
             let obj = v.as_object().ok_or_else(|| {
-                ApiError::BadRequest("cap must be null or an object {kind, value}".into())
+                ApiError::BadRequest("cap_type_invalid: cap must be null or an object {kind, value}".into())
             })?;
             let kind = obj.get("kind").and_then(|x| x.as_str());
             let raw_val = obj.get("value");
             let value: Option<Decimal> = match raw_val {
                 None | Some(serde_json::Value::Null) => None,
                 Some(serde_json::Value::String(s)) => Some(s.trim().parse().map_err(|_| {
-                    ApiError::BadRequest("cap.value must be a valid decimal string".into())
+                    ApiError::BadRequest("decimal_invalid: cap.value must be a valid decimal string".into())
                 })?),
                 Some(other) => Some(serde_json::from_value(other.clone()).map_err(|_| {
-                    ApiError::BadRequest("cap.value must be a valid decimal".into())
+                    ApiError::BadRequest("decimal_invalid: cap.value must be a valid decimal".into())
                 })?),
             };
             normalize_cap_pair(kind, value)?
@@ -723,7 +723,7 @@ pub async fn reorder_allocation_rules(
     let mut seen = std::collections::HashSet::new();
     for id in &body.ids {
         if !seen.insert(*id) {
-            return Err(ApiError::BadRequest("ids must be unique".into()));
+            return Err(ApiError::BadRequest("ids_not_unique: ids must be unique".into()));
         }
     }
 
@@ -738,7 +738,7 @@ pub async fn reorder_allocation_rules(
     let current_set: std::collections::HashSet<Uuid> = current.iter().copied().collect();
     if current_set.len() != body.ids.len() || !body.ids.iter().all(|id| current_set.contains(id)) {
         return Err(ApiError::BadRequest(
-            "ids must exactly match the rules in this scope".into(),
+            "ids_do_not_match_scope: ids must exactly match the rules in this scope".into(),
         ));
     }
 

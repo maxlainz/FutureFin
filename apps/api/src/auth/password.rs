@@ -11,7 +11,7 @@ pub fn hash_password(password: &str) -> Result<String, ApiError> {
     let argon2 = Argon2::default();
     Ok(argon2
         .hash_password(password.as_bytes(), &salt)
-        .map_err(|_| ApiError::BadRequest("could not hash password".into()))?
+        .map_err(|_| ApiError::BadRequest("password_hash_failed: could not hash password".into()))?
         .to_string())
 }
 
@@ -28,7 +28,7 @@ fn validate_password_strength(password: &str) -> Result<(), ApiError> {
     let len = password.chars().count();
     if !(12..=256).contains(&len) {
         return Err(ApiError::BadRequest(
-            "password must be between 12 and 256 characters".into(),
+            "password_length: password must be between 12 and 256 characters".into(),
         ));
     }
     Ok(())
