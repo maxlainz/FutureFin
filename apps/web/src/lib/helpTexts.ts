@@ -50,6 +50,17 @@ export const HELP_TEXTS = {
       "siguen guardados en tu historial.",
   },
 
+  // --- Jubilación -----------------------------------------------------------
+  "retirement.target": {
+    title: "Patrimonio objetivo",
+    body:
+      "Lo que necesitas acumular para vivir de tu patrimonio: tu gasto anual en jubilación, " +
+      "con los impuestos por delante si los tienes activados, dividido entre la tasa segura de " +
+      "retirada. La cifra grande está en euros de hoy. El paréntesis es ese mismo objetivo " +
+      "llevado al mes del cruce con la inflación que tengas configurada, que es lo que de " +
+      "verdad tendrás que haber reunido para entonces.",
+  },
+
   // --- Ajustes · Proyección -------------------------------------------------
   "settings.savings_source": {
     title: "Fuente del ahorro",

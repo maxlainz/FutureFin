@@ -34,8 +34,12 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Algo ha fallado en el servidor. Inténtalo de nuevo en unos segundos.",
 
   // ── Generados por el propio cliente, no por la API ────────────────────────────────
+  // No vienen del fixture del backend: van declarados en `CLIENT_ONLY` dentro de
+  // `errorMessages.test.ts`, que si no los denunciaría como entradas huérfanas.
   empty_json_body:
     "La respuesta del servidor no es válida. Comprueba que la API está en marcha.",
+  network_error:
+    "No se ha podido conectar con el servidor. Comprueba tu conexión y que FutureFin sigue en marcha.",
 
   // ── Cuenta y acceso ───────────────────────────────────────────────────────────────────
   username_taken: "Ese nombre de usuario ya está registrado. Elige otro.",
@@ -55,6 +59,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Otro registro ha creado el hogar justo antes que el tuyo. Vuelve a intentarlo.",
   membership_role_invalid:
     "Ese rol no existe. Elige propietario, miembro o visor.",
+  current_password_invalid:
+    "La contraseña actual no es correcta. Vuelve a escribirla.",
+  last_owner:
+    "El hogar no puede quedarse sin ningún propietario. Nombra antes a otro propietario.",
 
   // ── Copia de seguridad (.ffbackup) ────────────────────────────────────────────────────
   backup_wrong_password:
@@ -71,6 +79,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La copia declara un formato que FutureFin no reconoce. Usa otra copia.",
   backup_crypto_params_unsupported:
     "La copia está cifrada con un método que este servidor no reconoce. Comprueba que la generó FutureFin.",
+  backup_file_too_large:
+    "El contenido de la copia es demasiado grande para importarlo. Si la generó FutureFin, avísanos.",
   backup_payload_malformed:
     "El contenido de la copia no tiene la forma esperada. El archivo está dañado; usa otra copia.",
   backup_category_reference_missing:
@@ -426,6 +436,16 @@ const STATUS_MESSAGES: Record<number, string> = {
 };
 
 const FALLBACK = "Algo ha fallado. Inténtalo de nuevo en unos segundos.";
+
+/**
+ * Un 401 al ENVIAR el formulario de acceso no es una sesión caducada: es que el usuario o la
+ * contraseña no cuadran. La frase genérica de `unauthorized` («Tu sesión ha caducado. Vuelve a
+ * iniciar sesión.») dejaba a quien se equivocaba tecleando mirando un mensaje que no describía
+ * su problema y que le pedía hacer exactamente lo que estaba haciendo.
+ *
+ * Deliberadamente NO distingue cuál de los dos falla: decirlo confirmaría qué usuarios existen.
+ */
+export const LOGIN_INVALID_CREDENTIALS = "Usuario o contraseña incorrectos.";
 
 /**
  * Traduce un error de la API a la frase que ve el usuario. Prioridad: código estable → código de

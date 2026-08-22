@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { deflationFactorAt, projectionXTicks } from "./projection-chart";
+import {
+  deflationFactorAt,
+  lastPointIndexAtOrBeforeMonth,
+  projectionXTicks,
+} from "./projection-chart";
 
 describe("deflationFactorAt", () => {
   it("mes 0 → 1 (sin ajuste)", () => {
@@ -82,5 +86,43 @@ describe("projectionXTicks — con historia (startMonth < 0)", () => {
     expect(idx).toContain(0);
     // Ordenado ascendente.
     expect(idx).toEqual([...idx].sort((a, b) => a - b));
+  });
+});
+
+/**
+ * Serie decimada tal y como la sirve `?density=hybrid`: los 13 primeros meses uno a uno y
+ * después uno por año. La POSICIÓN 13 es el mes 24, no el 13 — ese desajuste es el que hacía
+ * que un `clampToMonth` no recortara nada y que el eje X repartiera 70 años a distancias iguales.
+ */
+const HYBRID_POINTS = [
+  ...Array.from({ length: 13 }, (_v, i) => ({ month_index: i })),
+  ...Array.from({ length: 10 }, (_v, i) => ({ month_index: 24 + i * 12 })),
+];
+
+describe("lastPointIndexAtOrBeforeMonth", () => {
+  it("serie mensual: la posición ES el mes", () => {
+    const monthly = Array.from({ length: 60 }, (_v, i) => ({ month_index: i }));
+    expect(lastPointIndexAtOrBeforeMonth(monthly, 0)).toBe(0);
+    expect(lastPointIndexAtOrBeforeMonth(monthly, 11)).toBe(11);
+    expect(lastPointIndexAtOrBeforeMonth(monthly, 59)).toBe(59);
+  });
+
+  it("serie hybrid: traduce el mes a su posición diezmada", () => {
+    // Mes 12 = última posición del tramo mensual.
+    expect(lastPointIndexAtOrBeforeMonth(HYBRID_POINTS, 12)).toBe(12);
+    // Mes 30 cae entre el 24 (pos 13) y el 36 (pos 14) → se queda en el 24.
+    expect(lastPointIndexAtOrBeforeMonth(HYBRID_POINTS, 30)).toBe(13);
+    expect(HYBRID_POINTS[13]!.month_index).toBe(24);
+    expect(lastPointIndexAtOrBeforeMonth(HYBRID_POINTS, 36)).toBe(14);
+  });
+
+  it("un mes más allá del último punto devuelve el último, no desborda", () => {
+    const last = HYBRID_POINTS.length - 1;
+    expect(lastPointIndexAtOrBeforeMonth(HYBRID_POINTS, 100_000)).toBe(last);
+  });
+
+  it("un mes anterior al primer punto devuelve 0: siempre hay algo que pintar", () => {
+    expect(lastPointIndexAtOrBeforeMonth(HYBRID_POINTS, -5)).toBe(0);
+    expect(lastPointIndexAtOrBeforeMonth([], 12)).toBe(0);
   });
 });
