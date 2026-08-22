@@ -247,28 +247,27 @@ Owner-confirmed rules, previously unwritten — now they ARE written:
 
 ## 4. Release discipline
 
-### 4.1 dev→main release flow (quoted from CLAUDE.md — follow verbatim)
+### 4.1 Release flow — one live branch, releases are tags (quoted from CLAUDE.md)
 
-**The merge commit needs its own message.** A bare `git merge dev` writes `Merge branch 'dev'`,
-which breaks the repo's Conventional Commits convention *and* is the first thing a visitor sees on
-the public branch. Always:
-`git merge --no-ff dev -m "chore(release): X.Y.Z — <one line>"`. Caught the hard way on 4.0.0: the
-first commit on public `main` said `Merge branch 'dev'` and had to be amended after the tag was
-already pushed.
+`main` is the only long-lived branch: default, published, protected. Work happens on short-lived
+branches that come back through a Pull Request; **a release is a tag on `main`**, not a branch.
+There is no `dev` and no mirror-merge — that model was retired in 4.0.2 because its ~244 lines of
+machinery (`release-to-main.sh`, the `main-guard` job, and the docs explaining why the two branches
+were not mirrors) existed only to manage a self-inflicted split, and because the script's direct
+push to `main` is what made required status checks impossible.
 
-`main` is the production/publishing branch. It is **NOT a full mirror of `dev`** — that was true
-until 4.0.0 and is now wrong in a way that destroys work if you act on it: `main` deliberately does
-not publish `CLAUDE.md` nor `.claude/`, so it carries release commits that delete those paths and
-that `dev` must never receive. **Never `git merge main` from `dev`.** A non-zero
-`git rev-list --count origin/dev..origin/main` is the normal state; check what actually diverges
-with `git diff --name-only origin/dev...origin/main | grep -vE '^(\.claude/|CLAUDE\.md)'` — empty
-means `dev` lacks nothing. CLAUDE.md, "Releases":
+**`main` cannot be pushed to directly** — branch protection requires a PR with CI green. That is
+the gate; do not look for a way around it. CLAUDE.md, "Releases":
 
-> 1. Desarrollar en `dev`, hacer commit y push.
-> 2. Bumpar versión en `apps/api/Cargo.toml` (sincronizar `Cargo.lock`) y añadir entrada en `CHANGELOG.md`.
-> 3. **Publicar `dev` en `main`** con `./scripts/release-to-main.sh X.Y.Z "<una frase>"`. Nunca a mano y nunca con copias parciales: el script mergea `dev` entero y después retira `CLAUDE.md` y `.claude/`, que son la ÚNICA diferencia admisible entre las dos ramas.
-> 4. Push tag `vX.Y.Z` **desde `main`** → `publish-image.yml` publica la imagen (multi-arch: ~2 h) y, al terminar, **crea él solo el GitHub Release** con las notas del CHANGELOG. La sección `## [X.Y.Z]` debe existir ANTES de taguear.
-> 5. Volver a `dev` (`git checkout dev`) y seguir. **`dev` no se «pone al día» con `main`**: el flujo es de una sola dirección (`dev` → `main`).
+> 1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`) y añadir la sección `## [X.Y.Z]` a `CHANGELOG.md`. **La sección debe existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde ahí, y el job `rust` lo comprueba con `./scripts/audit-releases.sh --version`.
+> 2. PR → CI verde → merge a `main`.
+> 3. `git tag vX.Y.Z && git push origin vX.Y.Z` desde `main`.
+> 4. El tag dispara `publish-image.yml`: imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
+
+**The merge commit needs its own message.** Merging a PR from GitHub takes the subject from the PR
+title, so give the PR a title that reads a year from now. Caught the hard way on 4.0.0, back when
+releases were merged by hand: the first commit on public `main` said `Merge branch 'dev'` and had
+to be amended after the tag was already pushed.
 
 The tag push triggers `.github/workflows/publish-image.yml`: multi-arch (amd64+arm64) image to
 GHCR (always) and Docker Hub `maxlainz/futurefin` (if secrets set), tags `:X.Y.Z`, `:X.Y`,
@@ -442,9 +441,9 @@ Then, per change class:
       `docker-compose*.yml`: `shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh`
       clean, `docker-stack` green in CI, and Section 2.8 re-read (no cluster deletion, no `VOLUME`,
       SIGINT to the postmaster).
-- [ ] If releasing: Section 4 in order — bump, mirror-merge, local Docker-stack test **and the
-      V2→V3 upgrade drill (4.2 B)**, tag from `main`, `git checkout dev` afterwards. After push:
-      pull again.
+- [ ] If releasing: Section 4 in order — bump + CHANGELOG section on a branch, PR with CI green,
+      local Docker-stack test **and the V2→V3 upgrade drill (4.2 B)**, merge, then tag from `main`.
+      After push: pull again.
 
 ## Provenance and maintenance
 
@@ -465,7 +464,7 @@ removed the external-database mode from the entrypoint (`exec_api_external`, `au
 - Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**33** on 2026-08-22 — las cinco altas del tren 4.0.0 son `account_and_members.rs`, `openapi_contract.rs`, `query_param_validation.rs`, `error_codes_parity.rs` y `fixtures_shape.rs`; 28 on 2026-08-21); test-attribute count: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375** on 2026-08-22). Totales del runner, que es lo autoritativo: `cargo test --workspace` **498**, Vitest **368** en 16 ficheros (2026-08-22)
 - MCP catalog: `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**52** on 2026-08-22) — debe cuadrar con CLAUDE.md ×2, `.claude/api-routes.md` §MCP y `futurefin-mcp-parity` §5
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: `secrets-scan` / `rust` / `web` /
-  `integration` / `main-guard` / `docker-stack`) and
+  `integration` / `docker-stack`; el `main-guard` se retiró con el modelo de dos ramas) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list.
   **Desde 4.0.0** `grep -n TEST_DATABASE_URL .github/workflows/ci.yml` y
   `grep -n 'npm test\|lint:web' .github/workflows/ci.yml` deben **imprimir algo**: la integración,
@@ -489,9 +488,11 @@ removed the external-database mode from the entrypoint (`exec_api_external`, `au
 - Fixture + both consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
 - Strict enum precedent: `grep -n "impl<'de> Deserialize" apps/api/src/handlers/installation.rs`
 - npm script names: `grep -n '"typecheck:web"\|"lint:web"\|"build:web"' package.json`
-- Release-flow wording drift: `grep -n 'NO es un espejo' CLAUDE.md` (debe imprimir algo; si
-  vuelve a aparecer «espejo completo» o «mantener `dev` al día con `main`», alguien revirtió
-  el modelo de ramas de 4.0.0 a mano)
+- Release-flow wording drift: `grep -n 'Una sola rama viva' CLAUDE.md` (debe imprimir algo). Si
+  reaparecen «espejo completo», «mantener `dev` al día con `main`» o `release-to-main.sh`, alguien
+  resucitó el modelo de dos ramas
+- Una sola rama viva: `git ls-remote --heads origin | grep -c 'refs/heads/dev$'` debe dar **0**, y
+  `ls scripts/release-to-main.sh` debe fallar
 - Ramas protegidas y ajustes de seguridad de GitHub (viven fuera del repo, no en git):
   `gh api repos/maxlainz/FutureFin/rulesets --jq '.[].name'` (**Proteger main**) y
   `gh api repos/maxlainz/FutureFin --jq '.security_and_analysis'` (secret scanning + push

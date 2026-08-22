@@ -244,44 +244,42 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 
 ## Git workflow
 
-**Branches:**
-- `main` — rama de producción y de publicación. La imagen Docker se construye y publica **desde `main`** (el workflow `publish-image.yml` vive aquí). Es la rama por defecto.
-- `dev` — desarrollo activo, **ramificada de `main`**.
+**Una sola rama viva: `main`.** Es la rama por defecto, la que se publica y la única de larga
+vida. El trabajo se hace en ramas cortas que salen de `main` y vuelven por Pull Request. Los
+releases son **tags** sobre `main`, no una rama aparte.
 
-> ### ⚠️ `main` NO es un espejo de `dev` — y nunca mergees `main` → `dev`
->
-> Desde la 4.0.0 (ya ejecutado) **`main` no publica documentación interna**: `.claude/` y
-> `CLAUDE.md` viven **solo en `dev`**. El job `main-guard` de `ci.yml` lo verifica en cada push a
-> `main` y en cada PR contra `main`; hoy `origin/main` tiene **0** ficheros de esas rutas.
->
-> La consecuencia contraintuitiva: `main` acumula commits que `dev` no tiene, y que **no debe
-> tener** — son exclusivamente los borrados de `.claude/` y `CLAUDE.md` que hace cada release.
-> Hoy son 4 commits, 28 ficheros, 10.527 líneas, **cero fuera de esas dos rutas**. Por eso:
->
-> **Nunca hagas `git merge main` estando en `dev`.** Borraría toda la documentación interna de
-> `dev` de un tirón. Que `git rev-list --count origin/dev..origin/main` devuelva un número > 0 es
-> el estado NORMAL y esperado, no un descuido que haya que corregir. Verifica antes de creerte
-> que `dev` está atrasada:
->
-> ```bash
-> git diff --name-only origin/dev...origin/main | grep -vE '^(\.claude/|CLAUDE\.md)'
-> # vacío = `main` no tiene nada que a `dev` le falte
-> ```
+Hasta la 4.0.1 hubo un `dev` de larga vida que se volcaba en `main` en cada release. Se retiró:
+mantenerlo costaba ~244 líneas de maquinaria (`release-to-main.sh`, el job `main-guard`, y la
+documentación que explicaba por qué las dos ramas no eran espejo) cuya única función era gestionar
+una complejidad autoinfligida — y, sobre todo, impedía exigir que CI estuviera en verde antes de
+mergear, porque el script empujaba a `main` directamente. **`main` no es un espejo de nada: es el
+sitio.**
 
-**Releases:**
+### Desarrollar
 
-> **Usa `./scripts/release-to-main.sh X.Y.Z "<una frase>"`.** Hace el merge con mensaje propio
-> —`git merge dev` a secas escribe `Merge branch 'dev'`, que incumple la convención y es lo
-> primero que ve quien abre la rama pública— y resuelve los conflictos «modificado/borrado» de
-> `CLAUDE.md` y `.claude/`, que salen en CADA release porque `main` no los publica. Aborta si
-> aparece cualquier conflicto fuera de esas rutas.
+```bash
+git checkout main && git pull --ff-only
+git checkout -b fix/lo-que-sea       # o feat/…, docs/…, chore/…
+# … trabajo, commits …
+git push -u origin fix/lo-que-sea
+gh pr create --fill                  # CI corre en el PR; sin verde no se mergea
+```
 
-1. Desarrollar en `dev`, hacer commit y push.
-2. Bumpar versión en `apps/api/Cargo.toml` (sincronizar `Cargo.lock`) y añadir entrada en `CHANGELOG.md`.
-3. **Publicar `dev` en `main`** con `./scripts/release-to-main.sh X.Y.Z "<una frase>"`. Nunca a mano y nunca con copias parciales: el script mergea `dev` entero y después retira `CLAUDE.md` y `.claude/`, que son la ÚNICA diferencia admisible entre las dos ramas.
-4. Push tag `vX.Y.Z` **desde `main`** → `publish-image.yml` publica la imagen (multi-arch: ~2 h) y, al terminar, **crea él solo el GitHub Release** con las notas del CHANGELOG. La sección `## [X.Y.Z]` debe existir ANTES de taguear.
-5. Volver a `dev` (`git checkout dev`) y seguir. **`dev` no se «pone al día» con `main`**: el flujo es de una sola dirección (`dev` → `main`). Ver el aviso de arriba.
+`main` está protegida: PR obligatorio, CI en verde, sin force-push ni borrado. No se empuja
+directamente — la protección lo rechaza, y ese es el objetivo.
 
-Tags published: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere secrets `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` en GitHub repo.
+### Releases
+
+1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`) y añadir la sección `## [X.Y.Z]` a `CHANGELOG.md`. **La sección debe existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde ahí, y el job `rust` lo comprueba con `./scripts/audit-releases.sh --version`.
+2. PR → CI verde → merge a `main`.
+3. `git tag vX.Y.Z && git push origin vX.Y.Z` desde `main`.
+4. El tag dispara `publish-image.yml`: imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
+
+Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKERHUB_USERNAME` +
+`DOCKERHUB_TOKEN`.
+
+> **El tag es la publicación.** Nunca taguees una versión histórica sin publicar: el workflow
+> incluye `type=raw,value=latest`, así que reconstruir una versión vieja **sobrescribe `:latest`**
+> con código antiguo.
 
 Before resuming work: `git pull --ff-only`. After push: pull again.
