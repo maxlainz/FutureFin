@@ -6,6 +6,37 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-08-22
+
+**Qué cambia para ti: nada visible, pero conviene actualizar.** No se toca motor, API, interfaz ni
+esquema: solo suben las dependencias que van dentro de la imagen. Varias de ellas son parches de
+seguridad de la cadena de terceros, así que **la imagen nueva es la recomendada**.
+
+### Dependencias que viajan en la imagen
+
+Del grupo `cargo-menores` (PR #42) — todas parche o menor, sin cambios de API:
+
+- `chrono` 0.4.44 → 0.4.45
+- `cookie` 0.18.1 → 0.18.2
+- `http` 1.4.0 → 1.5.0
+- `http-body-util` 0.1.3 → 0.1.5
+- `rmcp` 3.1.2 → 3.1.3 y `rmcp-macros` 3.1.2 → 3.1.4
+- `rust_decimal` 1.42.0 → 1.42.1
+- `serde` 1.0.228 → 1.0.229 y `serde_json` 1.0.149 → 1.0.151
+- `thiserror` 2.0.18 → 2.0.20
+- `tokio` 1.52.3 → 1.53.1
+- `uuid` 1.23.1 → 1.24.1
+
+De la cadena de build del frontend, que genera `apps/web/dist/`:
+
+- `vite` 6.4.2 → 6.4.3 (PR #32)
+- `postcss` 8.5.14 → 8.5.26, arrastrando `nanoid` 3.3.12 → 3.3.18 (PR #31)
+
+### Dependencias que NO viajan en la imagen
+
+Entraron en `main` en la misma tanda, pero son utillaje de test y lint, así que no cambian el
+binario ni los assets servidos: `brace-expansion` (PR #29) y `js-yaml` 4.1.1 → 4.3.1 (PR #30).
+
 ## [4.0.2] - 2026-08-22
 
 **Qué cambia para ti: nada.** Igual que la 4.0.1, esto no toca motor, API, interfaz ni esquema, y
