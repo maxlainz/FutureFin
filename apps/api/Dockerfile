@@ -38,7 +38,7 @@ RUN cargo build --release -p futurefin-api --locked \
     && test -s /version.txt && test -s /migration-versions.txt
 
 # --- Binarios PostgreSQL (estos stages son solo FUENTE de COPY, nunca la base) ---
-FROM postgres:16-bookworm@sha256:60f4761b9035e0b8d5218f701a8c3382f641bf12b1604822574cf5be3baeb537 AS pg16
+FROM postgres:18-bookworm@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108 AS pg16
 # La imagen oficial hace dpkg-divert de postgresql.conf.sample al directorio PADRE y deja
 # un symlink en la ruta versionada — al copiar solo /usr/share/postgresql/16 el enlace
 # quedaría roto e initdb fallaría. Materializar el fichero real (cada major con el SUYO).
@@ -48,7 +48,7 @@ RUN rm /usr/share/postgresql/16/postgresql.conf.sample \
     # resuelve por plataforma sin hardcodear x86_64/aarch64.
     && mkdir /pglib && cp -a /usr/lib/*-linux-gnu/libpq.so.5* /pglib/
 
-FROM postgres:15-bookworm@sha256:cf7f8fb958c63e62875e30645dc4819ff0243a923f3c709e752b99dedd40bfcd AS pg15
+FROM postgres:18-bookworm@sha256:7d2695c3aa88e792e8b3b233e7e4adb296a20412c6c0ca361e3edaaacfada108 AS pg15
 RUN rm /usr/share/postgresql/15/postgresql.conf.sample \
     && cp /usr/share/postgresql/postgresql.conf.sample /usr/share/postgresql/15/postgresql.conf.sample
 
