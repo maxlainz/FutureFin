@@ -1471,7 +1471,15 @@ pub(crate) async fn history_series_core(
 // son inputs del engine).
 
 /// Un mes del agregado de cash-flow. Signos reales de la suma (`expense`/`savings` ≤ 0, `income`
-/// ≥ 0); `net = expense + income + savings`. **Decimal-string** (son KPIs), redondeado a 2 dp.
+/// ≥ 0). **Decimal-string** (son KPIs), redondeado a 2 dp.
+///
+/// Publica **dos** netos, deliberadamente distintos y con la fórmula dentro del nombre. El campo se
+/// llamaba `net` y era `expense + income + savings`, mientras `get_transactions_summary.net_actual`
+/// se llama igual y **no** incluye el ahorro: dos cosas distintas con el mismo nombre en el mismo
+/// catálogo. Un abril con 3.710,97 € movidos a inversión salía `net: -3075.26` y se leía como «perdí
+/// 3.075 €» cuando había sido un mes excelente (issue #8 §6). La asimetría de signos entre las dos
+/// tools no obliga a elegir convención aquí: `income + expense` con `expense ≤ 0` es literalmente el
+/// mismo número que `income_mag − expense_mag`. Lo que faltaba era que el nombre lo dijera.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CashflowMonth {
     pub month_index: i32,
@@ -1486,9 +1494,17 @@ pub struct CashflowMonth {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub savings: Decimal,
+    /// `expense + income + savings`: variación de caja del mes. **INCLUYE los traspasos a ahorro**,
+    /// así que un mes excelente con una aportación grande sale negativo — no es una pérdida.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
-    pub net: Decimal,
+    pub cash_delta: Decimal,
+    /// `income + expense` (con `expense ≤ 0`) = ingresos menos gastos. **NO incluye el ahorro.**
+    /// Es el mismo número que `totals.net_actual` de `GET /v1/transactions/summary` para ese mes,
+    /// allí expresado con magnitudes ≥ 0. Es la cifra que responde a «¿fue buen mes?».
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub income_minus_expense: Decimal,
 }
 
 /// Punto de la rejilla fina: fecha + su posición x fraccional (mismo helper que los markers).
@@ -1703,9 +1719,10 @@ pub(crate) async fn history_cashflow_core(
                 expense,
                 income,
                 savings,
-                // net = suma exacta de las tres cifras devueltas (el invariante se cumple sobre
-                // los strings serializados, no sobre valores pre-redondeo).
-                net: money(expense + income + savings),
+                // Ambos = suma exacta de las cifras YA redondeadas que se devuelven (el invariante
+                // se cumple sobre los strings serializados, no sobre valores pre-redondeo).
+                cash_delta: money(expense + income + savings),
+                income_minus_expense: money(expense + income),
             }
         })
         .collect();

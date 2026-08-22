@@ -187,33 +187,42 @@ async fn monthly_aggregates_exact_household_and_mine() {
     assert_eq!(m_hh["expense"], "-150.00");
     assert_eq!(m_hh["income"], "2000.00");
     assert_eq!(m_hh["savings"], "-300.00");
-    assert_eq!(m_hh["net"], "1550.00");
+    // cash_delta          = -150 + 2000 - 300 = 1550.00  (invariante: suma de los tres strings)
+    // income_minus_expense = 2000 - 150       = 1850.00  (sin ahorro; == totals.net_actual del mes)
+    // Sólo este mes y el de alice DISCRIMINAN entre las dos fórmulas: los otros dos casos no tienen
+    // ahorro, así que ambas coinciden y no cazarían una fórmula intercambiada.
+    assert_eq!(m_hh["cash_delta"], "1550.00");
+    assert_eq!(m_hh["income_minus_expense"], "1850.00");
     // Sin vínculos a assets → fine ausente (omitido).
     assert!(hh.get("fine").is_none(), "fine debe estar ausente sin vínculos: {hh}");
 
-    // Un mes vacío (mes -3): todo a cero, net 0.00.
+    // Un mes vacío (mes -3): todo a cero, los dos netos 0.00.
     let empty = month_at(&hh, -3);
     assert_eq!(empty["expense"], "0.00");
     assert_eq!(empty["income"], "0.00");
     assert_eq!(empty["savings"], "0.00");
-    assert_eq!(empty["net"], "0.00");
+    assert_eq!(empty["cash_delta"], "0.00");
+    assert_eq!(empty["income_minus_expense"], "0.00");
 
-    // Mine (alice): solo lo suyo → expense -100.00; net = -100 + 2000 - 300 = 1600.00.
+    // Mine (alice): solo lo suyo → expense -100.00.
     let (mine, _, _) = get_cashflow(&app, &owner.cookie, "?view=mine&window_months=6").await;
     assert_eq!(mine["view"], "mine");
     let m_mine = month_at(&mine, -1);
     assert_eq!(m_mine["expense"], "-100.00");
     assert_eq!(m_mine["income"], "2000.00");
     assert_eq!(m_mine["savings"], "-300.00");
-    assert_eq!(m_mine["net"], "1600.00");
+    // cash_delta = -100 + 2000 - 300 = 1600.00 · income_minus_expense = 2000 - 100 = 1900.00
+    assert_eq!(m_mine["cash_delta"], "1600.00");
+    assert_eq!(m_mine["income_minus_expense"], "1900.00");
 
-    // Mine (bob): expense -50.00; sin income/savings → net = -50.00.
+    // Mine (bob): expense -50.00; sin income/savings → los dos netos = -50.00.
     let (mine_b, _, _) = get_cashflow(&app, &bob.cookie, "?view=mine&window_months=6").await;
     let m_b = month_at(&mine_b, -1);
     assert_eq!(m_b["expense"], "-50.00");
     assert_eq!(m_b["income"], "0.00");
     assert_eq!(m_b["savings"], "0.00");
-    assert_eq!(m_b["net"], "-50.00");
+    assert_eq!(m_b["cash_delta"], "-50.00");
+    assert_eq!(m_b["income_minus_expense"], "-50.00");
 }
 
 // ---------------------------------------------------------------------------
@@ -529,4 +538,66 @@ async fn reconciled_excluded_from_months_but_not_from_fine_curve() {
     let before = today - Duration::days(49);
     assert_close(val(before), 1187.5, "interior antes del cargo (la conciliada sigue moldeando)");
     assert_close(val(charge_date), 750.0, "interior en el cargo (salto por el delta conciliado)");
+}
+
+// ---------------------------------------------------------------------------
+// 5. REGRESIÓN (issue #8 §6) — los dos netos, y su relación con la comparativa
+// ---------------------------------------------------------------------------
+
+/// `cash_delta` incluye el ahorro; `income_minus_expense` no, y **coincide al céntimo** con
+/// `totals.net_actual` de la comparativa mensual.
+///
+/// Hasta 4.0.0 el campo se llamaba `net` y `get_transactions_summary.net_actual` también, con
+/// fórmulas distintas: dos cosas diferentes con el mismo nombre en el mismo catálogo. Un mes con
+/// una aportación fuerte a inversión salía en negativo y se leía como una pérdida cuando había sido
+/// un mes excelente. Este test siembra exactamente ese caso.
+#[tokio::test]
+async fn the_two_nets_differ_by_savings_and_one_matches_the_monthly_summary() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat_inc = app.create_category(&owner, "income", "Nómina").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vida").await;
+    let (_, anchor) = server_anchor(&app, &owner.cookie).await;
+
+    // Mes anterior (completo, para que la comparativa lo tome por defecto): un mes excelente que
+    // se leía como una pérdida — ingresa 2.853, gasta 2.218 y mueve 3.711 a inversión.
+    let m = add_months_signed(anchor, -1);
+    let day = |d: u32| m.with_day(d).expect("día válido");
+    manual_txn(&app, &owner, day(5), "2853.44", "income", json!({"category_id": cat_inc})).await;
+    manual_txn(&app, &owner, day(10), "-2217.73", "expense", json!({"category_id": cat_exp})).await;
+    manual_txn(&app, &owner, day(15), "-3710.97", "savings", json!({})).await;
+
+    let (cf, _, _) = get_cashflow(&app, &owner.cookie, "?window_months=6").await;
+    let month = month_at(&cf, -1);
+
+    // El número que se leía como «perdí 3.075 €».
+    assert_eq!(month["cash_delta"], "-3075.26", "{month}");
+    // Y el que dice de verdad cómo fue el mes.
+    assert_eq!(month["income_minus_expense"], "635.71", "{month}");
+
+    // La relación cruzada: el neto sin ahorro es EL MISMO número que publica la comparativa, allí
+    // con magnitudes ≥ 0. Es lo que ata las dos tools y lo que hace que no puedan volver a
+    // divergir sin que un test lo cace.
+    let summary = app
+        .get_with_cookie(
+            &format!(
+                "/v1/transactions/summary?year={}&month={}",
+                m.format("%Y"),
+                m.format("%m").to_string().trim_start_matches('0'),
+            ),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(summary.status, http::StatusCode::OK, "{summary:?}");
+    let totals = &summary.json()["totals"];
+    assert_close(
+        totals["net_actual"].as_str().expect("net_actual").parse::<f64>().unwrap(),
+        month["income_minus_expense"].as_str().unwrap().parse::<f64>().unwrap(),
+        "net_actual ↔ income_minus_expense",
+    );
+    // Y NO coincide con la variación de caja: la diferencia son los traspasos a ahorro.
+    assert_ne!(
+        totals["net_actual"].as_str().unwrap().parse::<f64>().unwrap(),
+        month["cash_delta"].as_str().unwrap().parse::<f64>().unwrap(),
+    );
 }

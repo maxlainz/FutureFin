@@ -932,7 +932,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_transactions_summary",
-        description = "Comparativa del mes: gasto/ingreso real por categoría vs presupuesto vs promedio ponderado de meses anteriores. El promedio divide entre `avg_months` = meses del tramo con al menos un movimiento REAL: un mes cuyo único contenido son instancias recurrentes queda fuera del numerador y del denominador, así que no hunde la media. `months_with_data` se devuelve aparte (meses con movimientos de cualquier tipo) y NO es el denominador. `avg_basis` dice de qué meses sale la media y si tienen huecos; si `avg_months` es 0 no hay promedio y `avg_unavailable_reason` explica por qué. Sin year/month usa el último mes completo.",
+        description = "Comparativa del mes: gasto/ingreso real por categoría vs presupuesto vs promedio ponderado de meses anteriores. El promedio divide entre `avg_months` = meses del tramo con al menos un movimiento REAL: un mes cuyo único contenido son instancias recurrentes queda fuera del numerador y del denominador, así que no hunde la media. `months_with_data` se devuelve aparte (meses con movimientos de cualquier tipo) y NO es el denominador. `avg_basis` dice de qué meses sale la media y si tienen huecos; si `avg_months` es 0 no hay promedio y `avg_unavailable_reason` explica por qué. Sin year/month usa el último mes completo. Los importes son MAGNITUDES ≥ 0 (el gasto no viaja en negativo aquí) y totals.net_actual = income_actual − expense_actual, SIN el ahorro: es el mismo número que income_minus_expense de get_history_cashflow para ese mes, allí expresado con signos reales. El cash_delta de esa otra tool sí incluye el ahorro y por tanto NO es comparable con éste.",
         annotations(title = "Comparativa mensual", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_transactions_summary(
@@ -1354,7 +1354,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_history_cashflow",
-        description = "Flujo de caja mensual real por tipo (expense/income/savings + net, strings decimales, meses firmados hacia atrás desde el actual): la mejor fuente para «¿cuánto entra y sale de verdad cada mes?». La curva fina por activo es opt-in (include_curve).",
+        description = "Flujo de caja mensual real por tipo, meses firmados hacia atrás desde el actual. Los importes van CON SU SIGNO REAL: expense ≤ 0, savings ≤ 0, income ≥ 0. Dos netos, deliberadamente distintos: cash_delta = expense + income + savings es la variación de caja e INCLUYE los traspasos a ahorro, así que un mes excelente con una aportación grande sale negativo y NO es una pérdida; income_minus_expense = income + expense son los ingresos menos los gastos SIN el ahorro, y es el mismo número que totals.net_actual de get_transactions_summary para ese mes. Para «¿fue buen mes?» usa income_minus_expense. La curva fina por activo es opt-in (include_curve).",
         annotations(title = "Cash-flow histórico", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_history_cashflow(
