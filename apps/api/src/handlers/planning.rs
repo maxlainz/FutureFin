@@ -31,7 +31,7 @@ impl PlanningFlowDirection {
     ///
     /// Existe porque el enum solo tenía `Debug`, así que un `{:?}` en un `format!` publicaba el
     /// identificador de Rust: las tools MCP de escritura devolvían `"… (Outflow)"` —inglés y
-    /// capitalizado— mientras las de lectura devolvían `"direction":"outflow"` (issue #8 §11b).
+    /// capitalizado— mientras las de lectura devolvían `"direction":"outflow"` (auditoría MCP §11b).
     /// Con esto, el único camino de un enum al wire vuelve a ser uno.
     pub fn as_str(&self) -> &'static str {
         match self {

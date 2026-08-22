@@ -541,7 +541,7 @@ async fn reconciled_excluded_from_months_but_not_from_fine_curve() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. REGRESIÓN (issue #8 §6) — los dos netos, y su relación con la comparativa
+// 5. REGRESIÓN (auditoría MCP §6) — los dos netos, y su relación con la comparativa
 // ---------------------------------------------------------------------------
 
 /// `cash_delta` incluye el ahorro; `income_minus_expense` no, y **coincide al céntimo** con

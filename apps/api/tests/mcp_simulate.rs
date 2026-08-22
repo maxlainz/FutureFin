@@ -550,7 +550,7 @@ async fn every_side_echoes_the_context_that_produced_it() {
         assert_eq!(k["savings_expense_basis"]["basis"], "budget", "{lado}: {k}");
         assert_eq!(k["savings_income_basis"]["months_with_data"], 0, "{lado}: {k}");
         // Hay target, así que la razón de ausencia va explícitamente a null (no desaparece:
-        // es la regla que dejó escrita el issue #8 §8).
+        // es la regla que dejó escrita el auditoría MCP §8).
         assert!(
             k.get("fire_target_absent_reason").is_some_and(|v| v.is_null()),
             "{lado} debe llevar fire_target_absent_reason: null, y lleva {k}"
@@ -855,7 +855,7 @@ async fn validation_bounds_are_enforced() {
             ]}),
             "-100",
         ),
-        // `extra_monthly_expense` NO está aquí: desde 4.0.0 admite signo (issue #27 §1). Los dos
+        // `extra_monthly_expense` NO está aquí: desde 4.0.0 admite signo (auditoría de simulate_projection §1). Los dos
         // ejes de caja siguen exigiendo `>= 0`, y esas dos filas son las que prueban que la
         // relajación fue POR EJE y no una apertura del helper compartido.
         (json!({"extra_monthly_cash_adjustment": "-5"}), ">= 0"),
@@ -1013,7 +1013,7 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
             dec(&h["savings_rate"]),
             "modo {mode}: tasa de ahorro (misma precisión en las dos superficies)"
         );
-        // El eco del contexto (issue #27 §8) tiene que decir lo MISMO que la superficie que ya
+        // El eco del contexto (auditoría de simulate_projection §8) tiene que decir lo MISMO que la superficie que ya
         // publicaba estos hechos: si divergieran, tendríamos dos verdades sobre qué modo se usó.
         assert_eq!(
             k["savings_source"], h["savings_source"],
@@ -1056,7 +1056,7 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
     }
 }
 
-/// REGRESIÓN (issue #8 §7) — ningún importe sale con más de 4 decimales, ni como `-0`.
+/// REGRESIÓN (auditoría MCP §7) — ningún importe sale con más de 4 decimales, ni como `-0`.
 ///
 /// El engine capitaliza con `annual_factor.powd(1/12)` (raíz duodécima irracional) y el target FIRE
 /// sale de `gross / (swr/100)`; ninguna de las dos se redondeaba, así que la escala saturaba en los
@@ -1136,7 +1136,7 @@ async fn no_money_string_carries_more_than_four_decimals_or_negative_zero() {
 /// Los hitos son umbrales redondos y se publican con una sola forma.
 ///
 /// `2.5 × 10⁴` heredaba la escala 1 del literal, así que el mismo array mezclaba `"25000.0"`,
-/// `"50000"` y `"100000"` (issue #8 §7).
+/// `"50000"` y `"100000"` (auditoría MCP §7).
 #[tokio::test]
 async fn projection_milestones_share_one_format() {
     let app = TestApp::spawn().await;
@@ -1156,7 +1156,7 @@ async fn projection_milestones_share_one_format() {
     }
 }
 
-/// REGRESIÓN (issue #8 §8) — la jubilación se publica como `null`, no desapareciendo; y
+/// REGRESIÓN (auditoría MCP §8) — la jubilación se publica como `null`, no desapareciendo; y
 /// `fire_target_series` es paralela a `points` en las dos densidades.
 ///
 /// Con `skip_serializing_if` el campo se esfumaba cuando el horizonte no alcanzaba el objetivo, así

@@ -490,7 +490,7 @@ async fn series_single_snapshot_today() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. REGRESIÓN (issue #7 §2) — la serie llega a sus propios snapshots
+// 8. REGRESIÓN (auditoría MCP §2) — la serie llega a sus propios snapshots
 // ---------------------------------------------------------------------------
 
 /// El repro del issue, reducido: dos snapshots del mes en curso y un activo que solo aparece en el

@@ -1182,7 +1182,7 @@ async fn batch_patch_matches_individual_patches_and_rejects_rewrites() {
 }
 
 // ---------------------------------------------------------------------------
-// REGRESIÓN — signo↔kind y fecha futura (issue #7 §3, issue #8 §11a; 4.0.0)
+// REGRESIÓN — signo↔kind y fecha futura (auditoría MCP §3, auditoría MCP §11a; 4.0.0)
 // ---------------------------------------------------------------------------
 
 /// El alta manual exige que el signo cuadre con el `kind`.
