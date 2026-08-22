@@ -24,6 +24,21 @@ jobs:
   dockerhub-description:
     runs-on: ubuntu-latest
     steps:
+      # Este workflow PUBLICA hacia fuera, y `workflow_dispatch` no restringe la rama: sin esta
+      # guardia, un dispatch desde cualquier ref manda a Docker Hub el fichero de ESE ref, sin
+      # que `main-guard` —lo único que garantiza que la documentación interna no salga— haya
+      # visto nada. Pasó el 2026-08-22: se despachó desde `dev` para estrenar un arreglo que
+      # aún no había llegado a `main`. Aquella vez no se filtró nada (el fichero era idéntico en
+      # las dos ramas), pero el camino estaba abierto. Si hay que publicar un arreglo, se releasa
+      # primero: es el mismo orden que sigue la imagen.
+      - name: Solo desde main
+        if: github.ref_name != 'main'
+        run: |
+          echo "::error::Este workflow solo publica desde 'main' (ref actual: ${{ github.ref_name }})."
+          echo "Publicar desde otra rama saltaría el main-guard, que es lo que impide que la"
+          echo "documentación interna llegue a Docker Hub. Haz el release a main y vuelve."
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
