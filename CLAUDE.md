@@ -267,6 +267,12 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 > Hasta que eso se ejecute: **no mergees a `main`**.
 
 **Releases:**
+
+> **El merge a `main` lleva mensaje propio.** `git merge dev` a secas genera
+> `Merge branch 'dev'`, que incumple la convención de commits del repo y además es lo primero
+> que se ve en la rama pública. Usa siempre:
+> `git merge --no-ff dev -m "chore(release): X.Y.Z — <una frase>"`.
+
 1. Desarrollar en `dev`, hacer commit y push.
 2. Bumpar versión en `apps/api/Cargo.toml` (sincronizar `Cargo.lock`) y añadir entrada en `CHANGELOG.md`.
 3. **Merge completo `dev` → `main`** (`git checkout main && git merge dev`). Nunca copias parciales de archivos: `main` debe quedar idéntico a `dev`.
