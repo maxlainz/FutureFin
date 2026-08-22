@@ -323,6 +323,119 @@ pub struct AssetReturnOverrideParam {
     pub expected_annual_return_percent: String,
 }
 
+/// Parsea un enum de dominio desde el string de un parámetro de tool **reusando su `Deserialize`
+/// custom**, que es donde vive la lista de variantes y sus alias. Reimplementar el `match` aquí
+/// sería la forma de que la superficie MCP aceptara —o rechazara— un valor distinto que HTTP.
+///
+/// Devuelve el error de serde CRUDO a propósito: el mensaje de la API lo compone cada call site
+/// con un literal `"<code>: {e}"`. Meter el `format!` aquí dentro dejó los códigos
+/// `savings_source` y `fire_number_mode` fuera del barrido de `error_codes_parity` —seguían
+/// emitiéndose en runtime, pero ningún literal estático los nombraba— y el fixture los dio por
+/// desaparecidos. El extractor solo ve literales; que el helper no se los coma es parte del
+/// contrato.
+fn parse_enum_param<T: serde::de::DeserializeOwned>(
+    raw: &Option<String>,
+) -> Result<Option<T>, serde_json::Error> {
+    raw.as_ref()
+        .map(|v| serde_json::from_value(serde_json::Value::String(v.trim().to_string())))
+        .transpose()
+}
+
+/// Convierte los tramos fiscales del wire (strings decimales) a los del dominio.
+fn parse_tax_brackets(
+    raw: &Option<Vec<TaxBracketParam>>,
+) -> Result<Option<Vec<crate::handlers::installation::TaxBracket>>, ApiError> {
+    raw.as_ref()
+        .map(|brackets| {
+            brackets
+                .iter()
+                .map(|b| {
+                    Ok(crate::handlers::installation::TaxBracket {
+                        up_to: b
+                            .up_to
+                            .as_deref()
+                            .map(|v| parse_decimal_param("tax_brackets.up_to", v))
+                            .transpose()?,
+                        pct: parse_decimal_param("tax_brackets.pct", &b.pct)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ApiError>>()
+        })
+        .transpose()
+}
+
+/// Ejes de `fire_settings` que `simulate_projection` puede cambiar **sin persistir**. Mismos
+/// nombres, mismos valores y mismas cotas que `update_fire_settings`: lo que se simula aquí es
+/// exactamente lo que pasaría al guardarlo allí.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FireSettingsOverrideParam {
+    /// "budget" (A: el plan) | "transactions_avg" (B: ingreso y gasto reales) |
+    /// "budget_income_real_expense" (C: ingreso del plan + gasto real). Cambiarlo arrastra tres
+    /// efectos, todos deseados: en B/C la cuota de pasivo deja de contar aparte (ya está dentro
+    /// del gasto real) y el principal queda como resta constante, los fines de partida de
+    /// presupuesto dejan de aplicarse, y la base del objetivo FIRE pasa a ser el gasto efectivo.
+    /// OJO: si pides B o C y no hay meses reales, el ensamblado cae al presupuesto y el escenario
+    /// sale idéntico al baseline — `savings_source` de la respuesta dice cuál se usó de verdad.
+    #[serde(default)]
+    pub savings_source: Option<String>,
+    /// "manual" | "annual_expense" | "current_income".
+    #[serde(default)]
+    pub fire_number_mode: Option<String>,
+    /// Objetivo manual > 0, string decimal (requerido si el modo efectivo acaba siendo "manual").
+    #[serde(default)]
+    pub fire_number_manual_amount: Option<String>,
+    /// Simular con y sin impuestos sobre la plusvalía en el gross-up del objetivo.
+    #[serde(default)]
+    pub taxes_enabled: Option<bool>,
+    /// Tramos fiscales COMPLETOS (sustituyen a los actuales; umbrales crecientes, solo el último
+    /// sin up_to).
+    #[serde(default)]
+    pub tax_brackets: Option<Vec<TaxBracketParam>>,
+    /// Ventana del promedio de INGRESO en meses (1–60). Solo la usa el modo B. Con una ventana
+    /// corta en modo "data" el ingreso proyectado es casi el último mes con datos, y un mes
+    /// atípico mueve la proyección entera: este eje existe para poder verlo sin persistirlo.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 60))]
+    pub income_avg_window_months: Option<u32>,
+    /// "data" (los N meses CON DATOS más recientes, saltando huecos) | "calendar" (solo los meses
+    /// con datos dentro de los últimos N civiles).
+    #[serde(default)]
+    pub income_avg_window_mode: Option<String>,
+    /// Ventana del promedio de GASTO en meses (1–60). La usan los modos B y C.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 60))]
+    pub expense_avg_window_months: Option<u32>,
+    /// "data" | "calendar".
+    #[serde(default)]
+    pub expense_avg_window_mode: Option<String>,
+}
+
+impl FireSettingsOverrideParam {
+    fn to_patch(&self) -> Result<crate::handlers::installation::FireSettingsPatch, ApiError> {
+        Ok(crate::handlers::installation::FireSettingsPatch {
+            swr_pct: None,
+            taxes_enabled: self.taxes_enabled,
+            tax_brackets: parse_tax_brackets(&self.tax_brackets)?,
+            fire_number_mode: parse_enum_param(&self.fire_number_mode)
+                .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))?,
+            fire_number_manual_amount: self
+                .fire_number_manual_amount
+                .as_deref()
+                .map(|v| parse_decimal_param("fire_number_manual_amount", v))
+                .transpose()?,
+            savings_source: parse_enum_param(&self.savings_source)
+                .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))?,
+            income_avg_window_months: self.income_avg_window_months,
+            income_avg_window_mode: parse_enum_param(&self.income_avg_window_mode)
+                .map_err(|e| ApiError::BadRequest(format!("income_avg_window_mode: {e}")))?,
+            expense_avg_window_months: self.expense_avg_window_months,
+            expense_avg_window_mode: parse_enum_param(&self.expense_avg_window_mode)
+                .map_err(|e| ApiError::BadRequest(format!("expense_avg_window_mode: {e}")))?,
+            annual_inflation_assumption_percent: None,
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SimulateParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
@@ -375,6 +488,10 @@ pub struct SimulateParams {
     /// Overrides de rentabilidad por activo.
     #[serde(default)]
     pub asset_return_overrides: Option<Vec<AssetReturnOverrideParam>>,
+    /// Ejes de la configuración FIRE simulables sin persistir: fuente del ahorro, modo del número
+    /// FIRE, impuestos y ventanas del promedio. `swr_pct` es el mismo eje y se pide arriba, suelto.
+    #[serde(default)]
+    pub fire_settings_overrides: Option<FireSettingsOverrideParam>,
 }
 
 /// Parsea un string decimal de un parámetro de tool con error tipado.
@@ -1225,7 +1342,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "simulate_projection",
-        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo) y devuelve KPIs + deltas de cada lado. DOS DE LOS EJES MENSUALES SON EL MISMO MANDO: `extra_monthly_savings` y `extra_monthly_cash_adjustment` escriben la misma variable con signo opuesto, así que `extra_monthly_savings` ES el ajuste de caja negativo y por eso el ajuste no acepta negativos (ambos exigen >= 0). Ojo con lo que NO mueven: los ajustes de caja entran en la caja del mes, no en la base de gasto, así que con cualquiera de los dos `expense_total_monthly_delta`, `net_monthly_delta`, `savings_rate_delta` y `runway_months_delta` salen 0 EXACTO — es el contrato, no un fallo. Si quieres que un recorte mueva también runway y target, el eje con semántica de gasto es `extra_monthly_expense`. La respuesta es autocontenida: trae `anchor_date_ymd` (mes 0), `show_age_mode` y `viewer_birth_date`, sin necesidad de encadenar get_projection. KPIs: jubilación como índice de mes MÁS `jubilacion_date_ymd` y `jubilacion_age` ya calculados, patrimonio final NOMINAL más `final_net_worth_real` (el mismo en euros de hoy, deflactado por índice de mes con la inflación efectiva del lado: con el horizonte por defecto el nominal está a décadas vista y no dice nada), target FIRE, runway, y la salud financiera del **mes 1** — income_monthly, expense_total_monthly (gasto regular + servicio de deuda: la misma base del runway y del target, la que cuadra con get_summary en los tres modos), debt_service_monthly, net_monthly (= income − expense_total; NO es lo que reparte la cascada, que además lleva el tramo de planning flows del mes) y savings_rate. Cada lado ECHA ADEMÁS el contexto con el que se calculó, para que ningún cero haya que interpretarlo: `savings_source` efectivo (tras el fallback a presupuesto por falta de meses reales), `savings_income_basis`/`savings_expense_basis` (de dónde salió cada lado y sobre cuántos meses reales), `fire_number_mode`, `swr_pct` y `annual_inflation_percent` efectivos, las tres bases usadas (`expense_base_monthly`, `income_base_monthly`, `expense_retirement_base_monthly`) y `fire_target_absent_reason` (`manual_amount_missing` | `net_need_not_positive` | `swr_not_positive`) cuando no hay objetivo. En la raíz, `horizon_basis` dice de dónde sale el horizonte. Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
+        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo — y `fire_settings_overrides`: fuente del ahorro, modo del número FIRE, impuestos y ventanas del promedio, todo SIN persistir y con las mismas cotas que update_fire_settings) y devuelve KPIs + deltas de cada lado. DOS DE LOS EJES MENSUALES SON EL MISMO MANDO: `extra_monthly_savings` y `extra_monthly_cash_adjustment` escriben la misma variable con signo opuesto, así que `extra_monthly_savings` ES el ajuste de caja negativo y por eso el ajuste no acepta negativos (ambos exigen >= 0). Ojo con lo que NO mueven: los ajustes de caja entran en la caja del mes, no en la base de gasto, así que con cualquiera de los dos `expense_total_monthly_delta`, `net_monthly_delta`, `savings_rate_delta` y `runway_months_delta` salen 0 EXACTO — es el contrato, no un fallo. Si quieres que un recorte mueva también runway y target, el eje con semántica de gasto es `extra_monthly_expense`. La respuesta es autocontenida: trae `anchor_date_ymd` (mes 0), `show_age_mode` y `viewer_birth_date`, sin necesidad de encadenar get_projection. KPIs: jubilación como índice de mes MÁS `jubilacion_date_ymd` y `jubilacion_age` ya calculados, patrimonio final NOMINAL más `final_net_worth_real` (el mismo en euros de hoy, deflactado por índice de mes con la inflación efectiva del lado: con el horizonte por defecto el nominal está a décadas vista y no dice nada), target FIRE, runway, y la salud financiera del **mes 1** — income_monthly, expense_total_monthly (gasto regular + servicio de deuda: la misma base del runway y del target, la que cuadra con get_summary en los tres modos), debt_service_monthly, net_monthly (= income − expense_total; NO es lo que reparte la cascada, que además lleva el tramo de planning flows del mes) y savings_rate. Cada lado ECHA ADEMÁS el contexto con el que se calculó, para que ningún cero haya que interpretarlo: `savings_source` efectivo (tras el fallback a presupuesto por falta de meses reales), `savings_income_basis`/`savings_expense_basis` (de dónde salió cada lado y sobre cuántos meses reales), `fire_number_mode`, `swr_pct` y `annual_inflation_percent` efectivos, las tres bases usadas (`expense_base_monthly`, `income_base_monthly`, `expense_retirement_base_monthly`) y `fire_target_absent_reason` (`manual_amount_missing` | `net_need_not_positive` | `swr_not_positive`) cuando no hay objetivo. En la raíz, `horizon_basis` dice de dónde sale el horizonte. Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
         annotations(title = "Simular escenario", read_only_hint = true, open_world_hint = false)
     )]
     async fn simulate_projection(
@@ -1277,6 +1394,11 @@ impl FutureFinMcp {
                 parse_opt("annual_inflation_percent", &p.annual_inflation_percent)?;
             spec.retirement_annual_expense =
                 parse_opt("retirement_annual_expense", &p.retirement_annual_expense)?;
+            spec.fire_settings_overrides = p
+                .fire_settings_overrides
+                .as_ref()
+                .map(|o| o.to_patch())
+                .transpose()?;
             if let Some(overrides) = &p.asset_return_overrides {
                 for o in overrides {
                     let asset_id = Uuid::parse_str(o.asset_id.trim()).map_err(|_| {
@@ -2799,63 +2921,23 @@ impl FutureFinMcp {
                 .map(|v| parse_decimal_param("fire_number_manual_amount", v))
                 .transpose()?;
             patch.taxes_enabled = p.taxes_enabled;
-            // Enums: reusar el Deserialize custom (misma lista de variantes y aliases que HTTP).
-            patch.savings_source = p
-                .savings_source
-                .as_ref()
-                .map(|s| {
-                    serde_json::from_value(serde_json::Value::String(s.trim().to_string()))
-                        .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))
-                })
-                .transpose()?;
+            // Enums y tramos: por los helpers compartidos con `simulate_projection`. La lista de
+            // variantes vive en el `Deserialize` custom del dominio y no se reimplementa aquí —
+            // dos copias se separan sin que ningún test lo note, y la superficie MCP acabaría
+            // aceptando o rechazando valores distintos que HTTP.
+            patch.savings_source = parse_enum_param(&p.savings_source)
+                .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))?;
             patch.income_avg_window_months = p.income_avg_window_months;
             patch.expense_avg_window_months = p.expense_avg_window_months;
-            for (label, src, dst) in [
-                (
-                    "income_avg_window_mode",
-                    &p.income_avg_window_mode,
-                    &mut patch.income_avg_window_mode,
-                ),
-                (
-                    "expense_avg_window_mode",
-                    &p.expense_avg_window_mode,
-                    &mut patch.expense_avg_window_mode,
-                ),
-            ] {
-                if let Some(v) = src.as_ref() {
-                    *dst = Some(
-                        serde_json::from_value(serde_json::Value::String(v.trim().to_string()))
-                            .map_err(|e| ApiError::BadRequest(format!("{label}: {e}")))?,
-                    );
-                }
-            }
-            patch.fire_number_mode = p
-                .fire_number_mode
-                .as_ref()
-                .map(|s| {
-                    serde_json::from_value(serde_json::Value::String(s.trim().to_string()))
-                        .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))
-                })
-                .transpose()?;
-            patch.tax_brackets = p
-                .tax_brackets
-                .as_ref()
-                .map(|brackets| {
-                    brackets
-                        .iter()
-                        .map(|b| {
-                            Ok(crate::handlers::installation::TaxBracket {
-                                up_to: b
-                                    .up_to
-                                    .as_deref()
-                                    .map(|v| parse_decimal_param("tax_brackets.up_to", v))
-                                    .transpose()?,
-                                pct: parse_decimal_param("tax_brackets.pct", &b.pct)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, ApiError>>()
-                })
-                .transpose()?;
+            patch.income_avg_window_mode =
+                parse_enum_param(&p.income_avg_window_mode)
+                    .map_err(|e| ApiError::BadRequest(format!("income_avg_window_mode: {e}")))?;
+            patch.expense_avg_window_mode =
+                parse_enum_param(&p.expense_avg_window_mode)
+                    .map_err(|e| ApiError::BadRequest(format!("expense_avg_window_mode: {e}")))?;
+            patch.fire_number_mode = parse_enum_param(&p.fire_number_mode)
+                .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))?;
+            patch.tax_brackets = parse_tax_brackets(&p.tax_brackets)?;
             Ok(patch)
         };
         let patch = match build() {

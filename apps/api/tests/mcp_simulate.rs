@@ -172,6 +172,228 @@ async fn final_net_worth_is_nominal_and_its_real_twin_deflates_by_month_index() 
     );
 }
 
+/// Household con presupuesto, un pasivo con cuota y movimientos reales en un mes cerrado — el
+/// mínimo para que los modos B y C tengan «meses reales» y no caigan al presupuesto.
+async fn seed_with_real_movements(app: &TestApp, owner: &LoggedInOwner) {
+    seed(app, owner).await;
+    let liab_cat = app.create_category(owner, "liability", "Deuda").await;
+    let liab_exp_cat = app.create_category(owner, "expense", "Cuotas").await;
+    let created = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({ "category_id": liab_cat, "expense_category_id": liab_exp_cat,
+                    "label": "Hipoteca", "principal": "100000", "payment_amount": "400",
+                    "payment_frequency": "monthly", "payment_end_date": "2040-01-01" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+
+    let exp_cat = app.create_category(owner, "expense", "Súper").await;
+    let inc_cat = app.create_category(owner, "income", "Sueldo").await;
+    for (concept, amount, kind, cat) in [
+        ("COMPRA SUPER", "-800", "expense", &exp_cat),
+        ("NOMINA", "2500", "income", &inc_cat),
+    ] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({ "op_date": "2026-06-10", "concept": concept, "amount": amount,
+                        "kind": kind, "category_id": cat }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+}
+
+#[tokio::test]
+async fn savings_source_override_predicts_exactly_what_persisting_it_would_do() {
+    // Issue #27 §3. El sentido de poder simular «¿y si cambio de fuente de ahorro?» es que prediga
+    // lo que pasaría al cambiarla de verdad. Por eso el override usa el MISMO
+    // `FireSettingsPatch::apply_to` que el PATCH real: dos copias del aplicador se separan sin que
+    // ningún test lo note. Este es ese test.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_with_real_movements(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    for modo in ["transactions_avg", "budget_income_real_expense"] {
+        // Instalación en modo A; el escenario pide el modo por override, sin persistir nada.
+        let r = app
+            .patch_json_with_cookie(
+                "/v1/installation",
+                json!({ "fire_settings": { "savings_source": "budget" } }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+        let simulado = tool_json(
+            &mcp_post(
+                &app,
+                &token,
+                tool_call(
+                    "simulate_projection",
+                    json!({"fire_settings_overrides": {"savings_source": modo}}),
+                ),
+            )
+            .await,
+        );
+
+        // Ahora el cambio de verdad, y el baseline de una simulación sin overrides.
+        let r = app
+            .patch_json_with_cookie(
+                "/v1/installation",
+                json!({ "fire_settings": { "savings_source": modo } }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+        let persistido =
+            tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+
+        assert_eq!(
+            simulado["scenario"], persistido["baseline"],
+            "modo {modo}: simular el cambio debe dar lo MISMO que hacerlo. Si difieren, el              aplicador del patchset se ha bifurcado entre el PATCH real y la simulación."
+        );
+        // Y el escenario tiene que diferir del baseline, o el test pasaría por no hacer nada.
+        assert_ne!(
+            simulado["scenario"]["expense_base_monthly"],
+            simulado["baseline"]["expense_base_monthly"],
+            "modo {modo}: el override no ha movido la base de gasto"
+        );
+        // Los tres efectos en cascada del modo real, visibles en el eco:
+        assert_eq!(simulado["scenario"]["savings_source"], modo);
+        assert_eq!(
+            dec(&simulado["baseline"]["debt_service_monthly"]),
+            400.0,
+            "modo A: la cuota cuenta aparte"
+        );
+        assert_eq!(
+            dec(&simulado["scenario"]["debt_service_monthly"]),
+            0.0,
+            "modo {modo}: la cuota ya vive dentro del gasto real"
+        );
+    }
+}
+
+#[tokio::test]
+async fn savings_source_override_without_real_months_says_it_fell_back() {
+    // El fallback por falta de meses reales es silencioso por diseño. Sin el eco de la fuente
+    // efectiva, pedir modo B sobre una instalación sin movimientos devuelve un escenario idéntico
+    // al baseline y NADA lo explica — que es la razón de que el §8 y el §3 vayan juntos.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await; // presupuesto, cero transacciones
+    let token = create_token(&app, &owner).await;
+
+    let sim = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"fire_settings_overrides": {"savings_source": "transactions_avg"}}),
+            ),
+        )
+        .await,
+    );
+
+    assert_eq!(
+        sim["scenario"], sim["baseline"],
+        "sin meses reales el modo B cae al presupuesto: el escenario ES el baseline"
+    );
+    assert_eq!(
+        sim["scenario"]["savings_source"], "budget",
+        "y el eco tiene que decir que se usó presupuesto, no lo que se pidió: {}",
+        sim["scenario"]
+    );
+    assert_eq!(sim["scenario"]["savings_expense_basis"]["basis"], "budget");
+}
+
+#[tokio::test]
+async fn fire_settings_overrides_reuse_the_validation_of_the_real_patch() {
+    // Los overrides pasan por `validate_fire_settings`, la misma del PATCH: no hay una segunda
+    // lista de cotas que pueda divergir. Y los enums se parsean con su `Deserialize` de dominio,
+    // así que un valor inventado se rechaza con el mismo código que por HTTP.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    for (overrides, needle) in [
+        // Modo manual sin importe: lo caza `validate_fire_settings`, no un `if` nuevo.
+        (json!({"fire_number_mode": "manual"}), "fire_manual_amount"),
+        (json!({"savings_source": "no_existe"}), "savings_source"),
+        (json!({"income_avg_window_mode": "semanal"}), "income_avg_window_mode"),
+        (json!({"expense_avg_window_months": 0}), "expense_avg_window_months"),
+    ] {
+        let envelope = mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({ "fire_settings_overrides": overrides }),
+            ),
+        )
+        .await;
+        let result = &envelope["result"];
+        assert_eq!(result["isError"], true, "debía fallar con {overrides}: {envelope}");
+        let body = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            body.contains(needle),
+            "el error de {overrides} debe nombrar «{needle}» y dice: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn average_window_override_moves_the_basis_without_persisting_it() {
+    // «¿Y si el promedio fuese de otra ventana?» era imposible sin persistirlo. El §3 del issue lo
+    // señala aparte porque con una ventana corta un mes atípico mueve la proyección entera.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_with_real_movements(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": { "savings_source": "transactions_avg" } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    let sim = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"fire_settings_overrides": {
+                    "expense_avg_window_months": 3,
+                    "expense_avg_window_mode": "calendar"
+                }}),
+            ),
+        )
+        .await,
+    );
+
+    assert_eq!(sim["scenario"]["savings_expense_basis"]["window_months"], 3);
+    assert_eq!(sim["scenario"]["savings_expense_basis"]["window_mode"], "calendar");
+    // El baseline conserva la ventana configurada: el override es del lado, no global.
+    assert_eq!(sim["baseline"]["savings_expense_basis"]["window_months"], 12);
+    // Y nada se ha persistido: una simulación posterior sin overrides sigue viendo la ventana
+    // configurada. Se comprueba por la MISMA superficie, que es donde se notaría la fuga.
+    let despues =
+        tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    assert_eq!(
+        despues["baseline"]["savings_expense_basis"]["window_months"], 12,
+        "la simulación no persiste NADA: {}",
+        despues["baseline"]
+    );
+}
+
 #[tokio::test]
 async fn every_side_echoes_the_context_that_produced_it() {
     // Issue #27 §8. Seis de estos valores ya se calculaban dentro de la simulación y se tiraban.

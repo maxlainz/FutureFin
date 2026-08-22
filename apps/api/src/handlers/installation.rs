@@ -771,6 +771,50 @@ pub(crate) struct FireSettingsPatch {
 }
 
 impl FireSettingsPatch {
+    /// Aplica el patchset sobre una base y devuelve el resultado, **sin validar ni persistir**.
+    ///
+    /// Lo comparten el PATCH real y el override what-if de `simulate_projection`. Que sea el mismo
+    /// código no es estética: el sentido de poder simular «¿y si cambio de modo de ahorro?» es que
+    /// prediga lo que pasaría al cambiarlo de verdad, y dos copias del aplicador se separan sin
+    /// que ningún test lo note.
+    ///
+    /// `annual_inflation_assumption_percent` NO se aplica aquí: vive en una columna de
+    /// `installation`, no en el JSONB, y cada caller lo resuelve por su lado.
+    pub(crate) fn apply_to(&self, base: &FireSettings) -> FireSettings {
+        let mut after = base.clone();
+        if let Some(v) = self.swr_pct {
+            after.swr_pct = v;
+        }
+        if let Some(v) = self.taxes_enabled {
+            after.taxes_enabled = v;
+        }
+        if let Some(v) = self.tax_brackets.clone() {
+            after.tax_brackets = v;
+        }
+        if let Some(v) = self.fire_number_mode {
+            after.fire_number_mode = v;
+        }
+        if let Some(v) = self.fire_number_manual_amount {
+            after.fire_number_manual_amount = Some(v);
+        }
+        if let Some(v) = self.savings_source {
+            after.savings_source = v;
+        }
+        if let Some(v) = self.income_avg_window_months {
+            after.income_avg_window_months = v;
+        }
+        if let Some(v) = self.income_avg_window_mode {
+            after.income_avg_window_mode = v;
+        }
+        if let Some(v) = self.expense_avg_window_months {
+            after.expense_avg_window_months = v;
+        }
+        if let Some(v) = self.expense_avg_window_mode {
+            after.expense_avg_window_mode = v;
+        }
+        after
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.swr_pct.is_none()
             && self.taxes_enabled.is_none()
@@ -823,37 +867,7 @@ pub(crate) async fn patch_fire_settings_core(
     .await?;
     let before = resolve_fire_settings(stored.map(|j| j.0));
 
-    let mut after = before.clone();
-    if let Some(v) = patchset.swr_pct {
-        after.swr_pct = v;
-    }
-    if let Some(v) = patchset.taxes_enabled {
-        after.taxes_enabled = v;
-    }
-    if let Some(v) = patchset.tax_brackets {
-        after.tax_brackets = v;
-    }
-    if let Some(v) = patchset.fire_number_mode {
-        after.fire_number_mode = v;
-    }
-    if let Some(v) = patchset.fire_number_manual_amount {
-        after.fire_number_manual_amount = Some(v);
-    }
-    if let Some(v) = patchset.savings_source {
-        after.savings_source = v;
-    }
-    if let Some(v) = patchset.income_avg_window_months {
-        after.income_avg_window_months = v;
-    }
-    if let Some(v) = patchset.income_avg_window_mode {
-        after.income_avg_window_mode = v;
-    }
-    if let Some(v) = patchset.expense_avg_window_months {
-        after.expense_avg_window_months = v;
-    }
-    if let Some(v) = patchset.expense_avg_window_mode {
-        after.expense_avg_window_mode = v;
-    }
+    let after = patchset.apply_to(&before);
     validate_fire_settings(&after)?;
 
     let annual_inflation_after = match patchset.annual_inflation_assumption_percent {
