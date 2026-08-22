@@ -516,6 +516,29 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `minimum`/`maximum`) — declarativa: rmcp deserializa con serde_json y no valida contra el schema,
   así que describe el contrato, no lo impone. Pinneado en
   `mcp_http.rs::simulate_cash_axes_carry_their_bound_in_the_json_schema`.
+  **Nominal y real (4.0.0, issue #27 §7)**: `final_net_worth` es nominal por contrato del motor
+  (`ProjectionOutput.net_worth` lo dice) y con el horizonte por defecto —hasta los 90 años— queda a
+  décadas vista. Se añade `final_net_worth_real` y su delta, deflactados con la inflación
+  **efectiva del lado** por `deflator_at_month_index`, extraída del núcleo de
+  `deflate_points_to_today` para no escribir una tercera copia de la fórmula. El exponente sale del
+  `month_index`, nunca de la posición en el array: bajo densidad `hybrid` los puntos no son
+  equidistantes (incidente v1.4.2). Con inflación ≤ 0 el deflactor es exactamente `1` y el par sale
+  como el **mismo string**. Pinneado en
+  `mcp_simulate.rs::final_net_worth_is_nominal_and_its_real_twin_deflates_by_month_index`.
+  **Eco de contexto por lado (4.0.0, issue #27 §8)**: `savings_source` efectivo,
+  `savings_income_basis`/`savings_expense_basis`, `fire_number_mode`, `swr_pct` y
+  `annual_inflation_percent` efectivos, las tres bases (`expense_base_monthly`,
+  `income_base_monthly`, `expense_retirement_base_monthly`, todas por `money_out`) y
+  `fire_target_absent_reason`; en la raíz, `horizon_basis`. Seis de ellos ya se calculaban en el
+  ensamblado y se descartaban. No es cosmética: sin `fire_number_mode` un
+  `fire_target_base_delta: 0` es indistinguible de un bug (en `manual` el objetivo es fijo), y sin
+  `savings_source` efectivo un override de modo que cae en el fallback devuelve un escenario
+  idéntico al baseline sin que nada lo diga. `compute_fire_target_nw` pasa de `Option<Decimal>` a
+  `Result<Decimal, &'static str>` para que el hueco y su causa viajen juntos — el GET no publica la
+  razón, su contrato no cambia. Paridad con `/v1/summary` (los tres modos) pinneada en
+  `mcp_simulate.rs::sim_kpis_match_summary_financial_health_in_all_three_modes`; el eco por lado y
+  la razón de ausencia, en `every_side_echoes_the_context_that_produced_it` y
+  `absent_fire_target_says_why_instead_of_going_quiet`.
   **Cache-neutral por construcción**: usa `resolve_projection_context` +
   `build_…` + doble `spawn_blocking`, nunca `projection_series_cached`. No persiste nada.
   Regresión: `apps/api/tests/mcp_simulate.rs`.

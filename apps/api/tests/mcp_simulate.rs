@@ -124,6 +124,144 @@ async fn seed(app: &TestApp, owner: &LoggedInOwner) -> String {
 }
 
 #[tokio::test]
+async fn final_net_worth_is_nominal_and_its_real_twin_deflates_by_month_index() {
+    // Issue #27 §7. `final_net_worth` es nominal por contrato del motor, y con el horizonte por
+    // defecto está a décadas vista: la cifra impresiona y no dice nada. El hermano real la lleva a
+    // euros de hoy con la inflación EFECTIVA DEL LADO.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    // Sin inflación el deflactor es exactamente 1: el mismo STRING, no un valor parecido.
+    let sin = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    assert_eq!(
+        sin["baseline"]["final_net_worth"], sin["baseline"]["final_net_worth_real"],
+        "con inflación 0 el par debe ser idéntico carácter a carácter: {}",
+        sin["baseline"]
+    );
+    assert_eq!(dec(&sin["deltas"]["final_net_worth_real_delta"]), 0.0);
+
+    // Con inflación, la razón entre ambos es (1+i)^(meses/12) — deflactado por ÍNDICE DE MES, que
+    // es lo que hay que fijar: deflactar por la posición en un array decimado daría otra cosa.
+    let con = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("simulate_projection", json!({"annual_inflation_percent": "3"})),
+        )
+        .await,
+    );
+    let esc = &con["scenario"];
+    let meses = con["horizon_months"].as_u64().unwrap() as f64;
+    let nominal = dec(&esc["final_net_worth"]);
+    let real = dec(&esc["final_net_worth_real"]);
+    assert!(real < nominal, "la inflación tiene que morder: {esc}");
+    let esperado = 1.03_f64.powf(meses / 12.0);
+    let observado = nominal / real;
+    assert!(
+        (observado - esperado).abs() / esperado < 1e-9,
+        "razón nominal/real = {observado}, esperada {esperado} para {meses} meses al 3 %: {esc}"
+    );
+
+    // El baseline conserva la inflación de la instalación (0), así que su par sigue idéntico: es
+    // la prueba de que el deflactor es por lado y no global.
+    assert_eq!(
+        con["baseline"]["final_net_worth"], con["baseline"]["final_net_worth_real"],
+        "{}", con["baseline"]
+    );
+}
+
+#[tokio::test]
+async fn every_side_echoes_the_context_that_produced_it() {
+    // Issue #27 §8. Seis de estos valores ya se calculaban dentro de la simulación y se tiraban.
+    // Sin ellos, respuestas correctas se leen como fallos: un `fire_target_base_delta: 0` es
+    // exacto en modo `manual` e inexplicable sin saber el modo.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let sim = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+
+    // El horizonte deja de ser un número a ciegas: dice de dónde sale.
+    assert_eq!(
+        sim["horizon_basis"], "lifespan_90",
+        "el owner tiene fecha de nacimiento, así que el horizonte llega a los 90: {sim}"
+    );
+
+    for lado in ["baseline", "scenario"] {
+        let k = &sim[lado];
+        // Cuadra con la MISMA superficie que ya publicaba estos hechos.
+        assert_eq!(k["savings_source"], "budget", "{lado}: {k}");
+        assert_eq!(k["fire_number_mode"], "annual_expense", "{lado}: {k}");
+        assert_eq!(k["savings_income_basis"]["basis"], "budget", "{lado}: {k}");
+        assert_eq!(k["savings_expense_basis"]["basis"], "budget", "{lado}: {k}");
+        assert_eq!(k["savings_income_basis"]["months_with_data"], 0, "{lado}: {k}");
+        // Hay target, así que la razón de ausencia va explícitamente a null (no desaparece:
+        // es la regla que dejó escrita el issue #8 §8).
+        assert!(
+            k.get("fire_target_absent_reason").is_some_and(|v| v.is_null()),
+            "{lado} debe llevar fire_target_absent_reason: null, y lleva {k}"
+        );
+        // Las tres bases: el presupuesto sembrado, sin la cuota de pasivo (que aquí no hay).
+        assert_eq!(dec(&k["expense_base_monthly"]), 1000.0, "{lado}: {k}");
+        assert_eq!(dec(&k["income_base_monthly"]), 3000.0, "{lado}: {k}");
+        assert_eq!(dec(&k["expense_retirement_base_monthly"]), 1000.0, "{lado}: {k}");
+        // `expense_base_monthly` NO es `expense_total_monthly`: aquella excluye el servicio de
+        // deuda. Sin pasivos coinciden, y esa coincidencia es la que hay que poder comprobar.
+        assert_eq!(dec(&k["expense_total_monthly"]), 1000.0, "{lado}: {k}");
+        assert_eq!(dec(&k["income_base_monthly"]), dec(&k["income_monthly"]));
+        assert_eq!(dec(&k["swr_pct"]), 3.5, "{lado}: {k}");
+        assert_eq!(dec(&k["annual_inflation_percent"]), 0.0, "{lado}: {k}");
+    }
+
+    // El eco es POR LADO, y eso solo se demuestra haciéndolos diferir: con un override, el
+    // baseline conserva el valor de la instalación y el escenario publica el efectivo. Sin esto,
+    // el consumidor no puede saber con qué inflación se calculó lo que está leyendo.
+    let con_infl = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("simulate_projection", json!({"annual_inflation_percent": "3"})),
+        )
+        .await,
+    );
+    assert_eq!(dec(&con_infl["baseline"]["annual_inflation_percent"]), 0.0);
+    assert_eq!(dec(&con_infl["scenario"]["annual_inflation_percent"]), 3.0);
+}
+
+#[tokio::test]
+async fn absent_fire_target_says_why_instead_of_going_quiet() {
+    // `swr_pct: "0"` es un estado modelado —«jamás», no «conservador»—, pero hasta 4.0.0 producía
+    // tres `null` sin causa. Con la razón, el consumidor distingue «no configuraste importe
+    // manual» de «tu gasto ya lo cubre la pensión» de «pediste SWR 0».
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let sim = tool_json(
+        &mcp_post(&app, &token, tool_call("simulate_projection", json!({"swr_pct": "0"}))).await,
+    );
+
+    assert!(sim["baseline"]["fire_target_absent_reason"].is_null());
+    assert!(!sim["baseline"]["fire_target_base"].is_null());
+
+    let esc = &sim["scenario"];
+    assert_eq!(
+        esc["fire_target_absent_reason"], "swr_not_positive",
+        "el escenario debe decir por qué no hay objetivo: {esc}"
+    );
+    assert!(esc["fire_target_base"].is_null(), "{esc}");
+    assert!(esc["jubilacion_month_index"].is_null(), "{esc}");
+    assert_eq!(dec(&esc["swr_pct"]), 0.0, "el SWR efectivo se echa de vuelta: {esc}");
+    // Los deltas que dependen de los dos lados salen null, y ahora eso se puede explicar.
+    assert!(sim["deltas"]["fire_target_base_delta"].is_null());
+    assert!(sim["deltas"]["jubilacion_months_delta"].is_null());
+}
+
+#[tokio::test]
 async fn baseline_without_overrides_matches_get_projection_and_scenario() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
@@ -519,6 +657,20 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
             dec(&k["savings_rate"]),
             dec(&h["savings_rate"]),
             "modo {mode}: tasa de ahorro (misma precisión en las dos superficies)"
+        );
+        // El eco del contexto (issue #27 §8) tiene que decir lo MISMO que la superficie que ya
+        // publicaba estos hechos: si divergieran, tendríamos dos verdades sobre qué modo se usó.
+        assert_eq!(
+            k["savings_source"], h["savings_source"],
+            "modo {mode}: la fuente efectiva echada debe ser la de /v1/summary"
+        );
+        assert_eq!(
+            k["savings_income_basis"], h["savings_income_basis"],
+            "modo {mode}: base de ingreso"
+        );
+        assert_eq!(
+            k["savings_expense_basis"], h["savings_expense_basis"],
+            "modo {mode}: base de gasto"
         );
 
         // Identidad interna del propio KPI, en los tres modos.

@@ -163,33 +163,53 @@ pub(crate) fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBrack
     net_annual
 }
 
+/// Por qué NO hay target FIRE. Devolver `None` a secas se tragaba tres causas muy distintas, y
+/// desde 4.0.0 la simulación puede llegar a ellas por caminos nuevos (un recorte que deja la base
+/// de gasto en 0, un override de modo a `manual` sin importe, `swr_pct: 0`). Sin la razón, esos
+/// escenarios se leen como un fallo de la herramienta (issue #27 §8).
+pub(crate) const FIRE_ABSENT_MANUAL_AMOUNT_MISSING: &str = "manual_amount_missing";
+pub(crate) const FIRE_ABSENT_NET_NEED_NOT_POSITIVE: &str = "net_need_not_positive";
+pub(crate) const FIRE_ABSENT_SWR_NOT_POSITIVE: &str = "swr_not_positive";
+
+/// `Err(razón)` en vez de `None`: el valor ausente y su causa viajan juntos, así que ningún caller
+/// puede publicar el hueco sin poder explicarlo.
 fn compute_fire_target_nw(
     fire: &FireSettings,
     income_monthly: Decimal,
     income_retirement_monthly: Decimal,
     expense_monthly: Decimal,
-) -> Option<Decimal> {
+) -> Result<Decimal, &'static str> {
     let need_annual = match fire.fire_number_mode {
         FireNumberMode::Manual => {
-            let amt = fire.fire_number_manual_amount?;
-            if amt <= Decimal::ZERO { return None; }
+            let amt = fire
+                .fire_number_manual_amount
+                .ok_or(FIRE_ABSENT_MANUAL_AMOUNT_MISSING)?;
+            if amt <= Decimal::ZERO {
+                return Err(FIRE_ABSENT_MANUAL_AMOUNT_MISSING);
+            }
             amt
         }
         FireNumberMode::AnnualExpense => {
             let net = expense_monthly - income_retirement_monthly;
-            if net <= Decimal::ZERO { return None; }
+            if net <= Decimal::ZERO {
+                return Err(FIRE_ABSENT_NET_NEED_NOT_POSITIVE);
+            }
             net * Decimal::from(12u32)
         }
         FireNumberMode::CurrentIncome => {
             let net = income_monthly - income_retirement_monthly;
-            if net <= Decimal::ZERO { return None; }
+            if net <= Decimal::ZERO {
+                return Err(FIRE_ABSENT_NET_NEED_NOT_POSITIVE);
+            }
             net * Decimal::from(12u32)
         }
     };
     let swr = fire.swr_pct;
-    if swr <= Decimal::ZERO { return None; }
+    if swr <= Decimal::ZERO {
+        return Err(FIRE_ABSENT_SWR_NOT_POSITIVE);
+    }
     let gross = gross_up_net_annual_fire(need_annual, &fire.tax_brackets, fire.taxes_enabled);
-    Some(gross / (swr / Decimal::from(100u32)))
+    Ok(gross / (swr / Decimal::from(100u32)))
 }
 
 /// Serializa un Decimal como f64 (~15 dígitos de precisión, suficiente para
@@ -511,11 +531,32 @@ fn projection_next_milestones(from: Decimal, count: usize) -> Vec<Decimal> {
     out
 }
 
-/// Deflacta una serie de puntos a euros de hoy: el patrimonio del mes `k` se divide por
-/// `(1 + inflación%)^(k/12)`. Es la versión a resolución mensual completa de la deflactación
-/// **visual** que hace el chart de la web (`ProjectionNetWorthChart.baseSeries`); calcularla aquí
-/// preserva la precisión del `reached_month_index` de los milestones bajo densidad `hybrid`, donde
-/// el cliente solo recibe puntos anuales. Con inflación 0 devuelve una copia sin cambios.
+/// Factor que lleva un importe nominal del mes `month_index` a euros de hoy:
+/// `1 / (1 + inflación%)^(month_index/12)`. Con inflación ≤ 0 devuelve exactamente `1`, así que el
+/// importe deflactado es **el mismo valor**, no uno aproximadamente igual.
+///
+/// El exponente sale del `month_index` del punto, **jamás de su posición en el array**. Hoy
+/// coinciden cuando se recorre la serie mensual completa, pero bajo densidad `hybrid` los puntos no
+/// son equidistantes y la versión ingenua deflacta 70 años como si fueran 30 — es el bug que la
+/// v1.4.2 arregló en el chart. Un único helper con dos callers, por el mismo motivo por el que
+/// existe `fire_target_at_month_index`.
+pub(crate) fn deflator_at_month_index(
+    annual_inflation_percent: Decimal,
+    month_index: u32,
+) -> Decimal {
+    if annual_inflation_percent <= Decimal::ZERO {
+        return Decimal::ONE;
+    }
+    let infl_factor = Decimal::ONE + annual_inflation_percent / Decimal::from(100u32);
+    let years = Decimal::from(month_index) / Decimal::from(12u32);
+    Decimal::ONE / infl_factor.powd(years)
+}
+
+/// Deflacta una serie de puntos a euros de hoy. Es la versión a resolución mensual completa de la
+/// deflactación **visual** que hace el chart de la web (`ProjectionNetWorthChart.baseSeries`);
+/// calcularla aquí preserva la precisión del `reached_month_index` de los milestones bajo densidad
+/// `hybrid`, donde el cliente solo recibe puntos anuales. Con inflación 0 devuelve una copia sin
+/// cambios.
 fn deflate_points_to_today(
     points: &[ProjectionPoint],
     annual_inflation_percent: Decimal,
@@ -523,12 +564,10 @@ fn deflate_points_to_today(
     if annual_inflation_percent <= Decimal::ZERO {
         return points.to_vec();
     }
-    let infl_factor = Decimal::ONE + annual_inflation_percent / Decimal::from(100u32);
     points
         .iter()
         .map(|p| {
-            let years = Decimal::from(p.month_index) / Decimal::from(12u32);
-            let deflator = Decimal::ONE / infl_factor.powd(years);
+            let deflator = deflator_at_month_index(annual_inflation_percent, p.month_index);
             ProjectionPoint {
                 month_index: p.month_index,
                 net_worth: p.net_worth * deflator,
@@ -897,6 +936,9 @@ pub(crate) struct BuiltProjection {
     /// modo A y en el fallback.
     pub savings_income_basis: SavingsAvgBasis,
     pub savings_expense_basis: SavingsAvgBasis,
+    /// Por qué este lado no tiene target FIRE, cuando no lo tiene. `None` ⟺ hay target, o no hay
+    /// `fire_settings` que interpretar.
+    pub fire_target_absent_reason: Option<&'static str>,
     /// Servicio de deuda mensual de los pasivos **activos** (`payment_end_date` nula o ≥ hoy), con
     /// la cuota nominal normalizada a mensual. No entra en `expense_regular_monthly` (el engine
     /// amortiza los pasivos aparte); lo consumen los caps `months_expense` de `assets.rs`. En modo
@@ -1021,7 +1063,7 @@ pub(crate) async fn build_installation_projection_input(
     // Base del FIRE number: income = income efectivo (modo C → presupuesto; modo B → promedio real);
     // expense = gasto efectivo en modo B/C (el gasto ya no es el del presupuesto), o
     // `expense_retirement` en modo A (comportamiento histórico).
-    let fire_target_base = fire_settings.and_then(|fs| {
+    let fire_target_outcome = fire_settings.map(|fs| {
         // El override explícito de gasto de jubilación ancla el target en TODOS los modos; sin
         // él, la base histórica (gasto efectivo en B/C, gasto de jubilación en A).
         let fire_expense = match ov.retirement_monthly_expense {
@@ -1031,6 +1073,10 @@ pub(crate) async fn build_installation_projection_input(
         };
         compute_fire_target_nw(fs, inputs.income, income_retirement, fire_expense)
     });
+    let fire_target_base = fire_target_outcome.as_ref().and_then(|r| r.as_ref().ok().copied());
+    // `None` cuando no hay `fire_settings` (no hay configuración FIRE que explicar), `Some(razón)`
+    // cuando la hay y aun así no sale target.
+    let fire_target_absent_reason = fire_target_outcome.and_then(|r| r.err());
     let fire_target = fire_target_base.map(|base_amount| FireTarget {
         base_amount,
         annual_inflation_percent: inflation_annual_percent.max(Decimal::ZERO),
@@ -1177,6 +1223,7 @@ pub(crate) async fn build_installation_projection_input(
         effective_savings_source,
         savings_income_basis,
         savings_expense_basis,
+        fire_target_absent_reason,
         debt_service_monthly,
     })
 }
@@ -1471,6 +1518,7 @@ pub async fn compute_projection_series_response(
         effective_savings_source,
         savings_income_basis,
         savings_expense_basis,
+        fire_target_absent_reason: _,
         debt_service_monthly: _,
     } = built;
 
@@ -1678,8 +1726,15 @@ pub(crate) struct SimKpis {
     pub jubilacion_date_ymd: Option<String>,
     /// Años cumplidos en esa fecha. `null` si no hay cruce o no hay fecha de nacimiento resuelta.
     pub jubilacion_age: Option<u32>,
+    /// Patrimonio al final del horizonte, en euros **NOMINALES** de ese mes. Con el horizonte por
+    /// defecto eso está a décadas vista, así que la cifra impresiona y no dice nada: para leerla,
+    /// su hermano `final_net_worth_real`.
     #[serde(with = "rust_decimal::serde::str")]
     pub final_net_worth: Decimal,
+    /// El mismo patrimonio final llevado a **euros de hoy** con la inflación efectiva de este lado.
+    /// Con inflación ≤ 0 es exactamente el mismo valor (el deflactor es 1, no ~1).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub final_net_worth_real: Decimal,
     /// Base del target FIRE (euros de hoy; el target servido crece con la inflación).
     #[serde(with = "rust_decimal::serde::str_option")]
     pub fire_target_base: Option<Decimal>,
@@ -1711,6 +1766,44 @@ pub(crate) struct SimKpis {
     /// precisión en las dos superficies). `None` si no hay ingreso.
     #[serde(with = "rust_decimal::serde::str_option")]
     pub savings_rate: Option<Decimal>,
+
+    // ---- Eco del contexto del lado (4.0.0, issue #27 §8) ------------------------------------
+    // Todo lo de aquí abajo se calculaba ya dentro del ensamblado y se tiraba a la basura. Sin
+    // ello, media respuesta se lee como un fallo: un `fire_target_base_delta: 0` es correcto en
+    // `manual` e inexplicable sin saber el modo, y un override de `savings_source` que cae en el
+    // fallback por falta de meses reales devuelve un escenario idéntico al baseline sin que nada
+    // lo diga. Va **por lado** porque los overrides pueden hacer que difieran.
+    /// Fuente del ahorro **efectiva** (tras el fallback: modo B/C sin meses reales → `budget`).
+    /// Mismo tipo y mismos strings que `financial_health.savings_source` de `/v1/summary`.
+    pub savings_source: SavingsSource,
+    /// De dónde salió cada lado del ahorro y sobre cuántos meses reales. Con `basis: "budget"` el
+    /// lado no promedió — es lo que distingue un escenario fundado de una extrapolación de un mes.
+    pub savings_income_basis: SavingsAvgBasis,
+    pub savings_expense_basis: SavingsAvgBasis,
+    /// Modo con el que se calculó el target. Es lo que hace legible un `fire_target_base_delta`
+    /// de 0: en `manual` el objetivo es un importe fijo y en `current_income` no mira el gasto,
+    /// así que ningún override de gasto puede moverlo.
+    pub fire_number_mode: FireNumberMode,
+    /// Por qué no hay target, cuando no lo hay. `null` ⟺ sí lo hay.
+    pub fire_target_absent_reason: Option<&'static str>,
+    /// SWR efectivo del lado (%), tras el override. `0` anula el target entero.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub swr_pct: Decimal,
+    /// Inflación anual efectiva del lado (%), tras el override.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub annual_inflation_percent: Decimal,
+    /// Base de gasto regular que ha usado el modelo, **después** de overrides. No es
+    /// `expense_total_monthly`: esta excluye el servicio de deuda. Es el número que revela qué
+    /// recorte se aplicó de verdad.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub expense_base_monthly: Decimal,
+    /// Base de ingreso regular tras overrides (= `income_monthly`; se echa aparte para que el
+    /// trío de bases se lea junto).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub income_base_monthly: Decimal,
+    /// Base de gasto **post-jubilación** tras overrides. En modo A es la que ancla el target FIRE.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub expense_retirement_base_monthly: Decimal,
 }
 
 #[derive(Debug, Serialize)]
@@ -1719,6 +1812,10 @@ pub(crate) struct SimDeltas {
     pub jubilacion_months_delta: Option<i64>,
     #[serde(with = "rust_decimal::serde::str")]
     pub final_net_worth_delta: Decimal,
+    /// El mismo delta en euros de hoy. Con inflaciones distintas entre lados NO es el nominal
+    /// deflactado: cada lado se deflacta con la suya, que es lo que hace comparable la cifra.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub final_net_worth_real_delta: Decimal,
     #[serde(with = "rust_decimal::serde::str_option")]
     pub fire_target_base_delta: Option<Decimal>,
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -1746,6 +1843,10 @@ pub(crate) struct SimSeries {
 #[derive(Debug, Serialize)]
 pub(crate) struct SimulateProjectionResponse {
     pub horizon_months: u32,
+    /// De dónde sale el horizonte: `lifespan_90` (hasta los 90 por fecha de nacimiento),
+    /// `fallback_no_demographics` (30 años, no hay ninguna) o `months_override` (lo pediste tú).
+    /// Sin él, un horizonte de 360 meses no se distingue de uno elegido a ciegas.
+    pub horizon_basis: String,
     pub view: String,
     /// Mes 0 de la simulación (`YYYY-MM-DD`), en el calendario de la instalación. Va aquí para que
     /// la respuesta sea autocontenida: sin ancla, convertir un índice de mes obligaba a encadenar
@@ -1772,19 +1873,30 @@ fn require_non_negative(name: &str, v: Option<Decimal>) -> Result<Decimal, ApiEr
 }
 
 /// KPIs de un lado de la simulación (baseline o escenario).
+/// `input` es el que se SIMULÓ de verdad (en el escenario, el clon ya mutado por los overrides
+/// post-build); `built` es el ensamblado de ese mismo lado, del que salen el servicio de deuda y
+/// el eco de contexto. Van separados a propósito: `built.input` es el de antes de mutar.
 fn sim_kpis(
     input: &ProjectionInput,
     output: &futurefin_engine::ProjectionOutput,
-    debt_service_monthly: Decimal,
+    built: &BuiltProjection,
     inflation_annual_percent: Decimal,
     fs: &FireSettings,
     today: NaiveDate,
     birth_date: Option<NaiveDate>,
 ) -> SimKpis {
+    let debt_service_monthly = built.debt_service_monthly;
     let jubilacion_month_index = fire_crossover_month(input.fire_target.as_ref(), &output.net_worth);
     let (jubilacion_date_ymd, jubilacion_age) =
         jubilacion_civil(today, birth_date, jubilacion_month_index);
     let final_net_worth = output.net_worth.last().copied().unwrap_or(Decimal::ZERO);
+    // El índice de mes del último punto es `len - 1` porque `output.net_worth` es la serie mensual
+    // COMPLETA (la decimación a hybrid ocurre después, al serializar). Se toma explícitamente y no
+    // como «la posición del último elemento»: si algún día esta cifra saliera de una serie ya
+    // decimada, la posición dejaría de ser el mes y deflactaríamos 70 años como si fueran 30.
+    let final_month_index = output.net_worth.len().saturating_sub(1) as u32;
+    let final_net_worth_real =
+        final_net_worth * deflator_at_month_index(inflation_annual_percent, final_month_index);
 
     // Runway: misma fórmula que `/v1/summary` (gasto total = regular + servicio de deuda;
     // infinito ⟺ SWR sobre el gasto anual grosseado), evaluada sobre los inputs del lado.
@@ -1822,6 +1934,7 @@ fn sim_kpis(
         jubilacion_date_ymd,
         jubilacion_age,
         final_net_worth: money_out(final_net_worth),
+        final_net_worth_real: money_out(final_net_worth_real),
         fire_target_base: input.fire_target.as_ref().map(|ft| money_out(ft.base_amount)),
         runway_months,
         runway_is_indefinite,
@@ -1830,6 +1943,18 @@ fn sim_kpis(
         debt_service_monthly: money_out(debt_service_monthly),
         net_monthly: money_out(net_monthly),
         savings_rate,
+        savings_source: built.effective_savings_source,
+        savings_income_basis: built.savings_income_basis.clone(),
+        savings_expense_basis: built.savings_expense_basis.clone(),
+        fire_number_mode: fs.fire_number_mode,
+        fire_target_absent_reason: built.fire_target_absent_reason,
+        swr_pct: fs.swr_pct,
+        annual_inflation_percent: inflation_annual_percent,
+        // `money_out` obligatorio: en modo B estas bases salen de `suma / n` y arrastran la escala
+        // que `rust_decimal` produce en una división (issue #8 §7).
+        expense_base_monthly: money_out(input.expense_regular_monthly),
+        income_base_monthly: money_out(income_monthly),
+        expense_retirement_base_monthly: money_out(input.expense_retirement_monthly),
     }
 }
 
@@ -2038,7 +2163,7 @@ pub(crate) async fn simulate_projection_core(
     let baseline = sim_kpis(
         &baseline_built.input,
         &baseline_out,
-        baseline_built.debt_service_monthly,
+        &baseline_built,
         ctx.inflation_annual_percent,
         &ctx.fire_settings,
         ctx.today,
@@ -2047,7 +2172,7 @@ pub(crate) async fn simulate_projection_core(
     let scenario = sim_kpis(
         &scenario_input,
         &scenario_out,
-        scenario_built.debt_service_monthly,
+        &scenario_built,
         inflation_eff,
         &fs_eff,
         ctx.today,
@@ -2061,6 +2186,9 @@ pub(crate) async fn simulate_projection_core(
             _ => None,
         },
         final_net_worth_delta: money_out(scenario.final_net_worth - baseline.final_net_worth),
+        final_net_worth_real_delta: money_out(
+            scenario.final_net_worth_real - baseline.final_net_worth_real,
+        ),
         fire_target_base_delta: match (baseline.fire_target_base, scenario.fire_target_base) {
             (Some(b), Some(s)) => Some(money_out(s - b)),
             _ => None,
@@ -2106,6 +2234,7 @@ pub(crate) async fn simulate_projection_core(
 
     Ok(SimulateProjectionResponse {
         horizon_months: months,
+        horizon_basis: ctx.horizon_basis.clone(),
         view: if view == LedgerView::Mine {
             "mine".into()
         } else {
