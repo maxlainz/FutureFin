@@ -251,6 +251,14 @@ consumir, que es lo que responde a «¿fue buen mes?») y **«Variación de caja
 traspasos). El tooltip enseña las dos, la primera delante, y la palabra «Neto» a secas desaparece de
 la interfaz. La primera coincide al céntimo con la de la comparativa.
 
+**API breaking**: en `GET /v1/history/cashflow` y en la tool `get_history_cashflow`, el campo
+`net` de cada mes pasa a llamarse **`cash_delta`** —que es lo que siempre fue: la caja que se
+movió, traspasos incluidos— y se añade **`income_minus_expense`**, que sí responde a «¿cuánto
+me quedó?» y coincide con `totals.net_actual` de `get_transactions_summary`. El nombre viejo
+no se conserva a propósito: un campo llamado `net` que significa dos cosas distintas en dos
+respuestas es exactamente lo que hacía que un mes excelente se leyera como una pérdida, y
+mantener el alias habría dejado vivo el malentendido.
+
 #### Las reglas de categorización se enviaban todas de golpe
 
 Es la única lista que **crece con el uso**: cada import aprende una regla por concepto nuevo, así
@@ -368,6 +376,10 @@ bien a «¿y si gasto más?»: los tres ajustes mensuales rechazaban cualquier v
 forma de tocar una categoría concreta, ni de cambiar la fuente del ahorro, ni de ponerle fecha a un
 cambio, ni de tocar el ingreso, ni de comparar dos escenarios de una vez. Y la cifra final llegaba
 en euros nominales a décadas vista, que no dicen nada.
+
+De esa lista, esta versión cierra **los deltas negativos y los ejes de `fire_settings`**. Siguen
+pendientes, dichos a las claras: recortar una categoría concreta, ponerle fecha de inicio o fin a
+un cambio, tocar el ingreso, y comparar varios escenarios en una sola llamada.
 
 **La descripción de la herramienta era incorrecta, no solo incompleta.** Decía que el gasto extra
 «mueve también el target FIRE», y eso solo es cierto con el número FIRE calculado por gasto anual:
