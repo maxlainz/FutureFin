@@ -1709,6 +1709,10 @@ pub(crate) struct SimulationSpec {
     pub extra_monthly_savings: Option<Decimal>,
     pub swr_pct: Option<Decimal>,
     pub annual_inflation_percent: Option<Decimal>,
+    /// Ejes de `fire_settings` simulables sin persistir (issue #27 §3). Se aplican con el MISMO
+    /// `FireSettingsPatch::apply_to` que el PATCH real, y `swr_pct` entra por aquí para que haya
+    /// un solo camino.
+    pub fire_settings_overrides: Option<crate::handlers::installation::FireSettingsPatch>,
     pub retirement_annual_expense: Option<Decimal>,
     pub asset_return_overrides: Vec<(Uuid, Decimal)>,
     pub include_series: bool,
@@ -2039,10 +2043,16 @@ pub(crate) async fn simulate_projection_core(
     let months = ctx.months;
 
     // Settings efectivos del escenario, re-validados con las cotas del PATCH real.
-    let mut fs_eff = ctx.fire_settings.clone();
+    //
+    // ESTE es el punto de aplicación, y el otro (mutar el `ProjectionInput` clonado, más abajo)
+    // es el EQUIVOCADO para esto: `savings_source` y las ventanas del promedio los lee el
+    // ensamblado para decidir si lanza siquiera la query de `transactions_avg`. Aplicados
+    // después, el override no haría absolutamente nada, en silencio.
+    let mut fs_patch = spec.fire_settings_overrides.unwrap_or_default();
     if let Some(swr) = spec.swr_pct {
-        fs_eff.swr_pct = swr;
+        fs_patch.swr_pct = Some(swr);
     }
+    let fs_eff = fs_patch.apply_to(&ctx.fire_settings);
     crate::handlers::installation::validate_fire_settings(&fs_eff)?;
     let inflation_eff = spec
         .annual_inflation_percent

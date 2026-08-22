@@ -516,6 +516,28 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `minimum`/`maximum`) — declarativa: rmcp deserializa con serde_json y no valida contra el schema,
   así que describe el contrato, no lo impone. Pinneado en
   `mcp_http.rs::simulate_cash_axes_carry_their_bound_in_the_json_schema`.
+  **`fire_settings_overrides` (4.0.0, issue #27 §3)**: hasta 4.0.0 el ÚNICO campo de
+  `FireSettings` simulable era `swr_pct`, así que preguntar «¿y si cumplo el presupuesto?» exigía
+  persistir el cambio con `update_fire_settings`. Ahora se pueden simular `savings_source`,
+  `fire_number_mode` + `fire_number_manual_amount`, `taxes_enabled`, `tax_brackets` y las cuatro
+  ventanas del promedio. **Punto de aplicación: entre el clon de `fire_settings` y
+  `validate_fire_settings`, NUNCA post-build** — `savings_source` y las ventanas las lee el
+  ensamblado para decidir si lanza siquiera la query de `transactions_avg`, así que aplicadas
+  después el override no haría nada, en silencio. Se aplican con
+  `FireSettingsPatch::apply_to`, **el mismo aplicador que el PATCH real** (extraído de
+  `patch_fire_settings_core` en este tren): simular un cambio tiene que predecir lo que pasa al
+  guardarlo, y dos copias del aplicador se separan sin que ningún test lo note — pinneado en
+  `savings_source_override_predicts_exactly_what_persisting_it_would_do`, que compara el
+  `scenario` simulado contra el `baseline` tras persistir de verdad, objeto entero. Los enums se
+  parsean con su `Deserialize` de dominio vía `parse_enum_param` (una sola lista de variantes para
+  HTTP y MCP) y la validación es `validate_fire_settings`, sin una segunda lista de cotas. **No
+  aparece superficie de autorización nueva**: `update_fire_settings` es owner-only porque
+  PERSISTE; esto no persiste nada, así que `simulate_projection` sigue sin `require_mcp_write` y
+  la regla del kill-switch no aplica (`mcp_write_enabled` no vive en `FireSettings`). Cambiar
+  `savings_source` arrastra los tres efectos de `expense_from_avg` —cuota fuera del servicio de
+  deuda, `end_adj` a cero, otra base de target—, que es justo lo que significa cambiar de modo; y
+  si no hay meses reales el ensamblado cae al presupuesto y el eco de `savings_source` lo dice
+  (`savings_source_override_without_real_months_says_it_fell_back`).
   **Nominal y real (4.0.0, issue #27 §7)**: `final_net_worth` es nominal por contrato del motor
   (`ProjectionOutput.net_worth` lo dice) y con el horizonte por defecto —hasta los 90 años— queda a
   décadas vista. Se añade `final_net_worth_real` y su delta, deflactados con la inflación

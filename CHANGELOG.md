@@ -276,6 +276,20 @@ nominales de dentro de cuarenta o cincuenta años, que es una cifra grande y vac
 acompañado del mismo importe **en euros de hoy**, descontada la inflación que se haya asumido en
 ese lado. Si no asumes inflación, las dos cifras son idénticas.
 
+**Ahora se puede preguntar «¿y si cambio de forma de calcular?» sin cambiarla.** De toda tu
+configuración FIRE, lo único que la simulación dejaba tocar era la tasa de retirada segura. Todo lo
+demás —de dónde sale el ahorro (tu presupuesto o tus movimientos reales), cómo se fija el número
+FIRE, si cuentan los impuestos, sobre cuántos meses se promedia cada lado— había que **guardarlo**
+para poder verlo, y luego deshacerlo. Ahora se simula sin tocar nada.
+
+Simular un cambio de estos usa exactamente el mismo código que hacerlo de verdad, para que lo que
+te enseña la simulación sea lo que pasará si lo guardas. Y si pides promediar tus movimientos reales
+pero no hay meses con datos suficientes, la respuesta te dice que acabó usando el presupuesto en
+lugar de devolverte en silencio el mismo escenario de partida.
+
+De paso: dos mensajes de error de los ajustes del promedio se devolvían sin traducir. Ya están en
+español.
+
 ### La app no se podía usar recién instalada
 
 Un hogar nuevo nacía con **cero categorías** —la migración original lo decía con todas las letras:

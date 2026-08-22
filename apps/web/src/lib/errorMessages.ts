@@ -294,6 +294,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa ventana del promedio no es válida. Elige 3, 6 o 12 meses, el año en curso o todo el histórico.",
   avg_window_out_of_range:
     "La ventana del promedio está fuera de rango. Elige un número de meses admitido.",
+  income_avg_window_mode:
+    "Esa forma de contar los meses del promedio de ingresos no es válida. Elige entre los últimos meses con datos o los últimos meses del calendario.",
+  expense_avg_window_mode:
+    "Esa forma de contar los meses del promedio de gastos no es válida. Elige entre los últimos meses con datos o los últimos meses del calendario.",
   avg_months_out_of_range:
     "El número de meses del promedio está fuera del rango permitido.",
   tax_brackets_empty:
