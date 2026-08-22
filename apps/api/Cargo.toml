@@ -46,7 +46,7 @@ sqlx = { version = "0.8", features = [
 ] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
-tower-http = { version = "0.6", features = ["cors", "fs", "trace", "compression-gzip", "set-header"] }
+tower-http = { version = "0.7", features = ["cors", "fs", "trace", "compression-gzip", "set-header"] }
 tracing = "0.1"
 url = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
