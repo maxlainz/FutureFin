@@ -9,7 +9,8 @@ description: >
   layer), and knowing what data lives where. Load this skill when the task mentions: deploy,
   production, docker compose up, upgrade, rollback, downgrade, release image, Docker Hub,
   GHCR, image tags, :latest, pull, watchtower, backup, restore, pg_dump, pg_upgrade,
-  automigración / automigration, external database, db-only mode, .ffbackup, export/import,
+  automigración / automigration (retired in 4.0.0 — see §4.5), external database, db-only mode,
+  .ffbackup, export/import,
   container unhealthy in the operational sense (reading healthcheck/probe status during
   deploy/upgrade, restarting, rolling back — for diagnosing WHY a container is unhealthy from
   a symptom use futurefin-debugging-playbook), healthcheck, /v1/health, /v1/ready, logs,
@@ -47,8 +48,10 @@ Vocabulary (defined once):
 - **`ffdata`** — the *new* named volume mounted at `/var/lib/futurefin`: automatic
   pre-migration backups, `pg_upgrade` staging, and the entrypoint's state files.
 - **`.ffbackup`** — FutureFin's per-user encrypted application-level backup file format.
-- **Embedded / external mode** — the DB the API talks to: the in-container PostgreSQL
-  (default) or a separate server via `DATABASE_URL` (**deprecated**, removed in 4.0.0).
+- **Embedded / external mode** — historical. Embedded = the in-container PostgreSQL, and since
+  **4.0.0 the only option**: external mode (a separate server via `DATABASE_URL`) was deprecated
+  in 3.0.0 and **removed** in 4.0.0 (§4.2/§4.3). `DATABASE_URL` still exists and is still required
+  in split-dev; what disappeared is the container ever honouring it.
 - **Migrations roll forward only** — SQLx applies pending `.sql` files at startup; there are
   no "down" migrations anywhere in this project.
 
@@ -223,12 +226,15 @@ follow `docker compose logs -f futurefin` instead of watching `docker ps`.
 with `cannot connect as role 'futurefin'. If your 2.x install used a custom POSTGRES_USER, set
 the same value now.`
 
-**Watchtower / auto-updaters, the awkward case.** A 2.x user who never edits their compose file
-but auto-pulls `:latest` will get the 3.x image *inside their 2.x compose*: no volume mounted at
-`$PGDATA`, `DATABASE_URL` pointing at `futurefin-database`. The entrypoint detects exactly this
-and falls back to **external compat mode** (§4.3): it keeps working against the old database and
-prints the `DEPRECATED` banner on every start. It will **never** migrate into the container's
-ephemeral layer. Finish the job by adopting the 3.x compose file as above.
+**Watchtower / auto-updaters, the awkward case (changed in 4.0.0).** A 2.x user who never edits
+their compose file but auto-pulls `:latest` gets the new image *inside their 2.x compose*: no
+volume mounted at `$PGDATA`, `DATABASE_URL` pointing at `futurefin-database`. Up to 3.9.0 the
+entrypoint fell back to **external compat mode** and kept serving from the old database with a
+`DEPRECATED` banner. **4.0.0 refuses to start instead** (`refuse_external_database`, exit 1),
+printing the boxed instructions and touching nothing — because the alternative, starting on an
+empty database, reads as data loss. The fix is the same as it always was, and now mandatory:
+adopt the current compose file as above, which reuses the very same `pgdata` volume. CI pins both
+halves of this (§9, scenario 5).
 
 Post-upgrade smoke test (the v1.0.10 lesson): log in, open Jubilación, and **export a
 `.ffbackup`** — not just `/v1/health`.
@@ -337,8 +343,7 @@ Whichever milestone is missing tells you the failing phase: nothing after (1) �
 (volume, PG_VERSION, role) — read the `FATAL:` line, it is written to be self-explanatory;
 stuck at (3) → the postmaster did not become ready in 60 s (`PostgreSQL did not become ready
 within 60s`); stuck at (5) → the pre-migration dump is failing, which **intentionally** blocks
-startup; nothing after (7) → the API cannot reach the socket (or, in external mode, the remote
-DB); stuck between (8) and (9) → migration failure (checksum mismatch or SQL error — the error
+startup; nothing after (7) → the API cannot reach the socket; stuck between (8) and (9) → migration failure (checksum mismatch or SQL error — the error
 is logged; resolution discipline in futurefin-change-control); missing (12) → port bind problem.
 
 If either supervised process dies on its own the entrypoint logs
@@ -424,19 +429,18 @@ Note the change of blast radius: in 2.x `docker compose restart futurefin` only 
 API. Now it restarts PostgreSQL as well — still safe (ordered shutdown, then normal start), but
 it is no longer a "free" operation on a busy instance.
 
-## 4. Database modes, guards, and one-shot migrations
+## 4. The embedded database: guards, leftovers and one-shot upgrades
 
 ### 4.1 The knobs (entrypoint env vars)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded` \| `external`. `auto` decides per §4.2. Any other value aborts. |
+| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded` — **synonyms since 4.0.0** (always the embedded cluster). `external` aborts with migration instructions; any other value aborts with `invalid FUTUREFIN_DB_MODE`. |
 | `FUTUREFIN_MODE` | `serve` | `serve` \| `db-only`. Also settable as argv[1] (`CMD ["serve"]`). `db-only` = PostgreSQL only, no API (§4.7). |
 | `FUTUREFIN_PREMIGRATION_BACKUP` | `on` | Anything else disables the automatic pre-migration dump. |
 | `FUTUREFIN_BACKUP_KEEP` | `10` | Newest N automatic backups are never pruned. |
 | `FUTUREFIN_BACKUP_KEEP_DAYS` | `90` | Beyond those N, prune files older than this. |
 | `FUTUREFIN_ALLOW_EPHEMERAL_DB` | `0` | `1` = start without a volume at `$PGDATA`. **Throwaway use only** (CI, demos). |
-| `FUTUREFIN_EXTERNAL_WAIT_SECS` | `60` | How long automigration waits for the external DB to answer. |
 | `FUTUREFIN_API_STOP_TIMEOUT` | `15` | Seconds to wait for the API on SIGTERM before SIGKILL. |
 | `FUTUREFIN_PG_STOP_TIMEOUT` | `30` | Seconds to wait for the postmaster on SIGINT before SIGQUIT. |
 | `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS` | `30` | *Binary* knob: how long `connect_with_retry` retries (backoff 0.5→1→2→4 s). Clamped to 1..=600. |
@@ -446,47 +450,61 @@ it is no longer a "free" operation on a busy instance.
 | `FUTUREFIN_PG_LOG_LEVEL` | unset | Debug: `log_min_messages` for the embedded postmaster. |
 
 Plus the compat/classic ones: `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_PASSWORD` (optional,
-applied to the role if present), `DATABASE_URL` (**deprecated**, §4.3), `APP_PORT`,
+applied to the role if present), `DATABASE_URL` (**no longer honoured in the container**, §4.2),
+`APP_PORT`,
 `FUTUREFIN_IMAGE`, `FUTUREFIN_TAG`, `RUST_LOG`, `COOKIE_SECURE`, `SESSION_TTL_DAYS`,
 `CORS_ORIGINS`. Full catalog: futurefin-config-and-flags.
 
-### 4.2 How `auto` decides
+### 4.2 What a leftover `DATABASE_URL` does now (4.0.0)
 
-`DATABASE_URL` unset (or pointing at `/var/run/postgresql`) → **embedded**, always.
+The database is always the embedded one. `DATABASE_URL` is still *read*, but only to catch a
+value dragged in from a 3.x or 2.x compose — "external" is defined exactly as before: a value
+that does **not** contain `/var/run/postgresql`.
 
-`DATABASE_URL` set to a remote server, in this exact order:
-
-| Situation | Decision |
+| Situation | What happens |
 |---|---|
-| No volume mounted at `$PGDATA` | **External compat mode** (§4.3). Never migrates — writing to the container layer would be data loss on the next recreate. This is the watchtower-over-2.x-compose case. |
-| A previous automigration is `in-progress` | Retry it: the partial cluster is **moved aside** to `$STATE_DIR/failed-automigration-<ts>/`, never deleted. After 3 attempts it is marked `failed` and startup aborts with your data intact in the external DB. |
-| `$PGDATA` already holds a cluster | **Embedded wins**, with a warning telling you to remove `DATABASE_URL` (or set `FUTUREFIN_DB_MODE=external` if you really meant the remote one). |
-| `$PGDATA` is empty | **One-shot automigration** (§4.5). |
+| `DATABASE_URL` unset, or pointing at the socket | Normal embedded start. (The entrypoint `export`s its own socket URL right before launching the API anyway, overwriting whatever was there.) |
+| External value **and** `$PGDATA` already holds a cluster | **Ignored**, with `WARN: DATABASE_URL está definida pero FutureFin 4.0.0 solo usa la base embebida, que ya tiene tus datos — se ignora. Quítala de tu compose.` Startup continues normally. |
+| External value **and** no cluster in `$PGDATA` | `refuse_external_database`: a boxed Spanish message on stderr + **exit 1**, before initializing anything. Nothing is written to the volume, nothing is read from the remote DB. |
 
-`FUTUREFIN_DB_MODE=external` forces external and skips all of the above (and refuses
-`db-only`, which makes no sense without a local cluster).
+Two details worth remembering:
 
-### 4.3 External database mode — DEPRECATED
+- **The refusal runs before the no-volume guard (§4.4)**, so the watchtower-over-2.x-compose case
+  reports the external message, not `no persistent volume`.
+- `FUTUREFIN_DB_MODE=external` is still *parsed*, only to die with
+  `FUTUREFIN_DB_MODE=external ya no existe: FutureFin 4.0.0 solo usa la base embebida…` — a
+  deliberate courtesy so a 3.x compose gets an explanation instead of `invalid FUTUREFIN_DB_MODE`.
 
-Setting `DATABASE_URL` keeps 2.x behaviour: the API talks to your own PostgreSQL server, and
-the container starts nothing locally. **It is removed in 4.0.0.** Every start prints a framed
-banner to stderr:
+### 4.3 Getting someone off an external database
+
+What the refusal of §4.2 tells the operator, and what you should tell them:
 
 ```
-[futurefin-entrypoint] ============================ DEPRECATED ============================
-[futurefin-entrypoint]  Estás usando una base de datos EXTERNA (DATABASE_URL definida).
-[futurefin-entrypoint]  Desde 3.0.0 FutureFin incluye PostgreSQL en la propia imagen y este
-[futurefin-entrypoint]  modo esta DEPRECADO: se eliminara en 4.0.0.
-…
+  FutureFin 4.0.0 ya no habla con bases de datos externas: PostgreSQL va dentro
+  de la imagen. Tus datos NO se han tocado y siguen intactos donde están.
+
+  Para migrarlos:
+    1. Arranca UNA VEZ FutureFin 3.9.0 con esta misma DATABASE_URL y este mismo
+       volumen. Copiará tus datos a la base embebida y te lo dirá en los logs
+       ("automigration completed").
+    2. Quita DATABASE_URL de tu compose.
+    3. Vuelve a 4.0.0.
 ```
 
-followed by `starting FutureFin 3.0.0 against the external database`. In this mode there is no
-embedded PostgreSQL, no automatic pre-migration backup and no `pg_upgrade` — the safety nets
-described below simply do not apply, which is a large part of why the mode is going away.
+Triage before repeating it, because **most people do not need 3.9.0 at all**:
 
-Because there is no `depends_on: service_healthy` guaranteeing the remote DB is up first, the
-binary retries the initial connection with backoff for `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS`
-(default 30 s) instead of crash-looping.
+| Where their data actually is | Route |
+|---|---|
+| The `pgdata` volume of a 2.x two-container stack | Adopt the current compose (§2.4). The volume is adopted in place — no intermediate version. This is the common case. |
+| A genuinely external server (managed, another host, another stack) | The 3.9.0 round trip above. It needs an **empty** volume mounted at `$PGDATA` and `DATABASE_URL` reaching the container, then dumps read-only, restores, and verifies by row census (§4.5). |
+| Anywhere, but they would rather do it by hand | `pg_dump` the external DB and restore into a fresh volume with `scripts/restore-postgres.sh` (§5). |
+
+Note that none of this repo's compose files pass `DATABASE_URL` into the container (no
+`env_file:`, no `DATABASE_URL:` entry) — a 2.x compose does. Whoever runs the 3.9.0 step has to
+make sure the variable actually reaches the image.
+
+Operator-facing version of all this: `docs/actualizar.md` §«Vengo de 2.x o tengo una base de
+datos externa».
 
 ### 4.4 The anti-data-loss guard
 
@@ -504,28 +522,32 @@ the entrypoint refuses to touch it (`refusing to touch it. Inspect the volume ma
 instead of guessing.
 
 **Golden rule of the entrypoint: it never deletes a cluster.** Partial or superseded clusters
-are `mv`-ed aside (`pgdata_old_15/`, `failed-automigration-<ts>/`). The only things it deletes
+are `mv`-ed aside (`pgdata_old_15/`; before 4.0.0 also `failed-automigration-<ts>/`). The only things it deletes
 are its own backups under retention and the `pg_upgrade` staging directory once copied.
 
-### 4.5 One-shot automigration from an external database
+### 4.5 One-shot automigration from an external database — REMOVED in 4.0.0
 
-Trigger: `DATABASE_URL` set **and** an empty volume mounted at `$PGDATA`. Sequence:
+`automigrate_prepare` / `automigrate_restore` are gone from the entrypoint, together with
+`exec_api_external` and `FUTUREFIN_EXTERNAL_WAIT_SECS`. **The last version that can do it is
+3.9.0**, so this is now a description of what you send someone back to, not of what this image
+does. Under 3.9.0, with `DATABASE_URL` set **and** an empty volume mounted at `$PGDATA`:
 
-1. Wait up to `FUTUREFIN_EXTERNAL_WAIT_SECS` for the external DB (`waiting for external
+1. Wait up to `FUTUREFIN_EXTERNAL_WAIT_SECS` (60 s) for the external DB (`waiting for external
    database to answer (max 60s): migration source`). If it never answers, **abort** — starting
    empty would look like data loss.
 2. `pg_dump --no-owner --no-privileges` of the external DB → `ffdata`
    (`pre-automigration-<ts>.sql.gz`). The external database is only ever **read**.
-3. Take a row census of the source (table:count per table, dynamic — no hardcoded table list).
+3. Row census of the source (table:count per table, dynamic — no hardcoded table list).
 4. `initdb` a fresh embedded cluster, start it, restore the dump into it.
 5. **Verify by census.** Any mismatch marks the automigration `failed` and aborts with both
    sides preserved.
 6. `automigration completed: N rows across M tables. The external database is NO LONGER USED —
    you can retire it and remove DATABASE_URL.`
 
-State lives in `ffdata` (`state/automigration.env`): `in-progress` retries up to **3** times,
-`done` and `failed` produce explicit, actionable FATAL messages if you restart into a
-contradictory situation. Nothing is ever deleted on either side.
+State lived in `ffdata` (`state/automigration.env`). A volume that went through it under 3.x
+still carries that file and its `pre-automigration-*.sql.gz`; 4.0.0 reads neither, and prunes the
+dump like any other `pre-*` backup. (Re-read the 3.9.0 code with
+`git show v3.9.0:apps/api/docker-entrypoint.sh` before advising anyone on the details.)
 
 ### 4.6 Automatic `pg_upgrade` (old-major volume)
 
@@ -556,11 +578,12 @@ pre-pg_upgrade backup (pg_dumpall)`, `running pg_upgrade 15 -> 16 (copy mode)`,
 **Delete `pgdata_old_15/` by hand** once you are happy — it is inside the `pgdata` volume and
 costs you the old cluster's full size until you do.
 
-**Major policy**: each image ships the current major **plus the previous one**. 3.x = 16 + 15;
-a future 4.x will ship 17 + 16, so a volume still on **15** must first be brought to 16 by a
-3.x release. A too-new volume is refused outright (§2.6); a too-old one aborts with the
-options spelled out (`start an older FutureFin release that bundles <N>` / dump with the
-official `postgres:<N>` image and use external automigration).
+**Major policy**: each image ships the current major **plus the previous one**. 3.x and 4.0.0
+both ship 16 + 15 (label `com.futurefin.postgres.majors=15,16`); whenever a release moves to
+17 + 16, a volume still on **15** must be brought to 16 by an image that still bundles 15. A
+too-new volume is refused outright (§2.6); a too-old one aborts with the options spelled out
+(`start an older FutureFin release that bundles <N>`, or dump with the official `postgres:<N>`
+image and restore into a fresh volume with `scripts/restore-postgres.sh`).
 
 ### 4.7 `db-only` rescue mode
 
@@ -570,8 +593,8 @@ entrypoint prints restore instructions and supervises the postmaster. Used by
 stay away from it.
 
 In this mode `/v1/ready` does not answer at all, so **the container reports `unhealthy` — that
-is expected**, not a symptom. It also refuses to run with an external database or without a
-volume.
+is expected**, not a symptom. It also refuses to run without a volume. (Up to 3.9.0 it also
+refused to run in external mode; there is no external mode left to refuse.)
 
 ## 5. Backups — three layers
 
@@ -595,14 +618,15 @@ Written by the entrypoint **before the API starts**, therefore before any migrat
   `state/last-version`) **or** the image embeds migrations the database has not applied
   (compared against `/app/migration-versions.txt`, baked at build time from
   `apps/api/migrations/`). A database with an empty `_sqlx_migrations` (brand-new install) is
-  skipped — there is nothing to lose yet — and so is the start right after an automigration.
+  skipped — there is nothing to lose yet. (Up to 3.9.0 the start right after an automigration was
+skipped too.)
 - **Output**: `/var/lib/futurefin/backups/pre-migration-<from>-to-<to>-<UTC ts>.sql.gz`
   (gzip -6), e.g. `pre-migration-2.3.0-to-3.0.0-20260816T031500Z.sql.gz`. `<from>` is
   `unknown` if the state file did not exist.
 - **Failure aborts startup**: `pre-migration backup FAILED — refusing to start with pending
   migrations and no safety net.` Bypass deliberately with `FUTUREFIN_PREMIGRATION_BACKUP=off`.
-- **Retention** (applies to all `pre-*.sql.gz` in the directory, i.e. also the
-  `pre-pgupgrade-*` and `pre-automigration-*` dumps): the newest `FUTUREFIN_BACKUP_KEEP`
+- **Retention** (applies to all `pre-*.sql.gz` in the directory: the `pre-pgupgrade-*` dumps and
+  any `pre-automigration-*` left over from a 3.x migration): the newest `FUTUREFIN_BACKUP_KEEP`
   (**10**) are untouchable; beyond those, files older than `FUTUREFIN_BACKUP_KEEP_DAYS`
   (**90**) are removed; and under **256 MB** free the oldest are pruned regardless of age,
   **never going below 3 files**.
@@ -713,7 +737,7 @@ copy of their data that does not depend on any volume surviving.
 | Thing | Where | Stateful? |
 |---|---|---|
 | PostgreSQL cluster (all application data) | Docker named volume `pgdata` (Compose project `futurefin` → `futurefin_pgdata`) at `/var/lib/postgresql/data`; also holds `pgdata_old_15/` after a `pg_upgrade` | **YES — the thing you must protect** |
-| Automatic backups + entrypoint state + pg_upgrade staging | Docker named volume `ffdata` (`futurefin_ffdata`) at `/var/lib/futurefin`: `backups/pre-*.sql.gz`, `state/{cluster,pgupgrade,automigration}.env`, `state/last-version` | **Semi** — losing it loses your automatic backups and the one-time markers (a lost `REINDEXED_SYSID` makes the next start redo the adoption REINDEX: slow but safe; a lost `last-version` produces one spurious pre-migration dump) |
+| Automatic backups + entrypoint state + pg_upgrade staging | Docker named volume `ffdata` (`futurefin_ffdata`) at `/var/lib/futurefin`: `backups/pre-*.sql.gz`, `state/{cluster,pgupgrade}.env` (plus a legacy `automigration.env` on volumes migrated under 3.x), `state/last-version` | **Semi** — losing it loses your automatic backups and the one-time markers (a lost `REINDEXED_SYSID` makes the next start redo the adoption REINDEX: slow but safe; a lost `last-version` produces one spurious pre-migration dump) |
 | PostgreSQL binaries (16 + 15) | Baked into the image (`/usr/lib/postgresql/{15,16}`) | Stateless |
 | API binary | `/app/futurefin-api`, run as uid 10001 `futurefin` via `gosu` | Stateless |
 | Web UI | Baked into the image at `/app/web` | Stateless |
@@ -762,26 +786,31 @@ loss". Do not weaken it. It builds the image and then exercises:
 4. **Clean shutdown**: `stop -t 60` must log `shutdown signal received`, `database pool closed`,
    `database system is shut down`, `clean shutdown complete`, and exit **0**.
 5. **Real 2.x → 3.x**: a genuine `maxlainz/futurefin:2.3.0` two-container stack is seeded, then
-   (a) the 3.x image is dropped into the untouched 2.x compose → `DEPRECATED` external compat
-   still serves the data; (b) the 3.x compose takes over the volume → `adopting ownership of
+   (a) the current image is dropped into the untouched 2.x compose → since 4.0.0 it **refuses to
+   start** (`ya no habla con bases de datos externas`, `3.9.0`, exit ≠ 0); (b) the current compose
+   takes over the volume → `adopting ownership of
    PGDATA`, `reindexing database after adoption`, same credentials still log in, a **duplicate
    username registration is rejected 409/422** (the corrupt-index detector), and a
    `pre-migration-*.sql.gz` exists in `ffdata`.
-6. **External automigration**: external DB seeded through a 2.3.0 app, then a 3.x container with
-   empty volumes migrates it, the external DB is stopped, and the stack still works.
+6. **Leftover `DATABASE_URL` + empty volume**: the container **aborts** (`ya no habla con bases de
+   datos externas`, `docs/actualizar.md`) and the volume is asserted to be **still empty** — no
+   half-initialized cluster. Replaced the old automigration scenario in 4.0.0.
 7. **`pg_upgrade` 15→16**: a real PG15 volume with a marker row upgrades, `SHOW server_version`
    starts with 16, `pgdata_old_15/` exists and `pre-pgupgrade-15-to-16-*.sql.gz` was written.
 
 Frozen fixtures live in `.github/testdata/` (`docker-compose.v2.yml`,
-`docker-compose.v2-app-v3.yml`, `docker-compose.automigrate.yml`).
+`docker-compose.v2-app-v3.yml`; `docker-compose.automigrate.yml` was deleted with the mode).
 
 ## Provenance and maintenance
 
-Verified **2026-08-16** against **v3.0.0** by reading: `docker-compose.yml`,
+Verified **2026-08-16** against **v3.0.0**, and §2.4/§4.1–§4.7/§9 re-verified **2026-08-22
+against v4.0.0** (which removed the external-database mode: `exec_api_external`,
+`automigrate_prepare`/`automigrate_restore`, `FUTUREFIN_DB_MODE=external` and
+`FUTUREFIN_EXTERNAL_WAIT_SECS` no longer exist in the entrypoint), by reading: `docker-compose.yml`,
 `docker-compose.dev.yml`, `docker-compose.local.yml`, `.env.example`,
 `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`, `scripts/backup-postgres.sh`,
 `scripts/restore-postgres.sh`, `.github/workflows/ci.yml`,
-`.github/testdata/docker-compose.{v2,v2-app-v3,automigrate}.yml`,
+`.github/testdata/docker-compose.{v2,v2-app-v3}.yml`,
 `apps/api/src/{main.rs,db.rs,state.rs,routes/mod.rs}`, `apps/api/src/handlers/health.rs`,
 `apps/api/src/handlers/backup_user/{crypto.rs,schema.rs}`,
 `.github/workflows/{publish-image.yml,cleanup-ghcr.yml}`, `CHANGELOG.md`.
@@ -816,7 +845,7 @@ Re-verify before trusting volatile facts:
 - Health/ready behavior: `grep -n 'SELECT 1' apps/api/src/handlers/health.rs`
 - Backup routes still as documented: `grep -n 'backup' apps/api/src/routes/mod.rs`
 - Backup schema version: `grep -n 'CURRENT_SCHEMA_VERSION' apps/api/src/handlers/backup_user/schema.rs`
-- Container-path CI coverage: `grep -n 'docker-stack\|adopting ownership\|automigration completed\|pg_upgrade needed' .github/workflows/ci.yml`
+- Container-path CI coverage: `grep -n 'docker-stack\|adopting ownership\|ya no habla con bases de datos externas\|pg_upgrade needed' .github/workflows/ci.yml`
 - Published registries/tags: `grep -nE 'images|semver|maxlainz' .github/workflows/publish-image.yml`
 - GHCR retention windows: `grep -nE 'KEEP_.*DAYS|KEEP_LATEST_DEV' .github/workflows/cleanup-ghcr.yml`
 - Projection cache TTL: `grep -n 'PROJECTION_CACHE_TTL' apps/api/src/state.rs`

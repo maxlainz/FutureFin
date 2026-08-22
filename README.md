@@ -116,6 +116,11 @@ Si alguien más se registra, verá una pantalla de espera hasta que tú le des a
 > Sin un volumen montado en `/var/lib/postgresql/data` el contenedor **se niega a arrancar**. Es
 > deliberado: sin él, tus datos morirían con el contenedor.
 
+**¿Vienes de una versión anterior con base de datos externa?** Desde 4.0.0 PostgreSQL va siempre
+dentro de la imagen. Si tienes `DATABASE_URL` apuntando fuera, arranca una vez FutureFin 3.9.0 para
+migrar tus datos y después actualiza — el contenedor 4.x te lo dirá si te lo saltas, sin tocar nada.
+Los pasos exactos en [docs/actualizar.md](docs/actualizar.md).
+
 Más detalle en [docs/instalacion.md](docs/instalacion.md).
 
 ## Documentación

@@ -1,7 +1,8 @@
 # Actualizar y volver atrás
 
 Cómo subir de versión, qué red de seguridad se activa sola, cómo volver a la versión anterior y
-cómo migrar desde la topología de dos contenedores de la 2.x.
+qué hacer si vienes de la topología de dos contenedores de la 2.x o de una base de datos
+externa.
 
 ## Cómo se publican las versiones
 
@@ -116,7 +117,7 @@ git ls-tree --name-only v3.8.0 apps/api/migrations/
   [backups.md](backups.md)) asumiendo que pierdes lo escrito desde la actualización.
 
 Hay una segunda barrera, esta a nivel de PostgreSQL: una imagen nunca abre un cluster creado por
-un PostgreSQL **más nuevo**. Si una 4.x futura ya hizo `pg_upgrade` de tu volumen a la 17, no
+un PostgreSQL **más nuevo**. Si una versión futura ya hizo `pg_upgrade` de tu volumen a la 17, no
 podrás volver a la 3.x sin restaurar un dump.
 
 ## Watchtower y otros actualizadores automáticos
@@ -136,14 +137,24 @@ healthcheck y dejar el contenedor dando tumbos en `unhealthy`.
 Con `FUTUREFIN_TAG=latest`, watchtower te subirá de versión sin preguntar. Es cómodo y es
 exactamente lo que no quieres en una instalación a la que tengas cariño: fija la versión.
 
-## Actualizar desde 2.x (dos contenedores) a 3.x
+## Vengo de 2.x o tengo una base de datos externa
 
 Hasta la 2.x el stack eran **dos contenedores**: `futurefin` y `futurefin-database`. Desde la 3.0.0
-es **uno solo**, con PostgreSQL dentro de la imagen. Es la operación más grande de la historia del
-proyecto, y es de un solo sentido: léela entera antes de empezar.
+es **uno solo**, con PostgreSQL dentro de la imagen. Y desde la **4.0.0 la imagen ya no sabe hablar
+con ninguna base de datos que no sea la suya**: el modo externo, marcado como deprecado desde la
+3.0.0, se ha retirado.
 
-**Sin pérdida de datos**: el volumen `pgdata` de la 2.x conserva el mismo nombre y la misma ruta en
-la 3.x, así que se reutiliza tal cual.
+Empieza por identificar tu caso:
+
+| Tu situación | Qué hacer |
+|---|---|
+| Compose de la 2.x (dos contenedores), tus datos en el volumen `pgdata` | **Caso A**: sustituye el compose y reutiliza el volumen. No hace falta pasar por ninguna versión intermedia. |
+| Tu PostgreSQL vive fuera del compose: gestionado, en otra máquina, en otro stack | **Caso B**: pasa **una vez** por la 3.9.0 para traértelo dentro. |
+| Te ha llegado la 4.0.0 sola (watchtower + `:latest`) y el contenedor no arranca | **Caso C**: no has perdido nada. Léelo y vuelve al caso A o al B. |
+
+Lo que no cambia en ninguno de los tres: **la 4.0.0 no escribe jamás en una base externa, y no
+arranca con una base vacía fingiendo que no pasa nada.** Si no puede continuar, se para y lo
+explica.
 
 ### Antes de tocar nada
 
@@ -151,36 +162,118 @@ Las dos capas, no una:
 
 ```bash
 # 1. Capa de aplicación: que cada usuario exporte su .ffbackup desde Ajustes.
-# 2. Capa de infraestructura: un pg_dump con el stack 2.x todavía en marcha.
+# 2. Capa de infraestructura: un pg_dump con el stack antiguo todavía en marcha.
 ENV_FILE=.env ./scripts/backup-postgres.sh
 ```
 
-### La actualización
+### Caso A — compose de 2.x, datos en el volumen `pgdata`
 
-Sustituye tu `docker-compose.yml` por el de la 3.x (el de este repositorio) y:
+**Sin pérdida de datos**: el volumen `pgdata` de la 2.x conserva el mismo nombre y la misma ruta,
+así que la imagen actual lo **adopta en el sitio**. No hay copia, ni conversión, ni versión
+intermedia.
+
+Sustituye tu `docker-compose.yml` por el de este repositorio y:
 
 ```bash
 docker compose pull && docker compose up -d --remove-orphans
 ```
 
-El `--remove-orphans` es lo que retira el contenedor `futurefin-database`, ya inútil. **No borres
-el volumen `pgdata`**: el compose de la 3.x monta exactamente ese nombre en exactamente esa ruta, y
-ahí está tu vida.
+El `--remove-orphans` es lo que retira el contenedor `futurefin-database`, ya inútil. **No borres el
+volumen `pgdata`**: el compose nuevo monta exactamente ese nombre en exactamente esa ruta, y ahí
+está tu vida.
+
+Y **quita `DATABASE_URL`** del compose: la 4.0.0 ya no la usa. Si se queda puesta y el volumen ya
+tiene datos, se ignora con un aviso en los logs; si el volumen está vacío, el contenedor se para
+(caso C).
+
+### Caso B — base de datos externa de verdad
+
+Una gestionada aparte, en otra máquina o en otro stack: no hay ningún volumen con tus datos que la
+4.0.0 pueda adoptar, así que se niega a arrancar. La última versión que sabe traérselos es la
+**3.9.0**, y lo hace en un solo arranque.
+
+Necesita tres cosas a la vez: la imagen `3.9.0`, la `DATABASE_URL` de siempre **llegando dentro del
+contenedor**, y un volumen montado en `/var/lib/postgresql/data` que esté **vacío**. Ojo con la
+segunda: el `docker-compose.yml` de este repositorio **no** pasa `DATABASE_URL` al contenedor
+(no la lista en `environment:` ni usa `env_file:`), así que ponerla en el `.env` no basta —
+tienes que declararla:
+
+```yaml
+services:
+  futurefin:
+    image: maxlainz/futurefin:3.9.0        # temporal, solo para este arranque
+    environment:
+      DATABASE_URL: postgres://usuario:contraseña@tu-host:5432/futurefin
+    volumes:
+      - pgdata:/var/lib/postgresql/data    # vacío: es el destino
+      - ffdata:/var/lib/futurefin          # aquí se guarda el dump intermedio
+```
+
+```bash
+docker compose up -d
+docker compose logs -f futurefin | grep -E "automigration completed|FATAL"
+```
+
+Qué hace por dentro, y por qué puedes dejarlo trabajar tranquilo:
+
+1. Espera hasta 60 segundos a que la base externa conteste (`FUTUREFIN_EXTERNAL_WAIT_SECS`). Si no
+   contesta, **se para**: nunca arranca vacío.
+2. Le hace un `pg_dump` **de solo lectura** y lo guarda en `ffdata` como `pre-automigration-<ts>.sql.gz`.
+3. Crea el cluster embebido y restaura ahí el dump.
+4. **Verifica contando filas tabla a tabla** contra el origen. Si el censo no coincide, marca la
+   migración como fallida y aborta — con tu base externa intacta y el dump guardado.
+5. Loguea `automigration completed: N rows across M tables`.
+
+Cuando lo veas: quita del compose la `DATABASE_URL` y el pin a `3.9.0`, y sube a la versión actual.
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Tu base externa se queda donde está, **intacta y sin usar**. Apágala cuando hayas comprobado que
+todo funciona desde dentro.
+
+Si prefieres no pasar por la 3.9.0, la alternativa manual es un `pg_dump` de la externa y un
+restore en un volumen nuevo con `scripts/restore-postgres.sh` (ver [backups.md](backups.md)).
+
+### Caso C — la 4.0.0 ya te ha llegado y el contenedor no arranca
+
+`FUTUREFIN_TAG=latest` incluye los saltos de major: watchtower puede haberte subido de la 3.x a la
+4.0.0 sin preguntar. Si tu `DATABASE_URL` apuntaba fuera y el volumen del contenedor no tenía una
+base embebida, el contenedor sale con código de error y en los logs pone:
+
+```
+DATABASE_URL apunta a una base de datos EXTERNA y este volumen no contiene
+todavía una base embebida.
+```
+
+**No has perdido nada.** La 4.0.0 se para *antes* de tocar nada, precisamente para que arrancar
+vacío no se lea como una pérdida de datos: ni la base externa ni el volumen se han modificado. El
+caso típico es el del compose 2.x sin tocar, donde el contenedor de la app no tiene ningún volumen
+montado en su `PGDATA` y sus datos siguen en el contenedor `futurefin-database`.
+
+Sal de ahí por el caso A (si tus datos están en el volumen `pgdata`) o por el caso B (si están en
+una base externa de verdad). Y mientras te organizas, siempre puedes volver atrás fijando
+`FUTUREFIN_TAG` a tu versión anterior.
+
+Para que no vuelva a pasar: **fija la versión** en el `.env` (`FUTUREFIN_TAG=4.0.0`). La etiqueta
+`:3` se queda en la última 3.x y nunca salta de major sola.
 
 ### El primer arranque tarda más — una única vez
 
-Antes de que la API llegue a levantar, el contenedor hace tres cosas que solo se hacen una vez:
+Cuando el contenedor adopta un volumen de la 2.x (caso A), antes de que la API llegue a levantar
+hace tres cosas que solo se hacen una vez:
 
-1. **Adopción de permisos.** El cluster de la 2.x lo creó `postgres:16.4-alpine` (uid 70); la 3.x
-   corre el postmaster como el `postgres` de Debian (uid 999). El entrypoint hace `chown -R` y
+1. **Adopción de permisos.** El cluster de la 2.x lo creó `postgres:16.4-alpine` (uid 70); la imagen
+   actual corre el postmaster como el `postgres` de Debian (uid 999). El entrypoint hace `chown -R` y
    loguea `adopting ownership of PGDATA (uid 70 -> 999)`.
 2. **Reindexado por colación.** Alpine usa musl y Debian usa glibc, y ordenan el texto de forma
    distinta: todos los índices de texto heredados de la 2.x son sospechosos (un índice UNIQUE
    corrupto aceptaría en silencio nombres de usuario duplicados). Se ejecuta un `REINDEX DATABASE`
    completo. En una base grande esto puede tardar. Es idempotente: se apunta en `ffdata` y no se
    repite para el mismo cluster.
-3. **Backup automático pre-migración**, escrito en `ffdata` antes de que ninguna migración de la
-   3.x toque el esquema. Si falla, el arranque se aborta.
+3. **Backup automático pre-migración**, escrito en `ffdata` antes de que ninguna migración toque el
+   esquema. Si falla, el arranque se aborta.
 
 Por eso el healthcheck lleva `start_period: 120s`. Si el reindexado se pasa de ahí, el contenedor
 aparecerá `unhealthy` un rato y luego se recuperará solo: **sigue los logs, no el `docker ps`**.
@@ -199,22 +292,13 @@ Espera a que `/v1/ready` devuelva 200.
   superusuario del cluster adoptado *es* ese rol; sin el valor correcto el arranque muere con
   `cannot connect as role 'futurefin'. If your 2.x install used a custom POSTGRES_USER, set the
   same value now.`
-- **Si actualizaste sin tocar el compose** (el caso típico de watchtower con `:latest`): la imagen
-  3.x se encuentra en una topología 2.x —sin volumen montado en su `PGDATA` y con `DATABASE_URL`
-  apuntando al contenedor de base de datos— y lo detecta. Sigue funcionando **contra la base de
-  datos antigua**, en modo compatibilidad externa, imprimiendo un aviso de deprecación en cada
-  arranque. Nunca migrará a la capa efímera del contenedor. Termina el trabajo adoptando el compose
-  nuevo cuando puedas: ese modo **se elimina en la 4.0.0**.
-- **Base de datos externa de verdad** (una gestionada aparte, no el contenedor de la 2.x): al
-  arrancar la 3.x con `DATABASE_URL` definida **y un volumen vacío montado**, se hace una
-  **automigración de una sola vez** — dump de la externa, restauración en la embebida y
-  verificación por censo de filas antes de dar el paso por bueno. La base externa solo se **lee**,
-  nunca se toca. Si prefieres quedarte en la externa: `FUTUREFIN_DB_MODE=external` (deprecado,
-  desaparece en la 4.0.0, y en ese modo **no hay backup automático ni `pg_upgrade`**).
+- **`FUTUREFIN_DB_MODE=external` ya no existe.** Si lo arrastras de un compose de la 3.x, el
+  contenedor aborta con un mensaje que te dice qué quitar. Los valores válidos son `auto` (el de por
+  defecto) y `embedded`, y hoy significan lo mismo.
 
 ### Volver a la 2.x
 
-Es aburrido a propósito, porque la 3.0.0 no cambia la forma del cluster en disco:
+Es aburrido a propósito, porque no se cambia la forma del cluster en disco:
 
 ```bash
 docker compose down
@@ -223,16 +307,16 @@ docker compose up -d
 ```
 
 - El volumen `pgdata` no necesita conversión: la imagen Alpine vuelve a hacer `chown` a su propio
-  uid al arrancar, igual que la 3.x hizo en la otra dirección.
+  uid al arrancar, igual que la imagen nueva hizo en la otra dirección.
 - El volumen `ffdata` queda **huérfano**. No lo borres si quieres conservar los backups
   automáticos: sácalos antes con `docker compose cp`.
-- Sigue vigente la regla dura: **si la 3.x aplicó migraciones que el binario 2.x no lleva, no
-  arranca.** Comprueba `_sqlx_migrations` como se explica arriba.
+- Sigue vigente la regla dura: **si la versión nueva aplicó migraciones que el binario 2.x no lleva,
+  no arranca.** Comprueba `_sqlx_migrations` como se explica arriba.
 
 ## `pg_upgrade` automático de un volumen antiguo
 
-Cada imagen lleva el PostgreSQL actual **y el anterior**: la 3.x lleva el 16 (activo) y el 15
-(solo para actualizar volúmenes viejos). Si el volumen está en la 15, el contenedor hace el
+Cada imagen lleva el PostgreSQL actual **y el anterior**: la imagen de hoy lleva el 16 (activo) y
+el 15 (solo para actualizar volúmenes viejos). Si el volumen está en la 15, el contenedor hace el
 `pg_upgrade` él solo al arrancar, y cada paso está diseñado para que el cluster viejo sobreviva a
 un fallo:
 
@@ -247,7 +331,7 @@ un fallo:
 El entrypoint **nunca borra un cluster**. Lo aparta con `mv` y lo deja ahí.
 
 Consecuencia de la política de dos majors: un volumen que siga en la 15 tiene que pasar por una
-3.x antes de que llegue una 4.x que lleve 17+16. Un volumen creado por un PostgreSQL más nuevo que
+imagen que todavía lleve el 15 antes de que salga la primera que ya no lo lleve. Un volumen creado por un PostgreSQL más nuevo que
 el de la imagen se rechaza en seco.
 
 ## Ver también

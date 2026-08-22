@@ -38,13 +38,12 @@ por defecto son exactamente lo que corre una instalación normal.
 
 | Variable | Por defecto | Qué hace |
 |---|---|---|
-| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded` \| `external`. `auto` usa la base embebida salvo que `DATABASE_URL` apunte a otro sitio. Cualquier otro valor **aborta** el arranque. |
+| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded`. Desde la 4.0.0 los dos significan lo mismo: la base embebida. `external` **aborta** el arranque con instrucciones (ver abajo), y cualquier otro valor también. |
 | `FUTUREFIN_MODE` | `serve` | `serve` \| `db-only`. `db-only` es el **modo rescate**: levanta PostgreSQL sin la API, para restaurar o inspeccionar. Lo usa `scripts/restore-postgres.sh`. |
 | `FUTUREFIN_PREMIGRATION_BACKUP` | `on` | Cualquier otro valor desactiva el backup automático pre-migración. Si el backup falla, el arranque se aborta a propósito. |
 | `FUTUREFIN_BACKUP_KEEP` | `10` | Cuántos backups automáticos son intocables, por recientes. |
 | `FUTUREFIN_BACKUP_KEEP_DAYS` | `90` | Más allá de los anteriores, se borran los de más días que este número. |
 | `FUTUREFIN_ALLOW_EPHEMERAL_DB` | `0` | `1` permite arrancar **sin volumen** montado. Los datos mueren con el contenedor: solo para pruebas de usar y tirar. |
-| `FUTUREFIN_EXTERNAL_WAIT_SECS` | `60` | Segundos que la automigración espera a que conteste la base de datos externa antes de negarse a arrancar vacía. |
 | `FUTUREFIN_API_STOP_TIMEOUT` | `15` | Segundos de gracia para que la API cierre tras el SIGTERM, antes del SIGKILL. |
 | `FUTUREFIN_PG_STOP_TIMEOUT` | `30` | Segundos de gracia para que PostgreSQL cierre tras el SIGINT (apagado *fast*), antes del SIGQUIT. Mantén el `stop_grace_period` del compose por encima de la suma de este y el anterior. |
 | `FUTUREFIN_STATE_DIR` | `/var/lib/futurefin` | Dónde vive el volumen `ffdata`: estado del entrypoint, backups y área de `pg_upgrade`. Avanzado. |
@@ -72,26 +71,36 @@ Las lee el binario de Rust. Sirven igual en Docker y en desarrollo.
 | `RUST_LOG` | `futurefin_api=info,tower_http=info,sqlx=warn` | Verbosidad, sintaxis de `EnvFilter`. Para depurar: `futurefin_api=debug,tower_http=debug,sqlx=info`. Un filtro inválido cae al de por defecto. |
 | `FUTUREFIN_MCP_ENABLED` | `true` | `0` desmonta el servidor MCP (`/mcp`) **y** todo el protocolo OAuth. El panel de Conexiones sigue montado, para que apagar MCP nunca te quite la capacidad de revocar lo que ya concediste. Ver [mcp.md](mcp.md). Mismo parseo estricto que `COOKIE_SECURE`, salvo que **sin definir vale `true`**. |
 | `FUTUREFIN_PUBLIC_URL` | se deriva de cada petición | Origen público (`https://tu-host`) para el OAuth del conector de claude.ai. Solo hace falta si tu proxy no manda `X-Forwarded-Proto`/`Host` correctos. Tiene que ser un origen pelado, sin path ni query: **si está y es inválido, el arranque falla**. |
-| `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS` | `30` | Presupuesto total de reintentos al conectar con la base de datos (backoff 0,5 s → 1 → 2 → 4…). Entre 1 y 600; fuera de rango, 30. Importa sobre todo con base externa, donde nadie garantiza el orden de arranque. |
+| `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS` | `30` | Presupuesto total de reintentos al conectar con la base de datos (backoff 0,5 s → 1 → 2 → 4…). Entre 1 y 600; fuera de rango, 30. Dentro del contenedor casi nunca importa —el entrypoint ya espera a que PostgreSQL conteste antes de lanzar la API—; en desarrollo sí, si arrancas `cargo run` antes que el PostgreSQL de `docker-compose.dev.yml`. |
 | `FUTUREFIN_RECONCILE_SWEEP_HOURS` | `24` | Horas entre barridos de conciliación de transferencias. **`0` lo desactiva.** No es el mecanismo principal —la conciliación automática ya corre tras cada mutación—, sino su red de reintento. Fuera de 0–168 vuelve a 24. |
 
-## Deprecado: base de datos externa
+## Bases de datos externas: retiradas en la 4.0.0
 
-Todo este bloque **se elimina en la 4.0.0**.
+Hasta la 3.x el contenedor sabía hablar con un PostgreSQL de fuera. **Ya no.** PostgreSQL vive
+dentro de la imagen y no hay forma de apuntarlo a otro sitio. Estaba anunciado desde la 3.0.0 —en
+el README, en `.env.example` y en un aviso de deprecación en cada arranque—, y aquí está.
 
-| Variable | Estado | Qué hace |
-|---|---|---|
-| `DATABASE_URL` | **Deprecado** en producción | Define una base de datos externa. En desarrollo (`cargo run`) sigue siendo normal y necesaria. |
-| `FUTUREFIN_DB_MODE=external` | **Deprecado** | Fuerza la base externa y desactiva la automigración. |
-| `POSTGRES_PASSWORD` | Ya no es necesaria | Solo tiene sentido si vienes de la 2.x o si accedes al rol desde fuera. |
+Qué hace hoy cada resto de aquella época:
 
-**Cuidado con este pie**: la imagen 3.x interpreta cualquier `DATABASE_URL` que no apunte al
-socket local como "quiero una base de datos externa". Si te dejas descomentada la `DATABASE_URL`
-de desarrollo en el `.env` que le pasas al compose de producción, el contenedor entra en modo
-externo deprecado (aviso enorme en los logs) o, con el volumen vacío, arranca una **automigración**
-de una base que no querías migrar. Mantén ficheros `.env` separados y pásalos con `--env-file`.
+| Resto de la 3.x | Qué hace la 4.0.0 |
+|---|---|
+| `DATABASE_URL` apuntando fuera, **con** base embebida ya en el volumen | La **ignora**, con un aviso en los logs: tus datos ya están dentro. Quítala del compose. |
+| `DATABASE_URL` apuntando fuera, **sin** base embebida en el volumen | El contenedor **se niega a arrancar** y explica cómo migrar. No toca nada: ni tu base externa, ni el volumen. Tus datos siguen intactos donde están. |
+| `FUTUREFIN_DB_MODE=external` | **Aborta** el arranque diciendo qué quitar. Ese valor se sigue reconociendo *solo* para poder dar esa explicación en vez de un error críptico. |
+| `FUTUREFIN_EXTERNAL_WAIT_SECS` | Ya no existe: nadie la lee. |
+| `POSTGRES_PASSWORD` | Sigue siendo opcional e inofensiva (ver la tabla de arriba). |
 
-Para forzar la base embebida pase lo que pase: `FUTUREFIN_DB_MODE=embedded`.
+**Si todavía no has migrado**, la ruta es pasar una vez por la 3.9.0, la última versión que sabía
+hacerlo. Pasos exactos en [actualizar.md](actualizar.md#vengo-de-2x-o-tengo-una-base-de-datos-externa).
+
+`DATABASE_URL` **sigue existiendo y sigue siendo necesaria en desarrollo** (`cargo run` contra el
+PostgreSQL de `docker-compose.dev.yml`). Lo que se ha retirado es el modo externo *del contenedor
+de producción*.
+
+**Cuidado con este pie**: si te dejas descomentada la `DATABASE_URL` de desarrollo en el `.env` que
+le pasas al compose de producción, el contenedor la verá. Con el volumen ya poblado te llevas el
+aviso; con el volumen vacío **no arranca**. Mantén ficheros `.env` separados y pásalos con
+`--env-file`.
 
 ## Solo desarrollo
 

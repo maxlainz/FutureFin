@@ -201,12 +201,13 @@ Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/*
   | Recreate (watchtower-style) keeps data | `up -d --force-recreate` and the same login + the accented category still there |
   | Clean shutdown | `stop -t 60`, then greps `shutdown signal received`, `database pool closed`, `database system is shut down`, `clean shutdown complete`, and asserts container `ExitCode == 0` |
   | V2 stack up + seed (2.3.0 **real**) | the frozen 2.x topology (two containers, image `maxlainz/futurefin:2.3.0`) boots and gets real seeded data |
-  | V3 image over untouched V2 compose | watchtower case: 3.x image + 2.x compose → boxed `DEPRECATED` warning, external-compat mode, login and data still work |
+  | Current image over untouched V2 compose | watchtower case. Up to 3.9.0 this entered external-compat mode; since 4.0.0 the container **must refuse to start**: the job waits for it to be `exited`, asserts `ExitCode != 0`, and greps the logs for `ya no habla con bases de datos externas` and `3.9.0` |
   | Migrate to V3 compose reusing the volume | the real upgrade: greps `adopting ownership of PGDATA` (uid 70 → 999) and `reindexing database after adoption`; same credentials log in; `Ácido Ñandú` intact; **duplicate username must be rejected (409/422)** — the detector for a unique index silently corrupted by the musl→glibc collation change; and a `pre-migration-*.sql.gz` exists in the `ffdata` volume |
-  | External DB automigration | one-shot dump → embedded restore → `automigration completed`; then the external DB is **stopped** and the stack restarted, proving it detached |
+  | Leftover `DATABASE_URL` + empty volume (scenario 3) | replaced the automigration scenario in 4.0.0: `docker run` with an external `DATABASE_URL` and two empty volumes must exit non-zero, log `ya no habla con bases de datos externas` **and** `docs/actualizar.md`, and leave the volume **still empty** (`test -z "$(ls -A /d)"`) — no half-initialized cluster |
   | pg_upgrade 15→16 | a PG15 volume seeded with a marker row is handed to the 3.x image: logs `pg_upgrade needed: PostgreSQL 15 -> 16` and `pg_upgrade 15 -> 16 completed`, the marker row survives, `SHOW server_version` starts with 16, `pgdata_old_15/` exists, and a `pre-pgupgrade-15-to-16-*.sql.gz` backup was written |
 
-  Frozen inputs live in `.github/testdata/docker-compose.{v2,v2-app-v3,automigrate}.yml`.
+  Frozen inputs live in `.github/testdata/docker-compose.{v2,v2-app-v3}.yml` (`automigrate.yml`
+  was deleted in 4.0.0 with the mode it tested).
   **`docker-compose.v2.yml` must NOT be updated when the production compose evolves** — its
   entire value is being the exact 2.x topology (two services, image pinned to 2.3.0). Treat it
   as a fixture, like `fire-parity.json`.
@@ -383,12 +384,12 @@ test pure functions only; extract logic out of components to make it testable.
 - **No E2E browser tests.** Nothing drives the real SPA; auth-flow + UI regressions are
   caught only manually. The `docker-stack` job now drives a lot through the **API** (register,
   login, create/read an accented category, duplicate-username rejection) across fresh installs,
-  V2→V3 upgrades, automigration and pg_upgrade — so it proves the server boots *and keeps your
-  data*, but it still never loads the UI.
+  2.x upgrades, the external-DB refusal paths and pg_upgrade — so it proves the server boots *and
+  keeps your data*, but it still never loads the UI.
 - **Container failure paths are covered only for the happy-ish cases CI exercises.** The guards
-  that abort a boot (`pre-migration backup FAILED`, `cannot connect as role …`, a partially
-  restored automigration, an interrupted pg_upgrade swap resume) have no automated test; the
-  no-volume guard is the one exception. Treat them as reasoned-but-unproven and read
+  that abort a boot (`pre-migration backup FAILED`, `cannot connect as role …`, an interrupted
+  pg_upgrade swap resume) have no automated test; the no-volume guard and the two external-DB
+  refusals (§ the docker-stack table) are the exceptions. Treat them as reasoned-but-unproven and read
   `futurefin-debugging-playbook` trap 12 before touching them.
 - **Integration tests not in CI.** A PR can go green with every `apps/api/tests/` test broken.
   This is the biggest gap; until fixed, the local obligation list in § 3 is mandatory.
@@ -431,7 +432,7 @@ plus the three inventory rows the MCP/OAuth releases had left out). Re-verify vo
 - `docker-stack` step list (the § 3 table, one row per step):
   `grep -n "      - name:" .github/workflows/ci.yml`
 - Its no-data-loss assertions verbatim:
-  `grep -n "no persistent volume\|initializing fresh PostgreSQL 16\|Ácido Ñandú\|adopting ownership\|reindexing database after adoption\|automigration completed\|pg_upgrade needed\|pgdata_old_15\|pre-migration-\|pre-pgupgrade-\|clean shutdown complete\|ExitCode" .github/workflows/ci.yml`
+  `grep -n "no persistent volume\|initializing fresh PostgreSQL 16\|Ácido Ñandú\|adopting ownership\|reindexing database after adoption\|ya no habla con bases de datos externas\|pg_upgrade needed\|pgdata_old_15\|pre-migration-\|pre-pgupgrade-\|clean shutdown complete\|ExitCode" .github/workflows/ci.yml`
 - Frozen compose fixtures still frozen (v2 pinned to the 2.x two-service topology):
   `ls .github/testdata/` and `grep -n "image:\|services:" .github/testdata/docker-compose.v2.yml`
 - Shellcheck gate over the entrypoint and every shipped script:

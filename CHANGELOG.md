@@ -6,15 +6,61 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-**Qué cambia para ti** — **la app se puede usar recién instalada, y deja de hablarte en inglés
-cuando algo falla.** Un hogar nuevo nace con categorías, te recibe un asistente que pregunta lo
-imprescindible (divisa, zona horaria, tus supuestos) y cada pantalla vacía explica qué va ahí en
-vez de enseñar un `0 €`. La divisa **ya se puede cambiar** (era EUR y punto). Borrar un activo, un
-pasivo, una línea del presupuesto o un movimiento previsto **ahora pregunta antes**. Los 187
-mensajes de error están en español, escribir importes con coma funciona en todos los formularios,
-y Ajustes pasa de ocho apartados a siete, agrupados por lo que quieres hacer y no por dónde vive
-el dato. Por dentro: los ficheros de prueba del importador contenían datos bancarios auténticos y
-se han sustituido por otros fabricados, con un gate automático para que no se repita.
+## [4.0.0] - 2026-08-22
+
+**Qué cambia para ti** — FutureFin **se abre en público** y esta versión es la que se puede
+enseñar. La app ya se puede usar recién instalada: un hogar nuevo nace con categorías, te recibe
+un asistente que pregunta lo imprescindible, y cada pantalla vacía explica qué va ahí. Los errores
+te hablan en español. La divisa se puede cambiar. Borrar algo pregunta antes. Ajustes está
+reorganizado.
+
+**Lo único que puede requerir acción por tu parte**: si tu instalación usa una **base de datos
+externa** (`DATABASE_URL` apuntando fuera del contenedor), 4.0.0 ya no la soporta. Tus datos no
+corren peligro y el contenedor te lo dirá antes de tocar nada — pero tienes que pasar una vez por
+la 3.9.0 para migrarlos. Todo lo demás se actualiza como siempre.
+
+### Breaking — se retira el soporte de bases de datos externas
+
+Se anunció en la 3.0.0, en el README, en `.env.example` y en el propio aviso de deprecación que
+salía en los logs: la base de datos externa desaparece en 4.0.0. Aquí está. PostgreSQL va **siempre**
+dentro de la imagen.
+
+Del entrypoint desaparecen `exec_api_external` (hablar con una base externa), su aviso de
+deprecación y la migración one-shot `automigrate_prepare`/`automigrate_restore`. Con ellos se van
+`FUTUREFIN_DB_MODE=external` —el valor se sigue aceptando solo para poder dar un mensaje útil en
+vez de un error críptico— y `FUTUREFIN_EXTERNAL_WAIT_SECS`.
+
+Lo que queda es una puerta, y es lo importante. Si `DATABASE_URL` apunta fuera del socket local:
+
+- **con un cluster embebido ya en el volumen** → se ignora con un aviso. Quien migró en la 3.x
+  tiene sus datos aquí y solo le sobra una variable en el compose.
+- **sin cluster** → el contenedor **se para**. No arranca con una base vacía, porque eso se leería
+  como pérdida de datos aunque los datos estén intactos al otro lado. El mensaje dice exactamente
+  qué hacer: arrancar una vez la 3.9.0 con esa misma `DATABASE_URL` y ese mismo volumen, quitar la
+  variable, y volver a 4.0.0.
+
+Esto alcanza también a quien **auto-actualiza con watchtower sobre un compose 2.x sin tocar**: ese
+caso venía funcionando en modo compatibilidad desde la 3.0.0 y ahora se para. Es deliberado, está
+cubierto por un test de CI, y la ruta de salida es la misma.
+
+`DATABASE_URL` **sigue existiendo y sigue haciendo falta en desarrollo** (`cargo run` contra
+`docker-compose.dev.yml`). Lo que se retira es el modo externo del contenedor de producción.
+
+#### Migración
+
+| Tu situación | Qué hacer |
+|---|---|
+| Compose 3.x normal, sin `DATABASE_URL` | Nada. `docker compose pull && docker compose up -d`. |
+| `DATABASE_URL` puesta pero ya migraste en 3.x | Quítala del compose. Si no lo haces, se ignora con un aviso. |
+| Base externa de verdad, sin migrar | Arranca **una vez** `maxlainz/futurefin:3.9.0` con la misma `DATABASE_URL` y el mismo volumen, espera a `automigration completed` en los logs, quita `DATABASE_URL` y actualiza a 4.0.0. |
+| Compose 2.x de dos contenedores | Igual: pasa por 3.9.0 y después sustituye el compose por el de 4.x. |
+
+#### Tests
+
+El escenario 3 de CI dejaba de tener sentido —probaba la automigración— y pasa a fijar la conducta
+nueva: con `DATABASE_URL` heredada y volumen vacío el contenedor **aborta sin inicializar nada** y
+el volumen se queda intacto. El escenario 2 mantiene la ruta 2.x → volumen reutilizado, pero su
+paso intermedio ahora comprueba el rechazo en vez del modo compatibilidad.
 
 ### La app no se podía usar recién instalada
 
