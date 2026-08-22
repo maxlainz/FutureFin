@@ -261,6 +261,21 @@ se señala cuál es el eje que sí mueve esas cifras.
 Además, la cota «cero o más» de esos dos ejes vivía solo en la prosa de la descripción. Ahora viaja
 también en el esquema de la herramienta, donde un cliente la lee como restricción y no como texto.
 
+**Cada lado dice ahora con qué se calculó.** La simulación devolvía cifras sin decir de dónde
+salían, y eso convertía respuestas correctas en aparentes fallos. El caso claro: si calculas tu
+número FIRE con un importe fijo, ningún cambio de gasto puede moverlo — el delta del objetivo sale
+0 y es exacto, pero sin saber el modo parece que la herramienta ignoró lo que le pediste. Ahora
+cada lado devuelve el modo del número FIRE, la fuente del ahorro que acabó usando, sobre cuántos
+meses reales promedió cada mitad, el SWR y la inflación efectivos, y las tres bases de gasto e
+ingreso con las que trabajó. Cuando no hay objetivo FIRE, dice **por qué** no lo hay —importe
+manual sin poner, la pensión ya cubre el gasto, o SWR a cero— en vez de devolver tres huecos sin
+causa. Seis de esos valores ya se calculaban por dentro y se tiraban.
+
+**La cifra final ya se puede leer.** El patrimonio al final de la simulación llegaba en euros
+nominales de dentro de cuarenta o cincuenta años, que es una cifra grande y vacía. Ahora viene
+acompañado del mismo importe **en euros de hoy**, descontada la inflación que se haya asumido en
+ese lado. Si no asumes inflación, las dos cifras son idénticas.
+
 ### La app no se podía usar recién instalada
 
 Un hogar nuevo nacía con **cero categorías** —la migración original lo decía con todas las letras:
