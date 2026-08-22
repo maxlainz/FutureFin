@@ -88,11 +88,22 @@ frecuentes: [docs/desarrollo.md](docs/desarrollo.md).
 
 ## 2. Cómo se organizan las ramas
 
-- `main` — rama de producción. La imagen Docker se publica desde aquí, con un tag `vX.Y.Z`.
-- `dev` — desarrollo activo, ramificada de `main`. `main` es un **espejo completo** de `dev`.
+Una sola rama viva: **`main`**. Es la rama por defecto, la que se publica y la única de larga vida.
 
-Trabaja sobre `dev` (o sobre una rama que salga de `dev`) y dirige el pull request a `dev`. Las
-publicaciones —bump de versión, merge a `main`, tag— las hace quien mantiene el repositorio.
+Saca una rama corta de `main`, trabaja ahí y dirige el pull request **a `main`**:
+
+```bash
+git checkout main && git pull --ff-only
+git checkout -b fix/lo-que-sea
+# … trabajo, commits …
+git push -u origin fix/lo-que-sea && gh pr create --fill
+```
+
+`main` está protegida: el pull request es obligatorio y CI tiene que estar en verde para poder
+mergear. No hay forma de empujar directamente, y es a propósito.
+
+Los releases son **tags** sobre `main` (`vX.Y.Z`), no una rama aparte; los publica quien mantiene
+el repositorio.
 
 Antes de retomar el trabajo: `git pull --ff-only`.
 
@@ -127,12 +138,12 @@ npm test --workspace futurefin-web
 Cada test de integración crea su propio esquema `ff_test_<uuid>`, le aplica todas las migraciones
 y corre contra el router de verdad.
 
-Lo que corre CI (`.github/workflows/ci.yml`), seis jobs: `secrets-scan` (escáner de datos
+Lo que corre CI (`.github/workflows/ci.yml`), cinco jobs: `secrets-scan` (escáner de datos
 sensibles), `rust` (build de la API + tests del engine), `web` (`npm ci`, typecheck, **lint**,
 **Vitest**, build), `integration` (**`cargo test --workspace` contra un servicio PostgreSQL
-16.4-alpine**), `main-guard` (que la rama pública no publique documentación interna) y
-`docker-stack` (shellcheck, build de la imagen y los caminos críticos del contenedor, incluida la
-preservación de datos al actualizar).
+16.4-alpine**) y `docker-stack` (shellcheck, build de la imagen y los caminos críticos del
+contenedor, incluida la preservación de datos al actualizar). Aparte va `codeql.yml`, que analiza
+el código propio (`rust`, `javascript-typescript`, `actions`) y publica en la pestaña Security.
 
 Hasta la 4.0.0 los tests de integración, `lint:web` y Vitest **no** corrían en CI: eran una
 obligación local, es decir, dependían de que a nadie se le olvidara, y una PR podía salir verde con
@@ -206,10 +217,9 @@ solape de la tabla» está por debajo del listón. Si hubo intentos fallidos pre
   con «actualiza recurring.rs». El primero se puede leer dentro de un año.
 - **El cuerpo** explica el porqué y lleva `Closes #N` si cierra un issue.
 - Un cambio *breaking* se marca en el asunto o en el cuerpo, y además en el CHANGELOG.
-- **Los merges también.** Un commit de merge lleva asunto propio y, en el cuerpo, **los titulares
-  de lo que suma a esa rama**. `git merge dev` a secas escribe «Merge branch 'dev'», que no dice
-  nada y obliga a ir al historial para saber qué entró. Para publicar en `main` usa
-  `./scripts/release-to-main.sh X.Y.Z "<una frase>"`, que lo compone solo.
+- **Los merges también.** Un commit de merge lleva asunto propio: «Merge branch 'x'» no dice nada
+  y obliga a ir al historial para saber qué entró. Mergeando un PR desde GitHub el asunto sale del
+  título del pull request, así que ponle uno que se lea dentro de un año.
 
 ## 6. Pull requests
 

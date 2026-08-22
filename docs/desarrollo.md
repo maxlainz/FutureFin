@@ -168,7 +168,8 @@ docker rm -f ff-test-db
   instalación desde cero, recreación estilo watchtower, apagado ordenado, actualización real desde
   un stack 2.x, el rechazo de una `DATABASE_URL` externa heredada (aborta sin inicializar nada) y
   `pg_upgrade` 15→16.
-- **`main-guard`** — `main` no publica `CLAUDE.md` ni `.claude/`.
+Y aparte de `ci.yml`, **`codeql.yml`**: análisis estático del código propio (`rust`,
+`javascript-typescript` y `actions`), en su propio workflow y **no** como check obligatorio.
 
 `cargo clippy` y `cargo fmt --check` están preparados pero **comentados**: el repositorio todavía
 no está limpio para ellos y meterlos en rojo sería peor que no tenerlos. Los números medidos están
