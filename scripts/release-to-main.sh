@@ -59,9 +59,16 @@ if [ -n "$remaining" ]; then
   exit 1
 fi
 
+# El cuerpo lleva los TITULARES de lo que entra en la rama. Un merge que solo dice su versión
+# obliga a ir al historial para saber qué trae; con los asuntos delante, el commit se lee solo.
+titulares="$(git log --no-merges --pretty='- %s' HEAD..dev)"
+[ -n "$titulares" ] || titulares="- (sin commits nuevos respecto a main)"
+
 git commit -m "chore(release): $VERSION — $SUMMARY
 
-$(printf 'Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>')"
+$titulares
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 offenders="$(git ls-files -- "${PRIVATE_PATHS[@]}")"
 [ -z "$offenders" ] || {
