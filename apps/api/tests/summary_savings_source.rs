@@ -162,7 +162,7 @@ async fn mode_a_summary_is_budget_based() {
     approx(parse_dec(&h["net_monthly_equivalent"]), 2000.0);
     approx(parse_dec(&h["savings_rate"]), 0.4); // 2000/5000
     assert_eq!(h["savings_source"], "budget");
-    assert_eq!(h["savings_expense_basis"]["months_with_data"].as_u64().unwrap(), 0);
+    assert_eq!(h["savings_expense_basis"]["avg_months"].as_u64().unwrap(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +252,7 @@ async fn mode_b_summary_uses_raw_avg() {
     approx(parse_dec(&h["net_monthly_equivalent"]), 1500.0);
     approx(parse_dec(&h["savings_rate"]), 0.5);
     assert_eq!(h["savings_source"], "transactions_avg");
-    assert_eq!(h["savings_expense_basis"]["months_with_data"].as_u64().unwrap(), 1);
+    assert_eq!(h["savings_expense_basis"]["avg_months"].as_u64().unwrap(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +292,7 @@ async fn mode_b_summary_zero_months_falls_back_to_budget() {
         h["savings_source"], "budget",
         "sin datos → fuente efectiva = budget"
     );
-    assert_eq!(h["savings_expense_basis"]["months_with_data"].as_u64().unwrap(), 0);
+    assert_eq!(h["savings_expense_basis"]["avg_months"].as_u64().unwrap(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +418,7 @@ async fn mode_b_summary_pseudo_empty_month_excluded() {
     approx(parse_dec(&h["net_monthly_equivalent"]), 2000.0);
     assert_eq!(h["savings_source"], "transactions_avg");
     assert_eq!(
-        h["savings_expense_basis"]["months_with_data"].as_u64().unwrap(),
+        h["savings_expense_basis"]["avg_months"].as_u64().unwrap(),
         1,
         "el mes solo-recurrente no cuenta"
     );
@@ -505,7 +505,7 @@ async fn mode_c_income_not_overwritten() {
     approx(parse_dec(&h["expense_regular_monthly_equivalent"]), 1500.0);
     approx(parse_dec(&h["net_monthly_equivalent"]), 3500.0);
     assert_eq!(h["savings_source"], "budget_income_real_expense");
-    assert_eq!(h["savings_expense_basis"]["months_with_data"].as_u64().unwrap(), 1);
+    assert_eq!(h["savings_expense_basis"]["avg_months"].as_u64().unwrap(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -541,12 +541,12 @@ async fn mode_b_expected_is_budget_net_not_override() {
     approx(parse_dec(&h["net_monthly_equivalent"]), 750.0);
     approx(parse_dec(&h["savings_expected_monthly_equivalent"]), 2000.0);
     assert_eq!(
-        h["savings_income_basis"]["months_with_data"].as_u64().unwrap(),
+        h["savings_income_basis"]["avg_months"].as_u64().unwrap(),
         2,
         "ambos lados promedian en modo B"
     );
     assert_eq!(
-        h["savings_expense_basis"]["months_with_data"].as_u64().unwrap(),
+        h["savings_expense_basis"]["avg_months"].as_u64().unwrap(),
         2
     );
 }

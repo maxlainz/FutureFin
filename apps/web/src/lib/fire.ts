@@ -163,8 +163,8 @@ export function formatYearMonth(ym: string | undefined): string | undefined {
 export function savingsBasisParenthetical(
   basis: SavingsAvgBasisApi | undefined,
 ): string | undefined {
-  if (!basis || basis.basis !== "average" || basis.months_with_data < 1) return undefined;
-  const n = basis.months_with_data;
+  if (!basis || basis.basis !== "average" || basis.avg_months < 1) return undefined;
+  const n = basis.avg_months;
   const last = formatYearMonth(basis.last_month);
   const first = formatYearMonth(basis.first_month);
   if (basis.has_gaps) {

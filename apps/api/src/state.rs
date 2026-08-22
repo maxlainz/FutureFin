@@ -23,7 +23,10 @@ pub enum Density {
     Hybrid,
 }
 
-/// Clave de cache. `owner_user_id` es `Some(_)` solo para `view=mine`.
+/// Clave de cache. `owner_user_id` es SIEMPRE `Some(_)`, también en `household`:
+/// la respuesta depende de la fecha de nacimiento del **solicitante** (horizonte,
+/// `viewer_birth_date`, `jubilacion_age`, eje de edades), así que una entrada
+/// household compartida servía la demografía de un miembro a otro.
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub struct ProjectionCacheKey {
     pub installation_id: Uuid,
@@ -132,8 +135,8 @@ impl AppState {
         }
     }
 
-    /// Al logout: borra solo las entries `view=mine` de ese usuario. Las
-    /// `view=household` quedan disponibles para otros miembros conectados.
+    /// Al logout: borra las entries de ese usuario — `mine` y `household`, porque
+    /// desde el arreglo de la clave ambas son suyas. Las de otros miembros no se tocan.
     pub async fn invalidate_projection_by_user(&self, user_id: Uuid) {
         let mut cache = self.projection_cache.write().await;
         let before = cache.len();

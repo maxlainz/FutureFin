@@ -1,7 +1,7 @@
 use crate::handlers::allocation_rules::allocation_rules_router;
 use crate::handlers::api_tokens::api_tokens_router;
 use crate::handlers::assets::assets_router;
-use crate::handlers::auth::{login, logout, me, patch_me, register};
+use crate::handlers::auth::{change_password, login, logout, me, patch_me, register};
 use crate::handlers::backup_user::{
     export_user_backup, import_user_backup_apply, import_user_backup_preview,
 };
@@ -15,6 +15,7 @@ use crate::handlers::installation::{
     setup_installation,
 };
 use crate::handlers::liabilities::liabilities_router;
+use crate::handlers::members::members_router;
 use crate::handlers::pending_users::pending_users_router;
 use crate::handlers::planning::planning_router;
 use crate::handlers::projection::projection_router;
@@ -43,6 +44,7 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
                 .route("/register", post(register))
                 .route("/login", post(login))
                 .route("/logout", post(logout))
+                .route("/password", post(change_password))
                 .route("/me", get(me).patch(patch_me)),
         )
         .route(
@@ -55,6 +57,7 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
         )
         .route("/installation/setup", post(setup_installation))
         .nest("/installation/pending-users", pending_users_router())
+        .nest("/installation/members", members_router())
         .nest("/api-tokens", api_tokens_router())
         .nest(
             "/oauth",

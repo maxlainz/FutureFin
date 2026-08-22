@@ -7,6 +7,12 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+# El token de este workflow no necesita escribir nada: solo construye y prueba. Sin este
+# bloque hereda el ajuste por defecto del repositorio, que es configuración fuera del
+# control de este fichero y puede cambiar sin que nadie lo note aquí.
+permissions:
+  contents: read
+
 jobs:
   # Barato, rápido y primero: ningún dato personal entra al repositorio. Existe porque
   # hasta agosto de 2026 `apps/api/tests/fixtures/` llevaba extractos bancarios reales
@@ -77,8 +83,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-      - name: npm install
-        run: npm install
+      - name: npm ci
+        run: npm ci
       - name: typecheck
         run: npm run typecheck:web
       # lint y Vitest existían desde siempre en package.json pero nunca corrían en
@@ -164,7 +170,12 @@ jobs:
   # obligatorios, y hacerlo fallar ahí sería exactamente lo contrario de lo que
   # queremos.
   main-guard:
-    if: github.ref == 'refs/heads/main'
+    # También en los PR contra `main`: con `github.ref` a secas, en un pull_request el ref es
+    # `refs/pull/N/merge` y el job se SALTABA — justo en el momento de la revisión, que es
+    # cuando serviría. Cuando sí corría (push a main) la rama pública ya llevaba los ficheros:
+    # CI solo lo contaba después. En un PR el checkout da el merge commit, así que
+    # `git ls-files` ve el árbol resultante.
+    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

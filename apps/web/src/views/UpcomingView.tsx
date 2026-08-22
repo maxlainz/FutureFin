@@ -379,6 +379,12 @@ export function UpcomingView({
         ) : planningFlows.length === 0 ? (
           !hasMembership ? (
             <p className="muted bordered-top">Sin acceso.</p>
+          ) : formError ? (
+            // Un fallo del loader vacía movimientos Y categorías: sin este caso la vista acusaba
+            // al usuario de no tener categorías cuando lo que había pasado es que no se pudo leer
+            // nada. El error ya se pinta en la banda global de App.tsx; aquí basta con no
+            // contradecirlo.
+            null
           ) : noPlanningCategories ? (
             <EmptyState
               embedded

@@ -14,7 +14,8 @@ use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::reconcile::{auto_reconcile_after_mutation, unlink_pair_no_rejection};
 use crate::handlers::transactions::recurring;
 use crate::handlers::transactions::schema::{
-    compute_fingerprint, like_needle, normalize_concept_field, normalize_kind, normalize_notes,
+    assert_amount_sign_matches_kind, compute_fingerprint, like_needle, normalize_concept_field,
+    normalize_kind, normalize_notes,
     sql_fold_concept_expr, BatchCreateBody, BatchPatchBody, CreateTransactionBody,
     ImportBatchResponse, MonthEntry, PatchTransactionBody, TransactionResponse, SOURCE_MANUAL,
 };
@@ -59,6 +60,21 @@ pub(super) struct PreparedTxn {
     pub(super) fingerprint: String,
 }
 
+/// Rechaza una `op_date` posterior al hoy civil de la instalación (`installation.calendar_tz`).
+async fn assert_op_date_not_in_future(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    op_date: NaiveDate,
+) -> Result<(), ApiError> {
+    let today = installation_naive_today(pool, iid).await?;
+    if op_date > today {
+        return Err(ApiError::BadRequest(
+            "op_date_in_future: op_date must not be in the future".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn validate_manual(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -72,6 +88,13 @@ async fn validate_manual(
             "amount_zero: amount must not be zero".into(),
         ));
     }
+    assert_amount_sign_matches_kind(amount, &kind)?;
+    // Un movimiento con fecha futura no es un gasto: es un plan, y para eso está «Próximos»
+    // (`planning_flows`, que sí acepta fechas por delante y sí es input del motor). Aquí una fecha
+    // futura solo ensuciaba los listados — `list_transaction_months` llegó a publicar
+    // `{"month":"2099-12","is_complete":true}`, un mes a 73 años vista marcado como cerrado. El
+    // guard es de escritura manual: el import y el restore no lo aplican.
+    assert_op_date_not_in_future(pool, iid, body.op_date).await?;
     assert_transaction_category(pool, iid, &kind, body.category_id).await?;
     assert_asset_in_installation(pool, iid, body.linked_asset_id).await?;
     assert_liability_in_installation(pool, iid, body.linked_liability_id).await?;
@@ -425,7 +448,7 @@ pub async fn list_transactions(
     let view = LedgerViewQuery {
         view: q.view.clone(),
     }
-    .resolve();
+    .resolve()?;
     let (out, _total) = list_transactions_core(
         &state.pool,
         iid,
@@ -882,7 +905,7 @@ pub async fn list_months(
 ) -> Result<Json<Vec<MonthEntry>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_months_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_months_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 
@@ -1045,6 +1068,26 @@ pub(crate) async fn patch_transaction_core(
         }
     };
 
+    // Signo↔kind: **solo cuando el PATCH fija el importe**. El signo es una propiedad del dinero;
+    // el kind es una clasificación. Escribir el importe exige que cuadre con la clasificación que
+    // la fila tiene; RE-clasificar dinero que ya existe no.
+    //
+    // La distinción no es cosmética: reclasificar es justo lo que hacen el lote
+    // (`patch_transactions_batch_core`, que ni siquiera admite `amount`) y el motor de reglas
+    // (`apply_categorization_rule`), y ninguno de los dos puede validar el signo sin romper el
+    // caso legítimo — una devolución llega en positivo, el importador la marca `income` por el
+    // signo, y pasarla a `expense` es lo correcto: netea contra el gasto del mes. Si el PATCH
+    // individual rechazara ese cambio y el lote no, dejarían de ser equivalentes, que es
+    // exactamente lo que fija `batch_patch_matches_individual_patches_and_rejects_rewrites`.
+    if body.amount.is_some() {
+        if let Some(k) = &new_kind {
+            assert_amount_sign_matches_kind(new_amount, k)?;
+        }
+    }
+    if body.op_date.is_some() {
+        assert_op_date_not_in_future(&state.pool, iid, new_op_date).await?;
+    }
+
     // Validaciones kind↔categoría y links.
     match &new_kind {
         Some(k) => assert_transaction_category(&state.pool, iid, k, new_category).await?,
@@ -1107,6 +1150,28 @@ pub(crate) async fn patch_transaction_core(
     .bind(user_id)
     .execute(&mut *tx)
     .await?;
+    // Mover la fecha de una INSTANCIA recurrente la desvincula de su plantilla.
+    //
+    // Sin esto, el PATCH se persistía y acto seguido la convergencia lo BORRABA: la poda
+    // elimina toda instancia cuyo mes no sea el de origen de su regla ni un mes activo, y el
+    // mes en curso nunca es activo. El usuario corregía «la nómina cayó el 5 de agosto», el
+    // servidor guardaba, la convergencia lo destruía, `load_txn` no encontraba la fila y la
+    // respuesta era un **500 sobre una mutación que sí había ocurrido** — y su edición
+    // reaparecía revertida, con id nuevo, en el mes original. Desvincular es lo correcto: una
+    // instancia que el usuario mueve de mes deja de describir la plantilla, así que pasa a ser
+    // un movimiento suelto y la convergencia recrea la del mes de origen sin pisar nada.
+    if new_op_date != current.op_date {
+        sqlx::query(
+            r#"UPDATE transactions SET recurring_rule_id = NULL
+               WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3
+                 AND recurring_rule_id IS NOT NULL"#,
+        )
+        .bind(id)
+        .bind(iid)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     // Los nuevos amount/op_date pueden abrir (o reabrir) un emparejado → pase antes de invalidar.
@@ -1232,7 +1297,7 @@ pub async fn list_imports(
 ) -> Result<Json<Vec<ImportBatchResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_imports_core(&state.pool, iid, user.id.0, q.resolve()).await?;
+    let out = list_imports_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 

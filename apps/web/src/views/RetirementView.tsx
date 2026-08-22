@@ -40,6 +40,7 @@ import { settingsSubTabPath } from "../lib/navigation";
 import {
   complementaryProjectionTickLabel,
   formatYearsEsFromMonths,
+  lastPointIndexAtOrBeforeMonth,
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
 } from "../lib/projection-chart";
@@ -121,12 +122,24 @@ export function RetirementView({
   })();
   const axisAnchor = projectionSeries?.anchor_date_ymd?.trim() || null;
 
+  // Fuente del ahorro CONFIGURADA (la de los ajustes, no la efectiva del summary): en los modos
+  // con promedio el summary es un input de la KPI, y si se lee de `summary` para decidir si hay
+  // que esperarlo, con summary a null nunca se espera. Ese es justo el bucle que dejaba la
+  // primera pintada con la base del presupuesto.
+  const configuredSavingsUsesTransactions = savingsSourceUsesTransactions(
+    installation?.installation.fire_settings?.savings_source,
+  );
+
   const retirementMetricsReady =
     hasMembership &&
     !projectionBusy &&
     !retirementBusy &&
     projectionSeries != null &&
-    retirementBudgetSnapshot != null;
+    retirementBudgetSnapshot != null &&
+    // En modos B/C la cifra sale del summary: sin él la KPI se pintaba primero con la base del
+    // presupuesto y daba un salto al llegar (o se quedaba mal para siempre si el summary fallaba).
+    // Un número plausible pero equivocado es peor que un guion.
+    (!configuredSavingsUsesTransactions || summary != null);
 
   const installationInflationPct = useMemo(() => {
     const raw = installation?.installation.annual_inflation_assumption_percent;
@@ -386,8 +399,13 @@ export function RetirementView({
       {hasMembership ? (
         <>
           <div className="metric-grid workspace-kpi-strip">
+            {/* Los rótulos estaban cruzados: la cifra grande es `targetNoPen`, euros de HOY, y
+                llevaba el rótulo «(con inflación)»; la inflada (`targetAtCross`) iba en el
+                paréntesis sin rótulo ninguno, así que la única cifra etiquetada era la que no
+                correspondía. */}
             <MetricCard
-              label="Patrimonio objetivo (con inflación)"
+              label="Patrimonio objetivo (euros de hoy)"
+              helpId="retirement.target"
               value={
                 retirementMetricsReady &&
                 fireKpis.targetNoPen !== null &&
@@ -399,7 +417,7 @@ export function RetirementView({
                 retirementMetricsReady &&
                 fireKpis.targetAtCross !== null &&
                 fireKpis.targetAtCross > 0
-                  ? formatCurrencyNumber(fireKpis.targetAtCross, currencyIso)
+                  ? `${formatCurrencyNumber(fireKpis.targetAtCross, currencyIso)} al cruce`
                   : undefined
               }
             />
@@ -482,7 +500,9 @@ export function RetirementView({
               : null;
           const jubLabel =
             jubMi != null
-              ? projectionXTickLabel(jubMi, pts.length, {
+              ? // Meses del horizonte, no puntos del array: con `density=hybrid` `pts.length`
+                // (~82) no es el número de meses y la etiqueta relativa elegía «m» donde tocaba «a».
+                projectionXTickLabel(jubMi, projectionSeries.months, {
                   ageUiMode: axisAgeMode,
                   birthDateIso: axisBirth,
                   anchorDateYmd: axisAnchor,
@@ -495,9 +515,13 @@ export function RetirementView({
           // Si hay jubilación, recortamos la serie a jub+12 (un año después
           // del cruce). El eje Y se zoom-ajusta entre NW(hoy) y NW(fin).
           const clampToMonth = jubMi != null ? jubMi + 12 : null;
+          // `clampToMonth` es un MES y `lastIdx` una POSICIÓN del array: con `density=hybrid`
+          // (0..12, 24, 36…) no son lo mismo, así que el pie del panel enseñaba el patrimonio de
+          // un punto que no era el último visible del chart. Misma traducción mes → posición que
+          // hace MiniProjection con esta misma prop.
           const lastVisibleIdx =
             clampToMonth != null
-              ? Math.min(clampToMonth, lastIdx)
+              ? lastPointIndexAtOrBeforeMonth(pts, clampToMonth)
               : lastIdx;
           const lastVisibleLabel = pts[lastVisibleIdx]
             ? formatCurrencyNumber(pts[lastVisibleIdx].net_worth, currencyIso)

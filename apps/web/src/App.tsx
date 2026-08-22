@@ -17,7 +17,15 @@ import {
   parseDisplayDecimal,
   toApiDecimalString,
 } from "./lib/format";
-import { apiErrorFromResponse, apiGet, defaultFetchInit } from "./api/client";
+import {
+  ApiRequestError,
+  apiErrorFromResponse,
+  apiFetch,
+  apiGet,
+  defaultFetchInit,
+  setUnauthorizedHandler,
+} from "./api/client";
+import { LOGIN_INVALID_CREDENTIALS } from "./lib/errorMessages";
 import { Modal, ModalFormError } from "./components/Modal";
 import { SnapshotPromptModal } from "./components/SnapshotPromptModal";
 import {
@@ -81,14 +89,19 @@ async function fetchProjectionTwoPhase(
   // mismo compute server con cache hit), pero si por algún motivo el monthly
   // llega antes, useTransition garantiza coherencia (la última asignación
   // gana).
-  const hybridPromise = fetch(
+  const hybridPromise = apiFetch(
     projectionSeriesUrl(scope, "hybrid"),
     defaultFetchInit,
   );
-  const monthlyPromise = fetch(
+  const monthlyPromise = apiFetch(
     projectionSeriesUrl(scope),
     defaultFetchInit,
   );
+  // El monthly viaja en paralelo y es SIEMPRE una mejora, nunca un requisito: su fallo no puede
+  // tumbar la fase 1 que ya pintó. Además, si el hybrid falla salimos por el `throw` de abajo
+  // sin haber esperado nunca al monthly, y su rechazo quedaría sin manejar (aviso en consola):
+  // engancharle aquí el catch resuelve las dos cosas de una vez.
+  const monthlySafe = monthlyPromise.catch(() => null);
 
   const hybridRes = await hybridPromise;
   chartPerf.mark("fetch-response");
@@ -96,18 +109,19 @@ async function fetchProjectionTwoPhase(
     const data = (await hybridRes.json()) as ProjectionSeriesApi;
     chartPerf.mark("fetch-end");
     onData(data);
-  } else if (
-    hybridRes.status === 403 ||
-    hybridRes.status === 404
-  ) {
-    // Sesión inválida o sin acceso: nada que hacer; el caller resuelve.
-    throw new Error(`projection hybrid: ${hybridRes.status}`);
+  } else {
+    // Antes solo lanzaba en 403/404 (y el comentario los llamaba «sesión inválida», que es el
+    // 401): con un 401, un 500 o un 502 la función salía en silencio, sin llamar a `onData` ni
+    // lanzar, y la pestaña se quedaba con el esqueleto de carga para siempre. Ahora cualquier
+    // respuesta no-ok se convierte en el error del cliente de API, que ya trae la frase en
+    // español del catálogo — el `Error` a pelo pintaba «projection hybrid: 403» en pantalla.
+    throw await apiErrorFromResponse(hybridRes);
   }
 
   // Phase 2 en background: cuando llega el monthly, reemplaza con
   // startTransition para que el re-render denso no bloquee inputs.
-  const monthlyRes = await monthlyPromise;
-  if (monthlyRes.ok) {
+  const monthlyRes = await monthlySafe;
+  if (monthlyRes?.ok) {
     const full = (await monthlyRes.json()) as ProjectionSeriesApi;
     startTransition(() => onData(full));
   }
@@ -1382,6 +1396,16 @@ export default function App() {
     };
   }, []);
 
+  // Un 401 en CUALQUIER llamada significa que la cookie ya no vale, no que esa acción concreta
+  // haya fallado. Hasta 4.0.0 solo lo miraba `refreshSession`, que corre al montar: si la sesión
+  // caducaba con la pestaña abierta, la app se quedaba enseñando datos que ya no podía refrescar
+  // y devolvía «Tu sesión ha caducado» en un banner tras otro, sin llevar nunca al login. El
+  // cliente de API avisa aquí (ver `setUnauthorizedHandler`) y el gate de auth hace el resto.
+  useEffect(() => {
+    setUnauthorizedHandler(() => setUser(null));
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
   useEffect(() => {
     void refreshSession();
   }, [refreshSession]);
@@ -1407,18 +1431,27 @@ export default function App() {
     }
   }, [installation?.installation.calendar_tz]);
 
+  // Depende de los VALORES, no del objeto `installation`: guardar cualquier ajuste FIRE hace
+  // `setInstallation(updated)`, que es una identidad nueva aunque la inflación no haya cambiado,
+  // y este efecto reescribía el draft borrando lo que el usuario estuviera tecleando en
+  // «Supuesto de inflación anual». Mismo patrón que el draft de zona horaria de arriba.
+  const installationInflationPctServer =
+    installation?.installation.annual_inflation_assumption_percent ?? null;
+  const installationShowAgeModeServer =
+    installation?.installation.show_age_mode ?? null;
   useEffect(() => {
-    if (!installation) {
+    if (installationInflationPctServer == null) {
       setProjectionInflationPctDraft("");
       setShowAgeModeDraft("dates");
       return;
     }
-    const inst = installation.installation;
     setProjectionInflationPctDraft(
-      formatEditableDecimalString(inst.annual_inflation_assumption_percent),
+      formatEditableDecimalString(installationInflationPctServer),
     );
-    setShowAgeModeDraft(inst.show_age_mode === "ages" ? "ages" : "dates");
-  }, [installation]);
+    setShowAgeModeDraft(
+      installationShowAgeModeServer === "ages" ? "ages" : "dates",
+    );
+  }, [installationInflationPctServer, installationShowAgeModeServer]);
 
   useEffect(() => {
     if (!user || installation?.role !== "owner") {
@@ -1704,7 +1737,16 @@ export default function App() {
       setUser(me);
       setPassword("");
     } catch (e: unknown) {
-      setSessionError(e instanceof Error ? e.message : String(e));
+      // Un 401 AQUÍ son credenciales que no cuadran, no una sesión caducada: la frase del
+      // catálogo («Vuelve a iniciar sesión») le pedía a quien escribía mal la contraseña
+      // justamente lo que acababa de intentar.
+      setSessionError(
+        e instanceof ApiRequestError && e.status === 401
+          ? LOGIN_INVALID_CREDENTIALS
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
     } finally {
       setAuthBusy(false);
     }
@@ -1879,9 +1921,25 @@ export default function App() {
     }
   }
 
+  /**
+   * `toApiDecimalString` lanza ante un importe ambiguo (`1.23.4`, dos comas…) en vez de
+   * adivinar — adivinar es lo que hacía que `250.000` se guardara como 250 €. Estos cuatro
+   * submits convierten ANTES de su `try`, así que la excepción se les escaparía como promesa
+   * rechazada: este helper la traduce al error de la vista, que es donde el usuario mira.
+   */
+  function decimalOrReport(raw: string, report: (m: string) => void): string | null {
+    try {
+      return toApiDecimalString(raw);
+    } catch (e) {
+      report(e instanceof Error ? e.message : String(e));
+      return null;
+    }
+  }
+
   async function saveInstallationProjection(ev: FormEvent) {
     ev.preventDefault();
-    const pctTrim = toApiDecimalString(projectionInflationPctDraft);
+    const pctTrim = decimalOrReport(projectionInflationPctDraft, setInstallationError);
+    if (pctTrim === null) return;
     const pctToSend = pctTrim === "" ? "0" : pctTrim;
     const n = Number(pctToSend);
     if (!Number.isFinite(n) || n < 0 || n > 50) {
@@ -2309,7 +2367,8 @@ export default function App() {
       );
       return;
     }
-    const payAmt = toApiDecimalString(liabilityFormPaymentAmount);
+    const payAmt = decimalOrReport(liabilityFormPaymentAmount, setLiabilitiesError);
+    if (payAmt === null) return;
     const payFreq = liabilityFormPaymentFrequency;
     const pend = liabilityFormPaymentEnd.trim();
 
@@ -2500,7 +2559,8 @@ export default function App() {
 
   async function submitBudgetForm(ev: FormEvent) {
     ev.preventDefault();
-    const amt = toApiDecimalString(budgetFormAmount);
+    const amt = decimalOrReport(budgetFormAmount, setBudgetError);
+    if (amt === null) return;
     if (!budgetFormCategoryId || !amt) {
       return;
     }
@@ -2627,7 +2687,8 @@ export default function App() {
 
   async function submitPlanningFlowForm(ev: FormEvent) {
     ev.preventDefault();
-    const amt = toApiDecimalString(planningFormAmount);
+    const amt = decimalOrReport(planningFormAmount, setPlanningError);
+    if (amt === null) return;
     const tit = planningFormTitle.trim();
     if (!planningFormCategoryId || !amt || !tit) {
       return;

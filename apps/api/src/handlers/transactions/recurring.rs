@@ -40,8 +40,14 @@
 //!
 //! Cache de proyección (contrato en `transactions/mod.rs`): la convergencia crea/borra instancias
 //! reales → siempre corre **antes** de la invalidación, para que una sola invalidación cubra la
-//! mutación y su convergencia. **Borrar una regla NO invalida** en ningún modo: la FK
-//! `ON DELETE SET NULL` conserva las instancias, así que el conjunto de transacciones no cambia.
+//! mutación y su convergencia. **Borrar una regla también invalida (COND)**, aunque no borre
+//! ninguna fila: el conjunto de transacciones no cambia, pero su CLASIFICACIÓN sí. `real_txns`
+//! cuenta `recurring_rule_id IS NULL`, y el mes de origen está exento de la poda, así que puede
+//! existir una instancia en un mes sin ningún movimiento real — un mes que el promedio ignora.
+//! Al borrar la plantilla, la FK `ON DELETE SET NULL` convierte esa instancia en movimiento
+//! real, el mes entra en numerador y denominador, y el ahorro del engine cambia. Hasta 4.0.0 el
+//! core recibía un `&PgPool` y era **estructuralmente incapaz** de invalidar: servía proyección
+//! vieja indefinidamente mientras alguien la mirara una vez por hora (TTL deslizante).
 
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
@@ -524,16 +530,17 @@ pub async fn delete_recurring_rule(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
-    delete_recurring_rule_core(&state.pool, iid, user.id.0, id).await?;
+    delete_recurring_rule_core(&state, iid, user.id.0, id).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_recurring_rule`. Solo
-/// borra la plantilla — la FK `transactions.recurring_rule_id` es ON DELETE SET NULL, las
-/// instancias ya materializadas sobreviven → por eso NO invalida la cache (contrato pinneado
-/// en `transactions_projection_cache.rs`).
+/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_recurring_rule`. Borra
+/// solo la plantilla — la FK `transactions.recurring_rule_id` es ON DELETE SET NULL, así que
+/// las instancias ya materializadas sobreviven. Pero al perder el enlace pasan a contar como
+/// movimientos REALES, y eso puede activar un mes que el promedio ignoraba: converge y
+/// **invalida (COND)**. Ver el porqué en la cabecera del módulo.
 pub(crate) async fn delete_recurring_rule_core(
-    pool: &sqlx::PgPool,
+    state: &Arc<AppState>,
     iid: Uuid,
     user_id: Uuid,
     id: Uuid,
@@ -545,10 +552,12 @@ pub(crate) async fn delete_recurring_rule_core(
     .bind(id)
     .bind(iid)
     .bind(user_id)
-    .execute(pool)
+    .execute(&state.pool)
     .await?;
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    converge_recurring_after_mutation(state, iid).await;
+    invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     Ok(())
 }

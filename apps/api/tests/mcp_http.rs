@@ -175,6 +175,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "create_transaction",
             "delete_asset",
             "delete_budget_entry",
+            "delete_categorization_rule",
             "delete_import",
             "delete_liability",
             "delete_planning_flow",
@@ -209,6 +210,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "update_asset",
             "update_asset_value",
             "update_budget_entry",
+            "update_categorization_rule",
             "update_fire_settings",
             "update_liability",
             "update_planning_flow",
@@ -502,6 +504,42 @@ async fn mcp_disabled_returns_404() {
 }
 
 #[tokio::test]
+async fn simulate_cash_axes_carry_their_bound_in_the_json_schema() {
+    // Issue #27, «Nota sobre la descripción»: la cota `>= 0` de los ejes de caja vivía SOLO en
+    // la prosa de la descripción. Un cliente no la ve como restricción — la ve como texto, y
+    // solo si lo lee entero; el error llegaba en runtime. `months` sí la llevaba
+    // (`schemars(range)`), pero `range` no aplica a strings decimales: la forma correcta es
+    // `regex(pattern)`. Es declarativo (rmcp deserializa con serde_json y no valida contra el
+    // schema), así que esto fija la DESCRIPCIÓN del contrato, no su cumplimiento.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(&app, &token, tools_list_body()).await;
+    let tool = resp["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|t| t["name"] == "simulate_projection")
+        .expect("simulate_projection en el catálogo")
+        .clone();
+    let props = &tool["inputSchema"]["properties"];
+
+    for axis in ["extra_monthly_cash_adjustment", "extra_monthly_savings"] {
+        let pattern = props[axis]["pattern"].as_str().unwrap_or_else(|| {
+            panic!("{axis} debe publicar su cota como `pattern` en el schema: {}", props[axis])
+        });
+        assert!(
+            pattern.contains("\\d"),
+            "el patrón de {axis} debe describir un decimal no negativo, y es {pattern}"
+        );
+    }
+    // `months` conserva su cota numérica: las dos formas conviven según el tipo del parámetro.
+    assert_eq!(props["months"]["minimum"], 12);
+    assert_eq!(props["months"]["maximum"], 840);
+}
+
+#[tokio::test]
 async fn tools_list_exposes_annotations_on_every_tool() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
@@ -538,9 +576,19 @@ async fn tools_list_exposes_annotations_on_every_tool() {
             // `apply_categorization_rule` reescribe la categoría/kind de filas históricas: es
             // destructiva aunque no empiece por update_/delete_. Declararlo aquí es deliberado —
             // el resto del catálogo deriva sus hints del prefijo del nombre.
+            // `materialize_recurring` no empieza por update_/delete_ pero PODA instancias
+            // (`pruned` en la respuesta) y su ámbito es la instalación entera, así que puede
+            // borrar movimientos de otro miembro. Con `destructiveHint: false` un cliente MCP
+            // conforme no pedía permiso al humano antes de invocarla.
             let expect_destructive = name.starts_with("update_")
                 || name.starts_with("delete_")
-                || name == "apply_categorization_rule";
+                || matches!(
+                    name,
+                    // `unreconcile_transfer` no borra filas, pero persiste un rechazo que solo
+                    // se limpia volviendo a conciliar el par a mano — y esa acción NO está
+                    // expuesta como tool. Desde el chat es irreversible.
+                    "apply_categorization_rule" | "materialize_recurring" | "unreconcile_transfer"
+                );
             assert_eq!(ann["destructiveHint"], expect_destructive, "tool {name}");
             let expect_idempotent = name.starts_with("update_")
                 || name.starts_with("delete_")
@@ -888,6 +936,11 @@ async fn get_allocation_resolution_matches_http_endpoint() {
     );
 }
 
+/// Nota: `list_categorization_rules` **no** está en este bucle desde 4.0.0. La tool pagina y
+/// envuelve la respuesta en `{total_count, offset, truncated, rules}` mientras el GET sigue
+/// devolviendo el array entero (contrato REST intacto), así que ya no son byte-idénticas —
+/// exactamente como `list_transactions`, que tampoco está aquí. La paridad de contenido la cubre
+/// `list_categorization_rules_paginates_without_changing_the_http_contract`.
 #[tokio::test]
 async fn new_read_tools_match_http_endpoints() {
     let app = TestApp::spawn().await;
@@ -933,11 +986,6 @@ async fn new_read_tools_match_http_endpoints() {
         (
             "list_recurring_rules",
             "/v1/transactions/recurring",
-            serde_json::json!({}),
-        ),
-        (
-            "list_categorization_rules",
-            "/v1/transactions/rules",
             serde_json::json!({}),
         ),
         (
@@ -1073,4 +1121,133 @@ async fn list_snapshots_items_are_opt_in_and_year_validates() {
     let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
     let body: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(body["error"], "bad_request");
+}
+
+/// REGRESIÓN (auditoría MCP §4) — `view` desconocido por MCP devuelve tool-error, no el hogar entero.
+///
+/// Éste era el repro literal del issue: `list_transactions {"view":"no-existe-esta-vista"}` →
+/// 200 con `total_count` del **hogar completo**. La tool no valida por su cuenta — comparte
+/// `LedgerViewQuery::resolve` con el HTTP —, así que lo que fija este test es que el rechazo
+/// **llegue** al cliente MCP como tool-error legible y no como un 200 con otros datos.
+#[tokio::test]
+async fn unknown_view_is_a_tool_error_not_the_whole_household() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("mcp_view_owner").await;
+    let token = create_token(&app, &owner).await;
+
+    for bad in ["no-existe-esta-vista", "MINE", "self"] {
+        for tool in ["list_transactions", "get_summary", "get_history_cashflow"] {
+            let resp = mcp_post(
+                &app,
+                &token,
+                tool_call_body(tool, serde_json::json!({"view": bad})),
+            )
+            .await;
+            assert_eq!(
+                resp["result"]["isError"], true,
+                "{tool} con view={bad} debería ser tool-error: {resp}"
+            );
+            let body: serde_json::Value = serde_json::from_str(
+                resp["result"]["content"][0]["text"].as_str().expect("texto"),
+            )
+            .expect("json de error");
+            assert_eq!(body["code"], "invalid_view", "{tool} view={bad}: {body}");
+        }
+    }
+
+    // Y los válidos siguen sirviendo, `household` explícito incluido.
+    for good in ["mine", "household"] {
+        let resp = mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_transactions", serde_json::json!({"view": good})),
+        )
+        .await;
+        assert_ne!(
+            resp["result"]["isError"], true,
+            "view={good} debería seguir sirviendo: {resp}"
+        );
+    }
+}
+
+/// REGRESIÓN (auditoría MCP §9) — la tool pagina; el GET sigue devolviendo el conjunto entero.
+///
+/// Es la única lista del catálogo que **crece con el uso normal**: `learn_rule` inserta una regla
+/// por concepto distinto en cada import con `learn_rules = true`, así que una instalación con dos
+/// años de extractos devolvía ~100 reglas de una tacada. Para un agente eso es una porción notable
+/// de su ventana de contexto gastada sin pedirlo.
+#[tokio::test]
+async fn list_categorization_rules_paginates_without_changing_the_http_contract() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    for i in 0..5 {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions/rules",
+                serde_json::json!({
+                    "match_kind": "substring", "pattern": format!("COMERCIO {i}"),
+                    "assign_kind": "expense",
+                }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    // HTTP: array desnudo con las 5, sin sobre. El contrato REST no se toca.
+    let http = app
+        .get_with_cookie("/v1/transactions/rules", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(http.as_array().expect("array").len(), 5, "{http}");
+
+    // MCP: sobre con total_count, y `truncated` dice la verdad en las dos direcciones.
+    let page = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_categorization_rules", serde_json::json!({"limit": 2})),
+        )
+        .await,
+    );
+    assert_eq!(page["total_count"], 5, "{page}");
+    assert_eq!(page["offset"], 0, "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    assert_eq!(page["rules"].as_array().expect("rules").len(), 2, "{page}");
+
+    let last = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body(
+                "list_categorization_rules",
+                serde_json::json!({"limit": 2, "offset": 4}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(last["truncated"], false, "la última página no está truncada: {last}");
+    assert_eq!(last["rules"].as_array().expect("rules").len(), 1, "{last}");
+
+    // Y las reglas que sirve la página son las mismas que sirve el GET, en el mismo orden.
+    let full = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_categorization_rules", serde_json::json!({"limit": 200})),
+        )
+        .await,
+    );
+    assert_eq!(full["rules"], http, "el contenido paginado debe ser el del GET");
+
+    // Cota de `limit`.
+    let bad = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_categorization_rules", serde_json::json!({"limit": 999})),
+    )
+    .await;
+    assert_eq!(bad["result"]["isError"], true, "{bad}");
 }

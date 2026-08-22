@@ -275,7 +275,7 @@ export function OnboardingWizard({
                     value={assetValue}
                     onChange={(e) => setAssetValue(e.target.value)}
                     inputMode="decimal"
-                    placeholder="1.500"
+                    placeholder="1500"
                     autoComplete="off"
                   />
                 </label>

@@ -98,14 +98,17 @@ Antes de retomar el trabajo: `git pull --ff-only`.
 
 ## 3. Las puertas — ejecútalas antes de proponer el cambio
 
-**CI no lo cubre todo.** Ejecuta esto en local, literalmente, desde la raíz del repositorio:
+**Córrelas en local aunque CI las repita.** Desde 4.0.0 CI ejecuta las mismas suites, pero
+enterarte en tres minutos en tu máquina es mejor que en quince en un runner — y hay cosas que
+ningún job puede ver (la interfaz de verdad, en tema claro **y** oscuro). Literalmente, desde la
+raíz del repositorio:
 
 ```bash
 # 1. Build de Rust + tests del engine (no necesitan base de datos)
 cargo build -p futurefin-api --locked
 cargo test -p futurefin-engine
 
-# 2. Tests de integración con PostgreSQL — CI NO los ejecuta. Son tu puerta.
+# 2. Tests de integración con PostgreSQL (CI también los corre, en su propio servicio).
 #    Base de datos de test dedicada, en el 5433 para no chocar con la de desarrollo:
 docker run -d --name ff-test-db \
   -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=futurefin_test \
@@ -114,7 +117,7 @@ docker run -d --name ff-test-db \
 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
   cargo test --workspace
 
-# 3. Frontend — el lint y Vitest tampoco están en CI
+# 3. Frontend (CI corre estos cuatro)
 npm run typecheck:web
 npm run lint:web
 npm run build:web
@@ -124,10 +127,19 @@ npm test --workspace futurefin-web
 Cada test de integración crea su propio esquema `ff_test_<uuid>`, le aplica todas las migraciones
 y corre contra el router de verdad.
 
-Lo que sí corre CI (`.github/workflows/ci.yml`): un escáner de datos sensibles, `rust` (build de la
-API + tests del engine), `web` (typecheck + build) y `docker-stack` (shellcheck, build de la imagen
-y los caminos críticos del contenedor). **No** corre los tests de integración, ni `lint:web`, ni
-Vitest.
+Lo que corre CI (`.github/workflows/ci.yml`), seis jobs: `secrets-scan` (escáner de datos
+sensibles), `rust` (build de la API + tests del engine), `web` (`npm ci`, typecheck, **lint**,
+**Vitest**, build), `integration` (**`cargo test --workspace` contra un servicio PostgreSQL
+16.4-alpine**), `main-guard` (que la rama pública no publique documentación interna) y
+`docker-stack` (shellcheck, build de la imagen y los caminos críticos del contenedor, incluida la
+preservación de datos al actualizar).
+
+Hasta la 4.0.0 los tests de integración, `lint:web` y Vitest **no** corrían en CI: eran una
+obligación local, es decir, dependían de que a nadie se le olvidara, y una PR podía salir verde con
+toda la capa de handlers rota. Con el repositorio público eso no se sostiene, así que los tres
+entraron como puertas bloqueantes. Lo que sigue **sin** cubrir ningún job: clippy y rustfmt
+(instalados pero desactivados a conciencia — el repo nunca ha pasado por ellos y activarlos hoy
+dejaría CI en rojo desde el primer push), y cualquier verificación visual.
 
 ### Puertas adicionales según lo que toques
 
@@ -194,6 +206,10 @@ solape de la tabla» está por debajo del listón. Si hubo intentos fallidos pre
   con «actualiza recurring.rs». El primero se puede leer dentro de un año.
 - **El cuerpo** explica el porqué y lleva `Closes #N` si cierra un issue.
 - Un cambio *breaking* se marca en el asunto o en el cuerpo, y además en el CHANGELOG.
+- **Los merges también.** Un commit de merge lleva asunto propio y, en el cuerpo, **los titulares
+  de lo que suma a esa rama**. `git merge dev` a secas escribe «Merge branch 'dev'», que no dice
+  nada y obliga a ir al historial para saber qué entró. Para publicar en `main` usa
+  `./scripts/release-to-main.sh X.Y.Z "<una frase>"`, que lo compone solo.
 
 ## 6. Pull requests
 

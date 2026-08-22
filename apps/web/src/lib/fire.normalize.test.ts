@@ -118,7 +118,7 @@ describe("savingsSourceUsesTransactions", () => {
 describe("savingsBasisParenthetical", () => {
   const avg = (over: Partial<SavingsAvgBasisApi> = {}): SavingsAvgBasisApi => ({
     basis: "average",
-    months_with_data: 3,
+    avg_months: 3,
     window_months: 3,
     window_mode: "calendar",
     first_month: "2026-05",
@@ -131,7 +131,7 @@ describe("savingsBasisParenthetical", () => {
     expect(
       savingsBasisParenthetical({
         basis: "budget",
-        months_with_data: 0,
+        avg_months: 0,
         window_months: 0,
         has_gaps: false,
       }),
@@ -145,7 +145,7 @@ describe("savingsBasisParenthetical", () => {
   it("un solo mes → no repite el rango", () => {
     expect(
       savingsBasisParenthetical(
-        avg({ months_with_data: 1, first_month: "2026-07", last_month: "2026-07" }),
+        avg({ avg_months: 1, first_month: "2026-07", last_month: "2026-07" }),
       ),
     ).toBe("media de jul 2026");
   });
@@ -153,13 +153,13 @@ describe("savingsBasisParenthetical", () => {
   it("con huecos NO finge un rango contiguo", () => {
     expect(
       savingsBasisParenthetical(
-        avg({ months_with_data: 3, first_month: "2024-01", last_month: "2026-07", has_gaps: true }),
+        avg({ avg_months: 3, first_month: "2024-01", last_month: "2026-07", has_gaps: true }),
       ),
     ).toBe("media de 3 meses con datos, hasta jul 2026");
   });
 
   it("sin meses con datos → sin paréntesis", () => {
-    expect(savingsBasisParenthetical(avg({ months_with_data: 0 }))).toBeUndefined();
+    expect(savingsBasisParenthetical(avg({ avg_months: 0 }))).toBeUndefined();
   });
 
   it("ausente → sin paréntesis", () => {

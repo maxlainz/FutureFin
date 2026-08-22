@@ -10,7 +10,13 @@
  */
 
 import { useState, type FormEvent, type ReactNode } from "react";
-import { apiErrorFromResponse, defaultFetchInit } from "../api/client";
+import {
+  ApiRequestError,
+  apiErrorFromResponse,
+  apiFetch,
+  defaultFetchInit,
+} from "../api/client";
+import { LOGIN_INVALID_CREDENTIALS } from "../lib/errorMessages";
 import type { UserResponse } from "../api/types";
 
 export function LoginPanel(props: {
@@ -27,7 +33,7 @@ export function LoginPanel(props: {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/v1/auth/login", {
+      const res = await apiFetch("/v1/auth/login", {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -40,7 +46,15 @@ export function LoginPanel(props: {
       setPassword("");
       props.onAuthenticated(me);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      // Un 401 al ENTRAR son credenciales incorrectas, no una sesión caducada (ver
+      // LOGIN_INVALID_CREDENTIALS): aquí todavía no hay sesión que caducar.
+      setError(
+        e instanceof ApiRequestError && e.status === 401
+          ? LOGIN_INVALID_CREDENTIALS
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
     } finally {
       setBusy(false);
     }

@@ -34,7 +34,11 @@ export function MonthlyCashflowBars({
         income: Number.isFinite(income) ? income : 0,
         expenseMag: Number.isFinite(expenseMag) ? expenseMag : 0,
         savingsMag: Number.isFinite(savingsMag) ? savingsMag : 0,
-        net: Number(m.net),
+        // Las dos cifras, porque dicen cosas distintas. La geometría de la barra ya codifica la
+        // variación de caja (el ahorro se dibuja del lado de los gastos); lo que NO se puede leer
+        // del dibujo es «gané más de lo que gasté», y ésa es la que el tooltip pone primero.
+        cashDelta: Number(m.cash_delta),
+        incomeMinusExpense: Number(m.income_minus_expense),
       };
     });
   const scale = cols.reduce(
@@ -73,7 +77,13 @@ export function MonthlyCashflowBars({
             )} · Ahorro ${formatCurrencyNumber(
               c.savingsMag,
               currencyIso,
-            )} · Neto ${formatCurrencyNumber(c.net, currencyIso)}`}
+            )} · Ingresos − gastos ${formatCurrencyNumber(
+              c.incomeMinusExpense,
+              currencyIso,
+            )} · Variación de caja ${formatCurrencyNumber(
+              c.cashDelta,
+              currencyIso,
+            )}`}
           >
             <div className="cf-col-up">
               <div

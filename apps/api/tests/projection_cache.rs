@@ -45,7 +45,7 @@ async fn projection_series_serves_the_second_get_from_the_cache() {
     // Espera al warm-up post-login y deja la cache vacía: si aterrizara más tarde, repoblaría la
     // entrada y pisaría el centinela.
     app.settle_login_warmup(iid).await;
-    let key = app.household_key(iid);
+    let key = app.household_key(iid, owner.user_id);
 
     // 1. MISS: puebla la cache.
     let r1 = app
@@ -174,7 +174,7 @@ async fn projection_cache_logout_drops_only_user_mine_entries() {
     let key_household = ProjectionCacheKey {
         installation_id,
         view: LedgerView::Household,
-        owner_user_id: None,
+        owner_user_id: Some(user_id),
         density: Density::Monthly,
     };
     let key_mine = ProjectionCacheKey {
@@ -195,12 +195,15 @@ async fn projection_cache_logout_drops_only_user_mine_entries() {
         .await;
     assert_eq!(logout.status, http::StatusCode::NO_CONTENT);
 
-    // Tras logout: household sigue, mine se borró.
+    // Tras logout: las DOS entries del usuario se borran. Desde el arreglo de la clave,
+    // `household` también es suya (lleva su fecha de nacimiento, su horizonte y su edad de
+    // jubilación), así que dejarla viva serviría su demografía a quien entrara después.
+    // Las entries household de OTROS miembros no se tocan: la clave las distingue.
     {
         let cache = app.state.projection_cache.read().await;
         assert!(
-            cache.contains_key(&key_household),
-            "household DEBE sobrevivir al logout (otros miembros pueden seguir conectados)"
+            !cache.contains_key(&key_household),
+            "household del usuario DEBE borrarse al logout: la entrada lleva SU demografía"
         );
         assert!(
             !cache.contains_key(&key_mine),
@@ -302,16 +305,17 @@ async fn projection_hybrid_and_monthly_cache_separately() {
     app.get_with_cookie("/v1/projection/series?density=hybrid", &owner.cookie).await;
 
     let installation_id = installation_id_of(&app, &owner.cookie).await;
+    let user_id = user_id_of(&app, &owner.cookie).await;
     let key_monthly = ProjectionCacheKey {
         installation_id,
         view: LedgerView::Household,
-        owner_user_id: None,
+        owner_user_id: Some(user_id),
         density: Density::Monthly,
     };
     let key_hybrid = ProjectionCacheKey {
         installation_id,
         view: LedgerView::Household,
-        owner_user_id: None,
+        owner_user_id: Some(user_id),
         density: Density::Hybrid,
     };
     {
@@ -358,4 +362,70 @@ async fn user_id_of(app: &TestApp, cookie: &str) -> Uuid {
         .expect("id is string")
         .to_string();
     Uuid::parse_str(&s).expect("valid uuid")
+}
+
+/// REGRESIÓN — la entrada `view=household` es **por usuario**, no compartida.
+///
+/// La clave de cache tenía `owner_user_id: None` en household, pero la respuesta lleva
+/// demografía del **solicitante**: `viewer_birth_date`, `months`/`horizon_years` (derivados de
+/// su edad por la regla `lifespan_90`), `jubilacion_age` y el eje de edades. Con la clave vieja,
+/// el primer miembro que pidiera la proyección dejaba SU horizonte cacheado para todo el hogar:
+/// el siguiente recibía la fecha de nacimiento ajena y, si su horizonte real era mayor, un
+/// «no alcanzas la jubilación» falso. Cifra plausible, silenciosamente incorrecta — el modo de
+/// fallo más caro de este repo.
+///
+/// Owner nace en 1990-01-01 y el miembro en 1992-02-02 (los helpers lo fijan), así que sus
+/// horizontes difieren en ~2 años. Si la cache los confundiera, los dos GET darían lo mismo.
+#[tokio::test]
+async fn household_cache_is_per_user_and_never_serves_another_members_demographics() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        serde_json::json!({"category_id": cat, "name": "X", "current_value": "10000"}),
+        &owner.cookie,
+    )
+    .await;
+    let member = app
+        .register_and_approve_member(&owner, "bob", "member")
+        .await;
+    // Dos usuarios ⇒ cuatro entradas de warm-up (household × {monthly, hybrid} por cada uno).
+    app.settle_login_warmup_for(app.installation_id().await, 2).await;
+
+    let r_owner = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await;
+    assert_eq!(r_owner.status, http::StatusCode::OK);
+    let r_member = app
+        .get_with_cookie("/v1/projection/series", &member.cookie)
+        .await;
+    assert_eq!(r_member.status, http::StatusCode::OK);
+
+    let (jo, jm) = (r_owner.json(), r_member.json());
+    assert_eq!(
+        jo["viewer_birth_date"], "1990-01-01",
+        "el owner debe ver SU fecha de nacimiento: {jo}"
+    );
+    assert_eq!(
+        jm["viewer_birth_date"], "1992-02-02",
+        "el miembro recibió la demografía de otro usuario desde la cache: {jm}"
+    );
+    assert_ne!(
+        jo["months"], jm["months"],
+        "dos miembros de edades distintas deben recibir horizontes distintos: {jo} / {jm}"
+    );
+
+    // Y las dos entradas conviven en la cache, cada una bajo su clave.
+    let iid = app.installation_id().await;
+    assert!(
+        app.cache_contains(&app.household_key(iid, owner.user_id))
+            .await,
+        "falta la entrada household del owner"
+    );
+    assert!(
+        app.cache_contains(&app.household_key(iid, member.user_id))
+            .await,
+        "falta la entrada household del miembro"
+    );
 }
