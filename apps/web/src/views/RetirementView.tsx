@@ -36,7 +36,7 @@ import {
   savingsSourceUsesTransactions,
 } from "../lib/fire";
 import { type LedgerPersonScope } from "../lib/ledger";
-import { TAB_PATH } from "../lib/navigation";
+import { settingsSubTabPath } from "../lib/navigation";
 import {
   complementaryProjectionTickLabel,
   formatYearsEsFromMonths,
@@ -84,6 +84,8 @@ export function RetirementView({
   const [fireDraft, setFireDraft] = useState<FireSettingsApi>(() =>
     defaultFireSettingsApi(),
   );
+  /** Aviso cuando el guardado automático se salta un cambio por datos inválidos. */
+  const [fireAutosaveIssue, setFireAutosaveIssue] = useState<string | null>(null);
   const lastSavedFirePayloadRef = useRef<string>("");
   const fireSaveTimerRef = useRef(0);
   const fireSaveSeqRef = useRef(0);
@@ -255,8 +257,14 @@ export function RetirementView({
 
   const runFireSave = useCallback(() => {
     if (!hasMembership || !canEditFire) return;
+    // Estos dos `return` salían SIN guardar y **sin decir nada**, mientras el pie del panel
+    // seguía prometiendo «Guardado automático». El usuario movía el SWR fuera de rango, veía el
+    // mensaje de guardado y se iba con el cambio perdido. Ahora el aviso es visible.
     const swrN = parseDisplayDecimal(fireDraft.swr_pct);
     if (swrN === null || swrN < 0 || swrN > 4) {
+      setFireAutosaveIssue(
+        "La tasa de retirada segura debe estar entre 0 y 4 %. No se ha guardado.",
+      );
       return;
     }
     if (
@@ -264,8 +272,12 @@ export function RetirementView({
       (fireDraft.fire_number_manual_amount == null ||
         String(fireDraft.fire_number_manual_amount).trim() === "")
     ) {
+      setFireAutosaveIssue(
+        "Has elegido fijar el objetivo a mano pero falta la cifra. No se ha guardado.",
+      );
       return;
     }
+    setFireAutosaveIssue(null);
     const payloadJson = JSON.stringify(fireDraft);
     if (payloadJson === lastSavedFirePayloadRef.current) return;
     const seq = ++fireSaveSeqRef.current;
@@ -343,19 +355,29 @@ export function RetirementView({
         <div className="banner error-banner">{retirementError}</div>
       ) : null}
 
+      {fireAutosaveIssue ? (
+        <div className="banner error-banner" role="alert">
+          {fireAutosaveIssue}
+        </div>
+      ) : null}
+
       {installationInflationPct <= 0 ? (
         <div className="banner info-banner">
-          Inflación a 0%: el target FIRE queda plano en euros de hoy. La fecha objetivo puede ser optimista respecto a tu poder adquisitivo real.{" "}
+          Con la inflación a 0 %, tu objetivo se queda plano en dinero de hoy: la fecha que ves
+          puede ser optimista frente a lo que costará vivir entonces.{" "}
           <a
-            href={TAB_PATH.settings}
+            href={settingsSubTabPath("plan")}
             onClick={(e) => {
               if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
                 return;
               e.preventDefault();
-              navigate(TAB_PATH.settings);
+              // Antes iba a `/ajustes` a secas, y el canonicalizador lo reescribía a la primera
+              // sub-pestaña: el aviso hablaba de la inflación y te dejaba en la pantalla de
+              // aprobar usuarios.
+              navigate(settingsSubTabPath("plan"));
             }}
           >
-            Ajustes
+            Ajustar la inflación
           </a>
           .
         </div>

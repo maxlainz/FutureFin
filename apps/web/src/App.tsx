@@ -37,7 +37,6 @@ import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
 import type { LedgerPersonScope } from "./lib/ledger";
 import {
-  TABS,
   TAB_PATH,
   type SettingsSubTabId,
   type TabId,
@@ -136,6 +135,9 @@ const RetirementView = lazy(() =>
 );
 const ProjectionView = lazy(() =>
   import("./views/ProjectionView").then((m) => ({ default: m.ProjectionView })),
+);
+const OnboardingWizard = lazy(() =>
+  import("./views/OnboardingWizard").then((m) => ({ default: m.OnboardingWizard })),
 );
 const SettingsView = lazy(() =>
   import("./views/SettingsView").then((m) => ({ default: m.SettingsView })),
@@ -282,6 +284,7 @@ export default function App() {
   const [setupCalendarTz, setSetupCalendarTz] = useState("UTC");
   const [calendarTzDraft, setCalendarTzDraft] = useState("UTC");
   const [calendarTzSaving, setCalendarTzSaving] = useState(false);
+  const [currencySaving, setCurrencySaving] = useState(false);
   const [projectionInflationPctDraft, setProjectionInflationPctDraft] =
     useState("");
   const [showAgeModeDraft, setShowAgeModeDraft] = useState<"dates" | "ages">(
@@ -524,20 +527,20 @@ export default function App() {
 
   const visibleSettingsSubTabs = useMemo<SettingsSubTabId[]>(() => {
     const out: SettingsSubTabId[] = [];
-    // «Usuarios» (aprobar acceso) es owner-only; «MCP» (tokens de API, conexiones OAuth y el
-    // toggle de escritura) es de cualquier miembro — los tokens son per-user, viewer incluido.
+    // Orden = de lo que casi todo el mundo toca a lo que toca casi nadie. «General» va primero
+    // porque es donde están el tema, la divisa y la zona horaria; antes el propietario aterrizaba
+    // en «Usuarios» → «Nadie pendiente» y el resto en «MCP», la página más técnica de la app.
+    // «Usuarios» sigue siendo owner-only; «Integraciones» la ve cualquier miembro porque los
+    // tokens de API son per-user, viewer incluido.
+    out.push("general");
+    if (hasMembership) {
+      out.push("plan", "categories", "history");
+    }
     if (isInstallationOwner) {
       out.push("access");
     }
     if (hasMembership) {
-      out.push(
-        "mcp",
-        "calendar",
-        "projection",
-        "retirement",
-        "categories",
-        "history",
-      );
+      out.push("integrations");
     }
     out.push("data");
     return out;
@@ -1707,6 +1710,75 @@ export default function App() {
     }
   }
 
+  // Mientras la cuenta espera aprobación no hay nada que el usuario pueda hacer desde aquí:
+  // antes tenía que recargar a mano para enterarse de que ya le habían dado acceso. Sondeo suave
+  // cada 15 s, solo en ese gate, y se apaga solo al entrar.
+  useEffect(() => {
+    if (installationGate !== "pending") return;
+    const id = window.setInterval(() => {
+      void loadInstallation();
+    }, 15_000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [installationGate]);
+
+  // Asistente de primera vez. Solo el propietario lo ve: es él quien configura el hogar, y un
+  // miembro recién aprobado no debe encontrarse un formulario de configuración global.
+  // `onboarding_completed` ausente (backend antiguo) se trata como completado.
+  const [onboardingSkipped, setOnboardingSkipped] = useState(false);
+  const [onboardingForced, setOnboardingForced] = useState(false);
+  const showOnboarding =
+    installationGate === "member" &&
+    installation?.role === "owner" &&
+    (onboardingForced ||
+      (!onboardingSkipped && installation.installation.onboarding_completed === false));
+
+  /**
+   * Confirmación de borrado del ledger.
+   *
+   * Activos, pasivos, líneas de presupuesto y movimientos previstos se borraban **a un clic**,
+   * sin modal, sin deshacer y sin aviso — mientras categorías, snapshots, movimientos y tokens sí
+   * confirmaban. La misma app con dos criterios opuestos, y el peligroso era el que no preguntaba.
+   *
+   * Se intercepta aquí, en el borde: las vistas siguen llamando a `deleteXRow(id)` sin enterarse.
+   */
+  type PendingDelete = {
+    kind: "asset" | "liability" | "budget" | "planning";
+    id: string;
+  };
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+
+  const DELETE_COPY: Record<PendingDelete["kind"], { title: string; noun: string }> = {
+    asset: { title: "Eliminar activo", noun: "el activo" },
+    liability: { title: "Eliminar pasivo", noun: "el pasivo" },
+    budget: { title: "Eliminar línea del presupuesto", noun: "la línea" },
+    planning: { title: "Eliminar movimiento previsto", noun: "el movimiento" },
+  };
+
+  /** Nombre visible de lo que se va a borrar, para que el modal no diga «¿seguro?» a secas. */
+  function pendingDeleteLabel(pd: PendingDelete): string | null {
+    switch (pd.kind) {
+      case "asset":
+        return assets.find((a) => a.id === pd.id)?.name ?? null;
+      case "liability":
+        return liabilities.find((l) => l.id === pd.id)?.label ?? null;
+      case "planning":
+        return planningFlows.find((f) => f.id === pd.id)?.title ?? null;
+      case "budget":
+        return null;
+    }
+  }
+
+  function confirmPendingDelete() {
+    const pd = pendingDelete;
+    setPendingDelete(null);
+    if (!pd) return;
+    if (pd.kind === "asset") void deleteAssetRow(pd.id);
+    else if (pd.kind === "liability") void deleteLiabilityRow(pd.id);
+    else if (pd.kind === "budget") void deleteBudgetEntryRow(pd.id);
+    else void deletePlanningFlowRow(pd.id);
+  }
+
   async function logout() {
     setAuthBusy(true);
     setSessionError(null);
@@ -1775,6 +1847,35 @@ export default function App() {
       setInstallationError(e instanceof Error ? e.message : String(e));
     } finally {
       setCalendarTzSaving(false);
+    }
+  }
+
+  /**
+   * Cambia la divisa base del hogar. Hasta 3.10.0 estaba clavada a EUR en el código: el único
+   * selector que existía era código muerto e inalcanzable, así que quien no vivía en la eurozona
+   * se quedaba en euros para siempre.
+   *
+   * **No reconvierte nada**: los importes guardados son cifras, no cantidades con divisa. Cambiar
+   * la divisa cambia el símbolo con el que se pintan, y eso hay que decirlo antes, no después.
+   */
+  async function saveInstallationCurrency(next: string) {
+    setCurrencySaving(true);
+    setInstallationError(null);
+    try {
+      const res = await fetch("/v1/installation", {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base_currency: next }),
+      });
+      if (!res.ok) {
+        throw await apiErrorFromResponse(res);
+      }
+      await loadInstallation({ preserveGate: true });
+    } catch (e: unknown) {
+      setInstallationError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCurrencySaving(false);
     }
   }
 
@@ -2959,6 +3060,7 @@ export default function App() {
         health={health}
         healthError={healthError}
         onMobileMenuOpen={() => setMobileNavOpen(true)}
+        showNav={installationGate === "member"}
         extras={
           installationGate === "member" && hasMembership ? (
             <select
@@ -3068,14 +3170,47 @@ export default function App() {
           </div>
         </main>
       ) : installationGate === "pending" ? (
+        // Hasta 3.10.0 esta pantalla entera era «Acceso pendiente» + «Ajustes → Usuarios»: una
+        // instrucción PARA EL PROPIETARIO, enseñada a quien espera, que además no podía cerrar
+        // sesión (el botón vive dentro de Ajustes, inalcanzable en este gate) y veía las nueve
+        // pestañas de navegación sin que ninguna hiciera nada.
         <main className="app-main">
           <div className="workspace">
             <div className="workspace-header">
-              <h2 className="workspace-title">Acceso pendiente</h2>
-              <p className="workspace-sub">
-                <strong>Ajustes → Usuarios</strong>
-              </p>
+              <h2 className="workspace-title">Tu cuenta está esperando aprobación</h2>
             </div>
+            <section className="panel">
+              <p>
+                Ya tienes cuenta en esta instalación de FutureFin, pero todavía no tienes acceso a
+                los datos del hogar. Quien lo administra tiene que darte permiso desde{" "}
+                <strong>Ajustes → Usuarios</strong>.
+              </p>
+              <p className="muted">
+                Avísale de que te has registrado como <strong>{user?.username}</strong>. En cuanto
+                te apruebe, esta página se actualizará sola.
+              </p>
+              {installationError ? (
+                <div className="banner error-banner">{installationError}</div>
+              ) : null}
+              <div className="asset-form-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void loadInstallation()}
+                  disabled={installationBusy}
+                >
+                  Comprobar ahora
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void logout()}
+                  disabled={authBusy}
+                >
+                  Cerrar sesión
+                </button>
+              </div>
+            </section>
           </div>
         </main>
       ) : installationGate === "bootstrap" ? (
@@ -3149,9 +3284,67 @@ export default function App() {
           ) : null}
         </div>
 
+        {pendingDelete ? (
+          <Modal
+            title={DELETE_COPY[pendingDelete.kind].title}
+            open
+            onClose={() => setPendingDelete(null)}
+          >
+            <p>
+              {(() => {
+                const nombre = pendingDeleteLabel(pendingDelete);
+                const noun = DELETE_COPY[pendingDelete.kind].noun;
+                return nombre
+                  ? `Se va a eliminar ${noun} «${nombre}».`
+                  : `Se va a eliminar ${noun}.`;
+              })()}{" "}
+              Esta acción no se puede deshacer.
+            </p>
+            <div className="asset-form-actions">
+              <button type="button" className="ghost" onClick={() => setPendingDelete(null)}>
+                Cancelar
+              </button>
+              <button type="button" className="btn danger" onClick={confirmPendingDelete}>
+                Eliminar
+              </button>
+            </div>
+          </Modal>
+        ) : null}
+
+        {/* Suspense propio: el asistente es lazy y se monta fuera del árbol de vistas. */}
+        {showOnboarding && installation ? (
+          <Suspense fallback={null}>
+          <OnboardingWizard
+            open
+            installation={installation.installation}
+            assetCategories={assetCategories}
+            onFinished={() => {
+              setOnboardingForced(false);
+              setOnboardingSkipped(false);
+              void loadInstallation({ preserveGate: true });
+              void loadAssetsPage();
+            }}
+            onSkip={() => {
+              setOnboardingForced(false);
+              setOnboardingSkipped(true);
+            }}
+          />
+          </Suspense>
+        ) : null}
+
         <Suspense fallback={<p className="muted tight">Cargando…</p>}>
         {activeTab === "summary" ? (
           <SummaryView
+            onAddFirstAsset={() => {
+              resetAssetForm();
+              setAssetModalOpen(true);
+              navigate(TAB_PATH.assets);
+            }}
+            onAddFirstBudgetEntry={() => {
+              resetBudgetForm("income");
+              setBudgetModalOpen(true);
+              navigate(TAB_PATH.budget);
+            }}
             installation={installation}
             loading={installationBusy}
             hasMembership={hasMembership}
@@ -3176,6 +3369,7 @@ export default function App() {
               resetAssetForm();
               setAssetModalOpen(false);
             }}
+            onOpenCategorySettings={() => navigate(settingsSubTabPath("categories"))}
             openNewAssetModal={() => {
               resetAssetForm();
               setAssetModalOpen(true);
@@ -3200,7 +3394,7 @@ export default function App() {
             editingAssetId={editingAssetId}
             assetSaving={assetSaving}
             submitAssetForm={(e) => void submitAssetForm(e)}
-            deleteAssetRow={(id) => void deleteAssetRow(id)}
+            deleteAssetRow={(id) => setPendingDelete({ kind: "asset", id })}
             beginEditAsset={(a) => {
               beginEditAsset(a);
               setAssetModalOpen(true);
@@ -3231,6 +3425,7 @@ export default function App() {
               resetLiabilityForm();
               setLiabilityModalOpen(true);
             }}
+            onOpenCategorySettings={() => navigate(settingsSubTabPath("categories"))}
             liabilities={liabilities}
             liabilitiesBusy={liabilitiesBusy}
             liabilityCategories={liabilityCategories}
@@ -3260,7 +3455,7 @@ export default function App() {
             editingLiabilityId={editingLiabilityId}
             liabilitySaving={liabilitySaving}
             submitLiabilityForm={(e) => void submitLiabilityForm(e)}
-            deleteLiabilityRow={(id) => void deleteLiabilityRow(id)}
+            deleteLiabilityRow={(id) => setPendingDelete({ kind: "liability", id })}
             beginEditLiability={(row) => {
               beginEditLiability(row);
               setLiabilityModalOpen(true);
@@ -3292,6 +3487,7 @@ export default function App() {
               resetBudgetForm();
               setBudgetModalOpen(false);
             }}
+            onOpenCategorySettings={() => navigate(settingsSubTabPath("categories"))}
             openNewBudgetModal={(scope) => {
               resetBudgetForm(scope);
               setBudgetModalOpen(true);
@@ -3317,7 +3513,7 @@ export default function App() {
             editingBudgetEntryId={editingBudgetEntryId}
             budgetSaving={budgetSaving}
             submitBudgetForm={(e) => void submitBudgetForm(e)}
-            deleteBudgetEntryRow={(id) => void deleteBudgetEntryRow(id)}
+            deleteBudgetEntryRow={(id) => setPendingDelete({ kind: "budget", id })}
             beginEditBudgetEntry={(row) => {
               beginEditBudgetEntry(row);
               setBudgetModalOpen(true);
@@ -3384,6 +3580,7 @@ export default function App() {
               resetPlanningFlowForm();
               setPlanningModalOpen(true);
             }}
+            onOpenCategorySettings={() => navigate(settingsSubTabPath("categories"))}
             planningFlows={planningFlows}
             planningLoading={planningLoading}
             planningIncomeCategories={planningIncomeCategories}
@@ -3405,7 +3602,7 @@ export default function App() {
             editingPlanningFlowId={editingPlanningFlowId}
             planningSaving={planningSaving}
             submitPlanningFlowForm={(e) => void submitPlanningFlowForm(e)}
-            deletePlanningFlowRow={(id) => void deletePlanningFlowRow(id)}
+            deletePlanningFlowRow={(id) => setPendingDelete({ kind: "planning", id })}
             beginEditPlanningFlow={(row) => {
               beginEditPlanningFlow(row);
               setPlanningModalOpen(true);
@@ -3451,6 +3648,7 @@ export default function App() {
             user={user}
             themePref={themePref}
             onChangeTheme={setThemePref}
+            onReopenOnboarding={() => setOnboardingForced(true)}
             onLogout={() => void logout()}
             onEditAccount={() => {
               setUserProfileError(null);
@@ -3488,6 +3686,8 @@ export default function App() {
             calendarTzDraft={calendarTzDraft}
             setCalendarTzDraft={setCalendarTzDraft}
             calendarTzSaving={calendarTzSaving}
+            currencySaving={currencySaving}
+            onChangeCurrency={(c: string) => void saveInstallationCurrency(c)}
             saveInstallationCalendarTz={(e) =>
               void saveInstallationCalendarTz(e)
             }
@@ -3567,9 +3767,7 @@ export default function App() {
             runFfbackupImportPreview={runFfbackupImportPreview}
             runFfbackupImportApply={() => void runFfbackupImportApply()}
           />
-        ) : (
-          <PlaceholderTab tabLabel={TABS.find((x) => x.id === activeTab)?.label ?? ""} />
-        )}
+        ) : null}
         </Suspense>
       </main>
         </>
@@ -3584,17 +3782,3 @@ export default function App() {
 
 
 
-function PlaceholderTab({ tabLabel }: { tabLabel: string }) {
-  return (
-    <div className="workspace">
-      <div className="workspace-header">
-        <h2 className="workspace-title">{tabLabel}</h2>
-        <p className="workspace-sub">Próximamente.</p>
-      </div>
-      <div
-        className="panel placeholder-hero"
-        aria-label={`${tabLabel}: pendiente`}
-      />
-    </div>
-  );
-}

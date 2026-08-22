@@ -1,0 +1,13 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Vulnerabilidad de seguridad
+    url: https://github.com/maxlainz/FutureFin/security/advisories/new
+    about: >
+      No abras un issue público. Repórtala en privado por aquí; las condiciones están en
+      SECURITY.md.
+  - name: Documentación
+    url: https://github.com/maxlainz/FutureFin/tree/main/docs
+    about: Instalación, actualizaciones, configuración, copias de seguridad y desarrollo.
+  - name: Contribuir
+    url: https://github.com/maxlainz/FutureFin/blob/main/CONTRIBUTING.md
+    about: Cómo levantar el entorno, qué puertas pasa un cambio y la convención de commits.

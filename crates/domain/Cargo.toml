@@ -3,6 +3,9 @@ name = "futurefin-domain"
 version = "1.0.0"
 edition = "2021"
 publish = false
+license = "AGPL-3.0-only"
+repository = "https://github.com/maxlainz/FutureFin"
+authors = ["Max Lainz"]
 description = "Shared domain types (money, identifiers) for FutureFin"
 
 [dependencies]

@@ -3,7 +3,7 @@
  *
  * Por qué existe: hasta 3.10.0 el mensaje del backend —inglés y técnico— se pintaba literalmente
  * en la UI. Registrarse con un usuario ya existente mostraba «resource conflict»; un CSV con otra
- * divisa, «currency_not_eur: row 3 has currency 'USD' (only EUR is supported)». La API sigue
+ * divisa, «currency_mismatch: row 3 has currency 'USD'…». La API sigue
  * hablando inglés (es superficie para desarrolladores, OpenAPI y clientes de terceros); la
  * traducción vive aquí.
  *
@@ -95,8 +95,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Hay una fecha que no se entiende en el CSV. Exporta el extracto otra vez sin modificarlo.",
   csv_amount_invalid:
     "Hay un importe que no se entiende en el CSV. Exporta el extracto otra vez sin modificarlo.",
-  currency_not_eur:
-    "El archivo trae movimientos en otra divisa. De momento solo se pueden importar movimientos en euros.",
+  currency_mismatch:
+    "El archivo trae movimientos en otra divisa. Solo se pueden importar los que estén en la divisa de tu hogar.",
   preview_confirm_mismatch:
     "El archivo ha cambiado desde la vista previa. Vuelve a empezar la importación.",
   transaction_currency_invalid: "Esa divisa no es válida.",
@@ -375,7 +375,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   token_limit_reached:
     "Has llegado al máximo de tokens. Revoca alguno antes de crear otro.",
   mcp_write_disabled:
-    "La escritura desde Claude está desactivada en este hogar. El propietario puede activarla en Ajustes.",
+    "La escritura desde Claude está desactivada en este hogar. El propietario puede activarla en Ajustes → Integraciones.",
   public_url_underivable:
     "No se ha podido determinar la dirección pública de la aplicación. Revisa la configuración del servidor.",
   redirect_uri_invalid:

@@ -5,6 +5,7 @@ import type {
   InstallationAccess,
   ProjectionSeriesApi,
 } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import { SnapshotButton } from "../components/SnapshotButton";
@@ -69,6 +70,7 @@ export function AssetsView({
   deleteAssetRow,
   beginEditAsset,
   onSaveSnapshot,
+  onOpenCategorySettings,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -106,6 +108,11 @@ export function AssetsView({
   beginEditAsset: (a: AssetApiRow) => void;
   /** Captura un snapshot de activos de hoy. `true` = guardado; lanza `Error` si falla. */
   onSaveSnapshot?: () => Promise<void>;
+  /**
+   * Lleva a `Ajustes → Categorías`. Única salida cuando el hogar se ha quedado sin categorías de
+   * activo (un hogar nuevo nace con las por defecto, así que solo pasa si las borras todas).
+   */
+  onOpenCategorySettings?: () => void;
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
@@ -202,7 +209,10 @@ export function AssetsView({
         <div className="banner info-banner">Sin acceso al hogar.</div>
       ) : null}
 
-      {hasMembership ? (
+      {/* Política de ceros: el bloque entero, no tarjeta a tarjeta. Con activos se pintan las
+          tres cifras aunque alguna valga 0 €; sin ninguno la banda desaparece y hablan los
+          estados vacíos de abajo (tres ceros en la portada fingirían precisión). */}
+      {hasMembership && (assetsBusy || assets.length > 0) ? (
         <div className="metric-grid workspace-kpi-strip">
           <MetricCard
             label="Valor total"
@@ -234,12 +244,6 @@ export function AssetsView({
                 : undefined
             }
           />
-        </div>
-      ) : null}
-
-      {hasMembership && assetCategories.length === 0 && !assetsBusy ? (
-        <div className="banner info-banner">
-          <strong>Activos</strong> · <strong>Ajustes → Categorías</strong>
         </div>
       ) : null}
 
@@ -374,11 +378,20 @@ export function AssetsView({
                   onSave={onSaveSnapshot}
                 />
               ) : null}
-              {canEdit && hasMembership && assetCategories.length > 0 ? (
+              {/* Siempre visible mientras se pueda editar: ocultarlo sin categorías dejaba al
+                  usuario sin salida. Sin categorías queda inerte y el estado vacío de abajo
+                  explica por qué y lleva a crearlas. */}
+              {canEdit && hasMembership ? (
                 <button
                   type="button"
                   className="btn primary icon-btn ledger-toolbar-add"
                   aria-label="Nuevo activo"
+                  title={
+                    assetCategories.length === 0
+                      ? "Necesitas una categoría de activo antes de crear uno"
+                      : "Nuevo activo"
+                  }
+                  disabled={assetCategories.length === 0}
                   onClick={() => openNewAssetModal()}
                 >
                   <PlusIcon />
@@ -386,14 +399,25 @@ export function AssetsView({
               ) : null}
             </div>
           </div>
-          {assetsBusy ? (
-            <p className="muted">Cargando…</p>
-          ) : assets.length === 0 ? (
-            <p className="muted">
-              No hay activos registrados en esta instalación.
-            </p>
-          ) : null}
+          {assetsBusy ? <p className="muted">Cargando…</p> : null}
         </div>
+        {!assetsBusy && hasMembership && assets.length === 0 ? (
+          assetCategories.length === 0 ? (
+            <EmptyState
+              title="Falta una categoría de activo"
+              description="Cada activo se guarda dentro de una categoría (cuentas, fondos, inmuebles). No queda ninguna, así que créala antes de registrar nada."
+              actionLabel={canEdit ? "Crear categorías" : undefined}
+              onAction={canEdit ? onOpenCategorySettings : undefined}
+            />
+          ) : (
+            <EmptyState
+              title="Sin activos"
+              description="Aquí anotas lo que tienes: cuentas, fondos, tu casa, el coche. Con su valor FutureFin calcula tu patrimonio y proyecta cómo crece."
+              actionLabel={canEdit ? "Añadir activo" : undefined}
+              onAction={canEdit ? openNewAssetModal : undefined}
+            />
+          )
+        ) : null}
         {!assetsBusy && assets.length > 0 ? (
           <div className="ledger-by-category-stack">
             {groupRowsByCategoryOrdered(assets, assetCategories, {

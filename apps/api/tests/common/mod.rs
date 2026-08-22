@@ -278,7 +278,13 @@ impl TestApp {
         }
     }
 
-    /// Crea una categoría del scope indicado y devuelve su id.
+    /// Asegura que existe una categoría con ese scope y nombre, y devuelve su id.
+    ///
+    /// **Tolera el 409 a propósito.** Desde 3.10.0 un hogar nuevo nace con un juego de categorías
+    /// por defecto (sin ellas la app no se podía usar recién instalada: el botón de añadir activo
+    /// se escondía). Un test que pida «Nómina» o «Supermercado» se choca con una que ya existe, y
+    /// eso no es un fallo del test: lo que quiere es *tener* esa categoría, no ser quien la crea.
+    /// Reventar aquí obligaría a elegir los nombres de las semillas en función de los tests.
     pub async fn create_category(&self, owner: &LoggedInOwner, scope: &str, name: &str) -> String {
         let resp = self
             .post_json_with_cookie(
@@ -287,8 +293,24 @@ impl TestApp {
                 &owner.cookie,
             )
             .await;
-        assert_eq!(resp.status, http::StatusCode::CREATED, "create_category failed: {resp:?}");
-        resp.json()["id"].as_str().expect("category id is string").to_string()
+        if resp.status == http::StatusCode::CREATED {
+            return resp.json()["id"].as_str().expect("category id is string").to_string();
+        }
+        assert_eq!(
+            resp.status,
+            http::StatusCode::CONFLICT,
+            "create_category failed: {resp:?}"
+        );
+        let list = self.get_with_cookie("/v1/categories", &owner.cookie).await;
+        let found = list
+            .json()
+            .as_array()
+            .expect("categories list")
+            .iter()
+            .find(|c| c["scope"] == scope && c["name"] == name)
+            .unwrap_or_else(|| panic!("409 al crear '{name}' ({scope}) pero no está en la lista"))
+            .clone();
+        found["id"].as_str().expect("category id is string").to_string()
     }
 
     /// Cuenta filas en una tabla del schema de tests (sin filtros adicionales).

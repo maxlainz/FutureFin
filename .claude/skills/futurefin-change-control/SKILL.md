@@ -372,6 +372,13 @@ v1.4.2, `fire_target_series` in v1.2.0), new endpoints, new optional request fie
 
 ## 6. Pre-merge checklist (execute literally, from repo root)
 
+**Step 0 — the issue tracker.** `gh issue list --state open` before you write code, and again
+before you merge. If the change closes an issue, the commit says `Closes #N` and the CHANGELOG
+entry references `(issue #N)`. If it *partially* touches one, say so in the issue rather than
+leaving it silently stale. INCIDENT: #5 and #6 were fully fixed and stayed open because no commit
+mentioned them — found only during the pre-public audit.
+
+
 ```bash
 # 0. Fresh base (CLAUDE.md rule: pull before resuming work)
 git pull --ff-only

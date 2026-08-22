@@ -6,13 +6,123 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-**Qué cambia para ti** — **la app deja de hablarte en inglés cuando algo falla**. Registrarte con un
-usuario que ya existe decía «resource conflict»; ahora dice «Ese nombre de usuario ya está
-registrado. Elige otro». Son 187 mensajes traducidos. Además, escribir importes con coma
-(`1234,5`) ya funciona en todos los formularios —en activos y pasivos el servidor los rechazaba—,
-y varias etiquetas sueltas en inglés («Budget», «Target FIRE», «Runway», «Focus») pasan al
-español. Por dentro: los ficheros de prueba del importador de CSV contenían datos bancarios
-auténticos y se han sustituido por otros fabricados, con un gate automático para que no se repita.
+**Qué cambia para ti** — **la app se puede usar recién instalada, y deja de hablarte en inglés
+cuando algo falla.** Un hogar nuevo nace con categorías, te recibe un asistente que pregunta lo
+imprescindible (divisa, zona horaria, tus supuestos) y cada pantalla vacía explica qué va ahí en
+vez de enseñar un `0 €`. La divisa **ya se puede cambiar** (era EUR y punto). Borrar un activo, un
+pasivo, una línea del presupuesto o un movimiento previsto **ahora pregunta antes**. Los 187
+mensajes de error están en español, escribir importes con coma funciona en todos los formularios,
+y Ajustes pasa de ocho apartados a siete, agrupados por lo que quieres hacer y no por dónde vive
+el dato. Por dentro: los ficheros de prueba del importador contenían datos bancarios auténticos y
+se han sustituido por otros fabricados, con un gate automático para que no se repita.
+
+### La app no se podía usar recién instalada
+
+Un hogar nuevo nacía con **cero categorías** —la migración original lo decía con todas las letras:
+«No server-side seeding; clients create categories as needed»— y la vista de Activos **escondía el
+botón de añadir** cuando no había ninguna. El primer usuario aterrizaba en un Resumen en blanco,
+iba a Activos y se encontraba una pantalla sin salida cuya única pista era una miga de pan de dos
+palabras («Activos · Ajustes → Categorías») que ni siquiera era un enlace.
+
+- **El hogar nace con categorías** (`seed_default_categories`): cuatro de activo, tres de pasivo,
+  dos de ingreso y siete de gasto, dentro de la misma transacción que crea la instalación. Son un
+  punto de partida, no un dogma: se renombran y se borran como cualquier otra.
+- **El botón «+» ya no se esconde nunca.** Si de verdad falta una categoría, se queda deshabilitado
+  y el estado vacío explica por qué y a dónde ir.
+- **Asistente de primera vez** (`OnboardingWizard`): divisa y zona horaria → inflación y tasa de
+  retirada → primer activo → un resumen de para qué sirve cada pestaña. Saltable, y reabrible
+  desde Ajustes → General. La zona horaria se propone desde el navegador: el servidor ponía `UTC`,
+  y con eso «el gasto de hoy» podía caer en el día equivocado.
+- **Estados vacíos con acción** en Resumen, Activos, Pasivos, Presupuesto y Próximos, siguiendo el
+  patrón que ya funcionaba en Movimientos. Con ellos se unifica la política de ceros, que estaba
+  partida: el Resumen ocultaba las KPI a cero mientras el resto pintaba `0 €`. Ahora la unidad es
+  el **bloque**: con datos se pintan todas las cifras (un cero real es información), y sin datos el
+  bloque entero deja paso a una explicación.
+
+### La divisa base estaba clavada a EUR
+
+`bootstrap_installation_as_owner_if_empty` insertaba `VALUES ('EUR', 'dates')` y `base_currency` no
+estaba en el PATCH de la instalación. El único selector de divisa del código vivía en
+`BootstrapInstallationPanel`, **inalcanzable**: el registro crea la instalación, así que la pantalla
+que lo contenía no llegaba a mostrarse nunca. Un usuario fuera de la eurozona se quedaba en euros
+para siempre, con «Moneda base: EUR» en Ajustes y ningún control al lado.
+
+Ahora `base_currency` se cambia en **Ajustes → General** (owner-only, EUR/USD/GBP) y en el paso 1
+del asistente. **Una sola divisa por instalación**: FutureFin no convierte ni mezcla, y cambiarla
+no reconvierte los importes ya guardados — el aviso lo dice antes, no después.
+
+De paso, el import de CSV deja de exigir euros a fuego: valida contra la divisa del hogar. El
+código de error `currency_not_eur` pasa a llamarse **`currency_mismatch`**, que es lo que de verdad
+comprueba.
+
+### La pantalla de «acceso pendiente» era una trampa
+
+Quien se registraba en segundo lugar veía esto, y nada más: «Acceso pendiente» + «Ajustes →
+Usuarios» — una instrucción **para el propietario**, enseñada a quien espera. No podía cerrar
+sesión (el botón vive dentro de Ajustes, inalcanzable en ese gate), y las nueve pestañas de
+navegación se pintaban igual aunque ninguna hiciera nada al pulsarla.
+
+Ahora explica qué pasa y con qué usuario se registró, ofrece **cerrar sesión** y **comprobar
+ahora**, se refresca sola cada 15 segundos —para entrar en cuanto la aprueben— y la navegación
+muerta desaparece (`TopBar` gana `showNav`).
+
+### Cuatro borrados permanentes iban a un clic
+
+Activo, pasivo, línea de presupuesto y movimiento previsto se borraban sin modal, sin deshacer y
+sin aviso, mientras categorías, snapshots, movimientos y tokens **sí** confirmaban: la misma app
+con dos criterios opuestos, y el peligroso era el que no preguntaba. Ahora los cuatro pasan por una
+confirmación que nombra lo que se va a borrar. Se intercepta en el borde de `App.tsx`, así que las
+vistas no se enteran.
+
+### Ajustes: ocho apartados partidos por dónde vive el dato
+
+La sub-pestaña «Jubilación» contenía **solo** los tramos de IRPF, mientras el SWR y el objetivo FIRE
+vivían en la **pestaña** «Jubilación»: dos cosas con el mismo nombre y mitades del mismo concepto.
+«Proyección» mezclaba un supuesto económico (inflación), una preferencia de visualización (modo
+edad) y el modo del motor bajo una sola cabecera. Y el propietario aterrizaba en «Usuarios» →
+«Nadie pendiente», mientras el resto aterrizaba en «MCP», la página más técnica de la app.
+
+Ahora son siete, ordenadas de lo que casi todo el mundo toca a lo que toca casi nadie:
+**General** (apariencia, divisa, zona horaria, asistente, datos de la instalación y estado del
+sistema) · **Plan** (todo el plan junto) · **Categorías** · **Histórico** · **Usuarios** ·
+**Integraciones** (MCP, tokens, conexiones) · **Copias de seguridad**.
+
+Los slugs antiguos siguen resolviendo (`/ajustes/mcp` → Integraciones, `/ajustes/jubilacion` →
+Plan): un enlace guardado que no se reconoce acaba en la primera sub-pestaña **sin decir nada**,
+que es peor que un 404.
+
+### Fixed — el aviso de la inflación llevaba a la pantalla equivocada
+
+El banner de Jubilación navegaba a `/ajustes` a secas y el canonicalizador lo reescribía a la
+primera sub-pestaña: hablaba de la inflación y te dejaba en la pantalla de aprobar usuarios. Ahora
+va a **Ajustes → Plan**, donde está el ajuste del que habla.
+
+### Fixed — el guardado automático del plan fallaba en silencio
+
+`runFireSave` salía **sin guardar y sin avisar** cuando el SWR estaba fuera de rango o faltaba el
+objetivo manual, mientras el pie del panel seguía prometiendo «Guardado automático». El usuario
+movía el control, leía que se había guardado, y se iba con el cambio perdido. Ahora sale un aviso.
+
+### Fixed — la contraseña equivocada de un backup decía «tu sesión ha caducado»
+
+`CryptoError::Decrypt` mapeaba a `Unauthorized` (401), que con el catálogo español se habría leído
+como «Tu sesión ha caducado. Vuelve a iniciar sesión» — y habría mandado al usuario a reiniciar
+sesión en vez de reescribir la contraseña del fichero, que es el error más frecuente de todo el
+flujo de importación. Ahora es **400 `backup_wrong_password`**: la sesión es válida; lo que no
+cuadra es la contraseña del archivo.
+
+### Migración
+
+`20260822120000_installation_onboarding.sql` — aditiva y sin pérdida. Añade
+`installation.onboarding_completed_at`; las instalaciones que ya existen se marcan como
+completadas, porque su dueño ya configuró el hogar a mano y enseñarle un asistente de bienvenida
+ahora sería absurdo.
+
+### Limpieza
+
+`PlaceholderTab` («Próximamente.») era inalcanzable desde que las nueve pestañas tienen vista
+propia: fuera, junto a su rama de render. La clase `dev-panel` deja de viajar a producción y
+«Estado del sistema» ya no enseña `/v1/health` como si el usuario supiera qué es.
 
 ### Los errores de la API se pintaban en inglés y en jerga
 
