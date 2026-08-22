@@ -27,6 +27,26 @@ const KDF_M_COST: u32 = 19_456;
 const KDF_T_COST: u32 = 2;
 const KDF_P_COST: u32 = 1;
 
+/// Techos de los parámetros del KDF **al importar**.
+///
+/// El manifiesto viaja en claro y queda FUERA del AAD (que solo cubre `schema_version`,
+/// `user_id_original` y `exported_at`), así que sus `kdf.*` son entrada no autenticada: los
+/// elige quien fabrica el fichero. `Params::new` no ayuda — en argon2 0.5 `MAX_M_COST` es
+/// `u32::MAX` y el propio crate documenta que no lo comprueba —, y `hash_password_into`
+/// reserva `vec![Block; m_cost]`, 1 KiB por bloque. Sin techo, un `.ffbackup` de 200 bytes con
+/// `m_cost: 8000000` pide 8 GB y se lleva por delante el contenedor entero, PostgreSQL
+/// embebido incluido. Los topes son holgados respecto a lo que exporta el servidor
+/// (19.456 / 2 / 1) para no romper ficheros de versiones futuras que suban el coste.
+const MAX_IMPORT_M_COST: u32 = 262_144; // 256 MiB
+const MAX_IMPORT_T_COST: u32 = 10;
+const MAX_IMPORT_P_COST: u32 = 4;
+
+/// Techo del texto en claro tras descomprimir. El AEAD no defiende de esto: **el atacante es
+/// quien cifra**, con su propia contraseña, así que una bomba gzip pasa la autenticación y
+/// llega intacta a `read_to_end`. El límite de cuerpo (16 MiB) acota la entrada, no la salida:
+/// 12 MB de ceros comprimen a ~12 KB y descomprimen a decenas de GB.
+const MAX_PLAINTEXT_BYTES: u64 = 128 * 1024 * 1024;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ManifestKdf {
     pub alg: String,
@@ -86,10 +106,17 @@ fn gzip_compress(plain: &[u8]) -> Result<Vec<u8>, CryptoError> {
 }
 
 fn gzip_decompress(zipped: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    let mut dec = GzDecoder::new(zipped);
+    // `take` acota la salida: sin él, un payload cifrado por el atacante con su propia
+    // contraseña descomprime sin límite hasta agotar la memoria del contenedor.
+    let mut dec = GzDecoder::new(zipped).take(MAX_PLAINTEXT_BYTES + 1);
     let mut out = Vec::new();
     dec.read_to_end(&mut out)
         .map_err(|_| CryptoError::Bad("backup_file_corrupt: payload decompression failed".into()))?;
+    if out.len() as u64 > MAX_PLAINTEXT_BYTES {
+        return Err(CryptoError::Bad(
+            "backup_file_too_large: el contenido descomprimido supera el máximo admitido".into(),
+        ));
+    }
     Ok(out)
 }
 
@@ -224,6 +251,15 @@ pub fn decrypt_payload(parsed: &ParsedFrame, password: &str) -> Result<Vec<u8>, 
         return Err(CryptoError::Bad("backup_file_corrupt: nonce length invalid".into()));
     }
 
+    if parsed.manifest.kdf.m_cost > MAX_IMPORT_M_COST
+        || parsed.manifest.kdf.t_cost > MAX_IMPORT_T_COST
+        || parsed.manifest.kdf.p_cost > MAX_IMPORT_P_COST
+        || parsed.manifest.kdf.out_len as usize != KEY_LEN
+    {
+        return Err(CryptoError::Bad(
+            "backup_crypto_params_unsupported: kdf params out of range".into(),
+        ));
+    }
     let params = Params::new(
         parsed.manifest.kdf.m_cost,
         parsed.manifest.kdf.t_cost,

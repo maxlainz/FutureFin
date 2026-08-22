@@ -1,7 +1,8 @@
 use crate::error::{ErrorBody, ErrorCode};
 #[allow(unused_imports)]
 use crate::handlers::auth::{
-    __path_login, __path_logout, __path_me, __path_patch_me, __path_register,
+    __path_change_password, __path_login, __path_logout, __path_me, __path_patch_me,
+    __path_register,
 };
 #[allow(unused_imports)]
 use crate::handlers::backup_user::export::__path_export_user_backup;
@@ -30,6 +31,10 @@ use crate::handlers::history::{
 use crate::handlers::installation::{
     __path_get_installation_session_context, __path_get_my_installation,
     __path_patch_my_installation, __path_setup_installation,
+};
+#[allow(unused_imports)]
+use crate::handlers::members::{
+    __path_list_members, __path_remove_member, __path_update_member_role,
 };
 #[allow(unused_imports)]
 use crate::handlers::pending_users::{__path_approve_pending_user, __path_list_pending_users};
@@ -91,14 +96,54 @@ use crate::handlers::transactions::summary::{__path_get_category_series, __path_
 use axum::Json;
 use utoipa::OpenApi;
 
+/// Declara cómo se autentica la API. Sin esto la spec presentaba **81 operaciones con sesión
+/// obligatoria como si fueran públicas**, y cualquier cliente generado a partir de ella nacía
+/// sin enviar credencial ninguna.
+///
+/// Son dos credenciales distintas y no intercambiables: la cookie `ff_session` la usa la SPA;
+/// el Bearer (`ffp_…` de un token de API, `ffo_…` de OAuth) solo vale para `/mcp`, que
+/// deliberadamente no está en esta spec — se declara porque las respuestas 401 de la API lo
+/// mencionan y un lector necesita saber que existe.
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{
+            ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme,
+        };
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "ff_session",
+            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description(
+                "ff_session",
+                "Cookie de sesión (HttpOnly, SameSite=Lax). La emite POST /v1/auth/login.",
+            ))),
+        );
+        components.add_security_scheme(
+            "bearer_token",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .description(Some(
+                        "Token de API (`ffp_…`) o access token OAuth (`ffo_…`). Solo lo acepta /mcp.",
+                    ))
+                    .build(),
+            ),
+        );
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
+    modifiers(&SecurityAddon),
+    security(("ff_session" = [])),
     paths(
         health_check,
         ready_check,
         register,
         login,
         logout,
+        change_password,
         me,
         patch_me,
         get_installation_session_context,
@@ -107,6 +152,9 @@ use utoipa::OpenApi;
         setup_installation,
         list_pending_users,
         approve_pending_user,
+        list_members,
+        update_member_role,
+        remove_member,
         list_categories,
         create_category,
         patch_category,
@@ -184,6 +232,10 @@ use utoipa::OpenApi;
         crate::handlers::auth::LoginBody,
         crate::handlers::auth::PatchMeBody,
         crate::handlers::auth::UserResponse,
+        crate::handlers::auth::ChangePasswordBody,
+        crate::handlers::members::MemberResponse,
+        crate::handlers::members::AssignableRole,
+        crate::handlers::members::UpdateMemberRoleBody,
         crate::handlers::installation::FireNumberMode,
         crate::handlers::installation::SavingsSource,
         crate::handlers::installation::FireSettings,

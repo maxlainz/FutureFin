@@ -167,7 +167,7 @@ pub fn normalize_kind(raw: &str) -> Result<String, ApiError> {
 /// promedio real que alimenta la proyección — la tasa de ahorro sube y la fecha FIRE se adelanta,
 /// sin que nada lo señale. Hasta 4.0.0 la invariante solo la aplicaba un componente de React
 /// (`ManualCashEntryModal`), así que el servidor aceptaba `{amount: "23.50", kind: "expense"}` con
-/// un 201 (issue #7 §3).
+/// un 201 (auditoría MCP §3).
 ///
 /// **Solo se aplica a la escritura manual** (alta y edición de un movimiento suelto). El
 /// importador de CSV y el restore de `.ffbackup` quedan fuera a propósito: traen el signo real del
@@ -455,6 +455,7 @@ pub struct PreviewRow {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[schema(as = TransactionImportPreviewResponse)]
 pub struct ImportPreviewResponse {
     /// Preset detectado: `myinvestor` | `n26`.
     pub source: String,

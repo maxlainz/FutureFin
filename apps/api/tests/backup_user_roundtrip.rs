@@ -505,7 +505,7 @@ async fn backup_import_invalidates_projection_cache() {
     let key = ProjectionCacheKey {
         installation_id: iid,
         view: LedgerView::Household,
-        owner_user_id: None,
+        owner_user_id: Some(owner.user_id),
         density: Density::Monthly,
     };
 
@@ -944,4 +944,70 @@ async fn v7_backup_imports_and_reconciles_retroactively() {
         );
         assert_eq!(t["transfer_reconciled_source"], "auto");
     }
+}
+
+/// REGRESIÓN — el manifiesto de un `.ffbackup` es entrada **no autenticada** y sus parámetros
+/// de Argon2id tienen techo.
+///
+/// El AAD del AES-GCM solo cubre `schema_version`, `user_id_original` y `exported_at`; los
+/// `kdf.*` viajan en claro y fuera de él, así que quien fabrica el fichero los elige. En
+/// argon2 0.5 `MAX_M_COST` es `u32::MAX` y `Params::new` no lo comprueba, mientras que
+/// `hash_password_into` reserva 1 KiB por unidad de `m_cost`: un fichero de 200 bytes con
+/// `m_cost: 8000000` pedía 8 GB y se llevaba por delante el contenedor entero —PostgreSQL
+/// embebido incluido— desde el endpoint de **preview**, que ni siquiera escribe.
+///
+/// El fichero se manipula sin recifrar nada: se parsea el marco, se toca el JSON del
+/// manifiesto y se rearma. Se rechaza ANTES de derivar la clave, así que el test es
+/// instantáneo — si algún día deja de serlo, es que la guardia desapareció.
+#[tokio::test]
+async fn import_rejects_a_manifest_with_out_of_range_kdf_parameters() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    create_asset(&app, &owner.cookie, &cat, "A", "10000").await;
+    let good = export_ffbackup_b64(&app, &owner.cookie).await;
+
+    // Desarmar el marco: [magic 4][format_version 1][manifest_len u32 LE][manifest][ciphertext]
+    let bytes = B64.decode(good.as_bytes()).expect("base64 del export");
+    let manifest_len = u32::from_le_bytes(bytes[5..9].try_into().unwrap()) as usize;
+    let head = &bytes[..9];
+    let manifest_json = &bytes[9..9 + manifest_len];
+    let ciphertext = &bytes[9 + manifest_len..];
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(manifest_json).expect("manifiesto json");
+
+    // El original tiene que ser sano, o el test no probaría nada.
+    assert_eq!(manifest["kdf"]["m_cost"], 19_456, "manifiesto exportado: {manifest}");
+
+    for (campo, valor) in [
+        ("m_cost", serde_json::json!(8_000_000u32)), // ~8 GB de reserva
+        ("t_cost", serde_json::json!(1_000_000u32)), // horas de CPU
+        ("p_cost", serde_json::json!(64u32)),
+        ("out_len", serde_json::json!(1024u32)),
+    ] {
+        manifest["kdf"][campo] = valor.clone();
+        let tampered = serde_json::to_vec(&manifest).expect("serializar manifiesto");
+        let mut frame = head[..5].to_vec();
+        frame.extend_from_slice(&(tampered.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&tampered);
+        frame.extend_from_slice(ciphertext);
+
+        let r = import_preview(&app, &owner.cookie, &B64.encode(&frame)).await;
+        assert_eq!(
+            r.status,
+            http::StatusCode::BAD_REQUEST,
+            "kdf.{campo} = {valor} debe rechazarse, no intentar derivar la clave: {r:?}"
+        );
+        assert_eq!(
+            r.json()["code"], "backup_crypto_params_unsupported",
+            "kdf.{campo}: código de error inesperado: {}",
+            r.json()
+        );
+        // Restaurar el campo para probar el siguiente de forma aislada.
+        manifest = serde_json::from_slice(manifest_json).expect("manifiesto json");
+    }
+
+    // Y el fichero intacto sigue importándose.
+    let ok = import_preview(&app, &owner.cookie, &good).await;
+    assert_eq!(ok.status, http::StatusCode::OK, "el export legítimo debe seguir valiendo: {ok:?}");
 }

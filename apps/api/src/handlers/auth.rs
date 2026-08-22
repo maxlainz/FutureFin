@@ -131,6 +131,7 @@ fn user_row_to_response(row: UserRow) -> UserResponse {
 #[utoipa::path(
     post,
     path = "/v1/auth/register",
+    security(()),
     tag = "auth",
     request_body = RegisterBody,
     responses(
@@ -150,7 +151,7 @@ pub async fn register(
         validate_birth_date(d)?;
         d
     };
-    let hash = password::hash_password(&body.password)?;
+    let hash = password::hash_password_blocking(&body.password).await?;
     let mut tx = state.pool.begin().await?;
     let row: UserRow = sqlx::query_as(
         r#"INSERT INTO users (username, password_hash, birth_date)
@@ -196,6 +197,7 @@ pub async fn register(
 #[utoipa::path(
     post,
     path = "/v1/auth/login",
+    security(()),
     tag = "auth",
     request_body = LoginBody,
     responses(
@@ -215,10 +217,13 @@ pub async fn login(
     .bind(&body.username)
     .fetch_optional(&state.pool)
     .await?;
+    // Se verifica SIEMPRE, exista el usuario o no: la rama inexistente pasa por el mismo
+    // coste de Argon2id, así que el 401 no delata quién tiene cuenta (ver `password.rs`).
+    let stored = user.as_ref().map(|u| u.password_hash.clone());
+    password::verify_password_blocking(&body.password, stored).await?;
     let Some(user) = user else {
         return Err(ApiError::Unauthorized);
     };
-    password::verify_password(&body.password, &user.password_hash)?;
     let expires_at = Utc::now() + Duration::days(state.session_ttl_days);
     let sid: Uuid = sqlx::query_scalar(
         r#"INSERT INTO sessions (user_id, expires_at) VALUES ($1, $2) RETURNING id"#,
@@ -373,4 +378,96 @@ pub async fn patch_me(
     }
 
     Ok(Json(user_row_to_response(row)))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChangePasswordBody {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// Cambio de contraseña — y, con él, el corte de todo lo que la contraseña vieja sostenía.
+///
+/// Hasta 4.0.0 `hash_password` solo se llamaba en `register`: no había forma de rotar la
+/// contraseña. Una cookie esnifada en la wifi de casa (`COOKIE_SECURE=false` por defecto, tras
+/// proxy), una sesión abierta en un equipo compartido o una filtración en otro servicio daban
+/// `SESSION_TTL_DAYS` de acceso completo sin que la víctima pudiera hacer nada — y `SECURITY.md`
+/// describía el comportamiento de este endpoint como si existiera.
+///
+/// Cambiar la contraseña **revoca las otras tres credenciales** en la misma transacción: las
+/// demás sesiones, los tokens de API (`ffp_…`) y las concesiones OAuth. Es el default seguro:
+/// si la razón del cambio es un compromiso, dejar viva una credencial que no caduca haría el
+/// cambio decorativo. La sesión desde la que se llama sobrevive, para no echar al usuario de la
+/// app al terminar.
+///
+/// AVISO documentado en `SECURITY.md`: los `.ffbackup` ya exportados siguen atados a la
+/// contraseña con la que se generaron. No se recifran.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/password",
+    tag = "auth",
+    request_body = ChangePasswordBody,
+    responses(
+        (status = 204, description = "Contraseña cambiada; el resto de credenciales revocadas"),
+        (status = 400, description = "La contraseña actual no es correcta, o la nueva no cumple la política"),
+        (status = 401, description = "Sin sesión válida"),
+    )
+)]
+pub async fn change_password(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Json(body): Json<ChangePasswordBody>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let current_sid = jar
+        .get(SESSION_COOKIE)
+        .and_then(|c| Uuid::parse_str(c.value()).ok());
+
+    let stored: String =
+        sqlx::query_scalar(r#"SELECT password_hash FROM users WHERE id = $1"#)
+            .bind(user.id.0)
+            .fetch_one(&state.pool)
+            .await?;
+    // 400 y no 401: la sesión es válida: lo que falla es el dato del formulario. Un 401 haría
+    // que la SPA echara al usuario al login por escribir mal su propia contraseña.
+    password::verify_password_blocking(&body.current_password, Some(stored))
+        .await
+        .map_err(|_| {
+            ApiError::BadRequest(
+                "current_password_invalid: la contraseña actual no es correcta".into(),
+            )
+        })?;
+    let hash = password::hash_password_blocking(&body.new_password).await?;
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(r#"UPDATE users SET password_hash = $2 WHERE id = $1"#)
+        .bind(user.id.0)
+        .bind(&hash)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"DELETE FROM sessions WHERE user_id = $1 AND ($2::uuid IS NULL OR id <> $2)"#,
+    )
+    .bind(user.id.0)
+    .bind(current_sid)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"UPDATE api_tokens SET revoked_at = now()
+           WHERE user_id = $1 AND revoked_at IS NULL"#,
+    )
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"UPDATE oauth_grants SET revoked_at = now(), revoked_reason = 'password_change'
+           WHERE user_id = $1 AND revoked_at IS NULL"#,
+    )
+    .bind(user.id.0)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    tracing::info!(user_id = %user.id.0, "password changed; other sessions, api tokens and oauth grants revoked");
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
