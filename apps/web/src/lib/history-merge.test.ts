@@ -41,6 +41,7 @@ function makeHistory(
     anchor_date_ymd: ANCHOR,
     anchor_month_first_ymd: "2026-07-01",
     view: "household",
+    liabilities_snapshotted: true,
     points: [
       { month_index: -1, net_worth: 900, assets_total: 900, liabilities_total: 0 },
       { month_index: -2, net_worth: 800, assets_total: 800, liabilities_total: 0 },

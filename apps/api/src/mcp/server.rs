@@ -1056,7 +1056,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_history",
-        description = "Serie histórica de patrimonio neto reconstruida desde los snapshots del usuario (interpolación servidor). month_index 0 = mes actual, negativos = pasado. Los valores de las series son números para el chart; los markers son los snapshots reales. Acota con window_months si solo necesitas lo reciente; asset_series es opt-in.",
+        description = "Serie histórica de patrimonio neto reconstruida desde los snapshots del usuario (interpolación servidor). month_index 0 = mes actual, EVALUADO EN EL DÍA DE HOY (los meses negativos, en su día 1), así que el último punto empalma con el patrimonio vivo y cuadra con get_summary.net_worth. Los valores de las series son números para el chart; los markers son los snapshots reales. OJO a liabilities_snapshotted: si es false, liabilities_total vale 0 en toda la serie porque no hay snapshots de pasivo, NO porque no haya deuda — el patrimonio neto histórico no la resta, y la deuda viva está en list_liabilities o get_summary. Acota con window_months si solo necesitas lo reciente; asset_series es opt-in.",
         annotations(title = "Histórico de patrimonio", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_history(

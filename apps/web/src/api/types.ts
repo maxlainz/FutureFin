@@ -420,6 +420,10 @@ export type HistorySeriesApi = {
   points: HistoryPointApi[];
   asset_series: HistoryAssetSeriesApi[];
   markers: HistoryMarkerApi[];
+  /** `false` ⇒ `points[].liabilities_total` vale 0 por falta de snapshots de pasivo, no porque no
+   *  haya deuda. El chart no lo usa (descarta el punto `month_index >= 0` y el pasado sale de los
+   *  snapshots que haya); existe para el consumidor MCP, que lee la cifra sin contexto. */
+  liabilities_snapshotted: boolean;
 };
 
 /** Ítem de un snapshot (CRUD Decimal-as-string). Los términos solo aplican a pasivos. */
