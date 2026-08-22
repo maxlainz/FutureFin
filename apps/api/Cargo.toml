@@ -11,7 +11,7 @@ authors = ["Max Lainz"]
 [dependencies]
 aes-gcm = "0.10"
 argon2 = "0.5"
-base64 = "0.22"
+base64 = "0.23"
 csv = "1"
 encoding_rs = "0.8"
 flate2 = "1.0"
