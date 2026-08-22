@@ -1320,6 +1320,7 @@ export function GastosView({
             onChanged={() => void handleMutated()}
           />
           <EditTransactionModal
+            today={today}
             target={editTarget}
             onClose={() => setEditTarget(null)}
             isMobile={isMobile}
@@ -1430,6 +1431,7 @@ function EditTransactionModal({
   categoryFitsKind,
   onSaved,
   onUnreconciled,
+  today,
 }: {
   target: TransactionApi | null;
   onClose: () => void;
@@ -1445,6 +1447,10 @@ function EditTransactionModal({
   onSaved: (updated: TransactionApi) => void;
   /** Par roto: la vista cierra el modal y recarga (ambas patas vuelven a los totales). */
   onUnreconciled: (pair: ReconcilePairResponseApi | null) => void;
+  /** Hoy en la zona horaria del hogar: tope del selector de fecha. El modal de ALTA ya lo tenía
+   *  y éste no, así que se podía mover un movimiento al futuro editándolo. La API lo rechaza
+   *  desde 4.0.0 (`op_date_in_future`); el tope evita el viaje de ida y vuelta. */
+  today: string;
 }) {
   const [opDate, setOpDate] = useState("");
   const [valueDate, setValueDate] = useState("");
@@ -1592,6 +1598,7 @@ function EditTransactionModal({
             <input
               type="date"
               value={opDate}
+              max={today}
               onChange={(e) => setOpDate(e.target.value)}
             />
           </label>
