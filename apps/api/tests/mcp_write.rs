@@ -1315,11 +1315,17 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
     )
     .await;
 
+    // Filas que la regla reclasificará a `expense`. Nacen POSITIVAS y como `income` a propósito:
+    // es el caso real de una devolución (llega en positivo, el importador la marca `income` por el
+    // signo) que se recategoriza a gasto para que **netee** contra el gasto del mes. Desde 4.0.0 el
+    // alta manual exige que el signo cuadre con el kind, pero la recategorización —en lote o por
+    // regla— sigue pudiendo dejar un `expense` positivo: es contabilidad correcta, y por eso el
+    // guard no alcanza a esta ruta (issue #7 §3).
     for concept in ["WWW.AMAZON* AAA", "AMAZON PRIME"] {
         let r = app
             .post_json_with_cookie(
                 "/v1/transactions",
-                json!({ "op_date": "2026-06-10", "concept": concept, "amount": "-20",
+                json!({ "op_date": "2026-06-10", "concept": concept, "amount": "20",
                         "kind": "income" }),
                 &owner.cookie,
             )
@@ -1470,13 +1476,16 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
     )
     .await;
 
+    // Positivas y `income`: el lote las pasará a `expense`, que es la reclasificación de una
+    // devolución. El alta manual ya no acepta un `income` negativo (`amount_sign_mismatch`), y el
+    // lote sigue sin poder tocar el importe — solo reclasifica.
     let mut ids = Vec::new();
     for i in 0..3 {
         let r = app
             .post_json_with_cookie(
                 "/v1/transactions",
                 json!({ "op_date": format!("2026-06-{:02}", 10 + i),
-                        "concept": format!("COMPRA {i}"), "amount": "-10", "kind": "income" }),
+                        "concept": format!("COMPRA {i}"), "amount": "10", "kind": "income" }),
                 &owner.cookie,
             )
             .await;

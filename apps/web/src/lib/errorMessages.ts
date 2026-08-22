@@ -110,6 +110,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
   transactions_not_found:
     "Alguno de los movimientos ya no existe, así que no se ha cambiado nada. Recarga la lista e inténtalo otra vez.",
   amount_zero: "El importe no puede ser cero.",
+  amount_sign_mismatch:
+    "El signo del importe no cuadra con el tipo: los ingresos van en positivo, y los gastos y los traspasos a ahorro en negativo.",
+  op_date_in_future:
+    "No puedes apuntar un movimiento con fecha futura. Si es algo que aún no ha pasado, va en «Próximos».",
   batch_empty: "No has seleccionado ningún movimiento. Elige al menos uno.",
   batch_too_large:
     "Has seleccionado demasiados movimientos de una vez. Divídelos en tandas más pequeñas.",

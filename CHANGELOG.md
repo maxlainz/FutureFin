@@ -70,6 +70,30 @@ y campos cuyo nombre invitaba a leerlos al revés. Nada de esto afecta a quien u
 web; afecta a quien le pregunta por sus finanzas a Claude. Se arreglan todos antes de publicar,
 porque 4.0.0 es la única versión en la que se puede cambiar el contrato sin romperle nada a nadie.
 
+#### Un gasto se podía apuntar en positivo, y eso adelantaba la fecha de jubilación
+
+Los importes van firmados: los ingresos en positivo, los gastos y los traspasos a ahorro en
+negativo. Esa regla la aplicaba **la pantalla**, no el servidor — así que apuntar un gasto por la
+API o por Claude con el importe en positivo se aceptaba sin rechistar. Y como el total de gastos se
+calcula cambiándole el signo a la suma, un solo gasto positivo dejaba el **gasto total del mes en
+negativo**. Si tu ahorro sale de los movimientos reales (modos B y C), ese mes entraba en el
+promedio que alimenta la proyección: la tasa de ahorro subía, la fecha de jubilación se adelantaba,
+y nada lo señalaba.
+
+Ahora el servidor lo rechaza al apuntar un movimiento y al cambiarle el importe. **Reclasificar
+sigue siendo libre**, y es deliberado: una devolución llega del banco en positivo y pasarla a
+«gasto» es lo correcto —netea contra el gasto del mes—, así que ni la edición del tipo, ni la
+recategorización en lote, ni las reglas lo impiden. El importador de CSV y la restauración de una
+copia `.ffbackup` tampoco validan nada: traen el signo real del banco, y una copia que se niega a
+restaurar es peor que una fila rara.
+
+#### Se podían apuntar movimientos con fecha futura
+
+`2099-12-31` se aceptaba, y el listado de meses lo publicaba como `2099-12`, **mes cerrado y con
+datos**. Un movimiento con fecha futura no es un gasto, es un plan: para eso está «Próximos». Ahora
+la fecha no puede pasar de hoy, ni al apuntar ni al editar, y el selector de fecha del formulario de
+edición tiene el mismo tope que ya tenía el de alta.
+
 #### Un filtro de vista mal escrito devolvía los datos de todo el hogar
 
 `?view=` aceptaba **cualquier** valor y, si no era exactamente `mine`, servía el hogar completo sin

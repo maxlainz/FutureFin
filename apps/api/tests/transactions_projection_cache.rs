@@ -439,13 +439,16 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
         let compras = app.create_category(&owner, "expense", "Compras").await;
         set_mode(&app, &owner.cookie, mode).await;
 
-        // Fila mal clasificada (income) y sin categoría: el backfill la pasará a expense, que es
+        // Fila clasificada como `income` y sin categoría: el backfill la pasará a expense, que es
         // exactamente lo que mueve el promedio real 12m — `transactions_avg` suma por `kind`.
+        // Nace en positivo porque desde 4.0.0 el alta exige que el signo cuadre con el kind; la
+        // reclasificación sigue siendo libre (es el caso de una devolución que pasa a netear
+        // contra el gasto), y es esa reclasificación lo que este test mide.
         let seeded = app
             .post_json_with_cookie(
                 "/v1/transactions",
                 json!({ "op_date": "2026-06-10", "concept": "WWW.AMAZON* MN34OP56",
-                        "amount": "-104.45", "kind": "income" }),
+                        "amount": "104.45", "kind": "income" }),
                 &owner.cookie,
             )
             .await;
@@ -552,7 +555,7 @@ async fn batch_patch_invalidates_once_for_the_whole_batch() {
             .post_json_with_cookie(
                 "/v1/transactions",
                 json!({ "op_date": format!("2026-06-{:02}", 10 + i),
-                        "concept": format!("COMPRA {i}"), "amount": "-10", "kind": "income" }),
+                        "concept": format!("COMPRA {i}"), "amount": "10", "kind": "income" }),
                 &owner.cookie,
             )
             .await;

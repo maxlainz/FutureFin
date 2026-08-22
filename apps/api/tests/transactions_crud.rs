@@ -1098,16 +1098,21 @@ async fn batch_patch_matches_individual_patches_and_rejects_rewrites() {
     let owner = app.register_and_login_owner("alice").await;
     let cat = app.create_category(&owner, "expense", "Compras").await;
 
+    // Positivas y `income`: el test las reclasifica a `expense`, que es el caso de una devolución
+    // (llega en positivo, el signo la marca como ingreso, y pasarla a gasto la netea contra el mes).
+    // Desde 4.0.0 el alta exige que el signo cuadre con el kind, así que un `income` negativo ya no
+    // se puede crear; reclasificar sí sigue pudiendo dejar un `expense` positivo — y tiene que
+    // poder, o el lote y el PATCH individual dejarían de ser equivalentes.
     let a = create_manual(
         &app,
         &owner.cookie,
-        json!({ "op_date": "2026-06-10", "concept": "UNO", "amount": "-10", "kind": "income" }),
+        json!({ "op_date": "2026-06-10", "concept": "UNO", "amount": "10", "kind": "income" }),
     )
     .await;
     let b = create_manual(
         &app,
         &owner.cookie,
-        json!({ "op_date": "2026-06-11", "concept": "DOS", "amount": "-20", "kind": "income" }),
+        json!({ "op_date": "2026-06-11", "concept": "DOS", "amount": "20", "kind": "income" }),
     )
     .await;
     let a_id = a.json()["id"].as_str().unwrap().to_string();
@@ -1160,7 +1165,7 @@ async fn batch_patch_matches_individual_patches_and_rejects_rewrites() {
         .iter()
         .find(|t| t["id"] == json!(a_id))
         .unwrap();
-    assert_eq!(a_row["amount"], "-10.0000", "el importe no se toca por lote: {a_row}");
+    assert_eq!(a_row["amount"], "10.0000", "el importe no se toca por lote: {a_row}");
     assert_eq!(a_row["op_date"], "2026-06-10", "{a_row}");
 
     // Validaciones de exclusión mutua y de lote vacío.
@@ -1174,4 +1179,179 @@ async fn batch_patch_matches_individual_patches_and_rejects_rewrites() {
             .await;
         assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{body}: {r:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// REGRESIÓN — signo↔kind y fecha futura (issue #7 §3, issue #8 §11a; 4.0.0)
+// ---------------------------------------------------------------------------
+
+/// El alta manual exige que el signo cuadre con el `kind`.
+///
+/// Hasta 4.0.0 la invariante la aplicaba **un componente de React**
+/// (`ManualCashEntryModal`), no el servidor: `{"amount":"23.50","kind":"expense"}` devolvía 201 y
+/// dejaba un gasto positivo. Como el lado gasto se agrega como `-Σ`, ese mes publicaba un **gasto
+/// total negativo**, y en los modos B/C entraba en el promedio real que alimenta la proyección:
+/// la tasa de ahorro subía y la fecha FIRE se adelantaba, sin que nada lo señalara. Es el error
+/// que comete un LLM al traducir «apunta 23,50 € de cena».
+#[tokio::test]
+async fn manual_create_rejects_amount_sign_that_contradicts_kind() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    for (amount, kind) in [("23.50", "expense"), ("100", "savings"), ("-50", "income")] {
+        let r = create_manual(
+            &app,
+            &owner.cookie,
+            json!({ "op_date": "2026-06-10", "concept": "X", "amount": amount, "kind": kind }),
+        )
+        .await;
+        assert_eq!(
+            r.status,
+            http::StatusCode::BAD_REQUEST,
+            "{amount} como {kind} debería rechazarse: {r:?}"
+        );
+        assert_eq!(r.json()["code"], "amount_sign_mismatch", "{amount}/{kind}");
+    }
+
+    // Los tres signos correctos siguen entrando.
+    for (amount, kind) in [("-23.50", "expense"), ("-100", "savings"), ("50", "income")] {
+        let r = create_manual(
+            &app,
+            &owner.cookie,
+            json!({ "op_date": "2026-06-10", "concept": "OK", "amount": amount, "kind": kind }),
+        )
+        .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{amount}/{kind}: {r:?}");
+    }
+}
+
+/// El PATCH valida el signo **cuando fija el importe**, y deja libre la reclasificación.
+///
+/// La distinción es lo que mantiene equivalentes el PATCH individual, el lote (que ni admite
+/// `amount`) y el motor de reglas: los tres reclasifican, y ninguno puede prohibir el `expense`
+/// positivo sin romper el neteo de una devolución.
+#[tokio::test]
+async fn patch_validates_sign_when_it_writes_the_amount_but_not_on_reclassification() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let id = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "CENA", "amount": "-23.50", "kind": "expense" }),
+    )
+    .await
+    .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Fijar un importe que contradice el kind actual: rechazado.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "amount": "23.50" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "amount_sign_mismatch");
+
+    // Cambiar importe y kind a la vez, coherentes: aceptado.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "amount": "23.50", "kind": "income" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    // Reclasificar sin tocar el importe: aceptado aunque quede incoherente. Es la devolución que
+    // se pasa a gasto para netear contra el mes.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "reclasificar debe seguir siendo libre: {r:?}");
+    assert_eq!(r.json()["amount"], "23.5000", "el importe no se toca al reclasificar");
+}
+
+/// El importador NO aplica el guard de signo: trae el del banco, y una regla aprendida puede
+/// asignarle un kind que lo contradiga. Si el import validara, un CSV con una devolución no se
+/// podría confirmar — y el usuario no puede editar el CSV.
+#[tokio::test]
+async fn csv_import_still_accepts_the_sign_the_bank_sent() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+               15/06/2026;15/06/2026;DEVOLUCION TIENDA;9;EUR\n";
+    let b64 = B64.encode(csv);
+    let p = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/preview",
+            json!({ "source": "myinvestor", "file_b64": b64 }),
+            &owner.cookie,
+        )
+        .await;
+    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    // Importe positivo declarado como gasto: es un abono que netea contra el gasto del mes.
+    let c = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/confirm",
+            json!({
+                "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
+                "decisions": [ { "kind": "expense" } ], "learn_rules": false,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(c.status, http::StatusCode::OK, "el import no debe validar el signo: {c:?}");
+    assert_eq!(c.json()["imported"], 1, "{:?}", c.json());
+}
+
+/// Un movimiento con fecha futura no es un gasto: es un plan, y para eso está «Próximos».
+///
+/// Se llegó a registrar `op_date: "2099-12-31"` sin error, y `list_transaction_months` lo publicaba
+/// como `{"month":"2099-12","is_complete":true}` — un mes a 73 años vista marcado como cerrado y
+/// con datos.
+#[tokio::test]
+async fn manual_create_rejects_future_op_date() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let r = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2099-12-31", "concept": "FUTURO", "amount": "-10", "kind": "expense" }),
+    )
+    .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "op_date_in_future");
+
+    // Hoy sí (el borde no se rechaza: el guard es `>`, no `>=`).
+    let today = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let r = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": today, "concept": "HOY", "amount": "-10", "kind": "expense" }),
+    )
+    .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "hoy debe entrar: {r:?}");
+
+    // Y el PATCH tampoco deja mover una fila al futuro.
+    let id = r.json()["id"].as_str().unwrap().to_string();
+    let moved = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "op_date": "2099-12-31" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(moved.status, http::StatusCode::BAD_REQUEST, "{moved:?}");
+    assert_eq!(moved.json()["code"], "op_date_in_future");
 }
