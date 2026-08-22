@@ -58,11 +58,24 @@ jobs:
     steps:
       - name: Resolve ref
         id: ref
+        # El input del dispatch va por `env`, no interpolado en el shell: estos jobs sostienen
+        # DOCKERHUB_TOKEN y `packages: write`, así que una expresión sin sanear aquí sería
+        # ejecución arbitraria con esas credenciales delante.
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          EVENT: ${{ github.event_name }}
+          GH_REF: ${{ github.ref }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "ref=refs/tags/${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            case "$INPUT_TAG" in
+              v[0-9]*.[0-9]*.[0-9]*) ;;
+              *) echo "::error::tag inválido: '$INPUT_TAG' (se espera vX.Y.Z)"; exit 1 ;;
+            esac
+            echo "ref=refs/tags/${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${GH_REF}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GH_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/checkout@v4
@@ -143,17 +156,71 @@ jobs:
     steps:
       - name: Resolve ref
         id: ref
+        # El input del dispatch va por `env`, no interpolado en el shell: estos jobs sostienen
+        # DOCKERHUB_TOKEN y `packages: write`, así que una expresión sin sanear aquí sería
+        # ejecución arbitraria con esas credenciales delante.
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          EVENT: ${{ github.event_name }}
+          GH_REF: ${{ github.ref }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "ref=refs/tags/${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            case "$INPUT_TAG" in
+              v[0-9]*.[0-9]*.[0-9]*) ;;
+              *) echo "::error::tag inválido: '$INPUT_TAG' (se espera vX.Y.Z)"; exit 1 ;;
+            esac
+            echo "ref=refs/tags/${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+            echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${GH_REF}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GH_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.ref.outputs.ref }}
           persist-credentials: false
+
+      # El tag es lo único que decide qué se publica, y nada comprobaba que dijera la verdad.
+      # Un `git tag v4.0.1` sobre un commit cuyo Cargo.toml sigue en 4.0.0 publicaba `:4.0.1`,
+      # `:4.0`, `:4` y `:latest` de una imagen que reporta 4.0.0 — y el entrypoint escribe esa
+      # versión en su estado, con lo que el backup automático pre-migración deja de dispararse
+      # en el arranque siguiente. Además el paso del Release usa `changelog-section.sh`, que
+      # falla si la sección no existe: mejor fallar aquí que con la imagen ya publicada.
+      - name: Tag matches version and CHANGELOG
+        env:
+          TAG: ${{ steps.ref.outputs.tag }}
+        run: |
+          cargo_version="$(grep -m1 '^version' apps/api/Cargo.toml | cut -d'"' -f2)"
+          if [ "v${cargo_version}" != "$TAG" ]; then
+            echo "::error::el tag ${TAG} no coincide con apps/api/Cargo.toml (v${cargo_version})"
+            exit 1
+          fi
+          ./scripts/changelog-section.sh "$TAG" > /dev/null
+
+      # `:latest`, `:X` y `:X.Y` son móviles: reconstruir una versión antigua los hacía
+      # RETROCEDER. El caso no es hipotético — este mismo workflow contempla reconstruir un tag
+      # viejo por dispatch —, y `docker-compose.yml` usa `${FUTUREFIN_TAG:-latest}`, así que
+      # quien actualice con watchtower recibiría un downgrade sobre un volumen ya migrado. Nada
+      # protege el esquema de la app frente a eso: `maybe_pg_upgrade` cubre el major de
+      # PostgreSQL, no las migraciones de sqlx.
+      - name: Is this the newest tag?
+        id: newest
+        env:
+          TAG: ${{ steps.ref.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          newest="$(git ls-remote --tags --refs "https://github.com/${REPO}" \
+            | sed 's#.*refs/tags/##' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)"
+          newest="$(printf '%s\n%s\n' "$newest" "$TAG" | sort -V | tail -1)"
+          if [ "$newest" = "$TAG" ]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::${TAG} no es el tag más alto (${newest}): NO se moverán :latest, :X ni :X.Y"
+          fi
 
       # El nombre de Docker Hub estaba a fuego. En un fork sin secretos eso no
       # fallaba en el login (que ni siquiera tenía `if:`) sino MÁS TARDE, al hacer
@@ -192,9 +259,9 @@ jobs:
           images: ${{ steps.images.outputs.list }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.newest.outputs.value == 'true' }}
+            type=semver,pattern={{major}},enable=${{ steps.newest.outputs.value == 'true' }}
+            type=raw,value=latest,enable=${{ steps.newest.outputs.value == 'true' }}
           # Etiquetas OCI explícitas. La imagen solo llevaba la suya propia
           # (`com.futurefin.postgres.majors`, en el Dockerfile) y ninguna estándar.
           # `image.source` es la que hace que GHCR enlace el package con este

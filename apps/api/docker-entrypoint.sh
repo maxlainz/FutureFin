@@ -303,7 +303,7 @@ prune_backups() {
   avail="$(df -Pm "$BACKUP_DIR" | awk 'NR==2 {print $4}')"
   if [ "${avail:-999999}" -lt 256 ]; then
     n=$( (ls -1 pre-*.sql.gz 2>/dev/null || true) | wc -l)
-    while [ "$n" -gt 3 ] && [ "$avail" -lt 256 ]; do
+    while [ "$n" -gt 3 ] && [ "${avail:-999999}" -lt 256 ]; do
       f="$( (ls -1tr pre-*.sql.gz 2>/dev/null || true) | head -n1)"
       [ -n "$f" ] || break
       warn "low disk space (${avail}MB) — pruning $f"
@@ -551,6 +551,22 @@ main() {
   fi
   if [ "$MOUNTED" != 1 ] && [ "$ALLOW_EPHEMERAL" = 1 ]; then
     warn "running with an EPHEMERAL database (no volume at $PGDATA) — all data is lost when this container is removed"
+  fi
+
+  # El resume del swap de pg_upgrade se comprueba ANTES de mirar si hay cluster, y esa es toda
+  # la diferencia: durante el swap, `pgupgrade_swap_resume` mueve el contenido entero de
+  # $PGDATA —PG_VERSION incluido— a pgdata_old_<major> y solo después copia el nuevo. En esa
+  # ventana `has_cluster` es FALSO. Si el contenedor moría ahí (SIGKILL tras el grace period,
+  # corte de luz, OOM), el arranque siguiente caía en la rama `else`, encontraba $PGDATA no
+  # vacío y moría pidiendo intervención manual — sin mencionar el resume ni dónde quedó el
+  # cluster viejo. Los datos estaban a salvo; la instalación, caída. El resume vive dentro de
+  # `maybe_pg_upgrade`, que solo se alcanzaba cuando ya había cluster: inalcanzable justo en
+  # el único caso para el que existe.
+  local pgupgrade_resume
+  pgupgrade_resume="$(state_get pgupgrade STATE)"
+  if [ -n "$pgupgrade_resume" ] && [ "$pgupgrade_resume" != "done" ] && ! has_cluster; then
+    log "detected an interrupted pg_upgrade swap (state=$pgupgrade_resume) — resuming before anything else"
+    pgupgrade_swap_resume "$pgupgrade_resume"
   fi
 
   if has_cluster; then

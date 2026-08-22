@@ -41,15 +41,41 @@ cargo_version="$(grep -m1 '^version' apps/api/Cargo.toml | cut -d'"' -f2)"
   exit 1
 }
 
+# Sin esto se publica lo que haya en local: si `dev` o `main` están atrasados respecto al
+# remoto, el merge sale parcial y el tag apunta a un árbol que nadie ha revisado.
+echo "== sincronía con origin =="
+git fetch --quiet origin
+for rama in dev main; do
+  local_sha="$(git rev-parse "$rama")"
+  remote_sha="$(git rev-parse "origin/$rama" 2>/dev/null || echo "")"
+  if [ -n "$remote_sha" ] && [ "$local_sha" != "$remote_sha" ]; then
+    echo "ERROR: $rama local ($local_sha) difiere de origin/$rama ($remote_sha). Sincroniza antes de publicar." >&2
+    exit 1
+  fi
+done
+
 git checkout dev
 git checkout main
 
 echo "== merge =="
-# `|| true`: los conflictos de PRIVATE_PATHS son esperados y se resuelven abajo.
-git merge --no-ff --no-commit dev -m "chore(release): $VERSION — $SUMMARY" || true
+# Los conflictos de PRIVATE_PATHS son esperados y se resuelven abajo, así que un exit 1 es
+# normal. Cualquier OTRO código no lo es: con un `|| true` a secas, un merge que ni llegara a
+# empezar (índice sucio, referencia mala) dejaba cero ficheros en conflicto, la comprobación
+# de abajo pasaba, y el script hacía un commit normal que BORRABA CLAUDE.md y .claude de main
+# sin haber mergeado nada.
+rc=0
+git merge --no-ff --no-commit dev -m "chore(release): $VERSION — $SUMMARY" || rc=$?
+if [ "$rc" -gt 1 ]; then
+  echo "ERROR: git merge falló con código $rc (no es un conflicto). Revísalo a mano." >&2
+  git merge --abort 2>/dev/null || true
+  exit 1
+fi
 
 git rm -r -q --cached --ignore-unmatch "${PRIVATE_PATHS[@]}"
-rm -rf "${PRIVATE_PATHS[@]}"
+# Solo lo TRACKEADO. `rm -rf .claude` se llevaba también lo ignorado que vive dentro
+# (settings.local.json, cachés, notas), que `git status --porcelain` no ve y `git checkout dev`
+# no restaura: desaparecía sin aviso y sin vuelta atrás.
+git ls-files -z -- "${PRIVATE_PATHS[@]}" | xargs -0 -r rm -f
 
 # Cualquier conflicto FUERA de esas rutas es real y hay que mirarlo a mano.
 remaining="$(git diff --name-only --diff-filter=U || true)"
