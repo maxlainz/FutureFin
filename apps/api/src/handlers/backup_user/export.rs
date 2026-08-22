@@ -80,7 +80,7 @@ pub async fn export_user_backup(
         let user_id_original = user.id.0.to_string();
         let username_original = username.clone();
         let exported_at_owned = exported_at.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::heavy::run_backup_crypto(move || {
             encrypt_payload(
                 &plaintext,
                 &password,
@@ -91,8 +91,7 @@ pub async fn export_user_backup(
                 &exported_at_owned,
             )
         })
-        .await
-        .map_err(|_| ApiError::Unavailable)?
+        .await?
     }
     .map_err(|e| {
         tracing::error!(?e, "ffbackup encryption");

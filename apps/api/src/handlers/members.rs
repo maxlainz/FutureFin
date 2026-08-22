@@ -116,26 +116,45 @@ pub async fn list_members(
     Ok(Json(rows))
 }
 
-/// Nº de owners restantes si `excluding` dejara de serlo. Se calcula **dentro** de la
-/// transacción y con `FOR UPDATE` sobre las filas de la instalación: sin eso, dos owners
-/// degradándose a la vez podrían dejar el hogar sin ninguno.
-async fn owners_left_without(
+/// Bloquea **todas** las filas de owner de la instalación, en orden de `user_id`, y devuelve
+/// sus ids. Es el primer paso de cualquier mutación de membresía, y el orden importa por dos
+/// razones distintas:
+///
+/// - **Corrección**: sin `FOR UPDATE`, dos owners degradándose a la vez podrían dejar el hogar
+///   sin ninguno. Cada transacción vería al otro y las dos se creerían a salvo.
+/// - **Deadlock**: bloquear primero la fila del objetivo y después el resto de owners es el
+///   patrón ABBA de manual. Dos owners degradándose simultáneamente se bloqueaban en cruz,
+///   Postgres abortaba una con SQLSTATE 40P01 tras un segundo, y eso salía como **500 internal
+///   error** — el invariante aguantaba, el contrato de error no. Con un orden total (`ORDER BY
+///   user_id`) fijado antes de tocar nada, el ciclo no se puede formar.
+async fn lock_owner_ids(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     iid: Uuid,
-    excluding: Uuid,
-) -> Result<i64, ApiError> {
-    let n: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*)::bigint FROM (
-               SELECT user_id FROM installation_memberships
-               WHERE installation_id = $1 AND role = 'owner' AND user_id <> $2
-               FOR UPDATE
-           ) AS remaining"#,
+) -> Result<Vec<Uuid>, ApiError> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT user_id FROM installation_memberships
+           WHERE installation_id = $1 AND role = 'owner'
+           ORDER BY user_id
+           FOR UPDATE"#,
     )
     .bind(iid)
-    .bind(excluding)
-    .fetch_one(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
-    Ok(n)
+    Ok(ids)
+}
+
+/// Reconfirma **dentro de la transacción** que quien llama sigue siendo owner.
+///
+/// `require_owner` consulta con el pool, fuera de la transacción, así que entre esa lectura y
+/// el commit puede haber pasado cualquier cosa: un owner al que acaban de expulsar —con la
+/// sesión ya borrada— podía completar igualmente su expulsión de un tercero. La ventana es de
+/// milisegundos y hacen falta dos owners hostiles a la vez, pero cerrarla cuesta una consulta.
+fn assert_still_owner(me: Uuid, owners: &[Uuid]) -> Result<(), ApiError> {
+    if owners.contains(&me) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
 }
 
 #[utoipa::path(
@@ -162,6 +181,9 @@ pub async fn update_member_role(
     let new_role = body.role.to_membership();
 
     let mut tx = state.pool.begin().await?;
+    // Orden fijo: owners primero (ordenados), objetivo después. Ver `lock_owner_ids`.
+    let owners = lock_owner_ids(&mut tx, iid).await?;
+    assert_still_owner(_me, &owners)?;
     let current: Option<String> = sqlx::query_scalar(
         r#"SELECT role FROM installation_memberships
            WHERE installation_id = $1 AND user_id = $2
@@ -177,7 +199,7 @@ pub async fn update_member_role(
 
     if current == "owner"
         && new_role != MembershipRole::Owner
-        && owners_left_without(&mut tx, iid, target_user_id).await? == 0
+        && owners.iter().all(|o| *o == target_user_id)
     {
         return Err(ApiError::BadRequest(
             "last_owner: no puedes dejar la instalación sin ningún propietario".into(),
@@ -219,6 +241,8 @@ pub async fn remove_member(
     let (iid, _me) = require_owner(&state, &jar).await?;
 
     let mut tx = state.pool.begin().await?;
+    let owners = lock_owner_ids(&mut tx, iid).await?;
+    assert_still_owner(_me, &owners)?;
     let current: Option<String> = sqlx::query_scalar(
         r#"SELECT role FROM installation_memberships
            WHERE installation_id = $1 AND user_id = $2
@@ -231,7 +255,7 @@ pub async fn remove_member(
     let Some(current) = current else {
         return Err(ApiError::NotFound);
     };
-    if current == "owner" && owners_left_without(&mut tx, iid, target_user_id).await? == 0 {
+    if current == "owner" && owners.iter().all(|o| *o == target_user_id) {
         return Err(ApiError::BadRequest(
             "last_owner: no puedes dejar la instalación sin ningún propietario".into(),
         ));

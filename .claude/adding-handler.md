@@ -95,7 +95,22 @@ use crate::handlers::foo::foo_router;
 ```
 
 ## 4. Register types in `openapi.rs`
-Add `FooResponse`, `CreateFooBody` to the `components(schemas(...))` list.
+Add `FooResponse`, `CreateFooBody` to the `components(schemas(...))` list, and the handler fn to
+`paths(...)`.
+
+**Autenticación en la spec (4.0.0)**: `openapi.rs` declara `security(("ff_session" = []))` **global**,
+así que un handler con sesión no necesita decir nada. Un endpoint **público** debe llevar
+`security(())` en su `#[utoipa::path]` — hoy lo llevan exactamente cuatro (`health_check`,
+`ready_check`, `register`, `login`). Sin esa declaración global la spec presentaba 81 operaciones con
+sesión obligatoria como públicas y cualquier cliente generado nacía sin credencial.
+
+**Dos trampas que `tests/openapi_contract.rs` ya vigila** — si tu handler las dispara, el test falla
+y no hace falta que las recuerdes, pero conviene saber por qué existe:
+- **Colisión de nombre de componente**: utoipa nombra el schema por el **último segmento del tipo**,
+  así que dos structs `ImportPreviewResponse` en módulos distintos se machacan y ambos endpoints
+  acaban apuntando al mismo `$ref`. Desambigua con `#[schema(as = OtroNombre)]`.
+- **Path con plantilla sin `params(...)`**: `/v1/foo/{id}` sin declarar `id` produce un documento
+  formalmente inválido.
 
 ## 5. Add migration if needed
 ```bash

@@ -86,8 +86,8 @@ and infrastructure do not.** Work the exclusions first — they are cheaper to d
 |---|---|---|
 | Credential minting/revocation | A tool that mints (`POST /v1/api-tokens`) would let a compromised agent grant itself persistence beyond the current token; revocation is the human's emergency brake and must work *against* the agent, not through it | `/v1/api-tokens` CRUD, `/v1/oauth/connections` |
 | OAuth protocol + consent | Protocol scaffolding of `/mcp` itself; consent's entire value is that a human executes it in a browser with a session cookie | `/.well-known/*`, `/oauth/register`, `/oauth/token`, `/oauth/revoke`, `/v1/oauth/authorize*` |
-| Session lifecycle | MCP clients arrive already authenticated by Bearer; there is no cookie jar to fill | `/v1/auth/register`, `login`, `logout` |
-| Membership boundaries | Approving a user grants access to the whole household ledger — the exact action a prompt-injected agent must never perform. `role_can_write` governs data, never membership | `/v1/installation/pending-users*`, `/setup` |
+| Session lifecycle **and password rotation** | MCP clients arrive already authenticated by Bearer; there is no cookie jar to fill. And `POST /v1/auth/password` (4.0.0) is the *human's* emergency brake: it revokes every other session, every `ffp_` token and every OAuth grant — i.e. it is designed to cut the agent off. An agent able to call it could rotate the owner's password out from under them, and would need the plaintext current password in its context to do it | `/v1/auth/register`, `login`, `logout`, **`/v1/auth/password`** |
+| Membership boundaries | Approving a user grants access to the whole household ledger — the exact action a prompt-injected agent must never perform. `role_can_write` governs data, never membership. The 4.0.0 endpoints that *revoke* and *downgrade* are excluded for the mirror reason: revocation is the human's brake on a misbehaving credential (it kills sessions, `ffp_` tokens and OAuth grants), so it must work **against** the agent, not through it. The `GET` listing is excluded too — it is only useful as the input to those writes, and it names people | `/v1/installation/pending-users*`, `/setup`, **`GET/PATCH/DELETE /v1/installation/members`** |
 | Encrypted blob transport | `.ffbackup` is password-encrypted, up to 16 MiB base64: an export floods the context window with ciphertext; an import both demands the primary password in a prompt AND mass-replaces the ledger | `/v1/backup/*` |
 | Infra probes | The MCP client learns liveness from `tools/list` itself; OpenAPI is the REST self-description, `tools/list` is MCP's | `/health`, `/v1/ready`, `/openapi.json` |
 | LLM footguns | An action whose worst-case is a *silent* data corruption an LLM is likely to trigger (e.g. pairing two hand-picked UUIDs where a mistake silently removes both from all flow aggregates) | `reconcile_pair` manual (§3) |
@@ -131,6 +131,8 @@ the blocking reason changes (noted per row).
 | Surface | Decision | Rationale (short) | Revisit when |
 |---|---|---|---|
 | auth/session, api-tokens, OAuth protocol+consent, membership/pending-users, backup, probes | **never** | §2.1 categories | Category-level change of posture only |
+| `POST /v1/auth/password` (4.0.0) | **never** | §2.1 session lifecycle / credential brake. Rotating the password revokes every other session, every `ffp_` token and every OAuth grant — including, quite possibly, the token making the call. It also requires the plaintext current password, which is exactly what must not travel through a model's context. It is the lever a compromised agent must not have and the human must always have | Category-level change of posture only |
+| `GET/PATCH/DELETE /v1/installation/members` (4.0.0) | **never** | §2.1 membership boundaries. `PATCH` can promote to `owner` and `DELETE` cuts all four credentials at once; both are the human's control over *who* is in the household, which `role_can_write` deliberately never governs. The `GET` follows them: its only real use is choosing a target for those writes, and a household roster is not financial data | Category-level change of posture only |
 | `POST /v1/transactions/{id}/reconcile` (manual pair; `reconcile_pair_core` EXISTS) | **omit** | Hand-picking two UUIDs among hundreds; a wrong pair silently leaves all flow aggregates and moves modes B/C savings | A server-side *suggestions* tool ships (candidates with opposite amounts), reducing the LLM's choice to confirming a proposed pair |
 | `/v1/transactions/import/preview|confirm` | **omit** | §2.1 context-window abuse + untrusted third-party content | MCP gains an out-of-band attachment channel |
 | `POST /v1/transactions/batch` (create) | **defer** | `create_transaction` loops fine; batch adds all-or-nothing tx semantics + shared fingerprint ordinals that complicate preview. **Sigue vigente en 3.8.0**: lo que se hizo tool-able fue el PATCH, no el POST | Real demand for >10-item batches from chat |
@@ -147,7 +149,7 @@ the blocking reason changes (noted per row).
 | 1 | `create_snapshot` (backfill) + `update_snapshot` | extract from `history.rs` backfill/PUT handlers (validations `normalize_kind`, `validate_snapshot_date`, 409 on (user, kind, date)) | NONE (D12) | The strongest conversational case: recording the past |
 | 2 | `create_allocation_rule` + `delete_allocation_rule` | extract; **careful**: the sink invariant (exactly one uncapped remainder, always last) lives spread across the handler | FULL | Completes cascade control; `update_allocation_rule` exists |
 | 3 | `update_category` + `delete_category` (with `remap_to`) | extract from `categories.rs` PATCH/DELETE | NONE | delete fits preview/confirm perfectly (preview shows `refs`, forces naming the remap target) |
-| 4 | `update_installation_settings` (allowlist: `annual_inflation_assumption_percent`, maybe `calendar_tz`, `show_age_mode`) | partial — only the FIRE slice has a core | FULL | Inflation is a direct engine input, today read-only via MCP; NEVER include `mcp_write_enabled` |
+| 4 | `update_installation_settings` (allowlist: `calendar_tz`, `show_age_mode`, `base_currency`) | partial — only the FIRE slice has a core | FULL | **Corrección 2026-08-22: la inflación YA es escribible por MCP.** `update_fire_settings` acepta `annual_inflation_assumption_percent` y lo persiste vía `FireSettingsPatch` (`mcp/server.rs`; su preview `{before, after}` lo incluye), aunque la columna viva en `installation` y no dentro del JSONB de `fire_settings`. Esta fila decía «today read-only via MCP» y llevaba tiempo siendo falsa — con ella, el eje que más mueve la proyección parecía un hueco pendiente cuando ya estaba cubierto. Lo que queda son los ejes de presentación (tz, modo de edad, divisa). **NUNCA incluir `mcp_write_enabled`** (§2.1, autorreferencia del kill-switch) |
 
 Closed since the register was created: **`update_categorization_rule` + `delete_categorization_rule`
 (4.0.0, auditoría MCP §10 — era la fila #4; `patch_rule_core`/`delete_rule_core` extraídas de `rules.rs`,
@@ -257,9 +259,23 @@ Written 2026-08-19 (post-3.5.0 train, branch `dev`), sourced from: full tool inv
 CLAUDE.md, `.claude/api-routes.md`, architecture-contract D14/D15 and change-control. The
 `update_asset`/`update_liability` pair (45→47) shipped in the same change as this skill.
 Refreshed 2026-08-20 for the 3.8.0 issue-#4 train (47→50).
+**Refreshed 2026-08-22 for the 4.0.0 train** (50→52 with `update_categorization_rule` +
+`delete_categorization_rule`), and that refresh ran the §1 evaluation over the routes the train
+added — recorded, never silent:
+
+| New HTTP surface (4.0.0) | Parity outcome |
+|---|---|
+| `POST /v1/auth/password` | **deliberate omission**, §2.1 session lifecycle / credential brake → row in §3.1 |
+| `GET/PATCH/DELETE /v1/installation/members` | **deliberate omission**, §2.1 membership boundaries → row in §3.1 |
+| `SavingsAvgBasis.months_with_data` → `avg_months` | **tool updated** — the field travels in `simulate_projection` too; renaming on one side only would have recreated the very ambiguity the rename fixes |
+| `simulate_projection`: inflation alias + `deny_unknown_fields` | **tool updated** (no HTTP counterpart — §3.3 tool-without-endpoint) |
+| `delete_asset` preview: `allocation_rules_deleted`, `allocation_remainder_rules_deleted` | **tool updated** alongside `delete_asset_preview_core` |
+| `density=hybrid` always emits the last month | **tool follows automatically** — `get_projection` forces `hybrid`, which is why the bug's default victim was the MCP consumer |
+| `destructive_hint` on `materialize_recurring` / `unreconcile_transfer` | **annotations corrected** (§4 step 4) |
+
 Re-verify before trusting:
 
-- Tool counts + gate invariants: the §5 block (50/21/29/29/10/1 on 2026-08-20).
+- Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22**; 50/21/29/29/10/1 on 2026-08-20).
 - Frozen catalog still matches the code (never count quotes — run the test):
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http tools_list_returns`
 - Cores still own invalidation, MCP module still SQL-free:

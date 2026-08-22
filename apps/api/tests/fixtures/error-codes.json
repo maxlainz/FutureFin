@@ -112,6 +112,7 @@
     "original_filename_too_long",
     "password_hash_failed",
     "password_length",
+    "password_unchanged",
     "patch_empty",
     "payment_amount_not_positive",
     "payment_amount_required_for_derived_principal",

@@ -29,13 +29,13 @@ pub fn verify_password(password: &str, stored: &str) -> Result<(), ApiError> {
 /// deja ese hilo bloqueado: con `num_cpus` peticiones concurrentes a `/v1/auth/register` —
 /// endpoint sin autenticación por diseño — se para el proceso entero, `GET /v1/ready`
 /// incluido, y el healthcheck del contenedor lo marca unhealthy. `spawn_blocking` lo manda al
-/// pool de blocking, que está acotado y aislado del reactor. Mismo patrón que el motor de
-/// proyección (`handlers/projection.rs`), que ya lo hacía siendo bastante más barato.
+/// pool de blocking, aislado del reactor. Pero ese pool tiene 512 hilos por defecto, así que
+/// mandarlo ahí sin más subía el techo de Argon2 concurrente de `num_cpus` a 512 — de ~38 MiB
+/// a ~9,5 GiB de reserva— y convertía una caída recuperable en un OOM-kill del contenedor con
+/// PostgreSQL dentro. Por eso va por `heavy::run_password_kdf`, que además lo acota.
 pub async fn hash_password_blocking(password: &str) -> Result<String, ApiError> {
     let password = password.to_owned();
-    tokio::task::spawn_blocking(move || hash_password(&password))
-        .await
-        .map_err(|_| ApiError::Unavailable)?
+    crate::heavy::run_password_kdf(move || hash_password(&password)).await?
 }
 
 /// Verifica fuera del reactor y **sin oráculo de timing**: cuando el usuario no existe
@@ -47,15 +47,14 @@ pub async fn verify_password_blocking(
     stored: Option<String>,
 ) -> Result<(), ApiError> {
     let password = password.to_owned();
-    tokio::task::spawn_blocking(move || match stored {
+    crate::heavy::run_password_kdf(move || match stored {
         Some(hash) => verify_password(&password, &hash),
         None => {
             let _ = verify_password(&password, dummy_hash());
             Err(ApiError::Unauthorized)
         }
     })
-    .await
-    .map_err(|_| ApiError::Unavailable)?
+    .await?
 }
 
 /// Hash PHC de descarte con los mismos parámetros que los reales, para que la rama

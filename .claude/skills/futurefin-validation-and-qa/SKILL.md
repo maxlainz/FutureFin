@@ -30,7 +30,13 @@ from § 2's inventory, and every total here was one release behind. Re-synced **
 (post-3.5.0)**: the 3.4.0/3.5.0 trains had repeated the same pattern (four rows missing —
 `budget_liability_quotas.rs`, `transactions_reconcile.rs`, `mcp_write.rs`, `mcp_simulate.rs` — and a
 stale `mcp_http.rs` row still describing the 10-tool catalog); all rows and counts now match
-the code, and § 2's table carries a standing "tests.md wins on disagreement" note.
+the code, and § 2's table carries a standing "tests.md wins on disagreement" note. **Re-synced again
+2026-08-22 (4.0.0)**: this is the release that put the integration suite, ESLint and Vitest **inside**
+CI, so § 3 and § 6 no longer describe them as a local-only obligation; two suites were missing from § 2's inventory
+(`account_and_members.rs`, `openapi_contract.rs`; the train's other three additions —
+`query_param_validation.rs`, `error_codes_parity.rs`, `fixtures_shape.rs` — were already listed); every count moved; and a claim about
+`handlers/transactions/` unit tests that had never been true was retracted — a money bug had been
+living in exactly that hole.
 
 Why this matters here: the hardest live problem in FutureFin is **projection correctness** —
 errors are silent (numbers look plausible but wrong). Eyeballing a chart is never acceptance.
@@ -58,14 +64,29 @@ not authoritative — recount with the commands in "Provenance and maintenance".
 
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
-| Engine unit tests (61) | `crates/engine/src/{projection.rs (27), history.rs (21), runway.rs (13)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
-| Backend integration (**284 tests, 27 files, as of 2026-08-19**) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
-| Frontend Vitest (**321, 13 files, as of 2026-08-19**) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
+| Engine unit tests (**67** as of 2026-08-22) | `crates/engine/src/{projection.rs (32), history.rs (22), runway.rs (13)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| Backend integration (**33 files, 375 `#[test]`/`#[tokio::test]` attributes, as of 2026-08-22**) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
+| Frontend Vitest (**368, 16 files, as of 2026-08-22**) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
 
-Plus API lib unit tests run by `cargo test --workspace` (no Postgres): notably
-`apps/api/src/handlers/backup_user/schema.rs` `mod tests` (10; 2 added in v1.6.0 for `.ffbackup` v5
-and 2 in v1.8.0 for v6 migration/round-trip) and the `handlers/transactions/` unit tests (CSV presets,
-fingerprint/ordinal, rule precedence).
+**Whole-workspace total: 498 on 2026-08-22** (`cargo test --workspace`), which is engine + the 57 API
+lib unit tests + integration. Ask the runner for totals; a `grep` of attributes is an approximation
+(loops generate tests on the frontend, and an attribute is not always an executed test).
+
+Plus **57** API lib unit tests run by `cargo test --workspace` (no Postgres, 2026-08-22): notably
+`apps/api/src/handlers/backup_user/schema.rs` `mod tests` (**14**; 2 added in v1.6.0 for `.ffbackup`
+v5 and 2 in v1.8.0 for v6 migration/round-trip).
+
+> **Correction (2026-08-22) — this skill used to claim `handlers/transactions/` carried unit tests
+> for "CSV presets, fingerprint/ordinal, rule precedence". It did not, and the false claim cost
+> money.** `csv_presets.rs` and `import.rs` had **zero** `#[test]`, so `parse_spanish_decimal` could
+> do `replace('.', "")` without looking at what the dot separated: `2100.00` became `210000` and the
+> transaction went in **a hundred times larger**, silently. No test caught it because no fixture
+> amount contains a dot — that branch never executed in the whole suite. What exists **today**
+> (count it, don't copy it: `grep -c '#[test]' apps/api/src/handlers/transactions/*.rs`):
+> `csv_presets.rs` **1**, `schema.rs` **6** (concept normalization, the SQL fold mirroring the Rust
+> fold, LIKE-needle escaping, canonical amount across scales, fingerprint determinism, rule-pattern
+> derivation), everything else **0**. A row describing tests that do not exist is worse than a
+> missing row: it stops anyone from writing them.
 
 ### Backend integration — full invocation (verbatim)
 
@@ -102,7 +123,7 @@ socket and would rather not publish a port; the 5433 TCP default stays the docum
 1. Creates schema `ff_test_<uuid-simple>` in the test DB.
 2. Opens a pool (max 5 conns) with `after_connect` hook: `SET search_path TO "<schema>", public`
    on every connection — so all queries in the test hit only that schema.
-3. Runs `sqlx::migrate!("./migrations")` inside it (**40** migration files as of 2026-08-19 —
+3. Runs `sqlx::migrate!("./migrations")` inside it (**42** migration files as of 2026-08-22 —
    count with `ls apps/api/migrations | wc -l`).
 4. Returns `(PgPool, schema_name)`. **Schemas leak intentionally** — no teardown, so a failed
    test leaves its state inspectable.
@@ -123,7 +144,8 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
 ### Integration test files (all 27, 2026-08-19)
 
 Recount before trusting: `ls apps/api/tests/*.rs | wc -l` (27) and per-file
-`grep -c '#\[tokio::test\]' apps/api/tests/*.rs` (284 total). On any disagreement between a
+`grep -rc '#\[tokio::test\]\|#\[test\]' apps/api/tests/*.rs` (375 attributes across 33 files on
+2026-08-22). On any disagreement between a
 row's description here and `.claude/tests.md` (refreshed every release train), tests.md wins —
 fix this table in the same change.
 
@@ -140,6 +162,8 @@ fix this table in the same change.
 | `history_snapshots.rs` | 20 | snapshot capture (copied terms) / same-day upsert / exclude shared+expired / backfill CRUD roundtrip with `year` filter + cascade / 400 validations (future, `duplicate_item_id`, terms-on-asset) / 409 date taken / 404 cross-user / 403 viewer on every mutation / GET never mutates / `snapshot_mutations_do_not_touch_projection_cache` (cache stays HIT — history is NOT a projection input) |
 | `history_series.rs` | 7 | `GET /v1/history/series`: empty→200, exact linear interpolation between two asset snapshots, join to live values (deleted asset→0 at k=0), amortization curve above the chord with exact endpoints, household sums two users + `?view=mine` filters, markers carry date/kind/total, single today snapshot. Numbers predicted before running |
 | `backup_user_roundtrip.rs` | 13 | `.ffbackup` v4/v5/v6: roundtrip with identical history series, item re-link to fresh asset UUIDs, null `ledger_index` keeps `item_key`, v3 still imports (0 snapshots), out-of-range index → 400 + rollback, import invalidates projection cache (pre-existing bug fix), preview reports snapshot/item counts, viewer 403; plus v5 (v1.6.0) transactions/imports/rules round-trip with index re-link and preserved `fingerprint_ordinal`; plus v6 (v1.8.0) `recurring_transaction_rules` round-trip with `recurring_rule_index` re-link and preserved `last_materialized_month` |
+| `account_and_members.rs` (4.0.0) | — | The two levers the docs promised and the code lacked. `POST /v1/auth/password`: rotates the hash, keeps the CALLING session alive and kills the rest, revokes `ffp_` tokens and OAuth grants in the same transaction, wrong `current_password` → **400 `current_password_invalid`** (not 401, on purpose), length policy. `/v1/installation/members`: GET open to any member (viewer included), PATCH/DELETE owner-only, `last_owner` guard on both, DELETE cuts all four credentials at once and **keeps the person's data**, 404 on a non-member |
+| `openapi_contract.rs` (4.0.0) | 4 | **No Postgres**: gates on the generated `openapi.json` — every templated path declares its parameters, the two `ImportPreviewResponse` structs no longer collide on one component name, authentication is declared and applied to every private operation (the spec previously had no `securityScheme` at all and showed 81 session-required operations as public), and no dangling `$ref`. There was **no** test on the spec before, which is why none of that broke anything |
 | `transactions_import.rs` | 15 | CSV import: MyInvestor/N26 header autodetection, preview flags `already_imported` (omitted by default), confirm inserts with ordinals, same-file re-confirm → 0 new, `force` appends a fresh ordinal, internal-transfer heuristic, learned rule pre-assigns on next preview, non-EUR rejected on confirm, viewer 403, preview↔confirm sha mismatch → 400; **accent folding** (post-2.0.0): savings hint + learned-rule matching are diacritic-insensitive (`savings_hint_accent_insensitive_*`, `learned_rule_matches_accent_insensitive*`) |
 | `fixtures_shape.rs` | 3 | **sin base de datos**: los tres CSV de `tests/fixtures/` siguen ejercitando lo que `transactions_import.rs` asume (escala `-26.000000000` → 4 dp, par opuesto, partner «Cuenta de Ahorro», tokens de transferencia, hint de ahorro, ≥3 filas que colapsan en UN patrón de regla) y **ninguno contiene una cadena con forma de IBAN**. Añadido en agosto de 2026 al rehacer los fixtures (`futurefin-data-hygiene`) |
 | `error_codes_parity.rs` | 2 | **sin base de datos**: extrae del fuente todo `snake_code:` que la API puede devolver, lo compara con `tests/fixtures/error-codes.json` (187 códigos) y exige que ninguno repita el nombre de una clase HTTP. Regenerar: `UPDATE_ERROR_CODES=1 cargo test -p futurefin-api --test error_codes_parity`. Su pareja en el front es `errorMessages.test.ts`, que falla si un código se queda sin frase en español |
@@ -159,7 +183,7 @@ fix this table in the same change.
 | `transactions_reconcile.rs` | 19 | Transfer reconciliation (3.5.0): deterministic auto-pass (±5-day window with exact 5/6 boundary, cross-import pair, greedy with multiple candidates, fixed-point idempotence, distinct owners never), unreconcile persists the anti-resurrection rejection, PATCH of `amount`/`op_date` breaks the pair WITHOUT rejection, deleting a leg/batch unreconciles the survivor, manual pairing without window + its 400s, viewer 403, owner-guard 404 |
 | `budget_liability_quotas.rs` | 10 | Liability quotas inside `GET /v1/budget` (renamed from `budget_derived.rs` in 3.7.0, when the quota became an ordinary `entries` row): entry shape (`source`, `liability_id`, `label`, expense category) and coexistence with the manual entry of the same category; totals (`expense_regular` = sum of expense entries, no `expense_derived`); quota excluded from `expense_retirement_*`; **quota excluded from the engine expense base** (`monthly_delta_assumption` — hand-predicted double-count regression); active-liability predicate (NULL end date derives, expired doesn't, `>=` boundary, no payment plan → nothing), weekly ×52/12, household/mine scoping, quota without `expense_category_id` still counts |
 
-### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; **321 en 13 ficheros a 2026-08-19**)
+### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; **368 en 16 ficheros a 2026-08-22**)
 
 Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/**/*.test.{ts,tsx}"]`,
 `globals: false` (import `describe/it/expect` from `vitest` explicitly).
@@ -180,14 +204,40 @@ Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/*
 ## 3. CI reality
 
 `.github/workflows/ci.yml` runs on push/PR to `main` and `dev`. Verified against the file on
-2026-07-02; the `docker-stack` job re-read on 2026-08-16 (v3.0.0):
+2026-07-02; the `docker-stack` job re-read on 2026-08-16 (v3.0.0); **the whole section rewritten on
+2026-08-22 (4.0.0), when the gap this section used to describe was closed.**
 
-**CI DOES run** (three jobs):
-- `rust`: `cargo build -p futurefin-api --locked` + `cargo test -p futurefin-engine --locked`
+> **4.0.0 — the integration suite, ESLint and Vitest now RUN in CI.** Until then they did not, and
+> this skill listed them as a "local obligation" — i.e. they depended on nobody forgetting. A PR
+> could go green with the entire handler layer broken (329 of the 447 tests never ran). With the
+> repository public and outside contributors that does not hold, so all three entered as **blocking**
+> gates. Any document still claiming they are absent from CI is stale — including older copies of
+> this very section.
+
+**CI DOES run** (six jobs):
+- `rust`: `./scripts/audit-releases.sh --version` (the CHANGELOG covers `Cargo.toml`'s version — the
+  hole 2.2.0 slipped through), `cargo build -p futurefin-api --locked` + `cargo test -p
+  futurefin-engine --locked`. **clippy and rustfmt are installed but their steps are commented out on
+  purpose**: the repo has never passed either (50 unique clippy warnings across 20 files; `cargo fmt
+  --check` flags 1.175 blocks across 72 files), and turning them on today would leave CI red from the
+  first push — a permanently red CI teaches people to ignore CI. Clean up first, in a separate
+  commit, with `cargo fmt --all` alone in its own.
+- `integration` (**4.0.0**): `cargo test --workspace --locked` against a **Postgres 16.4-alpine
+  service**, `TEST_DATABASE_URL` on `127.0.0.1:5432` (locally it stays 5433, to avoid the dev
+  Postgres). One job covers engine + API lib unit tests + integration. `timeout-minutes: 45`. Its
+  healthcheck is `pg_isready -h 127.0.0.1` **deliberately**: without the host, during `initdb` the
+  image runs a temporary server on the Unix socket only and `pg_isready` returns OK before the
+  database exists.
+- `main-guard`: `git ls-files -- CLAUDE.md .claude` must be empty on `main`. Runs when the ref **is**
+  `main` **or the PR targets `main`** — with a bare `github.ref` check, a pull request's ref is
+  `refs/pull/N/merge` and the job skipped exactly during review.
 - `secrets-scan`: `./scripts/scan-sensitive.sh` — blocking. No IBAN, card, private key or
   provider token in tracked files. Added August 2026 after real bank exports were found in
   `apps/api/tests/fixtures/`; see [`futurefin-data-hygiene`](../futurefin-data-hygiene/SKILL.md).
-- `web`: `npm install`, `npm run typecheck:web`, `npm run build:web`
+- `web`: **`npm ci`** (not `npm install` — that silently rewrote the lockfile, so CI potentially
+  tested a different dependency tree than the Dockerfile publishes), `npm run typecheck:web`,
+  **`npm run lint:web`**, **`npm test` (Vitest)**, `npm run build:web` — build last, because it is the
+  slow step and there is no point paying for it after a failure.
 - `docker-stack`: since 3.0.0 this is no longer a boot smoke test — it is the **only automated
   evidence that upgrading does not lose data**, and the job comment says so ("no debilitar").
   Its steps, in order:
@@ -212,12 +262,15 @@ Config: `apps/web/vitest.config.ts` — `environment: "node"`, `include: ["src/*
   entire value is being the exact 2.x topology (two services, image pinned to 2.3.0). Treat it
   as a fixture, like `fire-parity.json`.
 
-**CI does NOT run** — verified absent from `ci.yml` (unchanged by 3.0.0):
-- Backend integration tests (`apps/api/tests/`) — no Postgres service, no `TEST_DATABASE_URL`
-- Frontend Vitest (`npm test`) — the web job only typechecks and builds
-- ESLint (`npm run lint:web`)
+**CI still does NOT run** — verified absent from `ci.yml` on 2026-08-22:
+- **clippy / rustfmt** — present but commented out, on purpose (see the `rust` job above).
+- **Any browser E2E / component render.** Vitest runs in `environment: "node"`; nothing drives real
+  UI. Layout, both themes and every visual regression stay a manual check.
+- **The aborting startup guards** of the container (`pre-migration backup FAILED`, missing role,
+  interrupted `pg_upgrade` swap) except the "no volume" one.
 
-**Therefore, your pre-merge local obligation list** (green CI is NOT enough):
+**Your pre-merge local list** (now a fast feedback loop, not the only net — the repo's "local CI
+first" norm: find out in 3 minutes instead of 15):
 
 ```bash
 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
@@ -379,7 +432,7 @@ configured — `environment: "node"` only. The config comment says: if component
 are ever added, switch to `happy-dom` or `jsdom` in `apps/web/vitest.config.ts`. Until then,
 test pure functions only; extract logic out of components to make it testable.
 
-## 6. Coverage gaps — be honest (as of 2026-07-02; container coverage restated 2026-08-16)
+## 6. Coverage gaps — be honest (as of 2026-07-02; container coverage restated 2026-08-16; the CI gap **closed** 2026-08-22)
 
 - **No E2E browser tests.** Nothing drives the real SPA; auth-flow + UI regressions are
   caught only manually. The `docker-stack` job now drives a lot through the **API** (register,
@@ -391,8 +444,16 @@ test pure functions only; extract logic out of components to make it testable.
   pg_upgrade swap resume) have no automated test; the no-volume guard and the two external-DB
   refusals (§ the docker-stack table) are the exceptions. Treat them as reasoned-but-unproven and read
   `futurefin-debugging-playbook` trap 12 before touching them.
-- **Integration tests not in CI.** A PR can go green with every `apps/api/tests/` test broken.
-  This is the biggest gap; until fixed, the local obligation list in § 3 is mandatory.
+- ~~**Integration tests not in CI.**~~ **CLOSED in 4.0.0** (2026-08-22): the `integration` job runs
+  `cargo test --workspace` against a Postgres service, and the `web` job runs ESLint and Vitest. This
+  was for a long time the biggest gap in the repo — a PR could go green with every `apps/api/tests/`
+  test broken. The row stays, struck through, because "we already ran the tests in CI" is exactly the
+  kind of belief that is wrong for months without anybody checking: if you ever wonder again, the
+  answer is in `ci.yml`, not here.
+- **Unit-test coverage of a module is not implied by the module existing.** Until 2026-08-22 this
+  skill asserted unit tests for the CSV presets that did not exist, and a money bug (`2100.00` →
+  `210000`) lived in exactly that hole. Before you write "covered by unit tests", `grep -c '#[test]'`
+  the file.
 - **No property-based tests** on the engine (e.g. invariants like "cascade never allocates
   more than the surplus", "NW series is deterministic under input permutation"). Labeled a
   candidate direction — see `.claude/skills/futurefin-research-frontier/SKILL.md`.
@@ -419,16 +480,21 @@ Verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); `.claude/tests.md` w
 the same day (CI claim, migration count, missing `projection_cache.rs` row), and both files were
 updated together on 2026-08-16 for **v3.0.0** (`docker-stack` job contents, socket form of
 `TEST_DATABASE_URL`, container coverage gaps) and again on **2026-08-17 for v3.1.0** (all counts,
-plus the three inventory rows the MCP/OAuth releases had left out). Re-verify volatile facts with:
+plus the three inventory rows the MCP/OAuth releases had left out). **Rewritten again on 2026-08-22
+for 4.0.0**: § 3 (CI now runs integration + ESLint + Vitest), all counts, the two new suite rows
+(`account_and_members.rs`, `openapi_contract.rs`) and the retraction of the CSV-preset unit-test
+claim. Re-verify volatile facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
-- Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (61 on 2026-08-19 = projection 27 + history 21 + runway 13; the 5 added since 3.1.0 cover `monthly_multiplier` with negative rates)
-- Integration test count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs` (**284 across 27 files on 2026-08-19**; `oauth_flow.rs` alone is 30)
-- Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**321 in 13 files on 2026-08-19**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
-- Migration count: `ls apps/api/migrations | wc -l` (**40 on 2026-08-19**; v3.5.0 added `20260819120000_transactions_transfer_reconciliation.sql`)
-- CI coverage claims: read `.github/workflows/ci.yml` (jobs: rust, web, docker-stack; grep it
-  for `TEST_DATABASE_URL` — absent means integration tests still not in CI; grep for
-  `npm test`/`vitest` — absent means Vitest still not in CI)
+- Workspace total: `cargo test --workspace 2>&1 | grep "test result"` (**498 on 2026-08-22**)
+- Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (**67 on 2026-08-22** = projection 32 + history 22 + runway 13; it was 61 = 27+21+13 on 2026-08-19)
+- Integration attributes: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375 across 33 files on 2026-08-22**; `apps/api/src` adds **57** lib unit tests)
+- Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**368 in 16 files on 2026-08-22**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
+- Migration count: `ls apps/api/migrations | wc -l` (**42 on 2026-08-22**; 40 on 2026-08-19)
+- CI coverage claims: read `.github/workflows/ci.yml` (jobs: `secrets-scan`, `rust`, `web`,
+  `integration`, `main-guard`, `docker-stack`). `grep -n TEST_DATABASE_URL .github/workflows/ci.yml`
+  and `grep -n 'npm test\|lint:web' .github/workflows/ci.yml` must **print something** since 4.0.0 —
+  if they ever go silent again, someone removed a gate
 - `docker-stack` step list (the § 3 table, one row per step):
   `grep -n "      - name:" .github/workflows/ci.yml`
 - Its no-data-loss assertions verbatim:
@@ -437,9 +503,10 @@ plus the three inventory rows the MCP/OAuth releases had left out). Re-verify vo
   `ls .github/testdata/` and `grep -n "image:\|services:" .github/testdata/docker-compose.v2.yml`
 - Shellcheck gate over the entrypoint and every shipped script:
   `grep -n "shellcheck" .github/workflows/ci.yml`
-- Test DB is still TCP on 5433, untouched by the embedded-Postgres image:
-  `grep -n "5433" apps/api/tests/common/mod.rs` and `grep -rn "5433" .github/workflows/ci.yml`
-  (the second must print nothing — the integration suite is still not in CI)
+- Test DB is still TCP on 5433 **locally**, untouched by the embedded-Postgres image:
+  `grep -n "5433" apps/api/tests/common/mod.rs`. In CI it is **5432** (`grep -rn "5433"
+  .github/workflows/ci.yml` prints nothing — not because the suite is absent, but because the job's
+  Postgres service has no dev Postgres to clash with)
 - TestApp helper names: `grep -n "pub async fn\|pub fn" apps/api/tests/common/mod.rs`
 - Vitest env: `grep -n environment apps/web/vitest.config.ts` (still `"node"`?)
 - Fixture case count: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (7 cases on 2026-08-14; v2.2.0 did **not** touch the fixture)

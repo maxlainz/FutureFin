@@ -430,13 +430,26 @@ pub async fn change_password(
             .await?;
     // 400 y no 401: la sesión es válida: lo que falla es el dato del formulario. Un 401 haría
     // que la SPA echara al usuario al login por escribir mal su propia contraseña.
-    password::verify_password_blocking(&body.current_password, Some(stored))
-        .await
-        .map_err(|_| {
-            ApiError::BadRequest(
+    // Solo el 401 significa «la contraseña no es la suya»; un `Unavailable` (pánico del task,
+    // runtime cerrándose) se propaga tal cual. Traducirlo también a «contraseña incorrecta»
+    // mandaría al usuario a dudar de su memoria por un fallo de infraestructura.
+    match password::verify_password_blocking(&body.current_password, Some(stored)).await {
+        Ok(()) => {}
+        Err(ApiError::Unauthorized) => {
+            return Err(ApiError::BadRequest(
                 "current_password_invalid: la contraseña actual no es correcta".into(),
-            )
-        })?;
+            ))
+        }
+        Err(other) => return Err(other),
+    }
+
+    // Repetir la contraseña actual no es una rotación: sería revocar las otras tres
+    // credenciales sin cambiar nada, con la apariencia de haber rotado.
+    if body.new_password == body.current_password {
+        return Err(ApiError::BadRequest(
+            "password_unchanged: la contraseña nueva es la misma que la actual".into(),
+        ));
+    }
     let hash = password::hash_password_blocking(&body.new_password).await?;
 
     let mut tx = state.pool.begin().await?;

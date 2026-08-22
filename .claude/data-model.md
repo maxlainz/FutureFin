@@ -10,7 +10,7 @@ Migrations in `apps/api/migrations/`. SQLx embeds and runs them on startup.
 - `api_tokens` (v3.0.0, `20260816120000_api_tokens.sql`): `id (uuid PK)`, `user_id (FK users ON DELETE CASCADE)`, `label (1..64)`, `token_hash (text UNIQUE — SHA-256 hex del secreto; el secreto `ffp_…` jamás se persiste)`, `token_prefix (primeros 12 chars, para la UI)`, `created_at`, `expires_at (nullable)`, `last_used_at (nullable, throttle 60 s)`, `revoked_at (nullable — soft-revoke, la fila queda como auditoría)`. Credencial Bearer del servidor MCP (`/mcp`). **Excluida a propósito del `.ffbackup`**: son credenciales de la instalación, no datos financieros — un restore no debe resucitar secretos. Sin `installation_id`: el rol/installation se re-resuelven vivos en cada uso vía `require_installation_member`.
 
 ### Installation (singleton)
-- `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `annual_inflation_assumption_percent (decimal NOT NULL DEFAULT 0; 0 = target FIRE plano, >0 = target móvil que crece con la inflación)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `mcp_write_enabled (bool NOT NULL DEFAULT TRUE, `20260818120000` — kill-switch vivo de las tools de escritura MCP; toggle owner-only en Ajustes → MCP; NO se exporta en el `.ffbackup`)`, `created_at`
+- `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `annual_inflation_assumption_percent (decimal NOT NULL DEFAULT 0; 0 = target FIRE plano, >0 = target móvil que crece con la inflación)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `mcp_write_enabled (bool NOT NULL DEFAULT TRUE, `20260818120000` — kill-switch vivo de las tools de escritura MCP; toggle owner-only en Ajustes → Integraciones; NO se exporta en el `.ffbackup`)`, `created_at`
   - `projection_target_age` fue **eliminada** (`20260516120000_drop_projection_target_age.sql`, v1.0.6): el cruce FIRE es el único trigger de jubilación.
   - Singleton: only one row ever exists. First user auto-creates it on register.
   
@@ -119,7 +119,13 @@ del panel)`, `revoked_at (nullable)`, `revoked_reason (text nullable)`.
   posterior — el historial de revocaciones se acumula sin colisionar.
 - **Soft-revoke con motivo**: revocar es `revoked_at = now()` + `revoked_reason` ∈ `user_panel`
   (botón del panel) \| `refresh_token_reuse` \| `code_reuse` (señales de robo, OAuth 2.1 §4.3.1/§7.5)
-  \| `rfc7009` (revocación del cliente). La fila queda como auditoría. **Es el único punto de corte
+  \| `rfc7009` (revocación del cliente) \| **`password_change`** (4.0.0, `POST /v1/auth/password`)
+  \| **`membership_revoked`** (4.0.0, `DELETE /v1/installation/members/{user_id}`). Los dos nuevos
+  se escriben en la MISMA transacción que su acción: si el motivo del cambio de contraseña es un
+  compromiso, dejar viva una credencial que no caduca haría el cambio decorativo, y expulsar a
+  alguien dejándole el `ffo_` vivo no sería expulsarlo. Los motivos, reproducibles:
+  `grep -rn 'revoked_reason' apps/api/src` (ojo: `code_reuse` y `refresh_token_reuse` no viajan como
+  literal en el `UPDATE`, se pasan como parámetro desde `oauth/token.rs`). La fila queda como auditoría. **Es el único punto de corte
   que hay que tocar**: `oauth/access.rs` valida el access token con un JOIN que exige
   `g.revoked_at IS NULL`, así que revocar el grant mata todos sus tokens sin actualizarlos (misma
   filosofía que borrar una sesión).

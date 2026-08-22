@@ -62,6 +62,8 @@ propias cuentas para que no cuenten como gasto. Después compara mes real, presu
 - **Histórico**: guarda fotos de tu patrimonio y FutureFin reconstruye la curva del pasado, unida a
   la del futuro en un solo gráfico.
 - **Hogar compartido**: varias personas, una instalación. Cada una ve el conjunto o solo lo suyo.
+  Quien es propietario aprueba a quien entra, y también puede cambiarle el rol o retirarle el
+  acceso — sin borrar sus datos, que vuelven intactos si la readmite.
 - **Copias de seguridad**: exporta tus datos en un archivo cifrado con tu contraseña, y el
   contenedor guarda un respaldo automático antes de cada actualización.
 - **Claude**: si quieres, conecta la app a Claude y pregúntale por tus finanzas en voz alta, o

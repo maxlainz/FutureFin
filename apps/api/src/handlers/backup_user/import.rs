@@ -288,9 +288,7 @@ pub async fn import_user_backup_apply(
 async fn decode_request(
     body: ImportRequest,
 ) -> Result<(super::crypto::Manifest, BackupPayload), ApiError> {
-    tokio::task::spawn_blocking(move || decode_request_blocking(&body))
-        .await
-        .map_err(|_| ApiError::Unavailable)?
+    crate::heavy::run_backup_crypto(move || decode_request_blocking(&body)).await?
 }
 
 fn decode_request_blocking(

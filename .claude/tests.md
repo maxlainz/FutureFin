@@ -39,11 +39,11 @@ puerto; el default documentado sigue siendo el TCP de 5433.
 ## Backend
 
 ### Engine unit tests (`crates/engine/src/{projection.rs,history.rs,runway.rs}`)
-- `projection.rs` `mod tests`: 22 tests covering cascade allocation, retirement drain, FIRE target inflation, off-by-one between `fire_target_at_month_index(k+1)` and the handler's series.
-- `history.rs` `mod tests`: 21 tests (v1.5.0 + cash-flow tier-2) covering linear interpolation (midpoint exact, endpoints), the French-amortization curve (matches a pure schedule when the residual is 0, residual correction passes through both endpoints, midpoint above the linear chord, fallbacks when payment ≤ interest / no terms / apr=0, clamp ≥ 0), timeline rules (item absent from an intermediate snapshot = 0 between pairs, appears/disappears when present in only one, first-month clamp, virtual-today join with a deleted item → 0), and `month_index_of` / `add_months_signed` with negative deltas across a year boundary.
+- `projection.rs` `mod tests`: **32** tests (`grep -c '#[test]'`, 2026-08-22) covering cascade allocation, retirement drain, FIRE target inflation, off-by-one between `fire_target_at_month_index(k+1)` and the handler's series.
+- `history.rs` `mod tests`: **22** tests (2026-08-22; v1.5.0 + cash-flow tier-2) covering linear interpolation (midpoint exact, endpoints), the French-amortization curve (matches a pure schedule when the residual is 0, residual correction passes through both endpoints, midpoint above the linear chord, fallbacks when payment ≤ interest / no terms / apr=0, clamp ≥ 0), timeline rules (item absent from an intermediate snapshot = 0 between pairs, appears/disappears when present in only one, first-month clamp, virtual-today join with a deleted item → 0), and `month_index_of` / `add_months_signed` with negative deltas across a year boundary.
 - `runway.rs` `mod tests`: 13 tests (v2.3.0; 8 in v2.2.0) covering `liquid_runway_months` — exact reduction to `A/g` with no return/inflation (no tolerances), return extends / inflation shortens, `Indefinite` via the **SWR threshold** (`withdrawal_within_swr_is_indefinite`, renamed from `return_covering_expense_is_indefinite`), value-weighted multiplier (vs the naive per-asset mean), negative return **shortens** the runway (losses compound since the `monthly_multiplier` fix — before it behaved as zero growth), `NoExpenseBase` with zero expense (which also pins the check *order* against the threshold), `Months(0)` with zero balance. The five added in v2.3.0: `swr_threshold_exact_equality_is_indefinite` (exact `Decimal` boundary, 300.000 @ 4 %), `just_below_swr_threshold_is_finite` (one euro under → finite, `A/g` intact), `swr_zero_never_indefinite` (also defensive with `swr < 0`), `cap_reached_without_swr_is_months_at_cap` (surviving the cap is the `Months(1200)` **floor**, not `Indefinite`), `grossed_expense_raises_threshold` (the 5th parameter participates; the engine never recomputes `12 × monthly_expense`). Predicted values in each test's doc comment.
-- Engine total: **61** as of 2026-08-18 (27 + 21 + 13; los 5 nuevos cubren `monthly_multiplier` con tasas negativas — composición, clamp ≤ −100, pin de las positivas y decaimiento en simulación) — recuéntalo con `cargo test -p futurefin-engine 2>&1 | grep "test result"` o, sin compilar, `grep -c '#\[test\]' crates/engine/src/{projection,history,runway}.rs`.
-- Pure: no Postgres, no env. `cargo test -p futurefin-engine` runs both (and they run in **CI**, unlike the integration suite).
+- Engine total: **67** as of 2026-08-22 (32 + 22 + 13; antes 61 = 27+21+13 el 2026-08-18; los 5 nuevos cubren `monthly_multiplier` con tasas negativas — composición, clamp ≤ −100, pin de las positivas y decaimiento en simulación) — recuéntalo con `cargo test -p futurefin-engine 2>&1 | grep "test result"` o, sin compilar, `grep -c '#\[test\]' crates/engine/src/{projection,history,runway}.rs`.
+- Pure: no Postgres, no env. `cargo test -p futurefin-engine` runs both. **Desde 4.0.0 CI corre TODO** — engine, unitarios de la lib e integración contra Postgres: ver §CI.
 
 ### Integration tests (`apps/api/tests/`)
 - Each test spins up the full Axum router (`routes::app_router()`) and drives it via `tower::ServiceExt::oneshot` against a real Postgres.
@@ -79,6 +79,8 @@ puerto; el default documentado sigue siendo el TCP de 5433.
 | File | Covers |
 |---|---|
 | `smoke.rs` | health/ready, 401 on unauth, register→login→me, first-user bootstrap |
+| `account_and_members.rs` (4.0.0) | Las dos palancas que la documentación prometía y no existían. **`POST /v1/auth/password`**: cambia el hash, mantiene VIVA la sesión que llama y mata las demás, revoca los tokens `ffp_` y las concesiones OAuth en la misma transacción, `current_password` mala → **400 `current_password_invalid`** (no 401 — un 401 echaría al usuario al login por un error de formulario), política de longitud. **`/v1/installation/members`**: GET abierto a cualquier miembro (viewer incluido), PATCH/DELETE owner-only (miembro → 403), guardia `last_owner` en ambos, el DELETE corta las cuatro credenciales a la vez y **conserva los datos** del expulsado (vuelven al re-aprobarla), 404 sobre un no-miembro. |
+| `openapi_contract.rs` (4, 4.0.0) | **Sin Postgres**: gates sobre el propio `openapi.json`. (1) Todo path con plantilla declara sus parámetros — uno no lo hacía y el documento era formalmente inválido. (2) Los dos `ImportPreviewResponse` (CSV y backup) NO comparten schema: utoipa nombra por el último segmento del tipo, así que uno machacaba al otro y ambos endpoints apuntaban al mismo `$ref`. (3) La autenticación está declarada y **se aplica a toda operación privada** — antes la spec no tenía ni un `securityScheme` y presentaba 81 operaciones con sesión obligatoria como públicas. (4) Cero `$ref` colgantes. No existía **ningún** test sobre la spec: por eso nada de lo anterior rompía nada. |
 | `liabilities_purge.rs` | expired liabilities hidden from GET listings + summary totals but **persist in DB**; since 3.4.0 also `projection_excludes_expired_liability_principal` (la proyección filtra vencidos: `starting_net_worth == summary.net_worth`), `liability_create_requires_expense_category` (obligatoria + scope expense) y `expense_category_remap_and_set_null` (remap la arrastra; borrado sin refs no se bloquea → NULL) |
 | `budget_liability_quotas.rs` (10) | Cuotas de pasivo dentro de `GET /v1/budget` (renombrado desde `budget_derived.rs` en 3.7.0, cuando la cuota pasó a ser una partida más de `entries`): forma de la partida (`source`, `liability_id`, `label`, categoría de gasto) y convivencia con la partida manual de la misma categoría; totales (`expense_regular` = suma de los `entries` de gasto, sin `expense_derived`); la cuota fuera de `expense_retirement_*`; **la cuota fuera de la base de gasto del engine** (`monthly_delta_assumption`, regresión del doble conteo con cifras predichas a mano); predicado de pasivo activo (fecha fin NULL SÍ, vencido no, borde `>=`, sin plan no), semanal ×52/12, scoping household/mine, y la cuota sin `expense_category_id` que sigue sumando |
 | `body_limits.rs` | 1 MB cap on normal endpoints (413), 16 MB cap on `/backup/user-import` |
@@ -123,14 +125,28 @@ escribes un assert sobre el contenido de la cache y falla de forma intermitente,
 ### API lib unit tests (run under `cargo test --workspace`)
 
 Besides the integration files above, the API crate carries `#[cfg(test)]` unit tests in library
-modules. Notably `apps/api/src/handlers/backup_user/schema.rs` `mod tests` (10 tests; 2 added in
-v1.6.0 for `.ffbackup` v5, 2 more in v1.8.0 for v6): reject a future `schema_version`, migrate v1
+modules — **57 en total a 2026-08-22** (`grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l`).
+Notably `apps/api/src/handlers/backup_user/schema.rs` `mod tests` (**14** a 2026-08-22; eran 10, con 2
+añadidos en v1.6.0 para `.ffbackup` v5 y 2 más en v1.8.0 para v6): reject a future `schema_version`, migrate v1
 dropping legacy contribution fields, v3-with-rules round-trip, migrate v3→v4 filling empty
 `snapshots`, v4 snapshot-items round-trip, migrate v4 filling empty transactions, v5 transactions
 round-trip, migrate v5 filling empty `recurring_transaction_rules`, v6 recurring-rules round-trip,
-and the full v1→v6 migration chain. The `handlers/transactions/` module adds unit tests for the
-CSV presets (separators, ES/US decimals, BOM/Windows-1252, header autodetection), the
-fingerprint/ordinal grouping and the rule-precedence logic. `handlers/projection.rs` carries
+and the full v1→v6 migration chain. **Corrección (2026-08-22)**: hasta hoy esta página y `futurefin-validation-and-qa` decían que
+`handlers/transactions/` cubría con unit tests «los presets CSV (separadores, decimales ES/US,
+BOM/Windows-1252, autodetección de cabecera), el agrupamiento por huella/ordinal y la precedencia de
+reglas». **No era cierto y costó dinero**: `csv_presets.rs` e `import.rs` no tenían **ni un**
+`#[test]`, y por eso `parse_spanish_decimal` pudo hacer `replace('.', "")` sin mirar qué separaba el
+punto — `2100.00` entraba como `210000`, cien veces más grande, sin una sola señal. La rama no se
+ejecutaba en toda la suite porque ningún importe de los fixtures lleva punto. Lo que hay HOY
+(cuéntalo, no lo copies: `grep -c '#[test]' apps/api/src/handlers/transactions/*.rs`):
+`csv_presets.rs` **1** (`spanish_decimal_parses_thousands_and_rejects_a_dot_decimal`, que fija además
+el caso `0.075` — un millar nunca empieza por cero, así que un punto seguido de otra cosa no es un
+millar: se rechaza con `csv_amount_ambiguous` en vez de reinterpretarlo) y `schema.rs` **6**
+(`normalize_concept…`, `sql_fold_tables_mirror_the_rust_fold`, `like_needle_escapes_wildcards_and_folds`,
+`canonical_amount_is_stable_across_scales`, `fingerprint_is_deterministic_and_dedups_scale_variants`,
+`derive_rule_pattern_strips_numeric_reference_suffixes`). `import.rs` sigue con **cero**: su cobertura
+es toda de integración (`transactions_import.rs`). **Lección**: una fila de esta tabla que describe
+tests que no existen es peor que una fila ausente — hace que nadie los escriba. `handlers/projection.rs` carries
 `jubilacion_civil_tests` (8, issue #6): the month-index → civil-date rule — end-of-month clamp
 (including a 29 February), year rollover, `mi = 0` (already-FIRE today), no DOB → date but no age,
 and the one that earns the rule, `anclar_al_dia_1_restaria_un_ano_en_el_mes_del_cumpleanos`:
@@ -182,18 +198,21 @@ Rules of thumb:
 ## Frontend (Vitest)
 
 - Config: `apps/web/vitest.config.ts` — `node` environment (no jsdom). Add `happy-dom` if you ever add component render tests.
-- Pure-function tests only. **321 en 13 ficheros a 2026-08-19** (medido, no estimado: `npm test --workspace futurefin-web 2>&1 | grep Tests`). Ojo al contar a mano: `chart-gestures.test.ts` y `fire.test.ts` generan tests en bucles, así que el nº de `it(` en el fichero es menor que el que reporta Vitest (10 → 77 y 2 → 8 respectivamente). Esta lista omite `responsive.test.ts` (3) y `chart-gestures.test.ts` (77):
-  - `lib/format.test.ts` (38) — Intl formatting in es-ES, edge cases (null/NaN/empty), Decimal string preservation; `formatMonthsRough` en años + meses desde 24 y `formatRunwayValue` («Infinito» si el runway es indefinido; «+100 años» para el suelo `months ≥ 1200`) (v2.3.0).
-  - `lib/fire.normalize.test.ts` (21) — normalizadores y gating de `savings_source`, incluido `savingsAvgParenthetical` (paréntesis «promedio de N meses», singular, `undefined` en modo A / fallback) (v2.2.0).
-  - `lib/dates.test.ts` (32) — civil calendar (leap years, day clamping, age before/after birthday), TZ fallback, payment intervals, `addMonthsCivil` con deltas **negativos** (v1.5.0).
-  - `api/client.test.ts` (10) — `fetch` mocks: credentials, body serialization, 4xx error propagation, 204 handling.
-  - `lib/fire.test.ts` (8) — **FIRE target parity** vs server: loads the same `apps/api/tests/fixtures/fire-parity.json` and asserts `grossUpNetAnnualFire(computeFireAnnualNeedNetEur(...)) / (swr/100)` matches `expected_target_nw` (± 1 €).
-  - `lib/history-merge.test.ts` (12) — `mergeProjectionWithHistory`: identidad por referencia (history null/vacío/anchor distinto → render byte-idéntico), descarta puntos `month_index ≥ 0`, unión de asset series por `asset_id`, offset del futuro.
-  - `lib/projection-chart.test.ts` (10) — `deflationFactorAt` (0 / ±12 meses / inflación 0) y los tick-builders con `startMonth=-24` + regresión `startMonth=0` idéntica al comportamiento previo.
-  - `lib/snapshot-tracker.test.ts` (8) — `liquidCoverageComplete` (vacío→false, cobertura completa→true, stale tras `pruneEditLog`→false, asset nuevo dentro de la ventana).
-  - `lib/expenses.test.ts` (89) — helpers puros de la pestaña «Movimientos» (v1.6.0, ampliado en v1.8.0): labels de mes, `defaultSelectedMonth` (último completo), `categoriesForKind` (savings sin categoría), `buildConfirmDecisions` paralelo por índice, filtros del preview, tonos de delta, y (v1.8.0) `significanceThreshold`/`trendArrow`/`significantDeltaTone` (umbral 1% del ingreso real), `AVG_WINDOWS`/`avgWindowLabel`, `capitalizeSource`.
-  - `lib/oauth.test.ts` (8) — helpers de la pantalla de consentimiento (v3.1.0): `parseAuthorizeParams` (query completa con opcionales URL-decoded, `null` si falta cualquiera de los 5 obligatorios, opcionales ausentes **no** se inventan, y `code_challenge_method=plain` **SÍ** parsea — el rechazo es del servidor, no del cliente: la división de responsabilidades queda congelada en un test), `redirectHostLabel` (host con y sin puerto; string no-URL devuelto tal cual) y `authorizeErrorMessage` (códigos conocidos vs default legible).
-  - `lib/navigation.test.ts` (5) — sub-tabs de Ajustes (v3.0.0/3.1.0): la sub-tab `mcp` tiene slug y label propios, `access` se renombró a «Usuarios» **conservando el slug histórico** (los enlaces guardados siguen vivos), slug desconocido → `null` (App cae a la sub-tab por defecto), cualquier `/ajustes/*` resuelve a la pestaña `settings`, y todos los slugs son únicos y redondean por `settingsSubTabPath`.
+- Pure-function tests only. **368 en 16 ficheros a 2026-08-22** (medido con el runner: `npm test --workspace futurefin-web 2>&1 | grep Tests`; eran 321 en 13 el 2026-08-19). Los números entre paréntesis de la lista de abajo son **`it(` del fichero**, no tests ejecutados, y no cuadran con el total a propósito: `chart-gestures.test.ts` y `fire.test.ts` generan tests en bucles (10 `it(` → 77 y 2 → 8). Para un total, el runner; para orientarte, `grep -c 'it(' <fichero>`.
+  - `lib/format.test.ts` (50 `it(`) — Intl formatting in es-ES, edge cases (null/NaN/empty), Decimal string preservation; `formatMonthsRough` en años + meses desde 24 y `formatRunwayValue` («Infinito» si el runway es indefinido; «+100 años» para el suelo `months ≥ 1200`) (v2.3.0). **4.0.0**: la batería de `toApiDecimalString` — `250.000` → `250000` (el fallo que se llevaba tres órdenes de magnitud), `1.234,56`, el punto decimal suelto de los porcentajes, y lo ambiguo **rechazado** con `DecimalInputError` en vez de adivinado.
+  - `lib/fire.normalize.test.ts` (25 `it(`) — normalizadores y gating de `savings_source`, incluido `savingsAvgParenthetical` (paréntesis «promedio de N meses», singular, `undefined` en modo A / fallback) (v2.2.0).
+  - `lib/dates.test.ts` (32 `it(`) — civil calendar (leap years, day clamping, age before/after birthday), TZ fallback, payment intervals, `addMonthsCivil` con deltas **negativos** (v1.5.0).
+  - `api/client.test.ts` (14 `it(`) — `fetch` mocks: credentials, body serialization, 4xx error propagation, 204 handling. **4.0.0**: `apiFetch` traduce el `TypeError` del navegador a `network_error` con `status: 0`, y `setUnauthorizedHandler` se dispara con un 401 de cualquier llamada pero **no** con un fallo de red.
+  - `lib/errorMessages.test.ts` (8 `it(`) — traducción de los códigos estables al español; lee el mismo `apps/api/tests/fixtures/error-codes.json` que genera `error_codes_parity.rs`, así que un código nuevo sin traducción rompe **este** lado.
+  - `lib/helpTexts.test.ts` (3 `it(`) — cobertura del catálogo de descripciones en las dos direcciones (ningún `helpId` sin texto, ningún texto huérfano). Ver la skill `futurefin-metric-definitions`.
+  - `lib/ledger.test.ts` (4 `it(`) — helpers compartidos por las vistas de ledger.
+  - `lib/fire.test.ts` (2 `it(`, 8 ejecutados — el `for` sobre los casos del fixture) — **FIRE target parity** vs server: loads the same `apps/api/tests/fixtures/fire-parity.json` and asserts `grossUpNetAnnualFire(computeFireAnnualNeedNetEur(...)) / (swr/100)` matches `expected_target_nw` (± 1 €).
+  - `lib/history-merge.test.ts` (12 `it(`) — `mergeProjectionWithHistory`: identidad por referencia (history null/vacío/anchor distinto → render byte-idéntico), descarta puntos `month_index ≥ 0`, unión de asset series por `asset_id`, offset del futuro.
+  - `lib/projection-chart.test.ts` (14 `it(`) — `deflationFactorAt` (0 / ±12 meses / inflación 0) y los tick-builders con `startMonth=-24` + regresión `startMonth=0` idéntica al comportamiento previo. **4.0.0**: `lastPointIndexAtOrBeforeMonth` — mes → posición bajo densidad `hybrid`, donde la posición 13 es el mes 24 y un `Math.min(mes, len-1)` no recortaba nada.
+  - `lib/snapshot-tracker.test.ts` (8 `it(`) — `liquidCoverageComplete` (vacío→false, cobertura completa→true, stale tras `pruneEditLog`→false, asset nuevo dentro de la ventana).
+  - `lib/expenses.test.ts` (96 `it(`) — helpers puros de la pestaña «Movimientos» (v1.6.0, ampliado en v1.8.0): labels de mes, `defaultSelectedMonth` (último completo), `categoriesForKind` (savings sin categoría), `buildConfirmDecisions` paralelo por índice, filtros del preview, tonos de delta, y (v1.8.0) `significanceThreshold`/`trendArrow`/`significantDeltaTone` (umbral 1% del ingreso real), `AVG_WINDOWS`/`avgWindowLabel`, `capitalizeSource`.
+  - `lib/oauth.test.ts` (8 `it(`) — helpers de la pantalla de consentimiento (v3.1.0): `parseAuthorizeParams` (query completa con opcionales URL-decoded, `null` si falta cualquiera de los 5 obligatorios, opcionales ausentes **no** se inventan, y `code_challenge_method=plain` **SÍ** parsea — el rechazo es del servidor, no del cliente: la división de responsabilidades queda congelada en un test), `redirectHostLabel` (host con y sin puerto; string no-URL devuelto tal cual) y `authorizeErrorMessage` (códigos conocidos vs default legible).
+  - `lib/navigation.test.ts` (6 `it(`) — sub-tabs de Ajustes: fija los labels de `general` («General») y `plan` («Plan») y, sobre todo, que **los slugs viejos siguen resolviendo** tras la reorganización de 3.10.0 (ocho sub-pestañas → siete) (`/ajustes/mcp` → `integrations`, `/ajustes/proyeccion` y `/ajustes/jubilacion` → `plan`, `/ajustes/acceso` → `access`): un enlace guardado no puede caer en la primera sub-pestaña sin decir nada. Slug desconocido → `null` (App cae a la sub-tab por defecto), cualquier `/ajustes/*` resuelve a la pestaña `settings`, y todos los slugs son únicos y redondean por `settingsSubTabPath`.
 
 ### Writing a new frontend test
 Colocate beside the module: `lib/foo.ts` ↔ `lib/foo.test.ts`. Use `vi.mocked(globalThis.fetch)` if you need to stub fetch.
@@ -227,15 +246,29 @@ Algunos cálculos viven duplicados a propósito (e.g. FIRE math — el cliente a
 
 CI existe: `.github/workflows/ci.yml` corre en push/PR a `main`/`dev`:
 
+> **4.0.0 — CI dejó de tener el agujero que esta página documentaba.** Hasta entonces el workflow
+> **no** corría los tests de integración contra Postgres (329 de los 447 de la suite), ni ESLint, ni
+> Vitest: los tres estaban listados como «obligación local», es decir, dependían de que a nadie se le
+> olvidara. Una PR podía salir verde con toda la capa de handlers rota. Con el repositorio público y
+> colaboradores externos eso no se sostiene, así que los tres entran como gates **bloqueantes**. Si
+> lees en algún sitio que «la integración y Vitest no corren en CI», ese sitio está desactualizado.
+
 | Job | Corre | NO corre |
 |---|---|---|
-| `rust` | `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked` | los tests de integración (`apps/api/tests/`) — necesitan `TEST_DATABASE_URL` |
-| `web` | `npm run typecheck:web`, `npm run build:web` | Vitest (`npm test`), `npm run lint:web` |
+| `secrets-scan` | `./scripts/scan-sensitive.sh` sobre los ficheros trackeados — primero y barato. Existe porque hasta agosto de 2026 `apps/api/tests/fixtures/` llevaba extractos bancarios reales y nada lo detectó (`futurefin-data-hygiene`) | — |
+| `rust` | `./scripts/audit-releases.sh --version` (el CHANGELOG cubre la versión de Cargo.toml), `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked` | **clippy y rustfmt**, instalados pero con los pasos **comentados a propósito**: el repo nunca ha pasado por ellos (50 avisos únicos en 20 ficheros; `cargo fmt --check` marca 1.175 bloques en 72 ficheros) y activarlos hoy dejaría CI en rojo desde el primer push — una CI roja de serie enseña a ignorar la CI. Para activarlos: limpieza en un commit aparte, `cargo fmt --all` **solo** en el suyo, y descomentar |
+| `web` | `npm ci` (**no `npm install`**: reescribía el lockfile en silencio, así que CI probaba potencialmente otro árbol de dependencias que el que publica el Dockerfile), `typecheck:web`, **`lint:web`**, **`npm test` (Vitest)**, `build:web` — en ese orden, el build el último por caro | render de componentes (los tests son de función pura, entorno `node`) |
+| `integration` (4.0.0) | `cargo test --workspace --locked` con un **servicio Postgres 16.4-alpine** y `TEST_DATABASE_URL` apuntando a `127.0.0.1:5432` (en local el puerto documentado sigue siendo 5433, para no chocar con el Postgres de desarrollo). Cubre de una vez engine + unitarios de la lib + integración. `timeout-minutes: 45`. El healthcheck usa `pg_isready -h 127.0.0.1` **a propósito**: sin host, durante el `initdb` la imagen levanta un servidor temporal que solo escucha en el socket Unix y `pg_isready` da OK antes de que la base exista | — |
+| `main-guard` | Que `main` no publique documentación interna: `git ls-files -- CLAUDE.md .claude` debe salir vacío. Corre si el ref es `main` **o si el PR va contra `main`** — con `github.ref` a secas, en un pull request el ref es `refs/pull/N/merge` y el job se saltaba justo en la revisión | — |
 | `docker-stack` (3.0.0) | shellcheck (`docker-entrypoint.sh`, `scripts/*.sh`, scripts de skills) + build de la imagen autocontenida + **sanity** (majors PG 15 y 16 presentes, label `com.futurefin.postgres.majors=15,16`, arranque **sin volumen** debe ABORTAR) + **instalación nueva** (volumen virgen → `initializing fresh PostgreSQL 16`, `/v1/ready`, alta + login + categoría «Ácido Ñandú» vía API) + **recreate estilo watchtower** conservando datos + **apagado limpio** (greps de `shutdown signal received`, `database pool closed`, `database system is shut down`, `clean shutdown complete` y `ExitCode == 0`) + **stack 2.3.0 REAL con datos** → **imagen 4.x sobre el compose V2 sin tocar** (desde 4.0.0 ya NO arranca en compat: exit code ≠ 0 y logs con `ya no habla con bases de datos externas` + `3.9.0`) → **migración al compose V3 reutilizando el volumen** (`adopting ownership of PGDATA`, `reindexing database after adoption`, login idéntico, categoría con Ñ/acentos intacta, username duplicado → 409/422, backup `pre-migration-*.sql.gz` presente) + **escenario 3: `DATABASE_URL` externa heredada + volumen vacío** (ya no prueba la automigración —retirada en 4.0.0— sino que el contenedor **aborta**: exit ≠ 0, logs con `ya no habla con bases de datos externas` y `docs/actualizar.md`, y el volumen **sigue vacío**, sin inicializar nada a medias) + **pg_upgrade 15→16** (marker row sobrevive, `SHOW server_version` empieza por 16, `pgdata_old_15/`, backup `pre-pgupgrade-15-to-16-*.sql.gz`) | UI real (no hay E2E de navegador); las guardas de arranque que abortan (`pre-migration backup FAILED`, rol inexistente, swap de pg_upgrade interrumpido) salvo la de «sin volumen» |
 
 El `docker-stack` dejó de ser un smoke de arranque: desde 3.0.0 es **la única evidencia automatizada de «sin pérdida de datos»** (así lo dice el comentario del job: «no debilitar»). Sus entradas congeladas viven en `.github/testdata/docker-compose.{v2,v2-app-v3}.yml` (el `automigrate.yml` se borró en 4.0.0 con el modo externo); **`docker-compose.v2.yml` NO se actualiza** cuando evolucione el compose de producción — su valor es ser la topología 2.x exacta (dos servicios, imagen pineada a 2.3.0), igual que un fixture. Si tocas `apps/api/docker-entrypoint.sh`, `apps/api/Dockerfile`, `docker-compose.yml` o esos ficheros, ese job **es** tu suite: léelo, no lo debilites, y añade un paso nuevo si añades un camino de arranque nuevo.
 
-**Consecuencia**: antes de mergear tienes que correr EN LOCAL lo que CI no cubre:
+**Consecuencia (4.0.0)**: CI ya cubre lo mismo que tú corres en local, así que correrlo antes de
+empujar deja de ser la ÚNICA red y pasa a ser lo que siempre debió ser — enterarte en 3 minutos en
+vez de en 15 (norma «local CI first» del repo). Lo que sigue **sin** cubrir nadie: la UI real (no hay
+E2E de navegador), clippy/rustfmt (desactivados a conciencia, ver la tabla) y la verificación visual
+en tema claro **y** oscuro, que es manual por definición.
 ```bash
 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" cargo test --workspace
 npm test --workspace futurefin-web
@@ -246,8 +279,10 @@ npm run lint:web
 ## Procedencia y re-verificación
 
 Contenido verificado leyendo el código; la tabla de CI y las notas de contenedor se
-re-verificaron el **2026-08-16 (v3.0.0)**, y la suite `oauth_flow.rs`, los helpers nuevos de
-`common/mod.rs` y los recuentos de Vitest el **2026-08-17 (v3.1.0)**. Comandos para comprobar que
+re-verificaron el **2026-08-16 (v3.0.0)**, la suite `oauth_flow.rs`, los helpers nuevos de
+`common/mod.rs` y los recuentos de Vitest el **2026-08-17 (v3.1.0)**, y **la tabla de CI entera, los
+recuentos y la sección de unit tests el 2026-08-22 (4.0.0)** — que es cuando la integración, ESLint y
+Vitest entraron en CI y esta página dejó de decir lo contrario. Comandos para comprobar que
 esta página no ha derivado (todos desde la raíz del repo):
 
 ```bash
@@ -255,21 +290,25 @@ esta página no ha derivado (todos desde la raíz del repo):
 grep -n "^  [a-z-]*:$\|      - name:" .github/workflows/ci.yml
 # Aserciones de «sin pérdida de datos» que cita la tabla
 grep -n "no persistent volume\|initializing fresh PostgreSQL 16\|Ácido Ñandú\|adopting ownership\|reindexing database after adoption\|ya no habla con bases de datos externas\|pg_upgrade needed\|pgdata_old_15\|pre-migration-\|pre-pgupgrade-\|clean shutdown complete\|ExitCode" .github/workflows/ci.yml
-# Integración y Vitest siguen FUERA de CI (ambos deben no imprimir nada)
-grep -n "TEST_DATABASE_URL\|5433" .github/workflows/ci.yml
-grep -n "npm test\|vitest\|lint:web" .github/workflows/ci.yml
+# Integración y Vitest DENTRO de CI desde 4.0.0 (los tres deben imprimir algo)
+grep -n "TEST_DATABASE_URL" .github/workflows/ci.yml       # job `integration`, servicio postgres
+grep -n "npm test\|lint:web" .github/workflows/ci.yml      # job `web`, gates bloqueantes
+grep -n "^  integration:\|^  main-guard:\|^  secrets-scan:" .github/workflows/ci.yml
 # Fixtures congelados (v2 = topología 2.x, imagen pineada)
 ls .github/testdata/ && grep -n "image:\|services:" .github/testdata/docker-compose.v2.yml
 # La base de tests sigue en 5433 por TCP
 grep -n "5433" apps/api/tests/common/mod.rs
 # Recuentos sin compilar
 grep -c '#\[test\]' crates/engine/src/{projection,history,runway}.rs
-grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'
-                                        # 284 en 27 suites a 2026-08-19 (transactions_reconcile.rs aporta 19; +1 post-3.5.0 por la paridad CRUD MCP)
-ls apps/api/tests/*.rs | wc -l          # 27 a 2026-08-19
-ls apps/api/migrations | wc -l          # 40 a 2026-08-19 (3.5.0 añade 20260819120000_transactions_transfer_reconciliation.sql)
-# Vitest: el nº de `it(` NO es el total (hay bucles) — el autoritativo es el runner
-npm test --workspace futurefin-web 2>&1 | grep "Tests "   # 321 en 13 ficheros a 2026-08-19
+grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'
+                                        # 375 atributos en 33 ficheros a 2026-08-22 (eran 284 en 27 el 2026-08-19)
+grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l   # 57 unitarios de la lib de la API, 2026-08-22
+ls apps/api/tests/*.rs | wc -l          # 33 a 2026-08-22
+ls apps/api/migrations | wc -l          # 42 a 2026-08-22 (eran 40 el 2026-08-19)
+# Totales autoritativos: SIEMPRE del runner, nunca de un grep (hay bucles que generan tests, y el
+# atributo no siempre es un test ejecutado). A 2026-08-22: cargo 498, Vitest 368 en 16 ficheros.
+cargo test --workspace 2>&1 | grep "test result"
+npm test --workspace futurefin-web 2>&1 | grep "Tests "
 # El Host por defecto del harness (sin él, todo /oauth/* daría 400 irreal)
 grep -n "futurefin.test" apps/api/tests/common/mod.rs      # 2 hits: request() y mcp_initialize()
 ```

@@ -33,7 +33,14 @@ Radii: `--ff-radius-{frame=12, panel=14, kpi=12, pill=999, input=10}px`.
 
 ### Tokens del chart de proyección
 
-`--proj-nw`, `--proj-cc`, `--proj-fire`, `--proj-jub`, `--proj-grid`, `--proj-plot-bg`, `--proj-tick`, `--proj-meta`, `--proj-axis`, `--proj-milestone`, `--proj-crosshair`.
+`--proj-nw`, `--proj-cc`, `--proj-fire`, `--proj-grid`, `--proj-plot-bg`, `--proj-tick`, `--proj-meta`, `--proj-axis`, `--proj-milestone`, `--proj-crosshair`.
+
+> **`--proj-jub` está definido pero MUERTO** (verificado 2026-08-22): existe en las dos ramas de
+> [`theme.css`](../apps/web/src/styles/theme.css) como alias de `--ff-accent` y **nadie lo consume**
+> (`grep -rn 'proj-jub' apps/web/src` solo devuelve sus dos definiciones). La línea de jubilación
+> del chart usa `--proj-fire`. No lo cites como token vivo ni construyas nada nuevo sobre él: o se
+> conecta a un consumidor real, o se borra. Se documenta aquí en vez de callarlo porque un token
+> huérfano que parece vivo se acaba usando y arrastra una intención que nadie decidió.
 
 Áreas de activos: `--proj-area-1` a `--proj-area-10` (paleta polícroma — azul/teal/violeta/... en claro, pasteles más claros en oscuro). Consumidos por [`ASSET_LINE_COLORS`](../apps/web/src/lib/projection-chart.ts).
 
@@ -69,7 +76,8 @@ Una gráfica de apoyo (`components/charts/CategoryComparisonBars.tsx` → export
 - Estado vive en `App.tsx` (`themePref: ThemePref`), persistido en `localStorage["ff-theme-pref"]`.
 - Default: `"auto"` → sigue `prefers-color-scheme` y se suscribe a cambios en vivo.
 - Aplicación: `applyTheme(pref)` pone `data-theme="dark"|"light"` en `<html>`.
-- Toggle UI: segmented Auto/Claro/Oscuro en `Ajustes → Datos y sistema → Apariencia`.
+- Toggle UI: segmented Auto/Claro/Oscuro en `Ajustes → General → Apariencia` (la sub-pestaña se
+  reorganizó en 3.10.0; los nombres vivos están en `SETTINGS_SUBTAB_LABEL`, `lib/navigation.ts`).
 - Helpers en [`apps/web/src/lib/theme.ts`](../apps/web/src/lib/theme.ts).
 
 ## Shell
@@ -115,7 +123,7 @@ Excepciones sancionadas (por componente, no ejes estructurales):
 ### Táctil mínimo + carve-out
 
 - Token `--ff-touch-min: 2.75rem` (≈44px, HIG / WCAG 2.5.5) en [`theme.css`](../apps/web/src/styles/theme.css). Es **inerte**: solo lo consume la sección `MOBILE` dentro de `@media (max-width: 640px)`.
-- Controles primarios a ≥ `--ff-touch-min` en `≤640`: `.btn`, `.btn.icon-btn`, `.field input/select` (checkbox/radio excluidos), `.modal-close`, hamburguesa (`.ff-topbar-mobile-toggle`), items del drawer (`.ff-mobile-drawer-item`), switch `.ff-switch` (`2.6×1.5rem`; Proyección y Ajustes → MCP).
+- Controles primarios a ≥ `--ff-touch-min` en `≤640`: `.btn`, `.btn.icon-btn`, `.field input/select` (checkbox/radio excluidos), `.modal-close`, hamburguesa (`.ff-topbar-mobile-toggle`), items del drawer (`.ff-mobile-drawer-item`), switch `.ff-switch` (`2.6×1.5rem`; Proyección y Ajustes → Integraciones).
 - **Carve-out obligatorio**: los controles densos dentro de tablas quedan **excluidos** del bump (`min-height: 0`, y `min-width: 0` en los icon-btn) — su densidad la gobierna el trabajo de tablas móviles, no el sistema base. Selectores exentos: `.assets-table .btn`, `.asset-actions-cell .btn`, `.budget-row-actions .btn`, `.exp-inline-select`, `.import-preview-table select`. Si añades un control táctil nuevo dentro de una tabla, añádelo al carve-out.
 
 ### Patrón KPI strip
@@ -167,9 +175,9 @@ Leyenda discreta que acompaña al MiniProjection. Cada item: `{ label, color, da
 | `ThemeToggle` | Segmented Auto/Claro/Oscuro |
 | `MiniProjection` | Chart compacto reutilizable (ver arriba) |
 
-> **Switch (`components/Switch.tsx`, clases `.ff-switch*`)**: el toggle track+thumb accesible (`role="switch"`, focus-visible con outline `--ff-accent`, disabled al 55 %). Nació en la barra de Proyección y se extrajo a componente al añadir el toggle «Permitir escritura vía MCP» de Ajustes → MCP; `variant="chart"` conserva el label small-caps compacto de las barras de chart. Para booleanos de formulario clásicos sigue existiendo `label.field.checkbox-field`.
+> **Switch (`components/Switch.tsx`, clases `.ff-switch*`)**: el toggle track+thumb accesible (`role="switch"`, focus-visible con outline `--ff-accent`, disabled al 55 %). Nació en la barra de Proyección y se extrajo a componente al añadir el toggle «Permitir escritura vía MCP» de Ajustes → Integraciones; `variant="chart"` conserva el label small-caps compacto de las barras de chart. Para booleanos de formulario clásicos sigue existiendo `label.field.checkbox-field`.
 
-> **Segmented control (`.ff-theme-toggle`)**: el único segmented que queda es el toggle de tema Auto/Claro/Oscuro (`ThemeToggle`, clase `.ff-theme-toggle`). La antigua clase compartida **`.ff-segmented` se eliminó** tras 2.0.0: la «fuente del ahorro» de `Ajustes → Proyección` pasó a un `<select>` nativo estándar (con `<small>` de ayuda asociada por `aria-describedby`, fuera del `<label>`). Si necesitas un nuevo control inline de 2–3 opciones, valora primero un `<select>`; si de verdad hace falta un segmented, reintroduce la variante en el bloque de `.ff-theme-toggle` en `App.css`. Verifica claro **y** oscuro.
+> **Segmented control (`.ff-theme-toggle`)**: el único segmented que queda es el toggle de tema Auto/Claro/Oscuro (`ThemeToggle`, clase `.ff-theme-toggle`). La antigua clase compartida **`.ff-segmented` se eliminó** tras 2.0.0: la «fuente del ahorro» de la entonces `Ajustes → Proyección` (hoy `Ajustes → Plan`) pasó a un `<select>` nativo estándar (con `<small>` de ayuda asociada por `aria-describedby`, fuera del `<label>`). Si necesitas un nuevo control inline de 2–3 opciones, valora primero un `<select>`; si de verdad hace falta un segmented, reintroduce la variante en el bloque de `.ff-theme-toggle` en `App.css`. Verifica claro **y** oscuro.
 
 ## Iconografía
 

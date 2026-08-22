@@ -35,6 +35,15 @@ pub struct FirstMonthAllocation {
     pub rules: Vec<RuleOutcome>,
 }
 pub fn first_month_allocation(input: &ProjectionInput) -> Result<FirstMonthAllocation, EngineError>
+// 4.0.0 — resuelve el estado del mes 1 EXACTAMENTE como el bucle de simulación: si el patrimonio
+// de partida (Σ activos − Σ principales) ya cruza `fire_target_at_month_index(fire_target, 0)`,
+// usa ingreso y gasto DE JUBILACIÓN y el retiro mensual, igual que hace `project_net_worth_series`.
+// Antes solo miraba `retirement_start_month` e ignoraba `fire_target`, así que en un hogar ya por
+// encima de su número FIRE `GET /v1/assets` y `/v1/allocation-rules/resolution` publicaban una
+// aportación CON EL SIGNO CONTRARIO al de la proyección —«aportas 2.000 €/mes» sobre un activo que
+// la simulación reduce ese mismo mes— y explicaban regla a regla una cascada que no se ejecuta
+// jamás. Sostenido en todo el horizonte, y no es un caso raro: es el estado final del público al
+// que sirve la app.
 
 // Per-rule trace. `amount_intent` vs `amount_resolved` separates "trimmed by a cap" (not a skip,
 // and the most-asked question) from "skipped". Skip reasons are deliberately NOT collapsed —

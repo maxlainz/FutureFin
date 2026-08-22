@@ -1,0 +1,109 @@
+//! Techo de concurrencia para el trabajo criptográfico caro (Argon2id y el descifrado de
+//! `.ffbackup`).
+//!
+//! ## Por qué existe
+//!
+//! Mover Argon2id a `spawn_blocking` arregló un problema y creó otro peor, y las dos mitades
+//! importan:
+//!
+//! - **Lo que arregló**: con el KDF corriendo inline en un worker del reactor, `num_cpus`
+//!   peticiones concurrentes a `/v1/auth/register` —endpoint sin autenticación por diseño—
+//!   paraban el proceso entero, `GET /v1/ready` incluido.
+//! - **Lo que creó**: el pool de blocking de Tokio tiene **512 hilos** por defecto y una cola
+//!   de espera ilimitada. El techo de Argon2 concurrente pasó de `num_cpus` a 512, y cada hash
+//!   reserva 19 MiB: de ~38 MiB en un VPS de 2 vCPU a ~9,5 GiB. El fallo dejaba de ser «la API
+//!   no responde y el healthcheck la reinicia» para pasar a ser **OOM-kill del contenedor con
+//!   el PostgreSQL embebido dentro** — SIGKILL al postmaster a mitad de checkpoint, que es
+//!   justo lo que el apagado ordenado existe para evitar.
+//!
+//! Peor aún: el healthcheck no lo habría notado. `sqlx` no usa el pool de blocking, así que
+//! `/v1/ready` sigue devolviendo 200 mientras login, registro y backup están muertos. El fallo
+//! pasaba de ruidoso y auto-recuperable a silencioso.
+//!
+//! ## Por qué un semáforo y no un `try_acquire` con 503
+//!
+//! La memoria solo se reserva **mientras** se hashea. Un permiso pendiente es un future
+//! esperando: cuesta bytes, no megabytes. Así que esperar acota el pico de memoria sin
+//! rechazar tráfico legítimo: bajo carga las peticiones se ponen lentas, que es la degradación
+//! correcta, en vez de fallar o tumbar el contenedor.
+
+use crate::error::ApiError;
+use std::sync::OnceLock;
+use tokio::sync::Semaphore;
+
+/// Permisos para el KDF de contraseñas (login, registro, verificación del export).
+///
+/// Uno por CPU: es exactamente el techo que había antes de `spawn_blocking`, que era seguro en
+/// memoria. Lo que cambia respecto a entonces es que ahora se espera **fuera** del reactor, así
+/// que el resto de la API sigue respondiendo.
+fn password_permits() -> &'static Semaphore {
+    static S: OnceLock<Semaphore> = OnceLock::new();
+    S.get_or_init(|| {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 8);
+        Semaphore::const_new(n)
+    })
+}
+
+/// Permisos para el cifrado/descifrado de `.ffbackup`. **Uno solo**, a propósito.
+///
+/// Una sola petición de import puede pedir, sumando, varios cientos de MiB: el KDF con los
+/// parámetros máximos que se admiten, los 16 MiB del cuerpo en base64, los bytes decodificados,
+/// el texto en claro tras descomprimir y el payload deserializado. Los topes de `crypto.rs`
+/// acotan **una** petición; sin esto, veinte concurrentes seguían agotando un contenedor de
+/// 2 GiB desde el endpoint de *preview*, que ni siquiera escribe. Exportar e importar una copia
+/// de seguridad es una operación rara: serializarla no le cuesta nada a nadie.
+fn backup_permits() -> &'static Semaphore {
+    static S: OnceLock<Semaphore> = OnceLock::new();
+    S.get_or_init(|| Semaphore::const_new(1))
+}
+
+async fn run_with<T, F>(sem: &'static Semaphore, f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let _permit = sem.acquire().await.map_err(|_| ApiError::Unavailable)?;
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|_| ApiError::Unavailable)
+}
+
+/// Ejecuta un KDF de contraseña fuera del reactor y bajo el techo de concurrencia.
+pub async fn run_password_kdf<T, F>(f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    run_with(password_permits(), f).await
+}
+
+/// Ejecuta el cifrado/descifrado de un `.ffbackup` fuera del reactor, de uno en uno.
+pub async fn run_backup_crypto<T, F>(f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    run_with(backup_permits(), f).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn el_techo_de_contrasenas_no_es_el_pool_entero_de_tokio() {
+        let n = password_permits().available_permits();
+        assert!(
+            (2..=8).contains(&n),
+            "el techo debe seguir siendo del orden del nº de CPU, no los 512 hilos del pool: {n}"
+        );
+    }
+
+    #[test]
+    fn el_backup_va_de_uno_en_uno() {
+        assert_eq!(backup_permits().available_permits(), 1);
+    }
+}

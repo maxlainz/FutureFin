@@ -59,6 +59,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Otro registro ha creado el hogar justo antes que el tuyo. Vuelve a intentarlo.",
   membership_role_invalid:
     "Ese rol no existe. Elige propietario, miembro o visor.",
+  password_unchanged:
+    "La contraseña nueva es la misma que la actual. Elige una distinta.",
   current_password_invalid:
     "La contraseña actual no es correcta. Vuelve a escribirla.",
   last_owner:
