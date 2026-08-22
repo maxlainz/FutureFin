@@ -34,11 +34,39 @@ jobs:
       - name: CHANGELOG cubre la versión de Cargo.toml
         run: ./scripts/audit-releases.sh --version
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # clippy y rustfmt están instalados aunque sus pasos sigan comentados
+          # (ver abajo): así activarlos es descomentar, no tocar dos sitios.
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: cargo build
         run: cargo build -p futurefin-api --locked
       - name: cargo test (engine — no DB required)
         run: cargo test -p futurefin-engine --locked
+
+      # ── Gates preparados pero DESACTIVADOS a propósito (2026-08-22) ──────────
+      # El repo nunca ha pasado por clippy ni por rustfmt, así que activarlos hoy
+      # dejaría CI en rojo desde el primer push — y una CI roja de serie enseña a
+      # ignorar la CI, que es peor que no tenerla. Medido en local sobre `dev`:
+      #
+      #   cargo clippy --workspace --all-targets -- -D warnings
+      #     → 50 avisos únicos en 20 ficheros. Los dominan needless_borrow (14),
+      #       type_complexity (8) y unnecessary_map_or (7); ninguno toca aritmética
+      #       de Decimal. Con `-D warnings` aborta en `crates/engine` (4 avisos) y
+      #       ni siquiera llega a `apps/api`.
+      #   cargo fmt --all --check
+      #     → 1.175 bloques en 72 ficheros (el mayor, `tests/common/mod.rs`, con 280).
+      #
+      # Para activarlos: limpia primero el repo en un commit aparte —
+      # `cargo clippy --workspace --all-targets --fix` (29 de los 50 tienen
+      # autofix) y `cargo fmt --all` — comprueba que la suite sigue verde, y
+      # entonces descomenta estos dos pasos. Un `cargo fmt --all` toca 72 ficheros
+      # de golpe, así que va SOLO en su propio commit: mezclado con cambios reales
+      # hace ilegible cualquier diff y cualquier `git blame`.
+      # - name: cargo clippy
+      #   run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # - name: cargo fmt
+      #   run: cargo fmt --all --check
 
   web:
     runs-on: ubuntu-latest
@@ -49,11 +77,113 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-      - name: npm install + typecheck + build
+      - name: npm install
+        run: npm install
+      - name: typecheck
+        run: npm run typecheck:web
+      # lint y Vitest existían desde siempre en package.json pero nunca corrían en
+      # CI: la skill `futurefin-validation-and-qa` los listaba como «obligación
+      # local», es decir, dependían de que a nadie se le olvidara. Con
+      # colaboradores externos eso no se sostiene. Ambos están verdes hoy
+      # (eslint sin avisos; Vitest 355 tests en 16 ficheros), así que entran
+      # como gates bloqueantes, no informativos.
+      - name: lint
+        run: npm run lint:web
+      - name: vitest
+        run: npm test --workspace futurefin-web
+      # El build va el último: es el paso lento y no tiene sentido pagarlo si el
+      # typecheck o los tests ya han fallado.
+      - name: build
+        run: npm run build:web
+
+  # `cargo test --workspace` son 447 tests (medido el 2026-08-22); CI solo corría los
+  # 65 del engine. Los otros 382 —329 de integración en 30 ficheros de
+  # `apps/api/tests/` más 53 unitarios de la lib de la API— necesitan un Postgres de
+  # verdad, así que nunca se ejecutaban: una PR podía salir verde con toda la capa de
+  # handlers rota. Era el agujero de cobertura más grande del repo, documentado como
+  # «obligación local» en la skill `futurefin-validation-and-qa` — o sea, dependiendo
+  # de que a nadie se le olvidara. Con colaboradores externos eso no se sostiene.
+  #
+  # El harness (`apps/api/tests/common/mod.rs`) crea un schema `ff_test_<uuid>` por
+  # test y le aplica las 42 migraciones, así que un único Postgres compartido basta y
+  # los tests no se pisan entre sí. Los schemas NO se borran a propósito (un test que
+  # falla deja su estado inspeccionable); aquí da igual, el contenedor muere con el job.
+  #
+  # Sobre conexiones: cargo ejecuta los binarios de test en serie y libtest usa un
+  # hilo por core (4 en el runner), y cada test abre un pool de 5 → ~20 conexiones
+  # simultáneas, muy por debajo del max_connections=100 por defecto.
+  integration:
+    runs-on: ubuntu-latest
+    # ~3 min de tests + compilación. El tope evita que un test bloqueado se coma
+    # las 6 h por defecto del runner.
+    timeout-minutes: 45
+
+    services:
+      postgres:
+        # Misma imagen que el `ff-test-db` local documentado en CLAUDE.md, para que
+        # un fallo aquí sea reproducible en la máquina de quien manda la PR.
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: futurefin
+          POSTGRES_PASSWORD: futurefin_test
+          POSTGRES_DB: futurefin_test
+        ports:
+          - 5432:5432
+        # `-h 127.0.0.1` NO es decorativo: durante el initdb la imagen oficial
+        # levanta un servidor temporal que solo escucha en el socket Unix, y un
+        # `pg_isready` sin host da OK antes de que la base exista. Ese flake ya nos
+        # mordió en el paso de pg_upgrade de `docker-stack` (ver su comentario).
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U futurefin -d futurefin_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `cargo test --workspace` cubre las tres cosas de golpe: los tests unitarios
+      # del engine, los unitarios de la lib de la API y los de integración contra
+      # Postgres. En local el puerto documentado es el 5433 (para no chocar con el
+      # Postgres de desarrollo); aquí no hay con qué chocar, así que 5432.
+      - name: cargo test --workspace (engine + integración contra Postgres)
+        env:
+          TEST_DATABASE_URL: postgres://futurefin:futurefin_test@127.0.0.1:5432/futurefin_test
+        run: cargo test --workspace --locked
+
+  # `main` es la rama que se publica: desde 4.0.0 la documentación interna para
+  # modelos (`CLAUDE.md` y todo `.claude/`) vive solo en `dev` y no se publica.
+  # El merge dev→main es completo por norma (CLAUDE.md § Git workflow), así que es
+  # muy fácil arrastrarlos sin querer; este guard lo convierte en un fallo ruidoso
+  # en vez de en algo que se descubre leyendo el repo público.
+  #
+  # Solo corre cuando el ref ES `main`: en `dev` esos ficheros son legítimos y
+  # obligatorios, y hacerlo fallar ahí sería exactamente lo contrario de lo que
+  # queremos.
+  main-guard:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: '`main` no publica documentación interna'
         run: |
-          npm install
-          npm run typecheck:web
-          npm run build:web
+          set -euo pipefail
+          # `git ls-files` y no `ls`: lo que importa es lo que la rama PUBLICA
+          # (ficheros trackeados), no lo que quede suelto en el runner.
+          offenders="$(git ls-files -- CLAUDE.md .claude)"
+          if [ -n "$offenders" ]; then
+            echo "ERROR: main contiene documentación interna que no debe publicarse:"
+            echo "$offenders"
+            echo
+            echo "Viven solo en 'dev'. Sácalos de main y vuelve a empujar."
+            exit 1
+          fi
+          echo "OK: main no lleva CLAUDE.md ni .claude/"
 
   # Imagen autocontenida (3.x): construye y ejercita los caminos críticos del contenedor
   # único — arranque desde cero, preservación de datos V2→V3 (uid + colación), compat

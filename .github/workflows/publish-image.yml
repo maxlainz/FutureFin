@@ -10,6 +10,9 @@ name: Publish Docker image
 #   (none)              — GHCR uses GITHUB_TOKEN automatically
 #   DOCKERHUB_USERNAME  — Docker Hub user or org (optional)
 #   DOCKERHUB_TOKEN     — Docker Hub access token  (optional)
+#
+# Repository variables (Settings → Secrets and variables → Actions → Variables):
+#   DOCKERHUB_IMAGE     — repositorio de Docker Hub (por defecto maxlainz/futurefin)
 
 on:
   push:
@@ -26,9 +29,115 @@ permissions:
   # viaja como GH_TOKEN al paso que publica las notas.
   contents: write
   packages: write
+  # `actions: read` lo necesita el job `ci-gate` para consultar el resultado de
+  # las ejecuciones de ci.yml sobre el commit del tag.
+  actions: read
 
 jobs:
+  # ── Puerta: sin CI verde no se publica nada ──────────────────────────────────
+  # Hasta agosto de 2026 un `git push --tags` publicaba imagen multi-arch Y GitHub
+  # Release aunque la CI de ese commit estuviera en rojo: nada las conectaba.
+  #
+  # Por qué esta solución y no otra:
+  #   - `needs:` NO sirve: solo enlaza jobs DENTRO del mismo workflow, y CI vive en
+  #     ci.yml.
+  #   - `on: workflow_run` NO sirve: ci.yml se dispara con `push: branches:
+  #     [main, dev]`, nunca con tags, así que empujar un tag no produce ninguna
+  #     ejecución de CI a la que encadenarse. Cambiar ci.yml para que corriera
+  #     también en tags solo duplicaría el trabajo (mismo commit, mismos tests) y
+  #     dejaría el `workflow_dispatch` de reconstrucción sin cubrir.
+  #   - Rama elegida: preguntar a la API por el resultado de ci.yml sobre el SHA
+  #     EXACTO al que apunta el tag. El flujo de release (CLAUDE.md § Git workflow)
+  #     hace merge completo dev→main, empuja main y después taguea, así que ese
+  #     commit siempre ha pasado por CI en main. Es una comprobación sobre un
+  #     hecho ya ocurrido, no una carrera.
+  # Espera con límite porque el tag suele empujarse segundos después del push de
+  # main y la CI todavía está corriendo.
+  ci-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve ref
+        id: ref
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "ref=refs/tags/${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          persist-credentials: false
+
+      - name: Resolve commit
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: CI verde en el commit del tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.sha.outputs.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          echo "Comprobando la CI del commit ${SHA}…"
+
+          for i in $(seq 1 60); do
+            runs="$(gh api --paginate \
+              "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=100" \
+              --jq '.workflow_runs[] | "\(.status)\t\(.conclusion)\t\(.html_url)"' || true)"
+
+            if [ -z "${runs}" ]; then
+              # Reconstrucción manual de un tag antiguo: la ejecución de CI puede
+              # haber caducado por retención. No es motivo para bloquear a alguien
+              # que ha pedido la reconstrucción a mano y a sabiendas.
+              if [ "${EVENT}" = "workflow_dispatch" ] && [ "${i}" -ge 2 ]; then
+                echo "AVISO: no hay ninguna ejecución de CI para ${SHA} (¿retención caducada?)."
+                echo "Es un workflow_dispatch manual — continúo."
+                exit 0
+              fi
+              echo "  [${i}/60] aún no hay ejecuciones de CI para este commit…"
+              sleep 30
+              continue
+            fi
+
+            if printf '%s\n' "${runs}" | grep -qv '^completed'; then
+              echo "  [${i}/60] CI todavía en marcha:"
+              printf '%s\n' "${runs}" | sed 's/^/    /'
+              sleep 30
+              continue
+            fi
+
+            echo "Ejecuciones de CI sobre ${SHA}:"
+            printf '%s\n' "${runs}" | sed 's/^/  /'
+
+            # Un mismo commit puede tener varias ejecuciones (el push a dev y el
+            # push a main son el mismo SHA). Basta UNA en rojo para no publicar.
+            # Las canceladas se ignoran: cancelar una ejecución redundante es un
+            # acto deliberado, no un fallo.
+            if printf '%s\n' "${runs}" \
+                 | grep -qE '^completed[[:space:]]+(failure|timed_out|action_required|startup_failure)'; then
+              echo "ERROR: la CI de este commit NO está verde. No se publica ni imagen ni Release."
+              exit 1
+            fi
+            if ! printf '%s\n' "${runs}" | grep -qE '^completed[[:space:]]+success'; then
+              echo "ERROR: ninguna ejecución de CI de este commit concluyó con éxito."
+              exit 1
+            fi
+
+            echo "OK: CI verde sobre ${SHA}."
+            exit 0
+          done
+
+          echo "ERROR: 30 minutos esperando a la CI de ${SHA} y sigue sin concluir."
+          echo "Revisa https://github.com/${REPO}/actions y vuelve a lanzar el workflow."
+          exit 1
+
   build-and-push:
+    needs: ci-gate
     runs-on: ubuntu-latest
 
     steps:
@@ -46,11 +155,30 @@ jobs:
           ref: ${{ steps.ref.outputs.ref }}
           persist-credentials: false
 
+      # El nombre de Docker Hub estaba a fuego. En un fork sin secretos eso no
+      # fallaba en el login (que ni siquiera tenía `if:`) sino MÁS TARDE, al hacer
+      # push: la lista de imágenes entra en `docker/metadata-action`, y
+      # `build-push-action` empuja TODOS los tags que salen de ahí. Por eso no basta
+      # con condicionar el login: hay que dejar la imagen de Docker Hub fuera de la
+      # lista cuando no hay credenciales, y entonces el fork publica solo en su GHCR.
+      # El nombre sale de la variable de repositorio DOCKERHUB_IMAGE (por defecto el
+      # de siempre) para que un fork pueda apuntar al suyo sin tocar el workflow.
       - name: Resolve image list
         id: images
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'maxlainz/futurefin' }}
         run: |
+          set -euo pipefail
           images="ghcr.io/${{ github.repository_owner }}/futurefin"
-          images="${images}"$'\n'"maxlainz/futurefin"
+          if [ -n "${DOCKERHUB_USERNAME}" ]; then
+            images="${images}"$'\n'"${DOCKERHUB_IMAGE}"
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub: ${DOCKERHUB_IMAGE}"
+          else
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
+            echo "Sin DOCKERHUB_USERNAME: publico solo en GHCR."
+          fi
           {
             echo "list<<EOF"
             echo "$images"
@@ -67,6 +195,20 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest
+          # Etiquetas OCI explícitas. La imagen solo llevaba la suya propia
+          # (`com.futurefin.postgres.majors`, en el Dockerfile) y ninguna estándar.
+          # `image.source` es la que hace que GHCR enlace el package con este
+          # repositorio y herede su README y su visibilidad; sin ella el package
+          # aparece huérfano. No las dejamos a la autodetección de metadata-action
+          # porque `licenses` sale de la API de licencias de GitHub, que no responde
+          # igual en un repo privado ni en un fork.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=FutureFin
+            org.opencontainers.image.description=Finanzas del hogar y planificación FIRE, autoalojadas en un solo contenedor con PostgreSQL incluido.
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            org.opencontainers.image.vendor=maxlainz
 
       - uses: docker/setup-qemu-action@v3
 
@@ -79,7 +221,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      # Condicionado sobre la salida del paso anterior y no sobre `secrets.*`
+      # directamente: el contexto `secrets` no está disponible en las expresiones
+      # `if:`, así que la presencia del secreto se resuelve una vez en bash y se
+      # propaga como output.
       - name: Login to Docker Hub
+        if: steps.images.outputs.dockerhub == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -94,6 +241,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # En multi-arch las labels viajan en la config de cada imagen hija, no en
+          # el índice; las anotaciones sí van en el índice, que es lo que leen GHCR
+          # y Docker Hub para enlazar el package con el repositorio.
+          annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

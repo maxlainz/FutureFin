@@ -111,6 +111,66 @@ sesión en vez de reescribir la contraseña del fichero, que es el error más fr
 flujo de importación. Ahora es **400 `backup_wrong_password`**: la sesión es válida; lo que no
 cuadra es la contraseña del archivo.
 
+### CI: lo que nunca se ejecutaba, y una limpieza que era un no-op por accidente
+
+CI corría `cargo build`, los tests del engine, typecheck y build de la web, más el escenario
+Docker. **No corría** ESLint, ni Vitest, ni los tests de integración contra Postgres — que son
+**la mayor parte de la suite**: 447 de los tests del proyecto. Con colaboradores externos eso no
+aguanta: quien manda una PR no va a levantar un Postgres a mano.
+
+- Job `integration` nuevo, con `services: postgres:16.4-alpine` y `cargo test --workspace`. El
+  `pg_isready` lleva `-h 127.0.0.1` a propósito: durante el `initdb` la imagen oficial levanta un
+  servidor temporal que solo escucha en el socket Unix, y sin host el healthcheck da OK antes de
+  que la base exista — el mismo flake que ya mordió en el paso de `pg_upgrade`.
+- `npm run lint:web` y Vitest, verificados verdes antes de entrar como bloqueantes.
+- `cargo clippy` y `cargo fmt --check` quedan **preparados y comentados**, con los números
+  medidos al lado: 50 avisos únicos de clippy en 20 ficheros y 1.175 bloques de formato en 72.
+  Meterlos en rojo hoy sería dejar CI rota, que es peor que no tener el gate.
+- Job `main-guard`: `main` no publica `CLAUDE.md` ni `.claude/`. **Ver el aviso de CLAUDE.md
+  § Git workflow**: el guard ya está, la limpieza de `main` todavía no, así que hay un orden que
+  respetar.
+
+### Un tag publicaba imagen y Release aunque CI estuviera en rojo
+
+Nada conectaba `publish-image.yml` con `ci.yml`. Ahora hay un job `ci-gate` del que depende la
+publicación. Ni `needs:` ni `on: workflow_run` servían —el primero solo enlaza jobs del mismo
+workflow y el segundo no dispara porque CI **no corre en tags**—, así que la puerta consulta a la
+API el resultado de CI sobre el **SHA exacto** al que apunta el tag. El flujo de release mergea
+dev→main, empuja y después taguea: ese commit siempre ha pasado por CI.
+
+También: el push a Docker Hub y su login se condicionan a que existan los secretos —antes un fork
+reventaba, y no en el login sino en el push, porque el nombre entraba igualmente en la lista de
+imágenes—, y la imagen gana **seis etiquetas OCI** (`source`, `url`, `title`, `description`,
+`licenses` = `AGPL-3.0-only`, `vendor`). Sin `source`, el package de GHCR no enlaza con el
+repositorio; sin `licenses`, sale «sin licencia». Van explícitas y no autodetectadas porque
+`metadata-action` las saca de la API de licencias de GitHub, que no responde igual en un repo
+privado ni en un fork.
+
+### `cleanup-ghcr.yml` no borraba nada, y era pura suerte
+
+El workflow semanal borraba versiones **sin tag** de más de 60 días. En un package multi-arquitectura
+—este se publica para amd64 y arm64— las versiones sin tag son **los manifests hijos de los tags
+publicados**: borrarlas deja `:3.0.0`, `:2.3.0`… apuntando a capas que ya no existen y el `docker
+pull` falla. Hoy hay 24 versiones sin tag.
+
+Al auditarlo con fixtures aparecieron **otros dos** bugs en el jq: un `as` sobre un flujo vacío
+—no existe ninguna versión con tag `dev`— que en jq **anula toda la expresión posterior**, y una
+precedencia rota que reventaba con «Cannot index boolean». Los dos errores se los tragaba un
+`2>/dev/null || true`. O sea: la salvaguarda que impedía la catástrofe era **accidental**, y
+alguien que "arreglara" el jq sin entender el multi-arch habría empezado a destruir releases
+publicadas de inmediato.
+
+Ahora la regla es explícita: **solo se borra una versión cuyos tags sean todos `sha-*`**, y una
+versión sin tag no se toca jamás. Fuera el `2>/dev/null`, y añadido un `dry_run` por defecto en las
+ejecuciones manuales — es un workflow irreversible cuyo camino de borrado no se había ejercitado
+nunca.
+
+### La descripción de Docker Hub estaba vacía
+
+`maxlainz/futurefin` es público, lleva 3.285 descargas y no dice qué es. Nuevo
+`.github/dockerhub-README.md` (español, con el `docker compose` mínimo) sincronizado por un
+workflow con `peter-evans/dockerhub-description`.
+
 ### Marca: la pestaña del navegador enseñaba el icono por defecto
 
 `apps/web/index.html` eran once líneas sin favicon, sin descripción y con un `<title>` de una sola
