@@ -19,7 +19,7 @@ sha2 = "0.10"
 rand_core = { version = "0.6", features = ["std"] }
 rust_decimal = { version = "1.41", features = ["serde-with-str"] }
 axum = { version = "0.8", features = ["macros"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10"
 cookie = "0.18"
