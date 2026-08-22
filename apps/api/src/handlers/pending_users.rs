@@ -97,6 +97,7 @@ pub async fn list_pending_users(
     post,
     path = "/v1/installation/pending-users/{user_id}/approve",
     tag = "installation",
+    params(("user_id" = Uuid, Path, description = "Id del usuario pendiente")),
     request_body = ApprovePendingUserBody,
     responses(
         (status = 204, description = "Membership granted"),
