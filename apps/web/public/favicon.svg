@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="FutureFin">
+  <!-- Misma marca que la app: el cuadrado redondeado con «FF» de `.logo-mark` (App.css).
+       Colores fijos a propósito: un favicon no hereda el tema de la página. -->
+  <rect width="64" height="64" rx="14" fill="#0a0a0a"/>
+  <text x="32" y="43" text-anchor="middle"
+        font-family="ui-sans-serif, system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+        font-size="28" font-weight="700" fill="#7aa2f7" letter-spacing="-1">FF</text>
+</svg>
