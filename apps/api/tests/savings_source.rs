@@ -724,7 +724,7 @@ async fn projection_series_reports_effective_savings_source() {
         // El lado GASTO gobierna el contrato del modo (es el que decide `expense_from_avg`).
         (
             body["savings_source"].as_str().expect("savings_source").to_string(),
-            body["savings_expense_basis"]["months_with_data"]
+            body["savings_expense_basis"]["avg_months"]
                 .as_u64()
                 .expect("expense months"),
         )

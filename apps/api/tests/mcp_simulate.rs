@@ -548,7 +548,7 @@ async fn every_side_echoes_the_context_that_produced_it() {
         assert_eq!(k["fire_number_mode"], "annual_expense", "{lado}: {k}");
         assert_eq!(k["savings_income_basis"]["basis"], "budget", "{lado}: {k}");
         assert_eq!(k["savings_expense_basis"]["basis"], "budget", "{lado}: {k}");
-        assert_eq!(k["savings_income_basis"]["months_with_data"], 0, "{lado}: {k}");
+        assert_eq!(k["savings_income_basis"]["avg_months"], 0, "{lado}: {k}");
         // Hay target, así que la razón de ausencia va explícitamente a null (no desaparece:
         // es la regla que dejó escrita el auditoría MCP §8).
         assert!(
