@@ -17,12 +17,20 @@ src/
 ├── api/
 │   ├── client.ts                 # fetch wrappers: apiGet/Post/Put/Patch/Delete (+ apiDeleteJson para los DELETE con
 │   │                             #   cuerpo, p. ej. /v1/transactions/{id}/reconcile) + defaultFetchInit + errorMessageFromResponse
+│   │                             #   + **apiFetch** (4.0.0: envuelve `fetch` y traduce el TypeError del navegador a
+│   │                             #   ApiRequestError{code:"network_error", status:0} — con la API caída la UI leía «Failed to fetch»)
+│   │                             #   + **setUnauthorizedHandler** (4.0.0: un 401 en CUALQUIER llamada dispara el handler que
+│   │                             #   registra App.tsx → setUser(null) → login. Antes solo `refreshSession` miraba el 401, y solo al
+│   │                             #   arrancar: la cookie caducada con la pestaña abierta dejaba banners acumulándose sin salida.
+│   │                             #   `status: 0` NO lo dispara — un corte de red no es una sesión caducada)
 │   ├── client.test.ts            # mocks `globalThis.fetch`, asserts credentials/Content-Type/204
 │   └── types.ts                  # all *Api / *Response / *Row types (mirror of Rust handler structs)
 │
 ├── lib/                          # pure helpers, no React imports
-│   ├── format.ts                 # money/percent/decimal formatting (es-ES locale), parseDisplayDecimal, METRIC_DASH
-│   ├── format.test.ts            # 29 tests
+│   ├── format.ts                 # money/percent/decimal formatting (es-ES locale), parseDisplayDecimal, METRIC_DASH,
+│   │                             #   **toApiDecimalString** (normaliza es-ES → decimal de la API) y **DecimalInputError**.
+│   │                             #   TODO importe tecleado pasa por ahí; ver la nota «Importes tecleados» abajo
+│   ├── format.test.ts            # (cuenta: `grep -c 'it('`)
 │   ├── dates.ts                  # civil-calendar arithmetic (parallel to crates/engine), TZ-aware "today", interval counts
 │   ├── dates.test.ts             # 29 tests (incl. formatDateDm)
 │   ├── ledger.ts                 # shared by views: ledgerViewQs, groupRowsByCategoryOrdered, asset/liability portfolio helpers,
@@ -32,6 +40,9 @@ src/
 │   │                             #   defaultFireSettingsApi, normalizeInstallationFireSettings, taxOnGrossCapitalAnnual,
 │   │                             #   grossUpNetAnnualFire, computeFireAnnualNeedNetEur, findFirstMonthNetWorthAtLeastInflated
 │   ├── projection-chart.ts       # chart helpers: tick builders (startMonth param → soporta meses negativos), SVG layout,
+│   │                             #   **lastPointIndexAtOrBeforeMonth** (mes → posición en `points`; OBLIGATORIO para recortar una
+│   │                             #   ventana por mes: con density=hybrid la posición 13 es el mes 24 y `Math.min(mes, len-1)` no
+│   │                             #   recortaba nada — ver la nota «Índice de array ≠ mes» abajo),
 │   │                             #   niceYTicks, axis age/dates mode, deflationFactorAt (deflactor keyed por month_index; k<0 amplifica),
 │   │                             #   PROJECTION_FOCUS_STORAGE_KEY, ASSET_LINE_COLORS (CSS vars), complementaryProjectionTickLabel,
 │   │                             #   projectionHoverTitle, formatYearsEsFromMonths, formatProjectionChartHorizonLine
@@ -68,8 +79,8 @@ src/
 │   ├── TopBar.tsx                # cabecera única: marca + nav pills + extras + hamburguesa
 │   ├── MobileNavDrawer.tsx       # drawer derecho ≤720px
 │   ├── AccountCard.tsx           # tarjeta de cuenta en Ajustes (sustituye user-chip + Salir del header antiguo)
-│   ├── ThemeToggle.tsx           # segmented Auto/Claro/Oscuro (usado en Ajustes → Datos)
-│   ├── Switch.tsx                # switch accesible track+thumb (`.ff-switch*`); variant="chart" = label small-caps (Proyección); usado también en Ajustes → MCP
+│   ├── ThemeToggle.tsx           # segmented Auto/Claro/Oscuro (usado en Ajustes → General → Apariencia)
+│   ├── Switch.tsx                # switch accesible track+thumb (`.ff-switch*`); variant="chart" = label small-caps (Proyección); usado también en Ajustes → Integraciones
 │   ├── Modal.tsx                 # Modal + ModalFormError + InlineHint
 │   ├── MetricCard.tsx            # KPI con paren-slot siempre presente (prop `trend?` ocupa el mismo slot, prioridad sobre `parenthetical`) + tone hero/accent/accent-2
 │   ├── SnapshotButton.tsx        # botón «Guardar snapshot» (idle→busy→success/error) en panel-head de Activos y Pasivos
@@ -102,8 +113,10 @@ src/
 │   │                             #   «Sin categoría» va con su kind) y **cabeceras ordenables** (fecha/concepto/importe; importe por magnitud; la clave activa solo ordena las filas
 │   │                             #   dentro de cada grupo) — helpers puros en lib/expenses.ts —, edición inline optimista + modal (fecha/importe/concepto editables también en importadas: el backend ancla la huella al CSV) + tag «recurrente» +
 │   │                             #   borrado con dos opciones (solo este / y detener repetición) + **conciliación de transferencias** (3.5.0): badge «conciliada» (`.exp-reconciled-tag`,
-│   │                             #   tooltip con la contrapartida) y fila atenuada (`.exp-row-reconciled`) cuando `isReconciled`, botón «Conciliar ahora» en la toolbar
-│   │                             #   (POST /v1/transactions/reconcile) y «Desconciliar» en el modal de edición (DELETE /v1/transactions/{id}/reconcile) → `handleMutated`.
+│   │                             #   tooltip con la contrapartida) y fila atenuada (`.exp-row-reconciled`) cuando `isReconciled`, y «Desconciliar» en el modal
+│   │                             #   de edición (DELETE /v1/transactions/{id}/reconcile) → `handleMutated`. **NO hay botón «Conciliar ahora»**: se retiró al
+│   │                             #   añadir el barrido periódico del servidor (`FUTUREFIN_RECONCILE_SWEEP_HOURS`) + el pase post-import; `POST /v1/transactions/reconcile`
+│   │                             #   sigue existiendo en la API y como tool MCP, pero la SPA ya no lo llama.
 │   │                             #   Materializa recurrentes en silencio al montar (solo canEdit). `onCashflowMutated` avisa a App.
 │   ├── ImportWizardModal.tsx     # wizard import CSV en 2 pasos (useReducer). Paso 1 = archivo → select «Cuenta origen (activo)» (movido desde el footer; ahora también en el preview) →
 │   │                             #   formato en <details> plegado (autodetección por defecto). Paso 2 = banner con fuente capitalizada + chips de conteos, bulk bar con cluster único
@@ -121,10 +134,10 @@ src/
 │   │                                #   Overlay fino de cash-flow (v1.6.0): props cashflow/cashflowDaily/onRequestDailyCashflow — pinta la curva
 │   │                                #   fina (fine.grid por month_fraction real, deflactada igual) sobre la zona pasada; daily lazy al hacer zoom histórico
 │   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills («Usuarios» owner-only, «MCP» con tokens/conexiones/toggle de escritura) + ThemeToggle en "Datos y sistema"
-│   ├── ApiTokensPanel.tsx        # Ajustes → MCP: tokens de API (MCP). Self-fetch (patrón HistorySettingsPanel); crear (modal
+│   ├── ApiTokensPanel.tsx        # Ajustes → Integraciones: tokens de API (MCP). Self-fetch (patrón HistorySettingsPanel); crear (modal
 │   │                             #   label + caducidad), secreto mostrado UNA vez con copiar, tabla (prefix/último uso/vigencia),
 │   │                             #   revocar con modal de confirmación. Visible para cualquier miembro (v3.0.0).
-│   ├── OAuthConnectionsPanel.tsx # Ajustes → MCP, sección «Conexiones», justo debajo de ApiTokensPanel (v3.1.0). Calco del
+│   ├── OAuthConnectionsPanel.tsx # Ajustes → Integraciones, sección «Conexiones», justo debajo de ApiTokensPanel (v3.1.0). Calco del
 │   │                             #   patrón ApiTokensPanel: sin props, self-fetch GET /v1/oauth/connections; tabla
 │   │                             #   Aplicación (client_name + host verificado) / Conectada / Último uso; revocar =
 │   │                             #   DELETE /v1/oauth/connections/{id} tras Modal de confirmación → corte inmediato.
@@ -169,11 +182,19 @@ src/
 | New API type returned by the backend | `api/types.ts` (export it) |
 | New fetch endpoint wrapper | `api/client.ts` if reusable, otherwise inline in `App.tsx` next to existing handlers |
 | New pure formatter / parser | `lib/format.ts` (with a Vitest in `lib/format.test.ts`) |
+| **Campo de formulario que envía un importe/porcentaje** | `toApiDecimalString(raw)` de `lib/format.ts`, DENTRO del `try` del submit. Ver §Importes tecleados |
+| **Recortar una serie de proyección por un mes** | `lastPointIndexAtOrBeforeMonth(points, mes)` de `lib/projection-chart.ts`. Ver §Índice de array ≠ mes |
 | New design token (color/radius/shadow) | `styles/theme.css` con variantes claro **y** `[data-theme="dark"]`. Nunca hardcoded en App.css/componentes. |
 | New icon | extender el set en `components/icons.tsx` (viewBox 16×16, stroke 1.5). No crear SVG sueltos en views. |
 | New shared chart/SVG widget | `components/charts/` — si es una proyección compacta, considera reusar `MiniProjection` con props |
 | New full tab/page | `views/NewView.tsx` + add to `TABS` / `TAB_PATH` in `lib/navigation.ts` + render branch in `App.tsx` + add pill al `TopBar` (automático vía `TABS`) |
-| New Settings sub-tab | add to `SettingsSubTabId` + `SETTINGS_SUBTAB_SLUG`/`_LABEL` in `lib/navigation.ts` (con test en `navigation.test.ts`), visibilidad en `visibleSettingsSubTabs` (App.tsx) + render branch inside `SettingsView` (sub-tabs son `ff-nav-pill` ya, no tab-bar). Precedente completo: la sub-tab `mcp` (tokens + conexiones + toggle de escritura; «access» quedó owner-only renombrada «Usuarios», slug `acceso` intacto) |
+| New Settings sub-tab | add to `SettingsSubTabId` + `SETTINGS_SUBTAB_SLUG`/`_LABEL` in `lib/navigation.ts` (con test en `navigation.test.ts`), visibilidad en `visibleSettingsSubTabs` (App.tsx) + render branch inside `SettingsView` (sub-tabs son `ff-nav-pill` ya, no tab-bar). Precedente completo: la sub-tab `integrations` (tokens + conexiones + toggle de escritura; «access» quedó owner-only renombrada «Usuarios», slug `acceso` intacto) |
+
+> **Los nombres de las sub-pestañas de Ajustes cambiaron en 3.10.0** y la fuente de verdad es
+> `SETTINGS_SUBTAB_LABEL` (`lib/navigation.ts`): hoy son **General, Plan, Categorías, Histórico,
+> Usuarios, Integraciones, Copias de seguridad**. Al citarlas en un doc o en copy, cítalas de ahí.
+> Los slugs viejos siguen resolviendo (`/ajustes/mcp` → `integrations`, `/ajustes/proyeccion` y
+> `/ajustes/jubilacion` → `plan`, `/ajustes/acceso` → `access`), fijado en `navigation.test.ts`.
 | Tabla nueva (o columnas nuevas en una existente) | seguir el patrón móvil «columnas esenciales»: gatear th/td con `useIsMobile()` (`lib/responsive.ts`), datos secundarios a `.cell-subline`, fila tappable → modal. Doctrina completa en design-system.md «Responsive / móvil». Controles densos dentro de la tabla → añadirlos al carve-out táctil de App.css (sección A2) |
 | New auth/setup flow | `auth/` |
 | New **standalone page outside the tab router** (like `/oauth/authorize`) | `main.tsx`: rama lazy antes de `<App/>`. Ver §Ruta `/oauth/authorize` — el router de `App.tsx` canonicaliza cualquier path desconocido |
@@ -185,6 +206,37 @@ src/
 - **Views are self-contained**: each one can be opened and understood without scrolling 10K lines.
 - **Tests live next to code**: `format.test.ts` sits beside `format.ts`. The pattern scales — add helpers + tests together.
 - **No circular deps**: `views/` import `lib/`, `lib/` doesn't import `views/`. Linter would catch it.
+
+## Importes tecleados: `toApiDecimalString` es obligatorio (4.0.0)
+
+Todo campo que mande un importe o un porcentaje al backend pasa por
+`toApiDecimalString(raw)` (`lib/format.ts`). No conviertas a mano.
+
+- **El incidente**: la conversión era `raw.replace(",", ".")` — solo la primera coma, el punto sin
+  tocar. `250.000` (doscientos cincuenta mil, escritura española normal) llegaba tal cual y
+  `Decimal::from_str` lo lee como **250**. Sin error: el modal se cerraba y el patrimonio, la
+  proyección, el número FIRE y el runway quedaban mal en silencio, tres órdenes de magnitud. El
+  asistente de primera vez llegaba a invitar a hacerlo: su placeholder era literalmente `1.500`.
+- **Reglas** (en orden): con coma, la coma es el decimal y los puntos son miles; sin coma, puntos
+  que separan grupos de exactamente 3 dígitos son miles; un punto suelto que no forma grupo es el
+  decimal (así se teclean los porcentajes); **cualquier otra cosa lanza `DecimalInputError`**.
+  Rechazar lo ambiguo en vez de adivinar es el punto — adivinar fue el fallo.
+- **Llámala DENTRO del `try` del submit.** Cuatro submits convertían antes de su `try`, así que la
+  excepción se les escapaba como promesa rechazada y no pintaba nada. El patrón es capturar
+  `DecimalInputError` y traducirla al error de la vista.
+
+## Índice de array ≠ mes: `lastPointIndexAtOrBeforeMonth` (4.0.0)
+
+Con `?density=hybrid` el servidor **decima** la serie (meses 0..12, 24, 36, … y el último del
+horizonte), así que la posición 13 de `points` es el mes 24 y `points.length` (~82) **no** es el
+número de meses. Todo lo que recorte una ventana por un MES tiene que traducir mes → posición con
+`lastPointIndexAtOrBeforeMonth(points, mes)`, nunca con `Math.min(mes, len-1)` — que en `hybrid` no
+recortaba nada.
+
+Lo que se rompió por no hacerlo: `AssetsView` calculaba «objetivo alcanzado en dic 2027» donde la
+proyección lo alcanza en 2031, y `MiniProjection` rotulaba el eje con años que no correspondían a
+su serie. Con `density=monthly` la salida es idéntica, que es justo por lo que pasa desapercibido.
+Es la misma clase de fallo que el incidente v1.4.2 de la deflactación del chart.
 
 ## Ruta `/oauth/authorize` — resuelta en `main.tsx`, no en el router de `App.tsx` (v3.1.0)
 

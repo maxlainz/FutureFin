@@ -19,6 +19,33 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 > `GET /oauth/authorize` **no tiene ruta backend**: la sirve el fallback SPA de `main.rs`. Ver la
 > sección OAuth abajo — registrarla es un error que rompe la pantalla de consentimiento.
 
+### OpenAPI (`GET /openapi.json`) — cómo declara la autenticación (4.0.0)
+
+`apps/api/src/openapi.rs` genera la spec con `utoipa`. Hasta 4.0.0 **no declaraba ni un
+`securityScheme`**: presentaba 81 operaciones con sesión obligatoria como si fueran públicas, y
+cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna.
+
+- **`components.securitySchemes`** (añadidos por el `Modify` llamado `SecurityAddon`):
+  `ff_session` (`apiKey`, `in: cookie`) y `bearer_token` (`http`, scheme `bearer`). Son dos
+  credenciales **no intercambiables**: la cookie la usa la SPA en todo `/v1`; el Bearer (`ffp_…` /
+  `ffo_…`) solo vale para `/mcp`, que deliberadamente **no** está en esta spec — se declara porque
+  las 401 de la API lo mencionan y un lector necesita saber que existe.
+- **`security` global**: `("ff_session" = [])` en el `#[openapi(...)]` raíz. La excepción se marca
+  por operación con **`security(())`** (lista vacía = pública), y hoy la llevan exactamente cuatro:
+  `health_check`, `ready_check`, `register` y `login`
+  (`grep -rn 'security(())' apps/api/src`). Al añadir un handler público hay que ponerlo; al añadir
+  uno privado no hay que hacer nada.
+- Otras tres deudas cerradas en el mismo cambio: dos structs distintos compartían el nombre de
+  componente `ImportPreviewResponse` (preview de CSV y preview de backup) — utoipa nombra por el
+  último segmento del tipo, así que uno machacaba al otro y **los dos endpoints apuntaban al mismo
+  `$ref`**; se desambigua con `#[schema(as = TransactionImportPreviewResponse)]`. Un path con
+  plantilla no declaraba su parámetro (documento formalmente inválido), y `?density` no estaba
+  declarado mientras la descripción de `months` citaba `target_age`, eliminado en v1.0.6.
+- **Gates**: `apps/api/tests/openapi_contract.rs` (cuatro tests sobre el propio documento —
+  parámetros de path declarados, los dos previews con schema distinto, autenticación declarada y
+  aplicada a toda operación privada, y cero `$ref` colgantes). No existía ningún test sobre la spec:
+  por eso nada de lo anterior rompía nada.
+
 ## /v1 routes
 
 ### Health
@@ -33,8 +60,26 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 | POST | `/v1/auth/register` | No prior session needed. First user auto-becomes installation owner. |
 | POST | `/v1/auth/login` | Sets `ff_session` cookie |
 | POST | `/v1/auth/logout` | Clears cookie + DB session |
+| POST | `/v1/auth/password` | **4.0.0**. Sesión válida. Body `{current_password, new_password}` → **204**. Verifica la actual, aplica la política de longitud (12..=256 chars, `auth/password.rs`) y **revoca en la misma transacción** las demás sesiones, los tokens `ffp_` del usuario (`api_tokens.revoked_at`) y sus concesiones OAuth (`oauth_grants.revoked_at`, `revoked_reason = 'password_change'`). La sesión que llama **sobrevive** (se excluye por su propio `id`), para no echar al usuario de la app al terminar. |
 | GET | `/v1/auth/me` | Current user info |
 | PATCH | `/v1/auth/me` | Update `birth_date` |
+
+- **`current_password` incorrecta → 400 `current_password_invalid`, NO 401** (`handlers/auth.rs`).
+  Es deliberado y load-bearing: la sesión es válida — lo que falla es un dato del formulario. Con un
+  401, el handler global de no-autorizado de la SPA (`setUnauthorizedHandler`, ver
+  [`frontend-structure.md`](frontend-structure.md)) echaría al usuario al login por escribir mal su
+  propia contraseña.
+- **Los `.ffbackup` ya exportados NO se recifran**: siguen atados a la contraseña con la que se
+  generaron (su clave sale de la contraseña vía Argon2id, y el servidor no guarda la vieja). Aviso
+  duplicado a propósito en `SECURITY.md` — un usuario que rota la contraseña porque sospecha un
+  compromiso tiene que saber que su copia antigua sigue abriéndose con la contraseña filtrada.
+- **Sin UI todavía**: la SPA no llama a este endpoint (`grep -rn 'auth/password' apps/web/src` está
+  vacío). Se usa por API/`curl`.
+- Argon2id corre en `spawn_blocking` en los cinco call sites (`auth/password.rs`): inline en un
+  worker de Tokio, cuatro `/v1/auth/register` concurrentes —endpoint sin auth por diseño— paraban el
+  proceso entero, `/v1/ready` incluido, y el healthcheck marcaba el contenedor unhealthy. El login
+  verifica además SIEMPRE contra un hash constante aunque el usuario no exista (`dummy_hash`): sin
+  eso, ~1 ms vs ~40-80 ms enumeraba quién tiene cuenta.
 
 ### Installation
 | Method | Path | Notes |
@@ -46,6 +91,38 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 
 ### Pending users (`/v1/installation/pending-users/`)
 Owner-only management of users awaiting approval.
+
+### Members (`/v1/installation/members`) — handler `members.rs`, **4.0.0**
+Gestión de las membresías **ya concedidas**. Hasta 4.0.0 `installation_memberships` solo recibía
+`INSERT` (bootstrap del primer usuario, `setup`, aprobación de un pendiente): no había forma de
+degradar ni de expulsar a nadie desde la aplicación. El mecanismo de corte sí existía —rol y
+pertenencia se re-resuelven en cada request—, pero no la palanca: aprobar al usuario equivocado
+concedía acceso permanente a todas las finanzas del hogar y el único remedio era un `DELETE` a mano
+por `psql`. `SECURITY.md` y [`auth-and-membership.md`](auth-and-membership.md) prometían lo
+contrario.
+
+| Method | Path | Auth | Notes |
+|--------|------|------|-------|
+| GET | `/v1/installation/members` | **cualquier miembro** (viewer incluido) | `[{user_id, username, role, joined_at}]`, orden `owner → member → viewer` y después por `username`. Lectura abierta a propósito: todos los miembros comparten los mismos datos financieros, así que saber quién más tiene acceso no revela nada nuevo — y es justo lo que permite auditar el hogar. |
+| PATCH | `/v1/installation/members/{user_id}` | **owner-only** (`user_is_installation_owner`) | Body `{role: "owner" \| "member" \| "viewer"}` → **204**. `owner` es asignable a propósito: un hogar debe poder traspasar la propiedad sin pasar por `psql`. No miembro → 404. |
+| DELETE | `/v1/installation/members/{user_id}` | **owner-only** | Revoca el acceso → **204**. No miembro → 404. |
+
+- **Guardia `last_owner`** (PATCH y DELETE): degradar o expulsar al último `owner` devuelve **400**
+  con el prefijo `last_owner:`. El recuento (`owners_left_without`) va **dentro de la transacción y
+  con `FOR UPDATE`** sobre las filas de la instalación — sin eso, dos owners degradándose a la vez
+  dejarían el hogar sin ninguno.
+- **El DELETE conserva los datos de la persona.** Sus movimientos, snapshots, activos y reglas
+  siguen ligados a su `owner_user_id`; si se la vuelve a aprobar los recupera intactos. Lo que se
+  corta es el **acceso**, y se corta entero y en la misma transacción: fila de
+  `installation_memberships`, `sessions` del usuario, `api_tokens` (`revoked_at = now()`) y
+  `oauth_grants` (`revoked_reason = 'membership_revoked'`). Sin ese corte de las cuatro credenciales
+  la persona conservaría acceso durante días — la sesión dura `SESSION_TTL_DAYS` y un `ffp_` puede
+  no caducar nunca.
+- Post-commit, `state.invalidate_projection_by_user(target)`: sus entradas de la cache de proyección
+  llevan SU demografía.
+- Regresión: `apps/api/tests/account_and_members.rs`.
+- **Sin UI todavía**: la SPA no expone estos endpoints (`Ajustes → Usuarios` sigue siendo solo la
+  aprobación de pendientes). Se usan por API/`curl`.
 
 ### API tokens (`/v1/api-tokens`) — handler `api_tokens.rs`
 Credencial Bearer del servidor MCP (`/mcp`). Gestión autenticada por cookie de sesión; cualquier
@@ -150,11 +227,12 @@ Aggregated net worth, financial health metrics, category breakdowns. Accepts `?v
 - **Modo C (`budget_income_real_expense`)**: igual que B pero `income_monthly_equivalent` **conserva el income del presupuesto** (NO se sobreescribe); `expense_regular_monthly_equivalent = expense_avg` y `net_monthly_equivalent = income (presupuesto) − expense_avg`. El `match` sobre `savings_source` es exhaustivo (`Budget` es rama inalcanzable no-op, guardada por `uses_transactions()`).
 - **Base de gasto total**: en modo A la cuota vive dentro de `expense_regular_monthly_equivalent` (fusión en el presupuesto, 3.7.0); en B/C, dentro del promedio real de gasto (reforma 3.4.0: los pasivos solo restan su principal en `net_worth` y en la proyección) y `expense_total_monthly_equivalent` = `expense_avg`. **3.9.0 RETIRÓ** `expense_derived_monthly_equivalent`, `monthly_net_excluding_derived_debt` y `savings_rate_excluding_derived_debt`: eran degenerados desde 3.7.0 (idénticos a sus hermanos) y solo servían para que el Resumen enseñara tres cifras de ahorro irreconciliables. Sigue valiendo, en los tres modos:
   - `net_monthly_equivalent = income_monthly_equivalent − expense_total_monthly_equivalent`
-- **Fallback**: `months_with_data == 0` en B/C → el bloque `financial_health` completo es **idéntico** al de modo A (runway incluido).
+- **Fallback**: sin meses reales en B/C (`savings_*_basis.basis == "budget"`, `avg_months == 0`) → el bloque `financial_health` completo es **idéntico** al de modo A (runway incluido). El fallback se resuelve **por lado**: `savings_source` colapsa a `"budget"` ⟺ cayeron los DOS.
 
 Campos de `financial_health` relacionados con el modo y el runway:
 - `savings_source` (`"budget" | "transactions_avg" | "budget_income_real_expense"`) — modo **efectivo** tras el fallback (B o C con `months_with_data == 0` → devuelve `"budget"`).
-- `savings_income_basis` / `savings_expense_basis` (`SavingsAvgBasis`) — de qué meses sale cada lado del promedio. **Sustituyen a `savings_source_months_with_data` desde 3.9.0**: con ventanas configurables por lado, un solo número ya no podía describir las dos.
+- `savings_income_basis` / `savings_expense_basis` (`SavingsAvgBasis`) — de qué meses sale cada lado del promedio. **Sustituyen a `savings_source_months_with_data` desde 3.9.0**: con ventanas configurables por lado, un solo número ya no podía describir las dos. Campos: `basis` (`"budget" | "average"`), **`avg_months`**, `window_months`, `window_mode` (`"data" | "calendar"`, omitido si el lado no promedia), `first_month`, `last_month`, `has_gaps`.
+- **API breaking 4.0.0 — `SavingsAvgBasis.months_with_data` → `avg_months`** (en `/v1/summary`, `/v1/projection/series` y la tool `simulate_projection`). El campo era **el denominador realmente usado**, mientras que en `GET /v1/transactions/summary` `months_with_data` es lo contrario: los meses que HAY en el tramo, y el denominador allí ya se llamaba `avg_months`. Mismo nombre con significados opuestos, y el mismo concepto con dos nombres: un consumidor que preguntara «¿sobre cuántos meses está calculada mi media?» citaba 9 (los que hay) cuando el motor promedió 6 (los reales), y con esa cifra justificaba un ahorro proyectado que no cuadraba. Ahora **`avg_months` = denominador en las dos familias** y `months_with_data` se queda **solo** donde significa «lo que hay» — es decir, en `/v1/transactions/summary`, donde **no cambia**.
 
 **Las DOS cifras de ahorro de `financial_health`** — sobreviven a la limpieza de 3.9.0 y son distintas a propósito. Confundirlas desplaza una respuesta ~14 % (auditoría MCP §1):
 - `net_monthly_equivalent` — el ahorro **real del modo activo**. Es el que usa el motor: cuadra con `monthly_delta_assumption` de `/v1/projection/series`, con `baseline.net_monthly` de `simulate_projection` y con `recurring_net` de `get_allocation_resolution`, y es el numerador de `savings_rate`.
@@ -204,15 +282,15 @@ Response (`ProjectionSeriesResponse`) includes:
 - `milestones[]` — next 3 net-worth milestones (1/2.5/5×10ⁿ thresholds), each with `target`, `reached_month_index`, `reached_date_ymd`. **Ojo**: `reached_date_ymd` ancla al **día 1** del mes (contrato ya publicado, se deja como está), a diferencia de `jubilacion_date_ymd`. Ambas coinciden siempre en año y mes; solo difieren en el día.
 - `compound_outpaces_true_savings_month_index` — first month where compound return > base monthly savings (optional)
 - `fire_target_series: f64[]`, `asset_series[].values: f64[]` — arrays grandes paralelos a `points` (también `f64`).
-- `savings_source` + `savings_income_basis` / `savings_expense_basis` (v2.2.0; los `*_basis` sustituyen al escalar `savings_source_months_with_data` desde 3.9.0) — fuente del ahorro **efectiva** (tras el fallback) que produjo `monthly_delta_assumption`, y de qué meses sale cada lado del promedio; mismo naming y semántica que en `/v1/summary`. Aditivos: los sirve `BuiltProjection` sin queries extra, para que el chart etiquete la base del Δ mensual sin pedir `/v1/summary`.
+- `savings_source` + `savings_income_basis` / `savings_expense_basis` (v2.2.0; los `*_basis` sustituyen al escalar `savings_source_months_with_data` desde 3.9.0; su denominador se llama **`avg_months`** desde 4.0.0 — ver la nota de renombrado en §Summary) — fuente del ahorro **efectiva** (tras el fallback) que produjo `monthly_delta_assumption`, y de qué meses sale cada lado del promedio; mismo naming y semántica que en `/v1/summary`. Aditivos: los sirve `BuiltProjection` sin queries extra, para que el chart etiquete la base del Δ mensual sin pedir `/v1/summary`.
 
 > La misma excepción f64 cubre los arrays por punto de `GET /v1/history/series` (`points[].net_worth/assets_total/liabilities_total`, `asset_series[].values`, `markers[].total`) — misma justificación chart-only. Hay UNA sola definición de `serialize_decimal_as_f64` (`pub(crate)`, en `handlers/projection.rs`), usada solo por projection e history.
 
-**Cache server-side**: `AppState` mantiene un cache in-memory por `(installation_id, view, owner_user_id)` con sliding TTL de 60 min. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg, budget_income_real_expense}`, i.e. `SavingsSource::uses_transactions()`; ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa `view=household` para que el primer GET sea hit. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
+**Cache server-side**: `AppState` mantiene un cache in-memory por `(installation_id, view, owner_user_id, density)` (`ProjectionCacheKey`, `state.rs`) con sliding TTL de 60 min. **`owner_user_id` es SIEMPRE `Some(_)`, también en `household` (4.0.0)**: hasta entonces solo viajaba en `mine`, y la respuesta de `household` lleva demografía del **solicitante** (`viewer_birth_date`, el horizonte derivado de su edad, `jubilacion_age`, el eje de edades), así que el primer miembro que pedía la proyección dejaba la suya cacheada para todo el hogar — un miembro recibía la fecha de nacimiento de otro y, con el orden inverso, un horizonte de 360 meses en vez de 648: si su cruce FIRE caía en el mes 400, la app le decía «no llegas a jubilarte». Regresión: `apps/api/tests/projection_cache.rs`. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg, budget_income_real_expense}`, i.e. `SavingsSource::uses_transactions()`; ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa `view=household` para que el primer GET sea hit. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
 
 **Compresión**: todos los endpoints pasan por `tower_http::compression::CompressionLayer::new().gzip(true)`. `/v1/projection/series` baja de ~260 KB a ~30 KB con `Content-Encoding: gzip`.
 
-**Densidad (`?density=hybrid`)**: con `?density=hybrid` el response decima los arrays grandes (`points`, `fire_target_series`, `asset_series[].values`) a un patrón mixto — mes 0..12 mensual + mes 24, 36, ..., months. Total ~82 puntos en lugar de ~841. JSON ~5 KB. El compute interno del engine es idéntico (840 meses); solo cambia la serialización. Cada densidad tiene su propia entry en el cache (`ProjectionCacheKey.density`). Milestones, FIRE crossover y compound marker se calculan sobre el array full (no decimado) para no perder precisión. El campo `density: "monthly" | "hybrid"` viaja en el response para que el cliente sepa qué tiene.
+**Densidad (`?density=hybrid`)**: con `?density=hybrid` el response decima los arrays grandes (`points`, `fire_target_series`, `asset_series[].values`) a un patrón mixto — mes 0..12 mensual + mes 24, 36, … **y siempre el último mes del horizonte** (`density_month_indices`, `handlers/projection.rs`). Ese último empujón es de 4.0.0 y no es cosmético: el bucle anual solo emitía múltiplos de 12, así que con un horizonte que no lo fuera la serie se cortaba antes de tiempo sin decir nada — con `?months=100&density=hybrid` el último punto era el mes 96 y los meses 97–100 no existían en `points`, ni en `fire_target_series`, ni en `asset_series[].values`, y desaparecía el punto que cualquiera lee como «patrimonio al final»; con `?months=19` se perdía el 32 % del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12) pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que **fuerza** `hybrid` — o sea, era el camino por defecto de un consumidor conversacional. Pin: `hybrid_density_always_includes_the_last_month_of_the_horizon`. Total ~82 puntos en lugar de ~841. JSON ~5 KB. El compute interno del engine es idéntico (840 meses); solo cambia la serialización. Cada densidad tiene su propia entry en el cache (`ProjectionCacheKey.density`). Milestones, FIRE crossover y compound marker se calculan sobre el array full (no decimado) para no perder precisión. El campo `density: "monthly" | "hybrid"` viaja en el response para que el cliente sepa qué tiene.
 
 **Two-phase loading en el cliente**: `App.tsx` dispara `?density=hybrid` y `?density=monthly` en paralelo. El hybrid suele llegar primero (JSON más pequeño) → se renderiza el chart con menos puntos. Cuando llega el monthly, se reemplaza dentro de `startTransition()` (sin bloquear inputs). Si ambos son cache hit, ambos llegan en <10 ms → el hybrid no añade latencia perceptible.
 
@@ -502,7 +580,16 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `extra_monthly_savings` (NEUTROS: mecanismo planning-adjustment, no mueven target ni caps),
   `swr_pct` / `annual_inflation_percent` / `retirement_annual_expense` (re-validados con las
   cotas del PATCH real), `asset_return_overrides` (negativos válidos hasta −100 exclusivo),
-  `months` 12..840. **Dos de los tres ejes mensuales son el mismo mando**: `monthly_adj =
+  `months` 12..840.
+  **El eje de inflación tiene dos nombres, y hasta 4.0.0 el equivocado se descartaba en silencio**:
+  `get_settings` y `update_fire_settings` lo llaman `annual_inflation_assumption_percent`;
+  `simulate_projection` esperaba `annual_inflation_percent`. Un modelo que leyera la inflación y
+  copiara el nombre obtenía un escenario **idéntico al baseline** —sin error, sin aviso— y concluía
+  que subir la inflación no cambia la jubilación. Ahora el nombre largo es un
+  `#[serde(alias = …)]` del corto, y **`SimulateParams` y `FireSettingsOverrideParam` llevan
+  `#[serde(deny_unknown_fields)]`**: un campo mal escrito es un error que el modelo sabe corregir,
+  no un silencio que le hace afirmar algo falso. Al añadir un override nuevo, recuerda que
+  `deny_unknown_fields` convierte cualquier typo del cliente en 400 — es el objetivo. **Dos de los tres ejes mensuales son el mismo mando**: `monthly_adj =
   extra_savings − extra_cash_adj` (`projection.rs`), así que `extra_monthly_savings` ES el ajuste
   de caja negativo — por eso el ajuste no necesita aceptar negativos, y por eso con cualquiera de
   los dos `expense_total_monthly_delta`, `net_monthly_delta`, `savings_rate_delta` y
@@ -607,7 +694,43 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
 - **Tool annotations**: toda tool declara `annotations` (macro `#[tool(annotations(...))]` de
   rmcp): `title` legible, `open_world_hint = false` (el servidor solo toca su propia DB) y
   `read_only_hint = true` en las lecturas. Sin ellas un cliente conforme al spec asume el peor
-  caso (escritura destructiva). Test: `tools_list_exposes_annotations_on_every_tool`.
+  caso (escritura destructiva). Test: `tools_list_exposes_annotations_on_every_tool`. Recuentos
+  reproducibles: `grep -c 'read_only_hint = true'` → **21**, `grep -c 'destructive_hint = true'`
+  → **22** (`apps/api/src/mcp/server.rs`, 4.0.0).
+  **Dos reclasificaciones a `destructive_hint = true` en 4.0.0** — `destructive_hint` es lo que un
+  cliente MCP conforme usa para decidir si pide permiso al humano, así que declararlo mal no es un
+  matiz de documentación:
+  - `materialize_recurring`: se declaraba inocua y **borra datos**. La convergencia PODA instancias
+    (`pruned` en la respuesta) y su ámbito es la **instalación entera**, no el usuario del token —
+    desde el chat podía borrar instancias recurrentes de otro miembro del hogar sin preguntar.
+  - `unreconcile_transfer`: es una **puerta de un solo sentido**. Persiste un rechazo
+    anti-resurrección (`transfer_match_rejections`) que solo limpia volver a conciliar el par a
+    mano, y esa acción **no está expuesta como tool**. Equivocarse de par deja las dos patas
+    contando como gasto/ingreso para siempre, y en modos B/C eso desplaza el promedio, el número
+    FIRE y el runway.
+  El test que congela las annotations derivaba `destructiveHint` del prefijo del nombre, así que
+  **fijaba activamente los dos hints equivocados**: si tocas ese bucle, comprueba que no estás
+  convirtiendo una convención de nombres en una afirmación de seguridad.
+- **Las descripciones de las tools son contrato, no prosa.** El consumidor es un LLM: una
+  descripción equivocada hace el mismo daño que un número mal calculado, porque el modelo la cree y
+  razona sobre ella. Tres corregidas en 4.0.0 —además de las dos reclasificaciones de arriba y del
+  preview de `delete_asset`—, ninguna con cambio en el código de cálculo:
+  - `get_summary` afirmaba que `net_monthly_equivalent` «cuadra con `monthly_delta_assumption` de
+    `get_projection`». **No cuadra en modo A con ningún pasivo con plan de pago**: esa cifra es la
+    misma ANTES de restar el servicio de deuda, así que difieren exactamente en la cuota. Decía
+    además que era el DENOMINADOR de `savings_rate` cuando es el numerador. Ahora dice también que
+    `savings_rate` es una **fracción** (0,35 = 35 %), qué significan los dos `runway_months: null`
+    (los desambigua `runway_is_indefinite`) y que 1200 es el **suelo** de la escala, no una medida.
+  - `create_liability` prometía **amortización francesa** al derivar el principal. El código hace
+    `payment_amount × nº de intervalos` (`derive_principal_from_payment_plan`), sin descontar
+    intereses: la deuda entra inflada y esa deuda fantasma se resta del patrimonio en todo el
+    horizonte. La fórmula es una decisión de producto, no un bug — lo que se arregla es la promesa,
+    y la descripción dice ahora explícitamente que si el usuario conoce su capital pendiente es
+    mejor pasarlo.
+  - `cap_kind` documentaba un objeto (`{"kind": …, "value": …}`) que el schema **no acepta**: los
+    parámetros son planos, así que invitaba a mandar un campo `cap` inexistente — se descartaba, la
+    llamada devolvía 200 y el tope no se ponía. `cap_value` no tenía doc: ahora dice su unidad, que
+    depende de `cap_kind` (euros, meses de gasto o múltiplo del ingreso).
 - **Cero deriva handler↔tool**: cada tool llama a la MISMA core fn que el endpoint HTTP
   (`summary_core`, `projection_series_cached`, `budget_snapshot_core`, `transactions_summary_core`,
   `list_transactions_core`, `history_series_core`, `list_assets_core`, `list_liabilities_core`,
@@ -622,8 +745,10 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   de la core, post-commit) y devuelven respuestas compactas `{id, resumen}`. Tramo 1:
   `create_transaction` (con `recurring` opcional; reenvíos idénticos crean OTRO movimiento —
   ordinal de huella, mismo contrato que HTTP), `update_transaction` (owner-guard → `not_found`),
-  `capture_snapshot` (upsert por día civil — sobrescribe), `materialize_recurring` (idempotente
-  por cursor), `create_planning_flow` / `update_planning_flow` (tri-state `clear_due_date`),
+  `capture_snapshot` (upsert por día civil — sobrescribe), `materialize_recurring` (convergencia:
+  idempotente **por existencia**, sin cursor desde 3.9.0, y **poda** instancias → `pruned`;
+  `destructive_hint = true`, ver abajo), `create_planning_flow` / `update_planning_flow` (tri-state
+  `clear_due_date`),
   `create_category`, `create_categorization_rule` (solo imports futuros; conflict con `source`
   concreto duplicado). **Contrato de cache por tool**: COND (`invalidate_projection_if_savings_
   uses_transactions`, solo modos B/C) = transaction C/U + materialize; NONE = capture_snapshot
@@ -641,7 +766,11 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   clampa ≤ −100 a pérdida total). Tramo 3 (destructivas, todas preview/confirm):
   `delete_transaction` (preview = el movimiento completo; owner-guard), `delete_planning_flow`,
   `delete_budget_entry`, `delete_asset` (preview con contadores de desvinculación:
-  `linked_asset_id`/`account_asset_id` → SET NULL), `delete_liability` (ídem
+  `linked_asset_id`/`account_asset_id` → SET NULL — **y, desde 4.0.0, `allocation_rules_deleted` +
+  `allocation_remainder_rules_deleted`**: las reglas de reparto que apuntan al activo se BORRAN con
+  él (`ON DELETE CASCADE`) y eso no tiene vuelta atrás. El preview contaba lo reversible y callaba
+  lo irreversible, así que el humano confirmaba un borrado «inocuo» que podía llevarse el sumidero
+  de la cascada y redistribuir el sobrante mensual en todo el horizonte), `delete_liability` (ídem
   `linked_liability_id`), `delete_snapshot` (preview con `items_deleted`; NONE), `delete_import`
   (preview con `transactions_deleted`; cascada; COND — mismo contrato que el `?confirm=true`
   HTTP) y **`update_fire_settings`** (SOLO owner; merge campo a campo vía
@@ -649,8 +778,9 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   nivel de struct, el bug del reset silencioso; sin confirm devuelve `{before, after}` validado
   incluyendo `annual_inflation_assumption_percent`; FULL). Conciliación (3.5.0):
   `reconcile_transfers` (pase explícito, idempotente — `reconcile_now_core`; COND solo si enlaza
-  algo) y `unreconcile_transfer` (rompe el par + rechazo persistido — `unreconcile_core`; COND;
-  sin preview/confirm: no son destructivas). `reconcile_pair` manual se omite a conciencia
+  algo; `destructive_hint = false`) y `unreconcile_transfer` (rompe el par + rechazo persistido —
+  `unreconcile_core`; COND; **`destructive_hint = true` desde 4.0.0**). Ninguna de las dos usa
+  preview/confirm. `reconcile_pair` manual se omite a conciencia
   (footgun para un LLM; el registro de omisiones deliberadas vive en la skill
   `futurefin-mcp-parity`). Paridad CRUD del ledger (tras 3.5.0): `update_asset` (body completo
   del PATCH vía la misma `patch_asset_core` — rename, categoría, liquidez, precio de compra con
