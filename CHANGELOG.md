@@ -87,6 +87,19 @@ recategorización en lote, ni las reglas lo impiden. El importador de CSV y la r
 copia `.ffbackup` tampoco validan nada: traen el signo real del banco, y una copia que se niega a
 restaurar es peor que una fila rara.
 
+#### Poner un tope a una regla de reparto podía no hacer nada, y decir que sí
+
+Pedirle a Claude «ponle un tope de 99.999 € a la cartera» devolvía **éxito** y no cambiaba nada: el
+tope se manda en dos mitades —el tipo y el valor— y si solo llegaba el valor, se descartaba por el
+camino sin que nada lo notara. El caso simétrico (solo el tipo) sí daba error, así que la mitad de
+las veces funcionaba y la otra mitad mentía.
+
+Ahora cualquiera de las dos mitades a solas da el mismo error, y poner y quitar el tope a la vez
+también. La causa de fondo se arregla en su sitio: la comprobación de «no me has pedido cambiar
+nada» estaba escrita a mano en la capa de Claude en vez de vivir en el código compartido con la
+API, y ahí es donde se olvidó el campo. Ahora vive donde el resto, y el compilador se niega a
+construir el proyecto si alguien añade un campo nuevo y no lo tiene en cuenta.
+
 #### Se podían apuntar movimientos con fecha futura
 
 `2099-12-31` se aceptaba, y el listado de meses lo publicaba como `2099-12`, **mes cerrado y con

@@ -2408,38 +2408,46 @@ impl FutureFinMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
         let run = || -> Result<(Uuid, crate::handlers::allocation_rules::PatchAllocationRuleBody), ApiError> {
-            if p.amount.is_none()
-                && p.cap_kind.is_none()
-                && p.clear_cap.is_none()
-                && p.enabled.is_none()
-            {
+            // Destructuring EXHAUSTIVO y **sin `..`**: si mañana se añade un parámetro, esto deja
+            // de compilar hasta que alguien lo trate. Es la red que faltaba — `cap_value` estaba
+            // declarado en el schema (así que el LLM lo veía y lo mandaba con toda la razón) pero
+            // no participaba ni en la guardia ni en la construcción del cap: con otro campo
+            // presente, la llamada devolvía 200, `antes == despues` y el tope no se ponía.
+            let UpdateAllocationRuleParams {
+                rule_id,
+                amount,
+                cap_kind,
+                cap_value,
+                clear_cap,
+                enabled,
+            } = &p;
+
+            let clearing = *clear_cap == Some(true);
+            if clearing && (cap_kind.is_some() || cap_value.is_some()) {
                 return Err(ApiError::BadRequest(
-                    "provide at least one of amount, cap_kind/cap_value, clear_cap, enabled".into(),
+                    "cap_set_and_clear: provide either a cap or clear_cap, not both".into(),
                 ));
             }
-            if p.clear_cap == Some(true) && p.cap_kind.is_some() {
-                return Err(ApiError::BadRequest(
-                    "provide either a cap or clear_cap, not both".into(),
-                ));
-            }
-            let cap = if p.clear_cap == Some(true) {
+            // Cualquiera de las dos mitades construye el objeto. Media pareja llega así a
+            // `normalize_cap_pair`, que responde `cap_pair_incomplete` — el mismo error que ya
+            // daba el caso simétrico (`cap_kind` sin `cap_value`). Simetría sin código nuevo.
+            let cap = if clearing {
                 Some(serde_json::Value::Null)
-            } else if let Some(kind) = &p.cap_kind {
-                Some(serde_json::json!({"kind": kind, "value": p.cap_value}))
+            } else if cap_kind.is_some() || cap_value.is_some() {
+                Some(serde_json::json!({"kind": cap_kind, "value": cap_value}))
             } else {
                 None
             };
+            // La guardia de patch vacío vive ahora en `patch_allocation_rule_core`, como en el
+            // resto de handlers: un solo sitio para HTTP y MCP.
             Ok((
-                parse_uuid_param("rule_id", &p.rule_id)?,
+                parse_uuid_param("rule_id", rule_id)?,
                 crate::handlers::allocation_rules::PatchAllocationRuleBody {
                     target_asset_id: None,
                     kind: None,
-                    amount: p
-                        .amount
-                        .as_ref()
-                        .map(|a| serde_json::Value::String(a.clone())),
+                    amount: amount.as_ref().map(|a| serde_json::Value::String(a.clone())),
                     cap,
-                    enabled: p.enabled,
+                    enabled: *enabled,
                     notes: None,
                 },
             ))

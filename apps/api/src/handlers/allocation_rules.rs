@@ -511,6 +511,34 @@ pub(crate) async fn patch_allocation_rule_core(
     id: Uuid,
     body: PatchAllocationRuleBody,
 ) -> Result<AllocationRuleResponse, ApiError> {
+    // Destructuring EXHAUSTIVO y **sin `..`**: añadir un campo al body deja de compilar hasta que
+    // alguien decida si cuenta como «algo que actualizar». Ésta era una de las dos únicas cores de
+    // PATCH del repo sin `patch_empty` (`assets.rs`, `budget.rs`, `liabilities.rs`, `planning.rs` e
+    // `installation.rs` sí lo tienen), y por eso la tool MCP tuvo que escribirse su propia guardia
+    // a mano — donde se olvidó `cap_value` y el campo se evaporaba con un 200 (issue #7 §5). Una
+    // guardia que enumera campos siempre puede olvidarse uno; ésta la verifica el compilador.
+    {
+        let PatchAllocationRuleBody {
+            target_asset_id,
+            kind,
+            amount,
+            cap,
+            enabled,
+            notes,
+        } = &body;
+        if target_asset_id.is_none()
+            && kind.is_none()
+            && amount.is_none()
+            && cap.is_none()
+            && enabled.is_none()
+            && notes.is_none()
+        {
+            return Err(ApiError::BadRequest(
+                "patch_empty: provide at least one field to update".into(),
+            ));
+        }
+    }
+
     let current: Option<RuleRow> = sqlx::query_as(
         r#"SELECT id, owner_user_id, target_asset_id, priority, kind, amount,
                   cap_kind, cap_value, enabled, notes
