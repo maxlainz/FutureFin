@@ -145,7 +145,7 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
     **effective** scalars (`assets_projection_context`), so the € target matches the month-1
     contribution shown in the same response and the simulation.
   - `GET /v1/projection/series` echoes the effective mode in `savings_source` +
-    `savings_source_months_with_data` (same naming as summary), so the chart can label the Δ base.
+    `savings_income_basis`/`savings_expense_basis` (same naming as summary), so the chart can label the Δ base.
 - **Fallback**: `months_with_data == 0` in mode B/C → silently reverts to the budget scalars (mode A
   effective). `GET /v1/summary` reports the **effective** source in `financial_health.savings_source`
   (so it can read `"budget"` even when the setting is `transactions_avg` / `budget_income_real_expense`),
@@ -158,7 +158,7 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
   case in `fire-parity.json`: `expense_retirement 2137.5 → expected_target_nw 923327.306` (proves both
   sides derive the same need from an avg-style, non-round expense base).
 - **Read the mode from `summary.financial_health`, never from the root of `SummaryResponse`** (v2.2.0
-  fix): the server nests `savings_source` and `savings_source_months_with_data` inside
+  fix): the server nests `savings_source` and `savings_income_basis`/`savings_expense_basis` inside
   `FinancialHealthMetrics`, but `types.ts` declared them at the root until v2.2.0. `SummaryView` and
   `RetirementView` therefore read `undefined`, `savingsSourceUsesTransactions(undefined)` returned
   `false`, and the Jubilación tab ("Gasto actual", "Ingresos actuales", "Patrimonio objetivo", "Primer

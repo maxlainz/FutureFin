@@ -158,6 +158,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La regla necesita saber qué asignar. Elige gasto, ingreso o ahorro.",
   rule_assign_category_requires_kind:
     "Para que la regla asigne una categoría hay que indicar también el tipo.",
+  rule_patch_empty:
+    "No has indicado ningún cambio en la regla. Modifica algo antes de guardar.",
+  rule_patch_conflict:
+    "Estás poniendo y quitando el mismo dato de la regla a la vez. Elige una de las dos cosas.",
   rule_not_applicable:
     "Esa regla no asigna ningún tipo, así que no se puede aplicar a los movimientos que ya tienes. Edítala primero.",
   apply_to_existing_invalid:

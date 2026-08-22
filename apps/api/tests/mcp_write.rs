@@ -960,6 +960,268 @@ async fn planning_flow_summary_uses_the_wire_form_of_the_direction() {
     assert_eq!(flows[0]["direction"], "outflow", "{flows}");
 }
 
+/// Cuarteto de `update_categorization_rule`: core compartida, cache NONE, errores de dominio con
+/// el código del wire, y las dos puertas de escritura.
+///
+/// Cierra el hueco #4 del registro de paridad: desde 3.8.0 un agente podía CREAR una regla y
+/// aplicarla retroactivamente a cientos de movimientos, pero no corregirla ni retirarla. La
+/// asimetría empujaba a acumular reglas nuevas encima de las malas, que es lo que se ve en los
+/// datos reales del issue (`ANNABEL FLORISTERIA` → Hogar / Other / Regalos).
+#[tokio::test]
+async fn update_categorization_rule_shares_core_and_rejects_ambiguous_tristate() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    // Modo B: las transacciones SÍ son inputs del engine, así que si esta tool invalidara la cache
+    // se notaría. En modo A no invalida nada nunca y el test no valdría de nada.
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    let rule_id = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({"match_kind": "substring", "pattern": "FLORISTERIA", "source": "n26",
+                   "assign_kind": "expense", "assign_category_id": compras}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // Una segunda regla, para provocar la colisión de (source, pattern) más abajo.
+    app.post_json_with_cookie(
+        "/v1/transactions/rules",
+        json!({"match_kind": "substring", "pattern": "AMAZON", "source": "n26",
+               "assign_kind": "expense"}),
+        &owner.cookie,
+    )
+    .await;
+
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
+
+    // 1. Escritura por la tool + tri-estado: `clear_source` la hace agnóstica del banco.
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_categorization_rule",
+                json!({"rule_id": rule_id, "pattern": "ANNABEL FLORISTERIA",
+                       "clear_source": true, "clear_assign_category": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["pattern"], "ANNABEL FLORISTERIA", "{out}");
+    assert!(out["source"].is_null(), "clear_source debe dejarla agnóstica: {out}");
+    assert!(out["assign_category_id"].is_null(), "{out}");
+
+    // 2. Indistinguible vía HTTP: es la misma core.
+    let rows = app
+        .get_with_cookie("/v1/transactions/rules", &owner.cookie)
+        .await
+        .json();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(rule_id))
+        .expect("la regla sigue ahí");
+    assert_eq!(row["pattern"], "ANNABEL FLORISTERIA", "{row}");
+    assert!(row["source"].is_null(), "{row}");
+
+    // 3. Contrato de cache: NONE. Editar una regla no recategoriza nada, así que el conjunto de
+    //    transacciones no se mueve y la proyección no puede cambiar — ni siquiera en modo B.
+    assert!(
+        app.cache_contains(&key).await,
+        "editar una regla NUNCA invalida la cache de proyección"
+    );
+
+    // 4. Errores de dominio, con el código del wire.
+    for (body, code) in [
+        (json!({"rule_id": rule_id}), "rule_patch_empty"),
+        (
+            json!({"rule_id": rule_id, "source": "n26", "clear_source": true}),
+            "rule_patch_conflict",
+        ),
+        (
+            json!({"rule_id": rule_id, "assign_kind": "expense", "clear_assign_kind": true}),
+            "rule_patch_conflict",
+        ),
+        (json!({"rule_id": rule_id, "match_kind": "regex"}), "rule_match_kind_invalid"),
+    ] {
+        let envelope = mcp_post(
+            &app,
+            &token,
+            tool_call("update_categorization_rule", body.clone()),
+        )
+        .await;
+        let err = tool_error(&envelope, "bad_request");
+        assert_eq!(err["code"], code, "{body}: {err}");
+    }
+    // Colisión (source, pattern) con la otra regla → conflict, igual que HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_categorization_rule",
+            json!({"rule_id": rule_id, "pattern": "AMAZON", "source": "n26"}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "conflict");
+    // Una regla de otro (o inexistente) es 404, nunca 403.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_categorization_rule",
+            json!({"rule_id": uuid::Uuid::new_v4().to_string(), "pattern": "X"}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "not_found");
+
+    // 5. Toggle vivo y rol.
+    app.patch_json_with_cookie(
+        "/v1/installation",
+        json!({"mcp_write_enabled": false}),
+        &owner.cookie,
+    )
+    .await;
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_categorization_rule",
+            json!({"rule_id": rule_id, "pattern": "OTRA"}),
+        ),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+    assert!(
+        envelope["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("mcp_write_disabled"),
+        "{envelope}"
+    );
+}
+
+/// `delete_categorization_rule`: preview con la huella real, confirm que borra, y la invariante que
+/// más importa — **los movimientos conservan su categoría**.
+///
+/// Sin esa aserción el preview sería peligroso: un LLM que lea «40 movimientos» dirá al usuario «se
+/// descategorizarán 40 movimientos», que es falso. Por eso la respuesta lleva la nota, y por eso la
+/// cifra que se publica primero es `ya_conformes` y no `cambiarian`: una regla ya aplicada tiene
+/// `cambiarian: 0` y aun así gobierna decenas de filas.
+#[tokio::test]
+async fn delete_categorization_rule_previews_then_deletes() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    // Tres movimientos que la regla YA gobierna (categoría correcta): `ya_conformes = 3`,
+    // `cambiarian = 0`.
+    for i in 0..3 {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({"op_date": format!("2026-06-{:02}", 10 + i),
+                       "concept": format!("TIENDA {i}"), "amount": "-10", "kind": "expense",
+                       "category_id": compras}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let rule_id = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({"match_kind": "substring", "pattern": "TIENDA",
+                   "assign_kind": "expense", "assign_category_id": compras}),
+            &owner.cookie,
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid);
+    app.warm_household(&owner.cookie, &key).await;
+
+    // 1. Sin confirm: preview, no borra, y la huella cuadra con lo sembrado.
+    let preview = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("delete_categorization_rule", json!({"rule_id": rule_id})),
+        )
+        .await,
+    );
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert_eq!(preview["confirm_required"], true, "{preview}");
+    assert_eq!(preview["effects"]["regla"]["id"], json!(rule_id), "{preview}");
+    assert_eq!(preview["effects"]["huella"]["ya_conformes"], 3, "{preview}");
+    assert_eq!(
+        preview["effects"]["huella"]["cambiarian"], 0,
+        "una regla ya aplicada no cambiaría nada — por eso `ya_conformes` es la cifra útil: {preview}"
+    );
+    assert_eq!(app.count_rows("categorization_rules").await, 1, "el preview no borra");
+    assert!(app.cache_contains(&key).await, "el preview no invalida");
+
+    // 2. Con confirm: borra… y los movimientos CONSERVAN su categoría.
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "delete_categorization_rule",
+                json!({"rule_id": rule_id, "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["deleted"], true, "{out}");
+    assert_eq!(app.count_rows("categorization_rules").await, 0);
+    let rows = app
+        .get_with_cookie("/v1/transactions", &owner.cookie)
+        .await
+        .json();
+    for t in rows.as_array().unwrap() {
+        assert_eq!(
+            t["category_id"],
+            json!(compras),
+            "borrar la regla NO descategoriza: {t}"
+        );
+    }
+
+    // 3. Cache NONE también al borrar (modo B, donde sí se notaría).
+    assert!(
+        app.cache_contains(&key).await,
+        "borrar una regla NUNCA invalida la cache de proyección"
+    );
+
+    // 4. Idempotencia observable: repetir con confirm da not_found.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "delete_categorization_rule",
+            json!({"rule_id": rule_id, "confirm": true}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "not_found");
+}
+
 #[tokio::test]
 async fn delete_recurring_rule_previews_then_deletes() {
     let app = TestApp::spawn().await;

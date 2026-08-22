@@ -1245,9 +1245,19 @@ export function ProjectionNetWorthChart({
   const deltaStr = formatCurrencyAmount(series.monthly_delta_assumption, currencyIso);
   // Base del Δ mensual: presupuesto (modo A) o promedio de movimientos (modos B y C, ya con
   // el fallback del servidor aplicado). Se mantiene corto: comparte línea con más metadatos.
-  const deltaAvgMonths = series.savings_source_months_with_data ?? 0;
+  //
+  // Sale de los dos `*_basis` porque el escalar `savings_source_months_with_data` que se leía aquí
+  // dejó de enviarse en 3.9.0, al hacerse las ventanas configurables por lado — y esto llevaba
+  // desde entonces pintando «prom. 0 meses» en los modos B y C. Con dos ventanas puede haber dos
+  // denominadores distintos (un lado 3 meses, el otro 12): si difieren se dicen los dos, porque
+  // enseñar uno solo mal-etiqueta la mitad de la cifra.
+  const incomeMonths = series.savings_income_basis?.months_with_data ?? 0;
+  const expenseMonths = series.savings_expense_basis?.months_with_data ?? 0;
+  const monthsLabel = (n: number) => `${n} ${n === 1 ? "mes" : "meses"}`;
   const deltaBaseLabel = savingsSourceUsesTransactions(series.savings_source)
-    ? `prom. ${deltaAvgMonths} ${deltaAvgMonths === 1 ? "mes" : "meses"}`
+    ? incomeMonths === expenseMonths
+      ? `prom. ${monthsLabel(incomeMonths)}`
+      : `prom. ${monthsLabel(incomeMonths)} ingreso / ${monthsLabel(expenseMonths)} gasto`
     : "presup.";
   const scopeShort = ledgerPersonScope === "mine" ? "Mi vista" : "Hogar";
   const inflationShort =

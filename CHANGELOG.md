@@ -87,6 +87,30 @@ recategorización en lote, ni las reglas lo impiden. El importador de CSV y la r
 copia `.ffbackup` tampoco validan nada: traen el signo real del banco, y una copia que se niega a
 restaurar es peor que una fila rara.
 
+#### No se podía corregir una regla de categorización desde el chat
+
+Desde la 3.8.0 podías pedirle a Claude que creara una regla («todo lo que ponga MERCADONA es
+Supermercado») y que la aplicara a cientos de movimientos de golpe. Lo que **no** podía era
+corregirla ni retirarla — así que la única salida era crear otra encima. En una instalación real ya
+se veía el resultado: tres reglas contradictorias para la misma floristería, y `AMAZON` repartido
+entre Suscripciones, Hogar y Otros.
+
+Ahora existen las dos herramientas que faltaban. Borrar una regla pide confirmación y antes enseña
+**cuántos movimientos gobierna hoy** — y deja claro que borrarla **no descategoriza nada**: lo que
+ya está categorizado se queda como está, la regla simplemente deja de aplicarse a los imports
+futuros.
+
+De paso, editar una regla dejó de aceptar dos cosas que antes pasaban en silencio: mandar un cambio
+vacío (ahora avisa de que no has cambiado nada) y poner y quitar el mismo dato a la vez (antes ganaba
+el «quitar» sin decírtelo).
+
+#### El pie del gráfico decía «prom. 0 meses»
+
+Encontrado de camino, no estaba en los issues. Desde la 3.9.0 el gráfico de proyección leía un dato
+que el servidor había dejado de enviar al hacerse configurables las ventanas del promedio, así que
+en los modos que usan tus movimientos reales el pie ponía siempre **«prom. 0 meses»**. Ahora dice
+los meses de verdad, y si el ingreso y el gasto promedian ventanas distintas, dice las dos.
+
 #### Un mes excelente se leía como una pérdida
 
 En la pestaña Movimientos, el tooltip de la gráfica mensual decía «Neto». Ese neto **incluía el
