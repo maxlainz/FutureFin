@@ -288,17 +288,18 @@ jobs:
           POSTGRES_PASSWORD=ci-test docker compose -p futurefin \
             -f .github/testdata/docker-compose.v2.yml -f .github/testdata/docker-compose.v2-app-v3.yml \
             up -d futurefin || true
-          # Sin pipeline: el exit code que importa es el del contenedor, no el de tee.
-          for i in $(seq 1 30); do
-            state="$(docker inspect -f '{{.State.Status}}' futurefin 2>/dev/null || echo missing)"
-            [ "$state" = "exited" ] && break
-            sleep 2
-            [ "$i" = 30 ] && { docker logs futurefin --tail=100; echo "ERROR: seguía vivo"; exit 1; }
-          done
-          test "$(docker inspect -f '{{.State.ExitCode}}' futurefin)" != "0"
-          docker logs futurefin 2>&1 > /tmp/refuse.log 2>&1 || true
+          # El compose 2.x trae `restart: unless-stopped`, así que el contenedor NO se queda en
+          # `exited`: entra en bucle de reinicio, que es la conducta correcta —seguirá fallando
+          # hasta que su dueño arregle el compose—. Lo que se comprueba es lo que importa: que
+          # explica cómo migrar y que NO llega a dar servicio.
+          sleep 25
           docker logs futurefin 2>&1 | grep -q "ya no habla con bases de datos externas"
           docker logs futurefin 2>&1 | grep -q "3.9.0"
+          docker logs futurefin 2>&1 | grep -q "docs/actualizar.md"
+          if curl -sf --max-time 5 http://127.0.0.1:8080/v1/health >/dev/null 2>&1; then
+            echo "ERROR: llegó a dar servicio contra una base externa"; exit 1
+          fi
+          docker inspect -f '{{.State.Status}}' futurefin
 
       - name: Migrate to V3 compose reusing the volume (chown + REINDEX + backup)
         run: |
