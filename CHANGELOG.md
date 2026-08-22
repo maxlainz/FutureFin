@@ -204,6 +204,20 @@ patrimonio histórico no las resta, y un cero era indistinguible de «no debo na
 siendo la misma —el histórico es lo que tú fotografiaste— pero ahora la respuesta dice cuál de las
 dos cosas es.
 
+#### Dos cifras de ahorro sin decir cuál es cuál
+
+El resumen que Claude recibe trae **dos** ahorros mensuales, y no son intercambiables: uno es el
+ahorro real del modo que tengas activo —el que usa la proyección— y el otro es siempre el que sale
+de tu presupuesto, que existe solo para poder decirte «vas por encima del plan». En el modo por
+defecto valen lo mismo; en los modos que usan tus movimientos reales pueden diferir un 14 %. Nada lo
+explicaba, así que elegir el equivocado desplazaba la respuesta.
+
+No cambia ningún cálculo: cambia lo que la herramienta dice de sí misma. Ahora nombra las dos, dice
+cuál usa el motor, y cuál es solo el contraste con el plan. En la misma línea, dos aclaraciones más:
+el objetivo FIRE se devuelve **en euros de hoy** (el del año en que te jubiles es bastante mayor), y
+poner la tasa de retirada a cero no es un escenario conservador — es «jamás», y anula el objetivo
+entero.
+
 #### Un filtro de vista mal escrito devolvía los datos de todo el hogar
 
 `?view=` aceptaba **cualquier** valor y, si no era exactamente `mine`, servía el hogar completo sin
