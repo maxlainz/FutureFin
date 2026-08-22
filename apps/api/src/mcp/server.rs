@@ -368,6 +368,7 @@ fn parse_tax_brackets(
 /// nombres, mismos valores y mismas cotas que `update_fire_settings`: lo que se simula aquí es
 /// exactamente lo que pasaría al guardarlo allí.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FireSettingsOverrideParam {
     /// "budget" (A: el plan) | "transactions_avg" (B: ingreso y gasto reales) |
     /// "budget_income_real_expense" (C: ingreso del plan + gasto real). Cambiarlo arrastra tres
@@ -437,6 +438,7 @@ impl FireSettingsOverrideParam {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SimulateParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`).
@@ -483,6 +485,10 @@ pub struct SimulateParams {
     pub swr_pct: Option<String>,
     /// Inflación anual asumida en % (0–50, string decimal).
     #[serde(default)]
+    /// Alias aceptado: `annual_inflation_assumption_percent`, que es como se llama en
+    /// `get_settings` y en `update_fire_settings`. Sin él, el nombre que el modelo acababa de
+    /// leer se descartaba en silencio y el escenario salía idéntico al baseline.
+    #[serde(alias = "annual_inflation_assumption_percent")]
     pub annual_inflation_percent: Option<String>,
     /// Gasto ANUAL de jubilación (> 0, string decimal): sustituye **siempre** el gasto
     /// post-jubilación, y la base del target FIRE **solo con
@@ -880,10 +886,14 @@ pub struct UpdateAllocationRuleParams {
     /// kind=percent. (El kind y el orden no se editan desde chat.)
     #[serde(default)]
     pub amount: Option<String>,
-    /// Cap: {"kind": "amount"|"months_expense"|"income_multiple", "value": "..."}. clear_cap
-    /// lo elimina.
+    /// Tipo de tope: `"amount"` | `"months_expense"` | `"income_multiple"`. Va SUELTO, junto a
+    /// `cap_value` — no es un objeto anidado. El doc decía `{"kind": …, "value": …}`, así que
+    /// invitaba a mandar un campo `cap` que no existe: se descartaba en silencio, la llamada
+    /// devolvía 200, y el tope no se ponía.
     #[serde(default)]
     pub cap_kind: Option<String>,
+    /// Valor del tope, string decimal. La UNIDAD depende de `cap_kind`: euros con `amount`,
+    /// nº de meses de gasto con `months_expense`, múltiplo del ingreso con `income_multiple`.
     #[serde(default)]
     pub cap_value: Option<String>,
     /// true = quitar el cap.

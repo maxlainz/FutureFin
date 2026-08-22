@@ -539,7 +539,7 @@ async fn mode_b_runway_uses_effective_expense_base() {
 
     let h = health(&app, &owner.cookie).await;
     assert_eq!(h["savings_source"], "transactions_avg");
-    assert_eq!(h["savings_expense_basis"]["months_with_data"].as_u64().unwrap(), 1);
+    assert_eq!(h["savings_expense_basis"]["avg_months"].as_u64().unwrap(), 1);
 
     let income = dec(&h["income_monthly_equivalent"]);
     let expense_reg = dec(&h["expense_regular_monthly_equivalent"]);
@@ -608,7 +608,7 @@ async fn mode_b_zero_months_falls_back_to_budget_runway() {
 
     let modo_b = health(&app, &owner.cookie).await;
     assert_eq!(modo_b["savings_source"], "budget", "fallback ⇒ fuente efectiva budget");
-    assert_eq!(modo_b["savings_expense_basis"]["months_with_data"].as_u64().unwrap(), 0);
+    assert_eq!(modo_b["savings_expense_basis"]["avg_months"].as_u64().unwrap(), 0);
     assert_eq!(
         modo_b, modo_a,
         "sin meses reales el modo B debe devolver exactamente el bloque del modo A"

@@ -805,8 +805,16 @@ pub struct SavingsAvgBasis {
     /// `budget` = este lado salió del presupuesto (el modo no lo promedia, o cayó por falta de
     /// datos). `average` = promedio real de transacciones.
     pub basis: &'static str,
-    /// Denominador REALMENTE usado. `0` ⟺ `basis == "budget"`.
-    pub months_with_data: u32,
+    /// Denominador REALMENTE usado — los meses que se promediaron. `0` ⟺ `basis == "budget"`.
+    ///
+    /// Se llamaba `months_with_data`, y ese nombre significa **lo contrario** en la otra
+    /// familia de respuestas: en `GET /v1/transactions/summary`, `months_with_data` son los
+    /// meses que HAY en el tramo y el denominador es `avg_months`. Un consumidor que
+    /// preguntara «¿sobre cuántos meses está calculada mi media?» citaba 9 (los que hay)
+    /// cuando el motor promedió 6 (los reales) — y con esa cifra justificaba un ahorro
+    /// proyectado que no cuadraba. Ahora las dos familias usan `avg_months` para el
+    /// denominador y `months_with_data` solo donde significa «lo que hay».
+    pub avg_months: u32,
     /// Ventana configurada tras el clamp (permite decir «pediste 12, hay 7»). `0` si no aplica.
     pub window_months: u32,
     /// `"data"` | `"calendar"`; ausente cuando el lado no promedia.
@@ -826,7 +834,7 @@ impl SavingsAvgBasis {
     pub(crate) fn budget() -> Self {
         Self {
             basis: "budget",
-            months_with_data: 0,
+            avg_months: 0,
             window_months: 0,
             window_mode: None,
             first_month: None,
@@ -837,7 +845,7 @@ impl SavingsAvgBasis {
     fn from_side(side: &AvgSide) -> Self {
         Self {
             basis: "average",
-            months_with_data: side.months_with_data,
+            avg_months: side.months_with_data,
             window_months: side.window.months,
             window_mode: Some(match side.window.mode {
                 AvgWindowMode::Data => "data",

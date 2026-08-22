@@ -147,7 +147,8 @@ export type SavingsAvgBasisApi = {
    *  datos). `"average"` = promedio real de transacciones. */
   basis: "budget" | "average";
   /** Denominador realmente usado. `0` ⟺ `basis === "budget"`. */
-  months_with_data: number;
+  /** Denominador realmente usado: los meses que se promediaron. */
+  avg_months: number;
   /** Ventana configurada tras el clamp: permite decir «pediste 12, hay 7». */
   window_months: number;
   window_mode?: "data" | "calendar";

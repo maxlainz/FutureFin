@@ -1251,8 +1251,8 @@ export function ProjectionNetWorthChart({
   // desde entonces pintando «prom. 0 meses» en los modos B y C. Con dos ventanas puede haber dos
   // denominadores distintos (un lado 3 meses, el otro 12): si difieren se dicen los dos, porque
   // enseñar uno solo mal-etiqueta la mitad de la cifra.
-  const incomeMonths = series.savings_income_basis?.months_with_data ?? 0;
-  const expenseMonths = series.savings_expense_basis?.months_with_data ?? 0;
+  const incomeMonths = series.savings_income_basis?.avg_months ?? 0;
+  const expenseMonths = series.savings_expense_basis?.avg_months ?? 0;
   const monthsLabel = (n: number) => `${n} ${n === 1 ? "mes" : "meses"}`;
   const deltaBaseLabel = savingsSourceUsesTransactions(series.savings_source)
     ? incomeMonths === expenseMonths
