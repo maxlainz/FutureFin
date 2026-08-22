@@ -45,9 +45,12 @@ jobs:
             echo "Sin secretos de Docker Hub: no hay nada que sincronizar."
           fi
 
-      # `password` admite el token de acceso personal de Docker Hub, pero debe
-      # tener permisos de escritura sobre el repositorio (los tokens de solo
-      # lectura devuelven 401 aquí aunque sirvan para `docker push`).
+      # `password` admite el token de acceso personal de Docker Hub, pero **no basta
+      # con el que sirve para `docker push`**: editar los metadatos del repositorio
+      # exige scope `read/write/delete`, y un token `read/write` devuelve **403
+      # Forbidden** en el PATCH aunque su login haya ido bien. Es lo que pasó el
+      # 2026-08-22: `publish-image.yml` publicaba la imagen sin problema y este
+      # workflow moría con un «Forbidden» a secas, sin decir por qué.
       # El repositorio de destino sale de la misma variable que publish-image.yml,
       # para que ambos workflows no puedan apuntar a sitios distintos.
       - name: Publicar la descripción
@@ -57,5 +60,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ vars.DOCKERHUB_IMAGE || 'maxlainz/futurefin' }}
-          short-description: "Finanzas del hogar y planificación FIRE, autoalojadas en un solo contenedor con PostgreSQL incluido."
+          # Máximo 100 BYTES, no caracteres: cada tilde cuenta dos. La versión anterior
+          # medía 101 y Docker Hub la truncaba, dejándola sin punto final.
+          short-description: "Finanzas del hogar y planificación FIRE, autoalojadas en un contenedor con PostgreSQL dentro."
           readme-filepath: .github/dockerhub-README.md
+
+      # Un «Forbidden» a secas no dice a nadie qué hacer, y este workflow se dispara
+      # tan de uvas a peras que quien lo lea habrá perdido el contexto.
+      - name: Por qué ha fallado
+        if: failure()
+        run: |
+          echo "::error::La API de Docker Hub ha rechazado la actualización."
+          echo "Causa más probable: DOCKERHUB_TOKEN tiene scope 'read/write' (suficiente para"
+          echo "docker push, que es lo que hace publish-image.yml) pero editar la descripción"
+          echo "del repositorio exige 'read/write/delete'. Un 403 aquí NO es un problema de"
+          echo "este workflow ni del fichero de descripción."
+          echo "Arreglo: crea un token nuevo en Docker Hub → Account Settings → Personal access"
+          echo "tokens con permiso 'Read, Write, Delete' y actualiza el secreto DOCKERHUB_TOKEN.
