@@ -8,7 +8,7 @@
 # database is a separate compose, docker-compose.dev.yml, on 127.0.0.1:5432).
 #
 # Usage (from repo root, where docker-compose.yml lives):
-#   bash .claude/skills/futurefin-diagnostics-and-tooling/scripts/db-stats.sh
+#   bash scripts/diagnostics/db-stats.sh
 #   POSTGRES_USER=futurefin POSTGRES_DB=futurefin bash .../db-stats.sh
 #
 # Env vars (defaults match docker-compose.yml):

@@ -89,6 +89,22 @@ are local gates you must run yourself (Section 6).
 
 Never contradict these. If a task seems to require violating one, stop and re-plan.
 
+### 2.0 No real personal data — ever, anywhere in the repo
+No IBAN, account or card number, real person's name, actual salary/rent/balance from a live
+installation, street address, real purchase reference, personal email, or private hostname enters
+the repository — not in a fixture, not in a comment, not in the CHANGELOG, not in a screenshot.
+It applies to your own data too: the repo is public and git history is forever. RATIONALE: the
+history cannot be un-published. INCIDENT (found August 2026, while preparing 4.0.0): the two CSV
+fixtures under `apps/api/tests/fixtures/` were **real bank exports** — full Spanish IBAN, a
+person's first and last name, two consecutive months of salary to the cent, gym branch, street and
+neighbourhood — present in the tree of **109 commits**, while the test file's own header claimed
+they were "fixtures anonimizados". Several CHANGELOG entries reasoned "sobre una instalación
+**real**" with the owner's rent, monthly income and savings rate in before/after tables. Fixtures
+are **fabricated**, never anonymised; CHANGELOG figures are invented but arithmetically coherent.
+GATE: `./scripts/scan-sensitive.sh` (CI job `secrets-scan`, blocking). Full rules and the
+recipe for building a fixture that still proves what it must:
+[`futurefin-data-hygiene`](../futurefin-data-hygiene/SKILL.md).
+
 ### 2.1 Money is `Decimal`, never `f64` — with ONE deliberate wire exception
 All monetary values in domain, engine, handlers and schema are `rust_decimal::Decimal`; the API
 serializes amounts as decimal **strings**; the frontend never parses them to float for
@@ -423,7 +439,7 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
   `grep -n 'stop_grace_period\|CMD-SHELL' docker-compose.yml`
 - Rescue mode used by 4.2 C: `grep -n 'FUTUREFIN_MODE=db-only' scripts/restore-postgres.sh` and
   `grep -n 'db-only' apps/api/docker-entrypoint.sh`
-- Shellcheck gate reproduces locally: `shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh .claude/skills/futurefin-diagnostics-and-tooling/scripts/*.sh`
+- Shellcheck gate reproduces locally: `shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh scripts/diagnostics/*.sh`
 - Publish trigger + registries: `cat .github/workflows/publish-image.yml`
 - Coherencia CHANGELOG/tags/Releases: `./scripts/audit-releases.sh` (38 tags = 38 Releases el 2026-08-21;
   12 secciones sin tag, todas deliberadas)

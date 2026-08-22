@@ -8,6 +8,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Barato, rápido y primero: ningún dato personal entra al repositorio. Existe porque
+  # hasta agosto de 2026 `apps/api/tests/fixtures/` llevaba extractos bancarios reales
+  # —IBAN, nombre y nómina— y nada lo detectó. Ver la skill `futurefin-data-hygiene`.
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Datos sensibles en ficheros trackeados
+        run: ./scripts/scan-sensitive.sh
+
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -57,8 +69,7 @@ jobs:
       - name: shellcheck (entrypoint + scripts)
         run: |
           sudo apt-get install -y -q shellcheck >/dev/null
-          shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh \
-            .claude/skills/futurefin-diagnostics-and-tooling/scripts/*.sh
+          shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh scripts/diagnostics/*.sh
 
       - name: Build image
         run: docker build -t futurefin-ci:latest -f apps/api/Dockerfile .

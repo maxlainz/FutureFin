@@ -131,7 +131,7 @@ pub fn compute_fingerprint(
 }
 
 /// Patrón de regla aprendida: concepto normalizado SIN los sufijos de referencia numérica
-/// (`WWW.AMAZON* AB12CD34` → `WWW.AMAZON*`, `PERIODO 27/05/2026 27/06/2026` → `PERIODO`).
+/// (`TIENDA ONLINE* AB12CD34` → `TIENDA ONLINE*`, `PERIODO 27/05/2026 27/06/2026` → `PERIODO`).
 /// Descarta tokens finales que contengan algún dígito; conserva siempre ≥1 token.
 pub fn derive_rule_pattern(concept: &str) -> String {
     let norm = normalize_concept(concept);
@@ -858,11 +858,11 @@ mod tests {
         // ASCII-uppercase only: the accented chars stay verbatim (é not É).
         assert_eq!(normalize_concept("  Café   Módena  "), "CAFé MóDENA");
         assert_eq!(
-            normalize_concept("WWW.AMAZON* AB12CD34"),
-            "WWW.AMAZON* AB12CD34"
+            normalize_concept("TIENDA ONLINE* AB12CD34"),
+            "TIENDA ONLINE* AB12CD34"
         );
         assert_eq!(normalize_concept("estalvi"), "ESTALVI");
-        assert_eq!(normalize_concept("\tSopar\n entrada "), "SOPAR ENTRADA");
+        assert_eq!(normalize_concept("\tCena\n entrada "), "CENA ENTRADA");
     }
 
     /// La tabla del `translate()` SQL y la función Rust son dos implementaciones del mismo
@@ -944,9 +944,9 @@ mod tests {
             "n26",
             d,
             Decimal::from_str("-26.000000000").unwrap(),
-            " Sopar  entrada ",
+            " Cena  entrada ",
         );
-        let b = compute_fingerprint("n26", d, Decimal::from_str("-26").unwrap(), "Sopar entrada");
+        let b = compute_fingerprint("n26", d, Decimal::from_str("-26").unwrap(), "Cena entrada");
         assert_eq!(a, b, "scale + whitespace variants must share a fingerprint");
         // Different source, date, amount or concept must diverge.
         assert_ne!(
@@ -955,18 +955,18 @@ mod tests {
                 "myinvestor",
                 d,
                 Decimal::from_str("-26").unwrap(),
-                "Sopar entrada"
+                "Cena entrada"
             )
         );
         assert_ne!(
             a,
-            compute_fingerprint("n26", d, Decimal::from_str("-27").unwrap(), "Sopar entrada")
+            compute_fingerprint("n26", d, Decimal::from_str("-27").unwrap(), "Cena entrada")
         );
     }
 
     #[test]
     fn derive_rule_pattern_strips_numeric_reference_suffixes() {
-        assert_eq!(derive_rule_pattern("WWW.AMAZON* AB12CD34"), "WWW.AMAZON*");
+        assert_eq!(derive_rule_pattern("TIENDA ONLINE* AB12CD34"), "TIENDA ONLINE*");
         assert_eq!(
             derive_rule_pattern("PERIODO 27/05/2026 27/06/2026"),
             "PERIODO"

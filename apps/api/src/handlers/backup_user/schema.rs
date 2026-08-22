@@ -1243,7 +1243,7 @@ mod tests {
             ],
             "categorization_rules": [
                 {
-                    "match_kind": "substring", "pattern": "CONSUM", "source": "n26",
+                    "match_kind": "substring", "pattern": "SUPERMERCADO", "source": "n26",
                     "assign_kind": "expense",
                     "assign_category_ref": { "scope": "expense", "name": "Supermercado" }
                 }
@@ -1268,7 +1268,7 @@ mod tests {
         assert_eq!(v5.transactions[1].source, "manual");
 
         assert_eq!(v5.categorization_rules.len(), 1);
-        assert_eq!(v5.categorization_rules[0].pattern, "CONSUM");
+        assert_eq!(v5.categorization_rules[0].pattern, "SUPERMERCADO");
         assert_eq!(v5.categorization_rules[0].source.as_deref(), Some("n26"));
 
         // Decimal-string scale round-trip.

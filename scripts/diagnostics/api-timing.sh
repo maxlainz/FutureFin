@@ -3,7 +3,7 @@
 #
 # Usage (from repo root):
 #   SMOKE_USER=alice SMOKE_PASS=secret \
-#     bash .claude/skills/futurefin-diagnostics-and-tooling/scripts/api-timing.sh
+#     bash scripts/diagnostics/api-timing.sh
 #   # split-dev (API on :8081):
 #   BASE=http://127.0.0.1:8081 SMOKE_USER=... SMOKE_PASS=... bash .../api-timing.sh
 #
