@@ -258,21 +258,25 @@ pub struct ProjectionSeriesResponse {
     /// Primer mes en que el componente de interés/mercado supera el ahorro mensual base (sin Próximos ni plan de pagos de deudas).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compound_outpaces_true_savings_month_index: Option<u32>,
+    // Los cuatro campos de jubilación viajan como `null` EXPLÍCITO, sin `skip_serializing_if`.
+    //
+    // Con `skip` el campo simplemente desaparecía cuando no había cruce, así que un consumidor no
+    // podía distinguir «no se alcanza el objetivo» de «esta versión no publica el campo» — y la
+    // descripción de la tool lo prometía sin condiciones. `simulate_projection` ya devolvía `null`
+    // explícito en `jubilacion_month_index`, de modo que las dos superficies se contradecían para
+    // el mismo dato (issue #8 §8). Ahora las dos dicen `null`.
     /// Primer mes en que el patrimonio neto ≥ objetivo FIRE móvil del mes en curso. `null` si no hay objetivo o no se alcanza.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub jubilacion_month_index: Option<u32>,
     /// Fecha civil del cruce (`YYYY-MM-DD`) = `anchor_date_ymd` + `jubilacion_month_index` meses,
     /// conservando el día del ancla con recorte a fin de mes. `null` ⟺ no hay cruce.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub jubilacion_date_ymd: Option<String>,
     /// Años cumplidos en `jubilacion_date_ymd`. `null` si no hay cruce o no hay fecha de
     /// nacimiento resuelta (independiente de `show_age_mode`).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub jubilacion_age: Option<u32>,
-    /// Objetivo FIRE base en euros de hoy (gross-up de impuestos aplicado). Sirve como referencia
-    /// y como anclaje del target móvil — el target en cada mes es este valor × `(1 + inflación%)^(meses/12)`.
-    /// `null` cuando no hay configuración FIRE válida.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Objetivo FIRE base **en euros de HOY** (gross-up de impuestos aplicado). Sirve como
+    /// referencia y como anclaje del target móvil — el target en cada mes es este valor ×
+    /// `(1 + inflación%)^(meses/12)`, así que el objetivo nominal el mes de la jubilación es
+    /// bastante mayor que esta cifra. `null` cuando no hay configuración FIRE válida.
     pub jubilacion_target_net_worth: Option<String>,
     /// Serie mensual del target FIRE ajustado por inflación, paralela a `points`. Cada valor =
     /// `target_base × (1 + inflación%)^(month_index/12)`. Vacío cuando no hay FIRE configurado.
@@ -1576,17 +1580,22 @@ pub async fn compute_projection_series_response(
         match fire_target_ref {
             Some(ft) if ft.base_amount > Decimal::ZERO => {
                 let crossed_at = fire_crossover_month(Some(ft), &output.net_worth);
-                // Serializar el target solo en los puntos retenidos por la
-                // densidad. Paralelo a `points`.
-                let series: Vec<f64> = kept_indices
+                // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
+                // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
+                // issue #8 §8), así que el paralelismo tiene que ser estructural. Antes `points`
+                // usaba `filter_map` (descarta índices fuera de rango) y esta serie un `map` que
+                // no descartaba nada: coincidían solo porque `density_month_indices` nunca emite
+                // un índice > months-1. Un cambio ahí las habría desalineado en silencio.
+                let series: Vec<f64> = points
                     .iter()
-                    .map(|&i| {
-                        fire_target_at_month_index(Some(ft), i)
+                    .map(|p| {
+                        fire_target_at_month_index(Some(ft), p.month_index)
                             .unwrap_or(Decimal::ZERO)
                             .to_f64()
                             .unwrap_or(0.0)
                     })
                     .collect();
+                debug_assert_eq!(series.len(), points.len(), "fire_target_series ∥ points");
                 (series, crossed_at, Some(money_out(ft.base_amount).to_string()))
             }
             _ => (Vec::new(), None, None),
@@ -1664,10 +1673,10 @@ pub(crate) struct SimKpis {
     pub jubilacion_month_index: Option<u32>,
     /// Fecha civil del cruce (`YYYY-MM-DD`) = `anchor_date_ymd` + el índice, conservando el día
     /// del ancla con recorte a fin de mes. `null` ⟺ no hay cruce.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Sin `skip_serializing_if`: su hermano `jubilacion_month_index` ya iba explícito y estos dos
+    /// no, así que el mismo struct desaparecía unos campos y publicaba otros (issue #8 §8).
     pub jubilacion_date_ymd: Option<String>,
     /// Años cumplidos en esa fecha. `null` si no hay cruce o no hay fecha de nacimiento resuelta.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub jubilacion_age: Option<u32>,
     #[serde(with = "rust_decimal::serde::str")]
     pub final_net_worth: Decimal,
