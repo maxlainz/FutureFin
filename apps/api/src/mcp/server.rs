@@ -339,16 +339,24 @@ pub struct SimulateParams {
     /// Gasto puntual («¿y si me compro X?»): drena caja el mes indicado con la cascada real.
     #[serde(default)]
     pub one_off_expense: Option<OneOffExpenseParam>,
-    /// Gasto mensual extra REAL (>= 0, string decimal): mueve también el target FIRE y las
-    /// bases de caps — «vivir gastando más».
+    /// Gasto mensual extra REAL (string decimal): «vivir gastando más». Mueve las bases de los
+    /// caps `months_expense` en los tres modos, pero el target FIRE **solo con
+    /// `fire_number_mode = annual_expense`**: en `current_income` el objetivo se deriva del
+    /// ingreso y en `manual` es un importe fijo, así que ahí `fire_target_base_delta` sale 0 y
+    /// eso NO es un fallo. Cada lado de la respuesta echa su `fire_number_mode` para leerlo sin
+    /// adivinar.
     #[serde(default)]
     pub extra_monthly_expense: Option<String>,
     /// Ajuste de caja mensual NEUTRO (>= 0, se resta): menos ahorro sin mover el target FIRE
-    /// ni los caps. Usa este para «ahorro X € menos al mes sin cambiar mi objetivo».
+    /// ni los caps. Es el MISMO mando que `extra_monthly_savings` con el signo cambiado.
     #[serde(default)]
+    #[schemars(regex(pattern = r"^\d+(\.\d+)?$"))]
     pub extra_monthly_cash_adjustment: Option<String>,
     /// Ahorro mensual extra (>= 0): más caja asignable vía la cascada, sin mover el target.
+    /// Es el mando para simular MENOS gasto en términos de caja — idéntico a un
+    /// `extra_monthly_cash_adjustment` negativo, que por eso no hace falta aceptar.
     #[serde(default)]
+    #[schemars(regex(pattern = r"^\d+(\.\d+)?$"))]
     pub extra_monthly_savings: Option<String>,
     /// SWR en % (0–4, string decimal): «¿y si el SWR fuera 3?». **`"0"` se acepta pero no es un
     /// escenario conservador, es «jamás»**: anula el objetivo FIRE entero (`fire_target_base` y
@@ -358,8 +366,10 @@ pub struct SimulateParams {
     /// Inflación anual asumida en % (0–50, string decimal).
     #[serde(default)]
     pub annual_inflation_percent: Option<String>,
-    /// Gasto ANUAL de jubilación (> 0, string decimal): sustituye la base del target FIRE y el
-    /// gasto post-jubilación.
+    /// Gasto ANUAL de jubilación (> 0, string decimal): sustituye **siempre** el gasto
+    /// post-jubilación, y la base del target FIRE **solo con
+    /// `fire_number_mode = annual_expense`** (en `current_income` y `manual` el objetivo no mira
+    /// el gasto).
     #[serde(default)]
     pub retirement_annual_expense: Option<String>,
     /// Overrides de rentabilidad por activo.
@@ -1215,7 +1225,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "simulate_projection",
-        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo) y devuelve KPIs + deltas de cada lado. La respuesta es autocontenida: trae `anchor_date_ymd` (mes 0), `show_age_mode` y `viewer_birth_date`, sin necesidad de encadenar get_projection. KPIs: jubilación como índice de mes MÁS `jubilacion_date_ymd` y `jubilacion_age` ya calculados, patrimonio final, target FIRE, runway, y la salud financiera del **mes 1** — income_monthly, expense_total_monthly (gasto regular + servicio de deuda: la misma base del runway y del target, la que cuadra con get_summary en los tres modos), debt_service_monthly, net_monthly (= income − expense_total; NO es lo que reparte la cascada, que además lleva el tramo de planning flows del mes) y savings_rate. Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
+        description = "What-if de proyección/FIRE sin persistir NADA: simula baseline y escenario con overrides (gasto puntual, gasto mensual extra real vs ajuste de caja neutro, ahorro extra, SWR, inflación, gasto anual de jubilación, rentabilidad por activo — negativa válida hasta -100 exclusivo) y devuelve KPIs + deltas de cada lado. DOS DE LOS EJES MENSUALES SON EL MISMO MANDO: `extra_monthly_savings` y `extra_monthly_cash_adjustment` escriben la misma variable con signo opuesto, así que `extra_monthly_savings` ES el ajuste de caja negativo y por eso el ajuste no acepta negativos (ambos exigen >= 0). Ojo con lo que NO mueven: los ajustes de caja entran en la caja del mes, no en la base de gasto, así que con cualquiera de los dos `expense_total_monthly_delta`, `net_monthly_delta`, `savings_rate_delta` y `runway_months_delta` salen 0 EXACTO — es el contrato, no un fallo. Si quieres que un recorte mueva también runway y target, el eje con semántica de gasto es `extra_monthly_expense`. La respuesta es autocontenida: trae `anchor_date_ymd` (mes 0), `show_age_mode` y `viewer_birth_date`, sin necesidad de encadenar get_projection. KPIs: jubilación como índice de mes MÁS `jubilacion_date_ymd` y `jubilacion_age` ya calculados, patrimonio final, target FIRE, runway, y la salud financiera del **mes 1** — income_monthly, expense_total_monthly (gasto regular + servicio de deuda: la misma base del runway y del target, la que cuadra con get_summary en los tres modos), debt_service_monthly, net_monthly (= income − expense_total; NO es lo que reparte la cascada, que además lleva el tramo de planning flows del mes) y savings_rate. Importes como strings decimales. Series opt-in con include_series. Coste ~2 simulaciones (cientos de ms); no toca la cache.",
         annotations(title = "Simular escenario", read_only_hint = true, open_world_hint = false)
     )]
     async fn simulate_projection(

@@ -502,7 +502,21 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `extra_monthly_savings` (NEUTROS: mecanismo planning-adjustment, no mueven target ni caps),
   `swr_pct` / `annual_inflation_percent` / `retirement_annual_expense` (re-validados con las
   cotas del PATCH real), `asset_return_overrides` (negativos válidos hasta −100 exclusivo),
-  `months` 12..840. **Cache-neutral por construcción**: usa `resolve_projection_context` +
+  `months` 12..840. **Dos de los tres ejes mensuales son el mismo mando**: `monthly_adj =
+  extra_savings − extra_cash_adj` (`projection.rs`), así que `extra_monthly_savings` ES el ajuste
+  de caja negativo — por eso el ajuste no necesita aceptar negativos, y por eso con cualquiera de
+  los dos `expense_total_monthly_delta`, `net_monthly_delta`, `savings_rate_delta` y
+  `runway_months_delta` salen **0 exacto**: `sim_kpis` no lee `planning_monthly_cash_adjustment`.
+  Es contrato, y desde 4.0.0 está dicho en la descripción en vez de descubrirse restando (issue
+  #27). **El efecto sobre el target FIRE está condicionado a `fire_number_mode`** y la descripción
+  anterior era incorrecta, no incompleta, para dos de los tres modos: `compute_fire_target_nw` usa
+  el gasto solo en `annual_expense`, el ingreso solo en `current_income`, y ninguno de los dos en
+  `manual`. La cota de los ejes de caja viaja además como `pattern` en el JSON Schema
+  (`schemars(regex)`; `range` no aplica a strings decimales, `months` sí la lleva como
+  `minimum`/`maximum`) — declarativa: rmcp deserializa con serde_json y no valida contra el schema,
+  así que describe el contrato, no lo impone. Pinneado en
+  `mcp_http.rs::simulate_cash_axes_carry_their_bound_in_the_json_schema`.
+  **Cache-neutral por construcción**: usa `resolve_projection_context` +
   `build_…` + doble `spawn_blocking`, nunca `projection_series_cached`. No persiste nada.
   Regresión: `apps/api/tests/mcp_simulate.rs`.
 - **`get_allocation_resolution` (3.8.0, issue #4)**: la cascada resuelta del mes (read-only, cache

@@ -504,6 +504,42 @@ async fn mcp_disabled_returns_404() {
 }
 
 #[tokio::test]
+async fn simulate_cash_axes_carry_their_bound_in_the_json_schema() {
+    // Issue #27, «Nota sobre la descripción»: la cota `>= 0` de los ejes de caja vivía SOLO en
+    // la prosa de la descripción. Un cliente no la ve como restricción — la ve como texto, y
+    // solo si lo lee entero; el error llegaba en runtime. `months` sí la llevaba
+    // (`schemars(range)`), pero `range` no aplica a strings decimales: la forma correcta es
+    // `regex(pattern)`. Es declarativo (rmcp deserializa con serde_json y no valida contra el
+    // schema), así que esto fija la DESCRIPCIÓN del contrato, no su cumplimiento.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(&app, &token, tools_list_body()).await;
+    let tool = resp["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|t| t["name"] == "simulate_projection")
+        .expect("simulate_projection en el catálogo")
+        .clone();
+    let props = &tool["inputSchema"]["properties"];
+
+    for axis in ["extra_monthly_cash_adjustment", "extra_monthly_savings"] {
+        let pattern = props[axis]["pattern"].as_str().unwrap_or_else(|| {
+            panic!("{axis} debe publicar su cota como `pattern` en el schema: {}", props[axis])
+        });
+        assert!(
+            pattern.contains("\\d"),
+            "el patrón de {axis} debe describir un decimal no negativo, y es {pattern}"
+        );
+    }
+    // `months` conserva su cota numérica: las dos formas conviven según el tipo del parámetro.
+    assert_eq!(props["months"]["minimum"], 12);
+    assert_eq!(props["months"]["maximum"], 840);
+}
+
+#[tokio::test]
 async fn tools_list_exposes_annotations_on_every_tool() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
