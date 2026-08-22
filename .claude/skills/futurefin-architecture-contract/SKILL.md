@@ -479,11 +479,12 @@ prefix-or-substring redirect matching (instead of exact string) is an open redir
 
 ## 4. Known weak points (stated plainly, as of 2026-07-02)
 
-- **W1 — Postgres integration tests are NOT in CI.** `.github/workflows/ci.yml` runs: cargo build
-  of the API, `cargo test -p futurefin-engine`, npm typecheck+build, and a Docker-stack
-  `/v1/health` smoke test. The `apps/api/tests/` suite (fire parity, cache, purge, body limits,
-  unique violations — the tests guarding D5/D7/D8/I11) requires a local `TEST_DATABASE_URL`
-  (see CLAUDE.md §Rust). A green CI does NOT mean those invariants held. Run them locally before
+- **W1 — RESOLVED in 4.0.0: the Postgres integration suite now runs in CI.** For most of this
+  project's life it did not: `ci.yml` ran cargo build, `cargo test -p futurefin-engine`, npm
+  typecheck+build and the Docker-stack scenarios, while `apps/api/tests/` — fire parity, cache,
+  purge, body limits, unique violations, the tests guarding D5/D7/D8/I11 — needed a local
+  `TEST_DATABASE_URL`, so a green CI did NOT mean those invariants held. The job `integration`
+  closes that hole. Still run them locally before
   any release.
 - **W2 — `App.tsx` is still a 3229-LOC composition root** (down from 10,384 pre-v1.3.0, but still
   the single riskiest frontend file: auth gate, global state, route dispatch, two-phase projection

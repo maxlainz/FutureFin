@@ -157,15 +157,22 @@ docker rm -f ff-test-db
 
 ### Qué corre la integración continua
 
-`.github/workflows/ci.yml`, cuatro trabajos: un escáner de datos sensibles en ficheros trackeados;
-`rust` (build de la API + tests del engine); `web` (typecheck + build); y `docker-stack`, que
-construye la imagen y ejercita los caminos críticos del contenedor — instalación desde cero,
-recreación estilo watchtower, apagado ordenado, actualización real desde un stack 2.x, el rechazo
-de una `DATABASE_URL` externa heredada (el contenedor aborta sin inicializar nada) y `pg_upgrade`
-15→16.
+`.github/workflows/ci.yml`, seis trabajos:
 
-**CI no ejecuta los tests de integración con PostgreSQL.** Si tocas el backend, ejecútalos tú en
-local antes de dar el cambio por verificado.
+- **`secrets-scan`** — ningún dato personal en ficheros trackeados. Bloqueante y el primero.
+- **`rust`** — el CHANGELOG cubre la versión de `Cargo.toml`, build de la API y tests del engine.
+- **`web`** — typecheck, ESLint, Vitest y build.
+- **`integration`** — `cargo test --workspace` contra un PostgreSQL de servicio. Es la mayor parte
+  de la suite.
+- **`docker-stack`** — construye la imagen y ejercita los caminos críticos del contenedor:
+  instalación desde cero, recreación estilo watchtower, apagado ordenado, actualización real desde
+  un stack 2.x, el rechazo de una `DATABASE_URL` externa heredada (aborta sin inicializar nada) y
+  `pg_upgrade` 15→16.
+- **`main-guard`** — `main` no publica `CLAUDE.md` ni `.claude/`.
+
+`cargo clippy` y `cargo fmt --check` están preparados pero **comentados**: el repositorio todavía
+no está limpio para ellos y meterlos en rojo sería peor que no tenerlos. Los números medidos están
+en el propio fichero.
 
 ## Construir la imagen en local
 

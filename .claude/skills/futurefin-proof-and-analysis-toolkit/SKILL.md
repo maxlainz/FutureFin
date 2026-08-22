@@ -195,10 +195,9 @@ the *test* asserts through `f64` parsing of the decimal strings, hence ±0.01 to
       (the engine takes `ref_date` as input — see Recipe 6).
 - [ ] Discrete outputs asserted exactly; continuous ones with the table's tolerance and a comment
       saying which lossy step justifies it.
-- [ ] Note (corrects `.claude/tests.md` drift): CI (`.github/workflows/ci.yml`) runs only
-      `cargo test -p futurefin-engine` + typecheck/build — the Postgres integration suite and the
-      frontend Vitest suite are NOT in CI. Run them locally: `TEST_DATABASE_URL=… cargo test
-      --workspace` and `npm test --workspace futurefin-web`, or your regression net has holes.
+- [ ] Run them locally anyway: `TEST_DATABASE_URL=… cargo test --workspace` and
+      `npm test --workspace futurefin-web`. Since 4.0.0 CI does run both (jobs `integration` and
+      `web`), but waiting for CI to find what a local run finds in two minutes is a bad trade.
 
 ---
 
