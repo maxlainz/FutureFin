@@ -952,8 +952,10 @@ pub(crate) struct BuiltProjection {
 /// `ProjectionInput` clonado (patrón `compound_outpaces_true_savings_month`).
 #[derive(Debug, Default, Clone)]
 pub(crate) struct SimOverrides {
-    /// Gasto mensual extra «real»: se suma al gasto efectivo y al gasto de jubilación ANTES de
-    /// derivar el target FIRE y las bases de caps — mueve el objetivo en todos los modos.
+    /// Gasto mensual extra «real», **con signo**: se suma al gasto efectivo y al gasto de
+    /// jubilación ANTES de derivar el target FIRE y las bases de caps. Negativo = recorte, que es
+    /// el caso de uso más frecuente que existe y que hasta 4.0.0 se rechazaba (issue #27 §1).
+    /// Mueve las bases de caps en los tres modos; el objetivo, solo en `annual_expense`.
     pub extra_monthly_expense: Decimal,
     /// Gasto MENSUAL de jubilación (el caller ya dividió el anual entre 12): sustituye por
     /// completo la base de gasto del target FIRE y el gasto post-jubilación (gana sobre
@@ -1024,10 +1026,29 @@ pub(crate) async fn build_installation_projection_input(
     let ov = overrides.cloned().unwrap_or_default();
     let mut inputs = inputs;
     inputs.expense += ov.extra_monthly_expense;
-    let expense_retirement = match ov.retirement_monthly_expense {
+    let mut expense_retirement = match ov.retirement_monthly_expense {
         Some(v) => v,
         None => expense_retirement + ov.extra_monthly_expense,
     };
+    // Suelo cero para un recorte que se pasa de largo. Un gasto negativo actuaría como ingreso
+    // extra en la caja del motor, dejaría techos de caps negativos (la regla se saltaría entera,
+    // en silencio) y produciría un target FIRE y un runway sin sentido económico.
+    //
+    // GATEADO a que el override recorte, no incondicional: `inputs.expense` puede ser negativo
+    // hoy sin ningún override —modo B con filas de gasto de signo invertido—, y un `.max(ZERO)`
+    // a secas cambiaría `GET /v1/projection/series` y `GET /v1/summary`, no solo esta tool. El
+    // test `baseline_without_overrides_matches_get_projection_and_scenario` es la prueba de que
+    // no se ha escapado.
+    //
+    // Las dos bases se clampan por separado porque son magnitudes distintas: en modo A un recorte
+    // puede anular una y dejar la otra en pie. Y `retirement_monthly_expense` explícito NO se
+    // clampa: ya viene validado > 0 por el core.
+    if ov.extra_monthly_expense < Decimal::ZERO {
+        inputs.expense = inputs.expense.max(Decimal::ZERO);
+        if ov.retirement_monthly_expense.is_none() {
+            expense_retirement = expense_retirement.max(Decimal::ZERO);
+        }
+    }
 
     let expense_from_avg = inputs.expense_from_avg;
     let effective_savings_source = inputs.effective_source;
@@ -1991,7 +2012,11 @@ pub(crate) async fn simulate_projection_core(
             return Err(ApiError::BadRequest("months_out_of_range: months must be between 12 and 840".into()));
         }
     }
-    let extra_expense = require_non_negative("extra_monthly_expense", spec.extra_monthly_expense)?;
+    // Único eje con signo: es el que tiene semántica de GASTO (mueve runway, caps y —en
+    // `annual_expense`— el objetivo), así que es el único donde un recorte no tiene sustituto.
+    // Los dos ejes de caja siguen exigiendo `>= 0` porque entre ellos ya cubren ambos signos:
+    // `extra_monthly_savings` ES el ajuste de caja negativo.
+    let extra_expense = spec.extra_monthly_expense.unwrap_or(Decimal::ZERO);
     let extra_cash_adj = require_non_negative(
         "extra_monthly_cash_adjustment",
         spec.extra_monthly_cash_adjustment,

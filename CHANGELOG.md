@@ -290,6 +290,17 @@ lugar de devolverte en silencio el mismo escenario de partida.
 De paso: dos mensajes de error de los ajustes del promedio se devolvían sin traducir. Ya están en
 español.
 
+**Ya se puede simular un recorte.** Era el problema de fondo: los tres ajustes mensuales
+rechazaban cualquier valor negativo, así que la pregunta más frecuente que existe —«¿cuánto
+adelantaría mi jubilación si gasto 200 menos al mes?»— no se podía hacer. Ahora el gasto mensual
+extra admite signo, y un recorte mueve todo lo que movía un aumento: gasto total, ahorro neto, tasa
+de ahorro, runway, objetivo FIRE y fecha de jubilación.
+
+Si pides un recorte mayor que tu gasto, no se rechaza: la base se queda en cero y la respuesta dice
+en qué cifra quedó, para que veas cuánto se aplicó de verdad. Con gasto cero y el número FIRE
+calculado por gasto anual no hay objetivo que alcanzar — y también eso se dice, en lugar de
+devolver huecos.
+
 ### La app no se podía usar recién instalada
 
 Un hogar nuevo nacía con **cero categorías** —la migración original lo decía con todas las letras:
