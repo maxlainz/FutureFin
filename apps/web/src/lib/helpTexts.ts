@@ -23,7 +23,7 @@ export const HELP_TEXTS = {
     body:
       "Lo que la simulación da por ahorrado cada mes, y la única cifra de ahorro con la que se " +
       "proyecta tu patrimonio. De dónde salen el ingreso y el gasto depende de la fuente del " +
-      "ahorro que hayas elegido en Ajustes → Proyección. El porcentaje de abajo es esa misma " +
+      "ahorro que hayas elegido en Ajustes → Plan. El porcentaje de abajo es esa misma " +
       "cifra sobre ese mismo ingreso, así que las dos nunca pueden contradecirse. La flecha " +
       "compara ese ahorro con el que sale de tu presupuesto: en verde ahorras más de lo planeado, " +
       "en rojo menos.",
@@ -40,8 +40,10 @@ export const HELP_TEXTS = {
     body:
       "Meses que tus activos líquidos cubrirían tu gasto si dejaras de ingresar hoy. No es una " +
       "división simple: mientras se consumen, los líquidos siguen rindiendo su rentabilidad " +
-      "esperada y el gasto crece con la inflación que tengas configurada. «+100 años» es un " +
-      "suelo, no una medida exacta.",
+      "esperada y el gasto crece con la inflación que tengas configurada. Qué gasto se usa " +
+      "depende de la fuente del ahorro (Ajustes → Plan): con el presupuesto, el presupuestado; " +
+      "con los movimientos reales, tu gasto real promediado. «+100 años» es un suelo, no una " +
+      "medida exacta.",
   },
   "summary.net_worth": {
     title: "Patrimonio neto",
@@ -114,13 +116,17 @@ export const HELP_TEXTS = {
       "Media de tu gasto en la ventana elegida arriba. El denominador NO son los meses del " +
       "calendario: son los meses con movimientos reales. Un mes vacío, o uno cuyo único " +
       "contenido son movimientos recurrentes, queda fuera entero —ni suma ni divide—, así que " +
-      "no hunde la media mientras no tengas histórico. El paréntesis dice de qué meses sale.",
+      "no hunde la media mientras no tengas histórico. Dos cosas más: la ventana NO incluye el " +
+      "mes que estás mirando (con junio elegido y 3 meses, promedia marzo, abril y mayo), y las " +
+      "transferencias conciliadas quedan fuera, porque mover dinero entre tus cuentas no es " +
+      "gasto. El paréntesis dice de qué meses sale.",
   },
   "expenses.income_avg": {
     title: "Ingreso promedio",
     body:
       "Media de tus ingresos en la ventana elegida, con el mismo denominador que el gasto " +
-      "promedio: solo los meses con movimientos reales.",
+      "promedio: solo los meses con movimientos reales, sin contar el mes que estás mirando y " +
+      "sin las transferencias conciliadas.",
   },
   "expenses.savings_transferred": {
     title: "Traspasado a ahorro",
@@ -128,14 +134,16 @@ export const HELP_TEXTS = {
       "Dinero que moviste a cuentas o productos de ahorro, según los movimientos marcados como " +
       "ahorro. NO es ingresos menos gastos: es solo lo que apartaste de forma explícita, así que " +
       "no tiene por qué coincidir con el ahorro del Resumen. Promediado sobre los mismos meses " +
-      "reales que el gasto y el ingreso.",
+      "reales que el gasto y el ingreso, y con la misma ventana, que no incluye el mes que " +
+      "estás mirando.",
   },
   "expenses.transferred_rate": {
     title: "Porcentaje traspasado",
     body:
       "Qué parte de tus ingresos moviste a ahorro de forma explícita, sobre los mismos meses " +
       "reales que promedian las tarjetas de al lado. Ojo: no es tu tasa de ahorro — esa vive en " +
-      "el Resumen y sale de ingresos menos gastos.",
+      "el Resumen y sale de ingresos menos gastos. La ventana no incluye el mes que estás " +
+      "mirando.",
   },
 } as const satisfies Record<string, HelpText>;
 

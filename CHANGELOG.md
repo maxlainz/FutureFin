@@ -12,7 +12,12 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 enseñar. La app ya se puede usar recién instalada: un hogar nuevo nace con categorías, te recibe
 un asistente que pregunta lo imprescindible, y cada pantalla vacía explica qué va ahí. Los errores
 te hablan en español. La divisa se puede cambiar. Borrar algo pregunta antes. Ajustes está
-reorganizado.
+reorganizado. **Ya puedes cambiar tu contraseña y retirarle el acceso a alguien del hogar**: dos
+cosas que la documentación daba por hechas y que no existían.
+
+Y antes de publicar se auditó todo —seguridad, matemática, contrato de la API, interfaz, CI—, de
+donde salieron 28 arreglos. El más caro para ti: **teclear `250.000` guardaba 250 €**, sin avisar.
+Están todos contados más abajo.
 
 **Lo único que puede requerir acción por tu parte**: si tu instalación usa una **base de datos
 externa** (`DATABASE_URL` apuntando fuera del contenedor), 4.0.0 ya no la soporta. Tus datos no
@@ -61,6 +66,126 @@ El escenario 3 de CI dejaba de tener sentido —probaba la automigración— y p
 nueva: con `DATABASE_URL` heredada y volumen vacío el contenedor **aborta sin inicializar nada** y
 el volumen se queda intacto. El escenario 2 mantiene la ruta 2.x → volumen reutilizado, pero su
 paso intermedio ahora comprueba el rechazo en vez del modo compatibilidad.
+
+### Auditoría completa previa a la publicación: 28 hallazgos, arreglados
+
+Antes de taguear 4.0.0 se auditó el repositorio entero —seguridad, matemática del motor,
+contrato de la API y del MCP, frontend, CI y tests— con la app ya pública. Salieron 28 cosas
+que había que arreglar antes de publicar la imagen. Ninguna rompía un test: casi todas
+producían números plausibles o mensajes creíbles.
+
+#### Tus datos financieros estaban publicados en los issues
+
+Cinco issues cerrados eran auditorías del servidor MCP hechas contra una instalación real, y
+publicaban patrimonio neto, ingreso mensual, tasa de ahorro, deuda viva, el nombre de un
+prestamista y comercios concretos. Cerrado no es privado. Se borraron, y con ellos las
+referencias del código y del propio CHANGELOG. Se comprobaron además los 2.029 objetos del
+historial de git: sin IBAN, sin tarjetas, sin correos.
+
+#### Un importe con separador de miles se guardaba mil veces más pequeño
+
+Teclear `250.000` en el valor de un activo —escritura española normal— lo guardaba como
+**250 €**. Sin error: el formulario se cerraba y el patrimonio, la proyección, el número FIRE
+y el runway quedaban mal en silencio. El conversor solo cambiaba la primera coma por un punto
+y dejaba los puntos intactos, y `250.000` es un decimal válido para el servidor. El asistente
+de primera vez llegaba a sugerirlo: su ejemplo era literalmente `1.500`.
+
+Ahora la app entiende la escritura española completa (`1.234,56`, `250.000`) y **rechaza lo
+ambiguo en vez de adivinar**, que es exactamente lo que causó el fallo.
+
+#### La proyección de un miembro se le servía a otro
+
+La memoria intermedia que evita recalcular la proyección guardaba una sola copia por hogar,
+pero la respuesta lleva datos de **quien la pide**: su fecha de nacimiento, su horizonte y su
+edad de jubilación. El primer miembro que abría la proyección dejaba la suya cacheada para
+todos. En un hogar de dos personas con edades distintas, la segunda veía el horizonte de la
+primera — y si el suyo era más largo, la app podía decirle «no llegas a jubilarte» sobre un
+plan que sí llega.
+
+#### Si ya has llegado a tu número FIRE, la app decía que seguías aportando
+
+La pantalla de Activos publicaba una aportación mensual («aportas 2.000 €») para un hogar que
+la simulación, en ese mismo mes, está **vendiendo** activos para vivir. Signo contrario, y
+sostenido en todo el horizonte. La función que calcula la aportación del primer mes no miraba
+el objetivo FIRE; el motor sí. No es un caso raro: es el estado final del público de la app.
+
+#### `?months` no múltiplo de 12 perdía el final de la gráfica
+
+Con densidad `hybrid` la serie solo emitía múltiplos de 12, así que pedir 100 meses devolvía
+96: los cuatro últimos no existían, y con ellos desaparecía el punto que cualquiera lee como
+«patrimonio al final». Invisible desde la web, pero la herramienta `get_projection` del MCP
+usa siempre esa densidad.
+
+#### Faltaban dos palancas que la documentación daba por hechas
+
+**No se podía cambiar la contraseña.** Una cookie robada, una sesión abierta en un ordenador
+compartido o una filtración en otro servicio daban treinta días de acceso sin que pudieras
+hacer nada. Ahora `Ajustes` permite cambiarla, y hacerlo **cierra las demás sesiones y revoca
+los tokens de API y las conexiones OAuth**: si cambias la contraseña por miedo, dejar viva una
+credencial que no caduca haría el cambio decorativo. *Aviso*: un `.ffbackup` exportado antes
+sigue necesitando la contraseña con la que se generó.
+
+**No se podía retirar el acceso a nadie.** Aprobar al usuario equivocado concedía acceso
+permanente a todas las finanzas del hogar; el único remedio era entrar en la base de datos a
+mano. Ahora el propietario puede ver los miembros, cambiarles el rol y revocarlos, con la
+garantía de que el hogar nunca se queda sin propietario. Revocar **no borra los datos** de esa
+persona: si se la vuelve a aprobar, los recupera.
+
+#### Un fichero de copia de seguridad podía tumbar el servidor
+
+El manifiesto de un `.ffbackup` viaja sin firmar, y de él salían los parámetros de la función
+que deriva la clave. Un fichero de 200 bytes podía pedir 8 GB de memoria y llevarse por
+delante el contenedor entero —con la base de datos dentro— desde el endpoint de
+previsualización, que ni siquiera escribe. Se acotan esos parámetros y el tamaño de lo
+descomprimido. En la misma línea, el cifrado de contraseñas ya no bloquea el servidor: cuatro
+peticiones simultáneas de registro bastaban para dejar la aplicación sin responder.
+
+#### El asistente conversacional creía cosas falsas
+
+El servidor MCP describe cada herramienta al modelo, y varias descripciones mentían.
+`get_summary` afirmaba una igualdad entre dos cifras que no se cumple con ninguna hipoteca.
+`materialize_recurring` se presentaba como inocua y **borra movimientos**, del hogar entero,
+no solo tuyos — con la etiqueta que los clientes usan para decidir si te piden permiso puesta
+en «no destructiva». `unreconcile_transfer` es irreversible desde el chat y decía no serlo. Y
+`create_liability` prometía amortización francesa cuando suma cuotas sin descontar intereses:
+una hipoteca de 850 €/mes hasta 2049 entraba como 234.600 € en vez de unos 185.000.
+
+**Breaking de contrato**: el campo `months_with_data` de `savings_income_basis` /
+`savings_expense_basis` pasa a llamarse **`avg_months`** en `/v1/summary`,
+`/v1/projection/series` y `simulate_projection` — significaba lo contrario que el campo del
+mismo nombre de `/v1/transactions/summary`. La previsualización de `delete_asset` añade
+`allocation_rules_deleted` y `allocation_remainder_rules_deleted`: borrar un activo **borra**
+las reglas de reparto que apuntan a él, y era el único efecto irreversible que no se contaba.
+`simulate_projection` acepta `annual_inflation_assumption_percent` como alias y rechaza los
+campos desconocidos en vez de ignorarlos.
+
+#### Un tag mal puesto podía degradar instalaciones ajenas
+
+`:latest` se movía **siempre**, también al reconstruir una versión antigua. Con
+`FUTUREFIN_TAG:-latest` en el compose, quien actualiza automáticamente habría recibido una
+versión anterior sobre un volumen ya migrado. Ahora `:latest`, `:X` y `:X.Y` solo se mueven si
+el tag es el más alto del repositorio, y antes de construir se comprueba que el tag coincide
+con la versión del binario y que existe su sección en este archivo. Además, un `pg_upgrade`
+interrumpido en el peor momento ya se puede reanudar: el código que lo hacía era inalcanzable
+justo en el único caso para el que existía.
+
+#### Y en la interfaz
+
+Un fallo del servidor al cargar la proyección no se veía (la pestaña se quedaba en blanco para
+siempre) o se veía en inglés; con la API caída salía «Failed to fetch»; una sesión caducada a
+media navegación no te devolvía al acceso; una contraseña incorrecta decía «tu sesión ha
+caducado» en la pantalla donde por definición no hay sesión; el guardado automático de Ajustes
+daba por guardado lo que había fallado; guardar cualquier ajuste borraba lo que estuvieras
+tecleando en inflación; mover un movimiento a otro mes lo dejaba en la tabla del mes viejo; y
+con la API caída cuatro pantallas te acusaban de haber borrado tus categorías.
+
+#### Lo que queda escrito para que no vuelva a pasar
+
+Tests de regresión nuevos para todos los hallazgos con consecuencia numérica, cada uno
+verificado en rojo antes de arreglar. Una gate nueva (`tests/openapi_contract.rs`) que valida
+el propio documento OpenAPI: no había ninguna, y por eso la especificación pública podía
+declarar la API entera como si no necesitara autenticación —81 operaciones— sin que nada
+protestara.
 
 ### Auditoría del servidor MCP: once hallazgos, arreglados
 
@@ -388,19 +513,11 @@ va a **Ajustes → Plan**, donde está el ajuste del que habla.
 objetivo manual, mientras el pie del panel seguía prometiendo «Guardado automático». El usuario
 movía el control, leía que se había guardado, y se iba con el cambio perdido. Ahora sale un aviso.
 
-### Fixed — la contraseña equivocada de un backup decía «tu sesión ha caducado»
-
-`CryptoError::Decrypt` mapeaba a `Unauthorized` (401), que con el catálogo español se habría leído
-como «Tu sesión ha caducado. Vuelve a iniciar sesión» — y habría mandado al usuario a reiniciar
-sesión en vez de reescribir la contraseña del fichero, que es el error más frecuente de todo el
-flujo de importación. Ahora es **400 `backup_wrong_password`**: la sesión es válida; lo que no
-cuadra es la contraseña del archivo.
-
 ### CI: lo que nunca se ejecutaba, y una limpieza que era un no-op por accidente
 
 CI corría `cargo build`, los tests del engine, typecheck y build de la web, más el escenario
 Docker. **No corría** ESLint, ni Vitest, ni los tests de integración contra Postgres — que son
-**la mayor parte de la suite**: 447 de los tests del proyecto. Con colaboradores externos eso no
+**la mayor parte de la suite**. Con colaboradores externos eso no
 aguanta: quien manda una PR no va a levantar un Postgres a mano.
 
 - Job `integration` nuevo, con `services: postgres:16.4-alpine` y `cargo test --workspace`. El
@@ -515,14 +632,14 @@ de terceros. Lo que cambia es que ahora manda además un **código estable** con
 ~50 `setError(e.message)` muestran español sin tocar una línea. El texto técnico queda en
 `.detail` y se manda a la consola: depurar un 400 no debería obligar a abrir la pestaña de red.
 
-`apps/web/src/lib/errorMessages.ts` es el catálogo: **196 frases**, agrupadas por dónde las ve el
+`apps/web/src/lib/errorMessages.ts` es el catálogo, agrupado por dónde las ve el
 usuario. Regla de estilo: frase completa, qué ha pasado y qué puede hacer, sin nombres de campo del
 API ni jerga HTTP.
 
 #### El gate
 
 Un código sin traducir no rompe nada —cae al genérico— y por eso hacía falta un test: el fallo es
-silencioso. `apps/api/tests/error_codes_parity.rs` (sin Postgres) extrae del fuente los **187
+silencioso. `apps/api/tests/error_codes_parity.rs` (sin Postgres) extrae del fuente **todos los
 códigos** a `tests/fixtures/error-codes.json`, y `errorMessages.test.ts` lee ese mismo JSON y falla
 si alguno se queda sin frase, o si sobra una frase para un código que ya no existe.
 
@@ -721,8 +838,7 @@ conserva su día 1 (contrato ya publicado): ambas fechas coinciden siempre en a�
 Desenlace de la evaluación de `futurefin-mcp-parity`: **tool actualizada ×3** (`get_projection`,
 `simulate_projection`, `get_transactions_summary`), ninguna omisión. Las tres comparten core con
 sus handlers HTTP, así que no hubo código MCP que tocar — solo sus descripciones, que ahora
-describirían mal el denominador y la jubilación. El catálogo sigue en **50 tools**:
-`tools_list_returns_exactly_the_v1_catalog` no se mueve.
+describirían mal el denominador y la jubilación.
 
 ### Deriva de documentación corregida de paso
 
