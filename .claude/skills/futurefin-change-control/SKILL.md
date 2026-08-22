@@ -391,12 +391,13 @@ git pull --ff-only
 cargo build -p futurefin-api --locked
 cargo test -p futurefin-engine
 
-# 2. Postgres integration tests — NOT covered by CI, run them yourself.
+# 2. Postgres integration tests. CI runs these since 4.0.0 (job `integration`), but run them
+#    locally first: the feedback loop is minutes shorter and CI is not a debugger.
 #    (Test DB not running? One-time ff-test-db setup: futurefin-validation-and-qa §2.)
 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
   cargo test --workspace
 
-# 3. Frontend gates (lint and Vitest are also NOT in CI)
+# 3. Frontend gates. CI runs lint and Vitest since 4.0.0; same reason to run them here first.
 npm run typecheck:web
 npm run lint:web
 npm run build:web

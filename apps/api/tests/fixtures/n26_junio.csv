@@ -1,0 +1,34 @@
+"Booking Date","Value Date","Partner Name","Partner Iban",Type,"Payment Reference","Account Name","Amount (EUR)","Original Amount","Original Currency","Exchange Rate"
+2026-06-01,2026-06-01,"Cuenta de Ahorro",,"Credit Transfer","Traspaso mensual","Cuenta principal",40.00,,,
+2026-06-02,2026-06-02,"SUPERMERCADO ALMENDRO 21",,Presentment,,"Cuenta principal",-4.98,4.98,EUR,1
+2026-06-02,2026-06-02,"SUPERMERCADO ALMENDRO 21",,Presentment,,"Cuenta principal",-11.39,11.39,EUR,1
+2026-06-02,2026-06-02,,,"Debit Transfer","Cena, entrada","Cuenta principal",-26.000000000,,,
+2026-06-02,2026-06-02,"Cuenta de Ahorro",,"Credit Transfer","Reintegro cena","Cuenta principal",26.00,,,
+2026-06-03,2026-06-03,"CAFETERIA LA GLORIETA",,Presentment,,"Cuenta principal",-3.1,3.1,EUR,1
+2026-06-04,2026-06-04,"TIENDA ONLINE* AB12CD34",,Presentment,,"Cuenta principal",-32.3,32.3,EUR,1
+2026-06-04,2026-06-04,"SUPERMERCADO ALMENDRO 21",,Presentment,,"Cuenta principal",-2.99,2.99,EUR,1
+2026-06-04,2026-06-04,"CAFETERIA LA GLORIETA",,Presentment,,"Cuenta principal",-1.65,1.65,EUR,1
+2026-06-04,2026-06-04,"SUPERMERCADO ALMENDRO 21",,Presentment,,"Cuenta principal",-13.87,13.87,EUR,1
+2026-06-05,2026-06-05,"SUPERMERCADO ALMENDRO 8",,Presentment,,"Cuenta principal",-2.99,2.99,EUR,1
+2026-06-05,2026-06-05,"CAFETERIA LA GLORIETA",,Presentment,,"Cuenta principal",-1.65,1.65,EUR,1
+2026-06-06,2026-06-06,"ENVIOS RAPIDOS 05JUN EF56GH78",,Presentment,,"Cuenta principal",-17.64,17.64,EUR,1
+2026-06-06,2026-06-06,"CAFETERIA LA GLORIETA",,Presentment,,"Cuenta principal",-1.65,1.65,EUR,1
+2026-06-08,2026-06-07,"RESTAURANTE EL MIRADOR",,Presentment,,"Cuenta principal",-42.7,42.7,EUR,1
+2026-06-08,2026-06-08,,,"Credit Transfer","Devolucion comida","Cuenta principal",9.000000000,,,
+2026-06-09,2026-06-09,"PANADERIA CENTRAL",,Presentment,,"Cuenta principal",-6.08,6.08,EUR,1
+2026-06-11,2026-06-11,"Cuenta de Ahorro",,"Credit Transfer","RESTAURANTE EL MIRADOR","Cuenta principal",42.70,,,
+2026-06-11,2026-06-11,"SUPERMERCADO ALMENDRO 21",,Presentment,,"Cuenta principal",-41.63,41.63,EUR,1
+2026-06-13,2026-06-13,"Cuenta de Ahorro",,"Credit Transfer","TIENDA ONLINE","Cuenta principal",32.30,,,
+2026-06-14,2026-06-14,"SUSCRIPCION DIGITAL",,Presentment,,"Cuenta principal",-21.78,21.78,EUR,1
+2026-06-14,2026-06-14,"Cuenta de Ahorro",,"Credit Transfer","SUSCRIPCION DIGITAL","Cuenta principal",21.78,,,
+2026-06-16,2026-06-16,,,"Debit Transfer","Cena amigos ","Cuenta principal",-20.000000000,,,
+2026-06-17,2026-06-17,"SUPERMERCADO ALMENDRO 21",,Presentment,,"Cuenta principal",-3,3,EUR,1
+2026-06-19,2026-06-19,"ENVIOS RAPIDOS 18JUN IJ90KL12",,Presentment,,"Cuenta principal",-18.14,18.14,EUR,1
+2026-06-21,2026-06-21,"Cuenta de Ahorro",,"Credit Transfer",,"Cuenta principal",77.31,,,
+2026-06-23,2026-06-23,,,"Debit Transfer","Regalo cumpleanos ","Cuenta principal",-12.000000000,,,
+2026-06-25,2026-06-25,"HELADERIA LA PLAZA",,Presentment,,"Cuenta principal",-9.5,9.5,EUR,1
+2026-06-26,2026-06-26,"SUPERMERCADO ALMENDRO 21",,Presentment,,"Cuenta principal",-3.89,3.89,EUR,1
+2026-06-29,2026-06-29,"CUENTA NOMINA",,"Credit Transfer","Transferencia desde MyInvestor","Cuenta principal",600.00,,,
+2026-06-29,2026-06-29,"Cuenta de Ahorro",,"Debit Transfer","Ahorro mensual","Cuenta principal",-240.00,,,
+2026-06-29,2026-06-29,"Cuenta de Ahorro",,"Credit Transfer","TIENDA ONLINE","Cuenta principal",18.24,,,
+2026-06-30,2026-06-30,"SUPERMERCADO ALMENDRO 21",,Presentment,,"Cuenta principal",-6.24,6.24,EUR,1
