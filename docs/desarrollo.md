@@ -42,10 +42,14 @@ DATABASE_URL=postgres://futurefin:futurefin@127.0.0.1:5432/futurefin
 RUST_LOG=futurefin_api=info,tower_http=info
 ```
 
-> **No dejes esa `DATABASE_URL` descomentada si en la misma máquina levantas el compose de
-> producción.** La imagen interpreta cualquier `DATABASE_URL` como "quiero una base de datos
-> externa" y entra en el modo deprecado — o, con el volumen vacío, arranca una automigración de
-> una base que no querías migrar. Ten ficheros `.env` separados y pásalos con `--env-file`.
+> **Cuidado con esa `DATABASE_URL` si en la misma máquina levantas el compose de producción.**
+> La imagen interpreta cualquier `DATABASE_URL` que no apunte a su socket local como una base de
+> datos externa, y desde la 4.0.0 esas ya no se soportan: con el volumen poblado la ignora con un
+> aviso, y con el volumen vacío **se niega a arrancar**. El `docker-compose.yml` de este repositorio
+> no se la pasa al contenedor (ni la lista en `environment:` ni usa `env_file:`), así que dejarla en
+> el `.env` no basta para colártela; sí llega si la declaras a mano en tu compose o si lanzas la
+> imagen con `docker run -e DATABASE_URL=…`. Aun así, ten ficheros `.env` separados y pásalos con
+> `--env-file`.
 
 ### 2. Levanta el PostgreSQL de desarrollo
 
@@ -156,8 +160,9 @@ docker rm -f ff-test-db
 `.github/workflows/ci.yml`, cuatro trabajos: un escáner de datos sensibles en ficheros trackeados;
 `rust` (build de la API + tests del engine); `web` (typecheck + build); y `docker-stack`, que
 construye la imagen y ejercita los caminos críticos del contenedor — instalación desde cero,
-recreación estilo watchtower, apagado ordenado, actualización real desde un stack 2.x,
-automigración desde base externa y `pg_upgrade` 15→16.
+recreación estilo watchtower, apagado ordenado, actualización real desde un stack 2.x, el rechazo
+de una `DATABASE_URL` externa heredada (el contenedor aborta sin inicializar nada) y `pg_upgrade`
+15→16.
 
 **CI no ejecuta los tests de integración con PostgreSQL.** Si tocas el backend, ejecútalos tú en
 local antes de dar el cambio por verificado.

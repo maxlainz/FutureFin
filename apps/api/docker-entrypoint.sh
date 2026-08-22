@@ -22,12 +22,11 @@ STATE_DIR="${FUTUREFIN_STATE_DIR:-/var/lib/futurefin}"
 BACKUP_DIR="${FUTUREFIN_BACKUP_DIR:-$STATE_DIR/backups}"
 SOCK_DIR=/var/run/postgresql
 
-DB_MODE="${FUTUREFIN_DB_MODE:-auto}"                  # auto | embedded | external
+DB_MODE="${FUTUREFIN_DB_MODE:-auto}"                  # auto | embedded (external retirado en 4.0.0)
 BACKUP_KEEP="${FUTUREFIN_BACKUP_KEEP:-10}"
 BACKUP_KEEP_DAYS="${FUTUREFIN_BACKUP_KEEP_DAYS:-90}"
 PREMIGRATION_BACKUP="${FUTUREFIN_PREMIGRATION_BACKUP:-on}"
 ALLOW_EPHEMERAL="${FUTUREFIN_ALLOW_EPHEMERAL_DB:-0}"
-EXTERNAL_WAIT_SECS="${FUTUREFIN_EXTERNAL_WAIT_SECS:-60}"
 API_STOP_TIMEOUT="${FUTUREFIN_API_STOP_TIMEOUT:-15}"
 PG_STOP_TIMEOUT="${FUTUREFIN_PG_STOP_TIMEOUT:-30}"
 POSTGRES_USER="${POSTGRES_USER:-futurefin}"
@@ -37,7 +36,6 @@ APP_VERSION="$(cat /app/VERSION 2>/dev/null || echo unknown)"
 API_PID=""
 PG_PID=""
 SHUTTING_DOWN=0
-AUTOMIGRATE_PENDING=0
 SKIP_PREMIGRATION=0
 PGUPGRADE_JUST_RAN=0
 
@@ -332,7 +330,7 @@ maybe_pg_upgrade() {
     die "PGDATA was created by PostgreSQL $old, NEWER than this image's $PG_MAJOR. Do not start an older FutureFin over it."
   fi
   if [ ! -x "$PG_BINROOT/$old/bin/postgres" ]; then
-    die "PGDATA was created by PostgreSQL $old and this image only bundles $(ls "$PG_BINROOT" | tr '\n' ',' | sed 's/,$//'). Options: (1) start an older FutureFin release that bundles $old to upgrade stepwise; (2) dump with the official postgres:$old image and use external automigration."
+    die "PGDATA was created by PostgreSQL $old and this image only bundles $(ls "$PG_BINROOT" | tr '\n' ',' | sed 's/,$//'). Options: (1) start an older FutureFin release that bundles $old to upgrade stepwise; (2) dump with the official postgres:$old image and restore into a fresh volume with scripts/restore-postgres.sh."
   fi
 
   log "pg_upgrade needed: PostgreSQL $old -> $PG_MAJOR"
@@ -430,101 +428,40 @@ pgupgrade_swap_resume() { # $1=estado desde el que reanudar
 }
 
 # ── Automigración one-shot desde base externa ────────────────────────────────
-automigrate_prepare() { # deja el dump listo y el cluster embebido creado
-  local st attempts ts
-  st="$(state_get automigration STATE)"
-  attempts="$(state_get automigration ATTEMPTS)"; attempts="${attempts:-0}"
-  case "$st" in
-    done)
-      die "automigration already completed once, but $PGDATA is now empty (the migrated cluster was removed). To re-migrate from the external database, delete $STATE_DIR/state/automigration.env and restart; for a fresh empty install, unset DATABASE_URL." ;;
-    failed)
-      die "a previous automigration FAILED. Your data is intact in the external database. Inspect $BACKUP_DIR (dump preserved) and $STATE_DIR/state/automigration.env, fix the cause, then delete that file to retry." ;;
-    in-progress)
-      if [ "$attempts" -ge 3 ]; then
-        state_set automigration STATE failed
-        die "automigration failed 3 times — marking as failed. Your data is intact in the external database."
-      fi
-      warn "previous automigration attempt died midway — moving partial cluster aside and retrying"
-      ts="$(date -u +%Y%m%dT%H%M%SZ)"
-      mkdir -p "$STATE_DIR/failed-automigration-$ts"
-      find "$PGDATA" -mindepth 1 -maxdepth 1 ! -name 'lost+found' \
-        -exec mv -t "$STATE_DIR/failed-automigration-$ts/" {} + 2>/dev/null || true
-      ;;
-  esac
+# ── Base de datos externa: retirada en 4.0.0 ────────────────────────────────────
+# Hasta la 3.x esta imagen sabía tres cosas más: hablar con una base externa
+# (`exec_api_external`), avisar de que estaba deprecada, y migrar sus datos a la base
+# embebida una sola vez (`automigrate_prepare`/`automigrate_restore`). Se anunció su
+# eliminación en el README, en `.env.example` y en el propio aviso de deprecación desde
+# la 3.0.0, y aquí está.
+#
+# Lo único que queda es la puerta de abajo: alguien que actualice a 4.0.0 con
+# `DATABASE_URL` todavía puesta y sin cluster embebido NO debe arrancar con una base
+# vacía. Eso se leería como pérdida de datos aunque sus datos estén intactos al otro
+# lado. Se para y se le dice exactamente qué hacer.
+refuse_external_database() {
+  cat >&2 <<'MSG'
 
-  log "waiting for external database to answer (max ${EXTERNAL_WAIT_SECS}s): migration source"
-  local ok=0
-  for _ in $(seq 1 "$EXTERNAL_WAIT_SECS"); do
-    if pg_isready -q -d "$EXTERNAL_URL" 2>/dev/null; then ok=1; break; fi
-    sleep 1
-  done
-  if [ "$ok" != 1 ]; then
-    die "DATABASE_URL is set and the embedded volume is empty, but the external database does not answer. Refusing to start empty. Either bring the external DB up (one last time, to migrate), or unset DATABASE_URL for a fresh install."
-  fi
+[futurefin-entrypoint] ─────────────────────────────────────────────────────────
+  DATABASE_URL apunta a una base de datos EXTERNA y este volumen no contiene
+  todavía una base embebida.
 
-  state_set automigration STATE in-progress
-  state_set automigration ATTEMPTS "$((attempts + 1))"
-  state_set automigration SOURCE "$(echo "$EXTERNAL_URL" | sed 's#//[^@]*@#//***@#')"
+  FutureFin 4.0.0 ya no habla con bases de datos externas: PostgreSQL va dentro
+  de la imagen. Tus datos NO se han tocado y siguen intactos donde están.
 
-  ts="$(date -u +%Y%m%dT%H%M%SZ)"
-  AUTOMIGRATION_DUMP="$BACKUP_DIR/pre-automigration-${ts}.sql.gz"
-  log "dumping external database (read-only) to $AUTOMIGRATION_DUMP"
-  if ! pg_dump --no-owner --no-privileges -d "$EXTERNAL_URL" | gzip -6 > "$AUTOMIGRATION_DUMP"; then
-    rm -f "$AUTOMIGRATION_DUMP"
-    die "pg_dump from the external database failed — nothing was written locally, your data is intact"
-  fi
-  census -d "$EXTERNAL_URL" > "$STATE_DIR/state/automigration-source-census.txt" || true
+  Para migrarlos:
+    1. Arranca UNA VEZ FutureFin 3.9.0 con esta misma DATABASE_URL y este mismo
+       volumen. Copiará tus datos a la base embebida y te lo dirá en los logs
+       ("automigration completed").
+    2. Quita DATABASE_URL de tu compose.
+    3. Vuelve a 4.0.0.
 
-  init_fresh_cluster
-  AUTOMIGRATE_PENDING=1
+  Documentación: https://github.com/maxlainz/FutureFin/blob/main/docs/actualizar.md
+─────────────────────────────────────────────────────────────────────────────────
+MSG
+  exit 1
 }
 
-automigrate_restore() { # con el PG embebido ya arrancado
-  log "restoring dump into the embedded database"
-  if ! gunzip -c "$AUTOMIGRATION_DUMP" | psql_local "$POSTGRES_DB" -q; then
-    die "restore into the embedded database FAILED. Dump preserved at $AUTOMIGRATION_DUMP; your data is intact in the external database. Manual restore: gunzip -c <dump> | psql -h $SOCK_DIR -U $POSTGRES_USER -d $POSTGRES_DB"
-  fi
-  local src dst
-  src="$(cat "$STATE_DIR/state/automigration-source-census.txt" 2>/dev/null || true)"
-  dst="$(census -h "$SOCK_DIR" -U "$POSTGRES_USER" -d "$POSTGRES_DB" || true)"
-  if [ -n "$src" ] && [ "$src" != "$dst" ]; then
-    state_set automigration STATE failed
-    die "automigration verification FAILED (row census differs). Dump: $AUTOMIGRATION_DUMP. External database untouched. source=[$src] embedded=[$dst]"
-  fi
-  state_set automigration STATE "done"
-  local rows
-  rows="$(printf '%s\n' "$dst" | awk -F: '{s+=$2} END {print s+0}')"
-  log "automigration completed: $rows rows across $(printf '%s\n' "$dst" | grep -c . ) tables. The external database is NO LONGER USED — you can retire it and remove DATABASE_URL."
-  SKIP_PREMIGRATION=1
-  echo "$APP_VERSION" > "$STATE_DIR/state/last-version"
-}
-
-# ── Modo externo (deprecado) ─────────────────────────────────────────────────
-warn_external_deprecated() {
-  cat >&2 <<EOF
-[futurefin-entrypoint] ============================ DEPRECATED ============================
-[futurefin-entrypoint]  Estás usando una base de datos EXTERNA (DATABASE_URL definida).
-[futurefin-entrypoint]  Desde 3.0.0 FutureFin incluye PostgreSQL en la propia imagen y este
-[futurefin-entrypoint]  modo esta DEPRECADO: se eliminara en 4.0.0.
-[futurefin-entrypoint]  Para migrar: monta un volumen en $PGDATA y reinicia;
-[futurefin-entrypoint]  FutureFin copiara los datos automaticamente una sola vez.
-[futurefin-entrypoint]  Ver: README seccion «Actualizar a 3.x».
-[futurefin-entrypoint] ====================================================================
-EOF
-}
-
-exec_api_external() {
-  warn_external_deprecated
-  export DATABASE_URL="$EXTERNAL_URL"
-  log "starting FutureFin $APP_VERSION against the external database"
-  if is_root; then
-    exec gosu futurefin /app/futurefin-api
-  else
-    exec /app/futurefin-api
-  fi
-}
-
-# ── API ──────────────────────────────────────────────────────────────────────
 start_api() {
   export DATABASE_URL="postgres:///$POSTGRES_DB?host=$SOCK_DIR&user=$POSTGRES_USER"
   log "starting FutureFin API $APP_VERSION"
@@ -577,7 +514,13 @@ main() {
   esac
   MODE="${FUTUREFIN_MODE:-$cmd}"
 
-  case "$DB_MODE" in auto|embedded|external) ;; *) die "invalid FUTUREFIN_DB_MODE='$DB_MODE' (auto|embedded|external)";; esac
+  # `external` se acepta como valor para poder dar un mensaje útil en vez de un error
+  # críptico a quien lo arrastre en su compose desde la 3.x.
+  case "$DB_MODE" in
+    auto|embedded) ;;
+    external) die "FUTUREFIN_DB_MODE=external ya no existe: FutureFin 4.0.0 solo usa la base embebida. Quita esa variable (y DATABASE_URL) de tu compose; si aún no has migrado, arranca una vez la 3.9.0 para hacerlo." ;;
+    *) die "invalid FUTUREFIN_DB_MODE='$DB_MODE' (auto|embedded)" ;;
+  esac
 
   log "FutureFin $APP_VERSION — mode=$MODE db_mode=$DB_MODE postgres_majors=$(ls "$PG_BINROOT" | tr '\n' ' ')"
   ensure_runtime_dirs
@@ -590,32 +533,15 @@ main() {
     EXTERNAL_URL="$DATABASE_URL"
   fi
 
-  # ── Decisión de modo de base de datos ──
-  if [ "$DB_MODE" = external ]; then
-    [ -n "$EXTERNAL_URL" ] || die "FUTUREFIN_DB_MODE=external but DATABASE_URL is not set"
-    [ "$MODE" = db-only ] && die "db-only mode makes no sense with an external database"
-    exec_api_external            # no vuelve
-  fi
-
-  if [ "$DB_MODE" = auto ] && [ -n "$EXTERNAL_URL" ]; then
-    if [ "$MOUNTED" != 1 ]; then
-      # Compose 2.x recreado con imagen 3.x (watchtower): sin volumen en el contenedor
-      # de la app. Migrar aqui escribiria en la capa efimera → NUNCA. Modo compat.
-      [ "$MODE" = db-only ] && die "db-only mode needs a volume mounted at $PGDATA"
-      exec_api_external          # no vuelve
-    fi
-    # in-progress se comprueba ANTES que has_cluster: un cluster a medio restaurar no
-    # debe adoptarse jamás — automigrate_prepare lo aparta y reintenta.
-    if [ "$(state_get automigration STATE)" = in-progress ]; then
-      automigrate_prepare
-    elif has_cluster; then
-      if [ "$(state_get automigration STATE)" = "done" ]; then
-        warn "DATABASE_URL is set but data was already migrated to the embedded database — ignoring it. Remove DATABASE_URL from your compose."
-      else
-        warn "DATABASE_URL is set but $PGDATA already contains an embedded cluster with data — the EMBEDDED database wins. Set FUTUREFIN_DB_MODE=external if you really want the external one."
-      fi
-    elif pgdata_empty; then
-      automigrate_prepare
+  # ── DATABASE_URL heredada de la 3.x ──
+  # Con cluster embebido ya presente, la externa se ignora: quien migró en la 3.x tiene sus
+  # datos aquí y solo le sobra una variable en el compose. Sin cluster, se para (arrancar
+  # con una base vacía se leería como pérdida de datos).
+  if [ -n "$EXTERNAL_URL" ]; then
+    if has_cluster; then
+      warn "DATABASE_URL está definida pero FutureFin 4.0.0 solo usa la base embebida, que ya tiene tus datos — se ignora. Quítala de tu compose."
+    else
+      refuse_external_database   # no vuelve
     fi
   fi
 
@@ -630,7 +556,7 @@ main() {
   if has_cluster; then
     adopt_cluster
     maybe_pg_upgrade
-  elif [ "$AUTOMIGRATE_PENDING" != 1 ]; then
+  else
     if ! pgdata_empty; then
       die "$PGDATA is not empty but contains no PG_VERSION — refusing to touch it. Inspect the volume manually."
     fi
@@ -643,9 +569,6 @@ main() {
   if [ "$PGUPGRADE_JUST_RAN" = 1 ]; then
     run_as_pg "$PG_BINROOT/$PG_MAJOR/bin/vacuumdb" \
       -h "$SOCK_DIR" -U "$POSTGRES_USER" --all --analyze-in-stages >/dev/null 2>&1 || true
-  fi
-  if [ "$AUTOMIGRATE_PENDING" = 1 ]; then
-    automigrate_restore
   fi
   premigration_backup
 

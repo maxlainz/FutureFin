@@ -76,11 +76,12 @@ CI (`.github/workflows/ci.yml`, runs on push/PR to `main` and `dev`) covers thre
 - `docker-stack` — `shellcheck` on the entrypoint and `scripts/*.sh`, an image build, then the
   container's real data paths: image sanity + **no-volume guard** (a volume-less `docker run` must
   abort), fresh install → `/v1/ready` + seeded data, watchtower-style `--force-recreate` keeping
-  data, **clean shutdown** (drain → pool closed → PG checkpoint → exit 0), **V2→V3 over a real 2.3.0
-  stack** (uid adoption + collation REINDEX + duplicate-register detector + automatic
-  pre-migration backup), the 3.x image over an untouched 2.x compose (deprecated external-DB
-  compat), one-shot **automigration** from an external DB, and **pg_upgrade 15→16** verified by row
-  census.
+  data, **clean shutdown** (drain → pool closed → PG checkpoint → exit 0), **2.x → current over a
+  real 2.3.0 stack** (uid adoption + collation REINDEX + duplicate-register detector + automatic
+  pre-migration backup), and — since 4.0.0 retired the external-DB mode — the two **refusal**
+  paths: the current image over an untouched 2.x compose, and a leftover `DATABASE_URL` with an
+  empty volume (both must exit non-zero, print the migration instructions, and leave the volume
+  untouched). Plus **pg_upgrade 15→16** verified by row census.
 
 CI does **not** run: Postgres integration tests, `npm run lint:web`, or frontend Vitest. Those
 are local gates you must run yourself (Section 6).
@@ -190,7 +191,8 @@ rules are non-negotiable; each exists because breaking it loses data silently
 D13/W8):
 
 - **The entrypoint NEVER deletes a cluster — only moves it aside.** Old or partial clusters go to
-  `$PGDATA/pgdata_old_<major>` or `$STATE_DIR/failed-automigration-<ts>` via `mv`. The only `rm`s
+  `$PGDATA/pgdata_old_<major>` via `mv` (before 4.0.0 also `$STATE_DIR/failed-automigration-<ts>`).
+  The only `rm`s
   in the script are its own backups under retention and the pg_upgrade staging once copied. A
   review that finds a new `rm -rf` touching `$PGDATA` blocks the change.
 - **The image declares no `VOLUME`, and the runtime is not based on `postgres:*`.** The inherited
@@ -281,8 +283,10 @@ train that changes migrations or the entrypoint.**
 docker build --load -f apps/api/Dockerfile -t futurefin-local:dev .
 # .env only needs: FUTUREFIN_IMAGE=futurefin-local, FUTUREFIN_TAG=dev
 # (POSTGRES_PASSWORD is NO LONGER required — the embedded DB is socket-only.)
-# TRAP: leave DATABASE_URL commented out. A split-dev .env with it uncommented flips the
-# image into deprecated external-DB mode and you will test the wrong code path.
+# TRAP: do not let DATABASE_URL reach the container. Since 4.0.0 the image ignores an external
+# one when the volume already has a cluster, and REFUSES TO START when it doesn't — either way
+# you are not testing the path you meant to. (The .env alone does not leak it: no compose file
+# here declares env_file: or a DATABASE_URL: entry; a `docker run -e` or your own edit does.)
 docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d
 curl -sf http://127.0.0.1:8080/v1/ready          # readiness, not /v1/health: it round-trips the DB
 docker compose logs futurefin | grep -E "migrations applied|initializing fresh PostgreSQL"
@@ -428,7 +432,10 @@ Facts above verified against the repo on 2026-07-02 (v1.4.3, branch
 schema version refreshed for v1.5.0 on 2026-07-06 (history-snapshots feature); §1 Infra-release
 gates, §2.7 recovery commands, new §2.8, §4.2 drills and §6 checklist refreshed **2026-08-16 for
 v3.0.0** (self-contained image), and the version/migration/test-file counts re-counted **2026-08-17
-for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `apps/api/Dockerfile`,
+for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged). The `docker-stack` CI
+description and the container-integrity rules were re-verified **2026-08-22 for v4.0.0**, which
+removed the external-database mode from the entrypoint (`exec_api_external`, `automigrate_*`,
+`FUTUREFIN_DB_MODE=external`, `FUTUREFIN_EXTERNAL_WAIT_SECS`). Sources: `apps/api/Dockerfile`,
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 

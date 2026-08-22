@@ -278,20 +278,27 @@ jobs:
           curl -sf -b /tmp/v2jar -X POST http://127.0.0.1:8080/v1/categories -H 'content-type: application/json' \
             -d '{"scope":"asset","name":"Ácido Ñandú"}' >/dev/null
 
-      - name: V3 image over untouched V2 compose → external compat mode (watchtower case)
+      # 4.0.0 retiró el modo de base externa. La imagen 4.x sobre un compose 2.x sin tocar
+      # (el caso de quien auto-actualiza con watchtower) ya NO arranca en modo compat: se
+      # niega y explica cómo migrar. Es la conducta correcta — arrancar contra un volumen
+      # vacío se leería como pérdida de datos — y por eso se fija con un test.
+      - name: V4 image over untouched V2 compose → se niega a arrancar y explica cómo migrar
         run: |
           set -e
           POSTGRES_PASSWORD=ci-test docker compose -p futurefin \
             -f .github/testdata/docker-compose.v2.yml -f .github/testdata/docker-compose.v2-app-v3.yml \
-            up -d futurefin
-          for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8080/v1/health >/dev/null && break; sleep 2
-            [ "$i" = 60 ] && { docker logs futurefin --tail=100; exit 1; }
+            up -d futurefin || true
+          # Sin pipeline: el exit code que importa es el del contenedor, no el de tee.
+          for i in $(seq 1 30); do
+            state="$(docker inspect -f '{{.State.Status}}' futurefin 2>/dev/null || echo missing)"
+            [ "$state" = "exited" ] && break
+            sleep 2
+            [ "$i" = 30 ] && { docker logs futurefin --tail=100; echo "ERROR: seguía vivo"; exit 1; }
           done
-          docker logs futurefin 2>&1 | grep -q "DEPRECATED"
-          curl -sf -c /tmp/rr7jar -X POST http://127.0.0.1:8080/v1/auth/login -H 'content-type: application/json' \
-            -d '{"username":"citest","password":"ci-test-password-123"}' >/dev/null
-          curl -sf -b /tmp/rr7jar http://127.0.0.1:8080/v1/categories | grep -q 'Ácido Ñandú'
+          test "$(docker inspect -f '{{.State.ExitCode}}' futurefin)" != "0"
+          docker logs futurefin 2>&1 > /tmp/refuse.log 2>&1 || true
+          docker logs futurefin 2>&1 | grep -q "ya no habla con bases de datos externas"
+          docker logs futurefin 2>&1 | grep -q "3.9.0"
 
       - name: Migrate to V3 compose reusing the volume (chown + REINDEX + backup)
         run: |
@@ -322,34 +329,28 @@ jobs:
           docker compose -p futurefin exec -T futurefin sh -c 'ls /var/lib/futurefin/backups/pre-migration-*.sql.gz'
           docker compose -p futurefin down -v --remove-orphans
 
-      # ── Escenario 3: automigración one-shot desde base externa ──
-      - name: External DB automigration (dump → embedded → detach)
+      # ── Escenario 3: DATABASE_URL heredada + volumen vacío → se para, no arranca vacío ──
+      # La automigración one-shot desde base externa se retiró en 4.0.0 junto con el resto
+      # del modo externo. Lo que queda —y lo que hay que fijar— es que nadie acabe con una
+      # instalación vacía creyendo que ha perdido sus datos.
+      - name: DATABASE_URL heredada con volumen vacío → aborta con instrucciones
         run: |
           set -e
-          docker compose -f .github/testdata/docker-compose.automigrate.yml up -d extdb seed
-          for i in $(seq 1 90); do
-            curl -sf http://127.0.0.1:8081/v1/health >/dev/null && break; sleep 2
-            [ "$i" = 90 ] && { docker compose -f .github/testdata/docker-compose.automigrate.yml logs --tail=200; exit 1; }
-          done
-          curl -sf -X POST http://127.0.0.1:8081/v1/auth/register -H 'content-type: application/json' \
-            -d '{"username":"extuser","password":"ci-test-password-123","birth_date":"1985-05-05"}' >/dev/null
-          docker compose -f .github/testdata/docker-compose.automigrate.yml stop seed
-          docker compose -f .github/testdata/docker-compose.automigrate.yml up -d futurefin
-          for i in $(seq 1 90); do
-            curl -sf http://127.0.0.1:8080/v1/ready >/dev/null && break; sleep 2
-            [ "$i" = 90 ] && { docker compose -f .github/testdata/docker-compose.automigrate.yml logs futurefin --tail=300; exit 1; }
-          done
-          docker compose -f .github/testdata/docker-compose.automigrate.yml logs futurefin | grep -q "automigration completed"
-          # La base externa deja de usarse: apagarla y comprobar que todo sigue vivo
-          docker compose -f .github/testdata/docker-compose.automigrate.yml stop extdb
-          docker compose -f .github/testdata/docker-compose.automigrate.yml restart futurefin
-          for i in $(seq 1 60); do
-            curl -sf http://127.0.0.1:8080/v1/ready >/dev/null && break; sleep 2
-            [ "$i" = 60 ] && { docker compose -f .github/testdata/docker-compose.automigrate.yml logs futurefin --tail=300; exit 1; }
-          done
-          curl -sf -c /tmp/amjar -X POST http://127.0.0.1:8080/v1/auth/login -H 'content-type: application/json' \
-            -d '{"username":"extuser","password":"ci-test-password-123"}' >/dev/null
-          docker compose -f .github/testdata/docker-compose.automigrate.yml down -v --remove-orphans
+          docker volume create ffempty >/dev/null
+          docker volume create ffemptystate >/dev/null
+          rc=0
+          docker run --name ffext \
+            -e DATABASE_URL="postgres://futurefin:x@203.0.113.1:5432/futurefin" \
+            -v ffempty:/var/lib/postgresql/data -v ffemptystate:/var/lib/futurefin \
+            futurefin-ci:latest >/tmp/ext.log 2>&1 || rc=$?
+          cat /tmp/ext.log
+          [ "$rc" -ne 0 ] || { echo "ERROR: arrancó con una base externa"; exit 1; }
+          grep -q "ya no habla con bases de datos externas" /tmp/ext.log
+          grep -q "docs/actualizar.md" /tmp/ext.log
+          # Y el volumen sigue vacío: no ha inicializado nada a medias.
+          docker run --rm -v ffempty:/d alpine sh -c 'test -z "$(ls -A /d)"'
+          docker rm -f ffext >/dev/null
+          docker volume rm ffempty ffemptystate >/dev/null
 
       # ── Escenario 4: auto-pg_upgrade 15 → 16 ──
       - name: pg_upgrade 15→16 (seeded PG15 volume)
@@ -394,5 +395,5 @@ jobs:
         run: |
           docker compose -p ffresh down -v --remove-orphans 2>/dev/null || true
           docker compose -p futurefin down -v --remove-orphans 2>/dev/null || true
-          docker compose -f .github/testdata/docker-compose.automigrate.yml down -v --remove-orphans 2>/dev/null || true
-          docker rm -f ffpg15 pg15seed 2>/dev/null || true
+          docker rm -f ffpg15 pg15seed ffext 2>/dev/null || true
+          docker volume rm ffempty ffemptystate 2>/dev/null || true

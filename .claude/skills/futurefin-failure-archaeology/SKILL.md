@@ -9,7 +9,8 @@ description: >
   ZIP/CSV export, Caddy/TLS overlay, Decimal-string serialization for large projection arrays, or
   any undo of the 3.0.0 self-contained image (Postgres back as its own compose service, a
   `postgres:*` runtime base, a `VOLUME` in the Dockerfile, SIGTERM to the postmaster, a `/dev/tcp`
-  healthcheck fallback).
+  healthcheck fallback), or of the 4.0.0 removal of the external-database mode (making the
+  container honour `DATABASE_URL` again, re-adding the one-shot automigration).
   Also load it when you hit a symptom that "smells historical": backup export 500s, projection
   numbers that look plausible but shift with inflation toggles, chart deflation wrong only at some
   densities, overlapping table action buttons, FIRE preview diverging from server target, inverted
@@ -59,6 +60,7 @@ Vocabulary used below (defined once):
 | 17 | Docker healthcheck `CMD` exec form | `curl` not on exec PATH → always unhealthy; use `CMD-SHELL` (+ `/dev/tcp` fallback) | d0bb259, v1.0.2 |
 | 18 | `fire_number_expense_adjustment_pct`, `bump_contributed_series_with_purchase_basis` | Zombie code with no consumer / obsolete binary-compat patch | 0bba819, v1.3.0 |
 | 19 | Postgres as a separate compose service (`futurefin-database`, `postgres:16.4-alpine`) | Two moving parts, an externally-managed `POSTGRES_PASSWORD` and no snapshot before migrations, in an app whose stated axis is "upgrades that never lose data". Replaced in 3.0.0 by PostgreSQL **embedded in the image** (one container, socket-only). Five traps found doing it — read §2.11 before touching the image | 5ca91f4, v3.0.0; `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose.yml` (one service), CI job `docker-stack` |
+| 20 | **External-database mode** in the container (`DATABASE_URL` → `exec_api_external`, the `DEPRECATED` banner, the one-shot `automigrate_prepare`/`automigrate_restore`, `FUTUREFIN_DB_MODE=external`, `FUTUREFIN_EXTERNAL_WAIT_SECS`) | It was the one supported topology with **none** of the guarantees 3.0.0 was built to give: no pre-migration backup, no `pg_upgrade`, no ordered postmaster shutdown, no volume guard. Deprecated in 3.0.0 and announced there (README §«Actualizar desde 2.x» + env table, `.env.example`, and the start-up banner itself: «se eliminara en 4.0.0»); removed on schedule in 4.0.0. `DATABASE_URL` itself is untouched and still required in split-dev — what is gone is the *container* ever honouring it. Read §2.12 before proposing anything that talks to a database outside the image | v4.0.0; `apps/api/docker-entrypoint.sh` (`refuse_external_database` is all that remains), `.github/testdata/docker-compose.automigrate.yml` deleted, CI `docker-stack` scenarios 2b and 3 |
 
 ## 2. Detailed entries
 
@@ -255,10 +257,42 @@ Vocabulary used below (defined once):
 - **Status**: shipped in 3.0.0 (5ca91f4). **Evidence**: CI job `docker-stack`
   (`.github/workflows/ci.yml`) — image sanity + no-volume guard, fresh install, watchtower-style
   recreate, clean shutdown, **V2→V3 with real seeded data** (adoption `chown` + collation REINDEX +
-  automatic pre-migration backup + the duplicate-register detector), V3 image over an untouched 2.x
-  compose (deprecated external-DB compat), one-shot **automigration** from an external database, and
+  automatic pre-migration backup + the duplicate-register detector), the image over an untouched 2.x
+  compose (external-DB compat until 3.9.0; a **hard refusal** since 4.0.0 — §2.12), a leftover
+  `DATABASE_URL` with an empty volume (refusal + volume asserted still empty), and
   **pg_upgrade 15→16** with a row census. Frozen 2.x topologies live in `.github/testdata/`.
   Normative statement of the resulting contract: futurefin-architecture-contract **D13** and **W8**.
+
+### 2.12 Retiring the external-database mode without it reading as data loss (v4.0.0)
+
+- **Situation**: 3.0.0 moved PostgreSQL inside the image but kept talking to an external one when
+  `DATABASE_URL` was set — a compat mode for 2.x installs, deprecated from day one and announced
+  as "removed in 4.0.0" in the README, in `.env.example` and in the banner it printed on every
+  start. (After the `docs/` split the same notice lived in `docs/configuracion.md` and
+  `docs/actualizar.md`; the README had stopped repeating it by 3.9.0.)
+- **Why it had to go**: it was the only supported topology with **none** of the safety nets that
+  justify the self-contained image (§2.11): no automatic pre-migration dump, no `pg_upgrade`, no
+  ordered postmaster shutdown, no volume guard. Every one of those is a promise the project makes
+  and could not keep in that mode.
+- **The trap in removing it**: the naive removal is "ignore `DATABASE_URL` and start". For someone
+  whose data lives in that external database, that starts an **empty** installation — indistinguishable
+  from total data loss to the person looking at the screen, even though nothing was lost. A
+  deprecated feature must not be retired into a silent empty state.
+- **What was done instead** (`apps/api/docker-entrypoint.sh`): the leftover variable is triaged.
+  **Cluster already in the volume** → warn and ignore it (their data is already inside; they just
+  have one stale line in their compose). **No cluster** → `refuse_external_database`: print what
+  happened, state that the data is untouched, give the three steps (start 3.9.0 once with the same
+  URL and volume, drop `DATABASE_URL`, come back to 4.0.0), link `docs/actualizar.md`, and **exit 1
+  before initializing anything**. `FUTUREFIN_DB_MODE=external` is still *recognized*, purely to die
+  with an explanation instead of `invalid FUTUREFIN_DB_MODE`.
+- **Lesson**: when you delete a deprecated path, decide explicitly what happens to the inputs that
+  used to select it. Ignoring them is only safe when ignoring them is harmless; otherwise refusing
+  loudly beats proceeding quietly.
+- **Status**: shipped in 4.0.0. **Evidence**: CI `docker-stack` — the current image over an
+  untouched 2.x compose must exit non-zero and log `ya no habla con bases de datos externas` +
+  `3.9.0`; and a `docker run` with an external `DATABASE_URL` over empty volumes must exit non-zero,
+  log the same message plus `docs/actualizar.md`, and leave the volume **verifiably empty**.
+  Operator-facing form: `docs/actualizar.md` §«Vengo de 2.x o tengo una base de datos externa».
 
 ## 3. Designs that were tried and replaced
 
@@ -292,6 +326,8 @@ Vocabulary used below (defined once):
 | Stop the embedded postmaster with SIGTERM, or drop `stop_grace_period` | §2.11 trap 4 — SIGTERM is *smart* shutdown and hangs |
 | Add a `</dev/tcp` fallback to the healthcheck, or switch it back to exec-form `CMD` | §2.11 trap 5 + §1 row 17 — the two rules point in opposite directions on purpose |
 | Split PostgreSQL back out into its own compose service | §1 row 19, §2.11 |
+| Make the container talk to an external database again (honour `DATABASE_URL`, re-add automigration) | §1 row 20, §2.12 — removed in 4.0.0 after a full deprecation cycle |
+| Retire a deprecated path by silently ignoring the input that selected it | §2.12 — refuse loudly when ignoring is not harmless |
 | Trust an old migration file as evidence of current schema | §2.10 last bullet |
 
 ## 5. When NOT to use this skill
@@ -334,7 +370,14 @@ before relying on them:
 - §2.11 trap 5 (no `/dev/tcp`, `CMD-SHELL` kept): `grep -n 'dev/tcp' docker-compose.yml apps/api/Dockerfile`
   → only the two "do NOT add it back" comments; `grep -n 'CMD-SHELL' docker-compose.yml`.
 - §2.11 evidence: `grep -n '^      - name:' .github/workflows/ci.yml` (job `docker-stack`
-  scenarios) and `ls .github/testdata/` (frozen 2.x compose topologies).
+  scenarios) and `ls .github/testdata/` (frozen 2.x compose topologies — `automigrate.yml` gone
+  since 4.0.0).
+- §2.12 (external mode retired, added 2026-08-22 for v4.0.0): the mode is really gone —
+  `grep -n 'exec_api_external\|automigrate_\|EXTERNAL_WAIT' apps/api/docker-entrypoint.sh` must hit
+  **only** the two comment lines of the «Base de datos externa: retirada en 4.0.0» block — no
+  definition, no call site; what replaced it: `grep -n 'refuse_external_database\|ya no existe\|se ignora' apps/api/docker-entrypoint.sh`;
+  its CI guards: `grep -n 'ya no habla con bases de datos externas' .github/workflows/ci.yml` (two hits).
+  The 3.9.0 behaviour it points people back to: `git show v3.9.0:apps/api/docker-entrypoint.sh`.
 - FIRE helper is still the single source: `grep -rn 'fire_target_at_month_index' crates/ apps/api/src/`.
 - Scope helpers still used: `grep -n 'scope_where' apps/api/src/handlers/person_view.rs`.
 - No auto-repair regression: `grep -n 'repair' apps/api/src/db.rs` (expect no hits).

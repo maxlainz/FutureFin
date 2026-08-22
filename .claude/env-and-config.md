@@ -7,7 +7,7 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `DATABASE_URL` | — (sin default) | El binario hace panic si falta (`DATABASE_URL must be set`) — pero **en el contenedor 3.x la fabrica el entrypoint** (socket Unix: `postgres:///futurefin?host=/var/run/postgresql&user=futurefin`). Definirla en el entorno del contenedor activa el **modo DB externa (deprecado, se elimina en 4.0.0)**. En split-dev sigue siendo la var normal: `postgres://futurefin:futurefin@127.0.0.1:5432/futurefin`. |
+| `DATABASE_URL` | — (sin default) | El binario hace panic si falta (`DATABASE_URL must be set`) — pero **en el contenedor la fabrica el entrypoint** (socket Unix: `postgres:///futurefin?host=/var/run/postgresql&user=futurefin`), que la **exporta pisando** lo que hubiera. **4.0.0 retiró el modo DB externa**: una `DATABASE_URL` que no contenga `/var/run/postgresql` ya no conecta con nada — con cluster embebido presente se **ignora** con un `warn` («quítala de tu compose»), y **sin** cluster el entrypoint **aborta** (`refuse_external_database`, exit 1) indicando arrancar una vez la 3.9.0 con esa misma URL y ese mismo volumen. En split-dev sigue siendo la var normal y necesaria: `postgres://futurefin:futurefin@127.0.0.1:5432/futurefin`. |
 | `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS` | `30` | Ventana total del retry de conexión (`db::connect_with_retry`, backoff 0,5→4 s). Acepta 1–600; fuera de rango cae al default. |
 | `PORT` | `8080` | API listen port. Use `8081` in split-dev so Vite can use `8080`. |
 | `RUST_LOG` | — | e.g. `futurefin_api=info,tower_http=info,sqlx=warn` |
@@ -25,15 +25,14 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded` \| `external`. `auto` decide por presencia de `DATABASE_URL` y volumen; `external` fuerza la DB externa (deprecado) y desactiva la automigración. |
+| `FUTUREFIN_DB_MODE` | `auto` | `auto` \| `embedded` — desde 4.0.0 **son sinónimos** (siempre la embebida). `external` se sigue reconociendo **solo para abortar con un mensaje útil** a quien lo arrastre de un compose 3.x; cualquier otro valor aborta con `invalid FUTUREFIN_DB_MODE`. |
 | `FUTUREFIN_MODE` | `serve` | `serve` \| `db-only` (modo rescate: solo PostgreSQL, sin API; lo usa `scripts/restore-postgres.sh`). También como argv: `docker run … db-only`. |
 | `FUTUREFIN_BACKUP_KEEP` | `10` | Nº de backups automáticos pre-migración intocables (los más recientes). |
 | `FUTUREFIN_BACKUP_KEEP_DAYS` | `90` | Del resto, se borran los más viejos que esto. Poda extra bajo 256 MB libres (nunca los 3 últimos). |
 | `FUTUREFIN_PREMIGRATION_BACKUP` | `on` | `off` desactiva el backup automático pre-migración (y su aborto-si-falla). |
 | `FUTUREFIN_ALLOW_EPHEMERAL_DB` | `0` | `1` permite arrancar **sin volumen** en `PGDATA` (CI/demo). Sin esto, el contenedor aborta a propósito. |
-| `FUTUREFIN_EXTERNAL_WAIT_SECS` | `60` | Espera a que la DB externa responda antes de automigrar/abortar. |
 | `FUTUREFIN_API_STOP_TIMEOUT` / `FUTUREFIN_PG_STOP_TIMEOUT` | `15` / `30` | Timeouts del apagado ordenado (API: TERM; postmaster: SIGINT). La escalada está acotada: señal de escalada (KILL / QUIT) y, si 10 s después sigue vivo, KILL — nunca puede bloquear. |
-| `FUTUREFIN_STATE_DIR` | `/var/lib/futurefin` | Volumen `ffdata`: backups, staging de pg_upgrade, estado (marcadores de reindex/automigración). Avanzada. |
+| `FUTUREFIN_STATE_DIR` | `/var/lib/futurefin` | Volumen `ffdata`: backups, staging de pg_upgrade, estado (`state/cluster.env` con `REINDEXED_SYSID`, `state/pgupgrade.env`, `state/last-version`). Avanzada. |
 | `FUTUREFIN_BACKUP_DIR` | `$FUTUREFIN_STATE_DIR/backups` | Avanzada. |
 | `FUTUREFIN_PG_LISTEN` | vacío (sin TCP) | Solo depuración: `127.0.0.1` abre TCP dentro del contenedor. |
 | `FUTUREFIN_PG_LOG_LEVEL` | — | Solo depuración: `log_min_messages` del PG embebido. |
@@ -56,10 +55,14 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 
 Env vars already set in the environment take precedence over `.env` files.
 
-**Trampa 3.x**: un `.env` de desarrollo con `DATABASE_URL` descomentada junto al
-`docker-compose.yml` de producción hace que compose se la pase al contenedor → la imagen
-entra en modo DB externa (o aborta si el volumen está vacío y la externa no responde).
-Mantén `.env` de dev y de prod separados.
+**Trampa (corregida 2026-08-22)**: la versión larga de esta advertencia decía que un `.env` de
+desarrollo con `DATABASE_URL` junto al `docker-compose.yml` de producción «se la pasa al
+contenedor». **No es cierto con los compose de este repo**: ninguno declara `env_file:` ni lista
+`DATABASE_URL` en `environment:` (`grep -n 'env_file\|DATABASE_URL' docker-compose*.yml` → vacío),
+y Compose no inyecta el `.env` en el contenedor. La variable solo llega si el compose la declara
+(el de 2.x lo hace) o vía `docker run -e DATABASE_URL=…`. Cuando llega y apunta fuera del socket,
+4.0.0 la ignora (con cluster) o **aborta** (sin cluster). Aun así, mantén `.env` de dev y de prod
+separados.
 
 ## Vite config
 `apps/web/vite.config.ts` loads env from repo root (two levels up from `apps/web`). It reads `FUTUREFIN_API_PORT` and `WEB_DEV_PORT` without the `VITE_` prefix (uses `loadEnv` with `""`).
