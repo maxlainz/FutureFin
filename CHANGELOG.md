@@ -111,6 +111,15 @@ sesión en vez de reescribir la contraseña del fichero, que es el error más fr
 flujo de importación. Ahora es **400 `backup_wrong_password`**: la sesión es válida; lo que no
 cuadra es la contraseña del archivo.
 
+### Marca: la pestaña del navegador enseñaba el icono por defecto
+
+`apps/web/index.html` eran once líneas sin favicon, sin descripción y con un `<title>` de una sola
+palabra, y **no existía ni un solo fichero de imagen en el repositorio**: el «logo» era un cuadrado
+CSS con las letras `FF`. Ahora hay `favicon.svg` (la misma marca, en SVG), `apple-touch-icon.png`,
+`site.webmanifest`, `<meta name="description">` y `theme-color` por esquema de color. Los tres
+ficheros viven en `apps/web/public/`, así que el build los copia a `dist/` y `ServeDir` los sirve
+antes que el fallback de la SPA.
+
 ### Migración
 
 `20260822120000_installation_onboarding.sql` — aditiva y sin pérdida. Añade
