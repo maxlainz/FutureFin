@@ -14,7 +14,7 @@
 #     de un manifest de una sola plataforma — si no, el build arm64 falla.
 
 # --- Frontend (Vite) ---
-FROM node:24.15-bookworm-slim@sha256:24dc26ef1e3c3690f27ebc4136c9c186c3133b25563ae4d7f0692e4d1fe5db0e AS web
+FROM node:26.7-bookworm-slim@sha256:cd565714d4da3e84bfd341e31448f81d47c6362198f152345297c9c1154e6341 AS web
 WORKDIR /build
 COPY package.json package-lock.json ./
 COPY apps/web ./apps/web
