@@ -87,6 +87,20 @@ recategorización en lote, ni las reglas lo impiden. El importador de CSV y la r
 copia `.ffbackup` tampoco validan nada: traen el signo real del banco, y una copia que se niega a
 restaurar es peor que una fila rara.
 
+#### Cifras con veintidós decimales
+
+Preguntarle a Claude por tu patrimonio a treinta años devolvía
+`69946992.976753373554690255548 €`. No era un error de cálculo —el número es correcto— sino de
+presentación: la proyección compone un interés mensual que sale de una raíz duodécima, y nadie
+recortaba el resultado antes de mandarlo. Además de ruido, empujaba a presentar cifras con una
+precisión que no existe.
+
+Los importes salen ahora con **cuatro decimales**, la misma escala que usa la base de datos. El
+recorte se aplica solo a la cifra que se envía, nunca a la que entra en el cálculo: el objetivo FIRE
+es también un número interno del motor y redondearlo movería la fecha de jubilación. Con el mismo
+arreglo se van dos rarezas: una categoría sin movimientos publicaba su importe como `-0`, y la lista
+de hitos mezclaba `25000.0` con `50000` y `100000`.
+
 #### Poner un tope a una regla de reparto podía no hacer nada, y decir que sí
 
 Pedirle a Claude «ponle un tope de 99.999 € a la cartera» devolvía **éxito** y no cambiaba nada: el

@@ -548,3 +548,103 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
         }
     }
 }
+
+/// REGRESIÓN (issue #8 §7) — ningún importe sale con más de 4 decimales, ni como `-0`.
+///
+/// El engine capitaliza con `annual_factor.powd(1/12)` (raíz duodécima irracional) y el target FIRE
+/// sale de `gross / (swr/100)`; ninguna de las dos se redondeaba, así que la escala saturaba en los
+/// ~28 dígitos de `rust_decimal` y al wire salían `"69946992.976753373554690255548"` y
+/// `"1148456.9620253164556962025316"`. Ruido, tokens, y un LLM presentando precisión falsa.
+///
+/// El barrido es estructural a propósito: comprueba **todos** los strings decimales del payload,
+/// no una lista de campos. Un campo nuevo que se olvide de redondear cae aquí solo.
+#[tokio::test]
+async fn no_money_string_carries_more_than_four_decimals_or_negative_zero() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    seed(&app, &owner).await;
+
+    /// ¿Es este string un decimal? (Los ymd y los enums no lo son.)
+    fn decimal_str(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+            && s.chars().any(|c| c.is_ascii_digit())
+            && !s.contains("--")
+    }
+
+    /// Escalas distintas de 4 que son POLÍTICA, no descuido (`.claude/api-routes.md`, 3.8.0): los
+    /// ratios van a 6 dp porque no son dinero, y el runway a 1. Se nombran una a una: si mañana
+    /// aparece un campo con 6 decimales que sí es un importe, el barrido lo caza.
+    fn ratio_field(key: &str) -> bool {
+        key.ends_with("savings_rate")
+            || key.ends_with("savings_rate_delta")
+            || key.ends_with("debt_to_assets_ratio")
+    }
+
+    fn walk(v: &serde_json::Value, path: &str, bad: &mut Vec<String>) {
+        if ratio_field(path) {
+            return;
+        }
+        match v {
+            serde_json::Value::String(s) if decimal_str(s) => {
+                if let Some((_, frac)) = s.split_once('.') {
+                    if frac.len() > 4 {
+                        bad.push(format!("{path} = {s} ({} decimales)", frac.len()));
+                    }
+                }
+                // `impl Neg for Decimal` voltea el bit de signo también sobre el cero.
+                if s.starts_with('-') && s[1..].chars().all(|c| c == '0' || c == '.') {
+                    bad.push(format!("{path} = {s} (cero negativo)"));
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for (i, item) in a.iter().enumerate() {
+                    walk(item, &format!("{path}[{i}]"), bad);
+                }
+            }
+            serde_json::Value::Object(o) => {
+                for (k, item) in o {
+                    walk(item, &format!("{path}.{k}"), bad);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut bad = Vec::new();
+    for (tool, args) in [
+        ("simulate_projection", json!({})),
+        ("simulate_projection", json!({"extra_monthly_expense": "300"})),
+        ("get_projection", json!({})),
+        ("get_summary", json!({})),
+        ("get_transactions_summary", json!({})),
+    ] {
+        let out = tool_json(&mcp_post(&app, &token, tool_call(tool, args.clone())).await);
+        walk(&out, tool, &mut bad);
+    }
+    assert!(bad.is_empty(), "importes fuera de escala:\n  {}", bad.join("\n  "));
+}
+
+/// Los hitos son umbrales redondos y se publican con una sola forma.
+///
+/// `2.5 × 10⁴` heredaba la escala 1 del literal, así que el mismo array mezclaba `"25000.0"`,
+/// `"50000"` y `"100000"` (issue #8 §7).
+#[tokio::test]
+async fn projection_milestones_share_one_format() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    seed(&app, &owner).await;
+
+    let out = tool_json(&mcp_post(&app, &token, tool_call("get_projection", json!({}))).await);
+    let ms = out["milestones"].as_array().expect("milestones");
+    assert!(!ms.is_empty(), "sin hitos que comprobar: {out}");
+    for m in ms {
+        let target = m["target"].as_str().expect("target string");
+        assert!(
+            !target.contains('.'),
+            "un hito es un umbral redondo, no debería llevar decimales: {target}"
+        );
+    }
+}
