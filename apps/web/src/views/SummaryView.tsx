@@ -3,6 +3,7 @@ import type {
   ProjectionSeriesApi,
   SummaryResponse,
 } from "../api/types";
+import { EmptyState } from "../components/EmptyState";
 import { MetricCard } from "../components/MetricCard";
 import {
   SummaryBreakdownBlock,
@@ -22,7 +23,6 @@ import {
   formatPercentDisplay,
   formatRunwayValue,
   isAbsentMetric,
-  isZeroFractionMetric,
   isZeroMoneyMetric,
   parseDisplayDecimal,
 } from "../lib/format";
@@ -39,6 +39,8 @@ export function SummaryView({
   summary,
   summaryBusy,
   projectionSeries,
+  onAddFirstAsset,
+  onAddFirstBudgetEntry,
 }: {
   installation: InstallationAccess | null;
   loading: boolean;
@@ -47,6 +49,14 @@ export function SummaryView({
   summary: SummaryResponse | null;
   summaryBusy: boolean;
   projectionSeries: ProjectionSeriesApi | null;
+  /**
+   * Lleva al formulario de nuevo activo (pestaña Activos con el modal ya abierto). El Resumen
+   * no tiene formularios propios, así que su estado vacío delega en el de Activos — pero cae
+   * directamente en el formulario, no en «vete a otra pestaña».
+   */
+  onAddFirstAsset?: () => void;
+  /** Ídem con el formulario de nueva línea de presupuesto (pestaña Presupuesto). */
+  onAddFirstBudgetEntry?: () => void;
 }) {
   const currency =
     installation?.installation.base_currency ?? METRIC_DASH;
@@ -84,6 +94,13 @@ export function SummaryView({
 
   const fh = summary?.financial_health;
 
+  // ¿Hay ledger que resumir? Cero filas en ambos desgloses = la instalación no tiene ni un
+  // activo ni un pasivo (no es «vale 0 €»: es que no hay nada registrado).
+  const ledgerEmpty =
+    showMetrics &&
+    summary.assets_by_category.length === 0 &&
+    summary.liabilities_by_category.length === 0;
+
   // 3.9.0 — UNA sola cifra de ahorro por modo: la que usa la proyección.
   //
   // Antes convivían tres (el neto del modo, el neto del presupuesto y el promedio real bruto) y
@@ -94,8 +111,6 @@ export function SummaryView({
     showMetrics && fh
       ? formatCurrencyAmount(fh.net_monthly_equivalent, currencyIso)
       : METRIC_DASH;
-  const showSavingsTile =
-    showMetrics && fh !== undefined && !isZeroMoneyMetric(fh.net_monthly_equivalent);
 
   // Detalle: la tasa de ahorro, que por construcción comparte numerador y denominador con la
   // cifra de arriba (`net / income` del MISMO modo). El bug que abrió este rediseño era
@@ -140,12 +155,20 @@ export function SummaryView({
     ? runwaySwrParenthetical(installation?.installation.fire_settings)
     : undefined;
 
-  const financialHealthHasAnyTile =
+  // ¿Tiene el bloque «Salud financiera» de dónde salir? Sus dos entradas son el ahorro del
+  // modo activo (presupuesto o movimientos) y los activos líquidos. Si ambas son cero no hay
+  // salud que medir: el bloque se sustituye por su estado vacío en vez de enseñar dos ceros.
+  // La autonomía NO entra en la cuenta: con todo a cero el servidor la marca indefinida
+  // (0 € de gasto caben de sobra en cualquier SWR) y eso no es información, es un artefacto.
+  const healthEmpty =
     showMetrics &&
-    fh &&
-    (showSavingsTile ||
-      !isZeroMoneyMetric(fh.liquid_assets_total) ||
-      showRunwayTile);
+    (!fh ||
+      (isZeroMoneyMetric(fh.net_monthly_equivalent) &&
+        isZeroMoneyMetric(fh.liquid_assets_total)));
+
+  // Portada de un hogar recién creado: ni ledger ni salud. Una sola llamada a la acción, sin
+  // rejillas de ceros ni tres paneles diciendo «Sin datos.».
+  const nothingYet = ledgerEmpty && healthEmpty;
 
   const liquidAssetsPctOfTotalAssets =
     showMetrics && summary && fh
@@ -176,40 +199,42 @@ export function SummaryView({
         </div>
       ) : null}
 
-      <div className="metric-grid workspace-kpi-strip">
-        {!showMetrics ? (
-          <>
-            <MetricCard label="Patrimonio neto"
-                  helpId="summary.net_worth" value={nw} />
-            <MetricCard label="Activos totales" value={ta} />
-            <MetricCard label="Pasivos totales" value={tl} />
-            <MetricCard label="Ratio deuda / activos" value={dta} />
-          </>
-        ) : (
-          <>
-            {!isZeroMoneyMetric(summary.net_worth) ? (
-              <MetricCard label="Patrimonio neto"
-                  helpId="summary.net_worth" value={nw} />
-            ) : null}
-            {!isZeroMoneyMetric(summary.total_assets) ? (
-              <MetricCard label="Activos totales" value={ta} />
-            ) : null}
-            {!isZeroMoneyMetric(summary.total_liabilities) ? (
-              <MetricCard label="Pasivos totales" value={tl} />
-            ) : null}
-            {!isZeroFractionMetric(summary.debt_to_assets_ratio) ? (
-              <MetricCard label="Ratio deuda / activos" value={dta} />
-            ) : null}
-          </>
-        )}
-      </div>
+      {nothingYet ? (
+        <EmptyState
+          title="Empieza por aquí"
+          description="El Resumen reúne tu patrimonio, tu ahorro y tu proyección, pero aún no hay nada que resumir. Añade tu primer activo (una cuenta, un fondo, tu casa) y las cifras aparecen solas."
+          actionLabel="Añadir tu primer activo"
+          onAction={onAddFirstAsset}
+          secondaryLabel="Crear presupuesto"
+          onSecondary={onAddFirstBudgetEntry}
+        />
+      ) : null}
 
-      <section className="panel">
-        <h3 className="panel-title">Salud financiera</h3>
-        {showMetrics ? (
-          financialHealthHasAnyTile ? (
-            <div className="metric-grid bordered-top">
-              {showSavingsTile ? (
+      {/* Política de ceros — la decisión es de BLOQUE, no de tarjeta (ver App.css §Empty
+          states). Antes esta banda escondía una a una las KPIs que valían cero: con datos
+          eso oculta información real (un 0 € de pasivos es una buena noticia, no un hueco)
+          y con la instalación vacía dejaba la portada en blanco. Ahora, o se pintan las
+          cuatro, o el bloque entero cede su sitio al estado vacío de arriba. */}
+      {!nothingYet ? (
+        <div className="metric-grid workspace-kpi-strip">
+          <MetricCard
+            label="Patrimonio neto"
+            helpId="summary.net_worth"
+            value={nw}
+          />
+          <MetricCard label="Activos totales" value={ta} />
+          <MetricCard label="Pasivos totales" value={tl} />
+          <MetricCard label="Ratio deuda / activos" value={dta} />
+        </div>
+      ) : null}
+
+      {!nothingYet ? (
+        <section className="panel">
+          <h3 className="panel-title">Salud financiera</h3>
+          {showMetrics ? (
+            !healthEmpty ? (
+              <div className="metric-grid bordered-top">
+                {/* Bloque con datos ⇒ se pintan sus tarjetas, valgan lo que valgan. */}
                 <MetricCard
                   label="Ahorro mensual"
                   helpId="summary.savings"
@@ -217,8 +242,6 @@ export function SummaryView({
                   trend={savingsPlanTrend}
                   detail={savingsRateDetail}
                 />
-              ) : null}
-              {!isZeroMoneyMetric(summary.financial_health.liquid_assets_total) ? (
                 <MetricCard
                   label="Activos líquidos"
                   helpId="summary.liquid_assets"
@@ -226,32 +249,38 @@ export function SummaryView({
                     summary.financial_health.liquid_assets_total,
                     currencyIso,
                   )}
-                  parenthetical={
-                    liquidAssetsPctOfTotalAssets ?? undefined
-                  }
+                  parenthetical={liquidAssetsPctOfTotalAssets ?? undefined}
                 />
-              ) : null}
-              {showRunwayTile ? (
-                <MetricCard
-                  label="Autonomía"
-                  helpId="summary.runway"
-                  value={formatRunwayValue(
-                    summary.financial_health.runway_months,
-                    summary.financial_health.runway_is_indefinite,
-                  )}
-                  parenthetical={runwayParenthetical}
-                />
-              ) : null}
-            </div>
+                {/* Única tarjeta condicional del bloque, y NO por valer cero: `showRunwayTile`
+                    mira AUSENCIA de dato del servidor. Un runway de 0 meses sí se pinta. */}
+                {showRunwayTile ? (
+                  <MetricCard
+                    label="Autonomía"
+                    helpId="summary.runway"
+                    value={formatRunwayValue(
+                      summary.financial_health.runway_months,
+                      summary.financial_health.runway_is_indefinite,
+                    )}
+                    parenthetical={runwayParenthetical}
+                  />
+                ) : null}
+              </div>
+            ) : (
+              <EmptyState
+                embedded
+                title="Sin ahorro que medir"
+                description="Esta sección mide cuánto ahorras al mes y cuánto tiempo aguantarías con lo que tienes a mano. Necesita tu presupuesto o tus movimientos para calcularlo."
+                actionLabel="Crear presupuesto"
+                onAction={onAddFirstBudgetEntry}
+              />
+            )
           ) : (
-            <p className="muted bordered-top">Sin datos.</p>
-          )
-        ) : (
-          <p className="muted bordered-top">Sin acceso.</p>
-        )}
-      </section>
+            <p className="muted bordered-top">Sin acceso.</p>
+          )}
+        </section>
+      ) : null}
 
-      {hasMembership ? (
+      {hasMembership && !nothingYet ? (
         <section className="panel">
           <div className="panel-head-row">
             <h3 className="panel-title">Proyección · 12 meses</h3>
@@ -293,70 +322,81 @@ export function SummaryView({
         </section>
       ) : null}
 
-      <section className="panel">
-        <h3 className="panel-title">Desglose</h3>
-        {showMetrics && summary ? (
-          <div className="summary-donuts-row bordered-top">
-            <SummaryDonutChart
-              title="Activos por categoría"
-              currencyIso={currencyIso}
-              chartScope="asset"
-              totalWhole={summary.total_assets}
-              rows={summary.assets_by_category.map((r) => ({
-                key: r.category_id,
-                label: r.category_name,
-                total: r.total,
-              }))}
+      {!nothingYet ? (
+        <section className="panel">
+          <h3 className="panel-title">Desglose</h3>
+          {showMetrics && ledgerEmpty ? (
+            <EmptyState
+              embedded
+              title="Sin activos ni pasivos"
+              description="Cuando registres tus cuentas, fondos o deudas verás aquí cómo se reparte tu patrimonio por categoría."
+              actionLabel="Añadir activo"
+              onAction={onAddFirstAsset}
             />
-            <SummaryDonutChart
-              title="Pasivos por categoría"
-              currencyIso={currencyIso}
-              chartScope="liability"
-              totalWhole={summary.total_liabilities}
-              rows={summary.liabilities_by_category.map((r) => ({
-                key: r.category_id,
-                label: r.category_name,
-                total: r.total,
-              }))}
-            />
-          </div>
-        ) : hasMembership ? (
-          <div className="summary-donuts-row bordered-top">
-            <div className="ff-chart-skeleton ff-chart-skeleton--donut" aria-hidden />
-            <div className="ff-chart-skeleton ff-chart-skeleton--donut" aria-hidden />
-          </div>
-        ) : null}
-        {showMetrics && summary ? (
-          <div className="breakdown-grid">
-            <SummaryBreakdownBlock
-              title="Activos por categoría"
-              labelColumn="Categoría"
-              chartScope="asset"
-              totalWhole={summary.total_assets}
-              currencyIso={currencyIso}
-              rows={summary.assets_by_category.map((r) => ({
-                key: r.category_id,
-                label: r.category_name,
-                total: r.total,
-              }))}
-            />
-            <SummaryBreakdownBlock
-              title="Pasivos por categoría"
-              labelColumn="Categoría"
-              chartScope="liability"
-              totalWhole={summary.total_liabilities}
-              currencyIso={currencyIso}
-              rows={summary.liabilities_by_category.map((r) => ({
-                key: r.category_id,
-                label: r.category_name,
-                total: r.total,
-              }))}
-            />
-          </div>
-        ) : (
-          <p className="muted bordered-top">Sin acceso.</p>
-        )}
-      </section>
+          ) : null}
+          {showMetrics && summary && !ledgerEmpty ? (
+            <div className="summary-donuts-row bordered-top">
+              <SummaryDonutChart
+                title="Activos por categoría"
+                currencyIso={currencyIso}
+                chartScope="asset"
+                totalWhole={summary.total_assets}
+                rows={summary.assets_by_category.map((r) => ({
+                  key: r.category_id,
+                  label: r.category_name,
+                  total: r.total,
+                }))}
+              />
+              <SummaryDonutChart
+                title="Pasivos por categoría"
+                currencyIso={currencyIso}
+                chartScope="liability"
+                totalWhole={summary.total_liabilities}
+                rows={summary.liabilities_by_category.map((r) => ({
+                  key: r.category_id,
+                  label: r.category_name,
+                  total: r.total,
+                }))}
+              />
+            </div>
+          ) : hasMembership && !showMetrics ? (
+            <div className="summary-donuts-row bordered-top">
+              <div className="ff-chart-skeleton ff-chart-skeleton--donut" aria-hidden />
+              <div className="ff-chart-skeleton ff-chart-skeleton--donut" aria-hidden />
+            </div>
+          ) : null}
+          {showMetrics && summary && !ledgerEmpty ? (
+            <div className="breakdown-grid">
+              <SummaryBreakdownBlock
+                title="Activos por categoría"
+                labelColumn="Categoría"
+                chartScope="asset"
+                totalWhole={summary.total_assets}
+                currencyIso={currencyIso}
+                rows={summary.assets_by_category.map((r) => ({
+                  key: r.category_id,
+                  label: r.category_name,
+                  total: r.total,
+                }))}
+              />
+              <SummaryBreakdownBlock
+                title="Pasivos por categoría"
+                labelColumn="Categoría"
+                chartScope="liability"
+                totalWhole={summary.total_liabilities}
+                currencyIso={currencyIso}
+                rows={summary.liabilities_by_category.map((r) => ({
+                  key: r.category_id,
+                  label: r.category_name,
+                  total: r.total,
+                }))}
+              />
+            </div>
+          ) : !hasMembership ? (
+            <p className="muted bordered-top">Sin acceso.</p>
+          ) : null}
+        </section>
+      ) : null}
     </div>
   );
 }

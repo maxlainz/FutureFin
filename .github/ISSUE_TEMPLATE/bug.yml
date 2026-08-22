@@ -1,0 +1,105 @@
+name: Fallo
+description: Algo no funciona como debería.
+title: "[fallo]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por dedicar un rato a esto.
+
+        **Antes de pegar nada**: este repositorio es público y lo que escribas aquí queda para
+        siempre. Los registros, las capturas y los ficheros CSV de tu banco llevan datos
+        financieros tuyos —IBAN, nombres, importes, comercios—. Repásalos y sustituye lo que
+        identifique a alguien por valores inventados. Un fallo se reproduce igual de bien con
+        `SUPERMERCADO ALMENDRO 21` y `123,45 €`.
+
+        Busca también entre los issues abiertos por si ya está reportado.
+
+  - type: input
+    id: version
+    attributes:
+      label: Versión de FutureFin
+      description: La ves en la propia app, en «Ajustes → General → Estado del sistema».
+      placeholder: "3.9.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: despliegue
+    attributes:
+      label: Cómo lo tienes desplegado
+      options:
+        - Docker Compose (lo normal)
+        - docker run a mano
+        - Desarrollo (cargo run + npm run dev:web)
+        - Otro (explícalo abajo)
+    validations:
+      required: true
+
+  - type: textarea
+    id: esperado
+    attributes:
+      label: Qué esperabas que pasara
+      placeholder: |
+        Al guardar el activo, el patrimonio neto del Resumen debería subir en 1.000 €.
+    validations:
+      required: true
+
+  - type: textarea
+    id: ocurrido
+    attributes:
+      label: Qué pasó en realidad
+      description: >
+        Si es una cifra que no cuadra, escribe la que sale y la que debería salir. Los errores de
+        cálculo de este proyecto son silenciosos: el número parece razonable y está mal, así que
+        el número concreto es la mitad del diagnóstico.
+      placeholder: |
+        El Resumen sigue mostrando el mismo patrimonio. Al recargar la página, aparece.
+    validations:
+      required: true
+
+  - type: textarea
+    id: pasos
+    attributes:
+      label: Pasos para reproducirlo
+      placeholder: |
+        1. Ir a Activos.
+        2. Crear un activo de tipo «Fondo» con valor 1.000 €.
+        3. Volver a Resumen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Registros
+      description: >
+        `docker compose logs futurefin` (con Compose) o `docker logs futurefin` (con `docker run`).
+        Pega el tramo de alrededor del fallo, no el arranque entero.
+        **Repásalos antes de pegarlos**: una URL o una consulta puede llevar datos tuyos.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: entorno
+    attributes:
+      label: Dónde ocurre
+      description: >
+        Solo si viene al caso: navegador y versión, móvil o escritorio, tema claro u oscuro, y si
+        tienes la app detrás de un proxy inverso.
+      placeholder: "Firefox 141, escritorio, tema oscuro, detrás de Nginx."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmaciones
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: He revisado que lo que pego no lleva datos financieros ni personales reales.
+          required: true
+        - label: He buscado si ya hay un issue abierto sobre esto.
+          required: true

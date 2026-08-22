@@ -143,7 +143,7 @@ pub(crate) async fn require_mcp_write(
     if !enabled {
         return Err(ApiError::BadRequest(
             "mcp_write_disabled: la escritura vía MCP está desactivada en esta instalación \
-             (Ajustes → MCP, solo el owner puede activarla)"
+             (Ajustes → Integraciones, solo el propietario puede activarla)"
                 .into(),
         ));
     }

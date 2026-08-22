@@ -6,7 +6,7 @@ use crate::state::AppState;
 use axum::extract::Extension;
 use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -364,6 +364,9 @@ pub struct InstallationSnapshot {
     /// Kill-switch vivo de la escritura vía MCP (issue #3): con `false` las tools de escritura
     /// devuelven error tipado en el siguiente request. Editable solo por el owner (Ajustes → MCP).
     pub mcp_write_enabled: bool,
+    /// `false` mientras el hogar no haya pasado por el asistente de primera vez. La SPA lo usa
+    /// para lanzarlo; el owner puede volver a abrirlo cuando quiera desde Ajustes.
+    pub onboarding_completed: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -415,6 +418,15 @@ pub struct PatchInstallationBody {
     /// Omit = unchanged. Kill-switch de la escritura vía MCP (owner-only como todo el PATCH).
     #[serde(default)]
     pub mcp_write_enabled: Option<bool>,
+    /// Omit = unchanged. Divisa base del hogar (EUR, USD o GBP). **Una sola por instalación**:
+    /// FutureFin no convierte entre divisas ni las mezcla. Hasta 3.10.0 estaba clavada a EUR en
+    /// el código y no había forma de cambiarla — el único selector que existía era código muerto
+    /// e inalcanzable, así que un usuario fuera de la eurozona se quedaba en euros para siempre.
+    #[serde(default)]
+    pub base_currency: Option<String>,
+    /// Omit = unchanged. `true` cierra el asistente de primera vez; `false` lo vuelve a abrir.
+    #[serde(default)]
+    pub onboarding_completed: Option<bool>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -426,6 +438,7 @@ struct InstallationMemberRow {
     show_age_mode: String,
     fire_settings: Option<SqlxJson<FireSettings>>,
     mcp_write_enabled: bool,
+    onboarding_completed_at: Option<DateTime<Utc>>,
     role: String,
 }
 
@@ -440,9 +453,26 @@ fn installation_access_from_row(r: InstallationMemberRow) -> Result<Installation
             show_age_mode: r.show_age_mode,
             fire_settings: resolve_fire_settings(r.fire_settings.map(|j| j.0)),
             mcp_write_enabled: r.mcp_write_enabled,
+            onboarding_completed: r.onboarding_completed_at.is_some(),
         },
         role,
     })
+}
+
+/// Divisa base del hogar. Una sola por instalación: FutureFin no convierte ni mezcla divisas.
+///
+/// La usa el import de CSV para decidir qué filas puede aceptar. Antes ese control estaba a fuego
+/// en `"EUR"`, así que una instalación en libras no podía importar sus propios extractos.
+pub(crate) async fn installation_base_currency(
+    pool: &PgPool,
+    installation_id: Uuid,
+) -> Result<String, ApiError> {
+    let cur: String =
+        sqlx::query_scalar(r#"SELECT base_currency FROM installation WHERE id = $1"#)
+            .bind(installation_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(cur)
 }
 
 fn normalize_currency(code: &str) -> Result<String, ApiError> {
@@ -567,6 +597,65 @@ pub(crate) async fn bootstrap_installation_as_owner_if_empty(
     .execute(&mut **tx)
     .await?;
 
+    seed_default_categories(tx, iid).await?;
+
+    Ok(())
+}
+
+/// Juego de categorías con el que arranca un hogar nuevo.
+///
+/// La migración original decía «No server-side seeding; clients create categories as needed», y el
+/// resultado era una app que no se podía usar recién instalada: sin categorías, `AssetsView`
+/// **escondía** el botón de añadir y la única pista era una miga de pan de dos palabras
+/// («Activos · Ajustes → Categorías») que ni siquiera era un enlace. Sembrar es más honesto que
+/// pedirle a alguien que adivine el orden de los pasos.
+///
+/// Son un punto de partida, no un dogma: se renombran y se borran desde Ajustes como cualquier
+/// otra. Por eso la lista es corta — cubre lo que casi todo el mundo tiene y deja fuera lo que
+/// depende de cada uno.
+const DEFAULT_CATEGORIES: &[(&str, &[&str])] = &[
+    ("asset", &["Cuenta corriente", "Ahorro", "Inversión", "Inmuebles"]),
+    ("liability", &["Hipoteca", "Préstamo", "Tarjeta de crédito"]),
+    ("income", &["Nómina", "Otros ingresos"]),
+    (
+        "expense",
+        &[
+            "Vivienda",
+            "Supermercado",
+            "Suministros",
+            "Transporte",
+            "Ocio",
+            "Salud",
+            "Otros gastos",
+        ],
+    ),
+];
+
+/// Inserta `DEFAULT_CATEGORIES` en la instalación recién creada, dentro de la MISMA transacción
+/// que la crea: o hay hogar con categorías, o no hay hogar.
+///
+/// `ON CONFLICT DO NOTHING` sobre el único `(installation_id, scope, name)`: la función solo se
+/// llama al crear la instalación, pero si algún día se reutiliza no debe romper por un nombre que
+/// ya exista.
+pub(crate) async fn seed_default_categories(
+    tx: &mut Transaction<'_, Postgres>,
+    installation_id: Uuid,
+) -> Result<(), ApiError> {
+    for (scope, names) in DEFAULT_CATEGORIES {
+        for (i, name) in names.iter().enumerate() {
+            sqlx::query(
+                r#"INSERT INTO categories (installation_id, scope, name, sort_index)
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT (installation_id, scope, name) DO NOTHING"#,
+            )
+            .bind(installation_id)
+            .bind(scope)
+            .bind(name)
+            .bind(i as i32)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -593,7 +682,8 @@ pub async fn get_installation_session_context(
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
-                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled, m.role
+                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled,
+                  i.onboarding_completed_at, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -641,7 +731,8 @@ pub(crate) async fn installation_access_core(
     let row: Option<InstallationMemberRow> = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
-                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled, m.role
+                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled,
+                  i.onboarding_completed_at, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -852,16 +943,19 @@ pub async fn patch_my_installation(
         && body.annual_inflation_assumption_percent.is_none()
         && body.fire_settings.is_none()
         && body.mcp_write_enabled.is_none()
+        && body.base_currency.is_none()
+        && body.onboarding_completed.is_none()
     {
         return Err(ApiError::BadRequest(
-            "patch_empty: provide at least one of calendar_tz, show_age_mode, annual_inflation_assumption_percent, fire_settings, mcp_write_enabled".into(),
+            "patch_empty: provide at least one of calendar_tz, show_age_mode, annual_inflation_assumption_percent, fire_settings, mcp_write_enabled, base_currency, onboarding_completed".into(),
         ));
     }
 
     let row_before: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
-                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled, m.role
+                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled,
+                  i.onboarding_completed_at, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -914,19 +1008,36 @@ pub async fn patch_my_installation(
 
     let new_mcp_write = body.mcp_write_enabled.unwrap_or(row_before.mcp_write_enabled);
 
+    let new_currency = match &body.base_currency {
+        None => row_before.base_currency.clone(),
+        Some(raw) => normalize_currency(raw)?,
+    };
+
+    // `true` sella el momento; `false` lo borra y el asistente vuelve a salir. Reenviar `true`
+    // sobre un hogar ya configurado no mueve la fecha original: es un estado, no un contador.
+    let new_onboarding_at = match body.onboarding_completed {
+        None => row_before.onboarding_completed_at,
+        Some(true) => row_before.onboarding_completed_at.or_else(|| Some(Utc::now())),
+        Some(false) => None,
+    };
+
     sqlx::query(
         r#"UPDATE installation SET calendar_tz = $1,
                show_age_mode = $2,
                annual_inflation_assumption_percent = $3,
                fire_settings = $4,
-               mcp_write_enabled = $5
-           WHERE id = $6"#,
+               mcp_write_enabled = $5,
+               base_currency = $6,
+               onboarding_completed_at = $7
+           WHERE id = $8"#,
     )
     .bind(&new_tz)
     .bind(&new_show_age)
     .bind(new_ann_inf)
     .bind(new_fire_settings_json)
     .bind(new_mcp_write)
+    .bind(&new_currency)
+    .bind(new_onboarding_at)
     .bind(iid)
     .execute(&state.pool)
     .await?;
@@ -934,7 +1045,8 @@ pub async fn patch_my_installation(
     let row: InstallationMemberRow = sqlx::query_as(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
-                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled, m.role
+                  i.show_age_mode, i.fire_settings, i.mcp_write_enabled,
+                  i.onboarding_completed_at, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -993,9 +1105,10 @@ pub async fn setup_installation(
         r#"INSERT INTO installation (
                base_currency,
                show_age_mode,
-               calendar_tz
+               calendar_tz,
+               onboarding_completed_at
            )
-           VALUES ($1, $2, $3)
+           VALUES ($1, $2, $3, now())
            RETURNING id"#,
     )
     .bind(&currency)
@@ -1014,6 +1127,8 @@ pub async fn setup_installation(
     .execute(&mut *tx)
     .await?;
 
+    seed_default_categories(&mut tx, iid).await?;
+
     tx.commit().await?;
 
     Ok((
@@ -1027,6 +1142,8 @@ pub async fn setup_installation(
                 show_age_mode: body.show_age_mode,
                 fire_settings: default_fire_settings(),
                 mcp_write_enabled: true,
+                // Este endpoint ES la configuración inicial, así que el hogar nace configurado.
+                onboarding_completed: true,
             },
             role: MembershipRole::Owner,
         }),

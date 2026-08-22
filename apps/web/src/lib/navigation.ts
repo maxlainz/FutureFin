@@ -14,14 +14,27 @@ export type TabId =
   | "retirement"
   | "settings";
 
+/**
+ * Sub-pestañas de Ajustes, reorganizadas en 3.10.0.
+ *
+ * Antes eran ocho y estaban partidas por *dónde vive el dato* en vez de por *qué quiere hacer el
+ * usuario*: la sub-pestaña «Jubilación» contenía SOLO los tramos de IRPF mientras el SWR y el
+ * objetivo FIRE vivían en la PESTAÑA «Jubilación» — dos cosas con el mismo nombre y mitades del
+ * mismo concepto. «Proyección» mezclaba un supuesto económico (inflación), una preferencia de
+ * visualización (modo edad) y el modo del motor bajo una sola cabecera. Y el propietario
+ * aterrizaba en «Usuarios» → «Nadie pendiente», mientras el resto aterrizaba en «MCP», la página
+ * más técnica de la app.
+ *
+ * Ahora: todo el plan en un sitio, lo técnico agrupado en «Integraciones», y la primera pantalla
+ * es la que casi todo el mundo viene a tocar.
+ */
 export type SettingsSubTabId =
-  | "access"
-  | "mcp"
-  | "calendar"
-  | "projection"
-  | "retirement"
+  | "general"
+  | "plan"
   | "categories"
   | "history"
+  | "access"
+  | "integrations"
   | "data";
 
 export const TABS: { id: TabId; label: string }[] = [
@@ -49,26 +62,36 @@ export const TAB_PATH: Record<TabId, string> = {
 };
 
 export const SETTINGS_SUBTAB_SLUG: Record<SettingsSubTabId, string> = {
-  // El slug `acceso` se conserva aunque la pestaña se llame «Usuarios»: URLs guardadas.
-  access: "acceso",
-  mcp: "mcp",
-  calendar: "calendario",
-  projection: "proyeccion",
-  retirement: "jubilacion",
+  general: "general",
+  plan: "plan",
   categories: "categorias",
   history: "historico",
+  access: "usuarios",
+  integrations: "integraciones",
   data: "datos",
 };
 
+/**
+ * Slugs de antes de la reorganización de 3.10.0 → sub-pestaña que los recoge ahora. Existe para
+ * que un enlace guardado no acabe silenciosamente en la primera pestaña, que es lo que hace el
+ * canonicalizador con una ruta que no reconoce.
+ */
+const LEGACY_SUBTAB_SLUGS: Record<string, SettingsSubTabId> = {
+  acceso: "access",
+  mcp: "integrations",
+  calendario: "general",
+  proyeccion: "plan",
+  jubilacion: "plan",
+};
+
 export const SETTINGS_SUBTAB_LABEL: Record<SettingsSubTabId, string> = {
-  access: "Usuarios",
-  mcp: "MCP",
-  calendar: "Calendario",
-  projection: "Proyección",
-  retirement: "Jubilación",
+  general: "General",
+  plan: "Plan",
   categories: "Categorías",
   history: "Histórico",
-  data: "Datos y sistema",
+  access: "Usuarios",
+  integrations: "Integraciones",
+  data: "Copias de seguridad",
 };
 
 export function normalizeAppPath(pathname: string): string {
@@ -103,7 +126,7 @@ export function settingsSubTabFromPathname(pathname: string): SettingsSubTabId |
   for (const [id, s] of entries) {
     if (s === slug) return id;
   }
-  return null;
+  return LEGACY_SUBTAB_SLUGS[slug] ?? null;
 }
 
 export function settingsSubTabPath(id: SettingsSubTabId): string {

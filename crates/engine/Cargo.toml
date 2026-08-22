@@ -3,6 +3,9 @@ name = "futurefin-engine"
 version = "1.0.0"
 edition = "2021"
 publish = false
+license = "AGPL-3.0-only"
+repository = "https://github.com/maxlainz/FutureFin"
+authors = ["Max Lainz"]
 description = "Projection and FIRE simulation"
 
 [dependencies]

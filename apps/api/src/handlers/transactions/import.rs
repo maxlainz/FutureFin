@@ -9,6 +9,7 @@
 //! contrato en `transactions/mod.rs`.
 
 use crate::error::ApiError;
+use crate::handlers::installation::installation_base_currency;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
 use crate::handlers::session::require_session_user;
@@ -159,6 +160,7 @@ pub async fn import_preview(
 
     let rules = load_rules(&state.pool, iid, user.id.0).await?;
     let cat_names = load_category_names(&state.pool, iid).await?;
+    let base_currency = installation_base_currency(&state.pool, iid).await?;
     let transfer = transfer_flags(&rows);
 
     let fingerprints: Vec<String> = rows
@@ -192,7 +194,7 @@ pub async fn import_preview(
             precat_count += 1;
         }
         let category_name = category_id.and_then(|id| cat_names.get(&id).cloned());
-        let currency_warning = r.currency != "EUR";
+        let currency_warning = r.currency != base_currency;
         if currency_warning {
             cur_warn_count += 1;
         }
@@ -280,6 +282,7 @@ pub async fn import_confirm(
 
     // Validación temprana del `account_asset_id` y `original_filename`.
     assert_asset_in_installation(&state.pool, iid, body.account_asset_id).await?;
+    let base_currency = installation_base_currency(&state.pool, iid).await?;
     let original_filename = match &body.original_filename {
         Some(f) => {
             let t = f.trim();
@@ -341,9 +344,9 @@ pub async fn import_confirm(
         }
 
         // Validaciones de la fila a importar.
-        if r.currency != "EUR" {
+        if r.currency != base_currency {
             return Err(ApiError::BadRequest(format!(
-                "currency_not_eur: row {i} has currency '{}' (only EUR is supported)",
+                "currency_mismatch: row {i} has currency '{}' but this installation keeps its books in {base_currency}",
                 r.currency
             )));
         }

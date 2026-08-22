@@ -31,5 +31,15 @@
     "typescript-eslint": "^8.18.0",
     "vite": "^6.0.0",
     "vitest": "^2.1.9"
-  }
+  },
+  "description": "Interfaz web de FutureFin",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maxlainz/FutureFin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/maxlainz/FutureFin/issues"
+  },
+  "homepage": "https://github.com/maxlainz/FutureFin#readme"
 }

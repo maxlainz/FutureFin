@@ -1,0 +1,60 @@
+name: Pregunta
+description: Dudas de uso, de instalación o sobre cómo se calcula una cifra.
+title: "[pregunta]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de preguntar, mira si ya está contestado en la documentación:
+
+        - [Instalación](https://github.com/maxlainz/FutureFin/blob/main/docs/instalacion.md)
+        - [Actualizar](https://github.com/maxlainz/FutureFin/blob/main/docs/actualizar.md)
+        - [Configuración](https://github.com/maxlainz/FutureFin/blob/main/docs/configuracion.md)
+        - [Copias de seguridad](https://github.com/maxlainz/FutureFin/blob/main/docs/backups.md)
+        - [Conectar Claude](https://github.com/maxlainz/FutureFin/blob/main/docs/mcp.md)
+        - [Desarrollo](https://github.com/maxlainz/FutureFin/blob/main/docs/desarrollo.md)
+
+        Dentro de la app, muchas cifras tienen un icono de ayuda al lado que explica con qué base
+        y con qué ventana se calculan.
+
+        Este repositorio es público: no pegues capturas ni cifras de tu instalación.
+
+  - type: textarea
+    id: pregunta
+    attributes:
+      label: Tu pregunta
+    validations:
+      required: true
+
+  - type: textarea
+    id: contexto
+    attributes:
+      label: Contexto
+      description: >
+        Qué estabas intentando hacer y qué has mirado ya. Si la duda es sobre una cifra, di cuál y
+        en qué pantalla la ves.
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Versión de FutureFin
+      description: >
+        Solo si la pregunta va del comportamiento de la app. La ves en
+        «Ajustes → General → Estado del sistema».
+      placeholder: "3.9.0"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmaciones
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: He mirado la documentación enlazada arriba.
+          required: true
+        - label: Lo que pego no lleva datos financieros ni personales reales.
+          required: true

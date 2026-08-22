@@ -1,0 +1,6 @@
+# Propiedad del código de FutureFin.
+# Cada pull request que toque un fichero cubierto por una regla pide automáticamente
+# la revisión de quien figure aquí. La última regla que coincide es la que manda.
+
+# Todo el repositorio.
+*   @maxlainz

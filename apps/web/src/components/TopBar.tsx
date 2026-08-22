@@ -21,6 +21,7 @@ export function TopBar({
   healthError,
   onMobileMenuOpen,
   extras,
+  showNav = true,
 }: {
   activeTab: TabId | null;
   navigate: (path: string) => void;
@@ -29,6 +30,9 @@ export function TopBar({
   onMobileMenuOpen: () => void;
   /** Contenido extra anclado a la derecha (después de las pills). */
   extras?: ReactNode;
+  /** `false` oculta pestañas y hamburguesa. Se usa mientras el usuario no tiene acceso al hogar:
+   *  antes las nueve pills se pintaban igual y no hacían nada al pulsarlas — navegación muerta. */
+  showNav?: boolean;
 }) {
   const healthOk = !!health && !healthError;
   const healthTitle = healthError
@@ -50,6 +54,7 @@ export function TopBar({
         />
       </div>
 
+      {showNav ? (
       <nav className="ff-topbar-nav" aria-label="Secciones">
         {TABS.map((t) => (
           <a
@@ -75,18 +80,21 @@ export function TopBar({
           </a>
         ))}
       </nav>
+      ) : null}
 
       {extras ? <div className="ff-topbar-extras">{extras}</div> : null}
 
-      <button
-        type="button"
-        className="ff-topbar-mobile-toggle"
-        aria-label="Abrir menú"
-        title="Menú"
-        onClick={onMobileMenuOpen}
-      >
-        <MenuIcon style={{ width: "1rem", height: "1rem" }} />
-      </button>
+      {showNav ? (
+        <button
+          type="button"
+          className="ff-topbar-mobile-toggle"
+          aria-label="Abrir menú"
+          title="Menú"
+          onClick={onMobileMenuOpen}
+        >
+          <MenuIcon style={{ width: "1rem", height: "1rem" }} />
+        </button>
+      ) : null}
     </header>
   );
 }

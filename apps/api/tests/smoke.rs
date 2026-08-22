@@ -161,3 +161,116 @@ async fn validation_errors_carry_their_code() {
     assert_eq!(resp.status, http::StatusCode::BAD_REQUEST);
     assert_eq!(resp.json()["code"], "password_length");
 }
+
+// ---------------------------------------------------------------------------
+// Arranque en frío (3.10.0)
+// ---------------------------------------------------------------------------
+
+/// El hogar nace usable. Antes de 3.10.0 nacía con CERO categorías, y como la vista de Activos
+/// **escondía** el botón de añadir cuando no había ninguna, el primer usuario se encontraba una
+/// pantalla sin salida cuya única pista era la miga de pan «Activos · Ajustes → Categorías».
+#[tokio::test]
+async fn a_fresh_installation_can_create_an_asset_right_away() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let cats = app.get_with_cookie("/v1/categories", &owner.cookie).await;
+    let list = cats.json();
+    let list = list.as_array().expect("categorías");
+    assert!(!list.is_empty(), "un hogar nuevo debe nacer con categorías");
+    for scope in ["asset", "liability", "income", "expense"] {
+        assert!(
+            list.iter().any(|c| c["scope"] == scope),
+            "falta al menos una categoría de scope {scope}: {list:?}"
+        );
+    }
+
+    // Y con ellas se puede crear un activo sin pasar antes por Ajustes.
+    let asset_cat = list
+        .iter()
+        .find(|c| c["scope"] == "asset")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let created = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "category_id": asset_cat,
+                "name": "Cuenta nómina",
+                "current_value": "1000",
+                "is_liquid": true,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+}
+
+/// El asistente de primera vez tiene estado propio: un hogar recién creado lo pide, y el owner
+/// puede cerrarlo y volver a abrirlo.
+#[tokio::test]
+async fn onboarding_state_round_trips() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let ctx = app
+        .get_with_cookie("/v1/installation/session-context", &owner.cookie)
+        .await;
+    assert_eq!(
+        ctx.json()["access"]["installation"]["onboarding_completed"],
+        false,
+        "un hogar nuevo arranca con el asistente pendiente"
+    );
+
+    let done = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({ "onboarding_completed": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(done.status, http::StatusCode::OK, "{done:?}");
+    assert_eq!(done.json()["installation"]["onboarding_completed"], true);
+
+    // Reabrirlo desde Ajustes.
+    let reopen = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({ "onboarding_completed": false }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(reopen.json()["installation"]["onboarding_completed"], false);
+}
+
+/// La divisa base dejó de estar clavada a EUR: es configurable, pero **una sola por instalación**.
+#[tokio::test]
+async fn base_currency_is_configurable_and_validated() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let ok = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({ "base_currency": "gbp" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(ok.status, http::StatusCode::OK, "{ok:?}");
+    assert_eq!(
+        ok.json()["installation"]["base_currency"], "GBP",
+        "se normaliza a mayúsculas"
+    );
+
+    let bad = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({ "base_currency": "bitcoin" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(bad.status, http::StatusCode::BAD_REQUEST);
+    assert_eq!(bad.json()["code"], "currency_format_invalid");
+}
