@@ -246,7 +246,25 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 
 **Branches:**
 - `main` — rama de producción y de publicación. La imagen Docker se construye y publica **desde `main`** (el workflow `publish-image.yml` vive aquí). Es la rama por defecto.
-- `dev` — desarrollo activo, **ramificada de `main`**. `main` es un **espejo completo de `dev`**: contiene exactamente lo mismo (CLAUDE.md, .claude/, .github/, workflows, código). No hay divergencia de `.gitignore` ni archivos exclusivos de una rama.
+- `dev` — desarrollo activo, **ramificada de `main`**.
+
+> ### ⚠️ El modelo de ramas cambia en 4.0.0 — y el guard ya está puesto
+>
+> Hasta ahora `main` era un **espejo completo de `dev`**, `CLAUDE.md` y `.claude/` incluidos. Al
+> hacer público el repositorio eso deja de valer: **`main` no publicará documentación interna**.
+> `.claude/` y `CLAUDE.md` viven solo en `dev`.
+>
+> El job `main-guard` de `ci.yml` **ya lo comprueba**, y hoy `origin/main` tiene 30 ficheros de
+> `.claude/` más `CLAUDE.md`. Es decir: **el primer push a `main` saldrá en rojo** hasta que se
+> haga la limpieza. No es un fallo del guard, es una dependencia de orden — el guard implementa
+> una política que aún no está en vigor.
+>
+> El release a `main` pasará a hacerse con un script que mergea `dev` y después retira esas rutas
+> (`git merge --no-ff --no-commit dev`, `git rm -r --cached --ignore-unmatch .claude CLAUDE.md`,
+> abortar si queda algún conflicto fuera de esas rutas, y commit). Los conflictos
+> «modificado/borrado» de `.claude/` se resuelven **siempre** borrando.
+>
+> Hasta que eso se ejecute: **no mergees a `main`**.
 
 **Releases:**
 1. Desarrollar en `dev`, hacer commit y push.

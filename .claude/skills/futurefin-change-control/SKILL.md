@@ -16,7 +16,7 @@ description: >
 # FutureFin Change Control
 
 How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-20 for
-the 3.8.0 train** (issue #4, ergonomía MCP: **28** integration-test files in `apps/api/tests/`
+the 3.8.0 train** (issue #4, ergonomía MCP: **30** integration-test files in `apps/api/tests/`
 — el nuevo es `allocation_resolution.rs` —, **40** migraciones **sin cambios** (ningún bloque
 del tren añade columnas), `.ffbackup` sigue en **8**, y el catálogo MCP pasa de 47 a **50**
 tools. `apps/api/Cargo.toml` pasa a `3.8.0`, la versión que publica el tren). Antes,
@@ -24,8 +24,8 @@ tools. `apps/api/Cargo.toml` pasa a `3.8.0`, la versión que publica el tren). A
 a `budget_liability_quotas.rs`, 5 → 10 tests; **40** migraciones y **27** ficheros de test sin
 cambios; `.ffbackup` sigue en **8** — la reforma no toca datos almacenados). Antes, **2026-08-19 for
 the 3.6.0 train** (conciliación de transferencias + paridad MCP; 3.5.0 se cerró en el CHANGELOG
-pero nunca se tagueó — 3.6.0 es la imagen que lo publica todo): **40** migration files in
-`apps/api/migrations/` (la 40ª es `20260819120000_transactions_transfer_reconciliation`), **27**
+pero nunca se tagueó — 3.6.0 es la imagen que lo publica todo): **42** migration files in
+`apps/api/migrations/` (la 42ª es `20260822120000_installation_onboarding`), **27**
 integration-test files in `apps/api/tests/` (nuevo `transactions_reconcile.rs`), `.ffbackup`
 `CURRENT_SCHEMA_VERSION` = **8** (v8 añade el par conciliado por índice + los rechazos del
 auto-matcher; los ficheros antiguos siguen importando vía `payload_v7_to_v8`). All paths below
@@ -433,7 +433,7 @@ for v3.1.0** (embedded OAuth 2.1; `CURRENT_SCHEMA_VERSION` unchanged), against `
 `.github/testdata/` and `scripts/`. Re-verify before trusting:
 
 - Current version: `grep '^version' apps/api/Cargo.toml` (**3.8.0** on 2026-08-21; 3.5.0 nunca se publicó)
-- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**40** on 2026-08-19 — la 40ª es `20260819120000_transactions_transfer_reconciliation`)
+- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**42** on 2026-08-22 — la 42ª es `20260822120000_installation_onboarding`)
 - Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**28** on 2026-08-21 — el alta de 3.8.0 es `allocation_resolution.rs`); test-fn count: `grep -c "#\[tokio::test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (312 on 2026-08-21 tras el tren del issue #4; 289 at 3.7.0, 284 at 3.6.0, 283 at 3.5.0)
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: rust / web / docker-stack) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list
