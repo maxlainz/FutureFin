@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Publica `dev` en `main` para una release.
+#
+# Existe porque el merge a `main` tiene dos trampas que se repiten en CADA release y que ya
+# mordieron en la 4.0.0:
+#
+#   1. `git merge dev` a secas escribe «Merge branch 'dev'», que incumple la convención de commits
+#      del repo y es lo primero que ve quien abre la rama pública.
+#   2. `main` no publica `CLAUDE.md` ni `.claude/` (documentación de desarrollo, vive solo en
+#      `dev`), así que cada merge produce conflictos «modificado/borrado» en esas rutas. Se
+#      resuelven SIEMPRE borrando — pero hacerlo a mano invita a resolver mal el día que haya
+#      prisa, y el job `main-guard` de CI solo avisa después de empujar.
+#
+# Uso:
+#   ./scripts/release-to-main.sh 4.1.0 "una frase sobre la versión"
+#
+# No taguea ni empuja: eso lo decides tú después de mirar el resultado.
+set -euo pipefail
+
+VERSION="${1:?falta la versión, p. ej. 4.1.0}"
+SUMMARY="${2:?falta una frase que resuma la versión}"
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$repo_root"
+
+# Rutas que `main` nunca publica. Si añades otra, añádela también al job `main-guard` de ci.yml.
+PRIVATE_PATHS=(CLAUDE.md .claude)
+
+[ -z "$(git status --porcelain)" ] || {
+  echo "ERROR: el árbol tiene cambios sin commitear. Guárdalos antes de publicar." >&2
+  exit 1
+}
+
+echo "== comprobaciones previas =="
+./scripts/audit-releases.sh --version
+./scripts/scan-sensitive.sh
+
+cargo_version="$(grep -m1 '^version' apps/api/Cargo.toml | cut -d'"' -f2)"
+[ "$cargo_version" = "$VERSION" ] || {
+  echo "ERROR: apps/api/Cargo.toml está en $cargo_version y pides publicar $VERSION." >&2
+  exit 1
+}
+
+git checkout dev
+git checkout main
+
+echo "== merge =="
+# `|| true`: los conflictos de PRIVATE_PATHS son esperados y se resuelven abajo.
+git merge --no-ff --no-commit dev -m "chore(release): $VERSION — $SUMMARY" || true
+
+git rm -r -q --cached --ignore-unmatch "${PRIVATE_PATHS[@]}"
+rm -rf "${PRIVATE_PATHS[@]}"
+
+# Cualquier conflicto FUERA de esas rutas es real y hay que mirarlo a mano.
+remaining="$(git diff --name-only --diff-filter=U || true)"
+if [ -n "$remaining" ]; then
+  echo "ERROR: conflictos que no son documentación interna — resuélvelos a mano:" >&2
+  printf '  %s\n' $remaining >&2
+  exit 1
+fi
+
+git commit -m "chore(release): $VERSION — $SUMMARY
+
+$(printf 'Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>')"
+
+offenders="$(git ls-files -- "${PRIVATE_PATHS[@]}")"
+[ -z "$offenders" ] || {
+  echo "ERROR: main seguiría publicando documentación interna:" >&2
+  printf '  %s\n' $offenders >&2
+  exit 1
+}
+
+echo
+echo "main listo en $(git rev-parse --short HEAD). Ahora, si te convence:"
+echo "  git push origin main"
+echo "  git push origin v$VERSION      # después de crear el tag"
+echo "  git checkout dev"

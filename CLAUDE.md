@@ -268,10 +268,11 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 
 **Releases:**
 
-> **El merge a `main` lleva mensaje propio.** `git merge dev` a secas genera
-> `Merge branch 'dev'`, que incumple la convención de commits del repo y además es lo primero
-> que se ve en la rama pública. Usa siempre:
-> `git merge --no-ff dev -m "chore(release): X.Y.Z — <una frase>"`.
+> **Usa `./scripts/release-to-main.sh X.Y.Z "<una frase>"`.** Hace el merge con mensaje propio
+> —`git merge dev` a secas escribe `Merge branch 'dev'`, que incumple la convención y es lo
+> primero que ve quien abre la rama pública— y resuelve los conflictos «modificado/borrado» de
+> `CLAUDE.md` y `.claude/`, que salen en CADA release porque `main` no los publica. Aborta si
+> aparece cualquier conflicto fuera de esas rutas.
 
 1. Desarrollar en `dev`, hacer commit y push.
 2. Bumpar versión en `apps/api/Cargo.toml` (sincronizar `Cargo.lock`) y añadir entrada en `CHANGELOG.md`.
