@@ -282,7 +282,7 @@ directamente — la protección lo rechaza, y ese es el objetivo.
 3. Taguear, por cualquiera de las dos vías:
    - **Desde local**: `git tag vX.Y.Z && git push origin vX.Y.Z` estando en `main`.
    - **Desde GitHub**, sin git local: lanzar `publish-image.yml` por `workflow_dispatch` con el tag y la casilla **«Crear el tag sobre main»** marcada. Existe porque un token acotado (el de un agente, por ejemplo) puede mergear a `main` pero recibe **403 al empujar un tag**, y entonces la versión queda subida en `main` sin imagen que la respalde. El workflow crea el tag él mismo y sigue construyendo en la misma ejecución; **no vale un workflow aparte**, porque un tag empujado con `GITHUB_TOKEN` no dispara `on: push: tags`.
-4. El tag dispara `publish-image.yml` (o la propia ejecución continúa, si lo creaste por dispatch): imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
+4. El tag dispara `publish-image.yml` (o la propia ejecución continúa, si lo creaste por dispatch): imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG. **El orden es estricto**: `vX.Y.Z` no construye hasta que el tag inmediatamente anterior tenga su Release (= su imagen); si la publicación anterior falló, las siguientes abortan en vez de publicar por encima del agujero. Encadenar releases sin esperar los builds es seguro por eso.
 
 Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKERHUB_USERNAME` +
 `DOCKERHUB_TOKEN`.
