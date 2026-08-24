@@ -307,6 +307,12 @@ PR, con un **barrido los martes ~06:30** que caza huérfanos si un evento se per
   imagen»); lo que no llega (vitest, eslint, `@types/*`, acciones) se mergea sin bump.
 - Los issues-informe que la rutina abre **se cierran solos** cuando todo lo que reportaban
   queda resuelto.
+- **Método de merge**: los PRs de Dependabot se mergean con **merge commit** (título = el del
+  PR), no con squash — un squash deja a `dependabot[bot]` como autor del commit visible en la
+  portada de `main`, y el owner no lo quiere. Los PRs propios de la rutina (releases, misión
+  toolchain) van con squash: su autor ya es el owner.
+- El **webhook es el disparo principal pero no está garantizado** (en el estreno no disparó
+  con el evento de merge); el barrido del martes es la red que siempre corre.
 
 Dos artefactos suyos que NO hay que «limpiar» a mano:
 
