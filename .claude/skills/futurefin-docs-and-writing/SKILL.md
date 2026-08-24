@@ -225,10 +225,9 @@ workflow", in order:
    it; committing Cargo.toml without the lock is a classic miss).
 3. Verify every entry in the new section meets the forensic bar (§3.2) and that every migration in
    the release has a §4.3 note.
-4. Full merge `dev` → `main` (`git checkout main && git merge dev`) — `main` is a complete mirror,
-   never partial file copies.
-5. Tag `vX.Y.Z` from `main` → `publish-image.yml` publishes `:X.Y.Z`, `:X.Y`, `:X`, `:latest`.
-6. Back to `dev`; keep it up to date with `main`.
+4. PR contra `main` con CI verde (no hay `dev` desde 4.0.1: una sola rama viva).
+5. **El merge del bump publica solo** (auto-tag on merge, 4.0.6): `publish-image.yml` espera la
+   CI del commit, crea `vX.Y.Z` y publica `:X.Y.Z`, `:X.Y`, `:X`, `:latest` (móviles por rango).
 
 SemVer signal: breaking API change ⇒ at least minor bump + explicit "breaking" entry (owner-endorsed
 rule; v1.2.0 is the precedent).

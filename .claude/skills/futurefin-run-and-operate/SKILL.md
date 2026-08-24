@@ -113,10 +113,13 @@ Two containers still in `docker ps`? You are running a 2.x compose file. Go to �
 
 ### 2.1 Where images come from
 
-`.github/workflows/publish-image.yml` publishes on every git tag matching `v[0-9]+.[0-9]+.[0-9]+`
-pushed to the repo (tags are cut **from `main`** per the release process), plus manual
-`workflow_dispatch` on an existing tag. It builds `apps/api/Dockerfile` for
-**linux/amd64 + linux/arm64** and pushes to BOTH registries:
+`.github/workflows/publish-image.yml` publishes three ways: **auto-tag on merge** (the normal
+path since 4.0.6 — every push to `main` whose `Cargo.toml` carries an untagged version waits for
+that commit's CI, creates the tag and builds in the same run; a bump-less merge is a seconds-long
+green no-op), an explicit git tag push matching `v[0-9]+.[0-9]+.[0-9]+`, or manual
+`workflow_dispatch` (rebuilds; with `create_tag`, a new version — idempotent if the tag already
+exists). It builds `apps/api/Dockerfile` for **linux/amd64 + linux/arm64** and pushes to BOTH
+registries:
 
 | Registry | Image |
 |---|---|
