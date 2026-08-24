@@ -268,8 +268,8 @@ the gate; do not look for a way around it. CLAUDE.md, "Releases":
 
 > 1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`) y añadir la sección `## [X.Y.Z]` a `CHANGELOG.md`. **La sección debe existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde ahí, y el job `rust` lo comprueba con `./scripts/audit-releases.sh --version`.
 > 2. PR → CI verde → merge a `main`.
-> 3. Taguear: `git tag vX.Y.Z && git push origin vX.Y.Z` desde `main`, **o** lanzar `publish-image.yml` por `workflow_dispatch` con la casilla «Crear el tag sobre main» (para quien no pueda empujar tags: un token acotado recibe 403). El workflow crea el tag y sigue en la misma ejecución — un workflow aparte NO serviría, porque un tag empujado con `GITHUB_TOKEN` no dispara `on: push: tags`.
-> 4. El tag dispara `publish-image.yml`: imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
+> 3. **El merge del bump ES la publicación** (auto-tag on merge, 4.0.6): `publish-image.yml` corre en cada push a `main`; con una versión sin tag en `Cargo.toml`, ese run espera la CI verde del commit, comprueba el orden estricto, **crea el tag después** (un bump con CI rota no deja tag huérfano) y construye. Merge sin bump = no-op verde. Vías manuales que quedan como fallback/reconstrucción: `git tag vX.Y.Z && git push origin vX.Y.Z` desde `main`, o el `workflow_dispatch` con «Crear el tag sobre main» — ahora **idempotente** (tag ya creado → termina verde sin construir). Un workflow aparte NO serviría, porque un tag empujado con `GITHUB_TOKEN` no dispara `on: push: tags`.
+> 4. `publish-image.yml` construye la imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
 
 **Dependency PRs are handled by a cloud routine** (webhook on Dependabot PR + Tuesday sweep).
 Its merge policy: patch/minor-in-range → 5 green checks suffice; **major or 0.x-minor → an
