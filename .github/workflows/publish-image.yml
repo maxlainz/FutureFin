@@ -486,10 +486,19 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.images.outputs.list }}
+          # `value=` EXPLÍCITO en los tres semver, nunca implícito: sin él, metadata-action
+          # deriva la versión de `github.ref` — que solo es un tag en los push de tag. En
+          # dispatches (ref=main) y en el auto-tag on merge (ref=refs/heads/main) los tres
+          # semver quedaban VACÍOS en silencio y solo se publicaba `:latest`. INCIDENTE
+          # (detectado 2026-08-24): toda versión publicada por dispatch desde 3.10.0
+          # (3.10.0, 4.0.1, 4.0.4, 4.0.5) salió sin su `:X.Y.Z` en ambos registries, y los
+          # móviles `:4`/`:4.0` se quedaron clavados en 4.0.0 — quien fijaba FUTUREFIN_TAG=4
+          # llevaba semanas congelado sin ningún error. El paso «la imagen responde por su
+          # tag» de abajo existe para que esta clase de fallo nunca vuelva a ser silenciosa.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.newest.outputs.value == 'true' }}
-            type=semver,pattern={{major}},enable=${{ steps.newest.outputs.value == 'true' }}
+            type=semver,pattern={{version}},value=${{ steps.ref.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.ref.outputs.tag }},enable=${{ steps.newest.outputs.value == 'true' }}
+            type=semver,pattern={{major}},value=${{ steps.ref.outputs.tag }},enable=${{ steps.newest.outputs.value == 'true' }}
             type=raw,value=latest,enable=${{ steps.newest.outputs.value == 'true' }}
           # Etiquetas OCI explícitas. La imagen solo llevaba la suya propia
           # (`com.futurefin.postgres.majors`, en el Dockerfile) y ninguna estándar.
@@ -543,6 +552,26 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ── El guard que faltaba: la imagen debe RESPONDER por su tag de versión ──
+      # `build-push-action` publica lo que salga de `meta` sin quejarse si los semver
+      # vinieron vacíos (ver INCIDENTE de arriba). Preguntar al registry por el manifest
+      # del tag exacto convierte ese silencio en un run rojo, antes de crear el Release.
+      - name: La imagen responde por su tag de versión
+        env:
+          TAG: ${{ steps.ref.outputs.tag }}
+          DOCKERHUB_ENABLED: ${{ steps.images.outputs.dockerhub }}
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'maxlainz/futurefin' }}
+        run: |
+          set -euo pipefail
+          v="${TAG#v}"
+          echo "Verificando ghcr.io/${{ github.repository_owner }}/futurefin:${v}…"
+          docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/futurefin:${v}" > /dev/null
+          if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
+            echo "Verificando ${DOCKERHUB_IMAGE}:${v}…"
+            docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${v}" > /dev/null
+          fi
+          echo "OK: la imagen ${v} responde en los registries publicados."
 
       # Solo después de que la imagen esté publicada: un Release que anuncie una
       # versión inexistente es peor que no tener Release. Las notas salen del
