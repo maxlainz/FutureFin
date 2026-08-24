@@ -443,11 +443,19 @@ jobs:
       # versión inexistente es peor que no tener Release. Las notas salen del
       # CHANGELOG vía `scripts/changelog-section.sh` — misma fuente de verdad que
       # el backfill manual de 3.0.0…3.8.0, para que no haya dos formatos.
+      # También en dispatch cuando se CREA el tag: ese caso es una versión nueva, no una
+      # reconstrucción, y sin Release el guard de orden estricto bloquearía a la siguiente
+      # versión para siempre. Pasó el 2026-08-24: las tres publicaciones del día fueron
+      # dispatches con create_tag, ninguna creó su Release, y hubo que crearlos a mano.
+      # El dispatch de RECONSTRUCCIÓN (sin create_tag) sigue sin tocar notas, que era la
+      # intención original del `if` — y el «ya existe, no lo toco» de abajo lo refuerza.
+      #
+      # TAG viene del resolve, no de github.ref_name: en un dispatch ref_name vale «main».
       - name: Publish GitHub Release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.ref.outputs.tag }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "el Release $TAG ya existe — no lo toco"
