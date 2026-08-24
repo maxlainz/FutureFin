@@ -59,6 +59,12 @@ debajo, colapsada, y el gráfico ocupa siempre todo el ancho y el alto disponibl
 
 ### Infraestructura del repositorio (no toca la imagen; viaja en este release)
 
+- **Auto-tag on merge** (PR #63): mergear un bump de versión a `main` publica solo —
+  `publish-image.yml` corre en cada push a `main`, y si `Cargo.toml` lleva una versión sin tag,
+  el mismo run espera la CI verde del commit, comprueba el orden estricto, crea el tag y
+  construye. Un merge sin bump es un no-op de segundos. El `workflow_dispatch` con «Crear el
+  tag» pasa a ser idempotente (tag ya existente → verde sin construir), así que el dispatch de
+  la rutina de dependencias no puede chocar con el auto-tag. Esta 4.0.6 es el estreno en vivo.
 - **La gestión de dependencias pasa a ser autónoma**: los PRs de Dependabot los procesa una
   rutina cloud disparada por webhook (con barrido de seguridad los martes). Los majors ya no
   quedan bloqueados para siempre: se mergean con una barra de evidencia (notas leídas, cada
