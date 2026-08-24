@@ -6,13 +6,25 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [4.0.3] - 2026-08-22
+## [4.0.1] - 2026-08-24
 
-**Qué cambia para ti: nada visible, pero conviene actualizar.** No se toca motor, API, interfaz ni
-esquema: solo suben las dependencias que van dentro de la imagen. Varias de ellas son parches de
-seguridad de la cadena de terceros, así que **la imagen nueva es la recomendada**.
+**Qué cambia para ti**: se actualizan las dependencias que van dentro de la imagen, varias de ellas
+parches de seguridad de la cadena de terceros. No se toca motor, API, interfaz ni esquema, así que
+actualizar es seguro y recomendable.
+
+Todo lo demás que hay aquí abajo es **cómo se desarrolla el proyecto**, no cómo funciona la app:
+interesa a quien contribuya, no a quien lo instala. Va en esta versión porque entró en `main` entre
+la 4.0.0 y esta imagen.
+
+> **Nota sobre la numeración.** Durante dos días el repositorio llegó a tener secciones de CHANGELOG
+> para una 4.0.1, una 4.0.2 y una 4.0.3 que **nunca se publicaron como imagen**: se bumpaba la
+> versión por cambios de documentación y de CI que no viajan en el artefacto. Se ha corregido
+> colapsándolas en esta única 4.0.1, que sí tiene imagen. La regla, desde ahora: **una versión, una
+> imagen**. Si un cambio no altera la imagen, no cambia la versión.
 
 ### Dependencias que viajan en la imagen
+
+Son la razón por la que esta versión existe.
 
 Del grupo `cargo-menores` (PR #42) — todas parche o menor, sin cambios de API:
 
@@ -36,12 +48,6 @@ De la cadena de build del frontend, que genera `apps/web/dist/`:
 
 Entraron en `main` en la misma tanda, pero son utillaje de test y lint, así que no cambian el
 binario ni los assets servidos: `brace-expansion` (PR #29) y `js-yaml` 4.1.1 → 4.3.1 (PR #30).
-
-## [4.0.2] - 2026-08-22
-
-**Qué cambia para ti: nada.** Igual que la 4.0.1, esto no toca motor, API, interfaz ni esquema, y
-**no hay imagen nueva**. Cambia cómo se desarrolla el proyecto, que es información para quien
-contribuya, no para quien lo instala.
 
 ### Una sola rama
 
@@ -72,13 +78,6 @@ respondía `200` a cualquiera.
 
 De paso, `.github/dependabot.yml` pierde las cuatro líneas de `target-branch` que se le habían
 añadido horas antes: con una sola rama, la de por defecto ya es el destino correcto.
-
-## [4.0.1] - 2026-08-22
-
-**Qué cambia para ti: nada.** La aplicación es bit a bit la misma que la 4.0.0 — no se toca el
-motor, ni la API, ni la interfaz, ni el esquema. Esta versión existe porque `main` es la única
-rama desde la que se publica, y varios arreglos de la infraestructura del repositorio no surtían
-efecto mientras vivieran solo en `dev`. **No hay imagen nueva que descargar.**
 
 ### El problema
 

@@ -244,7 +244,7 @@ Algunos cálculos viven duplicados a propósito (e.g. FIRE math — el cliente a
 
 ## CI
 
-CI existe: `.github/workflows/ci.yml` corre en push a `main` y en PR contra `main` (desde 4.0.2 hay una sola rama viva):
+CI existe: `.github/workflows/ci.yml` corre en push a `main` y en PR contra `main` (desde 4.0.1 hay una sola rama viva):
 
 > **4.0.0 — CI dejó de tener el agujero que esta página documentaba.** Hasta entonces el workflow
 > **no** corría los tests de integración contra Postgres (329 de los 447 de la suite), ni ESLint, ni
