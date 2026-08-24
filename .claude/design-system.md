@@ -161,9 +161,28 @@ Props clave:
 
 **Marcador circular**: el SVG usa `viewBox=containerW × height` medido con `ResizeObserver`, por lo que las unidades del viewBox = píxeles reales y los `<circle>` salen circulares aun con `preserveAspectRatio="none"` para las polylines.
 
-### `MiniProjectionLegend`
+### `ChartLegend` — [`components/charts/ChartLegend.tsx`](../apps/web/src/components/charts/ChartLegend.tsx)
 
-Leyenda discreta que acompaña al MiniProjection. Cada item: `{ label, color, dash? }`.
+Leyenda compartida de charts (4.0.6): la consumen el chart grande de Proyección, el
+MiniProjection del Resumen y el de Jubilación (la antigua `MiniProjectionLegend` se eliminó).
+HTML normal —nunca dentro de un `<svg>`— con `flex-wrap` real.
+
+- Props: `{ structural, assets?, collapsedCap?, size? ("sm"|"md"), className?, ariaLabel? }`.
+  Los items son `ChartLegendItem` (`lib/chart-legend.ts`): `{ key, label, color, swatch, title? }`
+  con `swatch ∈ line | dashed | area` y `color` SIEMPRE un token `var(--…)` (entra por la
+  custom property `--ff-legend-color`; el swatch de área usa `color-mix` 14 %/40 %, el mismo
+  tinte que las áreas del chart).
+- **Colapso**: las entradas `structural` se ven siempre; los `assets` se truncan a
+  `collapsedCap` con un chip «+N más» / «Ver menos» (`applyLegendCollapse` no esconde nunca
+  uno solo). Caps por ancho en `collapsedAssetLegendCap` (≤640 → 3, ≤720 → 4, resto → 6;
+  mini charts: `DEFAULT_LEGEND_ASSET_CAP` = 4). El estado expandido es efímero (se resetea al
+  montar, sin localStorage). Expandida, la lista scrollea dentro de `max-height: 8.5rem`.
+- **No interactiva** para series (decisión de producto): el único control es el chip.
+- El chip es un control denso de chart: queda **fuera del bump `--ff-touch-min`** a propósito
+  (mismo criterio que el carve-out de tablas), con `min-height: 2.25rem` propio en `≤640`.
+- Toda la lógica de modelo (orden por peak desc conservando el color de pintado, sufijo de
+  owner en duplicados, colapso, top-N del tooltip) vive PURA en
+  [`lib/chart-legend.ts`](../apps/web/src/lib/chart-legend.ts) y está testeada en Vitest.
 
 ## Componentes nuevos (UI)
 
@@ -189,10 +208,41 @@ Leyenda discreta que acompaña al MiniProjection. Cada item: `{ label, color, da
 
 ## Reglas para el chart de Proyección grande
 
-- **Composición intacta**: hover, zoom, leyenda, tooltips, dimensiones, planning markers, jubilación pill — todo idéntico a antes del rediseño. Solo se sustituyeron hex hardcoded por `var(--proj-*)`.
+- **Composición del rediseño V1 intacta salvo la leyenda**: hover, zoom, tooltips, dimensiones, planning markers, jubilación pill — idénticos a antes del rediseño (solo se sustituyeron hex hardcoded por `var(--proj-*)`). La leyenda se rediseñó en 4.0.6 (ver siguiente bullet).
+- **Leyenda FUERA del SVG** (4.0.6): vive en HTML (`ChartLegend`, ver §Componentes) debajo del plot, dentro de `.projection-chart-root` (columna flex: `.projection-chart-plot` con `flex:1` + leyenda). Motivos: (1) `flex-wrap` real del navegador en lugar de anchos estimados a mano (el viejo `legendCharPx=7.6` de `buildProjectionChartLayout` se parcheó una vez por solaparse y aun así dimensionaba con un orden de activos distinto al renderizado); (2) el plot deja de ceder altura a la leyenda — `mt` es constante y con N activos la leyenda colapsada cuesta ~2,2rem fijos (antes, 8 filas de leyenda dejaban el plot en ~12px); (3) el chip «+N más» es un `<button>` nativo fuera de la máquina de gestos pan/zoom del `<svg>`. El `ResizeObserver` del chart mide `.projection-chart-plot`, NO la raíz (si midiera la raíz, el viewBox incluiría la leyenda y el hover se desalinearía); `wrapRef` (la raíz) sigue siendo la base del tooltip absoluto.
+- **Etiquetas de activo con owner** (solo vista hogar): los nombres duplicados se desambiguan «Nombre · owner» (`buildAssetLegendItems`); las series solo-históricas (de snapshots, sin fila en `/v1/assets`) ni se sufijan ni vetan el sufijo de las actuales. El tooltip lista el top-5 por |valor| del mes + «Otros (k) — suma» (`topAssetTooltipRows`).
+- **Ticks X diezmados por ancho** (4.0.6): los builders de año/edad emiten un tick por año (55 en un horizonte de 90); `thinTicksFromEnd` recorta los ticks **visibles** a `projectionMaxXTicks(pw, mode)` (≥52px/etiqueta en plots <560, ≥34 en anchos) desde el final — el fin de la ventana siempre etiquetado, huecos uniformes. NUNCA diezmar sobre el horizonte completo: la ventana filtraría los supervivientes y un zoom se quedaría sin etiquetas.
+- **«Hoy» vive en la fila del eje X** (4.0.6): la etiqueta del divisor de hoy se alinea con las etiquetas de año (misma baseline y rotación), no flota sobre el plot pegada al subtítulo; cuando está visible, se apartan las etiquetas de año a <40px del divisor. El divisor vertical no cambia.
+- **Comportamiento móvil (≤640, `useIsMobile`)** (4.0.6): estilo MiniProjection pero navegable — (1) «Vista cercana» activada POR DEFECTO vía override efímero en `ProjectionView` (estado, no storage: el toggle funciona pero nunca pisa `PROJECTION_FOCUS_STORAGE_KEY` → escritorio conserva su memoria); (2) sin etiquetas del eje Y ni caption EUR (`hideYAxisLabels` → `ml=16`, el plot gana todo el margen; el valor exacto vive en el tooltip); (3) la 2.ª línea de meta se parte en dos (`compactHeader` reserva la altura). La vista cercana (todas las plataformas) deja **margen tras el último hito** (~12 %) para que la etiqueta del marcador «Jubilación» no quede pisada por el borde, y el suelo de los milestones es `mt+22` para que un hito pegado al techo del plot no pierda la mitad superior de su etiqueta por el clip.
 - **Tooltip independiente del tema**: forzado a `color: #fafafa !important` + bg `rgba(10,10,10,0.92)`. Antes usaba `var(--ff-frame)` que en oscuro daba texto oscuro sobre fondo oscuro.
-- **Leyenda con espaciado dinámico**: `legendCharPx=7.6` (era 6.5, subestimaba) y `legendBudgetWidth=0.66*pw` (era 0.6). Ver [`buildProjectionChartLayout`](../apps/web/src/lib/projection-chart.ts).
 - **Milestones con collision-avoidance**: si dos milestones quedan cerca horizontalmente, el segundo sube al siguiente "carril" (14px arriba) y la línea punteada se estira hasta la nueva `y2`. Ver [`ProjectionNetWorthChart.tsx`](../apps/web/src/views/ProjectionNetWorthChart.tsx) en el bloque `(() => { … lanes … })()`.
+
+## Paneles de Ajustes — norma de texto (4.0.6)
+
+Armonización pedida por el owner («no todos encajan, hay párrafos diferentes, iconografía que
+sobra»). TODO panel de Ajustes sigue esta plantilla; si añades uno nuevo, cópiala:
+
+1. **Título**: `h3.panel-title`, **sin icono** (los tres `panel-title-icon` de Integraciones se
+   retiraron junto con la clase; el patrón dominante siempre fue sin icono). `.panel-head-row`
+   SOLO cuando hay una acción a la derecha (botón); sin acción, `h3` a secas.
+2. **Descripción** (opcional): UNA `<p className="muted">` de 1–2 frases directamente bajo el
+   título, sin separador. El detalle largo vive en el `HelpPopover` del campo, no en prosa
+   suelta (precedente: los tres modos de «Fuente del ahorro» — en pantalla solo la descripción
+   del modo ELEGIDO; la comparativa completa está en `settings.savings_source`).
+3. **Controles** después, separados con `bordered-top`. La ayuda de un campo concreto va en
+   `<small className="muted">` dentro de su `label.field`.
+4. **Estados**: `Cargando…` / `Sin datos.` / `Solo lectura.` (cortos, canónicos). Valor
+   read-only para no-owners: `<strong>{valor}</strong> · solo el propietario puede cambiarlo.`
+   Estado de guardado SIEMPRE al pie del panel: `Guardando…` / `Guardado automático.`
+   **En Ajustes no hay botones de guardar**: todo ajuste autosalva con debounce y una guarda
+   de validez client-side (el PATCH no se lanza con un valor a medio teclear — precedentes:
+   IANA válida para la zona horaria, 0–50 para la inflación; el pie lo dice: «… — sin
+   guardar»). Los modales de CRUD (categorías, snapshots, backups) sí llevan botón: son
+   acciones, no ajustes.
+5. **`<strong>` solo para valores de dato**, nunca énfasis retórico. La clase `compact` no
+   existe (era un no-op y se purgó); `.hint` y `.health-dl` se retiraron (usos únicos —
+   `muted tight` y `settings-meta-dl` los sustituyen). Listas en modales: `.muted-list`, sin
+   estilos inline.
 
 ## Reglas para añadir UI nueva
 

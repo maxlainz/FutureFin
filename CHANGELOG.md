@@ -4,10 +4,67 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.0.6] - 2026-08-24
 
-### Infraestructura del repositorio (sin imagen — viajará con el siguiente release)
+**Qué cambia para ti**: el gráfico de Proyección deja de encogerse cuando el hogar acumula
+activos. Hasta ahora la leyenda vivía dentro del propio gráfico y cada activo le robaba una
+línea: con un hogar real (varios miembros, histórico con snapshots) llegaba a ocupar 8 filas
+y el gráfico quedaba aplastado — en móvil directamente desaparecía. Ahora la leyenda vive
+debajo, colapsada, y el gráfico ocupa siempre todo el ancho y el alto disponibles.
 
+### Interfaz
+
+- **Leyenda escalable en Proyección** (issue del apilamiento): las series estructurales
+  (Patrimonio neto, Capital aportado, Objetivo FIRE, Histórico) se ven siempre; los activos
+  se ordenan de mayor a menor peso y se truncan con un chip «+N más» expandible. Con 30
+  activos o con 3, la leyenda colapsada cuesta lo mismo. El mismo componente unifica las
+  leyendas del Resumen y de Jubilación (antes había tres implementaciones distintas).
+- **Nombres duplicados desambiguados por persona** en la vista «Todo el hogar»: dos «Cuenta
+  corriente» de miembros distintos ahora se leen «Cuenta corriente · ana» / «Cuenta
+  corriente · luis». Las series que solo existen en el histórico (snapshots de activos ya
+  eliminados) quedan sin sufijo, sin impedir el de las actuales.
+- **Tooltip acotado**: lista los 5 activos con más valor en el mes apuntado y agrega el
+  resto en «Otros (k) — suma», en lugar de una línea por activo.
+- **El gráfico es por fin ancho completo**: el lienzo interno crecía 38px más alto que su
+  caja cuando las etiquetas del eje X iban rotadas, y el navegador encogía el dibujo entero
+  centrándolo con bandas laterales (defecto que la leyenda interna disimulaba). El alto
+  extra ahora sale del propio plot y el dibujo casa exacto con su caja.
+- **Etiquetas del eje X legibles**: los años se diezman según el ancho real del plot (fin de
+  la ventana siempre etiquetado, huecos uniformes) — antes se pintaban los 90 años del
+  horizonte aunque no cupieran. La etiqueta «Hoy» baja a la fila del eje X, alineada con los
+  años, en vez de flotar pegada al subtítulo.
+- **Móvil, estilo Resumen pero navegable**: «Vista cercana» activada por defecto (override
+  efímero — el toggle funciona y la preferencia guardada de escritorio no se toca), sin
+  etiquetas del eje Y (el valor exacto vive en el tooltip; el plot gana todo ese margen), y
+  el subtítulo se parte en dos líneas para no rozar el borde. La vista cercana deja además
+  margen tras el último hito para que la etiqueta «Jubilación» no quede pisada.
+- **Ajustes guarda todo solo**: los dos últimos formularios con botón de guardar (zona
+  horaria y proyección/modo de edad) pasan a guardado automático con el mismo contrato que
+  el resto de la pestaña. La zona horaria solo se envía cuando es una IANA válida (mientras
+  tecleas, el pie avisa «no reconocida — sin guardar» en vez de disparar errores), y la
+  inflación solo dentro de 0–50.
+- **La tabla de tramos IRPF se integra con el resto de la interfaz**: fuera el cajón gris
+  del `fieldset` y los inputs desnudos del navegador — ahora usan el estilo estándar de la
+  app, alineados a la derecha con numerales tabulares, y «Restaurar España» es un botón
+  discreto bajo la tabla.
+- **Ajustes armonizado**: todos los paneles siguen ahora la misma plantilla — título sin
+  iconografía (los tres iconos de Integraciones se retiran), una descripción corta bajo el
+  título, controles separados con el mismo filete, estados canónicos («Cargando…», «Sin
+  datos.», «Solo lectura.») y el «Guardado automático.» siempre al pie. En «Fuente del
+  ahorro» la pantalla muestra solo la descripción del modo elegido (la comparativa completa
+  de los tres modos vive en el icono de ayuda ⓘ, que además absorbe los matices de cuotas de
+  préstamos y del fallback al presupuesto); Snapshots estrena descripción, y las cabeceras de
+  la tabla de tramos IRPF y las fichas de Instalación/Estado del sistema quedan alineadas con
+  el resto de tablas y fichas.
+
+### Infraestructura del repositorio (no toca la imagen; viaja en este release)
+
+- **Auto-tag on merge** (PR #63): mergear un bump de versión a `main` publica solo —
+  `publish-image.yml` corre en cada push a `main`, y si `Cargo.toml` lleva una versión sin tag,
+  el mismo run espera la CI verde del commit, comprueba el orden estricto, crea el tag y
+  construye. Un merge sin bump es un no-op de segundos. El `workflow_dispatch` con «Crear el
+  tag» pasa a ser idempotente (tag ya existente → verde sin construir), así que el dispatch de
+  la rutina de dependencias no puede chocar con el auto-tag. Esta 4.0.6 es el estreno en vivo.
 - **La gestión de dependencias pasa a ser autónoma**: los PRs de Dependabot los procesa una
   rutina cloud disparada por webhook (con barrido de seguridad los martes). Los majors ya no
   quedan bloqueados para siempre: se mergean con una barra de evidencia (notas leídas, cada

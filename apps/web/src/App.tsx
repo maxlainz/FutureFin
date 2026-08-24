@@ -43,6 +43,7 @@ import { savingsSourceUsesTransactions } from "./lib/fire";
 import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
+import { assetOwnerNameById } from "./lib/chart-legend";
 import type { LedgerPersonScope } from "./lib/ledger";
 import {
   TAB_PATH,
@@ -174,6 +175,7 @@ import type {
   InstallationGate,
   InstallationSessionContext,
   LiabilityApiRow,
+  MemberApiRow,
   PlanningFlowApiRow,
   ProjectionSeriesApi,
   SummaryResponse,
@@ -340,6 +342,14 @@ export default function App() {
   const [assets, setAssets] = useState<AssetApiRow[]>([]);
   const [assetsBusy, setAssetsBusy] = useState(false);
   const [assetsError, setAssetsError] = useState<string | null>(null);
+  // asset_id → owner, para desambiguar nombres duplicados en la leyenda del chart de
+  // proyección (vista hogar). Estado propio con su propio fetch (members + assets en
+  // scope HOGAR): el estado `assets` de la pestaña Activos no sirve — sigue al scope
+  // activo y se carga tarde (prefetch idle). Best-effort: fallo → null (sin sufijos).
+  const [assetOwnerNames, setAssetOwnerNames] = useState<Record<
+    string,
+    string | null
+  > | null>(null);
   const [assetCategories, setAssetCategories] = useState<CategoryRow[]>([]);
   const [allocationRules, setAllocationRules] = useState<AllocationRuleApiRow[]>([]);
   const [allocationRulesBusy, setAllocationRulesBusy] = useState(false);
@@ -1206,6 +1216,27 @@ export default function App() {
     }
   }, []);
 
+  const loadAssetOwnerNames = useCallback(async () => {
+    try {
+      // Siempre scope hogar: el mapa solo se consume en la vista hogar, y el estado
+      // `assets` de la pestaña (scope activo) daría un mapa a medias en ?view=mine.
+      const [membersRes, assetsRes] = await Promise.all([
+        fetch("/v1/installation/members", defaultFetchInit),
+        fetch("/v1/assets", defaultFetchInit),
+      ]);
+      if (!membersRes.ok || !assetsRes.ok) {
+        // Best-effort: sin mapa no hay sufijo de owner en la leyenda, nada más.
+        setAssetOwnerNames(null);
+        return;
+      }
+      const members = (await membersRes.json()) as MemberApiRow[];
+      const rows = (await assetsRes.json()) as AssetApiRow[];
+      setAssetOwnerNames(assetOwnerNameById(rows, members));
+    } catch {
+      setAssetOwnerNames(null);
+    }
+  }, []);
+
   const loadPendingUsers = useCallback(async () => {
     setPendingUsersBusy(true);
     setPendingUsersError(null);
@@ -1424,34 +1455,28 @@ export default function App() {
     }
   }, [user, loadInstallation]);
 
+  // Los drafts de zona horaria e inflación/modo edad se re-inicializan SOLO al cambiar de
+  // instalación, no en cada refresh del objeto `installation`: desde que ambos formularios
+  // autosalvan (4.0.6), cada guardado refresca la instalación y un efecto dependiente de los
+  // valores del servidor pisaría lo que el usuario siguiera tecleando durante el vuelo del
+  // PATCH. Mismo patrón que el draft de fire_settings en SettingsView.
   useEffect(() => {
     const tz = installation?.installation.calendar_tz;
     if (typeof tz === "string" && tz.trim().length >= 3) {
       setCalendarTzDraft(tz.trim());
     }
-  }, [installation?.installation.calendar_tz]);
-
-  // Depende de los VALORES, no del objeto `installation`: guardar cualquier ajuste FIRE hace
-  // `setInstallation(updated)`, que es una identidad nueva aunque la inflación no haya cambiado,
-  // y este efecto reescribía el draft borrando lo que el usuario estuviera tecleando en
-  // «Supuesto de inflación anual». Mismo patrón que el draft de zona horaria de arriba.
-  const installationInflationPctServer =
-    installation?.installation.annual_inflation_assumption_percent ?? null;
-  const installationShowAgeModeServer =
-    installation?.installation.show_age_mode ?? null;
-  useEffect(() => {
-    if (installationInflationPctServer == null) {
+    const pct = installation?.installation.annual_inflation_assumption_percent ?? null;
+    if (pct == null) {
       setProjectionInflationPctDraft("");
       setShowAgeModeDraft("dates");
-      return;
+    } else {
+      setProjectionInflationPctDraft(formatEditableDecimalString(pct));
+      setShowAgeModeDraft(
+        installation?.installation.show_age_mode === "ages" ? "ages" : "dates",
+      );
     }
-    setProjectionInflationPctDraft(
-      formatEditableDecimalString(installationInflationPctServer),
-    );
-    setShowAgeModeDraft(
-      installationShowAgeModeServer === "ages" ? "ages" : "dates",
-    );
-  }, [installationInflationPctServer, installationShowAgeModeServer]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [installation?.installation.id]);
 
   useEffect(() => {
     if (!user || installation?.role !== "owner") {
@@ -1461,6 +1486,16 @@ export default function App() {
     }
     void loadPendingUsers();
   }, [user, installation?.role, loadPendingUsers]);
+
+  // A diferencia de pending-users, /v1/installation/members es legible por
+  // cualquier miembro (viewer incluido) → sin gate de owner.
+  useEffect(() => {
+    if (!user || !hasMembership) {
+      setAssetOwnerNames(null);
+      return;
+    }
+    void loadAssetOwnerNames();
+  }, [user, hasMembership, loadAssetOwnerNames]);
 
   useEffect(() => {
     if (!user || !hasMembership || activeTab !== "settings") {
@@ -1868,8 +1903,8 @@ export default function App() {
     }
   }
 
-  async function saveInstallationCalendarTz(ev: FormEvent) {
-    ev.preventDefault();
+  async function saveInstallationCalendarTz(ev?: FormEvent) {
+    ev?.preventDefault();
     setCalendarTzSaving(true);
     setInstallationError(null);
     try {
@@ -1936,8 +1971,8 @@ export default function App() {
     }
   }
 
-  async function saveInstallationProjection(ev: FormEvent) {
-    ev.preventDefault();
+  async function saveInstallationProjection(ev?: FormEvent) {
+    ev?.preventDefault();
     const pctTrim = decimalOrReport(projectionInflationPctDraft, setInstallationError);
     if (pctTrim === null) return;
     const pctToSend = pctTrim === "" ? "0" : pctTrim;
@@ -3703,6 +3738,7 @@ export default function App() {
             userBirthDate={user?.birth_date ?? null}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
             planningFlows={planningFlows}
+            assetOwnerNames={assetOwnerNames}
           />
         ) : activeTab === "settings" ? (
           <SettingsView

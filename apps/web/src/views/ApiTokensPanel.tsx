@@ -13,7 +13,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { apiDelete, apiGet, apiPost } from "../api/client";
 import type { ApiTokenApi, CreateApiTokenResponseApi } from "../api/types";
 import { Modal, ModalFormError } from "../components/Modal";
-import { KeyIcon, RowTrashIcon } from "../components/icons";
+import { RowTrashIcon } from "../components/icons";
 import { lastUsedLabel, tokenExpiryLabel } from "../lib/format";
 
 /** Opciones de caducidad del modal de creación (valor = días; "" = sin caducidad). */
@@ -116,18 +116,15 @@ export function ApiTokensPanel() {
   return (
     <section className="panel">
       <div className="panel-head-row">
-        <h3 className="panel-title">
-          <KeyIcon className="panel-title-icon" /> Tokens de API (MCP)
-        </h3>
+        <h3 className="panel-title">Tokens de API (MCP)</h3>
         <button type="button" className="btn primary" onClick={openCreate}>
           Crear token
         </button>
       </div>
       <p className="muted">
-        Conecta Claude u otro cliente MCP en <code>https://tu-host/mcp</code> con el header{" "}
-        <code>Authorization: Bearer &lt;token&gt;</code>. El token hereda tu rol en cada uso:
-        lectura siempre, y escritura solo si tu rol escribe y el interruptor «Permitir escritura
-        vía MCP» está activado.
+        Tokens personales para conectar un cliente MCP con la cabecera{" "}
+        <code>Authorization: Bearer &lt;token&gt;</code>. Heredan tu rol en cada
+        uso y respetan el interruptor de escritura de arriba.
       </p>
 
       {error ? (

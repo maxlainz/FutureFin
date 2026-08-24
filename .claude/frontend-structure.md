@@ -46,6 +46,13 @@ src/
 │   │                             #   niceYTicks, axis age/dates mode, deflationFactorAt (deflactor keyed por month_index; k<0 amplifica),
 │   │                             #   PROJECTION_FOCUS_STORAGE_KEY, ASSET_LINE_COLORS (CSS vars), complementaryProjectionTickLabel,
 │   │                             #   projectionHoverTitle, formatYearsEsFromMonths, formatProjectionChartHorizonLine
+│   ├── chart-legend.ts           # modelo PURO de la leyenda de charts (ChartLegend): buildStructuralLegendItems,
+│   │                             #   legendOrderByPeakDesc (leyenda peak DESC conservando el colorIndex de pintado),
+│   │                             #   buildAssetLegendItems (sufijo «Nombre · owner» en duplicados de la vista hogar;
+│   │                             #   las series solo-históricas ni sufijan ni vetan), assetOwnerNameById (join
+│   │                             #   /v1/assets + /v1/installation/members; null = actual sin owner resoluble),
+│   │                             #   collapsedAssetLegendCap / applyLegendCollapse (chip «+N más»; nunca esconde
+│   │                             #   uno solo), topAssetTooltipRows (top-5 por |valor| + «Otros»). Test: chart-legend.test.ts
 │   ├── history-merge.ts          # mergeProjectionWithHistory(series, history): une la serie histórica (month_index<0) con la
 │   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto
 │   ├── snapshot-tracker.ts       # trigger del modal: EditLog (Map<assetId, epochMs>), SNAPSHOT_EDIT_WINDOW_MS, pruneEditLog,
@@ -92,7 +99,9 @@ src/
 │       ├── CategoryComparisonBars.tsx   # exporta SOLO MonthlyCashflowBars (cash-flow mes a mes desde months[], tokens --cf-income/--cf-expense/--cf-savings; verde/rojo = colores
 │       │                                #   FUNCIONALES de serie, excepción de charts del design system, no chrome). El chart CategoryComparisonBars (barras Budget vs Promedio) y el
 │       │                                #   token --exp-average se ELIMINARON tras 2.0.0: el Real vive en la tabla/KPIs y la tendencia vs presupuesto pasó a la banda de KPIs
-│       └── MiniProjection.tsx    # SVG compacto reusado en Resumen y Jubilación
+│       ├── MiniProjection.tsx    # SVG compacto reusado en Resumen y Jubilación
+│       └── ChartLegend.tsx       # leyenda compartida (chart grande + minis): HTML fuera del SVG, estructurales
+│                                 #   siempre visibles + activos truncados con chip «+N más» (modelo en lib/chart-legend.ts)
 │
 ├── views/                        # one file per tab — receives props from App.tsx, owns local UI state
 │   ├── SummaryView.tsx           # KPIs → Salud financiera → Proyección 12m (zoomY) → Desglose
@@ -132,7 +141,11 @@ src/
 │   ├── ProjectionNetWorthChart.tsx  # gran SVG chart, drag/zoom/hover, colores vía --proj-* tokens; se extiende a meses
 │   │                                #   negativos con la serie histórica (áreas + marcadores + divisor «Hoy») vía mergeProjectionWithHistory.
 │   │                                #   Overlay fino de cash-flow (v1.6.0): props cashflow/cashflowDaily/onRequestDailyCashflow — pinta la curva
-│   │                                #   fina (fine.grid por month_fraction real, deflactada igual) sobre la zona pasada; daily lazy al hacer zoom histórico
+│   │                                #   fina (fine.grid por month_fraction real, deflactada igual) sobre la zona pasada; daily lazy al hacer zoom histórico.
+│   │                                #   Leyenda (4.0.6): HTML fuera del SVG (ChartLegend); el ResizeObserver mide .projection-chart-plot
+│   │                                #   (solo el SVG) y el viewBox casa EXACTO con la caja medida (los 38px de etiquetas X rotadas salen
+│   │                                #   de ph, no de lienzo extra — si no, `meet` encoge el dibujo con bandas laterales). Tooltip: top-5
+│   │                                #   activos por |valor| + «Otros (k)». Prop assetOwnerNames (App.tsx) desambigua duplicados en hogar
 │   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills («Usuarios» owner-only, «MCP» con tokens/conexiones/toggle de escritura) + ThemeToggle en "Datos y sistema"
 │   ├── ApiTokensPanel.tsx        # Ajustes → Integraciones: tokens de API (MCP). Self-fetch (patrón HistorySettingsPanel); crear (modal
 │   │                             #   label + caducidad), secreto mostrado UNA vez con copiar, tabla (prefix/último uso/vigencia),

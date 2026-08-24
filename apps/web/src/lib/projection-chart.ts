@@ -329,8 +329,7 @@ export function projectionXTicks(
   const mcRaw = Number(monthCount);
   const mc = Number.isFinite(mcRaw) && mcRaw >= 0 ? mcRaw : 0;
   const pw = density?.plotWidthPx ?? 600;
-  const minPx = opts?.ageUiMode === "dates" ? 34 : 28;
-  const maxTicks = Math.max(5, Math.min(18, Math.floor(Math.max(120, pw) / minPx)));
+  const maxTicks = projectionMaxXTicks(pw, opts?.ageUiMode ?? "dates");
 
   let ticks: number[] | null = null;
 
@@ -360,11 +359,54 @@ export function projectionXTicks(
   }));
 }
 
-/** Geometría del SVG en unidades de usuario: depende del ancho CSS real del contenedor. */
+/**
+ * Techo de etiquetas X que caben en un plot de `plotWidthPx`. En plots estrechos
+ * (móvil, < 560) las etiquetas van rotadas y aun diezmadas se amontonan: se les
+ * exige más aire por etiqueta → menos ticks.
+ */
+export function projectionMaxXTicks(
+  plotWidthPx: number,
+  ageUiMode: "dates" | "ages",
+): number {
+  const narrowPlot = plotWidthPx < 560;
+  const minPx = ageUiMode === "dates" ? (narrowPlot ? 52 : 34) : narrowPlot ? 44 : 28;
+  return Math.max(5, Math.min(18, Math.floor(Math.max(120, plotWidthPx) / minPx)));
+}
+
+/**
+ * Diezmado por ancho de los ticks VISIBLES: los builders de año/edad emiten UN tick
+ * por año (55 en un horizonte de 90) y en móvil salen amontonados e ilegibles. Debe
+ * aplicarse DESPUÉS de recortar a la ventana visible (nunca sobre el horizonte
+ * completo: la ventana filtraría los supervivientes y un zoom se quedaría sin
+ * etiquetas). Se recorre desde el FINAL con paso fijo: el último tick visible
+ * siempre queda etiquetado y todos los huecos son exactamente `step` (el resto de
+ * la división cae en ticks iniciales, que simplemente pierden etiqueta).
+ */
+export function thinTicksFromEnd<T>(items: readonly T[], maxTicks: number): T[] {
+  const cap = Math.max(1, Math.floor(maxTicks));
+  if (items.length <= cap) return [...items];
+  const step = Math.ceil(items.length / cap);
+  const thinned: T[] = [];
+  for (let i = items.length - 1; i >= 0; i -= step) {
+    thinned.unshift(items[i]!);
+  }
+  return thinned;
+}
+
+/** Geometría del SVG en unidades de usuario: depende del ancho CSS real del contenedor.
+ *  La leyenda ya NO participa: vive en HTML fuera del `<svg>` (`ChartLegend`), así que
+ *  el margen superior es constante (solo la cabecera) sea cual sea el número de activos. */
 export function buildProjectionChartLayout(
   containerCssWidth: number,
-  containerCssHeight: number | undefined,
-  legendLabels: string[],
+  containerCssHeight?: number,
+  layoutOpts?: {
+    /** Móvil: sin etiquetas del eje Y → el margen izquierdo se reduce a un borde
+     *  mínimo y el plot gana todo ese ancho (estilo MiniProjection, pero navegable). */
+    hideYAxisLabels?: boolean;
+    /** Móvil: la 2.ª línea de meta («Dinero de hoy … · Δ regular …») no cabe en una
+     *  sola y se parte en dos → la cabecera necesita una línea más de altura. */
+    compactHeader?: boolean;
+  },
 ) {
   const W = Math.max(300, Math.round(containerCssWidth));
   const aspect = 460 / 1040;
@@ -379,82 +421,27 @@ export function buildProjectionChartLayout(
   H = Math.max(260, Math.min(H, 980));
 
   const narrow = W < 560;
-  const ml = narrow
-    ? Math.round(42 + W * 0.035)
-    : Math.round(68 + Math.min(36, (W - 560) * 0.045));
-  const mr = narrow ? 12 : Math.round(26 + Math.min(30, (W - 560) * 0.022));
+  // Márgenes narrow recalibrados al hacer el viewBox == caja medida (antes el
+  // `meet`-shrink centraba el dibujo y esas bandas laterales escondían que
+  // «800 mil €» no cabía a la izquierda ni la última etiqueta X rotada a la derecha).
+  const ml = layoutOpts?.hideYAxisLabels
+    ? 16
+    : narrow
+      ? Math.round(50 + W * 0.035)
+      : Math.round(68 + Math.min(36, (W - 560) * 0.045));
+  const mr = narrow ? 22 : Math.round(26 + Math.min(30, (W - 560) * 0.022));
   const mb = narrow ? 32 : 38;
 
   const pw = W - ml - mr;
 
-  const legendRowHeight = 22;
-  const legendItemGap = 16;
-  // Estimación generosa del ancho del carácter (12px medium) — antes 6.5
-  // subestimaba y la leyenda acababa solapándose.
-  const legendCharPx = 7.6;
-  const legendSwatchPx = 24 + 8;
-  const legendRightAnchor = ml + pw;
-  // En narrow la leyenda no comparte banda con la cabecera (se coloca DEBAJO,
-  // ver mt más abajo), así que puede usar todo el ancho del plot.
-  const legendBudgetWidth = narrow ? pw : Math.max(180, Math.round(pw * 0.66));
-  const itemWidths = legendLabels.map(
-    (label) => legendSwatchPx + label.length * legendCharPx,
-  );
-  const rows: number[][] = [];
-  {
-    let currentRow: number[] = [];
-    let currentRowWidth = 0;
-    for (let i = 0; i < legendLabels.length; i++) {
-      const itemW = itemWidths[i];
-      const widthIfAdded =
-        currentRow.length === 0
-          ? itemW
-          : currentRowWidth + legendItemGap + itemW;
-      if (currentRow.length > 0 && widthIfAdded > legendBudgetWidth) {
-        rows.push(currentRow);
-        currentRow = [i];
-        currentRowWidth = itemW;
-      } else {
-        currentRow.push(i);
-        currentRowWidth = widthIfAdded;
-      }
-    }
-    if (currentRow.length > 0) rows.push(currentRow);
-  }
-  const rowsNeeded = Math.max(1, rows.length);
-  const placements: Array<{ x: number; y: number }> = new Array(
-    legendLabels.length,
-  );
-  rows.forEach((row, rowIdx) => {
-    const rowTotal = row.reduce(
-      (sum, itemIdx, idx) =>
-        sum + itemWidths[itemIdx] + (idx > 0 ? legendItemGap : 0),
-      0,
-    );
-    // Narrow: filas alineadas a la izquierda bajo la cabecera (misma ancla que
-    // el headline). Ancho: derecha-anclada, compartiendo banda con la cabecera.
-    let cursor = narrow ? ml : legendRightAnchor - rowTotal;
-    for (const itemIdx of row) {
-      placements[itemIdx] = { x: cursor, y: rowIdx * legendRowHeight };
-      cursor += itemWidths[itemIdx] + legendItemGap;
-    }
-  });
-
-  const legendBlockHeight = rowsNeeded * legendRowHeight;
-  const legendVerticalPad = 18;
   const headlineBlockTopY = 34;
-  const headlineBlockBottom = headlineBlockTopY + 40 + 14;
-  // Narrow: cabecera y leyenda no caben lado a lado (se solapaban a <560px,
-  // detectado en QA v1.7.0) → la leyenda baja a su propia banda bajo la cabecera.
-  const mt = narrow
-    ? headlineBlockBottom + legendBlockHeight + legendVerticalPad
-    : Math.max(legendBlockHeight + legendVerticalPad * 2, headlineBlockBottom);
-  const legendY = narrow
-    ? headlineBlockBottom - 4
-    : Math.round((mt - legendBlockHeight) / 2);
-  const ph = H - mt - mb;
-
-  const legend = { x: 0, y: legendY };
+  // Cabecera (headline + 2 líneas de meta) + aire; compactHeader añade la 3.ª línea.
+  // La etiqueta «Hoy» del divisor vive en la fila del eje X (no sobre el plot), así
+  // que la cabecera no necesita aire extra para ella.
+  const mt = headlineBlockTopY + (layoutOpts?.compactHeader ? 58 : 40) + 14;
+  // Guarda: cuando la leyenda SVG inflaba `mt`, `ph` podía quedar casi nulo (o negativo)
+  // sin nada que lo impidiera. El suelo garantiza un plot dibujable siempre.
+  const ph = Math.max(80, H - mt - mb);
 
   return {
     W,
@@ -466,9 +453,6 @@ export function buildProjectionChartLayout(
     pw,
     ph,
     narrow,
-    legend,
-    legendPlacements: placements,
-    legendRows: rowsNeeded,
     headlineBlockTopY,
   };
 }

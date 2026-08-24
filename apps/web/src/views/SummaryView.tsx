@@ -9,11 +9,9 @@ import {
   SummaryBreakdownBlock,
   SummaryDonutChart,
 } from "../components/charts/summary";
-import {
-  MiniProjection,
-  MiniProjectionLegend,
-} from "../components/charts/MiniProjection";
-import { ASSET_LINE_COLORS } from "../lib/projection-chart";
+import { MiniProjection } from "../components/charts/MiniProjection";
+import { ChartLegend } from "../components/charts/ChartLegend";
+import { buildAssetLegendItems } from "../lib/chart-legend";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
@@ -306,14 +304,25 @@ export function SummaryView({
                 showAreas={true}
                 zoomY
               />
-              <MiniProjectionLegend
-                items={[
-                  { label: "Patrimonio neto", color: "var(--proj-nw)" },
-                  ...(projectionSeries.asset_series ?? []).map((a, idx) => ({
-                    label: a.asset_name,
-                    color: ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length]!,
-                  })),
+              <ChartLegend
+                size="sm"
+                structural={[
+                  {
+                    key: "nw",
+                    label: "Patrimonio neto",
+                    color: "var(--proj-nw)",
+                    swatch: "line",
+                  },
                 ]}
+                // MiniProjection apila en el orden CRUDO de la API → colorIndex = i
+                // (reordenar aquí rompería la correspondencia color-área).
+                assets={buildAssetLegendItems(
+                  (projectionSeries.asset_series ?? []).map((a, idx) => ({
+                    id: a.asset_id,
+                    name: a.asset_name,
+                    colorIndex: idx,
+                  })),
+                )}
               />
             </>
           ) : (
