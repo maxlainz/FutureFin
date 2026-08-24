@@ -23,6 +23,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   un 500 de Docker Hub tumbó el job el 2026-08-24 sin que nada del repo estuviera roto; ahora
   reutiliza la imagen que el propio job acaba de construir.
 
+## [4.0.4] - 2026-08-24
+
+**Qué cambia para ti**: nada visible en la aplicación — la interfaz se reconstruye sobre **React
+19.2.8**, que corrige una regresión de React 19.2.6 en las entradas de `FormData` de las Server
+Actions y mejora el rendimiento de decodificación. No se toca motor, API, interfaz ni esquema:
+actualizar es seguro.
+
+### Dependencias que viajan en la imagen
+
+- **`react`** y **`react-dom`** 19.2.6 → 19.2.8 (PR #41). Ambas están en `dependencies`, así que
+  entran en `apps/web/dist/` vía el `npm ci && npm run build:web` del Dockerfile.
+
+### Dependencias de desarrollo (mismo PR #41, no viajan en la imagen)
+
+- **`eslint-plugin-react-refresh`** 0.4.26 → 0.5.4. Cruza minor en `0.x`, o sea que es un cambio
+  con roturas: pasa la barra de evidencia completa. De las cuatro roturas anunciadas en 0.5.0,
+  tres no aplican (`customHOCs` no se usa; el repo ya iba con flat config, ESLint 9 y Node 24; el
+  default export sigue existiendo y se verificó ejecutándolo). La cuarta —validación más estricta—
+  hace aparecer **un aviso nuevo** en `apps/web/src/main.tsx:11`
+  (`react-refresh/only-export-components`). No rompe nada: la regla es `warn` y `lint` corre sin
+  `--max-warnings`, así que el job `web` sigue en verde. Anotado por si algún día se endurece.
+- **`typescript-eslint`** 8.59.3 → 8.67.0, **`@types/react`** 19.2.14 → 19.2.18 y
+  **`@types/react-dom`** 19.2.3 → 19.2.4.
+
 ## [4.0.3] - 2026-08-24
 
 **Qué cambia para ti**: nada visible en la aplicación — el servidor MCP embebido incorpora las
