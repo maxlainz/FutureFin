@@ -279,10 +279,26 @@ directamente — la protección lo rechaza, y ese es el objetivo.
 
 1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`) y añadir la sección `## [X.Y.Z]` a `CHANGELOG.md`. **La sección debe existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde ahí, y el job `rust` lo comprueba con `./scripts/audit-releases.sh --version`.
 2. PR → CI verde → merge a `main`.
-3. Taguear, por cualquiera de las dos vías:
+3. **El merge del bump ES la publicación** (auto-tag on merge, desde 4.0.6): `publish-image.yml`
+   corre en cada push a `main`; si `Cargo.toml` lleva una versión sin tag, ese mismo run espera a
+   que la CI del commit esté verde, comprueba el orden estricto, **crea el tag y construye**. Un
+   merge sin bump es un no-op verde de segundos. Consecuencia: mergear un bump publica — no hay
+   paso manual, y un bump mergeado ya no puede quedarse sin imagen. Vías manuales que siguen
+   existiendo (fallback y reconstrucciones):
    - **Desde local**: `git tag vX.Y.Z && git push origin vX.Y.Z` estando en `main`.
-   - **Desde GitHub**, sin git local: lanzar `publish-image.yml` por `workflow_dispatch` con el tag y la casilla **«Crear el tag sobre main»** marcada. Existe porque un token acotado (el de un agente, por ejemplo) puede mergear a `main` pero recibe **403 al empujar un tag**, y entonces la versión queda subida en `main` sin imagen que la respalde. El workflow crea el tag él mismo y sigue construyendo en la misma ejecución; **no vale un workflow aparte**, porque un tag empujado con `GITHUB_TOKEN` no dispara `on: push: tags`.
-4. El tag dispara `publish-image.yml` (o la propia ejecución continúa, si lo creaste por dispatch): imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG. **El orden es estricto**: `vX.Y.Z` no construye hasta que el tag inmediatamente anterior tenga su Release (= su imagen); si la publicación anterior falló, las siguientes abortan en vez de publicar por encima del agujero. Encadenar releases sin esperar los builds es seguro por eso.
+   - **Desde GitHub**: `publish-image.yml` por `workflow_dispatch` con la casilla **«Crear el tag
+     sobre main»**. Es **idempotente**: si el auto-tag del merge ya creó el tag, el dispatch
+     termina verde sin hacer nada (así la rutina de dependencias puede seguir lanzándolo sin
+     chocar). El tag se crea dentro del mismo workflow y la ejecución sigue construyendo; **no
+     vale un workflow aparte**, porque un tag empujado con `GITHUB_TOKEN` no dispara
+     `on: push: tags` (los `workflow_dispatch` sí crean runs — es la excepción documentada).
+4. `publish-image.yml` construye la imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar
+   **crea él solo el GitHub Release** con las notas del CHANGELOG. **El orden es estricto**:
+   `vX.Y.Z` no construye hasta que el tag inmediatamente anterior tenga su Release (= su imagen);
+   si la publicación anterior falló, las siguientes abortan en vez de publicar por encima del
+   agujero. Encadenar releases sin esperar los builds es seguro por eso. Matiz del auto-tag: en
+   modo merge el tag se crea **después** de ver la CI verde (no antes, como el dispatch) — un bump
+   mergeado con CI rota no deja tag huérfano, deja un run rojo.
 
 Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKERHUB_USERNAME` +
 `DOCKERHUB_TOKEN`.
@@ -305,6 +321,10 @@ PR, con un **barrido los martes ~06:30** que caza huérfanos si un evento se per
   comentario del PR), checks sobre el SHA actual. Sin notas legibles no se mergea.
 - Cada fix que **llega a la imagen** produce su propio release patch (norma «una versión, una
   imagen»); lo que no llega (vitest, eslint, `@types/*`, acciones) se mergea sin bump.
+- **Desde el auto-tag on merge (4.0.6) el dispatch de la rutina es redundante pero inofensivo**:
+  mergear el bump ya taguea y publica solo. Si la rutina sigue lanzando `publish-image.yml` con
+  «crear el tag», el que llegue segundo (dispatch o auto-tag) termina verde sin hacer nada — se
+  puede retirar ese paso de la rutina cuando se revise, sin prisa.
 - Los issues-informe que la rutina abre **se cierran solos** cuando todo lo que reportaban
   queda resuelto.
 - **Método de merge**: los PRs de Dependabot se mergean con **merge commit** (título = el del
