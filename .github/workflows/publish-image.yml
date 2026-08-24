@@ -208,6 +208,71 @@ jobs:
           echo "Revisa https://github.com/${REPO}/actions y vuelve a lanzar el workflow."
           exit 1
 
+      # ── Orden estricto: la versión anterior debe tener su imagen ────────────
+      # Cada run de este workflow mira SU tag y nada más, así que hasta agosto de 2026 nada
+      # impedía esto: la 4.0.2 muere en su ci-gate (CI roja) y la 4.0.3 —tagueada segundos
+      # después por la cadena de la rutina— publica igual. Resultado: un agujero en la
+      # escalera de versiones, un tag sin imagen (violando «una versión, una imagen») y
+      # quien actualiza salta por encima de una versión que nunca existió.
+      #
+      # La regla: NO se construye vX.Y.Z hasta que el tag inmediatamente anterior tenga su
+      # GitHub Release — que este mismo workflow crea SOLO tras empujar la imagen, así que
+      # es el marcador fiable de «imagen publicada» (verificado: 38 tags = 38 Releases).
+      #
+      # Si el run del tag anterior sigue en marcha, se espera (les separa un build multi-arch
+      # de ~2 h; sondeo cada 2 min, tope 165 min). Si NO hay ningún run de este workflow en
+      # marcha y el Release sigue sin existir, es que el anterior FALLÓ o nunca se lanzó: se
+      # aborta con instrucciones, no se publica por encima.
+      - name: La versión anterior tiene su imagen
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.ref.outputs.tag }}
+          THIS_RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          prev="$(git ls-remote --tags --refs "https://github.com/${REPO}" \
+            | sed 's#.*refs/tags/##' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | { cat; echo "$TAG"; } | sort -Vu \
+            | grep -B1 -x "$TAG" | head -1)"
+
+          if [ -z "$prev" ] || [ "$prev" = "$TAG" ]; then
+            echo "No hay tag anterior a ${TAG}: nada que esperar."
+            exit 0
+          fi
+
+          echo "Tag anterior: ${prev}. Comprobando que su imagen está publicada…"
+
+          for i in $(seq 1 83); do
+            if gh api "repos/${REPO}/releases/tags/${prev}" --jq .tag_name >/dev/null 2>&1; then
+              echo "OK: ${prev} tiene su Release (imagen publicada). Continúo con ${TAG}."
+              exit 0
+            fi
+
+            # ¿Hay OTRO run de este workflow vivo que pueda estar produciéndolo?
+            vivos="$(gh api \
+              "repos/${REPO}/actions/workflows/publish-image.yml/runs?per_page=30" \
+              --jq "[.workflow_runs[] | select(.id != ${THIS_RUN}) \
+                     | select(.status == \"in_progress\" or .status == \"queued\")] | length")"
+
+            if [ "${vivos}" -eq 0 ]; then
+              echo "ERROR: ${prev} no tiene Release y no queda ningún run de publicación en marcha."
+              echo "Su publicación FALLÓ o nunca se lanzó. No se publica ${TAG} por encima de un"
+              echo "agujero: arregla ${prev} primero (relanza su publicación, o borra su tag si esa"
+              echo "versión no debe existir) y después vuelve a lanzar este workflow."
+              exit 1
+            fi
+
+            echo "  [${i}/83] ${prev} aún sin Release; ${vivos} run(s) de publicación en marcha. Espero 2 min…"
+            sleep 120
+          done
+
+          echo "ERROR: 166 minutos esperando la imagen de ${prev} (un build normal tarda ~2 h)."
+          echo "Revisa su run en https://github.com/${REPO}/actions antes de relanzar ${TAG}."
+          exit 1
+
   build-and-push:
     needs: ci-gate
     runs-on: ubuntu-latest
