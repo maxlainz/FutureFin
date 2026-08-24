@@ -25,6 +25,7 @@ import {
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
 } from "../lib/projection-chart";
+import { useIsMobile } from "../lib/responsive";
 
 import { ProjectionNetWorthChart } from "./ProjectionNetWorthChart";
 
@@ -43,6 +44,7 @@ export function ProjectionView({
   userBirthDate,
   calendarTz,
   planningFlows,
+  assetOwnerNames,
 }: {
   installation: InstallationAccess | null;
   installationBusy: boolean;
@@ -60,6 +62,9 @@ export function ProjectionView({
   userBirthDate: string | null;
   calendarTz: string;
   planningFlows: PlanningFlowApiRow[];
+  /** asset_id → nombre de owner (para desambiguar duplicados en la leyenda, vista hogar;
+   *  `null` en el valor = activo sin owner resoluble). */
+  assetOwnerNames: Readonly<Record<string, string | null>> | null;
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
   const inflationPctRaw =
@@ -90,7 +95,8 @@ export function ProjectionView({
       ? parseDisplayDecimal(projectionSeries.jubilacion_target_net_worth)
       : null;
 
-  const [focusMode, setFocusMode] = useState<boolean>(() => {
+  // Preferencia PERSISTIDA de «Vista cercana» (la memoria de escritorio)…
+  const [focusModeStored, setFocusModeStored] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     try {
       return window.localStorage.getItem(PROJECTION_FOCUS_STORAGE_KEY) === "1";
@@ -103,12 +109,30 @@ export function ProjectionView({
     try {
       window.localStorage.setItem(
         PROJECTION_FOCUS_STORAGE_KEY,
-        focusMode ? "1" : "0",
+        focusModeStored ? "1" : "0",
       );
     } catch {
       /* ignore */
     }
-  }, [focusMode]);
+  }, [focusModeStored]);
+
+  // …y el override de móvil: 90 años de horizonte en un plot de ~350px son
+  // ilegibles, así que en móvil la vista cercana va activada POR DEFECTO. El
+  // override es efímero (estado, no storage): el toggle sigue funcionando en
+  // móvil pero nunca pisa la preferencia guardada — escritorio mantiene su
+  // memoria intacta.
+  const isMobile = useIsMobile();
+  const [mobileFocusOverride, setMobileFocusOverride] = useState<boolean | null>(
+    null,
+  );
+  const focusMode = isMobile ? mobileFocusOverride ?? true : focusModeStored;
+  const setFocusMode = (v: boolean) => {
+    if (isMobile) {
+      setMobileFocusOverride(v);
+    } else {
+      setFocusModeStored(v);
+    }
+  };
 
   const [inflationAdjusted, setInflationAdjusted] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
@@ -286,6 +310,7 @@ export function ProjectionView({
             anchorDateYmd={axisAnchor}
             calendarTz={calendarTz}
             planningFlows={planningFlows}
+            assetOwnerNames={assetOwnerNames}
           />
         </section>
       ) : null}

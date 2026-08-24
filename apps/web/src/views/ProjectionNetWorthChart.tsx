@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
   type PointerEvent,
-  type ReactNode,
   type WheelEvent,
 } from "react";
 import type {
@@ -34,15 +33,26 @@ import {
   formatProjectionChartHorizonLine,
   niceYTicks,
   projectionHoverTitle,
+  projectionMaxXTicks,
   projectionXTickLabel,
   projectionXTicks,
+  thinTicksFromEnd,
 } from "../lib/projection-chart";
+import {
+  buildAssetLegendItems,
+  buildStructuralLegendItems,
+  collapsedAssetLegendCap,
+  legendOrderByPeakDesc,
+  topAssetTooltipRows,
+} from "../lib/chart-legend";
+import { ChartLegend } from "../components/charts/ChartLegend";
 import {
   formatAxisMoney,
   formatProjectionMilestoneCompactLabel,
   type LedgerPersonScope,
 } from "../lib/ledger";
 import { savingsSourceUsesTransactions } from "../lib/fire";
+import { useIsMobile } from "../lib/responsive";
 import { chartPerf } from "../lib/perf";
 import { panWindow, pinchWindow, type ChartDomain } from "../lib/chart-gestures";
 
@@ -103,6 +113,7 @@ export function ProjectionNetWorthChart({
   anchorDateYmd,
   calendarTz,
   planningFlows,
+  assetOwnerNames,
 }: {
   series: ProjectionSeriesApi;
   /** Serie histórica (snapshots pasados) ya validada contra el anchor de la proyección, o
@@ -129,6 +140,10 @@ export function ProjectionNetWorthChart({
   anchorDateYmd: string | null;
   calendarTz: string;
   planningFlows: PlanningFlowApiRow[];
+  /** asset_id → nombre de owner (join /v1/assets + /v1/installation/members hecho en App.tsx;
+   *  `null` en el valor = activo actual sin owner resoluble). Solo se usa en vista hogar para
+   *  desambiguar nombres duplicados en leyenda y tooltip; `null`/vacío degrada a sin sufijo. */
+  assetOwnerNames: Readonly<Record<string, string | null>> | null;
 }) {
   // `mount-start` se mide en el primer render (cuando el chart aparece en
   // pantalla), separado de `fetch-start` que ocurre cuando llega la serie.
@@ -146,6 +161,9 @@ export function ProjectionNetWorthChart({
   const gid = useId().replace(/:/g, "");
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // Caja del plot (solo el SVG): es la que mide el ResizeObserver. `wrapRef` (la raíz,
+  // que además contiene la leyenda HTML) sigue siendo la base del tooltip absoluto.
+  const plotRef = useRef<HTMLDivElement>(null);
   const yAxisAnimRef = useRef<number | null>(null);
   // ── Máquina de gestos táctiles (Pointer Events) ──
   // TODO el estado del gesto vive en este ref (sin re-render): puntos activos,
@@ -172,6 +190,7 @@ export function ProjectionNetWorthChart({
   const [hover, setHover] = useState<number | null>(null);
   const [tipOffset, setTipOffset] = useState({ x: 0, y: 0 });
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const isMobile = useIsMobile();
   // viewWindow está en **meses reales** (no en índices de array). Soporta
   // densidades mixtas: con `density=monthly` los puntos van 0..months con paso
   // 1; con `density=hybrid` van 0..12 con paso 1 y luego 24, 36, ... La
@@ -188,7 +207,9 @@ export function ProjectionNetWorthChart({
   const animatedYDomainRef = useRef<{ min: number; max: number } | null>(null);
 
   useLayoutEffect(() => {
-    const node = wrapRef.current;
+    // Mide el plot, NO la raíz: la raíz incluye la leyenda HTML y el viewBox saldría
+    // más alto que la caja del SVG (letterboxing + hover desalineado).
+    const node = plotRef.current;
     if (!node) return;
     const measure = () => {
       const rect = node.getBoundingClientRect();
@@ -227,7 +248,10 @@ export function ProjectionNetWorthChart({
       .slice(0, 3);
     const focusEnd = nextMonetaryMilestones.at(-1)?.reached_month_index;
     if (focusEnd == null) return null;
-    const clampedEnd = Math.max(0, Math.min(series.months - 1, focusEnd));
+    // Margen tras el último hito: sin él, el marcador (p. ej. «Jubilación») cae en el
+    // borde derecho y su etiqueta centrada queda pisada por el recorte del plot.
+    const padded = focusEnd + Math.max(9, Math.round(focusEnd * 0.12));
+    const clampedEnd = Math.max(0, Math.min(series.months - 1, padded));
     // Focus mantiene startMonth 0: es una lente de planificación futura; el pasado histórico
     // queda deliberadamente oculto (no arranca en historyStartMonth).
     return { startMonth: 0, monthSpan: clampedEnd + 1 };
@@ -256,23 +280,14 @@ export function ProjectionNetWorthChart({
     return Array.isArray(f) && f.length === series.points.length && f.length > 0;
   }, [series.fire_target_series, series.points.length]);
 
-  const legendLabels = useMemo(() => {
-    const assetNames = merged.assetSeries.map((as) => as.asset_name);
-    const labels: string[] = ["Patrimonio neto", "Capital aportado"];
-    if (hasFireTargetSeries) labels.push("Objetivo FIRE");
-    labels.push(...assetNames);
-    if (historyStartMonth < 0) labels.push("Histórico");
-    return labels;
-  }, [merged.assetSeries, hasFireTargetSeries, historyStartMonth]);
-
   const layoutDims = useMemo(
     () =>
       buildProjectionChartLayout(
         containerSize.width > 0 ? containerSize.width : 1040,
         containerSize.height > 0 ? containerSize.height : undefined,
-        legendLabels,
+        { hideYAxisLabels: isMobile, compactHeader: isMobile },
       ),
-    [containerSize.height, containerSize.width, legendLabels],
+    [containerSize.height, containerSize.width, isMobile],
   );
 
   // Series base: deflactación, orden de activos, stacking acumulado completo.
@@ -363,6 +378,38 @@ export function ProjectionNetWorthChart({
     inflationAdjusted,
     installationInflationPct,
   ]);
+
+  // ── Modelo de la leyenda (HTML, fuera del SVG) ──
+  const legendStructural = useMemo(
+    () =>
+      buildStructuralLegendItems({
+        hasFire: hasFireTargetSeries,
+        hasHistory: historyStartMonth < 0,
+      }),
+    [hasFireTargetSeries, historyStartMonth],
+  );
+
+  // Activos por peak DESC para la leyenda, conservando el color del orden de
+  // pintado (peak ASC de baseSeries). Sufijo de owner solo en vista hogar.
+  const legendAssets = useMemo(() => {
+    const painted = baseSeries?.assetSeries ?? [];
+    const ordered = legendOrderByPeakDesc(painted);
+    return buildAssetLegendItems(
+      ordered.map(({ item, colorIndex }) => ({
+        id: item.id,
+        name: item.name,
+        colorIndex,
+      })),
+      ledgerPersonScope === "mine" ? null : assetOwnerNames,
+    );
+  }, [baseSeries, ledgerPersonScope, assetOwnerNames]);
+
+  // asset_id → etiqueta con sufijo: misma fuente que la leyenda, la consume el tooltip.
+  const assetLabelById = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const it of legendAssets) out[it.key] = it.label;
+    return out;
+  }, [legendAssets]);
 
   // xTicks completos del horizonte. No dependen de viewWindow.
   const xTicksAll = useMemo(() => {
@@ -461,12 +508,12 @@ export function ProjectionNetWorthChart({
     const yMax = yTicks[yTicks.length - 1] ?? plotMax;
     if (!allowNegativeAxis && yMin < 0) yMin = 0;
 
-    const xTicks = xTicksAll.filter(
+    const xTicksInWindow = xTicksAll.filter(
       (tick) =>
         tick.monthIndex >= visibleMonthStart && tick.monthIndex <= visibleMonthEnd,
     );
-    if (xTicks.length === 0 && visibleMonthEnd > visibleMonthStart) {
-      xTicks.push({
+    if (xTicksInWindow.length === 0 && visibleMonthEnd > visibleMonthStart) {
+      xTicksInWindow.push({
         monthIndex: visibleMonthEnd,
         label: projectionXTickLabel(visibleMonthEnd, series.months, {
           ageUiMode,
@@ -476,15 +523,36 @@ export function ProjectionNetWorthChart({
         }),
       });
     }
+    // Diezmado por ancho SOBRE LOS VISIBLES (nunca sobre el horizonte completo: un
+    // zoom filtraría los supervivientes y se quedaría sin etiquetas).
+    const xTicksThinned = thinTicksFromEnd(
+      xTicksInWindow,
+      projectionMaxXTicks(layoutDims.pw, ageUiMode),
+    );
+    // «Hoy» vive en la fila del eje X: aparta cualquier etiqueta de año que caiga
+    // a menos de ~40px del divisor (el mes 0 ya está excluido de los builders,
+    // pero el primer año del horizonte puede quedar casi encima).
+    const showsTodayLabel =
+      historyStartMonth < 0 && visibleMonthStart <= 0 && visibleMonthEnd >= 0;
+    const pxPerMonth = layoutDims.pw / Math.max(1, monthSpan - 1);
+    const xTicks = xTicksThinned.filter(
+      (t) => !showsTodayLabel || Math.abs(t.monthIndex) * pxPerMonth > 40,
+    );
 
     const tickSpanPx =
       xTicks.length > 1 ? layoutDims.pw / (xTicks.length - 1) : layoutDims.pw;
     const rotateXLabels =
       xTicks.length > 11 || (xTicks.length > 5 && tickSpanPx < 46);
+    // Los 38px de las etiquetas X rotadas salen del alto del plot (ph), NUNCA de
+    // lienzo extra: si el viewBox fuera más alto que la caja CSS medida, `meet`
+    // encogería el dibujo entero y lo centraría con bandas laterales — el chart
+    // dejaba de ser ancho completo (defecto preexistente que se notaba más con la
+    // leyenda HTML restando altura a la caja del plot).
     const xAxisExtraBottom = rotateXLabels ? 38 : 0;
-    const viewHeight = layoutDims.H + xAxisExtraBottom;
+    const viewHeight = layoutDims.H;
 
-    const { W, H, ml, mr, mt, mb, pw, ph } = layoutDims;
+    const { W, H, ml, mr, mt, mb, pw } = layoutDims;
+    const ph = Math.max(60, layoutDims.ph - xAxisExtraBottom);
 
     // xScale toma un `monthIndex` real (mes desde el inicio del horizonte),
     // no un índice de array. Esto desacopla el render de la densidad de
@@ -1272,6 +1340,7 @@ export function ProjectionNetWorthChart({
       ref={wrapRef}
       className="projection-chart-root projection-chart-root--fullbleed bordered-top"
     >
+      <div ref={plotRef} className="projection-chart-plot">
       <svg
         ref={svgRef}
         viewBox={`0 0 ${W} ${viewHeight}`}
@@ -1306,78 +1375,35 @@ export function ProjectionNetWorthChart({
         <text x={ml} y={layoutDims.headlineBlockTopY + 22} className="projection-chart-meta">
           {horizonLine}
         </text>
-        <text x={ml} y={layoutDims.headlineBlockTopY + 40} className="projection-chart-meta">
-          {inflationShort} · Δ regular {deltaBaseLabel} {deltaStr}/mes
-        </text>
-
-        <g
-          transform={`translate(${layoutDims.legend.x}, ${layoutDims.legend.y})`}
-          className="projection-chart-legend"
-        >
-          {(() => {
-            const p = layoutDims.legendPlacements;
-            const items: ReactNode[] = [];
-            if (p[0]) {
-              items.push(
-                <g key="legend-nw" transform={`translate(${p[0].x}, ${p[0].y})`}>
-                  <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-nw)" strokeWidth={3} strokeLinecap="round" />
-                  <text x={28} y={15}>Patrimonio neto</text>
-                </g>,
-              );
-            }
-            if (p[1]) {
-              items.push(
-                <g key="legend-cc" transform={`translate(${p[1].x}, ${p[1].y})`}>
-                  <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-cc)" strokeWidth={2.25} strokeDasharray="6 5" strokeLinecap="round" />
-                  <text x={28} y={15}>Capital aportado</text>
-                </g>,
-              );
-            }
-            const fireOffset = hasFireTargetSeries ? 1 : 0;
-            if (hasFireTargetSeries && p[2]) {
-              items.push(
-                <g key="legend-fire" transform={`translate(${p[2].x}, ${p[2].y})`}>
-                  <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-fire)" strokeWidth={1.5} strokeDasharray="3 4" strokeLinecap="round" opacity={0.5} />
-                  <text x={28} y={15}>Objetivo FIRE</text>
-                </g>,
-              );
-            }
-            assetSeries.forEach((as, idx) => {
-              const pos = p[2 + fireOffset + idx];
-              if (!pos) return;
-              const color = ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length];
-              items.push(
-                <g key={`legend-${as.id}`} transform={`translate(${pos.x}, ${pos.y})`}>
-                  <rect
-                    x={0}
-                    y={6}
-                    width={20}
-                    height={11}
-                    rx={2}
-                    fill={color}
-                    fillOpacity={0.14}
-                    stroke={color}
-                    strokeOpacity={0.4}
-                    strokeWidth={0.8}
-                  />
-                  <text x={26} y={15}>{as.name}</text>
-                </g>,
-              );
-            });
-            if (historyStartMonth < 0) {
-              const histPos = p[2 + fireOffset + assetSeries.length];
-              if (histPos) {
-                items.push(
-                  <g key="legend-hist" transform={`translate(${histPos.x}, ${histPos.y})`}>
-                    <line x1={0} y1={11} x2={22} y2={11} stroke="var(--proj-nw-past)" strokeWidth={2.25} strokeLinecap="round" />
-                    <text x={28} y={15}>Histórico</text>
-                  </g>,
-                );
-              }
-            }
-            return items;
-          })()}
-        </g>
+        {isMobile ? (
+          // La línea combinada no cabe en un plot de ~380px y rozaba el borde
+          // derecho sin padding: en móvil se parte en dos (mt lo compensa vía
+          // compactHeader).
+          <>
+            <text
+              x={ml}
+              y={layoutDims.headlineBlockTopY + 40}
+              className="projection-chart-meta"
+            >
+              {inflationShort}
+            </text>
+            <text
+              x={ml}
+              y={layoutDims.headlineBlockTopY + 58}
+              className="projection-chart-meta"
+            >
+              Δ regular {deltaBaseLabel} {deltaStr}/mes
+            </text>
+          </>
+        ) : (
+          <text
+            x={ml}
+            y={layoutDims.headlineBlockTopY + 40}
+            className="projection-chart-meta"
+          >
+            {inflationShort} · Δ regular {deltaBaseLabel} {deltaStr}/mes
+          </text>
+        )}
 
         {yTicks.map((yt) => (
           <g key={`gy-${yt}`}>
@@ -1388,15 +1414,19 @@ export function ProjectionNetWorthChart({
               y2={yScale(yt)}
               className="projection-chart-grid"
             />
-            <text
-              x={ml - 10}
-              y={yScale(yt)}
-              textAnchor="end"
-              dominantBaseline="middle"
-              className="projection-chart-tick"
-            >
-              {formatAxisMoney(yt, currencyIso)}
-            </text>
+            {/* Móvil: sin etiquetas del eje Y (estilo MiniProjection) — el valor
+                exacto vive en el tooltip; el plot gana todo el margen izquierdo. */}
+            {!isMobile ? (
+              <text
+                x={ml - 10}
+                y={yScale(yt)}
+                textAnchor="end"
+                dominantBaseline="middle"
+                className="projection-chart-tick"
+              >
+                {formatAxisMoney(yt, currencyIso)}
+              </text>
+            ) : null}
           </g>
         ))}
 
@@ -1457,14 +1487,30 @@ export function ProjectionNetWorthChart({
               y2={mt + ph}
               className="projection-chart-today-divider"
             />
-            <text
-              x={xScale(0)}
-              y={mt - 5}
-              textAnchor="middle"
-              className="projection-chart-today-label"
-            >
-              Hoy
-            </text>
+            {/* «Hoy» se alinea con la fila de etiquetas del eje X (misma baseline y
+                rotación que los años) en vez de flotar sobre el plot pegado al
+                subtítulo. Es texto, no controla nada: la navegación no cambia. */}
+            {(() => {
+              const cx = xScale(0);
+              const tickY =
+                mt + ph + (layoutDims.narrow ? 12 : 14) + (rotateXLabels ? 8 : 0);
+              return (
+                <text
+                  transform={
+                    rotateXLabels
+                      ? `rotate(38 ${cx.toFixed(2)} ${tickY.toFixed(2)})`
+                      : undefined
+                  }
+                  x={cx}
+                  y={tickY}
+                  textAnchor="start"
+                  dominantBaseline={rotateXLabels ? "middle" : "auto"}
+                  className="projection-chart-today-label"
+                >
+                  Hoy
+                </text>
+              );
+            })()}
           </>
         ) : null}
 
@@ -1594,7 +1640,11 @@ export function ProjectionNetWorthChart({
               halfW: number;
               isJubilacion: boolean;
             };
-            const y1Floor = mt + 12;
+            // 22 y no 12: la etiqueta se pinta en y1−6 con ~10px de glifo por encima
+            // de la baseline; con el suelo antiguo, un milestone cuyo NW roza el techo
+            // del plot (p. ej. «Jubilación» en la vista cercana móvil) quedaba con la
+            // mitad superior recortada por el clip del plot.
+            const y1Floor = mt + 22;
             const items: MS[] = visibleMilestones
               .map((m) => {
                 const x = xScale(m.reached_month_index);
@@ -1777,14 +1827,27 @@ export function ProjectionNetWorthChart({
           ) : null}
         </g>
 
-        <text
-          transform={`translate(${Math.min(30, ml * 0.32)}, ${mt + ph / 2}) rotate(-90)`}
-          textAnchor="middle"
-          className="projection-chart-axis-caption"
-        >
-          {normalizeCurrencyIso(currencyIso) ?? "Importe"}
-        </text>
+        {!isMobile ? (
+          <text
+            transform={`translate(${Math.min(30, ml * 0.32)}, ${mt + ph / 2}) rotate(-90)`}
+            textAnchor="middle"
+            className="projection-chart-axis-caption"
+          >
+            {normalizeCurrencyIso(currencyIso) ?? "Importe"}
+          </text>
+        ) : null}
       </svg>
+      </div>
+
+      <ChartLegend
+        structural={legendStructural}
+        assets={legendAssets}
+        collapsedCap={collapsedAssetLegendCap(
+          containerSize.width > 0 ? containerSize.width : 1040,
+        )}
+        size="md"
+        ariaLabel="Series del gráfico de proyección"
+      />
 
       {hover !== null &&
       pts[hover] != null &&
@@ -1819,12 +1882,33 @@ export function ProjectionNetWorthChart({
               {formatCurrencyOrDashNumber(cc[hover], currencyIso)}
             </div>
           ) : null}
-          {assetSeries.map((as) => (
-            <div key={as.id}>
-              {as.name} —{" "}
-              {formatCurrencyOrDashNumber(as.values[hover], currencyIso)}
-            </div>
-          ))}
+          {(() => {
+            // Top-N por |valor| en el mes hovered + agregado «Otros»: el tooltip no
+            // escala listando N activos (misma disciplina que la leyenda).
+            const { shown, hiddenCount, hiddenTotal } = topAssetTooltipRows(
+              assetSeries.map((as) => ({
+                id: as.id,
+                label: assetLabelById[as.id] ?? as.name,
+                value: as.values[hover!],
+              })),
+            );
+            return (
+              <>
+                {shown.map((r) => (
+                  <div key={r.id}>
+                    {r.label} —{" "}
+                    {formatCurrencyOrDashNumber(r.value, currencyIso)}
+                  </div>
+                ))}
+                {hiddenCount > 0 ? (
+                  <div className="projection-chart-tooltip-rest">
+                    Otros ({hiddenCount}) —{" "}
+                    {formatCurrencyOrDashNumber(hiddenTotal, currencyIso)}
+                  </div>
+                ) : null}
+              </>
+            );
+          })()}
           {pts[hover]!.month_index < 0
             ? merged.markers
                 .filter((mk) => mk.month_index === pts[hover]!.month_index)

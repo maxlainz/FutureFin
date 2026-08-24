@@ -1052,30 +1052,6 @@
   border-style: dashed;
 }
 
-.health-dl {
-  margin: 0;
-  display: grid;
-  gap: 0.65rem;
-}
-
-.health-dl div {
-  display: grid;
-  grid-template-columns: 8rem 1fr;
-  gap: 0.5rem;
-  font-size: 0.875rem;
-}
-
-.health-dl dt {
-  margin: 0;
-  color: var(--ff-muted);
-}
-
-.health-dl dd {
-  margin: 0;
-  font-weight: 500;
-  color: var(--ff-ink);
-}
-
 /* ---------- Shared form controls ---------- */
 .muted {
   color: var(--ff-muted);
@@ -1330,9 +1306,71 @@
   outline-offset: 2px;
 }
 
-.hint {
-  margin: 0.75rem 0 0;
+/* Listas explicativas dentro de modales (sustituye paddings inline). */
+.muted-list {
+  padding-left: 1.2em;
+}
+
+/* Tramos IRPF (Ajustes → Plan). El <fieldset> pierde su cajón por defecto (el
+   doble borde era lo más feo del panel) y los inputs adoptan el estilo estándar
+   de la app — el global vive scoped a `.field input` y aquí no hay .field. */
+.tax-brackets-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.tax-brackets-fieldset:disabled {
+  opacity: 0.55;
+}
+
+.tax-brackets-fieldset .btn {
+  align-self: flex-start;
+}
+
+.tax-brackets-table {
+  border-collapse: collapse;
+}
+
+.tax-brackets-table th {
   font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--ff-ink-soft);
+  text-align: right;
+  padding: 0.25rem 0 0.35rem 1rem;
+}
+
+.tax-brackets-table th:first-child,
+.tax-brackets-table td:first-child {
+  padding-left: 0;
+}
+
+.tax-brackets-table td {
+  padding: 0.2rem 0 0.2rem 1rem;
+}
+
+.tax-brackets-table input {
+  font: inherit;
+  width: 9.5rem;
+  max-width: 100%;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-input);
+  background: var(--ff-paper);
+  color: var(--ff-ink);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tax-brackets-table input:focus-visible {
+  outline: 2px solid var(--ff-accent);
+  outline-offset: 0;
+}
+
+.tax-brackets-table input::placeholder {
   color: var(--ff-muted);
 }
 
@@ -1943,6 +1981,102 @@
   gap: 0.35rem;
 }
 
+/* ---------- Leyenda compartida de charts (ChartLegend) ---------- */
+/* HTML fuera del <svg>: flex-wrap real (sin anchos estimados) y el toggle «+N más»
+   queda fuera de la máquina de gestos pan/zoom del chart. */
+.ff-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.9rem;
+  padding: 0.5rem 0.15rem 0.15rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--ff-ink-soft);
+  min-width: 0;
+}
+
+.ff-chart-legend--sm {
+  font-size: 0.72rem;
+  gap: 0.3rem 0.85rem;
+  padding: 0;
+  margin-top: 0.45rem;
+}
+
+.ff-chart-legend-items {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.9rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+  /* Tope al expandir con muchos activos: scroll interno propio en lugar de
+     empujar el plot fuera del viewport bloqueado de Proyección. Colapsada
+     nunca lo alcanza. */
+  max-height: 8.5rem;
+  overflow-y: auto;
+}
+
+.ff-chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 14rem;
+}
+
+.ff-chart-legend-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ff-chart-legend-swatch {
+  flex-shrink: 0;
+  width: 0.9rem;
+}
+
+.ff-chart-legend-swatch--line {
+  height: 2px;
+  border-radius: 1px;
+  background: var(--ff-legend-color);
+}
+
+.ff-chart-legend-swatch--dashed {
+  height: 0;
+  border-top: 2px dashed var(--ff-legend-color);
+}
+
+.ff-chart-legend-swatch--area {
+  height: 0.65rem;
+  border-radius: 2px;
+  background: color-mix(in oklch, var(--ff-legend-color) 14%, transparent);
+  border: 1px solid color-mix(in oklch, var(--ff-legend-color) 40%, transparent);
+}
+
+.ff-chart-legend-toggle {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  padding: 0.15rem 0.55rem;
+  border-radius: var(--ff-radius-pill);
+  background: var(--ff-pill);
+  color: var(--ff-ink-soft);
+  border: 1px solid var(--ff-line-soft);
+}
+
+.ff-chart-legend-toggle:hover {
+  color: var(--ff-ink);
+}
+
+.ff-chart-legend-toggle:focus-visible {
+  outline: 2px solid var(--ff-accent);
+  outline-offset: 2px;
+}
+
 /* ---------- Projection chart container ---------- */
 .projection-chart-root {
   position: relative;
@@ -1960,7 +2094,17 @@
 .projection-chart-root--fullbleed {
   max-width: none;
   display: flex;
+  /* Columna: plot arriba (flex:1), leyenda HTML debajo. El suelo de altura vive
+     aquí (no en el SVG): si lo tuviera el SVG, bloquearía el shrink del plot al
+     expandir la leyenda y esta se recortaría contra el overflow:hidden. */
+  flex-direction: column;
   flex: 1;
+  min-height: 24rem;
+}
+
+.projection-chart-plot {
+  display: flex;
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -2050,7 +2194,6 @@
   width: 100%;
   max-width: 100%;
   height: 100%;
-  min-height: 22rem;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   background: var(--ff-paper);
   border: 1px solid var(--ff-line-soft);
@@ -2068,12 +2211,6 @@
 .projection-chart-meta {
   fill: var(--proj-meta);
   font-size: 12px;
-}
-
-.projection-chart-legend text {
-  fill: var(--ff-ink-soft);
-  font-size: 12px;
-  font-weight: 500;
 }
 
 .projection-chart-grid {
@@ -2219,6 +2356,11 @@
   font-weight: 700;
   margin-bottom: 0.35rem;
   letter-spacing: 0.02em;
+}
+
+.projection-chart-tooltip-rest {
+  /* La fila agregada «Otros (k)» se lee como resumen, no como un activo más. */
+  opacity: 0.8;
 }
 
 .projection-series-table-wrap {
@@ -3627,17 +3769,18 @@ fieldset.retirement-config-stack {
   .projection-chart-meta {
     font-size: 0.62rem;
   }
+  .ff-chart-legend {
+    font-size: 0.7rem;
+    gap: 0.3rem 0.7rem;
+  }
+  /* Control denso de chart: fuera del bump --ff-touch-min a propósito (mismo
+     criterio que el carve-out de tablas), pero con un mínimo tapeable. */
+  .ff-chart-legend-toggle {
+    min-height: 2.25rem;
+  }
 }
 
 /* ---------- Ajustes → Tokens de API (MCP) ---------- */
-.panel-title-icon {
-  width: 0.9rem;
-  height: 0.9rem;
-  vertical-align: -0.1em;
-  margin-right: 0.3rem;
-  color: var(--ff-ink-soft);
-}
-
 /* Aviso del secreto recién creado: se enseña UNA vez, borde acentuado para que no pase
    desapercibido antes de cerrar. */
 .token-reveal {

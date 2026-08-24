@@ -18,9 +18,10 @@ import type {
 } from "../api/types";
 import { HelpPopover } from "../components/HelpPopover";
 import { healthStatusLabel, roleLabel } from "../lib/enumLabels";
+import { parseDisplayDecimal } from "../lib/format";
 import { HELP_TEXTS } from "../lib/helpTexts";
 import { Modal, ModalFormError } from "../components/Modal";
-import { PlugIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
+import { RowEditIcon, RowTrashIcon } from "../components/icons";
 import { Switch } from "../components/Switch";
 import { AccountCard } from "../components/AccountCard";
 import { ApiTokensPanel } from "./ApiTokensPanel";
@@ -164,13 +165,13 @@ export function SettingsView({
   currencySaving?: boolean;
   /** Cambia la divisa base del hogar (owner-only). */
   onChangeCurrency?: (code: string) => void;
-  saveInstallationCalendarTz: (e: FormEvent) => void;
+  saveInstallationCalendarTz: (e?: FormEvent) => void;
   projectionInflationPctDraft: string;
   setProjectionInflationPctDraft: Dispatch<SetStateAction<string>>;
   showAgeModeDraft: "dates" | "ages";
   setShowAgeModeDraft: Dispatch<SetStateAction<"dates" | "ages">>;
   installationProjectionSaving: boolean;
-  saveInstallationProjection: (e: FormEvent) => void;
+  saveInstallationProjection: (e?: FormEvent) => void;
   onSaveFire: (fs: FireSettingsApi) => Promise<void>;
   health: HealthResponse | null;
   healthError: string | null;
@@ -315,6 +316,72 @@ export function SettingsView({
     };
   }, [fireTaxDraft, hasMembership, isOwner, onSaveFire]);
 
+  // ── Autoguardado de zona horaria (4.0.6: en Ajustes todo guarda solo) ──
+  // Solo se lanza el PATCH cuando el draft es una IANA VÁLIDA y difiere del servidor:
+  // sin la guarda, cada pausa al teclear («Europe/Ma…») sería un 400 y un banner.
+  const serverCalendarTz = (installation?.installation.calendar_tz ?? "UTC").trim();
+  const calendarTzValid = useMemo(() => {
+    const t = calendarTzDraft.trim();
+    if (t.length < 3) return false;
+    try {
+      new Intl.DateTimeFormat(undefined, { timeZone: t });
+      return true;
+    } catch {
+      return false;
+    }
+  }, [calendarTzDraft]);
+  useEffect(() => {
+    if (!hasMembership || !isOwner) return;
+    if (!calendarTzValid) return;
+    if (calendarTzDraft.trim() === serverCalendarTz) return;
+    const timer = window.setTimeout(() => saveInstallationCalendarTz(), 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    calendarTzDraft,
+    calendarTzValid,
+    serverCalendarTz,
+    hasMembership,
+    isOwner,
+    saveInstallationCalendarTz,
+  ]);
+
+  // ── Autoguardado de inflación + modo edad (mismo contrato) ──
+  const serverInflationPct = parseDisplayDecimal(
+    String(installation?.installation.annual_inflation_assumption_percent ?? "0"),
+  );
+  const serverShowAgeMode =
+    installation?.installation.show_age_mode === "ages" ? "ages" : "dates";
+  const draftInflationPct =
+    projectionInflationPctDraft.trim() === ""
+      ? 0
+      : parseDisplayDecimal(projectionInflationPctDraft);
+  const projectionDraftValid =
+    draftInflationPct != null &&
+    Number.isFinite(draftInflationPct) &&
+    draftInflationPct >= 0 &&
+    draftInflationPct <= 50;
+  useEffect(() => {
+    if (!hasMembership || !isOwner) return;
+    if (!projectionDraftValid) return;
+    if (
+      draftInflationPct === serverInflationPct &&
+      showAgeModeDraft === serverShowAgeMode
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => saveInstallationProjection(), 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    draftInflationPct,
+    projectionDraftValid,
+    showAgeModeDraft,
+    serverInflationPct,
+    serverShowAgeMode,
+    hasMembership,
+    isOwner,
+    saveInstallationProjection,
+  ]);
+
   return (
     <div className="workspace">
       <div className="workspace-header">
@@ -401,9 +468,7 @@ export function SettingsView({
 
       {settingsSubTab === "integrations" && hasMembership ? (
         <section className="panel">
-          <h3 className="panel-title">
-            <PlugIcon className="panel-title-icon" /> Servidor MCP
-          </h3>
+          <h3 className="panel-title">Servidor MCP</h3>
           <p className="muted">
             Conecta Claude u otro asistente a tus finanzas: el servidor MCP embebido vive en{" "}
             <code>https://tu-host/mcp</code> y acepta tokens de API (abajo) o el conector OAuth de
@@ -444,6 +509,10 @@ export function SettingsView({
       {settingsSubTab === "general" && hasMembership ? (
         <section className="panel">
           <h3 className="panel-title">Divisa</h3>
+          <p className="muted">
+            Una sola por hogar: FutureFin no convierte entre divisas. Cambiarla cambia el símbolo
+            con el que se muestran tus importes, no los reconvierte.
+          </p>
           {isOwner && onChangeCurrency ? (
             <div className="stack bordered-top">
               <label className="field">
@@ -458,15 +527,11 @@ export function SettingsView({
                   <option value="GBP">Libra esterlina (£)</option>
                 </select>
               </label>
-              <p className="muted compact">
-                Una sola por hogar: FutureFin no convierte entre divisas. Cambiarla cambia el
-                símbolo con el que se muestran tus importes, <strong>no los reconvierte</strong>.
-              </p>
             </div>
           ) : (
             <p className="muted bordered-top">
               <strong>{installation?.installation.base_currency ?? "EUR"}</strong> · solo el
-              propietario puede cambiarla
+              propietario puede cambiarlo.
             </p>
           )}
         </section>
@@ -476,10 +541,7 @@ export function SettingsView({
         <section className="panel">
           <h3 className="panel-title">Zona horaria del calendario</h3>
           {isOwner ? (
-            <form
-              className="stack bordered-top"
-              onSubmit={saveInstallationCalendarTz}
-            >
+            <div className="stack bordered-top">
               <label className="field">
                 <span>IANA (p. ej. Europe/Madrid)</span>
                 <input
@@ -490,18 +552,18 @@ export function SettingsView({
                   autoComplete="off"
                 />
               </label>
-              <button
-                type="submit"
-                className="btn primary"
-                disabled={calendarTzSaving}
-              >
-                Guardar zona horaria
-              </button>
-            </form>
+              <p className="muted tight">
+                {calendarTzSaving
+                  ? "Guardando…"
+                  : !calendarTzValid && calendarTzDraft.trim() !== ""
+                    ? "Zona horaria no reconocida — sin guardar."
+                    : "Guardado automático."}
+              </p>
+            </div>
           ) : (
             <p className="muted bordered-top">
               <strong>{installation?.installation.calendar_tz ?? "UTC"}</strong>{" "}
-              · solo lectura
+              · solo el propietario puede cambiarlo.
             </p>
           )}
         </section>
@@ -511,10 +573,7 @@ export function SettingsView({
         isOwner ? (
         <section className="panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
-          <form
-            className="stack bordered-top"
-            onSubmit={saveInstallationProjection}
-          >
+          <div className="stack bordered-top">
             <label className="field">
               <span className="label-with-help">
                 Inflación anual %
@@ -537,6 +596,9 @@ export function SettingsView({
                 ingresos, gastos y aportaciones se mantienen constantes en euros
                 — refleja «hacer lo que haces ahora». Usa <code>0</code> para
                 desactivar.
+                {!projectionDraftValid
+                  ? " Número entre 0 y 50 — sin guardar."
+                  : null}
               </small>
             </label>
             <label className="field">
@@ -553,14 +615,7 @@ export function SettingsView({
                 <option value="ages">Edades</option>
               </select>
             </label>
-            <button
-              type="submit"
-              className="btn primary"
-              disabled={installationProjectionSaving}
-            >
-              Guardar proyección
-            </button>
-          </form>
+          </div>
 
           <div className="stack bordered-top">
             {/* El bloque de ayuda va FUERA del <label> (como hermano) para que el nombre accesible
@@ -591,44 +646,32 @@ export function SettingsView({
                 </option>
               </select>
             </label>
+            {/* Solo la descripción del modo ELEGIDO; la comparativa completa de los tres
+                modos vive en el HelpPopover del selector (settings.savings_source). */}
             <div className="field" id="savings-source-help">
-              <small className="muted">
-                <strong>Presupuesto</strong>: la simulación ahorra cada mes lo
-                que fijas en tu presupuesto (ingresos − gastos presupuestados).
-                No depende de tus movimientos.
-              </small>
-              <small className="muted">
-                <strong>Movimientos reales</strong>: el ahorro sale de tus
-                movimientos, promediando el ingreso y el gasto por separado con
-                las ventanas de abajo. Las cuotas de préstamos cuentan como un
-                gasto más — ya están en tus movimientos — y los pasivos solo
-                restan su principal pendiente al patrimonio. Sin datos, ese lado
-                cae al presupuesto.
-              </small>
-              <small className="muted">
-                <strong>Ingresos de presupuesto + gasto real</strong>: la
-                simulación toma tus ingresos del presupuesto y el gasto medio
-                real (ventana de gasto de abajo). Útil si tu nómina es estable
-                pero quieres que el gasto refleje lo que gastas de verdad. Ojo:
-                acierta solo mientras mantengas el presupuesto de ingresos al
-                día, y si se desvía no hay nada que te avise.
-              </small>
-              <small className="muted">
-                El Resumen, la proyección y el target FIRE siguen el modo
-                elegido.
-              </small>
+              {(fireTaxDraft.savings_source ?? "budget") === "budget" ? (
+                <small className="muted">
+                  La simulación ahorra cada mes lo que fijas en tu presupuesto
+                  (ingresos − gastos presupuestados). No depende de tus
+                  movimientos.
+                </small>
+              ) : fireTaxDraft.savings_source === "transactions_avg" ? (
+                <small className="muted">
+                  El ahorro sale de tus movimientos: ingreso y gasto promediados
+                  por separado con las ventanas de abajo. Sin datos, ese lado cae
+                  al presupuesto.
+                </small>
+              ) : (
+                <small className="muted">
+                  Ingresos del presupuesto y gasto medio real (ventana de abajo).
+                  Solo acierta mientras mantengas el presupuesto de ingresos al
+                  día.
+                </small>
+              )}
             </div>
 
             {savingsSourceUsesTransactions(fireTaxDraft.savings_source) ? (
               <div className="stack">
-                <p className="muted tight">
-                  <strong>Ventanas del promedio.</strong> Se configuran por
-                  separado porque las dos series se comportan distinto: un
-                  ingreso cambia a escalones (una subida de sueldo) y conviene
-                  mirarlo corto para captarla pronto, mientras que el gasto es
-                  irregular mes a mes y una ventana larga evita que una compra
-                  grande redefina tu gasto habitual.
-                </p>
                 {(
                   [
                     ["income", "Ingreso"] as const,
@@ -715,18 +758,12 @@ export function SettingsView({
                       </label>
                     </div>
                   ))}
-                <small className="muted">
-                  <strong>Meses de calendario</strong>: mira hacia atrás ese
-                  número de meses y promedia los que tengan datos — si dejaste
-                  de importar, la media se apoya en menos meses.{" "}
-                  <strong>Meses con datos</strong>: coge siempre ese número de
-                  meses con movimientos, saltando los vacíos, aunque para
-                  reunirlos haya que ir más atrás en el tiempo.
-                </small>
               </div>
             ) : null}
             <p className="muted tight">
-              {fireTaxSaving ? "Guardando…" : "Guardado automático."}
+              {fireTaxSaving || installationProjectionSaving
+                ? "Guardando…"
+                : "Guardado automático."}
             </p>
           </div>
         </section>
@@ -742,9 +779,6 @@ export function SettingsView({
         isOwner ? (
           <section className="panel">
             <h3 className="panel-title">Fiscalidad (IRPF ahorro)</h3>
-            <p className="muted tight">
-              {fireTaxSaving ? "Guardando…" : "Guardado automático."}
-            </p>
             <div className="stack bordered-top">
               <label className="field checkbox-field">
                 <input
@@ -759,25 +793,12 @@ export function SettingsView({
                 />
                 <span>Aplicar IRPF del ahorro</span>
               </label>
-              <fieldset disabled={!fireTaxDraft.taxes_enabled} className="stack">
-                <div className="stack tight">
-                  <button
-                    type="button"
-                    className="btn ghost"
-                    onClick={() =>
-                      setFireTaxDraft((p) => ({
-                        ...p,
-                        tax_brackets: DEFAULT_ES_TAX_BRACKETS_API.map((b) => ({
-                          up_to: b.up_to,
-                          pct: b.pct,
-                        })),
-                      }))
-                    }
-                  >
-                    Restaurar España
-                  </button>
+              <fieldset
+                disabled={!fireTaxDraft.taxes_enabled}
+                className="stack tight tax-brackets-fieldset"
+              >
                   <div className="table-scroll">
-                    <table className="table">
+                    <table className="tax-brackets-table">
                       <thead>
                         <tr>
                           <th>Hasta base (€)</th>
@@ -829,8 +850,25 @@ export function SettingsView({
                       </tbody>
                     </table>
                   </div>
-                </div>
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    onClick={() =>
+                      setFireTaxDraft((p) => ({
+                        ...p,
+                        tax_brackets: DEFAULT_ES_TAX_BRACKETS_API.map((b) => ({
+                          up_to: b.up_to,
+                          pct: b.pct,
+                        })),
+                      }))
+                    }
+                  >
+                    Restaurar España
+                  </button>
               </fieldset>
+              <p className="muted tight">
+                {fireTaxSaving ? "Guardando…" : "Guardado automático."}
+              </p>
             </div>
           </section>
         ) : (
@@ -882,7 +920,7 @@ export function SettingsView({
             </p>
           ) : null}
           {categoriesBusy ? (
-            <p className="muted bordered-top">Cargando categorías…</p>
+            <p className="muted bordered-top">Cargando…</p>
           ) : (
             <ul className="category-list">
               {filteredCategories.map((c) => (
@@ -918,7 +956,7 @@ export function SettingsView({
             </ul>
           )}
           {!categoriesBusy && filteredCategories.length === 0 ? (
-            <p className="muted bordered-top">Vacío.</p>
+            <p className="muted bordered-top">Sin datos.</p>
           ) : null}
         </section>
       ) : null}
@@ -935,14 +973,12 @@ export function SettingsView({
       {settingsSubTab === "general" ? (
         <>
           <section className="panel">
-            <div className="panel-head-row">
-              <h3 className="panel-title">Apariencia</h3>
-            </div>
-            <p className="muted compact tight">
+            <h3 className="panel-title">Apariencia</h3>
+            <p className="muted">
               Elige el tema de la interfaz. «Auto» sigue la preferencia del
               sistema.
             </p>
-            <div className="bordered-top" style={{ paddingTop: "0.7rem" }}>
+            <div className="bordered-top">
               <ThemeToggle value={themePref} onChange={onChangeTheme} />
             </div>
           </section>
@@ -950,11 +986,11 @@ export function SettingsView({
           {isOwner && onReopenOnboarding ? (
             <section className="panel">
               <h3 className="panel-title">Configuración inicial</h3>
-              <p className="muted compact bordered-top">
+              <p className="muted">
                 Repasa la divisa, la zona horaria y los supuestos de tu plan con el asistente de
                 bienvenida. No borra nada: solo vuelve a preguntarte.
               </p>
-              <div className="bordered-top" style={{ paddingTop: "0.7rem" }}>
+              <div className="bordered-top">
                 <button type="button" className="btn" onClick={onReopenOnboarding}>
                   Abrir el asistente
                 </button>
@@ -965,7 +1001,7 @@ export function SettingsView({
           <section className="panel">
             <h3 className="panel-title">Instalación</h3>
             {installationBusy ? (
-              <p className="muted">Cargando…</p>
+              <p className="muted tight">Cargando…</p>
             ) : installation ? (
               <dl className="settings-meta-dl">
                 <div>
@@ -989,7 +1025,7 @@ export function SettingsView({
                 No se puede contactar con la API. {healthError}
               </p>
             ) : health ? (
-              <dl className="health-dl">
+              <dl className="settings-meta-dl">
                 <div>
                   <dt>Servicio</dt>
                   <dd>{health.service}</dd>
@@ -1004,7 +1040,7 @@ export function SettingsView({
                 </div>
               </dl>
             ) : (
-              <p className="muted">Comprobando…</p>
+              <p className="muted tight">Cargando…</p>
             )}
           </section>
         </>
@@ -1014,19 +1050,17 @@ export function SettingsView({
         <>
           {hasMembership ? (
             <section className="panel">
-              <h3 className="panel-title">Copia de seguridad personal (.ffbackup)</h3>
-              <p className="muted compact bordered-top">
-                Exporta o restaura un archivo cifrado con tu contraseña que
-                contiene solo tus datos: activos, pasivos, presupuesto,
-                planificación, categorías usadas, fecha de nacimiento y
-                preferencias UI. El archivo es portable entre instalaciones.
+              <h3 className="panel-title">Copia de seguridad personal</h3>
+              <p className="muted">
+                Exporta o restaura un archivo <code>.ffbackup</code> cifrado con
+                tu contraseña que contiene solo tus datos: activos, pasivos,
+                presupuesto, planificación, categorías usadas, fecha de
+                nacimiento y preferencias UI. Portable entre instalaciones.
               </p>
               {ffbackupImportDone ? (
-                <p className="muted compact bordered-top">
-                  {ffbackupImportDone}
-                </p>
+                <p className="muted bordered-top">{ffbackupImportDone}</p>
               ) : null}
-              <div className="bordered-top settings-backup-actions">
+              <div className="bordered-top">
                 <button
                   type="button"
                   className="btn primary"
@@ -1174,7 +1208,7 @@ export function SettingsView({
                   );
                   if (siblings.length === 0) {
                     return (
-                      <p className="hint">Sin categoría sustituta en el ámbito.</p>
+                      <p className="muted tight">Sin categoría sustituta en el ámbito.</p>
                     );
                   }
                   return (
@@ -1327,7 +1361,7 @@ export function SettingsView({
                 {ffbackupImportPreview.app_version}, schema v
                 {ffbackupImportPreview.schema_version}).
               </p>
-              <ul className="muted tight" style={{ paddingLeft: "1.2em" }}>
+              <ul className="muted tight muted-list">
                 <li>{ffbackupImportPreview.counts.assets} activos</li>
                 <li>{ffbackupImportPreview.counts.liabilities} pasivos</li>
                 <li>

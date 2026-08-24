@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiDelete, apiGet } from "../api/client";
 import type { OAuthConnectionApi } from "../api/types";
 import { Modal, ModalFormError } from "../components/Modal";
-import { LinkIcon, RowTrashIcon } from "../components/icons";
+import { RowTrashIcon } from "../components/icons";
 import { isoTimestampDmy, lastUsedLabel } from "../lib/format";
 
 export function OAuthConnectionsPanel() {
@@ -58,15 +58,11 @@ export function OAuthConnectionsPanel() {
 
   return (
     <section className="panel">
-      <div className="panel-head-row">
-        <h3 className="panel-title">
-          <LinkIcon className="panel-title-icon" /> Conexiones
-        </h3>
-      </div>
+      <h3 className="panel-title">Conexiones</h3>
       <p className="muted">
-        Aplicaciones autorizadas por OAuth (p. ej. el conector de claude.ai). El acceso hereda tu
-        rol en cada uso: lectura siempre, y escritura solo con el interruptor de escritura MCP
-        activado. Revocar corta el acceso al instante.
+        Aplicaciones autorizadas por OAuth (p. ej. el conector de claude.ai).
+        Heredan tu rol en cada uso y respetan el interruptor de escritura de
+        arriba; revocar corta el acceso al instante.
       </p>
 
       {error ? (

@@ -17,10 +17,8 @@ import type {
 import { HelpPopover } from "../components/HelpPopover";
 import { HELP_TEXTS } from "../lib/helpTexts";
 import { MetricCard } from "../components/MetricCard";
-import {
-  MiniProjection,
-  MiniProjectionLegend,
-} from "../components/charts/MiniProjection";
+import { MiniProjection } from "../components/charts/MiniProjection";
+import { ChartLegend } from "../components/charts/ChartLegend";
 import {
   METRIC_DASH,
   formatCurrencyNumber,
@@ -557,23 +555,32 @@ export function RetirementView({
                   calendarTz,
                 }}
               />
-              <MiniProjectionLegend
-                items={[
-                  { label: "Patrimonio neto", color: "var(--proj-nw)" },
+              <ChartLegend
+                size="sm"
+                structural={[
+                  {
+                    key: "nw",
+                    label: "Patrimonio neto",
+                    color: "var(--proj-nw)",
+                    swatch: "line",
+                  },
                   ...(hasFire
                     ? ([
                         {
+                          key: "fire",
                           label: "Objetivo FIRE",
                           color: "var(--proj-fire)",
-                          dash: true,
+                          swatch: "dashed",
                         },
                       ] as const)
                     : []),
                   ...(jubMi != null
                     ? ([
                         {
+                          key: "jub",
                           label: `Primer cruce · ${jubLabel ?? ""}`.trim(),
                           color: "var(--ff-accent)",
+                          swatch: "line",
                         },
                       ] as const)
                     : []),

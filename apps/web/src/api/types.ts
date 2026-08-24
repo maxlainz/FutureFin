@@ -81,6 +81,14 @@ export type InstallationAccess = {
   role: "owner" | "member" | "viewer";
 };
 
+/** Fila de GET /v1/installation/members (legible por cualquier miembro, viewer incluido). */
+export type MemberApiRow = {
+  user_id: string;
+  username: string;
+  role: "owner" | "member" | "viewer";
+  joined_at: string;
+};
+
 export type InstallationSessionContext = {
   installation_initialized: boolean;
   access: InstallationAccess | null;
