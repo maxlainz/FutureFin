@@ -292,3 +292,30 @@ Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKER
 > con código antiguo.
 
 Before resuming work: `git pull --ff-only`. After push: pull again.
+
+### Dependencias — automatizado (rutina cloud)
+
+Los PRs de Dependabot los procesa una **rutina cloud** («Dependabot semanal», gestionada por
+API de claude.ai, no vive en este repo): se dispara **por webhook** cuando Dependabot abre un
+PR, con un **barrido los martes ~06:30** que caza huérfanos si un evento se perdió. Política:
+
+- **Parche/minor dentro de rango**: se mergea con los 5 checks en verde.
+- **Major o 0.x-minor**: pasa una barra de evidencia — notas del salto leídas del cuerpo del
+  PR, cada rotura anunciada buscada con `grep` en el repo (salida pegada como evidencia en un
+  comentario del PR), checks sobre el SHA actual. Sin notas legibles no se mergea.
+- Cada fix que **llega a la imagen** produce su propio release patch (norma «una versión, una
+  imagen»); lo que no llega (vitest, eslint, `@types/*`, acciones) se mergea sin bump.
+- Los issues-informe que la rutina abre **se cierran solos** cuando todo lo que reportaban
+  queda resuelto.
+
+Dos artefactos suyos que NO hay que «limpiar» a mano:
+
+- **`ops/routine-lock`**: rama efímera que la rutina usa como candado anti-carrera (varios
+  webhooks en ráfaga → solo una sesión procesa). Aparece y desaparece sola; si lleva >2 h es
+  un candado caducado y la propia rutina lo roba. Borrarla a mano en mitad de una pasada deja
+  dos sesiones escribiendo a la vez.
+- **El issue con label `dependabot-mirror`**: espejo de las alertas abiertas, regenerado por
+  `dependabot-alerts-mirror.yml` (la rutina no puede leer la API de alertas desde su sandbox
+  y lee este issue en su lugar). Con 0 alertas queda abierto con `SIN_ALERTAS: true` — no
+  cerrarlo. Necesita el secret `DEPENDABOT_ALERTS_TOKEN` (el `GITHUB_TOKEN` de Actions no
+  puede leer alertas; TODO: sustituir el actual por un PAT fine-grained de solo lectura).
