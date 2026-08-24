@@ -23,6 +23,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   un 500 de Docker Hub tumbó el job el 2026-08-24 sin que nada del repo estuviera roto; ahora
   reutiliza la imagen que el propio job acaba de construir.
 
+## [4.0.5] - 2026-08-24
+
+**Qué cambia para ti**: nada visible en la aplicación, pero con esta versión **la instalación deja
+de tener alertas de seguridad abiertas**: las 7 que arrastraba la cadena de build de la interfaz
+(2 críticas, 1 alta, 3 moderadas y 1 baja) quedan cerradas. Ninguna era explotable contra un
+FutureFin desplegado —todas eran de herramientas de desarrollo, no de código que se ejecute en tu
+servidor—, pero salían en el panel del repositorio y ya no salen. No se toca motor, API, interfaz ni
+esquema: actualizar es seguro.
+
+### Dependencias que viajan en la imagen
+
+- **`@babel/core`** 7.29.0 → 7.29.7 (transitiva, vía `@vitejs/plugin-react`). Cierra
+  **GHSA-4x5r-pxfx-6jf8** (lectura arbitraria de ficheros a través del comentario
+  `sourceMappingURL`), la última alerta que quedaba abierta.
+
+### Contexto: de dónde venían las otras seis
+
+Se cerraron en el commit anterior (`vitest` 2 → 4), que no cambia la imagen y por eso no llevó
+versión propia. Merece quedar escrito porque el diagnóstico no era el que parecía: **el `vite` y el
+`esbuild` vulnerables nunca fueron los del repositorio**, que ya estaban parcheados (6.4.3 y
+0.25.12). Eran los que `vitest@2.1.9` anidaba por debajo — `vite@5.4.21` y `esbuild@0.21.5`. Al
+subir `vitest` a 4, que admite `vite ^6 || ^7 || ^8`, esas copias anidadas desaparecen y con ellas
+las seis alertas. No hizo falta subir `vite` de major ni cambiar `@vitejs/plugin-react`.
+
 ## [4.0.4] - 2026-08-24
 
 **Qué cambia para ti**: nada visible en la aplicación — la interfaz se reconstruye sobre **React
