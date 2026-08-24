@@ -1,6 +1,8 @@
 name: Publish Docker image
 
-# Publishes on explicit semver tags (v1.0.0, v1.2.3, …).
+# Publica por TRES vías: auto-tag on merge (push a main con versión sin tag en Cargo.toml —
+# la vía normal desde 4.0.6), push explícito de un tag semver (v1.0.0, …), y workflow_dispatch
+# (reconstrucciones; con create_tag, versión nueva — idempotente si el tag ya existe).
 # GHCR always; Docker Hub if DOCKERHUB_USERNAME + DOCKERHUB_TOKEN secrets are set.
 #
 # Tags published per registry:

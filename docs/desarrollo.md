@@ -172,10 +172,14 @@ Y aparte de `ci.yml`, tres workflows más:
 
 - **`codeql.yml`** — análisis estático del código propio (`rust`, `javascript-typescript` y
   `actions`), en su propio workflow y **no** como check obligatorio.
-- **`publish-image.yml`** — publica la imagen al empujar un tag `vX.Y.Z`, o por
-  `workflow_dispatch` (con la casilla `create_tag` crea él mismo el tag sobre `main`). Dos
-  guardas propias: CI verde sobre el commit del tag, y **orden estricto** (una versión no
-  construye hasta que la anterior tiene su GitHub Release).
+- **`publish-image.yml`** — publica por tres vías: **auto-tag on merge** (la normal desde
+  4.0.6: cada push a `main` con una versión sin tag en `Cargo.toml` espera la CI verde de ese
+  commit, crea el tag y construye; un merge sin bump es un no-op de segundos), un push de tag
+  `vX.Y.Z`, o `workflow_dispatch` (reconstrucciones; con la casilla `create_tag`, versión
+  nueva — idempotente si el tag ya existe). Tres guardas propias: CI verde sobre el commit,
+  **orden estricto** (una versión no construye hasta que la anterior tiene su GitHub Release)
+  y verificación de que **el manifest del tag responde en el registry** antes de crear el
+  Release. Los móviles `:X`/`:X.Y` se mueven por rango; `:latest`, solo con el más alto global.
 - **`dependabot-alerts-mirror.yml`** — vuelca las alertas Dependabot abiertas en el issue con
   label `dependabot-mirror` (diario + dispatch + push a manifiestos). Es la fuente de lectura
   de la rutina de dependencias; necesita el secret `DEPENDABOT_ALERTS_TOKEN`.

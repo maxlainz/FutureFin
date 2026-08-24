@@ -37,6 +37,12 @@ FUTUREFIN_TAG=3.9.0
 `3.9` y `3` son términos medios: flotan dentro del parche o del minor. Quien siguiera `:2` no
 recibió la 3.x automáticamente — esa es justo la vía conservadora.
 
+> **Nota para versiones 4.0.1–4.0.6 en Docker Hub**: por un fallo de publicación (corregido en
+> 4.0.6) esas versiones salieron a Docker Hub solo como `:latest`, así que fijarlas ahí falla
+> con «manifest not found». En **GHCR están todas**: para fijar una de ellas usa
+> `FUTUREFIN_IMAGE=ghcr.io/maxlainz/futurefin` junto al `FUTUREFIN_TAG`. Desde la siguiente
+> versión, ambos registries vuelven a llevar todos los tags.
+
 ## Actualizar dentro de la 3.x
 
 ```bash
