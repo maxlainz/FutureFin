@@ -20,8 +20,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing git tag to build (e.g. v1.0.0)"
+        description: "Tag vX.Y.Z a construir (o a crear, si marcas la casilla de abajo)"
         required: true
+      create_tag:
+        description: "Crear el tag sobre main si no existe (publica una versión nueva)"
+        type: boolean
+        default: false
 
 permissions:
   # `contents: write` es lo que permite crear el GitHub Release del tag; el
@@ -78,6 +82,55 @@ jobs:
             echo "tag=${GH_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
+      # ── Crear el tag desde aquí, y no con `git push` ────────────────────────
+      # Existe porque el tag es el único gesto del release que no se podía delegar: un agente
+      # (o cualquier automatismo con un token acotado) puede mergear a `main` pero recibe 403
+      # al empujar un tag. Quedaba `main` con la versión subida y sin imagen publicada — pasó
+      # con la 4.0.3.
+      #
+      # Y se hace DENTRO de este workflow, no en uno aparte, por una razón que no es de estilo:
+      # un tag empujado con GITHUB_TOKEN **no dispara** `on: push: tags` (GitHub lo impide para
+      # evitar recursión). Un workflow «crear tag» dejaría el tag creado y la imagen sin
+      # publicar — peor que el fallo actual, porque parecería que funcionó. Creándolo aquí no
+      # hay segundo workflow al que disparar: esta misma ejecución sigue y construye.
+      #
+      # Las comprobaciones se hacen ANTES de crear el tag: un tag equivocado ya publicado es
+      # mucho más caro de deshacer que un job en rojo.
+      - name: Checkout main (solo si se va a crear el tag)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_tag }}
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Crear el tag sobre main
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.ref.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::el tag ${TAG} ya existe. Para reconstruirlo, lanza este workflow SIN marcar «crear»."
+            exit 1
+          fi
+
+          # Las mismas dos verdades que comprueba el job de build, pero antes de que el tag
+          # exista: que la versión del binario coincide, y que hay notas que publicar.
+          cargo_version="$(grep -m1 '^version' apps/api/Cargo.toml | cut -d'"' -f2)"
+          if [ "v${cargo_version}" != "$TAG" ]; then
+            echo "::error::main está en ${cargo_version} y pides tag ${TAG}. Mergea el bump de versión primero."
+            exit 1
+          fi
+          ./scripts/changelog-section.sh "$TAG" > /dev/null
+
+          sha="$(git rev-parse HEAD)"
+          echo "Creando ${TAG} sobre main (${sha})…"
+          gh api "repos/${REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${sha}" --silent
+          echo "Tag ${TAG} creado. La CI de ${sha} se verifica en el paso siguiente."
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.ref.outputs.ref }}
@@ -93,6 +146,7 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ steps.sha.outputs.sha }}
           EVENT: ${{ github.event_name }}
+          CREATE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.create_tag }}
         run: |
           set -euo pipefail
 
@@ -107,7 +161,12 @@ jobs:
               # Reconstrucción manual de un tag antiguo: la ejecución de CI puede
               # haber caducado por retención. No es motivo para bloquear a alguien
               # que ha pedido la reconstrucción a mano y a sabiendas.
-              if [ "${EVENT}" = "workflow_dispatch" ] && [ "${i}" -ge 2 ]; then
+              #
+              # Pero NO cuando se está creando el tag: ahí no hay retención caducada que
+              # valga —el commit es la punta de `main`, de hoy—, y saltarse la puerta
+              # publicaría una versión NUEVA sin que nada la haya verificado. Si no aparece
+              # ninguna ejecución, es que algo va mal; que falle.
+              if [ "${EVENT}" = "workflow_dispatch" ] && [ "${CREATE_TAG}" != "true" ] && [ "${i}" -ge 2 ]; then
                 echo "AVISO: no hay ninguna ejecución de CI para ${SHA} (¿retención caducada?)."
                 echo "Es un workflow_dispatch manual — continúo."
                 exit 0
