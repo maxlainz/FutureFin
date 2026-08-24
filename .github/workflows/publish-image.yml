@@ -85,8 +85,8 @@ jobs:
       # ── Crear el tag desde aquí, y no con `git push` ────────────────────────
       # Existe porque el tag es el único gesto del release que no se podía delegar: un agente
       # (o cualquier automatismo con un token acotado) puede mergear a `main` pero recibe 403
-      # al empujar un tag. Quedaba `main` con la versión subida y sin imagen publicada — pasó
-      # con la 4.0.3.
+      # al empujar un tag. Quedaba `main` con la versión subida y sin imagen publicada, que es
+      # justo lo que la norma de «una versión, una imagen» prohíbe.
       #
       # Y se hace DENTRO de este workflow, no en uno aparte, por una razón que no es de estilo:
       # un tag empujado con GITHUB_TOKEN **no dispara** `on: push: tags` (GitHub lo impide para

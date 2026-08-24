@@ -251,10 +251,17 @@ Owner-confirmed rules, previously unwritten — now they ARE written:
 
 `main` is the only long-lived branch: default, published, protected. Work happens on short-lived
 branches that come back through a Pull Request; **a release is a tag on `main`**, not a branch.
-There is no `dev` and no mirror-merge — that model was retired in 4.0.2 because its ~244 lines of
+There is no `dev` and no mirror-merge — that model was retired in 4.0.1 because its ~244 lines of
 machinery (`release-to-main.sh`, the `main-guard` job, and the docs explaining why the two branches
 were not mirrors) existed only to manage a self-inflicted split, and because the script's direct
 push to `main` is what made required status checks impossible.
+
+**One version, one image.** A version number exists if and only if a published image carries it.
+**A change that does not alter the image does not bump the version**: docs, CI, release scripts and
+test tooling land on `main` unversioned and ride inside the next version that does need one.
+INCIDENT (August 2026): three consecutive bumps for docs/CI work left 4.0.1, 4.0.2 and 4.0.3 in the
+CHANGELOG with **no image behind any of them**; they were collapsed into a single 4.0.1. Check with
+`./scripts/audit-releases.sh`, which lists sections without a tag.
 
 **`main` cannot be pushed to directly** — branch protection requires a PR with CI green. That is
 the gate; do not look for a way around it. CLAUDE.md, "Releases":
