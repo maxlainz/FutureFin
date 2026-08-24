@@ -17,6 +17,13 @@ name: Publish Docker image
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    # Auto-tag on merge (4.0.6): cada push a main comprueba si Cargo.toml lleva una versión
+    # sin tag. Si no (merge de docs/CI, o versión ya publicada), el run es un no-op verde de
+    # segundos. Si sí, ESTE MISMO run verifica CHANGELOG + CI verde + orden estricto, crea el
+    # tag y sigue construyendo — el merge del bump ES la publicación, que es lo que la norma
+    # «una versión, una imagen» siempre quiso: un bump mergeado no puede quedarse sin imagen.
+    # (branches y tags en el mismo `push` se disparan por CUALQUIERA de los dos — semántica OR.)
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       tag:
@@ -59,6 +66,12 @@ jobs:
   # main y la CI todavía está corriendo.
   ci-gate:
     runs-on: ubuntu-latest
+    # `publish` gobierna si el job de build corre: '' (vacío, modos tag-push y rebuild) y
+    # 'true' publican; 'false' (merge sin bump, o tag ya creado por otra vía) lo salta.
+    # `tag` solo lo consume el resolve del build en modo merge (ahí github.ref es la rama).
+    outputs:
+      publish: ${{ steps.mkdisp.outputs.publish || steps.mktag.outputs.publish || steps.decide.outputs.candidate_ok }}
+      tag: ${{ steps.decide.outputs.tag || steps.ref.outputs.tag }}
     steps:
       - name: Resolve ref
         id: ref
@@ -77,6 +90,11 @@ jobs:
             esac
             echo "ref=refs/tags/${INPUT_TAG}" >> "$GITHUB_OUTPUT"
             echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          elif [ "$GH_REF" = "refs/heads/main" ]; then
+            # Merge a main: el tag candidato sale del Cargo.toml del commit empujado, que
+            # necesita checkout — se resuelve en el paso `decide`. El checkout genérico de
+            # abajo, con ref vacío, baja exactamente github.sha (default del evento push).
+            echo "mode=merge" >> "$GITHUB_OUTPUT"
           else
             echo "ref=${GH_REF}" >> "$GITHUB_OUTPUT"
             echo "tag=${GH_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
@@ -104,6 +122,7 @@ jobs:
           persist-credentials: false
 
       - name: Crear el tag sobre main
+        id: mkdisp
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.create_tag }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -113,8 +132,14 @@ jobs:
           set -euo pipefail
 
           if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-            echo "::error::el tag ${TAG} ya existe. Para reconstruirlo, lanza este workflow SIN marcar «crear»."
-            exit 1
+            # Idempotente desde el auto-tag on merge: si el merge del bump ya creó el tag
+            # (o dos automatismos se cruzan — la rutina de dependencias dispara este dispatch
+            # tras sus merges), «ya existe» no es un error: es que no queda nada que crear.
+            # El run termina VERDE sin construir; reconstruir un tag existente sigue siendo
+            # el dispatch SIN la casilla.
+            echo "El tag ${TAG} ya existe: nada que crear (¿lo publicó ya el auto-tag del merge?)."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           # Las mismas dos verdades que comprueba el job de build, pero antes de que el tag
@@ -130,17 +155,55 @@ jobs:
           echo "Creando ${TAG} sobre main (${sha})…"
           gh api "repos/${REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${sha}" --silent
           echo "Tag ${TAG} creado. La CI de ${sha} se verifica en el paso siguiente."
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
+        if: ${{ steps.mkdisp.outputs.publish != 'false' }}
         with:
           ref: ${{ steps.ref.outputs.ref }}
           persist-credentials: false
 
       - name: Resolve commit
         id: sha
+        if: ${{ steps.mkdisp.outputs.publish != 'false' }}
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # ── Auto-tag on merge: ¿este push a main publica algo? ──────────────────
+      # Se decide ANTES de esperar a la CI, con las comprobaciones baratas: versión del
+      # Cargo.toml del commit empujado, ¿tiene ya su tag?, ¿hay sección en el CHANGELOG?
+      # Pero el tag NO se crea aquí: se crea al FINAL del job (paso `mktag`), cuando la CI
+      # del commit ya está verde y el orden estricto comprobado. A diferencia del dispatch
+      # (que crea el tag primero y verifica después, porque quien lo lanza ya vio la CI),
+      # aquí la CI del commit acaba de arrancar: crear el tag antes de verla dejaría un tag
+      # sin imagen cada vez que un bump mergease con la CI rota.
+      - name: Decidir si el merge publica
+        id: decide
+        if: ${{ steps.ref.outputs.mode == 'merge' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          cargo_version="$(grep -m1 '^version' apps/api/Cargo.toml | cut -d'"' -f2)"
+          TAG="v${cargo_version}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "El tag ${TAG} ya existe: merge sin bump (docs/CI) o versión ya publicada. Nada que hacer."
+            echo "candidate_ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # La sección del CHANGELOG debe existir ANTES de esperar 20 min de CI: el job
+          # `rust` de ci.yml también lo audita, pero fallar aquí es inmediato y sin tag creado.
+          ./scripts/changelog-section.sh "$TAG" > /dev/null
+
+          echo "Versión ${cargo_version} sin tag: este merge publica ${TAG} si su CI acaba en verde."
+          echo "candidate_ok=true" >> "$GITHUB_OUTPUT"
+
       - name: CI verde en el commit del tag
+        if: ${{ steps.mkdisp.outputs.publish != 'false' && steps.decide.outputs.candidate_ok != 'false' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -224,10 +287,11 @@ jobs:
       # marcha y el Release sigue sin existir, es que el anterior FALLÓ o nunca se lanzó: se
       # aborta con instrucciones, no se publica por encima.
       - name: La versión anterior tiene su imagen
+        if: ${{ steps.mkdisp.outputs.publish != 'false' && steps.decide.outputs.candidate_ok != 'false' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          TAG: ${{ steps.ref.outputs.tag }}
+          TAG: ${{ steps.decide.outputs.tag || steps.ref.outputs.tag }}
           THIS_RUN: ${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -273,8 +337,40 @@ jobs:
           echo "Revisa su run en https://github.com/${REPO}/actions antes de relanzar ${TAG}."
           exit 1
 
+      # ── Auto-tag on merge, acto final: crear el tag con todo ya verificado ──
+      # A este punto solo se llega en modo merge con candidato, CI verde y orden en regla.
+      # Se taguea github.sha (el commit EXACTO del push, no «la punta de main», que podría
+      # haber avanzado). Si otro run se adelantó (una carrera de dos merges seguidos, o el
+      # dispatch de la rutina), «ya existe» degrada a no-op: el ganador ya construye.
+      - name: Crear el tag del merge
+        id: mktag
+        if: ${{ steps.ref.outputs.mode == 'merge' && steps.decide.outputs.candidate_ok == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.decide.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if gh api "repos/${REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${SHA}" --silent; then
+            echo "Tag ${TAG} creado sobre ${SHA}. Este run continúa y construye la imagen."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+              echo "Otro run creó ${TAG} mientras esperábamos la CI: le cedo la publicación."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::no se pudo crear el tag ${TAG} (y no existe)."
+              exit 1
+            fi
+          fi
+
   build-and-push:
     needs: ci-gate
+    # 'false' = merge sin bump, tag ya existente o carrera cedida: no hay nada que construir.
+    # Vacío ('') = modos tag-push y rebuild por dispatch, que publican como siempre.
+    if: ${{ needs.ci-gate.outputs.publish != 'false' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -287,6 +383,7 @@ jobs:
           INPUT_TAG: ${{ github.event.inputs.tag }}
           EVENT: ${{ github.event_name }}
           GH_REF: ${{ github.ref }}
+          NEEDS_TAG: ${{ needs.ci-gate.outputs.tag }}
         run: |
           if [ "$EVENT" = "workflow_dispatch" ]; then
             case "$INPUT_TAG" in
@@ -295,6 +392,14 @@ jobs:
             esac
             echo "ref=refs/tags/${INPUT_TAG}" >> "$GITHUB_OUTPUT"
             echo "tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          elif [ "$GH_REF" = "refs/heads/main" ]; then
+            # Auto-tag on merge: github.ref es la rama; el tag lo decidió (y creó) el ci-gate.
+            case "$NEEDS_TAG" in
+              v[0-9]*.[0-9]*.[0-9]*) ;;
+              *) echo "::error::tag inválido del ci-gate: '$NEEDS_TAG'"; exit 1 ;;
+            esac
+            echo "ref=refs/tags/${NEEDS_TAG}" >> "$GITHUB_OUTPUT"
+            echo "tag=${NEEDS_TAG}" >> "$GITHUB_OUTPUT"
           else
             echo "ref=${GH_REF}" >> "$GITHUB_OUTPUT"
             echo "tag=${GH_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
