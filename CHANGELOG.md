@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-08-24
+
+**Qué cambia para ti**: nada visible en la aplicación — la imagen se reconstruye sobre una snapshot
+más reciente del toolchain de Rust, que trae las actualizaciones de sistema de la base
+`rust:bookworm`. No se toca motor, API, interfaz ni esquema: actualizar es seguro.
+
+### Dependencias que viajan en la imagen
+
+- **`rust:bookworm`** (imagen base del `rust-builder` en `apps/api/Dockerfile`): digest
+  `adab794` → `e70e2ee` (PR #45).
+
 ## [4.0.1] - 2026-08-24
 
 **Qué cambia para ti**: se actualizan las dependencias que van dentro de la imagen, varias de ellas
