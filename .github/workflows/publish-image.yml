@@ -433,22 +433,45 @@ jobs:
       # quien actualice con watchtower recibiría un downgrade sobre un volumen ya migrado. Nada
       # protege el esquema de la app frente a eso: `maybe_pg_upgrade` cubre el major de
       # PostgreSQL, no las migraciones de sqlx.
-      - name: Is this the newest tag?
+      # Cada tag móvil se mueve solo si ESTE tag es el más alto de SU rango: `:latest` con el
+      # más alto global, `:X` con el más alto de su major, `:X.Y` con el más alto de su minor.
+      # Antes los tres colgaban del más alto global — protegía :latest en las
+      # reconstrucciones, pero también impedía que reconstruir la última de un rango viejo
+      # restaurase su móvil (p. ej. `:3` clavado en 3.9.0 con 3.10.0 existiendo, tras el
+      # incidente de los semver vacíos). Para un release nuevo (siempre el más alto global)
+      # las tres condiciones son ciertas a la vez: el comportamiento normal no cambia.
+      - name: Is this the newest tag (global / major / minor)?
         id: newest
         env:
           TAG: ${{ steps.ref.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
-          newest="$(git ls-remote --tags --refs "https://github.com/${REPO}" \
+          set -euo pipefail
+          all="$(git ls-remote --tags --refs "https://github.com/${REPO}" \
             | sed 's#.*refs/tags/##' \
             | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-            | sort -V | tail -1)"
-          newest="$(printf '%s\n%s\n' "$newest" "$TAG" | sort -V | tail -1)"
-          if [ "$newest" = "$TAG" ]; then
-            echo "value=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::${TAG} no es el tag más alto (${newest}): NO se moverán :latest, :X ni :X.Y"
+            | { cat; echo "$TAG"; } | sort -Vu)"
+
+          major="${TAG%%.*}"                # vX
+          minor="${TAG%.*}"                 # vX.Y
+          top_global="$(printf '%s\n' "$all" | tail -1)"
+          top_major="$(printf '%s\n' "$all" | grep -E "^${major}\." | tail -1)"
+          top_minor="$(printf '%s\n' "$all" | grep -E "^${minor//./\\.}\." | tail -1)"
+
+          latest=false; majhead=false; minhead=false
+          [ "$top_global" = "$TAG" ] && latest=true
+          [ "$top_major"  = "$TAG" ] && majhead=true
+          [ "$top_minor"  = "$TAG" ] && minhead=true
+
+          {
+            echo "value=${latest}"
+            echo "major=${majhead}"
+            echo "minor=${minhead}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "latest=${latest} (${top_global}) · :${major#v}=${majhead} (${top_major}) · :${minor#v}=${minhead} (${top_minor})"
+          if [ "$latest" != "true" ]; then
+            echo "::warning::${TAG} no es el tag más alto (${top_global}): no se moverá :latest"
           fi
 
       # El nombre de Docker Hub estaba a fuego. En un fork sin secretos eso no
@@ -486,10 +509,19 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.images.outputs.list }}
+          # `value=` EXPLÍCITO en los tres semver, nunca implícito: sin él, metadata-action
+          # deriva la versión de `github.ref` — que solo es un tag en los push de tag. En
+          # dispatches (ref=main) y en el auto-tag on merge (ref=refs/heads/main) los tres
+          # semver quedaban VACÍOS en silencio y solo se publicaba `:latest`. INCIDENTE
+          # (detectado 2026-08-24): toda versión publicada por dispatch desde 3.10.0
+          # (3.10.0, 4.0.1, 4.0.4, 4.0.5) salió sin su `:X.Y.Z` en ambos registries, y los
+          # móviles `:4`/`:4.0` se quedaron clavados en 4.0.0 — quien fijaba FUTUREFIN_TAG=4
+          # llevaba semanas congelado sin ningún error. El paso «la imagen responde por su
+          # tag» de abajo existe para que esta clase de fallo nunca vuelva a ser silenciosa.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.newest.outputs.value == 'true' }}
-            type=semver,pattern={{major}},enable=${{ steps.newest.outputs.value == 'true' }}
+            type=semver,pattern={{version}},value=${{ steps.ref.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.ref.outputs.tag }},enable=${{ steps.newest.outputs.minor == 'true' }}
+            type=semver,pattern={{major}},value=${{ steps.ref.outputs.tag }},enable=${{ steps.newest.outputs.major == 'true' }}
             type=raw,value=latest,enable=${{ steps.newest.outputs.value == 'true' }}
           # Etiquetas OCI explícitas. La imagen solo llevaba la suya propia
           # (`com.futurefin.postgres.majors`, en el Dockerfile) y ninguna estándar.
@@ -543,6 +575,26 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ── El guard que faltaba: la imagen debe RESPONDER por su tag de versión ──
+      # `build-push-action` publica lo que salga de `meta` sin quejarse si los semver
+      # vinieron vacíos (ver INCIDENTE de arriba). Preguntar al registry por el manifest
+      # del tag exacto convierte ese silencio en un run rojo, antes de crear el Release.
+      - name: La imagen responde por su tag de versión
+        env:
+          TAG: ${{ steps.ref.outputs.tag }}
+          DOCKERHUB_ENABLED: ${{ steps.images.outputs.dockerhub }}
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'maxlainz/futurefin' }}
+        run: |
+          set -euo pipefail
+          v="${TAG#v}"
+          echo "Verificando ghcr.io/${{ github.repository_owner }}/futurefin:${v}…"
+          docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/futurefin:${v}" > /dev/null
+          if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
+            echo "Verificando ${DOCKERHUB_IMAGE}:${v}…"
+            docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${v}" > /dev/null
+          fi
+          echo "OK: la imagen ${v} responde en los registries publicados."
 
       # Solo después de que la imagen esté publicada: un Release que anuncie una
       # versión inexistente es peor que no tener Release. Las notas salen del

@@ -4,6 +4,26 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Infraestructura del repositorio (sin imagen — viajará con el siguiente release)
+
+- **Toda publicación vuelve a subir su tag de versión** (`fix/publish-version-tags`). Desde la
+  3.10.0, cada versión publicada por `workflow_dispatch` (y la 4.0.6, por auto-tag) salió a los
+  registries **solo como `:latest`**: `metadata-action` deriva los tags semver de `github.ref`,
+  que fuera de un push de tag es `main`, y los tres semver quedaban vacíos en silencio. Faltaban
+  `:3.10.0`, `:4.0.1`, `:4.0.4`, `:4.0.5` y `:4.0.6` en GHCR y Docker Hub, y los móviles
+  `:4`/`:4.0` llevaban clavados en 4.0.0 desde entonces — quien desplegaba con
+  `FUTUREFIN_TAG=4` estaba congelado sin ningún error. Arreglo: `value=` explícito en los tres
+  semver + un guard nuevo que pregunta al registry por el manifest del tag exacto antes de crear
+  el Release (el silencio pasa a ser un run rojo). Además, los tags móviles pasan a moverse
+  **por rango**: `:X.Y` con la más alta de su minor y `:X` con la más alta de su major (antes
+  los tres colgaban del más alto global, lo que impedía que reconstruir la última de un rango
+  viejo restaurase su móvil); `:latest` sigue reservado al más alto global. Las cinco versiones
+  se rehicieron por dispatch de reconstrucción — la de `3.10.0` restaura también `:3` y
+  `:3.10` —; el hueco histórico de `1.0.6` (anterior a la imagen autocontenida) se deja
+  documentado sin reconstruir.
+
 ## [4.0.6] - 2026-08-24
 
 **Qué cambia para ti**: el gráfico de Proyección deja de encogerse cuando el hogar acumula
