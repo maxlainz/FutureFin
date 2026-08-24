@@ -284,9 +284,12 @@ title, so give the PR a title that reads a year from now. Caught the hard way on
 releases were merged by hand: the first commit on public `main` said `Merge branch 'dev'` and had
 to be amended after the tag was already pushed.
 
-The tag push triggers `.github/workflows/publish-image.yml`: multi-arch (amd64+arm64) image to
-GHCR (always) and Docker Hub `maxlainz/futurefin` (if secrets set), tags `:X.Y.Z`, `:X.Y`,
-`:X`, `:latest`. Version bump: edit `version` in `apps/api/Cargo.toml`, then sync the lockfile
+El merge del bump (auto-tag) o un push de tag disparan `.github/workflows/publish-image.yml`:
+multi-arch (amd64+arm64) image to GHCR (always) and Docker Hub `maxlainz/futurefin` (if secrets
+set), tags `:X.Y.Z`, `:X.Y`, `:X` (móviles por rango), `:latest` (solo el más alto global) — y
+desde 4.0.6 un guard verifica que el manifest del tag exacto responde en el registry antes de
+crear el Release (incidente de los semver vacíos: las versiones por dispatch salían solo como
+`:latest`). Version bump: edit `version` in `apps/api/Cargo.toml`, then sync the lockfile
 (`cargo build` or `cargo update -p futurefin-api` regenerates `Cargo.lock`) — a tag whose
 `Cargo.lock` disagrees with `Cargo.toml` breaks `--locked` builds in CI.
 
