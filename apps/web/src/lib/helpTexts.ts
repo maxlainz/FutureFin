@@ -69,8 +69,10 @@ export const HELP_TEXTS = {
     body:
       "Decide de dónde salen el ingreso y el gasto con los que se simula tu futuro: de tu " +
       "presupuesto (lo que planeas), de tus movimientos reales (lo que de verdad pasó), o una " +
-      "mezcla con el ingreso del presupuesto y el gasto real. La mezcla solo acierta mientras " +
-      "mantengas el presupuesto de ingresos al día.",
+      "mezcla con el ingreso del presupuesto y el gasto real. Con movimientos reales, las cuotas " +
+      "de préstamos cuentan como un gasto más y, si un lado no tiene datos, ese lado cae al " +
+      "presupuesto. La mezcla solo acierta mientras mantengas el presupuesto de ingresos al día. " +
+      "El Resumen, la proyección y el objetivo FIRE siguen el modo elegido.",
   },
   "settings.income_window": {
     title: "Ventana de ingreso",

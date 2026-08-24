@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   deflationFactorAt,
   lastPointIndexAtOrBeforeMonth,
+  projectionMaxXTicks,
   projectionXTicks,
+  thinTicksFromEnd,
 } from "./projection-chart";
 
 describe("deflationFactorAt", () => {
@@ -124,5 +126,44 @@ describe("lastPointIndexAtOrBeforeMonth", () => {
   it("un mes anterior al primer punto devuelve 0: siempre hay algo que pintar", () => {
     expect(lastPointIndexAtOrBeforeMonth(HYBRID_POINTS, -5)).toBe(0);
     expect(lastPointIndexAtOrBeforeMonth([], 12)).toBe(0);
+  });
+});
+
+describe("projectionMaxXTicks — techo de etiquetas por ancho", () => {
+  it("plots estrechos (<560) exigen más aire por etiqueta → menos ticks", () => {
+    // fechas: 340/52 → 6; 1300/34 → 18 (techo). edades: 340/44 → 7.
+    expect(projectionMaxXTicks(340, "dates")).toBe(6);
+    expect(projectionMaxXTicks(340, "ages")).toBe(7);
+    expect(projectionMaxXTicks(1300, "dates")).toBe(18);
+  });
+
+  it("acotado a [5, 18] en los extremos", () => {
+    expect(projectionMaxXTicks(60, "dates")).toBe(5);
+    expect(projectionMaxXTicks(4000, "dates")).toBe(18);
+  });
+});
+
+describe("thinTicksFromEnd — diezmado de los ticks visibles", () => {
+  const years = Array.from({ length: 54 }, (_, i) => ({ monthIndex: 6 + i * 12 }));
+
+  it("recorta a ≤ maxTicks con hueco uniforme y conserva el último visible", () => {
+    const thinned = thinTicksFromEnd(years, 6);
+    expect(thinned.length).toBeLessThanOrEqual(6);
+    // El fin de la ventana sigue etiquetado (se diezma desde el final)…
+    expect(thinned[thinned.length - 1]).toEqual(years[years.length - 1]);
+    // …y todos los huecos son idénticos (step·12 meses).
+    const gaps = new Set(
+      thinned.slice(1).map((t, k) => t.monthIndex - thinned[k]!.monthIndex),
+    );
+    expect(gaps.size).toBe(1);
+  });
+
+  it("sin exceso devuelve los mismos ticks (copia)", () => {
+    expect(thinTicksFromEnd(years.slice(0, 5), 6)).toEqual(years.slice(0, 5));
+    expect(thinTicksFromEnd([], 6)).toEqual([]);
+  });
+
+  it("cap < 1 se trata como 1: sobrevive solo el último", () => {
+    expect(thinTicksFromEnd(years, 0)).toEqual([years[years.length - 1]]);
   });
 });

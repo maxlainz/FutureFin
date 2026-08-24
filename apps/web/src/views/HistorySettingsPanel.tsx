@@ -453,6 +453,10 @@ export function HistorySettingsPanel({
           </button>
         ) : null}
       </div>
+      <p className="muted">
+        Fotos por fecha de tus activos y pasivos; el histórico del gráfico se
+        interpola entre ellas.
+      </p>
 
       <div className="category-toolbar bordered-top">
         <label className="field inline-role">
