@@ -90,3 +90,10 @@ separados.
 | `docker-compose.yml` | Producción: **un solo servicio** `futurefin` (PostgreSQL embebido, socket-only — ningún puerto de DB, ni al host ni interno). Volúmenes `pgdata` (datos, mismo nombre que 2.x) y `ffdata` (backups/estado). Healthcheck `curl /v1/ready` **sin** fallback `/dev/tcp`; `stop_grace_period: 60s`. |
 | `docker-compose.local.yml` | Override para usar imagen construida localmente (`futurefin-local:dev`). `pull_policy: never` en el servicio `futurefin`. Ver el bloque "Test local con Docker Desktop" del CLAUDE.md. |
 | `docker-compose.dev.yml` | **Compose autónomo** (no override) para split-dev (`cargo run` + `vite`): project `futurefin-dev`, servicio `db` en `127.0.0.1:5432`, volumen `devdata` (el fichero incluye cómo reutilizar el volumen antiguo `futurefin_pgdata`). Usar así: `docker compose -f docker-compose.dev.yml up -d`. **No usar en producción.** Sustituye al antiguo `docker-compose.split-dev.yml`. |
+
+## Secrets de GitHub Actions (no son env vars del binario)
+
+| Secret | Usado por | Qué es |
+|---|---|---|
+| `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | `publish-image.yml`, `dockerhub-description.yml` | Publicación en Docker Hub |
+| `DEPENDABOT_ALERTS_TOKEN` | `dependabot-alerts-mirror.yml` (solo el paso de LECTURA) | Token con acceso de lectura a las alertas Dependabot — el `GITHUB_TOKEN` de Actions no puede leerlas. **TODO(higiene)**: hoy es un token clásico con scope `repo`; sustituir por un PAT fine-grained con solo «Dependabot alerts: Read» sobre este repo. |

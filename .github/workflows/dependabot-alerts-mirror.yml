@@ -1,0 +1,130 @@
+name: Espejo de alertas Dependabot
+
+# La rutina de dependencias corre en un sandbox que NO llega a la API de alertas de Dependabot
+# (403), así que su única vía autoritativa es leer un issue de este repo por MCP. Este workflow
+# ES ese puente: vuelca las alertas abiertas en un issue fijo, localizado por la label
+# `dependabot-mirror` (no por título, que es editable por humanos).
+#
+# El GITHUB_TOKEN de Actions no puede leer dependabot/alerts — no existe esa clave en
+# `permissions:` y la app de Actions devuelve 403 «Resource not accessible by integration».
+# Por eso la LECTURA usa el secret DEPENDABOT_ALERTS_TOKEN y la ESCRITURA el GITHUB_TOKEN
+# normal: el secret nunca toca escritura. TODO(higiene): el secret actual es el token local
+# del owner (scope `repo` completo); sustituir por un PAT fine-grained con solo
+# «Dependabot alerts: Read» sobre este repo cuando se quiera afinar.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"        # diario, 07:17 Europe/Madrid en verano
+  workflow_dispatch:             # la rutina lo dispara tras cada merge para verificar cierres
+  push:
+    branches: [main]
+    paths:                       # refresco inmediato cuando cambia lo que las alertas miran
+      - "package-lock.json"
+      - "apps/web/package.json"
+      - "Cargo.lock"
+      - "apps/api/Cargo.toml"
+      - "crates/**/Cargo.toml"
+      - "apps/api/Dockerfile"
+
+permissions:
+  contents: read     # no hay checkout; explícito por higiene
+  issues: write      # crear/editar el issue espejo y su label
+
+# Dos ejecuciones nunca crean el issue a la vez (anti-duplicado real).
+# cancel-in-progress: false — cancelar a media escritura dejaría el cuerpo a medias.
+concurrency:
+  group: dependabot-alerts-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_REPO: ${{ github.repository }}
+      LABEL: dependabot-mirror
+      TITLE: "[auto] Espejo de alertas Dependabot abiertas"
+    steps:
+      # 1) LEER. Si esto falla, el job muere ANTES de escribir nada: nunca se sobrescribe el
+      #    issue con «0 alertas» por un fallo de red o un token caducado — la rutina lee este
+      #    issue como fuente autoritativa y un cero falso le haría dar por cerrado trabajo
+      #    que sigue pendiente.
+      - name: Leer alertas abiertas
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api --paginate -X GET "repos/$GH_REPO/dependabot/alerts" \
+            -f state=open -f per_page=100 > alerts.json
+          jq -e 'type == "array"' alerts.json > /dev/null
+
+      # 2) COMPONER. Orden determinista (severidad desc → paquete → número) para que el
+      #    cuerpo solo cambie cuando cambian los datos, sin ediciones-ruido.
+      - name: Componer cuerpo
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TOTAL=$(jq 'length' alerts.json)
+          {
+            echo "<!-- ff-alerts:begin  NO EDITAR A MANO: lo regenera dependabot-alerts-mirror.yml -->"
+            echo "GENERADO: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "RUN: ${RUN_URL}"
+            echo "TOTAL_ABIERTAS: $TOTAL"
+            jq -r '[.[] | select(.security_advisory.severity=="critical")] | length
+                   | "CRITICAS: \(.)"' alerts.json
+            echo
+            if [ "$TOTAL" -eq 0 ]; then
+              echo "SIN_ALERTAS: true"
+              echo
+              echo "No hay alertas Dependabot abiertas en este momento."
+            else
+              echo "SIN_ALERTAS: false"
+              echo
+              echo "| # | severidad | paquete | ecosistema | scope | GHSA | vulnerable | parcheada en | manifest | resumen |"
+              echo "|---|---|---|---|---|---|---|---|---|---|"
+              jq -r '
+                def rank: {"critical":0,"high":1,"medium":2,"low":3}[.security_advisory.severity] // 9;
+                sort_by(rank, .dependency.package.name, .number)
+                | .[]
+                | [ "#\(.number)",
+                    .security_advisory.severity,
+                    "`\(.dependency.package.name)`",
+                    .dependency.package.ecosystem,
+                    (.dependency.scope // "unknown"),
+                    .security_advisory.ghsa_id,
+                    (.security_vulnerability.vulnerable_version_range // "?"),
+                    (.security_vulnerability.first_patched_version.identifier // "SIN PARCHE"),
+                    "`\(.dependency.manifest_path)`",
+                    (.security_advisory.summary | gsub("[|\n\r]"; " ")) ]
+                | "| " + join(" | ") + " |"' alerts.json
+            fi
+            echo
+            echo "<!-- ff-alerts:end -->"
+          } > body.md
+
+      # 3) PUBLICAR. Label idempotente; issue localizado POR LABEL. Sin edición si el cuerpo
+      #    no cambió (se ignoran GENERADO/RUN, que cambian en cada run y no son datos).
+      #    Con 0 alertas el issue queda ABIERTO con SIN_ALERTAS: true — cerrarlo rompería el
+      #    contrato de «issue fijo» y la rutina no podría distinguir cero de espejo roto.
+      - name: Publicar o actualizar el issue espejo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh label create "$LABEL" --color "d93f0b" \
+            --description "Issue espejo automatico de las alertas Dependabot" 2>/dev/null || true
+          N=$(gh issue list --repo "$GH_REPO" --label "$LABEL" --state open \
+                --limit 1 --json number --jq '.[0].number // empty')
+          if [ -z "$N" ]; then
+            gh issue create --repo "$GH_REPO" --title "$TITLE" \
+              --label "$LABEL" --body-file body.md
+            exit 0
+          fi
+          gh issue view "$N" --repo "$GH_REPO" --json body --jq .body > current.md || true
+          norm() { grep -vE '^(GENERADO|RUN):' "$1"; }
+          if norm current.md | diff -q - <(norm body.md) > /dev/null 2>&1; then
+            echo "Sin cambios en las alertas; no se edita el issue #$N."
+          else
+            gh issue edit "$N" --repo "$GH_REPO" --body-file body.md
+          fi

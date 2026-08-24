@@ -168,8 +168,19 @@ docker rm -f ff-test-db
   instalación desde cero, recreación estilo watchtower, apagado ordenado, actualización real desde
   un stack 2.x, el rechazo de una `DATABASE_URL` externa heredada (aborta sin inicializar nada) y
   `pg_upgrade` 15→16.
-Y aparte de `ci.yml`, **`codeql.yml`**: análisis estático del código propio (`rust`,
-`javascript-typescript` y `actions`), en su propio workflow y **no** como check obligatorio.
+Y aparte de `ci.yml`, tres workflows más:
+
+- **`codeql.yml`** — análisis estático del código propio (`rust`, `javascript-typescript` y
+  `actions`), en su propio workflow y **no** como check obligatorio.
+- **`publish-image.yml`** — publica la imagen al empujar un tag `vX.Y.Z`, o por
+  `workflow_dispatch` (con la casilla `create_tag` crea él mismo el tag sobre `main`). Dos
+  guardas propias: CI verde sobre el commit del tag, y **orden estricto** (una versión no
+  construye hasta que la anterior tiene su GitHub Release).
+- **`dependabot-alerts-mirror.yml`** — vuelca las alertas Dependabot abiertas en el issue con
+  label `dependabot-mirror` (diario + dispatch + push a manifiestos). Es la fuente de lectura
+  de la rutina de dependencias; necesita el secret `DEPENDABOT_ALERTS_TOKEN`.
+
+El propio `ci.yml` valida todos los workflows con **actionlint** (job `docker-stack`).
 
 `cargo clippy` y `cargo fmt --check` están preparados pero **comentados**: el repositorio todavía
 no está limpio para ellos y meterlos en rojo sería peor que no tenerlos. Los números medidos están
