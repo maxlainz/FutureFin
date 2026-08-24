@@ -90,4 +90,4 @@ jobs:
           echo "del repositorio exige 'read/write/delete'. Un 403 aquí NO es un problema de"
           echo "este workflow ni del fichero de descripción."
           echo "Arreglo: crea un token nuevo en Docker Hub → Account Settings → Personal access"
-          echo "tokens con permiso 'Read, Write, Delete' y actualiza el secreto DOCKERHUB_TOKEN.
+          echo "tokens con permiso 'Read, Write, Delete' y actualiza el secreto DOCKERHUB_TOKEN."

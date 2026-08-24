@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Infraestructura del repositorio (sin imagen — viajará con el siguiente release)
+
+- **La gestión de dependencias pasa a ser autónoma**: los PRs de Dependabot los procesa una
+  rutina cloud disparada por webhook (con barrido de seguridad los martes). Los majors ya no
+  quedan bloqueados para siempre: se mergean con una barra de evidencia (notas leídas, cada
+  rotura anunciada buscada en el código con la salida como prueba, checks en verde). Cada fix
+  que llega a la imagen produce su propio release patch; los issues-informe resueltos se
+  cierran solos.
+- **Espejo de alertas** (`dependabot-alerts-mirror.yml`): las alertas Dependabot abiertas se
+  publican en un issue fijo (label `dependabot-mirror`) porque el sandbox de la rutina no
+  puede leer la API de alertas. Requiere el secret `DEPENDABOT_ALERTS_TOKEN`.
+- **actionlint en CI**: los propios workflows pasan a tener gate — hasta ahora un error de
+  sintaxis o un input inexistente solo se descubría en rojo tras el push.
+- **`docker-stack` deja de depender de un pull de `alpine`** para el check de volumen vacío:
+  un 500 de Docker Hub tumbó el job el 2026-08-24 sin que nada del repo estuviera roto; ahora
+  reutiliza la imagen que el propio job acaba de construir.
+
 ## [4.0.3] - 2026-08-24
 
 **Qué cambia para ti**: nada visible en la aplicación — el servidor MCP embebido incorpora las

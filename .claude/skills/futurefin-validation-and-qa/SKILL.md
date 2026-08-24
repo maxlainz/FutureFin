@@ -230,6 +230,8 @@ updated on 2026-08-24 (4.0.1).
   healthcheck is `pg_isready -h 127.0.0.1` **deliberately**: without the host, during `initdb` the
   image runs a temporary server on the Unix socket only and `pg_isready` returns OK before the
   database exists.
+- `docker-stack` also runs **actionlint** over every workflow file (added 2026-08-24 — before
+  that, nothing validated the workflows themselves).
 - `secrets-scan`: `./scripts/scan-sensitive.sh` — blocking. No IBAN, card, private key or
   provider token in tracked files. Added August 2026 after real bank exports were found in
   `apps/api/tests/fixtures/`; see [`futurefin-data-hygiene`](../futurefin-data-hygiene/SKILL.md).

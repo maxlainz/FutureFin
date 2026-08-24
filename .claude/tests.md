@@ -293,6 +293,8 @@ grep -n "no persistent volume\|initializing fresh PostgreSQL 16\|Ácido Ñandú\
 grep -n "TEST_DATABASE_URL" .github/workflows/ci.yml       # job `integration`, servicio postgres
 grep -n "npm test\|lint:web" .github/workflows/ci.yml      # job `web`, gates bloqueantes
 grep -n "^  integration:\|^  secrets-scan:\|^  docker-stack:" .github/workflows/ci.yml
+grep -n "actionlint" .github/workflows/ci.yml          # gate de los propios workflows (2026-08-24)
+ls .github/workflows/    # ci, codeql, publish-image, dockerhub-description, cleanup-ghcr, dependabot-alerts-mirror
 # Fixtures congelados (v2 = topología 2.x, imagen pineada)
 ls .github/testdata/ && grep -n "image:\|services:" .github/testdata/docker-compose.v2.yml
 # La base de tests sigue en 5433 por TCP

@@ -177,6 +177,15 @@ jobs:
           sudo apt-get install -y -q shellcheck >/dev/null
           shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh scripts/diagnostics/*.sh
 
+      # Los workflows también son código y hasta agosto de 2026 nada los validaba: un
+      # identificador de CodeQL inválido, un `if:` mal escrito o un input inexistente se
+      # descubrían en rojo tras el push. actionlint los comprueba todos, aquí, antes del build.
+      # Versión pineada — el script de descarga sale del tag, no de main.
+      - name: actionlint (todos los workflows)
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7 /tmp
+          /tmp/actionlint -color
+
       - name: Build image
         run: docker build -t futurefin-ci:latest -f apps/api/Dockerfile .
 
@@ -324,8 +333,11 @@ jobs:
           [ "$rc" -ne 0 ] || { echo "ERROR: arrancó con una base externa"; exit 1; }
           grep -q "ya no habla con bases de datos externas" /tmp/ext.log
           grep -q "docs/actualizar.md" /tmp/ext.log
-          # Y el volumen sigue vacío: no ha inicializado nada a medias.
-          docker run --rm -v ffempty:/d alpine sh -c 'test -z "$(ls -A /d)"'
+          # Y el volumen sigue vacío: no ha inicializado nada a medias. Con la propia imagen
+          # recién construida, no con alpine: aquel pull implícito dependía del registry en
+          # caliente y un 500 de Docker Hub tumbó este job el 2026-08-24 sin que nada del
+          # repo estuviera roto. futurefin-ci:latest ya está en el daemon: cero pulls.
+          docker run --rm --entrypoint sh -v ffempty:/d futurefin-ci:latest -c 'test -z "$(ls -A /d)"'
           docker rm -f ffext >/dev/null
           docker volume rm ffempty ffemptystate >/dev/null
 

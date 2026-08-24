@@ -271,6 +271,14 @@ the gate; do not look for a way around it. CLAUDE.md, "Releases":
 > 3. Taguear: `git tag vX.Y.Z && git push origin vX.Y.Z` desde `main`, **o** lanzar `publish-image.yml` por `workflow_dispatch` con la casilla «Crear el tag sobre main» (para quien no pueda empujar tags: un token acotado recibe 403). El workflow crea el tag y sigue en la misma ejecución — un workflow aparte NO serviría, porque un tag empujado con `GITHUB_TOKEN` no dispara `on: push: tags`.
 > 4. El tag dispara `publish-image.yml`: imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
 
+**Dependency PRs are handled by a cloud routine** (webhook on Dependabot PR + Tuesday sweep).
+Its merge policy: patch/minor-in-range → 5 green checks suffice; **major or 0.x-minor → an
+evidence bar** (release notes read from the PR body, every announced breaking change grepped in
+the repo with the output pasted as a PR comment, checks on the current SHA — no readable notes,
+no merge). Every image-affecting fix gets its own patch release («una versión, una imagen»).
+The routine's ephemeral lock branch `ops/routine-lock` and the `dependabot-mirror` issue are
+infrastructure — do not delete them by hand (CLAUDE.md § Dependencias explains both).
+
 **The merge commit needs its own message.** Merging a PR from GitHub takes the subject from the PR
 title, so give the PR a title that reads a year from now. Caught the hard way on 4.0.0, back when
 releases were merged by hand: the first commit on public `main` said `Merge branch 'dev'` and had
@@ -500,6 +508,8 @@ removed the external-database mode from the entrypoint (`exec_api_external`, `au
   resucitó el modelo de dos ramas
 - Una sola rama viva: `git ls-remote --heads origin | grep -c 'refs/heads/dev$'` debe dar **0**, y
   `ls scripts/release-to-main.sh` debe fallar
+- Workflows completos y su gate: `ls .github/workflows/` (**6** on 2026-08-24, incl.
+  `dependabot-alerts-mirror.yml`) y `grep -n actionlint .github/workflows/ci.yml` (debe imprimir)
 - Ramas protegidas y ajustes de seguridad de GitHub (viven fuera del repo, no en git):
   `gh api repos/maxlainz/FutureFin/rulesets --jq '.[].name'` (**Proteger main**) y
   `gh api repos/maxlainz/FutureFin --jq '.security_and_analysis'` (secret scanning + push
