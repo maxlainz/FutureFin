@@ -311,9 +311,14 @@ Before resuming work: `git pull --ff-only`. After push: pull again.
 
 ### Dependencias — automatizado (rutina cloud)
 
-Los PRs de Dependabot los procesa una **rutina cloud** («Dependabot semanal», gestionada por
-API de claude.ai, no vive en este repo): se dispara **por webhook** cuando Dependabot abre un
-PR, con un **barrido los martes ~06:30** que caza huérfanos si un evento se perdió. Política:
+Los PRs de Dependabot los procesa una **rutina cloud** («Dependabot autónomo», trigger de
+claude.ai): se dispara **por webhook** cuando Dependabot abre un PR, con un **barrido los
+martes ~06:30** que caza huérfanos si un evento se perdió. **Su prompt operativo vive en este
+repo** — [`.claude/routines/dependabot-autonomo.md`](.claude/routines/dependabot-autonomo.md) —
+y el trigger solo contiene un puntero que le manda leerlo del clon: editar la rutina es un PR
+normal (revisable y con historia); el trigger no se toca salvo para el cron, el entorno o el
+propio puntero. Si mueves o renombras ese fichero, actualiza el puntero del trigger a la vez.
+Política:
 
 - **Parche/minor dentro de rango**: se mergea con los 5 checks en verde.
 - **Major o 0.x-minor**: pasa una barra de evidencia — notas del salto leídas del cuerpo del
