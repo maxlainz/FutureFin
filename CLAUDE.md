@@ -272,8 +272,10 @@ directamente — la protección lo rechaza, y ese es el objetivo.
 
 1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`) y añadir la sección `## [X.Y.Z]` a `CHANGELOG.md`. **La sección debe existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde ahí, y el job `rust` lo comprueba con `./scripts/audit-releases.sh --version`.
 2. PR → CI verde → merge a `main`.
-3. `git tag vX.Y.Z && git push origin vX.Y.Z` desde `main`.
-4. El tag dispara `publish-image.yml`: imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
+3. Taguear, por cualquiera de las dos vías:
+   - **Desde local**: `git tag vX.Y.Z && git push origin vX.Y.Z` estando en `main`.
+   - **Desde GitHub**, sin git local: lanzar `publish-image.yml` por `workflow_dispatch` con el tag y la casilla **«Crear el tag sobre main»** marcada. Existe porque un token acotado (el de un agente, por ejemplo) puede mergear a `main` pero recibe **403 al empujar un tag** — pasó con la 4.0.3, que se quedó en `main` sin imagen. El workflow crea el tag él mismo y sigue construyendo en la misma ejecución; **no vale un workflow aparte**, porque un tag empujado con `GITHUB_TOKEN` no dispara `on: push: tags`.
+4. El tag dispara `publish-image.yml` (o la propia ejecución continúa, si lo creaste por dispatch): imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
 
 Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKERHUB_USERNAME` +
 `DOCKERHUB_TOKEN`.
