@@ -16,9 +16,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `:4`/`:4.0` llevaban clavados en 4.0.0 desde entonces — quien desplegaba con
   `FUTUREFIN_TAG=4` estaba congelado sin ningún error. Arreglo: `value=` explícito en los tres
   semver + un guard nuevo que pregunta al registry por el manifest del tag exacto antes de crear
-  el Release (el silencio pasa a ser un run rojo). Las cinco versiones se rehicieron por
-  dispatch de reconstrucción; el hueco histórico de `1.0.6` (anterior a la imagen autocontenida)
-  se deja documentado sin reconstruir.
+  el Release (el silencio pasa a ser un run rojo). Además, los tags móviles pasan a moverse
+  **por rango**: `:X.Y` con la más alta de su minor y `:X` con la más alta de su major (antes
+  los tres colgaban del más alto global, lo que impedía que reconstruir la última de un rango
+  viejo restaurase su móvil); `:latest` sigue reservado al más alto global. Las cinco versiones
+  se rehicieron por dispatch de reconstrucción — la de `3.10.0` restaura también `:3` y
+  `:3.10` —; el hueco histórico de `1.0.6` (anterior a la imagen autocontenida) se deja
+  documentado sin reconstruir.
 
 ## [4.0.6] - 2026-08-24
 
