@@ -6,6 +6,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-08-24
+
+**Qué cambia para ti**: nada visible en la aplicación — el servidor MCP embebido incorpora las
+correcciones de la versión 3.1.4 del SDK `rmcp` (endurecimiento del manejo de claves de firma,
+errores de metadatos previos a la inicialización y conservación del dialecto `$schema` en las
+elicitaciones). No se toca motor, API, interfaz ni esquema: actualizar es seguro.
+
+### Dependencias que viajan en la imagen
+
+- **`rmcp`** 3.1.3 → 3.1.4, y `rmcp-macros` con él (PR #46). Solo parche, sin cambios de API.
+
 ## [4.0.2] - 2026-08-24
 
 **Qué cambia para ti**: nada visible en la aplicación — la imagen se reconstruye sobre una snapshot
