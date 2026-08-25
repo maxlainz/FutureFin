@@ -1,0 +1,65 @@
+name: Conserje del candado de la rutina
+
+# La rutina de dependencias usa la rama `ops/routine-lock` como candado anti-carrera
+# (ver .claude/routines/dependabot-autonomo.md, PASO 0). Su credencial puede crear y
+# actualizar ramas, pero NO borrar refs (HTTP 403, igual que empujar tags) — issue #68.
+# Desde la v8.1 del prompt la rutina «libera» dejando en la punta un commit cuyo asunto
+# empieza por `lock: LIBERADO`; este workflow es quien borra la rama de verdad, para que
+# el repo no acumule ramas más allá de main.
+#
+# El candado NUNCA depende de este workflow para ser correcto: una punta LIBERADO ya se
+# lee como candado libre al adquirir, y el TTL de 120 min cubre sesiones muertas. Esto
+# es solo higiene. Carrera residual asumida: entre releer la punta y el DELETE otra
+# sesión podría adquirir el candado; si ocurre, su siguiente latido (--force-with-lease
+# sobre una ref ya inexistente) falla y esa sesión sale limpiamente por protocolo — el
+# fallo es en la dirección segura.
+
+on:
+  push:
+    branches: [ops/routine-lock]   # cada push del candado; solo actúa si la punta es LIBERADO
+  workflow_dispatch:               # limpieza manual: borra también un candado caducado (>120 min)
+
+permissions:
+  contents: write   # borrar la ref del candado
+
+concurrency:
+  group: routine-lock-janitor
+  cancel-in-progress: false
+
+jobs:
+  janitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Borrar el candado si está liberado (o caducado, por dispatch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # Se relee la punta REAL de la rama, no el payload del push: entre el push que
+          # disparó este run y su ejecución, otra sesión puede haber adquirido el candado
+          # con --force-with-lease y la punta ya no ser la del evento.
+          REF="$(gh api "repos/$GH_REPO/branches/ops/routine-lock" 2>/dev/null || true)"
+          if [ -z "$REF" ]; then
+            echo "No existe ops/routine-lock; nada que hacer."
+            exit 0
+          fi
+          SUBJECT=$(printf '%s' "$REF" | jq -r '.commit.commit.message' | head -n1)
+          DATE=$(printf '%s' "$REF" | jq -r '.commit.commit.committer.date')
+          AGE_MIN=$(( ( $(date -u +%s) - $(date -u -d "$DATE" +%s) ) / 60 ))
+          BORRAR=0
+          case "$SUBJECT" in
+            "lock: LIBERADO"*) BORRAR=1 ;;
+          esac
+          if [ "$BORRAR" -eq 0 ] && [ "$EVENT" = "workflow_dispatch" ] && [ "$AGE_MIN" -ge 120 ]; then
+            echo "Candado caducado (${AGE_MIN} min > TTL 120); se borra por dispatch."
+            BORRAR=1
+          fi
+          if [ "$BORRAR" -eq 1 ]; then
+            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/ops/routine-lock"
+            echo "Rama ops/routine-lock borrada."
+          else
+            echo "Candado activo (edad ${AGE_MIN} min, asunto: ${SUBJECT}); no se toca."
+          fi
