@@ -1562,4 +1562,129 @@ mod tests {
         let alloc2 = first_month_allocation(&sin_target).expect("cascada sin target");
         assert_eq!(alloc2.per_asset[0], Decimal::from(2000), "sin target FIRE la cascada es la de siempre");
     }
+
+    // -----------------------------------------------------------------------
+    // Pin baseline del modelo de pasivos ANTES de la reforma 4.2.0
+    // -----------------------------------------------------------------------
+
+    /// Decimal exacto desde string. Los pines de abajo son cadenas largas (hasta 27 dígitos
+    /// significativos) que salen de componer `powd` 300 veces: escribirlas con `Decimal::new`
+    /// sería ilegible y con `f64` sería directamente ilegal en este repo.
+    fn dec(s: &str) -> Decimal {
+        Decimal::from_str_exact(s).expect("literal Decimal válido")
+    }
+
+    /// Input representativo del pin: dos activos con rentabilidad distinta, cascada con tope +
+    /// sumidero, un pasivo de 100.000 € a 500 €/mes con `payment_end` lejano, planning ≠ 0 y
+    /// target FIRE configurado. Vive fuera del test para que la reforma 4.2.0 pueda reutilizarlo
+    /// añadiendo los campos nuevos a `None`/default sin tocar los valores esperados.
+    fn liability_pin_input() -> ProjectionInput {
+        let assets = vec![
+            mk_asset(0xA1, Decimal::from(50_000), true, Some(Decimal::from(7))),
+            mk_asset(0xB2, Decimal::from(20_000), false, Some(Decimal::new(35, 1))),
+        ];
+        let rules = vec![
+            rule_fixed(
+                0,
+                Decimal::from(300),
+                Some(AllocationCap::Amount(Decimal::from(120_000))),
+            ),
+            rule_remainder(1),
+        ];
+        let mut inp = base_input(300, Decimal::from(4000), Decimal::from(1500), assets, rules);
+        inp.liabilities = vec![ProjectionLiabilityInput {
+            principal: Decimal::from(100_000),
+            monthly_payment: Decimal::from(500),
+            payment_end: Some(NaiveDate::from_ymd_opt(2090, 1, 1).unwrap()),
+        }];
+        inp.planning_monthly_cash_adjustment[0] = Decimal::from(250);
+        inp.planning_monthly_cash_adjustment[5] = Decimal::from(-100);
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from(1_500_000),
+            annual_inflation_percent: Decimal::new(25, 1),
+        });
+        inp
+    }
+
+    /// **Pin de regresión pre-4.2.0 del modelo de pasivos.**
+    ///
+    /// Captura la salida EXACTA de `project_net_worth_series` sobre un input representativo con un
+    /// pasivo vivo, tal y como la produce el modelo actual (`fixed_payments`): la cuota mensual
+    /// sale de la caja del mes y reduce el principal en el MISMO importe — el pasivo **no devenga
+    /// intereses**, así que servir deuda es neutro para el patrimonio neto.
+    ///
+    /// Por qué existe: la reforma 4.2.0 introduce el cobro de intereses en los pasivos. Este test
+    /// se conserva tal cual tras la reforma (con los campos nuevos del pasivo a `None`/default) y
+    /// **debe seguir pasando bit a bit**: es la prueba de que el modelo por defecto
+    /// `fixed_payments` no cambió NADA. Si un solo dígito se mueve, la reforma ha cambiado el
+    /// comportamiento por defecto y no solo añadido uno nuevo.
+    ///
+    /// Qué pinea, en concreto:
+    /// 1. `net_worth` en los meses 0, 1, 2, 12, 200, 201 y el último (300) — valores Decimal
+    ///    exactos, `assert_eq!` sin tolerancia. La aritmética de `rust_decimal` (incluido `powd`)
+    ///    es determinista y pura, así que no hace falta margen: cualquier deriva es una deriva
+    ///    real del modelo, no ruido de coma flotante.
+    /// 2. El calendario de amortización: con 100.000 € de principal y 500 €/mes el pasivo se
+    ///    extingue en el mes **200** (verificado contra la salida real, no asumido). Se pinea
+    ///    mediante el principal implícito (`Σ activos − net_worth`, exacto aquí porque el
+    ///    sumidero deja `surplus_cash` en 0) y mediante los NW alrededor del corte.
+    /// 3. La **neutralidad** del pago: el mes 201 es el primero sin cuota (`debt_service = 0`) y
+    ///    aun así el salto de NW 200→201 NO da el escalón de +500 € que daría si el pago
+    ///    estuviera restando patrimonio. Con intereses, este assert dejaría de cuadrar — que es
+    ///    justo lo que la reforma debe cambiar SOLO cuando se activa el modelo nuevo.
+    /// 4. `debt_service` del primer mes, que `FirstMonthAllocation` sí expone.
+    #[test]
+    fn liability_payment_plan_series_pin_pre_4_2_0() {
+        let inp = liability_pin_input();
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth.len(), 301, "301 puntos: meses 0..=300");
+
+        // (1) Serie de patrimonio neto — valores exactos capturados sobre 4.1.0.
+        assert_eq!(out.net_worth[0], dec("-30000"), "mes 0 = 50.000 + 20.000 − 100.000");
+        assert_eq!(out.net_worth[1], dec("-26902.580260129782587857672390"));
+        assert_eq!(out.net_worth[2], dec("-24046.794776804757383934090581"));
+        assert_eq!(out.net_worth[12], dec("4876.52949312863908655995354"));
+        assert_eq!(out.net_worth[200], dec("754661.26626719402043993492188"));
+        assert_eq!(out.net_worth[201], dec("759950.40876629663413040639649"));
+        assert_eq!(out.net_worth[300], dec("1389197.0697233021375734775522"));
+
+        // (2) Calendario de amortización: 100.000 / 500 = 200 cuotas exactas. `surplus_cash` es 0
+        // en todo momento (la regla sumidero absorbe la caja entera), así que el principal vivo se
+        // reconstruye exactamente como `Σ activos − net_worth`.
+        let principal_at = |k: usize| -> Decimal {
+            out.per_asset_series.iter().map(|s| s[k]).sum::<Decimal>() - out.net_worth[k]
+        };
+        assert_eq!(principal_at(0), Decimal::from(100_000));
+        assert_eq!(principal_at(1), Decimal::from(99_500), "cuota íntegra a principal: 0 % interés");
+        assert_eq!(principal_at(199), Decimal::from(500), "queda la última cuota");
+        assert_eq!(principal_at(200), Decimal::ZERO, "el pasivo se extingue en el mes 200");
+        assert_eq!(principal_at(201), Decimal::ZERO, "y no resucita");
+
+        // (3) Neutralidad del servicio de deuda. El mes 201 es el primero sin cuota, así que
+        // dispone de 500 € más de caja para aportar; pero hasta el 200 esos 500 € tampoco se
+        // perdían — iban íntegros a reducir principal. Resultado: la serie NO tiene escalón de
+        // 500 €. Se comprueba sobre las segundas diferencias del NW.
+        let delta = |k: usize| out.net_worth[k] - out.net_worth[k - 1];
+        let salto_previo = delta(200) - delta(199);
+        let salto_en_el_corte = delta(201) - delta(200);
+        assert_eq!(salto_previo, dec("17.08730926366701766536981"));
+        assert_eq!(salto_en_el_corte, dec("18.59126818624123937199547"));
+        // El único efecto real de extinguir el pasivo es de segundo orden y ~1,44 €: los 500 €
+        // liberados dejan de amortizar (crecimiento 0) y pasan a componer un mes en el activo
+        // destino, 500 × (1,035^(1/12) − 1). Con intereses en el pasivo, este residuo dejaría de
+        // ser calderilla — que es exactamente lo que la reforma 4.2.0 debe cambiar SOLO cuando se
+        // activa el modelo nuevo.
+        let residuo = salto_en_el_corte - salto_previo;
+        assert!(
+            residuo.abs() < Decimal::from(5),
+            "sin intereses la extinción del pasivo no produce escalón de 500 €; residuo = {residuo}"
+        );
+
+        // (4) Servicio de deuda publicado del primer mes (única superficie del output que lo
+        // expone) y la caja que reparte la cascada: 4000 − 1500 − 500 + 250 de planning.
+        let alloc = first_month_allocation(&inp).unwrap();
+        assert_eq!(alloc.debt_service, Decimal::from(500));
+        assert_eq!(alloc.base_cash, Decimal::from(2250));
+        assert_eq!(alloc.per_asset, vec![Decimal::from(300), Decimal::from(1950)]);
+    }
 }
