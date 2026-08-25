@@ -78,14 +78,14 @@ Nunca en silencio. Es el mismo mecanismo probado de `futurefin-mcp-parity` §1.
 
 Si retiras una métrica, **retira su texto**; no lo dejes «por si vuelve». El test lo caza.
 
-## 6. Estado del catálogo (2026-08-22, 4.0.0)
+## 6. Estado del catálogo (2026-08-25)
 
-**15 entradas** repartidas en cuatro zonas de la app. `grep -c '^  "' apps/web/src/lib/helpTexts.ts` para el recuento;
+**16 entradas** repartidas en cuatro zonas de la app. `grep -c '^  "' apps/web/src/lib/helpTexts.ts` para el recuento;
 `grep -n '^  "' …` para la lista. Por si necesitas orientarte sin abrir el fichero:
 
 | Vista | Ids |
 |---|---|
-| Resumen · salud financiera | `summary.savings`, `summary.liquid_assets`, `summary.runway`, `summary.net_worth` |
+| Resumen · salud financiera | `summary.savings`, `summary.liquid_assets`, `summary.runway`, `summary.net_worth`, `summary.net_return` **(nueva)** |
 | Jubilación | `retirement.target` **(nueva en 4.0.0)** |
 | Ajustes → Plan | `settings.savings_source`, `settings.income_window`, `settings.expense_window`, `settings.window_mode`, `settings.swr`, `settings.inflation` |
 | Movimientos | `expenses.expense_avg`, `expenses.income_avg`, `expenses.savings_transferred`, `expenses.transferred_rate` |
@@ -97,6 +97,19 @@ por impuestos si están activados** dividido entre el SWR; **la cifra grande est
 último matiz es el que existía mal en la interfaz: el rótulo «Patrimonio objetivo (con inflación)»
 etiquetaba justo la cifra que NO la lleva. Si tocas la base del target, el gross-up o el SWR, esta
 entrada es la que hay que revisar (y ver `futurefin-fire-domain-reference`).
+
+**`summary.net_return` — «Rendimiento neto»** (2026-08-25). Rendimiento anual **esperado** del
+patrimonio neto: `Σ valor·rentabilidad − Σ principal·TAE` sobre el patrimonio neto, con los
+pasivos vencidos fuera (mismo filtro que el resto del Resumen). Tres cosas que el texto dice a
+propósito, y que son justo las que se rompen en silencio si alguien toca el cálculo: (1) un activo
+**sin rentabilidad configurada cuenta 0 % y sigue pesando en el denominador** —diluye, no se
+excluye—; (2) la cifra grande es la **real** y el paréntesis la **nominal**, y la real sale de
+dividir factores, no de restar puntos; (3) **no es rentabilidad realizada**, y **no cuadra con la
+proyección**, que hace crecer los activos pero todavía no le cobra intereses a la deuda — es la
+única entrada del catálogo que documenta una divergencia viva de modelo, y esconderla habría
+convertido «¿por qué la simulación va más rápido que mi rendimiento?» en un bug fantasma. Si
+alguna vez el engine empieza a cobrar el interés de la deuda, esta entrada es la que hay que
+revisar.
 
 ### 6.1 Auditoría de 4.0.0 — seis entradas a la deriva, y el patrón que las produjo
 
@@ -127,7 +140,7 @@ publicación, ya corregidas en `helpTexts.ts`). Re-verificación:
 
 ```bash
 # Entradas del catálogo y consumidores
-grep -c '^  "' apps/web/src/lib/helpTexts.ts        # 15 a 2026-08-22
+grep -c '^  "' apps/web/src/lib/helpTexts.ts        # 16 a 2026-08-25 (15 el 2026-08-22)
 grep -rn 'helpId=' apps/web/src --include='*.tsx' | wc -l
 # Los dos hechos que §6.1 afirma sobre el código, sin compilar:
 grep -n 'in_window\|window_start_ym' apps/api/src/handlers/transactions/summary.rs  # tramo medio-abierto

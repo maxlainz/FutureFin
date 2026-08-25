@@ -1,6 +1,7 @@
 //! Monthly net-worth projection.
 
 mod history;
+mod net_return;
 mod projection;
 mod runway;
 
@@ -9,6 +10,7 @@ pub use history::{
     month_index_of, CashFlowEntry, HistoryItem, HistoryItemKind, HistoryObservation,
     HistoryTimeline, LoanTerms,
 };
+pub use net_return::{net_return_percentages, NetReturn};
 pub use projection::{
     fire_target_at_month_index, first_month_allocation,
     first_month_per_asset_contribution_nominals, project_net_worth_series, AllocationCap,

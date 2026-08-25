@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Añadido
+
+- **KPI «Rendimiento neto» en el Resumen** (fila «Salud financiera»): el rendimiento anual
+  **esperado** del patrimonio neto. El Resumen contaba cuánto tienes, cuánto ahorras y cuánto
+  aguantas, pero no lo que tu patrimonio hace por sí solo — y la respuesta no estaba en ninguna
+  tarjeta porque hay que cruzar dos lados: los activos rinden y las deudas cuestan. La base, que
+  es lo que la métrica promete: se suma `valor × rentabilidad esperada` de **todos** los activos
+  del scope, se resta `principal × TAE` de los pasivos **no vencidos** (mismo filtro que el resto
+  del Resumen) y se divide entre el patrimonio neto. Un activo sin rentabilidad configurada o un
+  pasivo sin TAE cuentan como 0 % pero **siguen pesando en el denominador**: la cifra baja, que es
+  la lectura honesta de «no lo has configurado». Ejemplo con cifras inventadas: 100.000 € al 5 %
+  más 50.000 € sin tasa, con una hipoteca de 60.000 € al 3 %, dan 3.200 €/año sobre 90.000 € de
+  patrimonio = **3,5556 % nominal**; con la inflación en el 2 %, **1,5251 % real**. La cifra
+  grande es la real y el paréntesis la nominal.
+  - El **real se obtiene dividiendo factores** —`(1+n)/(1+i) − 1`—, no restando puntos: la resta
+    (3,5556 − 2 = 1,5556) se desvía justo cuando las tasas suben, y aquí ya se lleva tres
+    centésimas.
+  - **Sin patrimonio neto positivo no hay métrica**: la tarjeta desaparece y los dos campos no
+    viajan en el JSON. Un cociente con denominador negativo se leería con el signo cambiado —
+    «rindes un 10 %» sobre un patrimonio que en realidad debes.
+  - El cálculo vive en el motor (`crates/engine/src/net_return.rs`, `net_return_percentages`,
+    solo `Decimal`, 9 tests unitarios). API: dos campos **aditivos** en
+    `financial_health` de `GET /v1/summary` —`net_return_nominal_annual_pct` y
+    `net_return_real_annual_pct`, porcentajes (no fracciones) a 4 decimales—, que la tool MCP
+    `get_summary` hereda por compartir core.
+  - Consecuencia que el texto de ayuda dice en voz alta: la proyección hace crecer los activos
+    pero **todavía no le cobra intereses a la deuda**, así que este número es más conservador que
+    la simulación. Es una discrepancia real de modelo, y esconderla habría sido peor.
+
 ### Infraestructura del repositorio (sin imagen — viajará con el siguiente release)
 
 - **El espejo de alertas Dependabot ya no queda abierto para decir que no hay alertas**: con
