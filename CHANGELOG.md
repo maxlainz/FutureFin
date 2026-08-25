@@ -4,7 +4,7 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.2.0] - 2026-08-25
 
 ### Proyección — Modelo de amortización por pasivo: la deuda ya devenga intereses
 
