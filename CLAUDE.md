@@ -342,9 +342,12 @@ Política:
 Dos artefactos suyos que NO hay que «limpiar» a mano:
 
 - **`ops/routine-lock`**: rama efímera que la rutina usa como candado anti-carrera (varios
-  webhooks en ráfaga → solo una sesión procesa). Aparece y desaparece sola; si lleva >2 h es
-  un candado caducado y la propia rutina lo roba. Borrarla a mano en mitad de una pasada deja
-  dos sesiones escribiendo a la vez.
+  webhooks en ráfaga → solo una sesión procesa). La credencial de la rutina no puede borrar
+  refs (403), así que «liberar» es dejar un commit `lock: LIBERADO` en la punta; el workflow
+  `routine-lock-janitor.yml` borra la rama al verlo (y por `workflow_dispatch` borra también
+  un candado caducado). Verla viva durante una pasada es normal; con punta `LIBERADO`
+  desaparece sola en segundos. Si lleva >2 h sin liberar es un candado caducado y la propia
+  rutina lo roba. Borrarla a mano en mitad de una pasada deja dos sesiones escribiendo a la vez.
 - **El issue con label `dependabot-mirror`**: espejo de las alertas abiertas, regenerado por
   `dependabot-alerts-mirror.yml` (la rutina no puede leer la API de alertas desde su sandbox
   y lee este issue en su lugar). Con 0 alertas queda abierto con `SIN_ALERTAS: true` — no

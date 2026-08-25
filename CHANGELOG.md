@@ -8,6 +8,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Infraestructura del repositorio (sin imagen — viajará con el siguiente release)
 
+- **El candado de la rutina de dependencias ya no deja rama huérfana** (issue #68): la
+  credencial de la rutina no puede borrar refs (HTTP 403, igual que empujar tags), así que
+  `ops/routine-lock` se quedaba viva tras cada pasada. Protocolo v8.1: liberar = dejar un
+  commit `lock: LIBERADO` en la punta (que cualquier sesión futura lee como candado libre), y
+  un workflow nuevo, `routine-lock-janitor.yml`, borra la rama al ver la marca — con
+  `workflow_dispatch` como escoba para candados caducados. El repo vuelve a tener una sola
+  rama estable: `main`.
 - **Toda publicación vuelve a subir su tag de versión** (`fix/publish-version-tags`). Cada
   versión publicada por `workflow_dispatch` (4.0.1, 4.0.4, 4.0.5) y la 4.0.6 (auto-tag) salió a
   los registries **solo como `:latest`**: `metadata-action` deriva los tags semver de
