@@ -1,11 +1,13 @@
 # Projection Engine (crates/engine)
 
 Pure Rust crate — no I/O, no DB, no async. Pure financial math (projection + history interpolation).
-Only `Decimal` arithmetic. Three modules:
+Only `Decimal` arithmetic. Four modules:
 - `projection.rs` — monthly net-worth / FIRE simulation (this doc's main subject).
 - `history.rs` — pure interpolation of the **historical** net-worth series from manual snapshots
   (see [History interpolation](#history-interpolation-historyrs) below). Deps unchanged
   (`rust_decimal` feature `maths` already present for `powd`).
+- `net_return.rs` — expected annual net return of net worth (`net_return_percentages`; see
+  [Rendimiento neto](#rendimiento-neto-net_returnrs) below). Consumed by `GET /v1/summary`.
 - `runway.rs` — liquidity runway with compounded return + inflation (v2.2.0; **SWR threshold for the
   infinite case** since v2.3.0 — `Indefinite` ⟺ the grossed-up annual withdrawal fits inside
   `swr_pct` × liquid balance; see [Runway](#runway-runwayrs) below). Consumed by `GET /v1/summary`.
@@ -80,6 +82,14 @@ pub fn liquid_runway_months(
     swr_pct: Decimal,              // installation fire_settings.swr_pct (%), v2.3.0
     annual_expense_for_swr: Decimal, // ANNUAL expense already grossed up by the handler, v2.3.0
 ) -> RunwayOutcome
+
+// Expected annual net return of net worth (percent). `None` ⟺ net worth ≤ 0.
+pub struct NetReturn { pub nominal_pct: Decimal, pub real_pct: Decimal }
+pub fn net_return_percentages(
+    assets: &[(Decimal, Option<Decimal>)],      // (current_value, expected_annual_return_percent)
+    liabilities: &[(Decimal, Option<Decimal>)], // (principal, apr_percent)
+    annual_inflation_percent: Decimal,
+) -> Option<NetReturn>
 ```
 
 ## ProjectionInput fields
@@ -330,6 +340,49 @@ SWR 3,5 % with taxes off → `Indefinite` on the **exact** boundary (840.000 = 8
 7 % vs 4.000 €/month at SWR 3,5 % → `Months(1200)` floor, since 48.000 > 35.000 (it was `Indefinite`
 in v2.2.0, when the cap decided infinity); with the default ES brackets `gross_up(8.400) ≈ 10.481 €`,
 raising the threshold to ≈ 299.457 € of liquid balance.
+
+## Rendimiento neto (`net_return.rs`)
+
+Pure module answering "what is my net worth expected to return in a year?". Sole consumer:
+`GET /v1/summary` → `financial_health.net_return_nominal_annual_pct` /
+`net_return_real_annual_pct` (`apps/api/src/handlers/summary.rs`). 9 unit tests in-module.
+
+```
+numerator = Σ vₐ·rₐ/100 − Σ pₗ·aprₗ/100        (euros per year)
+nominal_pct = 100 · numerator / (Σ vₐ − Σ pₗ)
+real_pct    = 100 · ((100 + nominal_pct)/(100 + inflation_pct) − 1)
+```
+
+| Input | Meaning |
+|---|---|
+| `assets: &[(Decimal, Option<Decimal>)]` | `(current_value, expected_annual_return_percent)` for **every** asset in the requested scope — not only the liquid ones. |
+| `liabilities: &[(Decimal, Option<Decimal>)]` | `(principal, apr_percent)` for the **non-expired** liabilities (handler applies `payment_end_date IS NULL OR >= today`, same predicate as `total_liabilities`). |
+| `annual_inflation_percent` | `installation.annual_inflation_assumption_percent` (clamped ≥ 0 by the installation layer). |
+
+Rules, each load-bearing:
+
+- **`None` rate = 0 %, never an exclusion.** A row without a configured rate still weighs in the
+  denominator, so it dilutes. Dropping it would report the return of the *configured* subset
+  while calling it the return of the portfolio.
+- **Net worth is the denominator**, so leverage amplifies in both directions: 100.000 at 5 %
+  against a 60.000 loan at 3 % is 8 % on 40.000 of net worth, not 5 %.
+- **`net_worth ≤ 0` ⇒ `None`.** With a non-positive denominator the quotient flips sign or
+  diverges; the API omits both fields and the UI hides the tile rather than print a number that
+  reads backwards.
+- **Real by dividing factors, not subtracting points** (Fisher): `n − i` drifts exactly where it
+  matters. The API layer rounds to 4 decimals of percent for publication (`PCT_DP` in
+  `summary.rs`); the engine stays exact, same discipline as `runway_months`.
+- **Expectation, not realized return**: it reads the rates the user configured per asset, never
+  history, and ignores contributions — it measures the portfolio, not the saving.
+- **Known divergence with the simulation, deliberate**: the projection loop grows assets
+  (step 7) but never charges liability *interest* (it only amortizes principal with the payment
+  plan), so this KPI is strictly more conservative than the projected curve for any household
+  with debt. Written down here and in the metric's help text instead of quietly reconciled.
+
+Worked example (engine-verified, `worked_example_matches_the_documented_figures`): 100.000 at 5 %
++ 50.000 with no rate, minus a 60.000 loan at 3 % APR, inflation 2 % → numerator 3.200 €/year over
+90.000 € of net worth = **3,5556 %** nominal, **1,5251 %** real (the naive subtraction would say
+1,5556 %).
 
 ## Notes for the API handler (projection.rs)
 - Load `allocation_rules` from DB ordered by `priority ASC`, then map each `target_asset_id` → index in `assets[]` before building the engine input.

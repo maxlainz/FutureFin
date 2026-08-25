@@ -45,6 +45,19 @@ export const HELP_TEXTS = {
       "con los movimientos reales, tu gasto real promediado. «+100 años» es un suelo, no una " +
       "medida exacta.",
   },
+  "summary.net_return": {
+    title: "Rendimiento neto",
+    body:
+      "Lo que se espera que rinda tu patrimonio en un año: la rentabilidad que has configurado en " +
+      "cada activo, pesada por lo que vale cada uno, menos el interés de tus deudas, pesado por lo " +
+      "que te queda por pagar, todo sobre tu patrimonio neto. Un activo sin rentabilidad puesta " +
+      "cuenta como 0 % y sigue restando media. La cifra grande ya descuenta la inflación que " +
+      "tengas configurada; el paréntesis es la misma sin descontarla. No es lo que has ganado: es " +
+      "una expectativa, no tu rentabilidad pasada. Y es más prudente que la simulación de la " +
+      "proyección, que hace crecer tus activos pero todavía no le cobra los intereses a tus " +
+      "deudas. Si debes más de lo que tienes, la tarjeta desaparece: el porcentaje diría lo " +
+      "contrario de lo que pasa.",
+  },
   "summary.net_worth": {
     title: "Patrimonio neto",
     body:

@@ -19,6 +19,7 @@ import {
   formatDebtToAssetsPct,
   formatFractionAsPercent,
   formatPercentDisplay,
+  formatPercentDisplaySigned,
   formatRunwayValue,
   isAbsentMetric,
   isZeroMoneyMetric,
@@ -153,6 +154,28 @@ export function SummaryView({
     ? runwaySwrParenthetical(installation?.installation.fire_settings)
     : undefined;
 
+  // Rendimiento neto: la cifra grande es la REAL (descontada la inflación) y el paréntesis el
+  // nominal. Los dos llegan ya en porcentaje, no en fracción — de ahí `formatPercentDisplaySigned`
+  // directo y no `formatFractionAsPercent`. Mismo criterio de ausencia que la Autonomía: el
+  // servidor omite ambos campos cuando el patrimonio neto no es positivo (no es un cero, es que
+  // la métrica no existe), así que la tarjeta se oculta en vez de pintar un «—».
+  const netReturn = (() => {
+    if (!showMetrics || !fh) return null;
+    if (isAbsentMetric(fh.net_return_real_annual_pct)) return null;
+    const real = parseDisplayDecimal(String(fh.net_return_real_annual_pct));
+    if (real === null) return null;
+    const nominal = isAbsentMetric(fh.net_return_nominal_annual_pct)
+      ? null
+      : parseDisplayDecimal(String(fh.net_return_nominal_annual_pct));
+    return {
+      value: formatPercentDisplaySigned(real),
+      parenthetical:
+        nominal === null
+          ? undefined
+          : `${formatPercentDisplaySigned(nominal)} nominal`,
+    };
+  })();
+
   // ¿Tiene el bloque «Salud financiera» de dónde salir? Sus dos entradas son el ahorro del
   // modo activo (presupuesto o movimientos) y los activos líquidos. Si ambas son cero no hay
   // salud que medir: el bloque se sustituye por su estado vacío en vez de enseñar dos ceros.
@@ -260,6 +283,14 @@ export function SummaryView({
                       summary.financial_health.runway_is_indefinite,
                     )}
                     parenthetical={runwayParenthetical}
+                  />
+                ) : null}
+                {netReturn ? (
+                  <MetricCard
+                    label="Rendimiento neto"
+                    helpId="summary.net_return"
+                    value={netReturn.value}
+                    parenthetical={netReturn.parenthetical}
                   />
                 ) : null}
               </div>

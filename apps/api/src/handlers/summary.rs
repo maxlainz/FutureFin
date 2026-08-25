@@ -36,6 +36,13 @@ const RATIO_DP: u32 = 6;
 /// redondeaba a 1: el mismo número no puede tener dos precisiones según la superficie.
 const RUNWAY_DP: u32 = 1;
 
+/// Decimales de fracción con los que se sirven las cifras que ya vienen **en porcentaje**
+/// (`net_return_*_annual_pct`). 4 decimales de porcentaje = exactamente la misma resolución que
+/// `RATIO_DP` (6 decimales de fracción): la política de precisión es una, aunque la unidad del
+/// campo sea otra. Igual que `round_ratio`, es redondeo de PRESENTACIÓN — el engine calcula
+/// exacto y solo se recorta lo publicado.
+const PCT_DP: u32 = 4;
+
 /// Redondeo de **presentación** de un ratio. Se aplica SIEMPRE en el último paso (al construir la
 /// respuesta) y nunca sobre un valor que alimente otro cálculo: el gross-up, el umbral SWR y el
 /// runway se computan con la precisión completa y solo el resultado publicado se recorta.
@@ -114,6 +121,25 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub savings_expected_monthly_equivalent: Decimal,
+    /// Rendimiento anual **nominal** esperado del patrimonio neto, en porcentaje (`"3.5556"` =
+    /// 3,5556 %/año). Numerador: la suma de `current_value × expected_annual_return_percent` de
+    /// TODOS los activos del scope menos la de `principal × apr_percent` de los pasivos **no
+    /// vencidos** (mismo filtro que `total_liabilities`); denominador: `net_worth`. Un activo sin
+    /// rentabilidad configurada o un pasivo sin TAE cuentan como 0 % pero **siguen pesando** en el
+    /// denominador. Se **omite** cuando `net_worth ≤ 0` (el cociente cambiaría de signo o
+    /// divergiría). Lo calcula `futurefin_engine::net_return_percentages`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub net_return_nominal_annual_pct: Option<Decimal>,
+    /// El mismo rendimiento descontada `installation.annual_inflation_assumption_percent`, por
+    /// **división de factores** (`(1+n/100)/(1+i/100) − 1`), no por resta de puntos. Presente y
+    /// ausente exactamente a la vez que `net_return_nominal_annual_pct`; con inflación 0 son
+    /// idénticos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub net_return_real_annual_pct: Option<Decimal>,
 }
 
 #[derive(Debug, FromRow)]
@@ -276,7 +302,7 @@ pub struct SummaryResponse {
         ("view" = Option<String>, Query, description = "`mine` = sums for rows attributed to the signed-in user; omit = household."),
     ),
     responses(
-        (status = 200, description = "Installation aggregates + financial_health (monthly equivalents según `fire_settings.savings_source`, runway de líquidos con retorno e inflación, sumas de Próximos). Los pasivos con `payment_end_date` pasada se **filtran** de las lecturas; nunca se borran (reads never mutate).", body = SummaryResponse),
+        (status = 200, description = "Installation aggregates + financial_health (monthly equivalents según `fire_settings.savings_source`, runway de líquidos con retorno e inflación, rendimiento neto anual esperado del patrimonio —nominal y real—, sumas de Próximos). Los pasivos con `payment_end_date` pasada se **filtran** de las lecturas; nunca se borran (reads never mutate).", body = SummaryResponse),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Not an installation member"),
         (status = 404, description = "Installation missing"),
@@ -309,35 +335,43 @@ pub(crate) async fn summary_core(
     let liab_scope = view.scope_where("");
     let liab_today_ph = view.next_arg_index();
 
-    let total_assets_sql =
-        format!("SELECT COALESCE(SUM(current_value), 0) FROM assets WHERE {asset_scope}");
-    let total_liab_sql = format!(
-        r#"SELECT COALESCE(SUM(principal), 0) FROM liabilities
+    // Filas `(valor, rentabilidad anual %, líquido)` de TODOS los activos del scope. Antes se
+    // pedían dos cosas por separado —la suma total en SQL y las filas de los líquidos— pero el
+    // rendimiento neto necesita la rentabilidad de todos, no solo de los líquidos: una sola query
+    // sirve a los tres consumidores (total, runway, rendimiento) y el filtro `is_liquid` se hace
+    // en Rust. El runway sigue recibiendo EXACTAMENTE las mismas filas que antes.
+    let assets_sql = format!(
+        r#"SELECT current_value, expected_annual_return_percent, is_liquid
+           FROM assets WHERE {asset_scope}"#
+    );
+    // Ídem con los pasivos: `(principal, TAE %)` con el filtro de vencidos de siempre — el mismo
+    // `WHERE` que servía la suma escalar, no uno nuevo. `total_liabilities` se suma en Rust.
+    let liab_sql = format!(
+        r#"SELECT principal, apr_percent FROM liabilities
            WHERE {liab_scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph})"#
     );
-    // Filas `(valor, rentabilidad anual %)` de los líquidos — mismo scope que antes de la suma. El
-    // runway necesita la rentabilidad por activo (media ponderada por valor), así que la suma
-    // (`liquid_assets_total`) se hace en Rust en vez de en SQL.
-    let liquid_sql = format!(
-        r#"SELECT current_value, expected_annual_return_percent
-           FROM assets WHERE {asset_scope} AND is_liquid = true"#
-    );
 
-    let total_assets: Decimal = view
-        .bind_scope_scalar(sqlx::query_scalar(&total_assets_sql), iid, user_id)
-        .fetch_one(pool)
-        .await?;
-    let total_liabilities: Decimal = view
-        .bind_scope_scalar(sqlx::query_scalar(&total_liab_sql), iid, user_id)
-        .bind(today)
-        .fetch_one(pool)
-        .await?;
-    let liquid_rows: Vec<(Decimal, Option<Decimal>)> = view
-        .bind_scope_as(sqlx::query_as(&liquid_sql), iid, user_id)
+    let asset_rows: Vec<(Decimal, Option<Decimal>, bool)> = view
+        .bind_scope_as(sqlx::query_as(&assets_sql), iid, user_id)
         .fetch_all(pool)
         .await?;
+    let liab_rows: Vec<(Decimal, Option<Decimal>)> = view
+        .bind_scope_as(sqlx::query_as(&liab_sql), iid, user_id)
+        .bind(today)
+        .fetch_all(pool)
+        .await?;
+
+    let total_assets: Decimal = asset_rows.iter().map(|(v, _, _)| *v).sum();
+    let total_liabilities: Decimal = liab_rows.iter().map(|(p, _)| *p).sum();
+    let liquid_rows: Vec<(Decimal, Option<Decimal>)> = asset_rows
+        .iter()
+        .filter(|(_, _, is_liquid)| *is_liquid)
+        .map(|(v, r, _)| (*v, *r))
+        .collect();
     let liquid_assets: Decimal = liquid_rows.iter().map(|(v, _)| *v).sum();
+    let asset_return_rows: Vec<(Decimal, Option<Decimal>)> =
+        asset_rows.iter().map(|(v, r, _)| (*v, *r)).collect();
 
     let budget_totals = ledger_budget_totals_for_summary(pool, iid, user_id, view, today).await?;
 
@@ -431,6 +465,19 @@ pub(crate) async fn summary_core(
         RunwayOutcome::NoExpenseBase => (None, false),
     };
 
+    // Rendimiento neto anual esperado del patrimonio: lo que rinden los activos según la
+    // rentabilidad que el usuario configuró en cada uno, menos el interés de los pasivos vivos,
+    // sobre el patrimonio neto (las mismas filas que producen `total_assets` y
+    // `total_liabilities`, así que el denominador ES `net_worth`). `None` ⟺ patrimonio ≤ 0.
+    // El redondeo es de publicación (`PCT_DP`): el engine devuelve el valor exacto.
+    let net_return = futurefin_engine::net_return_percentages(
+        &asset_return_rows,
+        &liab_rows,
+        inflation_pct,
+    );
+    let net_return_nominal_annual_pct = net_return.as_ref().map(|r| r.nominal_pct.round_dp(PCT_DP));
+    let net_return_real_annual_pct = net_return.as_ref().map(|r| r.real_pct.round_dp(PCT_DP));
+
     let (upcoming_inflows_total, upcoming_outflows_total) =
         planning_flow_totals_in_out(pool, iid, user_id, view).await?;
 
@@ -459,6 +506,8 @@ pub(crate) async fn summary_core(
         savings_income_basis,
         savings_expense_basis,
         savings_expected_monthly_equivalent: money_out(savings_expected_monthly_equivalent),
+        net_return_nominal_annual_pct,
+        net_return_real_annual_pct,
     };
 
     let net_worth = total_assets - total_liabilities;

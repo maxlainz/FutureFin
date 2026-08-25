@@ -273,6 +273,12 @@ added — recorded, never silent:
 | `density=hybrid` always emits the last month | **tool follows automatically** — `get_projection` forces `hybrid`, which is why the bug's default victim was the MCP consumer |
 | `destructive_hint` on `materialize_recurring` / `unreconcile_transfer` | **annotations corrected** (§4 step 4) |
 
+Evaluación posterior (2026-08-25, sin cambio de contadores — el catálogo sigue en **52**):
+
+| New HTTP surface | Parity outcome |
+|---|---|
+| `GET /v1/summary` → `financial_health.net_return_nominal_annual_pct` + `net_return_real_annual_pct` | **Tool actualizada sin código nuevo**: `get_summary` comparte `summary_core` y el propio struct `FinancialHealthMetrics`, así que hereda los dos campos. Lo que SÍ hubo que tocar a mano es su `description` — son **porcentajes**, no fracciones como el vecino `savings_rate` (confundirlos multiplica por 100), y traen un aviso que ninguna otra tool puede dar: la proyección no cobra el interés de la deuda, así que este número es más conservador que `get_projection`. Cero tools nuevas: no hay recurso REST nuevo, ni escritura, ni nada que `get_summary` no cubra ya |
+
 Re-verify before trusting:
 
 - Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22**; 50/21/29/29/10/1 on 2026-08-20).

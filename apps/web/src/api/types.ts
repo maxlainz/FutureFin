@@ -197,6 +197,14 @@ export type FinancialHealthMetrics = {
   /** Neto mensual del PRESUPUESTO, capturado ANTES del override B/C — no sigue el modo. Es el
    *  denominador del delta «vs plan» de la tarjeta de ahorro. */
   savings_expected_monthly_equivalent?: string;
+  /** Rendimiento anual **nominal** esperado del patrimonio neto, ya en PORCENTAJE (`"3.5556"` =
+   *  3,5556 %/año), no en fracción como `savings_rate`. Suma de `valor × rentabilidad esperada`
+   *  de todos los activos menos `principal × TAE` de los pasivos vivos, sobre el patrimonio neto.
+   *  Ausente ⟺ el patrimonio neto no es positivo. */
+  net_return_nominal_annual_pct?: string | null;
+  /** El mismo rendimiento descontada la inflación configurada, dividiendo factores
+   *  (`(1+n)/(1+i) − 1`), no restando puntos. Presente/ausente a la vez que el nominal. */
+  net_return_real_annual_pct?: string | null;
 };
 
 export type CategoryBreakdownLineApi = {
