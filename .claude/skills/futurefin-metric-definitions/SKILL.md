@@ -105,11 +105,20 @@ propósito, y que son justo las que se rompen en silencio si alguien toca el cá
 **sin rentabilidad configurada cuenta 0 % y sigue pesando en el denominador** —diluye, no se
 excluye—; (2) la cifra grande es la **real** y el paréntesis la **nominal**, y la real sale de
 dividir factores, no de restar puntos; (3) **no es rentabilidad realizada**, y **no cuadra con la
-proyección**, que hace crecer los activos pero todavía no le cobra intereses a la deuda — es la
-única entrada del catálogo que documenta una divergencia viva de modelo, y esconderla habría
-convertido «¿por qué la simulación va más rápido que mi rendimiento?» en un bug fantasma. Si
-alguna vez el engine empieza a cobrar el interés de la deuda, esta entrada es la que hay que
-revisar.
+proyección**, que solo cobra intereses a **algunas** deudas — es la única entrada del catálogo que
+documenta una divergencia viva de modelo, y esconderla habría convertido «¿por qué la simulación va
+más rápido que mi rendimiento?» en un bug fantasma.
+
+**Actualizada en 4.2.0** — y es el caso de libro de por qué esta skill es un gate. La entrada
+decía «la proyección… todavía no le cobra los intereses a tus deudas» y avisaba: «si alguna vez el
+engine empieza a cobrar el interés de la deuda, esta entrada es la que hay que revisar». 4.2.0 es
+ese día: el engine devenga interés en los pasivos con `repayment_model` francés o revolving y plan
+de pago activo. La frase no se borra, se **matiza**, porque la divergencia se estrecha pero **no
+desaparece**: el KPI cuenta la TAE de **todas** las deudas vivas, sin condiciones, así que sigue
+siendo algo más prudente que la simulación mientras quede alguna deuda en cuota fija (el default de
+la columna, o sea: todas las que existían antes de 4.2.0). Para un hogar que declare su hipoteca
+como francesa, las dos cifras convergen. Si algún día `fixed_payments` deja de ser el default, o el
+KPI aprende a mirar el modelo, esta entrada vuelve a tocar.
 
 ### 6.1 Auditoría de 4.0.0 — seis entradas a la deriva, y el patrón que las produjo
 
