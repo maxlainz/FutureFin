@@ -1011,3 +1011,165 @@ async fn import_rejects_a_manifest_with_out_of_range_kdf_parameters() {
     let ok = import_preview(&app, &owner.cookie, &good).await;
     assert_eq!(ok.status, http::StatusCode::OK, "el export legítimo debe seguir valiendo: {ok:?}");
 }
+
+// ---------------------------------------------------------------------------
+// v10 (4.2.0) — `repayment_model` en los pasivos
+// ---------------------------------------------------------------------------
+
+/// Un `.ffbackup` **v9** (pre-4.2.0) no lleva `repayment_model`. Sus pasivos tienen que entrar
+/// como `fixed_payments`, que es exactamente el modelo con el que se calcularon los números que
+/// el usuario vio cuando exportó: restaurar un backup viejo no puede mover una proyección.
+#[tokio::test]
+async fn v9_backup_imports_its_liabilities_as_fixed_payments() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [
+            { "scope": "liability", "name": "Préstamos", "sort_index": 0 },
+            { "scope": "expense", "name": "Cuotas", "sort_index": 0 }
+        ],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [{
+            "category_ref": { "scope": "liability", "name": "Préstamos" },
+            "expense_category_ref": { "scope": "expense", "name": "Cuotas" },
+            "label": "Hipoteca vieja",
+            "principal": "80000.0000",
+            "principal_derived_from_plan": false,
+            "apr_percent": "3.0000",
+            "payment_amount": "500.0000",
+            "payment_frequency": "monthly",
+            "payment_end_date": null,
+            "sort_index": 0
+        }],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [],
+        "categorization_rules": [],
+        "recurring_transaction_rules": [],
+        "transfer_match_rejections": []
+    });
+    let b64 = craft_ffbackup_b64(9, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v9 import: {applied:?}");
+    assert_eq!(applied.json()["imported"]["liabilities"].as_u64(), Some(1));
+
+    let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    assert_eq!(rows[0]["label"], "Hipoteca vieja");
+    assert_eq!(
+        rows[0]["repayment_model"], "fixed_payments",
+        "un pasivo de un backup v9 tiene que quedar en el modelo histórico"
+    );
+}
+
+/// Roundtrip v10: el modelo sobrevive al export → import. Sin esto, un usuario que restaura su
+/// propio backup perdería la configuración de sus préstamos y su proyección cambiaría en
+/// silencio (que es el modo de fallo que este repo persigue).
+#[tokio::test]
+async fn v10_roundtrip_preserves_the_repayment_model() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let liab_cat = app.create_category(&owner, "liability", "Préstamos").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            serde_json::json!({
+                "category_id": liab_cat,
+                "expense_category_id": exp_cat,
+                "label": "Hipoteca",
+                "principal": "150000",
+                "repayment_model": "french",
+                "apr_percent": "2.75",
+                "payment_amount": "700",
+                "payment_frequency": "monthly",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "create french: {r:?}");
+
+    let backup = export_ffbackup_b64(&app, &owner.cookie).await;
+    // Ensuciar el estado vivo: el pasivo pasa al modelo histórico antes de restaurar.
+    let id = r.json()["id"].as_str().unwrap().to_string();
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            serde_json::json!({ "repayment_model": "fixed_payments" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+
+    let applied = import_apply(&app, &owner.cookie, &backup).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v10 import: {applied:?}");
+
+    let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["repayment_model"], "french", "el roundtrip debe conservar el modelo");
+    let apr: rust_decimal::Decimal = rows[0]["apr_percent"].as_str().unwrap().parse().unwrap();
+    assert_eq!(apr, "2.75".parse::<rust_decimal::Decimal>().unwrap());
+}
+
+/// Un v10 con un pasivo `french` **sin TIN** —combinación que el create rechaza con 400— tiene
+/// que importar igualmente: el INSERT del import bypasea la validación a propósito (un backup
+/// restaura lo que había, no lo que hoy sería válido) y el engine degenera a 0 % en vez de
+/// panicar. Lo único que filtra es el CHECK de la columna.
+#[tokio::test]
+async fn v10_french_liability_without_apr_still_imports() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [{ "scope": "liability", "name": "Préstamos", "sort_index": 0 }],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [{
+            "category_ref": { "scope": "liability", "name": "Préstamos" },
+            "expense_category_ref": null,
+            "label": "Francés sin TIN",
+            "principal": "50000.0000",
+            "principal_derived_from_plan": false,
+            "repayment_model": "french",
+            "apr_percent": null,
+            "payment_amount": "400.0000",
+            "payment_frequency": "monthly",
+            "payment_end_date": null,
+            "sort_index": 0
+        }],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [],
+        "categorization_rules": [],
+        "recurring_transaction_rules": [],
+        "transfer_match_rejections": []
+    });
+    let b64 = craft_ffbackup_b64(10, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v10 import: {applied:?}");
+    assert_eq!(applied.json()["imported"]["liabilities"].as_u64(), Some(1));
+
+    let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    assert_eq!(rows[0]["repayment_model"], "french");
+    assert!(rows[0].get("apr_percent").is_none_or(serde_json::Value::is_null));
+
+    // Y la proyección se sirve sin reventar (la degeneración del engine, extremo a extremo).
+    let series = app
+        .get_with_cookie("/v1/projection/series?months=24", &owner.cookie)
+        .await;
+    assert_eq!(series.status, http::StatusCode::OK, "series: {series:?}");
+}

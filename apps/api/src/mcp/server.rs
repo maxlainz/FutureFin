@@ -779,10 +779,18 @@ pub struct CreateLiabilityParams {
     /// Principal >= 0 como string decimal. Obligatorio salvo derive_principal_from_plan.
     #[serde(default)]
     pub principal: Option<String>,
-    /// true = derivar el principal del plan de pago (exige payment_amount + payment_frequency
-    /// + payment_end_date; principal = cuota × nº de pagos pendientes, SIN descontar intereses).
+    /// true = derivar el principal del plan de pago (exige payment_amount, payment_frequency y
+    /// payment_end_date). Con repayment_model fixed_payments el principal es cuota × nº de pagos
+    /// pendientes (SIN descontar intereses); con french es el valor actual de esas cuotas al
+    /// TIN, que es el capital pendiente de verdad.
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
+    /// Modelo de amortización: "fixed_payments" (default, la cuota va íntegra a principal y no
+    /// se devengan intereses), "french" (sistema francés, exige apr_percent > 0),
+    /// "interest_only" (la cuota es el interés, el principal no baja) o "revolving".
+    /// Todos menos fixed_payments exigen plan de pago mensual (weekly no se admite).
+    #[serde(default)]
+    pub repayment_model: Option<String>,
     /// TAE en % >= 0, string decimal.
     #[serde(default)]
     pub apr_percent: Option<String>,
@@ -816,10 +824,15 @@ pub struct UpdateLiabilityParams {
     /// Principal >= 0, string decimal. Ignorado si el principal queda derivado del plan.
     #[serde(default)]
     pub principal: Option<String>,
-    /// true = derivar el principal del plan de pago (cuota + frecuencia + fecha fin,
-    /// principal = cuota × nº de pagos, sin descuento); false = volver a principal explícito.
+    /// true = derivar el principal del plan de pago (cuota + frecuencia + fecha fin; Σ cuotas en
+    /// fixed_payments, valor actual al TIN en french); false = volver a principal explícito.
+    /// Cambiar el modelo o el TIN con esto activo RE-DERIVA el principal.
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
+    /// Nuevo modelo de amortización: "fixed_payments" | "french" | "interest_only" |
+    /// "revolving". Set-only: omitirlo conserva el actual.
+    #[serde(default)]
+    pub repayment_model: Option<String>,
     /// TAE en % >= 0, string decimal.
     #[serde(default)]
     pub apr_percent: Option<String>,
@@ -2370,7 +2383,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_liability",
-        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva como cuota × nº de pagos pendientes, una SUMA SIN DESCONTAR INTERESES — no es amortización francesa: para una hipoteca a 20 años sale bastante por encima del capital pendiente real, así que si el usuario conoce su capital pendiente, pásalo en `principal` en vez de derivarlo). Mueve la proyección entera.",
+        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin), y repayment_model. Los cuatro modelos: `fixed_payments` (default e histórico — la cuota va íntegra a principal, el pasivo NO devenga intereses); `french` (sistema francés, interés sobre el saldo de apertura, exige apr_percent > 0 y cuota mensual); `interest_only` (la cuota declarada ES el interés, el principal no baja); `revolving` (misma recurrencia que el francés). Derivar el principal significa Σ cuotas en `fixed_payments` —una suma SIN descontar intereses, que para una hipoteca a 20 años sale bastante por encima del capital pendiente real— y el VALOR ACTUAL de esas cuotas al TIN en `french`, que sí es el capital pendiente. Si el usuario conoce su capital pendiente, pásalo en `principal` en vez de derivarlo. Mueve la proyección entera.",
         annotations(title = "Crear pasivo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_liability(
@@ -2389,6 +2402,11 @@ impl FutureFinMcp {
                 label: p.label.clone(),
                 type_tag: None,
                 derive_principal_from_plan: p.derive_principal_from_plan,
+                repayment_model: p
+                    .repayment_model
+                    .as_deref()
+                    .map(crate::handlers::liabilities::RepaymentModel::parse)
+                    .transpose()?,
                 principal: p
                     .principal
                     .as_deref()
@@ -2438,7 +2456,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_liability",
-        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %»): label, categorías, TAE, plan de pago (cuota + frecuencia monthly|weekly + fecha fin), principal explícito o re-derivado del plan (derive_principal_from_plan). Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección entera.",
+        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %», «mi préstamo es francés, no cuota fija»): label, categorías, TAE, plan de pago (cuota + frecuencia monthly|weekly + fecha fin), repayment_model y principal explícito o re-derivado del plan (derive_principal_from_plan). Los cuatro modelos: `fixed_payments` (default e histórico — la cuota va íntegra a principal, sin intereses); `french` (sistema francés, exige apr_percent > 0 y cuota mensual); `interest_only` (la cuota es el interés, el principal no baja); `revolving` (misma recurrencia que el francés). Derivar el principal es Σ cuotas en `fixed_payments` y el valor actual al TIN en `french`; cambiar el modelo o la TAE con derive activo re-deriva el principal. Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección entera.",
         annotations(title = "Editar pasivo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_liability(
@@ -2464,6 +2482,11 @@ impl FutureFinMcp {
                     label: p.label.clone(),
                     type_tag: None,
                     derive_principal_from_plan: p.derive_principal_from_plan,
+                    repayment_model: p
+                        .repayment_model
+                        .as_deref()
+                        .map(crate::handlers::liabilities::RepaymentModel::parse)
+                        .transpose()?,
                     principal: p
                         .principal
                         .as_deref()
