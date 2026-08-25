@@ -4,7 +4,7 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.1.0] - 2026-08-25
 
 ### Añadido
 
@@ -35,7 +35,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
     pero **todavía no le cobra intereses a la deuda**, así que este número es más conservador que
     la simulación. Es una discrepancia real de modelo, y esconderla habría sido peor.
 
-### Infraestructura del repositorio (sin imagen — viajará con el siguiente release)
+### Infraestructura del repositorio (no toca la imagen; viaja en este release)
 
 - **El espejo de alertas Dependabot ya no queda abierto para decir que no hay alertas**: con
   0 alertas, `dependabot-alerts-mirror.yml` cierra el issue espejo (#55) y lo reabre solo
