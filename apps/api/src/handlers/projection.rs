@@ -21,7 +21,7 @@ use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
     fire_target_at_month_index, first_month_per_asset_contribution_nominals,
     project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
-    FireTarget, ProjectionInput, ProjectionLiabilityInput, SimAsset,
+    FireTarget, ProjectionInput, ProjectionLiabilityInput, RepaymentModel, SimAsset,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -1231,6 +1231,10 @@ pub(crate) async fn build_installation_projection_input(
             principal: r.principal.max(Decimal::ZERO),
             monthly_payment: liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()),
             payment_end: r.payment_end_date,
+            // TODO(4.2.0 parte 2): mapear desde la fila SQL (`repayment_model`, `apr_percent`).
+            // Provisional: el default histórico, que reproduce el modelo pre-4.2.0 bit a bit.
+            repayment_model: RepaymentModel::FixedPayments,
+            apr_percent: None,
         })
         .collect();
 
@@ -2639,6 +2643,8 @@ mod milestone_tests {
                 principal: Decimal::from(50_000),
                 monthly_payment: Decimal::from(1200),
                 payment_end: None,
+                repayment_model: RepaymentModel::FixedPayments,
+                apr_percent: None,
             }],
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
             retirement_start_month: None,
