@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "_doc": "Casos canónicos del PRINCIPAL DERIVADO de un plan de pago por modelo de amortización (4.2.0). Los consumen el backend (apps/api/tests/liability_derived_principal_parity.rs, sobre futurefin_engine::present_value_of_payments) y el frontend (apps/web/src/lib/ledger.repayment-model.test.ts, sobre liabilityDerivedPrincipalNum). Misma disciplina que fire-parity.json: si alguien cambia la fórmula en un lado y no en el otro, uno de los dos suites falla. La fuente de verdad es este JSON.",
+  "_formula": "fixed_payments → principal = payment_amount × intervals (exacto, contrato pre-4.2.0). french → principal = valor actual de la renta: P = M · (1 − (1 + i)^−n) / i con i = apr_percent / 1200 y n = intervals (MESES). interest_only y revolving no derivan: el handler los rechaza con derive_not_supported_for_model, así que no hay caso de paridad para ellos.",
+  "_why_no_zero_apr_french_case": "El engine degenera french con apr ausente o ≤ 0 a M·n (límite i→0), pero la API nunca llega ahí: validate_repayment_model_state exige apr_percent > 0 para french/revolving. Un caso así compararía dos cosas que el producto no permite crear; la degeneración se cubre en los tests unitarios de cada lado.",
+  "_intervals_are_months": "Todos los casos son mensuales: weekly solo existe con fixed_payments (weekly_not_supported_for_model), así que no hay n fraccionario aquí.",
+  "_tolerance_eur": 0.01,
+  "cases": [
+    {
+      "name": "fixed_payments — Σ cuotas, contrato histórico",
+      "repayment_model": "fixed_payments",
+      "payment_amount": "500",
+      "intervals": 200,
+      "apr_percent": null,
+      "expected_principal": 100000.0,
+      "_calc_note": "500 × 200. Bit a bit el valor que producía el pre-4.2.0."
+    },
+    {
+      "name": "fixed_payments con TIN informado — el TIN no entra en la derivación",
+      "repayment_model": "fixed_payments",
+      "payment_amount": "500",
+      "intervals": 200,
+      "apr_percent": "3",
+      "expected_principal": 100000.0,
+      "_calc_note": "Mismo 500 × 200: en este modelo el TIN es informativo y el engine lo ignora."
+    },
+    {
+      "name": "french — 200 cuotas de 500 € al 3 %",
+      "repayment_model": "french",
+      "payment_amount": "500",
+      "intervals": 200,
+      "apr_percent": "3",
+      "expected_principal": 78618.15423,
+      "_calc_note": "100.000 € de caja futura, 78.618,15 € de deuda hoy. Es el caso que separa los dos modelos."
+    },
+    {
+      "name": "french — plazo corto, TIN bajo",
+      "repayment_model": "french",
+      "payment_amount": "1000",
+      "intervals": 12,
+      "apr_percent": "1",
+      "expected_principal": 11935.25199,
+      "_calc_note": "i = 1/1200. 12.000 € de cuotas → 11.935,25 €."
+    },
+    {
+      "name": "french — una sola cuota: simple descuento de un mes",
+      "repayment_model": "french",
+      "payment_amount": "1000",
+      "intervals": 1,
+      "apr_percent": "12",
+      "expected_principal": 990.09901,
+      "_calc_note": "n = 1 → P = M / (1 + i) = 1000 / 1,01. Frontera: el sumatorio de un término."
+    },
+    {
+      "name": "french — hipoteca a 30 años al 6 %",
+      "repayment_model": "french",
+      "payment_amount": "800",
+      "intervals": 360,
+      "apr_percent": "6",
+      "expected_principal": 133433.291514,
+      "_calc_note": "288.000 € de caja futura → 133.433,29 € de principal. Plazo largo = donde más se separan powd (Decimal) y Math.pow (f64)."
+    },
+    {
+      "name": "french — TIN con decimales",
+      "repayment_model": "french",
+      "payment_amount": "250",
+      "intervals": 60,
+      "apr_percent": "7.5",
+      "expected_principal": 12476.327046,
+      "_calc_note": "i = 7,5/1200 = 0,00625. 15.000 € de cuotas → 12.476,33 €."
+    }
+  ]
+}

@@ -219,6 +219,45 @@ Accepts `?view=mine`. `principal_derived_from_plan` flag indicates auto-derived 
 
 **Expiration filter**: rows with `payment_end_date < today` are hidden from `GET /v1/liabilities` (and from totals/breakdowns in `/summary`, derived lines in `/budget`, debt service in `/projection`). The rows are not deleted — the filter is `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)`. Use `installation.calendar_tz` to compute `today`.
 
+**`repayment_model` (4.2.0)**: cómo cobra el engine de proyección la cuota. Campo del wire en las
+tres direcciones — **siempre presente** en `LiabilityResponse` (la columna es `NOT NULL DEFAULT
+'fixed_payments'`, así que no hay pasivo sin modelo), **opcional** en `POST` (ausente ⇒
+`fixed_payments`: un cliente que no sepa nada de 4.2.0 crea exactamente los mismos pasivos que
+antes) y **set-only** en `PATCH` (`None` conserva el actual; no hay «volver a NULL», para deshacer
+se manda `fixed_payments` explícito). Cuatro literales `snake_case`, idénticos a los del CHECK de
+la columna: `fixed_payments` | `french` | `interest_only` | `revolving`. Un literal desconocido en
+un body HTTP lo rechaza **serde** con un **422** (mismo comportamiento que `payment_frequency`);
+por MCP, donde el parámetro llega como string suelto, es un **400 `repayment_model_invalid`**.
+Semántica de cada modelo: [`engine.md`](engine.md) §ProjectionLiabilityInput.
+
+Validación por modelo (`validate_repayment_model_state`, sobre el **estado resultante** — en PATCH,
+tras mergear el body sobre la fila actual). `fixed_payments` no impone **nada** (el modelo histórico
+sigue admitiendo pasivos sin plan, `weekly`, o con un TIN informativo que el engine ignora). Los
+otros tres se comprueban en este orden fijo, para que el código de error sea predecible:
+
+| # | Regla | Modelos | Código (400) |
+|---|---|---|---|
+| 1 | exige `payment_amount` + `payment_frequency` | `french`, `interest_only`, `revolving` | `payment_plan_required_for_model` |
+| 2 | exige `apr_percent > 0` | `french`, `revolving` | `apr_required_for_model` |
+| 3 | prohíbe `payment_frequency = weekly` | `french`, `interest_only`, `revolving` | `weekly_not_supported_for_model` |
+| 4 | prohíbe `derive_principal_from_plan` | `interest_only`, `revolving` | `derive_not_supported_for_model` |
+
+Por qué cada una: (1) sin cuota el engine no devenga (`liability_active` gatea también el interés),
+así que un `french` sin plan sería un `fixed_payments` disfrazado que no mueve un número — se
+rechaza en vez de mentir; (2) un TIN ausente o 0 hace degenerar el engine a `fixed_payments`, y
+guardar eso sería ofrecer un «francés» que no cobra intereses (`interest_only` NO lo exige: su cuota
+declarada YA es el interés); (3) la recurrencia del engine es **mensual** y `weekly` se convierte
+×52/12 — exacto sin intereses, pero cambiaría el devengo; (4) derivar el principal solo tiene inversa
+cerrada en `fixed_payments` (Σ cuotas) y `french` (valor actual).
+
+**Cambio de comportamiento de POST/PATCH con `derive_principal_from_plan`**: la derivación deja de
+ser una sola fórmula. En `fixed_payments` sigue siendo `cuota × nº de intervalos` **bit a bit** (no
+pasa por el engine ni por `round_dp`); en `french` es el **valor actual** de esa renta al TIN
+(`present_value_of_payments`), redondeado a 4 decimales en el handler. 200 cuotas de 500 € al 3 %
+son 100.000 € de caja pero **78.618,1542 €** de deuda hoy. Además, en PATCH, cambiar
+`repayment_model` o `apr_percent` con el derive activo **re-deriva** el principal con los valores
+nuevos (el modelo se resuelve antes del bloque de derivación, a propósito).
+
 ### Summary (`/v1/summary/`)
 Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=mine`. `total_liabilities` and breakdowns exclude expired rows (see Liabilities note above).
 
@@ -252,7 +291,7 @@ Campos de `financial_health` relacionados con el modo y el runway:
 - **Precisión de salida, segunda mitad (4.0.0)** — 3.8.0 arregló los ratios y **dejó fuera los importes de proyección y FIRE**, que seguían saturando la escala: `simulate_projection.final_net_worth` salía con 21 decimales y `fire_target_base` / `get_projection.jubilacion_target_net_worth` con 22 (auditoría MCP §7). El origen: `annual_factor.powd(1/12)` es una raíz duodécima irracional y `gross / (swr/100)` una división, y ninguna se redondeaba. **La escala de los importes es 4** (`money_out`, **punto único en `apps/api/src/money.rs` desde 4.0.0** — antes había dos copias, en `projection.rs` y en `transactions/summary.rs`, y solo la segunda mataba el cero negativo: la duplicación ERA el bug, porque el arreglo se aplicó a una copia y no a la otra. La consumen `summary.rs`, `projection.rs` y `transactions/summary.rs`), aplicada a la **copia que se serializa, nunca a la que entra al motor** — `fire_target_base` ES `FireTarget.base_amount`, y redondear esa movería el cruce FIRE. Con ella se van dos rarezas más del serializador: el `-0` de las categorías sin movimientos (`impl Neg for Decimal` voltea el bit de signo también sobre el cero) y los hitos con formato mixto (`"25000.0"` junto a `"50000"`: `2.5 × 10⁴` heredaba la escala del literal). 4.0.0 la añade además donde faltaba: `/v1/summary`, `savings_expected_monthly_equivalent` y `monthly_delta_assumption`, que nacen de divisiones (`cuota × 52 / 12`, `suma / meses reales`) y viajaban con ~25 decimales. Excepciones **deliberadas** a la escala 4: ratios a 6, `runway_months` a 1, y los KPI del cash-flow a 2 (`money()` en `history.rs`, con su propio motivo escrito). Regresión estructural — barre TODO string decimal del payload, no una lista de campos: `mcp_simulate.rs::no_money_string_carries_more_than_four_decimals_or_negative_zero`.
 - `runway_is_indefinite` (`bool`) — desde **v2.3.0** lo decide el **umbral SWR**, no sobrevivir el cap: `true` ⟺ la retirada anual bruta no supera el SWR sobre el saldo líquido, es decir `gross_up(expense_total × 12) × 100 ≤ liquid_assets_total × swr_pct`, con `swr_pct`/`tax_brackets`/`taxes_enabled` de `installation.fire_settings` (pestaña Jubilación) y el **mismo** `gross_up_net_annual_fire` del target FIRE. Entonces `runway_months` no viaja. Con `swr_pct ≤ 0` nunca es `true`. Con `expense_total == 0` es `false` (no hay base de gasto, no es que esté cubierto). El disparador es deliberadamente independiente de rentabilidad e inflación (que gobiernan solo el caso finito). La UI muestra «Infinito (dentro del SWR 3,5 %)» en el primer caso y oculta la tarjeta en el segundo. **API no breaking**: tipo y nullabilidad de ambos campos son los de v2.2.0.
 
-- `net_return_nominal_annual_pct` / `net_return_real_annual_pct` (Decimal-string, opcionales) — **rendimiento anual esperado del patrimonio neto**, en **porcentaje** (no en fracción como `savings_rate`: `"3.5556"` = 3,5556 %/año), a **4 decimales** (`PCT_DP`, la misma resolución que `RATIO_DP` expresada en otra unidad). Numerador: `Σ (current_value × expected_annual_return_percent)/100` de **TODOS** los activos del scope − `Σ (principal × apr_percent)/100` de los pasivos **no vencidos** (mismo predicado que `total_liabilities`); denominador: `net_worth`, es decir, exactamente las mismas filas de arriba. Una rentabilidad o una TAE sin configurar (`NULL`) cuentan **0 %** y la fila **sigue pesando en el denominador** — se diluye, no se excluye. Lo calcula `futurefin_engine::net_return_percentages` (ver [`engine.md`](engine.md) §Rendimiento neto); el redondeo es de publicación, el engine devuelve el valor exacto. El **real** se obtiene **dividiendo factores** —`100·((1+n/100)/(1+i/100) − 1)` con `installation.annual_inflation_assumption_percent`—, nunca restando puntos. Ambos se **omiten** (`skip_serializing_if`) ⟺ `net_worth ≤ 0`: con denominador no positivo el cociente cambia de signo y se leería al revés. **No sigue `savings_source`** (no depende de ingreso ni de gasto) y es la única cifra del bloque que **no cuadra con la proyección**: el engine hace crecer los activos pero no cobra el interés de la deuda (ver `.claude/engine.md` §Simulation loop), así que esta métrica es deliberadamente más conservadora. Regresión: `summary_net_return.rs`.
+- `net_return_nominal_annual_pct` / `net_return_real_annual_pct` (Decimal-string, opcionales) — **rendimiento anual esperado del patrimonio neto**, en **porcentaje** (no en fracción como `savings_rate`: `"3.5556"` = 3,5556 %/año), a **4 decimales** (`PCT_DP`, la misma resolución que `RATIO_DP` expresada en otra unidad). Numerador: `Σ (current_value × expected_annual_return_percent)/100` de **TODOS** los activos del scope − `Σ (principal × apr_percent)/100` de los pasivos **no vencidos** (mismo predicado que `total_liabilities`); denominador: `net_worth`, es decir, exactamente las mismas filas de arriba. Una rentabilidad o una TAE sin configurar (`NULL`) cuentan **0 %** y la fila **sigue pesando en el denominador** — se diluye, no se excluye. Lo calcula `futurefin_engine::net_return_percentages` (ver [`engine.md`](engine.md) §Rendimiento neto); el redondeo es de publicación, el engine devuelve el valor exacto. El **real** se obtiene **dividiendo factores** —`100·((1+n/100)/(1+i/100) − 1)` con `installation.annual_inflation_assumption_percent`—, nunca restando puntos. Ambos se **omiten** (`skip_serializing_if`) ⟺ `net_worth ≤ 0`: con denominador no positivo el cociente cambia de signo y se leería al revés. **No sigue `savings_source`** (no depende de ingreso ni de gasto) y sigue siendo la cifra del bloque que **puede no cuadrar con la proyección** — aunque desde 4.2.0 la brecha se estrecha en vez de ser total: esta métrica cobra la TAE de **todos** los pasivos no vencidos, sin condiciones, mientras que el engine solo devenga interés en los pasivos cuyo `repayment_model` devenga (`french` / `revolving`), con plan de pago **activo** y en modo A (los modos B/C anulan el TIN). O sea: para un pasivo en `fixed_payments`, para uno sin plan vivo, o para cualquier hogar en modo B/C, el KPI sigue siendo deliberadamente más conservador que la curva proyectada; para quien declare su hipoteca como `french`, las dos cifras convergen (ver `.claude/engine.md` §ProjectionLiabilityInput). Regresión: `summary_net_return.rs`.
 
 ### Budget (`/v1/budget/`)
 Partidas de ingreso/gasto en **una sola lista** (`entries`). Acepta `?view=mine`.
@@ -728,7 +767,11 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
     intereses: la deuda entra inflada y esa deuda fantasma se resta del patrimonio en todo el
     horizonte. La fórmula es una decisión de producto, no un bug — lo que se arregla es la promesa,
     y la descripción dice ahora explícitamente que si el usuario conoce su capital pendiente es
-    mejor pasarlo.
+    mejor pasarlo. **Actualizado en 4.2.0**: la derivación ya no es una sola fórmula. Con
+    `repayment_model = fixed_payments` sigue siendo `Σ cuotas` (la suma inflada de siempre, bit a
+    bit); con `french` es el **valor actual** de esas cuotas al TIN, que sí es el capital pendiente
+    de verdad (`present_value_of_payments`). Las descripciones de `create_liability` y
+    `update_liability` enumeran ahora los cuatro modelos y esa diferencia.
   - `cap_kind` documentaba un objeto (`{"kind": …, "value": …}`) que el schema **no acepta**: los
     parámetros son planos, así que invitaba a mandar un campo `cap` inexistente — se descartaba, la
     llamada devolvía 200 y el tope no se ponía. `cap_value` no tenía doc: ahora dice su unidad, que

@@ -43,6 +43,76 @@ impl PaymentFrequency {
     }
 }
 
+/// Modelo de amortización del pasivo (4.2.0). Espejo del lado API de
+/// `futurefin_engine::RepaymentModel`: los dos enums existen por separado a propósito —el engine
+/// no conoce ni la columna SQL ni el wire, y este no conoce la recurrencia—, y `to_engine()` es el
+/// único puente.
+///
+/// Serde `snake_case`, así que los literales del wire coinciden exactamente con los del CHECK de
+/// `liabilities.repayment_model`. Un literal desconocido en un body HTTP lo rechaza **serde** con
+/// un 422 (mismo comportamiento que `PaymentFrequency`); [`RepaymentModel::parse`] existe para el
+/// camino MCP, donde el parámetro llega como `String` suelto y el error debe ser un 400 nuestro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RepaymentModel {
+    /// Modelo histórico (pre-4.2.0) y default de la columna: la cuota va íntegra a principal.
+    #[default]
+    FixedPayments,
+    /// Sistema francés: interés sobre el saldo de apertura, cuota a fin de mes.
+    French,
+    /// Solo intereses: la cuota paga el devengo y el principal queda constante.
+    InterestOnly,
+    /// Línea revolving: misma recurrencia que el francés en 4.2.0.
+    Revolving,
+}
+
+impl RepaymentModel {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            RepaymentModel::FixedPayments => "fixed_payments",
+            RepaymentModel::French => "french",
+            RepaymentModel::InterestOnly => "interest_only",
+            RepaymentModel::Revolving => "revolving",
+        }
+    }
+
+    /// Parseo desde el literal del wire/SQL. Lo usan `row_to_response` (donde el CHECK ya
+    /// garantiza el dominio) y las tools MCP (donde el usuario puede escribir cualquier cosa).
+    pub(crate) fn parse(s: &str) -> Result<Self, ApiError> {
+        match s.trim() {
+            "fixed_payments" => Ok(Self::FixedPayments),
+            "french" => Ok(Self::French),
+            "interest_only" => Ok(Self::InterestOnly),
+            "revolving" => Ok(Self::Revolving),
+            _ => Err(ApiError::BadRequest(
+                "repayment_model_invalid: repayment_model must be one of fixed_payments, french, interest_only, revolving".into(),
+            )),
+        }
+    }
+
+    /// Puente al enum del engine. Es la ÚNICA traducción: si algún día divergen los literales,
+    /// diverge aquí y en ningún otro sitio.
+    pub(crate) fn to_engine(self) -> futurefin_engine::RepaymentModel {
+        match self {
+            RepaymentModel::FixedPayments => futurefin_engine::RepaymentModel::FixedPayments,
+            RepaymentModel::French => futurefin_engine::RepaymentModel::French,
+            RepaymentModel::InterestOnly => futurefin_engine::RepaymentModel::InterestOnly,
+            RepaymentModel::Revolving => futurefin_engine::RepaymentModel::Revolving,
+        }
+    }
+
+    /// ¿Devenga intereses este modelo, y por tanto exige un TIN configurado?
+    fn requires_apr(self) -> bool {
+        matches!(self, RepaymentModel::French | RepaymentModel::Revolving)
+    }
+}
+
+impl std::fmt::Display for RepaymentModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LiabilityResponse {
     #[schema(value_type = String, format = "uuid")]
@@ -58,6 +128,9 @@ pub struct LiabilityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_tag: Option<String>,
     pub principal_derived_from_plan: bool,
+    /// Modelo de amortización (4.2.0). **Siempre presente**: la columna es NOT NULL con default
+    /// `fixed_payments`, así que no hay pasivo sin modelo ni razón para omitirlo del wire.
+    pub repayment_model: RepaymentModel,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub principal: Decimal,
@@ -91,6 +164,10 @@ pub struct CreateLiabilityBody {
     pub type_tag: Option<String>,
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
+    /// Modelo de amortización. Ausente = `fixed_payments` (el histórico): un cliente que no sepa
+    /// nada de 4.2.0 sigue creando exactamente los mismos pasivos que antes.
+    #[serde(default)]
+    pub repayment_model: Option<RepaymentModel>,
     #[serde(default)]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
@@ -127,6 +204,10 @@ pub struct PatchLiabilityBody {
     pub type_tag: Option<String>,
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
+    /// Set-only (sin clear): `None` conserva el modelo actual. No hay «volver a NULL» porque la
+    /// columna es NOT NULL — para deshacer se manda `fixed_payments` explícito.
+    #[serde(default)]
+    pub repayment_model: Option<RepaymentModel>,
     #[serde(default)]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
@@ -160,6 +241,7 @@ struct LiabilityRow {
     notes: Option<String>,
     sort_index: i32,
     principal_derived_from_plan: bool,
+    repayment_model: String,
 }
 
 fn normalize_label(raw: &str) -> Result<String, ApiError> {
@@ -242,6 +324,66 @@ fn validate_payment_pair(
     }
 }
 
+/// Coherencia del **estado resultante** (4.2.0): qué combinaciones de modelo, TIN y plan de pago
+/// tienen sentido económico. Se llama con los valores YA mergeados —en el PATCH, tras aplicar el
+/// body sobre la fila actual—, porque las tres reglas hablan del pasivo que va a quedar guardado,
+/// no de los campos que llegaron en la petición.
+///
+/// Orden de comprobación (determinista, para que el código de error sea predecible):
+/// 1. `payment_plan_required_for_model` — sin cuota no hay ni interés ni amortización: el engine
+///    exige plan activo para devengar (`liability_active`), así que un `french` sin cuota sería un
+///    `fixed_payments` disfrazado que no mueve un solo número. Se rechaza en vez de mentir.
+/// 2. `apr_required_for_model` — `french`/`revolving` **exigen** TIN > 0. Un TIN ausente o 0 hace
+///    que el engine degenere exactamente en `fixed_payments` (degeneración deliberada, ver
+///    `ProjectionLiabilityInput::apr_percent`): guardarlo sería ofrecer al usuario un «francés»
+///    que no cobra intereses. `interest_only` NO lo exige: su cuota declarada YA es el interés.
+/// 3. `weekly_not_supported_for_model` — la recurrencia del engine es MENSUAL. Con `weekly` el
+///    handler convierte la cuota a su equivalente mensual (×52/12), lo que para un modelo sin
+///    intereses es exacto pero para uno que devenga cambiaría el devengo. No se admite.
+/// 4. `derive_not_supported_for_model` — derivar el principal del plan solo tiene inversa cerrada
+///    en `fixed_payments` (Σ cuotas) y `french` (valor actual). En `interest_only` la cuota no
+///    amortiza (el principal no se deduce del plan) y en `revolving` el plan no describe un
+///    calendario cerrado.
+fn validate_repayment_model_state(
+    model: RepaymentModel,
+    apr: Option<Decimal>,
+    payment_amount: Option<Decimal>,
+    payment_frequency: Option<PaymentFrequency>,
+    derive: bool,
+) -> Result<(), ApiError> {
+    if model == RepaymentModel::FixedPayments {
+        // El modelo histórico no impone NADA: un pasivo sin plan, con `weekly`, o con un TIN
+        // configurado (informativo, el engine lo ignora en este modelo) sigue siendo válido.
+        return Ok(());
+    }
+
+    if payment_amount.is_none() || payment_frequency.is_none() {
+        return Err(ApiError::BadRequest(format!(
+            "payment_plan_required_for_model: repayment_model {model} requires payment_amount and payment_frequency"
+        )));
+    }
+
+    if model.requires_apr() && !matches!(apr, Some(a) if a > Decimal::ZERO) {
+        return Err(ApiError::BadRequest(format!(
+            "apr_required_for_model: repayment_model {model} requires apr_percent > 0"
+        )));
+    }
+
+    if payment_frequency == Some(PaymentFrequency::Weekly) {
+        return Err(ApiError::BadRequest(format!(
+            "weekly_not_supported_for_model: payment_frequency weekly is only supported with repayment_model fixed_payments (got {model})"
+        )));
+    }
+
+    if derive && matches!(model, RepaymentModel::InterestOnly | RepaymentModel::Revolving) {
+        return Err(ApiError::BadRequest(format!(
+            "derive_not_supported_for_model: derive_principal_from_plan is not supported with repayment_model {model}"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Principal = payment × intervals from **today**
 /// (installation `calendar_tz` civil date) through `payment_end_date` inclusive — monthly steps one
 /// calendar month at a time; weekly uses ceil(inclusive_days / 7).
@@ -286,11 +428,26 @@ fn payment_interval_count(
     }
 }
 
+/// Principal derivado del plan de pago. Desde 4.2.0 depende del **modelo**:
+///
+/// - `fixed_payments` → `Σ cuotas` = `cuota × n`, EXACTO y bit a bit igual al comportamiento
+///   pre-4.2.0. No pasa por el engine ni por `round_dp`: el contrato histórico no se toca.
+/// - `french` → **valor actual** de la renta al TIN (`present_value_of_payments`), que es el
+///   capital pendiente de verdad: 200 cuotas de 500 € al 3 % son 100.000 € de caja pero solo
+///   ~78.618 € de deuda hoy. `n` va en MESES; `weekly` no llega nunca aquí (lo rechaza antes
+///   `weekly_not_supported_for_model`), así que no hay caso fraccionario.
+/// - `interest_only` / `revolving` no llegan: `derive_not_supported_for_model` los ha rechazado.
+///
+/// El redondeo a 4 decimales (`MidpointAwayFromZero`, la escala de money del proyecto) vive AQUÍ
+/// y no en el engine: el engine devuelve el valor exacto de la fórmula y es el handler quien lo
+/// ajusta a la escala de la columna.
 fn derive_principal_from_payment_plan(
     payment_amount: Decimal,
     frequency: PaymentFrequency,
     payment_end_date: NaiveDate,
     today: NaiveDate,
+    model: RepaymentModel,
+    apr_percent: Option<Decimal>,
 ) -> Result<Decimal, ApiError> {
     let n = payment_interval_count(frequency, today, payment_end_date)?;
     if n == 0 {
@@ -298,7 +455,15 @@ fn derive_principal_from_payment_plan(
             "payment_schedule_empty: derived principal requires at least one payment interval".into(),
         ));
     }
-    Ok(payment_amount * Decimal::from(n))
+    match model {
+        RepaymentModel::French => Ok(futurefin_engine::present_value_of_payments(
+            payment_amount,
+            Decimal::from(n),
+            apr_percent,
+        )
+        .round_dp_with_strategy(4, rust_decimal::RoundingStrategy::MidpointAwayFromZero)),
+        _ => Ok(payment_amount * Decimal::from(n)),
+    }
 }
 
 async fn assert_liability_category(
@@ -370,6 +535,10 @@ fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
         label: r.label,
         type_tag: r.type_tag,
         principal_derived_from_plan: r.principal_derived_from_plan,
+        // El CHECK de la columna acota el dominio, así que un `parse` fallido aquí solo puede
+        // venir de una fila manipulada fuera de la API. Se propaga el 400 en vez de inventar un
+        // default: si la BD miente, mejor un error visible que un número silenciosamente distinto.
+        repayment_model: RepaymentModel::parse(&r.repayment_model)?,
         principal: r.principal,
         apr_percent: r.apr_percent,
         payment_amount: r.payment_amount,
@@ -419,7 +588,7 @@ pub(crate) async fn list_liabilities_core(
     let sql = format!(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan
+                  sort_index, principal_derived_from_plan, repayment_model
            FROM liabilities
            WHERE {scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph})
@@ -467,7 +636,8 @@ pub async fn create_liability(
 
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_liability`. Dos modos:
 /// `principal` explícito o `derive_principal_from_plan` (cuota + frecuencia + fecha fin →
-/// principal = cuota × nº de pagos pendientes, sin descontar intereses). Invalidación FULL dentro.
+/// principal = Σ cuotas en `fixed_payments`, valor actual al TIN en `french`). Invalidación FULL
+/// dentro.
 pub(crate) async fn create_liability_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -481,6 +651,17 @@ pub(crate) async fn create_liability_core(
     let type_tag = normalize_type_tag(&body.type_tag)?;
     let derive = body.derive_principal_from_plan.unwrap_or(false);
     let freq_str = body.payment_frequency.map(|f| f.as_str().to_string());
+    let model = body.repayment_model.unwrap_or_default();
+
+    // Coherencia modelo↔TIN↔plan ANTES de derivar: la derivación en `french` usa el TIN, así que
+    // no puede correr sobre un estado que vamos a rechazar.
+    validate_repayment_model_state(
+        model,
+        body.apr_percent,
+        body.payment_amount,
+        body.payment_frequency,
+        derive,
+    )?;
 
     let (principal, principal_derived) = if derive {
         let amt = body.payment_amount.ok_or_else(|| {
@@ -502,7 +683,7 @@ pub(crate) async fn create_liability_core(
         let pf = PaymentFrequency::parse(fs)?;
         let today = installation_naive_today(&state.pool, iid).await?;
         (
-            derive_principal_from_payment_plan(amt, pf, end, today)?,
+            derive_principal_from_payment_plan(amt, pf, end, today, model, body.apr_percent)?,
             true,
         )
     } else {
@@ -528,12 +709,12 @@ pub(crate) async fn create_liability_core(
                installation_id, category_id, expense_category_id, label, type_tag, principal,
                apr_percent, payment_amount, payment_frequency,
                payment_end_date, notes, sort_index, principal_derived_from_plan,
-               owner_user_id
+               owner_user_id, repayment_model
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            RETURNING id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan"#,
+                     sort_index, principal_derived_from_plan, repayment_model"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -549,6 +730,7 @@ pub(crate) async fn create_liability_core(
     .bind(sort_index)
     .bind(principal_derived)
     .bind(user_id)
+    .bind(model.as_str())
     .fetch_one(&state.pool)
     .await?;
 
@@ -602,6 +784,7 @@ pub(crate) async fn patch_liability_core(
         && body.label.is_none()
         && body.type_tag.is_none()
         && body.derive_principal_from_plan.is_none()
+        && body.repayment_model.is_none()
         && body.principal.is_none()
         && body.apr_percent.is_none()
         && body.payment_amount.is_none()
@@ -618,7 +801,7 @@ pub(crate) async fn patch_liability_core(
     let row: Option<LiabilityRow> = sqlx::query_as(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan
+                  sort_index, principal_derived_from_plan, repayment_model
            FROM liabilities
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -665,6 +848,14 @@ pub(crate) async fn patch_liability_core(
         None => current.apr_percent,
     };
 
+    // Set-only. Se resuelve ANTES del bloque de derivación a propósito: cambiar el modelo (o el
+    // TIN de arriba) con `derive_principal_from_plan` activo debe **re-derivar** el principal con
+    // los valores nuevos, no con los de la fila.
+    let new_model = match body.repayment_model {
+        Some(m) => m,
+        None => RepaymentModel::parse(&current.repayment_model)?,
+    };
+
     let new_pay_amt = body.payment_amount.or(current.payment_amount);
     let new_pay_freq_str = body
         .payment_frequency
@@ -672,6 +863,20 @@ pub(crate) async fn patch_liability_core(
         .or(current.payment_frequency.clone());
 
     validate_payment_pair(new_pay_amt, new_pay_freq_str.as_deref())?;
+
+    // Sobre el estado RESULTANTE (mismo criterio que `validate_payment_pair` con los pares
+    // incompletos): lo que se valida es el pasivo que va a quedar guardado.
+    let new_pay_freq = new_pay_freq_str
+        .as_deref()
+        .map(PaymentFrequency::parse)
+        .transpose()?;
+    validate_repayment_model_state(
+        new_model,
+        new_apr,
+        new_pay_amt,
+        new_pay_freq,
+        derived_flag,
+    )?;
 
     let new_pay_end = body.payment_end_date.or(current.payment_end_date);
 
@@ -702,7 +907,7 @@ pub(crate) async fn patch_liability_core(
         })?;
         let pf = PaymentFrequency::parse(fs)?;
         let today = installation_naive_today(&state.pool, iid).await?;
-        derive_principal_from_payment_plan(amt, pf, end, today)?
+        derive_principal_from_payment_plan(amt, pf, end, today, new_model, new_apr)?
     } else {
         match body.principal {
             Some(p) => {
@@ -727,11 +932,12 @@ pub(crate) async fn patch_liability_core(
                notes = $10,
                sort_index = $11,
                principal_derived_from_plan = $12,
+               repayment_model = $13,
                updated_at = now()
-           WHERE id = $13 AND installation_id = $14
+           WHERE id = $14 AND installation_id = $15
            RETURNING id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan"#,
+                     sort_index, principal_derived_from_plan, repayment_model"#,
     )
     .bind(new_cat)
     .bind(new_expense_cat)
@@ -745,6 +951,7 @@ pub(crate) async fn patch_liability_core(
     .bind(&new_notes)
     .bind(new_sort)
     .bind(new_principal_derived)
+    .bind(new_model.as_str())
     .bind(id)
     .bind(iid)
     .fetch_one(&state.pool)

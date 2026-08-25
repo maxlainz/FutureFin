@@ -9,6 +9,9 @@ use crate::handlers::installation::{
     resolve_fire_settings, FireNumberMode, FireSettings, SavingsSource, TaxBracket,
 };
 use crate::handlers::person_view::LedgerView;
+/// Alias local: `RepaymentModel` a secas es el del **engine** en este fichero (ver el `use` de
+/// `futurefin_engine`); este es el del lado API, que sabe hablar con la columna SQL.
+use crate::handlers::liabilities::RepaymentModel as LiabRepaymentModel;
 use crate::handlers::installation::AvgWindowMode;
 use crate::handlers::transactions::summary::{transactions_avg, AvgSide, TransactionsAvg};
 use crate::handlers::session::require_session_user;
@@ -21,7 +24,7 @@ use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
     fire_target_at_month_index, first_month_per_asset_contribution_nominals,
     project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
-    FireTarget, ProjectionInput, ProjectionLiabilityInput, SimAsset,
+    FireTarget, ProjectionInput, ProjectionLiabilityInput, RepaymentModel, SimAsset,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -360,6 +363,11 @@ struct LiabEngineRow {
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
     payment_end_date: Option<NaiveDate>,
+    /// TIN nominal anual en puntos porcentuales. `None` (o ≤ 0) ⇒ el engine no devenga.
+    apr_percent: Option<Decimal>,
+    /// Literal de la columna (`fixed_payments` | `french` | `interest_only` | `revolving`),
+    /// acotado por el CHECK de la migración `20260825120000_liabilities_repayment_model`.
+    repayment_model: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -1001,7 +1009,8 @@ pub(crate) async fn build_installation_projection_input(
     let liab_scope = view.scope_where("");
     let liab_today_ph = view.next_arg_index();
     let liab_sql = format!(
-        r#"SELECT principal, payment_amount, payment_frequency, payment_end_date
+        r#"SELECT principal, payment_amount, payment_frequency, payment_end_date,
+                  apr_percent, repayment_model
            FROM liabilities
            WHERE {liab_scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph})"#
@@ -1080,6 +1089,14 @@ pub(crate) async fn build_installation_projection_input(
     if expense_from_avg {
         for row in &mut liabs {
             row.payment_amount = None;
+            // REDUNDANTE A PROPÓSITO. Sin cuota el engine ya no devenga (el predicado
+            // `liability_active` gatea también el interés desde 4.2.0), así que anular el TIN no
+            // cambia un solo número. Se anula igualmente para que el contrato del modo real quede
+            // enunciado **en un único punto**: en B/C el pasivo es una resta constante del
+            // patrimonio, sin caja, sin amortización y sin intereses. Si mañana alguien relaja el
+            // gate del devengo en el engine, esta línea impide que el modo real empiece a cobrar
+            // intereses en silencio.
+            row.apr_percent = None;
         }
     }
 
@@ -1231,6 +1248,16 @@ pub(crate) async fn build_installation_projection_input(
             principal: r.principal.max(Decimal::ZERO),
             monthly_payment: liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()),
             payment_end: r.payment_end_date,
+            // El CHECK de la columna acota el dominio a los cuatro literales, así que este
+            // `parse` no puede fallar con datos escritos por la API. Ante lo imposible (una fila
+            // manipulada a mano) se cae al default histórico en vez de propagar un error: la
+            // proyección es una LECTURA y un pasivo con un literal corrupto debe degradar a los
+            // números pre-4.2.0, no tumbar el chart entero. La validación de verdad vive en
+            // `liabilities.rs`, que es por donde se escribe.
+            repayment_model: LiabRepaymentModel::parse(&r.repayment_model)
+                .map(LiabRepaymentModel::to_engine)
+                .unwrap_or(RepaymentModel::FixedPayments),
+            apr_percent: r.apr_percent,
         })
         .collect();
 
@@ -2639,6 +2666,8 @@ mod milestone_tests {
                 principal: Decimal::from(50_000),
                 monthly_payment: Decimal::from(1200),
                 payment_end: None,
+                repayment_model: RepaymentModel::FixedPayments,
+                apr_percent: None,
             }],
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
             retirement_start_month: None,

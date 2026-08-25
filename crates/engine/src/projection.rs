@@ -70,11 +70,151 @@ pub struct AllocationRule {
     pub cap: Option<AllocationCap>,
 }
 
+/// Modelo de amortización de un pasivo: decide cómo se reparte la cuota mensual entre intereses
+/// y principal. Enum **propio del crate** (mismo patrón que [`AllocationKind`]): el engine no
+/// conoce la columna SQL ni sus literales, el handler mapea.
+///
+/// `FixedPayments` es el modelo histórico (pre-4.2.0) y el default de la columna: la cuota va
+/// íntegra a principal, el pasivo no devenga intereses. Los otros tres sí los devengan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepaymentModel {
+    /// Sin intereses: la cuota reduce el principal en su importe exacto. Modelo pre-4.2.0.
+    FixedPayments,
+    /// Sistema francés: interés sobre el saldo de apertura, cuota a fin de mes.
+    French,
+    /// Solo intereses: la cuota paga el devengo y el principal queda constante.
+    InterestOnly,
+    /// Línea revolving. En 4.2.0 comparte recurrencia con [`RepaymentModel::French`]
+    /// (ver `revolving_matches_french_recurrence`); existe como concepto separado porque su
+    /// evolución futura —disposiciones, cuota mínima como % del saldo— sí diverge.
+    Revolving,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectionLiabilityInput {
     pub principal: Decimal,
     pub monthly_payment: Decimal,
     pub payment_end: Option<NaiveDate>,
+    /// Cómo se cobra la cuota. `FixedPayments` reproduce bit a bit el modelo pre-4.2.0.
+    pub repayment_model: RepaymentModel,
+    /// TIN **nominal anual** en puntos porcentuales (3 = 3 %/año). El tipo mensual es
+    /// `i = apr_percent / 1200`, la MISMA convención que `LoanTerms::apr_percent` en
+    /// `history.rs` (`i = apr / 1200`), para que la curva histórica y la proyectada hablen el
+    /// mismo idioma.
+    ///
+    /// `None` o `≤ 0` ⇒ **sin interés**: cualquier modelo degenera exactamente en
+    /// `FixedPayments` (y `InterestOnly` en un principal congelado). La degeneración es total y
+    /// deliberada: el import de un `.ffbackup` puede colar un pasivo `french` sin TIN, y el
+    /// engine jamás debe panicar ni devolver error por eso — devuelve la serie sin intereses.
+    pub apr_percent: Option<Decimal>,
+}
+
+/// ¿Tiene el pasivo un plan de pago vivo en el mes que empieza en `m_start`?
+///
+/// Predicado ÚNICO: `monthly_payment > 0` **y** (`payment_end` ausente o `>= m_start`). Estaba
+/// triplicado (cobro de la cuota, amortización del principal y `first_month_allocation`), tres
+/// copias que había que mantener sincronizadas a mano. Sin plan activo el pasivo no cobra caja,
+/// no amortiza y —desde 4.2.0— **tampoco devenga intereses**: es una resta constante al
+/// patrimonio, que es justo el contrato que explotan los modos B/C del handler (pasan
+/// `monthly_payment = 0` para congelar el principal).
+fn liability_active(liab: &ProjectionLiabilityInput, m_start: NaiveDate) -> bool {
+    liab.monthly_payment > Decimal::ZERO
+        && match liab.payment_end {
+            None => true,
+            Some(end) => end >= m_start,
+        }
+}
+
+/// Un mes de vida de un pasivo: devuelve `(caja que sale, principal de cierre)`.
+///
+/// Única implementación de la recurrencia — la consumen el bucle de simulación (para el
+/// `debt_service` y para el principal del mes siguiente) y `first_month_allocation`. Dos
+/// implementaciones divergirían en silencio y el chart contaría una historia distinta que la
+/// KPI de aportación.
+///
+/// Convención común a todos los modelos que devengan: **interés sobre el saldo de apertura y
+/// cuota a fin de mes**, `P' = P·(1 + i) − M` — la misma recurrencia que `theo(y)` en
+/// `history.rs`, para que la interpolación del pasado y la proyección del futuro sean la misma
+/// curva.
+///
+/// - inactivo → `(0, P)`: ni caja, ni amortización, ni devengo.
+/// - `FixedPayments` → `cash = min(M, P)`, `P' = P − cash`. **Bit-idéntico** al modelo pre-4.2.0.
+/// - `French` / `Revolving` → `payoff = P·(1 + i)`, `cash = min(M, payoff)`, `P' = payoff − cash`.
+///   Con `i = 0` degenera exactamente en `FixedPayments`. El tope de la cuota es el **payoff**,
+///   no el principal: cancelar el préstamo cuesta el saldo *con* el interés del mes.
+/// - `InterestOnly` → `cash = min(M, P)` y `P' = P` (constante). El TIN es informativo aquí: la
+///   cuota que el usuario declara YA es el interés que paga; recalcularlo lo cobraría dos veces.
+///
+/// **Saturación, nunca pánico**: si el `checked_mul`/`checked_add` del payoff desborda (TIN
+/// absurdo × horizonte largo), se devuelve el principal sin devengar más. La salida sigue siendo
+/// finita y la simulación termina.
+fn liability_month(
+    model: RepaymentModel,
+    principal: Decimal,
+    monthly_payment: Decimal,
+    apr_percent: Option<Decimal>,
+    active: bool,
+) -> (Decimal, Decimal) {
+    if !active {
+        return (Decimal::ZERO, principal);
+    }
+    let i = match apr_percent {
+        Some(apr) if apr > Decimal::ZERO => apr / Decimal::from(1200),
+        _ => Decimal::ZERO,
+    };
+    match model {
+        RepaymentModel::FixedPayments => {
+            let cash = monthly_payment.min(principal).max(Decimal::ZERO);
+            (cash, principal - cash)
+        }
+        RepaymentModel::InterestOnly => {
+            let cash = monthly_payment.min(principal).max(Decimal::ZERO);
+            (cash, principal)
+        }
+        RepaymentModel::French | RepaymentModel::Revolving => {
+            let payoff = Decimal::ONE
+                .checked_add(i)
+                .and_then(|factor| principal.checked_mul(factor))
+                .unwrap_or(principal);
+            let cash = monthly_payment.min(payoff).max(Decimal::ZERO);
+            (cash, payoff - cash)
+        }
+    }
+}
+
+/// Valor actual de una renta de `months` cuotas mensuales de `monthly_payment`, descontada al
+/// TIN nominal anual `apr_percent` (misma convención que
+/// [`ProjectionLiabilityInput::apr_percent`]: `i = apr / 1200`):
+///
+/// `P = M · (1 − (1 + i)^−n) / i`
+///
+/// `apr_percent` ausente o `≤ 0` devuelve `M · n` **exacto**, sin pasar por `powd`: el límite de
+/// la fórmula cuando `i → 0` es justo eso, y calcularlo con la transcendental metería error de
+/// redondeo en el caso más común y más fácil. `n` puede ser fraccionario (equivalencias
+/// semanales: `M = cuota·52/12`, `n = intervalos·12/52`). Si algún `checked_*` falla, cae al
+/// mismo `M · n`.
+pub fn present_value_of_payments(
+    monthly_payment: Decimal,
+    months: Decimal,
+    apr_percent: Option<Decimal>,
+) -> Decimal {
+    let plain = monthly_payment * months;
+    let i = match apr_percent {
+        Some(apr) if apr > Decimal::ZERO => apr / Decimal::from(1200),
+        _ => return plain,
+    };
+    (|| -> Option<Decimal> {
+        let u = Decimal::ONE.checked_add(i)?;
+        // `(1+i)^−n` como `1 / (1+i)^n`: `powd` con exponente positivo es el camino probado en
+        // este crate (`history.rs` lo usa así) y evita depender de cómo trate el exponente
+        // negativo.
+        let u_pow_n = u.checked_powd(months)?;
+        let discount = Decimal::ONE.checked_div(u_pow_n)?;
+        let numerator = Decimal::ONE.checked_sub(discount)?;
+        monthly_payment.checked_mul(numerator)?.checked_div(i)
+    })()
+    .unwrap_or(plain)
 }
 
 /// Target FIRE evaluado mes a mes. `base_amount` es el patrimonio necesario en euros de hoy
@@ -516,17 +656,16 @@ pub fn first_month_allocation(
 
     let mut debt_service = Decimal::ZERO;
     for (i, liab) in input.liabilities.iter().enumerate() {
-        let active = match liab.payment_end {
-            None => liab.monthly_payment > Decimal::ZERO,
-            Some(end) => end >= m_start && liab.monthly_payment > Decimal::ZERO,
-        };
-        if !active {
-            continue;
-        }
-        let pay = liab
-            .monthly_payment
-            .min(principals.get(i).copied().unwrap_or(Decimal::ZERO));
-        debt_service += pay;
+        // Mismo helper que el bucle de simulación; el principal de cierre se descarta aquí
+        // porque esta función solo resuelve el mes 1.
+        let (cash, _closing) = liability_month(
+            liab.repayment_model,
+            principals.get(i).copied().unwrap_or(Decimal::ZERO),
+            liab.monthly_payment,
+            liab.apr_percent,
+            liability_active(liab, m_start),
+        );
+        debt_service += cash;
     }
 
     let planning_adj = input.planning_monthly_cash_adjustment[0];
@@ -669,19 +808,29 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         let month_first = add_months(start_month_first, k - 1);
         let (m_start, _m_end) = month_window(month_first);
 
+        // Servicio de deuda del mes. Desde 4.2.0 la recurrencia del pasivo se resuelve **una
+        // sola vez** por mes: aquí salen a la vez la caja que se paga y el principal de cierre,
+        // que se guarda y se aplica en el paso de amortización más abajo. Antes eran dos
+        // recorridos que recalculaban el mismo `min(cuota, principal)`; con intereses de por
+        // medio recalcularlo sería recalcular el devengo, y una de las dos copias acabaría
+        // divergiendo. El orden de los pasos del mes NO cambia (servicio de deuda → caja →
+        // crecimiento de activos → amortización → NW) y nada muta `principals` entre este punto
+        // y aquel.
         let mut debt_service = Decimal::ZERO;
+        let mut closing_principals: Vec<Decimal> = Vec::with_capacity(principals.len());
         for (i, liab) in input.liabilities.iter().enumerate() {
-            let active = match liab.payment_end {
-                None => liab.monthly_payment > Decimal::ZERO,
-                Some(end) => end >= m_start && liab.monthly_payment > Decimal::ZERO,
-            };
-            if !active {
-                continue;
+            if i >= principals.len() {
+                break;
             }
-            let pay = liab
-                .monthly_payment
-                .min(principals.get(i).copied().unwrap_or(Decimal::ZERO));
-            debt_service += pay;
+            let (cash, closing) = liability_month(
+                liab.repayment_model,
+                principals[i],
+                liab.monthly_payment,
+                liab.apr_percent,
+                liability_active(liab, m_start),
+            );
+            debt_service += cash;
+            closing_principals.push(closing);
         }
 
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
@@ -753,21 +902,9 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             values[i] *= m;
         }
 
-        for (i, liab) in input.liabilities.iter().enumerate() {
-            if i >= principals.len() {
-                break;
-            }
-            let active = match liab.payment_end {
-                None => liab.monthly_payment > Decimal::ZERO,
-                Some(end) => end >= m_start && liab.monthly_payment > Decimal::ZERO,
-            };
-            if active {
-                let pay = liab
-                    .monthly_payment
-                    .min(principals[i])
-                    .max(Decimal::ZERO);
-                principals[i] -= pay;
-            }
+        // Amortización: solo se asienta el cierre ya calculado arriba. Sin recomputar nada.
+        for (i, closing) in closing_principals.iter().enumerate() {
+            principals[i] = *closing;
         }
 
         let nw = nw_fn(
@@ -1176,6 +1313,8 @@ mod tests {
             principal: Decimal::from(100_000),
             monthly_payment: Decimal::from(450),
             payment_end: Some(NaiveDate::from_ymd_opt(2040, 1, 1).unwrap()),
+            repayment_model: RepaymentModel::FixedPayments,
+            apr_percent: None,
         }];
 
         // (a) Sin componente de planning: base == neto recurrente.
@@ -1561,5 +1700,528 @@ mod tests {
         sin_target.fire_target = None;
         let alloc2 = first_month_allocation(&sin_target).expect("cascada sin target");
         assert_eq!(alloc2.per_asset[0], Decimal::from(2000), "sin target FIRE la cascada es la de siempre");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pin baseline del modelo de pasivos ANTES de la reforma 4.2.0
+    // -----------------------------------------------------------------------
+
+    /// Decimal exacto desde string. Los pines de abajo son cadenas largas (hasta 27 dígitos
+    /// significativos) que salen de componer `powd` 300 veces: escribirlas con `Decimal::new`
+    /// sería ilegible y con `f64` sería directamente ilegal en este repo.
+    fn dec(s: &str) -> Decimal {
+        Decimal::from_str_exact(s).expect("literal Decimal válido")
+    }
+
+    /// Input representativo del pin: dos activos con rentabilidad distinta, cascada con tope +
+    /// sumidero, un pasivo de 100.000 € a 500 €/mes con `payment_end` lejano, planning ≠ 0 y
+    /// target FIRE configurado. Vive fuera del test para que la reforma 4.2.0 pueda reutilizarlo
+    /// añadiendo los campos nuevos a `None`/default sin tocar los valores esperados.
+    fn liability_pin_input() -> ProjectionInput {
+        let assets = vec![
+            mk_asset(0xA1, Decimal::from(50_000), true, Some(Decimal::from(7))),
+            mk_asset(0xB2, Decimal::from(20_000), false, Some(Decimal::new(35, 1))),
+        ];
+        let rules = vec![
+            rule_fixed(
+                0,
+                Decimal::from(300),
+                Some(AllocationCap::Amount(Decimal::from(120_000))),
+            ),
+            rule_remainder(1),
+        ];
+        let mut inp = base_input(300, Decimal::from(4000), Decimal::from(1500), assets, rules);
+        inp.liabilities = vec![ProjectionLiabilityInput {
+            principal: Decimal::from(100_000),
+            monthly_payment: Decimal::from(500),
+            payment_end: Some(NaiveDate::from_ymd_opt(2090, 1, 1).unwrap()),
+            // El pin es del modelo histórico: sin intereses. La reforma 4.2.0 añade los campos
+            // pero no toca sus valores esperados.
+            repayment_model: RepaymentModel::FixedPayments,
+            apr_percent: None,
+        }];
+        inp.planning_monthly_cash_adjustment[0] = Decimal::from(250);
+        inp.planning_monthly_cash_adjustment[5] = Decimal::from(-100);
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from(1_500_000),
+            annual_inflation_percent: Decimal::new(25, 1),
+        });
+        inp
+    }
+
+    /// **Pin de regresión pre-4.2.0 del modelo de pasivos.**
+    ///
+    /// Captura la salida EXACTA de `project_net_worth_series` sobre un input representativo con un
+    /// pasivo vivo, tal y como la produce el modelo actual (`fixed_payments`): la cuota mensual
+    /// sale de la caja del mes y reduce el principal en el MISMO importe — el pasivo **no devenga
+    /// intereses**, así que servir deuda es neutro para el patrimonio neto.
+    ///
+    /// Por qué existe: la reforma 4.2.0 introduce el cobro de intereses en los pasivos. Este test
+    /// se conserva tal cual tras la reforma (con los campos nuevos del pasivo a `None`/default) y
+    /// **debe seguir pasando bit a bit**: es la prueba de que el modelo por defecto
+    /// `fixed_payments` no cambió NADA. Si un solo dígito se mueve, la reforma ha cambiado el
+    /// comportamiento por defecto y no solo añadido uno nuevo.
+    ///
+    /// Qué pinea, en concreto:
+    /// 1. `net_worth` en los meses 0, 1, 2, 12, 200, 201 y el último (300) — valores Decimal
+    ///    exactos, `assert_eq!` sin tolerancia. La aritmética de `rust_decimal` (incluido `powd`)
+    ///    es determinista y pura, así que no hace falta margen: cualquier deriva es una deriva
+    ///    real del modelo, no ruido de coma flotante.
+    /// 2. El calendario de amortización: con 100.000 € de principal y 500 €/mes el pasivo se
+    ///    extingue en el mes **200** (verificado contra la salida real, no asumido). Se pinea
+    ///    mediante el principal implícito (`Σ activos − net_worth`, exacto aquí porque el
+    ///    sumidero deja `surplus_cash` en 0) y mediante los NW alrededor del corte.
+    /// 3. La **neutralidad** del pago: el mes 201 es el primero sin cuota (`debt_service = 0`) y
+    ///    aun así el salto de NW 200→201 NO da el escalón de +500 € que daría si el pago
+    ///    estuviera restando patrimonio. Con intereses, este assert dejaría de cuadrar — que es
+    ///    justo lo que la reforma debe cambiar SOLO cuando se activa el modelo nuevo.
+    /// 4. `debt_service` del primer mes, que `FirstMonthAllocation` sí expone.
+    #[test]
+    fn liability_payment_plan_series_pin_pre_4_2_0() {
+        let inp = liability_pin_input();
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth.len(), 301, "301 puntos: meses 0..=300");
+
+        // (1) Serie de patrimonio neto — valores exactos capturados sobre 4.1.0.
+        assert_eq!(out.net_worth[0], dec("-30000"), "mes 0 = 50.000 + 20.000 − 100.000");
+        assert_eq!(out.net_worth[1], dec("-26902.580260129782587857672390"));
+        assert_eq!(out.net_worth[2], dec("-24046.794776804757383934090581"));
+        assert_eq!(out.net_worth[12], dec("4876.52949312863908655995354"));
+        assert_eq!(out.net_worth[200], dec("754661.26626719402043993492188"));
+        assert_eq!(out.net_worth[201], dec("759950.40876629663413040639649"));
+        assert_eq!(out.net_worth[300], dec("1389197.0697233021375734775522"));
+
+        // (2) Calendario de amortización: 100.000 / 500 = 200 cuotas exactas. `surplus_cash` es 0
+        // en todo momento (la regla sumidero absorbe la caja entera), así que el principal vivo se
+        // reconstruye exactamente como `Σ activos − net_worth`.
+        let principal_at = |k: usize| -> Decimal {
+            out.per_asset_series.iter().map(|s| s[k]).sum::<Decimal>() - out.net_worth[k]
+        };
+        assert_eq!(principal_at(0), Decimal::from(100_000));
+        assert_eq!(principal_at(1), Decimal::from(99_500), "cuota íntegra a principal: 0 % interés");
+        assert_eq!(principal_at(199), Decimal::from(500), "queda la última cuota");
+        assert_eq!(principal_at(200), Decimal::ZERO, "el pasivo se extingue en el mes 200");
+        assert_eq!(principal_at(201), Decimal::ZERO, "y no resucita");
+
+        // (3) Neutralidad del servicio de deuda. El mes 201 es el primero sin cuota, así que
+        // dispone de 500 € más de caja para aportar; pero hasta el 200 esos 500 € tampoco se
+        // perdían — iban íntegros a reducir principal. Resultado: la serie NO tiene escalón de
+        // 500 €. Se comprueba sobre las segundas diferencias del NW.
+        let delta = |k: usize| out.net_worth[k] - out.net_worth[k - 1];
+        let salto_previo = delta(200) - delta(199);
+        let salto_en_el_corte = delta(201) - delta(200);
+        assert_eq!(salto_previo, dec("17.08730926366701766536981"));
+        assert_eq!(salto_en_el_corte, dec("18.59126818624123937199547"));
+        // El único efecto real de extinguir el pasivo es de segundo orden y ~1,44 €: los 500 €
+        // liberados dejan de amortizar (crecimiento 0) y pasan a componer un mes en el activo
+        // destino, 500 × (1,035^(1/12) − 1). Con intereses en el pasivo, este residuo dejaría de
+        // ser calderilla — que es exactamente lo que la reforma 4.2.0 debe cambiar SOLO cuando se
+        // activa el modelo nuevo.
+        let residuo = salto_en_el_corte - salto_previo;
+        assert!(
+            residuo.abs() < Decimal::from(5),
+            "sin intereses la extinción del pasivo no produce escalón de 500 €; residuo = {residuo}"
+        );
+
+        // (4) Servicio de deuda publicado del primer mes (única superficie del output que lo
+        // expone) y la caja que reparte la cascada: 4000 − 1500 − 500 + 250 de planning.
+        let alloc = first_month_allocation(&inp).unwrap();
+        assert_eq!(alloc.debt_service, Decimal::from(500));
+        assert_eq!(alloc.base_cash, Decimal::from(2250));
+        assert_eq!(alloc.per_asset, vec![Decimal::from(300), Decimal::from(1950)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // 4.2.0 — intereses de los pasivos (`RepaymentModel` + `apr_percent`)
+    // -----------------------------------------------------------------------
+
+    /// Input mínimo para leer el principal vivo de UN pasivo mes a mes.
+    ///
+    /// Un solo activo sin rentabilidad y una regla sumidero: así `surplus_cash` es 0 (el
+    /// sumidero absorbe la caja entera), el activo no compone y el patrimonio se reduce a
+    /// `activo − principal`. Es la misma técnica del pin pre-4.2.0, que evita exponer los
+    /// principales en la API pública solo para poder testearlos.
+    fn one_liability_input(
+        horizon: u32,
+        principal: Decimal,
+        payment: Decimal,
+        model: RepaymentModel,
+        apr: Option<Decimal>,
+    ) -> ProjectionInput {
+        let mut inp = base_input(
+            horizon,
+            Decimal::from(4000),
+            Decimal::from(1500),
+            vec![mk_asset(0xC3, Decimal::ZERO, true, None)],
+            vec![rule_remainder(0)],
+        );
+        inp.liabilities = vec![ProjectionLiabilityInput {
+            principal,
+            monthly_payment: payment,
+            payment_end: None,
+            repayment_model: model,
+            apr_percent: apr,
+        }];
+        inp
+    }
+
+    /// Principal vivo implícito en el mes `k`: `Σ activos − net_worth`. Exacto con el input de
+    /// [`one_liability_input`].
+    fn implicit_principal(out: &ProjectionOutput, k: usize) -> Decimal {
+        out.per_asset_series.iter().map(|s| s[k]).sum::<Decimal>() - out.net_worth[k]
+    }
+
+    /// El TIN NO se cobra en `fixed_payments`: el modelo por defecto ignora `apr_percent` por
+    /// completo. Se comprueba sobre el pin pre-4.2.0 —el input más rico que hay— añadiéndole un
+    /// 3 % anual: la serie debe salir idéntica, punto por punto.
+    ///
+    /// Es la garantía de que el TIN es un dato **inerte** hasta que el usuario cambia de modelo:
+    /// alguien puede rellenar el interés de su hipoteca sin tocar el modelo, y sus números no se
+    /// pueden mover por eso.
+    #[test]
+    fn fixed_payments_with_apr_is_bit_identical_to_the_pre_4_2_0_pin() {
+        let base = liability_pin_input();
+        let mut con_apr = liability_pin_input();
+        con_apr.liabilities[0].apr_percent = Some(Decimal::from(3));
+
+        let a = project_net_worth_series(&base).unwrap();
+        let b = project_net_worth_series(&con_apr).unwrap();
+        assert_eq!(a.net_worth, b.net_worth, "el TIN no debe mover fixed_payments");
+        assert_eq!(a.contributed_capital, b.contributed_capital);
+        assert_eq!(a.per_asset_series, b.per_asset_series);
+    }
+
+    /// Sistema francés, cuatro meses a mano. P = 100.000, TIN 3 % ⇒ i = 3/1200 = 0,0025 exacto,
+    /// cuota 500 a fin de mes. `P' = P·1,0025 − 500`:
+    ///
+    /// | mes | payoff              | cierre                |
+    /// |-----|---------------------|-----------------------|
+    /// | 1   | 100.250             | 99.750                |
+    /// | 2   | 99.999,375          | 99.499,375            |
+    /// | 3   | 99.748,1234375      | 99.248,1234375        |
+    /// | 4   | 99.496,24374609375  | 98.996,24374609375    |
+    ///
+    /// Todo es exacto en `Decimal` (0,0025 tiene representación finita), así que `assert_eq!` sin
+    /// tolerancia: no hay `powd` por medio, solo multiplicaciones.
+    #[test]
+    fn french_two_months_hand_checked() {
+        let inp = one_liability_input(
+            4,
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(implicit_principal(&out, 0), Decimal::from(100_000));
+        assert_eq!(implicit_principal(&out, 1), dec("99750.00"));
+        assert_eq!(implicit_principal(&out, 2), dec("99499.375"));
+        assert_eq!(implicit_principal(&out, 3), dec("99248.1234375"));
+        assert_eq!(implicit_principal(&out, 4), dec("98996.24374609375"));
+    }
+
+    /// Extinción real del préstamo francés: 100.000 € al 3 % con 500 €/mes no se acaban en 200
+    /// meses (lo que costaría sin intereses) sino en **278**. Los 78 meses de diferencia son la
+    /// razón de ser de la reforma: el modelo pre-4.2.0 declaraba libre de deuda a un hogar que
+    /// todavía debe seis años y medio de cuotas.
+    ///
+    /// El último mes es de **cuota parcial**: el saldo pendiente ya no llega a 500 €, así que la
+    /// caja que sale es solo lo que queda por pagar (`payoff` del mes 277).
+    #[test]
+    fn french_extinction_at_month_278() {
+        let inp = one_liability_input(
+            280,
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let out = project_net_worth_series(&inp).unwrap();
+
+        let p277 = implicit_principal(&out, 277);
+        assert!(
+            (p277 - Decimal::from(302)).abs() < Decimal::ONE,
+            "el mes 277 debe dejar ≈ 302 € vivos, obtenido {p277}"
+        );
+        assert_eq!(
+            implicit_principal(&out, 278),
+            Decimal::ZERO,
+            "el pasivo se extingue en el mes 278"
+        );
+        assert_eq!(implicit_principal(&out, 279), Decimal::ZERO, "y no resucita");
+
+        // Caja del mes 278 = payoff del saldo anterior − cierre = cuota PARCIAL, < 500.
+        let cash_278 = p277 * (Decimal::ONE + Decimal::from(3) / Decimal::from(1200))
+            - implicit_principal(&out, 278);
+        assert!(
+            cash_278 < Decimal::from(500) && cash_278 > Decimal::ZERO,
+            "la última cuota es parcial, obtenida {cash_278}"
+        );
+    }
+
+    /// Cuota por debajo del interés: la deuda **crece**. P = 100.000 al 12 % ⇒ i = 0,01; el
+    /// devengo es 1.000 €/mes y la cuota 500. Cierres: 100.500 y 101.005 (= 100.500·1,01 − 500).
+    ///
+    /// El modelo pre-4.2.0 no podía ni representar esto: amortizaba 500 € al mes de un préstamo
+    /// que en realidad se hace más grande cada mes.
+    #[test]
+    fn french_payment_below_interest_grows_the_principal() {
+        let inp = one_liability_input(
+            2,
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(12)),
+        );
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(implicit_principal(&out, 1), dec("100500.00"));
+        assert_eq!(implicit_principal(&out, 2), dec("101005.0000"));
+    }
+
+    /// Solo intereses: el principal no se mueve NUNCA y la caja que sale es la cuota entera —
+    /// que es justo lo que declara el usuario de un préstamo de este tipo. El TIN es informativo
+    /// aquí: la cuota YA es el interés, devengarlo otra vez lo cobraría dos veces.
+    #[test]
+    fn interest_only_principal_constant_and_cash_is_the_quota() {
+        let inp = one_liability_input(
+            24,
+            Decimal::from(80_000),
+            Decimal::from(400),
+            RepaymentModel::InterestOnly,
+            Some(Decimal::from(6)),
+        );
+        let out = project_net_worth_series(&inp).unwrap();
+        for k in 0..=24 {
+            assert_eq!(
+                implicit_principal(&out, k),
+                Decimal::from(80_000),
+                "el principal de un interest_only es constante (mes {k})"
+            );
+        }
+        assert_eq!(
+            first_month_allocation(&inp).unwrap().debt_service,
+            Decimal::from(400),
+            "la caja del mes es la cuota íntegra"
+        );
+
+        // Con la cuota por encima del saldo, la caja se recorta al saldo (`min`): nadie paga
+        // 500 € por un préstamo del que solo debe 300.
+        let pequeno = one_liability_input(
+            1,
+            Decimal::from(300),
+            Decimal::from(500),
+            RepaymentModel::InterestOnly,
+            Some(Decimal::from(6)),
+        );
+        assert_eq!(
+            first_month_allocation(&pequeno).unwrap().debt_service,
+            Decimal::from(300)
+        );
+    }
+
+    /// `Revolving` y `French` comparten recurrencia en 4.2.0 — **deliberadamente**. Este test
+    /// pinea esa equivalencia para que no se rompa por accidente: el día que revolving modele lo
+    /// suyo (disposiciones, cuota mínima como % del saldo) este test se cambia A PROPÓSITO, con
+    /// su entrada de CHANGELOG. Mientras tanto, dos etiquetas para la misma matemática es una
+    /// decisión de producto (el usuario nombra su deuda como es), no un descuido.
+    #[test]
+    fn revolving_matches_french_recurrence() {
+        let frances = one_liability_input(
+            120,
+            Decimal::from(12_000),
+            Decimal::from(250),
+            RepaymentModel::French,
+            Some(Decimal::from(18)),
+        );
+        let revolving = one_liability_input(
+            120,
+            Decimal::from(12_000),
+            Decimal::from(250),
+            RepaymentModel::Revolving,
+            Some(Decimal::from(18)),
+        );
+        let a = project_net_worth_series(&frances).unwrap();
+        let b = project_net_worth_series(&revolving).unwrap();
+        assert_eq!(a.net_worth, b.net_worth);
+        assert_eq!(a.contributed_capital, b.contributed_capital);
+        assert_eq!(a.per_asset_series, b.per_asset_series);
+    }
+
+    /// `payment_end` congela el pasivo en los CUATRO modelos: desde el mes siguiente no sale
+    /// caja, no se amortiza y —lo nuevo en 4.2.0— tampoco se devenga interés. Un plan de pago
+    /// terminado con principal vivo es una resta constante al patrimonio, no una bola de nieve.
+    ///
+    /// `ref_date` = 2026-01-15 ⇒ el mes `k` abre el 2026-01-01 + (k−1) meses. Con
+    /// `payment_end = 2026-03-15` el último mes activo es el **3**.
+    #[test]
+    fn payment_end_freezes_every_model() {
+        for model in [
+            RepaymentModel::FixedPayments,
+            RepaymentModel::French,
+            RepaymentModel::InterestOnly,
+            RepaymentModel::Revolving,
+        ] {
+            let mut inp = one_liability_input(
+                8,
+                Decimal::from(100_000),
+                Decimal::from(500),
+                model,
+                Some(Decimal::from(6)),
+            );
+            inp.liabilities[0].payment_end = Some(NaiveDate::from_ymd_opt(2026, 3, 15).unwrap());
+            let out = project_net_worth_series(&inp).unwrap();
+
+            let congelado = implicit_principal(&out, 3);
+            assert!(
+                congelado > Decimal::ZERO,
+                "{model:?}: el principal debe seguir vivo al terminar el plan"
+            );
+            for k in 4..=8 {
+                assert_eq!(
+                    implicit_principal(&out, k),
+                    congelado,
+                    "{model:?}: sin plan activo el principal no se mueve (mes {k})"
+                );
+                // Sin caja: el patrimonio sube exactamente el neto del mes (4000 − 1500).
+                assert_eq!(
+                    out.net_worth[k] - out.net_worth[k - 1],
+                    Decimal::from(2500),
+                    "{model:?}: sin plan activo no sale caja (mes {k})"
+                );
+            }
+        }
+    }
+
+    /// Cuota 0 ⇒ el pasivo no tiene plan activo ⇒ **no devenga**, ni siquiera con TIN. Es el
+    /// contrato que explotan los modos B/C del handler (`savings_source.uses_transactions()`):
+    /// ponen `monthly_payment = 0` en memoria para que el principal sea una resta constante,
+    /// porque las cuotas pagadas ya viven dentro del promedio de gasto real. Si un pasivo sin
+    /// plan devengara intereses, esos hogares verían crecer una deuda que ya están pagando.
+    #[test]
+    fn zero_payment_liability_never_accrues_interest() {
+        let inp = one_liability_input(
+            36,
+            Decimal::from(50_000),
+            Decimal::ZERO,
+            RepaymentModel::French,
+            Some(Decimal::from(5)),
+        );
+        let out = project_net_worth_series(&inp).unwrap();
+        for k in 0..=36 {
+            assert_eq!(
+                implicit_principal(&out, k),
+                Decimal::from(50_000),
+                "sin plan de pago el principal es constante (mes {k})"
+            );
+        }
+        assert_eq!(
+            first_month_allocation(&inp).unwrap().debt_service,
+            Decimal::ZERO
+        );
+    }
+
+    /// El tope de la cuota es el **payoff**, no el principal: cancelar cuesta el saldo CON el
+    /// interés del mes. P = 400 al 3 % ⇒ payoff = 400 · 1,0025 = 401,00 exacto; con cuota de
+    /// 500 la caja del mes es 401,00 y el pasivo queda a cero.
+    ///
+    /// Cambio de comportamiento consciente respecto a 4.1.0, donde el tope era el principal (400)
+    /// — pero solo aplica a los modelos que devengan; `fixed_payments` sigue topando en 400.
+    #[test]
+    fn first_month_allocation_debt_service_caps_at_payoff_with_apr() {
+        let inp = one_liability_input(
+            1,
+            Decimal::from(400),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        assert_eq!(
+            first_month_allocation(&inp).unwrap().debt_service,
+            dec("401.00")
+        );
+
+        let historico = one_liability_input(
+            1,
+            Decimal::from(400),
+            Decimal::from(500),
+            RepaymentModel::FixedPayments,
+            Some(Decimal::from(3)),
+        );
+        assert_eq!(
+            first_month_allocation(&historico).unwrap().debt_service,
+            Decimal::from(400),
+            "fixed_payments sigue topando en el principal"
+        );
+    }
+
+    /// TIN absurdo (1.000 %) sobre el horizonte máximo (840 meses): el payoff desborda `Decimal`
+    /// en pocos meses y el `checked_mul` **satura** en vez de panicar. La simulación termina y
+    /// devuelve una serie completa. Nadie configura esto a mano, pero un `.ffbackup` importado o
+    /// un dedo torcido en el formulario no pueden tumbar el proceso.
+    #[test]
+    fn high_apr_never_panics() {
+        let inp = one_liability_input(
+            840,
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(1000)),
+        );
+        let out = project_net_worth_series(&inp).expect("la simulación debe terminar");
+        assert_eq!(out.net_worth.len(), 841);
+        // Saturado: el principal deja de crecer y la cuota lo va royendo 500 €/mes.
+        let p1 = implicit_principal(&out, 839);
+        let p2 = implicit_principal(&out, 840);
+        assert_eq!(p1 - p2, Decimal::from(500), "saturado, la cuota va a principal");
+    }
+
+    /// Valor actual de una renta. Tres contratos:
+    /// 1. Sin TIN (o con TIN ≤ 0) es `M · n` **exacto**, sin pasar por `powd`.
+    /// 2. Con TIN, la fórmula clásica: 500 €/mes × 200 meses al 3 % ⇒ i = 0,0025,
+    ///    `500 · (1 − 1,0025^−200) / 0,0025 = 78.618,154230356139584585434… €` (tolerancia 1 €,
+    ///    hay `powd` por medio). Nota: el plan de la reforma predecía «≈ 78.621»; el valor real,
+    ///    verificado a 40 dígitos con aritmética decimal exacta, es 78.618,15 — `powd` de
+    ///    `rust_decimal` reproduce los 26 primeros dígitos, así que la desviación era de la
+    ///    predicción, no del cálculo.
+    /// 3. `n` fraccionario: la equivalencia semanal (`M = cuota·52/12`, `n = intervalos·12/52`)
+    ///    reconstruye `cuota · intervalos` exacto con TIN 0.
+    #[test]
+    fn present_value_of_payments_matches_the_closed_form_and_degenerates_exactly() {
+        // (1) Sin descuento: la suma nominal, sin error de redondeo.
+        assert_eq!(
+            present_value_of_payments(Decimal::from(500), Decimal::from(200), None),
+            Decimal::from(100_000)
+        );
+        assert_eq!(
+            present_value_of_payments(Decimal::from(500), Decimal::from(200), Some(Decimal::ZERO)),
+            Decimal::from(100_000)
+        );
+        assert_eq!(
+            present_value_of_payments(Decimal::from(500), Decimal::from(200), Some(Decimal::from(-2))),
+            Decimal::from(100_000),
+            "un TIN negativo degenera igual que la ausencia de TIN"
+        );
+
+        // (2) Fórmula cerrada.
+        let pv = present_value_of_payments(
+            Decimal::from(500),
+            Decimal::from(200),
+            Some(Decimal::from(3)),
+        );
+        assert!(
+            (pv - dec("78618.154230356139584585434")).abs() < Decimal::ONE,
+            "esperado ≈ 78.618,15 €, obtenido {pv}"
+        );
+        assert!(pv < Decimal::from(100_000), "descontar reduce el nominal");
+
+        // (3) `n` fraccionario: 300 €/semana durante 52 semanas ⇒ M = 300·52/12 = 1.300 €/mes y
+        // n = 52·12/52 = 12 meses. Con TIN 0 el producto debe ser 15.600 € exactos.
+        let m = Decimal::from(300) * Decimal::from(52) / Decimal::from(12);
+        let n = Decimal::from(52) * Decimal::from(12) / Decimal::from(52);
+        assert_eq!(
+            present_value_of_payments(m, n, None),
+            Decimal::from(15_600),
+            "la equivalencia semanal es exacta sin descuento"
+        );
     }
 }

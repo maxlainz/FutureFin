@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
 
@@ -121,8 +121,11 @@ pub struct BackupAllocationRule {
 /// Alias for the current-version asset DTO. Always points to the latest variant.
 pub type BackupAsset = BackupAssetV3;
 
+/// Pasivo tal y como lo escribieron los backups **v1..v9**: sin `repayment_model`. Congelado
+/// (mismo patrón que `BackupAssetV1`/`V2`): los payloads viejos siguen deserializándose contra
+/// esta forma exacta, y añadir campos a la versión actual ya no los toca.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BackupLiability {
+pub struct BackupLiabilityV9 {
     pub category_ref: CategoryRef,
     /// Categoría de GASTO de la cuota (3.4.0). Aditivo con `default`: los backups anteriores no
     /// llevan el campo → `None` → el pasivo importa sin asignar (SIN bump de schema_version,
@@ -147,6 +150,46 @@ pub struct BackupLiability {
     pub notes: Option<String>,
     pub sort_index: i32,
 }
+
+/// v10 (4.2.0): el pasivo gana `repayment_model`. El campo es el literal de la columna, no un
+/// enum: el backup es un formato de datos y no debe romperse si mañana el CHECK admite un modelo
+/// más — el import lo escribe tal cual y es Postgres quien decide si es válido.
+fn default_repayment_model() -> String {
+    "fixed_payments".into()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupLiabilityV10 {
+    pub category_ref: CategoryRef,
+    /// Categoría de GASTO de la cuota (3.4.0). Aditivo con `default`: los backups anteriores no
+    /// llevan el campo → `None` → el pasivo importa sin asignar.
+    #[serde(default)]
+    pub expense_category_ref: Option<CategoryRef>,
+    pub label: String,
+    #[serde(default)]
+    pub type_tag: Option<String>,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub principal: Decimal,
+    pub principal_derived_from_plan: bool,
+    /// `fixed_payments` | `french` | `interest_only` | `revolving`. El `default` es defensivo:
+    /// un v10 escrito a mano sin el campo importa como el modelo histórico en vez de reventar.
+    #[serde(default = "default_repayment_model")]
+    pub repayment_model: String,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub apr_percent: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub payment_amount: Option<Decimal>,
+    #[serde(default)]
+    pub payment_frequency: Option<String>,
+    #[serde(default)]
+    pub payment_end_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub sort_index: i32,
+}
+
+/// Alias for the current-version liability DTO. Always points to the latest variant.
+pub type BackupLiability = BackupLiabilityV10;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BackupBudgetEntry {
@@ -394,7 +437,7 @@ pub struct BackupPayloadV1 {
     pub user: BackupUser,
     pub categories_used: Vec<BackupCategory>,
     pub assets: Vec<BackupAssetV1>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -407,7 +450,7 @@ pub struct BackupPayloadV2 {
     pub user: BackupUser,
     pub categories_used: Vec<BackupCategory>,
     pub assets: Vec<BackupAssetV2>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -424,7 +467,7 @@ pub struct BackupPayloadV3 {
     /// are dropped on migration — see [`payload_v2_to_v3`]).
     #[serde(default)]
     pub allocation_rules: Vec<BackupAllocationRule>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -439,7 +482,7 @@ pub struct BackupPayloadV4 {
     pub assets: Vec<BackupAssetV3>,
     #[serde(default)]
     pub allocation_rules: Vec<BackupAllocationRule>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -457,7 +500,7 @@ pub struct BackupPayloadV5 {
     pub assets: Vec<BackupAssetV3>,
     #[serde(default)]
     pub allocation_rules: Vec<BackupAllocationRule>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -483,7 +526,7 @@ pub struct BackupPayloadV6 {
     pub assets: Vec<BackupAssetV3>,
     #[serde(default)]
     pub allocation_rules: Vec<BackupAllocationRule>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -509,7 +552,7 @@ pub struct BackupPayloadV7 {
     pub assets: Vec<BackupAssetV3>,
     #[serde(default)]
     pub allocation_rules: Vec<BackupAllocationRule>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -535,7 +578,7 @@ pub struct BackupPayloadV8 {
     pub assets: Vec<BackupAssetV3>,
     #[serde(default)]
     pub allocation_rules: Vec<BackupAllocationRule>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -566,7 +609,36 @@ pub struct BackupPayloadV9 {
     pub assets: Vec<BackupAssetV3>,
     #[serde(default)]
     pub allocation_rules: Vec<BackupAllocationRule>,
-    pub liabilities: Vec<BackupLiability>,
+    pub liabilities: Vec<BackupLiabilityV9>,
+    pub budget_entries: Vec<BackupBudgetEntry>,
+    pub planning_flows: Vec<BackupPlanningFlow>,
+    #[serde(default)]
+    pub ui_preferences: UiPreferences,
+    pub installation_snapshot_informative: InstallationSnapshotInformative,
+    #[serde(default)]
+    pub snapshots: Vec<BackupSnapshot>,
+    #[serde(default)]
+    pub transaction_imports: Vec<BackupTransactionImport>,
+    #[serde(default)]
+    pub transactions: Vec<BackupTransaction>,
+    #[serde(default)]
+    pub categorization_rules: Vec<BackupCategorizationRule>,
+    #[serde(default)]
+    pub recurring_transaction_rules: Vec<BackupRecurringRule>,
+    #[serde(default)]
+    pub transfer_match_rejections: Vec<BackupTransferMatchRejection>,
+}
+
+/// v10 (4.2.0): los pasivos ganan `repayment_model`. Copia literal de V9 con el Vec nuevo — el
+/// resto de secciones son idénticas.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayloadV10 {
+    pub user: BackupUser,
+    pub categories_used: Vec<BackupCategory>,
+    pub assets: Vec<BackupAssetV3>,
+    #[serde(default)]
+    pub allocation_rules: Vec<BackupAllocationRule>,
+    pub liabilities: Vec<BackupLiabilityV10>,
     pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
@@ -587,7 +659,7 @@ pub struct BackupPayloadV9 {
 }
 
 /// Alias for the current-version payload. Export and import code work against this type.
-pub type BackupPayload = BackupPayloadV9;
+pub type BackupPayload = BackupPayloadV10;
 
 #[derive(Debug)]
 pub enum AnyPayload {
@@ -600,6 +672,7 @@ pub enum AnyPayload {
     V7(BackupPayloadV7),
     V8(BackupPayloadV8),
     V9(BackupPayloadV9),
+    V10(BackupPayloadV10),
 }
 
 pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, String> {
@@ -648,6 +721,11 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
             let p: BackupPayloadV9 = serde_json::from_slice(bytes)
                 .map_err(|e| format!("backup_payload_malformed: payload v9 malformed: {e}"))?;
             Ok(AnyPayload::V9(p))
+        }
+        10 => {
+            let p: BackupPayloadV10 = serde_json::from_slice(bytes)
+                .map_err(|e| format!("backup_payload_malformed: payload v10 malformed: {e}"))?;
+            Ok(AnyPayload::V10(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
             "backup_schema_version_unsupported: schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
@@ -896,31 +974,77 @@ fn payload_v8_to_v9(p: BackupPayloadV8) -> BackupPayloadV9 {
     }
 }
 
+/// v9 → v10: los pasivos de cualquier backup anterior a 4.2.0 entran como `fixed_payments`, que
+/// es EXACTAMENTE el modelo con el que se calcularon sus números cuando se exportaron. Restaurar
+/// un backup viejo no puede mover una proyección.
+fn payload_v9_to_v10(p: BackupPayloadV9) -> BackupPayloadV10 {
+    BackupPayloadV10 {
+        user: p.user,
+        categories_used: p.categories_used,
+        assets: p.assets,
+        allocation_rules: p.allocation_rules,
+        liabilities: p
+            .liabilities
+            .into_iter()
+            .map(|l| BackupLiabilityV10 {
+                category_ref: l.category_ref,
+                expense_category_ref: l.expense_category_ref,
+                label: l.label,
+                type_tag: l.type_tag,
+                principal: l.principal,
+                principal_derived_from_plan: l.principal_derived_from_plan,
+                repayment_model: default_repayment_model(),
+                apr_percent: l.apr_percent,
+                payment_amount: l.payment_amount,
+                payment_frequency: l.payment_frequency,
+                payment_end_date: l.payment_end_date,
+                notes: l.notes,
+                sort_index: l.sort_index,
+            })
+            .collect(),
+        budget_entries: p.budget_entries,
+        planning_flows: p.planning_flows,
+        ui_preferences: p.ui_preferences,
+        installation_snapshot_informative: p.installation_snapshot_informative,
+        snapshots: p.snapshots,
+        transaction_imports: p.transaction_imports,
+        transactions: p.transactions,
+        categorization_rules: p.categorization_rules,
+        recurring_transaction_rules: p.recurring_transaction_rules,
+        transfer_match_rejections: p.transfer_match_rejections,
+    }
+}
+
 pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
-    // Cadena completa v1..v9: TODOS los backups antiguos siguen importando (regla de
+    // Cadena completa v1..v10: TODOS los backups antiguos siguen importando (regla de
     // change-control §5 — un backup es la única vía de recuperación de un usuario).
     match any {
-        AnyPayload::V1(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(
-            payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(
-                payload_v1_to_v2(p),
+        AnyPayload::V1(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
+            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(
+                payload_v2_to_v3(payload_v1_to_v2(p)),
             )))),
         ))),
-        AnyPayload::V2(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(
-            payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(payload_v2_to_v3(p)))),
+        AnyPayload::V2(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
+            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(
+                payload_v2_to_v3(p),
+            )))),
         ))),
-        AnyPayload::V3(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(
-            payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(p))),
+        AnyPayload::V3(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
+            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(p)))),
         ))),
-        AnyPayload::V4(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(
-            payload_v5_to_v6(payload_v4_to_v5(p)),
+        AnyPayload::V4(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
+            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(p))),
         ))),
-        AnyPayload::V5(p) => {
-            payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(p))))
+        AnyPayload::V5(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
+            payload_v6_to_v7(payload_v5_to_v6(p)),
+        ))),
+        AnyPayload::V6(p) => {
+            payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(p))))
         }
-        AnyPayload::V6(p) => payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(p))),
-        AnyPayload::V7(p) => payload_v8_to_v9(payload_v7_to_v8(p)),
-        AnyPayload::V8(p) => payload_v8_to_v9(p),
-        AnyPayload::V9(p) => p,
+        AnyPayload::V7(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(p))),
+        AnyPayload::V8(p) => payload_v9_to_v10(payload_v8_to_v9(p)),
+        AnyPayload::V9(p) => payload_v9_to_v10(p),
+        AnyPayload::V10(p) => p,
     }
 }
 

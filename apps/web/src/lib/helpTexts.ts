@@ -53,9 +53,11 @@ export const HELP_TEXTS = {
       "que te queda por pagar, todo sobre tu patrimonio neto. Un activo sin rentabilidad puesta " +
       "cuenta como 0 % y sigue restando media. La cifra grande ya descuenta la inflación que " +
       "tengas configurada; el paréntesis es la misma sin descontarla. No es lo que has ganado: es " +
-      "una expectativa, no tu rentabilidad pasada. Y es más prudente que la simulación de la " +
-      "proyección, que hace crecer tus activos pero todavía no le cobra los intereses a tus " +
-      "deudas. Si debes más de lo que tienes, la tarjeta desaparece: el porcentaje diría lo " +
+      "una expectativa, no tu rentabilidad pasada. Aquí cuenta el interés de todas tus deudas; la " +
+      "proyección solo le cobra intereses a las que hayas declarado con un modelo que los devengue " +
+      "(francés o revolving), así que si alguna sigue en cuota fija esta cifra es algo más " +
+      "prudente que la simulación. Si debes más de lo que tienes, la tarjeta desaparece: el " +
+      "porcentaje diría lo " +
       "contrario de lo que pasa.",
   },
   "summary.net_worth": {

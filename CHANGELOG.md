@@ -4,6 +4,117 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Proyección — Modelo de amortización por pasivo: la deuda ya devenga intereses
+
+- **Cada pasivo declara CÓMO se paga (`repayment_model`), y la proyección le cobra los
+  intereses**: `fixed_payments` (default, el modelo histórico) · `french` (sistema francés) ·
+  `interest_only` (solo intereses) · `revolving`. Hasta ahora el motor amortizaba **1:1**: cada
+  cuota reducía el principal en su importe exacto, como si ningún préstamo cobrara nada. Sobre
+  una instalación de ejemplo, una deuda de **100.000 €** con cuota de **500 €/mes** al **3 %**:
+
+  | | Antes (hasta 4.1.0) | Ahora, declarándola `french` |
+  |---|---|---|
+  | Mes de extinción | **200** (100.000 ÷ 500) | **278** |
+  | Meses de cuota que faltaban | — | **+78** (6 años y medio) |
+  | Intereses nunca cobrados | 0 € | ≈ **38.800 €** (277 × 500 + ~303 − 100.000) |
+
+  Los 78 meses son lo grave: el patrimonio proyectado se liberaba de una cuota de 500 € seis años
+  y medio antes de tiempo, y todo lo que venía después —el cruce FIRE incluido— se apoyaba en esa
+  liberación falsa. El caso extremo que el modelo viejo **ni siquiera podía representar**: con una
+  cuota **por debajo del interés** la deuda **crece** y crece sin techo — 100.000 € al 12 % con
+  500 €/mes cierran el mes 1 en 100.500 y el mes 2 en 101.005. Antes esa misma deuda «se
+  amortizaba» a 500 €/mes.
+- **Es opt-in: al actualizar no se mueve un solo número.** La columna nace con
+  `DEFAULT 'fixed_payments'` y ese modelo reproduce la recurrencia anterior **bit a bit** —
+  pineado por un test escrito ANTES de la reforma (`liability_payment_plan_series_pin_pre_4_2_0`, que
+  congela la serie en los meses 0/1/2/12/200/201/300) y por un test que le añade un TIN del 3 % al
+  mismo input y exige serie idéntica: **el TIN es un dato inerte hasta que eliges modelo**.
+  Alguien puede rellenar el interés de su hipoteca sin cambiar nada más y sus cifras no se mueven.
+  Los intereses empiezan a contar solo cuando el usuario elige `french`/`revolving` y configura
+  la TAE.
+- **Qué hace cada modelo**: los que devengan aplican `P' = P·(1+i) − M` con `i = TAE/1200`,
+  interés sobre el **saldo de apertura** y cuota a **fin de mes** — la misma recurrencia con la que
+  el histórico ya interpolaba el pasado entre snapshots, así que pasado y futuro por fin hablan el
+  mismo idioma. `interest_only` deja el principal **constante** y la caja es la cuota (la cuota
+  declarada YA es el interés; devengarlo otra vez lo cobraría dos veces). `revolving` **comparte
+  recurrencia con `french` en 4.2.0**, a propósito y con test que lo fija: existe como concepto
+  aparte porque su evolución (disposiciones, cuota mínima como % del saldo) sí divergirá, y ese
+  día el test se cambia a conciencia. Dos detalles con consecuencias: sin **plan de pago activo**
+  no hay devengo (un `payment_end_date` cumplido con principal vivo **congela** el residual, no lo
+  convierte en bola de nieve; y los modos de ahorro B/C, que ponen la cuota a cero, siguen viendo
+  su deuda plana — las cuotas ya viven dentro de su gasto real promediado), y el tope de la cuota
+  pasa a ser el **payoff** en vez del principal: cancelar cuesta el saldo *con* el interés del mes
+  (400 € al 3 % ⇒ 401,00 € de caja, no 400).
+- **El principal derivado del plan ya no es una sola fórmula (cambio de comportamiento de
+  `POST`/`PATCH /v1/liabilities` con `derive_principal_from_plan`)**: en `fixed_payments` sigue
+  siendo `Σ cuotas` exacta, como siempre; en `french` es el **valor actual** de esa renta al TIN,
+  que es el capital pendiente de verdad. 200 cuotas de 500 € al 3 % son 100.000 € de caja pero
+  **78.618,1542 €** de deuda hoy — 21.382 € de diferencia que antes entraban en el ledger como
+  deuda fantasma y se restaban del patrimonio en todo el horizonte. Al 6 %, la misma renta vale
+  63.120,2771 €. Cambiar el modelo **o** la TAE con el derive activo **re-deriva** el principal.
+  (Nota de método: el plan de la reforma predijo «≈ 78.621 €» y el cálculo devolvió 78.618,15 —
+  la desviación era de la predicción, no del código; verificado a 40 dígitos con aritmética
+  decimal independiente. La misma disciplina destapó un «≈ 430 meses» que llevaba desde julio en
+  la tabla de la campaña de realismo: 430 meses corresponden a un TIN de ≈ 5 %, no al 3 % que la
+  fila decía. Corregido a 278.)
+- **Validación por modelo** (sobre el estado **resultante**, no sobre el body — en `PATCH` se
+  valida el pasivo que va a quedar guardado). Cinco códigos de error estables nuevos, todos con
+  su frase en español en la UI: `repayment_model_invalid` (literal desconocido por MCP; por HTTP
+  lo corta serde con un 422), `payment_plan_required_for_model` (sin cuota no hay ni interés ni
+  amortización: un `french` sin plan sería un `fixed_payments` disfrazado que no mueve un número),
+  `apr_required_for_model` (`french`/`revolving` exigen TAE > 0 — con TAE 0 el motor degenera al
+  modelo histórico y el usuario tendría un «francés» que no cobra un céntimo),
+  `weekly_not_supported_for_model` (la recurrencia es mensual; con `weekly` la cuota se convierte
+  ×52/12, exacto sin intereses pero falso con ellos) y `derive_not_supported_for_model` (derivar
+  solo tiene inversa cerrada en `fixed_payments` y `french`).
+- **Interfaz**: selector «Modelo» en el formulario de pasivos, con pista por modelo, TAE obligatoria
+  donde hace falta, `weekly` y el cálculo del capital pendiente **deshabilitados** donde el
+  servidor los rechazaría, y una vista previa del principal derivado que **calla** exactamente en
+  los estados que darían 400 (enseñar un número donde el servidor da error enseña a desconfiar de
+  la vista previa). En el listado, el modelo se ve como chip solo cuando **no** es cuota fija.
+  Cero CSS nuevo.
+- **MCP**: `create_liability` y `update_liability` aceptan `repayment_model` y sus descripciones
+  enumeran los cuatro modelos y la diferencia entre `Σ cuotas` y valor actual al derivar. El
+  catálogo **sigue en 52 tools** (es un campo de un recurso ya cubierto, no un recurso nuevo).
+  `simulate_projection` queda fuera: no acepta pasivos hipotéticos. Corregida también la
+  descripción de `get_summary`, que afirmaba en seco que «la proyección NO descuenta el interés de
+  la deuda».
+- **Engine breaking**: `ProjectionLiabilityInput` gana dos campos (`repayment_model`,
+  `apr_percent`), así que cualquier construcción literal del struct fuera del repo deja de
+  compilar. El enum `RepaymentModel` y `present_value_of_payments` se exportan desde
+  `futurefin_engine`. Un TIN ausente o ≤ 0 hace degenerar **cualquier** modelo en el histórico, a
+  propósito: el motor nunca panica ni falla por un dato incoherente (un TIN absurdo satura en vez
+  de desbordar), porque un `.ffbackup` restaurado puede traer combinaciones que hoy no serían
+  válidas.
+- **Cierra el hueco #11** del inventario de simplificaciones de la campaña de realismo de la
+  proyección («los pasivos no llevan interés», clasificado [GAP] desde julio de 2026) — cerrado
+  para quien elija modelo, vivo por defecto. Dos simplificaciones nuevas quedan registradas en su
+  sitio: un pasivo sin plan activo no devenga, y `revolving` todavía usa la matemática del francés.
+
+### Migración / compatibilidad
+
+- **Migración `20260825120000_liabilities_repayment_model.sql`**: añade
+  `liabilities.repayment_model TEXT NOT NULL DEFAULT 'fixed_payments'` + CHECK con los cuatro
+  literales (CHECK y no un ENUM de Postgres: añadir un modelo será un `ALTER` de la restricción,
+  sin las servidumbres de tipo que un ENUM arrastra a las migraciones y al backup por usuario).
+- **Datos**: sin pérdida de datos. Todos los pasivos existentes quedan en `fixed_payments` y sus
+  números —proyección, presupuesto, resumen— son idénticos a los de 4.1.0.
+- **Backups `.ffbackup`**: `schema_version` sube a **10**. Un backup **v1..v9 importa igual** y sus
+  pasivos entran como `fixed_payments`, que es exactamente el modelo con el que se calcularon los
+  números que el usuario vio al exportar. **Aviso en la otra dirección: un `.ffbackup` v10 NO
+  importa en 4.1.0 ni anterior** — la versión vieja rechaza con `409` cualquier `schema_version`
+  por encima de la suya (falla ruidosamente en vez de tragarse lo que no entiende). Si quieres un
+  backup legible por la imagen anterior, expórtalo **antes** de actualizar.
+- **Primer arranque tras actualizar**: nada que hacer. El selector «Modelo» aparece en el
+  formulario de pasivos con «Cuota fija» ya elegido.
+- **Rollback**: volver a la imagen 4.1.0 con la migración aplicada funciona — la columna sobra
+  pero no estorba (el binario viejo no la selecciona) y ningún pasivo cambia de comportamiento,
+  porque el binario viejo solo sabe amortizar 1:1, que es lo que hace `fixed_payments`. Lo que
+  **no** sobrevive al rollback es la elección de modelo: los pasivos declarados `french` se
+  proyectarán otra vez sin intereses hasta que vuelvas a subir.
+
 ## [4.1.0] - 2026-08-25
 
 ### Añadido
