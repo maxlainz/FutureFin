@@ -8,6 +8,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Infraestructura del repositorio (sin imagen — viajará con el siguiente release)
 
+- **El espejo de alertas Dependabot ya no queda abierto para decir que no hay alertas**: con
+  0 alertas, `dependabot-alerts-mirror.yml` cierra el issue espejo (#55) y lo reabre solo
+  cuando vuelve a haber; su estado pasa a ser parte del dato (abierto ⟺ hay alertas), y
+  «cero» sigue distinguiéndose de «espejo roto» por presencia + frescura de `GENERADO`. La
+  rutina (prompt v8.2) lo busca ahora entre abiertos y cerrados y no toca su estado.
 - **El candado de la rutina de dependencias ya no deja rama huérfana** (issue #68): la
   credencial de la rutina no puede borrar refs (HTTP 403, igual que empujar tags), así que
   `ops/routine-lock` se quedaba viva tras cada pasada. Protocolo v8.1: liberar = dejar un

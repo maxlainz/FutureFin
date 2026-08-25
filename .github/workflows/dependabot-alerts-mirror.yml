@@ -103,28 +103,42 @@ jobs:
             echo "<!-- ff-alerts:end -->"
           } > body.md
 
-      # 3) PUBLICAR. Label idempotente; issue localizado POR LABEL. Sin edición si el cuerpo
-      #    no cambió (se ignoran GENERADO/RUN, que cambian en cada run y no son datos).
-      #    Con 0 alertas el issue queda ABIERTO con SIN_ALERTAS: true — cerrarlo rompería el
-      #    contrato de «issue fijo» y la rutina no podría distinguir cero de espejo roto.
+      # 3) PUBLICAR. Label idempotente; issue localizado POR LABEL entre abiertos Y cerrados
+      #    (con 0 alertas vive cerrado). Sin edición si el cuerpo no cambió (se ignoran
+      #    GENERADO/RUN, que cambian en cada run y no son datos).
+      #    El ESTADO del issue es parte del dato: ABIERTO ⟺ hay alertas; CERRADO con
+      #    SIN_ALERTAS: true y GENERADO fresco ⟺ 0 alertas (decisión del owner 2026-08-25:
+      #    un issue abierto solo para decir «no hay alertas» es ruido). «Cero» y «espejo
+      #    roto» siguen siendo distinguibles: roto = issue ausente o GENERADO viejo (>36h).
       - name: Publicar o actualizar el issue espejo
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          TOTAL=$(jq 'length' alerts.json)
           gh label create "$LABEL" --color "d93f0b" \
             --description "Issue espejo automatico de las alertas Dependabot" 2>/dev/null || true
-          N=$(gh issue list --repo "$GH_REPO" --label "$LABEL" --state open \
+          N=$(gh issue list --repo "$GH_REPO" --label "$LABEL" --state all \
                 --limit 1 --json number --jq '.[0].number // empty')
           if [ -z "$N" ]; then
-            gh issue create --repo "$GH_REPO" --title "$TITLE" \
-              --label "$LABEL" --body-file body.md
-            exit 0
-          fi
-          gh issue view "$N" --repo "$GH_REPO" --json body --jq .body > current.md || true
-          norm() { grep -vE '^(GENERADO|RUN):' "$1"; }
-          if norm current.md | diff -q - <(norm body.md) > /dev/null 2>&1; then
-            echo "Sin cambios en las alertas; no se edita el issue #$N."
+            URL=$(gh issue create --repo "$GH_REPO" --title "$TITLE" \
+              --label "$LABEL" --body-file body.md)
+            N="${URL##*/}"
           else
-            gh issue edit "$N" --repo "$GH_REPO" --body-file body.md
+            gh issue view "$N" --repo "$GH_REPO" --json body --jq .body > current.md || true
+            norm() { grep -vE '^(GENERADO|RUN):' "$1"; }
+            if norm current.md | diff -q - <(norm body.md) > /dev/null 2>&1; then
+              echo "Sin cambios en las alertas; no se edita el cuerpo del issue #$N."
+            else
+              gh issue edit "$N" --repo "$GH_REPO" --body-file body.md
+            fi
+          fi
+          # Sincronizar el ESTADO con las alertas (idempotente: solo si difiere del deseado).
+          STATE=$(gh issue view "$N" --repo "$GH_REPO" --json state --jq .state)
+          if [ "$TOTAL" -eq 0 ] && [ "$STATE" = "OPEN" ]; then
+            gh issue close "$N" --repo "$GH_REPO" \
+              --comment "0 alertas abiertas — el espejo queda cerrado; se reabre solo si vuelve a haber alertas."
+          elif [ "$TOTAL" -gt 0 ] && [ "$STATE" = "CLOSED" ]; then
+            gh issue reopen "$N" --repo "$GH_REPO" \
+              --comment "Hay $TOTAL alerta(s) abierta(s) — el espejo se reabre."
           fi
