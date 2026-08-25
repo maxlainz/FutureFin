@@ -279,6 +279,16 @@ Evaluación posterior (2026-08-25, sin cambio de contadores — el catálogo sig
 |---|---|
 | `GET /v1/summary` → `financial_health.net_return_nominal_annual_pct` + `net_return_real_annual_pct` | **Tool actualizada sin código nuevo**: `get_summary` comparte `summary_core` y el propio struct `FinancialHealthMetrics`, así que hereda los dos campos. Lo que SÍ hubo que tocar a mano es su `description` — son **porcentajes**, no fracciones como el vecino `savings_rate` (confundirlos multiplica por 100), y traen un aviso que ninguna otra tool puede dar: la proyección no cobra el interés de la deuda, así que este número es más conservador que `get_projection`. Cero tools nuevas: no hay recurso REST nuevo, ni escritura, ni nada que `get_summary` no cubra ya |
 
+Evaluación del tren **4.2.0** (modelo de amortización por pasivo; 2026-08-25, catálogo **sin cambios en 52**):
+
+| New HTTP surface (4.2.0) | Parity outcome |
+|---|---|
+| `repayment_model` en `LiabilityResponse` / `CreateLiabilityBody` / `PatchLiabilityBody` | **Dos tools actualizadas**: `create_liability` y `update_liability` ganan el parámetro (`Option<String>`, parseado con `handlers::liabilities::RepaymentModel::parse` → **400 `repayment_model_invalid`** en un literal desconocido, no el 422 de serde que da el camino HTTP: por MCP el parámetro llega como string suelto y el error debe ser uno nuestro). Sus `description` enumeran ahora los cuatro modelos y sus requisitos. Cero tools nuevas: es un campo de un recurso que ya está cubierto |
+| Derivación del principal dependiente del modelo (Σ cuotas vs valor actual al TIN) | **Descripciones reescritas, código compartido**: las dos tools llaman a `create_liability_core` / `patch_liability_core`, así que la fórmula nueva llega sola. Lo que había que arreglar a mano es la promesa — la descripción de `create_liability` ya llevaba una corrección forense por prometer amortización francesa cuando sumaba cuotas (`.claude/api-routes.md` §MCP); ahora distingue `Σ cuotas` en `fixed_payments` del **valor actual** en `french`, y `update_liability` avisa de que cambiar el modelo o la TAE con el derive activo **re-deriva** el principal |
+| Cinco códigos de error 400 nuevos (`repayment_model_invalid`, `apr_required_for_model`, `payment_plan_required_for_model`, `weekly_not_supported_for_model`, `derive_not_supported_for_model`) | **Heredados**, sin trabajo de tool: viajan por la misma `ApiError` de las cores. El fixture `error-codes.json` los lleva y `errorMessages.ts` los traduce (guard de paridad) |
+| `simulate_projection` | **n/a**: la tool no acepta pasivos hipotéticos — simula sobre los del ledger. No hay parámetro que ampliar hasta que el what-if los admita, momento en el que esto pasaría a ser un gap de §3.2 |
+| `get_summary` — el aviso sobre `net_return_*` | **Descripción matizada**: la frase «la proyección NO descuenta el interés de la deuda», exacta en 4.1.0 y en la fila de arriba, deja de ser cierta en general. Ahora dice que el KPI cuenta el interés de **todos** los pasivos vivos mientras la proyección solo devenga en los que llevan modelo con intereses y plan activo — más conservador solo si queda alguna deuda en cuota fija |
+
 Re-verify before trusting:
 
 - Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22**; 50/21/29/29/10/1 on 2026-08-20).

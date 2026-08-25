@@ -116,15 +116,92 @@ pub struct FireTarget {
 }
 ```
 
-**Per-mode liability contract (handler-side, engine unchanged — reform 3.4.0):** the engine always
+## ProjectionLiabilityInput and repayment models (4.2.0)
+
+```rust
+pub struct ProjectionLiabilityInput {
+    pub principal: Decimal,
+    pub monthly_payment: Decimal,          // ya convertida a mensual por el handler (weekly ×52/12)
+    pub payment_end: Option<NaiveDate>,
+    pub repayment_model: RepaymentModel,   // 4.2.0
+    pub apr_percent: Option<Decimal>,      // 4.2.0 — TIN nominal anual en puntos (3 = 3 %/año)
+}
+
+pub enum RepaymentModel { FixedPayments, French, InterestOnly, Revolving }
+```
+
+`apr_percent` es el **TIN nominal anual**: el tipo mensual es `i = apr_percent / 1200`, la MISMA
+convención que `LoanTerms::apr_percent` de `history.rs`. Terminología: la columna SQL y el wire lo
+llaman `apr_percent` («TAE») por historia, pero el engine lo trata como **TIN** — lo divide entre 12
+sin desanualizar de forma compuesta. Si algún día se quiere TAE de verdad, es una conversión en el
+handler, no un cambio de fórmula aquí.
+
+`apr_percent` ausente o `≤ 0` ⇒ **sin interés**: cualquier modelo degenera exactamente en
+`FixedPayments` (y `InterestOnly` en un principal congelado). Deliberado: un `.ffbackup` importado
+puede colar un `french` sin TIN y el engine no debe panicar ni fallar — devuelve la serie sin
+intereses. La validación de coherencia vive en el handler (`liabilities.rs`), no aquí.
+
+Un único helper privado, `liability_month(model, principal, monthly_payment, apr, active) →
+(cash, closing_principal)`, resuelve la recurrencia; lo consumen el bucle de simulación y
+`first_month_allocation` (antes eran tres copias del `min(cuota, principal)`). El predicado de
+actividad es también único, `liability_active`: `monthly_payment > 0` **y** (`payment_end` ausente
+o `>= m_start`).
+
+| Modelo | Caja del mes | Principal de cierre | Notas |
+|---|---|---|---|
+| `FixedPayments` (default) | `min(M, P)` | `P − cash` | Modelo **pre-4.2.0 bit a bit**. Ignora `apr_percent` por completo (test `fixed_payments_with_apr_is_bit_identical_to_the_pre_4_2_0_pin`). |
+| `French` | `min(M, payoff)` | `payoff − cash` | `payoff = P·(1 + i)`: interés sobre el **saldo de apertura**, cuota a **fin de mes**. Misma recurrencia que `theo(y)` en `history.rs`. |
+| `InterestOnly` | `min(M, P)` | `P` (constante) | La cuota declarada YA es el interés; recalcularlo lo cobraría dos veces. El TIN es informativo. |
+| `Revolving` | igual que `French` | igual que `French` | **Recurrencia compartida con `French` en 4.2.0**, a propósito y pineado (`revolving_matches_french_recurrence`). Existe como concepto aparte porque su evolución (disposiciones, cuota mínima como % del saldo) sí diverge. |
+| cualquiera, **inactivo** | `0` | `P` | Sin plan activo no hay caja, ni amortización, ni **devengo**. |
+
+Consecuencias verificadas por tests del engine:
+
+- **El tope de la cuota es el payoff, no el principal** en los modelos que devengan: cancelar cuesta
+  el saldo *con* el interés del mes (P = 400 al 3 % ⇒ `debt_service` = 401,00, no 400).
+  `FixedPayments` sigue topando en el principal — cambio de comportamiento acotado a los modelos
+  nuevos.
+- **Cuota por debajo del interés ⇒ la deuda crece, sin topes**: 100.000 € al 12 % con cuota de 500 €
+  cierra el mes 1 en 100.500 y el mes 2 en 101.005. El modelo pre-4.2.0 no podía ni representarlo.
+- **Residual congelado**: si `payment_end` llega con principal vivo, ese principal se queda quieto
+  para siempre (resta constante al patrimonio), en los cuatro modelos.
+- **Saturación, nunca pánico**: `checked_mul`/`checked_add` en el payoff; un TIN absurdo (1.000 %
+  × 840 meses) satura y la simulación termina con una serie completa.
+- **Extinción**: 100.000 € con cuota de 500 € se extinguía en el mes **200** con `fixed_payments`
+  (100.000/500); en `french` al 3 % se extingue en el mes **278** — 78 meses más, ≈ 38.800 € de
+  intereses que el modelo viejo no cobraba.
+
+```rust
+pub fn present_value_of_payments(monthly_payment: Decimal, months: Decimal,
+                                 apr_percent: Option<Decimal>) -> Decimal
+```
+
+Valor actual de una renta de `months` cuotas al TIN: `P = M·(1 − (1+i)^−n)/i`. Con `apr_percent`
+ausente o `≤ 0` devuelve `M · n` **exacto**, sin pasar por `powd` (el límite cuando `i → 0`, y el
+caso más común). `n` puede ser fraccionario. Cualquier `checked_*` que falle cae al mismo `M · n`.
+Lo consume la derivación de principal del handler de pasivos: `PV(500 × 200 @ 3 %) = 78.618,1542 €`
+frente a los 100.000 € de la suma nominal.
+
+**Per-mode liability contract (handler-side — reform 3.4.0, extendido en 4.2.0):** the engine always
 subtracts every input liability's `principal` from net worth each month, and only charges cash /
-amortizes when `monthly_payment > 0` and the plan is active. The HANDLER exploits that: in mode A it
-passes the real payment plan (debt service charged, principal amortizes, cuota freed at
-`payment_end_date`); in the real modes B/C (`savings_source.uses_transactions()`) it zeroes
-`monthly_payment` in memory, so the principal becomes a **constant** net-worth subtraction across the
-whole horizon — paid cuotas already live inside the raw 12m expense average. The projection input
-query also filters expired liabilities (`payment_end_date IS NULL OR >= today`), same predicate as
-`/v1/summary`. See `build_installation_projection_input` in `apps/api/src/handlers/projection.rs`.
+amortizes / **accrues interest** when `monthly_payment > 0` and the plan is active. The HANDLER
+exploits that: in mode A it passes the real payment plan (debt service charged, principal amortizes,
+cuota freed at `payment_end_date`); in the real modes B/C (`savings_source.uses_transactions()`) it
+zeroes `monthly_payment` **and `apr_percent`** in memory, so the principal becomes a **constant**
+net-worth subtraction across the whole horizon — paid cuotas already live inside the raw 12m expense
+average. Zeroing the TIN is **deliberately redundant** (without a payment the engine already accrues
+nothing): it states the mode-B/C contract in one place, so relaxing the accrual gate in the engine
+cannot silently start charging interest in the real modes. The projection input query also filters
+expired liabilities (`payment_end_date IS NULL OR >= today`), same predicate as `/v1/summary`. See
+`build_installation_projection_input` in `apps/api/src/handlers/projection.rs`.
+
+**Divergencia histórico ↔ proyección, ahora visible.** La interpolación del pasado
+(`amortized_segment_value`) usa **siempre** amortización francesa cuando hay `LoanTerms`, sin
+consultar `repayment_model` — la curva histórica no tiene modelo, tiene snapshots. Así que un pasivo
+`fixed_payments` tiene curva histórica **francesa** y proyección **lineal**, y las dos se pintan
+unidas en el mismo chart. La divergencia es **preexistente** (el histórico siempre amortizó a la
+francesa); 4.2.0 no la crea, solo la vuelve nombrable — y la cierra para quien declare su deuda como
+`french`.
 
 ## Inflación y target FIRE móvil
 - Ingresos, gastos y aportaciones se mantienen **constantes en euros nominales** a lo largo de la simulación (filosofía «haciendo lo que hago ahora, ¿qué tal voy?»). No se inflan.
@@ -156,14 +233,20 @@ Rules are evaluated **in vector order** (caller passes them sorted by priority A
 All monetary state is **nominal** throughout (euros del momento). El ajuste por inflación se aplica
 únicamente al target FIRE, que crece cada mes para mantener el poder adquisitivo del usuario.
 
-1. Compute `debt_service` = sum of active liability payments (capped by remaining principal).
+1. Compute `debt_service` = Σ of the **cash** leg returned by `liability_month` for every liability
+   (0 when the plan is not active). The same call returns each liability's **closing principal**,
+   which is stashed in `closing_principals` and merely *applied* in step 8 — the recurrence is
+   resolved **once per month per liability** since 4.2.0. Recomputing it in step 8 would recompute
+   the accrual, and the two copies would eventually diverge. Nothing mutates `principals` between
+   the two steps, and the step order is unchanged.
 2. Determine `in_retirement = fire_reached || k >= retirement_start_month`. `fire_reached` compara `nw_prev` contra el target FIRE del mes `k`, que es `base × (1 + inflation/100)^((k-1)/12)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares.
 3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
 5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
 6. If `net_cash <= 0` (deficit): drain `surplus_cash` first, then drain liquid assets (lowest-return first).
 7. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar. `monthly_multiplier` = raíz 12ª del factor anual `1 + p/100`; `None` y `0` → factor 1; **las tasas negativas componen de verdad** (−50 % anual ⇒ ×0,5 en 12 meses); `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs con error tipado).
-8. Reduce liability principals by payments made.
+8. Assign each liability its `closing_principal` from step 1. No recomputation, no `min` — just the
+   assignment.
 
 ## Output
 ```rust
@@ -374,10 +457,14 @@ Rules, each load-bearing:
   `summary.rs`); the engine stays exact, same discipline as `runway_months`.
 - **Expectation, not realized return**: it reads the rates the user configured per asset, never
   history, and ignores contributions — it measures the portfolio, not the saving.
-- **Known divergence with the simulation, deliberate**: the projection loop grows assets
-  (step 7) but never charges liability *interest* (it only amortizes principal with the payment
-  plan), so this KPI is strictly more conservative than the projected curve for any household
-  with debt. Written down here and in the metric's help text instead of quietly reconciled.
+- **Known divergence with the simulation, narrowed in 4.2.0 but not closed**: this KPI charges
+  `apr_percent` on **every** non-expired liability, unconditionally. The projection loop only
+  accrues interest on liabilities whose `repayment_model` accrues (`french` / `revolving`) **and**
+  that have an active payment plan, and only in mode A (B/C zero the TIN). So the two still
+  disagree — for a `fixed_payments` debt, or a debt with no live plan, or any household in mode
+  B/C, the KPI stays strictly more conservative than the projected curve. What changed is that a
+  household that declares its mortgage as `french` now sees the two converge. Written down here
+  and in the metric's help text instead of quietly reconciled.
 
 Worked example (engine-verified, `worked_example_matches_the_documented_figures`): 100.000 at 5 %
 + 50.000 with no rate, minus a 60.000 loan at 3 % APR, inflation 2 % → numerator 3.200 €/year over

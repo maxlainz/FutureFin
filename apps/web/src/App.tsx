@@ -175,6 +175,7 @@ import type {
   InstallationGate,
   InstallationSessionContext,
   LiabilityApiRow,
+  LiabilityRepaymentModelApi,
   MemberApiRow,
   PlanningFlowApiRow,
   ProjectionSeriesApi,
@@ -400,6 +401,10 @@ export default function App() {
   const [liabilityFormNotes, setLiabilityFormNotes] = useState("");
   const [liabilityFormDerivePrincipal, setLiabilityFormDerivePrincipal] =
     useState(false);
+  // Modelo de amortización (4.2.0). El default del formulario es el histórico: dar de alta un
+  // pasivo sin tocar este select produce exactamente el pasivo que producía antes.
+  const [liabilityFormRepaymentModel, setLiabilityFormRepaymentModel] =
+    useState<LiabilityRepaymentModelApi>("fixed_payments");
   const [editingLiabilityId, setEditingLiabilityId] = useState<string | null>(
     null,
   );
@@ -2388,6 +2393,7 @@ export default function App() {
     setLiabilityFormPaymentEnd("");
     setLiabilityFormNotes("");
     setLiabilityFormDerivePrincipal(false);
+    setLiabilityFormRepaymentModel("fixed_payments");
   }
 
   async function submitLiabilityForm(ev: FormEvent) {
@@ -2437,6 +2443,10 @@ export default function App() {
         base.expense_category_id = liabilityFormExpenseCategoryId;
       }
       base.derive_principal_from_plan = liabilityFormDerivePrincipal;
+      // Se envía SIEMPRE, igual que `derive_principal_from_plan`: el PATCH es set-only y no hay
+      // «volver a NULL», así que mandar el valor del formulario en cada guardado es lo único que
+      // permite deshacer un modelo eligiendo `fixed_payments`.
+      base.repayment_model = liabilityFormRepaymentModel;
       if (!liabilityFormDerivePrincipal) {
         base.principal = toApiDecimalString(liabilityFormPrincipal);
       }
@@ -2536,6 +2546,9 @@ export default function App() {
     setLiabilityFormPaymentEnd(row.payment_end_date ?? "");
     setLiabilityFormNotes(row.notes ?? "");
     setLiabilityFormDerivePrincipal(row.principal_derived_from_plan ?? false);
+    // `?? "fixed_payments"` cubre una respuesta de un backend anterior a 4.2.0 (el campo es
+    // obligatorio en el tipo, pero el tipo describe el servidor de hoy, no el que haya delante).
+    setLiabilityFormRepaymentModel(row.repayment_model ?? "fixed_payments");
   }
 
   // Acciones del modal «¿Guardar snapshot?». Best-effort: si la captura falla la cerramos sin
@@ -3548,6 +3561,8 @@ export default function App() {
             setLiabilityFormNotes={setLiabilityFormNotes}
             liabilityFormDerivePrincipal={liabilityFormDerivePrincipal}
             setLiabilityFormDerivePrincipal={setLiabilityFormDerivePrincipal}
+            liabilityFormRepaymentModel={liabilityFormRepaymentModel}
+            setLiabilityFormRepaymentModel={setLiabilityFormRepaymentModel}
             editingLiabilityId={editingLiabilityId}
             liabilitySaving={liabilitySaving}
             submitLiabilityForm={(e) => void submitLiabilityForm(e)}

@@ -610,11 +610,15 @@ async fn fetch_liabilities(
         Option<NaiveDate>,
         Option<String>,
         i32,
+        String,
     )> = sqlx::query_as(
+        // `repayment_model` va AL FINAL a propósito: la tupla se indexa por posición (`r.0..r.N`)
+        // y meterlo en medio desplazaría en silencio todos los campos siguientes.
         r#"SELECT l.id, c.scope, c.name AS cat_name, ec.name AS expense_cat_name, l.label,
                   l.type_tag, l.principal,
                   l.principal_derived_from_plan, l.apr_percent, l.payment_amount,
-                  l.payment_frequency, l.payment_end_date, l.notes, l.sort_index
+                  l.payment_frequency, l.payment_end_date, l.notes, l.sort_index,
+                  l.repayment_model
            FROM liabilities l
            JOIN categories c ON c.id = l.category_id
            LEFT JOIN categories ec ON ec.id = l.expense_category_id
@@ -649,6 +653,7 @@ async fn fetch_liabilities(
                 payment_end_date: r.11,
                 notes: r.12,
                 sort_index: r.13,
+                repayment_model: r.14,
             }
         })
         .collect();

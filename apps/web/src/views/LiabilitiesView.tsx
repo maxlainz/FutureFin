@@ -3,6 +3,7 @@ import type {
   CategoryRow,
   InstallationAccess,
   LiabilityApiRow,
+  LiabilityRepaymentModelApi,
 } from "../api/types";
 import { EmptyState } from "../components/EmptyState";
 import { MetricCard } from "../components/MetricCard";
@@ -20,6 +21,8 @@ import {
 } from "../lib/format";
 import {
   PAYMENT_FREQ_LABEL,
+  REPAYMENT_MODEL_LABEL,
+  REPAYMENT_MODEL_ORDER,
   type LedgerPersonScope,
   type LiabilityPaymentFreq,
   groupRowsByCategoryOrdered,
@@ -66,6 +69,8 @@ export function LiabilitiesView({
   setLiabilityFormNotes,
   liabilityFormDerivePrincipal,
   setLiabilityFormDerivePrincipal,
+  liabilityFormRepaymentModel,
+  setLiabilityFormRepaymentModel,
   editingLiabilityId,
   liabilitySaving,
   submitLiabilityForm,
@@ -110,6 +115,11 @@ export function LiabilitiesView({
   setLiabilityFormNotes: Dispatch<SetStateAction<string>>;
   liabilityFormDerivePrincipal: boolean;
   setLiabilityFormDerivePrincipal: Dispatch<SetStateAction<boolean>>;
+  /** Modelo de amortización del pasivo (4.2.0); `fixed_payments` es el histórico. */
+  liabilityFormRepaymentModel: LiabilityRepaymentModelApi;
+  setLiabilityFormRepaymentModel: Dispatch<
+    SetStateAction<LiabilityRepaymentModelApi>
+  >;
   editingLiabilityId: string | null;
   liabilitySaving: boolean;
   submitLiabilityForm: (e: FormEvent) => void;
@@ -139,6 +149,8 @@ export function LiabilitiesView({
     liabilityFormPaymentEnd,
     installation?.installation.calendar_tz ?? "UTC",
     currencyIso,
+    liabilityFormRepaymentModel,
+    liabilityFormApr,
   );
 
   const liabilityMetricsReady = hasMembership && !liabilitiesBusy;
@@ -296,6 +308,26 @@ export function LiabilitiesView({
                   maxLength={120}
                   placeholder="Etiqueta libre"
                 />
+              </label>
+              <label className="field">
+                <span className="checkbox-label-with-hint">
+                  Modelo
+                  <InlineHint title="Cuota fija: la cuota va íntegra a principal (histórico). Francés y Revolving devengan interés y exigen TAE > 0 y cuota mensual. Solo intereses mantiene el principal." />
+                </span>
+                <select
+                  value={liabilityFormRepaymentModel}
+                  onChange={(e) =>
+                    setLiabilityFormRepaymentModel(
+                      e.target.value as LiabilityRepaymentModelApi,
+                    )
+                  }
+                >
+                  {REPAYMENT_MODEL_ORDER.map((m) => (
+                    <option key={m} value={m}>
+                      {REPAYMENT_MODEL_LABEL[m]}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label
                 className="field"
@@ -562,6 +594,23 @@ export function LiabilitiesView({
                             >
                               <td>
                                 {row.label}
+                                {/* Solo cuando el modelo NO es el histórico: un chip «Cuota fija»
+                                    en cada fila sería ruido en el 100 % de los pasivos previos a
+                                    4.2.0. El chip marca lo que es información nueva. */}
+                                {row.repayment_model &&
+                                row.repayment_model !== "fixed_payments" ? (
+                                  <>
+                                    {" "}
+                                    <span
+                                      className="chip"
+                                      title="Modelo de amortización del pasivo"
+                                    >
+                                      {REPAYMENT_MODEL_LABEL[
+                                        row.repayment_model
+                                      ] ?? row.repayment_model}
+                                    </span>
+                                  </>
+                                ) : null}
                                 {!row.expense_category_id ? (
                                   <span
                                     className="muted"

@@ -36,6 +36,11 @@ src/
 │   ├── ledger.ts                 # shared by views: ledgerViewQs, groupRowsByCategoryOrdered, asset/liability portfolio helpers,
 │   │                             #   PAYMENT_FREQ_LABEL, formatProjectionMilestoneCompactLabel, budgetCategoryMap,
 │   │                             #   sortBudgetEntriesMacStyle, formatAxisMoney, LedgerPersonScope, LiabilityPaymentFreq
+│   │                             #   4.2.0: REPAYMENT_MODEL_LABEL/ORDER + liabilityDerivedPrincipalNum /
+│   │                             #   liabilityDerivedPrincipalPreview (Σ cuotas en fixed_payments, valor actual al TIN
+│   │                             #   en french; devuelve null en todo estado que el POST rechazaría con 400)
+│   ├── ledger.repayment-model.test.ts  # 4.2.0 — paridad con apps/api/tests/fixtures/liability-derived-principal-parity.json
+│   │                             #   (patrón fire-parity: mismo JSON leído por el test Rust y por Vitest) + puertas del preview
 │   ├── fire.ts                   # client-side FIRE math for the live form preview (mirror of handlers/projection.rs):
 │   │                             #   defaultFireSettingsApi, normalizeInstallationFireSettings, taxOnGrossCapitalAnnual,
 │   │                             #   grossUpNetAnnualFire, computeFireAnnualNeedNetEur, findFirstMonthNetWorthAtLeastInflated
@@ -106,7 +111,10 @@ src/
 ├── views/                        # one file per tab — receives props from App.tsx, owns local UI state
 │   ├── SummaryView.tsx           # KPIs → Salud financiera → Proyección 12m (zoomY) → Desglose
 │   ├── AssetsView.tsx
-│   ├── LiabilitiesView.tsx       # tabla sin columna Tipo
+│   ├── LiabilitiesView.tsx       # tabla sin columna Tipo. 4.2.0: select «Modelo» + InlineHint por modelo, controles
+│   │                             #   (weekly, derive) deshabilitados donde el server daría 400, preview del principal
+│   │                             #   derivado, y chip del modelo en el listado SOLO cuando ≠ cuota fija (chip existente,
+│   │                             #   tokens del sistema, cero CSS nuevo)
 │   ├── BudgetView.tsx            # KPIs + Distribución (PlanningDirectionChart) + columnas Ingresos/Gastos
 │   ├── GastosView.tsx            # pestaña «Movimientos» (título «Movimientos» desde v1.8.0; TabId interno sigue siendo "expenses"). Vista AUTÓNOMA (self-fetch,
 │   │                             #   patrón HistorySettingsPanel): KPIs cuya cifra principal es el PROMEDIO de la ventana (etiqueta «… promedio (3m/6m/12m/YTD/total)», «—» sin datos);

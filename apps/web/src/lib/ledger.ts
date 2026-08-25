@@ -8,6 +8,7 @@ import type {
   BudgetEntryApiRow,
   CategoryRow,
   LiabilityApiRow,
+  LiabilityRepaymentModelApi,
 } from "../api/types";
 import { paymentIntervalCountUtc, todayYmdInTimeZone } from "./dates";
 import {
@@ -26,20 +27,99 @@ export const PAYMENT_FREQ_LABEL: Record<"monthly" | "weekly", string> = {
 
 export type LiabilityPaymentFreq = "" | "monthly" | "weekly";
 
+/** Orden de los `<option>` del formulario: el histórico primero, luego por cercanía conceptual. */
+export const REPAYMENT_MODEL_ORDER: LiabilityRepaymentModelApi[] = [
+  "fixed_payments",
+  "french",
+  "interest_only",
+  "revolving",
+];
+
+export const REPAYMENT_MODEL_LABEL: Record<LiabilityRepaymentModelApi, string> =
+  {
+    fixed_payments: "Cuota fija",
+    french: "Francés",
+    interest_only: "Solo intereses",
+    revolving: "Revolving",
+  };
+
+/**
+ * Valor actual de una renta de `months` cuotas de `monthlyPayment` al TIN nominal anual
+ * `aprPercent` (`i = apr / 1200`):
+ *
+ * `P = M · (1 − (1 + i)^−n) / i`
+ *
+ * Espejo EXACTO de `futurefin_engine::present_value_of_payments` (`crates/engine/src/projection.rs`),
+ * incluido su caso degenerado: `apr` ausente o `≤ 0` devuelve `M · n` sin tocar la potencia — el
+ * límite de la fórmula cuando `i → 0`. Aquí es `number` (f64) y allí `Decimal`: es una **vista
+ * previa** que se pinta redondeada al euro, nunca el valor que se guarda (ese lo calcula el
+ * servidor). La paridad de las dos implementaciones la fija
+ * `apps/api/tests/fixtures/liability-derived-principal-parity.json`.
+ */
+export function presentValueOfPayments(
+  monthlyPayment: number,
+  months: number,
+  aprPercent: number | null,
+): number {
+  const plain = monthlyPayment * months;
+  if (aprPercent === null || !Number.isFinite(aprPercent) || aprPercent <= 0) {
+    return plain;
+  }
+  const i = aprPercent / 1200;
+  const pv = (monthlyPayment * (1 - Math.pow(1 + i, -months))) / i;
+  return Number.isFinite(pv) ? pv : plain;
+}
+
+/**
+ * Principal derivado de `n` cuotas, por modelo — espejo de `derive_principal_from_payment_plan`
+ * (`apps/api/src/handlers/liabilities.rs`):
+ *
+ * - `fixed_payments` → `Σ cuotas` = `cuota × n` (contrato histórico, sin cambio).
+ * - `french` → valor actual de esas cuotas al TIN: el capital pendiente de verdad.
+ * - `interest_only` / `revolving` → el servidor rechaza derivar (`derive_not_supported_for_model`),
+ *   así que aquí no hay número que enseñar: `null`.
+ */
+export function liabilityDerivedPrincipalNum(
+  paymentAmount: number,
+  intervals: number,
+  model: LiabilityRepaymentModelApi,
+  aprPercent: number | null,
+): number | null {
+  if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) return null;
+  if (!Number.isFinite(intervals) || intervals <= 0) return null;
+  if (model === "interest_only" || model === "revolving") return null;
+  if (model === "french") {
+    if (aprPercent === null || !(aprPercent > 0)) return null;
+    return presentValueOfPayments(paymentAmount, intervals, aprPercent);
+  }
+  return paymentAmount * intervals;
+}
+
+/**
+ * Vista previa del principal derivado, ya formateada. Devuelve `null` —y la UI no pinta nada—
+ * siempre que el servidor fuese a rechazar esa combinación: es preferible callar a prometer un
+ * número que el POST no va a producir (`weekly` solo existe en `fixed_payments`, `french` exige
+ * TIN > 0, y `interest_only`/`revolving` no derivan).
+ */
 export function liabilityDerivedPrincipalPreview(
   amountStr: string,
   freq: LiabilityPaymentFreq,
   endYmd: string,
   installationCalendarTz: string,
   currencyIso: string,
+  model: LiabilityRepaymentModelApi = "fixed_payments",
+  aprStr = "",
 ): string | null {
   if (!freq || !endYmd.trim()) return null;
+  if (model !== "fixed_payments" && freq === "weekly") return null;
   const startYmd = todayYmdInTimeZone(installationCalendarTz);
   const n = paymentIntervalCountUtc(freq, startYmd, endYmd.trim());
   if (n === null || n <= 0) return null;
   const amount = Number(amountStr.trim().replace(",", "."));
   if (!Number.isFinite(amount) || amount <= 0) return null;
-  const total = amount * n;
+  const apr = parseDisplayDecimal(String(aprStr).trim());
+  const total = liabilityDerivedPrincipalNum(amount, n, model, apr);
+  if (total === null) return null;
   return formatCurrencyNumber(total, currencyIso);
 }
 

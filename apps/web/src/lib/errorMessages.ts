@@ -255,6 +255,16 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Para calcular el capital pendiente a partir del plan hace falta la periodicidad.",
   payment_end_date_required_for_derived_principal:
     "Para calcular el capital pendiente a partir del plan hace falta la fecha del último pago.",
+  repayment_model_invalid:
+    "Ese modelo de deuda no existe. Elige cuota fija, francés, solo intereses o revolving.",
+  apr_required_for_model:
+    "Para una deuda francesa o revolving hace falta la TAE (mayor que cero).",
+  payment_plan_required_for_model:
+    "Ese modelo de deuda necesita plan de pagos: indica cuota y periodicidad.",
+  derive_not_supported_for_model:
+    "El capital pendiente solo se puede calcular del plan en cuota fija o francés.",
+  weekly_not_supported_for_model:
+    "La periodicidad semanal solo vale para deudas de cuota fija.",
 
   // ── Presupuesto y próximos ────────────────────────────────────────────────────────────
   budget_entry_category_scope_unsupported:

@@ -779,10 +779,18 @@ pub struct CreateLiabilityParams {
     /// Principal >= 0 como string decimal. Obligatorio salvo derive_principal_from_plan.
     #[serde(default)]
     pub principal: Option<String>,
-    /// true = derivar el principal del plan de pago (exige payment_amount + payment_frequency
-    /// + payment_end_date; principal = cuota × nº de pagos pendientes, SIN descontar intereses).
+    /// true = derivar el principal del plan de pago (exige payment_amount, payment_frequency y
+    /// payment_end_date). Con repayment_model fixed_payments el principal es cuota × nº de pagos
+    /// pendientes (SIN descontar intereses); con french es el valor actual de esas cuotas al
+    /// TIN, que es el capital pendiente de verdad.
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
+    /// Modelo de amortización: "fixed_payments" (default, la cuota va íntegra a principal y no
+    /// se devengan intereses), "french" (sistema francés, exige apr_percent > 0),
+    /// "interest_only" (la cuota es el interés, el principal no baja) o "revolving".
+    /// Todos menos fixed_payments exigen plan de pago mensual (weekly no se admite).
+    #[serde(default)]
+    pub repayment_model: Option<String>,
     /// TAE en % >= 0, string decimal.
     #[serde(default)]
     pub apr_percent: Option<String>,
@@ -816,10 +824,15 @@ pub struct UpdateLiabilityParams {
     /// Principal >= 0, string decimal. Ignorado si el principal queda derivado del plan.
     #[serde(default)]
     pub principal: Option<String>,
-    /// true = derivar el principal del plan de pago (cuota + frecuencia + fecha fin,
-    /// principal = cuota × nº de pagos, sin descuento); false = volver a principal explícito.
+    /// true = derivar el principal del plan de pago (cuota + frecuencia + fecha fin; Σ cuotas en
+    /// fixed_payments, valor actual al TIN en french); false = volver a principal explícito.
+    /// Cambiar el modelo o el TIN con esto activo RE-DERIVA el principal.
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
+    /// Nuevo modelo de amortización: "fixed_payments" | "french" | "interest_only" |
+    /// "revolving". Set-only: omitirlo conserva el actual.
+    #[serde(default)]
+    pub repayment_model: Option<String>,
     /// TAE en % >= 0, string decimal.
     #[serde(default)]
     pub apr_percent: Option<String>,
@@ -1043,7 +1056,7 @@ const LIST_RULES_MAX_LIMIT: usize = 200;
 impl FutureFinMcp {
     #[tool(
         name = "get_summary",
-        description = "Resumen financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingresos/gastos mensuales, tasa de ahorro, runway de líquidos) y desgloses por categoría. Importes como strings decimales. OJO: `financial_health` trae DOS cifras de ahorro mensual y no son intercambiables. `net_monthly_equivalent` es el ahorro REAL del modo activo (`savings_source`) y es el que usa el motor — cuadra con `recurring_net` de get_allocation_resolution y con `net_monthly` de simulate_projection, y es el NUMERADOR de `savings_rate` (el denominador es `income_monthly_equivalent`). No lo compares directamente con `monthly_delta_assumption` de get_projection: en modo A esa cifra es la misma ANTES de restar el servicio de deuda, así que con cualquier pasivo con plan de pago difieren exactamente en la cuota. `savings_expected_monthly_equivalent` es el ahorro que sale del PRESUPUESTO, siempre, sin seguir al modo: existe solo para el delta «real vs plan». En modo A (budget) coinciden por construcción; en B y C difieren, y elegir mal desplaza la respuesta. Para razonar o hacer cuentas usa `net_monthly_equivalent`. `savings_rate` y `debt_to_assets_ratio` son FRACCIONES, no porcentajes: 0.35 es 35 %. `runway_months` null significa DOS cosas distintas — míralo junto a `runway_is_indefinite`: con `true` los líquidos cubren el gasto indefinidamente (no es falta de datos); con `false` es que no hay base de gasto. Y 1200 es el SUELO de la escala («al menos 100 años»), no una medida. `net_return_nominal_annual_pct` y `net_return_real_annual_pct` son PORCENTAJES (3.5556 es 3,5556 %/año), a diferencia de `savings_rate`: es el rendimiento anual ESPERADO del patrimonio neto según las rentabilidades que el usuario configuró activo por activo, menos el interés de los pasivos vivos, no una rentabilidad histórica ni realizada. El real descuenta la inflación configurada. Ambos faltan a la vez cuando el patrimonio neto no es positivo. Aviso al razonar: la proyección NO descuenta el interés de la deuda, así que esta cifra es más conservadora que lo que simula get_projection.",
+        description = "Resumen financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingresos/gastos mensuales, tasa de ahorro, runway de líquidos) y desgloses por categoría. Importes como strings decimales. OJO: `financial_health` trae DOS cifras de ahorro mensual y no son intercambiables. `net_monthly_equivalent` es el ahorro REAL del modo activo (`savings_source`) y es el que usa el motor — cuadra con `recurring_net` de get_allocation_resolution y con `net_monthly` de simulate_projection, y es el NUMERADOR de `savings_rate` (el denominador es `income_monthly_equivalent`). No lo compares directamente con `monthly_delta_assumption` de get_projection: en modo A esa cifra es la misma ANTES de restar el servicio de deuda, así que con cualquier pasivo con plan de pago difieren exactamente en la cuota. `savings_expected_monthly_equivalent` es el ahorro que sale del PRESUPUESTO, siempre, sin seguir al modo: existe solo para el delta «real vs plan». En modo A (budget) coinciden por construcción; en B y C difieren, y elegir mal desplaza la respuesta. Para razonar o hacer cuentas usa `net_monthly_equivalent`. `savings_rate` y `debt_to_assets_ratio` son FRACCIONES, no porcentajes: 0.35 es 35 %. `runway_months` null significa DOS cosas distintas — míralo junto a `runway_is_indefinite`: con `true` los líquidos cubren el gasto indefinidamente (no es falta de datos); con `false` es que no hay base de gasto. Y 1200 es el SUELO de la escala («al menos 100 años»), no una medida. `net_return_nominal_annual_pct` y `net_return_real_annual_pct` son PORCENTAJES (3.5556 es 3,5556 %/año), a diferencia de `savings_rate`: es el rendimiento anual ESPERADO del patrimonio neto según las rentabilidades que el usuario configuró activo por activo, menos el interés de los pasivos vivos, no una rentabilidad histórica ni realizada. El real descuenta la inflación configurada. Ambos faltan a la vez cuando el patrimonio neto no es positivo. Aviso al razonar: aquí cuenta el interés de TODOS los pasivos vivos, mientras que la proyección solo devenga interés en los pasivos cuyo `repayment_model` lo devenga (`french` o `revolving`) y con plan de pago activo; con cualquier deuda en `fixed_payments` esta cifra sigue siendo más conservadora que lo que simula get_projection.",
         annotations(title = "Resumen financiero", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_summary(
@@ -2370,7 +2383,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_liability",
-        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), y principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin — el principal se deriva como cuota × nº de pagos pendientes, una SUMA SIN DESCONTAR INTERESES — no es amortización francesa: para una hipoteca a 20 años sale bastante por encima del capital pendiente real, así que si el usuario conoce su capital pendiente, pásalo en `principal` en vez de derivarlo). Mueve la proyección entera.",
+        description = "Da de alta un pasivo (deuda/préstamo): label, categoría scope liability, categoría de GASTO de la cuota (expense_category_id — donde presupuesto y Movimientos atribuyen el plan), principal explícito O derive_principal_from_plan=true con el plan completo (cuota + frecuencia monthly|weekly + fecha fin), y repayment_model. Los cuatro modelos: `fixed_payments` (default e histórico — la cuota va íntegra a principal, el pasivo NO devenga intereses); `french` (sistema francés, interés sobre el saldo de apertura, exige apr_percent > 0 y cuota mensual); `interest_only` (la cuota declarada ES el interés, el principal no baja); `revolving` (misma recurrencia que el francés). Derivar el principal significa Σ cuotas en `fixed_payments` —una suma SIN descontar intereses, que para una hipoteca a 20 años sale bastante por encima del capital pendiente real— y el VALOR ACTUAL de esas cuotas al TIN en `french`, que sí es el capital pendiente. Si el usuario conoce su capital pendiente, pásalo en `principal` en vez de derivarlo. Mueve la proyección entera.",
         annotations(title = "Crear pasivo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_liability(
@@ -2389,6 +2402,11 @@ impl FutureFinMcp {
                 label: p.label.clone(),
                 type_tag: None,
                 derive_principal_from_plan: p.derive_principal_from_plan,
+                repayment_model: p
+                    .repayment_model
+                    .as_deref()
+                    .map(crate::handlers::liabilities::RepaymentModel::parse)
+                    .transpose()?,
                 principal: p
                     .principal
                     .as_deref()
@@ -2438,7 +2456,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_liability",
-        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %»): label, categorías, TAE, plan de pago (cuota + frecuencia monthly|weekly + fecha fin), principal explícito o re-derivado del plan (derive_principal_from_plan). Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección entera.",
+        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %», «mi préstamo es francés, no cuota fija»): label, categorías, TAE, plan de pago (cuota + frecuencia monthly|weekly + fecha fin), repayment_model y principal explícito o re-derivado del plan (derive_principal_from_plan). Los cuatro modelos: `fixed_payments` (default e histórico — la cuota va íntegra a principal, sin intereses); `french` (sistema francés, exige apr_percent > 0 y cuota mensual); `interest_only` (la cuota es el interés, el principal no baja); `revolving` (misma recurrencia que el francés). Derivar el principal es Σ cuotas en `fixed_payments` y el valor actual al TIN en `french`; cambiar el modelo o la TAE con derive activo re-deriva el principal. Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección entera.",
         annotations(title = "Editar pasivo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_liability(
@@ -2464,6 +2482,11 @@ impl FutureFinMcp {
                     label: p.label.clone(),
                     type_tag: None,
                     derive_principal_from_plan: p.derive_principal_from_plan,
+                    repayment_model: p
+                        .repayment_model
+                        .as_deref()
+                        .map(crate::handlers::liabilities::RepaymentModel::parse)
+                        .transpose()?,
                     principal: p
                         .principal
                         .as_deref()

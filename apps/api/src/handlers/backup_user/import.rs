@@ -517,8 +517,8 @@ async fn insert_payload(
             r#"INSERT INTO liabilities (
                    id, installation_id, owner_user_id, category_id, expense_category_id, label,
                    type_tag, principal, principal_derived_from_plan, apr_percent, payment_amount,
-                   payment_frequency, payment_end_date, notes, sort_index
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
+                   payment_frequency, payment_end_date, notes, sort_index, repayment_model
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
         )
         .bind(new_id)
         .bind(iid)
@@ -535,6 +535,12 @@ async fn insert_payload(
         .bind(l.payment_end_date)
         .bind(l.notes.as_deref())
         .bind(l.sort_index)
+        // Este INSERT bypasea a propósito la validación del create (igual que con
+        // `expense_category_id`): un backup restaura lo que había, no lo que hoy sería válido.
+        // Consecuencia buscada: un pasivo `french` sin TIN importa sin error y el engine lo trata
+        // como si no devengara (degeneración garantizada en `liability_month`). El único filtro
+        // es el CHECK de la columna — un literal inventado sí revienta el import, y debe.
+        .bind(&l.repayment_model)
         .execute(&mut **tx)
         .await?;
         new_liability_ids.push(new_id);

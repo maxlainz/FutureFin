@@ -414,6 +414,47 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     assert_eq!(apr, "2.10".parse::<rust_decimal::Decimal>().unwrap());
     let cuota: rust_decimal::Decimal = row["payment_amount"].as_str().unwrap().parse().unwrap();
     assert_eq!(cuota, "650".parse::<rust_decimal::Decimal>().unwrap());
+    // El modelo de amortización viaja en el listado desde 4.2.0, y el pasivo sigue en el
+    // histórico mientras nadie lo cambie.
+    assert_eq!(row["repayment_model"], "fixed_payments");
+
+    // 4.2.0 — «mi préstamo es francés»: el modelo se fija por MCP (la fila ya tiene TIN 2,10 y
+    // cuota mensual 650, así que el estado resultante es coherente) y se ve por HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_liability",
+            json!({"liability_id": liability_id, "repayment_model": "french"}),
+        ),
+    )
+    .await;
+    tool_json(&envelope);
+    let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["id"] == liability_id.as_str())
+        .expect("pasivo visible")
+        .clone();
+    assert_eq!(row["repayment_model"], "french");
+
+    // Un literal fuera del dominio no llega a la core: por MCP el parámetro es un String suelto
+    // (no hay serde que lo rechace como en HTTP), así que el 400 es nuestro y nombra las opciones.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_liability",
+            json!({"liability_id": liability_id, "repayment_model": "aleman"}),
+        ),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    let msg = body["message"].as_str().unwrap();
+    assert!(msg.starts_with("repayment_model_invalid"), "{body}");
+    assert!(msg.contains("must be one of"), "{body}");
 
     // Error de dominio compartido con el PATCH: sin ningún campo → 400 de la core.
     let envelope = mcp_post(
