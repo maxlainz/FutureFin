@@ -1074,7 +1074,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection",
-        description = "Proyección de patrimonio y jubilación (FIRE): serie futura de patrimonio neto (~82 puntos, mes 0-12 mensual y anual después), objetivo FIRE por mes, jubilación estimada — `jubilacion_month_index` para indexar las series, y ya resueltas en servidor `jubilacion_date_ymd` (fecha civil) y `jubilacion_age` (años cumplidos; null sin fecha de nacimiento) —, hitos de patrimonio y supuestos usados. `jubilacion_target_net_worth` está en **euros de HOY**: el objetivo crece con la inflación, así que el objetivo nominal del mes en que se cruza es bastante mayor que esa cifra — no la presentes como «necesitas X para jubilarte» sin decir en qué euros está. `fire_target_series` no lleva índice propio: es **paralela por posición** a `points`. Los valores de las series son números en euros nominales. Omite `months` salvo necesidad: sin él la respuesta sale de cache; con él se recomputa entera.",
+        description = "Proyección de patrimonio y jubilación (FIRE): serie futura de patrimonio neto (~82 puntos, mes 0-12 mensual y anual después), objetivo FIRE por mes, jubilación estimada — `jubilacion_month_index` para indexar las series, y ya resueltas en servidor `jubilacion_date_ymd` (fecha civil) y `jubilacion_age` (años cumplidos; null sin fecha de nacimiento) —, hitos de patrimonio y supuestos usados. `jubilacion_target_net_worth` está en **euros de HOY**: el objetivo crece con la inflación, así que el objetivo nominal del mes en que se cruza es bastante mayor que esa cifra — no la presentes como «necesitas X para jubilarte» sin decir en qué euros está. `fire_target_series` no lleva índice propio: es **paralela por posición** a `points`. Los valores de las series son números en euros nominales. La deuda se simula según el `repayment_model` de cada pasivo (ver list_liabilities): solo `french` y `revolving` devengan intereses, y solo mientras el plan de pago está activo — con todo en `fixed_payments` la amortización es 1:1 con la cuota, como antes de 4.2.0. Omite `months` salvo necesidad: sin él la respuesta sale de cache; con él se recomputa entera.",
         annotations(title = "Proyección FIRE", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection(
@@ -1301,7 +1301,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_liabilities",
-        description = "Pasivos activos (deudas/préstamos): principal, TAE, cuota y frecuencia de pago, fecha fin del plan. Los pasivos con plan de pago ya vencido se filtran. La cuota de cada uno aparece además como partida de gasto en get_budget.",
+        description = "Pasivos activos (deudas/préstamos): principal, TAE, cuota y frecuencia de pago, fecha fin del plan y `repayment_model` (fixed_payments | french | interest_only | revolving) — el modelo decide cómo simula la proyección esa deuda: con `fixed_payments` la cuota va íntegra a principal sin intereses; con `french`/`revolving` devenga interés al TIN sobre el saldo; con `interest_only` el principal no baja. Los pasivos con plan de pago ya vencido se filtran. La cuota de cada uno aparece además como partida de gasto en get_budget.",
         annotations(title = "Pasivos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_liabilities(
