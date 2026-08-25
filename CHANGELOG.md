@@ -4,6 +4,19 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Corregido
+
+- **El catálogo MCP no contaba entero el modelo de amortización nuevo**: las tools
+  `create_liability`/`update_liability` y `get_summary` salieron en 4.2.0 con los matices del
+  `repayment_model`, pero `list_liabilities` seguía enumerando los campos del pasivo sin el
+  modelo, y `get_projection` no decía cómo simula ahora la deuda. Un cliente MCP que solo
+  leyera esas dos descripciones podía razonar con el modelo antiguo (amortización 1:1 siempre).
+  Ambas descripciones nombran ya el `repayment_model` y su efecto: solo `french`/`revolving`
+  devengan intereses, y solo con plan de pago activo. Sin cambios de esquema ni de datos —
+  las descripciones de tools son contrato y por eso esto es un patch, no un arreglo de docs.
+
 ## [4.2.0] - 2026-08-25
 
 ### Proyección — Modelo de amortización por pasivo: la deuda ya devenga intereses
