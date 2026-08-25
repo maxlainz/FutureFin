@@ -377,6 +377,16 @@ export type FfbackupImportApplyResponse = {
   };
 };
 
+/**
+ * Modelo de amortización del pasivo (4.2.0). Literales exactos del wire — espejo de
+ * `RepaymentModel` en `apps/api/src/handlers/liabilities.rs` (serde `snake_case`).
+ */
+export type LiabilityRepaymentModelApi =
+  | "fixed_payments"
+  | "french"
+  | "interest_only"
+  | "revolving";
+
 export type LiabilityApiRow = {
   id: string;
   category_id: string;
@@ -385,6 +395,11 @@ export type LiabilityApiRow = {
   label: string;
   type_tag: string | null;
   principal_derived_from_plan?: boolean;
+  /**
+   * Siempre presente en el wire (columna NOT NULL con default `fixed_payments`, y el backend no
+   * la omite nunca) — por eso NO es opcional aquí: un pasivo sin modelo no existe.
+   */
+  repayment_model: LiabilityRepaymentModelApi;
   principal: string;
   apr_percent: string | null;
   payment_amount: string | null;
