@@ -350,6 +350,8 @@ Dos artefactos suyos que NO hay que «limpiar» a mano:
   rutina lo roba. Borrarla a mano en mitad de una pasada deja dos sesiones escribiendo a la vez.
 - **El issue con label `dependabot-mirror`**: espejo de las alertas abiertas, regenerado por
   `dependabot-alerts-mirror.yml` (la rutina no puede leer la API de alertas desde su sandbox
-  y lee este issue en su lugar). Con 0 alertas queda abierto con `SIN_ALERTAS: true` — no
-  cerrarlo. Necesita el secret `DEPENDABOT_ALERTS_TOKEN` (el `GITHUB_TOKEN` de Actions no
+  y lee este issue en su lugar). Su ESTADO es parte del dato y lo gestiona el workflow — no
+  tocarlo a mano: abierto ⟺ hay alertas; con 0 alertas queda **cerrado** con
+  `SIN_ALERTAS: true` (cerrado+fresco = cero; ausente o `GENERADO` >36h = espejo roto).
+  Necesita el secret `DEPENDABOT_ALERTS_TOKEN` (el `GITHUB_TOKEN` de Actions no
   puede leer alertas; TODO: sustituir el actual por un PAT fine-grained de solo lectura).
