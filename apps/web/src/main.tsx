@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles/theme.css";
 import "./index.css";
 import App from "./App.tsx";
+import { stripBase } from "./lib/basePath";
 import { chartPerf } from "./lib/perf";
 
 // La pantalla de autorización OAuth se resuelve AQUÍ, no en el router de App.tsx: su
@@ -14,7 +15,7 @@ const OAuthAuthorizeView = lazy(() =>
   })),
 );
 const isOAuthAuthorize =
-  window.location.pathname.replace(/\/+$/, "") === "/oauth/authorize";
+  stripBase(window.location.pathname).replace(/\/+$/, "") === "/oauth/authorize";
 
 // Detecta tasks que bloquean el main thread durante el flujo del chart.
 // Solo activo bajo `?perf=1` o `localStorage.debug:chart-perf=1`.

@@ -202,6 +202,7 @@ src/
 |----|----|
 | New API type returned by the backend | `api/types.ts` (export it) |
 | New fetch endpoint wrapper | `api/client.ts` if reusable, otherwise inline in `App.tsx` next to existing handlers |
+| **Cualquier URL absoluta que resuelva el navegador** (destino de `fetch`, `pushState`) | pásala por `apiUrl`/`appUrl` de `lib/basePath.ts`; lee `window.location.pathname` con `stripBase`. Sin proxy (`window.__FF_BASE__` ausente) son la identidad. `api/client.ts` ya lo hace por ti — solo los `fetch(` directos de `App.tsx`/`views/` lo necesitan a mano |
 | New pure formatter / parser | `lib/format.ts` (with a Vitest in `lib/format.test.ts`) |
 | **Campo de formulario que envía un importe/porcentaje** | `toApiDecimalString(raw)` de `lib/format.ts`, DENTRO del `try` del submit. Ver §Importes tecleados |
 | **Recortar una serie de proyección por un mes** | `lastPointIndexAtOrBeforeMonth(points, mes)` de `lib/projection-chart.ts`. Ver §Índice de array ≠ mes |
