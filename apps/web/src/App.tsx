@@ -38,7 +38,7 @@ import { MobileNavDrawer } from "./components/MobileNavDrawer";
 import { SummaryView } from "./views/SummaryView";
 import type { BudgetScopeToggle } from "./views/BudgetView";
 import { BootstrapInstallationPanel } from "./auth/BootstrapInstallationPanel";
-import { apiUrl, appUrl, stripBase } from "./lib/basePath";
+import { apiUrl, appUrl, stripBase, SSO_AVAILABLE } from "./lib/basePath";
 import { ledgerViewQs } from "./lib/ledger";
 import { savingsSourceUsesTransactions } from "./lib/fire";
 import { readFileAsBase64 } from "./lib/files";
@@ -248,6 +248,17 @@ type FfbackupImportApplyResponse = {
     projection_focus?: string | null;
   };
 };
+
+/**
+ * ¿Ya se ha intentado la sesión automática por SSO en esta carga de página?
+ *
+ * A nivel de módulo y no en un ref: el intento debe ocurrir UNA vez por carga, y el doble
+ * montaje de StrictMode (o un `refreshSession` que se repita) dispararía un segundo POST que
+ * crearía una segunda fila en `sessions` sin que nadie la use. Cerrar sesión a mano tiene que
+ * llevar a la pantalla de acceso, no a un login automático inmediato: de ahí que el flag no se
+ * reinicie nunca.
+ */
+let ssoAttempted = false;
 
 export default function App() {
   const ledgerScopeSelectId = useId();
@@ -628,6 +639,26 @@ export default function App() {
     try {
       const res = await fetch(apiUrl("/v1/auth/me"), defaultFetchInit);
       if (res.status === 401) {
+        // Sin sesión, pero el shell nos ha dicho que delante hay un proxy que ya sabe quién
+        // eres (Ingress de Home Assistant): se canjea esa identidad por una sesión normal antes
+        // de enseñar el formulario de acceso. Cualquier fallo cae al login de siempre — el SSO
+        // es un atajo, nunca la única puerta.
+        if (SSO_AVAILABLE && !ssoAttempted) {
+          ssoAttempted = true;
+          try {
+            const sso = await fetch(apiUrl("/v1/auth/sso"), {
+              ...defaultFetchInit,
+              method: "POST",
+            });
+            if (sso.ok) {
+              const me = (await sso.json()) as UserResponse;
+              setUser(me);
+              return;
+            }
+          } catch {
+            // Red caída o proxy que no responde: al login normal.
+          }
+        }
         setUser(null);
         return;
       }

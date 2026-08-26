@@ -30,7 +30,7 @@ pub const SESSION_COOKIE: &str = "ff_session";
 ///
 /// Invariante maestro: sin cabeceras de proxy el prefijo es `""` y la cookie sale con `Path=/`,
 /// **byte a byte** como siempre — el modo compose no cambia.
-fn session_cookie_path(state: &AppState, headers: &http::HeaderMap) -> String {
+pub(crate) fn session_cookie_path(state: &AppState, headers: &http::HeaderMap) -> String {
     let p = state.request_prefix(headers);
     if p.is_empty() {
         "/".to_string()
@@ -93,16 +93,30 @@ pub struct PatchMeBody {
 #[derive(Debug, FromRow)]
 struct UserAuthRow {
     id: Uuid,
+    #[allow(dead_code)]
     username: String,
-    password_hash: String,
+    /// `None` = cuenta SSO sin contraseña (ver la migración `users_trusted_header_identity`).
+    password_hash: Option<String>,
+    #[allow(dead_code)]
     birth_date: Option<NaiveDate>,
 }
 
 #[derive(Debug, FromRow)]
-struct UserRow {
-    id: Uuid,
-    username: String,
-    birth_date: Option<NaiveDate>,
+pub(crate) struct UserRow {
+    pub id: Uuid,
+    pub username: String,
+    pub birth_date: Option<NaiveDate>,
+}
+
+/// Error común a los dos sitios donde una cuenta sin contraseña se topa con el flujo de
+/// contraseña: `POST /v1/auth/login` y `POST /v1/auth/password`. Es un 401 **hablado** a
+/// propósito (ver `ApiError::UnauthorizedWith`): quien tiene una cuenta creada por el proxy no
+/// tiene ninguna contraseña que probar, y un 401 mudo lo dejaría tecleando para siempre.
+pub(crate) fn sso_account_no_password() -> ApiError {
+    ApiError::UnauthorizedWith(
+        "sso_account_no_password: this account signs in through the trusted proxy (Home Assistant)"
+            .into(),
+    )
 }
 
 pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
@@ -156,7 +170,7 @@ fn validate_birth_date(d: NaiveDate) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn user_row_to_response(row: UserRow) -> UserResponse {
+pub(crate) fn user_row_to_response(row: UserRow) -> UserResponse {
     UserResponse {
         id: UserId(row.id),
         username: row.username,
@@ -200,13 +214,20 @@ pub async fn register(
     .fetch_one(&mut *tx)
     .await
     // El `?` normal mapearía el SQLSTATE 23505 a un `Conflict` pelado, que llega a la SPA como
-    // «resource conflict»: el único unique de esta tabla es `username`, así que aquí SÍ sabemos
-    // qué colisionó y podemos decirlo.
-    .map_err(|e| match ApiError::from(e) {
-        ApiError::Conflict => ApiError::ConflictWith(
-            "username_taken: that username is already registered".into(),
-        ),
-        other => other,
+    // «resource conflict»: cuando sabemos QUÉ colisionó hay que decirlo. Y desde el SSO por
+    // cabeceras `username` **ya no es el único unique de la tabla** (`users_external_user_id_key`
+    // también lo es), así que se comprueba el nombre de la restricción antes de traducir: sin
+    // eso, una colisión de identidad externa se anunciaría como «ese nombre ya está registrado»
+    // y mandaría al usuario a cambiar algo que no tiene nada que ver.
+    .map_err(|e| {
+        let is_username = matches!(&e, sqlx::Error::Database(db)
+            if db.constraint() == Some("users_username_key"));
+        match (ApiError::from(e), is_username) {
+            (ApiError::Conflict, true) => ApiError::ConflictWith(
+                "username_taken: that username is already registered".into(),
+            ),
+            (other, _) => other,
+        }
     })?;
 
     match bootstrap_installation_as_owner_if_empty(&mut tx, &row.id).await
@@ -254,13 +275,23 @@ pub async fn login(
     .bind(&body.username)
     .fetch_optional(&state.pool)
     .await?;
-    // Se verifica SIEMPRE, exista el usuario o no: la rama inexistente pasa por el mismo
-    // coste de Argon2id, así que el 401 no delata quién tiene cuenta (ver `password.rs`).
-    let stored = user.as_ref().map(|u| u.password_hash.clone());
-    password::verify_password_blocking(&body.password, stored).await?;
+    // Se verifica SIEMPRE, exista el usuario o no —y también cuando existe SIN contraseña—: las
+    // tres ramas pasan por el mismo coste de Argon2id, así que el 401 no delata quién tiene
+    // cuenta por el reloj (ver `password.rs`).
+    let stored = user.as_ref().and_then(|u| u.password_hash.clone());
+    let verified = password::verify_password_blocking(&body.password, stored).await;
     let Some(user) = user else {
+        verified?;
         return Err(ApiError::Unauthorized);
     };
+    if user.password_hash.is_none() {
+        // Cuenta creada por el proxy de confianza: no hay contraseña que acertar. Decirlo revela
+        // que ese nombre existe como cuenta SSO, y es un intercambio buscado: sin el mensaje, el
+        // único usuario del add-on de Home Assistant se queda encallado en un 401 mudo tecleando
+        // una contraseña que nunca se fijó.
+        return Err(sso_account_no_password());
+    }
+    verified?;
     let expires_at = Utc::now() + Duration::days(state.session_ttl_days);
     let sid: Uuid = sqlx::query_scalar(
         r#"INSERT INTO sessions (user_id, expires_at) VALUES ($1, $2) RETURNING id"#,
@@ -450,11 +481,17 @@ pub async fn change_password(
         .get(SESSION_COOKIE)
         .and_then(|c| Uuid::parse_str(c.value()).ok());
 
-    let stored: String =
+    let stored: Option<String> =
         sqlx::query_scalar(r#"SELECT password_hash FROM users WHERE id = $1"#)
             .bind(user.id.0)
             .fetch_one(&state.pool)
             .await?;
+    // Cuenta SSO: no hay contraseña actual que verificar, y FIJAR una desde aquí crearía una
+    // segunda vía de acceso a una cuenta cuya autenticación pertenece al proveedor. Fuera de
+    // alcance en esta release; el 401 lo dice en vez de fallar con «contraseña incorrecta».
+    let Some(stored) = stored else {
+        return Err(sso_account_no_password());
+    };
     // 400 y no 401: la sesión es válida: lo que falla es el dato del formulario. Un 401 haría
     // que la SPA echara al usuario al login por escribir mal su propia contraseña.
     // Solo el 401 significa «la contraseña no es la suya»; un `Unavailable` (pánico del task,

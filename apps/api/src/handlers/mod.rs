@@ -20,5 +20,6 @@ pub mod planning;
 pub mod projection;
 pub mod session;
 pub mod spa;
+pub mod sso;
 pub mod summary;
 pub mod transactions;

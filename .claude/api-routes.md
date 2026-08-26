@@ -61,8 +61,11 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
 | POST | `/v1/auth/login` | Sets `ff_session` cookie |
 | POST | `/v1/auth/logout` | Clears cookie + DB session |
 | POST | `/v1/auth/password` | **4.0.0**. Sesión válida. Body `{current_password, new_password}` → **204**. Verifica la actual, aplica la política de longitud (12..=256 chars, `auth/password.rs`) y **revoca en la misma transacción** las demás sesiones, los tokens `ffp_` del usuario (`api_tokens.revoked_at`) y sus concesiones OAuth (`oauth_grants.revoked_at`, `revoked_reason = 'password_change'`). La sesión que llama **sobrevive** (se excluye por su propio `id`), para no echar al usuario de la app al terminar. |
+| POST | `/v1/auth/sso` | **SSO por proxy de confianza**. Identidad delegada a un proxy de confianza (add-on de Home Assistant). Sin cuerpo; la credencial es la cabecera `X-Remote-User-Id` (UUID) desde un peer autorizado. Devuelve el mismo `UserResponse` que el login y pone la misma cookie `ff_session`. **Se monta siempre** (la forma del router no depende del entorno): con `FUTUREFIN_TRUSTED_PROXY_AUTH` apagado → 401 `sso_disabled`; peer fuera de `FUTUREFIN_TRUSTED_PROXY_IPS` → 401 `sso_untrusted_peer`; cabecera ausente o no-UUID → 400 `sso_bad_identity`. El primer usuario que entra por aquí crea el hogar y queda owner; los siguientes quedan pendientes. |
 | GET | `/v1/auth/me` | Current user info |
 | PATCH | `/v1/auth/me` | Update `birth_date` |
+
+- **Las cuentas SSO no tienen contraseña** (`users.password_hash` NULL desde `20260827120000_users_trusted_header_identity.sql`). `POST /v1/auth/login`, `POST /v1/auth/password` y `POST /v1/backup/user-export` las rechazan con **401 `sso_account_no_password`** — un 401 hablado a propósito: sin él, la persona se queda probando una contraseña que nunca existió. El login sigue pagando el Argon2id de descarte antes de responder, así que el reloj no delata nada.
 
 - **`current_password` incorrecta → 400 `current_password_invalid`, NO 401** (`handlers/auth.rs`).
   Es deliberado y load-bearing: la sesión es válida — lo que falla es un dato del formulario. Con un

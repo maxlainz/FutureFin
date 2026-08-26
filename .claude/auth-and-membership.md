@@ -9,6 +9,30 @@ Este documento y el código (`apps/api/src/handlers/{session,installation,member
 3. **Session check**: `require_session_user` reads cookie UUID → joins `sessions` + `users` → returns `SessionUser { id: UserId }`.
 4. **Installation gate**: `GET /v1/installation/session-context` returns `{installation_initialized, access}`. Frontend uses this to decide between: setup screen, pending screen, or main app.
 5. **Cambio de contraseña** (`POST /v1/auth/password`, 4.0.0): ver §Rotar la contraseña abajo.
+6. **SSO por proxy de confianza** (`POST /v1/auth/sso`): ver §SSO abajo.
+
+## SSO por cabeceras de un proxy de confianza (`POST /v1/auth/sso`)
+
+Para el add-on de Home Assistant: el Ingress del Supervisor ya autenticó a la persona y añade
+`X-Remote-User-Id` (stripeando el que mande el cliente). `handlers/sso.rs` canjea esa identidad
+por una **sesión normal** — misma fila en `sessions`, misma cookie, mismo gate de instalación.
+
+- **La ruta se monta siempre**; lo que decide es el estado. Sin `FUTUREFIN_TRUSTED_PROXY_AUTH` →
+  401 `sso_disabled`; peer fuera de `FUTUREFIN_TRUSTED_PROXY_IPS` → 401 `sso_untrusted_peer`.
+  Esas dos comprobaciones **son la frontera de seguridad entera**: una cabecera de identidad es
+  una afirmación sin prueba, y solo vale la palabra de un peer que el operador ha nombrado.
+- **Provisión**: si no hay fila con ese `external_user_id`, se crea el usuario (username derivado
+  del nombre para mostrar, sin contraseña) y se ejecuta `bootstrap_installation_as_owner_if_empty`
+  en la MISMA transacción — el primero que entra crea el hogar y es owner, los siguientes quedan
+  pendientes de aprobación. Exactamente el mismo camino que `register`.
+- **La identidad, no el nombre, es la clave**: `users.external_user_id` (UNIQUE parcial). Cambiar
+  el nombre para mostrar en Home Assistant no crea una cuenta nueva.
+- **Una cuenta SSO no tiene contraseña** (`password_hash` NULL). Login, cambio de contraseña y
+  export de `.ffbackup` (su clave se deriva de la contraseña de cuenta) devuelven **401
+  `sso_account_no_password`**.
+- Regresión: `apps/api/tests/sso_login.rs`.
+- **Fuera del catálogo MCP a propósito**: es un mecanismo de sesión de navegador, no una
+  operación sobre datos.
 
 ## Rotar la contraseña (`POST /v1/auth/password`, 4.0.0)
 
