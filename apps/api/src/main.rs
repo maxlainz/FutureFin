@@ -1,5 +1,5 @@
 use futurefin_api::db;
-use futurefin_api::handlers::{fallback, spa};
+use futurefin_api::handlers::{fallback, frame, spa};
 use futurefin_api::prefix;
 use futurefin_api::routes;
 use futurefin_api::state::AppState;
@@ -12,7 +12,6 @@ use std::sync::Arc;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
-use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -101,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(CompressionLayer::new().gzip(true))
         .layer(TraceLayer::new_for_http());
 
-    let app = match web_static_root() {
+    let router = match web_static_root() {
         Some(root) if root.exists() => match spa::load_index(&root) {
             Some(index) => {
                 tracing::info!(root = %root.display(), "serving web UI and API on one port");
@@ -131,14 +130,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Router::new().merge(api).fallback(fallback::not_found)
         }
         None => Router::new().merge(api).fallback(fallback::not_found),
-    }
+    };
+
     // Anti-clickjacking global (protege sobre todo la pantalla de consentimiento OAuth,
     // servida por el fallback SPA — por eso la capa va en el router final, no en `api`).
-    // Nada de FutureFin se embebe legítimamente en iframes.
-    .layer(SetResponseHeaderLayer::overriding(
-        http::header::X_FRAME_OPTIONS,
-        http::HeaderValue::from_static("DENY"),
-    ));
+    // Nada de FutureFin se embebe legítimamente en iframes, con una excepción atada a un peer
+    // de confianza: el Ingress de Home Assistant, que embebe el add-on same-origin (frame.rs).
+    let app = frame::with_frame_policy(router, state.clone());
 
     let reconcile_sweep = spawn_reconcile_sweep(sweep_state);
 

@@ -28,6 +28,14 @@ pub struct SpaIndex {
     html: String,
 }
 
+impl SpaIndex {
+    /// Shell a partir de HTML en memoria — para los tests de integración, que montan el fallback
+    /// sin tocar el disco (el `ServeDir` de main.rs no participa en la inyección).
+    pub fn from_html(html: String) -> Self {
+        Self { html }
+    }
+}
+
 /// Lee `index.html` de la raíz estática. `None` si no existe o no se puede leer
 /// (el caller degrada a API-only con un warn, igual que cuando falta la raíz).
 pub fn load_index(root: &Path) -> Option<SpaIndex> {

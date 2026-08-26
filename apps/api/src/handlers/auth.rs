@@ -21,6 +21,42 @@ use uuid::Uuid;
 
 pub const SESSION_COOKIE: &str = "ff_session";
 
+/// `Path` de la cookie de sesión para una request: el prefijo público bajo el que el navegador
+/// ve la app, o `/` cuando no hay ninguno.
+///
+/// Por qué acotarla: bajo el Ingress de Home Assistant **todos los add-ons comparten origen**
+/// (`http://homeassistant.local:8123`), así que un `Path=/` emitiría `ff_session` también hacia
+/// `/api/hassio_ingress/<token-de-otro-add-on>`. Acotarla al prefijo propio la deja donde debe.
+///
+/// Invariante maestro: sin cabeceras de proxy el prefijo es `""` y la cookie sale con `Path=/`,
+/// **byte a byte** como siempre — el modo compose no cambia.
+fn session_cookie_path(state: &AppState, headers: &http::HeaderMap) -> String {
+    let p = state.request_prefix(headers);
+    if p.is_empty() {
+        "/".to_string()
+    } else {
+        p
+    }
+}
+
+/// Cookie de sesión (`ff_session`) con los atributos de siempre y el `Path` dado.
+pub(crate) fn session_cookie(state: &AppState, sid: Uuid, path: String) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, sid.to_string()))
+        .path(path)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::days(state.session_ttl_days))
+        .secure(state.cookie_secure)
+        .build()
+}
+
+/// Cookie «plantilla» para el borrado. El navegador solo casa un `Set-Cookie` de borrado con la
+/// cookie viva si **nombre y `Path` coinciden**: con el `Path=/` fijo de antes, un logout bajo
+/// Ingress dejaba la cookie acotada viva y el usuario seguía «dentro».
+pub(crate) fn session_cookie_removal(path: String) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, "")).path(path).build()
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RegisterBody {
     pub username: String,
@@ -208,6 +244,7 @@ pub async fn register(
 pub async fn login(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
+    headers: http::HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Result<(CookieJar, Json<UserResponse>), ApiError> {
     validate_username(&body.username)?;
@@ -232,14 +269,7 @@ pub async fn login(
     .bind(expires_at)
     .fetch_one(&state.pool)
     .await?;
-    let cookie = Cookie::build((SESSION_COOKIE, sid.to_string()))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .max_age(CookieDuration::days(state.session_ttl_days))
-        .secure(state.cookie_secure)
-        .build();
-    let jar = jar.add(cookie);
+    let jar = jar.add(session_cookie(&state, sid, session_cookie_path(&state, &headers)));
     let row: UserRow = sqlx::query_as(
         r#"SELECT id, username, birth_date FROM users WHERE id = $1"#,
     )
@@ -272,6 +302,7 @@ pub async fn login(
 pub async fn logout(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
+    headers: http::HeaderMap,
 ) -> Result<(CookieJar, axum::http::StatusCode), ApiError> {
     let mut user_id_to_invalidate: Option<Uuid> = None;
     if let Some(c) = jar.get(SESSION_COOKIE) {
@@ -293,11 +324,7 @@ pub async fn logout(
     if let Some(uid) = user_id_to_invalidate {
         state.invalidate_projection_by_user(uid).await;
     }
-    let jar = jar.remove(
-        Cookie::build((SESSION_COOKIE, ""))
-            .path("/")
-            .build(),
-    );
+    let jar = jar.remove(session_cookie_removal(session_cookie_path(&state, &headers)));
     Ok((jar, axum::http::StatusCode::NO_CONTENT))
 }
 
