@@ -1,5 +1,6 @@
 use futurefin_api::db;
 use futurefin_api::handlers::fallback;
+use futurefin_api::prefix;
 use futurefin_api::routes;
 use futurefin_api::state::AppState;
 use axum::extract::Extension;
@@ -52,16 +53,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(30);
     let mcp_enabled = parse_bool_env("FUTUREFIN_MCP_ENABLED").unwrap_or(true);
     let public_url = public_url();
+    let base_path = base_path();
+    let trusted_peers = trusted_peers();
+    let trusted_header_auth = parse_bool_env("FUTUREFIN_TRUSTED_PROXY_AUTH").unwrap_or(false);
+    if trusted_header_auth && matches!(trusted_peers, prefix::PeerPolicy::Disabled) {
+        // Fail-loud: SSO sin peers de confianza aceptaría X-Remote-User-Id de cualquiera.
+        panic!(
+            "FUTUREFIN_TRUSTED_PROXY_AUTH=1 requires FUTUREFIN_TRUSTED_PROXY_IPS \
+             (a comma-separated IP list, or 'any' behind a private network)"
+        );
+    }
 
     let shutdown_pool = pool.clone();
-    let state = Arc::new(AppState::new(
-        env!("CARGO_PKG_VERSION"),
-        pool,
-        cookie_secure,
-        session_ttl_days,
-        mcp_enabled,
-        public_url.clone(),
-    ));
+    let state = Arc::new(
+        AppState::new(
+            env!("CARGO_PKG_VERSION"),
+            pool,
+            cookie_secure,
+            session_ttl_days,
+            mcp_enabled,
+            public_url.clone(),
+        )
+        .with_trusted_proxy(base_path.clone(), trusted_peers, trusted_header_auth),
+    );
 
     tracing::info!(
         port = port(),
@@ -69,6 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cookie_secure,
         mcp_enabled,
         public_url = public_url.as_deref().unwrap_or("(derived from request)"),
+        base_path = if base_path.is_empty() { "(root)" } else { base_path.as_str() },
+        trusted_header_auth,
         "server config"
     );
 
@@ -117,9 +133,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     // Con Postgres en el mismo contenedor, drenar y cerrar el pool ANTES de que el
     // supervisor pare el postmaster es parte del contrato de apagado ordenado.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `with_connect_info`: la IP del peer alimenta la política de confianza
+    // (anti-clickjacking condicional y SSO por cabeceras — ver `prefix::PeerPolicy`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     tracing::info!("http server stopped");
     // El barrido se aborta ANTES de cerrar el pool: si no, una pasada en vuelo consultaría un
     // pool cerrado y ensuciaría el apagado con un error que no significa nada.
@@ -216,6 +237,25 @@ fn public_url() -> Option<String> {
         panic!("FUTUREFIN_PUBLIC_URL must be a bare origin (no path/query/fragment): {raw}");
     }
     Some(parsed.origin().ascii_serialization())
+}
+
+/// `FUTUREFIN_BASE_PATH` (opcional): prefijo público fijo (subpath tras proxy).
+/// Fail-loud vía `prefix::validate_base_path_env`; `""` = raíz (default histórico).
+fn base_path() -> String {
+    std::env::var("FUTUREFIN_BASE_PATH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| prefix::validate_base_path_env(&s))
+        .unwrap_or_default()
+}
+
+/// `FUTUREFIN_TRUSTED_PROXY_IPS` (opcional): peers de confianza. Fail-loud en entradas
+/// inválidas (estilo CORS_ORIGINS); sin definir ⇒ nadie es de confianza.
+fn trusted_peers() -> prefix::PeerPolicy {
+    std::env::var("FUTUREFIN_TRUSTED_PROXY_IPS")
+        .ok()
+        .map(|s| prefix::PeerPolicy::from_env_value(&s))
+        .unwrap_or(prefix::PeerPolicy::Disabled)
 }
 
 fn web_static_root() -> Option<PathBuf> {

@@ -7,5 +7,6 @@ pub mod mcp;
 pub mod money;
 pub mod oauth;
 pub mod openapi;
+pub mod prefix;
 pub mod routes;
 pub mod state;
