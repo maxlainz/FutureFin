@@ -12,10 +12,30 @@
 //! Lo que sí exige peer de confianza es relajar el anti-clickjacking
 //! (`handlers/frame.rs`) y aceptar identidad por cabeceras (`handlers/sso.rs`).
 
+use axum::extract::{ConnectInfo, FromRequestParts};
+use http::request::Parts;
 use http::HeaderMap;
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, OnceLock};
+
+/// IP del peer TCP, si el servidor arrancó `with_connect_info` (en tests con
+/// `oneshot` no hay `ConnectInfo` y vale `None`). Extractor infalible: la política
+/// de confianza decide qué hacer con un peer desconocido, no el framework.
+pub struct PeerIp(pub Option<IpAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for PeerIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(PeerIp(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ci| ci.0.ip()),
+        ))
+    }
+}
 
 /// Header que envía el Ingress de Home Assistant (`/api/hassio_ingress/<token>`).
 pub const X_INGRESS_PATH: &str = "x-ingress-path";

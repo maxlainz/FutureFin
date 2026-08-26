@@ -1,5 +1,5 @@
 use futurefin_api::db;
-use futurefin_api::handlers::fallback;
+use futurefin_api::handlers::{fallback, spa};
 use futurefin_api::prefix;
 use futurefin_api::routes;
 use futurefin_api::state::AppState;
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api = Router::new()
         .merge(routes::app_router(&state))
-        .layer(Extension(state))
+        .layer(Extension(state.clone()))
         .layer(cors_layer())
         // gzip para responses >1 KB. Reduce ~10× el JSON de /v1/projection/series
         // (260 KB → 30 KB). El cliente lo descomprime sin cambios.
@@ -102,13 +102,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(TraceLayer::new_for_http());
 
     let app = match web_static_root() {
-        Some(root) if root.exists() => {
-            tracing::info!(root = %root.display(), "serving web UI and API on one port");
-            let index = root.join("index.html");
-            Router::new()
-                .merge(api)
-                .fallback_service(ServeDir::new(root).fallback(ServeFile::new(index)))
-        }
+        Some(root) if root.exists() => match spa::load_index(&root) {
+            Some(index) => {
+                tracing::info!(root = %root.display(), "serving web UI and API on one port");
+                // El index NO lo sirve ServeDir (append_index_html_on_directories(false)):
+                // `GET /` cae al fallback, que inyecta el base path por request (spa.rs).
+                let index_svc = axum::routing::get(spa::serve_index)
+                    .with_state((state.clone(), Arc::new(index)));
+                Router::new().merge(api).fallback_service(
+                    ServeDir::new(root)
+                        .append_index_html_on_directories(false)
+                        .fallback(index_svc),
+                )
+            }
+            None => {
+                tracing::warn!(
+                    root = %root.display(),
+                    "WEB_STATIC_ROOT has no readable index.html — API only"
+                );
+                Router::new().merge(api).fallback(fallback::not_found)
+            }
+        },
         Some(root) => {
             tracing::warn!(
                 root = %root.display(),
