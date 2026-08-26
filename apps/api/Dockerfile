@@ -54,9 +54,11 @@ RUN rm /usr/share/postgresql/15/postgresql.conf.sample \
 
 # --- Runtime ---
 FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252 AS runtime
+# `jq`: el entrypoint lee /data/options.json cuando la imagen corre como add-on de
+# Home Assistant (parsear JSON con sed/grep sería frágil y silenciosamente incorrecto).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl gosu locales \
+        ca-certificates curl gosu locales jq \
         libicu72 libssl3 libxml2 libxslt1.1 liblz4-1 liblzma5 libzstd1 zlib1g \
         libgssapi-krb5-2 libldap-2.5-0 libsasl2-2 libpam0g libselinux1 \
         libedit2 libreadline8 libuuid1 libsystemd0 libffi8 tzdata \
