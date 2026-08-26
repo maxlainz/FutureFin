@@ -26,6 +26,33 @@ jobs:
       - name: Datos sensibles en ficheros trackeados
         run: ./scripts/scan-sensitive.sh
 
+      # El Supervisor de Home Assistant clona este repo como tienda de add-ons y
+      # recorre TODO el árbol: cada `config.{yaml,yml,json}` que encuentre lo
+      # interpreta como un add-on. Un fichero de configuración cualquiera con ese
+      # nombre aparecería en la tienda de los usuarios (o rompería el escaneo).
+      # Solo valen dos: el de las plantillas de issues (vive en un dot-dir, que HA
+      # excluye) y el del add-on de verdad.
+      - name: Guardia de config.* (tienda de add-ons de HA)
+        run: |
+          set -euo pipefail
+          encontrados="$(find . \
+            \( -name .git -o -name node_modules -o -name target \) -prune -o \
+            \( -name 'config.yaml' -o -name 'config.yml' -o -name 'config.json' \) \
+            -print | sort)"
+          esperados="./.github/ISSUE_TEMPLATE/config.yml
+          ./addon/futurefin/config.yaml"
+          esperados="$(printf '%s\n' "$esperados" | sed 's/^ *//' | sort)"
+          if [ "$encontrados" != "$esperados" ]; then
+            echo "::error::la lista de ficheros config.* no es la esperada."
+            echo "Home Assistant interpreta CUALQUIER config.{yaml,yml,json} del repo como un"
+            echo "add-on. Renombra el fichero nuevo (p. ej. a settings.yaml) o, si de verdad es"
+            echo "un add-on, actualiza esta guardia."
+            echo "--- encontrados ---"; printf '%s\n' "$encontrados"
+            echo "--- esperados ---";   printf '%s\n' "$esperados"
+            exit 1
+          fi
+          echo "OK: solo los dos config.* esperados."
+
   rust:
     runs-on: ubuntu-latest
     steps:

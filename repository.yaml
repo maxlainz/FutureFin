@@ -1,0 +1,6 @@
+# Este repositorio es también una tienda de add-ons de Home Assistant.
+# El Supervisor lo clona y busca recursivamente ficheros `config.{yaml,yml,json}`:
+# cada uno que encuentre lo interpreta como un add-on. Ver el add-on en addon/futurefin/.
+name: FutureFin
+url: "https://github.com/maxlainz/FutureFin"
+maintainer: maxlainz
