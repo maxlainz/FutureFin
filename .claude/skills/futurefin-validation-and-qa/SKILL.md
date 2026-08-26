@@ -65,7 +65,7 @@ not authoritative — recount with the commands in "Provenance and maintenance".
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
 | Engine unit tests (**67** as of 2026-08-22) | `crates/engine/src/{projection.rs (32), history.rs (22), runway.rs (13)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
-| Backend integration (**33 files, 375 `#[test]`/`#[tokio::test]` attributes, as of 2026-08-22**) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
+| Backend integration (**43 files on 2026-08-27**; 33 files / 375 attributes on 2026-08-22) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
 | Frontend Vitest (**368, 16 files, as of 2026-08-22**) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
 
 **Whole-workspace total: 498 on 2026-08-22** (`cargo test --workspace`), which is engine + the 57 API
@@ -123,8 +123,8 @@ socket and would rather not publish a port; the 5433 TCP default stays the docum
 1. Creates schema `ff_test_<uuid-simple>` in the test DB.
 2. Opens a pool (max 5 conns) with `after_connect` hook: `SET search_path TO "<schema>", public`
    on every connection — so all queries in the test hit only that schema.
-3. Runs `sqlx::migrate!("./migrations")` inside it (**42** migration files as of 2026-08-22 —
-   count with `ls apps/api/migrations | wc -l`).
+3. Runs `sqlx::migrate!("./migrations")` inside it (**44** migration files as of 2026-08-27, 42 on
+   2026-08-22 — count with `ls apps/api/migrations/*.sql | wc -l`).
 4. Returns `(PgPool, schema_name)`. **Schemas leak intentionally** — no teardown, so a failed
    test leaves its state inspectable.
 
@@ -141,11 +141,33 @@ docker exec ff-test-db psql -U futurefin -d futurefin_test -tAc \
   | docker exec -i ff-test-db psql -U futurefin -d futurefin_test
 ```
 
-### Integration test files (all 27, 2026-08-19)
+### Harness knobs: `TestConfig` and `spawn_with` (added 2026-08-27)
 
-Recount before trusting: `ls apps/api/tests/*.rs | wc -l` (27) and per-file
-`grep -rc '#\[tokio::test\]\|#\[test\]' apps/api/tests/*.rs` (375 attributes across 33 files on
-2026-08-22). On any disagreement between a
+`TestApp::spawn()` is unchanged and is still what almost every test wants. For the reverse-proxy
+axes there is `TestApp::spawn_with(TestConfig { .. })`, whose `Default` **is** the historical
+`spawn()` (no prefix, no trusted peers, no SSO, no SPA):
+
+| Field | Simulates |
+|---|---|
+| `trusted_header_auth: bool` | `FUTUREFIN_TRUSTED_PROXY_AUTH` |
+| `trusted_peers_any: bool` | `PeerPolicy::Any` instead of `Disabled`. **`Any` is the only workable policy in tests**: `oneshot` carries no `ConnectInfo`, so the peer is `None` and an IP list would never match |
+| `base_path: String` | `FUTUREFIN_BASE_PATH` |
+| `with_spa_index: Option<String>` | Mounts `spa::serve_index` as the fallback with that HTML (no `ServeDir`, no disk) |
+
+Two harness facts worth knowing before you write a proxy-ish test:
+- **The router is wrapped in `frame::with_frame_policy`, exactly like `main.rs`.** Without it the
+  `X-Frame-Options`/CSP policy would be invisible to tests, because `TestApp`'s router carries none
+  of the binary's outer layers.
+- Header-carrying requests go through `get_with_headers` / `post_with_headers` (the latter added
+  with `sso_login.rs`); the cookie helpers are unchanged.
+- **No test sets an environment variable.** Config arrives through `AppState::with_trusted_proxy`,
+  which is what keeps the suites parallel-safe.
+
+### Integration test files (**43** on 2026-08-27)
+
+Recount before trusting: `ls apps/api/tests/*.rs | wc -l` (**43** on 2026-08-27, 33 on 2026-08-22)
+and per-file `grep -rc '#\[tokio::test\]\|#\[test\]' apps/api/tests/*.rs` (375 attributes across 33
+files on 2026-08-22; the five files added on `feat/home-assistant-addon` bring 24 more). On any disagreement between a
 row's description here and `.claude/tests.md` (refreshed every release train), tests.md wins —
 fix this table in the same change.
 
@@ -181,6 +203,11 @@ fix this table in the same change.
 | `mcp_write.rs` | 17 | MCP write tools: viewer → `forbidden`, the live `mcp_write_enabled` toggle (cuts the next write without restart, reads survive), MCP-created rows indistinguishable via HTTP, the **FULL/COND/NONE cache contract through the MCP path** (`warm`/`assert_invalidated` helpers), preview/confirm on every destructive tool (preview is SUCCESS and does not execute), `update_fire_settings` owner-gate + field-by-field merge, reconcile tools (3.5.0), and the post-3.5.0 CRUD-parity test (`update_asset` full body incl. `clear_purchase_price`, `update_liability` editing the SAME row via `patch_liability_core`, both FULL, shared 400s, toggle cutting both) |
 | `mcp_simulate.rs` | 6 | `simulate_projection`: baseline ≡ `get_projection`, the discriminating override pair (real expense moves the target, neutral adjustments don't), `one_off_expense` by date ≡ by month_index, return override sinks final NW, bounds re-validated, and **cache neutrality** (simulating never creates nor touches cache entries) |
 | `transactions_reconcile.rs` | 19 | Transfer reconciliation (3.5.0): deterministic auto-pass (±5-day window with exact 5/6 boundary, cross-import pair, greedy with multiple candidates, fixed-point idempotence, distinct owners never), unreconcile persists the anti-resurrection rejection, PATCH of `amount`/`op_date` breaks the pair WITHOUT rejection, deleting a leg/batch unreconciles the survivor, manual pairing without window + its 400s, viewer 403, owner-guard 404 |
+| `base_path.rs` (2026-08-27) | 4 | Per-request public prefix in the SPA shell, seen through the whole router. **The master invariant goes first**: with no proxy headers the HTML is served **byte-identical** to the file (`root_without_proxy_headers_is_the_shell_verbatim`) — compose mode does not change one character. Then `X-Forwarded-Prefix` rewrites every absolute `src`/`href` and injects `window.__FF_BASE__`; `X-Ingress-Path` **wins** over `X-Forwarded-Prefix`; an invalid ingress header is ignored and the next valid source is used. Needs `TestConfig { with_spa_index: Some(html) }` — the harness mounts `spa::serve_index` as fallback, never a `ServeDir` |
+| `frame_options.rs` (2026-08-27) | 4 | Both halves of the conditional anti-clickjacking (D17): default → `X-Frame-Options: DENY`; **`X-Ingress-Path` from an untrusted peer → still `DENY`** (the header alone must not disarm it); trusted peer + header → `Content-Security-Policy: frame-ancestors 'self'` **and no `X-Frame-Options`** (a surviving `DENY` wins over the CSP and the HA panel goes blank); trusted peer without the header → `DENY`. `TestConfig { trusted_peers_any: true }` |
+| `session_cookie_path.rs` (2026-08-27) | 3 | `Path` of `ff_session`: `Path=/` with no proxy headers (unchanged for compose), scoped to the prefix under ingress (HA add-ons share an origin, so `Path=/` would leak the cookie to other add-ons' ingress paths), and **logout removes the cookie on that same `Path`** — a browser only matches a removal when name AND path agree |
+| `sso_login.rs` (2026-08-27) | 11 | `POST /v1/auth/sso` (D18). In priority order: **the door is closed by default** (perfect headers, no config → 401), untrusted peer → 401, non-UUID identity → 400; the external identity is stable (same `X-Remote-User-Id` → same user, no duplicate rows); provisioning goes through the same gates as password registration (first = owner + installation, second = pending); diacritics fold into valid usernames and a taken username gets a suffix; an SSO account **cannot** log in with a password nor set one (`sso_account_no_password`), and password accounts are untouched by the new column |
+| `migration_guard.rs` (2026-08-27) | 2 | Downgrade refusal. Uses **only** `common::isolated_pool()` (no `TestApp`): applies the real migrations to a fresh schema, then inserts a fake `_sqlx_migrations` row from "the future" — exactly what an older binary sees after an upgrade — and asserts `run_migrations` returns `MigrationError::Downgrade` with the operator banner. Tests the contract (don't lose sqlx's `VersionMissing`, translate it into something actionable), not the implementation |
 | `budget_liability_quotas.rs` | 10 | Liability quotas inside `GET /v1/budget` (renamed from `budget_derived.rs` in 3.7.0, when the quota became an ordinary `entries` row): entry shape (`source`, `liability_id`, `label`, expense category) and coexistence with the manual entry of the same category; totals (`expense_regular` = sum of expense entries, no `expense_derived`); quota excluded from `expense_retirement_*`; **quota excluded from the engine expense base** (`monthly_delta_assumption` — hand-predicted double-count regression); active-liability predicate (NULL end date derives, expired doesn't, `>=` boundary, no payment plan → nothing), weekly ×52/12, household/mine scoping, quota without `expense_category_id` still counts |
 
 ### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; **368 en 16 ficheros a 2026-08-22**)
@@ -484,14 +511,23 @@ updated together on 2026-08-16 for **v3.0.0** (`docker-stack` job contents, sock
 plus the three inventory rows the MCP/OAuth releases had left out). **Rewritten again on 2026-08-22
 for 4.0.0**: § 3 (CI now runs integration + ESLint + Vitest), all counts, the two new suite rows
 (`account_and_members.rs`, `openapi_contract.rs`) and the retraction of the CSV-preset unit-test
-claim. Re-verify volatile facts with:
+claim. **Extended 2026-08-27 on branch `feat/home-assistant-addon`**: the `TestConfig`/`spawn_with`
+harness knobs and the five new suites (`base_path.rs`, `frame_options.rs`,
+`session_cookie_path.rs`, `sso_login.rs`, `migration_guard.rs`), verified by reading those files and
+`apps/api/tests/common/mod.rs`. Re-verify volatile facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
 - Workspace total: `cargo test --workspace 2>&1 | grep "test result"` (**498 on 2026-08-22**)
 - Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (**67 on 2026-08-22** = projection 32 + history 22 + runway 13; it was 61 = 27+21+13 on 2026-08-19)
 - Integration attributes: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375 across 33 files on 2026-08-22**; `apps/api/src` adds **57** lib unit tests)
 - Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**368 in 16 files on 2026-08-22**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
-- Migration count: `ls apps/api/migrations | wc -l` (**42 on 2026-08-22**; 40 on 2026-08-19)
+- Migration count: `ls apps/api/migrations/*.sql | wc -l` (**44 on 2026-08-27**; 42 on 2026-08-22; 40 on 2026-08-19)
+- **Reverse-proxy / add-on suites (added 2026-08-27, branch `feat/home-assistant-addon`)**:
+  `ls apps/api/tests/{base_path,frame_options,session_cookie_path,sso_login,migration_guard}.rs`;
+  harness knobs: `grep -n "struct TestConfig" -A16 apps/api/tests/common/mod.rs` and
+  `grep -n "fn spawn_with\|with_frame_policy\|post_with_headers" apps/api/tests/common/mod.rs`;
+  the pure-unit half lives in the binary: `cargo test -p futurefin-api --lib prefix::` and
+  `cargo test -p futurefin-api --lib spa::` / `sso::` (slug folding, `Cow::Borrowed` shell)
 - CI coverage claims: read `.github/workflows/ci.yml` (jobs: `secrets-scan`, `rust`, `web`,
   `integration`, `docker-stack` — `main-guard` was retired with the two-branch model in 4.0.1). `grep -n TEST_DATABASE_URL .github/workflows/ci.yml`
   and `grep -n 'npm test\|lint:web' .github/workflows/ci.yml` must **print something** since 4.0.0 —

@@ -19,6 +19,33 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 > `GET /oauth/authorize` **no tiene ruta backend**: la sirve el fallback SPA de `main.rs`. Ver la
 > sección OAuth abajo — registrarla es un error que rompe la pantalla de consentimiento.
 
+### El `index.html` lo sirve un handler, no `ServeDir`
+
+Todo lo que no es API ni un asset existente cae en `ServeDir(WEB_STATIC_ROOT)`, montado con
+**`.append_index_html_on_directories(false)`** y con `.fallback(spa::serve_index)`. Ese `false` es
+lo que hace que `GET /` **no** sea servido como fichero: cae al fallback, que es un handler
+(`handlers/spa.rs::serve_index`) y no un `ServeFile`. Los assets hasheados sí los sigue sirviendo
+`ServeDir` tal cual.
+
+Por qué un handler: el prefijo público es **por request** (la misma imagen sirve compose en `/` y
+el Ingress de Home Assistant bajo `/api/hassio_ingress/<token>` a la vez), así que ni un `base` de
+Vite en build ni un placeholder reescrito al arrancar valen. `spa::load_index` lee el HTML del
+disco **una vez** al arrancar (si no hay `index.html` legible se degrada a API-only con un `warn`);
+por request, `spa::inject` reescribe los refs absolutos (`src="/…"`, `href="/…"` — las
+protocol-relative `//…` y las absolutas con esquema no se tocan) e inserta, justo después de
+`<head>`, un `<script>` con `window.__FF_BASE__` y `window.__FF_SSO__` (los consume
+`apps/web/src/lib/basePath.ts`). `__FF_SSO__` es `true` solo si hay SSO habilitado **y** peer de
+confianza **y** la request trae `X-Remote-User-Id`.
+
+- **Invariante maestro**: sin prefijo y sin SSO, `inject` devuelve `Cow::Borrowed` — los bytes
+  **exactos** del fichero. El modo compose no cambia ni un carácter.
+- **Cache headers**, atados a ese mismo invariante: respuesta sin modificar → `Cache-Control:
+  no-cache` (el shell de una SPA se revalida siempre, los assets hasheados sí cachean); respuesta
+  modificada → `Cache-Control: no-store` + `Vary: X-Ingress-Path, X-Forwarded-Prefix`, porque el
+  HTML pasa a depender de cabeceras de proxy y ningún caché intermedio debe servir el shell de un
+  despliegue con el prefijo de otro.
+- Regresión: `apps/api/tests/base_path.rs` (+ los unit tests de `spa.rs`).
+
 ### OpenAPI (`GET /openapi.json`) — cómo declara la autenticación (4.0.0)
 
 `apps/api/src/openapi.rs` genera la spec con `utoipa`. Hasta 4.0.0 **no declaraba ni un
@@ -31,10 +58,14 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
   `ffo_…`) solo vale para `/mcp`, que deliberadamente **no** está en esta spec — se declara porque
   las 401 de la API lo mencionan y un lector necesita saber que existe.
 - **`security` global**: `("ff_session" = [])` en el `#[openapi(...)]` raíz. La excepción se marca
-  por operación con **`security(())`** (lista vacía = pública), y hoy la llevan exactamente cuatro:
-  `health_check`, `ready_check`, `register` y `login`
+  por operación con **`security(())`** (lista vacía = pública), y hoy la llevan exactamente cinco:
+  `health_check`, `ready_check`, `register`, `login` y `sso_login`
   (`grep -rn 'security(())' apps/api/src`). Al añadir un handler público hay que ponerlo; al añadir
-  uno privado no hay que hacer nada.
+  uno privado no hay que hacer nada. `sso_login` es «pública» en el sentido de OpenAPI porque su
+  credencial —la palabra de un proxy de confianza: cabecera `X-Remote-User-Id` desde una IP
+  autorizada— **no se puede expresar como `securityScheme`**; la política vive en la descripción de
+  la operación y en `handlers/sso.rs`. La lista está congelada en `PUBLIC_OPERATIONS`
+  (`apps/api/tests/openapi_contract.rs`): añadir un público sin tocarla rompe el test.
 - Otras tres deudas cerradas en el mismo cambio: dos structs distintos compartían el nombre de
   componente `ImportPreviewResponse` (preview de CSV y preview de backup) — utoipa nombra por el
   último segmento del tipo, así que uno machacaba al otro y **los dos endpoints apuntaban al mismo
@@ -83,6 +114,46 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
   proceso entero, `/v1/ready` incluido, y el healthcheck marcaba el contenedor unhealthy. El login
   verifica además SIEMPRE contra un hash constante aunque el usuario no exista (`dummy_hash`): sin
   eso, ~1 ms vs ~40-80 ms enumeraba quién tiene cuenta.
+
+#### `POST /v1/auth/sso` — identidad delegada a un proxy de confianza (`handlers/sso.rs`)
+
+**Request**: sin cuerpo y sin cookie. La credencial son cabeceras que pone el proxy:
+
+| Header | Obligatorio | Uso |
+|---|---|---|
+| `X-Remote-User-Id` | **sí** | Identidad estable del proveedor. Debe parsear como UUID; se persiste en `users.external_user_id`. |
+| `X-Remote-User-Display-Name` | no | Nombre para mostrar. **Gana** sobre el siguiente: es el que la persona reconoce como suyo. |
+| `X-Remote-User-Name` | no | Nombre de cuenta del proveedor. Fallback del anterior. |
+
+**200** → el mismo `UserResponse` que `login` (`{id, username, birth_date?}`) + `Set-Cookie:
+ff_session` con el `Path` acotado al prefijo de la request (ver §Cookie en
+[`auth-and-membership.md`](auth-and-membership.md)) + el mismo warm-up en background de la
+proyección del hogar que hace `login` (se salta en silencio si el usuario está pending).
+
+**Errores** — cinco códigos, todos con el prefijo `sso_`:
+
+| Código | Status | Cuándo |
+|---|---|---|
+| `sso_disabled` | 401 | `FUTUREFIN_TRUSTED_PROXY_AUTH` apagado (el default). |
+| `sso_untrusted_peer` | 401 | La IP del peer no está en `FUTUREFIN_TRUSTED_PROXY_IPS`. |
+| `sso_bad_identity` | 400 | `X-Remote-User-Id` ausente o no parsea como UUID. |
+| `sso_account_no_password` | 401 | *No lo devuelve este endpoint*: lo devuelven `login`, `password` y `user-export` cuando la cuenta es SSO. Se lista aquí porque es parte del mismo contrato. |
+| `sso_username_unavailable` | 409 | Se agotaron los seis candidatos de nombre (slug, `-2`..`-5`, `ha-<8 hex del id externo>`) sin encontrar uno libre. |
+
+- **Las dos primeras comprobaciones SON la frontera de seguridad entera.** Una cabecera de
+  identidad es una afirmación sin prueba; solo vale la palabra de un peer que el operador nombró.
+  La ruta se monta **siempre** (`routes/mod.rs`) para que la forma del router no dependa del
+  entorno — lo que decide es el estado, no el montaje.
+- **Provisión**: si no hay fila con ese `external_user_id`, se crea el usuario (`password_hash`
+  NULL) y se ejecuta `bootstrap_installation_as_owner_if_empty` en la **misma transacción** — el
+  primero crea el hogar y es owner, los siguientes quedan pendientes de aprobación, igual que
+  `register`. Cada candidato de nombre abre su propia transacción (en Postgres una violación de
+  unique aborta la transacción entera, así que reintentar dentro no es posible), y una colisión
+  concurrente sobre `users_external_user_id_key` devuelve el usuario que ganó, no un error.
+- **Omisión deliberada del catálogo MCP** (registro en `futurefin-mcp-parity`): es un mecanismo de
+  sesión de navegador atado a cabeceras de un proxy, no una operación sobre datos. Ningún cliente
+  MCP puede ni debe invocarlo — su credencial es el Bearer, no una cookie.
+- Regresión: `apps/api/tests/sso_login.rs`.
 
 ### Installation
 | Method | Path | Notes |
@@ -985,8 +1056,84 @@ sigue sin requerir ninguna env var (promesa 3.0.0). Ver [`env-and-config.md`](en
 Los redirects se construyen **siempre** con `oauth::url::append_query` (escaping de `url::Url`) —
 concatenar a mano es donde nacen los open redirect.
 
-### Anti-clickjacking global
+#### El issuer NO lleva el prefijo público — y eso acota dónde funciona MCP
 
-`main.rs` aplica `SetResponseHeaderLayer::overriding(X_FRAME_OPTIONS, "DENY")` **sobre el router
-final** (API + fallback SPA), no sobre el sub-router `api`: la pantalla de consentimiento la sirve el
-fallback, y era justo la que había que proteger. Nada de FutureFin se embebe legítimamente en iframes.
+`public_base_url` deriva **origen** (esquema + host + puerto) y nada más: no consulta
+`crate::prefix` ni `AppState::base_path`. Consecuencia directa: bajo un subpath (`/futurefin/`, o
+el Ingress de Home Assistant) la metadata anunciaría `https://host/.well-known/…` y
+`resource: https://host/mcp`, URLs que el proxy no enruta a FutureFin.
+
+**MCP y OAuth necesitan el origen en la raíz**: no están soportados detrás de un subpath ni detrás
+del Ingress. La vía es el **puerto directo** del contenedor (en el add-on de Home Assistant, el
+puerto publicado del host — no la URL de ingress), con `FUTUREFIN_PUBLIC_URL` si el proxy delantero
+no manda `X-Forwarded-Proto`/`X-Forwarded-Host`. La SPA y toda la API `/v1` sí funcionan bajo
+subpath: lo que resuelve el navegador pasa por `apiUrl` (§Prefijo público).
+
+### Prefijo público de la request (`apps/api/src/prefix.rs`)
+
+El servidor monta **todas** sus rutas en la raíz, siempre. Los proxies con subpath (el Ingress de
+Home Assistant, un `location /futurefin/` de nginx) **quitan el prefijo** antes de entregar la
+petición, así que el router no lo ve nunca. Lo que sí depende del prefijo es lo que resuelve el
+**navegador**: los refs del HTML, las URLs de `fetch`/`pushState` y el `Path` de la cookie de
+sesión.
+
+`prefix::request_prefix(base_path, headers)` decide el prefijo efectivo de cada request, con esta
+**precedencia**:
+
+1. **`X-Ingress-Path`** — lo pone el Supervisor de Home Assistant (`/api/hassio_ingress/<token>`).
+2. **`X-Forwarded-Prefix`** — el header genérico de nginx / Traefik / Caddy.
+3. **`FUTUREFIN_BASE_PATH`** — prefijo fijo del despliegue, validado al arrancar.
+4. **`""`** — raíz. El caso de siempre.
+
+Un header **presente pero inválido no aborta**: se ignora (con un `warn` deduplicado, tope de 8
+valores distintos para que nadie convierta el log en un canal de flood) y se sigue con la fuente
+siguiente. `normalize_prefix` acepta `/` o vacío (⇒ `""`), o un path que empieza por `/`, sin `//`,
+sin segmentos `.`/`..`, charset `[A-Za-z0-9._~/%-]`, ≤128 chars, tolerando una barra final que
+recorta. Ese charset es también lo que hace seguro interpolarlo en atributos HTML y en JS
+(`spa::inject`): no hay comillas, ángulos ni backslash que escapar.
+
+**La detección NO exige peer de confianza, a propósito**: un `X-Forwarded-Prefix` falsificado solo
+deforma la respuesta del propio atacante (assets que no cargan). Lo que **sí** exige peer de
+confianza es relajar el anti-clickjacking y aceptar identidad por cabeceras.
+
+`PeerPolicy` (`FUTUREFIN_TRUSTED_PROXY_IPS`) es esa política: `Disabled` (sin definir — nadie es de
+confianza, el default seguro), `Any` (`any`: todo peer, para tests y redes privadas donde el proxy
+es el único camino al proceso) o `List` (IPs separadas por comas; el add-on usa `172.30.32.2`). La
+IP del peer llega por el extractor infalible `PeerIp`, que la lee de `ConnectInfo<SocketAddr>`
+— por eso `main.rs` sirve con `into_make_service_with_connect_info`. Un peer desconocido (`None`,
+p.ej. los tests con `oneshot`) solo pasa con `Any`.
+
+Regresión: `apps/api/tests/base_path.rs`, `frame_options.rs`, `session_cookie_path.rs` + los unit
+tests de `prefix.rs`. Variables y bounds: [`env-and-config.md`](env-and-config.md).
+
+### Anti-clickjacking — condicionado al peer (`handlers/frame.rs`)
+
+La invariante histórica era absoluta: nada de FutureFin se embebe en iframes, implementada como un
+`SetResponseHeaderLayer::overriding(X_FRAME_OPTIONS, "DENY")` fijo. La enmienda: el **Ingress de
+Home Assistant pinta el add-on dentro de un iframe del mismo origen** que HA, y con `DENY` la app
+sale en blanco.
+
+El layer suelto se sustituye por `frame::with_frame_policy(router, state)` — un middleware
+`from_fn_with_state` que envuelve el **router final** (API + fallback SPA), no el sub-router `api`:
+la pantalla de consentimiento OAuth la sirve el fallback y es justo la que había que proteger. Se
+expone como «envuelve este router» y no como un `Layer` suelto porque el tipo que devuelve
+`from_fn_with_state` no es nombrable; así `main.rs` y el `TestApp` montan exactamente lo mismo.
+
+La regla, exacta:
+
+| Peer de confianza | `X-Ingress-Path` presente | Respuesta |
+|---|---|---|
+| no | — | `X-Frame-Options: DENY` |
+| sí | no | `X-Frame-Options: DENY` |
+| sí | sí | `Content-Security-Policy: frame-ancestors 'self'`, **y `X-Frame-Options` eliminado** |
+
+- **La cabecera sola no basta**: sin el gate del peer, mandar `X-Ingress-Path` a mano desde fuera
+  bastaría para desactivar la protección. Con peer no confiable —el default— la respuesta lleva
+  `DENY` aunque el header venga.
+- **`frame-ancestors 'self'`, no `DENY` relajado a medias**: sigue prohibiendo el embebido
+  cross-origin, que es el vector real del clickjacking, y permite el same-origin que el Ingress
+  necesita.
+- **El `X-Frame-Options` hay que quitarlo, no dejarlo**: `DENY` gana sobre la CSP en los
+  navegadores que miran los dos, y el add-on saldría en blanco igualmente.
+- Se usa `insert` (no `append`), igual que hacía el `SetResponseHeaderLayer::overriding` anterior.
+- Regresión: `apps/api/tests/frame_options.rs` — las cuatro filas de la tabla, una por test.

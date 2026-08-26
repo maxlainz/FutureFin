@@ -4,6 +4,183 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.3.0] - 2026-08-27
+
+### Home Assistant — FutureFin se instala como add-on
+
+- **El repositorio es también una tienda de add-ons**: `repository.yaml` en la raíz y el add-on en
+  `addon/futurefin/`. Se añade desde la tienda de complementos, se instala, se arranca y sale como
+  **panel en la barra lateral** (`panel_title: FutureFin`, `panel_icon: mdi:currency-usd`) por el
+  **ingress** del Supervisor — sin publicar ningún puerto, sin TLS que gestionar y sin escribir un
+  `docker-compose.yml`. **No construye nada**: `image: ghcr.io/maxlainz/futurefin` apunta al
+  manifest multi-arch ya publicado, deliberadamente **sin `{arch}`**, para que el registry sirva
+  amd64 o aarch64 según el host. `init: false` porque el entrypoint de la imagen tiene que seguir
+  siendo PID 1: es quien supervisa PostgreSQL y hace el apagado ordenado, y meter s6 por delante
+  rompería esa cadena.
+- **Todo vive en `/data`, el único bind persistente que monta el Supervisor**: el entrypoint
+  detecta el modo add-on por la presencia de `/data/options.json` y **pisa** `PGDATA` y
+  `FUTUREFIN_STATE_DIR` (a `/data/pgdata` y `/data/state`) *antes* de la sección de configuración.
+  Tenía que ser un override explícito y no un `${VAR:-default}`: el `Dockerfile` exporta las dos
+  como `ENV`, así que el default nunca se habría aplicado y la base habría acabado fuera del
+  volumen — perdiéndose al recrear el contenedor. Por lo mismo, la guarda de «no arranco sin
+  volumen» pasa a preguntar por los **ancestros** del directorio (`is_persisted`) y no por el
+  directorio exacto: bajo HA el mountpoint es `/data`, no `/data/pgdata`. Sigue **parando antes de
+  `/`**, porque en cualquier contenedor `/` es un mountpoint y aceptarlo volvería la guarda
+  decorativa.
+- **`backup: cold`**: el Supervisor **para** el add-on mientras copia `/data`. Copiar en caliente el
+  directorio de datos de un PostgreSQL en marcha no da una copia consistente, y una copia que no
+  restaura no es una copia. El precio son 1–2 minutos de indisponibilidad por backup, y se paga.
+- **Cinco opciones** (`log_level`, `sso`, `mcp`, `cors_origins`, `public_url`) que el entrypoint
+  traduce a las variables de entorno de siempre, con traducciones al español y al inglés. Detalle
+  que costó un intento: se leen con `has($k)` explícito y **no** con el `//` de `jq`, porque `//`
+  trata `false` como vacío — un `mcp: false` se habría leído como «sin definir» y el toggle no se
+  habría aplicado nunca.
+- **Puerto directo `8080/tcp`, declarado pero cerrado por defecto** (`null`). Solo hace falta para
+  MCP y OAuth, que **no pueden funcionar por el ingress**: el descubrimiento de OAuth 2.1 (RFC 8414
+  y RFC 9728) exige servir los `/.well-known/*` en la **raíz del origen**, y bajo el ingress esa
+  raíz es de Home Assistant. No hay arreglo desde este lado; hay receta, y está documentada.
+  Tampoco se declara `watchdog`: el único endpoint candidato (`/v1/ready`) solo es alcanzable por
+  ese puerto, así que un watchdog reiniciaría en bucle la instalación normal.
+- **Documentación nueva**: [`docs/home-assistant.md`](docs/home-assistant.md) (instalación,
+  usuarios, tabla de opciones, MCP con receta LAN y Cloudflare Tunnel, copias, migración desde
+  Compose, actualizaciones, limitaciones y diagnóstico) más la ficha corta que se ve dentro de HA
+  en `addon/futurefin/DOCS.md`.
+
+### Acceso — Inicio de sesión con la identidad de Home Assistant
+
+- **`POST /v1/auth/sso`**: el ingress ya autenticó a la persona antes de que la petición llegue, y
+  manda su identidad en `X-Remote-User-Id`. El endpoint la canjea por una **sesión normal** —misma
+  fila en `sessions`, misma cookie `ff_session`, mismo gate de instalación, mismo warm-up de la
+  proyección en background—; a partir del 200 no hay nada especial en ese usuario salvo que su
+  `password_hash` es `NULL`. La primera persona que entra por aquí **crea el hogar y queda como
+  owner**, igual que el primer registro por contraseña; las siguientes quedan pendientes de
+  aprobación. Si el canje falla por lo que sea, la SPA **cae al formulario de acceso de siempre**:
+  el SSO es un atajo, nunca la única puerta.
+- **El modelo de confianza es una puerta doble, y las dos hojas son opt-in**:
+  `FUTUREFIN_TRUSTED_PROXY_AUTH` (sin ella, `401 sso_disabled`) **y**
+  `FUTUREFIN_TRUSTED_PROXY_IPS` (peer fuera de la lista, `401 sso_untrusted_peer`). Activar la
+  primera sin la segunda **aborta el arranque**: una cabecera de identidad es una afirmación sin
+  prueba, y sin peer verificado la escribiría cualquiera. En el add-on el entrypoint las pone solo
+  con `sso: true`, y la lista es exactamente el ingress del Supervisor (`172.30.32.2`) — de donde
+  se sigue que **el puerto directo nunca honra `X-Remote-User-*`**. La ruta se monta **siempre**,
+  llueva o truene: lo que decide es el estado, no la forma del router, o los tests dejarían de
+  describir el binario que se despliega.
+- **Las cuentas SSO no tienen contraseña, y eso se dice en voz alta.** Ni `POST /v1/auth/login` ni
+  `POST /v1/auth/password` ni la exportación `.ffbackup` pueden hacer nada con un `password_hash`
+  nulo, así que los tres responden un `401 sso_account_no_password` **hablado** en vez de un 401
+  mudo o un «contraseña incorrecta» falso. Fijar contraseña desde ahí queda **fuera de alcance en
+  esta versión** a propósito: crearía una segunda vía de acceso a una cuenta cuya autenticación
+  pertenece al proveedor. El caso de la exportación es el menos obvio y el más importante: la clave
+  del `.ffbackup` se **deriva de la contraseña de la cuenta**, así que sin contraseña el fichero
+  sería indescifrable — mejor negarse que entregar un archivo que nadie puede abrir. El coste
+  asumido es que ese 401 revela que la cuenta existe; es la misma postura que el `username_taken`
+  del registro, y está en la lista de «fuera de alcance» de `SECURITY.md`.
+
+### Servidor — Base path genérico: FutureFin ya se puede colgar de una ruta
+
+- **El prefijo público se resuelve por petición** (`apps/api/src/prefix.rs`), con precedencia
+  `X-Ingress-Path` > `X-Forwarded-Prefix` > `FUTUREFIN_BASE_PATH` > raíz. El servidor sigue
+  montando **todas** sus rutas en la raíz —quien quita el prefijo es el proxy—; lo que depende de
+  él es lo que resuelve el navegador: los refs absolutos del HTML, las URLs de `fetch`, los
+  `pushState` y el `Path` de la cookie. Por eso lo inyecta un handler (`handlers/spa.rs`,
+  `window.__FF_BASE__`) y no un `base` de Vite en build ni un placeholder reescrito al arrancar:
+  **la misma imagen sirve Compose en `/` y el ingress bajo `/api/hassio_ingress/<token>` a la vez**,
+  y el token cambia. La SPA lo consume desde `apps/web/src/lib/basePath.ts`, con helpers puros e
+  **idempotentes** (un path que pasa dos veces por `apiUrl` no se prefija dos veces).
+- **Invariante que hace esto seguro de mergear: sin prefijo y sin SSO, el `index.html` sale byte a
+  byte igual** (`Cow::Borrowed`), y `BASE_PATH` degrada a `""` ante cualquier basura. El modo
+  Compose no cambia ni un carácter. Cuando sí se inyecta, la respuesta lleva `Cache-Control:
+  no-store` y `Vary: X-Ingress-Path, X-Forwarded-Prefix`: el shell depende de cabeceras de proxy y
+  ningún caché intermedio debe servir el de un despliegue a otro.
+- **Un prefijo inválido no se cuela**: debe empezar por `/`, sin `//`, sin segmentos `.`/`..`,
+  charset `[A-Za-z0-9._~/%-]`, ≤128 caracteres. Una **cabecera** inválida se ignora y se sigue con
+  la fuente siguiente (con un `warn` deduplicado y acotado a 8 entradas, para que nadie convierta
+  el log en un canal de flood); un **`FUTUREFIN_BASE_PATH`** inválido **aborta el arranque**, igual
+  que `FUTUREFIN_PUBLIC_URL` — mejor un fallo ruidoso que HTML roto en silencio. La detección de
+  prefijo **no** exige peer de confianza, y es deliberado: un `X-Forwarded-Prefix` falsificado solo
+  deforma la respuesta del propio atacante.
+- **Salda una deuda vieja**: hasta ahora servir FutureFin en `https://tu-host/futurefin/` no
+  funcionaba y no había forma de arreglarlo desde la configuración. Ahora hay recetas de nginx,
+  Caddy y Traefik en [`docs/instalacion.md`](docs/instalacion.md), con el aviso de que **MCP y
+  OAuth siguen necesitando la raíz de un origen** y por tanto no valen en subpath.
+
+### Seguridad — Anti-clickjacking condicional (enmienda de un invariante)
+
+- **Hasta ahora la regla era absoluta: `X-Frame-Options: DENY` fijo sobre el router final, «nada de
+  FutureFin se embebe en un iframe».** El ingress de Home Assistant pinta el add-on dentro de un
+  iframe del **mismo origen** que HA, así que con `DENY` el panel salía **en blanco**. La enmienda
+  no es quitar la protección: es cambiar `DENY` por `Content-Security-Policy: frame-ancestors
+  'self'`, que sigue prohibiendo el embebido **cross-origin** — el vector real del clickjacking —
+  y permite el same-origin que el ingress necesita.
+- **La relajación tiene doble llave**: peer en `FUTUREFIN_TRUSTED_PROXY_IPS` **y** cabecera
+  `X-Ingress-Path` presente. Con una sola bastaría mandar la cabecera a mano desde fuera para
+  desactivar la protección. Con peer no confiable —el default— la respuesta lleva `DENY` aunque la
+  cabecera venga.
+- Detalle que evita un falso «arreglado»: cuando se aplica la CSP se **elimina** el
+  `X-Frame-Options`, porque los navegadores que miran las dos cabeceras dan prioridad al `DENY` y
+  la app habría seguido en blanco. Y la capa envuelve el router **final** (el que ya incluye el
+  fallback SPA), no `api`: la pantalla de consentimiento OAuth la sirve ese fallback y es
+  justamente la que más protección necesita.
+
+### Sesiones — la cookie `ff_session` se acota al prefijo
+
+- **El `Path` de la cookie pasa a ser el prefijo de la petición** (`/` cuando no hay prefijo, es
+  decir el comportamiento de siempre en Compose). Motivo concreto: bajo el ingress todos los
+  add-ons comparten el origen de Home Assistant, así que una cookie con `Path=/` se enviaría a
+  **todos los demás add-ons** de la instalación. Acotarla la deja donde tiene que estar. La cookie
+  de borrado usa la misma plantilla de path, porque un `Set-Cookie` de borrado solo casa con la
+  cookie si el `Path` coincide.
+
+### Arranque — la guarda de downgrade explica en vez de fallar en críptico
+
+- **Imagen vieja sobre datos nuevos ya no muere con el error crudo de sqlx.** `VersionMissing` es
+  la firma exacta de ese caso, y ahora se traduce a un mensaje de operador que empieza por
+  «FutureFin NO ARRANCA: esta base de datos viene de una versión MÁS NUEVA», dice **«TUS DATOS
+  ESTÁN INTACTOS: no se ha tocado nada»** y da las dos salidas: volver al tag más nuevo (lo normal)
+  o restaurar el `pre-migration-*.sql.gz` (`/var/lib/futurefin/backups`, o `/data/state/backups` en
+  el add-on). Importa más de lo que parece con actualización automática de por medio: el rollback
+  del add-on es restaurar la copia de HA, y quien lo intente reinstalando una versión anterior se
+  topa con esto y necesita entender qué le está diciendo.
+- **No añade ninguna comprobación propia**: sqlx ya fallaba ahí. Cualquier otro error de migración
+  —un desajuste de checksum, señaladamente— pasa **tal cual**, conserva su mensaje y sigue sin
+  auto-repararse.
+
+### Release — el add-on se versiona solo
+
+- **`publish-image.yml` sube el `version:` de `addon/futurefin/config.yaml` en `main`** al final del
+  run que publica, cuando la imagen ya está verificada en el registry y el GitHub Release creado:
+  la tienda de add-ons **nunca anuncia una versión que no existe**. Sin ese paso, el número se
+  quedaría clavado para siempre en la versión anterior, porque el Supervisor usa ese `version:`
+  como tag de la imagen. Va por la Contents API y no por `git push` porque los checkouts del
+  workflow usan `persist-credentials: false`. No hay bucle: un push con `GITHUB_TOKEN` no dispara
+  workflows.
+- **Requisito manual que no vive en git**: la app «GitHub Actions» tiene que estar como *bypass
+  actor* del ruleset «Proteger main», o el paso falla con un 403. Si falla, la imagen y el Release
+  ya están fuera y el add-on se queda una versión por detrás — se arregla con un PR normal.
+  Anotado en `CONTRIBUTING.md` para que no se pierda.
+- **`./scripts/audit-releases.sh --addon`** comprueba que el add-on y `apps/api/Cargo.toml`
+  declaran la misma versión.
+
+### Migración / compatibilidad
+
+- **Migración `20260827120000_users_trusted_header_identity.sql`**: `users.password_hash` deja de
+  ser `NOT NULL` y aparece `users.external_user_id` (UUID) con un índice **UNIQUE parcial**
+  (`WHERE external_user_id IS NOT NULL`, para que las cuentas de contraseña —que la dejan a NULL—
+  no compitan por él y el índice quede pequeño). Las dos cosas son **aditivas**: ninguna fila
+  existente cambia. Una cuenta creada por el proxy no tiene contraseña que guardar y **la ausencia
+  se modela como ausencia**; inventarle un hash aleatorio habría sido peor — una credencial que
+  nadie conoce y que el cambio de contraseña podría rotar.
+- **Datos**: sin pérdida. **Backups `.ffbackup`**: sin cambio, `schema_version` sigue en **10**.
+- **Primer arranque tras actualizar**: nada que hacer. Sin `FUTUREFIN_BASE_PATH`, sin cabeceras de
+  proxy y sin `FUTUREFIN_TRUSTED_PROXY_*`, el `index.html` se sirve idéntico, la cookie sigue con
+  `Path=/` y la respuesta sigue llevando `X-Frame-Options: DENY`. Actualizar no mueve ningún número.
+- **Rollback**: volver a 4.2.1 con la migración ya aplicada **no arranca** — es exactamente el caso
+  que la guarda de downgrade de esta versión aprende a explicar, solo que el binario de 4.2.1 aún
+  lo cuenta con el error crudo de sqlx. Se para sin tocar los datos igualmente; para bajar de
+  verdad hay que restaurar el `pre-migration-*.sql.gz`. Y lo que además se
+  pierde al bajar es el add-on: una imagen anterior no conoce `/data/options.json`, arrancaría en
+  modo Compose con `PGDATA` fuera de `/data` y **la guarda de volumen la pararía**.
+
 ## [4.2.1] - 2026-08-25
 
 ### Corregido

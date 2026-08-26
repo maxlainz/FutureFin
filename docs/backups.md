@@ -42,6 +42,13 @@ no entiende sin descifrar nada—, y el resto no.
 > No hay puerta de atrás, y una contraseña equivocada da un error genérico indistinguible de un
 > fichero corrupto. Es a propósito.
 
+> **Las cuentas creadas por SSO no pueden exportar.** En el add-on de Home Assistant, quien entra
+> con su identidad de HA tiene la cuenta **sin contraseña** — y la clave del `.ffbackup` se deriva
+> precisamente de esa contraseña. El servidor responde `sso_account_no_password` en vez de generar
+> un fichero que nadie podría descifrar. Para sacar datos de ahí: exporta desde una cuenta que sí
+> tenga contraseña, o usa la copia de seguridad de Home Assistant, que se lleva `/data` entero. Ver
+> [home-assistant.md](home-assistant.md#2-primer-arranque-y-usuarios).
+
 **Cómo se restaura**: en la misma pantalla, **Importar backup**. Dos cosas que hay que saber antes
 de pulsar:
 
@@ -50,9 +57,9 @@ de pulsar:
 - Antes de aplicar nada, la app enseña un **preview** con los recuentos de lo que va a entrar.
   Léelo. Es la última oportunidad de darte cuenta de que ese no era el archivo.
 
-**Compatibilidad entre versiones**: cada archivo lleva un `schema_version` (hoy el **9**, agosto de
-2026). Todos los formatos antiguos, del 1 al 9, se siguen importando: se migran en memoria al
-llegar. Al revés no: un archivo de una versión **más nueva** que el servidor se rechaza limpiamente
+**Compatibilidad entre versiones**: cada archivo lleva un `schema_version` (hoy el **10**, agosto de
+2026 — la constante `CURRENT_SCHEMA_VERSION` del servidor manda). Todos los formatos antiguos, del 1
+al 10, se siguen importando: se migran en memoria al llegar. Al revés no: un archivo de una versión **más nueva** que el servidor se rechaza limpiamente
 con un "actualiza FutureFin para importar este backup" — rechazo claro, nunca datos a medias.
 
 La API por debajo, si prefieres automatizarlo (todos con cookie de sesión):
@@ -103,6 +110,25 @@ ls -lh backups-auto/
 ```
 
 Y recuerda: `docker compose down -v` borra el volumen `ffdata` y **se lleva estos backups con él**.
+
+---
+
+## Si lo tienes como add-on de Home Assistant
+
+Las tres capas siguen ahí, pero la 3 cambia de dueño: **la hace Home Assistant**.
+
+- **La copia de Home Assistant sustituye al `pg_dump` manual.** Cubre `/data` **entero**, y en el
+  add-on ahí vive todo: el cluster de PostgreSQL (`/data/pgdata`), los backups automáticos y el
+  estado del entrypoint (`/data/state`). El add-on declara `backup: cold`, así que el Supervisor lo
+  **para** mientras copia — cuenta con 1–2 minutos de indisponibilidad. Es lo correcto: una copia
+  en caliente del directorio de datos de un PostgreSQL vivo no es consistente.
+- **Los backups automáticos pre-migración están en `/data/state/backups`**, no en
+  `/var/lib/futurefin/backups`. Mismo formato, misma retención, mismo nombre `pre-migration-*.sql.gz`.
+- **El `.ffbackup` funciona igual**, con la excepción de las cuentas SSO (arriba).
+- Los scripts `backup-postgres.sh` y `restore-postgres.sh` de este repositorio **no** están
+  pensados para el add-on: hablan con Docker Compose.
+
+Detalles en [home-assistant.md §5](home-assistant.md#5-copias-de-seguridad).
 
 ---
 

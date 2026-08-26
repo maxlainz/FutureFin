@@ -25,6 +25,7 @@ The repo carries three documentation layers. Consult them in this order:
 | Tocar una métrica o un KPI: su base, su ventana, su nombre, o añadir/retirar uno | [`futurefin-metric-definitions`](.claude/skills/futurefin-metric-definitions/SKILL.md) |
 | Añadir/cambiar un fixture, ilustrar un cambio con números, capturas, datos de demo | [`futurefin-data-hygiene`](.claude/skills/futurefin-data-hygiene/SKILL.md) |
 | Env vars, compose files, query params, fire_settings axes; adding a config axis | [`futurefin-config-and-flags`](.claude/skills/futurefin-config-and-flags/SKILL.md) |
+| Add-on de Home Assistant, ingress/subpath, `/data`, SSO por cabeceras de proxy | [`futurefin-run-and-operate`](.claude/skills/futurefin-run-and-operate/SKILL.md) (canal, backups, upgrade) + [`futurefin-config-and-flags`](.claude/skills/futurefin-config-and-flags/SKILL.md) (opciones→env, `FUTUREFIN_BASE_PATH`/`TRUSTED_PROXY_*`); el **porqué** de las dos concesiones (iframe, identidad delegada) está en `futurefin-architecture-contract` D17/D18 |
 | Setting up / building / dev-environment failures | [`futurefin-build-and-env`](.claude/skills/futurefin-build-and-env/SKILL.md) |
 | Deploy, upgrade, rollback, backups, logs, production ops | [`futurefin-run-and-operate`](.claude/skills/futurefin-run-and-operate/SKILL.md) |
 | Measuring: timings, cache hits, payload sizes, DB state (ships scripts) | [`futurefin-diagnostics-and-tooling`](.claude/skills/futurefin-diagnostics-and-tooling/SKILL.md) |
@@ -224,6 +225,8 @@ npm workspace:   apps/web (futurefin-web)
 
 **OAuth 2.1 embebido (v3.1.0)**: el binario es también **authorization server + resource server** de `/mcp` — lo que exige el conector de claude.ai web. Módulo `apps/api/src/oauth/` (protocolo: metadata RFC 8414/9728 en `/.well-known/*` **con y sin sufijo `/mcp`**, DCR RFC 7591 abierto en `POST /oauth/register`, token endpoint con PKCE S256-only + refresh rotation + reuse-detection, revocación RFC 7009) y `handlers/oauth_consent.rs` (`/v1/oauth/*`, cookie: pantalla de consentimiento de la SPA + panel «Conexiones»). Tokens opacos hash-only con rol vivo (D14); el grant (una fila por app+usuario) es la unidad de revocación. **Jamás registres una ruta backend en `/oauth/authorize`** (la sirve el fallback SPA; un 405 no cae al fallback). Todo el protocolo cuelga del kill-switch `FUTUREFIN_MCP_ENABLED` **excepto** `/v1/oauth/connections` (siempre montado). Issuer derivado del request; override opcional `FUTUREFIN_PUBLIC_URL`. El login de la app NO cambia: OAuth delega acceso, no inicia sesión (la fila «OAuth login» de la arqueología sigue vigente para login-con-IdP). Detalles: [`.claude/api-routes.md`](.claude/api-routes.md) sección OAuth.
 
+**Subpath por request + add-on de Home Assistant (2026-08-27)**: el servidor monta siempre sus rutas en la raíz, pero el **prefijo público es por request** (`apps/api/src/prefix.rs`: `X-Ingress-Path` > `X-Forwarded-Prefix` > `FUTUREFIN_BASE_PATH` > `""`), así que la misma imagen sirve compose en `/` y el Ingress de HA bajo `/api/hassio_ingress/<token>` a la vez: `handlers/spa.rs` reescribe los refs absolutos del `index.html` al vuelo (**sin prefijo devuelve el fichero byte a byte**) y la cookie `ff_session` se acota a ese prefijo. Dos cosas exigen **peer de confianza** (`FUTUREFIN_TRUSTED_PROXY_IPS`) y una cabecera sola nunca basta: relajar el anti-clickjacking a `frame-ancestors 'self'` (`handlers/frame.rs`; en todo lo demás sigue `X-Frame-Options: DENY`) y el **SSO de cabeceras** `POST /v1/auth/sso` (`handlers/sso.rs`), que además pide `FUTUREFIN_TRUSTED_PROXY_AUTH=1` — opt-in doble; con AUTH y sin IPS el binario **no arranca**. El SSO crea sesiones normales (primer usuario = owner, resto pendientes) y cuentas sin contraseña (`sso_account_no_password`). El **add-on va empaquetado en este propio repo** (`repository.yaml` + `addon/futurefin/`): no construye nada, apunta a la imagen de GHCR ya publicada, y bajo HA todo vive en `/data` (`/data/pgdata` + `/data/state`). Detalles: [`futurefin-run-and-operate`](.claude/skills/futurefin-run-and-operate/SKILL.md) y [`futurefin-config-and-flags`](.claude/skills/futurefin-config-and-flags/SKILL.md).
+
 **OpenAPI**: generated via `utoipa`, served at `GET /openapi.json`. All handler structs annotated with `#[utoipa::path]`.
 
 **CORS**: `CORS_ORIGINS` env var (comma-separated). Not required — defaults to localhost origins. Set explicitly only for cross-origin API access.
@@ -299,6 +302,16 @@ directamente — la protección lo rechaza, y ese es el objetivo.
    agujero. Encadenar releases sin esperar los builds es seguro por eso. Matiz del auto-tag: en
    modo merge el tag se crea **después** de ver la CI verde (no antes, como el dispatch) — un bump
    mergeado con CI rota no deja tag huérfano, deja un run rojo.
+5. **Último paso del mismo run: el add-on de Home Assistant apunta a la versión recién publicada.**
+   Con la imagen ya verificada en el registry y el Release creado, `publish-image.yml` sube el
+   `version:` de `addon/futurefin/config.yaml` en `main` por la **contents API** (los checkouts van
+   con `persist-credentials: false`: no hay credencial para un `git push`). El Supervisor usa ese
+   número como tag de imagen, así que sin este paso la tienda se queda clavada. **Requisito**: la
+   app «GitHub Actions» debe ser *bypass actor* del ruleset «Proteger main» — si no, la API
+   responde 403. Si el paso falla, la imagen y el Release ya están fuera y el add-on se queda **una
+   versión por detrás**: se arregla con un PR normal que suba el `version:`. El commit lleva
+   `[skip ci]` y no reentra (un push con `GITHUB_TOKEN` no dispara workflows). Comprueba la
+   sincronía con `./scripts/audit-releases.sh --addon`.
 
 Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKERHUB_USERNAME` +
 `DOCKERHUB_TOKEN`.

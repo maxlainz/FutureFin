@@ -126,6 +126,44 @@ Hay una segunda barrera, esta a nivel de PostgreSQL: una imagen nunca abre un cl
 un PostgreSQL **más nuevo**. Si una versión futura ya hizo `pg_upgrade` de tu volumen a la 17, no
 podrás volver a la 3.x sin restaurar un dump.
 
+### La guarda de downgrade: qué verás exactamente
+
+Desde la 4.3.0 ese "no arranca" tiene mensaje propio en vez del error crudo de la librería de
+migraciones. Si arrancas una imagen antigua sobre datos ya migrados por una posterior, el log dice:
+
+```
+─────────────────────────────────────────────────────────────────────────────
+FutureFin NO ARRANCA: esta base de datos viene de una versión MÁS NUEVA.
+─────────────────────────────────────────────────────────────────────────────
+La base tiene aplicada la migración <N>, que este binario (versión X.Y.Z)
+no conoce. Es la firma de haber arrancado una imagen antigua sobre datos ya
+migrados por una imagen posterior.
+
+TUS DATOS ESTÁN INTACTOS: no se ha tocado nada. FutureFin prefiere no arrancar
+antes que ejecutar un esquema viejo sobre datos nuevos.
+```
+
+Y da las dos salidas: corregir `FUTUREFIN_TAG` para volver a la versión más nueva —lo normal— o
+restaurar el `pre-migration-*.sql.gz` si de verdad quieres quedarte en la antigua. La detección no
+añade ninguna comprobación nueva: es el mismo fallo de siempre, contado para que se pueda accionar.
+Cualquier otro error de migración (un desajuste de checksum, por ejemplo) **conserva su mensaje
+original** y sigue sin auto-repararse.
+
+## Actualizar el add-on de Home Assistant
+
+Si lo instalaste como add-on ([home-assistant.md](home-assistant.md)), el canal es otro: ahí no hay
+`FUTUREFIN_TAG` que tocar.
+
+- **La versión del add-on ES la versión de la imagen.** El mismo workflow que publica una versión
+  sube ese número en `main` cuando la imagen ya está verificada en el registry y el Release creado:
+  la tienda nunca anuncia una versión que no exista.
+- **Puede ir una versión por detrás durante un rato**, entre la publicación y el siguiente refresco
+  del índice de repositorios del Supervisor. No es un error; **Buscar actualizaciones** lo fuerza.
+- **La actualización automática de Home Assistant está soportada.** El backup automático
+  pre-migración salta igual que en Compose, dentro de `/data/state/backups`.
+- **El rollback es restaurar la copia de Home Assistant** que hiciste antes de actualizar, no
+  reinstalar una versión anterior del add-on: se topará con la guarda de downgrade de arriba.
+
 ## Watchtower y otros actualizadores automáticos
 
 Funciona sin intervención, con **una configuración imprescindible**:

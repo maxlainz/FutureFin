@@ -25,8 +25,10 @@ better than consumer tools. Refreshed **2026-08-16 for v3.0.0**: 34 migrations, 
 
 **Implementation status — read before quoting this file.** Every item here was a pure candidate
 until 3.0.0. That is no longer true of **item 2**: its *pre-migration backup* half **shipped in
-3.0.0** (automatic, inside the container — see the item for the exact mechanism and for the two
-pieces that remain open). Items 1 and 3–9 remain **CANDIDATES — not implemented**; do not describe
+3.0.0** (automatic, inside the container) and its remaining two pieces — the **explicit downgrade
+guard with an operator message** and **`apps/api/tests/migration_guard.rs`** — **shipped 2026-08-27**
+on branch `feat/home-assistant-addon`. Item 2 is now essentially done; what is left is a drill, not
+a feature (see the item). Items 1 and 3–9 remain **CANDIDATES — not implemented**; do not describe
 any of them as existing features anywhere.
 
 **Calibration (owner-confirmed):** this is NOT a research program. "Beyond SOTA" means practical
@@ -86,7 +88,7 @@ exception: it names a mechanism CI asserts, and it deliberately stops short of "
 | "Deterministic / bit-exact projections" | A replay test asserting two runs of `project_net_worth_series` on the same input are `assert_eq!`-identical, running in CI (`cargo test -p futurefin-engine --locked` — CI runs engine tests; the Postgres integration tests do NOT run in CI, they need local `TEST_DATABASE_URL`) |
 | "Property-tested engine invariants" | proptest suite merged and green (item 1), named properties listed in the CHANGELOG entry |
 | "Tax-aware withdrawals" | Engine drawdown tax model + regenerated parity fixture with both suites green (item 7) |
-| "Safe upgrades / never lose data" | Pre-migration dump hook + a restore actually exercised in a test or documented drill (item 2). **Partly earned in 3.0.0**: the automatic pre-migration dump exists and the CI `docker-stack` job exercises V2→V3 with real data, automigration and pg_upgrade 15→16. Still unearned, and therefore still unclaimable: an explicit **downgrade guard** with a friendly message, and a restore drill run against a *production-shaped* dump. Word claims to what the evidence covers — "backs itself up before every migration" is provable today; "never lose data" is not. |
+| "Safe upgrades / never lose data" | Pre-migration dump hook + a restore actually exercised in a test or documented drill (item 2). **Partly earned in 3.0.0**: the automatic pre-migration dump exists and the CI `docker-stack` job exercises V2→V3 with real data, automigration and pg_upgrade 15→16. **The downgrade guard was earned on 2026-08-27** (`db.rs` → `MigrationError::Downgrade` + operator banner, pinned by `apps/api/tests/migration_guard.rs`), so "refuses to start instead of running an old schema over new data, and says so in words you can act on" is now claimable. Still unearned, and therefore still unclaimable: a restore drill run against a *production-shaped* dump. Word claims to what the evidence covers — "backs itself up before every migration" and "refuses to downgrade" are provable today; "never lose data" is not. |
 
 Rule of thumb: the CHANGELOG entry that introduces a capability must name the test(s) that prove
 it. If you cannot name the test, the claim is not ready.
@@ -100,7 +102,7 @@ change the economic model and therefore execute through
 | # | Item | Axis | Value | Effort | Risk | Verdict |
 |---|---|---|---|---|---|---|
 | 1 | Property-based engine invariants (proptest) | 2 | High | Low | Low | Do first |
-| 2 | Migration-safety tooling (pre-migration dump ✅ shipped 3.0.0; downgrade guard + `migration_guard.rs` still open) | 3 | High | Low | Low | **Partly done** — finish the remainder |
+| 2 | Migration-safety tooling (pre-migration dump ✅ 3.0.0; downgrade guard + `migration_guard.rs` ✅ 2026-08-27) | 3 | High | Low | Low | **Done except the restore drill** |
 | 3 | Projection-as-auditable-artifact (recomputable snapshot) | 2, 3 | Med–High | Med | Low | Do |
 | 4 | Sequence-of-returns risk surfacing (deterministic stress) | 1 | High | Med | Med | Via campaign |
 | 5 | Liability interest accrual (discovered gap) | 1 | Med–High | Med | Med | Via campaign |
@@ -206,26 +208,37 @@ What the host-side scripts are for now: `scripts/backup-postgres.sh` (ad-hoc dum
 `compose exec … pg_dump -h /var/run/postgresql`) and `scripts/restore-postgres.sh` (restores into a
 temporary `FUTUREFIN_MODE=db-only` container, printing a row census before and after).
 
-#### Still open — the two pieces this item has left
+#### ✅ Shipped 2026-08-27 (branch `feat/home-assistant-addon`) — the two pieces this item had left
 
-1. **Explicit downgrade guard with a friendly message.** Running an older image over a
-   newer-migrated database still surfaces as sqlx's raw `VersionMissing` error. It *is* a de-facto
-   guard (it refuses to start rather than corrupting anything), but the message does not tell a
-   self-hoster what happened or what to do — unlike the entrypoint's own guards, which do
-   (`PGDATA was created by PostgreSQL N, NEWER than this image's M …`). Target: detect the
-   condition and emit the same quality of message, naming the restore path and the
-   `pre-migration-*.sql.gz` file that matches.
-2. **`apps/api/tests/migration_guard.rs`.** Still absent (20 integration-test files, none of them
-   this one). Insert a fake `_sqlx_migrations` row with an unknown version into a schema-isolated
-   test DB (`apps/api/tests/common/mod.rs`) and assert `run_migrations` returns an error. This is
-   the piece that turns "sqlx documents it" into "we test it".
+1. **Explicit downgrade guard with a friendly message — SHIPPED.** `apps/api/src/db.rs` now maps
+   sqlx's `MigrateError::VersionMissing` (which *is* the signature of "the database went past this
+   binary") to its own `MigrationError::Downgrade { version, message }`. No extra check was added on
+   top: sqlx already fails: the work was (a) not losing that failure in a generic error and (b)
+   translating it. The message is a boxed operator banner —
+   `FutureFin NO ARRANCA: esta base de datos viene de una versión MÁS NUEVA.` — naming the unknown
+   migration version and the binary's own version, stating explicitly that **nothing was touched**,
+   and giving both exits: go back to the newer tag, or restore the matching
+   `pre-migration-*.sql.gz` (`ffdata`, or `/data/state/backups` under the Home Assistant add-on),
+   pointing at `docs/backups.md`. Same quality bar as the entrypoint's own guards, as the item asked.
+2. **`apps/api/tests/migration_guard.rs` — SHIPPED** (2 tests). It applies the real migrations to a
+   schema-isolated DB with `common::isolated_pool()` (deliberately *not* `TestApp` — no router
+   needed), inserts a fake `_sqlx_migrations` row with version `99_999_999_999_999`, and asserts
+   `run_migrations` returns `MigrationError::Downgrade` carrying the operator banner. It tests the
+   contract, not the implementation: keep the `VersionMissing` arm and the message quality, and the
+   test stays honest if the mechanism changes.
+
+Still not done from the optional half: the pending-migration count logged around
+`db::run_migrations` (below), and the **restore drill** of the "you have a result when" clause (c) —
+running an actual `pre-migration-*.sql.gz` back through `scripts/restore-postgres.sh` end to end.
+Until (c) is exercised, the "safe upgrades" claim is well-evidenced but not fully drilled.
 
 Optional and cheap: log pending-migration count + app version around `db::run_migrations` in
 `apps/api/src/main.rs`, so post-incident forensics can answer "which upgrade ran which migrations"
 from the app log as well as from the backup filename.
 
-**You have a result when:** (a) `migration_guard.rs` is green, (b) starting an older tag over a
-migrated volume prints a message a non-Rust user can act on, and (c) a restore drill —
+**You have a result when:** (a) `migration_guard.rs` is green — **done**, (b) starting an older tag
+over a migrated volume prints a message a non-Rust user can act on — **done** (`db.rs`
+`downgrade_message`), and (c) a restore drill — **still pending** —
 `scripts/restore-postgres.sh` against an automatic `pre-migration-*.sql.gz` pulled out of `ffdata`
 — ends with `/v1/ready` green and the row census matching, with the commands recorded in
 `.claude/skills/futurefin-run-and-operate/SKILL.md` or README "Backups". Only then does the
@@ -448,8 +461,12 @@ Facts verified 2026-07-02 against v1.4.3; item 2, the claims table and the count
   `grep -n 'premigration_backup\|migration-versions.txt\|refusing to start with pending migrations' apps/api/docker-entrypoint.sh`
   and `grep -n 'FUTUREFIN_BACKUP_KEEP\|FUTUREFIN_PREMIGRATION_BACKUP' apps/api/docker-entrypoint.sh`
   (defaults 10 / 90 days / `on`); CI assertion: `grep -n 'pre-migration-\|pre-pgupgrade-' .github/workflows/ci.yml`.
-- Item 2 open half: `ls apps/api/tests/migration_guard.rs` → **must still be missing**;
-  `ls apps/api/tests/*.rs | wc -l` (20 on 2026-08-16; 8 on 2026-07-02).
+- Item 2 formerly-open half — **SHIPPED 2026-08-27** (branch `feat/home-assistant-addon`), so the
+  old "must still be missing" check is inverted: `ls apps/api/tests/migration_guard.rs` → **must
+  exist** (2 tests); `grep -n 'MigrationError::Downgrade\|VersionMissing\|NO ARRANCA' apps/api/src/db.rs`
+  → must print the mapping and the operator banner; `ls apps/api/tests/*.rs | wc -l` (43 on
+  2026-08-27; 20 on 2026-08-16; 8 on 2026-07-02). Run it with
+  `TEST_DATABASE_URL=… cargo test -p futurefin-api --test migration_guard`.
 - Host-side backup/restore scripts (no `upgrade-with-backup.sh` — deliberately): `ls scripts/`.
 - Embedded PG runs with stock memory settings (Observables): `grep -n -A9 '^start_postgres()' apps/api/docker-entrypoint.sh`
   → the postmaster gets only `listen_addresses`, `unix_socket_directories`, `logging_collector`

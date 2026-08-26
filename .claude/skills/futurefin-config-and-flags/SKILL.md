@@ -4,11 +4,14 @@ description: >
   Catalog of every configuration axis in FutureFin: environment variables of the API binary (PORT,
   DATABASE_URL, SESSION_TTL_DAYS, COOKIE_SECURE, CORS_ORIGINS, WEB_STATIC_ROOT, RUST_LOG,
   FUTUREFIN_DB_CONNECT_TIMEOUT_SECS, FUTUREFIN_MCP_ENABLED, FUTUREFIN_PUBLIC_URL,
-  FUTUREFIN_RECONCILE_SWEEP_HOURS,
+  FUTUREFIN_RECONCILE_SWEEP_HOURS, FUTUREFIN_BASE_PATH, FUTUREFIN_TRUSTED_PROXY_IPS,
+  FUTUREFIN_TRUSTED_PROXY_AUTH,
   FUTUREFIN_API_PORT, WEB_DEV_PORT,
   TEST_DATABASE_URL) and of
   the self-contained container entrypoint (FUTUREFIN_DB_MODE, FUTUREFIN_MODE, FUTUREFIN_BACKUP_KEEP*,
   FUTUREFIN_PREMIGRATION_BACKUP, FUTUREFIN_ALLOW_EPHEMERAL_DB, FUTUREFIN_STATE_DIR, POSTGRES_*),
+  the Home Assistant add-on options and how the entrypoint maps them to env
+  (/data/options.json: log_level, sso, mcp, cors_origins, public_url; /data/pgdata + /data/state),
   deployment knobs (FUTUREFIN_IMAGE/TAG, APP_PORT), the three docker-compose files
   (prod single-service, dev standalone, local-image override), API query-parameter flags
   (?view=mine, ?months, ?density=hybrid), request-body limits, and per-installation runtime
@@ -97,6 +100,9 @@ entrypoint (`apps/api/docker-entrypoint.sh`, Docker image only), **§1.3** compo
 | `CORS_ORIGINS` | `http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080` | comma-separated origins, entries trimmed, empties dropped; an unparseable entry **panics at startup**; empty result panics | prod, only for cross-origin API access | `allow_credentials(true)`, methods GET/POST/PATCH/DELETE/OPTIONS, headers `content-type`/`accept`/`authorization`/`mcp-session-id` (the last two added in 3.0.0 for browser MCP clients; `mcp-session-id` is also exposed). Same-origin deployments (the normal Docker image) never send CORS preflights, so the default is fine. |
 | `WEB_STATIC_ROOT` | unset | path; empty/whitespace value treated as unset; set-but-missing path → startup warning, API-only mode | prod (Docker sets `/app/web`) | When the path exists, the SPA is served from it with `index.html` fallback (single-port mode). Omit in split-dev — Vite serves the UI. |
 | `RUST_LOG` | `futurefin_api=info,tower_http=info,sqlx=warn` | tracing `EnvFilter` syntax; invalid filter → the default is used | both | Default is applied in `main.rs` when the env filter can't be built from the env. |
+| `FUTUREFIN_BASE_PATH` | unset → `""` (root) | normalized by `prefix::validate_base_path_env`: `""` or `/` ⇒ root; otherwise must start with `/`, ≤128 chars, charset `[A-Za-z0-9._~/%-]`, no `//`, no `.`/`..` segments (one trailing slash is trimmed). Present-but-invalid → **panic at startup** (fail-loud, like `FUTUREFIN_PUBLIC_URL`) | prod, **optional** (new 2026-08-27) | Public subpath for deployments behind a reverse proxy that does **not** send `X-Forwarded-Prefix`. The server always mounts its routes at the root — the proxy strips the prefix; what needs it is what the *browser* resolves: asset refs in the HTML shell, fetch URLs, and the cookie `Path`. It is the **lowest-precedence** source: `X-Ingress-Path` > `X-Forwarded-Prefix` > `FUTUREFIN_BASE_PATH` > `""` (`prefix::request_prefix`), so one binary serves compose at `/` and HA Ingress under `/api/hassio_ingress/<token>` **at the same time**. An invalid *header* is ignored (deduped `warn`, ≤8 distinct values) and the next source is used — only the env var panics. Detection needs no trusted peer on purpose: a forged prefix only breaks the attacker's own page. |
+| `FUTUREFIN_TRUSTED_PROXY_IPS` | unset → `PeerPolicy::Disabled` (**nobody is trusted**) | `any` (case-insensitive) ⇒ every peer, including an unknown one; otherwise a comma-separated IP list (entries trimmed, empties dropped). An unparseable entry **panics**; a list that resolves empty **panics** | prod, **optional** (new 2026-08-27) | `prefix::PeerPolicy`, stored in `AppState.trusted_peers`. Gates the **two** things a header must never buy on its own: relaxing anti-clickjacking (`handlers/frame.rs` → `frame-ancestors 'self'` instead of `X-Frame-Options: DENY`) and accepting identity headers (`POST /v1/auth/sso`). The peer is the **TCP peer** (`ConnectInfo`), not `X-Forwarded-For`. The HA add-on exports `172.30.32.2` (the Supervisor's ingress address); a LAN client hitting the optional direct port is therefore *not* trusted by the same process. `any` is for tests and for deployments where the proxy is physically the only path in. |
+| `FUTUREFIN_TRUSTED_PROXY_AUTH` | `false` | `parse_bool_env` (same quirk as `COOKIE_SECURE`: only `1/true/TRUE/yes/YES`). **Set without `FUTUREFIN_TRUSTED_PROXY_IPS` → panic at startup** | prod, **optional** (new 2026-08-27) | Enables `POST /v1/auth/sso` (identity delegated to the proxy via `X-Remote-User-Id`, optional `X-Remote-User-Display-Name` / `X-Remote-User-Name`). The route is **always mounted** — only the state changes: off ⇒ 401 `sso_disabled`; on but untrusted peer ⇒ 401 `sso_untrusted_peer`; missing/non-UUID header ⇒ 400 `sso_bad_identity`. The startup panic is deliberate: "auth on, nobody trusted" is not a half-configuration, it is a config that *reads* as enabled while being dead. Accounts created this way have `password_hash IS NULL` and are rejected by password login with `sso_account_no_password`. |
 
 Not env-configurable (hardcoded constants — changing them is a code change):
 - DB pool: `max_connections=10, min=1, acquire_timeout=5s, idle_timeout=600s, max_lifetime=1800s` (`apps/api/src/db.rs`).
@@ -135,6 +141,44 @@ Dockerfile `ENV`s the entrypoint reads but you should not override: `PGDATA=/var
 `LABEL com.futurefin.postgres.majors="15,16"` (16 active, 15 bundled only to auto-`pg_upgrade`
 older volumes) and a `HEALTHCHECK` on `/v1/ready`, and deliberately declares **no `VOLUME`** — the
 mountpoint guard above depends on that.
+
+### 1.2.1 Home Assistant add-on: `options.json` → env (same entrypoint, new 2026-08-27)
+
+In the HA add-on the user never sees an env var: they fill a form, the Supervisor writes
+`/data/options.json`, and `apps/api/docker-entrypoint.sh` translates it. **The presence of that file
+IS the detection** (`HA_ADDON=1`) — there is no other reliable signal inside the container. The
+option schema lives in `addon/futurefin/config.yaml` (`options:` + `schema:`); the labels the user
+reads are in `addon/futurefin/translations/{en,es}.yaml`.
+
+Two variables are overridden **unconditionally and before everything else**, because the Supervisor
+mounts exactly one persistent bind (`/data`) and the Dockerfile `ENV`s point outside it — a
+`${VAR:-default}` would never see HA's value and the database would die on every container recreate:
+
+| Exported | Value under the add-on | Instead of |
+|---|---|---|
+| `PGDATA` | `/data/pgdata` | `/var/lib/postgresql/data` |
+| `FUTUREFIN_STATE_DIR` | `/data/state` (so backups land in `/data/state/backups`) | `/var/lib/futurefin` |
+
+Consequence for the volume guard: `$PGDATA` is now a *subdirectory* of the mountpoint, so the check
+is `is_persisted` (walks ancestors, **stops before `/`** — in any container `/` is a mountpoint, so
+accepting it would make the guard decorative) rather than a plain `mountpoint` on `$PGDATA`. The
+compose case is unchanged: `/var/lib/postgresql/data` → `/var/lib/postgresql` → `/var/lib` → `/var`,
+none mounted → still aborts.
+
+Then the five options, read with `ha_opt` (`jq`, in the image since this change). Note `ha_opt`
+checks presence explicitly instead of `.[$k] // empty`: jq's `//` treats `false` as empty, so a
+boolean set to `false` would read as absent and the toggle would never apply.
+
+| Option (`options.json`) | Default | Exports |
+|---|---|---|
+| `log_level` | `"info"` | `trace`/`debug` → `RUST_LOG=futurefin_api=debug,tower_http=debug,sqlx=warn`; `warn`/`error` → `…=warn,…=warn,sqlx=error`; `info`/`notice`/empty → **nothing** (any pre-existing `RUST_LOG` is respected). Schema: `list(trace\|debug\|info\|warn\|error)`. |
+| `sso` | `true` | When `true`: `FUTUREFIN_TRUSTED_PROXY_AUTH=1` **and** `FUTUREFIN_TRUSTED_PROXY_IPS=${FUTUREFIN_TRUSTED_PROXY_IPS:-172.30.32.2}` — both, always together, which is what keeps the §1.1 startup panic unreachable here. `172.30.32.2` is the Supervisor's ingress address on HA's internal network. |
+| `mcp` | `true` | Only `false` does anything: `FUTUREFIN_MCP_ENABLED=0`. (MCP and OAuth are **not** reachable through the ingress; they need the optional direct port.) |
+| `cors_origins` | `""` | Non-empty → `CORS_ORIGINS=<value>` verbatim (so §1.1's fail-loud parsing applies: a bad entry panics at startup). |
+| `public_url` | `""` | Non-empty → `FUTUREFIN_PUBLIC_URL=<value>` verbatim (same fail-loud validation). Only needed for OAuth over a direct/tunnelled URL. |
+
+Not an option and not an env var: `FUTUREFIN_BASE_PATH` stays unset in the add-on — the ingress
+sends `X-Ingress-Path` on every request, which outranks it (§1.1).
 
 ### 1.3 Compose / deployment level (substituted by `docker-compose*.yml`, never seen by the binary)
 
@@ -463,6 +507,19 @@ auditing for drift (all confirmed working on 2026-08-17):
 - Vite env reading: `grep -n "loadEnv\|FUTUREFIN_API_PORT\|WEB_DEV_PORT\|strictPort" apps/web/vite.config.ts`
 - Test DB default: `grep -n "TEST_DATABASE_URL" apps/api/tests/common/mod.rs`
 - Version stamp: `grep -n "^version" apps/api/Cargo.toml`
+- **Reverse-proxy trio (§1.1, added 2026-08-27, branch `feat/home-assistant-addon`)**:
+  `grep -n "FUTUREFIN_BASE_PATH\|FUTUREFIN_TRUSTED_PROXY_IPS\|FUTUREFIN_TRUSTED_PROXY_AUTH" apps/api/src/main.rs`
+  (the three parses + the `AUTH requires IPS` panic — `grep -n "TRUSTED_PROXY_AUTH=1 requires" apps/api/src/main.rs`
+  must print something); bounds and precedence:
+  `grep -n "fn normalize_prefix\|fn validate_base_path_env\|fn request_prefix\|enum PeerPolicy\|fn from_env_value" apps/api/src/prefix.rs`;
+  behaviour pinned by `cargo test -p futurefin-api --lib prefix::` and
+  `apps/api/tests/{base_path,frame_options,session_cookie_path,sso_login}.rs`
+- **Add-on options → env (§1.2.1)**:
+  `grep -n "options.json\|ha_opt\|HA_ADDON\|PGDATA=/data/pgdata\|FUTUREFIN_STATE_DIR=/data/state" apps/api/docker-entrypoint.sh`
+  (the block is the first ~45 lines, before the Configuración section);
+  `grep -n -A12 "^options:" addon/futurefin/config.yaml` (the five keys and their schema);
+  `grep -n "is_persisted" -B10 apps/api/docker-entrypoint.sh` (ancestor walk that stops before `/`);
+  `grep -n "jq" apps/api/Dockerfile` (the runtime dependency this mapping added)
 
 (The previously stale docs on these topics — data-model.md's `projection_target_age`,
 env-and-config.md's fake `DATABASE_URL` "default", and the `mac_*` `horizon_basis` doc comment in
