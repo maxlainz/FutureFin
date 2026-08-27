@@ -19,6 +19,7 @@ import type {
   UserResponse,
 } from "../api/types";
 import { LoginPanel } from "../auth/LoginPanel";
+import { apiUrl } from "../lib/basePath";
 import { isoTimestampDmy } from "../lib/format";
 import {
   authorizeErrorMessage,
@@ -85,7 +86,7 @@ export function OAuthAuthorizeView() {
         return;
       }
       // status === "consent": ¿hay sesión?
-      const me = await fetch("/v1/auth/me", defaultFetchInit);
+      const me = await fetch(apiUrl("/v1/auth/me"), defaultFetchInit);
       if (me.status === 401) {
         setPhase({ kind: "login" });
         return;
@@ -111,7 +112,7 @@ export function OAuthAuthorizeView() {
     if (phase.kind !== "consent" || !params) return;
     setPhase({ kind: "submitting", details: phase.details, user: phase.user });
     try {
-      const res = await fetch("/v1/oauth/authorize", {
+      const res = await fetch(apiUrl("/v1/oauth/authorize"), {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -140,7 +141,7 @@ export function OAuthAuthorizeView() {
 
   const changeUser = async () => {
     try {
-      await fetch("/v1/auth/logout", { ...defaultFetchInit, method: "POST" });
+      await fetch(apiUrl("/v1/auth/logout"), { ...defaultFetchInit, method: "POST" });
     } catch {
       // Da igual: sin cookie válida el siguiente estado es login de todos modos.
     }
@@ -303,7 +304,10 @@ async function fetchAuthorizeDetails(
   for (const [k, v] of Object.entries(params)) {
     if (v) q.set(k, v);
   }
-  const res = await fetch(`/v1/oauth/authorize-details?${q.toString()}`, defaultFetchInit);
+  const res = await fetch(
+    apiUrl(`/v1/oauth/authorize-details?${q.toString()}`),
+    defaultFetchInit,
+  );
   if (res.status === 404) return "disabled";
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return (await res.json()) as OAuthAuthorizeDetailsApi;

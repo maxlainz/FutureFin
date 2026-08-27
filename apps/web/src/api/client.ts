@@ -3,6 +3,8 @@
  *  - `credentials: "include"` para que el navegador envíe la cookie `ff_session`.
  *  - Traducción del error al español (`{ code, message }` → catálogo `lib/errorMessages`).
  *  - `Content-Type: application/json` en métodos con body.
+ *  - El prefijo de subpath: **toda URL de API pasa por `apiUrl`** (`lib/basePath`), que la deja
+ *    intacta salvo que la app se sirva detrás de un proxy en un subpath.
  *
  * Los wrappers `apiGet/Post/Patch/Delete` lanzan `ApiRequestError` cuando la respuesta no es 2xx,
  * devolviendo el JSON parseado en el caso bueno.
@@ -13,6 +15,7 @@
  * enseñarlo plegado o mandarlo a la consola, nunca como frase principal.
  */
 
+import { apiUrl } from "../lib/basePath";
 import { messageForError } from "../lib/errorMessages";
 
 export const defaultFetchInit: RequestInit = {
@@ -61,7 +64,7 @@ export class ApiRequestError extends Error {
  */
 export async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    return await fetch(apiUrl(url), init);
   } catch (e: unknown) {
     const detail = e instanceof Error ? e.message : String(e);
     console.debug(`[api] network_error ${url}: ${detail}`);

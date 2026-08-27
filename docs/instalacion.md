@@ -15,6 +15,11 @@ inventarse contraseñas y **ninguna variable de entorno es obligatoria**.
 
 No necesitas instalar PostgreSQL, ni Rust, ni Node: todo eso va dentro de la imagen.
 
+> **¿Usas Home Assistant?** Hay un **add-on** que empaqueta esta misma imagen: se instala desde la
+> tienda, sale en la barra lateral y entras con tu usuario de Home Assistant, sin escribir ningún
+> `docker-compose.yml`. Esta página no te hace falta: ve a
+> [home-assistant.md](home-assistant.md).
+
 ## Instalar con Docker Compose
 
 Crea un directorio vacío y guarda dentro el [`docker-compose.yml`](../docker-compose.yml) de este
@@ -230,6 +235,80 @@ Cuando termines TLS por delante, añade al servicio:
 
 Eso marca la cookie de sesión como `Secure`. Si además vas a conectar Claude desde claude.ai, lee
 [mcp.md](mcp.md): hay un caso en el que también hace falta `FUTUREFIN_PUBLIC_URL`.
+
+## Servirla en un subpath (`https://tu-host/futurefin/`)
+
+Desde la 4.3.0 FutureFin puede vivir colgada de una ruta y no solo de la raíz de un dominio. El
+servidor **sigue montando todas sus rutas en la raíz**: quien quita el prefijo es tu proxy. Lo
+único que depende del prefijo es lo que resuelve el navegador —los assets del HTML, las llamadas
+a la API, el `Path` de la cookie de sesión—, y eso se inyecta **por petición** en el `index.html`.
+
+Hay dos formas de decírselo, y la primera gana sobre la segunda:
+
+| Cómo | Qué es |
+|---|---|
+| Cabecera `X-Forwarded-Prefix: /futurefin` | Lo normal: el proxy la manda en cada petición. También se acepta `X-Ingress-Path`, que es la que usa el add-on de Home Assistant y tiene precedencia sobre las demás. |
+| Variable `FUTUREFIN_BASE_PATH=/futurefin` | Prefijo fijo, para proxies que no mandan la cabecera. |
+
+El prefijo tiene que empezar por `/`, sin `//`, sin segmentos `.` o `..`, con el juego de
+caracteres `[A-Za-z0-9._~/-]` y como mucho 128 caracteres. Una cabecera inválida se **ignora**
+(con un aviso en el log); un `FUTUREFIN_BASE_PATH` inválido **aborta el arranque** — igual que
+`FUTUREFIN_PUBLIC_URL`, mejor un fallo ruidoso que HTML roto en silencio.
+
+**Sin prefijo no cambia nada**: el `index.html` se sirve byte a byte como está en el disco.
+
+### nginx
+
+```nginx
+location /futurefin/ {
+    proxy_pass http://127.0.0.1:8080/;   # la barra final es la que quita el prefijo
+    proxy_set_header X-Forwarded-Prefix /futurefin;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+### Caddy
+
+```caddy
+handle_path /futurefin/* {
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Forwarded-Prefix /futurefin
+    }
+}
+```
+
+`handle_path` (y no `handle`) es lo que recorta el prefijo antes de reenviar.
+
+### Traefik
+
+```yaml
+http:
+  middlewares:
+    futurefin-prefix:
+      chain:
+        middlewares: [futurefin-strip, futurefin-header]
+    futurefin-strip:
+      stripPrefix:
+        prefixes: ["/futurefin"]
+    futurefin-header:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Prefix: "/futurefin"
+```
+
+### Lo que NO funciona en un subpath
+
+**MCP y OAuth.** El descubrimiento de OAuth 2.1 exige servir `/.well-known/oauth-authorization-server`
+y `/.well-known/oauth-protected-resource` en la **raíz del origen**, y en un subpath esa raíz es de
+otro. Si vas a conectar un cliente de IA, sirve FutureFin en la raíz de un dominio (o subdominio)
+propio. Ver [mcp.md](mcp.md).
+
+**Y no hay atajo por `FUTUREFIN_PUBLIC_URL`.** Esa variable fija el origen del issuer de OAuth, no
+una base con prefijo: acepta un **origen a secas** y **aborta el arranque** si le pones un path
+(`FUTUREFIN_PUBLIC_URL must be a bare origin (no path/query/fragment)`). Es deliberado — anunciar
+un issuer con path no movería los `/.well-known` a donde el cliente los busca, solo dejaría el
+descubrimiento roto de otra manera.
 
 ## Parar, reiniciar y desinstalar
 

@@ -625,3 +625,59 @@ jobs:
             --title "$TAG" \
             --notes-file "${RUNNER_TEMP}/release-notes.md" \
             --verify-tag
+
+      # ── El add-on de Home Assistant apunta a la versión recién publicada ─────
+      # `addon/futurefin/config.yaml` declara `version:`, y el Supervisor usa ese
+      # número como tag de la imagen (`ghcr.io/maxlainz/futurefin:X.Y.Z`). Si no se
+      # sube, la tienda de add-ons se queda clavada en la versión anterior para
+      # siempre. Por eso el bump lo hace el mismo run que publica.
+      #
+      # Va por la CONTENTS API y no por `git push`: los dos checkouts de este
+      # workflow usan `persist-credentials: false`, así que no hay credencial en el
+      # working tree con la que empujar. La API escribe el commit directamente sobre
+      # `main` con el GITHUB_TOKEN del run.
+      #
+      # Corre AQUÍ, al final, cuando la imagen ya está verificada en el registry y el
+      # Release creado: nunca se anuncia en la tienda una versión que no existe.
+      #
+      # No hay bucle: un push hecho con GITHUB_TOKEN no dispara workflows (GitHub lo
+      # impide para evitar recursión). El `[skip ci]` del mensaje es cinturón y
+      # tirantes, no la garantía.
+      #
+      # Si este paso falla, la imagen y el Release YA están fuera: el add-on se queda
+      # una versión por detrás y se arregla con un PR normal que suba el `version:`.
+      #
+      # REQUISITO: la app «GitHub Actions» debe estar como bypass actor del ruleset
+      # «Proteger main»; si no, la API responde 403 y el paso falla.
+      - name: Bump de la versión del add-on en main
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ref.outputs.tag }}
+        run: |
+          set -euo pipefail
+          v="${TAG#v}"
+          path="addon/futurefin/config.yaml"
+
+          meta="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}" -f ref=main)"
+          sha="$(printf '%s' "$meta" | jq -r .sha)"
+          printf '%s' "$meta" | jq -r .content | base64 -d > "${RUNNER_TEMP}/addon-config.yaml"
+
+          actual="$(grep -m1 '^version:' "${RUNNER_TEMP}/addon-config.yaml" | cut -d'"' -f2)"
+          if [ "$actual" = "$v" ]; then
+            echo "El add-on ya está en ${v}: nada que hacer."
+            exit 0
+          fi
+
+          echo "Add-on ${actual} → ${v}."
+          sed -i "s/^version: \".*\"$/version: \"${v}\"/" "${RUNNER_TEMP}/addon-config.yaml"
+
+          # `base64 | tr -d '\n'`: GNU quiere -w0 y BSD no lo tiene. Portable y sin sorpresas.
+          content="$(base64 < "${RUNNER_TEMP}/addon-config.yaml" | tr -d '\n')"
+
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${path}" \
+            -f "message=chore(addon): versión ${v} [skip ci]" \
+            -f "content=${content}" \
+            -f "branch=main" \
+            -f "sha=${sha}" --silent
+          echo "OK: addon/futurefin/config.yaml en main apunta a ${v}."

@@ -15,7 +15,17 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-22 for the
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-27 on branch
+`feat/home-assistant-addon`** (add-on de Home Assistant: subpath por request, SSO de cabeceras,
+guarda de downgrade): **43** ficheros de test de integración en `apps/api/tests/`
+(`ls apps/api/tests/*.rs | wc -l`; nuevos `base_path.rs`, `frame_options.rs`,
+`session_cookie_path.rs`, `sso_login.rs`, `migration_guard.rs`), **44** migraciones
+(`ls apps/api/migrations/*.sql | wc -l`; la 44ª es `20260827120000_users_trusted_header_identity`),
+`.ffbackup` `CURRENT_SCHEMA_VERSION` = **10** (sin cambios en esta rama: `external_user_id` NO se
+exporta), catálogo MCP en **52** tools (sin cambios). `apps/api/Cargo.toml` sigue en `4.2.1` — el
+bump de esta rama todavía no se ha hecho, y `addon/futurefin/config.yaml` ya declara `4.3.0`, así
+que `./scripts/audit-releases.sh --addon` **falla hasta que el bump del binario aterrice**. Antes,
+counts refreshed **2026-08-22 for the
 4.0.0 train** (apertura pública + auditoría previa): **33** integration-test files in
 `apps/api/tests/` (nuevos `account_and_members.rs` y `openapi_contract.rs`), **42** migraciones,
 `.ffbackup` `CURRENT_SCHEMA_VERSION` = **9**, catálogo MCP en **52** tools
@@ -76,7 +86,7 @@ a real Postgres (Section 6); they are **not** run in CI, so running them locally
 | **UI-visual** | Anything in `apps/web/src/` that renders | `npm run typecheck:web && npm run lint:web && npm run build:web && npm test --workspace futurefin-web`; verify **light AND dark theme** before merging (owner-mandated); tokens only, no hex (Section 2.4); icons only in `components/icons.tsx`; small charts via `MiniProjection`; update `.claude/design-system.md` / `.claude/frontend-structure.md` if conventions moved; CHANGELOG. |
 | **Métrica / KPI** | Cambiar la base, la ventana, el denominador o el nombre de una cifra visible; añadir o retirar un KPI | **Evaluación de definiciones** (`.claude/skills/futurefin-metric-definitions/SKILL.md` §2 — el cambio debe acabar en exactamente uno de: texto del catálogo actualizado, entrada añadida/retirada con su icono, o n/a razonado en el commit; nunca en silencio); `npm test --workspace futurefin-web` (el test de cobertura del catálogo va en las dos direcciones); CHANGELOG con la base ANTES y DESPUÉS. Los errores aquí no son cifras mal calculadas sino cifras correctas que el usuario no puede interpretar — el incidente fundacional fueron tres cifras de ahorro simultáneas, todas exactas y mutuamente irreconciliables. |
 | **Docs-only** | `CLAUDE.md`, `.claude/*.md`, `README.md`, CHANGELOG wording | No test gates. Gate = accuracy: verify every command/path/claim against the code before writing it (docs have drifted before — eight errata were found and fixed on 2026-07-02; prefer commands over frozen counts, e.g. `ls apps/api/migrations \| wc -l`). Record unfixable drift in futurefin-docs-and-writing §7. |
-| **Infra-release** | `Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose*.yml`, `.github/workflows/*`, version bump, tag | CI green on `dev` — **including the `docker-stack` job, which since 3.0.0 is the only automated evidence of "no data loss"; never merge on a red or skipped one**; full local Docker-stack test (Section 4.2) before tagging, **plus the V2→V3 upgrade drill with real seeded data** (4.2, step B) — the published image now carries the database, so a bad entrypoint destroys installations that never ran your code path in CI; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. Any edit to `docker-entrypoint.sh` also needs `shellcheck -S warning` clean (CI gates it). |
+| **Infra-release** | `Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose*.yml`, `.github/workflows/*`, **`addon/` y `repository.yaml`** (el paquete del add-on de Home Assistant: la misma imagen distribuida por un segundo canal — un `config.yaml` mal formado llega a la tienda de todos los suscriptores, y HA lee CUALQUIER `config.{yaml,yml,json}` del repo como add-on, de ahí la guarda del job `secrets-scan`), version bump, tag | CI green on `dev` — **including the `docker-stack` job, which since 3.0.0 is the only automated evidence of "no data loss"; never merge on a red or skipped one**; full local Docker-stack test (Section 4.2) before tagging, **plus the V2→V3 upgrade drill with real seeded data** (4.2, step B) — the published image now carries the database, so a bad entrypoint destroys installations that never ran your code path in CI; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. Any edit to `docker-entrypoint.sh` also needs `shellcheck -S warning` clean (CI gates it). |
 
 CI (`.github/workflows/ci.yml`, runs on push/PR to `main` and `dev`) covers three jobs:
 - `rust` — `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked`.
@@ -270,6 +280,16 @@ the gate; do not look for a way around it. CLAUDE.md, "Releases":
 > 2. PR → CI verde → merge a `main`.
 > 3. **El merge del bump ES la publicación** (auto-tag on merge, 4.0.6): `publish-image.yml` corre en cada push a `main`; con una versión sin tag en `Cargo.toml`, ese run espera la CI verde del commit, comprueba el orden estricto, **crea el tag después** (un bump con CI rota no deja tag huérfano) y construye. Merge sin bump = no-op verde. Vías manuales que quedan como fallback/reconstrucción: `git tag vX.Y.Z && git push origin vX.Y.Z` desde `main`, o el `workflow_dispatch` con «Crear el tag sobre main» — ahora **idempotente** (tag ya creado → termina verde sin construir). Un workflow aparte NO serviría, porque un tag empujado con `GITHUB_TOKEN` no dispara `on: push: tags`.
 > 4. `publish-image.yml` construye la imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
+> 5. **Último paso del mismo run: el add-on de Home Assistant apunta a la versión recién publicada.** Con la imagen ya verificada en el registry y el Release creado, `publish-image.yml` sube el `version:` de `addon/futurefin/config.yaml` en `main` por la **contents API** (los checkouts van con `persist-credentials: false`: no hay credencial para un `git push`). El Supervisor usa ese número como tag de imagen, así que sin este paso la tienda se queda clavada. **Requisito**: la app «GitHub Actions» debe ser *bypass actor* del ruleset «Proteger main» — si no, la API responde 403. Si el paso falla, la imagen y el Release ya están fuera y el add-on se queda **una versión por detrás**: se arregla con un PR normal que suba el `version:`. El commit lleva `[skip ci]` y no reentra (un push con `GITHUB_TOKEN` no dispara workflows).
+
+**El add-on es un segundo canal sobre la MISMA imagen** (`addon/futurefin/config.yaml` +
+`repository.yaml`): no construye nada, apunta a `ghcr.io/maxlainz/futurefin`. Consecuencias de
+control de cambios: (a) tras un bump, `./scripts/audit-releases.sh --addon` debe pasar — compara el
+`version:` del add-on con `apps/api/Cargo.toml`; (b) cualquier `config.{yaml,yml,json}` nuevo en el
+repo rompe el job `secrets-scan` a propósito (HA interpreta cada uno como un add-on de la tienda:
+renómbralo, o actualiza la guarda si de verdad lo es); (c) `addon/futurefin/DOCS.md` es la
+documentación que el usuario del add-on lee **dentro de Home Assistant** — si cambias las opciones
+o los puertos, cambia también ese fichero en el mismo PR.
 
 **Dependency PRs are handled by a cloud routine** (webhook on Dependabot PR + Tuesday sweep).
 Its merge policy: patch/minor-in-range → 5 green checks suffice; **major or 0.x-minor → an
@@ -459,9 +479,19 @@ Then, per change class:
       `docker-compose*.yml`: `shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh`
       clean, `docker-stack` green in CI, and Section 2.8 re-read (no cluster deletion, no `VOLUME`,
       SIGINT to the postmaster).
+- [ ] If you added ANY file named `config.yaml` / `config.yml` / `config.json` anywhere in the
+      repo: the `secrets-scan` guard fails on purpose — Home Assistant reads every such file as an
+      add-on of this store. Rename it, or update the guard's expected list if it really is one.
+      Check locally with
+      `find . \( -name .git -o -name node_modules -o -name target \) -prune -o \( -name 'config.yaml' -o -name 'config.yml' -o -name 'config.json' \) -print | sort`.
+- [ ] If you changed the add-on's options, ports, ingress or `/data` layout: `addon/futurefin/DOCS.md`
+      (what the user reads **inside Home Assistant**) and `addon/futurefin/translations/*.yaml` still
+      describe reality; `addon/futurefin/CHANGELOG.md` mentions the change.
 - [ ] If releasing: Section 4 in order — bump + CHANGELOG section on a branch, PR with CI green,
       local Docker-stack test **and the V2→V3 upgrade drill (4.2 B)**, merge, then tag from `main`.
-      After push: pull again.
+      After push: pull again. **After the build lands**, `./scripts/audit-releases.sh --addon`
+      must pass (the workflow's last step bumps `addon/futurefin/config.yaml` on `main`; a red
+      audit means that step failed and the add-on is a version behind — fix with a normal PR).
 
 ## Provenance and maintenance
 
@@ -475,11 +505,25 @@ description and the container-integrity rules were re-verified **2026-08-22 for 
 removed the external-database mode from the entrypoint (`exec_api_external`, `automigrate_*`,
 `FUTUREFIN_DB_MODE=external`, `FUTUREFIN_EXTERNAL_WAIT_SECS`). Sources: `apps/api/Dockerfile`,
 `apps/api/docker-entrypoint.sh`, `docker-compose.yml`, `.github/workflows/ci.yml`,
-`.github/testdata/` and `scripts/`. Re-verify before trusting:
+`.github/testdata/` and `scripts/`. §1 (Infra-release row), §4.1 (post-build add-on bump) and §6
+(add-on items) were extended **2026-08-27 on branch `feat/home-assistant-addon`**, verified against
+`addon/futurefin/config.yaml`, `repository.yaml`, `.github/workflows/publish-image.yml` (last step,
+«Bump de la versión del add-on en main»), `.github/workflows/ci.yml` (job `secrets-scan`, step
+«Guardia de config.* (tienda de add-ons de HA)») and `scripts/audit-releases.sh`. Re-verify before
+trusting:
 
-- Current version: `grep '^version' apps/api/Cargo.toml` (**4.0.0** on 2026-08-22; 3.5.0 nunca se publicó)
-- Migration count/list: `ls apps/api/migrations | wc -l && ls apps/api/migrations` (**42** on 2026-08-22 — la 42ª es `20260822120000_installation_onboarding`)
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**33** on 2026-08-22 — las cinco altas del tren 4.0.0 son `account_and_members.rs`, `openapi_contract.rs`, `query_param_validation.rs`, `error_codes_parity.rs` y `fixtures_shape.rs`; 28 on 2026-08-21); test-attribute count: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375** on 2026-08-22). Totales del runner, que es lo autoritativo: `cargo test --workspace` **498**, Vitest **368** en 16 ficheros (2026-08-22)
+- Current version: `grep '^version' apps/api/Cargo.toml` (**4.2.1** on 2026-08-27, pendiente de bump en esta rama; 4.0.0 on 2026-08-22; 3.5.0 nunca se publicó)
+- Migration count/list: `ls apps/api/migrations/*.sql | wc -l && ls apps/api/migrations` (**44** on 2026-08-27 — la 44ª es `20260827120000_users_trusted_header_identity`; 42 on 2026-08-22)
+- Add-on ↔ binario en la misma versión: `./scripts/audit-releases.sh --addon` y
+  `grep -m1 '^version:' addon/futurefin/config.yaml` (**4.3.0** el 2026-08-27, por delante del
+  `Cargo.toml` hasta que el bump aterrice). El paso que lo mantiene sincronizado:
+  `grep -n 'Bump de la versión del add-on en main' -A12 .github/workflows/publish-image.yml`
+- Guarda de la tienda de add-ons: `grep -n 'Guardia de config' -A20 .github/workflows/ci.yml`; la
+  lista esperada debe casar con
+  `find . \( -name .git -o -name node_modules -o -name target \) -prune -o \( -name 'config.yaml' -o -name 'config.yml' -o -name 'config.json' \) -print | sort`
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**43** on 2026-08-27 — las cinco altas
+  de la rama del add-on son `base_path.rs`, `frame_options.rs`, `session_cookie_path.rs`,
+  `sso_login.rs` y `migration_guard.rs`; **33** on 2026-08-22 — las cinco altas del tren 4.0.0 son `account_and_members.rs`, `openapi_contract.rs`, `query_param_validation.rs`, `error_codes_parity.rs` y `fixtures_shape.rs`; 28 on 2026-08-21); test-attribute count: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375** on 2026-08-22). Totales del runner, que es lo autoritativo: `cargo test --workspace` **498**, Vitest **368** en 16 ficheros (2026-08-22)
 - MCP catalog: `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**52** on 2026-08-22) — debe cuadrar con CLAUDE.md ×2, `.claude/api-routes.md` §MCP y `futurefin-mcp-parity` §5
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: `secrets-scan` / `rust` / `web` /
   `integration` / `docker-stack`; el `main-guard` se retiró con el modelo de dos ramas) and

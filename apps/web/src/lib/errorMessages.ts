@@ -65,6 +65,16 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La contraseña actual no es correcta. Vuelve a escribirla.",
   last_owner:
     "El hogar no puede quedarse sin ningún propietario. Nombra antes a otro propietario.",
+  sso_account_no_password:
+    "Esta cuenta entra por Home Assistant y no tiene contraseña.",
+  sso_disabled:
+    "Este servidor no admite la entrada automática desde Home Assistant.",
+  sso_untrusted_peer:
+    "La entrada automática solo funciona desde Home Assistant. Abre FutureFin desde ahí.",
+  sso_bad_identity:
+    "Home Assistant no ha enviado una identidad válida. Vuelve a abrir el add-on.",
+  sso_username_unavailable:
+    "No se ha podido crear tu cuenta porque ese nombre de usuario ya está cogido. Avisa al propietario del hogar.",
 
   // ── Copia de seguridad (.ffbackup) ────────────────────────────────────────────────────
   backup_wrong_password:

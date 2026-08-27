@@ -124,7 +124,12 @@ installation owner** automatically; later registrants are "pending" until the ow
   `.env.example`; the defaults (8081/8080) match the split-dev values. If you change `PORT`, you
   must set `FUTUREFIN_API_PORT` to the same value or the proxy points at a dead port.
 - In the Docker image there is no Vite: the API serves the prebuilt SPA itself from
-  `WEB_STATIC_ROOT=/app/web` on a single port (8080).
+  `WEB_STATIC_ROOT=/app/web` on a single port (8080). Since 2026-08-27 `index.html` is served by a
+  **handler** (`apps/api/src/handlers/spa.rs`), not `ServeFile`, because the public subpath is a
+  **per-request** property (the same image serves compose at `/` and HA's Ingress under
+  `/api/hassio_ingress/<token>` simultaneously). Assets keep coming from `ServeDir`. Without proxy
+  headers the shell is returned **byte-identical** to the file on disk, so the build output is
+  unaffected — see the note in §9.
 
 ## 3. API-only mode (no Vite)
 
@@ -430,3 +435,12 @@ self-contained image). Re-verify before trusting volatile facts — every comman
 - Migration runner (no auto-repair) + connect retry: `grep -n 'migrate!\|connect_with_retry' apps/api/src/db.rs`
 - CI jobs actually run: `grep -n 'name:\|run:' .github/workflows/ci.yml`
 - Test DB recipe: TL;DR block at top of `.claude/tests.md`
+- **`apps/web/vite.config.ts` still declares no `base` — and since 2026-08-27 that is deliberate,
+  not an omission** (`grep -n 'base' apps/web/vite.config.ts` → nothing). A Vite `base` is baked at
+  build time and would pin ONE public prefix into the bundle; the prefix is per request
+  (`apps/api/src/prefix.rs`), so the server rewrites the absolute refs of `index.html` on the way
+  out (`apps/api/src/handlers/spa.rs::inject`, which returns `Cow::Borrowed` — literally the same
+  bytes — when there is no prefix and no SSO). If someone adds a `base`, the add-on and the plain
+  compose deployment can no longer be served by the same image: check
+  `cargo test -p futurefin-api --lib prefix::` and `apps/api/tests/base_path.rs` before believing
+  otherwise.

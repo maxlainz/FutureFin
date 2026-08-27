@@ -1,0 +1,28 @@
+configuration:
+  log_level:
+    name: Nivel de log
+    description: >-
+      Verbosidad del log del add-on. Deja «info» salvo que estés diagnosticando
+      un problema: «debug» y «trace» generan mucho ruido.
+  sso:
+    name: Inicio de sesión con Home Assistant
+    description: >-
+      Entra en FutureFin con tu usuario de Home Assistant a través del panel de
+      la barra lateral. Desactívalo si prefieres el login clásico con correo y
+      contraseña. Las cuentas creadas por SSO no tienen contraseña.
+  mcp:
+    name: Servidor MCP
+    description: >-
+      Monta el servidor MCP y el OAuth embebido para conectar clientes de IA.
+      Requiere el puerto directo publicado: no funciona a través del ingress.
+  cors_origins:
+    name: Orígenes CORS
+    description: >-
+      Orígenes adicionales permitidos, separados por comas. Solo hace falta si
+      consumes la API de FutureFin desde otra página web.
+  public_url:
+    name: URL pública
+    description: >-
+      URL con la que FutureFin se anuncia hacia fuera (issuer de OAuth).
+      Rellénala si expones el add-on por un túnel o un proxy con dominio propio,
+      por ejemplo https://finanzas.tudominio.com

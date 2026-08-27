@@ -69,9 +69,17 @@ El valor es un UUID opaco: no lleva información dentro. La sesión de verdad vi
 borrar la fila corta el acceso al instante. No hay JWT que siga siendo válido después de
 revocarlo.
 
-Hay además una cabecera `X-Frame-Options: DENY` global, y el CORS nunca usa comodín: se sirve con
-una lista explícita de orígenes (`CORS_ORIGINS`, con los de `localhost` por defecto) y el arranque
-**aborta** si esa lista queda vacía.
+El **anti-clickjacking es condicional** desde la 4.3.0: por defecto toda respuesta lleva
+`X-Frame-Options: DENY`, como siempre. La única excepción es un despliegue tras un **ingress de
+confianza** —el add-on de Home Assistant, que pinta la app dentro de un iframe del mismo origen que
+HA—, y exige **las dos cosas a la vez**: que la IP del peer esté en `FUTUREFIN_TRUSTED_PROXY_IPS`
+**y** que la petición traiga la cabecera `X-Ingress-Path`. Solo entonces el `DENY` se sustituye por
+`Content-Security-Policy: frame-ancestors 'self'`, que sigue prohibiendo el embebido
+**cross-origin**, que es el vector real del clickjacking. Sin peer de confianza —el valor por
+defecto—, mandar esa cabecera a mano no relaja nada: la respuesta lleva `DENY` igual.
+
+El CORS nunca usa comodín: se sirve con una lista explícita de orígenes (`CORS_ORIGINS`, con los de
+`localhost` por defecto) y el arranque **aborta** si esa lista queda vacía.
 
 ### Contraseñas
 
@@ -195,6 +203,56 @@ a internet sin control de acceso delante.
 **La primera persona que se registra se convierte en propietaria** de la instalación, en la misma
 transacción del registro. Regístrate tú antes que nadie.
 
+### Confianza en cabeceras de proxy
+
+Desde la 4.3.0 FutureFin puede aceptar que un proxy delantero le diga **quién** es quien llama
+(`POST /v1/auth/sso`, cabecera `X-Remote-User-Id`), y convertir eso en una sesión normal suya. Una
+cabecera de identidad es una afirmación sin prueba, así que la puerta es **doble y opt-in**:
+
+1. **`FUTUREFIN_TRUSTED_PROXY_AUTH=1`** — sin ella el endpoint responde `401 sso_disabled` aunque
+   la cabecera venga. La ruta se monta siempre; lo que decide es el estado, no la forma del router.
+2. **`FUTUREFIN_TRUSTED_PROXY_IPS`** — la IP del peer TCP tiene que estar en esa lista (o la lista
+   ser `any`). Un peer que no lo esté recibe `401 sso_untrusted_peer`. Sin la lista definida,
+   **nadie** es de confianza.
+
+Las dos son necesarias: activar la primera sin la segunda **aborta el arranque** en vez de arrancar
+aceptando identidad de cualquiera. Y `FUTUREFIN_TRUSTED_PROXY_IPS=any` **se rechaza** cuando
+`FUTUREFIN_TRUSTED_PROXY_AUTH=1`: el comodín existe para el prefijo, que es inocuo, pero combinarlo
+con el canje de identidad significaría «cualquiera que alcance el puerto puede decir quién es», que
+es exactamente el fallo que estas dos variables existen para impedir. El arranque falla con un
+mensaje explícito en vez de quedarse abierto. En el add-on de Home Assistant, el entrypoint pone la
+lista al único peer que alcanza al contenedor por el ingress (`172.30.32.2`).
+
+**Co-tenancy del add-on: los add-ons de Home Assistant no están aislados entre sí.** Por el ingress
+todos cuelgan del **mismo origen** (el de Home Assistant) y se distinguen solo por el path. El
+aislamiento de origen del navegador —el que impide que una web lea otra— **no existe entre dos
+paneles de ingress**: un add-on malicioso o comprometido puede, desde su propio panel, abrir el de
+FutureFin y hablarle con las credenciales de la persona que ha iniciado sesión. FutureFin acota lo
+que puede acotar: la cookie `ff_session` se emite con `Path` restringido a su propio prefijo de
+ingress (solo cuando el peer es de confianza — si no lo es, no se acota nada, porque el prefijo
+vendría de una cabecera sin verificar) y fuera del ingress de confianza se mantiene
+`X-Frame-Options: DENY`. Pero eso son mitigaciones, no una frontera. **La frontera real es
+operativa: instala solo add-ons en los que confíes.** Si eso no te vale para tus datos financieros,
+la respuesta es un despliegue por Compose separado, no una opción del add-on.
+
+Consecuencia práctica: **si publicas el puerto directo del add-on, ese puerto nunca honra
+`X-Remote-User-*`** — quien llega por ahí tiene otra IP de origen y no pasa el filtro. Por ese
+camino hace falta sesión propia, token de API u OAuth, como en cualquier otro despliegue.
+
+Lo que **no** exige peer de confianza es la detección del **prefijo** (`X-Forwarded-Prefix`,
+`X-Ingress-Path`, `FUTUREFIN_BASE_PATH`). Es deliberado: un prefijo falsificado solo deforma la
+respuesta del propio atacante (assets que no cargan). Lo que sí lo exige es relajar el
+anti-clickjacking y aceptar identidad, que es lo descrito arriba.
+
+**Cuentas sin contraseña, y un trade-off asumido.** Un usuario creado por esta vía tiene el hash de
+contraseña a `NULL`: no puede entrar por el formulario de acceso, no puede fijarse una contraseña
+en esta versión, y **no puede exportar su `.ffbackup`** (la clave del archivo se deriva de la
+contraseña; sin ella no hay nada de donde derivarla). Los tres casos responden un
+`401 sso_account_no_password` **hablado**. Eso revela que ese nombre existe como cuenta SSO, y es
+un intercambio buscado: sin el mensaje, la persona se quedaría tecleando para siempre una
+contraseña que nunca se fijó. Es la misma postura que el `username_taken` del registro, que ya
+distingue "ese nombre está cogido" de cualquier otro error.
+
 ### Endpoints sin autenticación
 
 `GET /health`, `GET /v1/health`, `GET /v1/ready` y `GET /openapi.json` responden sin credenciales.
@@ -218,6 +276,8 @@ canal privado no hace daño, pero la respuesta será un enlace a esta página:
 - Que la aplicación no sirva HTTPS por sí misma.
 - Que un miembro del hogar vea los datos de otro miembro, o que `?view=mine` se pueda omitir.
 - Que el registro esté abierto, o que los endpoints de salud publiquen la versión.
+- Que el `401 sso_account_no_password` revele que una cuenta existe y es de tipo SSO (está descrito
+  arriba, y es coherente con el `username_taken` del registro).
 - Que no haya límite de intentos en el acceso (está descrito arriba; ponlo en tu proxy).
 - Hallazgos de un escáner automático sin un impacto demostrado.
 - Ataques que requieren acceso previo al host, al contenedor o al volumen de datos.

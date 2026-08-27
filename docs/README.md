@@ -6,6 +6,7 @@ quieres hacer.
 | Documento | Para cuando quieres… |
 |---|---|
 | **[Instalación](instalacion.md)** | Poner la app en marcha desde cero: Docker Compose o `docker run`, los dos volúmenes, por qué el contenedor se niega a arrancar sin uno, el primer registro y cómo aprobar a más gente. |
+| **[Home Assistant](home-assistant.md)** | Instalarla como add-on: panel en la barra lateral, entrar con tu usuario de Home Assistant, las opciones del add-on, por qué MCP necesita el puerto directo y cómo encajan las copias de seguridad. |
 | **[Actualizar](actualizar.md)** | Subir de versión y volver atrás con `FUTUREFIN_TAG`, entender el backup automático pre-migración, configurar watchtower, y la ruta completa de la 2.x de dos contenedores a la 3.x. |
 | **[Configuración](configuracion.md)** | Saber cómo se llama una opción, qué vale por defecto y quién la lee. La tabla completa de variables de entorno, lo deprecado marcado como tal, y los ajustes que viven dentro de la app. |
 | **[Copias de seguridad](backups.md)** | Entender las tres capas —`.ffbackup` por usuario, backup automático pre-migración y `pg_dump` manual—, qué cubre cada una y cómo restaurar. |
@@ -16,6 +17,9 @@ quieres hacer.
 
 **Acabo de instalarlo y no sé por dónde empezar** → [Instalación · El primer
 registro](instalacion.md#el-primer-registro-quien-llega-primero-es-el-propietario).
+
+**Uso Home Assistant y no quiero pelearme con Docker** → [Home
+Assistant](home-assistant.md#1-instalación): se instala como add-on y sale en la barra lateral.
 
 **Quiero que no me salte de versión sola** → [Actualizar · Cuál
 elegir](actualizar.md#cuál-elegir).

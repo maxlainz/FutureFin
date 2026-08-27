@@ -13,6 +13,7 @@
 import type { ReactNode } from "react";
 import { MenuIcon } from "./icons";
 import { TABS, TAB_PATH, type TabId } from "../lib/navigation";
+import { appUrl } from "../lib/basePath";
 
 export function TopBar({
   activeTab,
@@ -59,7 +60,9 @@ export function TopBar({
         {TABS.map((t) => (
           <a
             key={t.id}
-            href={TAB_PATH[t.id]}
+            // El `href` es lo que ve el navegador en un clic con Cmd/rueda o al previsualizar
+            // el enlace: sin el prefijo del proxy se sale del subpath (404 del Ingress de HA).
+            href={appUrl(TAB_PATH[t.id])}
             className={`ff-nav-pill ${activeTab === t.id ? "is-active" : ""}`}
             aria-current={activeTab === t.id ? "page" : undefined}
             onClick={(e) => {

@@ -14,6 +14,55 @@
 # Cualquier otro argv se ejecuta tal cual (p.ej. `docker run … pg_dump --version`).
 set -Eeuo pipefail
 
+# ── Modo add-on de Home Assistant ────────────────────────────────────────────
+# El Supervisor de HA monta UN único bind persistente en /data y escribe ahí
+# /data/options.json con las opciones del add-on. Su presencia ES la detección:
+# no hay ninguna otra señal fiable dentro del contenedor.
+#
+# OJO — aquí se PISAN a propósito PGDATA y FUTUREFIN_STATE_DIR: el Dockerfile los
+# exporta como ENV (/var/lib/postgresql/data y /var/lib/futurefin), así que los
+# `${VAR:-default}` de la sección de Configuración NUNCA verían un valor de HA —
+# verían el del ENV, que apunta fuera del único volumen persistente y perdería la
+# base al recrear el contenedor. Por eso el override es explícito y va ANTES.
+HA_ADDON=0
+if [ -f /data/options.json ]; then
+  HA_ADDON=1
+  export PGDATA=/data/pgdata
+  export FUTUREFIN_STATE_DIR=/data/state
+
+  # Lee una opción del add-on; vacío si no existe o es null. OJO: NO se usa
+  # `.[$k] // empty` — el `//` de jq considera `false` como «vacío», así que un
+  # booleano puesto a false (p.ej. `mcp: false`) se leería como ausente y el
+  # toggle no se aplicaría nunca. Se comprueba la presencia explícitamente.
+  ha_opt() { jq -r --arg k "$1" 'if has($k) and .[$k] != null then .[$k] else empty end' /data/options.json; }
+
+  case "$(ha_opt log_level)" in
+    trace|debug) export RUST_LOG="futurefin_api=debug,tower_http=debug,sqlx=warn" ;;
+    warn|error)  export RUST_LOG="futurefin_api=warn,tower_http=warn,sqlx=error" ;;
+    *)           : ;;   # info/notice/vacío: se respeta el RUST_LOG que ya hubiera
+  esac
+
+  # El ingress del Supervisor es el ÚNICO peer que alcanza al add-on (172.30.32.2 en
+  # la red interna de HA), así que es el único de confianza. Se exporta SIEMPRE en modo
+  # add-on, con SSO o sin él: el iframe del ingress necesita ese peer de confianza para
+  # que `handlers/frame.rs` relaje el anti-clickjacking a `frame-ancestors 'self'`. Sin
+  # la lista, la respuesta sale con `X-Frame-Options: DENY` y el panel se ve EN BLANCO
+  # aunque el add-on funcione. Lo que sí depende del toggle es aceptar identidad por
+  # cabeceras, que es la frontera de seguridad de verdad.
+  export FUTUREFIN_TRUSTED_PROXY_IPS="${FUTUREFIN_TRUSTED_PROXY_IPS:-172.30.32.2}"
+  if [ "$(ha_opt sso)" = "true" ]; then
+    export FUTUREFIN_TRUSTED_PROXY_AUTH=1
+  fi
+
+  [ "$(ha_opt mcp)" = "false" ] && export FUTUREFIN_MCP_ENABLED=0
+
+  ha_cors="$(ha_opt cors_origins)"
+  [ -n "$ha_cors" ] && export CORS_ORIGINS="$ha_cors"
+  ha_public_url="$(ha_opt public_url)"
+  [ -n "$ha_public_url" ] && export FUTUREFIN_PUBLIC_URL="$ha_public_url"
+  unset ha_cors ha_public_url
+fi
+
 # ── Configuración ────────────────────────────────────────────────────────────
 PGDATA="${PGDATA:-/var/lib/postgresql/data}"
 PG_MAJOR="${PG_MAJOR:-16}"
@@ -56,6 +105,33 @@ is_mounted() {
   else
     grep -qs " $1 " /proc/self/mountinfo
   fi
+}
+
+# ¿El directorio vive DENTRO de algo persistente? Sube por los ancestros preguntando
+# `is_mounted`, y PARA ANTES DE "/": en cualquier contenedor "/" es un mountpoint (el
+# rootfs del overlay), así que aceptarlo convertiría la guarda en decorativa y volvería
+# a permitir arrancar sin volumen — exactamente lo que la guarda existe para impedir.
+#
+# SOLO SE USA EN MODO ADD-ON ($HA_ADDON=1). En compose la guarda sigue siendo el
+# `is_mounted` histórico, exacto: ahí $PGDATA es SIEMPRE el punto de montaje del
+# volumen, y aceptar un ancestro montado (p.ej. un `-v dir:/var/lib` suelto) relajaría
+# una guarda que no tiene ninguna razón para relajarse fuera de HA.
+#
+# PRUEBA DE QUE SIGUE MORDIENDO bajo HA sin volumen (`docker run` de la imagen del
+# add-on con /data/options.json pero sin bind):
+#   PGDATA=/data/pgdata → se prueban /data/pgdata, /data. Ninguno es mountpoint
+#   → devuelve 1 → `die`.
+#   Con el bind del Supervisor: /data SÍ es mountpoint → devuelve 0. Con el
+#   `is_mounted` a secas ese caso moría, porque el mountpoint es el padre y no $PGDATA.
+is_persisted() {
+  local d="$1" parent
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    is_mounted "$d" && return 0
+    parent="$(dirname "$d")"
+    [ "$parent" = "$d" ] && break   # ruta relativa o degenerada: no seguimos en círculo
+    d="$parent"
+  done
+  return 1
 }
 
 has_cluster() { [ -s "$PGDATA/PG_VERSION" ]; }
@@ -142,6 +218,18 @@ ensure_runtime_dirs() {
   if is_root; then
     chown postgres:postgres "$STATE_DIR" "$STATE_DIR/state" "$BACKUP_DIR" "$SOCK_DIR" || true
     chmod 2775 "$SOCK_DIR" || true
+  fi
+  # $PGDATA existe en la imagen (lo crea el Dockerfile), pero NO bajo Home Assistant:
+  # allí es /data/pgdata dentro del bind del Supervisor y en el primer arranque no
+  # está. Sin esto, `init_fresh_cluster` moriría en su `chown` (que va antes de initdb).
+  # Solo se crea si falta: tocar el directorio de un cluster ya existente cambiaría el
+  # uid que `adopt_cluster` inspecciona y se saltaría la adopción de un volumen 2.x.
+  if [ ! -d "$PGDATA" ]; then
+    mkdir -p "$PGDATA"
+    if is_root; then
+      chown postgres:postgres "$PGDATA" || true
+      chmod 0700 "$PGDATA" || true
+    fi
   fi
 }
 
@@ -522,11 +610,19 @@ main() {
     *) die "invalid FUTUREFIN_DB_MODE='$DB_MODE' (auto|embedded)" ;;
   esac
 
-  log "FutureFin $APP_VERSION — mode=$MODE db_mode=$DB_MODE postgres_majors=$(ls "$PG_BINROOT" | tr '\n' ' ')"
+  log "FutureFin $APP_VERSION — mode=$MODE db_mode=$DB_MODE ha_addon=$HA_ADDON postgres_majors=$(ls "$PG_BINROOT" | tr '\n' ' ')"
   ensure_runtime_dirs
 
   local MOUNTED=0
-  is_mounted "$PGDATA" && MOUNTED=1
+  # Bajo Home Assistant basta con que $PGDATA cuelgue de un volumen real: el Supervisor
+  # monta /data y $PGDATA es /data/pgdata, así que el mountpoint es el padre. En compose
+  # se conserva la guarda histórica EXACTA (`is_mounted` sobre $PGDATA): ahí el volumen
+  # se monta en $PGDATA y no hay motivo para aceptar un ancestro montado.
+  if [ "$HA_ADDON" = "1" ]; then
+    is_persisted "$PGDATA" && MOUNTED=1
+  else
+    is_mounted "$PGDATA" && MOUNTED=1
+  fi
 
   EXTERNAL_URL=""
   if [ -n "${DATABASE_URL:-}" ] && ! printf '%s' "$DATABASE_URL" | grep -q "$SOCK_DIR"; then

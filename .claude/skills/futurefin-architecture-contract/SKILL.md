@@ -353,6 +353,29 @@ converts a two-process namespace into an exposed service for zero security gain;
 `/dev/tcp` fallback makes a container with a dead database report healthy — the exact failure the
 healthcheck exists to catch.
 
+**Amendment (2026-08-27, branch `feat/home-assistant-addon`) — a SECOND distribution channel over
+the SAME image.** The repo is also a Home Assistant add-on store (`repository.yaml` at the root +
+`addon/futurefin/config.yaml`). The add-on **builds nothing**: `image: ghcr.io/maxlainz/futurefin`
+(no `{arch}` — the GHCR manifest is multi-arch, the registry picks amd64/aarch64), and the
+Supervisor uses the add-on's `version:` as the image tag. None of D13's rules are weakened, only
+re-anchored:
+- **The layout moves, the model does not.** The Supervisor mounts exactly one persistent bind at
+  `/data`, so under the add-on the entrypoint exports `PGDATA=/data/pgdata` and
+  `FUTUREFIN_STATE_DIR=/data/state` (detection = `/data/options.json` exists). Because `$PGDATA` is
+  now a *subdirectory* of the mountpoint, the volume guard is `is_persisted` — an ancestor walk that
+  stops **before `/`** — instead of a plain `mountpoint` check on `$PGDATA`. Same refusal, same
+  message; still no `VOLUME` in the Dockerfile.
+- **`init: false`** in the add-on config: the image's entrypoint stays PID 1, so the ordered
+  shutdown of W8 (API SIGTERM → postmaster **SIGINT**) survives. Putting s6/tini in front breaks it.
+- **`backup: cold`**: the Supervisor stops the add-on before copying `/data`. A hot copy of a live
+  data directory is not consistent — this is D13's "the store is inside" paying its bill.
+- **No `watchdog`**: the only probe candidate (`/v1/ready`) is reachable only over the *optional*
+  direct port `8080/tcp`, which ships `null` (unpublished). A watchdog pointed there would restart
+  the add-on forever on a normal ingress-only install.
+- **CI guards the store shape**: HA reads *any* `config.{yaml,yml,json}` in the repo as an add-on,
+  so `ci.yml` (job `secrets-scan`) pins the exact list to two files. Adding a third `config.yaml`
+  anywhere would publish a phantom add-on to every subscriber.
+
 ### D16. Transfer reconciliation is continuous, with a periodic retry net (v3.8.1)
 El pase de conciliación (`handlers/transactions/reconcile.rs`) corre **tras cada mutación** del
 conjunto de transacciones: alta, alta en lote, PATCH de `amount`/`op_date`, borrado, borrado de
@@ -468,6 +491,79 @@ Host breaks LAN access with tunnel-issued tokens; a backend route at `/oauth/aut
 consent screen in production with a silent 405; `WWW-Authenticate` on 403 loops claude.ai forever;
 prefix-or-substring redirect matching (instead of exact string) is an open redirect.
 
+### D17. Anti-clickjacking condicional en modo ingress (2026-08-27)
+**Context.** The original invariant was absolute: *nothing* in FutureFin is embeddable, implemented
+as a fixed `X-Frame-Options: DENY` layered over the **final** router (outside `api`, because the
+thing that most needs it — the OAuth consent screen — is served by the SPA fallback, D15). Home
+Assistant's Ingress renders every add-on inside a **same-origin iframe** of the HA frontend. Under
+`DENY` the app renders blank.
+
+**Decision.** The header is now computed per request by `handlers/frame.rs`
+(`with_frame_policy(router, state)`, wrapping the same final router). Exactly one condition relaxes
+it: **trusted peer AND `X-Ingress-Path` present** ⇒ `Content-Security-Policy: frame-ancestors 'self'`
+and `X-Frame-Options` **removed**. Everywhere else — including a request that carries
+`X-Ingress-Path` from an untrusted peer — the response still carries `X-Frame-Options: DENY`.
+
+**Rationale (and why it is not a weakening).** `frame-ancestors 'self'` still forbids cross-origin
+framing, which is the actual clickjacking vector; same-origin embedding of our own app buys an
+attacker nothing. The two details that are load-bearing:
+- **The header alone cannot relax it.** If `X-Ingress-Path` were sufficient, any client could turn
+  the protection off by sending one header. The gate is `PeerPolicy` over
+  `FUTUREFIN_TRUSTED_PROXY_IPS` (`prefix.rs`), default `Disabled` = nobody is trusted.
+- **`X-Frame-Options` must be *removed*, not just accompanied by the CSP.** Browsers that read both
+  let `DENY` win, and the add-on would still render blank — a bug that looks like "the CSP didn't
+  apply".
+
+Note the deliberate asymmetry with the **prefix** detection (`prefix::request_prefix`), which does
+NOT require a trusted peer: a forged `X-Forwarded-Prefix` only deforms the attacker's own response
+(assets that fail to load). Relaxing frame policy and accepting identity (D18) are the two things
+that do require the peer.
+
+**Consequences / breaks if violated.** Restoring a static `SetResponseHeaderLayer` of
+`X-Frame-Options: DENY` breaks the HA add-on silently (blank panel, no console error that names the
+cause). Dropping the peer condition, or keeping `X-Frame-Options` alongside the CSP, breaks the
+protection or the add-on respectively. Pinned by `apps/api/tests/frame_options.rs`, which asserts
+**both halves** (untrusted peer + header ⇒ `DENY`; trusted peer + header ⇒ CSP and no XFO).
+
+### D18. Confianza en cabeceras de proxy: opt-in doble (2026-08-27)
+**Context.** Behind HA's Ingress the Supervisor has already authenticated the person and injects
+`X-Remote-User-Id` (stripping any client-supplied copy). `POST /v1/auth/sso` (`handlers/sso.rs`)
+turns that assertion into a **normal FutureFin session**: same `sessions` row, same `ff_session`
+cookie, same installation gate; the only difference in the account is `password_hash IS NULL`
+(migration `20260827120000_users_trusted_header_identity.sql`, plus a partial-UNIQUE
+`external_user_id`).
+
+**Decision.** A header of identity is an **unproven assertion**, so honoring it requires **two
+independent opt-ins**, both of which the operator must set:
+1. `FUTUREFIN_TRUSTED_PROXY_AUTH=1` — otherwise the endpoint answers 401 `sso_disabled`.
+2. The peer IP in `FUTUREFIN_TRUSTED_PROXY_IPS` — otherwise 401 `sso_untrusted_peer`.
+Setting (1) without (2) is not a half-configuration, it is a **startup panic** (`main.rs`): an
+enabled SSO with nobody trusted would either be dead code or, worse, read as enabled.
+The route is mounted **unconditionally** — the shape of the router must not depend on the
+environment, or the tests stop describing the binary that ships; what the environment changes is
+the *state*, not the route table.
+
+**Rationale.** A spoofed `X-Remote-User-Id` on an open port is not a privilege escalation, it is
+**total impersonation of any account, without a password**. Hence: the add-on's **direct port never
+qualifies** — the add-on exports `FUTUREFIN_TRUSTED_PROXY_IPS=172.30.32.2` (the Supervisor's ingress
+address on HA's internal network) and a LAN peer reaching the optional published `8080/tcp` is not
+on that list, so the same running process accepts SSO through the ingress and rejects it from the
+LAN. `PeerPolicy::Any` exists for tests and for deployments where the proxy is physically the only
+path to the process; it is never the default (`Disabled`), and an unknown peer (`None`, e.g. axum
+`oneshot` without `ConnectInfo`) passes **only** under `Any`.
+
+**Consequences.**
+- Auto-provisioning follows the password path exactly: first identity through the door **creates the
+  installation and is owner** (`bootstrap_installation_as_owner_if_empty`), everyone after is
+  *pending* until approved. SSO does not bypass D1 or membership.
+- Password login and `POST /v1/auth/password` reject a NULL-hash account with
+  `sso_account_no_password` instead of a generic 401 — otherwise the person hunts for a password
+  that does not exist.
+- **Breaks if violated**: honoring `X-Remote-User-*` on the strength of the header alone (or on a
+  `PeerPolicy::Any` default) is a full authentication bypass on any port the container publishes.
+  Pinned by `apps/api/tests/sso_login.rs` — whose *first* assertion is that the door is closed by
+  default.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
@@ -484,6 +580,9 @@ prefix-or-substring redirect matching (instead of exact string) is an open redir
 | I10 | SQLSTATE→HTTP mapping only in `error.rs` (D9) | `impl From<sqlx::Error> for ApiError` | `grep -rn "23505\|23503" apps/api/src/ --include=*.rs` → only `error.rs` |
 | I11 | Body limits: 1 MiB global, 16 MiB on `/v1/backup/user-import*` | `routes/mod.rs` constants | `apps/api/tests/body_limits.rs` (local) |
 | I12 | No hardcoded hex colors; tokens `var(--ff-*)` only; icons only in `components/icons.tsx` | frontend convention (CLAUDE.md, design-system.md) | `grep -rn "#[0-9a-fA-F]\{6\}" apps/web/src/App.css apps/web/src/components/ \| grep -v icons.tsx` |
+| I13 | Every response carries `X-Frame-Options: DENY` **except** trusted peer + `X-Ingress-Path`, which instead gets `Content-Security-Policy: frame-ancestors 'self'` **and no `X-Frame-Options`** (D17). The header alone never relaxes it | `handlers/frame.rs::frame_policy`, applied via `with_frame_policy` to the FINAL router (after the SPA fallback) in both `main.rs` and the test harness | `apps/api/tests/frame_options.rs` (both halves); `grep -n "X_FRAME_OPTIONS\|frame-ancestors" apps/api/src/handlers/frame.rs` |
+| I14 | Identity from `X-Remote-User-*` is honored only with `FUTUREFIN_TRUSTED_PROXY_AUTH=1` **and** a peer in `FUTUREFIN_TRUSTED_PROXY_IPS`; `AUTH` without `IPS` panics at startup (D18) | `handlers/sso.rs` (`sso_disabled` / `sso_untrusted_peer`), `prefix.rs::PeerPolicy`, guard in `main.rs` | `apps/api/tests/sso_login.rs`; `grep -n "sso_disabled\|sso_untrusted_peer" apps/api/src/handlers/sso.rs`; `grep -n "TRUSTED_PROXY_AUTH=1 requires" apps/api/src/main.rs` |
+| I15 | Without proxy headers the shell HTML is served **byte-identical** to the file on disk and the session cookie keeps `Path=/` — the compose deployment is unchanged by the subpath machinery | `handlers/spa.rs::inject` returns `Cow::Borrowed`; `handlers/auth.rs::session_cookie_path` | `apps/api/tests/base_path.rs`, `apps/api/tests/session_cookie_path.rs`; `cargo test -p futurefin-api --lib prefix::` |
 
 ## 4. Known weak points (stated plainly, as of 2026-07-02)
 
@@ -570,9 +669,9 @@ files cited inline (not from memory of the docs — docs can drift, see W6). D13
 `apps/api/src/main.rs`, `apps/api/src/handlers/health.rs` and `.github/workflows/ci.yml`.
 Re-verify volatile claims with:
 
-- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md` (3.1.0 on
-  2026-08-17).
-- Migration count: `ls apps/api/migrations | wc -l` (36 on 2026-08-17; 34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
+- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md` (4.2.1 on
+  2026-08-27; 3.1.0 on 2026-08-17).
+- Migration count: `ls apps/api/migrations/*.sql | wc -l` (44 on 2026-08-27; 36 on 2026-08-17; 34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
 - Engine purity deps (I8): `grep -E "tokio|sqlx|reqwest|axum" crates/engine/Cargo.toml` → empty.
 - Horizon rule (D11): `grep -n "LIFESPAN_AGE\|FALLBACK_YEARS\|clamp(12, 840)\|fallback_no_demographics" apps/api/src/handlers/projection.rs`.
 - Cache TTL/keys (D7): `grep -n "PROJECTION_CACHE_TTL\|ProjectionCacheKey\|invalidate_projection" apps/api/src/state.rs`.
@@ -620,8 +719,32 @@ Re-verify volatile claims with:
   clean shutdown, 2.x adoption, the two external-`DATABASE_URL` refusals — 4.0.0 replaced the old
   compat/automigration scenarios with them — and pg_upgrade 15→16) and
   `ls .github/testdata/`.
+- **D17 — conditional anti-clickjacking (added 2026-08-27, branch `feat/home-assistant-addon`)**:
+  `grep -n "X_FRAME_OPTIONS\|frame-ancestors\|trusted_peers.allows" apps/api/src/handlers/frame.rs`
+  (relaxation gated on peer AND header; XFO removed, not accompanied);
+  `grep -n "with_frame_policy" apps/api/src/main.rs apps/api/tests/common/mod.rs` (same layer in
+  binary and harness, applied to the final router); `apps/api/tests/frame_options.rs` pins both
+  halves.
+- **D17/D18 — peer policy and prefix precedence**: `grep -n "enum PeerPolicy\|fn allows\|fn request_prefix\|X_INGRESS_PATH\|X_FORWARDED_PREFIX" apps/api/src/prefix.rs`
+  (default `Disabled`; precedence `X-Ingress-Path` > `X-Forwarded-Prefix` > `FUTUREFIN_BASE_PATH` >
+  `""`); `cargo test -p futurefin-api --lib prefix::` (unit tests for normalization + precedence).
+- **D18 — header SSO double opt-in (added 2026-08-27)**:
+  `grep -n "sso_disabled\|sso_untrusted_peer\|sso_bad_identity" apps/api/src/handlers/sso.rs`;
+  `grep -n "TRUSTED_PROXY_AUTH=1 requires" apps/api/src/main.rs` (startup panic when AUTH is set
+  without IPS); `grep -n "sso" apps/api/src/routes/mod.rs` (route mounted unconditionally);
+  `grep -n "sso_account_no_password" apps/api/src/handlers/auth.rs` (2 call sites: login and
+  password change); `grep -n "external_user_id\|DROP NOT NULL" apps/api/migrations/20260827120000_users_trusted_header_identity.sql`;
+  `grep -rn "external_user_id" apps/api/src/handlers/backup_user/` → **must be empty** (the SSO
+  identity is not part of `.ffbackup`).
+- **D13 amendment — the HA add-on channel (added 2026-08-27)**: `cat repository.yaml`;
+  `grep -n "^image:\|^version:\|init:\|backup:\|ingress\|^ports:" addon/futurefin/config.yaml`
+  (prebuilt GHCR image, `init: false`, `backup: cold`, ingress 8080, direct port `null`);
+  `grep -n "options.json\|PGDATA=/data/pgdata\|FUTUREFIN_STATE_DIR=/data/state\|is_persisted" apps/api/docker-entrypoint.sh`;
+  `grep -n "Guardia de config" -A20 .github/workflows/ci.yml` (the store-shape guard);
+  `find . -name .git -prune -o -name 'config.yaml' -o -name 'config.yml' -o -name 'config.json' -print`
+  → exactly `.github/ISSUE_TEMPLATE/config.yml` and `addon/futurefin/config.yaml`.
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the
-engine), the container's process model or shutdown contract changes (D13/W8), or CI starts running
-the Postgres integration suite.
+engine), the container's process model or shutdown contract changes (D13/W8), the set of
+distribution channels changes (D13 amendment), or CI starts running the Postgres integration suite.

@@ -12,7 +12,10 @@ use axum::body::Body;
 use axum::extract::Extension;
 use axum::Router;
 use futurefin_api::routes;
+use futurefin_api::handlers::frame;
 use futurefin_api::handlers::person_view::LedgerView;
+use futurefin_api::handlers::spa::{self, SpaIndex};
+use futurefin_api::prefix::PeerPolicy;
 use futurefin_api::state::{AppState, Density, ProjectionCacheKey};
 use http::Request;
 use http_body_util::BodyExt;
@@ -340,20 +343,63 @@ impl TestApp {
     }
 }
 
+/// Ejes de configuración de proxy inverso del `TestApp`. `Default` = todo apagado, que es
+/// exactamente el `spawn()` histórico (sin prefijo, sin peers de confianza, sin SSO, sin SPA).
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct TestConfig {
+    /// `FUTUREFIN_TRUSTED_PROXY_AUTH`.
+    pub trusted_header_auth: bool,
+    /// `PeerPolicy::Any` en vez de `Disabled`. En `oneshot` no hay `ConnectInfo`, así que `Any`
+    /// es la única política que da un peer «de confianza» en tests.
+    pub trusted_peers_any: bool,
+    /// `FUTUREFIN_BASE_PATH`.
+    pub base_path: String,
+    /// HTML del shell SPA: con `Some(_)` se monta el fallback `spa::serve_index` igual que
+    /// main.rs (sin `ServeDir`: los tests no sirven assets del disco).
+    pub with_spa_index: Option<String>,
+}
+
 impl TestApp {
     pub async fn spawn() -> Self {
+        Self::spawn_with(TestConfig::default()).await
+    }
+
+    /// Igual que `spawn()` pero con la configuración de proxy dada. El router se envuelve con la
+    /// **misma** capa anti-clickjacking que main.rs (`frame::with_frame_policy`): sin ella, la
+    /// política de `X-Frame-Options` / CSP no sería observable desde los tests, porque el router
+    /// de `TestApp` no lleva ninguna de las capas exteriores del binario.
+    pub async fn spawn_with(cfg: TestConfig) -> Self {
         let (pool, schema) = isolated_pool().await;
-        let state = Arc::new(AppState::new(
-            env!("CARGO_PKG_VERSION"),
-            pool.clone(),
-            false,
-            30,
-            true,
-            None,
-        ));
-        let router = Router::new()
+        let state = Arc::new(
+            AppState::new(
+                env!("CARGO_PKG_VERSION"),
+                pool.clone(),
+                false,
+                30,
+                true,
+                None,
+            )
+            .with_trusted_proxy(
+                cfg.base_path,
+                if cfg.trusted_peers_any {
+                    PeerPolicy::Any
+                } else {
+                    PeerPolicy::Disabled
+                },
+                cfg.trusted_header_auth,
+            ),
+        );
+        let mut router = Router::new()
             .merge(routes::app_router(&state))
             .layer(Extension(state.clone()));
+        if let Some(html) = cfg.with_spa_index {
+            router = router.fallback_service(
+                axum::routing::get(spa::serve_index)
+                    .with_state((state.clone(), Arc::new(SpaIndex::from_html(html)))),
+            );
+        }
+        let router = frame::with_frame_policy(router, state.clone());
         Self {
             router,
             pool,
@@ -525,6 +571,33 @@ impl TestApp {
             builder = builder.header(*k, *v);
         }
         self.request(builder.body(Body::empty()).expect("build GET request"))
+            .await
+    }
+
+    /// POST con headers verbatim (y opcionalmente cookie y cuerpo JSON) — la vía para inyectar
+    /// `X-Ingress-Path` / `X-Forwarded-Prefix` en login y logout.
+    pub async fn post_with_headers(
+        &self,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+        cookie: Option<&str>,
+    ) -> ResponseParts {
+        let mut builder = Request::builder().method(http::Method::POST).uri(uri);
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        if let Some(c) = cookie {
+            builder = builder.header(http::header::COOKIE, c);
+        }
+        let body = match body {
+            Some(json) => {
+                builder = builder.header(http::header::CONTENT_TYPE, "application/json");
+                Body::from(serde_json::to_vec(&json).expect("json"))
+            }
+            None => Body::empty(),
+        };
+        self.request(builder.body(body).expect("build POST request"))
             .await
     }
 

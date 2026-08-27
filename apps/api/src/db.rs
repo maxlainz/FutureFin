@@ -39,9 +39,65 @@ pub async fn connect_with_retry(
     }
 }
 
+/// Error de arranque al aplicar migraciones.
+///
+/// Existe por un único motivo: convertir el `VersionMissing` crudo de sqlx —la firma exacta de
+/// «imagen vieja arrancada sobre datos nuevos»— en un mensaje que un self-hoster pueda accionar,
+/// al nivel de las guardas del entrypoint (`PGDATA was created by PostgreSQL N, NEWER than …`).
+/// Cualquier otro error de sqlx pasa **tal cual**: el desajuste de checksum conserva su semántica
+/// y su mensaje, y **nunca** se auto-repara (ver skill `futurefin-change-control` §2.7).
+#[derive(Debug, thiserror::Error)]
+pub enum MigrationError {
+    /// La base tiene aplicada una migración que este binario no lleva embebida.
+    #[error("{message}")]
+    Downgrade { version: i64, message: String },
+    /// Todo lo demás, sin reinterpretar.
+    #[error(transparent)]
+    Other(MigrateError),
+}
+
+/// Mensaje de operador para el caso downgrade. Va al log que lee quien se autohospeda, así que
+/// dice qué ha pasado, tranquiliza sobre los datos y da los dos caminos de salida.
+fn downgrade_message(version: i64) -> String {
+    format!(
+        "\n\
+         ─────────────────────────────────────────────────────────────────────────────\n\
+         FutureFin NO ARRANCA: esta base de datos viene de una versión MÁS NUEVA.\n\
+         ─────────────────────────────────────────────────────────────────────────────\n\
+         La base tiene aplicada la migración {version}, que este binario (versión {app})\n\
+         no conoce. Es la firma de haber arrancado una imagen antigua sobre datos ya\n\
+         migrados por una imagen posterior.\n\
+         \n\
+         TUS DATOS ESTÁN INTACTOS: no se ha tocado nada. FutureFin prefiere no arrancar\n\
+         antes que ejecutar un esquema viejo sobre datos nuevos.\n\
+         \n\
+         Qué hacer:\n\
+           1) Vuelve al tag de imagen que estabas usando (el más nuevo). Es la salida\n\
+              normal: basta con corregir FUTUREFIN_TAG y volver a levantar.\n\
+           2) Si de verdad quieres quedarte en esta versión, restaura el backup\n\
+              pre-migración: el fichero `pre-migration-*.sql.gz` del volumen `ffdata`\n\
+              (en el add-on de Home Assistant: /data/state/backups).\n\
+         \n\
+         Guía completa de backups y restauración: docs/backups.md\n\
+         ─────────────────────────────────────────────────────────────────────────────",
+        version = version,
+        app = env!("CARGO_PKG_VERSION"),
+    )
+}
+
 /// Aplica migraciones embebidas (`sqlx::migrate!`). Si una migración pre-existente cambia su
 /// checksum (por ej. tras un squash), el error queda visible — repararlo manualmente con
 /// `DELETE FROM _sqlx_migrations WHERE version = X` desde `psql` y reintentar.
-pub async fn run_migrations(pool: &PgPool) -> Result<(), MigrateError> {
-    sqlx::migrate!("./migrations").run(pool).await
+///
+/// La guarda de downgrade no añade ninguna comprobación propia: sqlx ya falla con
+/// `VersionMissing` cuando la base va por delante del binario; aquí solo se le pone el mensaje.
+pub async fn run_migrations(pool: &PgPool) -> Result<(), MigrationError> {
+    match sqlx::migrate!("./migrations").run(pool).await {
+        Ok(()) => Ok(()),
+        Err(MigrateError::VersionMissing(version)) => Err(MigrationError::Downgrade {
+            version,
+            message: downgrade_message(version),
+        }),
+        Err(other) => Err(MigrationError::Other(other)),
+    }
 }

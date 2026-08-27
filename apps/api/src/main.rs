@@ -1,5 +1,6 @@
 use futurefin_api::db;
-use futurefin_api::handlers::fallback;
+use futurefin_api::handlers::{fallback, frame, spa};
+use futurefin_api::prefix;
 use futurefin_api::routes;
 use futurefin_api::state::AppState;
 use axum::extract::Extension;
@@ -10,8 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
-use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -41,7 +41,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db::connect_with_retry(&database_url, std::time::Duration::from_secs(connect_timeout))
             .await?;
     tracing::info!("database connected");
-    db::run_migrations(&pool).await?;
+    // El `?` de siempre imprimía el error con `Debug` (lo que hace `Termination` con un
+    // `Box<dyn Error>`): el banner multilínea de la guarda de downgrade salía como una sola
+    // línea con `\n` escapados, ilegible justo cuando más falta hace entenderlo. `Display` a
+    // stderr, sin el formateo de `tracing`, y salida 1 igual que antes.
+    if let Err(e) = db::run_migrations(&pool).await {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     tracing::info!("migrations applied");
 
     let cookie_secure = parse_bool_env("COOKIE_SECURE").unwrap_or(false);
@@ -52,16 +59,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(30);
     let mcp_enabled = parse_bool_env("FUTUREFIN_MCP_ENABLED").unwrap_or(true);
     let public_url = public_url();
+    let base_path = base_path();
+    let trusted_peers = trusted_peers();
+    let trusted_header_auth = parse_bool_env("FUTUREFIN_TRUSTED_PROXY_AUTH").unwrap_or(false);
+    if trusted_header_auth
+        && matches!(
+            trusted_peers,
+            prefix::PeerPolicy::Disabled | prefix::PeerPolicy::Any
+        )
+    {
+        // Fail-loud: SSO sin una lista EXPLÍCITA de peers acepta `X-Remote-User-Id` de
+        // cualquiera que alcance al proceso. `Disabled` es evidente; `any` lo parece menos y es
+        // igual de grave: tras un proxy que reenvía sin filtrar (o con el puerto publicado por
+        // error), un `X-Remote-User-Id` inventado provisiona el PRIMER usuario y se lleva el
+        // hogar entero como owner. Si de verdad nadie más puede llegar, la lista es una línea.
+        panic!(
+            "FUTUREFIN_TRUSTED_PROXY_AUTH=1 requires an explicit FUTUREFIN_TRUSTED_PROXY_IPS \
+             list (comma-separated IPs, e.g. 172.30.32.2); 'any' and an unset value are \
+             refused because header identity would be accepted from any peer"
+        );
+    }
 
     let shutdown_pool = pool.clone();
-    let state = Arc::new(AppState::new(
-        env!("CARGO_PKG_VERSION"),
-        pool,
-        cookie_secure,
-        session_ttl_days,
-        mcp_enabled,
-        public_url.clone(),
-    ));
+    let state = Arc::new(
+        AppState::new(
+            env!("CARGO_PKG_VERSION"),
+            pool,
+            cookie_secure,
+            session_ttl_days,
+            mcp_enabled,
+            public_url.clone(),
+        )
+        .with_trusted_proxy(base_path.clone(), trusted_peers, trusted_header_auth),
+    );
 
     tracing::info!(
         port = port(),
@@ -69,6 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cookie_secure,
         mcp_enabled,
         public_url = public_url.as_deref().unwrap_or("(derived from request)"),
+        base_path = if base_path.is_empty() { "(root)" } else { base_path.as_str() },
+        trusted_header_auth,
         "server config"
     );
 
@@ -78,21 +110,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api = Router::new()
         .merge(routes::app_router(&state))
-        .layer(Extension(state))
+        .layer(Extension(state.clone()))
         .layer(cors_layer())
         // gzip para responses >1 KB. Reduce ~10× el JSON de /v1/projection/series
         // (260 KB → 30 KB). El cliente lo descomprime sin cambios.
         .layer(CompressionLayer::new().gzip(true))
         .layer(TraceLayer::new_for_http());
 
-    let app = match web_static_root() {
-        Some(root) if root.exists() => {
-            tracing::info!(root = %root.display(), "serving web UI and API on one port");
-            let index = root.join("index.html");
-            Router::new()
-                .merge(api)
-                .fallback_service(ServeDir::new(root).fallback(ServeFile::new(index)))
-        }
+    let router = match web_static_root() {
+        Some(root) if root.exists() => match spa::load_index(&root) {
+            Some(index) => {
+                tracing::info!(root = %root.display(), "serving web UI and API on one port");
+                // El index NO lo sirve ServeDir (append_index_html_on_directories(false)):
+                // `GET /` cae al fallback, que inyecta el base path por request (spa.rs).
+                let index_svc = axum::routing::get(spa::serve_index)
+                    .with_state((state.clone(), Arc::new(index)));
+                // `/index.html` explícito TAMBIÉN pasa por el inyector: si no, `ServeDir`
+                // encuentra el fichero en disco y lo sirve crudo — sin prefijo reescrito ni
+                // `__FF_SSO__`, y con `Cache-Control` de asset estático. Bajo el Ingress esa URL
+                // es alcanzable (y algún cliente la pide), así que la SPA saldría rota justo
+                // donde el fallback la arregla.
+                Router::new()
+                    .route("/index.html", index_svc.clone())
+                    .merge(api)
+                    .fallback_service(
+                        ServeDir::new(root)
+                            .append_index_html_on_directories(false)
+                            .fallback(index_svc),
+                    )
+            }
+            None => {
+                tracing::warn!(
+                    root = %root.display(),
+                    "WEB_STATIC_ROOT has no readable index.html — API only"
+                );
+                Router::new().merge(api).fallback(fallback::not_found)
+            }
+        },
         Some(root) => {
             tracing::warn!(
                 root = %root.display(),
@@ -101,14 +155,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Router::new().merge(api).fallback(fallback::not_found)
         }
         None => Router::new().merge(api).fallback(fallback::not_found),
-    }
+    };
+
     // Anti-clickjacking global (protege sobre todo la pantalla de consentimiento OAuth,
     // servida por el fallback SPA — por eso la capa va en el router final, no en `api`).
-    // Nada de FutureFin se embebe legítimamente en iframes.
-    .layer(SetResponseHeaderLayer::overriding(
-        http::header::X_FRAME_OPTIONS,
-        http::HeaderValue::from_static("DENY"),
-    ));
+    // Nada de FutureFin se embebe legítimamente en iframes, con una excepción atada a un peer
+    // de confianza: el Ingress de Home Assistant, que embebe el add-on same-origin (frame.rs).
+    let app = frame::with_frame_policy(router, state.clone());
 
     let reconcile_sweep = spawn_reconcile_sweep(sweep_state);
 
@@ -117,9 +170,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     // Con Postgres en el mismo contenedor, drenar y cerrar el pool ANTES de que el
     // supervisor pare el postmaster es parte del contrato de apagado ordenado.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `with_connect_info`: la IP del peer alimenta la política de confianza
+    // (anti-clickjacking condicional y SSO por cabeceras — ver `prefix::PeerPolicy`).
+    // Si el bind fuera dual-stack, el peer IPv4 llegaría mapeado (`::ffff:…`);
+    // `PeerPolicy::allows` canonicaliza ambos lados, así que la lista se escribe en IPv4.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     tracing::info!("http server stopped");
     // El barrido se aborta ANTES de cerrar el pool: si no, una pasada en vuelo consultaría un
     // pool cerrado y ensuciaría el apagado con un error que no significa nada.
@@ -216,6 +276,25 @@ fn public_url() -> Option<String> {
         panic!("FUTUREFIN_PUBLIC_URL must be a bare origin (no path/query/fragment): {raw}");
     }
     Some(parsed.origin().ascii_serialization())
+}
+
+/// `FUTUREFIN_BASE_PATH` (opcional): prefijo público fijo (subpath tras proxy).
+/// Fail-loud vía `prefix::validate_base_path_env`; `""` = raíz (default histórico).
+fn base_path() -> String {
+    // Sin filtro de blancos: `normalize_prefix` ya mapea vacío y `/` a `""`.
+    std::env::var("FUTUREFIN_BASE_PATH")
+        .ok()
+        .map(|s| prefix::validate_base_path_env(&s))
+        .unwrap_or_default()
+}
+
+/// `FUTUREFIN_TRUSTED_PROXY_IPS` (opcional): peers de confianza. Fail-loud en entradas
+/// inválidas (estilo CORS_ORIGINS); sin definir ⇒ nadie es de confianza.
+fn trusted_peers() -> prefix::PeerPolicy {
+    std::env::var("FUTUREFIN_TRUSTED_PROXY_IPS")
+        .ok()
+        .map(|s| prefix::PeerPolicy::from_env_value(&s))
+        .unwrap_or(prefix::PeerPolicy::Disabled)
 }
 
 fn web_static_root() -> Option<PathBuf> {
