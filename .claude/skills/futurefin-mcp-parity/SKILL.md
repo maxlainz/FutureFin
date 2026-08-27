@@ -133,6 +133,7 @@ the blocking reason changes (noted per row).
 | auth/session, api-tokens, OAuth protocol+consent, membership/pending-users, backup, probes | **never** | §2.1 categories | Category-level change of posture only |
 | `POST /v1/auth/password` (4.0.0) | **never** | §2.1 session lifecycle / credential brake. Rotating the password revokes every other session, every `ffp_` token and every OAuth grant — including, quite possibly, the token making the call. It also requires the plaintext current password, which is exactly what must not travel through a model's context. It is the lever a compromised agent must not have and the human must always have | Category-level change of posture only |
 | `POST /v1/auth/sso` (2026-08-27) | **never** | §2.1 session lifecycle. It is a **browser-session mechanism**: it turns a trusted proxy's `X-Remote-User-*` headers into an `ff_session` cookie. MCP clients already hold their own first-class credentials (`ffp_` API tokens, `ffo_` OAuth access tokens), so a tool would buy nothing — and it would buy it by moving identity assertion into a channel where the peer check that makes the endpoint safe (`FUTUREFIN_TRUSTED_PROXY_IPS`, D18) does not mean the same thing. Also note the ingress does not reach `/mcp` at all: an add-on user talking MCP is on the direct port, i.e. exactly the peer this endpoint refuses | Category-level change of posture only |
+| `GET /v1/auth/ha/start` + `GET /v1/auth/ha/callback` (4.3.1, 2026-08-27) | **never** | §2.1 session lifecycle, and the sharpest case in this table: the credential is not a value at all, it is a **browser round-trip** — a 302 to Home Assistant, a human approving there, a 302 back carrying a `code` that only matches a single-use `HttpOnly` cookie this server set. An MCP client cannot drive that: it has no browser, cannot receive the redirect, cannot hold the cookie, and the thing that comes out the far end is an `ff_session` cookie, **not a token** it could use on `/mcp`. A tool would have to either invent a headless HA login (a second, weaker auth path) or hand the model an HA access token — exactly what the flow revokes seconds after using it (D19: identity, never authorization; FutureFin retains no HA credential). Same rationale as the `POST /v1/auth/sso` row: identity plumbing for the browser, not an operation over data | Category-level change of posture only |
 | `GET/PATCH/DELETE /v1/installation/members` (4.0.0) | **never** | §2.1 membership boundaries. `PATCH` can promote to `owner` and `DELETE` cuts all four credentials at once; both are the human's control over *who* is in the household, which `role_can_write` deliberately never governs. The `GET` follows them: its only real use is choosing a target for those writes, and a household roster is not financial data | Category-level change of posture only |
 | `POST /v1/transactions/{id}/reconcile` (manual pair; `reconcile_pair_core` EXISTS) | **omit** | Hand-picking two UUIDs among hundreds; a wrong pair silently leaves all flow aggregates and moves modes B/C savings | A server-side *suggestions* tool ships (candidates with opposite amounts), reducing the LLM's choice to confirming a proposed pair |
 | `/v1/transactions/import/preview|confirm` | **omit** | §2.1 context-window abuse + untrusted third-party content | MCP gains an out-of-band attachment channel |
@@ -299,12 +300,24 @@ cambios en 52** — recontado ese día: 52/21/31/31):
 | `FUTUREFIN_BASE_PATH` / prefijo por request, cookie acotada al prefijo, `X-Frame-Options` condicional | **n/a**: no hay superficie nueva. Son propiedades del transporte y del shell HTML, invisibles para `/mcp` (que no viaja por el Ingress: el add-on solo lo expone por el puerto directo opcional) |
 | Guarda de downgrade (`db.rs`) | **n/a**: no es una ruta. Falla el arranque; el servidor MCP no llega a montarse |
 
+Evaluación de la rama **`feat/ha-idp-login`** (4.3.1, «Entrar con Home Assistant»; 2026-08-27,
+catálogo **sin cambios en 52**):
+
+| New HTTP surface (4.3.1) | Parity outcome |
+|---|---|
+| `GET /v1/auth/ha/start` + `GET /v1/auth/ha/callback` | **Omisión deliberada** → fila fechada en §3.1. Mecanismo de redirect de navegador que termina en una **cookie de sesión**, no en un token: un cliente MCP no tiene navegador que seguir el 302 a HA, ni forma de sostener la cookie `ff_ha_state` de un solo uso, ni sacaría de ahí una credencial usable en `/mcp` |
+| `FUTUREFIN_HA_SSO_URL` / `FUTUREFIN_HA_ADDON`, `window.__FF_HA_LOGIN__`, cookie `ff_ha_state`, códigos `?ha_error=` | **n/a**: configuración de arranque, bandera del shell HTML y códigos que viajan por redirect. Cero superficie de datos; `/mcp` no los ve |
+| `handlers/sso.rs::resolve_or_provision` pasa a `pub(crate)` con dos callers | **n/a**: refactor interno de visibilidad, ninguna ruta nueva ni campo nuevo en ninguna respuesta |
+
 Re-verify before trusting:
 
 - Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22, recontado
-  52/21/31/31 el 2026-08-27**; 50/21/29/29/10/1 on 2026-08-20).
+  52/21/31/31 el 2026-08-27**; 50/21/29/29/10/1 on 2026-08-20). El tren 4.3.1 **no los mueve**.
 - `POST /v1/auth/sso` sigue sin tool (fila §3.1): `grep -n 'sso' apps/api/src/mcp/server.rs` (vacío)
   frente a `grep -n 'sso' apps/api/src/routes/mod.rs` (la ruta existe y se monta siempre).
+- Las dos rutas de HA-IdP siguen sin tool (fila §3.1, 4.3.1):
+  `grep -rn 'ha_idp\|ha_sso\|auth/ha' apps/api/src/mcp/` (vacío) frente a
+  `grep -n 'ha/start\|ha/callback' apps/api/src/routes/mod.rs` (las dos, montadas siempre).
 - Frozen catalog still matches the code (never count quotes — run the test):
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http tools_list_returns`
 - Cores still own invalidation, MCP module still SQL-free:
