@@ -26,3 +26,10 @@ configuration:
       URL con la que FutureFin se anuncia hacia fuera (issuer de OAuth).
       Rellénala si expones el add-on por un túnel o un proxy con dominio propio,
       por ejemplo https://finanzas.tudominio.com
+  ha_sso_url:
+    name: URL de Home Assistant (entrar con HA)
+    description: >-
+      URL pública de tu Home Assistant, con https:// y sin barra final (p. ej.
+      https://ha.midominio.com). Habilita el botón «Entrar con Home Assistant»
+      cuando abres FutureFin fuera del panel (puerto directo o túnel). Déjala
+      vacía para apagar el botón.

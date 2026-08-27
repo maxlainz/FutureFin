@@ -26,3 +26,10 @@ configuration:
       The URL FutureFin advertises to the outside world (OAuth issuer). Set it
       if you expose the add-on through a tunnel or a reverse proxy with its own
       domain, e.g. https://finance.example.com
+  ha_sso_url:
+    name: Home Assistant URL (sign in with HA)
+    description: >-
+      Public URL of your Home Assistant, with https:// and no trailing slash
+      (e.g. https://ha.example.com). Enables the "Sign in with Home Assistant"
+      button when you open FutureFin outside the panel (direct port or tunnel).
+      Leave it empty to turn the button off.

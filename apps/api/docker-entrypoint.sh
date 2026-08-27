@@ -60,7 +60,17 @@ if [ -f /data/options.json ]; then
   [ -n "$ha_cors" ] && export CORS_ORIGINS="$ha_cors"
   ha_public_url="$(ha_opt public_url)"
   [ -n "$ha_public_url" ] && export FUTUREFIN_PUBLIC_URL="$ha_public_url"
-  unset ha_cors ha_public_url
+
+  # Señal para el binario de que corre como add-on; el login con Home Assistant
+  # es exclusivo de este modo — decisión del owner 4.3.1.
+  export FUTUREFIN_HA_ADDON=1
+
+  # URL PÚBLICA de HA (la que tecleas en el navegador) — la usa el navegador para
+  # el redirect y el propio add-on para canjear el código y leer la identidad; no
+  # requiere hassio_api ni homeassistant_api.
+  ha_idp_url="$(ha_opt ha_sso_url)"
+  [ -n "$ha_idp_url" ] && export FUTUREFIN_HA_SSO_URL="$ha_idp_url"
+  unset ha_cors ha_public_url ha_idp_url
 fi
 
 # ── Configuración ────────────────────────────────────────────────────────────

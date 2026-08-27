@@ -59,6 +59,9 @@ options:
   mcp: true
   cors_origins: ""
   public_url: ""
+  # URL pública de Home Assistant: habilita «Entrar con Home Assistant» fuera del
+  # ingress (puerto directo o túnel). Vacío = botón apagado.
+  ha_sso_url: ""
 
 schema:
   log_level: "list(trace|debug|info|warn|error)"
@@ -66,3 +69,4 @@ schema:
   mcp: "bool"
   cors_origins: "str?"
   public_url: "str?"
+  ha_sso_url: "str?"
