@@ -7,9 +7,11 @@ description: >-
   la propia imagen; todos los datos viven en /data.
 
 # Imagen YA publicada por publish-image.yml — el add-on no construye nada.
-# Sin `{arch}` a propósito: ghcr.io/maxlainz/futurefin es un manifest multi-arch,
+# Sin `{arch}` a propósito: maxlainz/futurefin (Docker Hub) es un manifest multi-arch,
 # así que el propio registry sirve amd64 o aarch64 según el host.
-image: "ghcr.io/maxlainz/futurefin"
+# Docker Hub y no GHCR: el paquete de GHCR es privado y el Supervisor hace pull
+# anónimo (401 en el estreno). Docker Hub es el mismo binario, público desde siempre.
+image: "maxlainz/futurefin"
 arch:
   - amd64
   - aarch64

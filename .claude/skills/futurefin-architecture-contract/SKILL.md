@@ -355,7 +355,7 @@ healthcheck exists to catch.
 
 **Amendment (2026-08-27, branch `feat/home-assistant-addon`) — a SECOND distribution channel over
 the SAME image.** The repo is also a Home Assistant add-on store (`repository.yaml` at the root +
-`addon/futurefin/config.yaml`). The add-on **builds nothing**: `image: ghcr.io/maxlainz/futurefin`
+`addon/futurefin/config.yaml`). The add-on **builds nothing**: `image: maxlainz/futurefin` (Docker Hub; GHCR remains private)
 (no `{arch}` — the GHCR manifest is multi-arch, the registry picks amd64/aarch64), and the
 Supervisor uses the add-on's `version:` as the image tag. None of D13's rules are weakened, only
 re-anchored:

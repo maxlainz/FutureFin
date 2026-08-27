@@ -27,7 +27,7 @@ en tu shell o inyectada por Compose, lo que ponga el fichero da igual. Cuando un
 
 | Variable | Por defecto | Qué hace |
 |---|---|---|
-| `FUTUREFIN_IMAGE` | `maxlainz/futurefin` | Imagen a usar. Cámbiala a `ghcr.io/maxlainz/futurefin` para tirar de GHCR, o a un nombre local para probar una imagen construida por ti. |
+| `FUTUREFIN_IMAGE` | `maxlainz/futurefin` | Imagen a usar. Cámbiala a `ghcr.io/maxlainz/futurefin` para tirar de GHCR (ojo: el paquete de GHCR es **privado** — exige `docker login ghcr.io`), o a un nombre local para probar una imagen construida por ti. |
 | `FUTUREFIN_TAG` | `latest` | Etiqueta de la imagen. Fíjala a `X.Y.Z` para que no salte de versión sola. Ver [actualizar.md](actualizar.md). |
 | `APP_PORT` | `8080` | Puerto **del host**. El de dentro del contenedor es siempre 8080. |
 

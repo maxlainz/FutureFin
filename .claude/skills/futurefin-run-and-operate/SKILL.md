@@ -152,7 +152,7 @@ Two Dockerfile rules that must not be "simplified" away (they are load-bearing):
 
 **Two distribution channels, one image (since 2026-08-27).** Besides Docker Compose, this repo is a
 **Home Assistant add-on store**: `repository.yaml` at the root plus `addon/futurefin/config.yaml`.
-The add-on **builds nothing** — it declares `image: ghcr.io/maxlainz/futurefin` (no `{arch}`: the
+The add-on **builds nothing** — it declares `image: maxlainz/futurefin` (Docker Hub: the GHCR package is private and the Supervisor pulls anonymously — 401 on debut; no `{arch}`: the
 GHCR manifest is multi-arch and the registry serves amd64/aarch64 by itself) and the Supervisor uses
 the add-on's `version:` as the image tag. Operational consequences:
 

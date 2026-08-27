@@ -12,7 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   `addon/futurefin/`. Se añade desde la tienda de complementos, se instala, se arranca y sale como
   **panel en la barra lateral** (`panel_title: FutureFin`, `panel_icon: mdi:currency-usd`) por el
   **ingress** del Supervisor — sin publicar ningún puerto, sin TLS que gestionar y sin escribir un
-  `docker-compose.yml`. **No construye nada**: `image: ghcr.io/maxlainz/futurefin` apunta al
+  `docker-compose.yml`. **No construye nada**: `image: maxlainz/futurefin` (Docker Hub) apunta al
   manifest multi-arch ya publicado, deliberadamente **sin `{arch}`**, para que el registry sirva
   amd64 o aarch64 según el host. `init: false` porque el entrypoint de la imagen tiene que seguir
   siendo PID 1: es quien supervisa PostgreSQL y hace el apagado ordenado, y meter s6 por delante
