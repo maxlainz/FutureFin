@@ -169,6 +169,53 @@ the add-on's `version:` as the image tag. Operational consequences:
   same embedded PostgreSQL, same ordered shutdown, same guards. What moves is *where the data lives*
   (§6) and *how you reach the logs* (Supervisor → add-on → Log tab, same stream as §3.1).
 
+**Turning on «Entrar con Home Assistant» (4.3.1).** By default the add-on only offers automatic
+login *inside* the panel (ingress SSO). If the household also opens FutureFin through the direct
+port or a tunnel — which is the only way to reach `/mcp` and the OAuth consent screen — those
+accounts have **no password by design** and cannot log in there. The fix is one option:
+
+```
+Settings → Add-ons → FutureFin → Configuration
+  ha_sso_url: "https://ha.midominio.com"     # the PUBLIC URL you type in the browser
+→ Save → Restart the add-on
+```
+
+- It is the **public** origin of Home Assistant, not an internal hostname: the browser is redirected
+  to it *and* the add-on calls it to exchange the code and read the identity. No `hassio_api` or
+  `homeassistant_api` permission is involved.
+- Bare origin only — no path, no query, no trailing junk. A malformed value **aborts startup**
+  (fail-loud, by design); the add-on Log shows `invalid FUTUREFIN_HA_SSO_URL` or
+  `must be a bare origin`, and the add-on will not come up until you fix or clear it.
+- It changes nothing else: same accounts, same roles, same data. The person who logs in this way
+  lands on the **same `users` row** as their ingress SSO login.
+
+**The button does not appear — three checks, in this order:**
+
+1. **Is the option actually set?** Read the startup line in the add-on's Log tab:
+   `server config … ha_sso_url=https://…`. `ha_sso_url=(disabled)` means the option is empty or
+   whitespace — the whole feature is off, and the login screen correctly shows nothing.
+2. **Are you outside the panel?** The button is for the direct/tunnel origin. **The two never
+   coexist by design**: when the request qualifies for ingress SSO (`window.__FF_SSO__`) the app
+   offers *that* instead — inside the panel the Supervisor has already authenticated you, and
+   sending you to type your HA password would be a regression.
+3. **Are you actually running the add-on?** The feature is add-on-only: the entrypoint exports
+   `FUTUREFIN_HA_ADDON=1` only when `/data/options.json` exists (the log line shows `ha_addon=1`).
+   In a plain Compose deployment, setting `FUTUREFIN_HA_SSO_URL` by hand does **not** enable
+   anything — it **panics at startup** with `is only honoured inside the Home Assistant add-on`.
+   That is deliberate: HA only accepts a `client_id` equal to this app's origin under its own
+   ingress, so a Compose install would get a button that can never complete a login.
+
+If the button appears but the login fails, the app comes back to its own login screen with a message
+derived from `?ha_error=<code>` — `ha_state_mismatch` (cookie lost/expired: press the button again),
+`ha_exchange_failed` (HA refused the code, or the person declined), `ha_identity_failed`,
+`ha_sso_disabled`. Full table in `.claude/api-routes.md`; nothing is written to the database in any
+of those cases.
+
+**Rollback is emptying the option.** Clear `ha_sso_url`, save, restart: the button disappears and
+the behaviour is byte-identical to 4.3.0 — **no migration, no data to undo**, and the accounts
+created through it are ordinary users (they keep working through the panel's SSO). No image change
+needed, so this is a rollback you can do without touching the version.
+
 GHCR housekeeping: `.github/workflows/cleanup-ghcr.yml` runs weekly (Mon 03:00 UTC),
 keeps anything tagged `vX.Y.Z` or `latest`, deletes `sha-*` versions older than 30 days and
 other untagged/dev versions older than 60 days. Release tags are never deleted, so pinned
@@ -379,7 +426,9 @@ start logs, in this order:
 7. `futurefin starting` (with `version=`)
 8. `database connected`
 9. `migrations applied`
-10. `server config` (with `port=`, `session_ttl_days=`, `cookie_secure=`)
+10. `server config` (with `port=`, `session_ttl_days=`, `cookie_secure=`, `mcp_enabled=`,
+    `public_url=`, `base_path=`, `trusted_header_auth=` and, since 4.3.1, `ha_sso_url=` — the
+    quickest way to answer "is the Home Assistant login on?": it prints the origin or `(disabled)`)
 11. `serving web UI and API on one port` (with `root=/app/web`) — if this instead says
     `WEB_STATIC_ROOT set but path missing — API only`, the UI will 404 while the API works
 12. `listening on http://0.0.0.0:8080`
@@ -893,6 +942,10 @@ against v4.0.0** (which removed the external-database mode: `exec_api_external`,
 `apps/api/src/handlers/backup_user/{crypto.rs,schema.rs}`,
 `.github/workflows/{publish-image.yml,cleanup-ghcr.yml}`, `CHANGELOG.md`.
 
+**§2.1 gained the «Entrar con Home Assistant» block on 2026-08-27 for v4.3.1** (branch
+`feat/ha-idp-login`), read from `addon/futurefin/config.yaml`, `apps/api/docker-entrypoint.sh`,
+`apps/api/src/main.rs` and `apps/api/src/handlers/ha_sso.rs`.
+
 Notes on facts that are asserted rather than measured: the ≈320–360 MB image size is an
 estimate from the image's contents (Debian slim + two PG majors, JIT stripped), not a reading
 off a published manifest — check with `docker image ls` after a local build if it matters.
@@ -937,6 +990,15 @@ Re-verify before trusting volatile facts:
   `apps/api/Cargo.toml`); `grep -n 'Bump de la versión del add-on en main' -A12 .github/workflows/publish-image.yml`
   (the post-build step that makes the update visible in HA — requires the «GitHub Actions» app as a
   bypass actor of the «Proteger main» ruleset).
+- **«Entrar con Home Assistant» (§2.1, added 2026-08-27 for v4.3.1, branch `feat/ha-idp-login`)**:
+  `grep -n 'ha_sso_url' addon/futurefin/config.yaml addon/futurefin/DOCS.md` (option + user docs);
+  `grep -n 'ha_sso_url\|FUTUREFIN_HA_ADDON' apps/api/docker-entrypoint.sh` (the mapping and the
+  unconditional add-on signal); `grep -n 'ha_sso_url =\|FUTUREFIN_HA_SSO_URL' apps/api/src/main.rs`
+  (fail-loud parsing, the add-on-only panic, and the `ha_sso_url=…` field of the `server config`
+  startup line); error codes seen by the user:
+  `grep -n 'ha_state_mismatch\|ha_exchange_failed\|ha_identity_failed\|ha_sso_disabled' apps/api/src/handlers/ha_sso.rs`.
+  Pinned by `apps/api/tests/ha_idp_login.rs` (17 tests). No migration ships with it — clearing the
+  option is a complete rollback.
 - **Downgrade refusal banner (§2.3, added 2026-08-27)**:
   `grep -n 'NO ARRANCA\|MigrationError::Downgrade\|VersionMissing' apps/api/src/db.rs`;
   pinned by `apps/api/tests/migration_guard.rs` (run with `TEST_DATABASE_URL` set).

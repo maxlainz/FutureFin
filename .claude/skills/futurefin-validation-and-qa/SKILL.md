@@ -153,6 +153,8 @@ axes there is `TestApp::spawn_with(TestConfig { .. })`, whose `Default` **is** t
 | `trusted_peers_any: bool` | `PeerPolicy::Any` instead of `Disabled`. **`Any` is the only workable policy in tests**: `oneshot` carries no `ConnectInfo`, so the peer is `None` and an IP list would never match |
 | `base_path: String` | `FUTUREFIN_BASE_PATH` |
 | `with_spa_index: Option<String>` | Mounts `spa::serve_index` as the fallback with that HTML (no `ServeDir`, no disk) |
+| `ha_idp: Option<Arc<FakeHaIdp>>` (4.3.1) | `FUTUREFIN_HA_SSO_URL` being set: `Some(_)` populates `AppState.ha_sso`, so `/v1/auth/ha/*` works with no real Home Assistant |
+| `ha_sso_url: Option<String>` (4.3.1) | The HA origin the test sees; **defaults to `https://ha.test`** and is only read when `ha_idp` is `Some(_)` |
 
 Two harness facts worth knowing before you write a proxy-ish test:
 - **The router is wrapped in `frame::with_frame_policy`, exactly like `main.rs`.** Without it the
@@ -160,14 +162,43 @@ Two harness facts worth knowing before you write a proxy-ish test:
   of the binary's outer layers.
 - Header-carrying requests go through `get_with_headers` / `post_with_headers` (the latter added
   with `sso_login.rs`); the cookie helpers are unchanged.
-- **No test sets an environment variable.** Config arrives through `AppState::with_trusted_proxy`,
-  which is what keeps the suites parallel-safe.
+- **No test sets an environment variable.** Config arrives through `AppState::with_trusted_proxy`
+  and `AppState::with_ha_idp`, which is what keeps the suites parallel-safe.
 
-### Integration test files (**43** on 2026-08-27)
+### Outbound integrations: fake behind a trait, **never** an HTTP mock (house style, 4.3.1)
 
-Recount before trusting: `ls apps/api/tests/*.rs | wc -l` (**43** on 2026-08-27, 33 on 2026-08-22)
-and per-file `grep -rc '#\[tokio::test\]\|#\[test\]' apps/api/tests/*.rs` (375 attributes across 33
-files on 2026-08-22; the five files added on `feat/home-assistant-addon` bring 24 more). On any disagreement between a
+The HA identity provider is the first time this binary calls **out** over the network, and the seam
+it introduced is the pattern every future outbound integration must copy:
+
+1. **A narrow trait for the outside world.** `ha_idp::HaIdp` has exactly three methods
+   (`exchange_code`, `identity`, `revoke`) and lives beside the pure helpers it needs. The real
+   client (`ha_idp/client.rs`: reqwest/rustls + tokio-tungstenite) is one implementation behind
+   `Arc<dyn HaIdp>` in `AppState`.
+2. **The test double is a hand-written fake in `common/mod.rs`, not `wiremock`.** Two structural
+   reasons, both worth stating because "just use a mock server" is the reflex: the harness is
+   `tower::ServiceExt::oneshot`, which **opens no sockets**, so there is no real HTTP stack to point
+   a fake server at; and half the dialogue with HA is a **WebSocket** (`auth/current_user` — HA has
+   no REST equivalent), which an HTTP mock cannot cover at all.
+3. **The fake logs its calls in order.** `FakeHaIdp::calls() -> Vec<FakeCall>` is what turns "the
+   order is a contract" into an assertion: `[Exchange { code, client_id }, Identity, Revoke]`, with
+   the revocation **before** any DB write. A stub that only returns canned values could not prove
+   that, and the property it proves (FutureFin keeps no HA credential) is the one the security
+   story rests on. Scripted constructors: `happy`, `without_refresh`, `exchange_fails`,
+   `identity_fails`, plus `set_identity` to make the same `AppState` speak for a second person.
+4. **`revoke` is infallible by signature** — the trait forbids a failure there from sinking a login
+   already proved. So "revocation failed" is modelled as what actually happens: the call occurs,
+   changes nothing, the user gets in.
+5. **The real client carries zero unit tests, on purpose.** Its pure parts (URL building, cookie
+   codec, `next` sanitizing) were pushed up into `ha_idp/mod.rs` and unit-tested there (11); what
+   remains is I/O against a real HA, verified by a live smoke, not by a double that would only
+   assert our own assumptions back at us.
+
+### Integration test files (**44** on 2026-08-27)
+
+Recount before trusting: `ls apps/api/tests/*.rs | wc -l` (**44** on 2026-08-27 — 43 after
+`feat/home-assistant-addon`, +1 for `ha_idp_login.rs` in 4.3.1; 33 on 2026-08-22) and
+`grep -rc '#\[tokio::test\]\|#\[test\]' apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'`
+(**449** attributes on 2026-08-27; 375 across 33 files on 2026-08-22). On any disagreement between a
 row's description here and `.claude/tests.md` (refreshed every release train), tests.md wins —
 fix this table in the same change.
 
@@ -207,6 +238,7 @@ fix this table in the same change.
 | `frame_options.rs` (2026-08-27) | 4 | Both halves of the conditional anti-clickjacking (D17): default → `X-Frame-Options: DENY`; **`X-Ingress-Path` from an untrusted peer → still `DENY`** (the header alone must not disarm it); trusted peer + header → `Content-Security-Policy: frame-ancestors 'self'` **and no `X-Frame-Options`** (a surviving `DENY` wins over the CSP and the HA panel goes blank); trusted peer without the header → `DENY`. `TestConfig { trusted_peers_any: true }` |
 | `session_cookie_path.rs` (2026-08-27) | 3 | `Path` of `ff_session`: `Path=/` with no proxy headers (unchanged for compose), scoped to the prefix under ingress (HA add-ons share an origin, so `Path=/` would leak the cookie to other add-ons' ingress paths), and **logout removes the cookie on that same `Path`** — a browser only matches a removal when name AND path agree |
 | `sso_login.rs` (2026-08-27) | 11 | `POST /v1/auth/sso` (D18). In priority order: **the door is closed by default** (perfect headers, no config → 401), untrusted peer → 401, non-UUID identity → 400; the external identity is stable (same `X-Remote-User-Id` → same user, no duplicate rows); provisioning goes through the same gates as password registration (first = owner + installation, second = pending); diacritics fold into valid usernames and a taken username gets a suffix; an SSO account **cannot** log in with a password nor set one (`sso_account_no_password`), and password accounts are untouched by the new column |
+| `ha_idp_login.rs` (4.3.1) | 17 | «Entrar con Home Assistant» (`GET /v1/auth/ha/start` + `/callback`, D19), in the order its own header declares. **The door is closed by default**: routes always mounted, but with no `FUTUREFIN_HA_SSO_URL` the start is 401 `ha_sso_disabled`, sets no cookie and provisions nobody. **Parity with header-SSO** is the cornerstone: `header_sso_and_ha_login_resolve_to_the_same_user` — hyphenated UUID through `POST /v1/auth/sso`, the same id as 32 bare hex through the HA flow, **one** `users` row (I16). **The `state` is the whole security boundary**: four ways of not having it (foreign state, no state, no cookie, garbage cookie) all end in `ha_state_mismatch` with **zero users and zero calls to the provider**, and the cookie is single-use. **Call order** pinned on `FakeHaIdp::calls()`: `[Exchange, Identity, Revoke]` with a byte-identical `client_id`, no `Revoke` when HA returned no refresh token. Plus the redirect shape (three exact params, `no-store`, `HttpOnly`/`Lax`/`Max-Age=600`/scoped `Path`, and under `base_path` the cookie is scoped while the `client_id` stays the bare origin), provider failures → `ha_exchange_failed` / `ha_identity_failed`, `?error=access_denied` never touching the provider, the `next` anti-open-redirect battery (prefixed exactly once), username collision → `maria`/`maria-2`, and the shell announcing `__FF_HA_LOGIN__`. Needs `TestConfig { ha_idp: Some(FakeHaIdp::happy(..)) }` |
 | `migration_guard.rs` (2026-08-27) | 2 | Downgrade refusal. Uses **only** `common::isolated_pool()` (no `TestApp`): applies the real migrations to a fresh schema, then inserts a fake `_sqlx_migrations` row from "the future" — exactly what an older binary sees after an upgrade — and asserts `run_migrations` returns `MigrationError::Downgrade` with the operator banner. Tests the contract (don't lose sqlx's `VersionMissing`, translate it into something actionable), not the implementation |
 | `budget_liability_quotas.rs` | 10 | Liability quotas inside `GET /v1/budget` (renamed from `budget_derived.rs` in 3.7.0, when the quota became an ordinary `entries` row): entry shape (`source`, `liability_id`, `label`, expense category) and coexistence with the manual entry of the same category; totals (`expense_regular` = sum of expense entries, no `expense_derived`); quota excluded from `expense_retirement_*`; **quota excluded from the engine expense base** (`monthly_delta_assumption` — hand-predicted double-count regression); active-liability predicate (NULL end date derives, expired doesn't, `>=` boundary, no payment plan → nothing), weekly ×52/12, household/mine scoping, quota without `expense_category_id` still counts |
 
@@ -514,12 +546,21 @@ for 4.0.0**: § 3 (CI now runs integration + ESLint + Vitest), all counts, the t
 claim. **Extended 2026-08-27 on branch `feat/home-assistant-addon`**: the `TestConfig`/`spawn_with`
 harness knobs and the five new suites (`base_path.rs`, `frame_options.rs`,
 `session_cookie_path.rs`, `sso_login.rs`, `migration_guard.rs`), verified by reading those files and
-`apps/api/tests/common/mod.rs`. Re-verify volatile facts with:
+`apps/api/tests/common/mod.rs`. **Extended again 2026-08-27 for v4.3.1** (branch
+`feat/ha-idp-login`): the outbound-integration house style (fake behind a trait, §Outbound
+integrations), the `ha_idp` / `ha_sso_url` knobs of `TestConfig`, the `ha_idp_login.rs` row and the
+file/attribute counts — read from `apps/api/tests/{ha_idp_login.rs,common/mod.rs}` and
+`apps/api/src/ha_idp/`. Re-verify volatile facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
 - Workspace total: `cargo test --workspace 2>&1 | grep "test result"` (**498 on 2026-08-22**)
+- **HA-IdP seam (4.3.1)**: `grep -n "struct FakeHaIdp\|enum FakeCall\|ha_idp:\|ha_sso_url:" apps/api/tests/common/mod.rs`;
+  `grep -c '#\[tokio::test\]' apps/api/tests/ha_idp_login.rs` (**17**);
+  `grep -c '#\[test\]' apps/api/src/ha_idp/mod.rs` (**11**) vs
+  `grep -c '#\[test\]' apps/api/src/ha_idp/client.rs` (**0**, deliberate);
+  no HTTP-mock crate crept in: `grep -rn "wiremock\|mockito\|httpmock" apps/api/Cargo.toml` (empty)
 - Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (**67 on 2026-08-22** = projection 32 + history 22 + runway 13; it was 61 = 27+21+13 on 2026-08-19)
-- Integration attributes: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375 across 33 files on 2026-08-22**; `apps/api/src` adds **57** lib unit tests)
+- Integration attributes: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**449 across 44 files on 2026-08-27**; 375 across 33 on 2026-08-22). Lib unit tests: `grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l` (**84 on 2026-08-27**; 72 after 4.3.0, 57 on 2026-08-22)
 - Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**368 in 16 files on 2026-08-22**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
 - Migration count: `ls apps/api/migrations/*.sql | wc -l` (**44 on 2026-08-27**; 42 on 2026-08-22; 40 on 2026-08-19)
 - **Reverse-proxy / add-on suites (added 2026-08-27, branch `feat/home-assistant-addon`)**:

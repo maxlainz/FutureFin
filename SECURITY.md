@@ -253,6 +253,63 @@ un intercambio buscado: sin el mensaje, la persona se quedaría tecleando para s
 contraseña que nunca se fijó. Es la misma postura que el `username_taken` del registro, que ya
 distingue "ese nombre está cogido" de cualquier otro error.
 
+### Home Assistant como proveedor de identidad
+
+Desde la 4.3.1 FutureFin puede además **entrar como cliente** en el Home Assistant de quien lo
+aloja: `GET /v1/auth/ha/start` y `GET /v1/auth/ha/callback` implementan el flujo de código de
+autorización de HA («Entrar con Home Assistant»), y la identidad que devuelve se canjea por una
+sesión normal. Es la contrapartida del apartado anterior: allí un proxy **afirma** quién eres; aquí
+la prueba es un round-trip por tu propio navegador contra HA.
+
+**Solo existe en modo add-on.** Se activa con `FUTUREFIN_HA_SSO_URL` (el origen público de tu HA) y
+**solo se honra con `FUTUREFIN_HA_ADDON=1`**, que exporta únicamente el entrypoint cuando detecta el
+Supervisor. La URL sin el flag **aborta el arranque**: es una decisión de diseño, no un descuido —
+no queríamos un «login con cualquier IdP» de propósito general entrando por la puerta de atrás. Las
+dos rutas se montan siempre; sin URL configurada responden `ha_sso_disabled`.
+
+**El modelo de defensa, y por qué no hay PKCE.** Home Assistant no soporta PKCE, ni `client_secret`,
+ni `scope`. Lo que sí exige es que el `client_id` y el `redirect_uri` sean del **mismo origen**, y
+FutureFin manda como `client_id` su propio origen público, byte a byte el mismo en la autorización
+y en el canje: un código emitido para esta instalación no sirve para redirigirlo a otra parte. La
+segunda pata es una cookie de estado propia, **`ff_ha_state`**: `HttpOnly`, `SameSite=Lax`,
+`Max-Age` de 10 minutos, `Secure` si `COOKIE_SECURE` lo está, con el `Path` acotado al prefijo del
+propio despliegue y **de un solo uso** — se borra en el callback pase lo que pase, así que un
+`state` no se puede reproducir. El `state` devuelto por HA se compara con el de la cookie en
+**tiempo constante**; sin coincidencia, no se llama a HA para nada.
+
+`SameSite=Lax` no es una relajación: es el único valor que funciona. El callback llega como
+navegación de nivel superior desde el dominio de Home Assistant, y `Strict` no manda la cookie en
+una navegación cross-site — el flujo fallaría **siempre**. `None` exigiría `Secure`, que no se puede
+dar por hecho en una LAN por HTTP.
+
+**La ruta de retorno viaja dentro de la cookie, no en el `state`.** Es deliberado: así el destino
+final es un valor que el servidor puso, no algo que el navegador trajo de vuelta. Aun así se sanea
+antes de guardarlo y el destino se acota a esta misma aplicación — tiene que empezar por `/`, no
+puede ser `//host` ni contener `\`, ni `://` o `@` en la parte de ruta, ni caracteres de control (un
+`\r\n` partiría la cabecera `Location`), y como mucho 512 caracteres; cualquier duda cae a la raíz.
+Esa disciplina es una obligación, no un extra: **este origen no puede tener ni un open-redirect**.
+Un redirect abierto en FutureFin permitiría fabricar un `redirect_uri` legítimo para HA que acabe
+entregando el código en otro sitio.
+
+**Qué queda guardado de tu Home Assistant: nada.** El token de refresco que HA emite se **revoca
+inmediatamente** después de leer la identidad, antes incluso de tocar la base de datos, y el de
+acceso muere con la petición. Ningún token de HA se escribe en el log (solo longitudes, y a nivel
+`debug`). Si la revocación falla —HA caído en ese instante—, el login sigue adelante y queda un
+**aviso en el log**: si lo ves, borra ese token a mano en **Home Assistant → Perfil → Seguridad →
+Tokens de actualización**.
+
+**Lo que heredas de tu Home Assistant, y lo que no.** FutureFin acepta a quien HA diga que ha
+entrado, **con cualquier proveedor de autenticación**: si tu HA usa `trusted_networks`, quien esté
+en esa red es ese usuario en HA y, por tanto, también aquí — sin teclear nada. HA es la fuente de
+**identidad**; el rol y la pertenencia al hogar los sigue decidiendo FutureFin, con las mismas
+reglas que el resto de las altas: la primera identidad de la instalación se queda la propiedad y
+las siguientes entran **pendientes** hasta que el propietario las apruebe. La otra cara: quien autentica es HA,
+así que los intentos fallidos que pasan por este botón cuentan para el `ip_ban` de Home Assistant.
+FutureFin sigue sin tener límite de intentos propio.
+
+Un certificado autofirmado en esa URL **no está soportado**: el cliente verifica el certificado y no
+existe opción para desactivar la verificación. Usa `http://` en la LAN o un certificado válido.
+
 ### Endpoints sin autenticación
 
 `GET /health`, `GET /v1/health`, `GET /v1/ready` y `GET /openapi.json` responden sin credenciales.

@@ -33,12 +33,20 @@ Vite en build ni un placeholder reescrito al arrancar valen. `spa::load_index` l
 disco **una vez** al arrancar (si no hay `index.html` legible se degrada a API-only con un `warn`);
 por request, `spa::inject` reescribe los refs absolutos (`src="/…"`, `href="/…"` — las
 protocol-relative `//…` y las absolutas con esquema no se tocan) e inserta, justo después de
-`<head>`, un `<script>` con `window.__FF_BASE__` y `window.__FF_SSO__` (los consume
-`apps/web/src/lib/basePath.ts`). `__FF_SSO__` es `true` solo si hay SSO habilitado **y** peer de
-confianza **y** la request trae `X-Remote-User-Id`.
+`<head>`, un `<script>` con `window.__FF_BASE__`, `window.__FF_SSO__` y `window.__FF_HA_LOGIN__`
+(los consume `apps/web/src/lib/basePath.ts`). Las dos banderas se calculan distinto **a propósito**
+(`handlers/spa.rs::ShellFlags`):
 
-- **Invariante maestro**: sin prefijo y sin SSO, `inject` devuelve `Cow::Borrowed` — los bytes
-  **exactos** del fichero. El modo compose no cambia ni un carácter.
+| Bandera | Verdadera cuando | Por qué esa condición |
+|---|---|---|
+| `__FF_SSO__` | SSO por cabeceras habilitado **y** peer de confianza **y** la request trae `X-Remote-User-Id` | Es configuración **de la request**: el atajo solo existe si este mismo tráfico viene del Ingress. |
+| `__FF_HA_LOGIN__` | `AppState.ha_sso.is_some()` — es decir, hay `FUTUREFIN_HA_SSO_URL` (`ha_idp::ha_login_available`) | Es configuración **del proceso**: el botón «Entrar con Home Assistant» existe precisamente donde NO hay proxy de confianza (el origen directo o un túnel), así que **no** puede depender del peer ni de ninguna cabecera. |
+
+- **Invariante maestro**: sin prefijo, sin SSO y sin login de HA
+  (`prefix.is_empty() && !sso && !ha_login`), `inject` devuelve `Cow::Borrowed` — los bytes
+  **exactos** del fichero. El modo
+  compose no cambia ni un carácter (unit test `ha_login_alone_injects_the_bootstrap` fija el otro
+  lado: la bandera de HA sola ya basta para inyectar).
 - **Cache headers**, atados a ese mismo invariante: respuesta sin modificar → `Cache-Control:
   no-cache` (el shell de una SPA se revalida siempre, los assets hasheados sí cachean); respuesta
   modificada → `Cache-Control: no-store` + `Vary: X-Ingress-Path, X-Forwarded-Prefix`, porque el
@@ -58,13 +66,16 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
   `ffo_…`) solo vale para `/mcp`, que deliberadamente **no** está en esta spec — se declara porque
   las 401 de la API lo mencionan y un lector necesita saber que existe.
 - **`security` global**: `("ff_session" = [])` en el `#[openapi(...)]` raíz. La excepción se marca
-  por operación con **`security(())`** (lista vacía = pública), y hoy la llevan exactamente cinco:
-  `health_check`, `ready_check`, `register`, `login` y `sso_login`
-  (`grep -rn 'security(())' apps/api/src`). Al añadir un handler público hay que ponerlo; al añadir
-  uno privado no hay que hacer nada. `sso_login` es «pública» en el sentido de OpenAPI porque su
-  credencial —la palabra de un proxy de confianza: cabecera `X-Remote-User-Id` desde una IP
-  autorizada— **no se puede expresar como `securityScheme`**; la política vive en la descripción de
-  la operación y en `handlers/sso.rs`. La lista está congelada en `PUBLIC_OPERATIONS`
+  por operación con **`security(())`** (lista vacía = pública), y desde 4.3.1 la llevan exactamente
+  **siete**: `health_check`, `ready_check`, `register`, `login`, `sso_login`, `ha_start` y
+  `ha_callback` (`grep -rn 'security(())' apps/api/src`). Al añadir un handler público hay que
+  ponerlo; al añadir uno privado no hay que hacer nada. Las tres últimas son «públicas» en el
+  sentido de OpenAPI porque su credencial **no se puede expresar como `securityScheme`**: en
+  `sso_login` es la palabra de un proxy de confianza (cabecera `X-Remote-User-Id` desde una IP
+  autorizada); en `ha_start`/`ha_callback` es el **round-trip del navegador contra Home Assistant**
+  más la cookie `ff_ha_state` de un solo uso — algo que ocurre *durante* la operación, no una
+  credencial que el cliente presente al empezar. La política vive en la descripción de cada
+  operación y en `handlers/{sso,ha_sso}.rs`. La lista está congelada en `PUBLIC_OPERATIONS`
   (`apps/api/tests/openapi_contract.rs`): añadir un público sin tocarla rompe el test.
 - Otras tres deudas cerradas en el mismo cambio: dos structs distintos compartían el nombre de
   componente `ImportPreviewResponse` (preview de CSV y preview de backup) — utoipa nombra por el
@@ -93,6 +104,8 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
 | POST | `/v1/auth/logout` | Clears cookie + DB session |
 | POST | `/v1/auth/password` | **4.0.0**. Sesión válida. Body `{current_password, new_password}` → **204**. Verifica la actual, aplica la política de longitud (12..=256 chars, `auth/password.rs`) y **revoca en la misma transacción** las demás sesiones, los tokens `ffp_` del usuario (`api_tokens.revoked_at`) y sus concesiones OAuth (`oauth_grants.revoked_at`, `revoked_reason = 'password_change'`). La sesión que llama **sobrevive** (se excluye por su propio `id`), para no echar al usuario de la app al terminar. |
 | POST | `/v1/auth/sso` | **SSO por proxy de confianza**. Identidad delegada a un proxy de confianza (add-on de Home Assistant). Sin cuerpo; la credencial es la cabecera `X-Remote-User-Id` (UUID) desde un peer autorizado. Devuelve el mismo `UserResponse` que el login y pone la misma cookie `ff_session`. **Se monta siempre** (la forma del router no depende del entorno): con `FUTUREFIN_TRUSTED_PROXY_AUTH` apagado → 401 `sso_disabled`; peer fuera de `FUTUREFIN_TRUSTED_PROXY_IPS` → 401 `sso_untrusted_peer`; cabecera ausente o no-UUID → 400 `sso_bad_identity`. El primer usuario que entra por aquí crea el hogar y queda owner; los siguientes quedan pendientes. |
+| GET | `/v1/auth/ha/start` | **4.3.1 — «Entrar con Home Assistant»**. Arranca el flujo de código de autorización contra HA como IdP. `?next=` opcional. **302** a `{FUTUREFIN_HA_SSO_URL}/auth/authorize?…` + cookie `ff_ha_state`. Se monta siempre; sin `FUTUREFIN_HA_SSO_URL` → **401 `ha_sso_disabled`** (este es el único error del flujo que sí sale como JSON, porque aquí el navegador todavía no está en mitad de una navegación venida de HA). |
+| GET | `/v1/auth/ha/callback` | **4.3.1**. Vuelta del navegador desde HA (`?code=&state=` o `?error=`). Éxito → **302** a la app + cookie `ff_session`; fallo → **302** a `{prefijo}/?ha_error=<código>`. **Nunca** devuelve un cuerpo JSON de error. |
 | GET | `/v1/auth/me` | Current user info |
 | PATCH | `/v1/auth/me` | Update `birth_date` |
 
@@ -154,6 +167,102 @@ proyección del hogar que hace `login` (se salta en silencio si el usuario está
   sesión de navegador atado a cabeceras de un proxy, no una operación sobre datos. Ningún cliente
   MCP puede ni debe invocarlo — su credencial es el Bearer, no una cookie.
 - Regresión: `apps/api/tests/sso_login.rs`.
+
+#### `GET /v1/auth/ha/start` + `GET /v1/auth/ha/callback` — «Entrar con Home Assistant» (4.3.1, `handlers/ha_sso.rs` + `ha_idp/`)
+
+El **segundo** camino de la misma identidad externa: el SSO por cabeceras solo funciona *dentro* del
+Ingress del Supervisor (que ya autenticó a la persona); este funciona **donde no hay proxy de
+confianza** — el add-on abierto por el puerto directo o por un túnel —, porque la prueba de
+identidad no es una cabecera sino un round-trip del navegador contra el propio HA. Ambos caminos
+convergen en la MISMA fila de `users` (ver [`auth-and-membership.md`](auth-and-membership.md) §SSO y
+la decisión **D19** del contrato de arquitectura). Las dos rutas **se montan siempre**; lo que
+decide es el estado (`AppState.ha_sso`, poblado solo si hay `FUTUREFIN_HA_SSO_URL` **y**
+`FUTUREFIN_HA_ADDON=1` — ver [`env-and-config.md`](env-and-config.md)).
+
+**Query params**
+
+| Ruta | Param | Obligatorio | Uso |
+|---|---|---|---|
+| `/start` | `next` | no | Ruta de la app a la que volver. Se sanea con `ha_idp::sanitize_next` y viaja **dentro de la cookie**, nunca en el `state` (que es tamperable). |
+| `/callback` | `code` | sí (salvo `error`) | Código de autorización de HA. Vacío o >512 chars ⇒ `ha_exchange_failed`. |
+| `/callback` | `state` | sí | Debe casar con el nonce de la cookie (comparación en tiempo constante). |
+| `/callback` | `error` | no | Lo manda HA si la persona rechaza el permiso (`access_denied`). No hay código que canjear ⇒ **no se llama al proveedor**. |
+
+**Flujo, paso a paso** (el orden es contrato, no detalle de implementación):
+
+1. `/start` resuelve el **origen público** (`oauth::url::public_base_url`) y lo **congela** en la
+   cookie: HA compara el `client_id` del canje con el de la autorización **byte a byte**, y las
+   cabeceras de la segunda petición podrían derivar otro (`Host` ausente o deforme ⇒ 400
+   `missing or malformed Host header`).
+2. Redirige (302) a `{ha}/auth/authorize` con exactamente tres parámetros: `client_id` = `{origen}/`
+   (con barra final), `redirect_uri` = `{origen}/v1/auth/ha/callback` y `state` = nonce
+   (`uuid4` en forma simple). **Nada de PKCE, `client_secret`, `scope` ni `response_type`**: HA no
+   los soporta; la defensa es el mismo-origen exacto `client_id`↔`redirect_uri` (con eso HA no hace
+   fetch de nuestra URL) más la cookie.
+3. `/callback` **lee** la cookie, valida el `state` con `ct_eq`, y **la retira SIEMPRE** — pase lo
+   que pase, éxito o fallo: es de un solo uso, y dejarla viva permitiría reintentar el mismo
+   `state`. Solo **después** de validar el estado se mira si la instalación tiene HA configurado: un
+   callback sin cookie es un callback ajeno y no merece saberlo.
+4. Canje del código (`POST {ha}/auth/token`) con el `client_id` **byte-idéntico** derivado del
+   origen de la cookie.
+5. Identidad por **WebSocket** (`auth/current_user`): HA no la expone por REST.
+6. **Revocación del refresh token ANTES de tocar la base de datos** (`POST {ha}/auth/revoke`,
+   best-effort e infalible por firma). FutureFin no retiene ninguna credencial de la domótica; un
+   fallo aquí se registra y el login sigue, porque ya está probado.
+7. `resolve_or_provision` — **la misma función** que usa `POST /v1/auth/sso`, con el mismo
+   `external_user_id`: el `result.id` de HA es `uuid4().hex` (32 hex **sin guiones**) y
+   `Uuid::parse_str` lo normaliza al mismo UUID que la forma canónica de `X-Remote-User-Id`.
+8. `establish_session` (fila en `sessions`, cookie `ff_session` acotada al prefijo, warm-up D7) y
+   302 limpio a `{prefijo}{next}`.
+
+**Cookie `ff_ha_state`** (`ha_idp::HA_STATE_COOKIE`), formato
+`1.<nonce>.<b64url(origin)>.<b64url(next)>` — base64url **sin padding** (`=` no cabe en un
+cookie-value sin comillas) y `1.` es la versión, para que un formato futuro pueda coexistir con las
+cookies vivas en vez de reventarlas:
+
+| Atributo | Valor | Por qué |
+|---|---|---|
+| `HttpOnly` | sí | El `state` es un secreto; ningún script tiene que leerlo. |
+| `SameSite` | **`Lax` — obligatorio, no una preferencia** | El callback llega como navegación de nivel superior **cross-site** desde el dominio de HA. Con `Strict` el navegador no la manda y el flujo fallaría SIEMPRE con `ha_state_mismatch`. `None` exigiría `Secure`, que no se puede dar por hecho en una LAN por http. |
+| `Max-Age` | `600` (10 min) | Lo que HA da a sus códigos; más tiempo solo alarga la ventana de un `state` robado. |
+| `Path` | el mismo que `ff_session` (`session_cookie_path`) | Bajo el Ingress todos los add-ons comparten origen; con `Path=/` la cookie viajaría a los demás. Compartir el helper garantiza además que el `Set-Cookie` de borrado del callback **case** con la cookie viva (el navegador exige nombre **y** `Path` iguales). |
+| `Secure` | sigue `COOKIE_SECURE` | Igual que la de sesión. |
+| Tamaño | ≤ 2048 chars al decodificar; `next` ≤ 512 | Se rechaza antes de decodificar nada. |
+
+**Los cinco errores llegan por REDIRECT, no en un cuerpo JSON.** El navegador está en mitad de una
+navegación venida de HA: un 4xx con cuerpo dejaría a la persona mirando un JSON. Se vuelve a
+`{prefijo}/?ha_error=<código>` (302, `Cache-Control: no-store`) y la SPA traduce el código con el
+catálogo de `apps/web/src/lib/errorMessages.ts`. Los códigos existen **también** como mensajes de
+`ApiError` para que `tests/error_codes_parity.rs` los recoja y ninguno se quede sin frase en
+español:
+
+| Código | Cuándo | Nota |
+|---|---|---|
+| `ha_sso_disabled` | La instalación no tiene login con HA configurado | Es el único que además se ve como **401 JSON**, y solo en `/start`. En el callback es un redirect, y se comprueba **después** del `state`. |
+| `ha_state_mismatch` | Cookie ausente, ilegible, caducada, `state` ausente o distinto | Es la frontera de seguridad entera: sin él **no se llama al proveedor** (pin: el doble no registra ni una llamada). |
+| `ha_exchange_failed` | HA no aceptó el código, o volvió con `?error=` (p.ej. `access_denied`), o el `code` falta / es desmesurado | Deliberadamente grueso: detallar más daría a un atacante una sonda sobre el HA de la víctima. |
+| `ha_identity_failed` | El canje fue bien pero `auth/current_user` no dio identidad | |
+| `sso_username_unavailable` | Se agotaron los seis candidatos de nombre | **Mismo código que emite `POST /v1/auth/sso`** para la misma situación: la persona se topa con lo mismo entre por donde entre, y una sola frase la explica. Cualquier otro error de `resolve_or_provision` (fallo de BD, carrera) sí sale como error de servidor — un redirect a la pantalla de login lo escondería. |
+
+- **El 302 se construye a mano** (`http::StatusCode::FOUND` + `Location`), **no** con
+  `axum::response::Redirect::to`, que emite **303 See Other**. 302 es lo que emiten los flujos OAuth
+  y lo que este contrato fija; el 303 añade además la semántica «convierte el método en GET», que
+  aquí sobra porque ya es GET. Las dos ramas (éxito y error) llevan `Cache-Control: no-store`: sin
+  él un caché intermedio podría servir el redirect de un intento a otro — y el de éxito lleva un
+  `Set-Cookie` de sesión.
+- **Anti-open-redirect**: `sanitize_next` acepta por lista blanca de forma y cualquier duda cae a
+  `/` — debe empezar por `/`, nunca `//`, ningún `\` en ninguna posición (varios navegadores lo
+  tratan como `/`), ningún carácter de control (un `\r\n` partiría el `Location`), fragmento
+  descartado, ≤512 chars. **`://` y `@` se prohíben solo en la parte de PATH** (antes del primer
+  `?`): en la query se permiten a propósito, porque
+  `/oauth/authorize?client_id=https://claude.ai&state=y` es un retorno legítimo de esta misma app y
+  prohibirlos ahí rompería la pantalla de consentimiento OAuth — una query no puede cambiar el
+  destino de un `Location` que ya empieza por `/`. El prefijo se aplica **una sola vez** e
+  idempotentemente (la cookie guarda la forma canónica, sin prefijo).
+- **Omisión deliberada del catálogo MCP** (registro fechado en `futurefin-mcp-parity` §3.1): es un
+  mecanismo de redirect de navegador que termina en una cookie, no en un token; una tool MCP no
+  puede conducirlo.
+- Regresión: `apps/api/tests/ha_idp_login.rs` (17 tests) + los 11 unitarios de `ha_idp/mod.rs`.
 
 ### Installation
 | Method | Path | Notes |

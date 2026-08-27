@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod db;
 pub mod error;
+pub mod ha_idp;
 pub mod handlers;
 pub mod heavy;
 pub mod mcp;

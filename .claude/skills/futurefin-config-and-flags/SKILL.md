@@ -5,13 +5,14 @@ description: >
   DATABASE_URL, SESSION_TTL_DAYS, COOKIE_SECURE, CORS_ORIGINS, WEB_STATIC_ROOT, RUST_LOG,
   FUTUREFIN_DB_CONNECT_TIMEOUT_SECS, FUTUREFIN_MCP_ENABLED, FUTUREFIN_PUBLIC_URL,
   FUTUREFIN_RECONCILE_SWEEP_HOURS, FUTUREFIN_BASE_PATH, FUTUREFIN_TRUSTED_PROXY_IPS,
-  FUTUREFIN_TRUSTED_PROXY_AUTH,
+  FUTUREFIN_TRUSTED_PROXY_AUTH, FUTUREFIN_HA_SSO_URL, FUTUREFIN_HA_ADDON,
   FUTUREFIN_API_PORT, WEB_DEV_PORT,
   TEST_DATABASE_URL) and of
   the self-contained container entrypoint (FUTUREFIN_DB_MODE, FUTUREFIN_MODE, FUTUREFIN_BACKUP_KEEP*,
   FUTUREFIN_PREMIGRATION_BACKUP, FUTUREFIN_ALLOW_EPHEMERAL_DB, FUTUREFIN_STATE_DIR, POSTGRES_*),
   the Home Assistant add-on options and how the entrypoint maps them to env
-  (/data/options.json: log_level, sso, mcp, cors_origins, public_url; /data/pgdata + /data/state),
+  (/data/options.json: log_level, sso, mcp, cors_origins, public_url, ha_sso_url;
+  /data/pgdata + /data/state),
   deployment knobs (FUTUREFIN_IMAGE/TAG, APP_PORT), the three docker-compose files
   (prod single-service, dev standalone, local-image override), API query-parameter flags
   (?view=mine, ?months, ?density=hybrid), request-body limits, and per-installation runtime
@@ -104,6 +105,9 @@ entrypoint (`apps/api/docker-entrypoint.sh`, Docker image only), **§1.3** compo
 | `FUTUREFIN_TRUSTED_PROXY_IPS` | unset → `PeerPolicy::Disabled` (**nobody is trusted**) | `any` (case-insensitive) ⇒ every peer, including an unknown one; otherwise a comma-separated IP list (entries trimmed, empties dropped). An unparseable entry **panics**; a list that resolves empty **panics** | prod, **optional** (new 2026-08-27) | `prefix::PeerPolicy`, stored in `AppState.trusted_peers`. Gates the **two** things a header must never buy on its own: relaxing anti-clickjacking (`handlers/frame.rs` → `frame-ancestors 'self'` instead of `X-Frame-Options: DENY`) and accepting identity headers (`POST /v1/auth/sso`). The peer is the **TCP peer** (`ConnectInfo`), not `X-Forwarded-For`. The HA add-on exports `172.30.32.2` (the Supervisor's ingress address); a LAN client hitting the optional direct port is therefore *not* trusted by the same process. `any` is for tests and for relaxing the frame policy behind a private-network proxy; **it is refused (startup panic) in combination with `FUTUREFIN_TRUSTED_PROXY_AUTH=1`** — identity headers require an explicit IP list. |
 | `FUTUREFIN_TRUSTED_PROXY_AUTH` | `false` | `parse_bool_env` (same quirk as `COOKIE_SECURE`: only `1/true/TRUE/yes/YES`). **Set without `FUTUREFIN_TRUSTED_PROXY_IPS`, or with it as `any`, → panic at startup** | prod, **optional** (new 2026-08-27) | Enables `POST /v1/auth/sso` (identity delegated to the proxy via `X-Remote-User-Id`, optional `X-Remote-User-Display-Name` / `X-Remote-User-Name`). The route is **always mounted** — only the state changes: off ⇒ 401 `sso_disabled`; on but untrusted peer ⇒ 401 `sso_untrusted_peer`; missing/non-UUID header ⇒ 400 `sso_bad_identity`. The startup panic is deliberate: "auth on, nobody trusted" is not a half-configuration, it is a config that *reads* as enabled while being dead. Accounts created this way have `password_hash IS NULL` and are rejected by password login with `sso_account_no_password`. |
 
+| `FUTUREFIN_HA_SSO_URL` | unset → «Entrar con Home Assistant» off | must parse as a URL, scheme `http`/`https`, host present, **bare origin** (no path, query or fragment); normalized with `Url::origin().ascii_serialization()`; blank/whitespace = unset. Present-but-invalid → **panic at startup** — the same fail-loud shape as `FUTUREFIN_PUBLIC_URL` | prod, **optional**, **add-on only** (new 4.3.1) | Public origin of the user's Home Assistant (`https://ha.example.org`, `http://homeassistant.local:8123`) — what the *browser* types, not an internal hostname. Parsed by `main.rs::ha_sso_url()` into `AppState.ha_sso` together with the real client (`ha_idp::client::HttpHaIdp`). Everything hangs off it: `{base}/auth/authorize`, `/auth/token`, `/auth/revoke` and `ws(s)://…/api/websocket` (identity is only readable over WebSocket — HA has no REST `auth/current_user`). **Set ⇒ the feature exists**: `ha_idp::ha_login_available` is `state.ha_sso.is_some()` and nothing else — no peer, no header — because the button's whole point is the origin where there is *no* trusted proxy. Drives `window.__FF_HA_LOGIN__` in the shell. Echoed in the startup `"server config"` line as `ha_sso_url=…` / `(disabled)`. |
+| `FUTUREFIN_HA_ADDON` | `false` | `parse_bool_env` (only `1/true/TRUE/yes/YES`) | **internal to the add-on** (new 4.3.1) | Exported by the entrypoint whenever `/data/options.json` exists; never set it by hand. Its only job today is to authorize the row above: **`FUTUREFIN_HA_SSO_URL` set without `FUTUREFIN_HA_ADDON=1` panics at startup** instead of being silently ignored. Deliberate (D19, owner-confirmed): a compose install that configured the URL would believe it had a login that cannot work — HA accepts a `client_id` equal to *this* app's origin, and it only accepts it when both share an origin through HA's own ingress. The reverse (flag without URL) is the normal add-on state with the option left empty. |
+
 Not env-configurable (hardcoded constants — changing them is a code change):
 - DB pool: `max_connections=10, min=1, acquire_timeout=5s, idle_timeout=600s, max_lifetime=1800s` (`apps/api/src/db.rs`).
 - Projection cache TTL: 60 min sliding (`PROJECTION_CACHE_TTL`, `apps/api/src/state.rs`).
@@ -165,17 +169,21 @@ accepting it would make the guard decorative) rather than a plain `mountpoint` o
 compose case is unchanged: `/var/lib/postgresql/data` → `/var/lib/postgresql` → `/var/lib` → `/var`,
 none mounted → still aborts.
 
-Then the five options, read with `ha_opt` (`jq`, in the image since this change). Note `ha_opt`
+Then the six options, read with `ha_opt` (`jq`, in the image since this change). Note `ha_opt`
 checks presence explicitly instead of `.[$k] // empty`: jq's `//` treats `false` as empty, so a
 boolean set to `false` would read as absent and the toggle would never apply.
 
 | Option (`options.json`) | Default | Exports |
 |---|---|---|
 | `log_level` | `"info"` | `trace`/`debug` → `RUST_LOG=futurefin_api=debug,tower_http=debug,sqlx=warn`; `warn`/`error` → `…=warn,…=warn,sqlx=error`; `info`/`notice`/empty → **nothing** (any pre-existing `RUST_LOG` is respected). Schema: `list(trace\|debug\|info\|warn\|error)`. |
-| `sso` | `true` | When `true`: `FUTUREFIN_TRUSTED_PROXY_AUTH=1` **and** `FUTUREFIN_TRUSTED_PROXY_IPS=${FUTUREFIN_TRUSTED_PROXY_IPS:-172.30.32.2}` — both, always together, which is what keeps the §1.1 startup panic unreachable here. `172.30.32.2` is the Supervisor's ingress address on HA's internal network. |
+| `sso` | `true` | When `true`: `FUTUREFIN_TRUSTED_PROXY_AUTH=1`. The IP list `FUTUREFIN_TRUSTED_PROXY_IPS=${FUTUREFIN_TRUSTED_PROXY_IPS:-172.30.32.2}` is exported **unconditionally in add-on mode**, toggle or not — the ingress iframe needs a trusted peer for `handlers/frame.rs` to relax `X-Frame-Options: DENY` into `frame-ancestors 'self'`, or the panel renders **blank** even though the add-on works. Between the two, the §1.1 startup panic ("auth on, nobody trusted") is unreachable here. `172.30.32.2` is the Supervisor's ingress address on HA's internal network. |
 | `mcp` | `true` | Only `false` does anything: `FUTUREFIN_MCP_ENABLED=0`. (MCP and OAuth are **not** reachable through the ingress; they need the optional direct port.) |
 | `cors_origins` | `""` | Non-empty → `CORS_ORIGINS=<value>` verbatim (so §1.1's fail-loud parsing applies: a bad entry panics at startup). |
 | `public_url` | `""` | Non-empty → `FUTUREFIN_PUBLIC_URL=<value>` verbatim (same fail-loud validation). Only needed for OAuth over a direct/tunnelled URL. |
+| `ha_sso_url` (4.3.1) | `""` | Non-empty → `FUTUREFIN_HA_SSO_URL=<value>` verbatim (same fail-loud validation: a malformed value panics at startup). Turns on **«Entrar con Home Assistant»** for the login screen and the OAuth consent screen *outside* the panel. It is the **public** URL of the user's HA — the browser follows the redirect to it, and the add-on itself calls it to exchange the code and read the identity — so it needs **neither `hassio_api` nor `homeassistant_api`**. Empty (the default) ⇒ the button does not exist and everything is byte-identical to 4.3.0. |
+
+Add-on mode also exports `FUTUREFIN_HA_ADDON=1` unconditionally (§1.1) — the signal that makes the
+option above legal at all; outside the add-on the URL is a startup panic, not a no-op.
 
 Not an option and not an env var: `FUTUREFIN_BASE_PATH` stays unset in the add-on — the ingress
 sends `X-Ingress-Path` on every request, which outranks it (§1.1).
@@ -477,8 +485,25 @@ rows (`FUTUREFIN_PUBLIC_URL`, `FUTUREFIN_MCP_ENABLED`) **2026-08-17 against v3.1
 **§1.2 and every `DATABASE_URL` claim re-verified 2026-08-22 against v4.0.0**, which RETIRED the
 external-database mode (`exec_api_external`, `automigrate_*`, `FUTUREFIN_DB_MODE=external` and
 `FUTUREFIN_EXTERNAL_WAIT_SECS` are gone from `apps/api/docker-entrypoint.sh`).
+**§1.1 gained `FUTUREFIN_HA_SSO_URL` + `FUTUREFIN_HA_ADDON` and §1.2.1 the `ha_sso_url` option on
+2026-08-27 for v4.3.1** (branch `feat/ha-idp-login`), read from `apps/api/src/main.rs`,
+`apps/api/src/ha_idp/`, `apps/api/docker-entrypoint.sh` and `addon/futurefin/config.yaml`. The same
+pass corrected the `sso` row: the entrypoint exports `FUTUREFIN_TRUSTED_PROXY_IPS` **always** in
+add-on mode, not only when the toggle is on.
 The rest of the tables carry their own dates inline. Every row is re-verifiable — run these from the repo root when
 auditing for drift (all confirmed working on 2026-08-17):
+
+- **`FUTUREFIN_HA_SSO_URL` parsing + the four panics, and the add-on-only combination check**:
+  `grep -n "FUTUREFIN_HA_SSO_URL" -A 14 apps/api/src/main.rs` and
+  `grep -n "FUTUREFIN_HA_ADDON" -B 6 -A 6 apps/api/src/main.rs` (the second must show the
+  `ha_sso_url.is_some() && !ha_addon` panic)
+- Where it is consumed (state + the single availability predicate, peer-independent):
+  `grep -n "ha_sso\|with_ha_idp" apps/api/src/state.rs` and
+  `grep -n "fn ha_login_available" -A 4 apps/api/src/ha_idp/mod.rs`
+- Add-on option → env, plus the two unconditional exports:
+  `grep -n "ha_sso_url\|FUTUREFIN_HA_ADDON\|FUTUREFIN_TRUSTED_PROXY_IPS" apps/api/docker-entrypoint.sh`
+  and `grep -n "ha_sso_url" addon/futurefin/config.yaml` (must appear in **both** `options:` and
+  `schema:`, the latter as `str?`)
 
 - Env parsing, defaults, bounds, load order: `grep -n "env::var\|unwrap_or\|contains(&d)\|load_env" apps/api/src/main.rs`
 - DB connect budget + retry backoff: `grep -n "FUTUREFIN_DB_CONNECT_TIMEOUT_SECS" -A 6 apps/api/src/main.rs` and `grep -n "connect_with_retry" -A 20 apps/api/src/db.rs`

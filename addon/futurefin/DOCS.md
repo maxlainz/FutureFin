@@ -40,10 +40,39 @@ contenedor y todos los datos viven en `/data`, que Home Assistant respalda.
 | `mcp` | `true` | Monta el servidor MCP y el OAuth embebido (`/mcp`, `/.well-known/*`). | Desactívalo si no vas a conectar ningún cliente MCP. |
 | `cors_origins` | *(vacío)* | Orígenes extra permitidos, separados por comas. | Solo si consumes la API desde otra web. |
 | `public_url` | *(vacío)* | URL pública con la que FutureFin se anuncia (issuer de OAuth). | Obligatoria si expones el add-on por un túnel o proxy con dominio propio. |
+| `ha_sso_url` | *(vacío)* | URL pública de tu Home Assistant; habilita el botón «Entrar con Home Assistant» fuera del panel. | Si entras por el puerto directo o por un túnel. Ver abajo. |
 | Puerto directo `8080/tcp` | deshabilitado | Publica el puerto del contenedor en la red local. | Necesario para MCP y OAuth. Ver abajo. |
 
 El puerto directo se activa en la pestaña **Configuración** del add-on, sección
 **Red**: escribe `8080` (o el puerto del host que prefieras) y reinicia.
+
+## Entrar con Home Assistant fuera del panel
+
+Dentro del panel de la barra lateral no hace falta contraseña: el ingress ya te
+identifica. Pero cuando abres FutureFin por el **puerto directo** o por un
+**túnel**, ese filtro no está y solo queda el login clásico. Con `ha_sso_url`
+configurada aparece además el botón **«Entrar con Home Assistant»**: te lleva a
+tu Home Assistant, te autenticas ahí como siempre y vuelves a FutureFin con la
+**misma cuenta** que usas en el panel (no se crea un usuario duplicado).
+
+Configuración: en las opciones del add-on, pon la URL pública de tu Home
+Assistant —la que tecleas en el navegador—, con `https://` y **sin barra final**:
+
+```yaml
+ha_sso_url: "https://ha.midominio.com"
+```
+
+Reinicia el add-on. Déjala vacía para apagar el botón.
+
+- **FutureFin no guarda NINGUNA credencial de Home Assistant**: no ve tu
+  contraseña, y el token que HA le entrega se revoca nada más verificar tu
+  identidad. No queda acceso a tu Home Assistant.
+- **Aviso — redes de confianza**: si tu Home Assistant autentica por
+  `trusted_networks`, cualquiera en esa red entra como ese usuario en HA… y por
+  tanto también aquí. Si te importa, no uses `trusted_networks` para el origen
+  desde el que se hace este login.
+- Los intentos fallidos cuentan para el `ip_ban` de Home Assistant: es HA quien
+  autentica, con sus propias defensas contra fuerza bruta.
 
 ## MCP y claude.ai
 
@@ -54,6 +83,11 @@ de Home Assistant, no del add-on: el ingress cuelga la aplicación de una ruta
 larga y con sesión propia. No hay forma de arreglarlo desde este lado.
 
 La receta es publicar el puerto directo y apuntar el cliente ahí.
+
+> Con `ha_sso_url` configurada **ya no hace falta una segunda cuenta con
+> contraseña** para esto: en la pantalla de consentimiento de OAuth (y en el
+> login del puerto directo) autorizas con tu propia cuenta de Home Assistant,
+> pulsando «Entrar con Home Assistant».
 
 ### En la red local
 

@@ -564,6 +564,42 @@ path to the process; it is never the default (`Disabled`), and an unknown peer (
   Pinned by `apps/api/tests/sso_login.rs` — whose *first* assertion is that the door is closed by
   default.
 
+### D19. «Entrar con Home Assistant»: HA como fuente de identidad, nunca de autorización (2026-08-27, v4.3.1)
+
+- **Context**: las cuentas SSO del add-on no tienen contraseña (decisión 4.3.0) y por tanto no
+  podían iniciar sesión en el origen directo — donde vive la pantalla de consentimiento OAuth del
+  conector MCP. La opción «que se pongan contraseña» fue rechazada por el owner; la paridad exigía
+  un login con la cuenta de HA fuera del panel. Esto **reabre estrechamente** la fila 12 de la
+  arqueología (OAuth-as-login, settled desde mayo 2026) — ver su second scope note.
+- **Decision** (cuatro pilares, todos owner-confirmados):
+  1. **Identidad, no autorización**: del flujo de HA solo se toma `auth/current_user.id` (el mismo
+     `User.id` que el Supervisor manda en `X-Remote-User-Id` — ambos caminos convergen en la misma
+     fila vía `users.external_user_id` y la misma `resolve_or_provision`). Roles, membership,
+     aprobación de pendientes y el bootstrap del owner siguen siendo 100 % de FutureFin;
+     `is_admin`/`is_owner` de HA se ignoran.
+  2. **IdP puro**: el refresh token de HA se revoca (`/auth/revoke`, best-effort) inmediatamente
+     después de leer la identidad y ANTES de tocar nuestra BD — FutureFin no retiene ninguna
+     credencial de HA. Un access token de HA es plenos poderes sobre la domótica: se usa una vez
+     y se tira.
+  3. **Modelo CSRF por cookie de estado**: HA no soporta PKCE ni client secret; la defensa es el
+     mismo-origen exacto `client_id`↔`redirect_uri` (con eso HA nunca fetchea nuestra URL) + la
+     cookie `ff_ha_state` (HttpOnly, **`SameSite=Lax` obligatorio** — el callback es un GET
+     top-level cross-site; `Strict` rompería todos los logins —, Max-Age 600, un solo uso, nonce
+     comparado en tiempo constante). La ruta de retorno `next` viaja DENTRO de la cookie (jamás en
+     el `state` tamperable) y `sanitize_next` la re-valida al emitirla.
+  4. **Solo add-on, una sola URL**: `FUTUREFIN_HA_SSO_URL` (origen público de HA, fail-loud) solo
+     se honra con `FUTUREFIN_HA_ADDON=1` — que únicamente exporta el entrypoint en modo add-on;
+     la URL sin el flag aborta el arranque. Sin optimización de URL interna
+     (`http://homeassistant:8123`): un solo origen para navegador y servidor, un solo modo de fallo.
+- **Consequences**: primera dependencia de red saliente del binario (reqwest/rustls +
+  tokio-tungstenite; gate `cargo tree -d` sin rustls duplicado); el seam de test es el trait
+  `HaIdp` con `FakeHaIdp` en el harness (sin wiremock: oneshot no abre sockets y la pata WS no la
+  cubre un mock HTTP); el login-con-IdP **genérico** sigue rechazado (arqueología fila 12).
+- **Breaks if violated**: guardar el refresh token convierte la BD de finanzas en un llavero de
+  domótica; derivar roles de `is_admin` fusionaría dos modelos de autorización distintos; aceptar
+  la env fuera del add-on pintaría el botón en instalaciones compose (decisión explícita del
+  owner en contra); meter `next` en el `state` es una fábrica de open-redirects.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
@@ -583,6 +619,7 @@ path to the process; it is never the default (`Disabled`), and an unknown peer (
 | I13 | Every response carries `X-Frame-Options: DENY` **except** trusted peer + `X-Ingress-Path`, which instead gets `Content-Security-Policy: frame-ancestors 'self'` **and no `X-Frame-Options`** (D17). The header alone never relaxes it | `handlers/frame.rs::frame_policy`, applied via `with_frame_policy` to the FINAL router (after the SPA fallback) in both `main.rs` and the test harness | `apps/api/tests/frame_options.rs` (both halves); `grep -n "X_FRAME_OPTIONS\|frame-ancestors" apps/api/src/handlers/frame.rs` |
 | I14 | Identity from `X-Remote-User-*` is honored only with `FUTUREFIN_TRUSTED_PROXY_AUTH=1` **and** a peer in `FUTUREFIN_TRUSTED_PROXY_IPS`; `AUTH` without `IPS` panics at startup (D18) | `handlers/sso.rs` (`sso_disabled` / `sso_untrusted_peer`), `prefix.rs::PeerPolicy`, guard in `main.rs` | `apps/api/tests/sso_login.rs`; `grep -n "sso_disabled\|sso_untrusted_peer" apps/api/src/handlers/sso.rs`; `grep -n "TRUSTED_PROXY_AUTH=1 requires" apps/api/src/main.rs` |
 | I15 | Without proxy headers the shell HTML is served **byte-identical** to the file on disk and the session cookie keeps `Path=/` — the compose deployment is unchanged by the subpath machinery | `handlers/spa.rs::inject` returns `Cow::Borrowed`; `handlers/auth.rs::session_cookie_path` | `apps/api/tests/base_path.rs`, `apps/api/tests/session_cookie_path.rs`; `cargo test -p futurefin-api --lib prefix::` |
+| I16 | An HA-IdP login and an ingress header-SSO with the same HA user resolve to the **same** `users` row (`external_user_id`, one `resolve_or_provision`); and the HA refresh token is revoked before any DB write (D19) | `handlers/ha_sso.rs::ha_callback` step order; `handlers/sso.rs::resolve_or_provision` (single provisioning path) | `apps/api/tests/ha_idp_login.rs::header_sso_and_ha_login_resolve_to_the_same_user`; call-order assertion `[Exchange, Identity, Revoke]` in the same suite |
 
 ## 4. Known weak points (stated plainly, as of 2026-07-02)
 

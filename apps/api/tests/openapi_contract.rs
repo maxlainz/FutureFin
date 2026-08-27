@@ -22,12 +22,18 @@ use utoipa::OpenApi;
 /// `/v1/auth/sso` no lleva cookie porque su credencial no es una cookie: es la palabra de un
 /// proxy de confianza (cabecera `X-Remote-User-Id` desde una IP autorizada), y esa política no
 /// se puede expresar como `securityScheme` de OpenAPI. Está descrita en la propia operación.
+///
+/// Las dos de `/v1/auth/ha/*` («Entrar con Home Assistant») tampoco: su credencial es el
+/// round-trip del navegador por Home Assistant más una cookie de estado de un solo uso, que se
+/// crea DENTRO del propio flujo. Tampoco es expresable como `securityScheme`.
 const PUBLIC_OPERATIONS: &[(&str, &str)] = &[
     ("/v1/health", "get"),
     ("/v1/ready", "get"),
     ("/v1/auth/register", "post"),
     ("/v1/auth/login", "post"),
     ("/v1/auth/sso", "post"),
+    ("/v1/auth/ha/start", "get"),
+    ("/v1/auth/ha/callback", "get"),
 ];
 
 fn doc() -> serde_json::Value {

@@ -99,6 +99,37 @@ puerto; el default documentado sigue siendo el TCP de 5433.
     headers verbatim (y opcionalmente cookie y cuerpo JSON). Es la vía para inyectar
     `X-Ingress-Path` / `X-Forwarded-Prefix` / `X-Remote-User-*` en login, logout y `/v1/auth/sso`.
     El gemelo de lectura sigue siendo `get_with_headers`.
+- **Helpers añadidos con «Entrar con Home Assistant» (4.3.1)**:
+  - **Dos campos más en `TestConfig`**: `ha_idp: Option<Arc<FakeHaIdp>>` — con `Some(_)`,
+    `AppState.ha_sso` queda puesto y `/v1/auth/ha/*` funciona sin un Home Assistant de verdad — y
+    `ha_sso_url: Option<String>` (origen que verá el test; **default `https://ha.test`**, y solo se
+    usa cuando `ha_idp` es `Some(_)`). `Default` sigue siendo el `spawn()` histórico: sin HA.
+  - **Tres lectores en `ResponseParts`**, que estrena este flujo porque es el primero que se prueba
+    por cabeceras de respuesta y no por cuerpo: `location()` (el `Location` del 302),
+    `set_cookie(name)` (la línea `Set-Cookie` **entera**, para asertar `HttpOnly`/`SameSite`/
+    `Max-Age`/`Path`) y `cookie_value(name)` (solo el valor, para decodificar la cookie de estado).
+    `session_cookie()` sigue como estaba.
+  - **`FakeHaIdp`, el doble del proveedor tras el trait `HaIdp`** — el patrón de la casa para
+    integraciones salientes (ver el recuadro abajo). Constructores guionizados: `happy(id, name)`,
+    `without_refresh(id, name)` (HA no devuelve refresh ⇒ no hay nada que revocar),
+    `exchange_fails()`, `identity_fails()`; `set_identity(id, name)` cambia lo que devolverá la
+    PRÓXIMA llamada (así un mismo `AppState` representa a dos personas de HA, que es lo que hace
+    falta para probar la cascada de nombres); y `calls() -> Vec<FakeCall>` devuelve el **log
+    ordenado** de llamadas (`Exchange { code, client_id }`, `Identity { access_token }`,
+    `Revoke { refresh_token }`). Ese vector es lo que convierte «el orden es contrato» en un test:
+    sin él no habría forma de ver que la revocación ocurre ANTES de tocar la base de datos.
+    `revoke` es **infalible por firma** (el trait lo impone), así que «fallo de revocación» se
+    modela como lo que de verdad ocurre: la llamada pasa, no cambia nada, y el login sigue.
+
+> **Fake tras el trait, no `wiremock`** — patrón de la casa para toda integración saliente futura.
+> Dos razones, ambas estructurales: (1) el harness es `tower::ServiceExt::oneshot`, que **no abre
+> sockets** — no hay pila HTTP real contra la que apuntar un servidor de mentira; (2) la mitad del
+> diálogo con HA es **WebSocket** (`auth/current_user`, que no existe por REST), y eso un mock HTTP
+> no lo cubre. El seam es el trait `HaIdp` (`exchange_code` / `identity` / `revoke`) y el cliente
+> real (`ha_idp/client.rs`, reqwest + tokio-tungstenite) **no lleva ni un `#[test]` a propósito**:
+> sus partes puras (URLs, códecs, saneado) viven en `ha_idp/mod.rs` con unitarios, y lo que queda es
+> I/O contra un HA real, que se prueba en el smoke en vivo. Si añades otra integración saliente,
+> copia esta forma: trait estrecho + doble con log de llamadas en `common/mod.rs`.
 - **Kill-switch: sin `set_var`.** Ni `oauth_flow.rs` ni `mcp_http.rs` tocan el entorno. `FUTUREFIN_MCP_ENABLED=0` se simula construyendo el router a mano con `AppState::new(…, /*mcp_enabled*/ false, /*public_url*/ None)` y montando un `TestApp` literal (patrón de `mcp_http.rs::mcp_disabled_returns_404`). `AppState::new` ganó en 3.1.0 un 6º parámetro `public_url: Option<String>`; `spawn()` pasa `None` **a propósito**, para que el issuer siempre se derive del request y `FUTUREFIN_PUBLIC_URL` no haga falta en tests.
 
 ### Tests checked in
@@ -156,12 +187,14 @@ escribes un assert sobre el contenido de la cache y falla de forma intermitente,
 | `frame_options.rs` (4) | **Anti-clickjacking condicionado al peer** (`handlers/frame.rs`) — las cuatro celdas de la tabla de decisión, una por test: default → `DENY`; `X-Ingress-Path` desde peer **no** de confianza → sigue `DENY` (si no, mandar un header bastaría para desactivar la protección desde fuera); peer de confianza **sin** el header → `DENY`; peer de confianza **con** el header → `Content-Security-Policy: frame-ancestors 'self'` y **sin** `X-Frame-Options` (un `DENY` superviviente ganaría sobre la CSP y el add-on saldría en blanco dentro del Ingress). Depende de que `spawn_with` monte `frame::with_frame_policy`, igual que `main.rs`. |
 | `session_cookie_path.rs` (3) | **`Path` de la cookie de sesión** (`handlers/auth.rs`). Bajo el Ingress de HA todos los add-ons comparten origen, así que un `Path=/` mandaría `ff_session` a las rutas de ingress de los demás: el login bajo `X-Ingress-Path` acota la cookie al prefijo. Y el **logout tiene que borrar esa misma** — el navegador solo casa el `Set-Cookie` de borrado si el `Path` coincide, y con el `Path=/` fijo de antes un logout bajo Ingress dejaba viva la cookie acotada y el usuario seguía «dentro». Tercer test: sin cabeceras de proxy, `Path=/` exactamente como siempre. |
 | `sso_login.rs` (11) | **`POST /v1/auth/sso`** — identidad delegada a un proxy de confianza. En orden de importancia: (1) **la puerta está cerrada por defecto** — el endpoint se monta siempre, pero sin `trusted_header_auth` (`sso_disabled`) y desde un peer fuera de la política (`sso_untrusted_peer`) responde 401 aunque las cabeceras sean perfectas; identidad no-UUID → 400 `sso_bad_identity`. (2) La identidad externa es **estable**: el mismo `X-Remote-User-Id` siempre devuelve el mismo usuario, sin duplicar filas. (3) El alta entra por las **mismas puertas** que el registro por contraseña — el primero crea el hogar y es owner, el segundo queda pendiente de aprobación. (4) Una cuenta sin contraseña **no se cuela por el login normal** ni puede fijar una desde la app (401 `sso_account_no_password` en ambos), y las cuentas de contraseña quedan intactas. Además: slug de nombres con diacríticos y sufijo `-2` cuando el nombre ya está cogido, con las dos cuentas sobreviviendo. |
+| `ha_idp_login.rs` (17, 4.3.1) | **«Entrar con Home Assistant»** (`GET /v1/auth/ha/start` + `/callback`), en el orden de importancia que declara su cabecera. (1) **La puerta está cerrada por defecto**: las rutas se montan siempre, pero sin `FUTUREFIN_HA_SSO_URL` el `/start` responde **401 `ha_sso_disabled`**, no pone cookie y no provisiona a nadie. (2) **Forma del redirect de arranque**: los tres parámetros exactos (`client_id` = `http://futurefin.test/`, `redirect_uri`, `state` = 32 hex), `Cache-Control: no-store`, y la cookie `HttpOnly` + `SameSite=Lax` + `Max-Age=600` + `Path` acotado — bajo `base_path: "/ff"` la cookie sale con `Path=/ff` mientras el `client_id` sigue siendo el **origen** (meterle el prefijo lo desalinearía del que HA verá al canjear). (3) **Paridad con el SSO de cabeceras**: `header_sso_and_ha_login_resolve_to_the_same_user` — el mismo id de HA entra con guiones por `POST /v1/auth/sso` y sin ellos por el flujo, y sale **una sola fila** de `users` (I16). Más el camino feliz completo: sesión que sirve de verdad (`/v1/auth/me` → `maria`) y owner del hogar recién creado. (4) **Orden de llamadas al proveedor**: `[Exchange{code, client_id}, Identity, Revoke]` exacto, con el `client_id` del canje **byte-idéntico** al de la autorización; sin refresh token no hay `Revoke`; y una revocación que no cambia nada deja entrar igual. (5) **El `state` es la frontera entera**: cuatro formas de no tenerlo (state ajeno, sin state, sin cookie, cookie basura) → `ha_state_mismatch`, **cero usuarios y el doble sin una sola llamada**; y la cookie es de **un solo uso** (el callback la retira aunque el login vaya bien, y un segundo intento sin ella es un desconocido). (6) **Fallos del proveedor** → `ha_exchange_failed` / `ha_identity_failed`, y `?error=access_denied` (la persona rechaza) no toca al proveedor. (7) **El `next` no es un open-redirect**: `/movimientos` y `/oauth/authorize?client_id=https://x&state=y` se respetan; `https://evil.test`, `//evil.test`, `/\evil` y uno de 1024 chars caen a `/`; bajo prefijo se aplica **exactamente una vez** (mandes `/movimientos` o `/ff/movimientos`) y en la cookie viaja la forma canónica sin prefijo. (8) Dos identidades distintas con el mismo nombre para mostrar → `maria` y `maria-2`. (9) El shell anuncia `window.__FF_HA_LOGIN__=true` con HA configurado y sale **byte a byte** como el fichero sin él. |
 | `migration_guard.rs` (2) | **Guarda de downgrade** (`db.rs::run_migrations` → `MigrationError::Downgrade`): arrancar un binario ANTIGUO sobre una base ya migrada por uno más nuevo debe fallar **en alto y con un mensaje accionable**, nunca «arreglarse» solo. Se prueba el contrato, no la implementación: sqlx ya devuelve `VersionMissing` cuando `_sqlx_migrations` tiene una versión que el binario no lleva embebida (esa **es** la firma del downgrade); lo nuestro es no perder ese fallo y traducirlo. Simulación: migraciones reales en un schema aislado + una fila «del futuro» insertada a mano en `_sqlx_migrations`. Segundo test: correr las migraciones **dos veces** es un no-op verde. |
 
 ### API lib unit tests (run under `cargo test --workspace`)
 
 Besides the integration files above, the API crate carries `#[cfg(test)]` unit tests in library
-modules — **57 en total a 2026-08-22** (`grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l`).
+modules — **84 en total a 2026-08-27** (`grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l`;
+eran 57 el 2026-08-22, 72 tras 4.3.0, y 4.3.1 suma los 11 de `ha_idp/mod.rs` + 1 de `spa.rs`).
 Notably `apps/api/src/handlers/backup_user/schema.rs` `mod tests` (**14** a 2026-08-22; eran 10, con 2
 añadidos en v1.6.0 para `.ffbackup` v5 y 2 más en v1.8.0 para v6): reject a future `schema_version`, migrate v1
 dropping legacy contribution fields, v3-with-rules round-trip, migrate v3→v4 filling empty
@@ -199,6 +232,26 @@ lands in the birthday month. They need no Postgres.
   de los `src="/…"` / `href="/…"` del `index.html`; el contrato central es el primero
   (`without_prefix_and_sso_is_borrowed_verbatim`: sin prefijo el HTML sale byte a byte) y el último
   fija que las URLs externas y las protocol-relative no se tocan.
+
+**Nuevos en 4.3.1** — `apps/api/src/ha_idp/mod.rs` **11**, toda la parte pura del login con HA
+(el cliente real, `ha_idp/client.rs`, no lleva ninguno **a propósito**: es I/O contra un HA de
+verdad; ver el recuadro del fake más arriba):
+
+- `authorize_url`: los tres parámetros exactos que HA espera, con percent-encoding **real** (la URL
+  se arma con `url::Url` y `query_pairs_mut`, nunca concatenando — de ahí nacen los open-redirect),
+  y una barra final en la base no cambia el resultado.
+- `ws_url_from_base`: `https→wss`, `http→ws`, barra final tolerada.
+- Códec de la cookie de estado: roundtrip con un charset apto para un cookie-value **sin comillas**,
+  y `None` ante versión distinta, segmentos de más o de menos, base64 inválido, nonce vacío o
+  tamaño desmesurado.
+- `ct_eq` coincide con la igualdad (incluidas longitudes distintas y la cadena vacía).
+- `sanitize_next` en tres tests: lo que se acepta (rutas de la app, **query con `://` y `@`** — el
+  retorno legítimo de la pantalla de consentimiento OAuth), lo que se rechaza (URL absoluta,
+  `//evil`, `\`, controles, sin barra, >512) y el prefijo aplicado **una sola vez** e
+  idempotentemente; más `canonical_next`/`strip_prefix`/`apply_prefix` como pareja inversa.
+- Y la piedra angular: `ha_user_id_without_dashes_parses_to_the_same_uuid` — el `uuid4().hex` de
+  32 hex de HA y la forma canónica de `X-Remote-User-Id` son el MISMO UUID (I16). Sin eso, la misma
+  persona serían dos filas de `users`.
 
 Son la clase de lógica que merece unit test: string in, string out, sin I/O.
 
@@ -336,8 +389,20 @@ Contenido verificado leyendo el código; la tabla de CI y las notas de contenedo
 re-verificaron el **2026-08-16 (v3.0.0)**, la suite `oauth_flow.rs`, los helpers nuevos de
 `common/mod.rs` y los recuentos de Vitest el **2026-08-17 (v3.1.0)**, y **la tabla de CI entera, los
 recuentos y la sección de unit tests el 2026-08-22 (4.0.0)** — que es cuando la integración, ESLint y
-Vitest entraron en CI y esta página dejó de decir lo contrario. Comandos para comprobar que
-esta página no ha derivado (todos desde la raíz del repo):
+Vitest entraron en CI y esta página dejó de decir lo contrario. **Ampliada el 2026-08-27 para
+4.3.1** («Entrar con Home Assistant»): la fila de `ha_idp_login.rs`, el seam `FakeHaIdp`/`HaIdp` y
+los dos campos nuevos de `TestConfig`, los tres lectores nuevos de `ResponseParts`, los 11
+unitarios de `ha_idp/mod.rs` y todos los recuentos, verificados leyendo
+`apps/api/tests/{ha_idp_login.rs,common/mod.rs}` y `apps/api/src/ha_idp/`. Comandos para comprobar
+que esta página no ha derivado (todos desde la raíz del repo):
+
+```bash
+# 4.3.1 — el fake vive en el harness y el cliente real no se testea en unitario
+grep -n "struct FakeHaIdp\|enum FakeCall\|ha_idp:\|ha_sso_url:" apps/api/tests/common/mod.rs
+grep -c '#\[test\]' apps/api/src/ha_idp/mod.rs   # 11
+grep -c '#\[test\]' apps/api/src/ha_idp/client.rs # 0 — a propósito
+grep -c '#\[tokio::test\]' apps/api/tests/ha_idp_login.rs  # 17
+```
 
 ```bash
 # Jobs y pasos de CI (la fila docker-stack = un paso por línea)
@@ -357,11 +422,13 @@ grep -n "5433" apps/api/tests/common/mod.rs
 # Recuentos sin compilar
 grep -c '#\[test\]' crates/engine/src/{projection,history,runway,net_return}.rs
 grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'
-                                        # 404 atributos en 38 ficheros a 2026-08-25 (eran 375 en 33 el 2026-08-22)
-grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l   # 72 unitarios de la lib de la API, 2026-08-27
-                                        # (eran 59 el 2026-08-25; +13 en 4.3.0: prefix.rs 6, spa.rs 4, sso.rs 3)
-ls apps/api/tests/*.rs | wc -l          # 38 a 2026-08-25 (eran 33 el 2026-08-22)
-ls apps/api/migrations | wc -l          # 43 a 2026-08-25 (eran 42 el 2026-08-22)
+                                        # 449 atributos en 44 ficheros a 2026-08-27 (404 en 38 el 2026-08-25;
+                                        # 375 en 33 el 2026-08-22). Los 17 de ha_idp_login.rs son 4.3.1
+grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l   # 84 unitarios de la lib de la API, 2026-08-27
+                                        # (72 tras 4.3.0: prefix.rs 6, spa.rs 4, sso.rs 3; 59 el 2026-08-25).
+                                        # 4.3.1 suma ha_idp/mod.rs 11 + 1 de spa.rs (spa.rs pasa a 5)
+ls apps/api/tests/*.rs | wc -l          # 44 a 2026-08-27 (38 el 2026-08-25, 33 el 2026-08-22)
+ls apps/api/migrations | wc -l          # 44 a 2026-08-27 (4.3.1 no añade ninguna: no hay esquema nuevo)
 # Totales autoritativos: SIEMPRE del runner, nunca de un grep (hay bucles que generan tests, y el
 # atributo no siempre es un test ejecutado). A 2026-08-25: cargo 551, Vitest 417 en 18 ficheros.
 cargo test --workspace 2>&1 | grep "test result"

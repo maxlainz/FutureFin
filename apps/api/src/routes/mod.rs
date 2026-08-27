@@ -8,6 +8,7 @@ use crate::handlers::backup_user::{
 use crate::handlers::budget::budget_router;
 use crate::handlers::categories::categories_router;
 use crate::handlers::fallback;
+use crate::handlers::ha_sso::{ha_callback, ha_start};
 use crate::handlers::health::{health_check, ready_check};
 use crate::handlers::history::history_router;
 use crate::handlers::installation::{
@@ -49,6 +50,11 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
                 // Se monta SIEMPRE: la forma del router no depende del entorno. Con el SSO
                 // apagado (el default) el handler devuelve 401 `sso_disabled`.
                 .route("/sso", post(sso_login))
+                // «Entrar con Home Assistant». También SIEMPRE montadas: la forma del router
+                // no depende del entorno. Sin `FUTUREFIN_HA_SSO_URL`, `/ha/start` responde
+                // 401 `ha_sso_disabled`.
+                .route("/ha/start", get(ha_start))
+                .route("/ha/callback", get(ha_callback))
                 .route("/me", get(me).patch(patch_me)),
         )
         .route(

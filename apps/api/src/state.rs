@@ -63,7 +63,22 @@ pub struct AppState {
     /// `FUTUREFIN_TRUSTED_PROXY_AUTH` (default false): habilita `POST /v1/auth/sso`
     /// (identidad por cabeceras `X-Remote-User-*` desde un peer de confianza).
     pub trusted_header_auth: bool,
+    /// «Entrar con Home Assistant» (`FUTUREFIN_HA_SSO_URL` + `FUTUREFIN_HA_ADDON=1`).
+    /// `None` (el default) = la instalación no ofrece ese login y `/v1/auth/ha/start`
+    /// responde `ha_sso_disabled`. Predicado único: `ha_idp::ha_login_available`.
+    pub ha_sso: Option<HaSso>,
     pub projection_cache: RwLock<ProjectionCacheMap>,
+}
+
+/// Configuración viva del login con Home Assistant: el origen público de HA y el proveedor.
+///
+/// El proveedor va tras un `Arc<dyn …>` para que los tests de integración puedan inyectar un
+/// doble sin levantar un Home Assistant — el mismo patrón por el que el resto del estado no
+/// guarda clientes concretos.
+pub struct HaSso {
+    /// Origen público de Home Assistant (`https://ha.example.org`, sin barra final).
+    pub base_url: String,
+    pub idp: Arc<dyn crate::ha_idp::HaIdp>,
 }
 
 impl AppState {
@@ -85,8 +100,17 @@ impl AppState {
             base_path: String::new(),
             trusted_peers: crate::prefix::PeerPolicy::Disabled,
             trusted_header_auth: false,
+            ha_sso: None,
             projection_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Proveedor de «Entrar con Home Assistant». Aparte de `new()` por la misma razón que
+    /// `with_trusted_proxy`: el default (`None`) es el comportamiento histórico y los call
+    /// sites que no lo necesitan no se enteran.
+    pub fn with_ha_idp(mut self, ha_sso: Option<HaSso>) -> Self {
+        self.ha_sso = ha_sso;
+        self
     }
 
     /// Configuración de proxy inverso (subpath + confianza). Aparte de `new()` para no
