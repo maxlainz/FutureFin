@@ -25,7 +25,7 @@ import {
   defaultFetchInit,
   setUnauthorizedHandler,
 } from "./api/client";
-import { LOGIN_INVALID_CREDENTIALS } from "./lib/errorMessages";
+import { LOGIN_INVALID_CREDENTIALS, messageForError } from "./lib/errorMessages";
 import { Modal, ModalFormError } from "./components/Modal";
 import { SnapshotPromptModal } from "./components/SnapshotPromptModal";
 import {
@@ -38,7 +38,14 @@ import { MobileNavDrawer } from "./components/MobileNavDrawer";
 import { SummaryView } from "./views/SummaryView";
 import type { BudgetScopeToggle } from "./views/BudgetView";
 import { BootstrapInstallationPanel } from "./auth/BootstrapInstallationPanel";
-import { apiUrl, appUrl, stripBase, SSO_AVAILABLE } from "./lib/basePath";
+import {
+  apiUrl,
+  appUrl,
+  stripBase,
+  SSO_AVAILABLE,
+  HA_LOGIN_AVAILABLE,
+  haLoginHref,
+} from "./lib/basePath";
 import { ledgerViewQs } from "./lib/ledger";
 import { savingsSourceUsesTransactions } from "./lib/fire";
 import { readFileAsBase64 } from "./lib/files";
@@ -1515,6 +1522,25 @@ export default function App() {
   useEffect(() => {
     void refreshSession();
   }, [refreshSession]);
+
+  // Vuelta fallida del login por Home Assistant: el servidor no puede pintar nada, así que
+  // devuelve el motivo en `?ha_error=` sobre la raíz de la app. Se traduce con el catálogo de
+  // siempre y se borra el parámetro de la URL — si se quedara, recargar o compartir el enlace
+  // repetiría un error que ya no describe nada. Va DESPUÉS del efecto de sesión a propósito:
+  // `refreshSession` limpia `sessionError` al arrancar y borraría este mensaje.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("ha_error");
+    if (!code) return;
+    setSessionError(messageForError(code, null));
+    params.delete("ha_error");
+    const qs = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+    );
+  }, []);
 
   useEffect(() => {
     if (user) {
@@ -3244,12 +3270,33 @@ export default function App() {
                 {authMode === "register" ? "Registrarse y entrar" : "Entrar"}
               </button>
             </form>
+            {/*
+              Dos formas de «Entrar con Home Assistant» que NUNCA conviven: el SSO del Ingress
+              gana cuando existe, porque dentro del panel el Supervisor ya te ha autenticado y
+              mandarte a teclear la contraseña de HA sería una regresión. El login por
+              redirección es para las instalaciones que se abren fuera del panel.
+            */}
             {SSO_AVAILABLE ? (
               <button
                 type="button"
                 className="btn secondary wide auth-alt-action"
                 disabled={authBusy}
                 onClick={() => void loginWithSso()}
+              >
+                Entrar con Home Assistant
+              </button>
+            ) : HA_LOGIN_AVAILABLE ? (
+              <button
+                type="button"
+                className="btn secondary wide auth-alt-action"
+                disabled={authBusy}
+                onClick={() =>
+                  window.location.assign(
+                    haLoginHref(
+                      window.location.pathname + window.location.search,
+                    ),
+                  )
+                }
               >
                 Entrar con Home Assistant
               </button>
