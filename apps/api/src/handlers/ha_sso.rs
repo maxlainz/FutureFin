@@ -17,8 +17,8 @@
 
 use crate::error::{ApiError, ErrorBody};
 use crate::ha_idp::{
-    apply_prefix, authorize_url, client_id_for, ct_eq, decode_state_cookie,
-    encode_state_cookie, strip_prefix, StateCookie, HA_STATE_COOKIE,
+    authorize_url, client_id_for, ct_eq, decode_state_cookie, encode_state_cookie,
+    sanitize_next, strip_prefix, StateCookie, HA_STATE_COOKIE,
 };
 use crate::handlers::auth::{establish_session, session_cookie_path};
 use crate::handlers::sso::resolve_or_provision;
@@ -248,15 +248,25 @@ pub async fn ha_callback(
                 return fail(HaLoginError::UsernameUnavailable);
             }
             // Todo lo demás (fallo de BD, carrera de instalación) es un error de servidor de
-            // verdad: un redirect a la pantalla de login lo escondería.
-            return Err(e);
+            // verdad: un redirect a la pantalla de login lo escondería. OJO: la respuesta se
+            // construye A MANO con el jar — un `return Err(e)` perdería el Set-Cookie de
+            // borrado y `ff_ha_state` sobreviviría sus 10 minutos, reabriendo el replay que
+            // el single-use promete cerrar (revisión 4.3.1).
+            return Ok((jar, e.into_response()));
         }
     };
 
     // 9. A partir de aquí es un login corriente: fila en `sessions`, cookie acotada al prefijo
     //    y warm-up en background (D7).
-    let (jar, _profile) = establish_session(&state, jar, path, row).await?;
-    Ok((jar, redirect(&apply_prefix(&prefix, &cookie.next))))
+    let (jar, _profile) = match establish_session(&state, jar.clone(), path, row).await {
+        Ok(out) => out,
+        // Mismo motivo que arriba: el 500 debe llevar el borrado de la cookie de estado.
+        Err(e) => return Ok((jar, e.into_response())),
+    };
+    // El `next` de la cookie se RE-SANEA al emitirlo: `strip_prefix` en /start puede fabricar
+    // un «//evil» que el filtro de ida ya no vio (prefijo de ida ≠ prefijo de vuelta tras un
+    // proxy asimétrico), y la cookie es el único input que no se re-verificaba (revisión 4.3.1).
+    Ok((jar, redirect(&sanitize_next(&prefix, Some(&cookie.next)))))
 }
 
 /// Redirect de fallo: de vuelta a la raíz de la app con el código en la query. Sin `no-store`

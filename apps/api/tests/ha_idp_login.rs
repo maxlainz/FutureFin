@@ -491,3 +491,39 @@ async fn the_shell_announces_whether_ha_login_exists() {
     // Sin ninguna bandera y sin prefijo, el shell sale byte a byte como está en disco.
     assert_eq!(String::from_utf8(r.body).unwrap(), SHELL);
 }
+
+/// Regresión (revisión 4.3.1): con prefijos asimétricos entre ida y vuelta, `strip_prefix`
+/// puede dejar en la cookie un `next` que empieza por `//` («/ff//evil» − «/ff» = «//evil»).
+/// El callback debe RE-SANEAR el `next` de la cookie al emitir el Location: si no, el 302
+/// sería protocol-relative y sacaría al usuario del origen con la sesión ya puesta.
+#[tokio::test]
+async fn a_next_forged_via_prefix_asymmetry_never_escapes_the_origin() {
+    let fake = FakeHaIdp::happy(ha_uuid(), "Max");
+    let app = app_with(fake.clone()).await;
+
+    // Ida CON prefijo (X-Forwarded-Prefix no exige peer de confianza a propósito).
+    let r = app
+        .get_with_headers(
+            &format!("/v1/auth/ha/start?next={}", urlencode("/ff//evil.test")),
+            &[("x-forwarded-prefix", "/ff")],
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::FOUND, "{r:?}");
+    let value = r
+        .cookie_value(HA_STATE_COOKIE)
+        .expect("/start pone la cookie de estado");
+    let decoded = decode_state_cookie(&value).expect("la cookie decodifica");
+    // La trampa existe: lo guardado empieza por "//".
+    assert!(
+        decoded.next.starts_with("//"),
+        "premisa del test: strip_prefix fabricó «{}»",
+        decoded.next
+    );
+
+    // Vuelta SIN prefijo: el Location debe caer a "/", jamás a "//evil.test".
+    let cookie = format!("{HA_STATE_COOKIE}={value}");
+    let r = callback(&app, Some(&cookie), &format!("code=abc&state={}", decoded.nonce)).await;
+    assert_eq!(r.status, http::StatusCode::FOUND, "{r:?}");
+    assert_eq!(r.location().as_deref(), Some("/"), "{r:?}");
+    assert!(r.session_cookie().is_some(), "el login en sí debe completarse");
+}

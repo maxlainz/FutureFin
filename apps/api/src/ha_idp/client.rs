@@ -83,17 +83,36 @@ impl super::HaIdp for HttpHaIdp {
             })?;
 
         let status = resp.status();
-        let body = resp.bytes().await.map_err(|e| {
-            tracing::warn!(error = %e, "home assistant: no se pudo leer la respuesta del canje");
-            HaIdpError::Transport
-        })?;
         if !status.is_success() {
             tracing::warn!(%status, "home assistant rechazó el canje del código");
             return Err(HaIdpError::Exchange);
         }
-        if body.len() > MAX_TOKEN_BODY {
-            tracing::warn!(bytes = body.len(), "home assistant: respuesta de token desmesurada");
+        // El tope se aplica ANTES y DURANTE la descarga: `bytes()` bufferiza el cuerpo entero
+        // sin límite, así que medir después no acota nada (revisión 4.3.1). Content-Length es
+        // la guarda barata; el bucle de chunks cubre el caso chunked/mentiroso.
+        if resp
+            .content_length()
+            .is_some_and(|n| n as usize > MAX_TOKEN_BODY)
+        {
+            tracing::warn!("home assistant: respuesta de token desmesurada (content-length)");
             return Err(HaIdpError::Exchange);
+        }
+        let mut body: Vec<u8> = Vec::with_capacity(1024);
+        let mut resp = resp;
+        loop {
+            let chunk = resp.chunk().await.map_err(|e| {
+                tracing::warn!(error = %e, "home assistant: no se pudo leer la respuesta del canje");
+                HaIdpError::Transport
+            })?;
+            let Some(chunk) = chunk else { break };
+            if body.len() + chunk.len() > MAX_TOKEN_BODY {
+                tracing::warn!(
+                    bytes = body.len() + chunk.len(),
+                    "home assistant: respuesta de token desmesurada"
+                );
+                return Err(HaIdpError::Exchange);
+            }
+            body.extend_from_slice(&chunk);
         }
         let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
             tracing::warn!(error = %e, "home assistant: la respuesta del canje no es JSON");
