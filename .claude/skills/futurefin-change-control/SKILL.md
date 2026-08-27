@@ -283,7 +283,7 @@ the gate; do not look for a way around it. CLAUDE.md, "Releases":
 > 5. **Último paso del mismo run: el add-on de Home Assistant apunta a la versión recién publicada.** Con la imagen ya verificada en el registry y el Release creado, `publish-image.yml` sube el `version:` de `addon/futurefin/config.yaml` en `main` por la **contents API** (los checkouts van con `persist-credentials: false`: no hay credencial para un `git push`). El Supervisor usa ese número como tag de imagen, así que sin este paso la tienda se queda clavada. **Requisito**: la app «GitHub Actions» debe ser *bypass actor* del ruleset «Proteger main» — si no, la API responde 403. Si el paso falla, la imagen y el Release ya están fuera y el add-on se queda **una versión por detrás**: se arregla con un PR normal que suba el `version:`. El commit lleva `[skip ci]` y no reentra (un push con `GITHUB_TOKEN` no dispara workflows).
 
 **El add-on es un segundo canal sobre la MISMA imagen** (`addon/futurefin/config.yaml` +
-`repository.yaml`): no construye nada, apunta a `ghcr.io/maxlainz/futurefin`. Consecuencias de
+`repository.yaml`): no construye nada, apunta a `maxlainz/futurefin` (Docker Hub — GHCR es privado y el Supervisor hace pull anónimo). Consecuencias de
 control de cambios: (a) tras un bump, `./scripts/audit-releases.sh --addon` debe pasar — compara el
 `version:` del add-on con `apps/api/Cargo.toml`; (b) cualquier `config.{yaml,yml,json}` nuevo en el
 repo rompe el job `secrets-scan` a propósito (HA interpreta cada uno como un add-on de la tienda:

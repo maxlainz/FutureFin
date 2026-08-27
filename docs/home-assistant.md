@@ -34,7 +34,7 @@ https://github.com/maxlainz/FutureFin
 ### Instalar y arrancar
 
 1. En la tienda, recarga y busca **FutureFin**. Pulsa **Instalar**. El Supervisor descarga la
-   imagen ya publicada (`ghcr.io/maxlainz/futurefin`); **el add-on no compila nada**, así que el
+   imagen ya publicada (`maxlainz/futurefin`, Docker Hub); **el add-on no compila nada**, así que el
    tiempo es el de la descarga.
 2. Pulsa **Iniciar**. El primer arranque crea el cluster de PostgreSQL desde cero y aplica todas
    las migraciones: puede tardar un minuto largo. La pestaña **Log** lo va contando.

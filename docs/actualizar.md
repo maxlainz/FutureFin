@@ -11,7 +11,7 @@ Cada release publica la misma imagen en dos registries:
 | Registry | Imagen |
 |---|---|
 | Docker Hub | `maxlainz/futurefin` |
-| GHCR | `ghcr.io/maxlainz/futurefin` |
+| GHCR | `ghcr.io/maxlainz/futurefin` (paquete **privado**: exige `docker login ghcr.io`) |
 
 Y cuatro etiquetas por versión. Publicar la `v3.2.1` crea:
 
