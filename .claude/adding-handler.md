@@ -100,8 +100,9 @@ Add `FooResponse`, `CreateFooBody` to the `components(schemas(...))` list, and t
 
 **Autenticación en la spec (4.0.0)**: `openapi.rs` declara `security(("ff_session" = []))` **global**,
 así que un handler con sesión no necesita decir nada. Un endpoint **público** debe llevar
-`security(())` en su `#[utoipa::path]` — hoy lo llevan exactamente cuatro (`health_check`,
-`ready_check`, `register`, `login`). Sin esa declaración global la spec presentaba 81 operaciones con
+`security(())` en su `#[utoipa::path]` — hoy lo llevan exactamente cinco (`health_check`,
+`ready_check`, `register`, `login` y, desde 4.3.0, `sso_login`: no lleva credencial de FutureFin
+porque la credencial la pone el proxy de confianza en una cabecera). Sin esa declaración global la spec presentaba 81 operaciones con
 sesión obligatoria como públicas y cualquier cliente generado nacía sin credencial.
 
 **Dos trampas que `tests/openapi_contract.rs` ya vigila** — si tu handler las dispara, el test falla

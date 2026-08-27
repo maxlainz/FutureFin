@@ -58,6 +58,13 @@ FutureFin es de **hogar compartido**: una instalación, varias personas, los mis
 roles (`owner`, `member`, `viewer`). Eso no cambia en el add-on. Lo que cambia es **cómo se
 identifica cada persona**.
 
+> **Quién ve el panel.** El add-on no declara `panel_admin`, así que vale el valor por defecto del
+> Supervisor: **solo los administradores de Home Assistant** ven el icono de FutureFin en la barra
+> lateral. Eso acota la frase «la primera persona que abre el panel se convierte en propietaria» —
+> esa persona solo puede ser un administrador de HA, no cualquier usuario de la casa. Aun así,
+> **instálalo y ábrelo tú primero**: si hay varios administradores, la propiedad se la lleva quien
+> llegue antes, y recuperarla después es trabajo manual.
+
 ### Con `sso` activada (el valor por defecto)
 
 El ingress del Supervisor ya ha autenticado a la persona antes de que la petición llegue al add-on,
@@ -298,9 +305,12 @@ Más contexto sobre rollback en [actualizar.md](actualizar.md#volver-a-una-versi
 
 ## 8. Limitaciones
 
-- **Sin enlaces profundos.** La ruta del ingress lleva un token de sesión que **caduca** (del orden
-  de 15 minutos), así que un enlace guardado a una vista concreta deja de funcionar. La entrada es
-  siempre por el icono de la barra lateral. Dentro de la app la navegación funciona con normalidad.
+- **Sin enlaces profundos.** Lo que caduca **no es el token del path**: `/api/hassio_ingress/<token>`
+  es estable mientras el add-on siga instalado (solo cambia si lo reinstalas o el Supervisor
+  regenera el token). Lo que caduca —y lo que hace inútil un enlace guardado— es la **sesión de
+  ingress**: la cookie que el Supervisor solo crea y refresca cuando abres el panel desde la barra
+  lateral de Home Assistant. Pegar la URL en una pestaña nueva no la crea. La entrada es siempre
+  por el icono de la barra lateral; dentro de la app la navegación funciona con normalidad.
 - **MCP y OAuth no funcionan por el ingress** (§4). Requieren el puerto directo.
 - **Solo amd64 y aarch64.** No hay imagen para armv7 ni i386.
 - **Las cuentas SSO no tienen contraseña** en esta versión, y por tanto no exportan `.ffbackup`

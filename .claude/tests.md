@@ -189,6 +189,19 @@ and the one that earns the rule, `anclar_al_dia_1_restaria_un_ano_en_el_mes_del_
 anchoring to day 1 (as `ProjectionMilestone` does) yields an age one year lower when the crossing
 lands in the birthday month. They need no Postgres.
 
+**Nuevos en 4.3.0** (el prefijo de proxy, todos puros y sin Postgres):
+
+- `apps/api/src/prefix.rs` **6** — `normalize_prefix` acepta/rechaza (barra final, ruta que no
+  empieza por `/`, charset), la **precedencia** entre `X-Forwarded-Prefix`, `X-Ingress-Path` y
+  `FUTUREFIN_BASE_PATH`, la caída al siguiente candidato cuando una cabecera es inválida, y la
+  política de peers de confianza (`any`, lista, IPv4 mapeada en IPv6).
+- `apps/api/src/handlers/spa.rs` **4** — la inyección de `__FF_BASE__`/`__FF_SSO__` y la reescritura
+  de los `src="/…"` / `href="/…"` del `index.html`; el contrato central es el primero
+  (`without_prefix_and_sso_is_borrowed_verbatim`: sin prefijo el HTML sale byte a byte) y el último
+  fija que las URLs externas y las protocol-relative no se tocan.
+
+Son la clase de lógica que merece unit test: string in, string out, sin I/O.
+
 **Excepción consciente (v3.1.0)**: el módulo `apps/api/src/oauth/` (9 ficheros), `auth/secret.rs` y
 `handlers/oauth_consent.rs` **no llevan ni un `#[test]`**. Su cobertura es 100 % de integración
 (`oauth_flow.rs`), porque casi todo lo que hay que probar cruza la DB (transacciones con
@@ -345,7 +358,8 @@ grep -n "5433" apps/api/tests/common/mod.rs
 grep -c '#\[test\]' crates/engine/src/{projection,history,runway,net_return}.rs
 grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'
                                         # 404 atributos en 38 ficheros a 2026-08-25 (eran 375 en 33 el 2026-08-22)
-grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l   # 59 unitarios de la lib de la API, 2026-08-25
+grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l   # 72 unitarios de la lib de la API, 2026-08-27
+                                        # (eran 59 el 2026-08-25; +13 en 4.3.0: prefix.rs 6, spa.rs 4, sso.rs 3)
 ls apps/api/tests/*.rs | wc -l          # 38 a 2026-08-25 (eran 33 el 2026-08-22)
 ls apps/api/migrations | wc -l          # 43 a 2026-08-25 (eran 42 el 2026-08-22)
 # Totales autoritativos: SIEMPRE del runner, nunca de un grep (hay bucles que generan tests, y el

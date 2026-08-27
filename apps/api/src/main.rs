@@ -41,7 +41,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db::connect_with_retry(&database_url, std::time::Duration::from_secs(connect_timeout))
             .await?;
     tracing::info!("database connected");
-    db::run_migrations(&pool).await?;
+    // El `?` de siempre imprimía el error con `Debug` (lo que hace `Termination` con un
+    // `Box<dyn Error>`): el banner multilínea de la guarda de downgrade salía como una sola
+    // línea con `\n` escapados, ilegible justo cuando más falta hace entenderlo. `Display` a
+    // stderr, sin el formateo de `tracing`, y salida 1 igual que antes.
+    if let Err(e) = db::run_migrations(&pool).await {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     tracing::info!("migrations applied");
 
     let cookie_secure = parse_bool_env("COOKIE_SECURE").unwrap_or(false);
@@ -55,11 +62,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_path = base_path();
     let trusted_peers = trusted_peers();
     let trusted_header_auth = parse_bool_env("FUTUREFIN_TRUSTED_PROXY_AUTH").unwrap_or(false);
-    if trusted_header_auth && matches!(trusted_peers, prefix::PeerPolicy::Disabled) {
-        // Fail-loud: SSO sin peers de confianza aceptaría X-Remote-User-Id de cualquiera.
+    if trusted_header_auth
+        && matches!(
+            trusted_peers,
+            prefix::PeerPolicy::Disabled | prefix::PeerPolicy::Any
+        )
+    {
+        // Fail-loud: SSO sin una lista EXPLÍCITA de peers acepta `X-Remote-User-Id` de
+        // cualquiera que alcance al proceso. `Disabled` es evidente; `any` lo parece menos y es
+        // igual de grave: tras un proxy que reenvía sin filtrar (o con el puerto publicado por
+        // error), un `X-Remote-User-Id` inventado provisiona el PRIMER usuario y se lleva el
+        // hogar entero como owner. Si de verdad nadie más puede llegar, la lista es una línea.
         panic!(
-            "FUTUREFIN_TRUSTED_PROXY_AUTH=1 requires FUTUREFIN_TRUSTED_PROXY_IPS \
-             (a comma-separated IP list, or 'any' behind a private network)"
+            "FUTUREFIN_TRUSTED_PROXY_AUTH=1 requires an explicit FUTUREFIN_TRUSTED_PROXY_IPS \
+             list (comma-separated IPs, e.g. 172.30.32.2); 'any' and an unset value are \
+             refused because header identity would be accepted from any peer"
         );
     }
 
@@ -108,11 +125,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // `GET /` cae al fallback, que inyecta el base path por request (spa.rs).
                 let index_svc = axum::routing::get(spa::serve_index)
                     .with_state((state.clone(), Arc::new(index)));
-                Router::new().merge(api).fallback_service(
-                    ServeDir::new(root)
-                        .append_index_html_on_directories(false)
-                        .fallback(index_svc),
-                )
+                // `/index.html` explícito TAMBIÉN pasa por el inyector: si no, `ServeDir`
+                // encuentra el fichero en disco y lo sirve crudo — sin prefijo reescrito ni
+                // `__FF_SSO__`, y con `Cache-Control` de asset estático. Bajo el Ingress esa URL
+                // es alcanzable (y algún cliente la pide), así que la SPA saldría rota justo
+                // donde el fallback la arregla.
+                Router::new()
+                    .route("/index.html", index_svc.clone())
+                    .merge(api)
+                    .fallback_service(
+                        ServeDir::new(root)
+                            .append_index_html_on_directories(false)
+                            .fallback(index_svc),
+                    )
             }
             None => {
                 tracing::warn!(
@@ -147,6 +172,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // supervisor pare el postmaster es parte del contrato de apagado ordenado.
     // `with_connect_info`: la IP del peer alimenta la política de confianza
     // (anti-clickjacking condicional y SSO por cabeceras — ver `prefix::PeerPolicy`).
+    // Si el bind fuera dual-stack, el peer IPv4 llegaría mapeado (`::ffff:…`);
+    // `PeerPolicy::allows` canonicaliza ambos lados, así que la lista se escribe en IPv4.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -254,9 +281,9 @@ fn public_url() -> Option<String> {
 /// `FUTUREFIN_BASE_PATH` (opcional): prefijo público fijo (subpath tras proxy).
 /// Fail-loud vía `prefix::validate_base_path_env`; `""` = raíz (default histórico).
 fn base_path() -> String {
+    // Sin filtro de blancos: `normalize_prefix` ya mapea vacío y `/` a `""`.
     std::env::var("FUTUREFIN_BASE_PATH")
         .ok()
-        .filter(|s| !s.trim().is_empty())
         .map(|s| prefix::validate_base_path_env(&s))
         .unwrap_or_default()
 }

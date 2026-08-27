@@ -13,14 +13,13 @@
 //! la protección desde fuera. Con peer no confiable —el default— la respuesta lleva `DENY` aunque
 //! el header venga presente.
 
-use crate::prefix::X_INGRESS_PATH;
+use crate::prefix::{peer_ip, X_INGRESS_PATH};
 use crate::state::AppState;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::Router;
 use http::{header, HeaderValue};
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Aplica la política al router **final** (el que ya incluye el fallback SPA).
@@ -36,12 +35,10 @@ async fn frame_policy(
     req: Request,
     next: Next,
 ) -> Response {
-    // El peer se lee de las extensiones (`with_connect_info`); en tests con `oneshot` no hay
-    // ninguno y vale `None` — solo `PeerPolicy::Any` lo acepta.
-    let peer = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip());
+    // El peer se lee de las extensiones (`with_connect_info`) por el MISMO helper que usa el
+    // extractor `PeerIp`; en tests con `oneshot` no hay ninguno y vale `None` — solo
+    // `PeerPolicy::Any` lo acepta.
+    let peer = peer_ip(req.extensions());
     let embedded = state.trusted_peers.allows(peer) && req.headers().contains_key(X_INGRESS_PATH);
 
     let mut response = next.run(req).await;

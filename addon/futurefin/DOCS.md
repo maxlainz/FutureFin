@@ -121,9 +121,11 @@ una URL pública con HTTPS.
 
 ## Limitaciones
 
-- **Sin enlaces profundos**: la sesión del ingress dura unos 15 minutos y la
-  entrada es siempre por el icono de la barra lateral. Un enlace guardado a una
-  vista concreta no te llevará ahí.
+- **Sin enlaces profundos**: la ruta `/api/hassio_ingress/<token>` es estable
+  mientras el add-on siga instalado, pero la **sesión** de ingress solo la crea
+  Home Assistant al abrir el panel desde la barra lateral. Por eso un enlace
+  guardado a una vista concreta no te llevará ahí: la entrada es siempre el
+  icono de la barra lateral.
 - Solo **amd64** y **aarch64**. No hay imagen para armv7 ni i386.
 
 ## Si algo no arranca

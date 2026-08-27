@@ -260,6 +260,36 @@ type FfbackupImportApplyResponse = {
  */
 let ssoAttempted = false;
 
+/**
+ * Marca de «he cerrado sesión a propósito», persistida en `sessionStorage`.
+ *
+ * El flag de módulo de arriba muere con el módulo, y bajo el Ingress de Home Assistant la app
+ * vive en un iframe que se REMONTA cada vez que cambias de panel: sin esta marca, cerrar sesión
+ * y volver al panel te volvía a loguear en silencio con el SSO del supervisor. `sessionStorage`
+ * es el ámbito correcto — sobrevive a los remontajes de la pestaña y se limpia sola al abrir una
+ * pestaña nueva, que es exactamente cuando querer entrar de nuevo es lo normal. Contrapartida
+ * aceptada: si el usuario cierra sesión y sigue en la misma pestaña, el SSO no vuelve a saltar
+ * hasta que pulse «Entrar con Home Assistant» (el botón del formulario de acceso).
+ */
+const SSO_SIGNED_OUT_KEY = "ff_sso_signed_out";
+
+function ssoSignedOut(): boolean {
+  try {
+    return window.sessionStorage.getItem(SSO_SIGNED_OUT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markSsoSignedOut(signedOut: boolean) {
+  try {
+    if (signedOut) window.sessionStorage.setItem(SSO_SIGNED_OUT_KEY, "1");
+    else window.sessionStorage.removeItem(SSO_SIGNED_OUT_KEY);
+  } catch {
+    /* almacenamiento bloqueado: el flag de módulo sigue cubriendo la sesión en curso */
+  }
+}
+
 export default function App() {
   const ledgerScopeSelectId = useId();
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -643,7 +673,7 @@ export default function App() {
         // eres (Ingress de Home Assistant): se canjea esa identidad por una sesión normal antes
         // de enseñar el formulario de acceso. Cualquier fallo cae al login de siempre — el SSO
         // es un atajo, nunca la única puerta.
-        if (SSO_AVAILABLE && !ssoAttempted) {
+        if (SSO_AVAILABLE && !ssoAttempted && !ssoSignedOut()) {
           ssoAttempted = true;
           try {
             const sso = await fetch(apiUrl("/v1/auth/sso"), {
@@ -1909,12 +1939,40 @@ export default function App() {
         ...defaultFetchInit,
         method: "POST",
       });
+      // Cerrar sesión gana al SSO: sin esta marca, el remontaje del iframe del Ingress volvía a
+      // canjear la identidad del supervisor y te devolvía dentro sin tocar nada.
+      markSsoSignedOut(true);
       setUser(null);
       setInstallation(null);
       setInstallationGate("loading");
       setPendingUsers([]);
       setPendingUsersError(null);
       navigate("/resumen", true);
+    } catch (e: unknown) {
+      setSessionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  /**
+   * Reintento manual del SSO desde el formulario de acceso. Es la única vía de vuelta para
+   * quien entró por el Ingress: su cuenta no tiene contraseña, así que sin este botón el
+   * formulario clásico sería un callejón sin salida tras cerrar sesión.
+   */
+  async function loginWithSso() {
+    setAuthBusy(true);
+    setSessionError(null);
+    try {
+      markSsoSignedOut(false);
+      const res = await fetch(apiUrl("/v1/auth/sso"), {
+        ...defaultFetchInit,
+        method: "POST",
+      });
+      if (!res.ok) {
+        throw await apiErrorFromResponse(res);
+      }
+      setUser((await res.json()) as UserResponse);
     } catch (e: unknown) {
       setSessionError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -3186,6 +3244,16 @@ export default function App() {
                 {authMode === "register" ? "Registrarse y entrar" : "Entrar"}
               </button>
             </form>
+            {SSO_AVAILABLE ? (
+              <button
+                type="button"
+                className="btn secondary wide auth-alt-action"
+                disabled={authBusy}
+                onClick={() => void loginWithSso()}
+              >
+                Entrar con Home Assistant
+              </button>
+            ) : null}
             {sessionError ? (
               <p className="error compact">{sessionError}</p>
             ) : null}

@@ -93,7 +93,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   no-store` y `Vary: X-Ingress-Path, X-Forwarded-Prefix`: el shell depende de cabeceras de proxy y
   ningún caché intermedio debe servir el de un despliegue a otro.
 - **Un prefijo inválido no se cuela**: debe empezar por `/`, sin `//`, sin segmentos `.`/`..`,
-  charset `[A-Za-z0-9._~/%-]`, ≤128 caracteres. Una **cabecera** inválida se ignora y se sigue con
+  charset `[A-Za-z0-9._~/-]`, ≤128 caracteres. Una **cabecera** inválida se ignora y se sigue con
   la fuente siguiente (con un `warn` deduplicado y acotado a 8 entradas, para que nadie convierta
   el log en un canal de flood); un **`FUTUREFIN_BASE_PATH`** inválido **aborta el arranque**, igual
   que `FUTUREFIN_PUBLIC_URL` — mejor un fallo ruidoso que HTML roto en silencio. La detección de
@@ -125,7 +125,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Sesiones — la cookie `ff_session` se acota al prefijo
 
 - **El `Path` de la cookie pasa a ser el prefijo de la petición** (`/` cuando no hay prefijo, es
-  decir el comportamiento de siempre en Compose). Motivo concreto: bajo el ingress todos los
+  decir el comportamiento de siempre en Compose), y **solo cuando el peer es de confianza**: el
+  prefijo se acepta sin verificar peer porque falsificarlo solo deforma la respuesta del propio
+  emisor, pero el `Path` de una cookie no es cosmético — sin esa condición cualquiera podría fijar
+  el de su propia `ff_session`. Motivo concreto: bajo el ingress todos los
   add-ons comparten el origen de Home Assistant, así que una cookie con `Path=/` se enviaría a
   **todos los demás add-ons** de la instalación. Acotarla la deja donde tiene que estar. La cookie
   de borrado usa la misma plantilla de path, porque un `Set-Cookie` de borrado solo casa con la
@@ -160,6 +163,44 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   Anotado en `CONTRIBUTING.md` para que no se pierda.
 - **`./scripts/audit-releases.sh --addon`** comprueba que el add-on y `apps/api/Cargo.toml`
   declaran la misma versión.
+
+### Endurecimientos de la revisión previa al merge
+
+Ocho correcciones salidas de la revisión de la rama, ninguna visible en Compose y todas capaces de
+romper el add-on:
+
+- **`sso: false` ya no deja el panel en blanco.** Con el SSO apagado el entrypoint no ponía
+  `FUTUREFIN_TRUSTED_PROXY_IPS`, y sin peer de confianza la respuesta salía con `X-Frame-Options:
+  DENY` — es decir, el iframe del ingress se quedaba vacío justo en la configuración pensada para
+  quien prefiere el login clásico. La lista del ingress se pone **siempre** en modo add-on; lo que
+  gobierna `sso` es el canje de identidad (`FUTUREFIN_TRUSTED_PROXY_AUTH`), que es lo que la opción
+  dice que hace.
+- **`/index.html` explícito pasa por el inyector.** El shell solo se inyectaba en el fallback SPA;
+  pedir la URL literal servía el fichero crudo, sin `__FF_BASE__`, y la app arrancaba creyéndose en
+  la raíz. Un caso raro de teclear a mano y garantizado en cuanto algo enlace esa URL.
+- **Cerrar sesión gana al SSO.** El flag de «ya lo he intentado» vivía a nivel de módulo, y bajo el
+  ingress el iframe se **remonta** al cambiar de panel: tras «Cerrar sesión», volver al panel te
+  volvía a entrar solo. Ahora la marca vive en `sessionStorage` (sobrevive al remontaje, se limpia
+  en una pestaña nueva). Corolario necesario: el formulario de acceso enseña **«Entrar con Home
+  Assistant»** cuando hay SSO disponible — sin ese botón, una cuenta SSO (que no tiene contraseña)
+  se quedaba encerrada fuera después de cerrar sesión.
+- **Los `href` de la navegación llevan prefijo.** Las pestañas de la barra superior, el drawer móvil
+  y el enlace del aviso de inflación pintaban la ruta cruda: el clic normal iba bien (lo intercepta
+  el router), pero Cmd/rueda —y la vista previa del enlace— salían del subpath al 404 de Home
+  Assistant. Van por `appUrl`, que además pasa a ser **literalmente la misma función** que `apiUrl`
+  para que las dos no puedan divergir. Una regla de ESLint prohíbe desde hoy pasar una ruta absoluta
+  a `fetch`, y CI comprueba que el `index.html` construido solo trae referencias absolutas de las
+  que el reescritor del servidor sabe tratar.
+- **Un `X-Remote-User-Id` repetido se rechaza.** Se leía la primera aparición; con dos cabeceras, un
+  proxy y un atacante podían discrepar sobre quién eres y ganaba la que llegara antes. Ante más de
+  una, la petición se rechaza en vez de elegir.
+- **`FUTUREFIN_TRUSTED_PROXY_IPS=any` es incompatible con el SSO activado** y aborta el arranque. El
+  comodín existe para redes privadas y tests; combinado con «acepto la identidad que me declaren»
+  significa no autenticar.
+- **El `%` sale del charset del prefijo.** Estaba permitido para dejar pasar rutas ya escapadas, pero
+  el prefijo se **interpola en el HTML** y en el `Path` de la cookie: aceptar escapes obligaba a
+  razonar sobre doble decodificación en dos contextos distintos. El token del ingress no lo necesita.
+- **El `Path` de la cookie solo se acota con peer de confianza** (ver arriba).
 
 ### Migración / compatibilidad
 

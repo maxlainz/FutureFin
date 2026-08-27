@@ -251,7 +251,7 @@ Hay dos formas de decírselo, y la primera gana sobre la segunda:
 | Variable `FUTUREFIN_BASE_PATH=/futurefin` | Prefijo fijo, para proxies que no mandan la cabecera. |
 
 El prefijo tiene que empezar por `/`, sin `//`, sin segmentos `.` o `..`, con el juego de
-caracteres `[A-Za-z0-9._~/%-]` y como mucho 128 caracteres. Una cabecera inválida se **ignora**
+caracteres `[A-Za-z0-9._~/-]` y como mucho 128 caracteres. Una cabecera inválida se **ignora**
 (con un aviso en el log); un `FUTUREFIN_BASE_PATH` inválido **aborta el arranque** — igual que
 `FUTUREFIN_PUBLIC_URL`, mejor un fallo ruidoso que HTML roto en silencio.
 
@@ -303,6 +303,12 @@ http:
 y `/.well-known/oauth-protected-resource` en la **raíz del origen**, y en un subpath esa raíz es de
 otro. Si vas a conectar un cliente de IA, sirve FutureFin en la raíz de un dominio (o subdominio)
 propio. Ver [mcp.md](mcp.md).
+
+**Y no hay atajo por `FUTUREFIN_PUBLIC_URL`.** Esa variable fija el origen del issuer de OAuth, no
+una base con prefijo: acepta un **origen a secas** y **aborta el arranque** si le pones un path
+(`FUTUREFIN_PUBLIC_URL must be a bare origin (no path/query/fragment)`). Es deliberado — anunciar
+un issuer con path no movería los `/.well-known` a donde el cliente los busca, solo dejaría el
+descubrimiento roto de otra manera.
 
 ## Parar, reiniciar y desinstalar
 

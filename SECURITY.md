@@ -216,8 +216,24 @@ cabecera de identidad es una afirmación sin prueba, así que la puerta es **dob
    **nadie** es de confianza.
 
 Las dos son necesarias: activar la primera sin la segunda **aborta el arranque** en vez de arrancar
-aceptando identidad de cualquiera. En el add-on de Home Assistant, el entrypoint pone la lista al
-único peer que alcanza al contenedor por el ingress (`172.30.32.2`).
+aceptando identidad de cualquiera. Y `FUTUREFIN_TRUSTED_PROXY_IPS=any` **se rechaza** cuando
+`FUTUREFIN_TRUSTED_PROXY_AUTH=1`: el comodín existe para el prefijo, que es inocuo, pero combinarlo
+con el canje de identidad significaría «cualquiera que alcance el puerto puede decir quién es», que
+es exactamente el fallo que estas dos variables existen para impedir. El arranque falla con un
+mensaje explícito en vez de quedarse abierto. En el add-on de Home Assistant, el entrypoint pone la
+lista al único peer que alcanza al contenedor por el ingress (`172.30.32.2`).
+
+**Co-tenancy del add-on: los add-ons de Home Assistant no están aislados entre sí.** Por el ingress
+todos cuelgan del **mismo origen** (el de Home Assistant) y se distinguen solo por el path. El
+aislamiento de origen del navegador —el que impide que una web lea otra— **no existe entre dos
+paneles de ingress**: un add-on malicioso o comprometido puede, desde su propio panel, abrir el de
+FutureFin y hablarle con las credenciales de la persona que ha iniciado sesión. FutureFin acota lo
+que puede acotar: la cookie `ff_session` se emite con `Path` restringido a su propio prefijo de
+ingress (solo cuando el peer es de confianza — si no lo es, no se acota nada, porque el prefijo
+vendría de una cabecera sin verificar) y fuera del ingress de confianza se mantiene
+`X-Frame-Options: DENY`. Pero eso son mitigaciones, no una frontera. **La frontera real es
+operativa: instala solo add-ons en los que confíes.** Si eso no te vale para tus datos financieros,
+la respuesta es un despliegue por Compose separado, no una opción del add-on.
 
 Consecuencia práctica: **si publicas el puerto directo del add-on, ese puerto nunca honra
 `X-Remote-User-*`** — quien llega por ahí tiene otra IP de origen y no pasa el filtro. Por ese

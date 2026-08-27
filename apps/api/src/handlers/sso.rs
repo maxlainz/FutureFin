@@ -15,21 +15,23 @@
 //! que solo vale la palabra de un peer que el operador ha nombrado.
 
 use crate::error::ApiError;
-use crate::handlers::auth::{session_cookie, session_cookie_path, user_row_to_response, UserRow, UserResponse};
-use crate::handlers::installation::{
-    bootstrap_installation_as_owner_if_empty, require_installation_member,
-};
-use crate::handlers::projection::warm_up_household_projection;
-use crate::handlers::spa::X_REMOTE_USER_ID;
+use crate::handlers::auth::{establish_session, session_cookie_path, UserRow, UserResponse};
+use crate::handlers::installation::bootstrap_installation_as_owner_if_empty;
 use crate::prefix::PeerIp;
 use crate::state::AppState;
 use axum::extract::Extension;
 use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{Duration, Utc};
+use http::HeaderMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Header de identidad del proxy de confianza (el Supervisor de HA lo stripea si viene del
+/// cliente, así que detrás del ingress es fiable). Este módulo es su **dueño**: `handlers/spa.rs`
+/// lo consume desde aquí para que el flag que pinta el shell y la puerta que abre la sesión no
+/// puedan describir cosas distintas.
+pub const X_REMOTE_USER_ID: &str = "x-remote-user-id";
 /// Nombre de cuenta del proveedor (p. ej. `maria`). Opcional.
 pub const X_REMOTE_USER_NAME: &str = "x-remote-user-name";
 /// Nombre para mostrar del proveedor (p. ej. `María Ñandú`). Opcional; tiene precedencia sobre
@@ -38,6 +40,32 @@ pub const X_REMOTE_USER_DISPLAY_NAME: &str = "x-remote-user-display-name";
 
 /// Tope del slug antes de sufijar. 60 + `-2` cabe de sobra en el máximo de 64 del `username`.
 const USERNAME_SLUG_MAX: usize = 60;
+
+/// Identidad externa de la request: exactamente **una** `X-Remote-User-Id` que sea un UUID.
+///
+/// Repetida ⇒ `None`: un proxy que **añade** su cabecera sin stripear la del cliente deja dos
+/// valores, y `HeaderMap::get` devuelve el primero — el del cliente. Antes que elegir cuál gana,
+/// se rechaza: una identidad ambigua no es una identidad.
+fn external_identity(headers: &HeaderMap) -> Option<Uuid> {
+    let mut values = headers.get_all(X_REMOTE_USER_ID).iter();
+    let first = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    Uuid::parse_str(first.to_str().ok()?.trim()).ok()
+}
+
+/// ¿Puede esta request abrir sesión por SSO? Predicado **único**: lo usan `sso_login` (que
+/// además distingue el porqué del fallo para poder contarlo) y `handlers/spa.rs` para decidir
+/// `window.__FF_SSO__`.
+///
+/// Incluye que la identidad **parsee como UUID**: sin eso el shell anunciaba SSO disponible
+/// ante una cabecera basura y la SPA lanzaba un `POST /v1/auth/sso` condenado a un 400.
+pub(crate) fn sso_available(state: &AppState, peer: Option<IpAddr>, headers: &HeaderMap) -> bool {
+    state.trusted_header_auth
+        && state.trusted_peers.allows(peer)
+        && external_identity(headers).is_some()
+}
 
 #[utoipa::path(
     post,
@@ -73,16 +101,16 @@ pub async fn sso_login(
         ));
     }
 
-    let external_user_id = headers
-        .get(X_REMOTE_USER_ID)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .and_then(|v| Uuid::parse_str(v).ok())
-        .ok_or_else(|| {
-            ApiError::BadRequest(
-                "sso_bad_identity: X-Remote-User-Id must be present and a UUID".into(),
-            )
-        })?;
+    if headers.get_all(X_REMOTE_USER_ID).iter().count() > 1 {
+        // Un proxy que APPENDEA su cabecera en vez de reemplazarla dejaría el valor del cliente
+        // el primero, y `HeaderMap::get` (el de siempre) devolvería ese. Ambiguo ⇒ 400.
+        return Err(ApiError::BadRequest(
+            "sso_bad_identity: X-Remote-User-Id must appear exactly once".into(),
+        ));
+    }
+    let external_user_id = external_identity(&headers).ok_or_else(|| {
+        ApiError::BadRequest("sso_bad_identity: X-Remote-User-Id must be present and a UUID".into())
+    })?;
 
     // El nombre para mostrar manda sobre el de cuenta: es el que la persona reconoce. Los dos
     // son opcionales — el Supervisor no siempre los manda — y de ahí el fallback del slug.
@@ -90,50 +118,34 @@ pub async fn sso_login(
         .or_else(|| header_text(&headers, X_REMOTE_USER_NAME))
         .unwrap_or_default();
 
-    let user_id = resolve_or_provision(&state, external_user_id, &raw_name).await?;
+    let row = resolve_or_provision(&state, external_user_id, &raw_name).await?;
 
-    // A partir de aquí es un login corriente: fila en `sessions` + cookie acotada al prefijo.
-    let expires_at = Utc::now() + Duration::days(state.session_ttl_days);
-    let sid: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO sessions (user_id, expires_at) VALUES ($1, $2) RETURNING id"#,
+    // A partir de aquí es un login corriente, por la MISMA función que el login por contraseña:
+    // fila en `sessions`, cookie acotada al prefijo y warm-up en background (D7).
+    establish_session(
+        &state,
+        jar,
+        session_cookie_path(&state, peer, &headers),
+        row,
     )
-    .bind(user_id)
-    .bind(expires_at)
-    .fetch_one(&state.pool)
-    .await?;
-    let jar = jar.add(session_cookie(&state, sid, session_cookie_path(&state, &headers)));
-
-    let row: UserRow = sqlx::query_as(r#"SELECT id, username, birth_date FROM users WHERE id = $1"#)
-        .bind(user_id)
-        .fetch_one(&state.pool)
-        .await?;
-
-    // Mismo warm-up en background que `login` (D7: no se espera al recompute). Usuario pending
-    // ⇒ no hay nada que calentar y se salta en silencio.
-    if let Ok((iid, _)) = require_installation_member(&state.pool, user_id).await {
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            warm_up_household_projection(state_clone, iid, user_id).await;
-        });
-    }
-
-    Ok((jar, Json(user_row_to_response(row))))
+    .await
 }
 
-fn header_text(headers: &http::HeaderMap, name: &str) -> Option<String> {
+fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(name)?;
     let text = String::from_utf8_lossy(raw.as_bytes()).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
 
-/// Busca al usuario por `external_user_id` y, si no existe, lo crea. Devuelve su id.
+/// Busca al usuario por `external_user_id` y, si no existe, lo crea. Devuelve su fila completa
+/// (el `RETURNING`/`SELECT` ya la trae: releerla después sería un viaje de más).
 async fn resolve_or_provision(
     state: &Arc<AppState>,
     external_user_id: Uuid,
     raw_name: &str,
-) -> Result<Uuid, ApiError> {
-    if let Some(id) = find_by_external_id(state, external_user_id).await? {
-        return Ok(id);
+) -> Result<UserRow, ApiError> {
+    if let Some(row) = find_by_external_id(state, external_user_id).await? {
+        return Ok(row);
     }
 
     let base = username_slug(raw_name);
@@ -150,11 +162,11 @@ async fn resolve_or_provision(
 
     for username in candidates {
         match try_provision(state, external_user_id, &username).await? {
-            Provision::Created(id) => {
-                tracing::info!(user_id = %id, %username, "provisioned account from trusted proxy identity");
-                return Ok(id);
+            Provision::Created(row) => {
+                tracing::info!(user_id = %row.id, %username, "provisioned account from trusted proxy identity");
+                return Ok(row);
             }
-            Provision::Existing(id) => return Ok(id),
+            Provision::Existing(row) => return Ok(row),
             Provision::UsernameTaken => continue,
         }
     }
@@ -165,9 +177,9 @@ async fn resolve_or_provision(
 }
 
 enum Provision {
-    Created(Uuid),
+    Created(UserRow),
     /// Otra petición concurrente provisionó la misma identidad externa entremedias.
-    Existing(Uuid),
+    Existing(UserRow),
     UsernameTaken,
 }
 
@@ -181,18 +193,18 @@ async fn try_provision(
     username: &str,
 ) -> Result<Provision, ApiError> {
     let mut tx = state.pool.begin().await?;
-    let inserted: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
+    let inserted: Result<UserRow, sqlx::Error> = sqlx::query_as(
         r#"INSERT INTO users (username, password_hash, birth_date, external_user_id)
            VALUES ($1, NULL, NULL, $2)
-           RETURNING id"#,
+           RETURNING id, username, birth_date"#,
     )
     .bind(username)
     .bind(external_user_id)
     .fetch_one(&mut *tx)
     .await;
 
-    let user_id = match inserted {
-        Ok(id) => id,
+    let row = match inserted {
+        Ok(row) => row,
         Err(e) => {
             let constraint = match &e {
                 sqlx::Error::Database(db) => db.constraint().map(str::to_string),
@@ -212,7 +224,7 @@ async fn try_provision(
         }
     };
 
-    match bootstrap_installation_as_owner_if_empty(&mut tx, &user_id).await {
+    match bootstrap_installation_as_owner_if_empty(&mut tx, &row.id).await {
         Ok(()) => {}
         Err(ApiError::Conflict) => {
             return Err(ApiError::ConflictWith(
@@ -222,19 +234,19 @@ async fn try_provision(
         Err(e) => return Err(e),
     }
     tx.commit().await?;
-    Ok(Provision::Created(user_id))
+    Ok(Provision::Created(row))
 }
 
 async fn find_by_external_id(
     state: &Arc<AppState>,
     external_user_id: Uuid,
-) -> Result<Option<Uuid>, ApiError> {
-    Ok(
-        sqlx::query_scalar(r#"SELECT id FROM users WHERE external_user_id = $1"#)
-            .bind(external_user_id)
-            .fetch_optional(&state.pool)
-            .await?,
+) -> Result<Option<UserRow>, ApiError> {
+    Ok(sqlx::query_as(
+        r#"SELECT id, username, birth_date FROM users WHERE external_user_id = $1"#,
     )
+    .bind(external_user_id)
+    .fetch_optional(&state.pool)
+    .await?)
 }
 
 /// Convierte un nombre humano en un `username` válido (`^[a-z0-9._-]{3,64}$`).
@@ -259,7 +271,10 @@ pub(crate) fn username_slug(raw: &str) -> String {
             last_dash = false;
         }
         out.push(c);
-        if out.chars().count() >= USERNAME_SLUG_MAX {
+        // `len()` y no `chars().count()`: `out` es ASCII por construcción (todo lo que no lo es
+        // ya se convirtió en '-'), así que son el mismo número sin recorrer la cadena entera en
+        // cada iteración.
+        if out.len() >= USERNAME_SLUG_MAX {
             break;
         }
     }
@@ -277,19 +292,22 @@ pub(crate) fn username_slug(raw: &str) -> String {
 
 /// Pliega los diacríticos del español a ASCII. Lo que no reconoce lo deja pasar tal cual (y el
 /// filtro de charset lo convertirá en `-`).
-fn fold_char(c: char) -> std::vec::IntoIter<char> {
-    let folded: Vec<char> = match c {
-        'á' | 'à' | 'ä' | 'â' | 'Á' | 'À' | 'Ä' | 'Â' => vec!['a'],
-        'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => vec!['e'],
-        'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => vec!['i'],
-        'ó' | 'ò' | 'ö' | 'ô' | 'Ó' | 'Ò' | 'Ö' | 'Ô' => vec!['o'],
-        'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => vec!['u'],
-        'ñ' | 'Ñ' => vec!['n'],
-        'ç' | 'Ç' => vec!['c'],
-        'ß' => vec!['s', 's'],
-        other => vec![other],
+///
+/// Sin `Vec`: el único caso de dos caracteres es `ß`, así que un par `(char, Option<char>)`
+/// cubre la tabla entera sin una asignación por letra del nombre.
+fn fold_char(c: char) -> impl Iterator<Item = char> {
+    let (first, second) = match c {
+        'á' | 'à' | 'ä' | 'â' | 'Á' | 'À' | 'Ä' | 'Â' => ('a', None),
+        'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => ('e', None),
+        'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => ('i', None),
+        'ó' | 'ò' | 'ö' | 'ô' | 'Ó' | 'Ò' | 'Ö' | 'Ô' => ('o', None),
+        'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => ('u', None),
+        'ñ' | 'Ñ' => ('n', None),
+        'ç' | 'Ç' => ('c', None),
+        'ß' => ('s', Some('s')),
+        other => (other, None),
     };
-    folded.into_iter()
+    std::iter::once(first).chain(second)
 }
 
 #[cfg(test)]

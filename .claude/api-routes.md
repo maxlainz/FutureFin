@@ -1088,7 +1088,7 @@ sesión.
 Un header **presente pero inválido no aborta**: se ignora (con un `warn` deduplicado, tope de 8
 valores distintos para que nadie convierta el log en un canal de flood) y se sigue con la fuente
 siguiente. `normalize_prefix` acepta `/` o vacío (⇒ `""`), o un path que empieza por `/`, sin `//`,
-sin segmentos `.`/`..`, charset `[A-Za-z0-9._~/%-]`, ≤128 chars, tolerando una barra final que
+sin segmentos `.`/`..`, charset `[A-Za-z0-9._~/-]`, ≤128 chars, tolerando una barra final que
 recorta. Ese charset es también lo que hace seguro interpolarlo en atributos HTML y en JS
 (`spa::inject`): no hay comillas, ángulos ni backslash que escapar.
 

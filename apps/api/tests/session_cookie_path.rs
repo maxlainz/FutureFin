@@ -4,10 +4,24 @@
 //! `ff_session` a las rutas de ingress de los demás. La cookie se acota al prefijo de la request
 //! — y el logout tiene que borrar **esa misma**, porque el navegador solo casa el borrado si el
 //! `Path` coincide. Sin cabeceras de proxy, `Path=/` exactamente como siempre.
+//!
+//! El prefijo solo cuenta si el **peer es de confianza**: el `Path` de una cookie es un atributo
+//! de seguridad y no puede decidirlo un header de cualquiera (`trusted_peers_any` en los tests
+//! del caso Ingress; sin él, `Path=/` aunque venga `X-Ingress-Path`).
 
 mod common;
 
-use common::TestApp;
+use common::{TestApp, TestConfig};
+
+/// App con peers de confianza (`PeerPolicy::Any`): en `oneshot` no hay `ConnectInfo`, así que
+/// `Any` es la única política que hace «de confianza» al peer de un test.
+async fn trusted_app() -> TestApp {
+    TestApp::spawn_with(TestConfig {
+        trusted_peers_any: true,
+        ..Default::default()
+    })
+    .await
+}
 
 /// El `Set-Cookie` completo de `ff_session` (no solo el valor, que es lo que da
 /// `ResponseParts::session_cookie`).
@@ -52,8 +66,28 @@ async fn login_without_proxy_headers_scopes_the_cookie_to_root() {
 }
 
 #[tokio::test]
-async fn login_under_ingress_scopes_the_cookie_to_the_prefix() {
+async fn an_untrusted_peer_cannot_scope_the_cookie_with_a_header() {
+    // `spawn()` = política por defecto (nadie es de confianza). El header está, pero no manda:
+    // si mandara, cualquiera podría fijar el `Path` de su propia cookie de sesión.
     let app = TestApp::spawn().await;
+    register(&app, "alice").await;
+    let login = app
+        .post_with_headers(
+            "/v1/auth/login",
+            &[("x-ingress-path", "/a/b")],
+            Some(login_body("alice")),
+            None,
+        )
+        .await;
+    assert_eq!(login.status, http::StatusCode::OK, "login: {login:?}");
+    let raw = set_cookie(&login);
+    assert!(raw.contains("Path=/;") || raw.ends_with("Path=/"), "cookie: {raw}");
+    assert!(!raw.contains("Path=/a/b"), "cookie: {raw}");
+}
+
+#[tokio::test]
+async fn login_under_ingress_scopes_the_cookie_to_the_prefix() {
+    let app = trusted_app().await;
     register(&app, "alice").await;
     let login = app
         .post_with_headers(
@@ -70,7 +104,7 @@ async fn login_under_ingress_scopes_the_cookie_to_the_prefix() {
 
 #[tokio::test]
 async fn logout_under_ingress_removes_the_cookie_on_the_same_path() {
-    let app = TestApp::spawn().await;
+    let app = trusted_app().await;
     register(&app, "alice").await;
     let login = app
         .post_with_headers(

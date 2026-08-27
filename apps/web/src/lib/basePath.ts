@@ -70,10 +70,13 @@ export function apiUrl(path: string): string {
   return apiUrlWith(BASE_PATH, path);
 }
 
-/** URL de navegación de la app (destino de `pushState`/`replaceState`). */
-export function appUrl(path: string): string {
-  return apiUrlWith(BASE_PATH, path);
-}
+/**
+ * URL de navegación de la app (destino de `pushState`/`replaceState` y de los `href` de la
+ * navegación). Es **literalmente la misma función** que `apiUrl`: los dos nombres existen para
+ * que el sitio de llamada diga qué está construyendo, pero comparten objeto a propósito — dos
+ * cuerpos separados podrían divergir en silencio y dejar la mitad de la app fuera del prefijo.
+ */
+export const appUrl = apiUrl;
 
 /** Ruta canónica de la app a partir de un `window.location.pathname`. */
 export function stripBase(pathname: string): string {

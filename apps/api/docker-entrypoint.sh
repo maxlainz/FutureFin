@@ -42,11 +42,16 @@ if [ -f /data/options.json ]; then
     *)           : ;;   # info/notice/vacío: se respeta el RUST_LOG que ya hubiera
   esac
 
-  # SSO por cabecera: el ingress del Supervisor es el ÚNICO peer que alcanza al
-  # add-on (172.30.32.2 en la red interna de HA), así que es el único de confianza.
+  # El ingress del Supervisor es el ÚNICO peer que alcanza al add-on (172.30.32.2 en
+  # la red interna de HA), así que es el único de confianza. Se exporta SIEMPRE en modo
+  # add-on, con SSO o sin él: el iframe del ingress necesita ese peer de confianza para
+  # que `handlers/frame.rs` relaje el anti-clickjacking a `frame-ancestors 'self'`. Sin
+  # la lista, la respuesta sale con `X-Frame-Options: DENY` y el panel se ve EN BLANCO
+  # aunque el add-on funcione. Lo que sí depende del toggle es aceptar identidad por
+  # cabeceras, que es la frontera de seguridad de verdad.
+  export FUTUREFIN_TRUSTED_PROXY_IPS="${FUTUREFIN_TRUSTED_PROXY_IPS:-172.30.32.2}"
   if [ "$(ha_opt sso)" = "true" ]; then
     export FUTUREFIN_TRUSTED_PROXY_AUTH=1
-    export FUTUREFIN_TRUSTED_PROXY_IPS="${FUTUREFIN_TRUSTED_PROXY_IPS:-172.30.32.2}"
   fi
 
   [ "$(ha_opt mcp)" = "false" ] && export FUTUREFIN_MCP_ENABLED=0
@@ -107,13 +112,17 @@ is_mounted() {
 # rootfs del overlay), así que aceptarlo convertiría la guarda en decorativa y volvería
 # a permitir arrancar sin volumen — exactamente lo que la guarda existe para impedir.
 #
-# PRUEBA DE QUE SIGUE MORDIENDO (compose sin volumen, imagen tal cual):
-#   PGDATA=/var/lib/postgresql/data → se prueban /var/lib/postgresql/data,
-#   /var/lib/postgresql, /var/lib, /var. Ninguno es mountpoint en esta imagen
-#   (todos son directorios del propio overlay) → devuelve 1 → `die`. Igual que antes.
-#   Bajo Home Assistant: PGDATA=/data/pgdata → /data SÍ es el bind del Supervisor
-#   → devuelve 0. Con el `is_mounted` a secas ese caso moría, porque el mountpoint
-#   es el padre y no $PGDATA.
+# SOLO SE USA EN MODO ADD-ON ($HA_ADDON=1). En compose la guarda sigue siendo el
+# `is_mounted` histórico, exacto: ahí $PGDATA es SIEMPRE el punto de montaje del
+# volumen, y aceptar un ancestro montado (p.ej. un `-v dir:/var/lib` suelto) relajaría
+# una guarda que no tiene ninguna razón para relajarse fuera de HA.
+#
+# PRUEBA DE QUE SIGUE MORDIENDO bajo HA sin volumen (`docker run` de la imagen del
+# add-on con /data/options.json pero sin bind):
+#   PGDATA=/data/pgdata → se prueban /data/pgdata, /data. Ninguno es mountpoint
+#   → devuelve 1 → `die`.
+#   Con el bind del Supervisor: /data SÍ es mountpoint → devuelve 0. Con el
+#   `is_mounted` a secas ese caso moría, porque el mountpoint es el padre y no $PGDATA.
 is_persisted() {
   local d="$1" parent
   while [ -n "$d" ] && [ "$d" != "/" ]; do
@@ -605,9 +614,15 @@ main() {
   ensure_runtime_dirs
 
   local MOUNTED=0
-  # `is_persisted`, no `is_mounted`: basta con que $PGDATA cuelgue de un volumen real
-  # (bajo Home Assistant el mountpoint es /data y $PGDATA es /data/pgdata).
-  is_persisted "$PGDATA" && MOUNTED=1
+  # Bajo Home Assistant basta con que $PGDATA cuelgue de un volumen real: el Supervisor
+  # monta /data y $PGDATA es /data/pgdata, así que el mountpoint es el padre. En compose
+  # se conserva la guarda histórica EXACTA (`is_mounted` sobre $PGDATA): ahí el volumen
+  # se monta en $PGDATA y no hay motivo para aceptar un ancestro montado.
+  if [ "$HA_ADDON" = "1" ]; then
+    is_persisted "$PGDATA" && MOUNTED=1
+  else
+    is_mounted "$PGDATA" && MOUNTED=1
+  fi
 
   EXTERNAL_URL=""
   if [ -n "${DATABASE_URL:-}" ] && ! printf '%s' "$DATABASE_URL" | grep -q "$SOCK_DIR"; then

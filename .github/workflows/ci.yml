@@ -128,6 +128,19 @@ jobs:
       # typecheck o los tests ya han fallado.
       - name: build
         run: npm run build:web
+      # El servidor reescribe las referencias absolutas del `index.html` para anteponerles el
+      # prefijo del proxy (Ingress de Home Assistant), y solo sabe hacerlo con la forma que
+      # Vite emite hoy: `src="/…"` y `href="/…"` entre comillas dobles. Cualquier otra forma
+      # (un `srcset`, un `content="/…"` de meta, un `url(/…)` en CSS inline, o comillas
+      # simples) se le escaparía y el navegador la pediría fuera del subpath. Es un gate y no
+      # un aviso porque el fallo es invisible en la raíz y solo rompe bajo el proxy.
+      - name: El index.html construido solo usa refs absolutos reescribibles
+        run: |
+          if grep -E 'srcset=|content="/|url\(/|href='"'"'/|src='"'"'/' apps/web/dist/index.html; then
+            echo "::error::apps/web/dist/index.html contiene referencias absolutas que el reescritor del servidor NO cubre (ver las líneas de arriba). Admite solo src=\"/…\" y href=\"/…\" con comillas dobles; si Vite ha empezado a emitir otra forma, hay que extender el reescritor de apps/api/src/handlers/spa.rs antes de mergear."
+            exit 1
+          fi
+          echo "OK: solo referencias absolutas reescribibles."
 
   # `cargo test --workspace` son 447 tests (medido el 2026-08-22); CI solo corría los
   # 65 del engine. Los otros 382 —329 de integración en 30 ficheros de

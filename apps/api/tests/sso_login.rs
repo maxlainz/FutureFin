@@ -82,6 +82,25 @@ async fn sso_without_a_uuid_identity_is_a_bad_request() {
 }
 
 #[tokio::test]
+async fn a_repeated_identity_header_is_refused() {
+    // Un proxy que AÑADE su cabecera sin stripear la del cliente deja dos valores y el primero
+    // —el del cliente— sería el que gana con un `get` normal. Identidad ambigua ⇒ 400, y nada
+    // provisionado.
+    let app = trusted_app().await;
+    let r = post_sso(
+        &app,
+        &[
+            ("x-remote-user-id", "99999999-9999-9999-9999-999999999999".to_string()),
+            ("x-remote-user-id", HA_USER.to_string()),
+        ],
+    )
+    .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "sso_bad_identity");
+    assert_eq!(app.count_rows("users").await, 0);
+}
+
+#[tokio::test]
 async fn first_sso_user_bootstraps_the_installation_as_owner() {
     let app = trusted_app().await;
     let r = post_sso(&app, &sso_headers(HA_USER, Some("María"))).await;

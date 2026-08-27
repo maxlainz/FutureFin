@@ -17,7 +17,17 @@ use http::request::Parts;
 use http::HeaderMap;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+/// IP del peer TCP tal y como la dejó `with_connect_info`. Punto ÚNICO de lectura de la
+/// extensión: el extractor `PeerIp` y el middleware de `handlers/frame.rs` la comparten
+/// para que las dos lecturas no puedan divergir.
+pub fn peer_ip(extensions: &http::Extensions) -> Option<IpAddr> {
+    extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+}
 
 /// IP del peer TCP, si el servidor arrancó `with_connect_info` (en tests con
 /// `oneshot` no hay `ConnectInfo` y vale `None`). Extractor infalible: la política
@@ -28,12 +38,7 @@ impl<S: Send + Sync> FromRequestParts<S> for PeerIp {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(PeerIp(
-            parts
-                .extensions
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|ci| ci.0.ip()),
-        ))
+        Ok(PeerIp(peer_ip(&parts.extensions)))
     }
 }
 
@@ -60,8 +65,13 @@ pub fn request_prefix(base_path: &str, headers: &HeaderMap) -> String {
 
 /// Normaliza un prefijo candidato. Devuelve `None` si es inválido.
 /// Acepta: `/` o vacío (⇒ raíz, `""`), o un path que empieza por `/`, sin `//`,
-/// sin segmentos `.`/`..`, charset `[A-Za-z0-9._~/%-]`, ≤128 chars. Se tolera una
+/// sin segmentos `.`/`..`, charset `[A-Za-z0-9._~/-]`, ≤128 chars. Se tolera una
 /// barra final (se recorta) porque algunos proxies la añaden.
+///
+/// El `%` NO está en el charset a propósito: con él, un dot-segment percent-encoded
+/// (`/%2e%2e/x`) pasaba entero el filtro de `.`/`..`, que compara texto plano. Los
+/// tokens del Ingress de Home Assistant son hex plano y ningún prefijo legítimo de
+/// este repo lo necesita, así que se prohíbe en vez de decodificar.
 pub fn normalize_prefix(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed == "/" {
@@ -73,7 +83,7 @@ pub fn normalize_prefix(raw: &str) -> Option<String> {
     }
     if !stripped
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/' | '%'))
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/'))
     {
         return None;
     }
@@ -96,7 +106,7 @@ pub fn validate_base_path_env(raw: &str) -> String {
     normalize_prefix(raw).unwrap_or_else(|| {
         panic!(
             "invalid FUTUREFIN_BASE_PATH ({raw}): must start with '/', no '//', no '.'/'..' \
-             segments, charset [A-Za-z0-9._~/%-], max 128 chars"
+             segments, charset [A-Za-z0-9._~/-], max 128 chars"
         )
     })
 }
@@ -141,11 +151,19 @@ impl PeerPolicy {
 
     /// ¿Es este peer de confianza? Peer desconocido (`None`, p.ej. tests con
     /// `oneshot` sin `ConnectInfo`) solo pasa con `Any`.
+    ///
+    /// La comparación **canonicaliza** las dos partes: un socket dual-stack (`::` a secas,
+    /// lo normal en Linux) entrega el peer IPv4 como IPv6-mapeada (`::ffff:172.30.32.2`),
+    /// que no es igual a la `172.30.32.2` de la lista. Sin esto, el add-on de Home Assistant
+    /// dejaría de reconocer al Supervisor en cuanto el bind fuera dual-stack.
     pub fn allows(&self, peer: Option<IpAddr>) -> bool {
         match self {
             Self::Disabled => false,
             Self::Any => true,
-            Self::List(ips) => peer.is_some_and(|p| ips.contains(&p)),
+            Self::List(ips) => peer.is_some_and(|p| {
+                let p = p.to_canonical();
+                ips.iter().any(|listed| listed.to_canonical() == p)
+            }),
         }
     }
 }
@@ -154,10 +172,20 @@ impl PeerPolicy {
 /// que un atacante no convierta el log en un canal de flood.
 fn warn_invalid_header_once(name: &str, raw: &str) {
     static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    /// Fast path sin lock: una vez alcanzado el tope no hay nada que decidir, y un flood de
+    /// headers inválidos (que es justo el caso que el tope existe para acotar) serializaría
+    /// todas las requests sobre un `Mutex` de la std sin ganar nada.
+    static CAPPED: AtomicBool = AtomicBool::new(false);
+    if CAPPED.load(Ordering::Relaxed) {
+        return;
+    }
     let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
     let mut seen = seen.lock().expect("prefix warn set poisoned");
     if seen.len() < 8 && seen.insert(format!("{name}:{raw}")) {
         tracing::warn!(header = name, value = raw, "ignoring invalid proxy prefix header");
+    }
+    if seen.len() >= 8 {
+        CAPPED.store(true, Ordering::Relaxed);
     }
 }
 
@@ -189,6 +217,9 @@ mod tests {
         assert_eq!(normalize_prefix("/con espacio"), None);
         assert_eq!(normalize_prefix("/con\"comilla"), None);
         assert_eq!(normalize_prefix("/con<angulo"), None);
+        // Percent-encoding fuera del charset: `/%2e%2e/x` burlaba el filtro de `..`.
+        assert_eq!(normalize_prefix("/%2e%2e/otro"), None);
+        assert_eq!(normalize_prefix("/tok%20en"), None);
         assert_eq!(normalize_prefix(&format!("/{}", "a".repeat(200))), None);
     }
 
@@ -232,5 +263,18 @@ mod tests {
         assert!(!list.allows(None));
         assert!(matches!(PeerPolicy::from_env_value(""), PeerPolicy::Disabled));
         assert!(matches!(PeerPolicy::from_env_value("any"), PeerPolicy::Any));
+    }
+
+    #[test]
+    fn peer_policy_matches_ipv4_mapped_ipv6_peers() {
+        // Socket dual-stack: el peer IPv4 llega como `::ffff:a.b.c.d` y debe casar con la
+        // entrada IPv4 de la lista (y al revés).
+        let list = PeerPolicy::from_env_value("172.30.32.2");
+        let mapped: IpAddr = "::ffff:172.30.32.2".parse().unwrap();
+        assert!(list.allows(Some(mapped)));
+        let mapped_list = PeerPolicy::from_env_value("::ffff:172.30.32.2");
+        assert!(mapped_list.allows(Some("172.30.32.2".parse().unwrap())));
+        // Y no se ablanda: otra IP mapeada sigue fuera.
+        assert!(!list.allows(Some("::ffff:10.0.0.9".parse().unwrap())));
     }
 }

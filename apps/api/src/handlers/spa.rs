@@ -10,6 +10,7 @@
 //! Invariante maestro: sin prefijo y sin SSO la respuesta es el fichero **byte a
 //! byte** (`Cow::Borrowed`) — el modo compose no cambia ni un carácter.
 
+use crate::handlers::sso::sso_available;
 use crate::prefix::PeerIp;
 use crate::state::AppState;
 use axum::extract::State;
@@ -19,9 +20,11 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Header de identidad del proxy de confianza (el Supervisor de HA lo stripea si
-/// viene del cliente, así que detrás del ingress es fiable).
-pub const X_REMOTE_USER_ID: &str = "x-remote-user-id";
+/// Cabeceras de las que depende el HTML que sale de aquí: las dos del prefijo y la de
+/// identidad, que decide `__FF_SSO__`. Se emite en **todas** las respuestas, también en la
+/// verbatim: un caché intermedio que guardara el shell anónimo sin `Vary` se lo devolvería
+/// después a una petición que sí trae `X-Remote-User-Id`, y el flag de SSO no llegaría nunca.
+const SHELL_VARY: &str = "X-Ingress-Path, X-Forwarded-Prefix, X-Remote-User-Id";
 
 /// `index.html` leído del disco una vez al arrancar.
 pub struct SpaIndex {
@@ -58,9 +61,9 @@ pub async fn serve_index(
     headers: HeaderMap,
 ) -> Response {
     let prefix = state.request_prefix(&headers);
-    let sso = state.trusted_header_auth
-        && state.trusted_peers.allows(peer)
-        && headers.contains_key(X_REMOTE_USER_ID);
+    // Predicado único con el endpoint que abrirá la sesión (`handlers/sso.rs`): si el shell
+    // dice `__FF_SSO__=true`, el `POST /v1/auth/sso` que la SPA lanzará puede prosperar.
+    let sso = sso_available(&state, peer, &headers);
 
     let body = inject(&index.html, &prefix, sso);
     let modified = matches!(body, Cow::Owned(_));
@@ -75,14 +78,12 @@ pub async fn serve_index(
         // El HTML depende de headers de proxy: que ningún caché intermedio sirva
         // el shell con el prefijo (o el flag SSO) de otro despliegue.
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        h.insert(
-            header::VARY,
-            HeaderValue::from_static("X-Ingress-Path, X-Forwarded-Prefix"),
-        );
     } else {
         // El shell de una SPA se revalida siempre (los assets hasheados sí cachean).
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     }
+    // `Vary` en las dos ramas: la respuesta verbatim también es una de las variantes.
+    h.insert(header::VARY, HeaderValue::from_static(SHELL_VARY));
     response
 }
 
