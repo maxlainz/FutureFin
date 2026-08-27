@@ -35,6 +35,7 @@ import {
 } from "../lib/fire";
 import { type LedgerPersonScope } from "../lib/ledger";
 import { settingsSubTabPath } from "../lib/navigation";
+import { appUrl } from "../lib/basePath";
 import {
   complementaryProjectionTickLabel,
   formatYearsEsFromMonths,
@@ -377,7 +378,7 @@ export function RetirementView({
           Con la inflación a 0 %, tu objetivo se queda plano en dinero de hoy: la fecha que ves
           puede ser optimista frente a lo que costará vivir entonces.{" "}
           <a
-            href={settingsSubTabPath("plan")}
+            href={appUrl(settingsSubTabPath("plan"))}
             onClick={(e) => {
               if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
                 return;

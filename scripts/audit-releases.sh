@@ -13,6 +13,7 @@
 # Uso:
 #   ./scripts/audit-releases.sh            # informe legible; sale 1 si hay deriva bloqueante
 #   ./scripts/audit-releases.sh --version  # solo comprueba la versión de Cargo.toml (modo CI)
+#   ./scripts/audit-releases.sh --addon    # el add-on de HA apunta a la versión del binario
 #
 # Deriva BLOQUEANTE (exit 1): un tag sin sección en el CHANGELOG. Eso rompe el
 # paso de publicación de `publish-image.yml`, que redacta las notas desde ahí.
@@ -30,6 +31,30 @@ changelog_versions() {
 cargo_version() {
   grep -m1 '^version' apps/api/Cargo.toml | cut -d'"' -f2
 }
+
+addon_version() {
+  grep -m1 '^version:' addon/futurefin/config.yaml | cut -d'"' -f2
+}
+
+# --- modo add-on: la tienda de HA y el binario deben decir lo mismo -------------
+# El Supervisor usa el `version:` del add-on como TAG de la imagen. Si diverge del
+# Cargo.toml, o pide una imagen que no existe todavía, o sirve una vieja en silencio.
+# Lo sincroniza el paso final de publish-image.yml; este modo es la comprobación
+# manual (durante una release el add-on va por detrás hasta que la imagen se publica,
+# así que NO está cableado en la CI a propósito).
+if [ "${1:-}" = "--addon" ]; then
+  cargo_v="$(cargo_version)"
+  addon_v="$(addon_version)"
+  if [ "$cargo_v" != "$addon_v" ]; then
+    echo "FALLO: el add-on declara $addon_v y apps/api/Cargo.toml está en $cargo_v." >&2
+    echo "       El Supervisor de Home Assistant usa ese número como tag de la imagen." >&2
+    echo "       Sincroniza addon/futurefin/config.yaml (lo hace publish-image.yml tras" >&2
+    echo "       publicar la imagen; a mano, con un PR normal)." >&2
+    exit 1
+  fi
+  echo "OK: add-on y binario coinciden en $cargo_v."
+  exit 0
+fi
 
 # --- modo CI: la versión que se va a publicar DEBE tener sección ---------------
 # Es el guard barato que habría evitado el agujero de la 2.2.0 (se tagueó y se

@@ -17,6 +17,9 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 | `FUTUREFIN_MCP_ENABLED` | `true` | Bool (`parse_bool_env` de `main.rs`). Con `0`/`false` el router `/mcp` **ni se monta** (404 del fallback) **y desde 3.1.0 tampoco el protocolo OAuth**: las 7 rutas raíz (`/.well-known/oauth-*`, `/oauth/register|token|revoke`) ni se construyen, y con ellas caen `/v1/oauth/authorize-details` y `POST /v1/oauth/authorize`. **EXCEPCIÓN: `GET/DELETE /v1/oauth/connections[/{id}]` se montan siempre**, igual que `/v1/api-tokens` — apagar MCP no puede dejarte sin poder revocar credenciales ya concedidas. Default habilitado: el endpoint es inerte sin credenciales (todo 401) y producción sigue sin requerir env vars. |
 | `FUTUREFIN_PUBLIC_URL` | — (derivado del request) | **Opcional** (3.1.0). Origen público canónico usado como `issuer` OAuth y para construir los endpoints de la metadata `.well-known`. Sin ella, `oauth/url.rs::public_base_url` lo **deriva por request**: `X-Forwarded-Proto` + `X-Forwarded-Host` (primer valor de cada uno) o el header `Host`, con charset estricto (`host[:puerto]`, IPv6 entre corchetes, ≤255 chars, sin `/`, `@`, espacios ni controles) → si no cuadra, **400 `invalid_request`**. **Fíjala solo si tu reverse proxy no manda esos headers** (o manda un `Host` interno): entonces claude.ai recibiría un issuer inalcanzable y la conexión falla. Formato: origen desnudo, `https://finanzas.example.com` — **sin path, query, fragmento ni barra final**. **Validación fail-loud** como `CORS_ORIGINS` (`main.rs::public_url()`): si está presente pero es inválida (no parseable, esquema ≠ http/https, sin host, o con path/query/fragmento) el arranque hace **panic** en vez de servir metadata OAuth rota en silencio. Se normaliza al origen ASCII. El log de arranque la imprime (`public_url=…` o `(derived from request)`). Irrelevante con `FUTUREFIN_MCP_ENABLED=0`. |
 | `FUTUREFIN_RECONCILE_SWEEP_HOURS` | `24` | **Opcional** (3.8.1). Cada cuántas horas corre el barrido de conciliación de transferencias (`main.rs::spawn_reconcile_sweep` → `reconcile::sweep_all_owners`), la **única tarea periódica del binario**. `0` la desactiva. Se parsea como `u64` y se **descarta si supera 168** (una semana): valor no parseable, negativo o `>168` → default 24, sin avisar (`main.rs::reconcile_sweep_hours`). Es una **red de reintento**, no el mecanismo principal: el pase corre ya tras cada mutación del conjunto, y esos pases son best-effort (un fallo se loguea y no convierte una escritura persistida en 5xx), así que sin barrido un fallo puntual dejaba el par sin conciliar para siempre y en silencio. La primera pasada va **tras el primer intervalo**, no al arrancar. En modos B/C, una pasada que recupera pares **invalida la cache de proyección** (D12a) — si no recupera nada, no la toca. La tarea se aborta antes de cerrar el pool en el apagado ordenado. |
+| `FUTUREFIN_BASE_PATH` | — (`""` = raíz) | **Opcional** (add-on HA). Prefijo público fijo para despliegues tras un proxy con subpath que **no** manda `X-Forwarded-Prefix`. Parseada en `main.rs::base_path()` → `prefix::validate_base_path_env`. Es la **fuente de menor precedencia**: `X-Ingress-Path` > `X-Forwarded-Prefix` > esta var > `""` (`prefix::request_prefix`). Bounds de `normalize_prefix`: empieza por `/`, sin `//`, sin segmentos `.`/`..`, charset `[A-Za-z0-9._~/-]`, ≤128 chars; `/` o vacío ⇒ raíz; una barra final se recorta. **Fail-loud** como `FUTUREFIN_PUBLIC_URL`: presente pero inválida ⇒ **panic** al arrancar, en vez de servir HTML con refs rotos. Solo afecta a lo que resuelve el navegador (refs del `index.html`, `fetch`/`pushState`, `Path` de la cookie): el router sigue montado en la raíz. **No arregla MCP/OAuth bajo subpath** — el issuer es solo origen (ver [`api-routes.md`](api-routes.md) §URL pública). El log de arranque la imprime (`base_path=… ` o `(root)`). |
+| `FUTUREFIN_TRUSTED_PROXY_IPS` | — (`Disabled`) | **Opcional** (add-on HA). Peers cuya palabra sobre identidad y embebido en iframe se acepta. Parseada en `main.rs::trusted_peers()` → `prefix::PeerPolicy::from_env_value`. Valores: sin definir o vacía ⇒ `Disabled` (**nadie** es de confianza, el default seguro); `any` (case-insensitive) ⇒ `Any`, todo peer — **solo** para tests y para relajar el frame tras un proxy en red privada; **incompatible con `FUTUREFIN_TRUSTED_PROXY_AUTH=1`** (el arranque hace panic: sería un «entra como quien digas» para cualquiera que alcance el puerto); lista de IPs separadas por comas ⇒ `List` (el add-on de HA usa `172.30.32.2`, el ingress del Supervisor). **Fail-loud** estilo `CORS_ORIGINS`: una entrada que no parsea como `IpAddr` hace **panic**, y una lista que resuelve vacía también. La IP la aporta `PeerIp` desde `ConnectInfo<SocketAddr>` (`main.rs` sirve con `into_make_service_with_connect_info`); un peer desconocido solo pasa con `any`. Habilita dos cosas y **nada más**: relajar el anti-clickjacking a `frame-ancestors 'self'` cuando además llega `X-Ingress-Path` (`handlers/frame.rs`), y aceptar identidad por cabeceras si `FUTUREFIN_TRUSTED_PROXY_AUTH=1`. La detección del prefijo **no** la usa a propósito. |
+| `FUTUREFIN_TRUSTED_PROXY_AUTH` | `false` | **Opcional** (add-on HA). Bool (`parse_bool_env`). Con `1`/`true`, `POST /v1/auth/sso` acepta la identidad de `X-Remote-User-Id` desde un peer de confianza; apagada, ese endpoint —que **se monta siempre**— responde 401 `sso_disabled`. **Combinación fail-loud** (`main.rs`): `FUTUREFIN_TRUSTED_PROXY_AUTH=1` con `FUTUREFIN_TRUSTED_PROXY_IPS` sin definir hace **panic** al arrancar, porque aceptaría `X-Remote-User-Id` de cualquiera. El log de arranque imprime `trusted_header_auth`. Contrato completo: [`auth-and-membership.md`](auth-and-membership.md) §SSO. |
 | `WEB_STATIC_ROOT` | — | Path to Vite `dist/`. Docker sets `/app/web`. Omit for API-only. |
 | `FUTUREFIN_API_PORT` | `8081` | Used by Vite proxy (`vite.config.ts`) |
 | `WEB_DEV_PORT` | `8080` | Vite dev server port |
@@ -38,7 +41,48 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 | `FUTUREFIN_PG_LOG_LEVEL` | — | Solo depuración: `log_min_messages` del PG embebido. |
 | `POSTGRES_USER` / `POSTGRES_DB` | `futurefin` | Compat con instalaciones 2.x personalizadas. |
 | `POSTGRES_PASSWORD` | — | **Ya no es obligatoria** (socket local, auth trust). Si viene, se aplica al rol y nada más. |
-| `PGDATA` | `/var/lib/postgresql/data` | Avanzada; cambiarla rompe la compat con volúmenes 2.x. |
+| `PGDATA` | `/var/lib/postgresql/data` | Avanzada; cambiarla rompe la compat con volúmenes 2.x. **Bajo Home Assistant el entrypoint la pisa** con `/data/pgdata` (ver §Modo add-on). |
+
+### Modo add-on de Home Assistant (entrypoint)
+
+**La detección es la presencia de `/data/options.json`** — el fichero que el Supervisor escribe con
+las opciones del add-on. No hay ninguna otra señal fiable desde dentro del contenedor. La variable
+interna `HA_ADDON` (0/1) se imprime en la línea de arranque (`ha_addon=…`).
+
+**Overrides de rutas, explícitos y ANTES de la sección de Configuración**: el Supervisor monta **un
+único** bind persistente en `/data`, así que
+
+| Variable | Valor bajo HA | Por qué el override es explícito |
+|---|---|---|
+| `PGDATA` | `/data/pgdata` | El Dockerfile las exporta como `ENV`, así que los `${VAR:-default}` de la sección de Configuración **nunca** verían un valor de HA: verían el del ENV, que apunta fuera del único volumen persistente y perdería la base al recrear el contenedor. |
+| `FUTUREFIN_STATE_DIR` | `/data/state` | Idem — ahí van los backups pre-migración (`/data/state/backups`). |
+
+**Mapeo `options.json` → env** (helper `ha_opt`, que lee con `jq` comprobando `has($k)` en vez de
+`// empty`: el `//` de jq trata `false` como vacío, así que un booleano puesto a `false` se leería
+como ausente y el toggle no se aplicaría nunca):
+
+| Opción | Efecto |
+|---|---|
+| `log_level` | `trace`/`debug` → `RUST_LOG=futurefin_api=debug,tower_http=debug,sqlx=warn`; `warn`/`error` → `…=warn,…=warn,sqlx=error`. `info`/`notice`/vacío: se respeta el `RUST_LOG` que ya hubiera. |
+| `sso` = `true` | `FUTUREFIN_TRUSTED_PROXY_AUTH=1` + `FUTUREFIN_TRUSTED_PROXY_IPS` (default `172.30.32.2`, el ingress del Supervisor — el único peer que alcanza al add-on). |
+| `mcp` = `false` | `FUTUREFIN_MCP_ENABLED=0`. |
+| `cors_origins` | `CORS_ORIGINS`, si no está vacía. |
+| `public_url` | `FUTUREFIN_PUBLIC_URL`, si no está vacía. |
+
+**Guarda de volumen: `is_persisted`, no `is_mounted`.** La comprobación de «hay volumen montado en
+`PGDATA`» sube por los ancestros preguntando `is_mounted` y **para antes de `/`**: en cualquier
+contenedor `/` es un mountpoint (el rootfs del overlay), así que aceptarlo convertiría la guarda en
+decorativa. Sigue mordiendo igual en compose sin volumen (`/var/lib/postgresql/data`,
+`/var/lib/postgresql`, `/var/lib`, `/var` — ninguno es mountpoint ⇒ aborta), y bajo HA acepta
+`/data/pgdata` porque `/data` sí es el bind del Supervisor. Con el `is_mounted` a secas ese caso
+moría, porque el mountpoint es el padre y no `$PGDATA`. `ensure_runtime_dirs` crea además `$PGDATA`
+si falta (bajo HA no existe en el primer arranque) — **solo si falta**: tocar el directorio de un
+cluster existente cambiaría el uid que inspecciona `adopt_cluster` y se saltaría la adopción de un
+volumen 2.x.
+
+> `.env.example` lista las tres comentadas en el bloque Producción (verificar con
+> `grep -n TRUSTED_PROXY .env.example`): son variables del despliegue tras proxy — bajo Home
+> Assistant no hacen falta porque las fija el propio entrypoint desde `options.json`.
 
 ## Docker-specific (prod)
 

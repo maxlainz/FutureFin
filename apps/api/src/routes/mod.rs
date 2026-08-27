@@ -19,6 +19,7 @@ use crate::handlers::members::members_router;
 use crate::handlers::pending_users::pending_users_router;
 use crate::handlers::planning::planning_router;
 use crate::handlers::projection::projection_router;
+use crate::handlers::sso::sso_login;
 use crate::handlers::summary::summary_router;
 use crate::handlers::transactions::transactions_router;
 use crate::openapi::openapi_json;
@@ -45,6 +46,9 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
                 .route("/login", post(login))
                 .route("/logout", post(logout))
                 .route("/password", post(change_password))
+                // Se monta SIEMPRE: la forma del router no depende del entorno. Con el SSO
+                // apagado (el default) el handler devuelve 401 `sso_disabled`.
+                .route("/sso", post(sso_login))
                 .route("/me", get(me).patch(patch_me)),
         )
         .route(

@@ -53,6 +53,16 @@ pub struct AppState {
     /// barra final), validado al arrancar. `None` ⇒ el issuer OAuth se deriva de los
     /// headers del request (X-Forwarded-Proto / Host).
     pub public_url: Option<String>,
+    /// `FUTUREFIN_BASE_PATH` (opcional, normalizado, `""` = raíz): prefijo fijo para
+    /// despliegues tras proxy con subpath. Los headers `X-Ingress-Path` /
+    /// `X-Forwarded-Prefix` tienen precedencia por request (ver `crate::prefix`).
+    pub base_path: String,
+    /// `FUTUREFIN_TRUSTED_PROXY_IPS`: peers cuya palabra sobre identidad y embebido en
+    /// iframe se acepta. `Disabled` (default) = nadie.
+    pub trusted_peers: crate::prefix::PeerPolicy,
+    /// `FUTUREFIN_TRUSTED_PROXY_AUTH` (default false): habilita `POST /v1/auth/sso`
+    /// (identidad por cabeceras `X-Remote-User-*` desde un peer de confianza).
+    pub trusted_header_auth: bool,
     pub projection_cache: RwLock<ProjectionCacheMap>,
 }
 
@@ -72,8 +82,31 @@ impl AppState {
             session_ttl_days,
             mcp_enabled,
             public_url,
+            base_path: String::new(),
+            trusted_peers: crate::prefix::PeerPolicy::Disabled,
+            trusted_header_auth: false,
             projection_cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Configuración de proxy inverso (subpath + confianza). Aparte de `new()` para no
+    /// tocar los call sites que no la necesitan (los defaults son el comportamiento
+    /// histórico: sin prefijo, sin peers de confianza, sin SSO).
+    pub fn with_trusted_proxy(
+        mut self,
+        base_path: String,
+        trusted_peers: crate::prefix::PeerPolicy,
+        trusted_header_auth: bool,
+    ) -> Self {
+        self.base_path = base_path;
+        self.trusted_peers = trusted_peers;
+        self.trusted_header_auth = trusted_header_auth;
+        self
+    }
+
+    /// Prefijo efectivo de una request (ver `crate::prefix::request_prefix`).
+    pub fn request_prefix(&self, headers: &http::HeaderMap) -> String {
+        crate::prefix::request_prefix(&self.base_path, headers)
     }
 
     /// Hit del cache con sliding TTL. Devuelve `None` si no existe o expiró

@@ -6,6 +6,7 @@
  * reconoce acaba en la primera sub-pestaña sin avisar, que es peor que un 404.
  */
 import { describe, expect, it } from "vitest";
+import { stripBaseWith } from "./basePath";
 import {
   SETTINGS_SUBTAB_LABEL,
   SETTINGS_SUBTAB_SLUG,
@@ -53,5 +54,20 @@ describe("settings sub-tabs", () => {
     for (const id of Object.keys(SETTINGS_SUBTAB_SLUG) as (keyof typeof SETTINGS_SUBTAB_SLUG)[]) {
       expect(settingsSubTabFromPathname(settingsSubTabPath(id))).toBe(id);
     }
+  });
+
+  // Detrás de un proxy en un subpath el `window.location.pathname` llega prefijado; el router
+  // solo entiende rutas canónicas, así que la composición con `stripBaseWith` es el contrato.
+  it("con prefijo de proxy, el router resuelve tras stripBase", () => {
+    const base = "/api/hassio_ingress/abc123";
+    expect(tabFromPathname(stripBaseWith(base, `${base}/ajustes/plan`))).toBe(
+      "settings",
+    );
+    expect(
+      settingsSubTabFromPathname(stripBaseWith(base, `${base}/ajustes/plan`)),
+    ).toBe("plan");
+    expect(tabFromPathname(stripBaseWith(base, `${base}/resumen`))).toBe(
+      "summary",
+    );
   });
 });

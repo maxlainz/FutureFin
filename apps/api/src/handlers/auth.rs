@@ -5,6 +5,7 @@ use crate::handlers::installation::{
 };
 use crate::handlers::projection::warm_up_household_projection;
 use crate::handlers::session::require_session_user;
+use crate::prefix::PeerIp;
 use crate::state::AppState;
 use axum::extract::Extension;
 use axum::Json;
@@ -20,6 +21,58 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 pub const SESSION_COOKIE: &str = "ff_session";
+
+/// `Path` de la cookie de sesión para una request: el prefijo público bajo el que el navegador
+/// ve la app, o `/` cuando no hay ninguno.
+///
+/// Por qué acotarla: bajo el Ingress de Home Assistant **todos los add-ons comparten origen**
+/// (`http://homeassistant.local:8123`), así que un `Path=/` emitiría `ff_session` también hacia
+/// `/api/hassio_ingress/<token-de-otro-add-on>`. Acotarla al prefijo propio la deja donde debe.
+///
+/// El prefijo de la request solo manda si el **peer es de confianza**. `prefix.rs` tolera un
+/// `X-Ingress-Path` falsificado porque «solo deforma la respuesta del propio emisor», y eso
+/// deja de ser cierto en cuanto el header decide un atributo de seguridad de una cookie: sin
+/// esta condición, cualquiera podría fijar el `Path` de su propia `ff_session` (o el de la
+/// cookie de borrado del logout, dejándola viva). Con peer no confiable se usa el prefijo
+/// configurado del servidor (`FUTUREFIN_BASE_PATH`), que no viene de la red.
+///
+/// Invariante maestro: sin cabeceras de proxy y sin base path el prefijo es `""` y la cookie
+/// sale con `Path=/`, **byte a byte** como siempre — el modo compose no cambia. Bajo el add-on
+/// el Supervisor SÍ es peer de confianza, así que ahí tampoco cambia nada.
+pub(crate) fn session_cookie_path(
+    state: &AppState,
+    peer: Option<std::net::IpAddr>,
+    headers: &http::HeaderMap,
+) -> String {
+    let p = if state.trusted_peers.allows(peer) {
+        state.request_prefix(headers)
+    } else {
+        state.base_path.clone()
+    };
+    if p.is_empty() {
+        "/".to_string()
+    } else {
+        p
+    }
+}
+
+/// Cookie de sesión (`ff_session`) con los atributos de siempre y el `Path` dado.
+pub(crate) fn session_cookie(state: &AppState, sid: Uuid, path: String) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, sid.to_string()))
+        .path(path)
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::days(state.session_ttl_days))
+        .secure(state.cookie_secure)
+        .build()
+}
+
+/// Cookie «plantilla» para el borrado. El navegador solo casa un `Set-Cookie` de borrado con la
+/// cookie viva si **nombre y `Path` coinciden**: con el `Path=/` fijo de antes, un logout bajo
+/// Ingress dejaba la cookie acotada viva y el usuario seguía «dentro».
+pub(crate) fn session_cookie_removal(path: String) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, "")).path(path).build()
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RegisterBody {
@@ -58,15 +111,27 @@ pub struct PatchMeBody {
 struct UserAuthRow {
     id: Uuid,
     username: String,
-    password_hash: String,
+    /// `None` = cuenta SSO sin contraseña (ver la migración `users_trusted_header_identity`).
+    password_hash: Option<String>,
     birth_date: Option<NaiveDate>,
 }
 
 #[derive(Debug, FromRow)]
-struct UserRow {
-    id: Uuid,
-    username: String,
-    birth_date: Option<NaiveDate>,
+pub(crate) struct UserRow {
+    pub id: Uuid,
+    pub username: String,
+    pub birth_date: Option<NaiveDate>,
+}
+
+/// Error común a los dos sitios donde una cuenta sin contraseña se topa con el flujo de
+/// contraseña: `POST /v1/auth/login` y `POST /v1/auth/password`. Es un 401 **hablado** a
+/// propósito (ver `ApiError::UnauthorizedWith`): quien tiene una cuenta creada por el proxy no
+/// tiene ninguna contraseña que probar, y un 401 mudo lo dejaría tecleando para siempre.
+pub(crate) fn sso_account_no_password() -> ApiError {
+    ApiError::UnauthorizedWith(
+        "sso_account_no_password: this account signs in through the trusted proxy (Home Assistant)"
+            .into(),
+    )
 }
 
 pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
@@ -120,7 +185,44 @@ fn validate_birth_date(d: NaiveDate) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn user_row_to_response(row: UserRow) -> UserResponse {
+/// Abre sesión para un usuario ya autenticado: fila en `sessions`, cookie `ff_session` con el
+/// `Path` dado, warm-up del cache en background y la respuesta con su perfil.
+///
+/// Punto ÚNICO de creación de sesión de la app: lo comparten el login por contraseña y el
+/// login por identidad delegada (`handlers/sso.rs`). Antes eran dos copias del mismo bloque, y
+/// una copia es una vía de acceso que puede divergir de la otra en silencio (TTL, atributos de
+/// la cookie, warm-up).
+pub(crate) async fn establish_session(
+    state: &Arc<AppState>,
+    jar: CookieJar,
+    cookie_path: String,
+    user: UserRow,
+) -> Result<(CookieJar, Json<UserResponse>), ApiError> {
+    let expires_at = Utc::now() + Duration::days(state.session_ttl_days);
+    let sid: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO sessions (user_id, expires_at) VALUES ($1, $2) RETURNING id"#,
+    )
+    .bind(user.id)
+    .bind(expires_at)
+    .fetch_one(&state.pool)
+    .await?;
+    let jar = jar.add(session_cookie(state, sid, cookie_path));
+
+    // Warm-up del cache de proyección en background. Si el usuario no es miembro de ningún
+    // installation (caso pending), skip silencioso. El login responde inmediatamente sin
+    // esperar al recompute (D7).
+    let user_id = user.id;
+    if let Ok((iid, _)) = require_installation_member(&state.pool, user_id).await {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            warm_up_household_projection(state_clone, iid, user_id).await;
+        });
+    }
+
+    Ok((jar, Json(user_row_to_response(user))))
+}
+
+pub(crate) fn user_row_to_response(row: UserRow) -> UserResponse {
     UserResponse {
         id: UserId(row.id),
         username: row.username,
@@ -164,13 +266,20 @@ pub async fn register(
     .fetch_one(&mut *tx)
     .await
     // El `?` normal mapearía el SQLSTATE 23505 a un `Conflict` pelado, que llega a la SPA como
-    // «resource conflict»: el único unique de esta tabla es `username`, así que aquí SÍ sabemos
-    // qué colisionó y podemos decirlo.
-    .map_err(|e| match ApiError::from(e) {
-        ApiError::Conflict => ApiError::ConflictWith(
-            "username_taken: that username is already registered".into(),
-        ),
-        other => other,
+    // «resource conflict»: cuando sabemos QUÉ colisionó hay que decirlo. Y desde el SSO por
+    // cabeceras `username` **ya no es el único unique de la tabla** (`users_external_user_id_key`
+    // también lo es), así que se comprueba el nombre de la restricción antes de traducir: sin
+    // eso, una colisión de identidad externa se anunciaría como «ese nombre ya está registrado»
+    // y mandaría al usuario a cambiar algo que no tiene nada que ver.
+    .map_err(|e| {
+        let is_username = matches!(&e, sqlx::Error::Database(db)
+            if db.constraint() == Some("users_username_key"));
+        match (ApiError::from(e), is_username) {
+            (ApiError::Conflict, true) => ApiError::ConflictWith(
+                "username_taken: that username is already registered".into(),
+            ),
+            (other, _) => other,
+        }
     })?;
 
     match bootstrap_installation_as_owner_if_empty(&mut tx, &row.id).await
@@ -208,6 +317,8 @@ pub async fn register(
 pub async fn login(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
+    PeerIp(peer): PeerIp,
+    headers: http::HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Result<(CookieJar, Json<UserResponse>), ApiError> {
     validate_username(&body.username)?;
@@ -217,48 +328,31 @@ pub async fn login(
     .bind(&body.username)
     .fetch_optional(&state.pool)
     .await?;
-    // Se verifica SIEMPRE, exista el usuario o no: la rama inexistente pasa por el mismo
-    // coste de Argon2id, así que el 401 no delata quién tiene cuenta (ver `password.rs`).
-    let stored = user.as_ref().map(|u| u.password_hash.clone());
-    password::verify_password_blocking(&body.password, stored).await?;
+    // Se verifica SIEMPRE, exista el usuario o no —y también cuando existe SIN contraseña—: las
+    // tres ramas pasan por el mismo coste de Argon2id, así que el 401 no delata quién tiene
+    // cuenta por el reloj (ver `password.rs`).
+    let stored = user.as_ref().and_then(|u| u.password_hash.clone());
+    let verified = password::verify_password_blocking(&body.password, stored).await;
     let Some(user) = user else {
+        verified?;
         return Err(ApiError::Unauthorized);
     };
-    let expires_at = Utc::now() + Duration::days(state.session_ttl_days);
-    let sid: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO sessions (user_id, expires_at) VALUES ($1, $2) RETURNING id"#,
-    )
-    .bind(user.id)
-    .bind(expires_at)
-    .fetch_one(&state.pool)
-    .await?;
-    let cookie = Cookie::build((SESSION_COOKIE, sid.to_string()))
-        .path("/")
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .max_age(CookieDuration::days(state.session_ttl_days))
-        .secure(state.cookie_secure)
-        .build();
-    let jar = jar.add(cookie);
-    let row: UserRow = sqlx::query_as(
-        r#"SELECT id, username, birth_date FROM users WHERE id = $1"#,
-    )
-    .bind(user.id)
-    .fetch_one(&state.pool)
-    .await?;
-
-    // Warm-up del cache de proyección en background. Si el usuario no es
-    // miembro de ningún installation (caso pending), skip silencioso. El
-    // login responde inmediatamente sin esperar al recompute.
-    if let Ok((iid, _)) = require_installation_member(&state.pool, user.id).await {
-        let state_clone = state.clone();
-        let user_id = user.id;
-        tokio::spawn(async move {
-            warm_up_household_projection(state_clone, iid, user_id).await;
-        });
+    if user.password_hash.is_none() {
+        // Cuenta creada por el proxy de confianza: no hay contraseña que acertar. Decirlo revela
+        // que ese nombre existe como cuenta SSO, y es un intercambio buscado: sin el mensaje, el
+        // único usuario del add-on de Home Assistant se queda encallado en un 401 mudo tecleando
+        // una contraseña que nunca se fijó.
+        return Err(sso_account_no_password());
     }
-
-    Ok((jar, Json(user_row_to_response(row))))
+    verified?;
+    // El perfil sale de la fila que ya se leyó para verificar la contraseña: un segundo SELECT
+    // por el mismo id solo añadía un viaje a la BD.
+    let row = UserRow {
+        id: user.id,
+        username: user.username,
+        birth_date: user.birth_date,
+    };
+    establish_session(&state, jar, session_cookie_path(&state, peer, &headers), row).await
 }
 
 #[utoipa::path(
@@ -272,6 +366,8 @@ pub async fn login(
 pub async fn logout(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
+    PeerIp(peer): PeerIp,
+    headers: http::HeaderMap,
 ) -> Result<(CookieJar, axum::http::StatusCode), ApiError> {
     let mut user_id_to_invalidate: Option<Uuid> = None;
     if let Some(c) = jar.get(SESSION_COOKIE) {
@@ -293,11 +389,7 @@ pub async fn logout(
     if let Some(uid) = user_id_to_invalidate {
         state.invalidate_projection_by_user(uid).await;
     }
-    let jar = jar.remove(
-        Cookie::build((SESSION_COOKIE, ""))
-            .path("/")
-            .build(),
-    );
+    let jar = jar.remove(session_cookie_removal(session_cookie_path(&state, peer, &headers)));
     Ok((jar, axum::http::StatusCode::NO_CONTENT))
 }
 
@@ -423,11 +515,17 @@ pub async fn change_password(
         .get(SESSION_COOKIE)
         .and_then(|c| Uuid::parse_str(c.value()).ok());
 
-    let stored: String =
+    let stored: Option<String> =
         sqlx::query_scalar(r#"SELECT password_hash FROM users WHERE id = $1"#)
             .bind(user.id.0)
             .fetch_one(&state.pool)
             .await?;
+    // Cuenta SSO: no hay contraseña actual que verificar, y FIJAR una desde aquí crearía una
+    // segunda vía de acceso a una cuenta cuya autenticación pertenece al proveedor. Fuera de
+    // alcance en esta release; el 401 lo dice en vez de fallar con «contraseña incorrecta».
+    let Some(stored) = stored else {
+        return Err(sso_account_no_password());
+    };
     // 400 y no 401: la sesión es válida: lo que falla es el dato del formulario. Un 401 haría
     // que la SPA echara al usuario al login por escribir mal su propia contraseña.
     // Solo el 401 significa «la contraseña no es la suya»; un `Unavailable` (pánico del task,

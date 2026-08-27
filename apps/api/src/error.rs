@@ -78,6 +78,13 @@ pub enum ApiError {
     Unprocessable(String),
     #[error("unauthorized")]
     Unauthorized,
+    /// 401 que SÍ propaga mensaje al wire, con prefijo `snake_code:`. El `Unauthorized` pelado es
+    /// deliberadamente mudo (no delata qué credencial falló); existe este hermano para el caso
+    /// contrario: cuando el 401 describe una situación de la CUENTA que el usuario necesita
+    /// entender para salir de ella — «esta cuenta entra por el proxy y no tiene contraseña» —, y
+    /// callarlo lo dejaría reintentando una contraseña que no existe.
+    #[error("{0}")]
+    UnauthorizedWith(String),
     #[error("forbidden")]
     Forbidden,
     #[error("resource conflict")]
@@ -125,7 +132,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Unauthorized | ApiError::UnauthorizedWith(_) => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::NotFound | ApiError::NotFoundWith(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict | ApiError::ConflictWith(_) => StatusCode::CONFLICT,
@@ -139,6 +146,7 @@ impl ApiError {
             ApiError::BadRequest(s) => s.clone(),
             ApiError::Unprocessable(s) => s.clone(),
             ApiError::Unauthorized => "authentication required".into(),
+            ApiError::UnauthorizedWith(s) => s.clone(),
             ApiError::Forbidden => "forbidden".into(),
             ApiError::NotFound => "not found".into(),
             ApiError::NotFoundWith(s) => s.clone(),
@@ -156,7 +164,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => ErrorCode::BadRequest,
             ApiError::Unprocessable(_) => ErrorCode::Unprocessable,
-            ApiError::Unauthorized => ErrorCode::Unauthorized,
+            ApiError::Unauthorized | ApiError::UnauthorizedWith(_) => ErrorCode::Unauthorized,
             ApiError::Forbidden => ErrorCode::Forbidden,
             ApiError::NotFound | ApiError::NotFoundWith(_) => ErrorCode::NotFound,
             ApiError::Conflict | ApiError::ConflictWith(_) => ErrorCode::Conflict,

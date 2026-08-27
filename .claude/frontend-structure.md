@@ -81,6 +81,12 @@ src/
 │   │                             #   equivalencia en chart-gestures.test.ts. ProjectionNetWorthChart la consume desde su
 │   │                             #   máquina de gestos Pointer Events (touch-action: pan-y; vertical = scroll de página)
 │   ├── theme.ts                  # ThemePref ("auto"|"light"|"dark") + apply/load/save + subscribeSystemThemeChanges
+│   ├── basePath.ts               # prefijo de subpath tras proxy inverso (Ingress de HA, X-Forwarded-Prefix).
+│   │                             #   Lee window.__FF_BASE__ / __FF_SSO__ (los inyecta handlers/spa.rs por request) →
+│   │                             #   BASE_PATH (normalizeBase: solo ruta absoluta, sin barra final; todo lo demás → "")
+│   │                             #   y SSO_AVAILABLE. apiUrl(path) para fetch, appUrl(path) para pushState,
+│   │                             #   stripBase(pathname) para el router. Puras testeables: apiUrlWith/stripBaseWith.
+│   │                             #   Test: basePath.test.ts (11 it()). Ver la regla en la tabla de abajo
 │   └── oauth.ts                  # helpers PUROS de la pantalla de consentimiento (v3.1.0): AuthorizeParams,
 │                                 #   parseAuthorizeParams (null si falta cualquiera de los 5 params obligatorios;
 │                                 #   `code_challenge_method=plain` SÍ parsea — rechazarlo es del servidor),
@@ -202,6 +208,7 @@ src/
 |----|----|
 | New API type returned by the backend | `api/types.ts` (export it) |
 | New fetch endpoint wrapper | `api/client.ts` if reusable, otherwise inline in `App.tsx` next to existing handlers |
+| **Cualquier URL absoluta que resuelva el navegador** (destino de `fetch`, `pushState`) | pásala por `apiUrl`/`appUrl` de `lib/basePath.ts`; lee `window.location.pathname` con `stripBase`. Sin proxy (`window.__FF_BASE__` ausente) son la identidad. `api/client.ts` ya lo hace por ti — solo los `fetch(` directos de `App.tsx`/`views/` lo necesitan a mano |
 | New pure formatter / parser | `lib/format.ts` (with a Vitest in `lib/format.test.ts`) |
 | **Campo de formulario que envía un importe/porcentaje** | `toApiDecimalString(raw)` de `lib/format.ts`, DENTRO del `try` del submit. Ver §Importes tecleados |
 | **Recortar una serie de proyección por un mes** | `lastPointIndexAtOrBeforeMonth(points, mes)` de `lib/projection-chart.ts`. Ver §Índice de array ≠ mes |
@@ -259,6 +266,36 @@ proyección lo alcanza en 2031, y `MiniProjection` rotulaba el eje con años que
 su serie. Con `density=monthly` la salida es idéntica, que es justo por lo que pasa desapercibido.
 Es la misma clase de fallo que el incidente v1.4.2 de la deflactación del chart.
 
+## Subpath tras proxy: toda URL de API pasa por `apiUrl` (`lib/basePath.ts`)
+
+Cuando FutureFin se sirve bajo un subpath (Ingress de Home Assistant, un `location /futurefin/` de
+nginx) **el servidor no ve el prefijo**: el proxy lo quita antes de entregar la petición, y el
+router de Axum sigue montado en la raíz. El prefijo solo existe para el **navegador**. `handlers/spa.rs`
+lo inyecta por request en el shell (`window.__FF_BASE__`, más `window.__FF_SSO__`) y este módulo lo
+convierte en tres funciones:
+
+| Función | Dónde se usa |
+|---|---|
+| `apiUrl(path)` | Destino de cualquier `fetch`. `api/client.ts` lo aplica **dentro de `apiFetch`**, así que todo lo que pase por los wrappers ya está cubierto. |
+| `appUrl(path)` | Destino de `pushState`/`replaceState` (la navegación de `App.tsx`). |
+| `stripBase(pathname)` | Lectura de `window.location.pathname` antes de dárselo al router (`App.tsx` en el estado inicial y en `popstate`; `main.tsx` para `/oauth/authorize`). |
+
+- **La regla**: *toda* URL absoluta que resuelva el navegador pasa por una de las tres. Los `fetch(`
+  directos de `App.tsx` y de las vistas autónomas lo necesitan **a mano** —`api/client.ts` solo
+  cubre lo que va por `apiFetch`—; audítalos con `grep -rn 'fetch("/v1' apps/web/src` y su gemelo
+  con backtick en vez de comilla doble (los dos deben salir vacíos).
+- **Contrato de no-regresión**: sin `window.__FF_BASE__` inyectado, `BASE_PATH` es `""` y las tres
+  funciones son la **identidad** carácter a carácter — la app se comporta exactamente igual que
+  antes de existir el módulo. `normalizeBase` degrada a `""` cualquier valor que no sea una ruta
+  absoluta (vacío, `/`, `//host`, una URL completa, basura): el caso sin prefijo es siempre el
+  seguro.
+- `apiUrlWith` es **idempotente**: una ruta ya prefijada no se duplica. Importa porque hay valores
+  (una URL que vuelve de `history`, un `url` que se recompone) que pueden pasar dos veces.
+- `SSO_AVAILABLE` (= `window.__FF_SSO__ === true`) es lo que dispara el intento **único** de
+  `POST /v1/auth/sso` cuando `/v1/auth/me` responde 401 (`refreshSession` en `App.tsx`). Cualquier
+  fallo cae al formulario de acceso de siempre.
+- Tests: `lib/basePath.test.ts`.
+
 ## Ruta `/oauth/authorize` — resuelta en `main.tsx`, no en el router de `App.tsx` (v3.1.0)
 
 La pantalla de consentimiento OAuth es la única vista que **no** cuelga del router de `App.tsx`. La
@@ -269,7 +306,7 @@ const OAuthAuthorizeView = lazy(() =>
   import("./views/OAuthAuthorizeView").then((m) => ({ default: m.OAuthAuthorizeView })),
 );
 const isOAuthAuthorize =
-  window.location.pathname.replace(/\/+$/, "") === "/oauth/authorize";
+  stripBase(window.location.pathname).replace(/\/+$/, "") === "/oauth/authorize";
 // …
 {isOAuthAuthorize ? (
   <Suspense fallback={null}><OAuthAuthorizeView /></Suspense>

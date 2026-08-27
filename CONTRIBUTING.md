@@ -107,6 +107,16 @@ el repositorio.
 
 Antes de retomar el trabajo: `git pull --ff-only`.
 
+> **Nota de administración del repositorio** (solo afecta a quien lo mantiene, no a quien
+> contribuye): tras publicar una imagen, `publish-image.yml` escribe en `main` el `version:` de
+> `addon/futurefin/config.yaml`, que es lo que hace que la tienda de add-ons de Home Assistant vea
+> la versión nueva. Para que ese commit pase la protección de rama, la app **«GitHub Actions» tiene
+> que estar como *bypass actor* del ruleset «Proteger main»**. Es un ajuste manual de GitHub que
+> **no vive en git**: si alguien lo quita, el paso falla con un 403 y el add-on se queda una
+> versión por detrás (la imagen y el Release ya están fuera; se arregla con un PR normal que suba
+> ese `version:`). `./scripts/audit-releases.sh --addon` comprueba que el add-on y
+> `apps/api/Cargo.toml` declaran la misma versión.
+
 ## 3. Las puertas — ejecútalas antes de proponer el cambio
 
 **Córrelas en local aunque CI las repita.** Desde 4.0.0 CI ejecuta las mismas suites, pero

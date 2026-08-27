@@ -100,8 +100,9 @@ Add `FooResponse`, `CreateFooBody` to the `components(schemas(...))` list, and t
 
 **Autenticación en la spec (4.0.0)**: `openapi.rs` declara `security(("ff_session" = []))` **global**,
 así que un handler con sesión no necesita decir nada. Un endpoint **público** debe llevar
-`security(())` en su `#[utoipa::path]` — hoy lo llevan exactamente cuatro (`health_check`,
-`ready_check`, `register`, `login`). Sin esa declaración global la spec presentaba 81 operaciones con
+`security(())` en su `#[utoipa::path]` — hoy lo llevan exactamente cinco (`health_check`,
+`ready_check`, `register`, `login` y, desde 4.3.0, `sso_login`: no lleva credencial de FutureFin
+porque la credencial la pone el proxy de confianza en una cabecera). Sin esa declaración global la spec presentaba 81 operaciones con
 sesión obligatoria como públicas y cualquier cliente generado nacía sin credencial.
 
 **Dos trampas que `tests/openapi_contract.rs` ya vigila** — si tu handler las dispara, el test falla
@@ -125,6 +126,16 @@ touch apps/api/migrations/$(date +%Y%m%d%H%M%S)_add_foo.sql
 - Never return `sqlx::Error` directly — `impl From<sqlx::Error> for ApiError` maps 23505 → 409 and 23503 → 400 automatically. Just `?` it.
 - For long horizons / large datasets in CPU-bound work, wrap in `tokio::task::spawn_blocking` so the Tokio runtime stays responsive.
 - Add an integration test in `apps/api/tests/{topic}.rs` using `common::TestApp::spawn()` (see [`.claude/tests.md`](tests.md)). One test per surprising behavior is plenty.
+- **Client side: la URL nueva pasa por `apiUrl`.** Si el frontend llama a tu endpoint con un
+  `fetch(` directo, envuélvela en `apiUrl("/v1/foo")` (`apps/web/src/lib/basePath.ts`) — es lo que
+  hace que la app funcione bajo un subpath (Ingress de Home Assistant). Los wrappers de
+  `api/client.ts` ya lo aplican solos. Ver [`frontend-structure.md`](frontend-structure.md)
+  §Subpath tras proxy.
+- **Si tu handler emite o borra la cookie de sesión**, usa los helpers de `handlers/auth.rs`
+  —`session_cookie_path(&state, &headers)`, `session_cookie(&state, sid, path)`,
+  `session_cookie_removal(path)`— en vez de construir el `Cookie` a mano: el `Path` va acotado al
+  prefijo público de la request, y un borrado con otro `Path` **no** casa con la cookie viva. Ver
+  [`auth-and-membership.md`](auth-and-membership.md) §Cookie.
 
 ## 6. Add a regression test
 Drop a file in `apps/api/tests/foo.rs` that exercises your handler end-to-end:

@@ -38,6 +38,7 @@ import { MobileNavDrawer } from "./components/MobileNavDrawer";
 import { SummaryView } from "./views/SummaryView";
 import type { BudgetScopeToggle } from "./views/BudgetView";
 import { BootstrapInstallationPanel } from "./auth/BootstrapInstallationPanel";
+import { apiUrl, appUrl, stripBase, SSO_AVAILABLE } from "./lib/basePath";
 import { ledgerViewQs } from "./lib/ledger";
 import { savingsSourceUsesTransactions } from "./lib/fire";
 import { readFileAsBase64 } from "./lib/files";
@@ -194,23 +195,25 @@ function useAppPathNavigation(): [
   pathname: string,
   navigate: (path: string, replace?: boolean) => void,
 ] {
+  // El router trabaja SIEMPRE con la ruta canónica de la app (sin el prefijo del proxy):
+  // se lee con `stripBase` y se escribe con `appUrl`. Sin prefijo ambas son la identidad.
   const [pathname, setPathname] = useState(() =>
     typeof window !== "undefined"
-      ? window.location.pathname
+      ? stripBase(window.location.pathname)
       : TAB_PATH.summary,
   );
 
   useEffect(() => {
-    const onPop = () => setPathname(window.location.pathname);
+    const onPop = () => setPathname(stripBase(window.location.pathname));
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
   const navigate = useCallback((path: string, replace = false) => {
-    const url = path.startsWith("/") ? path : `/${path}`;
+    const url = appUrl(path.startsWith("/") ? path : `/${path}`);
     if (replace) window.history.replaceState(null, "", url);
     else window.history.pushState(null, "", url);
-    setPathname(window.location.pathname);
+    setPathname(stripBase(window.location.pathname));
   }, []);
 
   return [pathname, navigate];
@@ -245,6 +248,47 @@ type FfbackupImportApplyResponse = {
     projection_focus?: string | null;
   };
 };
+
+/**
+ * ¿Ya se ha intentado la sesión automática por SSO en esta carga de página?
+ *
+ * A nivel de módulo y no en un ref: el intento debe ocurrir UNA vez por carga, y el doble
+ * montaje de StrictMode (o un `refreshSession` que se repita) dispararía un segundo POST que
+ * crearía una segunda fila en `sessions` sin que nadie la use. Cerrar sesión a mano tiene que
+ * llevar a la pantalla de acceso, no a un login automático inmediato: de ahí que el flag no se
+ * reinicie nunca.
+ */
+let ssoAttempted = false;
+
+/**
+ * Marca de «he cerrado sesión a propósito», persistida en `sessionStorage`.
+ *
+ * El flag de módulo de arriba muere con el módulo, y bajo el Ingress de Home Assistant la app
+ * vive en un iframe que se REMONTA cada vez que cambias de panel: sin esta marca, cerrar sesión
+ * y volver al panel te volvía a loguear en silencio con el SSO del supervisor. `sessionStorage`
+ * es el ámbito correcto — sobrevive a los remontajes de la pestaña y se limpia sola al abrir una
+ * pestaña nueva, que es exactamente cuando querer entrar de nuevo es lo normal. Contrapartida
+ * aceptada: si el usuario cierra sesión y sigue en la misma pestaña, el SSO no vuelve a saltar
+ * hasta que pulse «Entrar con Home Assistant» (el botón del formulario de acceso).
+ */
+const SSO_SIGNED_OUT_KEY = "ff_sso_signed_out";
+
+function ssoSignedOut(): boolean {
+  try {
+    return window.sessionStorage.getItem(SSO_SIGNED_OUT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markSsoSignedOut(signedOut: boolean) {
+  try {
+    if (signedOut) window.sessionStorage.setItem(SSO_SIGNED_OUT_KEY, "1");
+    else window.sessionStorage.removeItem(SSO_SIGNED_OUT_KEY);
+  } catch {
+    /* almacenamiento bloqueado: el flag de módulo sigue cubriendo la sesión en curso */
+  }
+}
 
 export default function App() {
   const ledgerScopeSelectId = useId();
@@ -623,8 +667,28 @@ export default function App() {
     setSessionBusy(true);
     setSessionError(null);
     try {
-      const res = await fetch("/v1/auth/me", defaultFetchInit);
+      const res = await fetch(apiUrl("/v1/auth/me"), defaultFetchInit);
       if (res.status === 401) {
+        // Sin sesión, pero el shell nos ha dicho que delante hay un proxy que ya sabe quién
+        // eres (Ingress de Home Assistant): se canjea esa identidad por una sesión normal antes
+        // de enseñar el formulario de acceso. Cualquier fallo cae al login de siempre — el SSO
+        // es un atajo, nunca la única puerta.
+        if (SSO_AVAILABLE && !ssoAttempted && !ssoSignedOut()) {
+          ssoAttempted = true;
+          try {
+            const sso = await fetch(apiUrl("/v1/auth/sso"), {
+              ...defaultFetchInit,
+              method: "POST",
+            });
+            if (sso.ok) {
+              const me = (await sso.json()) as UserResponse;
+              setUser(me);
+              return;
+            }
+          } catch {
+            // Red caída o proxy que no responde: al login normal.
+          }
+        }
         setUser(null);
         return;
       }
@@ -649,7 +713,10 @@ export default function App() {
       setInstallationGate("loading");
     }
     try {
-      const res = await fetch("/v1/installation/session-context", defaultFetchInit);
+      const res = await fetch(
+        apiUrl("/v1/installation/session-context"),
+        defaultFetchInit,
+      );
       if (!res.ok) {
         throw await apiErrorFromResponse(res);
       }
@@ -682,8 +749,8 @@ export default function App() {
     let loaded: AssetApiRow[] = [];
     try {
       const [catRes, astRes] = await Promise.all([
-        fetch("/v1/categories?scope=asset", defaultFetchInit),
-        fetch(`/v1/assets${ledgerViewQs(ledgerPersonScope)}`, defaultFetchInit),
+        fetch(apiUrl("/v1/categories?scope=asset"), defaultFetchInit),
+        fetch(apiUrl(`/v1/assets${ledgerViewQs(ledgerPersonScope)}`), defaultFetchInit),
       ]);
       if (catRes.status === 403 || catRes.status === 404) {
         setAssetCategories([]);
@@ -716,7 +783,7 @@ export default function App() {
     setAllocationRulesError(null);
     try {
       const res = await fetch(
-        `/v1/allocation-rules${ledgerViewQs(ledgerPersonScope)}`,
+        apiUrl(`/v1/allocation-rules${ledgerViewQs(ledgerPersonScope)}`),
         defaultFetchInit,
       );
       if (res.status === 403 || res.status === 404) {
@@ -802,7 +869,7 @@ export default function App() {
         ? `/v1/allocation-rules/${encodeURIComponent(editingRuleId)}`
         : "/v1/allocation-rules";
       const method = editingRuleId ? "PATCH" : "POST";
-      const res = await fetch(url, {
+      const res = await fetch(apiUrl(url), {
         ...defaultFetchInit,
         method,
         headers: { "Content-Type": "application/json" },
@@ -824,7 +891,7 @@ export default function App() {
     setAllocationRulesError(null);
     try {
       const res = await fetch(
-        `/v1/allocation-rules/${encodeURIComponent(id)}`,
+        apiUrl(`/v1/allocation-rules/${encodeURIComponent(id)}`),
         { ...defaultFetchInit, method: "DELETE" },
       );
       if (!res.ok) throw await apiErrorFromResponse(res);
@@ -845,7 +912,7 @@ export default function App() {
     setAllocationRulesError(null);
     try {
       const res = await fetch(
-        `/v1/allocation-rules/reorder${ledgerViewQs(ledgerPersonScope)}`,
+        apiUrl(`/v1/allocation-rules/reorder${ledgerViewQs(ledgerPersonScope)}`),
         {
           ...defaultFetchInit,
           method: "POST",
@@ -865,10 +932,10 @@ export default function App() {
     setLiabilitiesError(null);
     try {
       const [catRes, expCatRes, libRes] = await Promise.all([
-        fetch("/v1/categories?scope=liability", defaultFetchInit),
-        fetch("/v1/categories?scope=expense", defaultFetchInit),
+        fetch(apiUrl("/v1/categories?scope=liability"), defaultFetchInit),
+        fetch(apiUrl("/v1/categories?scope=expense"), defaultFetchInit),
         fetch(
-          `/v1/liabilities${ledgerViewQs(ledgerPersonScope)}`,
+          apiUrl(`/v1/liabilities${ledgerViewQs(ledgerPersonScope)}`),
           defaultFetchInit,
         ),
       ]);
@@ -908,9 +975,9 @@ export default function App() {
     setBudgetError(null);
     try {
       const [budRes, incRes, expRes] = await Promise.all([
-        fetch(`/v1/budget${ledgerViewQs(ledgerPersonScope)}`, defaultFetchInit),
-        fetch("/v1/categories?scope=income", defaultFetchInit),
-        fetch("/v1/categories?scope=expense", defaultFetchInit),
+        fetch(apiUrl(`/v1/budget${ledgerViewQs(ledgerPersonScope)}`), defaultFetchInit),
+        fetch(apiUrl("/v1/categories?scope=income"), defaultFetchInit),
+        fetch(apiUrl("/v1/categories?scope=expense"), defaultFetchInit),
       ]);
 
       if (budRes.status === 403 || budRes.status === 404) {
@@ -956,11 +1023,11 @@ export default function App() {
     try {
       const [flowsRes, incRes, expRes] = await Promise.all([
         fetch(
-          `/v1/planning/flows${ledgerViewQs(ledgerPersonScope)}`,
+          apiUrl(`/v1/planning/flows${ledgerViewQs(ledgerPersonScope)}`),
           defaultFetchInit,
         ),
-        fetch("/v1/categories?scope=income", defaultFetchInit),
-        fetch("/v1/categories?scope=expense", defaultFetchInit),
+        fetch(apiUrl("/v1/categories?scope=income"), defaultFetchInit),
+        fetch(apiUrl("/v1/categories?scope=expense"), defaultFetchInit),
       ]);
 
       if (flowsRes.status === 403 || flowsRes.status === 404) {
@@ -1006,7 +1073,7 @@ export default function App() {
     // después, cuando llegue projection-series, sin bloquear el resto.
     const summaryFlow = (async () => {
       try {
-        const res = await fetch(`/v1/summary${qs}`, defaultFetchInit);
+        const res = await fetch(apiUrl(`/v1/summary${qs}`), defaultFetchInit);
         if (res.status === 403 || res.status === 404) {
           setSummary(null);
         } else if (!res.ok) {
@@ -1105,7 +1172,7 @@ export default function App() {
   // no invalidan la cache de proyección; solo refrescamos la serie histórica.
   const saveSnapshotNow = useCallback(
     async (kinds: HistorySnapshotKindApi[]): Promise<void> => {
-      const res = await fetch("/v1/history/snapshots/capture", {
+      const res = await fetch(apiUrl("/v1/history/snapshots/capture"), {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1136,10 +1203,10 @@ export default function App() {
       try {
         const qs =
           ledgerPersonScope === "mine" ? "?view=mine" : "";
-        const budPromise = fetch(`/v1/budget${qs}`, defaultFetchInit);
+        const budPromise = fetch(apiUrl(`/v1/budget${qs}`), defaultFetchInit);
         const projPromise = skipProjection
           ? Promise.resolve(null as Response | null)
-          : fetch(`/v1/projection/series${qs}`, defaultFetchInit);
+          : fetch(apiUrl(`/v1/projection/series${qs}`), defaultFetchInit);
         // El preview del target en los modos con promedio (B y C) consume los equivalentes
         // efectivos del summary; lo cargamos aquí para que sea fresco y coherente con el scope
         // activo. Independiente y silencioso: cualquier fallo degrada el preview al
@@ -1152,7 +1219,7 @@ export default function App() {
         ) {
           void (async () => {
             try {
-              const res = await fetch(`/v1/summary${qs}`, defaultFetchInit);
+              const res = await fetch(apiUrl(`/v1/summary${qs}`), defaultFetchInit);
               if (res.status === 403 || res.status === 404) {
                 setSummary(null);
               } else if (res.ok) {
@@ -1203,7 +1270,7 @@ export default function App() {
     setCategoriesBusy(true);
     setCategoriesError(null);
     try {
-      const res = await fetch("/v1/categories", defaultFetchInit);
+      const res = await fetch(apiUrl("/v1/categories"), defaultFetchInit);
       if (res.status === 403 || res.status === 404) {
         setCategories([]);
         return;
@@ -1226,8 +1293,8 @@ export default function App() {
       // Siempre scope hogar: el mapa solo se consume en la vista hogar, y el estado
       // `assets` de la pestaña (scope activo) daría un mapa a medias en ?view=mine.
       const [membersRes, assetsRes] = await Promise.all([
-        fetch("/v1/installation/members", defaultFetchInit),
-        fetch("/v1/assets", defaultFetchInit),
+        fetch(apiUrl("/v1/installation/members"), defaultFetchInit),
+        fetch(apiUrl("/v1/assets"), defaultFetchInit),
       ]);
       if (!membersRes.ok || !assetsRes.ok) {
         // Best-effort: sin mapa no hay sufijo de owner en la leyenda, nada más.
@@ -1246,7 +1313,10 @@ export default function App() {
     setPendingUsersBusy(true);
     setPendingUsersError(null);
     try {
-      const res = await fetch("/v1/installation/pending-users", defaultFetchInit);
+      const res = await fetch(
+        apiUrl("/v1/installation/pending-users"),
+        defaultFetchInit,
+      );
       if (res.status === 403 || res.status === 404) {
         setPendingUsers([]);
         return;
@@ -1410,7 +1480,7 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/v1/health")
+    fetch(apiUrl("/v1/health"))
       .then(async (res) => {
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
@@ -1750,7 +1820,7 @@ export default function App() {
     setSessionError(null);
     try {
       if (authMode === "register") {
-        const reg = await fetch("/v1/auth/register", {
+        const reg = await fetch(apiUrl("/v1/auth/register"), {
           ...defaultFetchInit,
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1764,7 +1834,7 @@ export default function App() {
           throw await apiErrorFromResponse(reg);
         }
       }
-      const loginRes = await fetch("/v1/auth/login", {
+      const loginRes = await fetch(apiUrl("/v1/auth/login"), {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1865,10 +1935,13 @@ export default function App() {
     setAuthBusy(true);
     setSessionError(null);
     try {
-      await fetch("/v1/auth/logout", {
+      await fetch(apiUrl("/v1/auth/logout"), {
         ...defaultFetchInit,
         method: "POST",
       });
+      // Cerrar sesión gana al SSO: sin esta marca, el remontaje del iframe del Ingress volvía a
+      // canjear la identidad del supervisor y te devolvía dentro sin tocar nada.
+      markSsoSignedOut(true);
       setUser(null);
       setInstallation(null);
       setInstallationGate("loading");
@@ -1882,12 +1955,37 @@ export default function App() {
     }
   }
 
+  /**
+   * Reintento manual del SSO desde el formulario de acceso. Es la única vía de vuelta para
+   * quien entró por el Ingress: su cuenta no tiene contraseña, así que sin este botón el
+   * formulario clásico sería un callejón sin salida tras cerrar sesión.
+   */
+  async function loginWithSso() {
+    setAuthBusy(true);
+    setSessionError(null);
+    try {
+      markSsoSignedOut(false);
+      const res = await fetch(apiUrl("/v1/auth/sso"), {
+        ...defaultFetchInit,
+        method: "POST",
+      });
+      if (!res.ok) {
+        throw await apiErrorFromResponse(res);
+      }
+      setUser((await res.json()) as UserResponse);
+    } catch (e: unknown) {
+      setSessionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
   async function setupInstallation(ev: FormEvent) {
     ev.preventDefault();
     setInstallationBusy(true);
     setInstallationError(null);
     try {
-      const res = await fetch("/v1/installation/setup", {
+      const res = await fetch(apiUrl("/v1/installation/setup"), {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1913,7 +2011,7 @@ export default function App() {
     setCalendarTzSaving(true);
     setInstallationError(null);
     try {
-      const res = await fetch("/v1/installation", {
+      const res = await fetch(apiUrl("/v1/installation"), {
         ...defaultFetchInit,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1944,7 +2042,7 @@ export default function App() {
     setCurrencySaving(true);
     setInstallationError(null);
     try {
-      const res = await fetch("/v1/installation", {
+      const res = await fetch(apiUrl("/v1/installation"), {
         ...defaultFetchInit,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1991,7 +2089,7 @@ export default function App() {
     setInstallationProjectionSaving(true);
     setInstallationError(null);
     try {
-      const res = await fetch("/v1/installation", {
+      const res = await fetch(apiUrl("/v1/installation"), {
         ...defaultFetchInit,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -2015,7 +2113,7 @@ export default function App() {
     if (installation?.role !== "owner") return;
     setInstallationError(null);
     try {
-      const res = await fetch("/v1/installation", {
+      const res = await fetch(apiUrl("/v1/installation"), {
         ...defaultFetchInit,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -2043,7 +2141,7 @@ export default function App() {
     setInstallationError(null);
     setMcpWriteSaving(true);
     try {
-      const res = await fetch("/v1/installation", {
+      const res = await fetch(apiUrl("/v1/installation"), {
         ...defaultFetchInit,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -2066,7 +2164,7 @@ export default function App() {
     setPendingUsersError(null);
     try {
       const res = await fetch(
-        `/v1/installation/pending-users/${encodeURIComponent(userId)}/approve`,
+        apiUrl(`/v1/installation/pending-users/${encodeURIComponent(userId)}/approve`),
         {
           ...defaultFetchInit,
           method: "POST",
@@ -2094,7 +2192,7 @@ export default function App() {
     setCategorySaving(true);
     setCategoriesError(null);
     try {
-      const res = await fetch("/v1/categories", {
+      const res = await fetch(apiUrl("/v1/categories"), {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2147,7 +2245,7 @@ export default function App() {
     setCategoriesError(null);
     try {
       const res = await fetch(
-        `/v1/categories/${encodeURIComponent(row.id)}${qs}`,
+        apiUrl(`/v1/categories/${encodeURIComponent(row.id)}${qs}`),
         {
           ...defaultFetchInit,
           method: "DELETE",
@@ -2178,7 +2276,7 @@ export default function App() {
     setCategorySaving(true);
     setCategoriesError(null);
     try {
-      const res = await fetch(`/v1/categories/${encodeURIComponent(id)}`, {
+      const res = await fetch(apiUrl(`/v1/categories/${encodeURIComponent(id)}`), {
         ...defaultFetchInit,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -2292,7 +2390,7 @@ export default function App() {
       let createdAsset: AssetApiRow | null = null;
       if (editingAssetId) {
         const res = await fetch(
-          `/v1/assets/${encodeURIComponent(editingAssetId)}`,
+          apiUrl(`/v1/assets/${encodeURIComponent(editingAssetId)}`),
           {
             ...defaultFetchInit,
             method: "PATCH",
@@ -2304,7 +2402,7 @@ export default function App() {
           throw await apiErrorFromResponse(res);
         }
       } else {
-        const res = await fetch("/v1/assets", {
+        const res = await fetch(apiUrl("/v1/assets"), {
           ...defaultFetchInit,
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2345,7 +2443,7 @@ export default function App() {
     setAssetSaving(true);
     setAssetsError(null);
     try {
-      const res = await fetch(`/v1/assets/${encodeURIComponent(id)}`, {
+      const res = await fetch(apiUrl(`/v1/assets/${encodeURIComponent(id)}`), {
         ...defaultFetchInit,
         method: "DELETE",
       });
@@ -2472,7 +2570,7 @@ export default function App() {
 
       if (editingLiabilityId) {
         const res = await fetch(
-          `/v1/liabilities/${encodeURIComponent(editingLiabilityId)}`,
+          apiUrl(`/v1/liabilities/${encodeURIComponent(editingLiabilityId)}`),
           {
             ...defaultFetchInit,
             method: "PATCH",
@@ -2484,7 +2582,7 @@ export default function App() {
           throw await apiErrorFromResponse(res);
         }
       } else {
-        const res = await fetch("/v1/liabilities", {
+        const res = await fetch(apiUrl("/v1/liabilities"), {
           ...defaultFetchInit,
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2510,7 +2608,7 @@ export default function App() {
     setLiabilitySaving(true);
     setLiabilitiesError(null);
     try {
-      const res = await fetch(`/v1/liabilities/${encodeURIComponent(id)}`, {
+      const res = await fetch(apiUrl(`/v1/liabilities/${encodeURIComponent(id)}`), {
         ...defaultFetchInit,
         method: "DELETE",
       });
@@ -2640,7 +2738,7 @@ export default function App() {
           }
         }
         const res = await fetch(
-          `/v1/budget/entries/${encodeURIComponent(editingBudgetEntryId)}`,
+          apiUrl(`/v1/budget/entries/${encodeURIComponent(editingBudgetEntryId)}`),
           {
             ...defaultFetchInit,
             method: "PATCH",
@@ -2661,7 +2759,7 @@ export default function App() {
             base.expense_end_date = budgetFormExpenseEndDate;
           }
         }
-        const res = await fetch("/v1/budget/entries", {
+        const res = await fetch(apiUrl("/v1/budget/entries"), {
           ...defaultFetchInit,
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2685,7 +2783,7 @@ export default function App() {
     setBudgetSaving(true);
     setBudgetError(null);
     try {
-      const res = await fetch(`/v1/budget/entries/${encodeURIComponent(id)}`, {
+      const res = await fetch(apiUrl(`/v1/budget/entries/${encodeURIComponent(id)}`), {
         ...defaultFetchInit,
         method: "DELETE",
       });
@@ -2756,7 +2854,7 @@ export default function App() {
           show_in_chart: showInChart,
         };
         const res = await fetch(
-          `/v1/planning/flows/${encodeURIComponent(editingPlanningFlowId)}`,
+          apiUrl(`/v1/planning/flows/${encodeURIComponent(editingPlanningFlowId)}`),
           {
             ...defaultFetchInit,
             method: "PATCH",
@@ -2783,7 +2881,7 @@ export default function App() {
         if (showInChart) {
           base.show_in_chart = true;
         }
-        const res = await fetch("/v1/planning/flows", {
+        const res = await fetch(apiUrl("/v1/planning/flows"), {
           ...defaultFetchInit,
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2807,7 +2905,7 @@ export default function App() {
     setPlanningSaving(true);
     setPlanningError(null);
     try {
-      const res = await fetch(`/v1/planning/flows/${encodeURIComponent(id)}`, {
+      const res = await fetch(apiUrl(`/v1/planning/flows/${encodeURIComponent(id)}`), {
         ...defaultFetchInit,
         method: "DELETE",
       });
@@ -2832,7 +2930,7 @@ export default function App() {
     setUserProfileError(null);
     const trimmed = userBirthDraft.trim();
     try {
-      const res = await fetch("/v1/auth/me", {
+      const res = await fetch(apiUrl("/v1/auth/me"), {
         ...defaultFetchInit,
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -2890,7 +2988,7 @@ export default function App() {
     setFfbackupExportBusy(true);
     setFfbackupExportError(null);
     try {
-      const res = await fetch("/v1/backup/user-export", {
+      const res = await fetch(apiUrl("/v1/backup/user-export"), {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2959,7 +3057,7 @@ export default function App() {
     setFfbackupImportError(null);
     try {
       const fileB64 = await readFileAsBase64(ffbackupImportFile);
-      const res = await fetch("/v1/backup/user-import/preview", {
+      const res = await fetch(apiUrl("/v1/backup/user-import/preview"), {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2988,7 +3086,7 @@ export default function App() {
     setFfbackupImportError(null);
     try {
       const fileB64 = await readFileAsBase64(ffbackupImportFile);
-      const res = await fetch("/v1/backup/user-import", {
+      const res = await fetch(apiUrl("/v1/backup/user-import"), {
         ...defaultFetchInit,
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3146,6 +3244,16 @@ export default function App() {
                 {authMode === "register" ? "Registrarse y entrar" : "Entrar"}
               </button>
             </form>
+            {SSO_AVAILABLE ? (
+              <button
+                type="button"
+                className="btn secondary wide auth-alt-action"
+                disabled={authBusy}
+                onClick={() => void loginWithSso()}
+              >
+                Entrar con Home Assistant
+              </button>
+            ) : null}
             {sessionError ? (
               <p className="error compact">{sessionError}</p>
             ) : null}

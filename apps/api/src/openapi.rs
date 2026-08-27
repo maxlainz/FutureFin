@@ -39,6 +39,8 @@ use crate::handlers::members::{
 #[allow(unused_imports)]
 use crate::handlers::pending_users::{__path_approve_pending_user, __path_list_pending_users};
 #[allow(unused_imports)]
+use crate::handlers::sso::__path_sso_login;
+#[allow(unused_imports)]
 use crate::handlers::summary::__path_get_summary;
 #[allow(unused_imports)]
 use crate::handlers::assets::{
@@ -144,6 +146,7 @@ impl utoipa::Modify for SecurityAddon {
         login,
         logout,
         change_password,
+        sso_login,
         me,
         patch_me,
         get_installation_session_context,

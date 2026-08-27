@@ -5,6 +5,7 @@
 
 import { useEffect } from "react";
 import { TABS, TAB_PATH, type TabId } from "../lib/navigation";
+import { appUrl } from "../lib/basePath";
 import { XIcon } from "./icons";
 
 export function MobileNavDrawer({
@@ -62,7 +63,8 @@ export function MobileNavDrawer({
           {TABS.map((t) => (
             <a
               key={t.id}
-              href={TAB_PATH[t.id]}
+              // Con prefijo (Ingress), el `href` crudo mandaría el Cmd-clic fuera del subpath.
+              href={appUrl(TAB_PATH[t.id])}
               className={`ff-mobile-drawer-item ${activeTab === t.id ? "is-active" : ""}`}
               aria-current={activeTab === t.id ? "page" : undefined}
               onClick={(e) => {

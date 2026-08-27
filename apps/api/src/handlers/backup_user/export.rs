@@ -140,13 +140,18 @@ async fn fetch_user_for_export(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<(String, Option<NaiveDate>, String), ApiError> {
-    let row: Option<(String, Option<NaiveDate>, String)> = sqlx::query_as(
+    let row: Option<(String, Option<NaiveDate>, Option<String>)> = sqlx::query_as(
         r#"SELECT username, birth_date, password_hash FROM users WHERE id = $1"#,
     )
     .bind(user_id)
     .fetch_optional(pool)
     .await?;
-    row.ok_or(ApiError::Unauthorized)
+    let (username, birth_date, password_hash) = row.ok_or(ApiError::Unauthorized)?;
+    // La clave del `.ffbackup` se deriva de la contraseña de la cuenta, y una cuenta SSO no
+    // tiene ninguna: no hay secreto del usuario con el que cifrar. Antes de decirlo, el `SELECT`
+    // reventaba con «unexpected null» y el usuario veía un 500 sin explicación.
+    let password_hash = password_hash.ok_or_else(crate::handlers::auth::sso_account_no_password)?;
+    Ok((username, birth_date, password_hash))
 }
 
 async fn build_payload(

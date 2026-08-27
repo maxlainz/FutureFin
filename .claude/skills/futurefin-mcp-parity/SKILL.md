@@ -132,6 +132,7 @@ the blocking reason changes (noted per row).
 |---|---|---|---|
 | auth/session, api-tokens, OAuth protocol+consent, membership/pending-users, backup, probes | **never** | §2.1 categories | Category-level change of posture only |
 | `POST /v1/auth/password` (4.0.0) | **never** | §2.1 session lifecycle / credential brake. Rotating the password revokes every other session, every `ffp_` token and every OAuth grant — including, quite possibly, the token making the call. It also requires the plaintext current password, which is exactly what must not travel through a model's context. It is the lever a compromised agent must not have and the human must always have | Category-level change of posture only |
+| `POST /v1/auth/sso` (2026-08-27) | **never** | §2.1 session lifecycle. It is a **browser-session mechanism**: it turns a trusted proxy's `X-Remote-User-*` headers into an `ff_session` cookie. MCP clients already hold their own first-class credentials (`ffp_` API tokens, `ffo_` OAuth access tokens), so a tool would buy nothing — and it would buy it by moving identity assertion into a channel where the peer check that makes the endpoint safe (`FUTUREFIN_TRUSTED_PROXY_IPS`, D18) does not mean the same thing. Also note the ingress does not reach `/mcp` at all: an add-on user talking MCP is on the direct port, i.e. exactly the peer this endpoint refuses | Category-level change of posture only |
 | `GET/PATCH/DELETE /v1/installation/members` (4.0.0) | **never** | §2.1 membership boundaries. `PATCH` can promote to `owner` and `DELETE` cuts all four credentials at once; both are the human's control over *who* is in the household, which `role_can_write` deliberately never governs. The `GET` follows them: its only real use is choosing a target for those writes, and a household roster is not financial data | Category-level change of posture only |
 | `POST /v1/transactions/{id}/reconcile` (manual pair; `reconcile_pair_core` EXISTS) | **omit** | Hand-picking two UUIDs among hundreds; a wrong pair silently leaves all flow aggregates and moves modes B/C savings | A server-side *suggestions* tool ships (candidates with opposite amounts), reducing the LLM's choice to confirming a proposed pair |
 | `/v1/transactions/import/preview|confirm` | **omit** | §2.1 context-window abuse + untrusted third-party content | MCP gains an out-of-band attachment channel |
@@ -289,9 +290,21 @@ Evaluación del tren **4.2.0** (modelo de amortización por pasivo; 2026-08-25, 
 | `simulate_projection` | **n/a**: la tool no acepta pasivos hipotéticos — simula sobre los del ledger. No hay parámetro que ampliar hasta que el what-if los admita, momento en el que esto pasaría a ser un gap de §3.2 |
 | `get_summary` — el aviso sobre `net_return_*` | **Descripción matizada**: la frase «la proyección NO descuenta el interés de la deuda», exacta en 4.1.0 y en la fila de arriba, deja de ser cierta en general. Ahora dice que el KPI cuenta el interés de **todos** los pasivos vivos mientras la proyección solo devenga en los que llevan modelo con intereses y plan activo — más conservador solo si queda alguna deuda en cuota fija |
 
+Evaluación de la rama **`feat/home-assistant-addon`** (add-on de HA; 2026-08-27, catálogo **sin
+cambios en 52** — recontado ese día: 52/21/31/31):
+
+| New HTTP surface | Parity outcome |
+|---|---|
+| `POST /v1/auth/sso` | **Omisión deliberada** → fila en §3.1. Es un mecanismo de sesión de navegador (cabeceras de un proxy de confianza → cookie `ff_session`); MCP ya tiene credenciales propias (`ffp_`, `ffo_`) y una tool no añadiría capacidad, solo movería una afirmación de identidad a un canal donde el chequeo de peer que la hace segura no significa lo mismo |
+| `FUTUREFIN_BASE_PATH` / prefijo por request, cookie acotada al prefijo, `X-Frame-Options` condicional | **n/a**: no hay superficie nueva. Son propiedades del transporte y del shell HTML, invisibles para `/mcp` (que no viaja por el Ingress: el add-on solo lo expone por el puerto directo opcional) |
+| Guarda de downgrade (`db.rs`) | **n/a**: no es una ruta. Falla el arranque; el servidor MCP no llega a montarse |
+
 Re-verify before trusting:
 
-- Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22**; 50/21/29/29/10/1 on 2026-08-20).
+- Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22, recontado
+  52/21/31/31 el 2026-08-27**; 50/21/29/29/10/1 on 2026-08-20).
+- `POST /v1/auth/sso` sigue sin tool (fila §3.1): `grep -n 'sso' apps/api/src/mcp/server.rs` (vacío)
+  frente a `grep -n 'sso' apps/api/src/routes/mod.rs` (la ruta existe y se monta siempre).
 - Frozen catalog still matches the code (never count quotes — run the test):
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http tools_list_returns`
 - Cores still own invalidation, MCP module still SQL-free:

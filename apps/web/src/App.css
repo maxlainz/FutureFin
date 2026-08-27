@@ -105,6 +105,11 @@
   color: var(--ff-ink);
 }
 
+/* Vía alternativa de acceso (SSO del Ingress) bajo el formulario clásico. */
+.auth-alt-action {
+  margin-top: 0.75rem;
+}
+
 .auth-footer {
   margin-top: 1.25rem;
   font-size: 0.8rem;

@@ -71,6 +71,19 @@ propias cuentas para que no cuenten como gasto. Después compara mes real, presu
 
 ## Instalación
 
+### Como add-on de Home Assistant
+
+Si ya usas Home Assistant, es el camino corto: un panel más en la barra lateral, sin escribir
+ningún `docker-compose.yml` y entrando con tu propio usuario de Home Assistant.
+
+[![Añadir repositorio a Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmaxlainz%2FFutureFin)
+
+Ese botón añade este repositorio a tu tienda de add-ons; después, **Instalar → Iniciar → Mostrar en
+la barra lateral**. Todo lo demás —opciones, copias de seguridad, y por qué MCP necesita ahí un
+puerto aparte— en [docs/home-assistant.md](docs/home-assistant.md).
+
+### Con Docker Compose
+
 Un solo contenedor: **PostgreSQL va dentro de la imagen**. No hace falta configurar nada.
 
 Guarda esto como `docker-compose.yml`:
@@ -129,7 +142,8 @@ Más detalle en [docs/instalacion.md](docs/instalacion.md).
 
 | | |
 |---|---|
-| [Instalación](docs/instalacion.md) | Poner en marcha la app, volúmenes, primer usuario |
+| [Instalación](docs/instalacion.md) | Poner en marcha la app, volúmenes, primer usuario, subpath |
+| [Home Assistant](docs/home-assistant.md) | El add-on: panel, opciones, SSO, backups, MCP |
 | [Actualizar](docs/actualizar.md) | Subir de versión, volver atrás, migrar desde 2.x |
 | [Configuración](docs/configuracion.md) | Variables de entorno y ajustes de la instalación |
 | [Copias de seguridad](docs/backups.md) | Las tres capas de respaldo y cómo restaurar |

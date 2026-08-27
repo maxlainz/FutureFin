@@ -1,0 +1,66 @@
+name: FutureFin
+version: "4.3.0"
+slug: futurefin
+url: "https://github.com/maxlainz/FutureFin"
+description: >-
+  Finanzas del hogar y planificación FIRE, autoalojadas. PostgreSQL embebido en
+  la propia imagen; todos los datos viven en /data.
+
+# Imagen YA publicada por publish-image.yml — el add-on no construye nada.
+# Sin `{arch}` a propósito: ghcr.io/maxlainz/futurefin es un manifest multi-arch,
+# así que el propio registry sirve amd64 o aarch64 según el host.
+image: "ghcr.io/maxlainz/futurefin"
+arch:
+  - amd64
+  - aarch64
+
+# init: false → el entrypoint de la imagen es PID 1 y supervisa PostgreSQL + API
+# (incluido el apagado ordenado). Meter s6/tini por delante rompería esa cadena.
+init: false
+startup: application
+boot: auto
+
+host_network: false
+hassio_api: false
+homeassistant_api: false
+
+# El panel de la barra lateral pasa por el ingress del Supervisor.
+# ingress_port 8080 reutiliza el puerto que la imagen ya expone (EXPOSE 8080 y su
+# HEALTHCHECK siguen siendo válidos tal cual, sin recompilar ni reconfigurar nada).
+ingress: true
+ingress_port: 8080
+panel_icon: mdi:currency-usd
+panel_title: FutureFin
+
+# cold: el Supervisor para el add-on antes de copiar /data. Es lo correcto con un
+# PostgreSQL dentro: una copia en caliente del directorio de datos no es consistente.
+backup: cold
+
+# Puerto directo OPCIONAL, deshabilitado por defecto (null = no publicado).
+ports:
+  "8080/tcp": null
+ports_description:
+  "8080/tcp": >-
+    Acceso directo opcional, necesario solo para MCP y OAuth (no funcionan a
+    través del ingress). Deshabilitado por defecto. Si lo activas, FutureFin
+    queda expuesto a tu red local sin la autenticación de Home Assistant
+    delante — sigue exigiendo su propia sesión o token, pero el filtro de HA
+    ya no está en medio.
+
+# Sin `watchdog`: el único endpoint candidato (/v1/ready) solo es alcanzable por el
+# puerto directo, que está deshabilitado por defecto. Un watchdog apuntando ahí
+# reiniciaría el add-on en bucle en la instalación normal (solo ingress).
+
+options:
+  log_level: "info"
+  sso: true
+  mcp: true
+  cors_origins: ""
+  public_url: ""
+
+schema:
+  log_level: "list(trace|debug|info|warn|error)"
+  sso: "bool"
+  mcp: "bool"
+  cors_origins: "str?"
+  public_url: "str?"

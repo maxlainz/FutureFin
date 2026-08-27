@@ -17,12 +17,17 @@ use futurefin_api::openapi::ApiDoc;
 use std::collections::BTreeSet;
 use utoipa::OpenApi;
 
-/// Endpoints públicos por diseño: los dos de salud y el alta/acceso.
+/// Endpoints públicos por diseño: los dos de salud y las tres vías de acceso.
+///
+/// `/v1/auth/sso` no lleva cookie porque su credencial no es una cookie: es la palabra de un
+/// proxy de confianza (cabecera `X-Remote-User-Id` desde una IP autorizada), y esa política no
+/// se puede expresar como `securityScheme` de OpenAPI. Está descrita en la propia operación.
 const PUBLIC_OPERATIONS: &[(&str, &str)] = &[
     ("/v1/health", "get"),
     ("/v1/ready", "get"),
     ("/v1/auth/register", "post"),
     ("/v1/auth/login", "post"),
+    ("/v1/auth/sso", "post"),
 ];
 
 fn doc() -> serde_json::Value {

@@ -14,7 +14,10 @@ description: >
   container unhealthy in the operational sense (reading healthcheck/probe status during
   deploy/upgrade, restarting, rolling back — for diagnosing WHY a container is unhealthy from
   a symptom use futurefin-debugging-playbook), healthcheck, /v1/health, /v1/ready, logs,
-  RUST_LOG, volume, pgdata, ffdata, stop_grace_period, data loss, stop the stack. Do NOT load
+  RUST_LOG, volume, pgdata, ffdata, stop_grace_period, data loss, stop the stack; and the
+  **Home Assistant add-on** channel (add-on de Home Assistant, HA store, repository.yaml,
+  addon/futurefin, ingress, /data/pgdata, /data/state, backup cold, the post-build add-on version
+  bump, "no arranca: la base viene de una versión más nueva"). Do NOT load
   for: setting up a local DEV environment or building the image locally
   (futurefin-build-and-env), measuring performance or cache behavior
   (futurefin-diagnostics-and-tooling), diagnosing an app-level bug behind a failing container
@@ -147,6 +150,25 @@ Two Dockerfile rules that must not be "simplified" away (they are load-bearing):
 - **Do not add a `VOLUME` instruction.** The entrypoint detects a real mount with `mountpoint`
   and refuses to start without one; a `VOLUME` would defeat that guard.
 
+**Two distribution channels, one image (since 2026-08-27).** Besides Docker Compose, this repo is a
+**Home Assistant add-on store**: `repository.yaml` at the root plus `addon/futurefin/config.yaml`.
+The add-on **builds nothing** — it declares `image: ghcr.io/maxlainz/futurefin` (no `{arch}`: the
+GHCR manifest is multi-arch and the registry serves amd64/aarch64 by itself) and the Supervisor uses
+the add-on's `version:` as the image tag. Operational consequences:
+
+- **Updates reach add-on users through the HA UI**, not `docker compose pull`. They appear when
+  `addon/futurefin/config.yaml` on `main` names the new version — the **last step of
+  `publish-image.yml` bumps it via the contents API, after the image is verified in the registry and
+  the Release is created**. So an add-on user can never be offered a version whose image does not
+  exist. If that step fails (e.g. the «GitHub Actions» app is not a bypass actor of the «Proteger
+  main» ruleset), the image is out but the store stays one version behind until someone lands a
+  normal PR raising `version:`. Check with `./scripts/audit-releases.sh --addon`.
+- **The add-on ignores `FUTUREFIN_TAG`, `FUTUREFIN_IMAGE` and `.env` entirely** — §2.2's pinning
+  advice does not apply there. Pinning = not pressing Update.
+- **Nothing about the container's internals changes**: same entrypoint as PID 1 (`init: false`),
+  same embedded PostgreSQL, same ordered shutdown, same guards. What moves is *where the data lives*
+  (§6) and *how you reach the logs* (Supervisor → add-on → Log tab, same stream as §3.1).
+
 GHCR housekeeping: `.github/workflows/cleanup-ghcr.yml` runs weekly (Mon 03:00 UTC),
 keeps anything tagged `vX.Y.Z` or `latest`, deletes `sha-*` versions older than 30 days and
 other untagged/dev versions older than 60 days. Release tags are never deleted, so pinned
@@ -179,6 +201,23 @@ docker compose logs futurefin | grep -E "pre-migration backup written|migrations
 New migrations run automatically on the first start of the new image, **after** the entrypoint
 has written a pre-migration dump. A migration checksum mismatch **fails loud** (startup aborts;
 no auto-repair since v1.3.0) — that is deliberate.
+
+**Downgrade refusal (new 2026-08-27).** Starting an OLDER binary over a database already migrated by
+a newer one no longer produces a cryptic sqlx error: `db.rs` maps that case
+(`MigrateError::VersionMissing`) to `MigrationError::Downgrade` and prints a boxed operator message
+that begins **`FutureFin NO ARRANCA: esta base de datos viene de una versión MÁS NUEVA.`**, names the
+unknown migration version and the binary's own version, states that **nothing was touched**, and
+gives the two exits: go back to the newer tag, or restore the `pre-migration-*.sql.gz` dump. That
+banner is the signature of "I rolled back too far" — see §2.6. Pinned by
+`apps/api/tests/migration_guard.rs`.
+
+**Upgrading the add-on (Home Assistant).** Settings → Add-ons → FutureFin → **Update**. The
+Supervisor pulls the tag named in the add-on's `version:`, stops the add-on and starts the new
+image; the same pre-migration dump is written first, into `/data/state/backups` (§5.1, §6). There is
+no `.env` and no `docker compose pull`. Read the result in the add-on's **Log** tab — same milestones
+as §3.2. Downgrading the add-on is only possible for versions the store still offers, and hits the
+same refusal banner above if the database moved past it: restore the pre-migration dump or go back
+up.
 
 ### 2.4 Upgrading from a 2.x two-container stack
 
@@ -263,7 +302,10 @@ docker compose up -d
 
 **The real constraint is unchanged: migrations only roll forward.** If the 3.x release applied
 migrations the 2.x binary does not embed, sqlx's default migrator (`ignore_missing = false`)
-aborts startup with `VersionMissing` — the same de-facto downgrade guard as always. Check first:
+aborts startup with `VersionMissing`. **Since 2026-08-27 that abort is dressed as an operator
+message** (`FutureFin NO ARRANCA: esta base de datos viene de una versión MÁS NUEVA.` — §2.3) on any
+binary carrying the guard; a genuinely old 2.x/3.x binary still shows the raw sqlx error, which
+means the same thing. Check first:
 
 ```bash
 # Which migrations has THIS database applied? (3.x form — no separate DB container)
@@ -613,6 +655,17 @@ Layer (1) is the automatic net around upgrades — it lives *inside a Docker vol
 not off-host disaster recovery. Layer (2) is your disaster-recovery copy. Layer (3) is per-user
 data portability. None replaces the others.
 
+**Under the Home Assistant add-on, layer (2) is HA's own backup.** The add-on declares
+`backup: cold` (`addon/futurefin/config.yaml`), so the Supervisor **stops the add-on before copying
+`/data`** — which is the only correct way to copy a live PostgreSQL data directory, and the price
+D13's "the store is inside the image" has to pay. Because `/data` holds *everything*
+(`/data/pgdata` + `/data/state`), one HA backup contains the cluster **and** the automatic
+pre-migration dumps; restoring the add-on from an HA backup restores the whole installation. What
+this does **not** give you: an off-host copy (send HA's backups somewhere else) and per-user
+portability (layer 3 is unchanged and works the same through the ingress). `scripts/backup-postgres.sh`
+and `scripts/restore-postgres.sh` (§5.2/§5.3) are **compose tools** — they drive `docker compose`,
+so they do not apply to an add-on install.
+
 ### 5.1 Automatic pre-migration backups
 
 Written by the entrypoint **before the API starts**, therefore before any migration runs.
@@ -625,7 +678,10 @@ Written by the entrypoint **before the API starts**, therefore before any migrat
 skipped too.)
 - **Output**: `/var/lib/futurefin/backups/pre-migration-<from>-to-<to>-<UTC ts>.sql.gz`
   (gzip -6), e.g. `pre-migration-2.3.0-to-3.0.0-20260816T031500Z.sql.gz`. `<from>` is
-  `unknown` if the state file did not exist.
+  `unknown` if the state file did not exist. **Under the HA add-on the path is
+  `/data/state/backups/`** — the entrypoint exports `FUTUREFIN_STATE_DIR=/data/state` when it sees
+  `/data/options.json`, so the dumps land inside the single `/data` bind and are therefore included
+  in HA's own backups. The downgrade banner (§2.3) points operators at exactly that path.
 - **Failure aborts startup**: `pre-migration backup FAILED — refusing to start with pending
   migrations and no safety net.` Bypass deliberately with `FUTUREFIN_PREMIGRATION_BACKUP=off`.
 - **Retention** (applies to all `pre-*.sql.gz` in the directory: the `pre-pgupgrade-*` dumps and
@@ -751,6 +807,25 @@ copy of their data that does not depend on any volume surviving.
 bind-mount over `$PGDATA` casually; never `docker compose down -v` on production (it now takes
 your automatic backups with it, too).
 
+**Under the Home Assistant add-on the two volumes collapse into one bind**, because the Supervisor
+mounts exactly one: `/data`. The entrypoint detects the add-on by the presence of
+`/data/options.json` and overrides `PGDATA=/data/pgdata` and `FUTUREFIN_STATE_DIR=/data/state`
+*before* anything else reads them (the Dockerfile `ENV`s point outside `/data`, so a
+`${VAR:-default}` would have silently put the cluster on the container's ephemeral layer and lost it
+on the next update).
+
+| Thing | Where under the add-on |
+|---|---|
+| PostgreSQL cluster | `/data/pgdata` (plus `/data/pgdata/pgdata_old_15/` after a `pg_upgrade`) |
+| Automatic backups + entrypoint state | `/data/state/` → `backups/pre-*.sql.gz`, `state/*.env`, `state/last-version` |
+| Everything else | Unchanged — all of it is inside the image |
+
+Two consequences worth stating: (a) HA's cold backup of `/data` covers **both** halves at once
+(§5); (b) the volume guard had to become `is_persisted` — an ancestor walk that stops *before* `/` —
+because `$PGDATA` is now a subdirectory of the mountpoint, not the mountpoint itself. A plain
+`mountpoint /data/pgdata` would have failed and refused to start; accepting `/` would have made the
+guard decorative in every deployment. Same refusal message, same protection.
+
 ## 7. Known operational incidents (short list — historical record, do not prune)
 
 - **v1.0.2 — healthcheck false-unhealthy**: exec-form `CMD` couldn't find `curl`; fixed with
@@ -852,3 +927,16 @@ Re-verify before trusting volatile facts:
 - Published registries/tags: `grep -nE 'images|semver|maxlainz' .github/workflows/publish-image.yml`
 - GHCR retention windows: `grep -nE 'KEEP_.*DAYS|KEEP_LATEST_DEV' .github/workflows/cleanup-ghcr.yml`
 - Projection cache TTL: `grep -n 'PROJECTION_CACHE_TTL' apps/api/src/state.rs`
+- **Home Assistant add-on channel (§2.1/§2.3/§5/§6, added 2026-08-27 on branch
+  `feat/home-assistant-addon`)**: `cat repository.yaml`;
+  `grep -n '^image:\|^version:\|init:\|backup:\|ingress\|^ports:' addon/futurefin/config.yaml`
+  (prebuilt GHCR image, `init: false`, `backup: cold`, ingress 8080, direct port `null`);
+  `grep -n 'options.json\|PGDATA=/data/pgdata\|FUTUREFIN_STATE_DIR=/data/state\|HA_ADDON' apps/api/docker-entrypoint.sh`
+  (the `/data` layout); `grep -n 'is_persisted' apps/api/docker-entrypoint.sh` (ancestor-walk volume
+  guard, stops before `/`); `./scripts/audit-releases.sh --addon` (add-on version vs
+  `apps/api/Cargo.toml`); `grep -n 'Bump de la versión del add-on en main' -A12 .github/workflows/publish-image.yml`
+  (the post-build step that makes the update visible in HA — requires the «GitHub Actions» app as a
+  bypass actor of the «Proteger main» ruleset).
+- **Downgrade refusal banner (§2.3, added 2026-08-27)**:
+  `grep -n 'NO ARRANCA\|MigrationError::Downgrade\|VersionMissing' apps/api/src/db.rs`;
+  pinned by `apps/api/tests/migration_guard.rs` (run with `TEST_DATABASE_URL` set).

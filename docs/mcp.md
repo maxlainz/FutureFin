@@ -89,6 +89,29 @@ Detalles de los tokens:
 
 ---
 
+## MCP necesita la raíz de un origen: ingress y subpath no valen
+
+Esto no es una limitación del empaquetado ni algo que se arregle con una opción: es el protocolo.
+El descubrimiento de OAuth 2.1 (RFC 8414 y RFC 9728) exige servir
+`/.well-known/oauth-authorization-server` y `/.well-known/oauth-protected-resource` **en la raíz
+del origen**. Si FutureFin cuelga de una ruta, esa raíz es de otro y el cliente pregunta a un sitio
+donde no hay nadie escuchando.
+
+Afecta a dos despliegues:
+
+- **El add-on de Home Assistant**, cuyo acceso normal va por el ingress del Supervisor
+  (`/api/hassio_ingress/<token>`). La receta es **publicar el puerto directo** del add-on y apuntar
+  el cliente ahí: pasos completos, con la variante de Cloudflare Tunnel para claude.ai web, en
+  [home-assistant.md §4](home-assistant.md#4-mcp-y-claudeai-por-qué-hace-falta-el-puerto-directo).
+- **Un proxy inverso con subpath** (`https://tu-host/futurefin/`). Si vas a conectar un cliente MCP,
+  sirve FutureFin en la raíz de un dominio o subdominio propio. Ver
+  [instalacion.md](instalacion.md#lo-que-no-funciona-en-un-subpath).
+
+Todo lo demás —tokens, roles, el interruptor de escritura, el preview de las destructivas— funciona
+igual por el puerto directo que por cualquier otro camino.
+
+---
+
 ## Permisos: qué puede escribir y qué no
 
 Escribir vía MCP pasa por **tres puertas**, y las tres tienen que estar abiertas:
@@ -124,4 +147,5 @@ inerte hasta que tú la abres.
 ## Ver también
 
 - [Configuración](configuracion.md) — `FUTUREFIN_MCP_ENABLED`, `FUTUREFIN_PUBLIC_URL` y el resto
-- [Instalación](instalacion.md) — roles del hogar y cómo poner la app detrás de HTTPS
+- [Instalación](instalacion.md) — roles del hogar, HTTPS por delante y el modo subpath
+- [Home Assistant](home-assistant.md) — el add-on, y por qué MCP necesita ahí el puerto directo

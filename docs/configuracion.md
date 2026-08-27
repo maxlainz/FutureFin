@@ -73,6 +73,9 @@ Las lee el binario de Rust. Sirven igual en Docker y en desarrollo.
 | `FUTUREFIN_PUBLIC_URL` | se deriva de cada petición | Origen público (`https://tu-host`) para el OAuth del conector de claude.ai. Solo hace falta si tu proxy no manda `X-Forwarded-Proto`/`Host` correctos. Tiene que ser un origen pelado, sin path ni query: **si está y es inválido, el arranque falla**. |
 | `FUTUREFIN_DB_CONNECT_TIMEOUT_SECS` | `30` | Presupuesto total de reintentos al conectar con la base de datos (backoff 0,5 s → 1 → 2 → 4…). Entre 1 y 600; fuera de rango, 30. Dentro del contenedor casi nunca importa —el entrypoint ya espera a que PostgreSQL conteste antes de lanzar la API—; en desarrollo sí, si arrancas `cargo run` antes que el PostgreSQL de `docker-compose.dev.yml`. |
 | `FUTUREFIN_RECONCILE_SWEEP_HOURS` | `24` | Horas entre barridos de conciliación de transferencias. **`0` lo desactiva.** No es el mecanismo principal —la conciliación automática ya corre tras cada mutación—, sino su red de reintento. Fuera de 0–168 vuelve a 24. |
+| `FUTUREFIN_BASE_PATH` | vacío (raíz) | Prefijo público fijo cuando un proxy sirve la app en un subpath (`/futurefin`) y **no** manda `X-Forwarded-Prefix`. La cabecera, si viene, gana sobre esta variable. Debe empezar por `/`, sin `//` ni segmentos `.`/`..`, charset `[A-Za-z0-9._~/-]`, máximo 128 caracteres: **si está y es inválido, el arranque falla**. Ver [instalacion.md](instalacion.md#servirla-en-un-subpath-httpstu-hostfuturefin). |
+| `FUTUREFIN_TRUSTED_PROXY_IPS` | vacío (nadie) | Lista de IPs de proxies de confianza, separadas por comas, o `any` para confiar en cualquier peer (redes privadas y tests). Sin definir, **nadie** es de confianza: es el valor seguro. **Una entrada que no sea una IP aborta el arranque**, igual que en `CORS_ORIGINS`. De ella dependen dos cosas: aceptar identidad por cabeceras y relajar el anti-clickjacking bajo un ingress. **`any` es incompatible con `FUTUREFIN_TRUSTED_PROXY_AUTH=1`**: combinar «confío en cualquier peer» con «acepto la identidad que me declaren» equivale a no autenticar, así que el arranque se aborta en vez de dejarlo pasar. |
+| `FUTUREFIN_TRUSTED_PROXY_AUTH` | `false` | Acepta la identidad que declara el proxy (`POST /v1/auth/sso`, cabecera `X-Remote-User-Id`) y la convierte en una sesión normal. **Exige `FUTUREFIN_TRUSTED_PROXY_IPS`**: activarla sin lista de IPs **aborta el arranque** a propósito, porque una cabecera de identidad sin peer verificado la puede escribir cualquiera. Mismo parseo estricto que `COOKIE_SECURE`. Tampoco vale una lista `any` (ver la fila de arriba). La activa sola el add-on de Home Assistant. |
 
 ## Bases de datos externas: retiradas en la 4.0.0
 
@@ -142,5 +145,7 @@ instalación. Los toca el propietario.
 ## Ver también
 
 - [Instalación](instalacion.md) · [Actualizar](actualizar.md) · [Copias de seguridad](backups.md)
+- [Home Assistant](home-assistant.md) — las opciones del add-on y a qué variable de esta página
+  traduce cada una
 - [Conectar Claude](mcp.md) — `FUTUREFIN_MCP_ENABLED` y `FUTUREFIN_PUBLIC_URL` en contexto
 - [Desarrollo](desarrollo.md) — el bloque de variables de `split-dev`
