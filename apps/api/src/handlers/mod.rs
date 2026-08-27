@@ -7,6 +7,7 @@ pub mod budget;
 pub mod categories;
 pub mod fallback;
 pub mod frame;
+pub mod ha_sso;
 pub mod health;
 pub mod history;
 pub mod installation;

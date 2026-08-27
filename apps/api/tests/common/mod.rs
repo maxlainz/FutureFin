@@ -12,11 +12,12 @@ use axum::body::Body;
 use axum::extract::Extension;
 use axum::Router;
 use futurefin_api::routes;
+use futurefin_api::ha_idp::{HaIdentity, HaIdp, HaIdpError, HaTokens};
 use futurefin_api::handlers::frame;
 use futurefin_api::handlers::person_view::LedgerView;
 use futurefin_api::handlers::spa::{self, SpaIndex};
 use futurefin_api::prefix::PeerPolicy;
-use futurefin_api::state::{AppState, Density, ProjectionCacheKey};
+use futurefin_api::state::{AppState, Density, HaSso, ProjectionCacheKey};
 use http::Request;
 use http_body_util::BodyExt;
 use sqlx::postgres::PgPoolOptions;
@@ -358,6 +359,116 @@ pub struct TestConfig {
     /// HTML del shell SPA: con `Some(_)` se monta el fallback `spa::serve_index` igual que
     /// main.rs (sin `ServeDir`: los tests no sirven assets del disco).
     pub with_spa_index: Option<String>,
+    /// Proveedor falso de «Entrar con Home Assistant». Con `Some(_)`, `AppState.ha_sso` queda
+    /// puesto y las rutas `/v1/auth/ha/*` funcionan sin un Home Assistant de verdad.
+    pub ha_idp: Option<Arc<FakeHaIdp>>,
+    /// Origen público de HA que verá el test (default `https://ha.test`). Solo se usa cuando
+    /// `ha_idp` es `Some(_)`.
+    pub ha_sso_url: Option<String>,
+}
+
+/// Llamadas que el doble registra, en orden. Lo que fija el ORDEN (canje → identidad →
+/// revocación → base de datos) es un test sobre este vector: la revocación tiene que ocurrir
+/// antes de tocar la BD, y sin registro no habría forma de verlo.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FakeCall {
+    Exchange { code: String, client_id: String },
+    Identity { access_token: String },
+    Revoke { refresh_token: String },
+}
+
+/// Doble de `HaIdp` con respuestas guionizadas.
+///
+/// `revoke` es infalible por firma (el trait lo impone: un fallo revocando no puede tirar un
+/// login ya probado), así que «fallo de revocación» se modela como lo que es de verdad — la
+/// llamada ocurre, no cambia nada, y el login sigue.
+pub struct FakeHaIdp {
+    exchange: std::sync::Mutex<Result<HaTokens, HaIdpError>>,
+    identity: std::sync::Mutex<Result<HaIdentity, HaIdpError>>,
+    calls: std::sync::Mutex<Vec<FakeCall>>,
+}
+
+#[allow(dead_code)]
+impl FakeHaIdp {
+    /// Camino feliz: canje con refresh token e identidad `(id, name)`.
+    pub fn happy(external_user_id: Uuid, name: &str) -> Arc<Self> {
+        Arc::new(Self {
+            exchange: std::sync::Mutex::new(Ok(HaTokens {
+                access_token: "ha-access-token".into(),
+                refresh_token: Some("ha-refresh-token".into()),
+            })),
+            identity: std::sync::Mutex::new(Ok(HaIdentity {
+                external_user_id,
+                name: name.to_string(),
+            })),
+            calls: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Igual, pero HA no devuelve refresh token (⇒ no hay nada que revocar).
+    pub fn without_refresh(external_user_id: Uuid, name: &str) -> Arc<Self> {
+        let fake = Self::happy(external_user_id, name);
+        *fake.exchange.lock().unwrap() = Ok(HaTokens {
+            access_token: "ha-access-token".into(),
+            refresh_token: None,
+        });
+        fake
+    }
+
+    pub fn exchange_fails() -> Arc<Self> {
+        let fake = Self::happy(Uuid::new_v4(), "nadie");
+        *fake.exchange.lock().unwrap() = Err(HaIdpError::Exchange);
+        fake
+    }
+
+    pub fn identity_fails() -> Arc<Self> {
+        let fake = Self::happy(Uuid::new_v4(), "nadie");
+        *fake.identity.lock().unwrap() = Err(HaIdpError::Identity);
+        fake
+    }
+
+    /// Cambia la identidad que devolverá la PRÓXIMA llamada. Con esto un mismo `AppState`
+    /// puede representar a dos personas distintas de Home Assistant, que es lo que hace falta
+    /// para probar la cascada de nombres.
+    pub fn set_identity(&self, external_user_id: Uuid, name: &str) {
+        *self.identity.lock().unwrap() = Ok(HaIdentity {
+            external_user_id,
+            name: name.to_string(),
+        });
+    }
+
+    pub fn calls(&self) -> Vec<FakeCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn record(&self, call: FakeCall) {
+        self.calls.lock().unwrap().push(call);
+    }
+}
+
+#[async_trait::async_trait]
+impl HaIdp for FakeHaIdp {
+    async fn exchange_code(&self, code: &str, client_id: &str) -> Result<HaTokens, HaIdpError> {
+        self.record(FakeCall::Exchange {
+            code: code.to_string(),
+            client_id: client_id.to_string(),
+        });
+        self.exchange.lock().unwrap().clone()
+    }
+
+    async fn identity(&self, access_token: &str) -> Result<HaIdentity, HaIdpError> {
+        self.record(FakeCall::Identity {
+            access_token: access_token.to_string(),
+        });
+        self.identity.lock().unwrap().clone()
+    }
+
+    async fn revoke(&self, refresh_token: &str) {
+        self.record(FakeCall::Revoke {
+            refresh_token: refresh_token.to_string(),
+        });
+    }
 }
 
 impl TestApp {
@@ -388,7 +499,14 @@ impl TestApp {
                     PeerPolicy::Disabled
                 },
                 cfg.trusted_header_auth,
-            ),
+            )
+            // `Arc<FakeHaIdp>` se convierte solo en `Arc<dyn HaIdp>`.
+            .with_ha_idp(cfg.ha_idp.map(|idp| HaSso {
+                base_url: cfg
+                    .ha_sso_url
+                    .unwrap_or_else(|| "https://ha.test".to_string()),
+                idp,
+            })),
         );
         let mut router = Router::new()
             .merge(routes::app_router(&state))
@@ -663,6 +781,35 @@ impl ResponseParts {
                 String::from_utf8_lossy(&self.body)
             )
         })
+    }
+
+    /// Cabecera `Location` de un redirect.
+    #[allow(dead_code)]
+    pub fn location(&self) -> Option<String> {
+        self.headers
+            .get(http::header::LOCATION)?
+            .to_str()
+            .ok()
+            .map(str::to_string)
+    }
+
+    /// El `Set-Cookie` COMPLETO (con sus atributos) de la cookie con ese nombre.
+    #[allow(dead_code)]
+    pub fn set_cookie(&self, name: &str) -> Option<String> {
+        self.headers
+            .get_all(http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|s| s.starts_with(&format!("{name}=")))
+            .map(str::to_string)
+    }
+
+    /// Solo el valor de esa cookie (vacío = borrado).
+    #[allow(dead_code)]
+    pub fn cookie_value(&self, name: &str) -> Option<String> {
+        let raw = self.set_cookie(name)?;
+        let first = raw.split(';').next()?;
+        Some(first[name.len() + 1..].to_string())
     }
 
     /// Extrae el valor de la cookie `ff_session` del `Set-Cookie` de la respuesta.

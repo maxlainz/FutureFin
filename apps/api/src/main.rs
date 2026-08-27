@@ -80,6 +80,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // «Entrar con Home Assistant»: exclusivo del add-on. La URL sola no basta — el entrypoint
+    // del add-on exporta `FUTUREFIN_HA_ADDON=1`, y fuera de ahí la variable se rechaza en vez
+    // de ignorarse: una instalación compose que la configurara creería tener un login que no
+    // puede funcionar (el `client_id` que HA acepta es el origen de ESTA app, y HA solo lo
+    // acepta cuando ambos comparten origen a través de su propio Ingress).
+    let ha_sso_url = ha_sso_url();
+    let ha_addon = parse_bool_env("FUTUREFIN_HA_ADDON").unwrap_or(false);
+    if ha_sso_url.is_some() && !ha_addon {
+        panic!(
+            "FUTUREFIN_HA_SSO_URL is only honoured inside the Home Assistant add-on \
+             (FUTUREFIN_HA_ADDON=1): el login con HA es exclusivo del add-on"
+        );
+    }
+    let ha_sso = ha_sso_url.clone().map(|base| futurefin_api::state::HaSso {
+        idp: Arc::new(futurefin_api::ha_idp::client::HttpHaIdp::new(base.clone())),
+        base_url: base,
+    });
+
     let shutdown_pool = pool.clone();
     let state = Arc::new(
         AppState::new(
@@ -90,7 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             mcp_enabled,
             public_url.clone(),
         )
-        .with_trusted_proxy(base_path.clone(), trusted_peers, trusted_header_auth),
+        .with_trusted_proxy(base_path.clone(), trusted_peers, trusted_header_auth)
+        .with_ha_idp(ha_sso),
     );
 
     tracing::info!(
@@ -101,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         public_url = public_url.as_deref().unwrap_or("(derived from request)"),
         base_path = if base_path.is_empty() { "(root)" } else { base_path.as_str() },
         trusted_header_auth,
+        ha_sso_url = ha_sso_url.as_deref().unwrap_or("(disabled)"),
         "server config"
     );
 
@@ -274,6 +294,30 @@ fn public_url() -> Option<String> {
     }
     if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
         panic!("FUTUREFIN_PUBLIC_URL must be a bare origin (no path/query/fragment): {raw}");
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
+/// `FUTUREFIN_HA_SSO_URL` (opcional): origen público de Home Assistant para «Entrar con Home
+/// Assistant». Mismas reglas y mismo fail-loud que `FUTUREFIN_PUBLIC_URL` — un origen desnudo,
+/// http(s), con host, sin path/query/fragmento — porque de él cuelgan la URL de autorización y
+/// la del WebSocket, y una URL deforme se manifestaría como un login que redirige a ninguna
+/// parte en vez de como un error de arranque.
+fn ha_sso_url() -> Option<String> {
+    let raw = std::env::var("FUTUREFIN_HA_SSO_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let parsed = url::Url::parse(&raw)
+        .unwrap_or_else(|e| panic!("invalid FUTUREFIN_HA_SSO_URL ({raw}): {e}"));
+    if !matches!(parsed.scheme(), "http" | "https") {
+        panic!("FUTUREFIN_HA_SSO_URL must be http(s), got: {raw}");
+    }
+    if parsed.host_str().is_none() {
+        panic!("FUTUREFIN_HA_SSO_URL must include a host: {raw}");
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        panic!("FUTUREFIN_HA_SSO_URL must be a bare origin (no path/query/fragment): {raw}");
     }
     Some(parsed.origin().ascii_serialization())
 }
