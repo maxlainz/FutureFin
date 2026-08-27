@@ -659,7 +659,9 @@ jobs:
           v="${TAG#v}"
           path="addon/futurefin/config.yaml"
 
-          meta="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}" -f ref=main)"
+          # OJO: `-f` convierte el GET en POST (gh api cambia de método al recibir fields) —
+          # el ref va como query string o esto es un 404. Incidente: el estreno en 4.3.0.
+          meta="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}?ref=main")"
           sha="$(printf '%s' "$meta" | jq -r .sha)"
           printf '%s' "$meta" | jq -r .content | base64 -d > "${RUNNER_TEMP}/addon-config.yaml"
 
