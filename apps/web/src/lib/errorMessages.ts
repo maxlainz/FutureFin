@@ -75,6 +75,17 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Home Assistant no ha enviado una identidad válida. Vuelve a abrir el add-on.",
   sso_username_unavailable:
     "No se ha podido crear tu cuenta porque ese nombre de usuario ya está cogido. Avisa al propietario del hogar.",
+  // «Entrar con Home Assistant»: estos códigos NO llegan en el cuerpo de una respuesta, sino
+  // como `?ha_error=` en la vuelta del redirect. Se traducen aquí igual que el resto para que
+  // haya un único sitio donde vive la frase que ve el usuario.
+  ha_sso_disabled:
+    "Esta instalación no tiene configurado el acceso con Home Assistant. Pídele al propietario que rellene «URL de Home Assistant» en las opciones del add-on.",
+  ha_state_mismatch:
+    "La vuelta desde Home Assistant no se ha podido verificar. Vuelve a pulsar «Entrar con Home Assistant».",
+  ha_exchange_failed:
+    "Home Assistant no ha confirmado el acceso. Comprueba que sigue en marcha y vuelve a intentarlo.",
+  ha_identity_failed:
+    "No se ha podido leer tu usuario de Home Assistant. Vuelve a intentarlo en unos segundos.",
 
   // ── Copia de seguridad (.ffbackup) ────────────────────────────────────────────────────
   backup_wrong_password:

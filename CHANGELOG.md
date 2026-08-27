@@ -4,6 +4,41 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.3.1] - 2026-08-27
+
+### «Entrar con Home Assistant» — HA como proveedor de identidad (solo add-on)
+
+- **Por qué existe**: la 4.3.0 dejó a los usuarios del add-on con SSO solo dentro del panel. En el
+  origen directo (túnel/puerto) sus cuentas —sin contraseña, por diseño— no podían iniciar sesión,
+  y por tanto **no podían autorizar el conector MCP de claude.ai** (el consentimiento OAuth exige
+  sesión en ese origen). Este parche cierra esa cojera; se publica como 4.3.1 y no como minor
+  porque una 4.3.0 sin esto queda inservible en demasiados modos para quien siga el tag `:4.3`.
+- **Qué hace**: con la opción `ha_sso_url` del add-on rellenada (la URL pública de tu HA), el login
+  de FutureFin fuera del panel muestra **«Entrar con Home Assistant»** — también en la pantalla de
+  consentimiento OAuth. El flujo es el OAuth de las apps móviles de HA (`/auth/authorize` →
+  código → `/auth/token`), la identidad se lee por WebSocket (`auth/current_user`) y **es el mismo
+  usuario** que el SSO del panel: el `id` de HA es el `X-Remote-User-Id` del ingress, así que ambos
+  caminos caen en la misma fila de `users` (test de paridad dedicado).
+- **Modelo de seguridad en tres frases**: HA no soporta PKCE ni client secret, así que la defensa
+  es el mismo-origen exacto entre `client_id` y `redirect_uri` más una cookie de estado
+  (`ff_ha_state`, HttpOnly, `SameSite=Lax`, un solo uso, 10 min) — la ruta de retorno viaja
+  **dentro de la cookie**, nunca en el `state`, y se re-valida contra open-redirects. El refresh
+  token de HA se **revoca inmediatamente** tras verificar la identidad: FutureFin no retiene
+  ninguna credencial de tu domótica. La feature solo se activa en modo add-on
+  (`FUTUREFIN_HA_SSO_URL` + `FUTUREFIN_HA_ADDON=1`, que solo exporta el entrypoint; la URL sin el
+  flag aborta el arranque).
+- **Primera dependencia de red saliente del binario**: `reqwest` (rustls, sin OpenSSL) +
+  `tokio-tungstenite` para la pata WebSocket, con un único stack rustls en el árbol (gate
+  `cargo tree -d`). Los tests de integración usan un doble del proveedor tras el trait `HaIdp`
+  (17 casos nuevos, orden `exchange → identity → revoke` verificado) — sin red en la suite.
+- **Reapertura deliberada**: la arqueología tenía «OAuth login» (FutureFin como cliente de un IdP)
+  como batalla cerrada; se reabre **estrecha y conscientemente** solo para HA, con scope-note
+  fechado y la decisión D19 del contrato de arquitectura (HA = fuente de identidad, nunca de
+  autorización: roles y membership siguen siendo de FutureFin).
+- **No es breaking y el rollback es trivial**: sin la opción todo es byte-idéntico a la 4.3.0
+  (los tests del shell lo fijan); vaciar `ha_sso_url` apaga la feature — sin migraciones, sin
+  datos que deshacer.
+
 ## [4.3.0] - 2026-08-27
 
 ### Home Assistant — FutureFin se instala como add-on

@@ -26,6 +26,19 @@ const fixture = JSON.parse(readFileSync(FIXTURE_PATH, "utf8")) as Fixture;
 /** Códigos que nacen en el cliente y por tanto no están en el fixture del backend. */
 const CLIENT_ONLY = new Set(["empty_json_body", "network_error"]);
 
+/**
+ * Códigos que el backend entrega por REDIRECCIÓN (`?ha_error=…` en la vuelta del login por
+ * Home Assistant), no en el cuerpo de una respuesta de error. El fixture solo enumera los
+ * `ApiError`, así que estos no tienen por qué aparecer ahí — pero su frase sí vive en el
+ * catálogo, que es el único sitio donde se traduce lo que ve el usuario.
+ */
+const REDIRECT_ONLY = new Set([
+  "ha_sso_disabled",
+  "ha_state_mismatch",
+  "ha_exchange_failed",
+  "ha_identity_failed",
+]);
+
 describe("catálogo de errores", () => {
   it("el fixture trae códigos y clases", () => {
     expect(fixture.http_classes.length).toBeGreaterThan(0);
@@ -47,7 +60,12 @@ describe("catálogo de errores", () => {
   });
 
   it("no hay entradas huérfanas en el catálogo", () => {
-    const conocidos = new Set([...fixture.http_classes, ...fixture.codes, ...CLIENT_ONLY]);
+    const conocidos = new Set([
+      ...fixture.http_classes,
+      ...fixture.codes,
+      ...CLIENT_ONLY,
+      ...REDIRECT_ONLY,
+    ]);
     const sobran = Object.keys(ERROR_MESSAGES).filter((c) => !conocidos.has(c));
     expect(
       sobran,

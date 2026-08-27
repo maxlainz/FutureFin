@@ -14,6 +14,8 @@ import {
   stripBase,
   BASE_PATH,
   SSO_AVAILABLE,
+  HA_LOGIN_AVAILABLE,
+  haLoginHrefWith,
 } from "./basePath";
 
 const HA = "/api/hassio_ingress/abc123";
@@ -86,10 +88,35 @@ describe("stripBaseWith", () => {
   });
 });
 
+describe("haLoginHrefWith", () => {
+  it("sin prefijo, el `next` viaja tal cual (escapado)", () => {
+    expect(haLoginHrefWith("", "/movimientos")).toBe(
+      "/v1/auth/ha/start?next=%2Fmovimientos",
+    );
+  });
+
+  it("con prefijo: la URL lo lleva y el `next` NO — el servidor no ve el subpath", () => {
+    expect(haLoginHrefWith("/ff", "/ff/oauth/authorize?a=b")).toBe(
+      `/ff/v1/auth/ha/start?next=${encodeURIComponent("/oauth/authorize?a=b")}`,
+    );
+  });
+
+  it("acepta un `next` que ya venga sin prefijo", () => {
+    expect(haLoginHrefWith("/ff", "/movimientos")).toBe(
+      "/ff/v1/auth/ha/start?next=%2Fmovimientos",
+    );
+  });
+
+  it("la raíz bajo prefijo vuelve como «/»", () => {
+    expect(haLoginHrefWith(HA, HA)).toBe(`${HA}/v1/auth/ha/start?next=%2F`);
+  });
+});
+
 describe("wrappers sobre el window del test", () => {
   it("sin `__FF_BASE__` inyectado, todo es passthrough", () => {
     expect(BASE_PATH).toBe("");
     expect(SSO_AVAILABLE).toBe(false);
+    expect(HA_LOGIN_AVAILABLE).toBe(false);
     expect(apiUrl("/v1/summary")).toBe("/v1/summary");
     expect(appUrl("/resumen")).toBe("/resumen");
     expect(stripBase("/resumen")).toBe("/resumen");

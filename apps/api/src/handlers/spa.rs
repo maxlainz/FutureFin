@@ -5,10 +5,11 @@
 //! `/api/hassio_ingress/<token>` a la vez), así que ni un `base` de Vite en build
 //! ni un placeholder reescrito al arrancar valen. El HTML del disco se lee una vez;
 //! por request se reescriben los refs absolutos (`src="/…"`, `href="/…"`) y se
-//! inyecta `window.__FF_BASE__` / `window.__FF_SSO__` para la SPA.
+//! inyecta `window.__FF_BASE__` / `window.__FF_SSO__` / `window.__FF_HA_LOGIN__`
+//! para la SPA.
 //!
-//! Invariante maestro: sin prefijo y sin SSO la respuesta es el fichero **byte a
-//! byte** (`Cow::Borrowed`) — el modo compose no cambia ni un carácter.
+//! Invariante maestro: sin prefijo y sin ninguna bandera activa la respuesta es el
+//! fichero **byte a byte** (`Cow::Borrowed`) — el modo compose no cambia ni un carácter.
 
 use crate::handlers::sso::sso_available;
 use crate::prefix::PeerIp;
@@ -24,7 +25,20 @@ use std::sync::Arc;
 /// identidad, que decide `__FF_SSO__`. Se emite en **todas** las respuestas, también en la
 /// verbatim: un caché intermedio que guardara el shell anónimo sin `Vary` se lo devolvería
 /// después a una petición que sí trae `X-Remote-User-Id`, y el flag de SSO no llegaría nunca.
+/// `__FF_HA_LOGIN__` NO entra en esta lista a propósito: es configuración del PROCESO
+/// (`FUTUREFIN_HA_SSO_URL`), igual para todas las requests, así que no genera variantes de
+/// caché. Solo se listan las cabeceras que sí cambian el HTML entre peticiones.
 const SHELL_VARY: &str = "X-Ingress-Path, X-Forwarded-Prefix, X-Remote-User-Id";
+
+/// Banderas que el shell anuncia a la SPA. `Default` = todas apagadas, que es el shell
+/// verbatim.
+#[derive(Clone, Copy, Default)]
+pub struct ShellFlags {
+    /// `window.__FF_SSO__`: esta request puede abrir sesión por cabeceras (proxy de confianza).
+    pub sso: bool,
+    /// `window.__FF_HA_LOGIN__`: esta instalación ofrece «Entrar con Home Assistant».
+    pub ha_login: bool,
+}
 
 /// `index.html` leído del disco una vez al arrancar.
 pub struct SpaIndex {
@@ -63,9 +77,14 @@ pub async fn serve_index(
     let prefix = state.request_prefix(&headers);
     // Predicado único con el endpoint que abrirá la sesión (`handlers/sso.rs`): si el shell
     // dice `__FF_SSO__=true`, el `POST /v1/auth/sso` que la SPA lanzará puede prosperar.
-    let sso = sso_available(&state, peer, &headers);
+    let flags = ShellFlags {
+        sso: sso_available(&state, peer, &headers),
+        // Predicado único con `/v1/auth/ha/start`: si el shell pinta el botón, el endpoint que
+        // la SPA invocará al pulsarlo puede prosperar.
+        ha_login: crate::ha_idp::ha_login_available(&state),
+    };
 
-    let body = inject(&index.html, &prefix, sso);
+    let body = inject(&index.html, &prefix, flags);
     let modified = matches!(body, Cow::Owned(_));
 
     let mut response = (StatusCode::OK, body.into_owned()).into_response();
@@ -87,15 +106,16 @@ pub async fn serve_index(
     response
 }
 
-/// Reescritura pura del shell. Sin prefijo y sin SSO devuelve `Cow::Borrowed` —
-/// los bytes exactos del disco. Con prefijo: los atributos `src="/…"` y
+/// Reescritura pura del shell. Sin prefijo y con todas las banderas apagadas devuelve
+/// `Cow::Borrowed` — los bytes exactos del disco. Con prefijo: los atributos `src="/…"` y
 /// `href="/…"` del HTML de entrada (los 4 refs estáticos + los assets que emite
 /// Vite) pasan a `{prefix}/…`; no hay `url()` en el CSS del proyecto y los chunks
 /// dinámicos resuelven relativos a su módulo importador, así que el HTML es el
-/// único punto de reescritura. El `<script>` con `__FF_BASE__`/`__FF_SSO__` va
-/// inmediatamente después de `<head>` para ejecutarse antes que cualquier módulo.
-pub fn inject<'a>(html: &'a str, prefix: &str, sso: bool) -> Cow<'a, str> {
-    if prefix.is_empty() && !sso {
+/// único punto de reescritura. El `<script>` con las banderas va inmediatamente
+/// después de `<head>` para ejecutarse antes que cualquier módulo.
+pub fn inject<'a>(html: &'a str, prefix: &str, flags: ShellFlags) -> Cow<'a, str> {
+    let ShellFlags { sso, ha_login } = flags;
+    if prefix.is_empty() && !sso && !ha_login {
         return Cow::Borrowed(html);
     }
     // `prefix` ya pasó `normalize_prefix` (charset sin comillas, ángulos ni
@@ -107,7 +127,8 @@ pub fn inject<'a>(html: &'a str, prefix: &str, sso: bool) -> Cow<'a, str> {
         }
     }
     let bootstrap = format!(
-        "<script>window.__FF_BASE__=\"{prefix}\";window.__FF_SSO__={sso};</script>"
+        "<script>window.__FF_BASE__=\"{prefix}\";window.__FF_SSO__={sso};\
+         window.__FF_HA_LOGIN__={ha_login};</script>"
     );
     if let Some(pos) = out.find("<head>") {
         out.insert_str(pos + "<head>".len(), &bootstrap);
@@ -153,9 +174,13 @@ mod tests {
         "  </head>\n  <body><div id=\"root\"></div></body>\n</html>\n",
     );
 
+    fn sso() -> ShellFlags {
+        ShellFlags { sso: true, ha_login: false }
+    }
+
     #[test]
-    fn without_prefix_and_sso_is_borrowed_verbatim() {
-        let out = inject(SHELL, "", false);
+    fn without_prefix_and_without_flags_is_borrowed_verbatim() {
+        let out = inject(SHELL, "", ShellFlags::default());
         assert!(matches!(out, Cow::Borrowed(_)));
         assert_eq!(out.as_ref(), SHELL);
     }
@@ -163,7 +188,7 @@ mod tests {
     #[test]
     fn with_prefix_rewrites_all_absolute_refs_and_injects_bootstrap() {
         let p = "/api/hassio_ingress/tok";
-        let out = inject(SHELL, p, true);
+        let out = inject(SHELL, p, sso());
         assert!(out.contains(&format!("href=\"{p}/favicon.svg\"")));
         assert!(out.contains(&format!("href=\"{p}/site.webmanifest\"")));
         assert!(out.contains(&format!("src=\"{p}/assets/index-abc123.js\"")));
@@ -174,22 +199,40 @@ mod tests {
         // Bootstrap inmediatamente tras <head>.
         let head = out.find("<head>").unwrap() + "<head>".len();
         assert!(out[head..].starts_with(&format!(
-            "<script>window.__FF_BASE__=\"{p}\";window.__FF_SSO__=true;</script>"
+            "<script>window.__FF_BASE__=\"{p}\";window.__FF_SSO__=true;window.__FF_HA_LOGIN__=false;</script>"
         )));
     }
 
     #[test]
     fn sso_without_prefix_still_injects_flag() {
-        let out = inject(SHELL, "", true);
-        assert!(out.contains("window.__FF_BASE__=\"\";window.__FF_SSO__=true;"));
+        let out = inject(SHELL, "", sso());
+        assert!(out.contains(
+            "window.__FF_BASE__=\"\";window.__FF_SSO__=true;window.__FF_HA_LOGIN__=false;"
+        ));
         // Sin prefijo no se reescribe ningún asset.
+        assert!(out.contains("src=\"/assets/index-abc123.js\""));
+    }
+
+    /// El login con Home Assistant es config del proceso, no de la request: activa la
+    /// inyección él solo, sin prefijo y sin SSO de cabeceras.
+    #[test]
+    fn ha_login_alone_injects_the_bootstrap() {
+        let out = inject(
+            SHELL,
+            "",
+            ShellFlags { sso: false, ha_login: true },
+        );
+        assert!(matches!(out, Cow::Owned(_)));
+        assert!(out.contains(
+            "window.__FF_BASE__=\"\";window.__FF_SSO__=false;window.__FF_HA_LOGIN__=true;"
+        ));
         assert!(out.contains("src=\"/assets/index-abc123.js\""));
     }
 
     #[test]
     fn protocol_relative_and_external_urls_untouched() {
         let html = "<head></head><a href=\"//cdn.example/x\"></a><a href=\"https://x.example/\"></a>";
-        let out = inject(html, "/p", false);
+        let out = inject(html, "/p", ShellFlags::default());
         assert!(out.contains("href=\"//cdn.example/x\""));
         assert!(out.contains("href=\"https://x.example/\""));
     }

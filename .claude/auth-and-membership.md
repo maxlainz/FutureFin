@@ -9,7 +9,9 @@ Este documento y el código (`apps/api/src/handlers/{session,installation,member
 3. **Session check**: `require_session_user` reads cookie UUID → joins `sessions` + `users` → returns `SessionUser { id: UserId }`.
 4. **Installation gate**: `GET /v1/installation/session-context` returns `{installation_initialized, access}`. Frontend uses this to decide between: setup screen, pending screen, or main app.
 5. **Cambio de contraseña** (`POST /v1/auth/password`, 4.0.0): ver §Rotar la contraseña abajo.
-6. **SSO por proxy de confianza** (`POST /v1/auth/sso`): ver §SSO — cuarto esquema, abajo.
+6. **SSO por proxy de confianza** (`POST /v1/auth/sso`): ver §Identidad externa de Home Assistant, abajo.
+7. **«Entrar con Home Assistant»** (`GET /v1/auth/ha/start` → `/callback`, 4.3.1): el mismo destino
+   —una sesión normal— por el otro camino. Ver la misma sección.
 
 ## Rotar la contraseña (`POST /v1/auth/password`, 4.0.0)
 
@@ -136,13 +138,20 @@ scope note). OAuth se limita a delegar acceso *después* del login. Los cuatro e
 | Sesión | cookie `ff_session` (UUID en DB) | la SPA, todo `/v1` | borrar la fila de `sessions` / logout |
 | Token de API | Bearer `ffp_…` (`api_tokens`) | `/mcp` desde Claude Code/Desktop, pegado a mano | `DELETE /v1/api-tokens/{id}` (soft-revoke) |
 | OAuth | Bearer `ffo_…` (`oauth_access_tokens` vía `oauth_grants`) | `/mcp` desde un cliente OAuth (claude.ai web) | `DELETE /v1/oauth/connections/{id}` → revoca el **grant** |
-| SSO por proxy | cabecera `X-Remote-User-Id` desde un peer de confianza | el navegador tras el Ingress de Home Assistant, en `POST /v1/auth/sso` | apagar `FUTUREFIN_TRUSTED_PROXY_AUTH`, sacar la IP de `FUTUREFIN_TRUSTED_PROXY_IPS`, o revocar la membership del usuario |
+| Identidad externa de HA | **dos mecanismos, una sola identidad**: cabecera `X-Remote-User-Id` desde un peer de confianza (`POST /v1/auth/sso`), o el round-trip del navegador contra HA + cookie `ff_ha_state` de un solo uso (`GET /v1/auth/ha/start` → `/callback`, 4.3.1) | el navegador del add-on: el primero **tras el Ingress**, el segundo en el **origen directo** | apagar `FUTUREFIN_TRUSTED_PROXY_AUTH` / vaciar la opción `ha_sso_url` respectivamente, o revocar la membership del usuario (corta los dos a la vez) |
+
+Los dos primeros producen una credencial propia; los dos últimos **no**: terminan en la misma fila
+de `sessions` y la misma cookie `ff_session` de siempre.
 
 **Matiz sobre «solo usuario + contraseña»**: hasta 4.2.x era literal. Desde el SSO por cabeceras hay
-una **segunda** forma de autenticarse ante FutureFin — pero no es login-con-IdP: FutureFin no habla
-con ningún proveedor, no hay redirects ni tokens de terceros; se limita a creerle a un proceso que
-el operador ha nombrado por IP y que corre en la misma red privada. La fila «OAuth login» de la
-arqueología sigue vigente.
+otras formas de autenticarse ante FutureFin. El SSO por cabeceras no es login-con-IdP: FutureFin no
+habla con ningún proveedor, se limita a creerle a un proceso que el operador ha nombrado por IP y que
+corre en la misma red privada. **«Entrar con Home Assistant» (4.3.1) sí lo es**, y reabre la fila
+«OAuth login» de la arqueología de forma **estrecha y consciente**: solo para Home Assistant, solo
+dentro del add-on, y tomando de HA **identidad, nunca autorización** (roles, membership, aprobación
+de pendientes y bootstrap del owner siguen siendo 100 % de FutureFin). El login-con-IdP **genérico**
+sigue rechazado — ver la decisión **D19** del contrato de arquitectura y el scope note de la
+arqueología.
 
 ### Flujo completo
 
@@ -186,7 +195,41 @@ un code o de un refresh ya consumido (`code_reuse` / `refresh_token_reuse`, OAut
 El panel se monta **siempre**, incluso con `FUTUREFIN_MCP_ENABLED=0`: apagar MCP no puede dejarte sin
 poder revocar lo que ya concediste.
 
-## SSO por cabeceras de un proxy de confianza — cuarto esquema de credencial
+## Identidad externa de Home Assistant — dos caminos, una sola identidad
+
+Desde 4.3.1 hay **dos** mecanismos que canjean la identidad de una persona en Home Assistant por una
+sesión normal de FutureFin. No son dos identidades ni dos tipos de cuenta: son **dos caras de la
+misma**, y esa es la propiedad load-bearing.
+
+| | SSO por cabeceras (4.3.0) | «Entrar con HA» / HA-IdP (4.3.1) |
+|---|---|---|
+| Ruta | `POST /v1/auth/sso` (`handlers/sso.rs`) | `GET /v1/auth/ha/start` → `/callback` (`handlers/ha_sso.rs` + `ha_idp/`) |
+| Dónde aplica | **Dentro del Ingress** del Supervisor (el panel de la barra lateral) | Donde **no** hay proxy de confianza: puerto directo, túnel, `homeassistant.local:8123` en una pestaña normal |
+| La prueba de identidad es | Una cabecera que pone un peer que el operador nombró por IP | Un **round-trip del navegador** contra el propio HA + cookie `ff_ha_state` de un solo uso |
+| Se habilita con | `FUTUREFIN_TRUSTED_PROXY_AUTH` + `FUTUREFIN_TRUSTED_PROXY_IPS` (opción `sso` del add-on) | `FUTUREFIN_HA_SSO_URL` + `FUTUREFIN_HA_ADDON=1` (opción `ha_sso_url` del add-on) |
+| Lo anuncia a la SPA | `window.__FF_SSO__` (depende de la request: peer + cabecera) | `window.__FF_HA_LOGIN__` (depende **solo** del proceso) |
+| Errores | JSON `sso_*` | **Redirect** `?ha_error=…` (ver [`api-routes.md`](api-routes.md)) |
+
+**Lo que comparten es lo que importa**: el mismo `external_user_id` (el `User.id` de HA — el
+Supervisor lo manda en `X-Remote-User-Id` en forma canónica y `auth/current_user` lo devuelve como
+`uuid4().hex`, 32 hex sin guiones; `Uuid::parse_str` normaliza ambas al MISMO UUID), la misma
+`resolve_or_provision` (`pub(crate)` desde 4.3.1, con **dos** callers y ni una línea duplicada), las
+mismas cuentas sin contraseña y el mismo `establish_session`. Entrar por un camino o por el otro
+lleva a la **misma fila de `users`**; si alguien toca una de las dos normalizaciones, la persona se
+duplica en silencio y su hogar se parte en dos (invariante **I16**, pin
+`ha_idp_login.rs::header_sso_and_ha_login_resolve_to_the_same_user`).
+
+**El callback, resumido** (contrato de orden, no detalle): leer la cookie → comparar el `state` en
+tiempo constante → **borrar la cookie SIEMPRE** (un solo uso, éxito o fallo) → canjear el código con
+el `client_id` byte-idéntico congelado en la cookie → leer la identidad por WebSocket → **revocar el
+refresh token de HA ANTES de tocar la base de datos** (FutureFin no retiene credenciales de la
+domótica) → `resolve_or_provision` → `establish_session` → 302 limpio. Paso a paso, atributos de la
+cookie y los cinco códigos de error: [`api-routes.md`](api-routes.md)
+§`/v1/auth/ha/start`+`/callback`. El **porqué** de cada pilar (identidad y nunca autorización, IdP
+puro, modelo CSRF por cookie, solo add-on): decisión **D19** de
+[`futurefin-architecture-contract`](skills/futurefin-architecture-contract/SKILL.md).
+
+### SSO por cabeceras de un proxy de confianza
 
 `POST /v1/auth/sso`, `apps/api/src/handlers/sso.rs`. Para el add-on de Home Assistant: el Ingress
 del Supervisor ya autenticó a la persona antes de que la petición llegue aquí y añade
@@ -196,7 +239,7 @@ instalación. A partir del 200 no hay nada especial en el usuario salvo que su `
 NULL. Contrato de request/respuesta y códigos de error: [`api-routes.md`](api-routes.md)
 §`POST /v1/auth/sso`.
 
-### Modelo de confianza — doble puerta, y es la frontera entera
+#### Modelo de confianza — doble puerta, y es la frontera entera
 
 Una cabecera de identidad es **una afirmación sin prueba**: cualquiera puede escribir
 `X-Remote-User-Id: <uuid del owner>`. Lo único que la convierte en credencial es de quién viene.
@@ -215,7 +258,11 @@ De ahí dos gates independientes, ambos por request:
 - El default sigue siendo **apagado**: una instalación normal responde 401 `sso_disabled` a un
   `POST /v1/auth/sso` perfecto (primer test de `sso_login.rs`).
 
-### Provisión de la cuenta
+### Provisión de la cuenta — compartida por los dos caminos
+
+`handlers/sso.rs::resolve_or_provision` (`pub(crate)`; la llaman `sso_login` y `ha_callback`). En el
+camino HA-IdP el «nombre para mostrar» es el `result.name` de `auth/current_user`; el resto es
+idéntico:
 
 1. Se busca por `users.external_user_id` (UNIQUE parcial). Si existe → ese usuario, sin más. **La
    identidad, no el nombre, es la clave**: renombrarse en Home Assistant no crea una cuenta nueva.
@@ -234,9 +281,16 @@ De ahí dos gates independientes, ambos por request:
    un error — se devuelve el usuario que ganó, que es lo que quien llama pedía.
 
 Tras el 200, `sso_login` hace el **mismo warm-up en background** de la proyección del hogar que
-`login` (D7: no se espera al recompute); usuario pending ⇒ no hay nada que calentar y se salta.
+`login` (D7: no se espera al recompute); usuario pending ⇒ no hay nada que calentar y se salta. El
+camino HA-IdP lo hereda: `ha_callback` termina en el mismo `establish_session`.
 
-### Cuentas sin contraseña
+**Un matiz del camino HA-IdP**: el 409 `sso_username_unavailable` del punto 3 no puede salir como
+JSON (el navegador viene de HA), así que se traduce al redirect `?ha_error=sso_username_unavailable`
+— **mismo código**, misma frase. Cualquier OTRO error de `resolve_or_provision` (fallo de BD, carrera
+de instalación) sí sale como error de servidor: esconderlo detrás de la pantalla de login haría
+indistinguible «tu base de datos está caída» de «vuelve a intentarlo».
+
+### Cuentas sin contraseña — vale para los dos caminos
 
 `password_hash` es NULL y no hay ninguna contraseña que probar. Los tres flujos que la exigen
 devuelven **401 `sso_account_no_password`** (`handlers/auth.rs::sso_account_no_password`, un único
@@ -258,18 +312,30 @@ constructor compartido):
 
 ### Notas
 
-- **Omisión deliberada del catálogo MCP** (registrada en `futurefin-mcp-parity`): es un mecanismo
-  de sesión de navegador atado a cabeceras de proxy, no una operación sobre datos.
-- La SPA lo intenta **una sola vez** y solo si el shell le inyectó `window.__FF_SSO__` (ver
-  [`frontend-structure.md`](frontend-structure.md) §`lib/basePath.ts`): un 401 de `/v1/auth/me` con
-  ese flag dispara un `POST /v1/auth/sso`, y cualquier fallo cae al formulario de acceso de siempre
-  — el SSO es un atajo, nunca la única puerta.
-- Regresión: `apps/api/tests/sso_login.rs` (11 tests).
+- **Omisión deliberada del catálogo MCP** (registrada en `futurefin-mcp-parity` §3.1, las **tres**
+  rutas): `POST /v1/auth/sso` es un mecanismo de sesión de navegador atado a cabeceras de proxy, y
+  `/v1/auth/ha/{start,callback}` un mecanismo de redirect de navegador que termina en una cookie, no
+  en un token — una tool MCP no puede conducirlo. Ninguna es una operación sobre datos.
+- La SPA intenta el SSO por cabeceras **una sola vez** y solo si el shell le inyectó
+  `window.__FF_SSO__` (ver [`frontend-structure.md`](frontend-structure.md) §`lib/basePath.ts`): un
+  401 de `/v1/auth/me` con ese flag dispara un `POST /v1/auth/sso`, y cualquier fallo cae al
+  formulario de acceso de siempre — el SSO es un atajo, nunca la única puerta. El botón «Entrar con
+  Home Assistant» es lo contrario: **nunca es automático**, lo pulsa la persona
+  (`haLoginHref(next)` → navegación completa a `/v1/auth/ha/start`), y aparece con
+  `window.__FF_HA_LOGIN__` tanto en el login como en la pantalla de consentimiento OAuth — que es
+  el caso que lo motiva: sin él, una cuenta sin contraseña no podía autorizar el conector MCP en el
+  origen directo.
+- Regresión: `apps/api/tests/sso_login.rs` (11 tests) y `apps/api/tests/ha_idp_login.rs` (17), más
+  los 11 unitarios puros de `apps/api/src/ha_idp/mod.rs`.
 
 ## Key functions
 ```rust
 // handlers/session.rs
 require_session_user(&jar, &pool) -> Result<SessionUser, ApiError>
+
+// handlers/sso.rs — UN solo camino de alta para la identidad externa de HA.
+// pub(crate) desde 4.3.1: la llaman sso_login (cabeceras) y ha_callback (HA-IdP).
+resolve_or_provision(&state, external_user_id: Uuid, raw_name: &str) -> Result<UserRow, ApiError>
 
 // handlers/api_tokens.rs
 require_api_token(pool, authorization: Option<&HeaderValue>) -> Result<ApiTokenIdentity, ApiError>

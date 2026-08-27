@@ -17,16 +17,26 @@ import {
   defaultFetchInit,
 } from "../api/client";
 import { LOGIN_INVALID_CREDENTIALS } from "../lib/errorMessages";
+import { HA_LOGIN_AVAILABLE, haLoginHref } from "../lib/basePath";
 import type { UserResponse } from "../api/types";
 
 export function LoginPanel(props: {
   intro?: ReactNode;
   onAuthenticated: (user: UserResponse) => void;
+  /**
+   * Ruta de la app a la que volver tras el rodeo por Home Assistant. Su presencia es lo que
+   * habilita el botón: quien monte el panel decide si el flujo de redirección tiene sentido
+   * ahí (en `/oauth/authorize` sí — la vuelta reevalúa la solicitud y cae en el consentimiento).
+   */
+  haLoginNext?: string;
 }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // El botón de HA solo existe si la instalación sabe hablar con un Home Assistant Y el caller
+  // ha dicho a dónde volver: sin destino, el rodeo dejaría al usuario en otra pantalla.
+  const haLoginNext = HA_LOGIN_AVAILABLE ? props.haLoginNext : undefined;
 
   const submit = async (ev: FormEvent) => {
     ev.preventDefault();
@@ -92,6 +102,16 @@ export function LoginPanel(props: {
           Entrar
         </button>
       </form>
+      {haLoginNext ? (
+        <button
+          type="button"
+          className="btn secondary wide auth-alt-action"
+          disabled={busy}
+          onClick={() => window.location.assign(haLoginHref(haLoginNext))}
+        >
+          Entrar con Home Assistant
+        </button>
+      ) : null}
       {error ? <p className="error compact">{error}</p> : null}
     </div>
   );

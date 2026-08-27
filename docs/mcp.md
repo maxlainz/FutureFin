@@ -9,13 +9,13 @@ hace absolutamente nada: responde 401 a todo.
 
 ## Qué puede hacer
 
-A fecha de agosto de 2026 el catálogo son **50 herramientas**, que se reparten así:
+A fecha de agosto de 2026 (4.3.1) el catálogo son **52 herramientas**, que se reparten así:
 
 | Grupo | Cuántas | Qué son |
 |---|---|---|
-| **Lectura** | 20 | Resumen, proyección FIRE, presupuesto, activos, pasivos, reglas de reparto, movimientos, importaciones, categorías, histórico, snapshots, ajustes. |
+| **Lectura** | 19 | Resumen, proyección FIRE, presupuesto, activos, pasivos, reglas de reparto, movimientos, importaciones, categorías, histórico, snapshots, ajustes. |
 | **Simulación** | 1 | `simulate_projection`: un *what-if* puro («¿y si gasto 200 € más al mes?»). No persiste nada ni ensucia la cache. |
-| **Escritura** | 29 | Crear, editar y borrar activos, pasivos, presupuesto, planificación, movimientos, categorías, reglas y snapshots; conciliar transferencias; cambiar los supuestos FIRE. |
+| **Escritura** | 32 | Crear, editar y borrar activos, pasivos, presupuesto, planificación, movimientos, categorías, reglas y snapshots; conciliar transferencias; cambiar los supuestos FIRE. |
 
 Las herramientas no son una API paralela: llaman **a las mismas funciones internas** que los
 endpoints HTTP de la app. Lo que ves por MCP es exactamente lo que ves en la interfaz.
@@ -43,6 +43,12 @@ comprobar tu pertenencia al hogar y tu rol**, así que revocar corta el acceso a
 3. Claude te lleva a la **pantalla de autorización de FutureFin**. Inicia sesión con tu usuario de
    siempre y pulsa **Autorizar**.
 4. Ya está. El acceso hereda tu rol.
+
+> **Si usas el add-on de Home Assistant**, tu cuenta probablemente no tiene contraseña: es una
+> cuenta de identidad delegada. Con la opción `ha_sso_url` configurada, esa misma pantalla de
+> autorización ofrece **«Entrar con Home Assistant»** y autorizas con tu cuenta de HA — sin crear
+> una segunda cuenta solo para esto. Cómo activarlo, en
+> [home-assistant.md](home-assistant.md#entrar-con-home-assistant-desde-fuera-del-panel).
 
 **Revocar**: `Ajustes → Integraciones → Conexiones` → **Revocar**. El corte es inmediato y Claude
 tendrá que volver a pedir permiso.

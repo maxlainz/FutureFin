@@ -139,7 +139,7 @@ fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// Busca al usuario por `external_user_id` y, si no existe, lo crea. Devuelve su fila completa
 /// (el `RETURNING`/`SELECT` ya la trae: releerla después sería un viaje de más).
-async fn resolve_or_provision(
+pub(crate) async fn resolve_or_provision(
     state: &Arc<AppState>,
     external_user_id: Uuid,
     raw_name: &str,

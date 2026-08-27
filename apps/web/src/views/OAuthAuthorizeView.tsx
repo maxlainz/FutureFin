@@ -195,9 +195,13 @@ export function OAuthAuthorizeView() {
         );
       case "login":
         return (
+          // El `next` conserva los params OAuth: a la vuelta del rodeo por Home Assistant el
+          // navegador aterriza otra vez en /oauth/authorize?<mismos params>, `evaluate()` vuelve
+          // a correr y —ya con sesión— cae en la pantalla de consentimiento.
           <LoginPanel
             intro="Una aplicación quiere conectarse a tu FutureFin con tu rol (lectura, y escritura si está permitida en Ajustes → MCP). Inicia sesión para revisar y autorizar el acceso."
             onAuthenticated={() => void evaluate()}
+            haLoginNext={window.location.pathname + window.location.search}
           />
         );
       case "pending":

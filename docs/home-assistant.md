@@ -97,7 +97,10 @@ segunda vía de acceso a una cuenta cuya autenticación pertenece a Home Assista
 
 Consecuencias prácticas, en orden de sorpresa:
 
-- **Si desactivas `sso` después**, esas cuentas se quedan sin forma de entrar por el login clásico.
+- **Si desactivas `sso` después**, esas cuentas se quedan sin forma de entrar **por el formulario**
+  de usuario y contraseña. Desde la 4.3.1 tienen otra puerta: con la opción `ha_sso_url` rellenada
+  aparece el botón **«Entrar con Home Assistant»**, que es independiente de `sso` y funciona igual
+  fuera del panel (ver «Entrar con Home Assistant desde fuera del panel»).
 - **Una cuenta SSO no puede exportar su `.ffbackup`.** La exportación cifra con una clave derivada
   de la contraseña de la cuenta ([backups.md](backups.md) §Capa 1); sin contraseña no hay clave, y
   el servidor responde el mismo `sso_account_no_password` en vez de generar un fichero que nadie
@@ -120,6 +123,7 @@ variables de entorno de siempre ([configuracion.md](configuracion.md)).
 | `mcp` | `true` | Monta `/mcp` y todo el protocolo OAuth embebido. En `false` exporta `FUTUREFIN_MCP_ENABLED=0` y los desmonta (el panel de Conexiones sigue, para poder revocar). | Ponla en `false` si no vas a conectar ningún cliente de IA. **Ojo**: dejarla en `true` no basta para que MCP funcione — ver §4. |
 | `cors_origins` | *(vacío)* | Orígenes extra permitidos (`CORS_ORIGINS`), separados por comas. Vacío = los de por defecto. **Una entrada inválida aborta el arranque** a propósito. | Solo si llamas a la API de FutureFin desde otra página web. |
 | `public_url` | *(vacío)* | Origen público con el que FutureFin se anuncia como issuer de OAuth (`FUTUREFIN_PUBLIC_URL`). Tiene que ser un origen pelado, sin path ni barra final; **si está y es inválido, no arranca**. | Obligatoria si expones el add-on por un túnel o un proxy con dominio propio. Ver §4. |
+| `ha_sso_url` | *(vacío)* | URL pública de **tu Home Assistant**. Habilita el botón «Entrar con Home Assistant» en el login y en la pantalla de consentimiento de OAuth, para entrar desde fuera del panel con la misma cuenta. Origen pelado, `http(s)://`; **si está y es inválida, no arranca**. | Si abres FutureFin por el puerto directo o por un túnel — sobre todo si tu cuenta es SSO y no tiene contraseña. Ver la sección siguiente. |
 | Puerto directo `8080/tcp` | **no publicado** | Publica el puerto del contenedor en la red local. Se configura en la sección **Red** de la misma pestaña: escribe el puerto del host (`8080`, o el que quieras) y reinicia. | Necesario para MCP y OAuth, y **solo** para eso. Ver §4 y el aviso de seguridad. |
 
 ### Lo que el add-on decide por ti
@@ -132,6 +136,91 @@ Estas no son opciones, son consecuencias del empaquetado, y conviene saberlas:
 | `FUTUREFIN_STATE_DIR` | `/data/state` | Mismo motivo: ahí van los backups automáticos pre-migración y el estado del entrypoint. |
 | Modo de backup | `cold` | El Supervisor **para** el add-on antes de copiar `/data`. Copiar en caliente el directorio de datos de un PostgreSQL vivo no da una copia consistente. |
 | Sin *watchdog* | — | El único endpoint que podría vigilar (`/v1/ready`) solo es alcanzable por el puerto directo, que está cerrado por defecto. Un watchdog apuntando ahí reiniciaría el add-on en bucle en la instalación normal. |
+
+---
+
+## Entrar con Home Assistant desde fuera del panel
+
+*(Desde la 4.3.1. Esta sección va sin número para no romper los enlaces a las de abajo.)*
+
+Dentro del panel de la barra lateral no hace falta contraseña: el ingress ya te ha identificado
+(§2). Pero cuando abres FutureFin por el **puerto directo** o por un **túnel**, ese filtro no está
+—las cabeceras de identidad no se honran fuera del ingress— y hasta la 4.3.0 solo quedaba el login
+clásico. Con la opción `ha_sso_url` rellenada aparece además, bajo el formulario, el botón
+**«Entrar con Home Assistant»**: te lleva a tu Home Assistant, te autenticas ahí como siempre y
+vuelves a FutureFin con la **misma cuenta** que usas en el panel. No se crea un usuario duplicado
+—el identificador que devuelve Home Assistant es el mismo que manda el ingress—, así que ves tus
+mismos datos, con tu mismo rol.
+
+El botón sale en dos sitios: en el **login** del origen directo y en la **pantalla de
+consentimiento de OAuth**, la que te enseña Claude al conectar el conector MCP. Eso segundo es lo
+que hace que un usuario del add-on —sin contraseña, por diseño— pueda autorizar claude.ai por sí
+mismo.
+
+### Activarlo
+
+En las opciones del add-on, pon la URL pública de tu Home Assistant: **la misma que tecleas en el
+navegador**, como origen pelado (sin ruta ni query).
+
+```yaml
+ha_sso_url: "https://ha.midominio.com"
+```
+
+Reinicia el add-on. Para apagarlo, deja la opción vacía y reinicia: no hay migraciones ni datos que
+deshacer, y el botón desaparece.
+
+- Vale `http://` para una LAN (`http://homeassistant.local:8123`) y `https://` para un dominio
+  público. **Si la URL es inválida —otro esquema, sin host, con path— el add-on no arranca**: es
+  preferible un fallo ruidoso a un botón que redirige a ninguna parte.
+- **Es exclusiva del add-on.** Por debajo son dos variables que fija el entrypoint solo cuando
+  detecta que corre bajo el Supervisor; no son parámetros de un despliegue por Compose. Ver
+  [configuracion.md](configuracion.md).
+- Es independiente de la opción `sso`: puedes tener el login con HA fuera del panel aunque hayas
+  desactivado la identidad delegada dentro de él.
+
+### Qué pasa por debajo
+
+Es el mismo flujo de código de autorización que usan las apps móviles de Home Assistant. FutureFin
+te redirige al login de **tu** Home Assistant; si autorizas, HA te devuelve a FutureFin con un
+código de un solo uso; FutureFin lo canjea por un token, lee con él **quién eres** y ahí acaba: el
+token de refresco que HA entrega se **revoca inmediatamente**, antes incluso de tocar la base de
+datos.
+
+**FutureFin no guarda ninguna credencial de tu Home Assistant**: no ve tu contraseña, no conserva
+ningún token y no queda con acceso a tu domótica. El precio de eso es que **teclearás tu contraseña
+de Home Assistant en cada nuevo inicio de sesión** (salvo que HA ya tenga sesión abierta en ese
+navegador). No es un peaje frecuente: la sesión de FutureFin que se abre al volver dura lo mismo
+que cualquier otra, **30 días** por defecto.
+
+### Antes de activarlo, tres avisos
+
+- **Redes de confianza.** FutureFin acepta a quien Home Assistant diga que ha entrado, **sea cual
+  sea el proveedor** con el que entró. Si tu HA autentica por `trusted_networks`, cualquiera desde
+  esa red es ese usuario en HA… y por tanto también aquí, sin teclear nada. Si tus finanzas no
+  deben heredar esa confianza, no uses `trusted_networks` para el origen desde el que se hace este
+  login.
+- **Fuerza bruta: la defiende Home Assistant, no FutureFin.** Quien autentica es HA, así que los
+  intentos fallidos que salen de este botón cuentan para su `ip_ban` y sus propias protecciones.
+  FutureFin sigue sin tener límite de intentos propio ([SECURITY.md](../SECURITY.md)).
+- **Certificados autofirmados no están soportados.** FutureFin verifica el certificado de la URL
+  que le des y no hay opción para saltárselo. Usa `http://` dentro de la LAN o un certificado
+  válido de verdad; un `https://` con certificado autofirmado fallará siempre.
+
+### Si el botón falla
+
+Los fallos vuelven a la pantalla de acceso con un mensaje explicado. Lo que hay detrás de cada uno:
+
+| Lo que dice | Qué pasó |
+|---|---|
+| «Esta instalación no tiene configurado el acceso con Home Assistant» | `ha_sso_url` está vacía (o el add-on no se ha reiniciado tras rellenarla). |
+| «La vuelta desde Home Assistant no se ha podido verificar» | La cookie de estado faltaba, caducó (dura 10 minutos) o ya se había usado. Vuelve a pulsar el botón. |
+| «Home Assistant no ha confirmado el acceso» | HA rechazó el código, o rechazaste el permiso en su pantalla. También sale si la URL apunta a un HA que no responde. |
+| «No se ha podido leer tu usuario de Home Assistant» | El canje fue bien pero la lectura de identidad no. Casi siempre es red: revisa que la URL sea alcanzable **desde el contenedor**, no solo desde tu navegador. |
+| «No se ha podido crear tu cuenta porque ese nombre de usuario ya está cogido» | Entrabas por primera vez y **todos** los nombres candidatos estaban ocupados, incluido el derivado de tu identificador de Home Assistant. Es casi imposible; si te pasa, avisa al propietario del hogar. |
+
+Si en el log del add-on ves un aviso de que **no se pudo revocar** el token de refresco de Home
+Assistant, bórralo a mano en **Home Assistant → Perfil → Seguridad → Tokens de actualización**: el
+login funcionó igual, pero quedó un token vivo que FutureFin ya no necesita.
 
 ---
 
@@ -156,9 +245,10 @@ siempre — ver [mcp.md](mcp.md).
 Para Claude Code o cualquier cliente que corra en la misma red.
 
 1. Publica el puerto: **Configuración → Red → 8080/tcp → `8080`**, y reinicia el add-on.
-2. Abre `http://IP-DE-TU-HOME-ASSISTANT:8080` en el navegador. **Ojo**: por ahí no hay SSO (el peer
-   ya no es el ingress), así que necesitas una cuenta con contraseña; si tu única cuenta es SSO,
-   crea una por el login clásico o usa la receta B con OAuth desde el panel.
+2. Abre `http://IP-DE-TU-HOME-ASSISTANT:8080` en el navegador. Por ahí no hay identidad delegada
+   (el peer ya no es el ingress), así que hay que iniciar sesión: si tu cuenta es SSO y no tiene
+   contraseña, rellena `ha_sso_url` y entra con **«Entrar con Home Assistant»** (ver la sección
+   anterior).
 3. `Ajustes → Integraciones → Tokens de API (MCP)` → **Crear token**. Cópialo: solo se enseña una
    vez.
 4. Endpoint MCP: `http://IP-DE-TU-HOME-ASSISTANT:8080/mcp`, con
@@ -192,6 +282,9 @@ Anthropic, no de tu navegador, y necesitan una URL pública con HTTPS.
    llegar y claude.ai diría que la conexión falló.
 5. En claude.ai: `Configuración → Conectores → Añadir conector personalizado`, y pega
    `https://finanzas.tudominio.com/mcp`. El registro de la aplicación es automático.
+6. Claude te lleva a la **pantalla de consentimiento de FutureFin**. Si tu cuenta es SSO y no tiene
+   contraseña, rellena `ha_sso_url` y pulsa ahí **«Entrar con Home Assistant»**: ya no hace falta
+   una segunda cuenta con contraseña solo para autorizar el conector.
 
 > **No pongas Cloudflare Access delante de ese hostname.** Access intercepta las peticiones con su
 > propio login y el flujo OAuth del cliente MCP nunca llega a FutureFin. La autenticación ya la
@@ -314,7 +407,8 @@ Más contexto sobre rollback en [actualizar.md](actualizar.md#volver-a-una-versi
 - **MCP y OAuth no funcionan por el ingress** (§4). Requieren el puerto directo.
 - **Solo amd64 y aarch64.** No hay imagen para armv7 ni i386.
 - **Las cuentas SSO no tienen contraseña** en esta versión, y por tanto no exportan `.ffbackup`
-  (§2).
+  (§2). Lo que sí pueden desde la 4.3.1 es **iniciar sesión fuera del panel**, con «Entrar con Home
+  Assistant»; la exportación cifrada sigue necesitando una contraseña de cuenta.
 - **La interfaz está solo en español**, y la divisa es **una por instalación** (EUR, USD o GBP). No
   hay multidivisa. Esto no es propio del add-on: es así en cualquier despliegue.
 
