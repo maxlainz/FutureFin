@@ -39,6 +39,68 @@ bump y la publicación van al final.
 - Test `every_input_schema_forbids_unknown_properties` añadido **como `#[ignore]`**: hoy 51 de 52
   tools aceptan campos desconocidos en silencio. Es la diana de la Fase 2 (#83).
 
+### Capacidades nuevas: el catálogo pasa de 52 a 68 tools (Fase 6 — issue #87)
+
+La paridad de **rutas** era casi perfecta, pero paridad de rutas ≠ paridad de **capacidades**: la
+app calculaba cosas que no eran una ruta y que el chat no alcanzaba. **Cuatro de las cinco más
+valiosas eran código que ya existía y solo necesitaba superficie.**
+
+- **`get_liability_schedule`** — el engine calculaba el principal de cierre de cada pasivo hasta
+  840 veces por request **y lo tiraba**, así que «¿cuánto pago de intereses?» y «¿cuándo termino la
+  hipoteca?» eran **incontestables** en una app de finanzas personales. El calendario deriva el
+  interés como **residuo** de los saldos, no lo devenga aparte: así `cuota + extra == interés +
+  principal` es exacto **por construcción** en los cuatro modelos, y si alguien recalculara el
+  devengo por su cuenta la igualdad se rompería justo en el mes en que las dos implementaciones se
+  separaran. `principal_repaid` puede ser **negativo** cuando la cuota no cubre el devengo:
+  clamparlo escondería exactamente ese caso. Contrastado contra la fórmula cerrada de la anualidad
+  francesa, con los números predichos antes de ejecutar.
+- **`liability_overrides` en `simulate_projection`** — «¿me compensa amortizar antes?». Había 12
+  ejes de what-if y **ninguno tocaba pasivos**; lo más cerca era un gasto puntual, que drena caja
+  pero no reduce deuda ni cuota. La cuota liberada al extinguir vuelve a la cascada, y **eso no es
+  una decisión nueva**: es lo que el motor ya hacía con un préstamo que se acaba solo. Suprimirlo
+  habría exigido *añadir* código para esconder caja que el modelo tiene, y habría hecho que dos
+  préstamos en el mismo estado de balance se comportaran distinto. Contrapartida obligatoria: la
+  amortización extra **se cobra a la caja del mes** — las dos mitades o ninguna, porque hacer solo
+  la que baja el principal *imprimiría dinero*.
+- **`aggregate_transactions`** — «¿cuánto llevo gastado en X este año?» obligaba a bajar hasta 500
+  filas al contexto y sumarlas con un modelo que **no aplica** el predicado de transferencias
+  conciliadas. En el escenario del test, ese olvido convierte un gasto mensual de 180 € en **680 €**:
+  creíble y falso. La suma se compara **iterando** las categorías de `get_transactions_summary`, no
+  contra constantes: si las dos no cuadran, una miente.
+- **Deflactado servido** — el servidor ya deflactaba (es lo que produce `milestones_real`) y solo
+  salía al aire ahí. Ahora `net_worth_real` va **dentro de cada punto**, que ya lleva su
+  `month_index` — un array paralelo obligaría a alinear por posición, que es el bug que ya se pagó
+  en la v1.4.2. Es **capa de presentación**, no el motor «real puro» rechazado en la v1.2.0 por
+  drenar activos antes de la jubilación, y la forma testable de esa afirmación es que
+  `net_worth_real` no lleva información que el motor no haya producido.
+- **Trío de descubrimiento y conciliación sin footgun.** `uncategorized` no existía ni en HTTP;
+  ver un par candidato de transferencia obligaba a **escribir**. Y la omisión histórica de
+  `reconcile_pair` se cierra sin exponer dos UUID: `confirm_transfer_match` acepta **solo un
+  `match_id` emitido por el servidor**, así que un par arbitrario **no es expresable en el
+  esquema**. No es una barrera: es hacer imposible el error que motivaba la omisión.
+- **Cuatro filas del registro de paridad, cerradas**: backfill y edición de snapshots (el
+  «diferencial conversacional»: grabar el pasado es lo que el chat hace mejor que un formulario),
+  crear y borrar reglas de reparto, editar y borrar categorías con `remap_to`, y los ejes de
+  presentación de la instalación.
+- **`prompts`** con tres flujos reales. Es el único punto del protocolo donde se gana **capacidad**
+  y no formato. Aviso honesto: **el conector remoto de claude.ai no los expone hoy** (sus docs lo
+  dicen); Claude Code y los clientes genéricos sí.
+
+**Al encapsular el invariante del sumidero aparecieron tres agujeros reales.** Dos preexistentes: el
+`PATCH` podía dejar el sumidero **en medio** de la cascada —y todo lo de debajo dejaba de recibir,
+en silencio—, y la guardia del `reorder` **no comprobaba nada en vista de hogar** porque derivaba el
+scope de la vista en vez del owner. Y uno que introdujo esta misma fase: la puerta que impide crear
+el sumidero desde MCP era **saltable en dos pasos** (crear un `remainder` con tope y quitárselo
+después), porque la política solo llegaba a la core de creación. Los tres se cierran con la misma
+doctrina —post-condición sobre el estado resultante, con un **único punto de commit** en el módulo
+fijado por un test que lee el propio fichero— y el tercero lleva su regresión de dos pasos, porque
+una guardia probada solo en el `create` deja verde cualquier test que solo pruebe el `create`.
+
+También: `delete_category` con `remap_to` **ignoraba el remap en silencio** cuando no había
+referencias contadas, degradando a `NULL` la atribución de las cuotas de pasivo — justo lo que el
+remap venía a evitar. Y el `instructions` del servidor enumeraba **siete** tools con `confirm_token`
+y omitía la octava: es el único texto que toda sesión lee.
+
 ### Coste de contexto y ergonomía del catálogo (Fase 5 — issue #86)
 
 El servidor defendía su corrección con **prosa**, y esa estrategia fallaba justo donde importa: en

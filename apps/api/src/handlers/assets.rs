@@ -29,6 +29,36 @@ pub struct AssetResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub purchase_price: Option<Decimal>,
+    /// **Plusvalía latente**: `current_value − purchase_price`, en euros. Puede ser negativa.
+    ///
+    /// **NO es rentabilidad.** No anualiza, y no descuenta las aportaciones posteriores a la
+    /// compra — que en este modelo son mensuales, así que en un activo con reglas de reparto
+    /// activas el número está inflado por todo lo que se ha ido metiendo: leerlo como retorno
+    /// engaña. Para retorno hay `expected_annual_return_percent` (supuesto, hacia adelante) y
+    /// `summary.financial_health.net_return_*` (realizado, a nivel de hogar).
+    ///
+    /// `null` ⟺ `unrealized_pnl_absent_reason == "no_purchase_price"`: sin coste declarado no hay
+    /// resta que hacer, y un `0` ahí significaría «no has ganado ni perdido», que es una
+    /// afirmación distinta de «no sé lo que te costó».
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub unrealized_pnl: Option<Decimal>,
+    /// Por qué falta `unrealized_pnl`. Hoy un único valor: `no_purchase_price`. `null` ⟺ la cifra
+    /// viaja.
+    #[schema(value_type = Option<String>)]
+    pub unrealized_pnl_absent_reason: Option<&'static str>,
+    /// La plusvalía latente como porcentaje del coste: `(current_value − purchase_price) /
+    /// purchase_price × 100`, un decimal. Mismos avisos que `unrealized_pnl`: **no es una TAE**.
+    ///
+    /// `null` en dos casos distintos, y por eso hay un motivo aparte: sin coste declarado
+    /// (`no_purchase_price`) o con coste declarado **cero** (`zero_purchase_price`), donde el
+    /// porcentaje no está definido (dividir entre 0) aunque la plusvalía en euros sí lo esté.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub unrealized_pnl_pct: Option<Decimal>,
+    /// `no_purchase_price` | `zero_purchase_price`. `null` ⟺ `unrealized_pnl_pct` viaja.
+    #[schema(value_type = Option<String>)]
+    pub unrealized_pnl_pct_absent_reason: Option<&'static str>,
     pub is_liquid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -223,18 +253,54 @@ async fn assert_asset_category(
     Ok(())
 }
 
+/// Plusvalía latente de un activo: `(euros, motivo_ausencia, porcentaje, motivo_ausencia_pct)`.
+///
+/// Un solo sitio porque los dos campos y sus dos motivos tienen que decidirse juntos: el caso
+/// `purchase_price = 0` da euros SÍ y porcentaje NO, y separarlos invita a que uno de los dos
+/// publique `null` sin motivo (o un `0` que se lee como «ni ganancia ni pérdida»).
+fn unrealized_pnl_of(
+    current_value: Decimal,
+    purchase_price: Option<Decimal>,
+) -> (
+    Option<Decimal>,
+    Option<&'static str>,
+    Option<Decimal>,
+    Option<&'static str>,
+) {
+    match purchase_price {
+        None => (None, Some("no_purchase_price"), None, Some("no_purchase_price")),
+        Some(pp) if pp.is_zero() => (
+            Some(current_value),
+            None,
+            None,
+            Some("zero_purchase_price"),
+        ),
+        Some(pp) => {
+            let pnl = current_value - pp;
+            let pct = (pnl / pp * Decimal::from(100)).round_dp(1);
+            (Some(pnl), None, Some(pct), None)
+        }
+    }
+}
+
 fn row_to_response(
     r: AssetRow,
     contribution_nominal_monthly: Decimal,
     contribution_recurring_monthly: Decimal,
     contribution_target_amount: Option<Decimal>,
 ) -> AssetResponse {
+    let (unrealized_pnl, unrealized_pnl_absent_reason, unrealized_pnl_pct, unrealized_pnl_pct_absent_reason) =
+        unrealized_pnl_of(r.current_value, r.purchase_price);
     AssetResponse {
         id: r.id,
         category_id: r.category_id,
         name: r.name,
         current_value: r.current_value,
         purchase_price: r.purchase_price,
+        unrealized_pnl,
+        unrealized_pnl_absent_reason,
+        unrealized_pnl_pct,
+        unrealized_pnl_pct_absent_reason,
         is_liquid: r.is_liquid,
         expected_annual_return_percent: r.expected_annual_return_percent,
         // Presentación: la cascada trabaja con la precisión completa, aquí solo se publica.
@@ -275,11 +341,16 @@ async fn fetch_asset_resolved_targets(
 
     let mut out = std::collections::HashMap::with_capacity(rows.len());
     for (asset_id, cap_kind, cap_value) in rows {
-        let resolved = match cap_kind.as_str() {
-            "amount" => cap_value.max(Decimal::ZERO),
-            "months_expense" => (cap_value.max(Decimal::ZERO)) * expense_with_debt,
-            "income_multiple" => (cap_value.max(Decimal::ZERO)) * income_monthly,
-            _ => continue,
+        // Una sola implementación del techo en todo el lado API (`allocation_rules.rs`): el
+        // objetivo que enseña esta pantalla y el techo contra el que
+        // `GET /v1/allocation-rules/goals` calcula el ETA deben ser el MISMO número.
+        let Some(resolved) = crate::handlers::allocation_rules::resolve_cap_ceiling_eur(
+            &cap_kind,
+            cap_value,
+            income_monthly,
+            expense_with_debt,
+        ) else {
+            continue;
         };
         if resolved > Decimal::ZERO {
             out.insert(asset_id, resolved);

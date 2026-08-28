@@ -50,13 +50,16 @@ use crate::handlers::assets::{
 };
 #[allow(unused_imports)]
 use crate::handlers::allocation_rules::{
-    __path_create_allocation_rule, __path_delete_allocation_rule, __path_get_allocation_resolution,
-    __path_list_allocation_rules, __path_patch_allocation_rule, __path_reorder_allocation_rules,
+    __path_create_allocation_rule, __path_delete_allocation_rule, __path_get_allocation_goals,
+    __path_get_allocation_resolution, __path_list_allocation_rules, __path_patch_allocation_rule,
+    __path_reorder_allocation_rules,
 };
 #[allow(unused_imports)]
+use crate::handlers::changes::__path_get_recent_changes;
+#[allow(unused_imports)]
 use crate::handlers::liabilities::{
-    __path_create_liability, __path_delete_liability, __path_list_liabilities,
-    __path_patch_liability,
+    __path_create_liability, __path_delete_liability, __path_get_liability_schedule,
+    __path_list_liabilities, __path_patch_liability,
 };
 #[allow(unused_imports)]
 use crate::handlers::budget::{
@@ -74,7 +77,7 @@ use crate::handlers::categories::{
     __path_patch_category,
 };
 #[allow(unused_imports)]
-use crate::handlers::projection::__path_get_projection_series;
+use crate::handlers::projection::{__path_get_projection_deflate, __path_get_projection_series};
 #[allow(unused_imports)]
 use crate::handlers::transactions::crud::{
     __path_create_batch, __path_create_transaction, __path_delete_import, __path_patch_batch,
@@ -82,10 +85,15 @@ use crate::handlers::transactions::crud::{
     __path_patch_transaction,
 };
 #[allow(unused_imports)]
+use crate::handlers::transactions::aggregate::__path_aggregate_transactions;
+#[allow(unused_imports)]
+use crate::handlers::transactions::duplicates::__path_list_duplicates;
+#[allow(unused_imports)]
 use crate::handlers::transactions::import::{__path_import_confirm, __path_import_preview};
 #[allow(unused_imports)]
 use crate::handlers::transactions::reconcile::{
-    __path_reconcile_now, __path_reconcile_pair, __path_unreconcile_transaction,
+    __path_confirm_transfer_match, __path_reconcile_now, __path_reconcile_pair,
+    __path_suggest_transfer_matches, __path_unreconcile_transaction,
 };
 #[allow(unused_imports)]
 use crate::handlers::transactions::recurring::{
@@ -172,6 +180,8 @@ impl utoipa::Modify for SecurityAddon {
         delete_asset,
         list_allocation_rules,
         get_allocation_resolution,
+        get_allocation_goals,
+        get_recent_changes,
         create_allocation_rule,
         patch_allocation_rule,
         delete_allocation_rule,
@@ -180,6 +190,7 @@ impl utoipa::Modify for SecurityAddon {
         create_liability,
         patch_liability,
         delete_liability,
+        get_liability_schedule,
         get_summary,
         get_budget_snapshot,
         create_budget_entry,
@@ -190,6 +201,7 @@ impl utoipa::Modify for SecurityAddon {
         patch_planning_flow,
         delete_planning_flow,
         get_projection_series,
+        get_projection_deflate,
         capture_snapshots,
         list_snapshots,
         create_snapshot,
@@ -220,8 +232,12 @@ impl utoipa::Modify for SecurityAddon {
         reconcile_now,
         reconcile_pair,
         unreconcile_transaction,
+        suggest_transfer_matches,
+        confirm_transfer_match,
         get_transactions_summary,
         get_category_series,
+        aggregate_transactions,
+        list_duplicates,
         export_user_backup,
         import_user_backup_preview,
         import_user_backup_apply,
@@ -274,12 +290,19 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::assets::PatchAssetBody,
         crate::handlers::allocation_rules::AllocationRuleResponse,
         crate::handlers::allocation_rules::AllocationResolutionResponse,
+        crate::handlers::allocation_rules::AllocationGoal,
+        crate::handlers::allocation_rules::AllocationGoalsResponse,
+        crate::handlers::changes::RecentChange,
+        crate::handlers::changes::RecentChangesResponse,
         crate::handlers::allocation_rules::ResolvedRule,
         crate::handlers::allocation_rules::ResolvedAssetContribution,
         crate::handlers::allocation_rules::CreateAllocationRuleBody,
         crate::handlers::allocation_rules::PatchAllocationRuleBody,
         crate::handlers::allocation_rules::ReorderBody,
         crate::handlers::liabilities::LiabilityResponse,
+        crate::handlers::liabilities::LiabilityScheduleResponse,
+        crate::handlers::liabilities::LiabilityScheduleMonthResponse,
+        crate::handlers::liabilities::LiabilityScheduleYearResponse,
         crate::handlers::liabilities::CreateLiabilityBody,
         crate::handlers::liabilities::PatchLiabilityBody,
         crate::handlers::liabilities::PaymentFrequency,
@@ -300,6 +323,7 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::planning::CreatePlanningFlowBody,
         crate::handlers::planning::PatchPlanningFlowBody,
         crate::handlers::projection::ProjectionSeriesResponse,
+        crate::handlers::projection::DeflateResponse,
         crate::handlers::projection::ProjectionPoint,
         crate::handlers::history::SnapshotResponse,
         crate::handlers::history::SnapshotItemResponse,
@@ -354,6 +378,17 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::transactions::schema::CategoryMonthPoint,
         crate::handlers::transactions::schema::CategoryMonthlySeriesEntry,
         crate::handlers::transactions::schema::CategoryMonthlySeriesResponse,
+        crate::handlers::transactions::aggregate::AggregateResponse,
+        crate::handlers::transactions::aggregate::AggregateKindEntry,
+        crate::handlers::transactions::aggregate::AggregateMonthEntry,
+        crate::handlers::transactions::aggregate::AggregateCategoryEntry,
+        crate::handlers::transactions::aggregate::AggregateTopEntry,
+        crate::handlers::transactions::duplicates::DuplicatesResponse,
+        crate::handlers::transactions::duplicates::DuplicateGroup,
+        crate::handlers::transactions::duplicates::DuplicateMember,
+        crate::handlers::transactions::reconcile::TransferMatchSuggestionsResponse,
+        crate::handlers::transactions::reconcile::TransferMatchSuggestion,
+        crate::handlers::transactions::reconcile::TransferMatchLeg,
         crate::handlers::backup_user::ExportRequest,
         crate::handlers::backup_user::ImportRequest,
         crate::handlers::backup_user::ImportPreviewResponse,

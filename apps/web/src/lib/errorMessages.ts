@@ -163,6 +163,53 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La clave de idempotencia solo vale para dar de alta un movimiento suelto, no para un lote.",
   budget_entry_is_liability_derived:
     "Esa partida es la cuota de un pasivo: se edita o se elimina desde el pasivo, no desde el presupuesto.",
+  // --- Fase 6: capacidades nuevas (agregación, calendario de deuda, deflactado, cascada) ---
+  category_filter_exclusive:
+    "No puedes filtrar por categoría y por «sin categoría» a la vez. Elige una de las dos cosas.",
+  transfer_match_not_found:
+    "Esa sugerencia de transferencia ya no existe: vuelve a pedir la lista y confirma una de las actuales.",
+  window_days_out_of_range:
+    "La ventana debe estar entre 1 y 365 días.",
+  sink_creation_not_allowed:
+    "No se puede crear desde aquí la regla de resto sin tope (el sumidero de la cascada). Ponle un tope, o cambia el sumidero desde la app.",
+  deflate_date_in_past:
+    "Solo se pueden pasar a euros de hoy importes de una fecha futura.",
+  deflate_month_out_of_range:
+    "Ese mes queda fuera del horizonte de la proyección.",
+  deflate_timing_ambiguous:
+    "Indica la fecha o el número de mes, pero no los dos.",
+  schedule_from_month_out_of_range:
+    "El mes de inicio del calendario queda fuera del plan de pago.",
+  schedule_window_out_of_range:
+    "La ventana del calendario de amortización está fuera del rango permitido.",
+  liability_not_in_scope:
+    "Ese pasivo no es de este hogar, o ya no existe.",
+  liability_override_duplicate:
+    "Has repetido el mismo pasivo dos veces en la simulación. Deja una sola entrada por deuda.",
+  liability_override_empty:
+    "Esa simulación de deuda no cambia nada: indica amortización extra, una entrega puntual o un TIN.",
+  liability_override_needs_payment_plan:
+    "Para simular esa deuda hace falta que tenga cuota y periodicidad.",
+  liability_overrides_unavailable_in_real_expense_mode:
+    "Con el gasto tomado de tus movimientos reales, la cuota ya está dentro del gasto: simular la deuda aparte la contaría dos veces.",
+  liability_repayment_model_needs_apr:
+    "Ese modelo de amortización necesita un TIN mayor que cero.",
+  liability_apr_negative:
+    "El TIN no puede ser negativo.",
+  liability_apr_ignored_by_repayment_model:
+    "Ese modelo de amortización no usa el TIN: la cuota va íntegra a principal.",
+  liability_extra_principal_negative:
+    "La amortización extra no puede ser negativa.",
+  liability_lump_sum_amount_required:
+    "Indica el importe de la entrega puntual.",
+  liability_lump_sum_not_positive:
+    "La entrega puntual tiene que ser mayor que cero.",
+  liability_lump_sum_timing_ambiguous:
+    "Indica la fecha o el número de mes de la entrega, pero no los dos.",
+  liability_lump_sum_month_out_of_range:
+    "El mes de la entrega puntual queda fuera del horizonte de la proyección.",
+  liability_lump_sum_date_out_of_horizon:
+    "La fecha de la entrega puntual queda fuera del horizonte de la proyección.",
   uuid_invalid:
     "Ese identificador no tiene el formato esperado. Cópialo tal cual del listado en vez de escribirlo a mano.",
   date_invalid:

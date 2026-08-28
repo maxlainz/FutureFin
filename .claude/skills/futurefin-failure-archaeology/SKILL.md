@@ -45,7 +45,7 @@ Vocabulary used below (defined once):
 |---|---|---|---|
 | 1 | `projection_target_age` (age-based retirement trigger) | Caused visual gap: contributions stopped years before the Jubilación marker; FIRE crossover is the sole trigger | 542ecfa, v1.0.6; migration `20260516120000_drop_projection_target_age.sql` |
 | 2 | Per-asset contribution config (`monthly_contribution_fixed`, weights, caps on `assets`) | Overlapped badly with reality: fixed sums > surplus, weights >100 %, no explicit priority order | cc23186, v1.1.0 / v1.0.13; `20260519120100_drop_asset_contribution_columns.sql` |
-| 3 | Inflation model v1 "real pure" (deflate returns, simulate in today-€) | Half-real/half-nominal mix produced incoherent output (assets drained *before* retirement with inflation on) | v1.0.12 introduced, v1.2.0 (3396725) replaced |
+| 3 | Inflation model v1 "real pure" (deflate returns, simulate in today-€) | Half-real/half-nominal mix produced incoherent output (assets drained *before* retirement with inflation on) | v1.0.12 introduced, v1.2.0 (3396725) replaced. **Reafirmado en 4.4.0 (Fase 6, issue #87)**: servir `points[].net_worth_real` y `GET /v1/projection/deflate` **no** reabre esto — el motor sigue simulando 100 % en nominal y el deflactado es capa de presentación. La forma testable de esa frase: `net_worth_real == net_worth / (1+i)^(month_index/12)`, o sea cero información que el motor no haya producido ya (`apps/api/tests/projection_deflation.rs`) |
 | 4 | Flat FIRE target (fixed scalar) | Toggling inflation barely moved retirement age; target must grow with inflation | v1.2.0, `20260520120000_inflation_always_on.sql` |
 | 5 | `projection_includes_inflation` boolean toggle | Redundant: `annual_inflation_assumption_percent = 0` already means "off" | v1.2.0 (API-breaking, dropped from `PATCH /v1/installation`) |
 | 6 | GET-side purges (`purge_expired_liabilities` DELETE inside 6 GET handlers) | Reads must not mutate; broke HTTP semantics and caching; data now filtered, kept for audit | 0bba819, v1.3.0; guard: `apps/api/tests/liabilities_purge.rs` |
@@ -450,6 +450,86 @@ Vocabulary used below (defined once):
 - **Status**: rejected 4.4.0; `basis` fields shipped instead. Grounded in
   `BudgetTotalsResponse::basis`'s doc-comment, `apps/api/src/handlers/budget.rs`.
 
+### 2.20 El invariante del sumidero era una **pre-condición repartida**, y tapaba dos bugs vivos (MCP Fase 6, issue #87, v4.4.0)
+- **Cómo salió**: la Fase 6 abría `create_allocation_rule` / `delete_allocation_rule` por MCP, y el
+  registro de paridad ya avisaba en su fila §3.2 #2: «**careful**: the sink invariant lives spread
+  across the handler». Encapsularlo no era una limpieza opcional: era el requisito para que una
+  superficie nueva no pudiera romperlo.
+- **Lo que había**: I1 (**como mucho** un `remainder` sin cap y, si existe, **siempre el último** —
+  cero sumideros es un estado válido, y `assert_sink_invariant` lo dice explícitamente) se comprobaba
+  como **pre-condición**, en cada camino de escritura, por separado. Un camino nuevo que se
+  olvidara de mirar simplemente no miraba, y nada fallaba.
+- **Los dos bugs que aparecieron al encapsularlo** — ninguno era hipotético:
+  1. El **`PATCH`** podía convertir una regla en sumidero **sin recolocarla**. La cascada quedaba
+     con el `remainder` **en medio**: todo lo que hubiera por debajo dejaba de recibir un euro, en
+     silencio y para todo el horizonte. El síntoma es exactamente el que nadie reporta, porque el
+     dinero sigue yendo a algún sitio.
+  2. La guardia `sink_must_be_last` del **`reorder`** derivaba el scope de **la vista** en vez del
+     owner. En vista de hogar eso significaba comparar contra `owner_user_id IS NULL`, que no casa
+     con ninguna fila real: **no comprobaba nada**. Es el primo del incidente §2.6 (binds
+     invertidos entre ramas household/mine) — misma familia: una guardia que existe, corre y no
+     mira lo que cree mirar.
+- **Arreglo**: I1 pasa a **post-condición** verificada dentro de la transacción, con un **único
+  punto de commit** en el módulo (`commit_with_sink_invariant`, el único `tx.commit()` de
+  `allocation_rules.rs`, con cuatro llamantes: create, patch, delete, reorder). Un camino nuevo que
+  abra transacción y se olvide no corrompe nada: se cae al hacer `drop`. **Matiz honesto**: la
+  garantía cubre a quien abre transacción; un `execute(&state.pool)` suelto sí escribiría, y además
+  sería invisible para la guardia, que cuenta `tx.commit()`. Hoy el módulo está limpio.
+  Son **dos redes distintas**, no las confundas:
+  - el **punto único** lo fija un `#[test]` **sin BD, dentro del propio módulo**
+    (`apps/api/src/handlers/allocation_rules.rs`,
+    `sink_guard_tests::el_modulo_tiene_un_unico_punto_de_commit`): hace `include_str!` de su propio
+    fichero, compone la aguja en runtime (`format!("tx.{}()", "commit")`) **para no contarse a sí
+    mismo** e ignora las líneas de comentario;
+  - el **comportamiento** lo fijan los 6 tests de integración de
+    `apps/api/tests/allocation_sink_invariant.rs`.
+- **Lección transferible**: una pre-condición repartida por N caminos es N oportunidades de
+  olvidarla y cero de detectarlo; una post-condición con un solo punto de commit es una. Y cuando
+  encapsulas una invariante que llevaba tiempo «funcionando», cuenta cuántos bugs caen: si caen
+  cero, probablemente no la has encapsulado.
+
+### 2.21 `delete_category` con `remap_to` ignoraba el remap **en silencio** justo donde dolía (MCP Fase 6, issue #87, v4.4.0)
+- **Síntoma**: borrar una categoría de gasto pasando `remap_to` funcionaba… salvo cuando el
+  contador de referencias daba 0. En ese caso el remap **no se aplicaba**, y la referencia que sí
+  existía —`liabilities.expense_category_id`— se degradaba a `NULL` por la FK.
+- **Causa raíz**: la FK de esa columna es `ON DELETE SET NULL`, así que la referencia **no entraba
+  en el recuento** de las que bloquean el borrado. Como el remap solo se ejecutaba en el camino
+  «hay referencias contadas», la única referencia que quedaba era precisamente la que el `remap_to`
+  venía a salvar: la atribución de las cuotas de pasivo, el enlace que empareja el recibo real con
+  su partida de presupuesto.
+- **Por qué es peor que un error**: el usuario pide explícitamente «muévelo a esta otra categoría»,
+  recibe 200, y el dato queda **peor** que si no hubiera pedido nada. Un 400 habría sido correcto;
+  el silencio no.
+- **Arreglo + regresión**: el remap se aplica siempre que se pide, incluidas las referencias
+  `SET NULL` no contadas; el preview desglosa por tabla y separa las bloqueantes de las que solo se
+  degradan (`liabilities_expense_attribution`, `categorization_rules_degraded`). Cubierto en
+  `apps/api/tests/categories_crud.rs` (8 tests).
+- **Lección transferible**: «no hay referencias» y «no hay referencias **que bloqueen**» no son lo
+  mismo, y una FK `SET NULL` es exactamente la diferencia. Si un contador decide si un remap se
+  ejecuta, comprueba primero que el contador cuenta todo lo que el remap iba a arreglar.
+
+### 2.22 `suggest_transfer_matches`: ver un par candidato exigía **escribir** (MCP Fase 6, issue #87, v4.4.0)
+- **Síntoma de partida**: la conciliación de transferencias (3.5.0) tenía pase automático y par
+  manual, pero **ninguna forma de mirar** los candidatos. Desde el chat, la única manera de saber
+  qué pares habría era ejecutar el pase y ver el resultado.
+- **Regla que se aplicó, y por qué es dura**: **GET aparte, nunca un `?dry_run` sobre el POST**. Un
+  GET que muta ya costó caro una vez (§3 fila 4, `purge_expired_liabilities`), y un `dry_run` sobre
+  el verbo que escribe es la misma puerta con otra etiqueta: un día alguien invierte el default.
+- **Y cierra una omisión deliberada sin reabrirla.** El registro de paridad excluía
+  `reconcile_pair` manual como *LLM footgun* — su fila habla de elegir dos UUID a dedo y de que un
+  par equivocado saca a las dos patas de todos los agregados de flujo y mueve el ahorro de los
+  modos B/C —, con un *revisit trigger* que era, literalmente, que existiera una tool de
+  sugerencias. Existe. Lo que se
+  implementó **no es `reconcile_pair`**: `confirm_transfer_match` acepta **solo un `match_id`
+  emitido por el servidor** (24 hex del SHA-256 de `instalación|owner|ids ordenados`,
+  deliberadamente **no** un UUID). Un par arbitrario **no es expresable en el esquema** — no hay
+  barrera que saltarse, es que el input no existe. Regresión:
+  `apps/api/tests/transactions_transfer_matches.rs`.
+- **Lección transferible**: cuando la razón de omitir algo es «un modelo lo va a equivocar», la
+  salida buena no es una advertencia en la descripción — es un esquema en el que el error no se
+  puede escribir.
+
+
 ## 3. Designs that were tried and replaced
 
 | Old design | Specific failure mode | Replacement (current) |
@@ -466,7 +546,10 @@ Vocabulary used below (defined once):
 |---|---|
 | Add a retirement age / target-age setting | §2.2 |
 | Put contribution config back on assets, or "simplify" the cascade | §3 row 2; engine cascade tests in `crates/engine/src/projection.rs` |
-| Deflate returns / simulate in real terms inside the engine | §3 row 1 — display-layer deflation only |
+| Deflate returns / simulate in real terms inside the engine | §3 row 1 y §1 fila 3 — deflactado solo de presentación; servirlo (4.4.0) no es simularlo |
+| «Simplificar» la invariante del sumidero, o comprobarla en cada camino de escritura | §2.20 — post-condición con un solo punto de commit, no pre-condición repartida |
+| Decidir si aplicas un remap por un contador de referencias | §2.21 — una FK `SET NULL` no entra en ese contador |
+| Añadir `?dry_run` a un POST para «solo mirar», o exponer un `reconcile_pair` con dos UUID | §2.22 y §3 fila 4 |
 | Make a GET delete/clean anything | §3 row 4; `apps/api/tests/liabilities_purge.rs` |
 | Auto-fix a migration checksum mismatch in code | §3 row 3; CLAUDE.md Migrations |
 | Warm the projection cache after a mutation | §2.7 |

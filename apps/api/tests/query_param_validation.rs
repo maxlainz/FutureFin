@@ -31,6 +31,8 @@ const VIEW_ROUTES: &[&str] = &[
     "/v1/history/series",
     "/v1/history/cashflow",
     "/v1/transactions",
+    "/v1/transactions/aggregate",
+    "/v1/transactions/duplicates",
     "/v1/transactions/summary",
     "/v1/transactions/months",
     "/v1/transactions/imports",

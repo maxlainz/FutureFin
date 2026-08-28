@@ -91,7 +91,7 @@ exception: it names a mechanism CI asserts, and it deliberately stops short of "
 | "Property-tested engine invariants" | proptest suite merged and green (item 1), named properties listed in the CHANGELOG entry |
 | "Tax-aware withdrawals" | Engine drawdown tax model + regenerated parity fixture with both suites green (item 7) |
 | "Safe upgrades / never lose data" | Pre-migration dump hook + a restore actually exercised in a test or documented drill (item 2). **Partly earned in 3.0.0**: the automatic pre-migration dump exists and the CI `docker-stack` job exercises V2→V3 with real data, automigration and pg_upgrade 15→16. **The downgrade guard was earned on 2026-08-27** (`db.rs` → `MigrationError::Downgrade` + operator banner, pinned by `apps/api/tests/migration_guard.rs`), so "refuses to start instead of running an old schema over new data, and says so in words you can act on" is now claimable. Still unearned, and therefore still unclaimable: a restore drill run against a *production-shaped* dump. Word claims to what the evidence covers — "backs itself up before every migration" and "refuses to downgrade" are provable today; "never lose data" is not. |
-| "The MCP catalog fits in context" / "context-efficient MCP" | Split the claim by which half you mean. **Descriptions**: earned — `apps/api/tests/mcp_http.rs::tool_descriptions_stay_within_the_context_budget` (`PER_TOOL_MAX = 600`, `TOTAL_BUDGET = 24_000`) is green in CI, cutting 37.214 → 21.319 chars (Fase 5, issue #86). **`inputSchema`**: NOT earned — measured after that cut it is ~55 KB, ~2,7× the descriptions, and no guard test exists for it (item 10). Do not let "the catalog is context-efficient" stand as a whole claim until item 10's guard exists too — today it is true for one half of the payload and open for the larger half. |
+| "The MCP catalog fits in context" / "context-efficient MCP" | Split the claim by which half you mean. **Descriptions**: earned, but the margin is now thin — `apps/api/tests/mcp_http.rs::tool_descriptions_stay_within_the_context_budget` (`PER_TOOL_MAX = 600`, `TOTAL_BUDGET = 24_000`) is green in CI; Fase 5 (issue #86) cut 37.214 → 21.319 chars over 52 tools, and Fase 6 (issue #87) added 16 tools that pushed the raw total to **28.884** (+4.884 over budget) before the prescribed rebalancing brought it to **23.874 / 24.000, max 596** — **126 characters of headroom**, so "fits in context" is true today and one tool away from needing work again. **`inputSchema`**: NOT earned — measured after that cut it is ~55 KB, ~2,7× the descriptions, and no guard test exists for it (item 10). Do not let "the catalog is context-efficient" stand as a whole claim until item 10's guard exists too — today it is true for one half of the payload and open for the larger half. |
 
 Rule of thumb: the CHANGELOG entry that introduces a capability must name the test(s) that prove
 it. If you cannot name the test, the claim is not ready.
@@ -347,8 +347,19 @@ tests: `fixed_payments_with_apr_is_bit_identical_to_the_pre_4_2_0_pin` (bit-exac
 `french_payment_below_interest_grows_the_principal`,
 `interest_only_principal_constant_and_cash_is_the_quota`,
 `revolving_matches_french_recurrence`. MCP: `create_liability`/`update_liability` gained
-`repayment_model` — the catalog stayed at **52 tools** (a field on an already-covered resource,
-not a new one).
+`repayment_model` — the catalog stayed at **52 tools** at the time (a field on an already-covered
+resource, not a new one; it reached 68 in the 4.4.0 train's Fase 6).
+
+**Extended, not reopened, in 4.4.0 (Fase 6, issue #87)** — the accrual shipped in 4.2.0 but was
+**invisible**: the engine derived every liability's closing principal up to 840 times per request
+and `ProjectionOutput` never published it, so «¿cuánto interés pago?» and «¿cuándo termino?» had no
+answer. `liability_amortization_schedule` (engine) + `GET /v1/liabilities/{id}/schedule` (handler)
+now serve it, and `simulate_projection` gained `liability_overrides` (extra monthly principal and
+lump sums) so «¿me compensa amortizar antes?» is answerable at all — until then the 12 what-if axes
+touched **no liability**. Zero new math: both reuse `liability_month`, and the interest is derived
+as a **residual** from the balances (`payment − (opening − closing)`), which is what makes
+`payment + extra == interest + principal` exact by construction in all four models. Cross-surface
+pin: `simulate_liability_kpis.rs::the_what_if_debt_kpis_agree_with_the_liability_schedule`.
 
 **Why this counts as fully closed, not partly:** opt-in (existing liabilities keep
 `fixed_payments`, bit-identical to pre-4.2.0 — the exact "you have a result when" bar this item
@@ -476,8 +487,8 @@ before reaching for more words in a description — that instinct is what Fase 5
 hard way, and it is exactly the instinct this item asks you to apply one layer deeper.
 
 **What Fase 5 did NOT touch — the asset that makes this item tractable HERE:** measured with a
-live `tools/list` AFTER the description cut, the `inputSchema` block of the same 52-tool catalog
-is **~55 KB — roughly 2,7× the descriptions**. Prose stopped being the dominant cost; the lever
+live `tools/list` AFTER the description cut, the `inputSchema` block of the then-52-tool catalog
+was **~55 KB — roughly 2,7× the descriptions**. Prose stopped being the dominant cost; the lever
 left is the **~250 parameter doc-comments** that `schemars` publishes as the `description` of
 each JSON-Schema field (Fase 2, issue #83, already put the *structural* constraints — `enum`,
 `pattern`, numeric bounds — into the schema itself; the doc-comment sitting on top of that is
@@ -510,7 +521,7 @@ frozen fixture:
 ```bash
 python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"
 ```
-→ today `52 21319 596`.
+→ today `68 23874 596` (`52 21319 596` right after Fase 5). **Fase 6 turned this item's headroom into work**: the 16 new tools took the raw total to 28.884, +4.884 over `TOTAL_BUDGET`, and the fix was the one the guard prescribes — provenance fields and `instructions`, never raising the constant. What is left is 126 characters, i.e. the description half is no longer self-financing either: the next tool pays for itself out of somebody else's prose.
 
 **First three steps in this repo:**
 1. Extend the pattern of `tool_descriptions_stay_within_the_context_budget` in `mcp_http.rs` with
@@ -590,8 +601,9 @@ nothing automatically un-lists a shipped item here. Re-verify before relying on 
 - Item 2 formerly-open half — **SHIPPED 2026-08-27** (branch `feat/home-assistant-addon`), so the
   old "must still be missing" check is inverted: `ls apps/api/tests/migration_guard.rs` → **must
   exist** (2 tests); `grep -n 'MigrationError::Downgrade\|VersionMissing\|NO ARRANCA' apps/api/src/db.rs`
-  → must print the mapping and the operator banner; `ls apps/api/tests/*.rs | wc -l` (43 on
-  2026-08-27; 20 on 2026-08-16; 8 on 2026-07-02). Run it with
+  → must print the mapping and the operator banner; `ls apps/api/tests/*.rs | wc -l` (**62** on
+  2026-08-28 after the whole 4.4.0 MCP-audit train; 43 on 2026-08-27; 20 on 2026-08-16; 8 on
+  2026-07-02). Run it with
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test migration_guard`.
 - Host-side backup/restore scripts (no `upgrade-with-backup.sh` — deliberately): `ls scripts/`.
 - Embedded PG runs with stock memory settings (Observables): `grep -n -A9 '^start_postgres()' apps/api/docker-entrypoint.sh`
@@ -624,7 +636,8 @@ unreleased at verification time — `Cargo.toml` still 4.3.1).** Verified agains
 - Description budget + guard: `grep -n 'PER_TOOL_MAX\|TOTAL_BUDGET' apps/api/tests/mcp_http.rs`
   (must show `600` / `24_000`); cheap re-derivation:
   `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
-  (`52 21319 596` on 2026-08-28).
+  (`68 23874 596` on 2026-08-28 after Fase 6 — **126 from the ceiling**; `52 21319 596` at the
+  close of Fase 5, same day).
 - `inputSchema` has NO guard yet — this absence IS the item, do not treat it as an oversight to
   silently "fix" outside this item's steps: `grep -rn 'schema_bytes\|inputSchema.*len' apps/api/tests/mcp_http.rs`
   (empty = still open). Re-derive the ~55 KB figure with the live-server curl recipe inside the

@@ -754,13 +754,35 @@ pub async fn create_snapshot(
         return Err(ApiError::Forbidden);
     }
 
+    let resp = create_snapshot_core(&state.pool, iid, user.id.0, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+}
+
+/// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_snapshot` (backfill).
+///
+/// **Grabar el pasado es lo que una conversación hace mejor que un formulario** («en enero de 2023
+/// tenía 40.000 € en el fondo»), y por eso esta core existe: la validación —`normalize_kind`,
+/// `validate_snapshot_date` contra el HOY civil de la instalación, los bounds por ítem y el 409 de
+/// `(usuario, kind, fecha)`— tiene que ser la misma por los dos caminos. La fecha ocupada llega
+/// como unique-violation sobre `history_snapshots_unique_per_day` y la mapea `From<sqlx::Error>`;
+/// aquí nadie inspecciona el SQLSTATE.
+///
+/// **Cache NONE (contrato D12)**: los snapshots no son inputs del engine, así que esta core NO
+/// llama a `refresh_projection_after_mutation`. La ausencia está fijada por
+/// `snapshot_mutations_do_not_touch_projection_cache`.
+pub(crate) async fn create_snapshot_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    body: CreateSnapshotBody,
+) -> Result<SnapshotResponse, ApiError> {
     let kind = normalize_kind(&body.kind)?;
     let is_liability = kind == "liability";
-    let today = installation_naive_today(&state.pool, iid).await?;
+    let today = installation_naive_today(pool, iid).await?;
     validate_snapshot_date(body.snapshot_date, today)?;
     let items = validate_and_prepare_items(&body.items, is_liability)?;
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = pool.begin().await?;
     // Fecha ocupada → unique-violation sobre history_snapshots_unique_per_day → 409
     // (mapeado en From<sqlx::Error>; el handler no inspecciona el SQLSTATE).
     let snapshot_id: Uuid = sqlx::query_scalar(
@@ -770,7 +792,7 @@ pub async fn create_snapshot(
            RETURNING id"#,
     )
     .bind(iid)
-    .bind(user.id.0)
+    .bind(user_id)
     .bind(&kind)
     .bind(body.snapshot_date)
     .fetch_one(&mut *tx)
@@ -780,7 +802,8 @@ pub async fn create_snapshot(
     let resp = load_snapshot_response(&mut tx, snapshot_id).await?;
     tx.commit().await?;
 
-    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+    // Nota: NO se invalida la cache de proyección (ver doc del módulo).
+    Ok(resp)
 }
 
 #[utoipa::path(
@@ -812,6 +835,28 @@ pub async fn update_snapshot(
         return Err(ApiError::Forbidden);
     }
 
+    let resp = update_snapshot_core(&state.pool, iid, user.id.0, id, body).await?;
+    Ok(Json(resp))
+}
+
+/// Core sin HTTP: lo comparten el handler PUT y la tool MCP `update_snapshot`.
+///
+/// Dos reglas que no se pueden reimplementar por fuera sin romper algo:
+/// - **`kind` es inmutable**: los términos por ítem (`apr_percent`/`payment_*`) solo son válidos en
+///   `liability`, y se validan contra el kind YA guardado, no contra uno que venga en el body.
+/// - **`items` ausente conserva; presente (incluso `[]`) reemplaza**. Un PUT que solo mueve la
+///   fecha no puede vaciar el snapshot.
+///
+/// Mover a una fecha ocupada es una unique-violation → 409, igual que en el alta.
+///
+/// **Cache NONE (contrato D12)**, misma razón que [`create_snapshot_core`].
+pub(crate) async fn update_snapshot_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: UpdateSnapshotBody,
+) -> Result<SnapshotResponse, ApiError> {
     // Guardia id + installation + owner: si no es tuyo, 404 (no revelar existencia).
     let existing: Option<SnapshotHeaderRow> = sqlx::query_as(
         r#"SELECT id, kind, snapshot_date, source, created_at, updated_at
@@ -820,8 +865,8 @@ pub async fn update_snapshot(
     )
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
-    .fetch_optional(&state.pool)
+    .bind(user_id)
+    .fetch_optional(pool)
     .await?;
     let Some(existing) = existing else {
         return Err(ApiError::NotFound);
@@ -830,7 +875,7 @@ pub async fn update_snapshot(
     // `kind` es inmutable: los términos permitidos dependen del kind existente.
     let is_liability = existing.kind == "liability";
     let new_date = body.snapshot_date.unwrap_or(existing.snapshot_date);
-    let today = installation_naive_today(&state.pool, iid).await?;
+    let today = installation_naive_today(pool, iid).await?;
     validate_snapshot_date(new_date, today)?;
     // `items` ausente (`None`) → conservar los items existentes; presente (incluso `[]`) →
     // reemplazo completo. Un PUT con solo `snapshot_date` ya no borra los items.
@@ -839,7 +884,7 @@ pub async fn update_snapshot(
         None => None,
     };
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = pool.begin().await?;
     // Mover a una fecha ocupada → unique-violation → 409. `source` intacto.
     sqlx::query(
         r#"UPDATE history_snapshots
@@ -849,7 +894,7 @@ pub async fn update_snapshot(
     .bind(new_date)
     .bind(id)
     .bind(iid)
-    .bind(user.id.0)
+    .bind(user_id)
     .execute(&mut *tx)
     .await?;
 
@@ -863,7 +908,8 @@ pub async fn update_snapshot(
     let resp = load_snapshot_response(&mut tx, id).await?;
     tx.commit().await?;
 
-    Ok(Json(resp))
+    // Nota: NO se invalida la cache de proyección (ver doc del módulo).
+    Ok(resp)
 }
 
 #[utoipa::path(

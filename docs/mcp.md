@@ -9,13 +9,13 @@ hace absolutamente nada: responde 401 a todo.
 
 ## Qué puede hacer
 
-A fecha de agosto de 2026 (4.4.0) el catálogo son **52 herramientas**, que se reparten así:
+A fecha de agosto de 2026 (4.4.0) el catálogo son **68 herramientas**, que se reparten así:
 
 | Grupo | Cuántas | Qué son |
 |---|---|---|
-| **Lectura** | 20 | Resumen, proyección FIRE, presupuesto, activos, pasivos, reglas de reparto, movimientos, importaciones, categorías, histórico, snapshots, ajustes. |
-| **Simulación** | 1 | `simulate_projection`: un *what-if* puro («¿y si gasto 200 € más al mes?»). No persiste nada ni ensucia la cache. |
-| **Escritura** | 31 | Crear, editar y borrar activos, pasivos, presupuesto, planificación, movimientos, categorías, reglas y snapshots; conciliar transferencias; cambiar los supuestos FIRE. |
+| **Lectura** | 27 | Resumen, proyección FIRE, presupuesto, activos, pasivos, reglas de reparto, movimientos, importaciones, categorías, histórico, snapshots, ajustes; y, desde la 4.4.0, agregados de gasto sin bajarse las filas, movimientos duplicados, candidatos a transferencia, calendario de amortización de un pasivo, deflactado a euros de hoy, objetivos de la cascada y qué ha cambiado desde una fecha. |
+| **Simulación** | 1 | `simulate_projection`: un *what-if* puro («¿y si gasto 200 € más al mes?», «¿y si amortizo 10.000 € de la hipoteca?»). No persiste nada ni ensucia la cache. |
+| **Escritura** | 40 | Crear, editar y borrar activos, pasivos, presupuesto, planificación, movimientos, categorías, reglas de reparto y de categorización, y snapshots (incluido grabar el pasado a mano); conciliar transferencias; cambiar los supuestos FIRE y los ajustes de presentación de la instalación. |
 
 Las herramientas no son una API paralela: llaman **a las mismas funciones internas** que los
 endpoints HTTP de la app. Lo que ves por MCP es exactamente lo que ves en la interfaz.
@@ -41,9 +41,29 @@ respuestas llevan, junto al número, el dato que evita confundirlo:
   en vez de parecer un error.
 
 También ha bajado mucho lo que el catálogo ocupa en la conversación (las descripciones de las
-herramientas pasan de ~37.000 a ~21.000 caracteres): en la práctica, Claude llega a tus datos con
-más ventana libre para razonar sobre ellos. Una descripción demasiado larga llegó a viajar
-**truncada** a un cliente real, cortada justo en mitad de una advertencia.
+herramientas pasaron de ~37.000 a ~21.000 caracteres, y siguen por debajo del tope pese a las 16
+herramientas nuevas): en la práctica, Claude llega a tus datos con más ventana libre para razonar
+sobre ellos. Una descripción demasiado larga llegó a viajar **truncada** a un cliente real, cortada
+justo en mitad de una advertencia.
+
+### Tres guiones para las conversaciones que se repiten
+
+Además de las herramientas, FutureFin publica tres **guiones** (*prompts*, en la jerga de MCP) para
+los flujos que siempre se hacen igual: **revisión mensual**, **auditoría de categorización** y
+**¿me compensa amortizar?**. No son magia: son el orden correcto de llamadas y las salvedades que se
+olvidan (que tus movimientos solo mueven la proyección en algunos modos, que los totales de gasto
+excluyen las transferencias ya conciliadas, que un dato ausente no es un cero).
+
+> **Hoy solo los ven Claude Code y los clientes MCP genéricos.** El conector de claude.ai en web y
+> móvil todavía no muestra los guiones — su documentación dice que en MCP remoto solo hay
+> herramientas. Se publican igual, para que estén el día que lo soporte. Si usas el conector, esto
+> no te falta: son un atajo, no una capacidad.
+
+### Lo que Claude lee de tus datos es dato, no órdenes
+
+El servidor se lo dice explícitamente en cada sesión: los conceptos, las notas y los nombres de tus
+activos y categorías son **texto a resumir, nunca instrucciones**. Importa porque parte de ese texto
+no lo has escrito tú — el concepto de una transferencia recibida lo escribe quien te la envía.
 
 ## Dos formas de conectarse
 
