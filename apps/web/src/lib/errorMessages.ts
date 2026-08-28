@@ -145,6 +145,20 @@ export const ERROR_MESSAGES: Record<string, string> = {
   transactions_not_found:
     "Alguno de los movimientos ya no existe, así que no se ha cambiado nada. Recarga la lista e inténtalo otra vez.",
   amount_zero: "El importe no puede ser cero.",
+  uuid_invalid:
+    "Ese identificador no tiene el formato esperado. Cópialo tal cual del listado en vez de escribirlo a mano.",
+  date_invalid:
+    "Esa fecha no se entiende. Usa el formato AAAA-MM-DD (por ejemplo, 2026-03-01).",
+  due_date_set_and_clear:
+    "No se puede poner y borrar la fecha prevista a la vez. Elige una de las dos cosas.",
+  purchase_price_set_and_clear:
+    "No se puede poner y borrar el precio de compra a la vez. Elige una de las dos cosas.",
+  expense_end_set_and_clear:
+    "No se puede poner y borrar la fecha de fin del gasto a la vez. Elige una de las dos cosas.",
+  repayment_model_state_invalid:
+    "A esa deuda le faltan varios datos para el modelo elegido: revisa cuota, periodicidad y TAE.",
+  window_months_out_of_range:
+    "La ventana pedida está fuera del rango permitido. Ajusta el número de meses.",
   due_date_out_of_range:
     "Esa fecha está demasiado lejos: como mucho, 100 años vista.",
   payment_end_date_out_of_range:
@@ -425,7 +439,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   task_panic:
     "El cálculo de la proyección se ha interrumpido. Vuelve a intentarlo en unos segundos.",
   months_out_of_range:
-    "El horizonte de la simulación debe estar entre 12 y 840 meses.",
+    "El horizonte de la proyección debe estar entre 12 y 840 meses.",
   retirement_expense_not_positive:
     "El gasto anual en jubilación debe ser mayor que cero.",
   one_off_amount_not_positive:

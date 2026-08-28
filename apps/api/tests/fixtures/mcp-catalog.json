@@ -1,8 +1,16 @@
 {
-  "_doc": "Contrato de entrada de las tools MCP. GENERADO — no editar a mano: UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract. `description_sha256_12` son los 6 primeros bytes del SHA-256 de la descripción publicada.",
+  "_doc": "Contrato de entrada de las tools MCP. GENERADO — no editar a mano: UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract. `description_sha256_12` son los 6 primeros bytes del SHA-256 de la descripción publicada. `constraints` son las restricciones del inputSchema por posición ($ = raíz, $.x = propiedad, $.x[] = items, $defs.T.x = anidado), y `constraints_sha256_12` su hash: cubren additionalProperties, enum, pattern, type, required y las cotas numéricas y de longitud a cada nivel.",
   "tool_count": 52,
   "tools": [
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"rule_id\"] type=\"object\"",
+        "$.apply_to_existing": "enum=[\"all\",\"uncategorized\"] type=[\"null\",\"string\"]",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.from_month": "pattern=\"^\\\\d{4}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "54fcb81d6a0e",
       "description_len": 941,
       "description_sha256_12": "88c6259fb6bd",
       "name": "apply_categorization_rule",
@@ -17,6 +25,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.kinds": "type=[\"array\",\"null\"]",
+        "$.kinds[]": "enum=[\"asset\",\"liability\"] type=\"string\""
+      },
+      "constraints_sha256_12": "c2bf8051e468",
       "description_len": 298,
       "description_sha256_12": "f0120edf5141",
       "name": "capture_snapshot",
@@ -26,6 +40,17 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"category_id\",\"current_value\",\"name\"] type=\"object\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.current_value": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$.expected_annual_return_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.is_liquid": "type=[\"boolean\",\"null\"]",
+        "$.name": "type=\"string\"",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "5512eefd8b12",
       "description_len": 206,
       "description_sha256_12": "bf7d1494e179",
       "name": "create_asset",
@@ -45,6 +70,16 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"amount\",\"category_id\"] type=\"object\"",
+        "$.amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.ends_at_retirement": "type=[\"boolean\",\"null\"]",
+        "$.expense_end_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.persists_after_retirement": "type=[\"boolean\",\"null\"]"
+      },
+      "constraints_sha256_12": "1c665ae43d01",
       "description_len": 291,
       "description_sha256_12": "3ca4baa509b9",
       "name": "create_budget_entry",
@@ -62,6 +97,15 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"assign_kind\",\"pattern\"] type=\"object\"",
+        "$.assign_category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.assign_kind": "enum=[\"expense\",\"income\",\"savings\"] type=\"string\"",
+        "$.match_kind": "enum=[\"exact\",\"prefix\",\"substring\"] type=[\"null\",\"string\"]",
+        "$.pattern": "type=\"string\"",
+        "$.source": "type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "b61a3238dcf7",
       "description_len": 747,
       "description_sha256_12": "7ff1acd50e38",
       "name": "create_categorization_rule",
@@ -78,6 +122,13 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"name\",\"scope\"] type=\"object\"",
+        "$.name": "type=\"string\"",
+        "$.scope": "enum=[\"asset\",\"expense\",\"income\",\"liability\"] type=\"string\"",
+        "$.sort_index": "format=\"int32\" type=[\"integer\",\"null\"]"
+      },
+      "constraints_sha256_12": "c63108629988",
       "description_len": 204,
       "description_sha256_12": "5ae0bd49fe1f",
       "name": "create_category",
@@ -92,6 +143,21 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"category_id\",\"expense_category_id\",\"label\"] type=\"object\"",
+        "$.apr_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.derive_principal_from_plan": "type=[\"boolean\",\"null\"]",
+        "$.expense_category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.label": "type=\"string\"",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.payment_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.payment_end_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.payment_frequency": "enum=[\"monthly\",\"weekly\"] type=[\"null\",\"string\"]",
+        "$.principal": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.repayment_model": "enum=[\"fixed_payments\",\"french\",\"interest_only\",\"revolving\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "284b42284286",
       "description_len": 1051,
       "description_sha256_12": "e5a907cf1e43",
       "name": "create_liability",
@@ -115,6 +181,16 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"category_id\",\"expected_amount\",\"title\"] type=\"object\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.due_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.expected_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.show_in_chart": "type=[\"boolean\",\"null\"]",
+        "$.title": "type=\"string\""
+      },
+      "constraints_sha256_12": "5e3bef85ba0a",
       "description_len": 256,
       "description_sha256_12": "82b75174f7df",
       "name": "create_planning_flow",
@@ -133,6 +209,19 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"amount\",\"concept\",\"kind\",\"op_date\"] type=\"object\"",
+        "$.amount": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.concept": "type=\"string\"",
+        "$.kind": "enum=[\"expense\",\"income\",\"savings\"] type=\"string\"",
+        "$.linked_asset_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.linked_liability_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.op_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=\"string\"",
+        "$.recurring": "type=[\"boolean\",\"null\"]"
+      },
+      "constraints_sha256_12": "d89c3b4e3661",
       "description_len": 572,
       "description_sha256_12": "fd20e0a3aeea",
       "name": "create_transaction",
@@ -155,8 +244,14 @@
       ]
     },
     {
-      "description_len": 600,
-      "description_sha256_12": "24f2a187eb33",
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "d9b763ce74d3",
+      "description_len": 626,
+      "description_sha256_12": "dba2da2f840f",
       "name": "delete_asset",
       "properties": [
         "confirm",
@@ -167,6 +262,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "d9b763ce74d3",
       "description_len": 123,
       "description_sha256_12": "f55101e2d59c",
       "name": "delete_budget_entry",
@@ -179,6 +280,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"rule_id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "56ad48dea7cf",
       "description_len": 503,
       "description_sha256_12": "abf3fbfae01b",
       "name": "delete_categorization_rule",
@@ -191,6 +298,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "d9b763ce74d3",
       "description_len": 195,
       "description_sha256_12": "3e3b2f9cf959",
       "name": "delete_import",
@@ -203,6 +316,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "d9b763ce74d3",
       "description_len": 168,
       "description_sha256_12": "d9b8f9305b2c",
       "name": "delete_liability",
@@ -215,6 +334,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "d9b763ce74d3",
       "description_len": 109,
       "description_sha256_12": "f87eb11062c6",
       "name": "delete_planning_flow",
@@ -227,6 +352,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "d9b763ce74d3",
       "description_len": 231,
       "description_sha256_12": "b26cdee52b31",
       "name": "delete_recurring_rule",
@@ -239,6 +370,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "d9b763ce74d3",
       "description_len": 160,
       "description_sha256_12": "d475916b4758",
       "name": "delete_snapshot",
@@ -251,6 +388,12 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "d9b763ce74d3",
       "description_len": 155,
       "description_sha256_12": "f468003c9109",
       "name": "delete_transaction",
@@ -263,6 +406,11 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 1265,
       "description_sha256_12": "f9e52a45169b",
       "name": "get_allocation_resolution",
@@ -272,6 +420,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 426,
       "description_sha256_12": "861cdbfe6c47",
       "name": "get_budget",
@@ -281,6 +434,14 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"kind\"] type=\"object\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.kind": "enum=[\"expense\",\"income\"] type=\"string\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]",
+        "$.window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]"
+      },
+      "constraints_sha256_12": "f1a75650cda8",
       "description_len": 753,
       "description_sha256_12": "8cb3ff87c7cf",
       "name": "get_category_monthly_series",
@@ -295,6 +456,13 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.include_asset_series": "type=[\"boolean\",\"null\"]",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]",
+        "$.window_months": "format=\"int64\" maximum=1200 minimum=1 type=[\"integer\",\"null\"]"
+      },
+      "constraints_sha256_12": "0baf22866d5b",
       "description_len": 1046,
       "description_sha256_12": "7fd798d6e63c",
       "name": "get_history",
@@ -306,6 +474,14 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.include_curve": "type=[\"boolean\",\"null\"]",
+        "$.resolution": "enum=[\"daily\",\"weekly\"] type=[\"null\",\"string\"]",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]",
+        "$.window_months": "format=\"int64\" maximum=120 minimum=1 type=[\"integer\",\"null\"]"
+      },
+      "constraints_sha256_12": "98f6a7bce371",
       "description_len": 990,
       "description_sha256_12": "7e92bdb60492",
       "name": "get_history_cashflow",
@@ -318,6 +494,13 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.include_asset_series": "type=[\"boolean\",\"null\"]",
+        "$.months": "format=\"uint32\" maximum=840 minimum=12 type=[\"integer\",\"null\"]",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "5bbdcf2de7e5",
       "description_len": 1607,
       "description_sha256_12": "f856420b86ba",
       "name": "get_projection",
@@ -329,6 +512,10 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\""
+      },
+      "constraints_sha256_12": "e3fc94c62797",
       "description_len": 380,
       "description_sha256_12": "be5b6ae9af47",
       "name": "get_settings",
@@ -336,6 +523,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 2278,
       "description_sha256_12": "746e8e2e2540",
       "name": "get_summary",
@@ -345,6 +537,14 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.avg_window": "enum=[\"12\",\"3\",\"6\",\"all\",\"ytd\"] type=[\"null\",\"string\"]",
+        "$.month": "format=\"uint32\" maximum=12 minimum=1 type=[\"integer\",\"null\"]",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]",
+        "$.year": "format=\"int32\" maximum=3000 minimum=1900 type=[\"integer\",\"null\"]"
+      },
+      "constraints_sha256_12": "35306683141e",
       "description_len": 1538,
       "description_sha256_12": "ae81b8ae8aaf",
       "name": "get_transactions_summary",
@@ -357,6 +557,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 327,
       "description_sha256_12": "cca0c6e5256e",
       "name": "list_allocation_rules",
@@ -366,6 +571,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 729,
       "description_sha256_12": "db8245acbb1a",
       "name": "list_assets",
@@ -375,6 +585,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.scope": "enum=[\"asset\",\"expense\",\"income\",\"liability\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "c340cf7d8f32",
       "description_len": 169,
       "description_sha256_12": "bf0501bd9721",
       "name": "list_categories",
@@ -384,6 +599,12 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.limit": "format=\"uint32\" maximum=200 minimum=1 type=[\"integer\",\"null\"]",
+        "$.offset": "format=\"uint32\" minimum=0 type=[\"integer\",\"null\"]"
+      },
+      "constraints_sha256_12": "3e0ffff16d85",
       "description_len": 469,
       "description_sha256_12": "1da84c2c2f51",
       "name": "list_categorization_rules",
@@ -394,6 +615,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 527,
       "description_sha256_12": "57754d52d6a8",
       "name": "list_liabilities",
@@ -403,6 +629,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 158,
       "description_sha256_12": "7cc8cbb6a044",
       "name": "list_planning_flows",
@@ -412,6 +643,10 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\""
+      },
+      "constraints_sha256_12": "e3fc94c62797",
       "description_len": 315,
       "description_sha256_12": "82d5578569e6",
       "name": "list_recurring_rules",
@@ -419,6 +654,13 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.include_items": "type=[\"boolean\",\"null\"]",
+        "$.kind": "enum=[\"asset\",\"liability\"] type=[\"null\",\"string\"]",
+        "$.year": "format=\"int32\" maximum=3000 minimum=1900 type=[\"integer\",\"null\"]"
+      },
+      "constraints_sha256_12": "4019d89ae3ea",
       "description_len": 209,
       "description_sha256_12": "dbc58d58a2ff",
       "name": "list_snapshots",
@@ -430,6 +672,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 191,
       "description_sha256_12": "eca615bcea11",
       "name": "list_transaction_imports",
@@ -439,6 +686,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 180,
       "description_sha256_12": "bbc77df0abb6",
       "name": "list_transaction_months",
@@ -448,6 +700,22 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.concept_contains": "maxLength=200 minLength=1 type=[\"null\",\"string\"]",
+        "$.date_from": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.date_to": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.import_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.kind": "enum=[\"expense\",\"income\",\"savings\"] type=[\"null\",\"string\"]",
+        "$.limit": "format=\"uint32\" maximum=500 minimum=1 type=[\"integer\",\"null\"]",
+        "$.max_amount": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.min_amount": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.month": "pattern=\"^\\\\d{4}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.offset": "format=\"uint32\" minimum=0 type=[\"integer\",\"null\"]",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "b5fc8c9ab48c",
       "description_len": 395,
       "description_sha256_12": "721ae9b7b07e",
       "name": "list_transactions",
@@ -468,6 +736,10 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\""
+      },
+      "constraints_sha256_12": "e3fc94c62797",
       "description_len": 710,
       "description_sha256_12": "cdbf80d39ccf",
       "name": "materialize_recurring",
@@ -475,6 +747,10 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\""
+      },
+      "constraints_sha256_12": "e3fc94c62797",
       "description_len": 405,
       "description_sha256_12": "87a38fe6208b",
       "name": "reconcile_transfers",
@@ -482,6 +758,46 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.annual_inflation_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.asset_return_overrides": "type=[\"array\",\"null\"]",
+        "$.asset_return_overrides[]": "$ref=\"#/$defs/AssetReturnOverrideParam\"",
+        "$.extra_monthly_cash_adjustment": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.extra_monthly_expense": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.extra_monthly_savings": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.fire_settings_overrides|anyOf[0]": "$ref=\"#/$defs/FireSettingsOverrideParam\"",
+        "$.fire_settings_overrides|anyOf[1]": "type=\"null\"",
+        "$.include_series": "type=[\"boolean\",\"null\"]",
+        "$.months": "format=\"uint32\" maximum=840 minimum=12 type=[\"integer\",\"null\"]",
+        "$.one_off_expense|anyOf[0]": "$ref=\"#/$defs/OneOffExpenseParam\"",
+        "$.one_off_expense|anyOf[1]": "type=\"null\"",
+        "$.retirement_annual_expense": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.swr_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]",
+        "$defs.AssetReturnOverrideParam": "additionalProperties=false required=[\"asset_id\",\"expected_annual_return_percent\"] type=\"object\"",
+        "$defs.AssetReturnOverrideParam.asset_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$defs.AssetReturnOverrideParam.expected_annual_return_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$defs.FireSettingsOverrideParam": "additionalProperties=false type=\"object\"",
+        "$defs.FireSettingsOverrideParam.expense_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
+        "$defs.FireSettingsOverrideParam.expense_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
+        "$defs.FireSettingsOverrideParam.fire_number_manual_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$defs.FireSettingsOverrideParam.fire_number_mode": "enum=[\"annual_expense\",\"current_income\",\"manual\"] type=[\"null\",\"string\"]",
+        "$defs.FireSettingsOverrideParam.income_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
+        "$defs.FireSettingsOverrideParam.income_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
+        "$defs.FireSettingsOverrideParam.savings_source": "enum=[\"budget\",\"budget_income_real_expense\",\"transactions_avg\"] type=[\"null\",\"string\"]",
+        "$defs.FireSettingsOverrideParam.tax_brackets": "type=[\"array\",\"null\"]",
+        "$defs.FireSettingsOverrideParam.tax_brackets[]": "$ref=\"#/$defs/TaxBracketParam\"",
+        "$defs.FireSettingsOverrideParam.taxes_enabled": "type=[\"boolean\",\"null\"]",
+        "$defs.OneOffExpenseParam": "additionalProperties=false required=[\"amount\"] type=\"object\"",
+        "$defs.OneOffExpenseParam.amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$defs.OneOffExpenseParam.date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$defs.OneOffExpenseParam.month_index": "format=\"uint32\" maximum=840 minimum=1 type=[\"integer\",\"null\"]",
+        "$defs.TaxBracketParam": "additionalProperties=false required=[\"pct\"] type=\"object\"",
+        "$defs.TaxBracketParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "e38d37593828",
       "description_len": 3821,
       "description_sha256_12": "5ed53e0cbdfa",
       "name": "simulate_projection",
@@ -502,6 +818,11 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"transaction_id\"] type=\"object\"",
+        "$.transaction_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "72a49d98699a",
       "description_len": 751,
       "description_sha256_12": "6ddf50dd79f8",
       "name": "unreconcile_transfer",
@@ -513,6 +834,16 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"rule_id\"] type=\"object\"",
+        "$.amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.cap_kind": "enum=[\"amount\",\"income_multiple\",\"months_expense\"] type=[\"null\",\"string\"]",
+        "$.cap_value": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.clear_cap": "type=[\"boolean\",\"null\"]",
+        "$.enabled": "type=[\"boolean\",\"null\"]",
+        "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+      },
+      "constraints_sha256_12": "c255b4e30e86",
       "description_len": 378,
       "description_sha256_12": "78c22b523515",
       "name": "update_allocation_rule",
@@ -529,6 +860,19 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"asset_id\"] type=\"object\"",
+        "$.asset_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.clear_purchase_price": "type=[\"boolean\",\"null\"]",
+        "$.current_value": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.expected_annual_return_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.is_liquid": "type=[\"boolean\",\"null\"]",
+        "$.name": "type=[\"null\",\"string\"]",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "95950f1c68a5",
       "description_len": 374,
       "description_sha256_12": "233f4f78fbe8",
       "name": "update_asset",
@@ -548,6 +892,13 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"asset_id\"] type=\"object\"",
+        "$.asset_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.current_value": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.expected_annual_return_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "4d33fcf99be9",
       "description_len": 421,
       "description_sha256_12": "093cf0ef1139",
       "name": "update_asset_value",
@@ -561,6 +912,18 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.clear_expense_end_date": "type=[\"boolean\",\"null\"]",
+        "$.ends_at_retirement": "type=[\"boolean\",\"null\"]",
+        "$.expense_end_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.persists_after_retirement": "type=[\"boolean\",\"null\"]"
+      },
+      "constraints_sha256_12": "52b9a1745aca",
       "description_len": 184,
       "description_sha256_12": "602d70419aa8",
       "name": "update_budget_entry",
@@ -579,6 +942,19 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"rule_id\"] type=\"object\"",
+        "$.assign_category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.assign_kind": "enum=[\"expense\",\"income\",\"savings\"] type=[\"null\",\"string\"]",
+        "$.clear_assign_category": "type=[\"boolean\",\"null\"]",
+        "$.clear_assign_kind": "type=[\"boolean\",\"null\"]",
+        "$.clear_source": "type=[\"boolean\",\"null\"]",
+        "$.match_kind": "enum=[\"exact\",\"prefix\",\"substring\"] type=[\"null\",\"string\"]",
+        "$.pattern": "type=[\"null\",\"string\"]",
+        "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.source": "type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "cfdb99dd6ac1",
       "description_len": 657,
       "description_sha256_12": "ebaac7acb163",
       "name": "update_categorization_rule",
@@ -598,6 +974,26 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.annual_inflation_assumption_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.expense_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
+        "$.expense_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
+        "$.fire_number_manual_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.fire_number_mode": "enum=[\"annual_expense\",\"current_income\",\"manual\"] type=[\"null\",\"string\"]",
+        "$.income_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
+        "$.income_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
+        "$.savings_source": "enum=[\"budget\",\"budget_income_real_expense\",\"transactions_avg\"] type=[\"null\",\"string\"]",
+        "$.swr_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.tax_brackets": "type=[\"array\",\"null\"]",
+        "$.tax_brackets[]": "$ref=\"#/$defs/TaxBracketParam\"",
+        "$.taxes_enabled": "type=[\"boolean\",\"null\"]",
+        "$defs.TaxBracketParam": "additionalProperties=false required=[\"pct\"] type=\"object\"",
+        "$defs.TaxBracketParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "4806c51fd66f",
       "description_len": 750,
       "description_sha256_12": "1d7e55e9451a",
       "name": "update_fire_settings",
@@ -618,6 +1014,22 @@
       "required": []
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"liability_id\"] type=\"object\"",
+        "$.apr_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.derive_principal_from_plan": "type=[\"boolean\",\"null\"]",
+        "$.expense_category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.label": "type=[\"null\",\"string\"]",
+        "$.liability_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.payment_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.payment_end_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.payment_frequency": "enum=[\"monthly\",\"weekly\"] type=[\"null\",\"string\"]",
+        "$.principal": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.repayment_model": "enum=[\"fixed_payments\",\"french\",\"interest_only\",\"revolving\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "170010fafb00",
       "description_len": 872,
       "description_sha256_12": "03a4b6578fbe",
       "name": "update_liability",
@@ -640,6 +1052,18 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.clear_due_date": "type=[\"boolean\",\"null\"]",
+        "$.due_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.expected_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.show_in_chart": "type=[\"boolean\",\"null\"]",
+        "$.title": "type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "53abad6fdf51",
       "description_len": 148,
       "description_sha256_12": "220d408d09a7",
       "name": "update_planning_flow",
@@ -658,6 +1082,23 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.amount": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.clear_category": "type=[\"boolean\",\"null\"]",
+        "$.clear_linked_asset": "type=[\"boolean\",\"null\"]",
+        "$.clear_linked_liability": "type=[\"boolean\",\"null\"]",
+        "$.clear_notes": "type=[\"boolean\",\"null\"]",
+        "$.concept": "type=[\"null\",\"string\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.kind": "enum=[\"expense\",\"income\",\"savings\"] type=[\"null\",\"string\"]",
+        "$.linked_asset_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.linked_liability_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.notes": "type=[\"null\",\"string\"]",
+        "$.op_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "a02b114fe676",
       "description_len": 599,
       "description_sha256_12": "711198c55c78",
       "name": "update_transaction",
@@ -681,8 +1122,19 @@
       ]
     },
     {
+      "constraints": {
+        "$": "additionalProperties=false required=[\"ids\"] type=\"object\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.clear_category": "type=[\"boolean\",\"null\"]",
+        "$.clear_notes": "type=[\"boolean\",\"null\"]",
+        "$.ids": "maxItems=200 minItems=1 type=\"array\"",
+        "$.ids[]": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.kind": "enum=[\"expense\",\"income\",\"savings\"] type=[\"null\",\"string\"]",
+        "$.notes": "type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "1b295ddee3bb",
       "description_len": 501,
-      "description_sha256_12": "f5807007306d",
+      "description_sha256_12": "0365b91dcce8",
       "name": "update_transactions",
       "properties": [
         "category_id",

@@ -182,7 +182,7 @@ async fn create_transaction_writes_the_same_row_as_http() {
     .await;
     let created = tool_json(&envelope);
     let id = created["id"].as_str().unwrap();
-    assert!(created["resumen"].as_str().unwrap().contains("cena"), "{created}");
+    assert!(created["summary"].as_str().unwrap().contains("cena"), "{created}");
     assert_eq!(created["category_name"], "Comida");
 
     // La fila es indistinguible de una creada por HTTP: el GET la sirve con el mismo shape.
@@ -282,7 +282,7 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
     )
     .await;
     let flow = tool_json(&envelope);
-    assert!(flow["resumen"].as_str().unwrap().contains("IRPF"));
+    assert!(flow["summary"].as_str().unwrap().contains("IRPF"));
     app.assert_invalidated(&key, "create_planning_flow").await;
 
     // --- Modo B: create_transaction vía MCP SÍ invalida (COND activa) -------------------------
@@ -350,8 +350,8 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     )
     .await;
     let updated = tool_json(&envelope);
-    assert!(updated["resumen"].as_str().unwrap().contains("Fondo global"), "{updated}");
-    assert!(updated["resumen"].as_str().unwrap().contains("ilíquido"), "{updated}");
+    assert!(updated["summary"].as_str().unwrap().contains("Fondo global"), "{updated}");
+    assert!(updated["summary"].as_str().unwrap().contains("ilíquido"), "{updated}");
     app.assert_invalidated(&key, "update_asset").await;
 
     let listed = app.get_with_cookie("/v1/assets", &owner.cookie).await;
@@ -570,7 +570,7 @@ async fn category_and_rule_creation_with_conflicts() {
     )
     .await;
     let rule = tool_json(&envelope);
-    assert!(rule["resumen"].as_str().unwrap().contains("TIENDA MASCOTAS NORTE"), "{rule}");
+    assert!(rule["summary"].as_str().unwrap().contains("TIENDA MASCOTAS NORTE"), "{rule}");
 
     // Duplicado (source, pattern) con source concreto → conflict (la UNIQUE de la tabla; con
     // source NULL Postgres no colisiona — contrato idéntico al HTTP).
@@ -613,7 +613,7 @@ async fn planning_flow_update_and_due_date_tristate() {
     .await;
     let flow = tool_json(&envelope);
     let flow_id = flow["id"].as_str().unwrap().to_string();
-    assert!(flow["resumen"].as_str().unwrap().contains("2026-10-15"));
+    assert!(flow["summary"].as_str().unwrap().contains("2026-10-15"));
 
     // clear_due_date borra la fecha (tri-state del PATCH).
     let envelope = mcp_post(
@@ -626,8 +626,8 @@ async fn planning_flow_update_and_due_date_tristate() {
     )
     .await;
     let updated = tool_json(&envelope);
-    assert!(!updated["resumen"].as_str().unwrap().contains("2026-10-15"), "{updated}");
-    assert!(updated["resumen"].as_str().unwrap().contains("900"));
+    assert!(!updated["summary"].as_str().unwrap().contains("2026-10-15"), "{updated}");
+    assert!(updated["summary"].as_str().unwrap().contains("900"));
 
     // due_date + clear_due_date a la vez → bad_request.
     let envelope = mcp_post(
@@ -679,7 +679,7 @@ async fn asset_tools_create_update_and_reject_absurd_returns() {
     .await;
     let created = tool_json(&envelope);
     let asset_id = created["id"].as_str().unwrap().to_string();
-    assert!(created["resumen"].as_str().unwrap().contains("Depósito"));
+    assert!(created["summary"].as_str().unwrap().contains("Depósito"));
     app.assert_invalidated(&key, "create_asset").await;
 
     // update_asset_value: valor anterior/nuevo + FULL.
@@ -774,7 +774,7 @@ async fn liability_create_with_derived_principal() {
     .await;
     let created = tool_json(&envelope);
     assert_eq!(created["principal_derived_from_plan"], true);
-    assert!(created["resumen"].as_str().unwrap().contains("Coche"));
+    assert!(created["summary"].as_str().unwrap().contains("Coche"));
 }
 
 #[tokio::test]
@@ -967,7 +967,7 @@ async fn allocation_rule_update_never_drops_a_half_cap_silently() {
     assert_eq!(http_empty.json()["code"], "patch_empty");
 }
 
-/// REGRESIÓN (auditoría MCP §11b) — el `resumen` de un flujo planificado habla el idioma del wire.
+/// REGRESIÓN (auditoría MCP §11b) — el `summary` de un flujo planificado habla el idioma del wire.
 ///
 /// `PlanningFlowDirection` solo tenía `Debug`, y un `{:?}` en el `format!` publicaba el
 /// identificador de Rust: las escrituras devolvían `"… (Outflow)"` —inglés y capitalizado— mientras
@@ -992,9 +992,9 @@ async fn planning_flow_summary_uses_the_wire_form_of_the_direction() {
         )
         .await,
     );
-    let resumen = out["resumen"].as_str().expect("resumen");
-    assert!(resumen.contains("(outflow)"), "{resumen}");
-    assert!(!resumen.contains("Outflow"), "el Debug de Rust no debe salir al wire: {resumen}");
+    let summary = out["summary"].as_str().expect("summary");
+    assert!(summary.contains("(outflow)"), "{summary}");
+    assert!(!summary.contains("Outflow"), "el Debug de Rust no debe salir al wire: {summary}");
 
     // Y coincide con lo que devuelve la lectura para la misma fila.
     let flows = tool_json(&mcp_post(&app, &token, tool_call("list_planning_flows", json!({}))).await);
@@ -1209,11 +1209,12 @@ async fn delete_categorization_rule_previews_then_deletes() {
     );
     assert_eq!(preview["preview"], true, "{preview}");
     assert_eq!(preview["confirm_required"], true, "{preview}");
-    assert_eq!(preview["effects"]["regla"]["id"], json!(rule_id), "{preview}");
-    assert_eq!(preview["effects"]["huella"]["ya_conformes"], 3, "{preview}");
+    assert_eq!(preview["effects"]["entity"]["id"], json!(rule_id), "{preview}");
+    assert_eq!(preview["effects"]["side_effects"]["already_correct"], 3, "{preview}");
     assert_eq!(
-        preview["effects"]["huella"]["cambiarian"], 0,
-        "una regla ya aplicada no cambiaría nada — por eso `ya_conformes` es la cifra útil: {preview}"
+        preview["effects"]["side_effects"]["would_match"], 0,
+        "una regla ya aplicada no cambiaría nada — por eso `already_correct` es la cifra útil: \
+         {preview}"
     );
     assert_eq!(app.count_rows("categorization_rules").await, 1, "el preview no borra");
     assert!(app.cache_contains(&key).await, "el preview no invalida");
@@ -1292,7 +1293,11 @@ async fn delete_recurring_rule_previews_then_deletes() {
     let preview = tool_json(&envelope);
     assert_eq!(preview["preview"], true);
     assert_eq!(preview["confirm_required"], true);
-    assert_eq!(preview["effects"]["rule"]["id"].as_str().unwrap(), rule_id);
+    assert_eq!(preview["effects"]["entity"]["id"].as_str().unwrap(), rule_id);
+    assert_eq!(
+        preview["effects"]["side_effects"]["materialized_instances_deleted"], 0,
+        "borrar la plantilla no toca las instancias: {preview}"
+    );
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*)::bigint FROM recurring_transaction_rules")
             .fetch_one(&app.pool)
@@ -1367,8 +1372,9 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
     .await;
     let preview = tool_json(&envelope);
     assert_eq!(preview["preview"], true);
-    assert_eq!(preview["effects"]["before"]["swr_pct"], "4");
-    assert_eq!(preview["effects"]["after"]["swr_pct"], "3.0");
+    assert_eq!(preview["effects"]["entity"]["before"]["swr_pct"], "4");
+    assert_eq!(preview["effects"]["entity"]["after"]["swr_pct"], "3.0");
+    assert_eq!(preview["effects"]["side_effects"]["scope"], "installation");
     let stored = app.get_with_cookie("/v1/installation", &owner.cookie).await;
     assert_eq!(stored.json()["installation"]["fire_settings"]["swr_pct"], "4");
 
@@ -1461,7 +1467,7 @@ async fn destructive_deletes_preview_then_execute() {
     let envelope = mcp_post(&app, &token, tool_call("delete_transaction", json!({"id": txn_id}))).await;
     let preview = tool_json(&envelope);
     assert_eq!(preview["preview"], true);
-    assert_eq!(preview["effects"]["transaction"]["concept"], "aporte");
+    assert_eq!(preview["effects"]["entity"]["concept"], "aporte");
     assert_eq!(app.count_rows("transactions").await, 1);
     let envelope = mcp_post(
         &app,
@@ -1487,7 +1493,10 @@ async fn destructive_deletes_preview_then_execute() {
     // y la transacción sobrevive desvinculada.
     let envelope = mcp_post(&app, &token, tool_call("delete_asset", json!({"id": asset_id}))).await;
     let preview = tool_json(&envelope);
-    assert_eq!(preview["effects"]["unlinked"]["transactions_unlinked"], 1, "{preview}");
+    assert_eq!(
+        preview["effects"]["side_effects"]["transactions_unlinked"], 1,
+        "{preview}"
+    );
     assert_eq!(app.count_rows("assets").await, 1);
     let envelope = mcp_post(
         &app,
@@ -1521,7 +1530,7 @@ async fn destructive_deletes_preview_then_execute() {
     let snap_id = snap["snapshots"][0]["id"].as_str().unwrap().to_string();
     let envelope = mcp_post(&app, &token, tool_call("delete_snapshot", json!({"id": snap_id}))).await;
     let preview = tool_json(&envelope);
-    assert_eq!(preview["effects"]["snapshot"]["items_deleted"], 1, "{preview}");
+    assert_eq!(preview["effects"]["side_effects"]["items_deleted"], 1, "{preview}");
     let envelope = mcp_post(
         &app,
         &token,
@@ -1617,7 +1626,10 @@ async fn delete_import_previews_txn_count_and_cascades() {
 
     let envelope = mcp_post(&app, &token, tool_call("delete_import", json!({"id": import_id}))).await;
     let preview = tool_json(&envelope);
-    assert_eq!(preview["effects"]["transactions_deleted"], 2, "{preview}");
+    assert_eq!(
+        preview["effects"]["side_effects"]["transactions_deleted"], 2,
+        "{preview}"
+    );
     assert_eq!(app.count_rows("transactions").await, 2, "el preview no borra");
 
     let envelope = mcp_post(
@@ -1788,13 +1800,19 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         .await,
     );
     assert_eq!(preview["preview"], true, "{preview}");
-    assert_eq!(preview["effects"]["would_match"], 2, "{preview}");
-    assert_eq!(preview["effects"]["would_change_kind"], 2, "{preview}");
+    assert_eq!(preview["effects"]["side_effects"]["would_match"], 2, "{preview}");
     assert_eq!(
-        preview["effects"]["moves_projection_in_modes_b_and_c"], true,
+        preview["effects"]["side_effects"]["would_change_kind"], 2,
+        "{preview}"
+    );
+    assert_eq!(
+        preview["effects"]["side_effects"]["moves_projection_in_modes_b_and_c"], true,
         "el aviso de proyección debe salir ANTES de ejecutar: {preview}"
     );
-    assert_eq!(preview["effects"]["sample"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        preview["effects"]["side_effects"]["sample"].as_array().unwrap().len(),
+        2
+    );
     assert!(app.cache_contains(&key).await, "el preview no debe invalidar");
     let rows = app
         .get_with_cookie("/v1/transactions", &owner.cookie)
@@ -1817,7 +1835,7 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         .await,
     );
     assert_eq!(out["updated"], 2, "{out}");
-    assert_eq!(out["resumen"].as_array().unwrap().len(), 2, "{out}");
+    assert_eq!(out["summary"].as_array().unwrap().len(), 2, "{out}");
     let rows = app
         .get_with_cookie("/v1/transactions", &owner.cookie)
         .await
@@ -1938,8 +1956,8 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
         .await,
     );
     assert_eq!(out["updated"], 3, "{out}");
-    assert_eq!(out["resumen"].as_array().unwrap().len(), 3, "{out}");
-    assert_eq!(out["resumen_truncated"], false, "{out}");
+    assert_eq!(out["summary"].as_array().unwrap().len(), 3, "{out}");
+    assert_eq!(out["summary_truncated"], false, "{out}");
 
     // 2. Indistinguible vía HTTP.
     let rows = app
@@ -2379,9 +2397,9 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
 
 /// `delete_liability` (Fase 0, issue #81): hasta ahora la tool sólo existía como cadena
 /// dentro del vector del catálogo congelado — **ningún test la invocaba**. Es destructiva,
-/// tiene preview/confirm, y su `effects` **no tiene la misma forma** que el de
-/// `delete_asset`: aquí `transactions_unlinked` cuelga directamente de `effects` (es un
-/// escalar), mientras que en `delete_asset` vive dentro de `effects.unlinked` junto a las
+/// tiene preview/confirm. Hasta la Fase 2 su `effects` **no tenía la misma forma** que el de
+/// `delete_asset`: aquí `transactions_unlinked` colgaba directamente de `effects` (es un
+/// escalar), mientras que en `delete_asset` vivía dentro de `effects.unlinked` junto a las
 /// reglas de reparto borradas. Un cliente que asumiera la forma del vecino leería `null` y
 /// le diría al usuario que no se desvincula nada.
 ///
@@ -2432,13 +2450,16 @@ async fn delete_liability_previews_effects_then_deletes() {
     assert_eq!(preview["preview"], true, "{preview}");
     assert_eq!(preview["confirm_required"], true, "{preview}");
     assert_eq!(preview["action"], "delete_liability", "{preview}");
-    assert_eq!(preview["effects"]["liability"]["label"], "Coche", "{preview}");
-    assert_eq!(preview["effects"]["liability"]["id"], liab_id, "{preview}");
-    // `transactions_unlinked` cuelga de `effects`, NO de `effects.unlinked` (delete_asset).
-    assert_eq!(preview["effects"]["transactions_unlinked"], 2, "{preview}");
+    assert_eq!(preview["effects"]["entity"]["label"], "Coche", "{preview}");
+    assert_eq!(preview["effects"]["entity"]["id"], liab_id, "{preview}");
+    // Fase 2: misma forma que delete_asset — `{entity, side_effects}`, sin `unlinked`.
+    assert_eq!(
+        preview["effects"]["side_effects"]["transactions_unlinked"], 2,
+        "{preview}"
+    );
     assert!(
         preview["effects"]["unlinked"].is_null(),
-        "la forma de delete_asset (effects.unlinked) no debe aparecer aquí: {preview}"
+        "la clave `unlinked` desapareció en la Fase 2: {preview}"
     );
     assert_eq!(app.count_rows("liabilities").await, 1, "el preview no borra");
     assert_eq!(app.count_rows("transactions").await, 2);
@@ -2505,8 +2526,8 @@ async fn delete_planning_flow_preview_does_not_delete() {
     assert_eq!(preview["action"], "delete_planning_flow", "{preview}");
     // El preview devuelve el flujo ENTERO (la respuesta del listado), no un resumen: es lo que
     // permite a un cliente enseñar título e importe antes de pedir confirmación.
-    assert_eq!(preview["effects"]["flow"]["title"], "Viaje a Oslo", "{preview}");
-    assert_eq!(preview["effects"]["flow"]["id"], flow_id, "{preview}");
+    assert_eq!(preview["effects"]["entity"]["title"], "Viaje a Oslo", "{preview}");
+    assert_eq!(preview["effects"]["entity"]["id"], flow_id, "{preview}");
     assert_eq!(app.count_rows("planning_flows").await, 1, "el preview no borra");
 
     // Repetir el preview es inocuo (no es un borrado a medias).
@@ -2515,4 +2536,433 @@ async fn delete_planning_flow_preview_does_not_delete() {
     );
     assert_eq!(again, preview, "el preview es estable entre llamadas");
     assert_eq!(app.count_rows("planning_flows").await, 1);
+}
+
+/// Fase 2 (issue #83) — **los 11 previews tienen UNA forma, no seis**.
+///
+/// Antes de esta fase cada preview inventaba su `effects`: `{transaction}`, `{flow}`,
+/// `{entry}`, `{rule, nota}`, `{asset, unlinked}`, `{liability, transactions_unlinked}`,
+/// `{snapshot{…, items_deleted}}`, `{transactions_deleted, import}`, contadores planos, el
+/// `before/after` pelado de `update_fire_settings`… y `delete_categorization_rule` los ponía en
+/// **español** (`regla`, `huella.cambiarian`, `nota`), único caso del catálogo.
+///
+/// El peor no era la variedad, era una clave concreta: `delete_asset` escondía
+/// `allocation_remainder_rules_deleted` —la única cifra IRREVERSIBLE del borrado, la que su
+/// propia descripción destaca en mayúsculas— dentro de una clave llamada `unlinked`, que es la
+/// palabra que describe justo lo contrario (los movimientos, que solo se desvinculan).
+///
+/// La forma es `{"entity": …, "side_effects": …}`: qué se toca, y qué cambia además. Este test
+/// recorre los ONCE y no deja pasar ni una clave suelta ni una clave en español.
+#[tokio::test]
+async fn every_preview_shares_the_entity_side_effects_shape() {
+    /// Claves en español que llegó a publicar algún preview. No pueden volver: la norma del
+    /// repo es «UI en español, identificadores en inglés», y los VALORES de prosa (`note`)
+    /// siguen en español.
+    const SPANISH_KEYS: &[&str] = &[
+        "regla",
+        "huella",
+        "nota",
+        "cambiarian",
+        "ya_conformes",
+        "no_asigna_nada",
+        "tapa_a_otra_regla",
+        "pierde_frente_a_otra_regla",
+        "descartados_por_source",
+        // Publicada hasta la Fase 2 por los ONCE payloads de confirmación (`{id, resumen}`),
+        // no por los previews. Renombrada a `summary` en el mismo cambio: era la última clave
+        // en español del wire MCP.
+        "resumen",
+    ];
+
+    fn assert_shape(action: &str, preview: &serde_json::Value) {
+        assert_eq!(preview["preview"], true, "{action}: {preview}");
+        assert_eq!(preview["confirm_required"], true, "{action}: {preview}");
+        assert_eq!(preview["action"], action, "{action}: {preview}");
+        let effects = preview["effects"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{action}: effects debe ser un objeto: {preview}"));
+        let mut keys: Vec<&str> = effects.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["entity", "side_effects"],
+            "{action}: `effects` solo tiene `entity` y `side_effects`: {preview}"
+        );
+        assert!(
+            effects["entity"].is_object(),
+            "{action}: `entity` describe la fila tocada: {preview}"
+        );
+        assert!(
+            effects["side_effects"].is_object(),
+            "{action}: `side_effects` es un objeto (vacío = «no arrastra nada»): {preview}"
+        );
+
+        // Ninguna clave en español, a ninguna profundidad.
+        fn keys_of(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, sub) in map {
+                        out.push(k.clone());
+                        keys_of(sub, out);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|i| keys_of(i, out)),
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        keys_of(&preview["effects"], &mut all);
+        for k in &all {
+            assert!(
+                !SPANISH_KEYS.contains(&k.as_str()),
+                "{action}: la clave `{k}` está en español: {preview}"
+            );
+            assert!(
+                k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{action}: la clave `{k}` no es snake_case ASCII: {preview}"
+            );
+        }
+    }
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat_exp = app.create_category(&owner, "expense", "Comida").await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    let cat_lia = app.create_category(&owner, "liability", "Préstamos").await;
+
+    let preview_of = |args: serde_json::Value, tool: &'static str| {
+        let app = &app;
+        let token = &token;
+        async move { tool_json(&mcp_post(app, token, tool_call(tool, args)).await) }
+    };
+
+    // --- Seed: un activo con movimiento vinculado, un pasivo, un presupuesto, un próximo,
+    //     un snapshot, una plantilla recurrente, una regla y un lote de import.
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_ast, "name": "Fondo", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+    let liab = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({"category_id": cat_lia, "expense_category_id": cat_exp,
+                   "label": "Coche", "principal": "5000"}),
+            &owner.cookie,
+        )
+        .await;
+    let liab_id = liab.json()["id"].as_str().unwrap().to_string();
+    let txn = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_transaction",
+                json!({"op_date": "2026-07-01", "concept": "aporte", "amount": "-200.00",
+                       "kind": "savings", "linked_asset_id": asset_id, "recurring": true}),
+            ),
+        )
+        .await,
+    );
+    let txn_id = txn["id"].as_str().unwrap().to_string();
+    let entry = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("create_budget_entry", json!({"category_id": cat_exp, "amount": "100"})),
+        )
+        .await,
+    );
+    let flow = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_planning_flow",
+                json!({"title": "Viaje", "category_id": cat_exp, "expected_amount": "600"}),
+            ),
+        )
+        .await,
+    );
+    let snaps = tool_json(
+        &mcp_post(&app, &token, tool_call("capture_snapshot", json!({"kinds": ["asset"]}))).await,
+    );
+    let snap_id = snaps["snapshots"][0]["id"].as_str().unwrap().to_string();
+    let rule = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_categorization_rule",
+                json!({"pattern": "SUPER", "assign_kind": "expense",
+                       "assign_category_id": cat_exp}),
+            ),
+        )
+        .await,
+    );
+    let rule_id = rule["id"].as_str().unwrap().to_string();
+    let recurring = tool_json(
+        &mcp_post(&app, &token, tool_call("list_recurring_rules", json!({}))).await,
+    );
+    let recurring_id = recurring[0]["id"].as_str().unwrap().to_string();
+
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+               01/06/2026;01/06/2026;SUPER;-10,00;EUR\n";
+    let b64 = B64.encode(csv);
+    let p = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/preview",
+            json!({"source": "myinvestor", "file_b64": b64}),
+            &owner.cookie,
+        )
+        .await;
+    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    let c = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/confirm",
+            json!({"source": "myinvestor", "file_b64": b64, "file_sha256": sha,
+                   "decisions": [{"kind": "expense"}], "learn_rules": false}),
+            &owner.cookie,
+        )
+        .await;
+    assert!(c.status.is_success(), "{c:?}");
+    let batches = tool_json(
+        &mcp_post(&app, &token, tool_call("list_transaction_imports", json!({}))).await,
+    );
+    let import_id = batches[0]["id"].as_str().unwrap().to_string();
+
+    // --- Los once previews. NINGUNO lleva `confirm`, así que nada se escribe.
+    let cases: Vec<(&'static str, serde_json::Value)> = vec![
+        ("delete_asset", json!({"id": asset_id})),
+        ("delete_liability", json!({"id": liab_id})),
+        ("delete_transaction", json!({"id": txn_id})),
+        ("delete_budget_entry", json!({"id": entry["id"]})),
+        ("delete_planning_flow", json!({"id": flow["id"]})),
+        ("delete_snapshot", json!({"id": snap_id})),
+        ("delete_import", json!({"id": import_id})),
+        ("delete_categorization_rule", json!({"rule_id": rule_id})),
+        ("delete_recurring_rule", json!({"id": recurring_id})),
+        ("apply_categorization_rule", json!({"rule_id": rule_id})),
+        ("update_fire_settings", json!({"swr_pct": "3.5"})),
+    ];
+    assert_eq!(cases.len(), 11, "los 11 previews del catálogo");
+    for (tool, args) in cases {
+        let preview = preview_of(args, tool).await;
+        assert_shape(tool, &preview);
+    }
+
+    // Y la cifra que motivó la unificación está donde debe: fuera de una clave llamada
+    // `unlinked`, al mismo nivel que el resto de efectos colaterales del borrado.
+    let asset_preview = preview_of(json!({"id": asset_id}), "delete_asset").await;
+    let side = &asset_preview["effects"]["side_effects"];
+    assert_eq!(side["transactions_unlinked"], 1, "{asset_preview}");
+    assert_eq!(side["allocation_rules_deleted"], 0, "{asset_preview}");
+    assert_eq!(side["allocation_remainder_rules_deleted"], 0, "{asset_preview}");
+}
+
+/// Fase 2 (issue #83) — **un parámetro mal escrito falla; ya no se descarta en silencio**.
+///
+/// Hermano de comportamiento de `every_input_schema_forbids_unknown_properties`
+/// (`mcp_http.rs`), que solo mira el esquema publicado. Aquí se comprueba lo que de verdad
+/// pasa al llamar, porque rmcp **no valida contra el `inputSchema`**: quien rechaza es
+/// `#[serde(deny_unknown_fields)]` al deserializar, y sin él el esquema podría decir
+/// `additionalProperties: false` mientras el servidor sigue tragando.
+///
+/// Los tres casos son los medidos en la auditoría, y ninguno fallaba antes:
+///   * `delete_asset {id, confirmed: true}` — typo por `confirm`. Devolvía un **preview**, que
+///     un modelo lee como «hecho»: cree haber borrado y el activo sigue ahí.
+///   * `update_budget_entry {id, ammount: "250"}` — devolvía 200 sin cambiar el importe.
+///   * `list_transactions {search: "…"}` — devolvía la primera página **sin filtrar**, que es
+///     la peor de las tres: los datos parecen la respuesta a la pregunta.
+#[tokio::test]
+async fn a_misspelled_parameter_is_rejected_instead_of_silently_dropped() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat_exp = app.create_category(&owner, "expense", "Comida").await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_ast, "name": "Fondo", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+    let entry = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("create_budget_entry", json!({"category_id": cat_exp, "amount": "100"})),
+        )
+        .await,
+    );
+
+    for (tool, args, field, why) in [
+        (
+            "delete_asset",
+            json!({"id": asset_id, "confirmed": true}),
+            "confirmed",
+            "`confirmed` no existe (es `confirm`): antes devolvía un preview, que un modelo lee \
+             como «borrado hecho»",
+        ),
+        (
+            "update_budget_entry",
+            json!({"id": entry["id"], "ammount": "250"}),
+            "ammount",
+            "`ammount` no existe: antes devolvía 200 sin cambiar el importe",
+        ),
+        (
+            "list_transactions",
+            json!({"search": "mercadona"}),
+            "search",
+            "`search` no existe (es `concept_contains`): antes devolvía la página SIN filtrar",
+        ),
+    ] {
+        let envelope = mcp_post(&app, &token, tool_call(tool, args)).await;
+        // rmcp sirve el fallo de deserialización como tool-error de texto (no como error de
+        // protocolo), y el mensaje NOMBRA el campo desconocido y enumera los válidos: es
+        // exactamente lo que un modelo necesita para corregirse solo.
+        match classify(&envelope) {
+            Outcome::ToolError { message, .. } => {
+                assert!(
+                    message.contains("unknown field") && message.contains(field),
+                    "{tool}: el error debe nombrar `{field}`, y dice {message:?}"
+                );
+            }
+            other => panic!("{tool}: {why} — y ha devuelto {other:?}: {envelope}"),
+        }
+    }
+
+    // Nada se ha escrito ni borrado por el camino.
+    assert_eq!(app.count_rows("assets").await, 1);
+    let budget = tool_json(&mcp_post(&app, &token, tool_call("get_budget", json!({}))).await);
+    assert_eq!(budget["entries"][0]["amount"], "100.0000", "{budget}");
+}
+
+/// Fase 2 (issue #83) — **los errores propios de MCP llevan código estable y dicen el formato**.
+///
+/// Los tres helpers de parseo de `mcp/server.rs` (`parse_decimal_param`, `parse_uuid_param`,
+/// `parse_date_param`) y cuatro guardias sueltas construían su mensaje SIN el prefijo
+/// `snake_code: `, así que `derive_error_code` caía a la clase HTTP y el cliente recibía
+/// `bad_request` — el código genérico que la SPA traduce por «Los datos enviados no son
+/// válidos». Un `code` genérico es exactamente lo que `error_codes_parity` existe para impedir,
+/// pero ese test extrae los códigos del FUENTE: si nadie escribe el literal, no hay nada que
+/// extraer y el fixture no protesta.
+///
+/// El de decimal comprueba además el CONTENIDO: la UI es española, el usuario dicta «once con
+/// ochenta y tres» y el modelo escribe `"11,83"`. Un mensaje que solo dijera «must be a decimal
+/// string» deja al modelo eligiendo a ciegas entre cambiar la coma por un punto y quitar el
+/// separador — y `"1183"` se acepta sin ruido, con dos órdenes de magnitud de más.
+#[tokio::test]
+async fn mcp_only_errors_carry_a_stable_code() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat_exp = app.create_category(&owner, "expense", "Comida").await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_ast, "name": "Fondo", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+    let entry = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("create_budget_entry", json!({"category_id": cat_exp, "amount": "100"})),
+        )
+        .await,
+    );
+    let flow = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_planning_flow",
+                json!({"title": "Viaje", "category_id": cat_exp, "expected_amount": "600"}),
+            ),
+        )
+        .await,
+    );
+
+    // Importe con coma decimal: el caso que motiva el mensaje.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_asset_value", json!({"asset_id": asset_id, "current_value": "11,83"})),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert_eq!(body["code"], "decimal_invalid", "{body}");
+    let msg = body["message"].as_str().unwrap();
+    assert!(
+        msg.contains("current_value") && msg.contains("1234.56") && msg.contains("1.234,56"),
+        "el mensaje debe enseñar el formato bueno Y el malo: {msg}"
+    );
+
+    for (tool, args, code, needle) in [
+        (
+            "update_asset_value",
+            json!({"asset_id": "el fondo", "current_value": "10"}),
+            "uuid_invalid",
+            "8-4-4-4-12",
+        ),
+        (
+            "create_transaction",
+            json!({"op_date": "01/03/2026", "concept": "x", "amount": "-10", "kind": "expense"}),
+            "date_invalid",
+            "YYYY-MM-DD",
+        ),
+        (
+            "update_asset",
+            json!({"asset_id": asset_id, "purchase_price": "10",
+                   "clear_purchase_price": true}),
+            "purchase_price_set_and_clear",
+            "mutually exclusive",
+        ),
+        (
+            "update_asset_value",
+            json!({"asset_id": asset_id}),
+            "patch_empty",
+            "expected_annual_return_percent",
+        ),
+        (
+            "update_budget_entry",
+            json!({"id": entry["id"], "expense_end_date": "2027-01-01",
+                   "clear_expense_end_date": true}),
+            "expense_end_set_and_clear",
+            "mutually exclusive",
+        ),
+        (
+            "update_planning_flow",
+            json!({"id": flow["id"], "due_date": "2027-01-01", "clear_due_date": true}),
+            "due_date_set_and_clear",
+            "mutually exclusive",
+        ),
+        (
+            "list_transactions",
+            json!({"limit": 501}),
+            "limit_out_of_range",
+            "between 1 and 500",
+        ),
+    ] {
+        let envelope = mcp_post(&app, &token, tool_call(tool, args)).await;
+        let body = tool_error(&envelope, "bad_request");
+        assert_eq!(body["code"], code, "{tool}: {body}");
+        assert!(
+            body["message"].as_str().unwrap().contains(needle),
+            "{tool}: el mensaje debe contener {needle:?}: {body}"
+        );
+    }
 }

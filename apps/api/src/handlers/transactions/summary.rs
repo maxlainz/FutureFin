@@ -40,6 +40,7 @@ use crate::handlers::installation::{
 };
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
+use crate::handlers::validate_window_months;
 use crate::handlers::transactions::schema::{
     AvgBasis, BlockActualAvg, CategoryComparisonLine, CategoryMonthPoint,
     CategoryMonthlySeriesEntry, CategoryMonthlySeriesResponse, SummaryTotals,
@@ -808,6 +809,7 @@ pub(crate) async fn transactions_summary_core(
 // ---------------------------------------------------------------------------
 
 const DEFAULT_CATEGORY_SERIES_WINDOW: u32 = 12;
+/// Cota de la ventana. Fuera de rango se **rechaza** (`validate_window_months`), no se clampa.
 const MAX_CATEGORY_SERIES_WINDOW: u32 = 60;
 
 #[derive(Debug, Deserialize)]
@@ -819,7 +821,8 @@ pub struct CategorySeriesQuery {
     /// Limita la respuesta a una categoría (omitido = todas las del `kind` con datos).
     #[serde(default)]
     pub category_id: Option<Uuid>,
-    /// Amplitud de la ventana en meses (default 12, clamp 1..=60). El último mes es el actual.
+    /// Amplitud de la ventana en meses (default 12, rango 1..=60; fuera de rango → 400
+    /// `window_months_out_of_range`). El último mes es el actual.
     #[serde(default)]
     pub window_months: Option<u32>,
 }
@@ -832,7 +835,7 @@ pub struct CategorySeriesQuery {
         ("view" = Option<String>, Query, description = "`mine` | household."),
         ("kind" = String, Query, description = "`expense` | `income`."),
         ("category_id" = Option<Uuid>, Query, description = "Limita a una categoría."),
-        ("window_months" = Option<u32>, Query, description = "Ventana en meses (default 12, clamp 1..=60)."),
+        ("window_months" = Option<u32>, Query, description = "Ventana en meses (default 12, rango 1..=60; fuera de rango → 400 `window_months_out_of_range`)."),
     ),
     responses(
         (status = 200, description = "Serie mensual por categoría (cero-rellena, magnitudes ≥ 0)", body = CategoryMonthlySeriesResponse),
@@ -887,9 +890,14 @@ pub(crate) async fn category_monthly_series_core(
             ))
         }
     };
-    let window = window_months
-        .unwrap_or(DEFAULT_CATEGORY_SERIES_WINDOW)
-        .clamp(1, MAX_CATEGORY_SERIES_WINDOW);
+    // Rechazo, no clamp: la respuesta ecoa `window_months`, así que un clamp silencioso hacía que
+    // la serie describiera una ventana distinta de la pedida. Cota compartida con las otras dos
+    // ventanas del producto (`handlers::validate_window_months`).
+    validate_window_months(
+        window_months.map(i64::from),
+        i64::from(MAX_CATEGORY_SERIES_WINDOW),
+    )?;
+    let window = window_months.unwrap_or(DEFAULT_CATEGORY_SERIES_WINDOW);
 
     // La categoría pedida tiene que existir Y ser del `kind` pedido. Antes no se validaba: pedir
     // `kind: "expense"` con el id de una categoría de scope `income` (o de `savings`/`liability`,

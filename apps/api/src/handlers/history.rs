@@ -14,6 +14,7 @@
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
+use crate::handlers::validate_window_months;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::projection::serialize_decimal_as_f64;
 use crate::handlers::session::require_session_user;
@@ -1318,8 +1319,9 @@ fn accumulate_series(
 pub struct HistorySeriesQuery {
     #[serde(default)]
     pub view: Option<String>,
-    /// Limita la rejilla emitida a los últimos N meses (clamp 1..=1200). La interpolación sigue
-    /// anclándose en TODOS los snapshots; solo se recortan los puntos/markers devueltos.
+    /// Limita la rejilla emitida a los últimos N meses (1..=1200; fuera de rango es 400
+    /// `window_months_out_of_range`, NO se clampa). La interpolación sigue anclándose en TODOS los
+    /// snapshots; solo se recortan los puntos/markers devueltos.
     #[serde(default)]
     pub window_months: Option<i64>,
     /// `false` omite `asset_series` (payload por activo × puntos). Default true en HTTP.
@@ -1327,8 +1329,9 @@ pub struct HistorySeriesQuery {
     pub include_asset_series: Option<bool>,
 }
 
-/// Clamp del windowing de la serie histórica (100 años, el mismo techo que el runway).
+/// Cota del windowing de la serie histórica (100 años, el mismo techo que el runway).
 const MAX_HISTORY_WINDOW_MONTHS: i64 = 1200;
+
 
 #[utoipa::path(
     get,
@@ -1336,7 +1339,7 @@ const MAX_HISTORY_WINDOW_MONTHS: i64 = 1200;
     tag = "history",
     params(
         ("view" = Option<String>, Query, description = "`mine` = solo mis snapshots; omitido u otro valor → `household` (todos los usuarios de la instalación)."),
-        ("window_months" = Option<i64>, Query, description = "Limita la serie a los últimos N meses (clamp 1..=1200). Omitido = desde el snapshot más antiguo."),
+        ("window_months" = Option<i64>, Query, description = "Limita la serie a los últimos N meses (1..=1200; fuera de rango → 400 `window_months_out_of_range`). Omitido = desde el snapshot más antiguo."),
         ("include_asset_series" = Option<bool>, Query, description = "`false` omite `asset_series`. Default `true`."),
     ),
     responses(
@@ -1376,6 +1379,7 @@ pub(crate) async fn history_series_core(
     window_months: Option<i64>,
     include_asset_series: bool,
 ) -> Result<HistorySeriesResponse, ApiError> {
+    validate_window_months(window_months, MAX_HISTORY_WINDOW_MONTHS)?;
     let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
 
     let today = installation_naive_today(pool, iid).await?;
@@ -1431,7 +1435,9 @@ pub(crate) async fn history_series_core(
     // sigue anclándose en TODOS los snapshots del scope.
     let k_min_full = markers.iter().map(|m| m.month_index).min().unwrap_or(0).min(0);
     let k_min = match window_months {
-        Some(w) => k_min_full.max(-(w.clamp(1, MAX_HISTORY_WINDOW_MONTHS) as i32)),
+        // Ya validado en la entrada de la core (`validate_window_months`): aquí el valor es de
+        // rango, no clampado. Un clamp aquí volvería a inventar una ventana distinta en silencio.
+        Some(w) => k_min_full.max(-(w as i32)),
         None => k_min_full,
     };
     let markers: Vec<HistoryMarker> = markers
@@ -1634,7 +1640,8 @@ pub struct CashflowResponse {
 pub struct CashflowQuery {
     #[serde(default)]
     pub view: Option<String>,
-    /// Meses de ventana, default 24, clamp 1..=120.
+    /// Meses de ventana, default 24, rango 1..=120 (fuera de rango → 400
+    /// `window_months_out_of_range`).
     #[serde(default)]
     pub window_months: Option<i64>,
     /// `weekly` (default) | `daily`. `daily` solo con `window_months <= 6`.
@@ -1660,6 +1667,7 @@ struct CashflowLegRow {
 }
 
 const DEFAULT_CASHFLOW_WINDOW_MONTHS: i64 = 24;
+/// Cota de la ventana del cash-flow. Fuera de rango se rechaza: ver `validate_window_months`.
 const MAX_CASHFLOW_WINDOW_MONTHS: i64 = 120;
 /// `resolution=daily` solo se permite con ventanas acotadas (coste del grid diario).
 const MAX_DAILY_WINDOW_MONTHS: i32 = 6;
@@ -1670,7 +1678,7 @@ const MAX_DAILY_WINDOW_MONTHS: i32 = 6;
     tag = "history",
     params(
         ("view" = Option<String>, Query, description = "`mine` = solo mis transacciones/snapshots; omitido u otro valor → `household`."),
-        ("window_months" = Option<i64>, Query, description = "Meses de ventana (default 24, clamp 1..=120)."),
+        ("window_months" = Option<i64>, Query, description = "Meses de ventana (default 24, rango 1..=120; fuera de rango → 400 `window_months_out_of_range`)."),
         ("resolution" = Option<String>, Query, description = "`weekly` (default) | `daily`. `daily` requiere `window_months <= 6`."),
     ),
     responses(
@@ -1719,9 +1727,8 @@ pub(crate) async fn history_cashflow_core(
 ) -> Result<CashflowResponse, ApiError> {
     let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
 
-    let window_months: i32 = window_months
-        .unwrap_or(DEFAULT_CASHFLOW_WINDOW_MONTHS)
-        .clamp(1, MAX_CASHFLOW_WINDOW_MONTHS) as i32;
+    validate_window_months(window_months, MAX_CASHFLOW_WINDOW_MONTHS)?;
+    let window_months: i32 = window_months.unwrap_or(DEFAULT_CASHFLOW_WINDOW_MONTHS) as i32;
     // `resolution` desconocido es un error, no un weekly silencioso: la respuesta ecoa
     // `resolution` y `resolution:"hourly"` devolvía 200 diciendo "weekly" (auditoría MCP §4, misma
     // clase que `view`).
