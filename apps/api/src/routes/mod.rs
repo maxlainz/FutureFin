@@ -28,7 +28,10 @@ use crate::state::AppState;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
+use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use http::Method;
 use std::sync::Arc;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 /// Tope global del body en endpoints normales. Endpoints que reciben backups crecen su tope.
 const DEFAULT_BODY_LIMIT_BYTES: usize = 1 * 1024 * 1024;
@@ -96,28 +99,81 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
         )
         .fallback(fallback::v1_not_found);
 
+    let origins = cors_origins();
+
     // El endpoint MCP vive en el nivel raíz (como /health y /openapi.json), dentro del
-    // router api → gana siempre al fallback SPA de main.rs. Con MCP deshabilitado el
-    // router ni se monta y /mcp cae al fallback (404 o index.html según despliegue).
-    let mcp = if state.mcp_enabled {
-        crate::mcp::mcp_router(state.clone())
-    } else {
-        Router::new()
-    };
+    // router api → gana siempre al fallback SPA de main.rs. **Se monta pase lo que pase**:
+    // con `FUTUREFIN_MCP_ENABLED=0` responde un JSON `mcp_disabled` (ver `mcp/mod.rs`), no
+    // desaparece. Trae su propia capa CORS, sin credenciales.
+    let mcp = crate::mcp::mcp_router(state.clone(), &origins);
     // Protocolo OAuth (metadata .well-known, register, token, revoke): mismo criterio y
     // mismo kill-switch que /mcp — OAuth hoy solo sirve al conector MCP. OJO: el panel
     // /v1/oauth/connections NO va aquí; se monta siempre (ver oauth_consent_router).
-    let oauth_protocol = if state.mcp_enabled {
-        crate::oauth::oauth_protocol_router()
-    } else {
-        Router::new()
-    };
+    let oauth_protocol = crate::oauth::oauth_protocol_router(state.mcp_enabled);
 
     Router::new()
         .route("/health", get(health_check))
         .route("/openapi.json", get(openapi_json))
         .nest("/v1", v1)
-        .merge(mcp)
         .merge(oauth_protocol)
+        // La capa CORS del API va AQUÍ y no en `main.rs` por dos razones: los tests montan el
+        // mismo router que el binario (la forma no puede depender del entorno), y `merge` de
+        // `mcp` DESPUÉS de este `layer` es lo que deja a `/mcp` fuera de ella — `Router::layer`
+        // solo envuelve las rutas ya registradas.
+        .layer(api_cors_layer(&origins))
+        .merge(mcp)
         .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT_BYTES))
+}
+
+/// Orígenes de navegador permitidos (`CORS_ORIGINS`, separados por comas). Fail-loud: una
+/// entrada que no es un `HeaderValue` aborta el arranque, igual que antes.
+///
+/// **Una lista, dos superficies con privilegios distintos** (issue #85, hallazgo 4): la capa del
+/// API la usa con `allow_credentials(true)` (su credencial es la cookie) y la de `/mcp` sin
+/// credenciales (la suya es el header `Authorization`). Antes había una sola capa sobre el router
+/// entero, así que añadir un origen para que funcionara un cliente MCP de navegador concedía de
+/// paso acceso **con cookie** a `/v1/backup/user-export`, `/v1/api-tokens` y `/v1/installation`.
+/// La misma lista alimenta además la validación de `Origin` de rmcp (hallazgo 3).
+pub fn cors_origins() -> Vec<String> {
+    let raw = std::env::var("CORS_ORIGINS").unwrap_or_else(|_| {
+        "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080"
+            .into()
+    });
+    let origins: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<http::HeaderValue>()
+                .unwrap_or_else(|_| panic!("invalid CORS_ORIGINS entry: {s}"));
+            s.to_string()
+        })
+        .collect();
+    if origins.is_empty() {
+        panic!("CORS_ORIGINS resolved empty — set at least one origin when credentials are used");
+    }
+    origins
+}
+
+/// CORS del API propio (`/v1/*`, `/health`, `/openapi.json` y el protocolo OAuth). Lleva
+/// `allow_credentials(true)` porque su credencial es la cookie `ff_session`. **No cubre `/mcp`**.
+fn api_cors_layer(origins: &[String]) -> CorsLayer {
+    let values: Vec<http::HeaderValue> = origins
+        .iter()
+        .map(|s| s.parse().expect("CORS_ORIGINS entry validated above"))
+        .collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(values))
+        .allow_credentials(true)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        // AUTHORIZATION sigue aquí por el protocolo OAuth: `client_secret_basic` autentica el
+        // cliente con `Authorization: Basic …` en `/oauth/token` y `/oauth/revoke`. Las
+        // cabeceras propias de MCP ya NO están en esta lista — viven en la capa de `/mcp`.
+        .allow_headers([CONTENT_TYPE, ACCEPT, AUTHORIZATION])
 }

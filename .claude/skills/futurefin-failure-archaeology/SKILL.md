@@ -61,6 +61,7 @@ Vocabulary used below (defined once):
 | 18 | `fire_number_expense_adjustment_pct`, `bump_contributed_series_with_purchase_basis` | Zombie code with no consumer / obsolete binary-compat patch | 0bba819, v1.3.0 |
 | 19 | Postgres as a separate compose service (`futurefin-database`, `postgres:16.4-alpine`) | Two moving parts, an externally-managed `POSTGRES_PASSWORD` and no snapshot before migrations, in an app whose stated axis is "upgrades that never lose data". Replaced in 3.0.0 by PostgreSQL **embedded in the image** (one container, socket-only). Five traps found doing it — read §2.11 before touching the image | 5ca91f4, v3.0.0; `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose.yml` (one service), CI job `docker-stack` |
 | 20 | **External-database mode** in the container (`DATABASE_URL` → `exec_api_external`, the `DEPRECATED` banner, the one-shot `automigrate_prepare`/`automigrate_restore`, `FUTUREFIN_DB_MODE=external`, `FUTUREFIN_EXTERNAL_WAIT_SECS`) | It was the one supported topology with **none** of the guarantees 3.0.0 was built to give: no pre-migration backup, no `pg_upgrade`, no ordered postmaster shutdown, no volume guard. Deprecated in 3.0.0 and announced there (README §«Actualizar desde 2.x» + env table, `.env.example`, and the start-up banner itself: «se eliminara en 4.0.0»); removed on schedule in 4.0.0. `DATABASE_URL` itself is untouched and still required in split-dev — what is gone is the *container* ever honouring it. Read §2.12 before proposing anything that talks to a database outside the image | v4.0.0; `apps/api/docker-entrypoint.sh` (`refuse_external_database` is all that remains), `.github/testdata/docker-compose.automigrate.yml` deleted, CI `docker-stack` scenarios 2b and 3 |
+| 21 | Binding the Streamable HTTP `Mcp-Session-Id` to the Bearer credential | Not a removal — a **deliberate non-addition**, reasoned in full in the code so it doesn't get re-proposed as an obvious hardening. Today it buys nothing: the Bearer middleware runs before the MCP protocol on *every* request, identity is re-resolved live (D14), and a stolen session id without a valid token never gets past 401. It also has a named trigger to revisit — see §2.17 | v4.4.0; `apps/api/src/mcp/mod.rs` module doc-comment |
 
 ## 2. Detailed entries
 
@@ -309,6 +310,104 @@ Vocabulary used below (defined once):
   log the same message plus `docs/actualizar.md`, and leave the volume **verifiably empty**.
   Operator-facing form: `docs/actualizar.md` §«Vengo de 2.x o tengo una base de datos externa».
 
+### 2.13 El kill-switch se diagnosticaba como avería (MCP Fase 4, v4.4.0)
+- **Symptom**: with `FUTUREFIN_MCP_ENABLED=0`, `POST /mcp` returned **405 with an empty body** and
+  `GET /.well-known/oauth-authorization-server` returned **200 `text/html`** (the SPA shell). The
+  claude.ai connector could not parse either as JSON and reported "connection failed" with no
+  usable cause.
+- **Root cause**: the switch **unmounted** `/mcp` and the OAuth protocol routes outright. The
+  published image's final fallback is a `ServeDir` with a fallback to `index.html`, and
+  **`ServeDir` does not invoke its fallback for methods other than GET/HEAD** — so an unmounted
+  `POST /mcp` fell through to axum's bare 405, while an unmounted GET fell through to the SPA
+  shell. **A security control that, once activated, diagnosed as an outage.** Generalized: **a
+  test that asserted an absence while mounting a router the published image does not have** — the
+  test suite that shipped this behaviour built the router *without* the SPA static fallback, so it
+  confirmed a clean 404 production never actually returned.
+- **Fix**: 4.4.0 — routes are **always mounted** (`mcp_router`, `oauth_protocol_router(enabled)`
+  in `apps/api/src/mcp/mod.rs` / `apps/api/src/oauth/mod.rs`); with the switch off, every one of
+  them answers **404 JSON `{error, code: "mcp_disabled", message}`**, any method. Same doctrine as
+  `POST /v1/auth/sso` answering `sso_disabled` instead of disappearing (**D18**: the shape of the
+  router does not depend on the environment). Both regression tests
+  (`mcp_http.rs::mcp_disabled_answers_json_even_with_the_spa_mounted`,
+  `oauth_flow.rs::oauth_protocol_disabled_with_mcp_but_connections_panel_survives`) now mount the
+  router through `spa::mount_static_spa`, the exact function `main.rs` calls — and the harness
+  axis behind it, `TestConfig::web_static_root`, is now the one every future test must use
+  whenever it asserts something about a route that does NOT exist; a test that skips it describes
+  a lab binary the published image does not match.
+- **Status**: fixed 4.4.0. Operator-facing detail: `futurefin-run-and-operate` §3.8.
+
+### 2.14 El invariante de 1 MiB era falso justo donde importaba (MCP Fase 4, v4.4.0)
+- **Discovery**: the documented invariant — "every request body is capped at 1 MiB, except the
+  explicitly larger backup-import route" — was false for `/mcp`.
+- **Root cause**: `DefaultBodyLimit` enforces its cap **through axum's extractors**; `/mcp` is
+  mounted as a `route_service` (rmcp's own Tower service), which reads the request body itself and
+  never goes through an extractor — so it fell back to rmcp's own undocumented default of **4
+  MiB**. Generalized lesson: **an invariant enforced by a layer only holds for the routes that
+  layer's actual mechanism reaches** — sitting behind the same `.layer()` call is not enough if
+  the route bypasses the thing the layer instruments.
+- **Fix**: 4.4.0 — `mcp::MCP_MAX_REQUEST_BODY_BYTES = 1 MiB` set explicitly via
+  `StreamableHttpServerConfig::with_max_request_body_bytes`. Regression test
+  `body_limits.rs::oversized_mcp_body_returns_413` sends a 2 MiB body — above the documented
+  global cap, below the SDK's undocumented default — exactly the gap that was silently open.
+- **Status**: fixed 4.4.0.
+
+### 2.15 Una lista de CORS, dos privilegios (MCP Fase 4, v4.4.0)
+- **Symptom/discovery**: until 4.3.1 a single `CORS_ORIGINS`-derived layer with
+  `allow_credentials(true)` wrapped the **entire** router. Adding an origin so a browser-based MCP
+  client (the MCP Inspector) could reach `/mcp` also granted that origin **cookie-authenticated**
+  cross-origin access to `/v1/backup/user-export`, `/v1/api-tokens` and `/v1/installation` —
+  routes whose credential is the `ff_session` cookie, not a Bearer header.
+- **Root cause**: `/mcp`'s credential is always a Bearer header, so it never needed
+  `allow_credentials`; the HTTP API's credential is the cookie, so it does. One shared CORS layer
+  cannot express two different privilege levels, and the safer default was never chosen because
+  CORS was configured once, at the very top of the router.
+- **Fix**: 4.4.0 — two layers: `routes::app_router`'s own `api_cors_layer` (`allow_credentials(true)`,
+  unchanged surface) and a separate `mcp::mcp_cors_layer` (no `allow_credentials`, MCP-specific
+  header allowlist, applied only inside `/mcp`'s own sub-router). Regression test
+  `mcp_http.rs::mcp_preflight_is_complete_and_grants_no_cookie_access`.
+- **Status**: fixed 4.4.0. Ordering trap this fix depends on: `mcp` must be `merge`d **after**
+  `.layer(api_cors_layer(...))` is applied to the rest of the router — merging it earlier would
+  make `/mcp` inherit `allow_credentials(true)` again. See §2.16 for the companion trap inside
+  `mcp`'s own sub-router.
+
+### 2.16 `Router::layer` vs `route_layer`: a merge drags the fallback along (MCP Fase 4, v4.4.0)
+- **Symptom (caught before shipping)**: with the MCP Bearer-auth/CORS layer applied via
+  `.layer(...)` inside `mcp`'s own sub-router instead of `route_layer`, every unknown route on the
+  **whole merged application** — including `/oauth/authorize`, the SPA-served OAuth consent
+  screen — started returning **401** from the MCP auth middleware.
+- **Root cause**: axum's `Router::layer` wraps not only the router's registered routes but also
+  its **fallback**; `Router::merge` then drags that already-wrapped fallback onto the destination
+  router. The merged application's fallback effectively becomes the MCP sub-router's fallback, so
+  any route the destination does not otherwise handle passes through the MCP layer first.
+  `route_layer` wraps only the registered routes and leaves the fallback untouched.
+- **Caught by**: the **pre-existing** test `oauth_flow.rs::get_oauth_authorize_is_not_handled_by_the_api`
+  — written for an unrelated reason, it happened to cross this exact path and failed loudly before
+  merge.
+- **Status**: fixed 4.4.0 (`mcp`'s auth and CORS layers use `route_layer`, never `layer`). **This
+  is a trap that will be reintroduced by anyone adding a new layer to a router meant to be merged
+  into another: always use `route_layer` inside that sub-router, never `layer`, unless you
+  specifically intend to also own the parent's fallback.**
+
+### 2.17 Streamable HTTP sessions not bound to the credential — deliberate, with a trigger to revisit (MCP Fase 4, v4.4.0)
+- **Not a bug, a considered non-addition**: `LocalSessionManager`'s `Mcp-Session-Id` is not
+  cryptographically tied to the Bearer credential that opened it, and the decision to leave it
+  that way is reasoned in full in the module doc-comment of `apps/api/src/mcp/mod.rs` so it does
+  not get re-proposed as an obvious hardening later.
+- **Why it is safe today**: the Bearer middleware runs before the MCP protocol on **every**
+  request, identity is re-resolved live per request (**D14**), and every tool executes as the user
+  of the presented token — never "the user of the session". A stolen `Mcp-Session-Id` without a
+  valid token never gets past 401. And the server issues **no** notifications or server-initiated
+  requests today, so no session carries data the authenticated request itself did not already ask
+  for — that absence is the *entire* reason the missing binding is currently safe, not a
+  side detail.
+- **Named trigger to revisit**: the first capability that emits something toward the client on the
+  server's own initiative — notifications, `progress` updates, a resumable SSE stream carrying
+  data. At that point either build a `SessionManager` that ties session → credential, or drop to
+  `legacy_session_mode: false` (stateless only, which SEP-2567 is retiring sessions toward anyway).
+  **Do not add the binding pre-emptively "just in case" before that trigger fires** — it is
+  complexity with no defender until then.
+- **Status**: deliberately not implemented, v4.4.0.
+
 ## 3. Designs that were tried and replaced
 
 | Old design | Specific failure mode | Replacement (current) |
@@ -344,6 +443,11 @@ Vocabulary used below (defined once):
 | Make the container talk to an external database again (honour `DATABASE_URL`, re-add automigration) | §1 row 20, §2.12 — removed in 4.0.0 after a full deprecation cycle |
 | Retire a deprecated path by silently ignoring the input that selected it | §2.12 — refuse loudly when ignoring is not harmless |
 | Trust an old migration file as evidence of current schema | §2.10 last bullet |
+| Unmount routes based on a runtime toggle (kill-switch, feature flag) | §2.13, §1 row 21's sibling doctrine — **D18**: keep the router shape environment-independent; return a disabled response (`mcp_disabled`, `sso_disabled`) instead of removing the route |
+| Assume a `DefaultBodyLimit`/`.layer()` cap reaches every route behind it | §2.14 — a `route_service` (or anything reading the body itself) bypasses extractor-based layers; verify per-route, don't assume |
+| Configure CORS once for a whole router that mixes cookie-auth and Bearer-auth routes | §2.15 — one `allow_credentials` cannot express two privilege levels; split the layer |
+| Add a `.layer(...)` to a sub-router you are about to `merge` into another | §2.16 — `layer` wraps the fallback too and `merge` drags it along; use `route_layer` inside a sub-router meant to be merged |
+| Bind an MCP `Mcp-Session-Id` to its credential "just in case" | §2.17 — no defender exists until the server emits something on its own initiative; wait for that trigger |
 
 ## 5. When NOT to use this skill
 
@@ -366,8 +470,23 @@ Vocabulary used below (defined once):
 Compiled 2026-07-02 at v1.4.3 from `git log` (all 50 commits), `CHANGELOG.md` (complete read),
 and direct code inspection. §1 row 19 and §2.11 (embedded PostgreSQL) added 2026-08-16 for
 **v3.0.0**, by reading `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`,
-`docker-compose.yml`, `.github/workflows/ci.yml` and `.github/testdata/`. Re-verify volatile facts
-before relying on them:
+`docker-compose.yml`, `.github/workflows/ci.yml` and `.github/testdata/`.
+
+**§1 row 21 and §2.13–§2.17 added 2026-08-28 for v4.4.0** (MCP Fase 4, issue #85), by reading
+`apps/api/src/mcp/mod.rs`, `apps/api/src/oauth/mod.rs`, `apps/api/src/main.rs` and
+`apps/api/tests/{mcp_http.rs,oauth_flow.rs,body_limits.rs}`. Re-verify:
+- §2.13 (kill-switch, always mounted, JSON 404): `grep -n 'mcp_disabled\|MCP_DISABLED_MESSAGE' apps/api/src/mcp/mod.rs apps/api/src/oauth/mod.rs`;
+  `grep -n 'web_static_root\|mount_static_spa' apps/api/tests/common/mod.rs`.
+- §2.14 (explicit 1 MiB cap on `/mcp`): `grep -n 'MCP_MAX_REQUEST_BODY_BYTES\|with_max_request_body_bytes' apps/api/src/mcp/mod.rs`.
+- §2.15 (two CORS layers): `grep -n 'mcp_cors_layer\|api_cors_layer' apps/api/src/mcp/mod.rs apps/api/src/routes/mod.rs`.
+- §2.16 (`route_layer`, not `layer`, inside the merged `mcp` sub-router):
+  `grep -n 'route_layer' apps/api/src/mcp/mod.rs`.
+- §2.17 (session not bound to credential, reasoned in the module doc-comment):
+  `grep -n 'Mcp-Session-Id\|LocalSessionManager' apps/api/src/mcp/mod.rs`.
+- Counters unmoved by this phase (transport-only, no tool/route surface change):
+  `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (expect 52).
+
+Re-verify volatile facts before relying on them:
 
 - Commit hashes and dates: `git log --oneline` (50 commits as of 2026-07-02; new work lands on `dev`).
 - Version: `grep '^version' apps/api/Cargo.toml` + top of `CHANGELOG.md` (3.0.0 on 2026-08-16).

@@ -5,13 +5,8 @@
 mod common;
 
 use common::{LoggedInOwner, TestApp};
-use futurefin_api::routes;
-use futurefin_api::state::AppState;
-use axum::extract::Extension;
-use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
-use std::sync::Arc;
 
 const CLAUDE_CALLBACK: &str = "https://claude.ai/api/mcp/auth_callback";
 
@@ -617,6 +612,94 @@ async fn refresh_rotates_and_reuse_kills_grant() {
     );
 }
 
+/// Hallazgo 8: no existía **ningún** `DELETE` sobre `oauth_access_tokens`,
+/// `oauth_refresh_tokens` ni `oauth_authorization_codes`. Cada rotación de refresh insertaba dos
+/// filas que no se borraban jamás: no tumba un self-host, pero infla los dumps pre-migración y
+/// los índices `UNIQUE` para siempre.
+///
+/// El GC es perezoso y vive en `POST /oauth/token` —el camino que hace crecer las tablas—,
+/// **nunca en un GET** (D5). Aquí se envejecen las filas a mano y se comprueba que la siguiente
+/// emisión de token las barre, sin tocar las vivas.
+#[tokio::test]
+async fn expired_oauth_credentials_are_collected_on_the_next_token_request() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (client_id, tokens) = full_grant(&app, &owner).await;
+    let refresh = tokens["refresh_token"].as_str().unwrap().to_string();
+
+    // Tras el canje: 1 code (consumido), 1 access, 1 refresh.
+    assert_eq!(app.count_rows("oauth_authorization_codes").await, 1);
+    assert_eq!(app.count_rows("oauth_access_tokens").await, 1);
+    assert_eq!(app.count_rows("oauth_refresh_tokens").await, 1);
+
+    // Se envejecen MÁS ALLÁ de la gracia del GC (1 día para code/access, 30 días para refresh).
+    for sql in [
+        "UPDATE oauth_authorization_codes SET expires_at = now() - interval '3 days'",
+        "UPDATE oauth_access_tokens SET expires_at = now() - interval '3 days'",
+    ] {
+        sqlx::query(sql).execute(&app.pool).await.expect("envejecer");
+    }
+
+    // Una rotación normal: emite un par nuevo y, de paso, poda lo caducado.
+    let rotated = app
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", &refresh),
+                ("client_id", &client_id),
+            ],
+        )
+        .await;
+    assert_eq!(rotated.status, http::StatusCode::OK, "{rotated:?}");
+
+    assert_eq!(
+        app.count_rows("oauth_authorization_codes").await,
+        0,
+        "el code caducado debía barrerse"
+    );
+    // El access viejo se fue; el recién emitido (vivo) sigue.
+    assert_eq!(
+        app.count_rows("oauth_access_tokens").await,
+        1,
+        "solo debía quedar el access recién emitido"
+    );
+    // El refresh viejo está consumido pero NO caducado: la reuse-detection lo necesita vivo.
+    assert_eq!(
+        app.count_rows("oauth_refresh_tokens").await,
+        2,
+        "un refresh consumido pero no caducado no se toca: es lo que detecta el robo"
+    );
+
+    // Y ahora sí: envejecido el viejo por encima de su gracia, la siguiente emisión lo barre.
+    sqlx::query("UPDATE oauth_refresh_tokens SET expires_at = now() - interval '60 days' WHERE consumed_at IS NOT NULL")
+        .execute(&app.pool)
+        .await
+        .expect("envejecer refresh");
+    let next = app
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", rotated.json()["refresh_token"].as_str().unwrap()),
+                ("client_id", &client_id),
+            ],
+        )
+        .await;
+    assert_eq!(next.status, http::StatusCode::OK, "{next:?}");
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM oauth_refresh_tokens WHERE expires_at > now()",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("count");
+    assert_eq!(
+        app.count_rows("oauth_refresh_tokens").await,
+        live,
+        "no debe quedar ningún refresh caducado más allá de su gracia"
+    );
+}
+
 #[tokio::test]
 async fn refresh_from_another_client_is_rejected() {
     let app = TestApp::spawn().await;
@@ -927,46 +1010,51 @@ async fn rfc7009_revoke_with_refresh_token_kills_grant() {
 // Kill-switch, shadowing y backup
 // ---------------------------------------------------------------------------
 
+/// Kill-switch del protocolo OAuth, **con el fallback estático del binario montado** (issue
+/// #85, hallazgo 1). El test viejo construía el router sin SPA y su propio comentario admitía
+/// que «en producción caería al fallback SPA»: allí `GET /.well-known/oauth-authorization-server`
+/// devolvía **200 `text/html`**, y el conector fallaba al parsear JSON con un «connection failed»
+/// que no dice nada. Ahora las rutas se montan siempre y responden 404 JSON `mcp_disabled`.
 #[tokio::test]
 async fn oauth_protocol_disabled_with_mcp_but_connections_panel_survives() {
-    // Router a mano con mcp_enabled=false (patrón de mcp_http.rs).
-    let (pool, _schema) = common::isolated_pool().await;
-    let state = Arc::new(AppState::new(
-        env!("CARGO_PKG_VERSION"),
-        pool.clone(),
-        false,
-        30,
-        false,
-        None,
-    ));
-    let router = Router::new()
-        .merge(routes::app_router(&state))
-        .layer(Extension(state.clone()));
-    let app = TestApp {
-        router,
-        pool,
-        schema: _schema,
-        state,
-    };
+    let web = common::TempWebRoot::with_index(
+        "<!doctype html><html><head></head><body></body></html>",
+    );
+    let app = TestApp::spawn_with(common::TestConfig {
+        mcp_disabled: true,
+        web_static_root: Some(web.path.clone()),
+        ..Default::default()
+    })
+    .await;
     let owner = app.register_and_login_owner("alice").await;
 
-    // Protocolo desmontado: 404 (en producción caería al fallback SPA).
+    // El `ServeDir` está montado de verdad: cualquier ruta desconocida devuelve el shell.
+    let shell = app.get("/ruta-de-la-spa").await;
+    assert_eq!(shell.status, http::StatusCode::OK);
+
+    // Protocolo apagado: 404 **JSON** con código estable, jamás el shell de la SPA.
     for path in [
         "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
         "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server/mcp",
     ] {
         let resp = app.get_with_headers(path, &[("host", "futurefin.test")]).await;
         assert_eq!(resp.status, http::StatusCode::NOT_FOUND, "{path}");
+        assert_disabled_json(&resp, path);
     }
     let token = app.post_form("/oauth/token", &[("grant_type", "authorization_code")]).await;
     assert_eq!(token.status, http::StatusCode::NOT_FOUND);
+    assert_disabled_json(&token, "/oauth/token");
     let register = app
         .post_json("/oauth/register", serde_json::json!({"redirect_uris": [CLAUDE_CALLBACK]}))
         .await;
     assert_eq!(register.status, http::StatusCode::NOT_FOUND);
+    assert_disabled_json(&register, "/oauth/register");
     let details = app
         .get_with_headers("/v1/oauth/authorize-details?client_id=x", &[("host", "h")])
         .await;
+    // Este vive bajo `/v1`, cuyo fallback ya devolvía JSON: sigue siendo `not_found`.
     assert_eq!(details.status, http::StatusCode::NOT_FOUND);
 
     // El panel sobrevive (precedente /v1/api-tokens): sin él no podrías revocar
@@ -977,12 +1065,185 @@ async fn oauth_protocol_disabled_with_mcp_but_connections_panel_survives() {
     assert_eq!(list.status, http::StatusCode::OK, "{list:?}");
 }
 
+fn assert_disabled_json(resp: &common::ResponseParts, path: &str) {
+    let ct = resp
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/json"),
+        "{path} debe ser JSON (si es text/html, el fallback SPA se lo está tragando): {ct}"
+    );
+    assert_eq!(resp.json()["code"], "mcp_disabled", "{path}: {resp:?}");
+}
+
+/// Hallazgo 7: `.claude/api-routes.md` afirmaba que toda respuesta OAuth lleva
+/// `Cache-Control: no-store` y era falso justo para la metadata — la única que depende de
+/// cabeceras de proxy. Sin `no-store` + `Vary`, un caché intermedio podía servirle a otro el
+/// issuer derivado de un `X-Forwarded-Host` inyectado.
+#[tokio::test]
+async fn discovery_metadata_is_never_cached_and_varies_on_the_forwarded_headers() {
+    let app = TestApp::spawn().await;
+    for path in [
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server/mcp",
+    ] {
+        let resp = app.get_with_headers(path, &[("host", "futurefin.test")]).await;
+        assert_eq!(resp.status, http::StatusCode::OK, "{path}");
+        assert_eq!(
+            resp.headers
+                .get(http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "{path} sin Cache-Control: no-store"
+        );
+        let vary = resp
+            .headers
+            .get(http::header::VARY)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        assert!(vary.contains("x-forwarded-proto"), "{path}: vary={vary}");
+        assert!(vary.contains("x-forwarded-host"), "{path}: vary={vary}");
+    }
+}
+
+/// Hallazgo 2: tras un proxy con subpath el issuer tiene que llevar el prefijo, y hasta ahora
+/// **ninguna configuración lo conseguía** (`FUTUREFIN_PUBLIC_URL` rechazaba cualquier path y el
+/// prefijo del request no entraba en `public_base_url`). La salida elegida es declararlo.
+#[tokio::test]
+async fn public_url_with_a_subpath_prefixes_every_advertised_url() {
+    let app = TestApp::spawn_with(common::TestConfig {
+        public_url: Some("https://ejemplo.com/futurefin".to_string()),
+        ..Default::default()
+    })
+    .await;
+
+    let prm = app
+        .get_with_headers("/.well-known/oauth-protected-resource/mcp", &[("host", "otro.host")])
+        .await
+        .json();
+    assert_eq!(prm["resource"], "https://ejemplo.com/futurefin/mcp");
+    assert_eq!(prm["authorization_servers"][0], "https://ejemplo.com/futurefin");
+
+    let asm = app
+        .get_with_headers("/.well-known/oauth-authorization-server", &[("host", "otro.host")])
+        .await
+        .json();
+    assert_eq!(asm["issuer"], "https://ejemplo.com/futurefin");
+    assert_eq!(
+        asm["authorization_endpoint"],
+        "https://ejemplo.com/futurefin/oauth/authorize"
+    );
+    assert_eq!(asm["token_endpoint"], "https://ejemplo.com/futurefin/oauth/token");
+    assert_eq!(
+        asm["registration_endpoint"],
+        "https://ejemplo.com/futurefin/oauth/register"
+    );
+    assert_eq!(asm["revocation_endpoint"], "https://ejemplo.com/futurefin/oauth/revoke");
+
+    // Y el 401 de /mcp anuncia la metadata en la URL que el proxy sí enruta.
+    let challenge = app
+        .mcp_initialize(None)
+        .await
+        .headers
+        .get(http::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        challenge.contains(
+            "https://ejemplo.com/futurefin/.well-known/oauth-protected-resource/mcp"
+        ),
+        "el challenge debe llevar el subpath: {challenge}"
+    );
+
+    // Y el `resource` de RFC 8707 se valida contra ESE recurso: el flujo entero cuadra con el
+    // subpath, que es lo que hacía falta para que el conector funcione tras el proxy.
+    let owner = app.register_and_login_owner("alice").await;
+    let client_id = register_public_client(&app).await;
+    let (verifier, challenge_pkce) = pkce_pair();
+    let denegado = app
+        .post_json_with_cookie(
+            "/v1/oauth/authorize",
+            serde_json::json!({
+                "approve": true,
+                "client_id": client_id,
+                "redirect_uri": CLAUDE_CALLBACK,
+                "response_type": "code",
+                "code_challenge": challenge_pkce,
+                "code_challenge_method": "S256",
+                // El recurso SIN prefijo: ya no es el nuestro.
+                "resource": "https://ejemplo.com/mcp",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    let redirect_denegado = denegado.json()["redirect_to"].as_str().unwrap_or("").to_string();
+    assert!(
+        redirect_denegado.contains("error=invalid_target"),
+        "un resource sin el subpath no puede ser el nuestro: {denegado:?}"
+    );
+
+    let aceptado = app
+        .post_json_with_cookie(
+            "/v1/oauth/authorize",
+            serde_json::json!({
+                "approve": true,
+                "client_id": client_id,
+                "redirect_uri": CLAUDE_CALLBACK,
+                "response_type": "code",
+                "code_challenge": challenge_pkce,
+                "code_challenge_method": "S256",
+                "resource": "https://ejemplo.com/futurefin/mcp",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(aceptado.status, http::StatusCode::OK, "{aceptado:?}");
+    let redirect_to = aceptado.json()["redirect_to"].as_str().unwrap().to_string();
+    let code = url::Url::parse(&redirect_to)
+        .expect("redirect_to parses")
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.to_string())
+        .expect("code");
+    let tokens = app
+        .post_form(
+            "/oauth/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &code),
+                ("redirect_uri", CLAUDE_CALLBACK),
+                ("code_verifier", &verifier),
+                ("client_id", &client_id),
+                ("resource", "https://ejemplo.com/futurefin/mcp"),
+            ],
+        )
+        .await;
+    assert_eq!(tokens.status, http::StatusCode::OK, "{tokens:?}");
+    let access = tokens.json()["access_token"].as_str().unwrap().to_string();
+    assert_eq!(
+        app.mcp_initialize(Some(&access)).await.status,
+        http::StatusCode::OK
+    );
+}
+
 #[tokio::test]
 async fn get_oauth_authorize_is_not_handled_by_the_api() {
     let app = TestApp::spawn().await;
     // En el harness (sin fallback SPA) debe ser 404 — un 405 significaría que alguien
     // registró una ruta backend en /oauth/authorize y axum ya no cae al fallback:
     // la pantalla de consentimiento moriría en producción.
+    //
+    // Y un **401** significaría otra cosa igual de letal, que este test ya ha cazado una vez:
+    // que el router de `/mcp` ha vuelto a aplicar sus capas con `Router::layer` en vez de
+    // `route_layer`. `layer` envuelve también el fallback del router, y el `merge` de
+    // `routes/mod.rs` se lo lleva al router de destino: TODA ruta desconocida —incluida la
+    // pantalla de consentimiento— pasaría por la auth Bearer de MCP.
     let resp = app.get("/oauth/authorize").await;
     assert_eq!(
         resp.status,

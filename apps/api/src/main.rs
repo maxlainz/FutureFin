@@ -5,13 +5,9 @@ use futurefin_api::routes;
 use futurefin_api::state::AppState;
 use axum::extract::Extension;
 use axum::Router;
-use http::header::{ACCEPT, CONTENT_TYPE};
-use http::Method;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::{AllowOrigin, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -128,45 +124,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // y el barrido necesita el AppState (no solo el pool) para invalidar la cache de proyección.
     let sweep_state = state.clone();
 
+    // La capa CORS ya no vive aquí: la aplica `routes::app_router`, con una lista para el API
+    // (con cookie) y otra para `/mcp` (sin credenciales) — ver el hallazgo 4 del issue #85.
+    // Así los tests montan exactamente la misma forma de router que el binario.
     let api = Router::new()
         .merge(routes::app_router(&state))
         .layer(Extension(state.clone()))
-        .layer(cors_layer())
         // gzip para responses >1 KB. Reduce ~10× el JSON de /v1/projection/series
         // (260 KB → 30 KB). El cliente lo descomprime sin cambios.
         .layer(CompressionLayer::new().gzip(true))
         .layer(TraceLayer::new_for_http());
 
     let router = match web_static_root() {
-        Some(root) if root.exists() => match spa::load_index(&root) {
-            Some(index) => {
-                tracing::info!(root = %root.display(), "serving web UI and API on one port");
-                // El index NO lo sirve ServeDir (append_index_html_on_directories(false)):
-                // `GET /` cae al fallback, que inyecta el base path por request (spa.rs).
-                let index_svc = axum::routing::get(spa::serve_index)
-                    .with_state((state.clone(), Arc::new(index)));
-                // `/index.html` explícito TAMBIÉN pasa por el inyector: si no, `ServeDir`
-                // encuentra el fichero en disco y lo sirve crudo — sin prefijo reescrito ni
-                // `__FF_SSO__`, y con `Cache-Control` de asset estático. Bajo el Ingress esa URL
-                // es alcanzable (y algún cliente la pide), así que la SPA saldría rota justo
-                // donde el fallback la arregla.
-                Router::new()
-                    .route("/index.html", index_svc.clone())
-                    .merge(api)
-                    .fallback_service(
-                        ServeDir::new(root)
-                            .append_index_html_on_directories(false)
-                            .fallback(index_svc),
-                    )
-            }
-            None => {
-                tracing::warn!(
-                    root = %root.display(),
-                    "WEB_STATIC_ROOT has no readable index.html — API only"
-                );
-                Router::new().merge(api).fallback(fallback::not_found)
-            }
-        },
+        // El fallback estático se monta con el MISMO helper que usan los tests (spa.rs):
+        // el `ServeDir` es justo la pieza que hacía que el binario publicado se comportara
+        // distinto del router de laboratorio.
+        Some(root) if root.exists() => spa::mount_static_spa(api, &root, state.clone()),
         Some(root) => {
             tracing::warn!(
                 root = %root.display(),
@@ -275,10 +248,27 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received — draining connections");
 }
 
-/// `FUTUREFIN_PUBLIC_URL` (opcional): origen público canónico para el issuer OAuth.
+/// `FUTUREFIN_PUBLIC_URL` (opcional): URL pública canónica para el issuer OAuth.
 /// Fail-loud como CORS_ORIGINS: un valor presente pero inválido aborta el arranque en
-/// vez de emitir metadata OAuth rota en silencio. Se normaliza al origen (sin path,
-/// query ni fragmento, sin barra final).
+/// vez de emitir metadata OAuth rota en silencio.
+///
+/// **Admite subpath desde el issue #85 (hallazgo 2)**: `https://ejemplo.com/futurefin` es
+/// válido, y de ahí cuelgan el issuer, el `resource` MCP y los cuatro endpoints anunciados.
+/// Antes se rechazaba cualquier path, y el resultado era que un despliegue tras un proxy con
+/// subpath —el que el propio `prefix.rs` documenta como soportado, un nginx con
+/// `location /futurefin/`— tenía el OAuth roto **sin ninguna configuración que lo arreglara**:
+/// el cliente descubría URLs que el proxy no enruta y fallaba con un 404 que no dice por qué.
+///
+/// El path se valida con `prefix::normalize_prefix` (la MISMA función que valida
+/// `FUTUREFIN_BASE_PATH`, ya probada): debe empezar por `/`, sin `//`, sin `.`/`..`, charset
+/// `[A-Za-z0-9._~/-]` (el `%` está prohibido a propósito), ≤128 chars; una barra final se
+/// recorta y `/` a secas equivale a raíz. Query y fragmento siguen prohibidos.
+///
+/// El prefijo NO se deriva de `X-Forwarded-Prefix`: el porqué está en la cabecera de
+/// `oauth/url.rs`. Nota para el add-on: `handlers/ha_sso.rs` usa esta misma URL como
+/// `client_id` ante Home Assistant, así que declarar un subpath aquí también lo cambia allí —
+/// no es un problema en la práctica porque el login con HA vive tras el Ingress, donde nadie
+/// declara `FUTUREFIN_PUBLIC_URL`.
 fn public_url() -> Option<String> {
     let raw = std::env::var("FUTUREFIN_PUBLIC_URL")
         .ok()
@@ -292,10 +282,16 @@ fn public_url() -> Option<String> {
     if parsed.host_str().is_none() {
         panic!("FUTUREFIN_PUBLIC_URL must include a host: {raw}");
     }
-    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
-        panic!("FUTUREFIN_PUBLIC_URL must be a bare origin (no path/query/fragment): {raw}");
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        panic!("FUTUREFIN_PUBLIC_URL must not carry a query or fragment: {raw}");
     }
-    Some(parsed.origin().ascii_serialization())
+    let prefix = prefix::normalize_prefix(parsed.path()).unwrap_or_else(|| {
+        panic!(
+            "invalid path in FUTUREFIN_PUBLIC_URL ({raw}): must start with '/', no '//', \
+             no '.'/'..' segments, charset [A-Za-z0-9._~/-], max 128 chars"
+        )
+    });
+    Some(format!("{}{prefix}", parsed.origin().ascii_serialization()))
 }
 
 /// `FUTUREFIN_HA_SSO_URL` (opcional): origen público de Home Assistant para «Entrar con Home
@@ -365,43 +361,4 @@ fn port() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080)
-}
-
-fn cors_layer() -> CorsLayer {
-    let raw = std::env::var("CORS_ORIGINS").unwrap_or_else(|_| {
-        "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080,http://localhost:8080"
-            .into()
-    });
-    let origins: Vec<http::HeaderValue> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            s.parse::<http::HeaderValue>()
-                .unwrap_or_else(|_| panic!("invalid CORS_ORIGINS entry: {s}"))
-        })
-        .collect();
-    if origins.is_empty() {
-        panic!("CORS_ORIGINS resolved empty — set at least one origin when credentials are used");
-    }
-
-    CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
-        .allow_credentials(true)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ])
-        // AUTHORIZATION + Mcp-Session-Id: clientes MCP de navegador (p.ej. MCP Inspector)
-        // mandan el Bearer y la sesión legacy por header y necesitan pasar el preflight.
-        .allow_headers([
-            CONTENT_TYPE,
-            ACCEPT,
-            http::header::AUTHORIZATION,
-            http::HeaderName::from_static("mcp-session-id"),
-        ])
-        .expose_headers([http::HeaderName::from_static("mcp-session-id")])
 }

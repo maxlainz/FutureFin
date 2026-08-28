@@ -94,6 +94,22 @@ use crate::handlers::foo::foo_router;
 .nest("/foo", foo_router())
 ```
 
+Tres trampas del cableado, las tres cobradas ya en este repo (D18, D21):
+
+- **Si la ruta va tras un flag, móntala igual y que el HANDLER diga que no.** La forma del router no
+  puede depender del entorno: una ruta ausente cae al fallback final, que en la imagen publicada es
+  un `ServeDir`, y `ServeDir` **no llama a su fallback para métodos distintos de GET/HEAD** → un
+  `POST` se lleva un **405 con cuerpo vacío** y un `GET` se lleva el **shell de la SPA en
+  `text/html`**. Patrón correcto: `/v1/auth/sso` (`sso_disabled`) y `/mcp` (`mcp_disabled`), que
+  responden 404/401 JSON con código estable. Y tu test tiene que montar el fallback real
+  (`TestConfig::web_static_root`) o estará probando un router que no se publica.
+- **`DefaultBodyLimit` solo alcanza a lo que pasa por un extractor.** Si tu ruta es un
+  `route_service` (o lee el body a mano), fija su tope explícitamente y añádele una fila a
+  `apps/api/tests/body_limits.rs` — si no, el tope real es el que traiga la librería (I11).
+- **`route_layer`, no `layer`, para cualquier capa que no deba tocar el fallback.** `Router::layer`
+  envuelve también el fallback del router, y un `merge` posterior se lo lleva al router destino: una
+  capa de auth puesta con `layer` acaba interceptando **toda ruta desconocida** de la aplicación.
+
 ## 4. Register types in `openapi.rs`
 Add `FooResponse`, `CreateFooBody` to the `components(schemas(...))` list, and the handler fn to
 `paths(...)`.

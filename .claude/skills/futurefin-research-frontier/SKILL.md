@@ -28,8 +28,10 @@ until 3.0.0. That is no longer true of **item 2**: its *pre-migration backup* ha
 3.0.0** (automatic, inside the container) and its remaining two pieces — the **explicit downgrade
 guard with an operator message** and **`apps/api/tests/migration_guard.rs`** — **shipped 2026-08-27**
 on branch `feat/home-assistant-addon`. Item 2 is now essentially done; what is left is a drill, not
-a feature (see the item). Items 1 and 3–9 remain **CANDIDATES — not implemented**; do not describe
-any of them as existing features anywhere.
+a feature (see the item). Nor of **item 5**: liability interest accrual (`RepaymentModel` +
+`apr_percent`) **shipped in full in 4.2.0** (2026-08-25) — see the item for what landed and what
+tests prove it. Items 1, 3, 4 and 6–9 remain **CANDIDATES — not implemented**; do not describe any
+of them as existing features anywhere.
 
 **Calibration (owner-confirmed):** this is NOT a research program. "Beyond SOTA" means practical
 excellence on exactly three axes:
@@ -53,7 +55,7 @@ by both `apps/api/tests/fire_parity.rs` and `apps/web/src/lib/fire.test.ts`.
 
 ## When NOT to use this skill
 
-- Executing a projection-model change end-to-end → `.claude/skills/futurefin-projection-realism-campaign/SKILL.md` (items 4, 5, 6, 7 below EXECUTE through it)
+- Executing a projection-model change end-to-end → `.claude/skills/futurefin-projection-realism-campaign/SKILL.md` (items 4, 6, 7 below EXECUTE through it; item 5 already did — shipped 4.2.0)
 - Evidence bar, predict-then-run, idea lifecycle while investigating → `.claude/skills/futurefin-research-methodology/SKILL.md`
 - Whether/how a change may merge, migration + release gates → `.claude/skills/futurefin-change-control/SKILL.md`
 - "Has this been tried and rejected?" → `.claude/skills/futurefin-failure-archaeology/SKILL.md` — **check it before pitching anything from this file**; e.g. deflated-engine simulation, age-based retirement trigger and per-asset contribution config are settled rejections, not open frontier
@@ -97,7 +99,8 @@ it. If you cannot name the test, the claim is not ready.
 
 Ranking = value for a solo self-hosted household app ÷ effort, discounted by risk. Items 4–7
 change the economic model and therefore execute through
-`futurefin-projection-realism-campaign`; ALL items gate through `futurefin-change-control`.
+`futurefin-projection-realism-campaign` (item 5 already did — shipped 4.2.0); ALL items gate
+through `futurefin-change-control`.
 
 | # | Item | Axis | Value | Effort | Risk | Verdict |
 |---|---|---|---|---|---|---|
@@ -105,7 +108,7 @@ change the economic model and therefore execute through
 | 2 | Migration-safety tooling (pre-migration dump ✅ 3.0.0; downgrade guard + `migration_guard.rs` ✅ 2026-08-27) | 3 | High | Low | Low | **Done except the restore drill** |
 | 3 | Projection-as-auditable-artifact (recomputable snapshot) | 2, 3 | Med–High | Med | Low | Do |
 | 4 | Sequence-of-returns risk surfacing (deterministic stress) | 1 | High | Med | Med | Via campaign |
-| 5 | Liability interest accrual (discovered gap) | 1 | Med–High | Med | Med | Via campaign |
+| 5 | Liability interest accrual (`RepaymentModel` + `apr_percent`) | 1 | High | — | — | **✅ Done — shipped 4.2.0** |
 | 6 | Monte Carlo percentile bands (seeded) | 1 | Med | High | High | Candidate, gate behind 4 |
 | 7 | Tax-aware drawdown path | 1 | Med | Med–High | Med | Candidate, via campaign |
 | 8 | Variable/dynamic SWR strategies | 1 | Low–Med | Med | Med | Deferred until 6 exists |
@@ -314,35 +317,44 @@ come out equal, the model is not capturing SORR and must not ship.
 
 ---
 
-### 5. Liability interest accrual — discovered gap, via campaign
+### 5. Liability interest accrual — ✅ SHIPPED IN 4.2.0
 
-**Discovery (verified in code):** the simulation reduces each liability's principal by the full
-monthly payment with NO interest accrual — `principals[i] -= pay` (projection.rs:549–553). A
-250k€ mortgage at 1.200 €/month is simulated as paid off in ~208 months regardless of its rate;
-real amortization would take far longer. Net-worth trajectories with large mortgages are
-systematically optimistic (debt vanishes too fast). Liabilities carry no rate column today —
-check `apps/api/migrations/` and `.claude/data-model.md` (noting that doc has known drift)
-before designing the schema change.
+**Discovery that started this item (verified in code as of 2026-08-16, no longer true):** the
+simulation used to reduce each liability's principal by the full monthly payment with **no**
+interest accrual — `principals[i] -= pay`. A 250k€ mortgage at 1.200 €/month was simulated as
+paid off in ~208 months regardless of its rate; real amortization would take far longer.
+Net-worth trajectories with large mortgages were systematically optimistic (debt vanished too
+fast).
 
-**Why this ranks above Monte Carlo:** it is a correctness bug-shaped gap in axis 1 with a
-closed-form ground truth (standard amortization) to test against — cheaper and more certain
-value than stochastic features.
+**What shipped, verified against `CHANGELOG.md` §[4.2.0] (2026-08-25) and
+`crates/engine/src/projection.rs`:** every liability now declares HOW it is paid via
+`RepaymentModel` — `fixed_payments` (the old 1:1 behavior; stays the column default so upgrading
+moves no number), `french` (standard amortization), `interest_only`, `revolving` (shares
+`french`'s recurrence in 4.2.0, deliberately, pinned by a test) — plus `apr_percent` (nominal
+annual rate, `i = apr_percent / 1200`, same convention the historical snapshot interpolation
+already used). The accruing models apply `P' = P·(1+i) − M` on the **opening** balance; a payment
+below the interest makes the principal **grow**, the exact case the old model could not represent
+at all. `POST`/`PATCH /v1/liabilities` derive the outstanding principal differently per model when
+`derive_principal_from_plan` is set — `Σ cuotas` for `fixed_payments`, the annuity's present value
+for `french` (engine-exported `present_value_of_payments`). Migration
+`20260825120000_liabilities_repayment_model.sql` adds the column, `NOT NULL DEFAULT
+'fixed_payments'`, no data loss; `.ffbackup schema_version` unaffected (already 10). Engine unit
+tests: `fixed_payments_with_apr_is_bit_identical_to_the_pre_4_2_0_pin` (bit-exact regression pin),
+`french_two_months_hand_checked`, `french_extinction_at_month_278`,
+`french_payment_below_interest_grows_the_principal`,
+`interest_only_principal_constant_and_cash_is_the_quota`,
+`revolving_matches_french_recurrence`. MCP: `create_liability`/`update_liability` gained
+`repayment_model` — the catalog stayed at **52 tools** (a field on an already-covered resource,
+not a new one).
 
-**First three steps in this repo:**
-1. Campaign design note: add optional `annual_interest_rate_percent` to liabilities (migration +
-   `ProjectionLiabilityInput`), semantics: monthly interest accrues on principal before the
-   payment applies; payment smaller than interest ⇒ principal grows (test this case explicitly).
-2. Engine: implement in the liability loop (projection.rs:540–555) + unit tests
-   `liability_interest_slows_amortization` and `payment_below_interest_grows_principal`,
-   asserting against hand-computed closed-form amortization values.
-3. Migration `apps/api/migrations/<YYYYMMDDHHMMSS>_liability_interest_rate.sql` (nullable column,
-   NULL = current zero-interest behavior — existing installs unchanged), handler plumbing in
-   `apps/api/src/handlers/liabilities.rs` + `projection.rs`, gated through
-   futurefin-change-control (schema + engine behavior change).
-
-**You have a result when:** for a fixture loan, the simulated payoff month matches the standard
-amortization formula within 1 month, and a NULL-rate liability reproduces today's series
-bit-exactly (regression guard).
+**Why this counts as fully closed, not partly:** opt-in (existing liabilities keep
+`fixed_payments`, bit-identical to pre-4.2.0 — the exact "you have a result when" bar this item
+originally set), a closed-form ground truth checked by hand
+(`french_extinction_at_month_278`, `french_two_months_hand_checked`), and the payment-below-interest
+case this item flagged as untestable before is now both representable and tested. What remains
+named-but-out-of-scope is not unfinished business from this item: a liability without an active
+payment plan simply does not accrue (documented behavior), and `revolving` sharing `french`'s math
+is a tracked, tested simplification for a future release, not a gap in this one.
 
 ---
 
@@ -453,7 +465,15 @@ this scale). Listing them here keeps them from being re-discovered as "obvious w
 
 Facts verified 2026-07-02 against v1.4.3; item 2, the claims table and the counts re-verified
 **2026-08-16 for v3.0.0** against `apps/api/docker-entrypoint.sh`, `apps/api/Dockerfile`,
-`.github/workflows/ci.yml` and `scripts/`. Re-verify before relying on them:
+`.github/workflows/ci.yml` and `scripts/`.
+
+**Item 5 corrected 2026-08-28 (MCP Fase 4 doc sweep, issue #88) — it had shipped in 4.2.0
+(2026-08-25) and this file still called it an open candidate.** Verified against
+`CHANGELOG.md` §[4.2.0] and `crates/engine/src/projection.rs` (`RepaymentModel`, `apr_percent`,
+the six tests named in the item). Lesson for this skill specifically: a "candidate" item is only
+as fresh as the last time someone checked whether the campaign it points at already closed it —
+`futurefin-projection-realism-campaign`/`futurefin-change-control` gate the *shipping*, but
+nothing automatically un-lists a shipped item here. Re-verify before relying on them:
 
 - Version: `grep -m1 '^version' apps/api/Cargo.toml` — **read `2.3.0` on 2026-08-16; the 3.0.0
   bump is part of the release gate and had not been applied yet** (futurefin-change-control §4).
@@ -473,7 +493,10 @@ Facts verified 2026-07-02 against v1.4.3; item 2, the claims table and the count
   (+ optional `log_min_messages`); no `shared_buffers`/`work_mem` anywhere.
 - Engine purity (no RNG/IO deps): `grep -A8 '\[dependencies\]' crates/engine/Cargo.toml`
 - No proptest yet: `grep -rn proptest crates/ apps/ --include=Cargo.toml` (empty = item 1 still open)
-- Liability loop has no interest accrual: `grep -n 'principals\[i\] -= pay' crates/engine/src/projection.rs`
+- Item 5 shipped (no longer a gap): `grep -n 'enum RepaymentModel\|apr_percent' crates/engine/src/projection.rs`
+  (must hit; the old marker `principals[i] -= pay` is gone — `grep -n` for it now returns nothing,
+  which is the expected, correct state, not drift) and
+  `grep -n '^## \[4.2.0\]' CHANGELOG.md`.
 - Drain is tax-free / gross-up only in target: `grep -n 'gross_up_net_annual_fire\|drain_from_assets' apps/api/src/handlers/projection.rs crates/engine/src/projection.rs`
 - Backup script defaults: `grep -n 'BACKUP_DIR=\|KEEP_BACKUPS=\|ENV_FILE=' scripts/backup-postgres.sh`
   (since 3.0.0 it `compose exec`s into the single `futurefin` service and `ENV_FILE` is optional)

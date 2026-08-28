@@ -68,6 +68,46 @@ pub fn load_index(root: &Path) -> Option<SpaIndex> {
 
 pub type SpaIndexState = (Arc<AppState>, Arc<SpaIndex>);
 
+/// Cierra el router del binario: le cuelga el fallback estático (`ServeDir` + shell) que sirve
+/// la SPA en el mismo puerto que el API. Si no hay raíz utilizable degrada a API-only con
+/// `fallback::not_found`, exactamente como antes.
+///
+/// **Por qué es una función de la lib y no cinco líneas dentro de `main.rs`** (issue #85,
+/// hallazgo 1): el `ServeDir` es la pieza que hace que el binario publicado se comporte distinto
+/// del router de laboratorio que montaban los tests — `ServeDir` **no llama a su fallback para
+/// métodos distintos de GET/HEAD**, así que una ruta ausente devolvía 405 con cuerpo vacío a un
+/// POST, y 200 `text/html` (¡el shell de la SPA!) a un GET. Un test que no monte esto no describe
+/// lo que se publica. Ahora `main.rs` y `apps/api/tests/mcp_http.rs` llaman a la MISMA función.
+///
+/// `root` debe existir; el caller comprueba (`root.exists()`).
+pub fn mount_static_spa(api: axum::Router, root: &Path, state: Arc<AppState>) -> axum::Router {
+    let Some(index) = load_index(root) else {
+        tracing::warn!(
+            root = %root.display(),
+            "WEB_STATIC_ROOT has no readable index.html — API only"
+        );
+        return axum::Router::new()
+            .merge(api)
+            .fallback(crate::handlers::fallback::not_found);
+    };
+    tracing::info!(root = %root.display(), "serving web UI and API on one port");
+    // El index NO lo sirve ServeDir (append_index_html_on_directories(false)):
+    // `GET /` cae al fallback, que inyecta el base path por request.
+    let index_svc = axum::routing::get(serve_index).with_state((state, Arc::new(index)));
+    // `/index.html` explícito TAMBIÉN pasa por el inyector: si no, `ServeDir` encuentra el
+    // fichero en disco y lo sirve crudo — sin prefijo reescrito ni `__FF_SSO__`, y con
+    // `Cache-Control` de asset estático. Bajo el Ingress esa URL es alcanzable (y algún cliente
+    // la pide), así que la SPA saldría rota justo donde el fallback la arregla.
+    axum::Router::new()
+        .route("/index.html", index_svc.clone())
+        .merge(api)
+        .fallback_service(
+            tower_http::services::ServeDir::new(root)
+                .append_index_html_on_directories(false)
+                .fallback(index_svc),
+        )
+}
+
 /// Fallback SPA: toda ruta que no es API ni un asset existente devuelve el shell.
 pub async fn serve_index(
     State((state, index)): State<SpaIndexState>,

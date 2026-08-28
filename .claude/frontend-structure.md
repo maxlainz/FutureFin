@@ -173,7 +173,9 @@ src/
 │   │                             #   Sigue disponible con FUTUREFIN_MCP_ENABLED=0 (el endpoint se monta siempre)
 │   ├── OAuthAuthorizeView.tsx    # pantalla de consentimiento OAuth (v3.1.0), montada desde main.tsx, NO desde App.tsx.
 │   │                             #   Autónoma: aplica el tema ella misma (applyTheme/loadThemePref) e importa App.css,
-│   │                             #   porque App.tsx nunca monta. Máquina de fases: loading → disabled (404 = kill-switch)
+│   │                             #   porque App.tsx nunca monta. Máquina de fases: loading → disabled (404 = kill-switch;
+│   │                             #   `/v1/oauth/authorize-details` es de los pocos que el switch SÍ desmonta, así que su
+│   │                             #   404 es el `not_found` del fallback de /v1 — no el `mcp_disabled` de las rutas raíz)
 │   │                             #   | invalid (error FATAL: pinta y muere, JAMÁS redirige) | redirecting (error
 │   │                             #   redirigible → location.replace) | login (401 → LoginPanel) | consent → submitting
 │   │                             #   → pending (403) | error. Endpoints: GET /v1/oauth/authorize-details, GET /v1/auth/me,

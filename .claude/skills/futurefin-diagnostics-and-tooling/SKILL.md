@@ -79,7 +79,7 @@ mutation!)** → 2× GET to show MISS→HIT after invalidation → logout.
 |---|---|---|
 | `GET /health` and `GET /v1/health` | none | Process is up; returns `{status, service, version}` — read `version` to confirm which build is running. |
 | `GET /v1/ready` | none | DB reachable (`SELECT 1`); 503 (`Unavailable`) if not. Distinguishes "app up, DB down" from "app down". **Since 3.0.0 this is also the compose healthcheck** (it replaced `/v1/health`, and the old `</dev/tcp/…` fallback was deliberately removed so a 503 can no longer be masked) — so the `docker ps` health state and this probe now say the same thing. |
-| `GET /openapi.json` | none | Full utoipa-generated contract. Snapshot it before/after a change: `curl -s $BASE/openapi.json | python3 -m json.tool > /tmp/openapi-before.json` and `diff` later. Any route/field drift shows up here without reading Rust. |
+| `GET /openapi.json` | none | Full utoipa-generated contract. Snapshot it before/after a change: `curl -s $BASE/openapi.json \| python3 -m json.tool > /tmp/openapi-before.json` and `diff` later. Any route/field drift shows up here without reading Rust. |
 
 ### Log axes (`RUST_LOG`)
 

@@ -145,6 +145,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   transactions_not_found:
     "Alguno de los movimientos ya no existe, así que no se ha cambiado nada. Recarga la lista e inténtalo otra vez.",
   amount_zero: "El importe no puede ser cero.",
+  mcp_disabled:
+    "El servidor MCP está desactivado en esta instalación.",
   confirm_token_required:
     "Esa acción no se puede confirmar a ciegas: hay que previsualizarla antes y confirmar con el código que devuelve el preview.",
   confirm_token_invalid:

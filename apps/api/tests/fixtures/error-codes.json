@@ -111,6 +111,7 @@
     "linked_asset_set_and_clear",
     "linked_liability_not_found",
     "linked_liability_set_and_clear",
+    "mcp_disabled",
     "mcp_token_read_only",
     "mcp_write_disabled",
     "membership_role_invalid",

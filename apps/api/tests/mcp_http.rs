@@ -7,12 +7,7 @@
 
 mod common;
 
-use axum::extract::Extension;
-use axum::Router;
-use common::{LoggedInOwner, TestApp};
-use futurefin_api::routes;
-use futurefin_api::state::AppState;
-use std::sync::Arc;
+use common::{LoggedInOwner, TempWebRoot, TestApp, TestConfig};
 
 const PROTOCOL: &str = "2026-07-28";
 
@@ -458,31 +453,50 @@ async fn get_settings_returns_installation_and_role() {
     assert!(settings["installation"]["fire_settings"]["swr_pct"].is_string());
 }
 
+/// Shell mínimo de la SPA, para montar el `ServeDir` del binario publicado.
+const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
+
+/// El kill-switch tiene que fallar **limpio en la imagen que se publica**, no solo en el router
+/// de laboratorio (issue #85, hallazgo 1).
+///
+/// Antes este test construía el router **sin SPA**, así que confirmaba un 404 que en producción
+/// no ocurría: allí el fallback final es un `ServeDir` con fallback al `index.html`, y `ServeDir`
+/// **no llama a su fallback para métodos distintos de GET/HEAD**. El resultado real era
+/// `POST /mcp` → **405 con cuerpo vacío** y
+/// `GET /.well-known/oauth-authorization-server` → **200 `text/html`** con el shell de la SPA:
+/// el conector fallaba al parsear JSON y enseñaba «connection failed» sin causa — un control de
+/// seguridad que, al activarse, se diagnostica como avería.
+///
+/// Ahora las rutas se montan siempre y el switch cambia el handler (misma doctrina que
+/// `/v1/auth/sso`, D18). El test monta `WEB_STATIC_ROOT` con `spa::mount_static_spa`, la MISMA
+/// función que llama `main.rs`.
 #[tokio::test]
-async fn mcp_disabled_returns_404() {
-    // TestApp::spawn monta el MCP; aquí se construye el router a mano con mcp_enabled=false.
-    let (pool, _schema) = common::isolated_pool().await;
-    let state = Arc::new(AppState::new(
-        env!("CARGO_PKG_VERSION"),
-        pool.clone(),
-        false,
-        30,
-        false,
-        None,
-    ));
-    let router = Router::new()
-        .merge(routes::app_router(&state))
-        .layer(Extension(state.clone()));
-    let app = TestApp {
-        router,
-        pool,
-        schema: _schema,
-        state,
-    };
+async fn mcp_disabled_answers_json_even_with_the_spa_mounted() {
+    let web = TempWebRoot::with_index(SHELL);
+    let app = TestApp::spawn_with(TestConfig {
+        mcp_disabled: true,
+        web_static_root: Some(web.path.clone()),
+        ..Default::default()
+    })
+    .await;
 
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await; // el CRUD de tokens sigue montado
 
+    // Primero: el `ServeDir` está de verdad ahí. Sin esta comprobación el resto del test podría
+    // pasar por no haber montado nada, que es justo el fallo que veníamos a cerrar.
+    let spa = app.get("/una-ruta-cualquiera-de-la-spa").await;
+    assert_eq!(spa.status, http::StatusCode::OK);
+    assert!(
+        spa.headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("text/html"),
+        "el fallback SPA debería estar sirviendo el shell: {spa:?}"
+    );
+
+    // POST /mcp: 404 JSON con código estable, NUNCA 405 mudo.
     let resp = app
         .request(
             http::Request::builder()
@@ -499,7 +513,220 @@ async fn mcp_disabled_returns_404() {
     assert_eq!(
         resp.status,
         http::StatusCode::NOT_FOUND,
-        "con FUTUREFIN_MCP_ENABLED=0 /mcp no existe: {resp:?}"
+        "con FUTUREFIN_MCP_ENABLED=0 /mcp responde 404, no 405: {resp:?}"
+    );
+    assert_json_mcp_disabled(&resp);
+
+    // Y el protocolo OAuth, que es lo que consulta el conector ANTES de llegar a /mcp.
+    for path in [
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server/mcp",
+    ] {
+        let resp = app.get(path).await;
+        assert_eq!(resp.status, http::StatusCode::NOT_FOUND, "{path}: {resp:?}");
+        assert_json_mcp_disabled(&resp);
+    }
+    for path in ["/oauth/register", "/oauth/token", "/oauth/revoke"] {
+        let resp = app.post_json(path, serde_json::json!({})).await;
+        assert_eq!(resp.status, http::StatusCode::NOT_FOUND, "{path}: {resp:?}");
+        assert_json_mcp_disabled(&resp);
+    }
+
+    // `/oauth/authorize` sigue siendo de la SPA: con el switch echado tampoco se lo queda el API.
+    let authorize = app.get("/oauth/authorize").await;
+    assert_eq!(authorize.status, http::StatusCode::OK);
+}
+
+fn assert_json_mcp_disabled(resp: &common::ResponseParts) {
+    let ct = resp
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("application/json"),
+        "debe ser JSON (si es text/html, el fallback SPA se lo está tragando): {ct}"
+    );
+    assert_eq!(resp.json()["code"], "mcp_disabled", "{resp:?}");
+}
+
+/// Con el MCP encendido y el `ServeDir` montado, `/mcp` sigue llegando a rmcp: la ruta del API
+/// gana al fallback estático. (Es la otra mitad del test anterior: montar el SPA no puede
+/// tragarse el endpoint bueno.)
+#[tokio::test]
+async fn mcp_still_works_behind_the_static_fallback() {
+    let web = TempWebRoot::with_index(SHELL);
+    let app = TestApp::spawn_with(TestConfig {
+        web_static_root: Some(web.path.clone()),
+        ..Default::default()
+    })
+    .await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(&app, &token, initialize_body()).await;
+    assert_eq!(resp["result"]["protocolVersion"], PROTOCOL, "{resp}");
+}
+
+/// Hallazgo 3: la validación de `Origin` de rmcp estaba apagada (su default es lista vacía).
+///
+/// El dato que decide si esto rompe a Claude Desktop / Claude Code: rmcp
+/// (`validate_origin_header`) devuelve `Ok(())` cuando **falta** la cabecera, aunque la lista NO
+/// esté vacía. Los clientes sin navegador no mandan `Origin` y siguen entrando; los dos primeros
+/// asserts fijan justamente eso.
+#[tokio::test]
+async fn mcp_validates_the_origin_header() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let post = |origin: Option<&'static str>| {
+        let token = token.clone();
+        async move {
+            let mut builder = http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/mcp")
+                .header(http::header::HOST, "futurefin.test")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::ACCEPT, "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", PROTOCOL)
+                .header("Mcp-Method", "initialize")
+                .header(http::header::AUTHORIZATION, format!("Bearer {token}"));
+            if let Some(o) = origin {
+                builder = builder.header(http::header::ORIGIN, o);
+            }
+            builder
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&initialize_body()).unwrap(),
+                ))
+                .unwrap()
+        }
+    };
+
+    // Sin Origin (Claude Desktop, Claude Code, curl): pasa.
+    let sin = app.request(post(None).await).await;
+    assert_eq!(
+        sin.status,
+        http::StatusCode::OK,
+        "una request sin Origin NO se puede rechazar: rompería a los clientes sin navegador"
+    );
+    // Origin de la lista (el default de CORS_ORIGINS incluye este): pasa.
+    let permitido = app.request(post(Some("http://127.0.0.1:8080")).await).await;
+    assert_eq!(permitido.status, http::StatusCode::OK, "{permitido:?}");
+    // Origin ajeno (el vector de DNS rebinding desde una pestaña cualquiera): 403.
+    let ajeno = app.request(post(Some("https://malicioso.example")).await).await;
+    assert_eq!(
+        ajeno.status,
+        http::StatusCode::FORBIDDEN,
+        "un Origin fuera de CORS_ORIGINS debe rechazarse: {ajeno:?}"
+    );
+}
+
+/// Hallazgos 4 y 5: `/mcp` tiene su propia capa CORS —**sin `allow_credentials`**— y su
+/// preflight admite las cabeceras que un cliente MCP de navegador manda de verdad.
+#[tokio::test]
+async fn mcp_preflight_is_complete_and_grants_no_cookie_access() {
+    let app = TestApp::spawn().await;
+
+    let resp = app
+        .request(
+            http::Request::builder()
+                .method(http::Method::OPTIONS)
+                .uri("/mcp")
+                .header(http::header::ORIGIN, "http://127.0.0.1:8080")
+                .header(http::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(
+                    http::header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "authorization, content-type, mcp-protocol-version, mcp-session-id, \
+                     last-event-id",
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert!(
+        resp.status.is_success(),
+        "el preflight de /mcp debe pasar: {resp:?}"
+    );
+    let allowed = resp
+        .headers
+        .get(http::header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    for h in [
+        "mcp-protocol-version", // obligatoria fuera de initialize desde 2025-06-18
+        "last-event-id",        // reanudación de SSE
+        "mcp-session-id",
+        "authorization",
+    ] {
+        assert!(allowed.contains(h), "falta {h} en allow-headers: {allowed}");
+    }
+    // `Access-Control-Expose-Headers` no viaja en el preflight (es cabecera de la respuesta
+    // real), así que se comprueba sobre una petición de verdad — un 401 sin Bearer sirve, y de
+    // paso fija que `WWW-Authenticate` es legible: sin exponerla, un cliente de navegador no
+    // puede leer el `resource_metadata=` del 401 y nunca descubre el authorization server.
+    let real = app
+        .request(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/mcp")
+                .header(http::header::HOST, "futurefin.test")
+                .header(http::header::ORIGIN, "http://127.0.0.1:8080")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&initialize_body()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(real.status, http::StatusCode::UNAUTHORIZED, "{real:?}");
+    let exposed = real
+        .headers
+        .get(http::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    for h in ["mcp-protocol-version", "mcp-session-id", "www-authenticate"] {
+        assert!(exposed.contains(h), "falta {h} en expose-headers: {exposed}");
+    }
+    assert!(
+        real.headers
+            .get(http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none(),
+        "tampoco en la respuesta real: {real:?}"
+    );
+
+    // La mitad que importa del hallazgo 4: `/mcp` NO concede acceso con cookie…
+    assert!(
+        resp.headers
+            .get(http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .is_none(),
+        "la capa CORS de /mcp no debe permitir credenciales: {resp:?}"
+    );
+    // …mientras que el API sí, para el MISMO origen. Son dos capas distintas, y por eso añadir
+    // un origen para un cliente MCP de navegador ya no regala la cookie a /v1/backup/user-export.
+    let api_preflight = app
+        .request(
+            http::Request::builder()
+                .method(http::Method::OPTIONS)
+                .uri("/v1/backup/user-export")
+                .header(http::header::ORIGIN, "http://127.0.0.1:8080")
+                .header(http::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(http::header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        api_preflight
+            .headers
+            .get(http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .and_then(|v| v.to_str().ok()),
+        Some("true"),
+        "el API sí usa cookie: su capa mantiene allow-credentials"
     );
 }
 
