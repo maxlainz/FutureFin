@@ -1,0 +1,700 @@
+{
+  "_doc": "Contrato de entrada de las tools MCP. GENERADO — no editar a mano: UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract. `description_sha256_12` son los 6 primeros bytes del SHA-256 de la descripción publicada.",
+  "tool_count": 52,
+  "tools": [
+    {
+      "description_len": 941,
+      "description_sha256_12": "88c6259fb6bd",
+      "name": "apply_categorization_rule",
+      "properties": [
+        "apply_to_existing",
+        "confirm",
+        "from_month",
+        "rule_id"
+      ],
+      "required": [
+        "rule_id"
+      ]
+    },
+    {
+      "description_len": 298,
+      "description_sha256_12": "f0120edf5141",
+      "name": "capture_snapshot",
+      "properties": [
+        "kinds"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 206,
+      "description_sha256_12": "bf7d1494e179",
+      "name": "create_asset",
+      "properties": [
+        "category_id",
+        "current_value",
+        "expected_annual_return_percent",
+        "is_liquid",
+        "name",
+        "notes",
+        "purchase_price"
+      ],
+      "required": [
+        "category_id",
+        "current_value",
+        "name"
+      ]
+    },
+    {
+      "description_len": 291,
+      "description_sha256_12": "3ca4baa509b9",
+      "name": "create_budget_entry",
+      "properties": [
+        "amount",
+        "category_id",
+        "ends_at_retirement",
+        "expense_end_date",
+        "notes",
+        "persists_after_retirement"
+      ],
+      "required": [
+        "amount",
+        "category_id"
+      ]
+    },
+    {
+      "description_len": 376,
+      "description_sha256_12": "7155d23b6499",
+      "name": "create_categorization_rule",
+      "properties": [
+        "assign_category_id",
+        "assign_kind",
+        "match_kind",
+        "pattern",
+        "source"
+      ],
+      "required": [
+        "assign_kind",
+        "pattern"
+      ]
+    },
+    {
+      "description_len": 204,
+      "description_sha256_12": "5ae0bd49fe1f",
+      "name": "create_category",
+      "properties": [
+        "name",
+        "scope",
+        "sort_index"
+      ],
+      "required": [
+        "name",
+        "scope"
+      ]
+    },
+    {
+      "description_len": 1051,
+      "description_sha256_12": "e5a907cf1e43",
+      "name": "create_liability",
+      "properties": [
+        "apr_percent",
+        "category_id",
+        "derive_principal_from_plan",
+        "expense_category_id",
+        "label",
+        "notes",
+        "payment_amount",
+        "payment_end_date",
+        "payment_frequency",
+        "principal",
+        "repayment_model"
+      ],
+      "required": [
+        "category_id",
+        "expense_category_id",
+        "label"
+      ]
+    },
+    {
+      "description_len": 256,
+      "description_sha256_12": "82b75174f7df",
+      "name": "create_planning_flow",
+      "properties": [
+        "category_id",
+        "due_date",
+        "expected_amount",
+        "notes",
+        "show_in_chart",
+        "title"
+      ],
+      "required": [
+        "category_id",
+        "expected_amount",
+        "title"
+      ]
+    },
+    {
+      "description_len": 572,
+      "description_sha256_12": "fd20e0a3aeea",
+      "name": "create_transaction",
+      "properties": [
+        "amount",
+        "category_id",
+        "concept",
+        "kind",
+        "linked_asset_id",
+        "linked_liability_id",
+        "notes",
+        "op_date",
+        "recurring"
+      ],
+      "required": [
+        "amount",
+        "concept",
+        "kind",
+        "op_date"
+      ]
+    },
+    {
+      "description_len": 600,
+      "description_sha256_12": "24f2a187eb33",
+      "name": "delete_asset",
+      "properties": [
+        "confirm",
+        "id"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 123,
+      "description_sha256_12": "f55101e2d59c",
+      "name": "delete_budget_entry",
+      "properties": [
+        "confirm",
+        "id"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 503,
+      "description_sha256_12": "abf3fbfae01b",
+      "name": "delete_categorization_rule",
+      "properties": [
+        "confirm",
+        "rule_id"
+      ],
+      "required": [
+        "rule_id"
+      ]
+    },
+    {
+      "description_len": 195,
+      "description_sha256_12": "3e3b2f9cf959",
+      "name": "delete_import",
+      "properties": [
+        "confirm",
+        "id"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 168,
+      "description_sha256_12": "d9b8f9305b2c",
+      "name": "delete_liability",
+      "properties": [
+        "confirm",
+        "id"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 109,
+      "description_sha256_12": "f87eb11062c6",
+      "name": "delete_planning_flow",
+      "properties": [
+        "confirm",
+        "id"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 231,
+      "description_sha256_12": "b26cdee52b31",
+      "name": "delete_recurring_rule",
+      "properties": [
+        "confirm",
+        "id"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 160,
+      "description_sha256_12": "d475916b4758",
+      "name": "delete_snapshot",
+      "properties": [
+        "confirm",
+        "id"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 155,
+      "description_sha256_12": "f468003c9109",
+      "name": "delete_transaction",
+      "properties": [
+        "confirm",
+        "id"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 920,
+      "description_sha256_12": "de12bdd09caa",
+      "name": "get_allocation_resolution",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 426,
+      "description_sha256_12": "861cdbfe6c47",
+      "name": "get_budget",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 251,
+      "description_sha256_12": "f7d78955b6e4",
+      "name": "get_category_monthly_series",
+      "properties": [
+        "category_id",
+        "kind",
+        "view",
+        "window_months"
+      ],
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description_len": 701,
+      "description_sha256_12": "fb31cfa42c27",
+      "name": "get_history",
+      "properties": [
+        "include_asset_series",
+        "view",
+        "window_months"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 650,
+      "description_sha256_12": "17edffd427a8",
+      "name": "get_history_cashflow",
+      "properties": [
+        "include_curve",
+        "resolution",
+        "view",
+        "window_months"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 1154,
+      "description_sha256_12": "3bd5372a4ab4",
+      "name": "get_projection",
+      "properties": [
+        "include_asset_series",
+        "months",
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 380,
+      "description_sha256_12": "be5b6ae9af47",
+      "name": "get_settings",
+      "properties": [],
+      "required": []
+    },
+    {
+      "description_len": 2278,
+      "description_sha256_12": "746e8e2e2540",
+      "name": "get_summary",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 964,
+      "description_sha256_12": "631fab21038c",
+      "name": "get_transactions_summary",
+      "properties": [
+        "avg_window",
+        "month",
+        "view",
+        "year"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 327,
+      "description_sha256_12": "cca0c6e5256e",
+      "name": "list_allocation_rules",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 729,
+      "description_sha256_12": "db8245acbb1a",
+      "name": "list_assets",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 169,
+      "description_sha256_12": "bf0501bd9721",
+      "name": "list_categories",
+      "properties": [
+        "scope"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 469,
+      "description_sha256_12": "1da84c2c2f51",
+      "name": "list_categorization_rules",
+      "properties": [
+        "limit",
+        "offset"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 527,
+      "description_sha256_12": "57754d52d6a8",
+      "name": "list_liabilities",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 158,
+      "description_sha256_12": "7cc8cbb6a044",
+      "name": "list_planning_flows",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 315,
+      "description_sha256_12": "82d5578569e6",
+      "name": "list_recurring_rules",
+      "properties": [],
+      "required": []
+    },
+    {
+      "description_len": 209,
+      "description_sha256_12": "dbc58d58a2ff",
+      "name": "list_snapshots",
+      "properties": [
+        "include_items",
+        "kind",
+        "year"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 191,
+      "description_sha256_12": "eca615bcea11",
+      "name": "list_transaction_imports",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 180,
+      "description_sha256_12": "bbc77df0abb6",
+      "name": "list_transaction_months",
+      "properties": [
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 395,
+      "description_sha256_12": "721ae9b7b07e",
+      "name": "list_transactions",
+      "properties": [
+        "category_id",
+        "concept_contains",
+        "date_from",
+        "date_to",
+        "import_id",
+        "kind",
+        "limit",
+        "max_amount",
+        "min_amount",
+        "month",
+        "offset",
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 710,
+      "description_sha256_12": "cdbf80d39ccf",
+      "name": "materialize_recurring",
+      "properties": [],
+      "required": []
+    },
+    {
+      "description_len": 405,
+      "description_sha256_12": "87a38fe6208b",
+      "name": "reconcile_transfers",
+      "properties": [],
+      "required": []
+    },
+    {
+      "description_len": 3055,
+      "description_sha256_12": "e776a7904b5d",
+      "name": "simulate_projection",
+      "properties": [
+        "annual_inflation_percent",
+        "asset_return_overrides",
+        "extra_monthly_cash_adjustment",
+        "extra_monthly_expense",
+        "extra_monthly_savings",
+        "fire_settings_overrides",
+        "include_series",
+        "months",
+        "one_off_expense",
+        "retirement_annual_expense",
+        "swr_pct",
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 751,
+      "description_sha256_12": "6ddf50dd79f8",
+      "name": "unreconcile_transfer",
+      "properties": [
+        "transaction_id"
+      ],
+      "required": [
+        "transaction_id"
+      ]
+    },
+    {
+      "description_len": 378,
+      "description_sha256_12": "78c22b523515",
+      "name": "update_allocation_rule",
+      "properties": [
+        "amount",
+        "cap_kind",
+        "cap_value",
+        "clear_cap",
+        "enabled",
+        "rule_id"
+      ],
+      "required": [
+        "rule_id"
+      ]
+    },
+    {
+      "description_len": 374,
+      "description_sha256_12": "233f4f78fbe8",
+      "name": "update_asset",
+      "properties": [
+        "asset_id",
+        "category_id",
+        "clear_purchase_price",
+        "current_value",
+        "expected_annual_return_percent",
+        "is_liquid",
+        "name",
+        "notes",
+        "purchase_price"
+      ],
+      "required": [
+        "asset_id"
+      ]
+    },
+    {
+      "description_len": 421,
+      "description_sha256_12": "093cf0ef1139",
+      "name": "update_asset_value",
+      "properties": [
+        "asset_id",
+        "current_value",
+        "expected_annual_return_percent"
+      ],
+      "required": [
+        "asset_id"
+      ]
+    },
+    {
+      "description_len": 184,
+      "description_sha256_12": "602d70419aa8",
+      "name": "update_budget_entry",
+      "properties": [
+        "amount",
+        "category_id",
+        "clear_expense_end_date",
+        "ends_at_retirement",
+        "expense_end_date",
+        "id",
+        "notes",
+        "persists_after_retirement"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 657,
+      "description_sha256_12": "ebaac7acb163",
+      "name": "update_categorization_rule",
+      "properties": [
+        "assign_category_id",
+        "assign_kind",
+        "clear_assign_category",
+        "clear_assign_kind",
+        "clear_source",
+        "match_kind",
+        "pattern",
+        "rule_id",
+        "source"
+      ],
+      "required": [
+        "rule_id"
+      ]
+    },
+    {
+      "description_len": 750,
+      "description_sha256_12": "1d7e55e9451a",
+      "name": "update_fire_settings",
+      "properties": [
+        "annual_inflation_assumption_percent",
+        "confirm",
+        "expense_avg_window_mode",
+        "expense_avg_window_months",
+        "fire_number_manual_amount",
+        "fire_number_mode",
+        "income_avg_window_mode",
+        "income_avg_window_months",
+        "savings_source",
+        "swr_pct",
+        "tax_brackets",
+        "taxes_enabled"
+      ],
+      "required": []
+    },
+    {
+      "description_len": 872,
+      "description_sha256_12": "03a4b6578fbe",
+      "name": "update_liability",
+      "properties": [
+        "apr_percent",
+        "category_id",
+        "derive_principal_from_plan",
+        "expense_category_id",
+        "label",
+        "liability_id",
+        "notes",
+        "payment_amount",
+        "payment_end_date",
+        "payment_frequency",
+        "principal",
+        "repayment_model"
+      ],
+      "required": [
+        "liability_id"
+      ]
+    },
+    {
+      "description_len": 148,
+      "description_sha256_12": "220d408d09a7",
+      "name": "update_planning_flow",
+      "properties": [
+        "category_id",
+        "clear_due_date",
+        "due_date",
+        "expected_amount",
+        "id",
+        "notes",
+        "show_in_chart",
+        "title"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 238,
+      "description_sha256_12": "bae2e57a2857",
+      "name": "update_transaction",
+      "properties": [
+        "amount",
+        "category_id",
+        "clear_category",
+        "clear_linked_asset",
+        "clear_linked_liability",
+        "clear_notes",
+        "concept",
+        "id",
+        "kind",
+        "linked_asset_id",
+        "linked_liability_id",
+        "notes",
+        "op_date"
+      ],
+      "required": [
+        "id"
+      ]
+    },
+    {
+      "description_len": 501,
+      "description_sha256_12": "f5807007306d",
+      "name": "update_transactions",
+      "properties": [
+        "category_id",
+        "clear_category",
+        "clear_notes",
+        "ids",
+        "kind",
+        "notes"
+      ],
+      "required": [
+        "ids"
+      ]
+    }
+  ]
+}
