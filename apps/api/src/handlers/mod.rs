@@ -47,7 +47,7 @@ pub(crate) fn max_user_settable_future_date(today: chrono::NaiveDate) -> chrono:
         .unwrap_or(chrono::NaiveDate::MAX)
 }
 
-/// Un `window_months` fuera de rango se **rechaza**, no se clampa (4.3.2). Lo comparten las tres
+/// Un `window_months` fuera de rango se **rechaza**, no se clampa (4.4.0). Lo comparten las tres
 /// ventanas del producto: `/v1/history/series` (1..=1200), `/v1/history/cashflow` (1..=120) y
 /// `/v1/transactions/category-series` (1..=60), con sus tools MCP hermanas.
 ///

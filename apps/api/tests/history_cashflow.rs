@@ -426,7 +426,7 @@ async fn resolution_daily_bounds_and_weekly_default() {
     assert_eq!(wk["view"], "household");
     assert_eq!(wk["months"].as_array().unwrap().len(), 13); // -12..=0
 
-    // `window_months` fuera de rango se RECHAZA (4.3.2): antes se clampaba a 120 y se devolvía
+    // `window_months` fuera de rango se RECHAZA (4.4.0): antes se clampaba a 120 y se devolvía
     // 200, así que quien pedía 500 meses leía 121 puntos como si fueran los 501 que pidió. La
     // respuesta ecoa la ventana: contestar otra pregunta sin decirlo era el fallo, no el número.
     // La cota exacta sigue siendo válida (120 → 121 puntos, `-120..=0`).

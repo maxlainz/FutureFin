@@ -411,7 +411,7 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
 - **Horizon rule** — `projection_horizon_months` (projection.rs:598-627): 90-year lifespan.
   `years = clamp(90 − completed_age, 5, 70)` using the session user's `birth_date`, falling back
   to the primary household person's (projection.rs:965-989); no birth date anywhere →
-  **30 years**. `?months=N` overrides, clamped 12–840. `horizon_basis` reports `lifespan_90` |
+  **30 years**. `?months=N` overrides; fuera de 12–840 **rechaza** con 400 `months_out_of_range` (hasta 4.3.1 clampaba en silencio, así que `get_projection` y `simulate_projection` respondían distinto al mismo valor). `horizon_basis` reports `lifespan_90` |
   `fallback_no_demographics` | `months_override`.
 - Large arrays (`points[].net_worth`, `fire_target_series`, `asset_series[].values`) serialize as
   f64 for wire size; scalar KPIs (`jubilacion_target_net_worth`, milestones targets,

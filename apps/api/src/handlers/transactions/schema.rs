@@ -357,9 +357,31 @@ pub struct CreateTransactionBody {
     pub recurrence: Option<RecurrenceSpec>,
 }
 
+/// Cuerpo real de `POST /v1/transactions`: el movimiento **más** la clave de idempotencia.
+///
+/// La clave viaja aquí y no dentro de `CreateTransactionBody` a propósito: no es una propiedad del
+/// movimiento (no se guarda en él, no se lista, no se exporta), es metadato de **la petición**.
+/// `CreateTransactionBody` sigue siendo el DTO de «qué crear», compartido tal cual con la tool MCP.
+/// En el wire son un único objeto plano (`#[serde(flatten)]`), así que el JSON no cambia de forma.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateTransactionRequest {
+    #[serde(flatten)]
+    pub transaction: CreateTransactionBody,
+    /// Clave de idempotencia elegida por el cliente (1–200 caracteres). **Opcional y opt-in**:
+    /// omitirla deja el comportamiento histórico (reenviar el mismo movimiento crea OTRO). Con
+    /// ella, repetir la llamada con el MISMO cuerpo devuelve el movimiento original en vez de
+    /// crear otro; repetirla con un cuerpo distinto es un 409 `idempotency_key_conflict`.
+    /// Ámbito: por usuario. Caduca a las 24 h. Ver `handlers/transactions/idempotency.rs`.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct BatchCreateBody {
-    pub transactions: Vec<CreateTransactionBody>,
+    /// Los ítems aceptan la misma forma que el alta individual, pero `idempotency_key` **se
+    /// rechaza** en el lote (`idempotency_key_batch_unsupported`): un lote es todo-o-nada y
+    /// aceptar el campo para ignorarlo dejaría al llamante creyéndose protegido.
+    pub transactions: Vec<CreateTransactionRequest>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

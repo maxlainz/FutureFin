@@ -185,8 +185,12 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
    response struct, **cache invalidation post-commit**) moves into the core. Classify the
    invalidation: FULL (`refresh_projection_after_mutation`), COND
    (`invalidate_projection_if_savings_uses_transactions`) or NONE — and put it INSIDE the core
-   so no future caller can forget it. Zero SQL in `apps/api/src/mcp/` (sole exception:
-   `require_mcp_write`'s toggle SELECT in `auth.rs`).
+   so no future caller can forget it. Zero SQL in **`apps/api/src/mcp/server.rs`** — ese es el invariante que importa, y es el que
+   un `grep -c` sobre ese fichero comprueba en un segundo. `auth.rs` sí tiene SQL propio y
+   creciente (el SELECT del toggle desde siempre; el INSERT/UPDATE/poda de `mcp_write_audit`
+   desde 4.4.0), porque la autorización y su registro NO son lógica de dominio y no tienen
+   core que compartir. Contar «1 hit en todo `mcp/`» era una aproximación que caducó en
+   cuanto la auditoría aterrizó: el número subía sin que nada se hubiera roto.
 2. **Params struct** in `server.rs` (before the `#[tool_router]` impl): `#[derive(Debug,
    Deserialize, schemars::JsonSchema)]`, `///` doc comments in Spanish on every field (they ARE
    the schema descriptions the LLM reads), `#[serde(default)]` + `Option` for optional fields,
@@ -238,8 +242,14 @@ grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 52 — tota
 grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 21 — reads + simulate
 grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 31 — writes
 grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 31 — MUST equal writes
-grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 11 — preview/confirm tools
-grep -rn 'sqlx::query' apps/api/src/mcp/                            # exactly 1 hit (auth.rs toggle)
+grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 14 — preview/confirm (4.4.0: +3)
+grep -c 'confirm_token.as_deref' apps/api/src/mcp/server.rs         # 7 — las que exigen token de dos fases
+#   (OJO: `grep -c 'confirm_token'` a secas da 50 — cuenta también el campo del schema y su prosa
+#   en las 7 tools; el comando de arriba cuenta solo la lectura del argumento en `two_phase(...)`)
+grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 31 — == escrituras: toda escritura cierra su fila de auditoría
+#   (el patrón lleva `&self.state.pool` a propósito: `grep -c 'settled('` da 32, contando la definición)
+grep -c 'sqlx::query' apps/api/src/mcp/server.rs                   # 0 — EL invariante real
+grep -c 'sqlx::query' apps/api/src/mcp/auth.rs                     # 4 — gate + auditoría (4.4.0)
 ```
 
 Invariant cross-checks: writes == `require_mcp_write` count (a write tool skipping the gate is
@@ -360,8 +370,55 @@ filas que cierran los huecos que la auditoría de la propia fase encontró:
 | `constraints` + `constraints_sha256_12` en `mcp-catalog.json` | **Gate, no tool**: el congelador (`tools_list_freezes_the_input_contract_of_every_tool`) fijaba `properties`, `required` y el hash de la `description` — es decir, era **ciego a todo lo que la Fase 2 acababa de construir**. Quitar un `enum` o un `deny_unknown_fields` no rompía un solo test. Ahora congela también las restricciones del `inputSchema` recorrido **recursivamente** (`properties`, `items`, `$defs`, combinadores, `additionalProperties` sub-schema): `additionalProperties`, `enum`, `pattern`, `type`, `required`, `format`, `const`, `$ref` y las cotas `minimum`/`maximum`/`minLength`/`maxLength`/`minItems`/`maxItems`/`multipleOf`/`uniqueItems`, **a cada nivel**. 296 nodos sobre las 52 tools. El hash es estable por construcción (claves de objeto ordenadas, `enum`/`type`/`required` tratados como conjuntos y ordenados también), así que ni el orden de emisión de schemars ni una actualización de dependencia lo mueven |
 | Clave `resumen` → **`summary`** en los 11 payloads de confirmación de escritura | **Once tools actualizadas, breaking**. `{id, resumen}` era la última clave en español del wire MCP (la norma del repo es «UI copy en español, código e identificadores en inglés»), y la misma fase ya había unificado los `effects` de los previews a `entity`/`side_effects`. Diez tools sintetizan la cadena en el propio MCP; `update_transactions` **traduce** los campos `resumen`/`resumen_truncated` de `BatchPatchResponse` (contrato HTTP de `PATCH /v1/transactions/batch`, que **no** cambia). Se traduce en vez de dejar una excepción porque el fallo de la excepción es silencioso: un cliente que aprendió `summary` en diez tools lee `result.summary` en la onceava y recibe `undefined` sin error. Cero tools nuevas, cero retiradas |
 
+Evaluación de la rama **`feat/mcp-fase-3-escritura-segura`** (Fase 3, issue #84 — «escritura
+segura»: auditoría, scope, confirmación en dos fases; catálogo **sin cambios en 52**, recontado
+52/21/31/31 el 2026-08-28). A diferencia de las Fases 1/2, esta SÍ añade superficie nueva de
+protocolo (`mcp_write_audit`, `api_tokens.scope`, `confirm_token`) pero **no añade ni retira
+ninguna tool** — reescribe el andamiaje común de las escrituras y el contrato de entrada/salida de
+22 de las 31:
+
+| Surface tocada | Parity outcome |
+|---|---|
+| `mcp_write_audit` (auditoría append-only de toda escritura) | **n/a — no es superficie del catálogo**. Vive por completo dentro de `require_mcp_write`/`settled`, invisible en `inputSchema` y en la respuesta de cualquier tool; no hay nada que un cliente MCP pueda leer o negociar. Es el mismo tipo de "n/a" que el guard de downgrade de la rama del add-on: existe, protege, pero no es una tool ni cambia una |
+| `api_tokens.scope` (`read_write` \| `read_only`) | **n/a para el catálogo MCP** (es un eje de `POST/GET /v1/api-tokens`, ya fuera del catálogo por la fila «Credential minting/revocation» de §2.1 — un token de solo lectura sigue sin tool propia por la misma razón que emitir uno de lectura-escritura nunca la tuvo). Sí es una puerta nueva DENTRO de `require_mcp_write`, documentada en `.claude/auth-and-membership.md` y `.claude/api-routes.md`, no en este registro |
+| `mcp_confirm_tokens` + `confirm_token` en 7 tools | **7 tools actualizadas** (`delete_import`, `delete_asset`, `delete_liability`, `apply_categorization_rule`, `materialize_recurring`, `unreconcile_transfer`, `delete_snapshot`): ganan el parámetro `confirm_token` en su `inputSchema`. No es una tool nueva — es el mismo verbo con una puerta más, exactamente el patrón que el fixture de contrato (Fase 2) existe para detectar |
+| `confirm`/preview en `materialize_recurring`, `reconcile_transfers`, `unreconcile_transfer` | **3 tools actualizadas, la reapertura de un hueco real**: las tres llevaban desde el issue #3 aceptando `{}`/un id suelto y ejecutando sin preview — dos de ellas irreversibles (`materialize_recurring` poda, `unreconcile_transfer` es de un solo sentido). `reconcile_transfers` pasa de `NoParams` a `ReconcileTransfersParams {confirm}`; `materialize_recurring` de `NoParams` a `MaterializeRecurringParams {confirm, confirm_token}`; `unreconcile_transfer` gana `confirm`+`confirm_token` sobre su `transaction_id` ya existente |
+| `impact` en las 15 escrituras que invalidan FULL | **15 tools actualizadas**: `create_planning_flow`/`update_planning_flow`/`delete_planning_flow`, `create_asset`/`update_asset`/`update_asset_value`, `create_liability`/`update_liability`, `create_budget_entry`/`update_budget_entry`/`delete_budget_entry`, `update_allocation_rule`, `update_fire_settings`, `delete_asset`, `delete_liability` ganan el bloque `impact` en la respuesta (comparten `impact_since`/`impact_probe`, cero SQL propio — la misma core que `get_summary`). No toca ninguna tool de lectura ni las escrituras COND (transacciones): esas quedan deliberadamente sin `impact`, ver el bullet de `api-routes.md` §MCP |
+| `idempotency_key` en `create_transaction` | **Tool actualizada**, comparte `create_transaction_core` con el POST HTTP — el parámetro y el 409 `idempotency_key_conflict` llegan sin código propio en `server.rs` salvo la `description` |
+| `budget_entry_removed` en el preview de `delete_liability` | **Tool actualizada**, comparte `liability_delete_effects` con el HTTP DELETE — la cuota de presupuesto que desaparece y sus cuatro totales before/after se enseñan en el mismo `effects` que ya contaba `transactions_unlinked` |
+| 422 `budget_entry_is_liability_derived` en `PATCH`/`DELETE /v1/budget/entries/{id}` | **Tool actualizada, sin código nuevo**: `update_budget_entry`/`delete_budget_entry` comparten `patch_budget_entry_core`/`delete_budget_entry_core`, así que el 422 llega heredado; documentado en `.claude/api-routes.md` §Budget |
+| `heavy::run_projection_sim` (tercer semáforo) | **n/a**: no es superficie observable por MCP — envuelve la simulación por dentro, con el mismo contrato de entrada/salida de siempre (`simulate_projection`, `get_projection`). El único efecto visible sería un 503 `Unavailable` bajo saturación extrema, que ya existía como posibilidad antes de este semáforo (el pool de blocking podía agotarse igual) |
+
+**22 tools con `inputSchema`/payload tocados**, sin solapamientos dobles: las 15 del `impact` +
+las 7 del `confirm_token` (`delete_import`, `apply_categorization_rule`, `materialize_recurring`,
+`unreconcile_transfer`, `delete_snapshot`, y `delete_asset`/`delete_liability` que YA estaban en el
+grupo de `impact` — de ahí que no sumen 22 a secas) + `reconcile_transfers` (gana `confirm` pero no
+`confirm_token`, y no invalida FULL así que no está en el grupo de `impact`) + `create_transaction`
+(`idempotency_key`, ajeno a los otros dos ejes). El fixture `mcp-catalog.json` cambia exactamente
+**22 entradas** — reprodúcelo con el diff de abajo. Cero tools nuevas, cero retiradas: el catálogo
+sigue en **52**.
+
 Re-verify before trusting:
 
+- El fixture de contrato detecta las 22 tools tocadas por este tren:
+  `UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http tools_list_freezes_the_input_contract_of_every_tool`
+  y compara contra `git diff --stat -- apps/api/tests/fixtures/mcp-catalog.json`, o para la lista
+  exacta de nombres:
+  ```bash
+  python3 -c "
+  import json,subprocess
+  old=json.loads(subprocess.run(['git','show','HEAD:apps/api/tests/fixtures/mcp-catalog.json'],capture_output=True,text=True).stdout)
+  new=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))
+  oi={t['name']:t for t in old['tools']}; ni={t['name']:t for t in new['tools']}
+  print(sorted(n for n in ni if oi.get(n)!=ni.get(n)))
+  "
+  ```
+  (Compara el `git show HEAD:…` de tu checkout contra el fichero en disco: útil para ver qué
+  cambió justo antes de commitear la Fase 3, y sirve igual de guardia de drift después — con el
+  árbol limpio y sin cambios pendientes, la lista sale vacía.)
+- `confirm_token` de dos fases: `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_confirm_and_impact`.
+- Auditoría + scope: `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_audit_and_scope`.
+- Idempotencia + preview del presupuesto + semáforo: `TEST_DATABASE_URL=… cargo test -p futurefin-api --test write_safety_phase3`.
 - Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22, recontado
   52/21/31/31 el 2026-08-27 y de nuevo el 2026-08-28**; 50/21/29/29/10/1 on 2026-08-20). Ningún
   tren desde 4.0.0 los mueve — ni siquiera este, que toca 10 tools sin añadir ni retirar ninguna.

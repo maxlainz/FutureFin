@@ -11,7 +11,7 @@ Migrations in `apps/api/migrations/`. SQLx embeds and runs them on startup.
   - **Índice `users_external_user_id_key`: UNIQUE PARCIAL**, `CREATE UNIQUE INDEX … ON users (external_user_id) WHERE external_user_id IS NOT NULL`. El `WHERE` deja explícito que las filas sin identidad externa no compiten (aunque en Postgres `NULL` ya sea distinto de `NULL`) y mantiene el índice pequeño. **Consecuencia para los handlers**: `username` ya **no es el único UNIQUE de la tabla**, así que un 23505 sobre `users` hay que discriminarlo por `db.constraint()` antes de traducirlo — `register` lo hace (solo `users_username_key` → `username_taken`) y `handlers/sso.rs` distingue las tres salidas (nombre cogido → siguiente candidato; identidad duplicada → devolver el usuario que ganó la carrera; otra cosa → error).
   - Los dos `COMMENT ON COLUMN` de la migración son la documentación in-situ; `\d+ users` en `psql` los muestra.
 - `sessions`: `id (uuid PK)`, `user_id (FK users)`, `expires_at`, `created_at`
-- `api_tokens` (v3.0.0, `20260816120000_api_tokens.sql`): `id (uuid PK)`, `user_id (FK users ON DELETE CASCADE)`, `label (1..64)`, `token_hash (text UNIQUE — SHA-256 hex del secreto; el secreto `ffp_…` jamás se persiste)`, `token_prefix (primeros 12 chars, para la UI)`, `created_at`, `expires_at (nullable)`, `last_used_at (nullable, throttle 60 s)`, `revoked_at (nullable — soft-revoke, la fila queda como auditoría)`. Credencial Bearer del servidor MCP (`/mcp`). **Excluida a propósito del `.ffbackup`**: son credenciales de la instalación, no datos financieros — un restore no debe resucitar secretos. Sin `installation_id`: el rol/installation se re-resuelven vivos en cada uso vía `require_installation_member`.
+- `api_tokens` (v3.0.0, `20260816120000_api_tokens.sql`; `scope` añadida en `20260828140100_api_tokens_scope.sql`, Fase 3/issue #84): `id (uuid PK)`, `user_id (FK users ON DELETE CASCADE)`, `label (1..64)`, `token_hash (text UNIQUE — SHA-256 hex del secreto; el secreto `ffp_…` jamás se persiste)`, `token_prefix (primeros 12 chars, para la UI)`, `scope (text NOT NULL DEFAULT 'read_write', CHECK ∈ {read_write, read_only})`, `created_at`, `expires_at (nullable)`, `last_used_at (nullable, throttle 60 s)`, `revoked_at (nullable — soft-revoke, la fila queda como auditoría)`. Credencial Bearer del servidor MCP (`/mcp`). **Excluida a propósito del `.ffbackup`**: son credenciales de la instalación, no datos financieros — un restore no debe resucitar secretos. Sin `installation_id`: el rol/installation se re-resuelven vivos en cada uso vía `require_installation_member`. `scope` se lee **vivo** en el mismo SELECT que autentica; `ADD COLUMN … NOT NULL DEFAULT` no reescribe la tabla (PG 11+, el default vive en el catálogo) así que los tokens ya emitidos siguen funcionando byte a byte. Detalle de las tres puertas de escritura (rol → scope → toggle) y del reparto de responsabilidades: [`auth-and-membership.md`](auth-and-membership.md) §API tokens.
 
 ### Installation (singleton)
 - `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `annual_inflation_assumption_percent (decimal NOT NULL DEFAULT 0; 0 = target FIRE plano, >0 = target móvil que crece con la inflación)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `mcp_write_enabled (bool NOT NULL DEFAULT TRUE, `20260818120000` — kill-switch vivo de las tools de escritura MCP; toggle owner-only en Ajustes → Integraciones; NO se exporta en el `.ffbackup`)`, `created_at`
@@ -174,6 +174,121 @@ financieros: un restore no debe resucitar accesos concedidos. La exclusión no e
 haya que mantener — `backup_user/export.rs` es una **whitelist**: un `SELECT` explícito por tabla
 exportada, y ninguno menciona `oauth_*`. **No los añadas ahí.** Corolario: la migración OAuth no tocó el
 formato de backup (el bump a **7** llegó después, en 3.2.0, por las reglas recurrentes).
+
+## MCP write safety — auditoría, idempotencia y confirmación en dos fases (Fase 3, issue #84)
+
+Cuatro tablas nuevas (más la columna `api_tokens.scope` de arriba), ninguna en el `.ffbackup`: son
+artefactos operativos del transporte de escritura, no datos del hogar (misma familia que
+`api_tokens`/`oauth_*`, y por la misma razón — un restore no debe resucitar secretos ni estado de
+protocolo). Ninguna cambia `CURRENT_SCHEMA_VERSION` (sigue en **10**). Contexto de diseño completo
+(el porqué de cada decisión) en los doc-comments de cada migración; aquí solo el esquema y las
+invariantes.
+
+**mcp_write_audit** (`20260828140000_mcp_write_audit.sql`) — registro append-only de toda escritura
+MCP, escrito desde `require_mcp_write` (`apps/api/src/mcp/auth.rs`): `id (uuid PK)`,
+`at (timestamptz NOT NULL DEFAULT now())`, `installation_id (FK installation ON DELETE CASCADE)`,
+`user_id (FK users ON DELETE CASCADE)`, `credential_kind (text NOT NULL, CHECK ∈ {api_token,
+oauth})`, `credential_id (uuid NOT NULL — `api_tokens.id` u `oauth_access_tokens.id`, **sin FK a
+propósito**: es polimórfico y el log tiene que sobrevivir a que la credencial se borre o caduque)`,
+`role (text NOT NULL — rol VIVO en el momento de la llamada, no el de hoy)`, `tool (text NOT NULL)`,
+`outcome (text NOT NULL, CHECK ∈ {attempted, ok, failed, denied})`, `error_code (text nullable —
+solo el código estable, p.ej. `forbidden`; NUNCA el mensaje, que puede llevar texto escrito por la
+persona)`, `target_ids (uuid[] NOT NULL DEFAULT '{}' — filas que la llamada mutó de verdad; vacío en
+un preview)`, `settled_at (timestamptz nullable)`.
+- **QUÉ NO SE GUARDA, y es la decisión central**: nunca los argumentos de la tool, ni en claro ni
+  como digest. Los argumentos llevan contenido escrito por la persona (conceptos, notas, importes);
+  guardarlos crearía un segundo domicilio para ese contenido fuera del `.ffbackup` cifrado, y al ser
+  append-only convertiría el borrado del usuario en una mentira. Un digest tampoco vale: el espacio
+  de entrada (fecha + importe + un concepto de vocabulario corto) es lo bastante pequeño para
+  fuerza-bruta un SHA-256. El esquema es tipado sin JSONB ni texto libre **a propósito** — no cabe
+  una frase que haya escrito una persona.
+- **`CONSTRAINT mcp_write_audit_settled_shape CHECK ((settled_at IS NULL) = (outcome = 'attempted'))`**
+  — la forma que hace el orden imposible de falsear: `attempted` nace con `settled_at NULL` y solo
+  puede cerrarse una vez (write-once por `WHERE settled_at IS NULL` en el UPDATE de
+  `McpWriteAudit::settle`); `denied` nace **ya cerrado** (el gate ES toda la operación). Un proceso
+  que muere a mitad deja `attempted` + `settled_at IS NULL`, que es exactamente la verdad: se
+  intentó, no se sabe cómo acabó. No hay otra vía de UPDATE ni de DELETE salvo la poda.
+- **Retención 365 días** (`AUDIT_RETENTION_DAYS`, constante en `auth.rs`, no env var — mismo criterio
+  que `MAX_ACTIVE_TOKENS_PER_USER`), podada de forma **perezosa dentro del propio camino de
+  escritura** (después de cada INSERT de auditoría, nunca en un GET — D5). Autorregulado: una
+  instalación parada no poda porque tampoco crece.
+- Índice `mcp_write_audit_at_idx (at)`: sirve tanto la poda por rango como leer lo reciente.
+
+**api_tokens.scope**: ver arriba (junto a `api_tokens`) y [`auth-and-membership.md`](auth-and-membership.md).
+
+**transaction_idempotency_keys** (`20260828150000_transaction_idempotency_keys.sql`) — claves de
+idempotencia opt-in del alta manual `POST /v1/transactions` (`handlers/transactions/idempotency.rs`):
+`installation_id (FK installation ON DELETE CASCADE)`, `owner_user_id (FK users ON DELETE CASCADE)`,
+`idempotency_key (text NOT NULL, CHECK 1..200 chars)`, `request_hash (text NOT NULL — SHA-256 del
+cuerpo YA VALIDADO/normalizado, no del JSON crudo)`, `transaction_id (uuid NOT NULL FK transactions
+ON DELETE CASCADE)`, `created_at (timestamptz NOT NULL DEFAULT now())`,
+`PRIMARY KEY (installation_id, owner_user_id, idempotency_key)`.
+- **Opt-in**: sin `idempotency_key` en el cuerpo esta tabla no se toca y el comportamiento es
+  exactamente el de siempre (reenviar el mismo movimiento crea otro). Cambiar el default rompería un
+  contrato ya publicado en la propia tool MCP.
+- **Ámbito `(installation, owner_user_id)`**: la clave la elige el cliente, así que dos miembros
+  pueden elegir la misma sin colisionar entre sí — con ámbito de instalación, la clave de Bob
+  «reproduciría» el movimiento de Alice y le devolvería una fila ajena.
+- **`request_hash` es del cuerpo normalizado**: dos peticiones que describen el mismo movimiento con
+  distinta forma (`"10"` vs `"10.00"`) son el mismo reintento y se reproducen; el `money_out` fija la
+  escala a 4 decimales antes de hashear.
+- **Reclamada DENTRO de la misma transacción que el INSERT** del movimiento (`ON CONFLICT DO
+  NOTHING`, nunca se mira el SQLSTATE 23505 a mano — el mapeo central vive en `error.rs`, I10): o
+  existen las dos filas o ninguna, lo que resuelve la carrera de dos reintentos simultáneos sin
+  dejar el duplicado que esta tabla existe para evitar. El perdedor de la carrera hace un segundo
+  `lookup`: si encuentra la fila del ganador, reproduce su respuesta (mismo camino que el replay
+  normal); si no la encuentra —la única forma es que la fila del ganador se borrara entre medias—
+  devuelve **409 `idempotency_key_in_flight`** en vez de inventar un desenlace: ni es un duplicado
+  ni un éxito, así que el cliente debe reintentar sin más.
+- **`ON DELETE CASCADE` hacia `transactions`**: borrar el movimiento libera la clave — reintentar
+  después vuelve a crear, correctamente, porque borrar es una intención posterior y explícita.
+- **Retención 24 h**, poda perezosa dentro del propio `POST /v1/transactions` (D5). La ventana útil
+  de una clave son segundos (protege un reintento en vuelo); 24 h es tres órdenes de magnitud de
+  margen.
+- **`POST /v1/transactions/batch` la RECHAZA**, no la ignora: `idempotency_key_batch_unsupported`. Un
+  lote es todo-o-nada; aceptar el campo para descartarlo dejaría al llamante creyéndose protegido.
+- Índice `transaction_idempotency_keys_created_idx (created_at)`.
+
+**mcp_confirm_tokens** (`20260828160000_mcp_confirm_tokens.sql`) — confirmación en dos fases de las
+escrituras MCP irreversibles (`apps/api/src/confirm_token.rs`, `pub` fuera de `mcp/` porque no hay
+camino HTTP con dos fases que la comparta): `token_hash (text PK — SHA-256 hex del secreto `ffpv_…`,
+el secreto viaja una única vez, en la respuesta del preview)`, `installation_id (FK installation ON
+DELETE CASCADE)`, `user_id (FK users ON DELETE CASCADE — el token es de quien previsualizó; otro
+miembro no puede confirmar tu borrado con tu token)`, `tool (text NOT NULL — un token de
+`delete_import` no confirma un `delete_asset`)`, `args_hash (text NOT NULL — SHA-256 de los
+argumentos normalizados del preview)`, `effects_hash (text NOT NULL — SHA-256 del bloque `effects`
+que el preview publicó)`, `created_at`, `expires_at (NOT NULL — TTL 10 min)`,
+`consumed_at (timestamptz nullable — un solo uso)`.
+- **Por qué existe**: `confirm: true` es un booleano del propio esquema de la tool, así que el
+  modelo puede escribirlo en la PRIMERA llamada — sin este token, `confirm` nunca fue un control de
+  dos fases real, solo *prompting*. La confirmación exige el token que **solo** el preview emite.
+- **Ligado a la huella de los EFECTOS, no solo a la tool y los argumentos**: si entre el preview y el
+  confirm el mundo se movió (el lote creció, el pasivo ganó movimientos vinculados), la huella
+  recalculada en la confirmación no casa y `confirm_token_stale` — la ventana que un `confirm`
+  booleano no podía ni ver.
+- **Digest con orden de claves canónico** (`confirm_token::digest`, claves de objeto ordenadas a
+  todos los niveles + longitud delante de cada string): un cambio de dependencia o de estilo en el
+  `json!` que construye `effects` no puede mover la huella y producir un `confirm_token_stale`
+  intermitente sobre efectos idénticos.
+- **Un solo uso, TTL 10 min**: precedente exacto `oauth_authorization_codes` (`consumed_at` marcado
+  dentro del mismo UPDATE que valida — el consumo es atómico, dos confirmaciones simultáneas no
+  pueden ganar las dos). El TTL es 5× el de un código OAuth (2 min) porque aquí hay una persona
+  leyendo un preview en un chat, no una máquina respondiendo al instante.
+- **Solo hashes, nunca argumentos/efectos en claro**: a diferencia de `mcp_write_audit` (donde un
+  digest sería fuerza-brutable por baja entropía), aquí el hash no es una medida de privacidad sino
+  de igualdad — la fila vive 10 minutos y se poda. Se hashea de todos modos porque una tabla
+  operativa no tiene por qué contener el concepto de un movimiento ni el nombre de un activo.
+- **Solo 7 de las 14 tools con preview lo exigen** — las de cascada de tamaño no acotado
+  (`delete_import`, `delete_asset`, `delete_liability`, `apply_categorization_rule`,
+  `materialize_recurring`) y las puertas de un solo sentido (`unreconcile_transfer`,
+  `delete_snapshot`). Los borrados de una fila cuyo contenido íntegro viaja en el preview no lo
+  piden: el agente puede recrearlos desde su propio contexto, y encarecer cada borrado trivial a dos
+  viajes es la forma más rápida de que la ceremonia se lea como ruido. Detalle por tool:
+  [`api-routes.md`](api-routes.md) §MCP.
+- **Poda perezosa en la emisión** (`gc_expired`, antes de cada `issue`, D5), **estricta al emitir**:
+  si el INSERT falla, el preview entero falla — prometer un token que no existe dejaría al llamante
+  en un bucle de `confirm_token_invalid` sin explicación.
+- Índice `mcp_confirm_tokens_expires_at_idx (expires_at)`.
 
 ## FIRE settings (JSONB in installation.fire_settings)
 ```json

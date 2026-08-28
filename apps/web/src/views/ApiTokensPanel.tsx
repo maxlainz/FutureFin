@@ -2,11 +2,13 @@
  * Ajustes → MCP: tokens de API (Bearer) para el servidor MCP embebido (`/mcp`).
  *
  * Panel autoservicio (self-fetch al montar, patrón HistorySettingsPanel): lista los tokens
- * del PROPIO usuario, crea nuevos (modal con label + caducidad) y los revoca. El secreto
- * completo solo existe en la respuesta del POST — se muestra UNA vez con botón de copiar
+ * del PROPIO usuario, crea nuevos (modal con label + caducidad + permisos) y los revoca. El
+ * secreto completo solo existe en la respuesta del POST — se muestra UNA vez con botón de copiar
  * y no vuelve a ser recuperable. Cualquier miembro (viewer incluido) puede crear los
  * suyos: el token hereda su identidad y rol vivos en cada uso — lectura siempre, escritura
- * solo si el rol escribe y `mcp_write_enabled` está activado (Ajustes → MCP).
+ * solo si el rol escribe, el token es `read_write` y `mcp_write_enabled` está activado
+ * (Ajustes → MCP). El **scope** es la única de las tres puertas que se elige aquí, y solo resta:
+ * un token `read_write` de un `viewer` sigue sin poder escribir.
  */
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
@@ -23,6 +25,24 @@ const EXPIRY_OPTIONS: { value: string; label: string }[] = [
   { value: "365", label: "1 año" },
 ];
 
+/** Opciones de permisos del modal de creación. */
+const SCOPE_OPTIONS: { value: "read_write" | "read_only"; label: string }[] = [
+  { value: "read_write", label: "Lectura y escritura" },
+  { value: "read_only", label: "Solo lectura" },
+];
+
+/** Etiqueta legible del scope de un token; un valor desconocido se devuelve tal cual. */
+function scopeLabel(scope: string): string {
+  switch (scope) {
+    case "read_write":
+      return "Lectura y escritura";
+    case "read_only":
+      return "Solo lectura";
+    default:
+      return scope;
+  }
+}
+
 export function ApiTokensPanel() {
   const [tokens, setTokens] = useState<ApiTokenApi[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,6 +51,7 @@ export function ApiTokensPanel() {
   const [createOpen, setCreateOpen] = useState(false);
   const [labelDraft, setLabelDraft] = useState("");
   const [expiryDraft, setExpiryDraft] = useState("");
+  const [scopeDraft, setScopeDraft] = useState<"read_write" | "read_only">("read_write");
   const [createBusy, setCreateBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   /** Secreto recién creado — visible solo hasta cerrar el aviso. */
@@ -59,6 +80,7 @@ export function ApiTokensPanel() {
   const openCreate = () => {
     setLabelDraft("");
     setExpiryDraft("");
+    setScopeDraft("read_write");
     setCreateError(null);
     setCreateOpen(true);
   };
@@ -68,8 +90,9 @@ export function ApiTokensPanel() {
     setCreateBusy(true);
     setCreateError(null);
     try {
-      const body: { label: string; expires_in_days?: number } = {
+      const body: { label: string; expires_in_days?: number; scope: "read_write" | "read_only" } = {
         label: labelDraft.trim(),
+        scope: scopeDraft,
       };
       if (expiryDraft !== "") body.expires_in_days = Number(expiryDraft);
       const created = await apiPost<CreateApiTokenResponseApi>("/v1/api-tokens", body);
@@ -166,6 +189,7 @@ export function ApiTokensPanel() {
               <tr>
                 <th>Nombre</th>
                 <th>Token</th>
+                <th>Permisos</th>
                 <th>Último uso</th>
                 <th>Vigencia</th>
                 <th className="asset-actions-cell">
@@ -180,6 +204,7 @@ export function ApiTokensPanel() {
                   <td>
                     <code>{t.token_prefix}…</code>
                   </td>
+                  <td>{scopeLabel(t.scope)}</td>
                   <td>{lastUsedLabel(t.last_used_at)}</td>
                   <td>{tokenExpiryLabel(t.expires_at, t.revoked_at)}</td>
                   <td className="asset-actions-cell">
@@ -226,6 +251,23 @@ export function ApiTokensPanel() {
               ))}
             </select>
           </label>
+          <label className="field">
+            <span>Permisos</span>
+            <select
+              value={scopeDraft}
+              onChange={(e) => setScopeDraft(e.target.value as "read_write" | "read_only")}
+            >
+              {SCOPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="muted tight">
+            Solo lectura: el cliente podrá consultar tus datos pero no crear, editar ni
+            borrar nada.
+          </p>
           <ModalFormError message={createError} />
           <button type="submit" className="btn primary" disabled={createBusy}>
             Crear token

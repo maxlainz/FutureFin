@@ -169,7 +169,7 @@ state) plus one point per simulated month, so 841 points for the 840-month
 `horizon_basis` is one of `lifespan_90 | fallback_no_demographics |
 months_override`.
 
-**`?months=N`** (12–840, clamped): bypasses the cache entirely (`q.months.is_none()`
+**`?months=N`** (12–840; fuera de rango **rechaza** con 400 `months_out_of_range` desde 4.4.0 — antes clampaba en silencio): bypasses the cache entirely (`q.months.is_none()`
 gate in `get_projection_series`) — use it to force a true compute measurement.
 
 **view=mine vs household diff**: use `projection-diff.sh "" "view=mine"` (below), or
@@ -380,7 +380,7 @@ trusting:
 
 - Route paths / new endpoints: `grep -n 'route(' apps/api/src/routes/mod.rs`
 - Cache TTL + key shape: `grep -n 'PROJECTION_CACHE_TTL\|pub struct ProjectionCacheKey' -A6 apps/api/src/state.rs`
-- Density pattern + months clamp + cache bypass: `grep -n 'density_month_indices\|clamp(12, 840)\|q.months.is_none' apps/api/src/handlers/projection.rs`
+- Density pattern + months clamp + cache bypass: `grep -n 'density_month_indices\|validate_months_override\|q.months.is_none' apps/api/src/handlers/projection.rs`
 - horizon_basis values: `grep -n '"months_override"\|lifespan_90\|fallback_no_demographics' apps/api/src/handlers/projection.rs`
 - Cache log messages grepped in §1: `grep -rn '"projection cache\|warm-up' apps/api/src/handlers/projection.rs apps/api/src/state.rs`
 - gzip layer: `grep -n 'CompressionLayer' apps/api/src/main.rs`
