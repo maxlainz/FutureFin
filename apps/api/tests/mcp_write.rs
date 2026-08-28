@@ -1997,3 +1997,522 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
         .unwrap()
         .contains("mcp_write_disabled"));
 }
+
+// ---------------------------------------------------------------------------
+// Fase 0 del plan de mejora del MCP (issue #81) — la red que faltaba alrededor
+// del gate de escritura.
+//
+// Hasta aquí, la invariante «31 tools de escritura == 31 llamadas a
+// `require_mcp_write`» solo vivía en un `grep` dentro de un `.md`
+// (`futurefin-mcp-parity` §5). Una tool nueva que se olvidara del gate pasaba
+// TODA la CI en verde, y con ella un `viewer` podía escribir — o se podía
+// escribir con el kill-switch `mcp_write_enabled` apagado. Los dos tests que
+// siguen convierten ese grep en código ejecutable, por dos vías
+// deliberadamente distintas:
+//
+//   1. `every_write_tool_rejects_a_viewer_and_the_disabled_toggle` — de
+//      comportamiento, guiado por `tools/list`: prueba lo que un cliente MCP
+//      vería de verdad.
+//   2. `every_write_tool_in_the_source_calls_require_mcp_write` — estructural,
+//      sobre el fuente, sin base de datos: es el único que detecta el olvido en
+//      una tool futura ANTES de que alguien escriba su fixture.
+// ---------------------------------------------------------------------------
+
+/// Resultado de una llamada MCP, clasificado. Un envelope JSON-RPC puede volver de tres
+/// maneras y las tres importan aquí: éxito (`result` sin `isError`), tool-error (`result`
+/// con `isError: true` y el cuerpo de error de la API dentro del content de texto) y error
+/// de protocolo (`error` en la raíz — es lo que devuelve rmcp cuando los argumentos ni
+/// siquiera deserializan contra el `inputSchema`).
+#[derive(Debug)]
+enum Outcome {
+    Success,
+    ToolError { code: String, message: String },
+    RpcError,
+}
+
+fn classify(envelope: &serde_json::Value) -> Outcome {
+    if envelope.get("error").is_some() {
+        return Outcome::RpcError;
+    }
+    let result = &envelope["result"];
+    if result["isError"] != true {
+        return Outcome::Success;
+    }
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(body) => Outcome::ToolError {
+            code: body["error"].as_str().unwrap_or("").to_string(),
+            message: body["message"].as_str().unwrap_or("").to_string(),
+        },
+        // Un tool-error que no es JSON de la API (p.ej. un error de deserialización de rmcp
+        // servido como content de texto) cuenta como rechazo de validación, no como éxito.
+        Err(_) => Outcome::ToolError {
+            code: String::new(),
+            message: text.to_string(),
+        },
+    }
+}
+
+/// Argumentos **sintácticamente válidos** para cada tool de escritura: UUIDs con forma de
+/// UUID (que no existen: da igual, el gate corre ANTES de que la core busque la fila),
+/// fechas ISO, importes decimales. Su único trabajo es atravesar el parseo de parámetros
+/// para que la llamada llegue de verdad a `require_mcp_write`.
+///
+/// **Por qué existe esta tabla** (la trampa que haría falso el test sin ella). Dos medidas
+/// tomadas el 2026-08-28 sobre `src/mcp/server.rs`, y las dos apuntan al mismo sitio:
+///
+///   * **Estructural**: en **27 de las 31** tools de escritura el parseo de parámetros corre
+///     ANTES del gate — el patrón `let run = || { … parse … }; match run() { Err(e) =>
+///     return to_tool_outcome(e) }`. Sólo cuatro (`capture_snapshot`,
+///     `materialize_recurring`, `reconcile_transfers`, `unreconcile_transfer`) llaman a
+///     `require_mcp_write` en la primera línea del bloque asíncrono.
+///   * **Observable**: **27 de las 31** declaran algún parámetro `required`, así que con
+///     `{}` mueren en la deserialización de rmcp y **nunca ejecutan el gate**. Con
+///     argumentos vacíos sólo lo alcanzan `capture_snapshot`, `materialize_recurring`,
+///     `reconcile_transfers` y `update_fire_settings`.
+///
+/// Es decir: un test que barriera las 31 con `{}` y aceptara «cualquier error» daría verde
+/// aunque el gate no existiera en 27 de ellas. De ahí la tabla.
+///
+/// Decisión (issue #81, punto 1): se implementan **las dos vías**, y la tabla es
+/// **exhaustiva** — una tool de escritura nueva sin fila aquí hace fallar el test con
+/// instrucciones. La vía laxa (aceptar validación) queda sólo como red de la fase 1, que
+/// prueba una propiedad más débil pero de mantenimiento cero: *ninguna* escritura con
+/// argumentos vacíos puede terminar en éxito para un viewer.
+fn write_probe(name: &str) -> Option<serde_json::Value> {
+    // UUID v4 sintácticamente válido que no existe en ninguna instalación.
+    const ID: &str = "00000000-0000-4000-8000-000000000001";
+    Some(match name {
+        // Gate primero: estas cuatro ya llegan al gate con `{}`.
+        "capture_snapshot" => json!({}),
+        "materialize_recurring" => json!({}),
+        "reconcile_transfers" => json!({}),
+        "unreconcile_transfer" => json!({"transaction_id": ID}),
+        // Parseo primero: necesitan argumentos con forma válida.
+        "create_transaction" => {
+            json!({"op_date": "2026-07-01", "concept": "probe", "amount": "-1.00", "kind": "expense"})
+        }
+        "update_transaction" => json!({"id": ID}),
+        "update_transactions" => json!({"ids": [ID], "notes": "probe"}),
+        "delete_transaction" => json!({"id": ID}),
+        "create_planning_flow" => {
+            json!({"title": "probe", "category_id": ID, "expected_amount": "1.00"})
+        }
+        "update_planning_flow" => json!({"id": ID}),
+        "delete_planning_flow" => json!({"id": ID}),
+        "create_category" => json!({"scope": "expense", "name": "probe"}),
+        "create_categorization_rule" => json!({"pattern": "PROBE", "assign_kind": "expense"}),
+        "update_categorization_rule" => json!({"rule_id": ID}),
+        "delete_categorization_rule" => json!({"rule_id": ID}),
+        "apply_categorization_rule" => json!({"rule_id": ID}),
+        "create_asset" => json!({"name": "probe", "category_id": ID, "current_value": "1.00"}),
+        "update_asset" => json!({"asset_id": ID}),
+        "update_asset_value" => json!({"asset_id": ID, "current_value": "1.00"}),
+        "delete_asset" => json!({"id": ID}),
+        "create_liability" => {
+            json!({"label": "probe", "category_id": ID, "expense_category_id": ID, "principal": "1.00"})
+        }
+        "update_liability" => json!({"liability_id": ID}),
+        "delete_liability" => json!({"id": ID}),
+        "create_budget_entry" => json!({"category_id": ID, "amount": "1.00"}),
+        "update_budget_entry" => json!({"id": ID}),
+        "delete_budget_entry" => json!({"id": ID}),
+        "update_allocation_rule" => json!({"rule_id": ID, "enabled": true}),
+        "delete_recurring_rule" => json!({"id": ID}),
+        "delete_snapshot" => json!({"id": ID}),
+        "delete_import" => json!({"id": ID}),
+        "update_fire_settings" => json!({"swr_pct": "3.5"}),
+        _ => return None,
+    })
+}
+
+/// Nombres de las tools de escritura tal y como las publica el propio servidor
+/// (`annotations.readOnlyHint == false`). Guiar el test por el catálogo y no por una lista
+/// escrita a mano es lo que hace que una tool nueva entre sola en la batería.
+fn write_tool_names(catalog: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = catalog["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools array: {catalog}"))
+        .iter()
+        .filter(|t| t["annotations"]["readOnlyHint"] == false)
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Las dos puertas de escritura, sobre **todas** las tools de escritura del catálogo:
+/// rol (`viewer` → `forbidden`) y kill-switch (`mcp_write_enabled = false` →
+/// `mcp_write_disabled: …`).
+///
+/// Fase 1 (laxa, mantenimiento cero): con argumentos vacíos, ninguna escritura puede
+/// terminar en éxito para un viewer. Fase 2 (con dientes): con la tabla `write_probe` de
+/// argumentos válidos, el error tiene que ser EXACTAMENTE el del gate — no vale un error de
+/// validación disfrazado.
+#[tokio::test]
+async fn every_write_tool_rejects_a_viewer_and_the_disabled_toggle() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let viewer = app
+        .register_and_approve_member(&owner, "vera", "viewer")
+        .await;
+    let viewer_token = create_token_for(&app, &viewer.cookie).await;
+    let owner_token = create_token(&app, &owner).await;
+
+    let catalog = mcp_post(
+        &app,
+        &owner_token,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {"_meta": request_meta()}
+        }),
+    )
+    .await;
+    let writes = write_tool_names(&catalog);
+    assert_eq!(
+        writes.len(),
+        31,
+        "contador de futurefin-mcp-parity §5: 31 tools de escritura. Si has añadido o \
+         retirado una, actualiza el contador AQUÍ, en la skill y en CLAUDE.md a la vez: {writes:?}"
+    );
+
+    // --- Fase 1: barrido laxo con argumentos vacíos -------------------------
+    // Prueba débil pero universal: da igual lo que devuelva (forbidden, validación, error de
+    // protocolo), lo que NO puede hacer es funcionar.
+    for name in &writes {
+        let envelope = mcp_post(&app, &viewer_token, tool_call(name, json!({}))).await;
+        match classify(&envelope) {
+            Outcome::Success => panic!(
+                "la tool de escritura {name} ha tenido ÉXITO con un token de rol `viewer` y \
+                 argumentos vacíos: {envelope}"
+            ),
+            Outcome::ToolError { .. } | Outcome::RpcError => {}
+        }
+    }
+
+    // --- Fase 2: barrido con dientes ----------------------------------------
+    let missing: Vec<&String> = writes.iter().filter(|n| write_probe(n).is_none()).collect();
+    assert!(
+        missing.is_empty(),
+        "tools de escritura sin fila en `write_probe`: {missing:?}. Añade unos argumentos \
+         sintácticamente válidos (UUIDs inexistentes valen) para que el test pueda comprobar \
+         que la llamada llega al gate en vez de morir en el parseo."
+    );
+
+    for name in &writes {
+        let args = write_probe(name).unwrap();
+        let envelope = mcp_post(&app, &viewer_token, tool_call(name, args.clone())).await;
+        match classify(&envelope) {
+            Outcome::ToolError { code, .. } if code == "forbidden" => {}
+            other => panic!(
+                "la tool {name} debe responder `forbidden` a un viewer y respondió {other:?}. \
+                 Si es un error de validación, el problema es la fila de `write_probe`; si es \
+                 un éxito, es que a la tool le falta `require_mcp_write`. Envelope: {envelope}"
+            ),
+        }
+    }
+
+    // Toggle apagado, con un token que SÍ podría escribir (owner).
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({"mcp_write_enabled": false}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    for name in &writes {
+        let args = write_probe(name).unwrap();
+        let envelope = mcp_post(&app, &owner_token, tool_call(name, args)).await;
+        match classify(&envelope) {
+            Outcome::ToolError { code, message }
+                if code == "bad_request" && message.starts_with("mcp_write_disabled") => {}
+            other => panic!(
+                "la tool {name} debe responder `mcp_write_disabled` con el kill-switch apagado \
+                 y respondió {other:?}. Envelope: {envelope}"
+            ),
+        }
+    }
+
+    // Y con el toggle apagado nada se ha escrito: el hogar sigue vacío de datos de prueba.
+    assert_eq!(app.count_rows("transactions").await, 0);
+    assert_eq!(app.count_rows("assets").await, 0);
+    assert_eq!(app.count_rows("liabilities").await, 0);
+    assert_eq!(app.count_rows("history_snapshots").await, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Aserción ESTRUCTURAL — sin base de datos.
+// ---------------------------------------------------------------------------
+
+/// Quita las líneas de comentario del fuente. **No es cosmética**: el comentario de sección
+/// que separa las lecturas de las escrituras cita literalmente `require_mcp_write`, y vive en
+/// el mismo trozo que la ÚLTIMA tool de lectura — sin esto, `list_snapshots` parecería llamar
+/// al gate. La prosa de este repo habla de su propio código; el parser tiene que ignorarla.
+fn strip_line_comments(src: &str) -> String {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Un bloque `#[tool(…)] async fn …` del fuente del servidor MCP.
+struct ToolBlock {
+    name: String,
+    read_only: bool,
+    body: String,
+}
+
+/// Trocea `src/mcp/server.rs` por `#[tool(`. Es un parser deliberadamente crudo: no
+/// entiende Rust, sólo la forma que el fichero tiene hoy. A cambio es exacto para lo único
+/// que le pedimos —¿aparece `require_mcp_write` dentro del cuerpo de esta tool?— y no
+/// necesita ni base de datos ni arrancar el router.
+fn tool_blocks() -> Vec<ToolBlock> {
+    const SRC: &str = include_str!("../src/mcp/server.rs");
+    let mut out = Vec::new();
+    for chunk in SRC.split("#[tool(").skip(1) {
+        let split_at = chunk
+            .find("async fn ")
+            .unwrap_or_else(|| panic!("bloque #[tool( sin `async fn`:\n{}", &chunk[..200.min(chunk.len())]));
+        let (attr, body) = chunk.split_at(split_at);
+        let name = attr
+            .split_once("name = \"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(n, _)| n.to_string())
+            .unwrap_or_else(|| panic!("bloque #[tool( sin `name = \"…\"`:\n{attr}"));
+        let read_only = match (
+            attr.contains("read_only_hint = true"),
+            attr.contains("read_only_hint = false"),
+        ) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => panic!("la tool {name} debe declarar `read_only_hint` exactamente una vez"),
+        };
+        out.push(ToolBlock {
+            name,
+            read_only,
+            body: strip_line_comments(body),
+        });
+    }
+    out
+}
+
+/// **La aserción que no depende de la base de datos ni de que alguien escriba un fixture**:
+/// toda tool declarada de escritura (`read_only_hint = false`) contiene una llamada a
+/// `require_mcp_write` en su cuerpo, y esa llamada se identifica con SU PROPIO nombre.
+///
+/// Es cruda —lee el fuente como texto— pero es exacta, cuesta milisegundos y es lo único
+/// que detecta el olvido en una tool futura: el test de comportamiento sólo recorre lo que
+/// el catálogo publica y sólo tiene dientes donde alguien haya escrito su fila de
+/// `write_probe`; éste no necesita ninguna de las dos cosas.
+///
+/// Fija además los contadores de `futurefin-mcp-parity` §5, para que cualquier cambio del
+/// catálogo tenga que pasar por aquí y por la skill a la vez.
+#[test]
+fn every_write_tool_in_the_source_calls_require_mcp_write() {
+    const SRC: &str = include_str!("../src/mcp/server.rs");
+    let blocks = tool_blocks();
+
+    // Contadores de futurefin-mcp-parity §5 (52 / 21 / 31 / 31, a 2026-08-27).
+    let read_only = blocks.iter().filter(|b| b.read_only).count();
+    let writes = blocks.iter().filter(|b| !b.read_only).count();
+    assert_eq!(blocks.len(), 52, "total de tools (§5 de futurefin-mcp-parity)");
+    assert_eq!(read_only, 21, "tools de lectura + simulate (§5)");
+    assert_eq!(writes, 31, "tools de escritura (§5)");
+    assert_eq!(
+        read_only + writes,
+        blocks.len(),
+        "toda tool es de lectura o de escritura"
+    );
+    assert_eq!(
+        SRC.matches("require_mcp_write(&self.state.pool").count(),
+        31,
+        "el nº de llamadas al gate debe ser EXACTAMENTE el nº de escrituras: una escritura \
+         sin gate es un fallo de seguridad (viewer escribiendo, o escritura con el \
+         kill-switch apagado); una llamada de más es una lectura que ya no lo es"
+    );
+    assert_eq!(
+        SRC.matches("p.confirm.unwrap_or(false)").count(),
+        11,
+        "tools con preview/confirm (§5). Toda destructiva nueva debería sumar aquí"
+    );
+
+    for block in &blocks {
+        if block.read_only {
+            assert!(
+                !block.body.contains("require_mcp_write"),
+                "la tool {} se declara `read_only_hint = true` pero llama al gate de \
+                 escritura: una de las dos cosas es mentira",
+                block.name
+            );
+            continue;
+        }
+        let at = block.body.find("require_mcp_write").unwrap_or_else(|| {
+            panic!(
+                "la tool {} declara `read_only_hint = false` y NO llama a `require_mcp_write`: \
+                 un `viewer` puede ejecutarla, y el kill-switch `mcp_write_enabled` no la \
+                 corta. Añade el gate como primera línea del bloque asíncrono (patrón de \
+                 `capture_snapshot`).",
+                block.name
+            )
+        });
+        // El tercer argumento del gate es el nombre de la tool y alimenta la traza de
+        // auditoría: copiar-pegar el bloque de otra tool y olvidarse de cambiarlo dejaría el
+        // log señalando a la tool equivocada, que es peor que no tener log.
+        let call = &block.body[at..];
+        // Hasta el `;` de la sentencia: acota la búsqueda a ESTA llamada aunque venga
+        // envuelta en varias líneas, y evita que el nombre casara por accidente con una
+        // aparición posterior en el mismo cuerpo.
+        let end = call.find(';').unwrap_or(call.len());
+        assert!(
+            call[..end].contains(&format!("\"{}\"", block.name)),
+            "la llamada a require_mcp_write de la tool {} no se identifica con su propio \
+             nombre (la traza de auditoría apuntaría a otra tool): {}",
+            block.name,
+            &call[..end.min(200)]
+        );
+    }
+}
+
+/// `delete_liability` (Fase 0, issue #81): hasta ahora la tool sólo existía como cadena
+/// dentro del vector del catálogo congelado — **ningún test la invocaba**. Es destructiva,
+/// tiene preview/confirm, y su `effects` **no tiene la misma forma** que el de
+/// `delete_asset`: aquí `transactions_unlinked` cuelga directamente de `effects` (es un
+/// escalar), mientras que en `delete_asset` vive dentro de `effects.unlinked` junto a las
+/// reglas de reparto borradas. Un cliente que asumiera la forma del vecino leería `null` y
+/// le diría al usuario que no se desvincula nada.
+///
+/// Incluye la invariante que de verdad importa al confirmar: el movimiento vinculado
+/// **sobrevive** desvinculado (SET NULL), no se borra con el pasivo.
+#[tokio::test]
+async fn delete_liability_previews_effects_then_deletes() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat_liab = app.create_category(&owner, "liability", "Préstamos").await;
+    let cat_exp = app.create_category(&owner, "expense", "Cuotas").await;
+
+    let liab = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({
+                "category_id": cat_liab,
+                "expense_category_id": cat_exp,
+                "label": "Coche",
+                "principal": "9000",
+                "payment_amount": "300",
+                "payment_frequency": "monthly",
+                "payment_end_date": "2090-01-01",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(liab.status, http::StatusCode::CREATED, "{liab:?}");
+    let liab_id = liab.json()["id"].as_str().unwrap().to_string();
+
+    // Dos cuotas pagadas y vinculadas al pasivo: el preview debe contarlas.
+    for day in ["2026-06-05", "2026-07-05"] {
+        let t = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({"op_date": day, "concept": "cuota coche", "amount": "-300.00",
+                       "kind": "expense", "category_id": cat_exp, "linked_liability_id": liab_id}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(t.status, http::StatusCode::CREATED, "{t:?}");
+    }
+
+    // Preview: NO borra y describe los efectos con su forma propia.
+    let envelope = mcp_post(&app, &token, tool_call("delete_liability", json!({"id": liab_id}))).await;
+    let preview = tool_json(&envelope);
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert_eq!(preview["confirm_required"], true, "{preview}");
+    assert_eq!(preview["action"], "delete_liability", "{preview}");
+    assert_eq!(preview["effects"]["liability"]["label"], "Coche", "{preview}");
+    assert_eq!(preview["effects"]["liability"]["id"], liab_id, "{preview}");
+    // `transactions_unlinked` cuelga de `effects`, NO de `effects.unlinked` (delete_asset).
+    assert_eq!(preview["effects"]["transactions_unlinked"], 2, "{preview}");
+    assert!(
+        preview["effects"]["unlinked"].is_null(),
+        "la forma de delete_asset (effects.unlinked) no debe aparecer aquí: {preview}"
+    );
+    assert_eq!(app.count_rows("liabilities").await, 1, "el preview no borra");
+    assert_eq!(app.count_rows("transactions").await, 2);
+
+    // Confirm: borra el pasivo; los movimientos sobreviven desvinculados.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_liability", json!({"id": liab_id, "confirm": true})),
+    )
+    .await;
+    let done = tool_json(&envelope);
+    assert_eq!(done["deleted"], true, "{done}");
+    assert_eq!(done["id"], liab_id, "{done}");
+    assert_eq!(app.count_rows("liabilities").await, 0);
+    assert_eq!(app.count_rows("transactions").await, 2, "los movimientos sobreviven");
+    let unlinked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM transactions WHERE linked_liability_id IS NULL",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(unlinked, 2, "desvinculadas, no borradas");
+
+    // Y el pasivo ya no está: repetir el borrado es not_found, no un segundo éxito.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_liability", json!({"id": liab_id, "confirm": true})),
+    )
+    .await;
+    tool_error(&envelope, "not_found");
+}
+
+/// `delete_planning_flow` **sin `confirm`** (Fase 0, issue #81): la única llamada que existía
+/// a esta tool iba directa con `confirm: true`, así que el camino del preview no se ejecutaba
+/// nunca — podía devolver cualquier cosa, o borrar, sin que ningún test se enterara.
+#[tokio::test]
+async fn delete_planning_flow_preview_does_not_delete() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat_exp = app.create_category(&owner, "expense", "Viajes").await;
+
+    let flow = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_planning_flow",
+                json!({"title": "Viaje a Oslo", "category_id": cat_exp,
+                       "expected_amount": "600", "due_date": "2090-06-01"}),
+            ),
+        )
+        .await,
+    );
+    let flow_id = flow["id"].as_str().unwrap().to_string();
+
+    let preview = tool_json(
+        &mcp_post(&app, &token, tool_call("delete_planning_flow", json!({"id": flow_id}))).await,
+    );
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert_eq!(preview["confirm_required"], true, "{preview}");
+    assert_eq!(preview["action"], "delete_planning_flow", "{preview}");
+    // El preview devuelve el flujo ENTERO (la respuesta del listado), no un resumen: es lo que
+    // permite a un cliente enseñar título e importe antes de pedir confirmación.
+    assert_eq!(preview["effects"]["flow"]["title"], "Viaje a Oslo", "{preview}");
+    assert_eq!(preview["effects"]["flow"]["id"], flow_id, "{preview}");
+    assert_eq!(app.count_rows("planning_flows").await, 1, "el preview no borra");
+
+    // Repetir el preview es inocuo (no es un borrado a medias).
+    let again = tool_json(
+        &mcp_post(&app, &token, tool_call("delete_planning_flow", json!({"id": flow_id}))).await,
+    );
+    assert_eq!(again, preview, "el preview es estable entre llamadas");
+    assert_eq!(app.count_rows("planning_flows").await, 1);
+}

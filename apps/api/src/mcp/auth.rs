@@ -27,10 +27,10 @@ use http::StatusCode;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Qué credencial autenticó el request (para telemetría/futuras auditorías; las tools
-/// solo consumen `user_id`/`installation_id`/`role`).
+/// Qué credencial autenticó el request. Lo consume la traza de `require_mcp_write` (y,
+/// en su momento, la tabla de auditoría); las tools solo miran
+/// `user_id`/`installation_id`/`role`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum McpCredential {
     ApiToken { token_id: Uuid },
     OAuth { grant_id: Uuid, token_id: Uuid },
@@ -43,7 +43,6 @@ pub struct McpIdentity {
     pub user_id: Uuid,
     pub installation_id: Uuid,
     pub role: MembershipRole,
-    #[allow(dead_code)]
     pub credential: McpCredential,
 }
 
@@ -128,10 +127,34 @@ async fn authenticate(
 /// `sanitised_message` lo fija). Toggle apagado → `BadRequest` con prefijo `mcp_write_disabled:`
 /// — BadRequest es la única variante que propaga el mensaje al wire, y el LLM necesita leer el
 /// MOTIVO para poder explicárselo al usuario en vez de reintentar a ciegas.
+///
+/// `tool` es el nombre de la tool que llama. Es OBLIGATORIO y no decorativo: este gate es el
+/// único punto por el que pasan las 31 escrituras, así que es donde vive la traza — y donde
+/// vivirá la tabla de auditoría. Sin él, un borrado masivo por MCP no deja absolutamente
+/// ningún rastro de qué tool lo hizo: `delete_transaction` es hard delete y el único registro
+/// existente (`api_tokens.last_used_at`) tiene throttle de 60 s.
+///
+/// La traza sale a `info` a propósito: es el nivel por defecto de la imagen publicada
+/// (`futurefin_api=info`), así que un operador la ve sin reconfigurar nada. Emite ANTES de
+/// resolver el gate, para que quede constancia también de los intentos rechazados.
 pub(crate) async fn require_mcp_write(
     pool: &sqlx::PgPool,
     id: &McpIdentity,
+    tool: &str,
 ) -> Result<(), ApiError> {
+    let credential = match id.credential {
+        McpCredential::ApiToken { token_id } => ("api_token", token_id),
+        McpCredential::OAuth { token_id, .. } => ("oauth", token_id),
+    };
+    tracing::info!(
+        tool,
+        user_id = %id.user_id,
+        installation_id = %id.installation_id,
+        role = id.role.as_str(),
+        credential_kind = credential.0,
+        credential_id = %credential.1,
+        "mcp write attempt"
+    );
     if !crate::handlers::membership::role_can_write(id.role.as_str()) {
         return Err(ApiError::Forbidden);
     }
