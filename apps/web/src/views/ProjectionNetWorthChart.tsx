@@ -385,8 +385,9 @@ export function ProjectionNetWorthChart({
       buildStructuralLegendItems({
         hasFire: hasFireTargetSeries,
         hasHistory: historyStartMonth < 0,
+        historyIsAssetsOnly: merged.pastIsAssetsOnly,
       }),
-    [hasFireTargetSeries, historyStartMonth],
+    [hasFireTargetSeries, historyStartMonth, merged.pastIsAssetsOnly],
   );
 
   // Activos por peak DESC para la leyenda, conservando el color del orden de
@@ -834,9 +835,11 @@ export function ProjectionNetWorthChart({
     if (historyStartMonth >= 0 || visibleMonthStart >= 0) return null;
     const valid = (src: HistoryCashflowApi | null): CashflowFineApi | null => {
       const f = src?.fine;
-      return f && f.grid.length >= 2 && f.net_worth.length === f.grid.length
-        ? f
-        : null;
+      // `net_worth` puede ser null legítimamente (sin el pasivo del scope fotografiado entero):
+      // en ese caso la curva se dibuja desde `asset_series`, así que null NO invalida el fine.
+      if (!f || f.grid.length < 2) return null;
+      if (f.net_worth !== null && f.net_worth.length !== f.grid.length) return null;
+      return f;
     };
     const weekly = valid(cashflow);
     const daily = valid(cashflowDaily);
@@ -847,13 +850,23 @@ export function ProjectionNetWorthChart({
         ? installationInflationPct
         : 0;
     const visEnd = Math.min(0, visibleMonthEnd);
+    // La curva fina tiene que medir LO MISMO que la mensual que continúa. Cuando el pasado son
+    // activos (`pastIsAssetsOnly`) el servidor manda `fine.net_worth: null` — precisamente porque
+    // ahí no hay patrimonio neto — y la curva se construye con `Σ asset_series`, que es la parte
+    // de activos de esa misma cifra (el backend la arma desde `acc.asset_values`) evaluada en el
+    // mismo grid fino. Con el pasivo fotografiado entero, `net_worth` existe y es lo correcto.
+    const valueAt = (f: CashflowFineApi, i: number): number => {
+      if (!merged.pastIsAssetsOnly) return f.net_worth?.[i] ?? 0;
+      let sum = 0;
+      for (const as of f.asset_series) sum += as.values[i] ?? 0;
+      return sum;
+    };
     const pointsOf = (f: CashflowFineApi, from: number, to: number): string[] => {
       const parts: string[] = [];
       for (let i = 0; i < f.grid.length; i++) {
         const g = f.grid[i]!;
         if (g.month_fraction < from || g.month_fraction > to) continue;
-        const v =
-          (f.net_worth[i] ?? 0) * deflationFactorAt(g.month_fraction, effectivePct);
+        const v = valueAt(f, i) * deflationFactorAt(g.month_fraction, effectivePct);
         parts.push(`${xScale(g.month_fraction)},${yScale(v)}`);
       }
       return parts;
@@ -1873,8 +1886,13 @@ export function ProjectionNetWorthChart({
             {pts[hover]!.month_index < 0 ? " · histórico" : ""}
           </div>
           <div>
-            Patrimonio neto —{" "}
-            {formatCurrencyOrDashNumber(nw[hover], currencyIso)}
+            {/* En el pasado sin pasivo fotografiado, la curva son ACTIVOS: llamarla «patrimonio
+                neto» aquí sería repetir en el tooltip el número que el servidor ya se niega a
+                publicar con ese nombre. El futuro sale de la proyección y sí es neto. */}
+            {merged.pastIsAssetsOnly && pts[hover]!.month_index < 0
+              ? "Activos"
+              : "Patrimonio neto"}{" "}
+            — {formatCurrencyOrDashNumber(nw[hover], currencyIso)}
           </div>
           {pts[hover]!.month_index >= 0 ? (
             <div>

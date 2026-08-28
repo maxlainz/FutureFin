@@ -829,15 +829,42 @@ pub(crate) async fn delete_snapshot_core(
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HistorySeriesPoint {
     pub month_index: i32,
-    #[serde(serialize_with = "serialize_decimal_as_f64")]
-    #[schema(value_type = f64)]
-    pub net_worth: Decimal,
+    /// Patrimonio neto histórico (`assets_total − liabilities_total`), **o `null`**.
+    ///
+    /// Es `null` en TODA la serie cuando `liabilities_snapshotted == false`: sin el pasivo
+    /// fotografiado entero, `liabilities_total` vale 0 (o solo parte de la deuda) y la resta no
+    /// sería un patrimonio neto, sino el total de activos con nombre de patrimonio neto. Se
+    /// publicaba como número y coincidía exactamente con `assets_total`, así que un cliente
+    /// obtenía dos patrimonios distintos —éste y el de `GET /v1/summary`— sin nada que le dijera
+    /// cuál mirar. Con `null` la cifra equivocada deja de ser dable: quien la quiera tiene que
+    /// pasar por el flag. `assets_total` y `liabilities_total` se publican igual que siempre.
+    ///
+    /// **Nunca se omite**: viaja como `null` explícito para que «no lo sé» no se confunda con
+    /// «campo ausente en una versión vieja».
+    // `required` explícito: `Option<T>` saldría de `required` por defecto y el contrato diría
+    // «puede faltar», que es justo lo que este campo NO hace. Es nullable **y** obligatorio.
+    #[serde(serialize_with = "serialize_opt_decimal_as_f64")]
+    #[schema(value_type = Option<f64>, required = true)]
+    pub net_worth: Option<Decimal>,
     #[serde(serialize_with = "serialize_decimal_as_f64")]
     #[schema(value_type = f64)]
     pub assets_total: Decimal,
     #[serde(serialize_with = "serialize_decimal_as_f64")]
     #[schema(value_type = f64)]
     pub liabilities_total: Decimal,
+}
+
+/// `Option<Decimal>` → f64 o `null` explícito. Misma excepción chart-only que
+/// `serialize_decimal_as_f64` (D4/I3): solo para arrays de chart, jamás para un KPI escalar.
+/// `serialize_none` emite `null`, no omite el campo — el punto SIEMPRE lleva `net_worth`.
+fn serialize_opt_decimal_as_f64<S: serde::Serializer>(
+    d: &Option<Decimal>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match d {
+        Some(v) => s.serialize_f64(v.to_f64().unwrap_or(0.0)),
+        None => s.serialize_none(),
+    }
 }
 
 /// Serie histórica por asset (`source_item_id`), agregada entre usuarios.
@@ -885,14 +912,19 @@ pub struct HistorySeriesResponse {
     pub asset_series: Vec<HistoryAssetSeries>,
     /// Un marcador por snapshot en scope.
     pub markers: Vec<HistoryMarker>,
-    /// `true` si el scope tiene al menos un snapshot de kind `liability`.
+    /// `true` ⟺ el pasivo del scope está fotografiado **entero** (ver
+    /// `liabilities_fully_snapshotted`): hay al menos un snapshot y **todos** los usuarios que
+    /// aportan serie tienen alguna cabecera de kind `liability`.
     ///
-    /// Con `false`, `points[].liabilities_total` es 0 en toda la serie **por ausencia de datos**,
-    /// no porque no haya deuda: los timelines se agrupan a partir de los snapshots existentes, y un
-    /// kind sin ninguna cabecera no tiene timeline ni fallback a las filas vivas. Sin este flag,
-    /// «no lo he fotografiado» y «no debo nada» son indistinguibles, y el `net_worth` histórico de
-    /// alguien con hipoteca se lee como si no la tuviera (auditoría MCP §2). La deuda viva está en
-    /// `GET /v1/liabilities` y en `GET /v1/summary`.
+    /// Con `false`, `points[].liabilities_total` es 0 (o solo parte de la deuda) **por ausencia de
+    /// datos**, no porque no haya deuda: los timelines se agrupan a partir de los snapshots
+    /// existentes, y un kind sin cabecera no tiene timeline ni fallback a las filas vivas. Sin este
+    /// flag, «no lo he fotografiado» y «no debo nada» son indistinguibles, y el `net_worth`
+    /// histórico de alguien con hipoteca se leía como si no la tuviera (auditoría MCP §2).
+    ///
+    /// **Es el interruptor de `points[].net_worth`**: `net_worth == null` ⟺
+    /// `liabilities_snapshotted == false`. Un solo invariante, comprobable de un vistazo. La deuda
+    /// viva está en `GET /v1/liabilities` y en `GET /v1/summary`.
     pub liabilities_snapshotted: bool,
 }
 
@@ -937,6 +969,37 @@ fn loan_terms_of(
         }),
         _ => None,
     }
+}
+
+/// ¿Está el pasivo del scope fotografiado **entero**?
+///
+/// `true` ⟺ hay alguna cabecera en scope **y** todos los usuarios que aportan serie (los que
+/// tienen alguna cabecera, de cualquier kind) tienen además alguna de kind `liability`.
+///
+/// **No es un `any`**, y la diferencia solo se ve en el hogar: con Alice fotografiando su hipoteca
+/// y Bob sin fotografiar la suya, `any` daría `true` y el agregado restaría **media deuda** —
+/// exactamente el error que este flag existe para impedir, pero más difícil de detectar, porque
+/// la cifra ya no coincide con `assets_total` y parece un patrimonio neto de verdad. `all` es el
+/// único predicado bajo el que `assets_total − liabilities_total` es realmente el neto del scope.
+///
+/// Un usuario **sin deuda** no queda condenado a que su hogar no tenga neto histórico: declara la
+/// ausencia capturando un snapshot de pasivo, que escribe la cabecera aunque no haya ni una fila
+/// viva (`capture_snapshots_core` hace el upsert antes de copiar items). Eso es un hecho afirmado
+/// por el usuario, no una ausencia interpretada por el servidor — que es justo la distinción que
+/// el flag defiende.
+///
+/// Scope vacío → `false`: sin snapshots no hay nada fotografiado (y `points` va vacío, así que la
+/// nulabilidad de `net_worth` no llega a observarse).
+fn liabilities_fully_snapshotted(headers: &[SeriesHeaderRow]) -> bool {
+    let mut owners: HashSet<Uuid> = HashSet::new();
+    let mut with_liability: HashSet<Uuid> = HashSet::new();
+    for h in headers {
+        owners.insert(h.owner_user_id);
+        if h.kind == "liability" {
+            with_liability.insert(h.owner_user_id);
+        }
+    }
+    !owners.is_empty() && owners.iter().all(|o| with_liability.contains(o))
 }
 
 /// Días del mes civil de `d` (28–31).
@@ -1325,7 +1388,7 @@ pub(crate) async fn history_series_core(
     // Sobre el scope COMPLETO, no sobre los markers recortados por `window_months`: un snapshot de
     // pasivo anterior a la ventana sigue anclando la interpolación dentro de ella, así que
     // `liabilities_total` sí es significativo. Con `headers` vacío da `false` sin caso especial.
-    let liabilities_snapshotted = scope.headers.iter().any(|h| h.kind == "liability");
+    let liabilities_snapshotted = liabilities_fully_snapshotted(&scope.headers);
 
     // 0 snapshots en scope → 200 con arrays vacíos.
     if scope.headers.is_empty() {
@@ -1406,10 +1469,14 @@ pub(crate) async fn history_series_core(
     let live_asset_names: HashMap<Uuid, &str> =
         scope.live_assets.iter().map(|a| (a.id, a.name.as_str())).collect();
 
+    // `net_worth` existe ⟺ el pasivo está fotografiado entero. Sin eso la resta no es un neto y no
+    // se publica: `assets_total` sigue ahí, y el cliente tiene que decidir a la vista del flag en
+    // vez de leer un número que se parece al patrimonio y no lo es.
     let points: Vec<HistorySeriesPoint> = (0..grid_len)
         .map(|g| HistorySeriesPoint {
             month_index: k_min + g as i32,
-            net_worth: acc.assets_total[g] - acc.liabilities_total[g],
+            net_worth: liabilities_snapshotted
+                .then(|| acc.assets_total[g] - acc.liabilities_total[g]),
             assets_total: acc.assets_total[g],
             liabilities_total: acc.liabilities_total[g],
         })
@@ -1533,7 +1600,15 @@ pub struct CashflowFine {
     pub grid: Vec<CashflowFineGridPoint>,
     pub asset_series: Vec<CashflowFineAssetSeries>,
     /// `Σ assets moldeados − Σ liabilities amortizadas`, evaluado en el MISMO grid fino. f64.
-    pub net_worth: Vec<f64>,
+    ///
+    /// **`null` cuando el pasivo del scope no está fotografiado entero** — mismo invariante que
+    /// `HistorySeriesPoint.net_worth` (4.4.0, issue #82). Sin snapshots de pasivo esto valía
+    /// exactamente `Σ assets` y se seguía llamando `net_worth`: el mismo campo mal nombrado que
+    /// la serie mensual, y aquí PEOR, porque esta respuesta ni siquiera publicaba el flag con el
+    /// que sospechar. Ahora lo publica (`CashflowResponse.liabilities_snapshotted`).
+    /// Viaja como `null` EXPLÍCITO, nunca omitido: para un cliente LLM «ausente» es ambiguo
+    /// (¿no aplica? ¿versión vieja? ¿bug?) y `null` no. Mismo criterio que la serie mensual.
+    pub net_worth: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1546,6 +1621,10 @@ pub struct CashflowResponse {
     pub view: String,
     /// Agregado mensual contiguo `-window_months..=0`, ascendente por `month_index`.
     pub months: Vec<CashflowMonth>,
+    /// `true` sólo si TODOS los usuarios del scope tienen algún snapshot de pasivo. Cuando es
+    /// false no existe patrimonio neto histórico y `fine.net_worth` no viaja: lo que hay son
+    /// activos (`fine.asset_series`). Mismo predicado `all`-por-usuario que `/v1/history/series`.
+    pub liabilities_snapshotted: bool,
     /// Curva fina moldeada. Ausente si no hay transacciones vinculadas a assets (o sin snapshots).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fine: Option<CashflowFine>,
@@ -1778,10 +1857,14 @@ pub(crate) async fn history_cashflow_core(
     }
 
     // ---- Capa fina (solo si hay vínculos a assets Y snapshots que anclar) --------------------
+    // El flag se resuelve dentro de la rama fina (es donde se carga el scope) y sale por aquí:
+    // sin capa fina no hay serie de neto que cualificar, y `false` es la lectura honesta.
+    let mut liabilities_snapshotted = false;
     let fine = if cashflow.is_empty() {
         None
     } else {
         let scope = fetch_history_scope(pool, view, iid, user_id, today).await?;
+        liabilities_snapshotted = liabilities_fully_snapshotted(&scope.headers);
         if scope.headers.is_empty() {
             None
         } else {
@@ -1858,7 +1941,9 @@ pub(crate) async fn history_cashflow_core(
                 resolution: resolution_label.into(),
                 grid,
                 asset_series,
-                net_worth,
+                // Mismo invariante que la serie mensual: sin el pasivo entero fotografiado esto
+                // NO es patrimonio neto, así que no se publica disfrazado de tal.
+                net_worth: liabilities_snapshotted.then_some(net_worth),
             })
         }
     };
@@ -1868,6 +1953,7 @@ pub(crate) async fn history_cashflow_core(
         anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
         view: view_label.into(),
         months,
+        liabilities_snapshotted,
         fine,
     })
 }

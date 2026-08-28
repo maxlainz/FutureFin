@@ -1355,3 +1355,98 @@ async fn manual_create_rejects_future_op_date() {
     assert_eq!(moved.status, http::StatusCode::BAD_REQUEST, "{moved:?}");
     assert_eq!(moved.json()["code"], "op_date_in_future");
 }
+
+// ---------------------------------------------------------------------------
+// PATCH individual: poner y borrar el mismo campo (Fase 1, issue #82)
+// ---------------------------------------------------------------------------
+
+/// `category_id` + `clear_category: true` en la MISMA llamada devolvía **200** y dejaba el
+/// movimiento SIN categoría: el `clear` ganaba en silencio. Un agente que arma el patch desde una
+/// plantilla creía recategorizar, los totales seguían cuadrando y la atribución mentía (y en los
+/// modos B/C eso mueve el promedio que alimenta la proyección).
+///
+/// Se comprueban los CINCO `clear_*` del body, no solo los que tienen consecuencia contable: la
+/// guardia existía ya en el camino de lote y en el de reglas, y el hueco era justo el PATCH
+/// individual, que es el que comparten HTTP y la tool MCP `update_transaction`.
+///
+/// Los ids de asset/pasivo son UUID inventados a propósito: la guardia se evalúa ANTES que
+/// `assert_asset_in_installation`, así que si alguna vez se moviera detrás, este test lo cazaría
+/// (devolvería `linked_asset_not_found` en vez del código del conflicto).
+#[tokio::test]
+async fn patch_rejects_setting_and_clearing_the_same_field() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    let libros = app.create_category(&owner, "expense", "Libros").await;
+
+    let created = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "LIBRERIA", "amount": "-20",
+                "kind": "expense", "category_id": compras }),
+    )
+    .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    let ghost = "11111111-2222-3333-4444-555555555555";
+    for (code, body) in [
+        (
+            "value_date_set_and_clear",
+            json!({ "value_date": "2026-06-11", "clear_value_date": true }),
+        ),
+        (
+            "category_set_and_clear",
+            json!({ "category_id": libros, "clear_category": true }),
+        ),
+        (
+            "linked_asset_set_and_clear",
+            json!({ "linked_asset_id": ghost, "clear_linked_asset": true }),
+        ),
+        (
+            "linked_liability_set_and_clear",
+            json!({ "linked_liability_id": ghost, "clear_linked_liability": true }),
+        ),
+        (
+            "notes_set_and_clear",
+            json!({ "notes": "algo", "clear_notes": true }),
+        ),
+    ] {
+        let r = app
+            .patch_json_with_cookie(&format!("/v1/transactions/{id}"), body.clone(), &owner.cookie)
+            .await;
+        assert_eq!(
+            r.status,
+            http::StatusCode::BAD_REQUEST,
+            "{code} debería rechazarse: {r:?}"
+        );
+        assert_eq!(r.json()["code"], code, "{}", r.json());
+    }
+
+    // Y NADA se ha escrito: la categoría sigue siendo la original.
+    let row = app
+        .get_with_cookie("/v1/transactions?concept_contains=LIBRERIA", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(row[0]["category_id"], json!(compras), "{row}");
+
+    // El camino sano sigue funcionando: solo `clear_category` borra, solo `category_id` asigna.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "category_id": libros }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["category_id"], json!(libros), "{}", r.json());
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "clear_category": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["category_id"], Value::Null, "{}", r.json());
+}

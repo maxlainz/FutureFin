@@ -28,6 +28,17 @@ export type MergedProjectionHistory = {
   markers: HistoryMarkerApi[];
   /** Mínimo `net_worth` sobre `pts` (para decidir eje negativo). */
   minNetWorth: number;
+  /**
+   * `true` ⇒ el tramo PASADO de `pts` no es patrimonio neto, son **activos**: el servidor no
+   * publicó `net_worth` porque el pasivo del scope no está fotografiado entero, y aquí se sustituye
+   * por `assets_total` para no dejar el chart mudo. El futuro sigue siendo patrimonio neto (sale de
+   * la proyección, que sí conoce la deuda viva), así que las dos mitades miden cosas distintas y
+   * quien pinte esto **tiene que decirlo** — de lo contrario reproduce en píxeles el mismo error
+   * que el `null` del servidor acaba de cerrar.
+   *
+   * `false` cuando no hay histórico fusionado (no hay tramo pasado que etiquetar).
+   */
+  pastIsAssetsOnly: boolean;
 };
 
 function minNetWorthOf(pts: ProjectionPointApi[]): number {
@@ -44,7 +55,8 @@ function minNetWorthOf(pts: ProjectionPointApi[]): number {
  * `anchor_date_ymd` no coincide con el de la proyección (grids desalineadas → no se puede empalmar).
  *
  * En el caso fusionado: descarta puntos históricos con `month_index ≥ 0` (el vértice mes-0 lo
- * aporta la proyección), ordena el pasado ascendente, y construye la unión de series por
+ * aporta la proyección), **cae a `assets_total` cuando el servidor no publica `net_worth`**
+ * (marcándolo en `pastIsAssetsOnly`), ordena el pasado ascendente, y construye la unión de series por
  * `asset_id` rellenando con 0 las posiciones donde una serie no está presente. El nombre lo gana
  * la serie de futuro (activo vivo) en caso de colisión.
  */
@@ -61,6 +73,7 @@ export function mergeProjectionWithHistory(
     assetSeries: series.asset_series ?? [],
     markers: [],
     minNetWorth: minNetWorthOf(series.points),
+    pastIsAssetsOnly: false,
   });
 
   const seriesAnchor = series.anchor_date_ymd;
@@ -91,11 +104,16 @@ export function mergeProjectionWithHistory(
     (a, b) => history.points[a].month_index - history.points[b].month_index,
   );
 
+  // Sin el pasivo fotografiado entero el servidor manda `net_worth: null` (no puede decir cuál es
+  // el patrimonio neto). Se pinta `assets_total`, que sí es un dato real: la curva no desaparece ni
+  // se rompe. Lo que NO puede pasar es que se llame «patrimonio neto» — de ahí `pastIsAssetsOnly`.
+  const pastIsAssetsOnly = !history.liabilities_snapshotted;
+
   const histPts: ProjectionPointApi[] = keptIdx.map((i) => {
     const hp = history.points[i];
     return {
       month_index: hp.month_index,
-      net_worth: hp.net_worth,
+      net_worth: hp.net_worth ?? hp.assets_total,
       // Centinela: el pasado no tiene "capital aportado"; nunca se renderiza en k<0.
       contributed_capital: 0,
     };
@@ -155,5 +173,6 @@ export function mergeProjectionWithHistory(
     assetSeries,
     markers: history.markers,
     minNetWorth: minNetWorthOf(pts),
+    pastIsAssetsOnly,
   };
 }

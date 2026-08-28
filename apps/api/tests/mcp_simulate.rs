@@ -269,10 +269,20 @@ async fn savings_source_override_predicts_exactly_what_persisting_it_would_do() 
             400.0,
             "modo A: la cuota cuenta aparte"
         );
+        assert!(
+            simulado["baseline"]["debt_service_absent_reason"].is_null(),
+            "modo A: la cuota es medible, no hay razón de ausencia"
+        );
+        // En el modo real la cuota NO es 0: es inexistente como cifra aparte (ya está dentro del
+        // gasto real). Publicarla como `"0"` se leía como «no pagas servicio de deuda».
+        assert!(
+            simulado["scenario"]["debt_service_monthly"].is_null(),
+            "modo {modo}: la cuota ya vive dentro del gasto real, debe ser null: {}",
+            simulado["scenario"]
+        );
         assert_eq!(
-            dec(&simulado["scenario"]["debt_service_monthly"]),
-            0.0,
-            "modo {modo}: la cuota ya vive dentro del gasto real"
+            simulado["scenario"]["debt_service_absent_reason"], "included_in_real_expense",
+            "modo {modo}: y la razón tiene que decir por qué"
         );
     }
 }
@@ -1035,12 +1045,24 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
             "modo {mode}: net = income − expense_total"
         );
 
-        // El servicio de deuda solo es no nulo en modo A; en B/C la cuota ya es un movimiento real.
-        let debt = dec(&k["debt_service_monthly"]);
+        // El servicio de deuda solo es una cifra en modo A; en B/C la cuota ya es un movimiento
+        // real dentro del promedio, así que no existe como número aparte y viaja `null` + razón.
         if mode == "budget" {
-            assert_eq!(debt, 400.0, "modo A: la cuota viaja en debt_service_monthly");
+            assert_eq!(
+                dec(&k["debt_service_monthly"]),
+                400.0,
+                "modo A: la cuota viaja en debt_service_monthly"
+            );
+            assert!(k["debt_service_absent_reason"].is_null(), "modo A: {k}");
         } else {
-            assert_eq!(debt, 0.0, "modo {mode}: debt_service es 0 por contrato");
+            assert!(
+                k["debt_service_monthly"].is_null(),
+                "modo {mode}: debt_service no aplica, debe ser null (no 0): {k}"
+            );
+            assert_eq!(
+                k["debt_service_absent_reason"], "included_in_real_expense",
+                "modo {mode}: la razón de ausencia"
+            );
         }
 
         // Sin overrides, todos los deltas de salud son cero.

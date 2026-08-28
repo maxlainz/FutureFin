@@ -188,4 +188,85 @@ describe("mergeProjectionWithHistory — fusión", () => {
     const out = mergeProjectionWithHistory(makeSeries(), history);
     expect(out.markers).toBe(history.markers);
   });
+
+  it("con net_worth publicado, pastIsAssetsOnly = false", () => {
+    const out = mergeProjectionWithHistory(makeSeries(), makeHistory());
+    expect(out.pastIsAssetsOnly).toBe(false);
+  });
+});
+
+/**
+ * Sin el pasivo fotografiado entero el servidor manda `net_worth: null` en toda la serie
+ * (`liabilities_snapshotted: false`). El chart no puede quedarse mudo: pinta `assets_total` y
+ * marca `pastIsAssetsOnly` para que quien lo dibuje lo etiquete como activos, no como patrimonio.
+ */
+describe("mergeProjectionWithHistory — histórico sin patrimonio neto", () => {
+  const historyWithoutNetWorth = () =>
+    makeHistory({
+      liabilities_snapshotted: false,
+      points: [
+        {
+          month_index: -1,
+          net_worth: null,
+          assets_total: 900,
+          liabilities_total: 0,
+        },
+        {
+          month_index: -2,
+          net_worth: null,
+          assets_total: 800,
+          liabilities_total: 0,
+        },
+        {
+          month_index: 0,
+          net_worth: null,
+          assets_total: 1000,
+          liabilities_total: 0,
+        },
+      ],
+    });
+
+  it("cae a assets_total: la curva del pasado no desaparece ni se rompe", () => {
+    const out = mergeProjectionWithHistory(
+      makeSeries(),
+      historyWithoutNetWorth(),
+    );
+    expect(out.pts.map((p) => p.month_index)).toEqual([-2, -1, 0, 1]);
+    // Mismos valores que traía assets_total, en el mismo orden ascendente.
+    expect(out.pts.slice(0, 2).map((p) => p.net_worth)).toEqual([800, 900]);
+    // Nada de NaN/null colándose al eje: minNetWorth sigue siendo un número usable.
+    expect(out.minNetWorth).toBe(800);
+  });
+
+  it("marca pastIsAssetsOnly para que el chart lo etiquete como activos", () => {
+    const out = mergeProjectionWithHistory(
+      makeSeries(),
+      historyWithoutNetWorth(),
+    );
+    expect(out.pastIsAssetsOnly).toBe(true);
+  });
+
+  it("sin histórico fusionado, pastIsAssetsOnly = false (no hay tramo pasado que etiquetar)", () => {
+    // Identidad por `history: null` y por histórico solo-hoy: en ninguno de los dos casos se
+    // dibuja pasado, así que la etiqueta no aplica aunque el flag del servidor sea false.
+    expect(mergeProjectionWithHistory(makeSeries(), null).pastIsAssetsOnly).toBe(
+      false,
+    );
+    const onlyToday = makeHistory({
+      liabilities_snapshotted: false,
+      points: [
+        {
+          month_index: 0,
+          net_worth: null,
+          assets_total: 1000,
+          liabilities_total: 0,
+        },
+      ],
+      asset_series: [{ asset_id: "B", asset_name: "Beta old", values: [1000] }],
+      markers: [],
+    });
+    expect(
+      mergeProjectionWithHistory(makeSeries(), onlyToday).pastIsAssetsOnly,
+    ).toBe(false);
+  });
 });

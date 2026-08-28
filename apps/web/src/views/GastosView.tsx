@@ -55,6 +55,7 @@ import {
 import { MonthlyCashflowBars } from "../components/charts/CategoryComparisonBars";
 import {
   formatCurrencyAmount,
+  formatCurrencyOrDash,
   formatPercentDisplay,
   METRIC_DASH,
   parseDisplayDecimal,
@@ -440,6 +441,10 @@ export function GastosView({
   // único contenido son instancias recurrentes no promedia (y por eso no diluye la media).
   const avgMonths = summary?.avg_months ?? 0;
   const hasAvg = avgMonths > 0;
+  // El mes seleccionado no tiene NINGÚN movimiento (de ningún tipo). Sin esto, `delta_vs_budget`/
+  // `delta_vs_avg` en `null` se degradaban a 0 y la columna Δ mentía «vas exactamente al
+  // presupuesto» donde en realidad no hay nada que comparar.
+  const hasActualData = summary?.has_actual_data ?? false;
   // Qué meses produjeron la media, o por qué no hay. La ventana pedida («6m») no es lo mismo que
   // los meses promediados, así que la tarjeta lo dice en vez de dejarlo suponer.
   // Va al slot `detail` (segundo), no al `parenthetical`: en gasto e ingreso el primero lo ocupa
@@ -457,7 +462,10 @@ export function GastosView({
   const avgLabel = avgWindowLabel(summary?.avg_window ?? avgWindow);
 
   const savingsRateAvg = useMemo(() => {
-    if (!totals) return null;
+    // income_avg/savings_avg son null exactamente cuando avg_months == 0: sin promedio no hay
+    // tasa que calcular, y calcularla igualmente (con un 0 de relleno) pintaría un «0 %» donde
+    // no hay dato.
+    if (!totals || totals.income_avg === null || totals.savings_avg === null) return null;
     const inc = parseDisplayDecimal(totals.income_avg) ?? 0;
     const sav = parseDisplayDecimal(totals.savings_avg) ?? 0;
     if (inc <= 0) return null;
@@ -515,7 +523,9 @@ export function GastosView({
    * bajo el umbral → «=» atenuado (`flat`); sin promedio → slot vacío (sin datos ≠ sin cambio).
    */
   function renderTrend(deltaVsAvg: number, kind: "expense" | "income") {
-    const arrow = trendArrow(deltaVsAvg, kind, threshold, hasAvg);
+    // `delta_vs_avg` (de donde sale `deltaVsAvg`) es null tanto sin promedio como sin movimientos
+    // este mes — las dos condiciones tienen que cumplirse para que la flecha tenga sentido.
+    const arrow = trendArrow(deltaVsAvg, kind, threshold, hasAvg && hasActualData);
     return (
       <span
         className={`exp-trend-slot ${arrow.direction === "flat" ? "muted" : arrow.tone}`}
@@ -534,12 +544,14 @@ export function GastosView({
    * tono (num-pos/num-neg); «vs presupuesto» hereda muted.
    */
   function renderKpiTrend(
-    avg: string,
+    avg: string | null,
     budget: string,
     kind: "expense" | "income",
   ): ReactNode {
+    // `hasAvg` es el gate real (kpiBudgetTrend lo comprueba primero e ignora `avg` si es falso);
+    // el "0" de relleno solo evita parsear `null`, nunca se llega a usar sin promedio.
     const t = kpiBudgetTrend(
-      parseDisplayDecimal(avg) ?? 0,
+      parseDisplayDecimal(avg ?? "0") ?? 0,
       parseDisplayDecimal(budget) ?? 0,
       kind,
       threshold,
@@ -565,9 +577,8 @@ export function GastosView({
   function renderComparisonTable(
     lines: CategoryComparisonLineApi[],
     kind: "expense" | "income",
-    total: { actual: string; budget: string; avg: string },
+    total: { actual: string; budget: string; avg: string | null },
     threshold: number,
-    hasAvg: boolean,
   ) {
     if (lines.length === 0) {
       return <p className="muted bordered-top">Sin datos.</p>;
@@ -578,12 +589,19 @@ export function GastosView({
     // llegado.
     const totalActual = parseDisplayDecimal(total.actual) ?? 0;
     const totalBudget = parseDisplayDecimal(total.budget) ?? 0;
-    const totalAvg = parseDisplayDecimal(total.avg) ?? 0;
+    // El "0" de relleno solo evita parsear `null`; el render de `total.avg` usa
+    // `formatCurrencyOrDash` y el de la flecha usa `hasAvg && hasActualData` (closure del
+    // componente), ambos ajenos a este valor cuando no hay promedio.
+    const totalAvg = parseDisplayDecimal(total.avg ?? "0") ?? 0;
     const totalDeltaBudget = totalActual - totalBudget;
     const totalDeltaAvg = totalActual - totalAvg;
-    const totalTone = isPartial
-      ? "muted"
-      : significantDeltaTone(totalDeltaBudget, kind, threshold);
+    // Sin movimientos este mes, el delta vs presupuesto no es un dato: no hay «actual» real que
+    // comparar (el `0` de la Σ vacía no es lo mismo que «gastaste 0»).
+    const totalTone = !hasActualData
+      ? ""
+      : isPartial
+        ? "muted"
+        : significantDeltaTone(totalDeltaBudget, kind, threshold);
     return (
       <div className="table-scroll bordered-top">
         <table className="assets-table exp-comparison-table">
@@ -598,11 +616,18 @@ export function GastosView({
           </thead>
           <tbody>
             {lines.map((l) => {
-              const dNum = parseDisplayDecimal(l.delta_vs_budget) ?? 0;
-              const dAvg = parseDisplayDecimal(l.delta_vs_avg) ?? 0;
-              const toneClass = isPartial
-                ? "muted"
-                : significantDeltaTone(dNum, kind, threshold);
+              // El "0" de relleno solo evita parsear `null`: el render de la celda Δ y de la
+              // flecha comprueban `hasActualData`/`hasAvg` (closure del componente) por su
+              // cuenta, ajenos a este valor cuando no hay dato.
+              const dNum = parseDisplayDecimal(l.delta_vs_budget ?? "0") ?? 0;
+              const dAvg = parseDisplayDecimal(l.delta_vs_avg ?? "0") ?? 0;
+              // Sin movimientos este mes no hay delta que juzgar: sin tono (ni rojo ni verde),
+              // como el resto de guiones de esta tabla.
+              const toneClass = !hasActualData
+                ? ""
+                : isPartial
+                  ? "muted"
+                  : significantDeltaTone(dNum, kind, threshold);
               return (
                 <tr key={l.category_id ?? "uncategorized"}>
                   <td>
@@ -616,10 +641,7 @@ export function GastosView({
                     {isMobile ? (
                       <span className="cell-subline">
                         Presup. {formatCurrencyAmount(l.budget, currencyIso)} · Prom{" "}
-                        {avgLabel}{" "}
-                        {hasAvg
-                          ? formatCurrencyAmount(l.avg, currencyIso)
-                          : METRIC_DASH}
+                        {avgLabel} {formatCurrencyOrDash(l.avg, currencyIso)}
                       </span>
                     ) : null}
                   </td>
@@ -631,12 +653,10 @@ export function GastosView({
                     <td className="num">{formatCurrencyAmount(l.budget, currencyIso)}</td>
                   )}
                   <td className={`num ${toneClass}`}>
-                    {formatDeltaCurrency(dNum, currencyIso)}
+                    {hasActualData ? formatDeltaCurrency(dNum, currencyIso) : METRIC_DASH}
                   </td>
                   {isMobile ? null : (
-                    <td className="num">
-                      {hasAvg ? formatCurrencyAmount(l.avg, currencyIso) : METRIC_DASH}
-                    </td>
+                    <td className="num">{formatCurrencyOrDash(l.avg, currencyIso)}</td>
                   )}
                 </tr>
               );
@@ -647,10 +667,7 @@ export function GastosView({
                 {isMobile ? (
                   <span className="cell-subline">
                     Presup. {formatCurrencyAmount(total.budget, currencyIso)} · Prom{" "}
-                    {avgLabel}{" "}
-                    {hasAvg
-                      ? formatCurrencyAmount(total.avg, currencyIso)
-                      : METRIC_DASH}
+                    {avgLabel} {formatCurrencyOrDash(total.avg, currencyIso)}
                   </span>
                 ) : null}
               </td>
@@ -662,12 +679,12 @@ export function GastosView({
                 <td className="num">{formatCurrencyAmount(total.budget, currencyIso)}</td>
               )}
               <td className={`num ${totalTone}`}>
-                {formatDeltaCurrency(totalDeltaBudget, currencyIso)}
+                {hasActualData
+                  ? formatDeltaCurrency(totalDeltaBudget, currencyIso)
+                  : METRIC_DASH}
               </td>
               {isMobile ? null : (
-                <td className="num">
-                  {hasAvg ? formatCurrencyAmount(total.avg, currencyIso) : METRIC_DASH}
-                </td>
+                <td className="num">{formatCurrencyOrDash(total.avg, currencyIso)}</td>
               )}
             </tr>
           </tbody>
@@ -924,9 +941,7 @@ export function GastosView({
               helpId="expenses.expense_avg"
               detail={avgBasisText}
               value={
-                totals && hasAvg
-                  ? formatCurrencyAmount(totals.expense_avg, currencyIso)
-                  : METRIC_DASH
+                totals ? formatCurrencyOrDash(totals.expense_avg, currencyIso) : METRIC_DASH
               }
               trend={
                 totals
@@ -939,9 +954,7 @@ export function GastosView({
               helpId="expenses.income_avg"
               detail={avgBasisText}
               value={
-                totals && hasAvg
-                  ? formatCurrencyAmount(totals.income_avg, currencyIso)
-                  : METRIC_DASH
+                totals ? formatCurrencyOrDash(totals.income_avg, currencyIso) : METRIC_DASH
               }
               trend={
                 totals
@@ -954,9 +967,7 @@ export function GastosView({
               helpId="expenses.savings_transferred"
               detail={avgBasisText}
               value={
-                totals && hasAvg
-                  ? formatCurrencyAmount(totals.savings_avg, currencyIso)
-                  : METRIC_DASH
+                totals ? formatCurrencyOrDash(totals.savings_avg, currencyIso) : METRIC_DASH
               }
               tone="accent-2"
             />
@@ -1111,7 +1122,11 @@ export function GastosView({
                   <p className="muted bordered-top">Sin datos.</p>
                 ) : (
                   <>
-                    {isPartial ? (
+                    {!hasActualData ? (
+                      <p className="muted tight exp-partial-note">
+                        Sin movimientos este mes.
+                      </p>
+                    ) : isPartial ? (
                       <p className="muted tight exp-partial-note">
                         Mes en curso: las comparativas son provisionales.
                       </p>
@@ -1128,7 +1143,6 @@ export function GastosView({
                             avg: summary.totals.expense_avg,
                           },
                           threshold,
-                          hasAvg,
                         )}
                       </div>
                       <div className="exp-comparison-col">
@@ -1142,7 +1156,6 @@ export function GastosView({
                             avg: summary.totals.income_avg,
                           },
                           threshold,
-                          hasAvg,
                         )}
                       </div>
                     </div>

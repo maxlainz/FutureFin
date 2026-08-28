@@ -31,10 +31,20 @@ export const DEFAULT_LEGEND_ASSET_CAP = 4;
 /** Activos listados uno a uno en el tooltip antes de agregar en «Otros». */
 export const TOOLTIP_ASSET_LIMIT = 5;
 
-/** Entradas estructurales del chart de proyección, siempre visibles y en este orden. */
+/**
+ * Entradas estructurales del chart de proyección, siempre visibles y en este orden.
+ *
+ * `historyIsAssetsOnly` cambia la etiqueta del tramo pasado de «Histórico» a «Activos
+ * (histórico)». No es cosmética: cuando el pasivo no está fotografiado entero, el servidor no
+ * publica patrimonio neto histórico y el chart pinta activos. Ese tramo YA se dibuja con su propio
+ * color, así que basta con que la leyenda diga qué es — llamarlo «Histórico» junto a un
+ * «Patrimonio neto» invita a leer las dos mitades como la misma magnitud, que es exactamente el
+ * error que se está corrigiendo.
+ */
 export function buildStructuralLegendItems(opts: {
   hasFire: boolean;
   hasHistory: boolean;
+  historyIsAssetsOnly?: boolean;
 }): ChartLegendItem[] {
   const items: ChartLegendItem[] = [
     { key: "nw", label: "Patrimonio neto", color: "var(--proj-nw)", swatch: "line" },
@@ -51,9 +61,12 @@ export function buildStructuralLegendItems(opts: {
   if (opts.hasHistory) {
     items.push({
       key: "hist",
-      label: "Histórico",
+      label: opts.historyIsAssetsOnly ? "Activos (histórico)" : "Histórico",
       color: "var(--proj-nw-past)",
       swatch: "line",
+      title: opts.historyIsAssetsOnly
+        ? "Sin snapshots de pasivo no hay patrimonio neto histórico: el tramo pasado son tus activos."
+        : undefined,
     });
   }
   return items;
