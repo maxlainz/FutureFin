@@ -47,9 +47,15 @@ referencia como `(issue #N)` — convención que el repo ya usa. INCIDENTE: los 
 resolvieron enteros y se quedaron **abiertos** porque el commit no los mencionaba; nadie se enteró
 hasta la auditoría previa a hacer público el repositorio.
 
-## Norm — delegate to Opus subagents whenever possible
+## Norm — delegate to subagents whenever possible (Opus or smaller, never Fable)
 
-**Default posture: delegate.** Any unit of work that can be handed to a subagent should be, and every subagent runs on **Opus** (`Agent` tool with `model: "opus"`). Never let delegated work silently fall to a smaller model: this repo's failure modes are *silent wrong numbers* (projection/FIRE math, Decimal handling, index arithmetic), and a cheaper model reads as confident on exactly those.
+**Default posture: delegate.** Any unit of work that can be handed to a subagent should be. **Pick the subagent's model by difficulty — at most Opus, never Fable** (the main session is the only place Fable runs; delegating on Fable duplicates its cost for work a smaller model does fine):
+
+- **Opus** (`model: "opus"`): anything touching money math, projection/FIRE semantics, Decimal handling, index arithmetic, invariants, or adversarial review. This repo's failure modes are *silent wrong numbers*, and a cheaper model reads as confident on exactly those — when in doubt between tiers, Opus.
+- **Sonnet** (`model: "sonnet"`): exploration/search across many files, per-area research, doc audits, mechanical multi-file edits with a clear spec.
+- **Haiku** (`model: "haiku"`): trivial mechanical sweeps — grep-and-report, listing occurrences, format checks.
+
+**Adjust reasoning effort to the task** as well (`effort` where the harness supports it, e.g. Workflow `agent()` calls): `low` for mechanical stages, default/`medium` for normal work, `high`+ only for the hardest verify/judge/math stages. Model tier and effort are independent knobs — a Sonnet sweep at low effort is often the right shape; an Opus verifier of money math deserves high effort.
 
 **Delegate by default:**
 - Exploration and search that spans many files or naming conventions (`Explore` / `general-purpose`).

@@ -4,6 +4,41 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.4.0] - sin publicar
+
+Revisión adversarial del servidor MCP (issues #81–#88). Esta sección se completa por fases; el
+bump y la publicación van al final.
+
+### Red de seguridad del catálogo MCP (Fase 0 — issue #81)
+
+- **Por qué existe**: la invariante «toda tool de escritura pasa por `require_mcp_write`» solo
+  vivía en un `grep` de una skill, y el catálogo congelado solo congelaba **nombres**. Una tool
+  nueva que olvidara el gate pasaba la CI en verde, y una descripción se podía volver falsa sin
+  que fallara nada — ya ocurrió tres veces en 4.0.0, y las tres se encontraron a mano.
+- **Traza de escritura**: `require_mcp_write` recibe ahora el nombre de la tool y emite
+  `tracing::info!` con tool, usuario, rol y credencial **antes** de resolver el gate, así que
+  también quedan registrados los intentos rechazados. Sale a nivel `info`, el de la imagen por
+  defecto: un operador lo ve sin reconfigurar nada. Hasta ahora un borrado por MCP no dejaba
+  ningún rastro de qué tool lo hizo. `McpCredential` deja de ser `dead_code`.
+- **Dos tests nuevos con dientes**: uno tabla-guiado que recorre `tools/list` y exige que las 31
+  tools de escritura rechacen a un `viewer` (`forbidden`) y al toggle apagado
+  (`mcp_write_disabled`); y otro **estructural sin BD** que trocea `server.rs` y exige que toda
+  tool `read_only_hint = false` llame al gate **nombrándose a sí misma**, fijando de paso los
+  contadores 52/21/31/31/11.
+- **El contrato de entrada queda congelado**, no solo los nombres: nuevo fixture
+  `apps/api/tests/fixtures/mcp-catalog.json` con las claves de `inputSchema`, el `required` y un
+  hash de la `description` por tool. Regenerable con `UPDATE_MCP_CATALOG=1` (patrón de
+  `UPDATE_ERROR_CODES=1`).
+- **Cobertura de lo que nadie ejercitaba**: `delete_liability` (destructiva, con preview) no se
+  invocaba en ningún test; el preview de `delete_planning_flow` no se ejecutaba jamás; `get_budget`
+  y `list_liabilities` no tenían paridad byte a byte contra su GET.
+- **Contenido de terceros marcado como dato**: las `instructions` del servidor advierten ahora de
+  que `concept`, `notes`, `category_name`, `pattern` y los nombres de activos, pasivos y categorías
+  contienen texto importado de extractos bancarios —el concepto de una transferencia recibida lo
+  escribe quien la envía— y nunca son instrucciones.
+- Test `every_input_schema_forbids_unknown_properties` añadido **como `#[ignore]`**: hoy 51 de 52
+  tools aceptan campos desconocidos en silencio. Es la diana de la Fase 2 (#83).
+
 ## [4.3.1] - 2026-08-27
 
 ### «Entrar con Home Assistant» — HA como proveedor de identidad (solo add-on)

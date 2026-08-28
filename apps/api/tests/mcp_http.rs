@@ -950,6 +950,7 @@ async fn new_read_tools_match_http_endpoints() {
     // Datos: categorías de varios scopes + un movimiento (para months/imports vacío no rompe).
     let cat_exp = app.create_category(&owner, "expense", "Comida").await;
     let _cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    let cat_liab = app.create_category(&owner, "liability", "Préstamos").await;
     let r = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -965,9 +966,43 @@ async fn new_read_tools_match_http_endpoints() {
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
 
+    // Un pasivo activo: hace que `list_liabilities` no sea el array vacío y que `get_budget`
+    // traiga además la partida derivada de su cuota — las dos filas nuevas de la tabla sólo
+    // prueban algo si los dos lados tienen datos que contradecirse.
+    let liab = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            serde_json::json!({
+                "category_id": cat_liab,
+                "expense_category_id": cat_exp,
+                "label": "Hipoteca",
+                "principal": "50000",
+                "payment_amount": "300",
+                "payment_frequency": "monthly",
+                "payment_end_date": "2090-01-01",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(liab.status, http::StatusCode::CREATED, "{liab:?}");
+    let budget = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            serde_json::json!({"category_id": cat_exp, "amount": "400"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(budget.status, http::StatusCode::CREATED, "{budget:?}");
+
     // Paridad byte a byte tool ↔ endpoint para los listados extraídos en este cambio.
     for (tool, path, args) in [
         ("list_categories", "/v1/categories", serde_json::json!({})),
+        // Fase 0 (issue #81): `get_budget` y `list_liabilities` llevaban desde su alta sin
+        // ninguna aserción de paridad — sólo aparecían como cadenas en el catálogo congelado.
+        // Las dos son `to_tool_result(core(...))` directo, así que la paridad byte a byte es
+        // exactamente el contrato que prometen.
+        ("get_budget", "/v1/budget", serde_json::json!({})),
+        ("list_liabilities", "/v1/liabilities", serde_json::json!({})),
         (
             "list_allocation_rules",
             "/v1/allocation-rules",
@@ -1250,4 +1285,190 @@ async fn list_categorization_rules_paginates_without_changing_the_http_contract(
     )
     .await;
     assert_eq!(bad["result"]["isError"], true, "{bad}");
+}
+
+// ---------------------------------------------------------------------------
+// Fase 0 del plan de mejora del MCP (issue #81) — congelar el CONTRATO, no sólo los nombres.
+// ---------------------------------------------------------------------------
+
+/// Firma congelable de una tool: qué parámetros publica, cuáles exige, y una señal de su
+/// descripción.
+fn tool_signature(tool: &serde_json::Value) -> serde_json::Value {
+    let schema = &tool["inputSchema"];
+    let mut properties: Vec<String> = schema["properties"]
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    properties.sort();
+    let mut required: Vec<String> = schema["required"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    // Ordenados: lo que es contrato es el CONJUNTO de obligatorios, no el orden en que
+    // schemars decida emitirlos.
+    required.sort();
+
+    let description = tool["description"].as_str().unwrap_or("");
+    serde_json::json!({
+        "name": tool["name"].as_str().unwrap_or_default(),
+        "properties": properties,
+        "required": required,
+        // Señal de la descripción: longitud + hash corto. Congelar los 27 KB de prosa del
+        // catálogo dentro del test lo volvería ilegible y nadie revisaría el diff; con esto,
+        // vaciar, invertir o volver falsa una descripción rompe el test igual, y el diff del
+        // fixture cabe en una línea. En 4.0.0 se encontraron TRES descripciones falsas, todas
+        // por auditoría manual: esto es lo que convierte esa auditoría en un gate.
+        "description_len": description.chars().count(),
+        "description_sha256_12": sha256_12(description),
+    })
+}
+
+fn sha256_12(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(s.as_bytes());
+    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
+}
+
+fn catalog_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-catalog.json")
+}
+
+/// Congela el **contrato de entrada** de las 52 tools, no sólo sus nombres.
+///
+/// `tools_list_returns_exactly_the_v1_catalog` (arriba) compara un `Vec<String>` de nombres y
+/// nada más: con él en verde se puede vaciar una descripción, invertir su sentido, quitar un
+/// parámetro obligatorio o añadir uno nuevo sin que falle un solo test. Este hermano fija, por
+/// tool: las claves de `inputSchema.properties` ordenadas, el array `required`, y una señal de
+/// la descripción (longitud + SHA-256 corto).
+///
+/// **Regenerar el fixture cuando el cambio es intencionado** (mismo patrón que
+/// `UPDATE_ERROR_CODES=1` en `error_codes_parity.rs`):
+///
+/// ```text
+/// UPDATE_MCP_CATALOG=1 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
+///   cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract
+/// ```
+///
+/// …y después revisa el diff de `tests/fixtures/mcp-catalog.json` como parte del PR: un
+/// `description_sha256_12` que se mueve sin que la descripción deba cambiar es la señal.
+#[tokio::test]
+async fn tools_list_freezes_the_input_contract_of_every_tool() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(&app, &token, tools_list_body()).await;
+    let mut tools: Vec<serde_json::Value> = resp["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools array: {resp}"))
+        .iter()
+        .map(tool_signature)
+        .collect();
+    tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+
+    let generated = serde_json::json!({
+        "_doc": "Contrato de entrada de las tools MCP. GENERADO — no editar a mano: \
+                 UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- \
+                 tools_list_freezes_the_input_contract. `description_sha256_12` son los 6 \
+                 primeros bytes del SHA-256 de la descripción publicada.",
+        "tool_count": tools.len(),
+        "tools": tools,
+    });
+    let pretty = format!("{}\n", serde_json::to_string_pretty(&generated).unwrap());
+
+    if std::env::var("UPDATE_MCP_CATALOG").is_ok() {
+        std::fs::write(catalog_fixture_path(), &pretty).expect("escribir el fixture");
+        eprintln!("fixture regenerado con {} tools", tools.len());
+        return;
+    }
+
+    let current = std::fs::read_to_string(catalog_fixture_path()).unwrap_or_default();
+    if current == pretty {
+        return;
+    }
+
+    // Diff útil: qué tool cambió y en qué campo. Un `assert_eq!` de dos JSON de 52 entradas es
+    // ilegible en la salida de cargo, y una diferencia ilegible se "arregla" regenerando a
+    // ciegas — que es exactamente lo que este test existe para impedir.
+    let old: serde_json::Value = serde_json::from_str(&current).unwrap_or(serde_json::Value::Null);
+    let empty = vec![];
+    let old_tools = old["tools"].as_array().unwrap_or(&empty);
+    let mut report = String::new();
+    for tool in &tools {
+        let name = tool["name"].as_str().unwrap();
+        match old_tools.iter().find(|t| t["name"] == tool["name"]) {
+            None => report.push_str(&format!("  + tool NUEVA: {name}\n")),
+            Some(before) if before != tool => {
+                for field in ["properties", "required", "description_len", "description_sha256_12"]
+                {
+                    if before[field] != tool[field] {
+                        report.push_str(&format!(
+                            "  ~ {name}.{field}: {} → {}\n",
+                            before[field], tool[field]
+                        ));
+                    }
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    for before in old_tools {
+        if !tools.iter().any(|t| t["name"] == before["name"]) {
+            report.push_str(&format!(
+                "  - tool RETIRADA: {}\n",
+                before["name"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+    if report.is_empty() {
+        report.push_str("  (sólo cambió el encabezado o el formato del fichero)\n");
+    }
+    panic!(
+        "tests/fixtures/mcp-catalog.json no coincide con el catálogo que sirve /mcp:\n{report}\n\
+         Si el cambio es intencionado, regenera con:\n  \
+         UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- \
+         tools_list_freezes_the_input_contract\n\
+         …y revisa el diff en el PR (una descripción que cambia de hash sin motivo es la señal \
+         que este test busca)."
+    );
+}
+
+/// **`#[ignore]` A PROPÓSITO — diana de la Fase 2 (issue #83).**
+///
+/// Hoy falla, y eso es lo esperado. Medido al escribirlo (2026-08-28): **51 de las 52 tools**
+/// aceptan propiedades desconocidas. `#[serde(deny_unknown_fields)]` aparece dos veces en
+/// `src/mcp/server.rs`, pero una de ellas es `FireSettingsOverrideParam`, un struct ANIDADO
+/// dentro de `SimulateParams` — no es el struct de params de ninguna tool. La única tool cuyo
+/// `inputSchema` publica hoy `additionalProperties: false` es `simulate_projection`.
+///
+/// No se ablanda: un parámetro mal escrito por un cliente (`cap` en vez de `cap_kind` +
+/// `cap_value`, el bug real de la auditoría MCP §5) se descarta hoy **en silencio** y la
+/// llamada devuelve 200 sin haber hecho lo que se le pidió.
+///
+/// El test se escribe ahora, ignorado, para que ese trabajo tenga diana: al cerrar la Fase 2
+/// se quita el `#[ignore]` en el mismo commit y deja de poder reabrirse el agujero.
+#[tokio::test]
+#[ignore = "Fase 2 (issue #83): falta `deny_unknown_fields` en 51 de las 52 tools"]
+async fn every_input_schema_forbids_unknown_properties() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(&app, &token, tools_list_body()).await;
+    let offenders: Vec<String> = resp["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter(|t| t["inputSchema"]["additionalProperties"] != false)
+        .map(|t| t["name"].as_str().unwrap_or("?").to_string())
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "estas tools aceptan propiedades desconocidas en silencio (falta \
+         `#[serde(deny_unknown_fields)]` en su struct de Params): {offenders:?}"
+    );
 }
