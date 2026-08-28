@@ -1,4 +1,5 @@
 use crate::error::ApiError;
+use crate::handlers::budget::{budget_line_removed_with_liability, BudgetLineRemoved};
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
@@ -345,7 +346,7 @@ fn validate_payment_pair(
 ///    amortiza (el principal no se deduce del plan) y en `revolving` el plan no describe un
 ///    calendario cerrado.
 ///
-/// **Las cuatro se evalúan SIEMPRE antes de decidir el error** (4.3.2). Hasta entonces se devolvía
+/// **Las cuatro se evalúan SIEMPRE antes de decidir el error** (4.4.0). Hasta entonces se devolvía
 /// la primera y se salía: un `french` sin plan ni TIN gastaba tres turnos —
 /// `payment_plan_required_for_model` → (añades la cuota) → `apr_required_for_model` → (añades el
 /// TIN) → 201 —, y un `revolving` con `derive` los gastaba cuatro. El servidor conoce las cuatro
@@ -1062,21 +1063,49 @@ pub async fn delete_liability(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// Nº de transacciones cuyo `linked_liability_id` pasará a NULL al borrar el pasivo (preview
-/// de la tool MCP `delete_liability`).
-pub(crate) async fn liability_delete_effects(
+/// Efectos colaterales de borrar un pasivo, para el preview de la tool MCP `delete_liability`.
+#[derive(Debug, serde::Serialize)]
+pub struct LiabilityDeleteEffects {
+    /// Transacciones cuyo `linked_liability_id` pasa a NULL (`SET NULL`, no se borran).
+    pub transactions_unlinked: i64,
+    /// **La cuota que desaparece del presupuesto**, con el efecto exacto sobre los totales.
+    ///
+    /// Era el efecto que el preview callaba. Un pasivo con plan de pago activo publica una partida
+    /// derivada en `GET /v1/budget` (`source = "liability"`); al borrarlo, esa partida se va y el
+    /// gasto mensual presupuestado baja. Para una hipoteca son cientos de euros al mes, y el
+    /// llamante confirmaba el borrado sin haberlo visto — la misma omisión que en su día tuvo
+    /// `delete_asset` con las reglas de reparto.
+    ///
+    /// `None` ⇒ el pasivo NO genera cuota (sin plan de pago, o con `payment_end_date` ya pasada):
+    /// entonces el presupuesto no se mueve, y decirlo también es informar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_entry_removed: Option<BudgetLineRemoved>,
+}
+
+/// Efectos completos del borrado: los links que se sueltan **y** la partida de presupuesto que
+/// desaparece con sus totales antes/después. Solo lee (D5: un preview jamás muta).
+///
+/// `pub` (y no `pub(crate)` como su hermana de activos) para que la suite de integración pueda
+/// clavar el contenido del preview **antes** de que `mcp/server.rs` lo cablee: la promesa que
+/// importa es que los números del preview sean los que el borrado cumple después.
+pub async fn liability_delete_effects(
     pool: &sqlx::PgPool,
     iid: Uuid,
     id: Uuid,
-) -> Result<i64, ApiError> {
-    Ok(sqlx::query_scalar(
+) -> Result<LiabilityDeleteEffects, ApiError> {
+    let transactions_unlinked: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)::bigint FROM transactions
            WHERE installation_id = $1 AND linked_liability_id = $2"#,
     )
     .bind(iid)
     .bind(id)
     .fetch_one(pool)
-    .await?)
+    .await?;
+    let budget_entry_removed = budget_line_removed_with_liability(pool, iid, id).await?;
+    Ok(LiabilityDeleteEffects {
+        transactions_unlinked,
+        budget_entry_removed,
+    })
 }
 
 /// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_liability`.

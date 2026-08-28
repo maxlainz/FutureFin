@@ -145,6 +145,22 @@ export const ERROR_MESSAGES: Record<string, string> = {
   transactions_not_found:
     "Alguno de los movimientos ya no existe, así que no se ha cambiado nada. Recarga la lista e inténtalo otra vez.",
   amount_zero: "El importe no puede ser cero.",
+  confirm_token_required:
+    "Esa acción no se puede confirmar a ciegas: hay que previsualizarla antes y confirmar con el código que devuelve el preview.",
+  confirm_token_invalid:
+    "El código de confirmación no vale: es de otra operación, ya se usó o ha caducado (dura 10 minutos y sirve una sola vez). Vuelve a previsualizar.",
+  confirm_token_stale:
+    "Los datos han cambiado desde la previsualización, así que la confirmación ya no describe lo que iba a pasar. Vuelve a previsualizar y revisa las cifras nuevas.",
+  idempotency_key_invalid:
+    "La clave de idempotencia debe tener entre 1 y 200 caracteres.",
+  idempotency_key_conflict:
+    "Esa clave de idempotencia ya creó un movimiento distinto. Gana el primero: usa una clave nueva para un movimiento nuevo.",
+  idempotency_key_in_flight:
+    "Otra petición está usando esa clave de idempotencia ahora mismo. Inténtalo de nuevo.",
+  idempotency_key_batch_unsupported:
+    "La clave de idempotencia solo vale para dar de alta un movimiento suelto, no para un lote.",
+  budget_entry_is_liability_derived:
+    "Esa partida es la cuota de un pasivo: se edita o se elimina desde el pasivo, no desde el presupuesto.",
   uuid_invalid:
     "Ese identificador no tiene el formato esperado. Cópialo tal cual del listado en vez de escribirlo a mano.",
   date_invalid:
@@ -472,6 +488,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La caducidad del token debe estar entre 1 y 3.650 días.",
   token_limit_reached:
     "Has llegado al máximo de tokens. Revoca alguno antes de crear otro.",
+  token_scope_invalid:
+    "Esos permisos no son válidos. Elige solo lectura, o lectura y escritura.",
+  mcp_token_read_only:
+    "Ese token es de solo lectura. Crea uno con permiso de escritura en Ajustes → Integraciones si necesitas que Claude modifique datos.",
   mcp_write_disabled:
     "La escritura desde Claude está desactivada en este hogar. El propietario puede activarla en Ajustes → Integraciones.",
   public_url_underivable:

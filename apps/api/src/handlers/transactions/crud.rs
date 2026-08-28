@@ -13,11 +13,13 @@ use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::reconcile::{auto_reconcile_after_mutation, unlink_pair_no_rejection};
 use crate::handlers::transactions::recurring;
+use crate::handlers::transactions::idempotency;
 use crate::handlers::transactions::schema::{
     assert_amount_sign_matches_kind, compute_fingerprint, like_needle, normalize_concept_field,
     normalize_kind, normalize_notes,
     sql_fold_concept_expr, BatchCreateBody, BatchPatchBody, CreateTransactionBody,
-    ImportBatchResponse, MonthEntry, PatchTransactionBody, TransactionResponse, SOURCE_MANUAL,
+    CreateTransactionRequest, ImportBatchResponse, MonthEntry, PatchTransactionBody,
+    TransactionResponse, SOURCE_MANUAL,
 };
 use crate::handlers::transactions::{
     assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
@@ -47,17 +49,17 @@ const MAX_PATCH_BATCH: usize = 200;
 // Prepared (validated) transaction ready to insert
 // ---------------------------------------------------------------------------
 
-pub(super) struct PreparedTxn {
-    pub(super) op_date: NaiveDate,
-    pub(super) value_date: Option<NaiveDate>,
-    pub(super) concept: String,
-    pub(super) amount: Decimal,
-    pub(super) kind: String,
-    pub(super) category_id: Option<Uuid>,
-    pub(super) linked_asset_id: Option<Uuid>,
-    pub(super) linked_liability_id: Option<Uuid>,
-    pub(super) notes: Option<String>,
-    pub(super) fingerprint: String,
+pub(crate) struct PreparedTxn {
+    pub(crate) op_date: NaiveDate,
+    pub(crate) value_date: Option<NaiveDate>,
+    pub(crate) concept: String,
+    pub(crate) amount: Decimal,
+    pub(crate) kind: String,
+    pub(crate) category_id: Option<Uuid>,
+    pub(crate) linked_asset_id: Option<Uuid>,
+    pub(crate) linked_liability_id: Option<Uuid>,
+    pub(crate) notes: Option<String>,
+    pub(crate) fingerprint: String,
 }
 
 /// Rechaza una `op_date` posterior al hoy civil de la instalación (`installation.calendar_tz`).
@@ -191,38 +193,52 @@ pub(super) async fn load_txn(pool: &sqlx::PgPool, id: Uuid) -> Result<Transactio
     post,
     path = "/v1/transactions",
     tag = "transactions",
-    request_body = CreateTransactionBody,
+    request_body = CreateTransactionRequest,
     responses(
-        (status = 201, description = "Transacción manual creada", body = TransactionResponse),
+        (status = 201, description = "Transacción manual creada. Con `idempotency_key`, un reenvío del MISMO cuerpo devuelve otra vez ESTA respuesta (mismo id) sin crear nada", body = TransactionResponse),
         (status = 400, description = "Validación"),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
-        (status = 409, description = "Huella duplicada (misma fecha/importe/concepto/ordinal)"),
+        (status = 409, description = "Huella duplicada (misma fecha/importe/concepto/ordinal), o `idempotency_key` reutilizada con un cuerpo distinto"),
     )
 )]
 pub async fn create_transaction(
     Extension(state): Extension<Arc<AppState>>,
     jar: CookieJar,
-    Json(body): Json<CreateTransactionBody>,
+    Json(body): Json<CreateTransactionRequest>,
 ) -> Result<(axum::http::StatusCode, Json<TransactionResponse>), ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
-    let resp = create_transaction_core(&state, iid, user.id.0, body).await?;
+    let resp = create_transaction_core(
+        &state,
+        iid,
+        user.id.0,
+        body.transaction,
+        body.idempotency_key,
+    )
+    .await?;
     Ok((axum::http::StatusCode::CREATED, Json(resp)))
 }
 
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_transaction`. La
 /// invalidación condicionada de la cache (COND: solo modos B/C) vive DENTRO, post-commit —
 /// así el contrato es idéntico por ambos caminos. El caller ya validó sesión + rol.
+///
+/// `idempotency_key` es **opt-in** (ver `transactions/idempotency.rs`): sin ella, el camino es
+/// exactamente el de siempre y no se toca ninguna tabla nueva. Con ella, repetir la llamada con el
+/// mismo cuerpo devuelve el movimiento original —misma respuesta, mismo `id`— y repetirla con otro
+/// cuerpo es 409: gana el primero.
 pub(crate) async fn create_transaction_core(
     state: &Arc<AppState>,
     iid: Uuid,
     user_id: Uuid,
     body: CreateTransactionBody,
+    idempotency_key: Option<String>,
 ) -> Result<TransactionResponse, ApiError> {
+    let idem_key = idempotency::normalize_key(idempotency_key)?;
     let prepared = validate_manual(&state.pool, iid, &body).await?;
     // Recurrencia (opcional): marcador sin campos — las reglas tienen resolución mensual.
     let is_recurring = body.recurrence.is_some();
@@ -237,11 +253,47 @@ pub(crate) async fn create_transaction_core(
         recurring::assert_recurrence_not_too_old(body.op_date, today)?;
     }
 
+    // Huella del cuerpo YA VALIDADO: dos peticiones que describen el mismo movimiento con distinta
+    // forma ("10" vs "10.00") son el mismo reintento. Solo se calcula si hay clave.
+    let request_hash = idem_key
+        .as_ref()
+        .map(|_| idempotency::request_hash(&prepared, is_recurring));
+
+    // Camino de réplica: si la clave ya está tomada no se inserta NADA (ni movimiento, ni regla
+    // recurrente, ni pases post-commit). La poda de claves caducadas va aquí, en la escritura,
+    // nunca en un GET (D5).
+    if let (Some(key), Some(hash)) = (idem_key.as_deref(), request_hash.as_deref()) {
+        idempotency::gc_expired(&state.pool).await;
+        if let Some(existing) = idempotency::lookup(&state.pool, iid, user_id, key).await? {
+            let id = idempotency::replay_or_conflict(&existing, hash)?;
+            return load_txn(&state.pool, id).await;
+        }
+    }
+
     let mut tx = state.pool.begin().await?;
     let ordinal = next_fingerprint_ordinal(&mut tx, iid, user_id, &prepared.fingerprint).await?;
     let id =
         insert_manual_with_recurrence(&mut tx, iid, user_id, &prepared, ordinal, is_recurring)
             .await?;
+    // La clave se reclama DENTRO de la misma transacción que el INSERT: o existen las dos filas o
+    // no existe ninguna. Es lo que cierra la carrera de dos reintentos simultáneos — el perdedor
+    // deshace su propia inserción y reproduce la del ganador, en vez de dejar el duplicado que
+    // toda esta maquinaria existe para evitar.
+    if let (Some(key), Some(hash)) = (idem_key.as_deref(), request_hash.as_deref()) {
+        if !idempotency::claim(&mut tx, iid, user_id, key, hash, id).await? {
+            tx.rollback().await?;
+            let Some(existing) = idempotency::lookup(&state.pool, iid, user_id, key).await? else {
+                // `ON CONFLICT DO NOTHING` espera a que la transacción rival termine, así que si
+                // no insertó es que la otra commiteó: llegar aquí significa que se borró entre
+                // medias. No es un duplicado ni un éxito; que el cliente reintente.
+                return Err(ApiError::ConflictWith(
+                    "idempotency_key_in_flight: another request is using this idempotency_key right now; retry".into(),
+                ));
+            };
+            let id = idempotency::replay_or_conflict(&existing, hash)?;
+            return load_txn(&state.pool, id).await;
+        }
+    }
     tx.commit().await?;
 
     // Orden contractual: conciliar (cambia QUÉ cuenta como real) → converger (cambia el CONJUNTO)
@@ -290,19 +342,31 @@ pub async fn create_batch(
         )));
     }
 
-    let mut prepared = Vec::with_capacity(body.transactions.len());
-    for b in &body.transactions {
+    // La idempotencia es del alta INDIVIDUAL. Aquí se rechaza en vez de ignorarse: un lote es
+    // todo-o-nada en una sola transacción, así que una clave por ítem tendría que responder «3 de
+    // 5 se reproducen», y aceptar el campo para tirarlo dejaría al llamante creyéndose protegido
+    // — el fallo silencioso exacto que la clave viene a cerrar.
+    if body.transactions.iter().any(|b| b.idempotency_key.is_some()) {
+        return Err(ApiError::BadRequest(
+            "idempotency_key_batch_unsupported: idempotency_key is only supported on POST /v1/transactions, not in a batch".into(),
+        ));
+    }
+    let items: Vec<&CreateTransactionBody> =
+        body.transactions.iter().map(|b| &b.transaction).collect();
+
+    let mut prepared = Vec::with_capacity(items.len());
+    for b in &items {
         prepared.push(validate_manual(&state.pool, iid, b).await?);
     }
     // "Hoy" de la instalación para el backfill (solo si algún ítem trae recurrencia).
-    let today = if body.transactions.iter().any(|b| b.recurrence.is_some()) {
+    let today = if items.iter().any(|b| b.recurrence.is_some()) {
         Some(installation_naive_today(&state.pool, iid).await?)
     } else {
         None
     };
     // Cota al backfill por ítem recurrente (pre-tx, reutilizando el `today` ya calculado).
     if let Some(today) = today {
-        for b in &body.transactions {
+        for b in &items {
             if b.recurrence.is_some() {
                 recurring::assert_recurrence_not_too_old(b.op_date, today)?;
             }
@@ -314,7 +378,7 @@ pub async fn create_batch(
     let mut next_ord: HashMap<String, i32> = HashMap::new();
     let mut ids = Vec::with_capacity(prepared.len());
     // La recurrencia se acepta por ítem del batch (el modal de efectivo del frontend usa /batch).
-    for (b, p) in body.transactions.iter().zip(prepared.iter()) {
+    for (b, p) in items.iter().zip(prepared.iter()) {
         let ord = match next_ord.get(&p.fingerprint) {
             Some(&o) => o,
             None => next_fingerprint_ordinal(&mut tx, iid, user.id.0, &p.fingerprint).await?,

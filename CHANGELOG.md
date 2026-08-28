@@ -39,6 +39,71 @@ bump y la publicación van al final.
 - Test `every_input_schema_forbids_unknown_properties` añadido **como `#[ignore]`**: hoy 51 de 52
   tools aceptan campos desconocidos en silencio. Es la diana de la Fase 2 (#83).
 
+### Escritura segura y automatización desatendida (Fase 3 — issue #84)
+
+La fase que decide si se pueden dejar correr agentes sin nadie delante. El diagnóstico de la
+auditoría era que **si algo salía mal —modelo confundido, token filtrado, inyección exitosa— el
+sistema no lo limitaba, no lo detenía y no lo registraba**. Las tres cosas se cierran aquí.
+
+- **Auditoría de escrituras** (`mcp_write_audit`). Un token podía borrar el ledger entero del hogar
+  sin dejar rastro de quién, qué ni cuándo: `delete_transaction` es *hard delete* y el único
+  registro era un `last_used_at` con throttle de 60 s. Ahora cada escritura deja fila con **quién,
+  con qué credencial, con qué rol vivo en ese momento** (sin eso, un log de hace tres meses se
+  leería con los permisos de hoy), qué tool, el desenlace y los UUIDs mutados. **Nunca los
+  argumentos**, ni en claro ni hasheados: un log append-only con conceptos bancarios convierte el
+  borrado del usuario en una mentira —el concepto que borró seguiría vivo un año fuera del backup
+  cifrado— y un digest de fecha + importe + concepto es fuerza-brutable por baja entropía, o sea la
+  misma fuga con una capa de tranquilidad falsa. El esquema es **tipado sin texto libre a
+  propósito**, para que la regla no dependa de que el siguiente se acuerde de ella.
+  El orden no puede mentir: la fila nace `attempted` —jamás `ok`, porque en ese instante la
+  operación no ha corrido— y se cierra después; `settled_at IS NULL` significa exactamente «sigue
+  en vuelo o el proceso murió», garantizado por CHECK, y el cierre es *write-once*. Todo
+  best-effort: un fallo del log nunca tumba la escritura del usuario.
+- **Credenciales de solo lectura.** No se podía emitir un token de lectura sin degradar a la
+  persona a `viewer`, que le quita también la web: un token para «que Claude me analice los gastos»
+  podía ejecutar las 31 escrituras sobre el hogar entero. `api_tokens.scope` con default que
+  preserva **exactamente** los tokens existentes, y selector en Ajustes → Integraciones.
+  **OAuth no se extiende**: ahí el scope lo pide la aplicación cliente —el lado del agente—, no la
+  persona, así que sin pantalla de consentimiento donde estrecharlo no restringe nada, y
+  anunciar `scopes_supported` sería mentir en la metadata.
+- **`create_transaction` idempotente (opt-in).** Un reintento tras un timeout creaba una segunda
+  fila y devolvía éxito, y en modo B/C los movimientos **son inputs del motor**: el duplicado
+  inflaba el promedio y retrasaba la jubilación proyectada, en silencio. Con `idempotency_key`, el
+  mismo cuerpo reproduce la fila original; un cuerpo **distinto** con la misma clave es 409 y gana
+  el primero (devolver la original diría «tu segundo movimiento se creó», que es una mentira que se
+  materializa como un gasto que falta). La huella se calcula sobre el cuerpo **ya validado**, así
+  que `"-12.50"` y `"-12.5"` son el mismo reintento. Ámbito por usuario, no por instalación: con
+  ámbito de instalación la clave de un miembro reproduciría el movimiento de otro y le devolvería
+  una fila ajena.
+- **El preview deja de ser saltable en lo irreparable.** `confirm: true` era un booleano que rellena
+  el propio modelo: *prompting*, no un control. Ahora el preview devuelve un token de un solo uso
+  ligado al hash de los efectos, **recalculados en la confirmación** — así se cierra también la
+  ventana de que los efectos cambien entre las dos llamadas. Se exige en **7 de las 14**, no en
+  todas: el criterio no es «destructiva» sino «confirmar sin mirar destruye algo que la conversación
+  no puede reconstruir». Duplicar los viajes de cada borrado trivial haría que la ceremonia se lea
+  como ruido, y una salvaguarda que se lee como ruido deja de serlo.
+- **`confirm` en las tres destructivas que no lo admitían** (previews 11 → 14). `materialize_recurring`
+  **poda instancias de toda la instalación** y no tenía ni struct de parámetros, así que `confirm`
+  era literalmente inexpresable; `unreconcile_transfer` es irreversible y el cliente solo tenía el id
+  de una pata, así que confirmaba a ciegas cuál era el par — ahora ve las dos. Para
+  `materialize_recurring` el preview honesto **no era posible** (su core calcula y escribe en la
+  misma transacción), así que publica los contadores como `null` **con el motivo**: un `null` sin
+  motivo se lee como cero, e inventar una estimación habría sido peor que declarar el límite.
+- **Bloque `impact`** en las escrituras que mueven el motor: un `create_liability` movía cuatro
+  cifras de `get_summary` sin mencionar ninguna, así que el agente reportaba «pasivo creado» como si
+  fuera inocuo. Sale de `summary_core` y **nunca de la proyección**: incluir la fecha de jubilación
+  costaría una simulación de hasta 840 meses por escritura, justo después de que esa escritura haya
+  invalidado la cache.
+- **Techo de concurrencia para la proyección.** `simulate_projection` lanzaba dos `spawn_blocking`
+  sin permiso; un agente en bucle podía vaciar el pool de 10 conexiones y, como `/v1/ready` usa ese
+  mismo pool, dejar el contenedor *unhealthy* y reiniciándose. El semáforo envuelve la simulación y
+  no el handler, así que una lectura cacheada no lo toca.
+- **Dos errores que decían lo contrario de la verdad**: `delete_budget_entry` sobre la cuota de un
+  pasivo devolvía **404 «no existe»** sobre un id que el cliente acababa de leer en nuestra propia
+  respuesta de `GET /v1/budget` (las cuotas viajan con el UUID del pasivo). No borraba nada, pero
+  mandaba a buscar un fantasma. Y el preview de `delete_liability` omitía que se lleva por delante
+  la partida de presupuesto — para una hipoteca, cientos de euros al mes que el agente no contaba.
+
 ### El esquema como contrato (Fase 2 — issue #83)
 
 El servidor defendía su corrección con **prosa**: ~27 KB de descripciones sobre un esquema casi

@@ -1,5 +1,5 @@
-//! Techo de concurrencia para el trabajo criptográfico caro (Argon2id y el descifrado de
-//! `.ffbackup`).
+//! Techo de concurrencia para el trabajo CPU-bound caro: el KDF de contraseñas (Argon2id), el
+//! cripto de `.ffbackup` y las simulaciones de proyección.
 //!
 //! ## Por qué existe
 //!
@@ -60,6 +60,52 @@ fn backup_permits() -> &'static Semaphore {
     S.get_or_init(|| Semaphore::const_new(1))
 }
 
+/// Permisos para las **simulaciones de proyección** (`project_net_worth_series` y el marker de
+/// «compound supera ahorro»), el tercer trabajo CPU-bound del binario.
+///
+/// ## El agujero que tapa
+///
+/// `heavy.rs` acotaba el KDF y el cripto del backup, pero las proyecciones lanzaban
+/// `spawn_blocking` a pelo — dos por petición, en `tokio::join!`. Sin techo, el límite efectivo
+/// volvía a ser el pool de blocking de Tokio (512 hilos) y el fallo es peor que el de Argon2
+/// porque **no hace falta un atacante**: un agente MCP en bucle emitiendo `simulate_projection`
+/// —o cualquier cliente pidiendo `GET /v1/projection/series?months=…`, que **salta la cache por
+/// diseño** (D7)— basta para poner N simulaciones en vuelo. Cada una es CPU pura durante cientos
+/// de milisegundos, así que a partir de unas pocas los hilos de blocking se comen los núcleos que
+/// necesitan los workers del reactor: los `/v1` normales empiezan a agotar el `acquire_timeout`
+/// de 5 s del pool de 10 conexiones y devuelven 500. Y como `/v1/ready` usa **ese mismo pool**,
+/// el healthcheck falla y el contenedor —con el PostgreSQL embebido dentro— se reinicia. La
+/// diferencia con Argon2: allí el síntoma era memoria (OOM), aquí es CPU, pero el destino es el
+/// mismo contenedor reiniciándose a mitad de checkpoint.
+///
+/// ## Por qué ESTE número
+///
+/// `available_parallelism()` acotado a `[2, 8]`, igual que el KDF, porque el recurso escaso es el
+/// mismo (núcleos) y el trabajo es igual de indivisible. Las dos cotas son deliberadas:
+///
+/// - **Suelo 2, nunca 1**: una petición de proyección usa DOS permisos (serie principal + marker;
+///   baseline + escenario en el what-if) y los suelta por separado, cuando termina cada tarea. Con
+///   un solo permiso no habría deadlock —cada permiso se libera al acabar SU tarea, y el semáforo
+///   de tokio es FIFO—, pero se perdería el paralelismo intra-petición que el `tokio::join!`
+///   existe para explotar: una proyección tardaría el doble incluso en una máquina ociosa.
+/// - **Techo 8**: por encima, más simulaciones concurrentes no terminan antes ninguna (son CPU
+///   pura), solo le quitan núcleos al reactor. Dejar la mitad de una máquina grande fuera del
+///   techo es exactamente lo que mantiene vivo `/v1/ready` bajo carga.
+///
+/// Lo que **no** se serializa: la proyección **cacheada**. El permiso se pide alrededor de la
+/// simulación, no del handler, así que un HIT de `projection_series_cached` no toca el semáforo
+/// (regresión: `projection_concurrency.rs`).
+fn projection_permits() -> &'static Semaphore {
+    static S: OnceLock<Semaphore> = OnceLock::new();
+    S.get_or_init(|| {
+        let n = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 8);
+        Semaphore::const_new(n)
+    })
+}
+
 async fn run_with<T, F>(sem: &'static Semaphore, f: F) -> Result<T, ApiError>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -89,6 +135,28 @@ where
     run_with(backup_permits(), f).await
 }
 
+/// Ejecuta una simulación de proyección fuera del reactor y bajo el techo de concurrencia.
+///
+/// A diferencia de `run_password_kdf` / `run_backup_crypto` **no** convierte el pánico de la tarea
+/// en `Unavailable`: los dos llamantes ya publican el código estable `task_panic`, que vive en el
+/// catálogo de errores (`tests/fixtures/error-codes.json`) y tiene frase en español en la SPA.
+/// Cambiarlo aquí retiraría un código publicado a cambio de nada. `label` solo compone el detalle
+/// técnico del mensaje; el prefijo `task_panic:` es un literal completo, como exige
+/// `error_codes_parity`.
+pub async fn run_projection_sim<T, F>(label: &str, f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let _permit = projection_permits()
+        .acquire()
+        .await
+        .map_err(|_| ApiError::Unavailable)?;
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("task_panic: {label} task panic: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +173,17 @@ mod tests {
     #[test]
     fn el_backup_va_de_uno_en_uno() {
         assert_eq!(backup_permits().available_permits(), 1);
+    }
+
+    /// El techo de proyección existe, es del orden del nº de CPU y **nunca es 1**: una petición
+    /// consume dos permisos (serie + marker, o baseline + escenario) y con uno solo perdería el
+    /// paralelismo intra-petición del `tokio::join!`.
+    #[test]
+    fn el_techo_de_proyeccion_permite_el_paralelismo_intra_peticion() {
+        let n = projection_permits().available_permits();
+        assert!(
+            (2..=8).contains(&n),
+            "el techo debe ser del orden del nº de CPU y >= 2 (dos simulaciones por petición): {n}"
+        );
     }
 }

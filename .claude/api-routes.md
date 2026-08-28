@@ -314,8 +314,8 @@ hacer nada que su dueño no pueda ya.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/v1/api-tokens` | Lista propios (`token_prefix`, nunca el secreto ni el hash), orden `created_at DESC`. Incluye revocados (auditoría). |
-| POST | `/v1/api-tokens` | Body `{label (1..64), expires_in_days? (1..=3650)}` → 201 con `token` (secreto `ffp_` + 43 chars base64url) **una única vez**. Máx. 10 activos por usuario → 400 `token_limit_reached`. |
+| GET | `/v1/api-tokens` | Lista propios (`token_prefix`, `scope`, nunca el secreto ni el hash), orden `created_at DESC`. Incluye revocados (auditoría). |
+| POST | `/v1/api-tokens` | Body `{label (1..64), expires_in_days? (1..=3650), scope? ("read_write"\|"read_only", default "read_write")}` → 201 con `token` (secreto `ffp_` + 43 chars base64url) **una única vez**. Máx. 10 activos por usuario → 400 `token_limit_reached`. `scope` desconocido → 400 `token_scope_invalid` (validado a mano, no por serde, para dar el código estable en vez del 422 genérico). |
 | DELETE | `/v1/api-tokens/{id}` | Soft-revoke (`revoked_at = now()`). Id ajeno o ya revocado → 404. |
 
 - **Solo se persiste el SHA-256 hex** del secreto (`token_hash` UNIQUE); lookup O(1), sin
@@ -323,6 +323,12 @@ hacer nada que su dueño no pueda ya.
 - `require_api_token(pool, authorization)` (mismo archivo) valida `Bearer ffp_…` → 401 para todo
   fallo (ausente/malformado/revocado/expirado, sin distinguir). Actualiza `last_used_at` con
   throttle de 60 s (telemetría de auth, análoga a `sessions` — no viola reads-never-mutate).
+- **`scope` (Fase 3, issue #84)**: `read_write` (default, preserva byte a byte los tokens
+  emitidos antes de que la columna existiera) o `read_only`. Se lee vivo en el mismo SELECT que
+  autentica y solo RESTA — nunca concede nada que el rol vivo de la persona no conceda ya. Es la
+  segunda de las tres puertas de `require_mcp_write` (rol → **scope** → toggle de la instalación);
+  ver §MCP y [`auth-and-membership.md`](auth-and-membership.md). El selector vive en Ajustes →
+  Integraciones, junto a la columna «Permisos» del listado.
 
 ### Categories (`/v1/categories/`)
 Scopes: `asset`, `liability`, `income`, `expense`. Per-installation.
@@ -493,7 +499,7 @@ Partidas de ingreso/gasto en **una sola lista** (`entries`). Acepta `?view=mine`
 
 **Fusión de las cuotas de pasivo (3.7.0, API breaking).** Hasta la 3.6.0 las cuotas vivían en un array aparte (`derived_from_liabilities`) que se sumaba por debajo del presupuesto en `totals.expense_derived_monthly_equivalent`. Ahora son **una partida más de `entries`**:
 
-- `source`: `"manual"` (fila de `budget_entries`, editable) | `"liability"` (cuota derivada del plan de pago, **solo lectura**). `PATCH`/`DELETE /v1/budget/entries/{id}` sobre una cuota devuelven 404: se edita con `PATCH /v1/liabilities/{id}`.
+- `source`: `"manual"` (fila de `budget_entries`, editable) | `"liability"` (cuota derivada del plan de pago, **solo lectura**). `PATCH`/`DELETE /v1/budget/entries/{id}` sobre el id de una cuota derivada → **422 `budget_entry_is_liability_derived`** (Fase 3, issue #84; antes 404). El id que se lee en `GET /v1/budget` para una cuota **es el del pasivo** (`source = "liability"`), así que un cliente que lo copia de ahí y lo pasa al PATCH/DELETE de una partida estaba recibiendo «no existe» sobre un recurso que el propio servidor le acababa de enseñar — el error decía lo contrario de la verdad. El 422 nombra el destino correcto (`update_liability` / `delete_liability`, `PATCH`/`DELETE /v1/liabilities/{id}`); un id que de verdad no existe en ninguna tabla sigue siendo 404 (`missing_budget_entry_error`, `handlers/budget.rs`, un SELECT extra solo en el camino de error).
 - En una cuota: `id` = id del pasivo (los UUID no colisionan entre tablas) y `liability_id` lo repite; `label` = etiqueta del pasivo; `category_id` = su **`expense_category_id`** (la misma categoría de GASTO con la que la comparativa de Movimientos empareja los recibos reales); `amount` = **equivalente mensual** del plan (`weekly` → ×52/12; el importe y la frecuencia crudos siguen en `/v1/liabilities`); `expense_end_date` = fin del plan (`null` = indefinido).
 - `category_id` es **opcional** (`skip_serializing_if`): se omite solo en cuotas de pasivos sin `expense_category_id` (anteriores a 3.4.0, y los importados de `.ffbackup` viejos). Esas cuotas **siguen sumando** en los totales — descartarlas bajaría el gasto presupuestado en silencio.
 - Totales: `expense_regular_monthly_equivalent` incluye las cuotas y es exactamente la suma de los `entries` de scope `expense`; `expense_total_monthly_equivalent` vale lo mismo (se mantiene por compatibilidad). **`expense_derived_monthly_equivalent` y `derived_from_liabilities` ya no existen.**
@@ -520,7 +526,9 @@ códigos se emiten como literales completos en cada sitio** porque `error_codes_
 fuente y uno compuesto con `format!` sería invisible para el catálogo.
 
 ### Projection (`/v1/projection/`)
-Net-worth series via `futurefin-engine`. Accepts `?view=mine` and `?months=N` (12–840).
+Net-worth series via `futurefin-engine`. Accepts `?view=mine` and `?months=N`. `N` fuera de
+**12–840** es **400 `months_out_of_range`** (desde 4.4.0; antes se clampaba en silencio y la
+respuesta afirmaba `horizon_basis: "months_override"` como si hubiera hecho caso al valor pedido).
 
 Response (`ProjectionSeriesResponse`) includes:
 - `points[]` — `{month_index, net_worth, contributed_capital}` for months 0..=N. **`net_worth` y `contributed_capital` se serializan como `f64`** (no Decimal-as-string) por rendimiento: ~30 KB menos en JSON y evita ~5.000 `parseDisplayDecimal` cliente. Precisión <1 € en horizontes de 70 años.
@@ -591,15 +599,15 @@ Cash-flow histórico de las transacciones (tier-2 sobre los snapshots). Solo lec
 Params: `view` (`mine` | omitido → household); `window_months` (i64, default 24, clamp 1..=120); `resolution` (`weekly` default | `daily`). **Gating de daily**: `resolution=daily` exige `window_months <= 6` → si no, **400** `daily_window_too_large`. Response `CashflowResponse {anchor_date_ymd, anchor_month_first_ymd, view, months, liabilities_snapshotted, fine?}`; numéricos de `fine` en **f64** (misma excepción chart-only que projection/history-series), `months[]` en Decimal-string.
 
 ### Transactions (`/v1/transactions/`) — v1.6.0
-Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26) o efectivo a mano, categorización con reglas aprendidas, y comparativa mes real vs presupuesto vs promedio. Decimal-as-string (importes firmados: negativo = cargo). **Invalidación de la cache de proyección condicionada al modo** (`fire_settings.savings_source`): en modo A (`budget`, default) las transacciones **no son inputs del engine** → ninguna mutación invalida; en los modos que usan transacciones (B `transactions_avg` y C `budget_income_real_expense` → `SavingsSource::uses_transactions()`) el ahorro de la simulación deriva del promedio real 12m → las mutaciones que cambian el conjunto (create/batch/patch/delete, delete import, import confirm, `recurring/materialize`, y desde 3.5.0 conciliar/desconciliar) invalidan la cache vía `invalidate_projection_if_savings_uses_transactions` (best-effort post-commit, jamás convierte una mutación exitosa en 5xx). `rules.rs`, previews y un pase de conciliación sin pares nuevos nunca invalidan. **Corrección 4.0.0 — borrar una regla recurrente SÍ invalida (COND)**: el contrato decía «no cambia el conjunto de transacciones», y es cierto, pero cambia su **CLASIFICACIÓN**, que es lo que cuenta. `real_txns` filtra `recurring_rule_id IS NULL` y el mes de origen está exento de la poda, así que puede haber una instancia en un mes sin ningún movimiento real: un mes que el promedio ignora entero. Al borrar la plantilla, el `ON DELETE SET NULL` lo convierte en mes real y entra en numerador **y** denominador. `delete_recurring_rule_core` recibía un `&PgPool` y era **estructuralmente incapaz** de invalidar; ahora recibe el `&Arc<AppState>`. El test que congelaba lo contrario queda corregido. Regresión (A/B/C + flip + reconcile): `transactions_projection_cache.rs`.
+Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26) o efectivo a mano, categorización con reglas aprendidas, y comparativa mes real vs presupuesto vs promedio. Decimal-as-string (importes firmados: negativo = cargo). **Invalidación de la cache de proyección condicionada al modo** (`fire_settings.savings_source`): en modo A (`budget`, default) las transacciones **no son inputs del engine** → ninguna mutación invalida; en los modos que usan transacciones (B `transactions_avg` y C `budget_income_real_expense` → `SavingsSource::uses_transactions()`) el ahorro de la simulación deriva del promedio real 12m → las mutaciones que cambian el conjunto (create/batch/patch/delete, delete import, import confirm, `recurring/materialize`, y desde 3.5.0 conciliar/desconciliar) invalidan la cache vía `invalidate_projection_if_savings_uses_transactions` (best-effort post-commit, jamás convierte una mutación exitosa en 5xx). `rules.rs`, previews y un pase de conciliación sin pares nuevos nunca invalidan. **El REPLAY de un `create` con `idempotency_key` (Fase 3, issue #84) tampoco invalida**: no inserta nada, así que el conjunto no cambia — desalojar una cache caliente por una petición que no movió un número sería pagar un recompute de ~500 ms por nada. Regresión: `transactions_projection_cache.rs::mode_b_replay_of_an_idempotent_create_does_not_invalidate`. **Corrección 4.0.0 — borrar una regla recurrente SÍ invalida (COND)**: el contrato decía «no cambia el conjunto de transacciones», y es cierto, pero cambia su **CLASIFICACIÓN**, que es lo que cuenta. `real_txns` filtra `recurring_rule_id IS NULL` y el mes de origen está exento de la poda, así que puede haber una instancia en un mes sin ningún movimiento real: un mes que el promedio ignora entero. Al borrar la plantilla, el `ON DELETE SET NULL` lo convierte en mes real y entra en numerador **y** denominador. `delete_recurring_rule_core` recibía un `&PgPool` y era **estructuralmente incapaz** de invalidar; ahora recibe el `&Arc<AppState>`. El test que congelaba lo contrario queda corregido. Regresión (A/B/C + flip + reconcile): `transactions_projection_cache.rs`.
 
 **Promedio real que alimenta el engine** (`transactions_avg`, distinto del summary de Movimientos): ventana `[first-of-month(today) − 12m, first-of-month(today))`. El denominador `months_with_data` y las sumas por kind cuentan solo **meses reales** — meses del tramo con ≥1 transacción `recurring_rule_id IS NULL`. Un mes vacío o «pseudovacío» (solo instancias recurrentes materializadas, p. ej. tras un backfill) se excluye **por completo** (ni numerador ni denominador); un mes real cuenta entero, incluidas sus recurrentes. Desde 3.5.0 las **transferencias conciliadas** (`transfer_counterpart_id IS NOT NULL`) quedan igualmente fuera de numerador Y denominador (un mes cuyo único contenido son patas conciliadas es un mes vacío). Desde el auditoría MCP el `GET /v1/transactions/summary` de la pestaña Movimientos aplica **el mismo predicado de mes real** (la divergencia deliberada se cerró: dividía entre cualquier mes con datos y un mes solo-recurrente hundía todas las medias). Siguen sin ser idénticos: `transactions_avg` tiene ventanas por lado configurables (`AvgWindowSpec`, modos `data`/`calendar`), mientras que el summary usa siempre ventana de calendario. Ambos excluyen conciliadas de todos sus buckets. Lecturas: cualquier miembro (`?view=mine` vía `LedgerView` en los GET de listado/comparativa/imports; las **reglas** son siempre own-user, sin `?view`); escrituras siempre `owner_user_id = usuario` y exigen `role_can_write` o **403**. Import limit 16 MiB (`BACKUP_IMPORT_BODY_LIMIT_BYTES`, reutilizado). Códigos 400 estables entre comillas. **Signo↔kind (4.0.0)**: `assert_amount_sign_matches_kind` (`transactions/schema.rs`) exige `income > 0`, `expense`/`savings < 0` en el **alta manual** y en el PATCH **cuando éste fija `amount`**. Reclasificar no valida —ni el PATCH de solo `kind`, ni el lote (que no admite `amount`), ni `apply_categorization_rule`— porque un `expense` positivo es contabilidad correcta (devolución que netea) y porque el lote y el individual tienen que seguir siendo equivalentes (`batch_patch_matches_individual_patches_and_rejects_rewrites`). Import de CSV y restore de `.ffbackup` **exentos**: traen el signo del banco. Igual de acotado el guard de `op_date` futura (`op_date_in_future`): alta manual + PATCH, nunca import/restore. Regresión: `transactions_crud.rs`. **`list_categorization_rules` pagina en MCP desde 4.0.0** (`limit` 1–200 default 50, `offset`, sobre `{total_count, offset, truncated, rules}`): es la única lista del catálogo que crece con el uso normal —`learn_rule` inserta una por concepto distinto en cada import— y devolvía ~11 KB de una tacada. El GET HTTP sigue sirviendo el array entero (`limit = None`, mismo contrato que `list_transactions_core`), así que la tool ya **no** es byte-idéntica al endpoint y sale del bucle `new_read_tools_match_http_endpoints`; su paridad de contenido la cubre `list_categorization_rules_paginates_without_changing_the_http_contract`.
 
 | Method | Path | Rol | Notas |
 |--------|------|-----|-------|
 | GET | `/v1/transactions?view=&month=&kind=&category_id=&import_id=` | lectura | Listado, orden `op_date DESC`. `month` = `YYYY-MM` (inválido → 400). → **200** `[TransactionResponse]`. |
-| POST | `/v1/transactions` | write | Alta manual (efectivo, `import_id NULL`, `source='manual'`). Body `{op_date, value_date?, concept, amount, kind, category_id?, linked_asset_id?, linked_liability_id?, notes?, recurrence?}`. **`recurrence: {}`** (opcional, marcador sin campos desde 3.2.0): crea además una regla recurrente-plantilla y deja esta transacción enlazada como instancia de origen (`recurring_rule_id`). Las reglas tienen **resolución mensual** — el legacy `day_of_month` (≤3.1.0) se **ignora** si un cliente viejo lo envía (breaking documentado en CHANGELOG 3.2.0). **Un alta con `op_date` pasada backfillea las instancias de todos los meses CERRADOS intermedios en el MISMO commit** (el mes en curso jamás; ya no depende de una llamada posterior a `/materialize`); `op_date` a más de 10 años atrás → **422** `recurrence_too_old`. 400: `invalid_kind`, `amount_zero`, `savings_no_category`, `category_scope_mismatch`, `linked_asset_not_found`, `linked_liability_not_found`. Huella duplicada → **409**. → **201** `TransactionResponse` (incluye `recurring_rule_id?`). |
-| POST | `/v1/transactions/batch` | write | Alta manual multifila (1..=1000). Body `{transactions:[CreateTransactionBody]}`. Cada item acepta `recurrence` (misma semántica que el alta simple, backfill de meses intermedios incluido; item con `op_date` a >10 años → **422** `recurrence_too_old`). Ordinal de huella se avanza dentro del batch. → **201** `[TransactionResponse]`. |
+| POST | `/v1/transactions` | write | Alta manual (efectivo, `import_id NULL`, `source='manual'`). Body `{op_date, value_date?, concept, amount, kind, category_id?, linked_asset_id?, linked_liability_id?, notes?, recurrence?, idempotency_key?}` (`CreateTransactionRequest = CreateTransactionBody` aplanado con `#[serde(flatten)]` + el campo de idempotencia — el JSON no cambia de forma). **`recurrence: {}`** (opcional, marcador sin campos desde 3.2.0): crea además una regla recurrente-plantilla y deja esta transacción enlazada como instancia de origen (`recurring_rule_id`). Las reglas tienen **resolución mensual** — el legacy `day_of_month` (≤3.1.0) se **ignora** si un cliente viejo lo envía (breaking documentado en CHANGELOG 3.2.0). **Un alta con `op_date` pasada backfillea las instancias de todos los meses CERRADOS intermedios en el MISMO commit** (el mes en curso jamás; ya no depende de una llamada posterior a `/materialize`); `op_date` a más de 10 años atrás → **422** `recurrence_too_old`. **`idempotency_key` (Fase 3, issue #84, opt-in)**: 1..200 chars; misma clave + mismo cuerpo (huella del cuerpo YA VALIDADO, así que `"10"` y `"10.00"` son el mismo reintento) → devuelve la fila original **sin crear nada**, mismo `id`, mismo 201; misma clave + cuerpo distinto → **409** `idempotency_key_conflict` (gana el primero); clave reclamada DENTRO de la misma transacción que el INSERT (dos reintentos simultáneos: el perdedor deshace su INSERT y reproduce el del ganador). Caduca a las 24 h, poda perezosa en el propio POST. Ver [`data-model.md`](data-model.md) §`transaction_idempotency_keys`. 400: `invalid_kind`, `amount_zero`, `savings_no_category`, `category_scope_mismatch`, `linked_asset_not_found`, `linked_liability_not_found`, `idempotency_key_invalid`. Huella duplicada → **409**. → **201** `TransactionResponse` (incluye `recurring_rule_id?`). |
+| POST | `/v1/transactions/batch` | write | Alta manual multifila (1..=1000). Body `{transactions:[CreateTransactionRequest]}`. Cada item acepta `recurrence` (misma semántica que el alta simple, backfill de meses intermedios incluido; item con `op_date` a >10 años → **422** `recurrence_too_old`). Ordinal de huella se avanza dentro del batch. **`idempotency_key` por ítem se RECHAZA, no se ignora** (Fase 3, issue #84): cualquier ítem con la clave → **400** `idempotency_key_batch_unsupported` **antes** de tocar la BD (todo el lote, cero filas). Un lote es todo-o-nada en una sola transacción; aceptar el campo para descartarlo dejaría al llamante creyéndose protegido — la idempotencia solo cubre el alta individual. → **201** `[TransactionResponse]`. |
 | GET | `/v1/transactions/months?view=` | lectura | Meses con datos (`GROUP BY YYYY-MM`), orden DESC; `is_complete=false` para el mes en curso. → **200** `[MonthEntry]`. |
 | GET | `/v1/transactions/category-series?view=&kind=&category_id=&window_months=` | lectura | Serie mensual por categoría (issue #2): para cada categoría del `kind` (`expense`\|`income`, obligatorio) con ≥1 movimiento en la ventana, un punto por mes **cero-relleno** (`{month: "YYYY-MM", total}`; magnitudes ≥ 0 Decimal-string escala 2, misma convención de signos que el summary). `window_months` default 12, clamp 1..=60; el último mes es el actual (parcial). Orden: nombre ASC, pseudo-categoría `null` (sin categorizar) al final. **Fase 1 (issue #82)**: cada punto lleva `has_data` (¿ese mes tiene ALGÚN movimiento en el scope, de cualquier `kind`?) y la raíz publica `first_month_with_data` (`YYYY-MM` del primer movimiento de toda la historia, omitido si no hay ninguno) — sin ellos, el cero-relleno hacía indistinguibles «no gastaste en esta categoría» y «de ese mes no hay datos». Y un `category_id` del scope equivocado ya no devuelve `{series: []}` con 200: **400 `category_scope_mismatch`** si el scope no casa con el `kind`, **400 `category_not_found`** si el UUID no existe (400 y no 404, igual que `assert_transaction_category` y `budget.rs`: el recurso existe, lo que está mal es un parámetro). 400 `category_series_kind_invalid`. → **200** `CategoryMonthlySeriesResponse`. Espejo MCP: `get_category_monthly_series`. |
 | GET | `/v1/transactions/summary?view=&year=&month=&avg_window=&avg_months=` | lectura | Comparativa del mes (default: último mes **completo**). **Ventana del promedio** con `avg_window` ∈ {`3`,`6`,`12`,`ytd`,`all`} (default `6`; trim + case-insensitive; inválido → 400 `avg_window must be one of 3, 6, 12, ytd, all`); `avg_months` (1..24) es **alias legado** y `avg_window` gana si vienen ambos. Promedio **ponderado**: denominador = `avg_months` = meses **reales** del tramo `[window_start, selected)` (≥1 transacción del scope con `recurring_rule_id IS NULL`), **no** el nº de meses del tramo ni todos los que tienen algo. Un mes no real queda fuera del **numerador Y del denominador** — excluirlo solo del denominador dejaría su importe arriba y dispararía las categorías presentes en él. Denominador **único** para todas las líneas (no por categoría), así que `Σ avg de categorías == totals.expense_avg` y la tasa de ahorro promedio no se infla; la contrapartida aceptada es que un mes real sin movimientos de una categoría concreta sí cuenta como cero para ella. YTD = meses del año del mes seleccionado estrictamente anteriores (enero → tramo vacío); ALL = desde el mes del primer movimiento. Magnitudes ≥0 para comparar con budget (gasto = `−Σ`, ingreso = `+Σ`, ahorro = `−Σ`). **Cuotas atribuidas por categoría (3.4.0)**: cada pasivo activo EN EL MES seleccionado (`payment_end_date IS NULL OR >= primer día del mes`) con `expense_category_id` asignada suma su equivalente mensual al lado **budget** de esa categoría — se empareja con los recibos reales (que ya viven categorizados) y `totals.expense_budget` = Σ budget de categorías de gasto **+ cuotas atribuidas**. Una categoría solo-cuota materializa su fila (budget = plan, actual = 0). Pasivos sin asignar (NULL, pre-3.4.0): sin atribución (comportamiento previo). Sigue **sin** `derived_debt_line` (la fila sintética sin pareja de la v1.6-1.8 no vuelve). Response añade `avg_window: string`, `window_months: u32`, `months_with_data: u32` (meses con ≥1 movimiento de **cualquier** tipo, recurrentes incluidos — describe lo que hay, **no** es el denominador), `avg_months: u32` (**el denominador**), `avg_basis: {months, first_month, last_month, has_gaps}` (omitido ⟺ `avg_months == 0`; `has_gaps` impide etiquetar «abr–jun» una media de abril y junio) y `avg_unavailable_reason: "empty_window" | "only_recurring_months"` (omitido cuando sí hay promedio). **API breaking, Fase 1 (issue #82) — un cero ya no puede confundirse con un hueco**: (a) la respuesta añade `actual_txn_count: i64` y `has_actual_data: bool` (movimientos del mes seleccionado, conciliadas fuera) porque `is_partial` dice si el mes civil ha terminado, **no** si tiene datos; (b) sin meses reales las medias ya **no son 0 sino `null`** — `CategoryComparisonLine.avg`, `BlockActualAvg.avg` y `totals.{expense,income,savings}_avg` pasan a `string | null`, con `null ⟺ avg_months == 0`; (c) `delta_vs_budget` es `null ⟺ has_actual_data == false` y `delta_vs_avg` es `null` si falla cualquiera de los dos operandos. Los `actual` **no** se anulan: son mediciones (Σ∅ = 0); lo que no puede existir sin base es la comparación, que era la que afirmaba «vas muy por debajo de tu media» a quien no había importado nada. `avg_months` como campo de query sigue siendo el **alias legado** de `avg_window`; no confundir con el campo homónimo del response. Ya **no** trae `derived_debt_line`. 400: `year`/`month` fuera de rango o desapareados, `avg_window`/`avg_months` inválidos. → **200** `TransactionsSummaryResponse`. |
@@ -954,8 +962,11 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   en la capa MCP. Es el único sitio del catálogo donde la clave de salida no coincide con la
   del handler, y se hace a conciencia: el catálogo MCP habla inglés entero.
 - **`apply_categorization_rule` (3.8.0, auditoría MCP)**: backfill de una regla sobre el histórico —
-  `rule_id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`. Sin
-  `confirm` devuelve preview con `would_match` / `already_correct` / `would_change_kind` /
+  `rule_id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`, y
+  **desde la Fase 3 (issue #84) `confirm_token`** (obligatorio junto a `confirm: true`: el lote
+  puede tocar cientos de movimientos, así que entra en las 7 tools con confirmación en dos fases —
+  ver el bloque `confirm_token` más abajo). Sin `confirm` devuelve preview con `would_match` /
+  `already_correct` / `would_change_kind` /
   `skipped_by_source` / `matched_by_other_rule` / `skipped_reconciled` / `by_current_category` /
   `sample` y el aviso `moves_projection_in_modes_b_and_c`. Cache **COND**. Annotations:
   `destructive_hint = true`, `idempotent_hint = true` — declaradas **a conciencia** en
@@ -1054,22 +1065,38 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   Decimal-as-string intacto. Paridad congelada en `apps/api/tests/mcp_http.rs`.
 - **Errores**: dominio/validación → `CallToolResult{is_error:true}` con el JSON `{error, message}`
   de `ErrorBody`; `Db`/`Unavailable` → `ErrorData::internal_error` sanitizado (detalle a tracing).
-- **Tools de escritura (issue #3)** — todas pasan primero por `require_mcp_write` (mcp/auth.rs:
-  `role_can_write` con el rol vivo + kill-switch `installation.mcp_write_enabled` leído por
-  request; viewer → `forbidden`, toggle apagado → `bad_request` con prefijo `mcp_write_disabled:`),
-  llaman a la MISMA core fn de mutación que su handler HTTP (la invalidación de cache vive DENTRO
-  de la core, post-commit) y devuelven respuestas compactas `{id, summary}` (**breaking, Fase 2
-  del issue #83**: la clave se llamaba `resumen` y era la última en español del wire MCP; la
+- **Tools de escritura (issue #3)** — todas pasan primero por `require_mcp_write` (`mcp/auth.rs`),
+  que desde la **Fase 3 (issue #84)** son **tres puertas** en orden, de la más fundamental a la
+  más circunstancial: (1) **rol vivo** — `role_can_write`, viewer → `forbidden`; (2) **scope de la
+  credencial** — `api_tokens.scope`, un token `read_only` corta aquí aunque el rol escriba →
+  `mcp_token_read_only` (los `ffo_…` de OAuth siempre son `read_write`, no negocian scope — ver
+  §OAuth 2.1 abajo); (3) **toggle de la instalación** — `installation.mcp_write_enabled` leído por
+  request → `bad_request` con prefijo `mcp_write_disabled:`. Las puertas 2 y 3 responden
+  `BadRequest` (no `Forbidden`) para que el mensaje llegue al wire y el LLM sepa explicarlo en vez
+  de reintentar a ciegas. **Cada llamada al gate dobla como auditoría**: `require_mcp_write` abre
+  una fila en `mcp_write_audit` (`denied` si cualquier puerta rechaza, `attempted` si las tres
+  dejan pasar) y la propia tool la cierra a `ok`/`failed` con `settled(...)` — el envoltorio que
+  hace que ningún call site pueda propagar un error entre el gate y el cierre sin dejar la fila
+  huérfana. Nunca se audita el contenido de los argumentos, solo quién/con qué credencial/con qué
+  rol/qué tool/qué desenlace/qué UUIDs mutó. Esquema, invariantes y retención (365 días, poda
+  perezosa en la propia escritura): [`data-model.md`](data-model.md) §MCP write safety.
+  Las tools llaman a la MISMA core fn de mutación que su handler HTTP (la invalidación de cache
+  vive DENTRO de la core, post-commit) y devuelven respuestas compactas `{id, summary}` (**breaking,
+  Fase 2 del issue #83**: la clave se llamaba `resumen` y era la última en español del wire MCP; la
   norma del repo es «UI en español, identificadores en inglés», y la misma fase ya había
   unificado los `effects` de los previews a `entity`/`side_effects`). Once tools la publican:
   en diez es una cadena sintetizada por el propio MCP y en `update_transactions` es un array,
   traducido del `resumen`/`resumen_truncated` del handler. Tramo 1:
   `create_transaction` (con `recurring` opcional; reenvíos idénticos crean OTRO movimiento —
-  ordinal de huella, mismo contrato que HTTP), `update_transaction` (owner-guard → `not_found`),
-  `capture_snapshot` (upsert por día civil — sobrescribe), `materialize_recurring` (convergencia:
-  idempotente **por existencia**, sin cursor desde 3.9.0, y **poda** instancias → `pruned`;
-  `destructive_hint = true`, ver abajo), `create_planning_flow` / `update_planning_flow` (tri-state
-  `clear_due_date`),
+  ordinal de huella, mismo contrato que HTTP; **desde la Fase 3, `idempotency_key` opt-in** —
+  1..200 chars, misma clave + mismo cuerpo devuelve el movimiento original en vez de crear otro,
+  cuerpo distinto → 409 `idempotency_key_conflict`, gana el primero; caduca a las 24 h; ver
+  [`data-model.md`](data-model.md) §`transaction_idempotency_keys`. El REPLAY no escribe nada, así
+  que **no invalida** la cache de proyección aunque el modo use transacciones — pagar un recompute
+  por una petición que no movió un número sería incoherente con el propio objetivo de la clave),
+  `update_transaction` (owner-guard → `not_found`),
+  `capture_snapshot` (upsert por día civil — sobrescribe), `create_planning_flow` /
+  `update_planning_flow` (tri-state `clear_due_date`),
   `create_category`, `create_categorization_rule` (solo imports futuros; conflict con `source`
   concreto duplicado). **Contrato de cache por tool**: COND (`invalidate_projection_if_savings_
   uses_transactions`, solo modos B/C) = transaction C/U + materialize; NONE = capture_snapshot
@@ -1080,11 +1107,25 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `update_budget_entry` (exclusión `ends_at_retirement` ⊕ `expense_end_date`),
   `update_allocation_rule` (subset amount/cap/enabled — sin create/delete/reorder; la invariante
   del sink vive en la core compartida) y `delete_recurring_rule` (**estrena el patrón
-  preview/confirm**: sin `confirm: true` la tool devuelve `{preview, confirm_required, action,
-  effects}` como ÉXITO — para un LLM el preview es información, no fallo — y solo ejecuta con
-  confirm; NONE). Todos los anteriores excepto delete_recurring_rule invalidan FULL. La capa API
-  valida además `expected_annual_return_percent > −100` en create/patch de assets (el engine
-  clampa ≤ −100 a pérdida total). Tramo 3 (destructivas, todas preview/confirm):
+  preview/confirm en 4.0.0**: sin `confirm: true` la tool devuelve `{preview, confirm_required,
+  action, effects}` como ÉXITO — para un LLM el preview es información, no fallo — y solo ejecuta
+  con confirm; NONE). Todos los anteriores excepto delete_recurring_rule invalidan FULL. La capa
+  API valida además `expected_annual_return_percent > −100` en create/patch de assets (el engine
+  clampa ≤ −100 a pérdida total). **Bloque `impact` (Fase 3, issue #84)**: las escrituras que
+  invalidan FULL — quince en total: `create_planning_flow`/`update_planning_flow`/
+  `delete_planning_flow`, `create_asset`/`update_asset`/`update_asset_value`,
+  `create_liability`/`update_liability`, `create_budget_entry`/`update_budget_entry`/
+  `delete_budget_entry`, `update_allocation_rule`, `update_fire_settings`, `delete_asset`,
+  `delete_liability` — devuelven además `impact`: antes/después/delta de las cuatro cifras de
+  `get_summary` (`net_worth`, `savings_expected_monthly`, `net_return_real_annual_pct`,
+  `debt_to_assets_ratio`), medidas alrededor de la propia escritura con la MISMA core que
+  `get_summary` (`summary_core`, dos lecturas extra, best-effort — si fallan, `impact: null` y la
+  escritura sigue). **Nunca incluye la fecha de jubilación**: eso costaría una simulación completa
+  (hasta 840 meses) justo después de invalidar la cache, compitiendo por el semáforo de proyección
+  con cualquier lectura concurrente — se pide aparte con `get_projection` cuando hace falta. Las
+  escrituras COND (transacciones) NO llevan `impact`: es la escritura más frecuente del catálogo y
+  solo mueve el motor a través de un promedio 12m, no vale la pena la lectura doble en el camino
+  caliente. Tramo 3 (destructivas, todas preview/confirm):
   `delete_transaction` (preview = el movimiento completo; owner-guard), `delete_planning_flow`,
   `delete_budget_entry`, `delete_asset` (preview con contadores de desvinculación:
   `linked_asset_id`/`account_asset_id` → SET NULL — **y, desde 4.0.0, `allocation_rules_deleted` +
@@ -1092,7 +1133,14 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   él (`ON DELETE CASCADE`) y eso no tiene vuelta atrás. El preview contaba lo reversible y callaba
   lo irreversible, así que el humano confirmaba un borrado «inocuo» que podía llevarse el sumidero
   de la cascada y redistribuir el sobrante mensual en todo el horizonte), `delete_liability` (ídem
-  `linked_liability_id`), `delete_snapshot` (preview con `items_deleted`; NONE), `delete_import`
+  `linked_liability_id` **y, desde la Fase 3, `budget_entry_removed`**: la cuota derivada que
+  desaparece de `GET /v1/budget`, con `label`, `monthly_amount` y los cuatro totales
+  before/after — `expense_monthly_*` y `net_monthly_*` — del presupuesto del HOGAR completo,
+  recomputados quitando la fila derivada del conjunto en vez de restados a mano. `None` cuando el
+  pasivo no genera cuota (sin plan de pago, o `payment_end_date` ya pasada): entonces borrarlo no
+  mueve el presupuesto y decirlo también es informar. Antes el preview solo contaba lo que se
+  desvincula y callaba que, tras confirmar, el gasto mensual presupuestado baja — en una hipoteca,
+  cientos de euros), `delete_snapshot` (preview con `items_deleted`; NONE), `delete_import`
   (preview con `transactions_deleted`; cascada; COND — mismo contrato que el `?confirm=true`
   HTTP) y **`update_fire_settings`** (SOLO owner; merge campo a campo vía
   `patch_fire_settings_core` — jamás deserializa a `FireSettings` con su `#[serde(default)]` a
@@ -1105,11 +1153,37 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   persistiendo el SWR y **descartando la inflación en silencio**, sobre el eje que más mueve la
   proyección. Ningún cambio de forma en el catálogo (el alias no añade una `property` nueva al
   schema, por eso `update_fire_settings` no entra en el diff de `mcp-catalog.json` de este tren
-  pese a ser uno de los cinco críticos del issue). Conciliación (3.5.0):
-  `reconcile_transfers` (pase explícito, idempotente — `reconcile_now_core`; COND solo si enlaza
-  algo; `destructive_hint = false`) y `unreconcile_transfer` (rompe el par + rechazo persistido —
-  `unreconcile_core`; COND; **`destructive_hint = true` desde 4.0.0**). Ninguna de las dos usa
-  preview/confirm. `reconcile_pair` manual se omite a conciencia
+  pese a ser uno de los cinco críticos del issue). Conciliación (3.5.0; **Fase 3, issue #84,
+  ganan preview/confirm las tres**): `materialize_recurring` (convergencia: idempotente **por
+  existencia**, sin cursor desde 3.9.0, y **poda** instancias → `pruned`; `destructive_hint =
+  true`. Es el único preview del catálogo que NO puede dar cifras — la core calcula y escribe en
+  la misma transacción, sin dry-run — así que publica `would_materialize`/`would_prune` como
+  `null` con `counts_unavailable_reason`, más `your_recurring_rules` y el aviso de que el ámbito
+  es la instalación entera; exige `confirm` + `confirm_token`), `reconcile_transfers` (pase
+  explícito, idempotente — `reconcile_now_core`; COND solo si enlaza algo; `destructive_hint =
+  false`; sin `confirm` devuelve un preview de alcance — tampoco puede contar pares de antemano,
+  mismo motivo que materialize_recurring — pero **no** exige `confirm_token`: es reversible con
+  `unreconcile_transfer`) y `unreconcile_transfer` (rompe el par + rechazo persistido —
+  `unreconcile_core`; COND; `destructive_hint = true` desde 4.0.0; el preview enseña **las dos
+  patas** del par — el cliente solo tiene el id de una — y por eso, a diferencia de
+  `materialize_recurring`/`reconcile_transfers`, el parseo de parámetros corre ANTES del gate de
+  escritura; exige `confirm` + `confirm_token`, es una puerta de un solo sentido). Preview/confirm
+  del catálogo: **11 → 14** con este tren; de ellas, **7 exigen además `confirm_token`** —
+  cascadas de tamaño no acotado (`delete_import`, `delete_asset`, `delete_liability`,
+  `apply_categorization_rule`, `materialize_recurring`) y puertas de un solo sentido
+  (`unreconcile_transfer`, `delete_snapshot`); los borrados de una fila cuyo contenido íntegro
+  viaja en el preview (`delete_transaction`, `delete_planning_flow`, `delete_budget_entry`) no lo
+  piden. **`confirm_token`, el mecanismo (`apps/api/src/confirm_token.rs`)**: `confirm: true` es
+  un booleano del propio esquema, así que el modelo podía escribirlo en la PRIMERA llamada — sin
+  el token, `confirm` nunca fue un control de dos fases, solo *prompting*. El preview emite un
+  secreto `ffpv_…` (hash-only, un solo uso, TTL 10 min) ligado a la tool, a los argumentos
+  normalizados y a la **huella de los efectos que acaba de enseñar** (`confirm_token::digest`,
+  orden de claves canónico — un cambio de dependencia o de estilo en el `json!` no puede mover la
+  huella); la confirmación exige el token y el servidor **recalcula** los efectos y compara: si
+  algo cambió entre medias, `confirm_token_stale` en vez de ejecutar sobre un mundo distinto del
+  que se enseñó. Sin token: `confirm_token_required`. Token de otra tool/objetivo/usuario:
+  `confirm_token_invalid`. Esquema y retención: [`data-model.md`](data-model.md)
+  §`mcp_confirm_tokens`. `reconcile_pair` manual se omite a conciencia
   (footgun para un LLM; el registro de omisiones deliberadas vive en la skill
   `futurefin-mcp-parity`). Paridad CRUD del ledger (tras 3.5.0): `update_asset` (body completo
   del PATCH vía la misma `patch_asset_core` — rename, categoría, liquidez, precio de compra con
@@ -1129,8 +1203,26 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   guardias del PATCH viven en la **core** (`rule_patch_empty`, `rule_patch_conflict`): el `clear_*`
   ya no gana en silencio sobre el campo puesto. Catálogo total: **52 tools** (21 con `read_only_hint = true` + 31 de
   escritura; recuento reproducible: `grep -c '#\[tool(' apps/api/src/mcp/server.rs`), congelado
-  en `tools_list_returns_exactly_the_v1_catalog`. Regresión:
-  `apps/api/tests/mcp_write.rs`.
+  en `tools_list_returns_exactly_the_v1_catalog`. **La Fase 3 (issue #84) no toca el catálogo**
+  (sigue en 52/21/31) — reescribe el andamiaje de las escrituras (auditoría, scope, dos fases,
+  `impact`), no añade ni retira ninguna tool. Regresión: `apps/api/tests/mcp_write.rs` (tramos
+  1–3 + los cuartetos por tool) + los tres ficheros nuevos de la Fase 3:
+  `apps/api/tests/mcp_audit_and_scope.rs` (auditoría append-only + scope de tokens),
+  `apps/api/tests/mcp_confirm_and_impact.rs` (`confirm_token` de dos fases + bloque `impact`) y
+  `apps/api/tests/write_safety_phase3.rs` (idempotencia de `create_transaction` + preview de
+  `delete_liability` sobre el presupuesto + el semáforo de proyección, ver abajo). Detalle de
+  cobertura: [`tests.md`](tests.md).
+- **Semáforo de proyección (Fase 3, issue #84)**: `heavy::run_projection_sim` (mismo módulo que
+  ya acotaba el KDF de contraseñas y el cripto de `.ffbackup`) pasa a envolver también
+  `project_net_worth_series` y el marker de «compound supera ahorro» — `available_parallelism()`
+  acotado a `[2, 8]`, suelo 2 porque una petición de proyección usa DOS permisos (serie + marker,
+  o baseline + escenario en el what-if) y los suelta por separado. Sin este techo, `simulate_
+  projection` en bucle desde un agente MCP —o cualquier `GET /v1/projection/series?months=…`, que
+  **salta la cache por diseño** (D7)— podía poner N simulaciones CPU-bound en vuelo sobre el pool
+  de blocking de Tokio (512 hilos), agotando los núcleos del reactor hasta que `/v1/ready` (mismo
+  pool de conexiones) empezara a fallar y el contenedor —con el PostgreSQL embebido dentro— se
+  reiniciara a mitad de checkpoint. Envuelve la simulación, no el handler: un HIT de la cache de
+  proyección no toca el semáforo. Detalle y tests: [`futurefin-architecture-contract`](skills/futurefin-architecture-contract/SKILL.md).
 - **NO está en OpenAPI a propósito**: no es un recurso REST — es JSON-RPC cuyo contrato define la
   spec MCP y que se autodescribe vía `tools/list`.
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
@@ -1159,7 +1251,7 @@ no acepta un Bearer pegado a mano. FutureFin es a la vez **authorization server 
 | Method | Path | Notas |
 |--------|------|-------|
 | GET | `/.well-known/oauth-protected-resource[/mcp]` | RFC 9728. `{resource: "{base}/mcp", authorization_servers: [base], bearer_methods_supported: ["header"]}`. Sin SELECT y sin mutación: solo refleja la URL pública. |
-| GET | `/.well-known/oauth-authorization-server[/mcp]` | RFC 8414. `issuer`, `authorization_endpoint` (`{base}/oauth/authorize`), `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `code_challenge_methods_supported: ["S256"]` (único), `grant_types_supported: [authorization_code, refresh_token]`, `authorization_response_iss_parameter_supported: true`. **Sin `scopes_supported`** a propósito: el acceso no se granula por scopes sino por el rol vivo del usuario + el toggle `installation.mcp_write_enabled` (las tools de escritura lo comprueban por request) — un scope congelado en el token sería MENOS revocable que el gate vivo. |
+| GET | `/.well-known/oauth-authorization-server[/mcp]` | RFC 8414. `issuer`, `authorization_endpoint` (`{base}/oauth/authorize`), `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `code_challenge_methods_supported: ["S256"]` (único), `grant_types_supported: [authorization_code, refresh_token]`, `authorization_response_iss_parameter_supported: true`. **Sin `scopes_supported`, y sigue así tras la Fase 3 (issue #84)** — aunque el argumento original («no hay scopes con función») ya no es literal: los tokens de API sí tienen `scope` (`api_tokens.scope`, ver §API tokens y `auth-and-membership.md`). El motivo por el que NO se extiende a OAuth es distinto: un scope solo restringe **si lo elige la persona** — en un token de API lo elige ella misma con cookie de sesión; en OAuth el `scope` del authorization request lo elige la **aplicación cliente**, así que anunciarlo sin una pantalla de consentimiento que lo recorte no restringiría nada, solo mentiría en la metadata. El techo de una conexión OAuth sigue siendo el rol vivo del usuario + el toggle `installation.mcp_write_enabled`, comprobados por request. |
 | POST | `/oauth/register` | DCR (RFC 7591), **público y sin autenticación**. Body `{redirect_uris (1..5, requerido), client_name?, client_uri?, token_endpoint_auth_method?, grant_types?, response_types?}` → **201** `{client_id ("ffc_…"), client_id_issued_at, client_secret? ("ffcs_…"), client_secret_expires_at? (0 = no caduca), …}`. `token_endpoint_auth_method` omitido ⇒ `client_secret_basic` (default RFC 7591 §2) y se emite secreto; `none` ⇒ cliente público sin secreto (el caso de claude.ai). Errores `invalid_client_metadata` / `invalid_redirect_uri`. |
 | POST | `/oauth/token` | `grant_type=authorization_code` (PKCE **S256 obligatorio**) o `grant_type=refresh_token` (rotación). Form-urlencoded. → `{access_token ("ffo_…"), token_type: "Bearer", expires_in: 3600, refresh_token ("ffr_…"), scope?}` + `Cache-Control: no-store`. |
 | POST | `/oauth/revoke` | RFC 7009. Un `ffr_…` revoca el **grant entero** (§2.1: "desconectar" en claude corta todo); un `ffo_…` revoca solo su fila. Token desconocido → **200** igualmente (§2.2). |

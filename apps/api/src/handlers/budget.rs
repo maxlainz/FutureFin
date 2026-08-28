@@ -5,6 +5,7 @@ use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
 use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
+use crate::money::money_out;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch};
@@ -182,7 +183,7 @@ pub(crate) struct BudgetEntryJoinRow {
     expense_end_date: Option<NaiveDate>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 pub(crate) struct LiabilityDerivedRow {
     id: Uuid,
     expense_category_id: Option<Uuid>,
@@ -305,7 +306,7 @@ pub(crate) async fn assert_budget_category(
     Ok(s)
 }
 
-async fn fetch_budget_rows_and_derived_liabilities(
+pub(crate) async fn fetch_budget_rows_and_derived_liabilities(
     pool: &sqlx::PgPool,
     iid: Uuid,
     session_user_id: Uuid,
@@ -399,6 +400,116 @@ pub(crate) fn ledger_budget_totals_from_parts(
         expense_total_monthly_equivalent: expense_reg,
         net_monthly_equivalent: net,
     })
+}
+
+/// La partida de presupuesto que DESAPARECE al borrar un pasivo, con el efecto exacto sobre los
+/// totales del hogar.
+///
+/// Existe porque el preview de `delete_liability` engañaba por omisión: contaba los movimientos
+/// que quedan desvinculados y callaba que, tras confirmar, la cuota derivada se va de
+/// `GET /v1/budget` y el gasto mensual presupuestado baja. En una hipoteca son cientos de euros
+/// al mes; quien confirma el borrado tiene derecho a verlos ANTES.
+#[derive(Debug, serde::Serialize)]
+pub struct BudgetLineRemoved {
+    /// Categoría de gasto donde se sentaba la cuota (`None` en pasivos sin `expense_category_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<Uuid>,
+    /// Etiqueta del pasivo, tal y como aparece hoy en el presupuesto.
+    pub label: String,
+    /// Equivalente MENSUAL de la cuota (una cuota semanal ya viene convertida ×52/12).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub monthly_amount: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub expense_monthly_before: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub expense_monthly_after: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub net_monthly_before: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub net_monthly_after: Decimal,
+}
+
+/// Calcula [`BudgetLineRemoved`] para un pasivo. `None` cuando el pasivo **no genera** cuota
+/// derivada (sin plan de pago, o con `payment_end_date` ya pasada): entonces borrarlo no mueve
+/// ni un euro del presupuesto, y decir «desaparece una partida» sería mentir en la otra dirección.
+///
+/// Los totales de después se **recomputan** con la misma función que los de antes, quitando la
+/// fila derivada del conjunto — no se restan a mano. Restar daría hoy el mismo número, pero
+/// dejaría el preview mintiendo el día que una cuota contribuya a algún total de otra manera.
+///
+/// Vista **household** a propósito: borrar un pasivo lo borra para todo el hogar, así que el
+/// efecto que hay que enseñar es el del hogar, no el del solicitante.
+pub(crate) async fn budget_line_removed_with_liability(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    liability_id: Uuid,
+) -> Result<Option<BudgetLineRemoved>, ApiError> {
+    let today = installation_naive_today(pool, iid).await?;
+    // `LedgerView::Household` ignora el `session_user_id` en `bind_scope_as` (ver person_view.rs),
+    // así que el nil no llega a ningún bind: no hay identidad que pasar.
+    let (rows, derived) = fetch_budget_rows_and_derived_liabilities(
+        pool,
+        iid,
+        Uuid::nil(),
+        LedgerView::Household,
+        today,
+    )
+    .await?;
+
+    let Some(target) = derived.iter().find(|d| d.id == liability_id).cloned() else {
+        return Ok(None);
+    };
+    let before = ledger_budget_totals_from_parts(&rows, &derived)?;
+    let after_derived: Vec<LiabilityDerivedRow> = derived
+        .into_iter()
+        .filter(|d| d.id != liability_id)
+        .collect();
+    let after = ledger_budget_totals_from_parts(&rows, &after_derived)?;
+
+    Ok(Some(BudgetLineRemoved {
+        category_id: target.expense_category_id,
+        label: target.label,
+        monthly_amount: money_out(monthly_equivalent(
+            target.payment_amount,
+            &target.payment_frequency,
+        )),
+        expense_monthly_before: money_out(before.expense_regular_monthly_equivalent),
+        expense_monthly_after: money_out(after.expense_regular_monthly_equivalent),
+        net_monthly_before: money_out(before.net_monthly_equivalent),
+        net_monthly_after: money_out(after.net_monthly_equivalent),
+    }))
+}
+
+/// ¿Este id es un **pasivo** de la instalación en vez de una partida de presupuesto?
+///
+/// Las cuotas derivadas se publican en `GET /v1/budget` con el **UUID de su pasivo**
+/// (`source = "liability"`), así que un id recogido de ahí y pasado a
+/// `PATCH`/`DELETE /v1/budget/entries/{id}` apunta a un pasivo. Hasta ahora eso era un 404 pelado
+/// —«no existe»— justo sobre un id que el llamante acababa de leer en una respuesta nuestra: el
+/// error decía lo contrario de la verdad y no señalaba a dónde ir.
+async fn id_is_liability(pool: &sqlx::PgPool, iid: Uuid, id: Uuid) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM liabilities WHERE id = $1 AND installation_id = $2)"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Traduce «no hay partida con ese id» a un error que distinga las dos causas: un id inventado
+/// (404) o el id de un pasivo cuya cuota derivada NO se edita aquí (422, con el sitio al que ir).
+///
+/// Solo se llama en el camino de error, así que el coste de la consulta extra es cero en la ruta
+/// buena. Mensaje literal COMPLETO: `error_codes_parity` extrae el código del literal del fuente.
+async fn missing_budget_entry_error(pool: &sqlx::PgPool, iid: Uuid, id: Uuid) -> ApiError {
+    match id_is_liability(pool, iid, id).await {
+        Ok(true) => ApiError::Unprocessable(
+            "budget_entry_is_liability_derived: this id is a liability, not a budget entry — its budget line is derived from the liability's payment plan; edit or remove it with update_liability / delete_liability (PATCH or DELETE /v1/liabilities/{id})".into(),
+        ),
+        // Un fallo del SELECT no debe inventar un 422: se cae al 404 de siempre.
+        Ok(false) | Err(_) => ApiError::NotFound,
+    }
 }
 
 /// Los mismos totales que `GET /v1/budget` (partidas persistidas + cuotas de pasivos activos,
@@ -626,6 +737,7 @@ pub(crate) async fn create_budget_entry_core(
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
         (status = 404, description = "Entry missing"),
+        (status = 422, description = "El id es un pasivo: su partida es derivada y se edita en /v1/liabilities (`budget_entry_is_liability_derived`)"),
     )
 )]
 pub async fn patch_budget_entry(
@@ -705,7 +817,7 @@ pub(crate) async fn patch_budget_entry_core(
     .await?;
 
     let Some(current) = row else {
-        return Err(ApiError::NotFound);
+        return Err(missing_budget_entry_error(&state.pool, iid, id).await);
     };
 
     let new_cat = body.category_id.unwrap_or(current.category_id);
@@ -798,6 +910,7 @@ pub(crate) async fn patch_budget_entry_core(
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
         (status = 404, description = "Entry missing"),
+        (status = 422, description = "El id es un pasivo: su partida es derivada y se edita en /v1/liabilities (`budget_entry_is_liability_derived`)"),
     )
 )]
 pub async fn delete_budget_entry(
@@ -829,7 +942,7 @@ pub(crate) async fn delete_budget_entry_core(
         .await?;
 
     if res.rows_affected() == 0 {
-        return Err(ApiError::NotFound);
+        return Err(missing_budget_entry_error(&state.pool, iid, id).await);
     }
 
     refresh_projection_after_mutation(&state, iid, user_id).await;

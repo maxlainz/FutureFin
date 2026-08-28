@@ -951,6 +951,9 @@ export type ApiTokenApi = {
   id: string;
   label: string;
   token_prefix: string;
+  /** `"read_write"` (histórico) | `"read_only"` — con `read_only` ninguna tool de escritura de
+   *  `/mcp` acepta el token, aunque autentica y lee igual. Siempre presente. */
+  scope: string;
   created_at: string;
   expires_at?: string | null;
   last_used_at?: string | null;

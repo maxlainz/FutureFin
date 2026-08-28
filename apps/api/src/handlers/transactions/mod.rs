@@ -31,6 +31,7 @@
 
 pub mod crud;
 pub mod csv_presets;
+pub mod idempotency;
 pub mod import;
 pub mod reconcile;
 pub mod recurring;
@@ -63,6 +64,7 @@ pub use summary::{get_category_series, get_transactions_summary};
 
 pub use schema::{
     BatchCreateBody, CategoryComparisonLine, CreateRuleBody, CreateTransactionBody,
+    CreateTransactionRequest,
     ImportBatchResponse, ImportConfirmBody, ImportConfirmResponse, ImportDecision, ImportPreviewBody,
     ImportPreviewResponse, MaterializeResponse, MonthEntry, PatchRuleBody, PatchTransactionBody,
     PreviewRow, RecurrenceSpec, ReconcilePairBody, ReconcilePairResponse, ReconcileRunResponse,

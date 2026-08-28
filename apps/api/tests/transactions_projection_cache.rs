@@ -368,6 +368,55 @@ async fn mode_c_mutation_invalidates_projection_cache() {
 }
 
 // ---------------------------------------------------------------------------
+// Idempotencia: el REPLAY no escribe, luego no invalida
+// ---------------------------------------------------------------------------
+
+/// Un alta con `idempotency_key` invalida COND como cualquier otra (el conjunto cambió). El
+/// **replay** de esa misma clave NO: no inserta nada, así que desalojar una cache caliente sería
+/// pagar un recompute de ~500 ms por una petición que no movió un solo número. Es el mismo
+/// criterio que ya rige el barrido de conciliación (invalida solo si `pairs_created > 0`).
+#[tokio::test]
+async fn mode_b_replay_of_an_idempotent_create_does_not_invalidate() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+        &owner.cookie,
+    )
+    .await;
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid, owner.user_id);
+    let body = json!({
+        "op_date": "2026-05-10", "concept": "Manual", "amount": "-25",
+        "kind": "expense", "idempotency_key": "k-cache",
+    });
+
+    // El alta REAL invalida: el conjunto de transacciones cambió.
+    app.warm_household(&owner.cookie, &key).await;
+    let created = app
+        .post_json_with_cookie("/v1/transactions", body.clone(), &owner.cookie)
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    app.assert_invalidated(&key, "modo B create con clave").await;
+
+    // El replay NO: devuelve la misma fila sin escribir, y la cache caliente sigue caliente.
+    app.warm_household(&owner.cookie, &key).await;
+    let replay = app
+        .post_json_with_cookie("/v1/transactions", body, &owner.cookie)
+        .await;
+    assert_eq!(replay.status, http::StatusCode::CREATED, "{replay:?}");
+    assert_eq!(replay.json()["id"], created.json()["id"]);
+    assert!(
+        app.cache_contains(&key).await,
+        "un replay no escribe nada: no debe desalojar la cache de proyección"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Reglas de categorización: crear una regla NUNCA invalida, en NINGÚN modo
 // ---------------------------------------------------------------------------
 

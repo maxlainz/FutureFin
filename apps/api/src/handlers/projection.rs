@@ -1508,7 +1508,7 @@ pub(crate) async fn projection_series_cached(
 pub(crate) const MIN_PROJECTION_MONTHS: u32 = 12;
 pub(crate) const MAX_PROJECTION_MONTHS: u32 = 840;
 
-/// Un `months` fuera de rango se **rechaza**, no se clampa (4.3.2).
+/// Un `months` fuera de rango se **rechaza**, no se clampa (4.4.0).
 ///
 /// Hasta 4.3.1 `resolve_projection_context` hacía `m.clamp(12, 840)` y devolvía 200 con
 /// `horizon_basis: "months_override"` — o sea: la respuesta afirmaba «te he hecho caso» mientras
@@ -1671,21 +1671,25 @@ pub async fn compute_projection_series_response(
     // Las dos simulaciones (principal + marker «compound supera ahorro») son CPU-bound y se
     // ejecutan en el pool blocking de Tokio. `tokio::join!` arranca ambas en paralelo, así que
     // un horizonte de 70 años con N activos no bloquea el reactor y aprovecha 2 cores.
+    //
+    // Desde la Fase 3 van bajo el techo de `heavy::run_projection_sim` (el tercer semáforo, junto
+    // al KDF y al cripto del backup): sin él el límite efectivo eran los 512 hilos del pool de
+    // blocking de Tokio, y N proyecciones concurrentes —trivial de provocar con `?months=`, que
+    // salta la cache por diseño— dejaban sin CPU al reactor hasta tumbar `/v1/ready`. El permiso
+    // envuelve SOLO la simulación: un HIT de cache no pasa por aquí y no espera a nadie.
     let main_input = projection_input.clone();
     let marker_input = projection_input.clone();
     let assumption = monthly_delta_assumption;
     let (main_join, marker_join) = tokio::join!(
-        tokio::task::spawn_blocking(move || project_net_worth_series(&main_input)),
-        tokio::task::spawn_blocking(move || {
+        crate::heavy::run_projection_sim("projection", move || project_net_worth_series(
+            &main_input
+        )),
+        crate::heavy::run_projection_sim("compound marker", move || {
             compound_outpaces_true_savings_month(&marker_input, assumption)
         }),
     );
-    let output = main_join
-        .map_err(|e| ApiError::BadRequest(format!("task_panic: projection task panic: {e}")))?
-        .map_err(map_engine_err)?;
-    let compound_outpaces_true_savings_month_index = marker_join
-        .map_err(|e| ApiError::BadRequest(format!("task_panic: compound marker task panic: {e}")))?
-        .map_err(map_engine_err)?;
+    let output = main_join?.map_err(map_engine_err)?;
+    let compound_outpaces_true_savings_month_index = marker_join?.map_err(map_engine_err)?;
 
     let starting_net_worth = output
         .net_worth
@@ -2360,18 +2364,21 @@ pub(crate) async fn simulate_projection_core(
     }
 
     // ---- Doble simulación en el pool blocking (CPU-bound; patrón del marker) -----------------
+    // Bajo el MISMO techo que la proyección real (`heavy::run_projection_sim`). Es el llamante
+    // que más lo necesita: `simulate_projection` es cache-neutral por diseño, así que cada
+    // what-if de un agente en bucle es dos simulaciones nuevas, sin excepción.
     let baseline_input = baseline_built.input.clone();
     let scenario_sim_input = scenario_input.clone();
     let (baseline_join, scenario_join) = tokio::join!(
-        tokio::task::spawn_blocking(move || project_net_worth_series(&baseline_input)),
-        tokio::task::spawn_blocking(move || project_net_worth_series(&scenario_sim_input)),
+        crate::heavy::run_projection_sim("projection", move || project_net_worth_series(
+            &baseline_input
+        )),
+        crate::heavy::run_projection_sim("projection", move || project_net_worth_series(
+            &scenario_sim_input
+        )),
     );
-    let baseline_out = baseline_join
-        .map_err(|e| ApiError::BadRequest(format!("task_panic: projection task panic: {e}")))?
-        .map_err(map_engine_err)?;
-    let scenario_out = scenario_join
-        .map_err(|e| ApiError::BadRequest(format!("task_panic: projection task panic: {e}")))?
-        .map_err(map_engine_err)?;
+    let baseline_out = baseline_join?.map_err(map_engine_err)?;
+    let scenario_out = scenario_join?.map_err(map_engine_err)?;
 
     let baseline = sim_kpis(
         &baseline_built.input,
