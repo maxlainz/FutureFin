@@ -145,6 +145,12 @@ export const ERROR_MESSAGES: Record<string, string> = {
   transactions_not_found:
     "Alguno de los movimientos ya no existe, así que no se ha cambiado nada. Recarga la lista e inténtalo otra vez.",
   amount_zero: "El importe no puede ser cero.",
+  due_date_out_of_range:
+    "Esa fecha está demasiado lejos: como mucho, 100 años vista.",
+  payment_end_date_out_of_range:
+    "La fecha de fin del plan está demasiado lejos: como mucho, 100 años vista.",
+  amount_out_of_range:
+    "El importe es demasiado grande: caben hasta 14 dígitos enteros y 4 decimales.",
   amount_sign_mismatch:
     "El signo del importe no cuadra con el tipo: los ingresos van en positivo, y los gastos y los traspasos a ahorro en negativo.",
   op_date_in_future:
@@ -158,6 +164,12 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Has pedido asignar y borrar la categoría a la vez. Elige una de las dos.",
   notes_set_and_clear:
     "Has pedido escribir y borrar las notas a la vez. Elige una de las dos.",
+  value_date_set_and_clear:
+    "No se puede poner y borrar la fecha valor a la vez. Elige una de las dos cosas.",
+  linked_asset_set_and_clear:
+    "No se puede enlazar y desenlazar el activo a la vez. Elige una de las dos cosas.",
+  linked_liability_set_and_clear:
+    "No se puede enlazar y desenlazar el pasivo a la vez. Elige una de las dos cosas.",
   concept_contains_length:
     "El texto de búsqueda debe tener entre 1 y 200 caracteres.",
   month_and_range_exclusive:
@@ -197,6 +209,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "No has indicado ningún cambio en la regla. Modifica algo antes de guardar.",
   rule_patch_conflict:
     "Estás poniendo y quitando el mismo dato de la regla a la vez. Elige una de las dos cosas.",
+  rule_duplicate:
+    "Ya tienes una regla con ese texto para ese banco. Edítala en vez de crear otra.",
   rule_not_applicable:
     "Esa regla no asigna ningún tipo, así que no se puede aplicar a los movimientos que ya tienes. Edítala primero.",
   apply_to_existing_invalid:

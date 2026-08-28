@@ -687,15 +687,22 @@ pub struct CategoryComparisonLine {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub budget: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub avg: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub delta_vs_budget: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub delta_vs_avg: Decimal,
+    /// Promedio de la ventana. **`null` ⟺ `avg_months == 0`**: sin meses reales que promediar no
+    /// hay media, y un `"0"` ahí se leía como «de media no gastas nada» (auditoría MCP §4).
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub avg: Option<Decimal>,
+    /// `actual − budget`. **`null` ⟺ `has_actual_data == false`**: sin ningún movimiento en el mes,
+    /// `actual` no mide tu gasto, mide la ausencia de datos — y el delta afirmaba «vas muy por
+    /// debajo del presupuesto» con el presupuesto entero en negativo.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub delta_vs_budget: Option<Decimal>,
+    /// `actual − avg`. **`null` si falta cualquiera de los dos operandos**: `avg_months == 0` o
+    /// `has_actual_data == false`.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub delta_vs_avg: Option<Decimal>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -703,9 +710,10 @@ pub struct BlockActualAvg {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub actual: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub avg: Decimal,
+    /// `null` ⟺ `avg_months == 0` (misma regla que `CategoryComparisonLine::avg`).
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub avg: Option<Decimal>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -717,24 +725,28 @@ pub struct SummaryTotals {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_budget: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub expense_avg: Decimal,
+    /// `null` ⟺ `avg_months == 0`. Los totales siguen la MISMA regla que las filas: si una fila no
+    /// tiene media, el total tampoco puede tenerla (sería la suma de nada).
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub expense_avg: Option<Decimal>,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub income_actual: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub income_budget: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub income_avg: Decimal,
+    /// `null` ⟺ `avg_months == 0`.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub income_avg: Option<Decimal>,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub savings_actual: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub savings_avg: Decimal,
+    /// `null` ⟺ `avg_months == 0`.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub savings_avg: Option<Decimal>,
     /// `income_actual − expense_actual` (savings excluido del consumo).
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
@@ -759,8 +771,18 @@ pub struct AvgBasis {
 pub struct TransactionsSummaryResponse {
     pub year: i32,
     pub month: u32,
-    /// `true` si el mes seleccionado es el mes civil en curso de la instalación.
+    /// `true` si el mes seleccionado es el mes civil en curso de la instalación. **No significa
+    /// «faltan datos»**: significa «el mes no ha terminado». Para eso está `has_actual_data`.
     pub is_partial: bool,
+    /// Movimientos del mes seleccionado que entran en la comparativa: cualquier `kind` (los
+    /// recurrentes materializados incluidos, porque sí suman en `actual`) y **sin** las patas de
+    /// transferencia conciliadas (que no suman en ninguna parte).
+    pub actual_txn_count: i64,
+    /// `actual_txn_count > 0`. Existe porque un mes sin importar y un mes de gasto cero producían
+    /// exactamente la misma respuesta —`actual: "0.0000"` en todas las filas— y la comparativa
+    /// contestaba «vas muy por debajo de tu media» a quien simplemente no había importado nada.
+    /// Cuando es `false`, todos los `delta_vs_*` van a `null`.
+    pub has_actual_data: bool,
     /// Ventana efectiva del promedio: `"3"` | `"6"` | `"12"` (nº de meses) | `"ytd"` | `"all"`.
     pub avg_window: String,
     /// Nº de meses civiles del tramo `[window_start, selected)` (Months(n)=n; Ytd=month−1;
@@ -804,6 +826,11 @@ pub struct CategoryMonthPoint {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub total: Decimal,
+    /// `true` ⟺ ese mes tiene al menos un movimiento (de cualquier `kind`, conciliadas aparte) en
+    /// el scope pedido. Distingue las dos lecturas de un `total` a cero, que la serie
+    /// cero-rellenada volvía indistinguibles: «ese mes no gastaste en esta categoría» (`true`) y
+    /// «de ese mes no hay datos» (`false`).
+    pub has_data: bool,
 }
 
 /// Serie de una categoría: un punto por cada mes de la ventana (cero-relleno — los meses sin
@@ -827,6 +854,11 @@ pub struct CategoryMonthlySeriesResponse {
     pub kind: String,
     /// Amplitud efectiva de la ventana (1..=60).
     pub window_months: u32,
+    /// Primer mes (`YYYY-MM`) con algún movimiento en el scope, **de toda la historia**, no solo de
+    /// la ventana. `null` ⟺ el usuario no tiene ni un movimiento. Sirve para leer los ceros del
+    /// principio de la serie: los meses anteriores a este no son gasto cero, son ausencia de datos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_month_with_data: Option<String>,
     /// Solo categorías con ≥1 movimiento del `kind` en la ventana (orden: nombre ASC, la
     /// pseudo-categoría `null` al final).
     pub series: Vec<CategoryMonthlySeriesEntry>,

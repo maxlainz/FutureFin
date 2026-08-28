@@ -120,6 +120,19 @@ impl From<sqlx::Error> for ApiError {
                 Some("23503") => {
                     return ApiError::BadRequest("referenced record missing".into());
                 }
+                // 22003 = numeric_value_out_of_range. Las columnas de dinero son NUMERIC(18,4)
+                // (14 dígitos enteros), así que un importe absurdo las desborda en el INSERT.
+                // Sin este brazo caía a `Db(_)` → 500 «internal error» pelado: el ÚNICO error de
+                // toda la superficie que un cliente no puede clasificar, y justo el que dispara
+                // las políticas de retry-on-5xx contra una entrada que nunca va a ser válida.
+                // Un agente desatendido entraba en bucle. Es 400: la entrada es el problema.
+                Some("22003") => {
+                    return ApiError::BadRequest(
+                        "amount_out_of_range: el importe excede el máximo que admite la base \
+                         (hasta 14 dígitos enteros y 4 decimales)"
+                            .into(),
+                    );
+                }
                 _ => {}
             }
         }

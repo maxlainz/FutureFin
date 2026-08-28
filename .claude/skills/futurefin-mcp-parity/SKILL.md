@@ -309,10 +309,50 @@ catálogo **sin cambios en 52**):
 | `FUTUREFIN_HA_SSO_URL` / `FUTUREFIN_HA_ADDON`, `window.__FF_HA_LOGIN__`, cookie `ff_ha_state`, códigos `?ha_error=` | **n/a**: configuración de arranque, bandera del shell HTML y códigos que viajan por redirect. Cero superficie de datos; `/mcp` no los ve |
 | `handlers/sso.rs::resolve_or_provision` pasa a `pub(crate)` con dos callers | **n/a**: refactor interno de visibilidad, ninguna ruta nueva ni campo nuevo en ninguna respuesta |
 
+Evaluación de la rama **`feat/mcp-fase-1-numeros`** (Fase 1 de la revisión adversarial del MCP,
+issue #82 — «números que mienten»; tren 4.4.0, sin publicar aún; catálogo **sin cambios en 52**,
+recontado 52/21/31/31 el 2026-08-28). A diferencia de los trenes anteriores, este NO añade
+superficie: reescribe el **contrato de salida** de handlers que ya existían, y como cada tool
+comparte la core de su handler, la mayoría del trabajo llegó gratis — lo que costó fue la prosa:
+
+| Surface tocada | Parity outcome |
+|---|---|
+| `points[].net_worth` nullable + `liabilities_snapshotted` `any`→`all` (`GET /v1/history/series`) | **Tool actualizada**: `get_history` hereda el campo sin código propio (comparte `history_series_core`); `description` reescrita — prometía «cuadra con `get_summary.net_worth`» y se desmentía a sí misma dos frases más abajo |
+| `fine.net_worth` nullable + `liabilities_snapshotted` nuevo en la raíz (`GET /v1/history/cashflow`) | **Tool actualizada**: `get_history_cashflow` idem, vía `history_cashflow_core` — este caso era **peor** que el anterior, porque la respuesta ni publicaba el flag con el que sospechar de la cifra |
+| `jubilacion_series_position` + `jubilacion_target_net_worth_nominal` (`GET /v1/projection/series`) | **Tool actualizada**: `get_projection` gana los dos campos vía `projection_series_cached`, cero código propio; descripción reescrita para dejar de decir que `jubilacion_month_index` sirve para indexar (nunca sirvió) |
+| `debt_service_monthly`/`final_net_worth_real_delta` nullable + `*_absent_reason` | **Tool actualizada** en su propia core (`sim_kpis`, `simulate_projection_core`): `simulate_projection` no tiene ruta HTTP homóloga (tool-without-endpoint, §3.3), así que la evaluación recae sobre la tool misma, no sobre un GET que auditar |
+| `debt_service` nullable + `debt_service_absent_reason` (`GET /v1/allocation-rules/resolution`) | **Tool actualizada**: `get_allocation_resolution` comparte `allocation_resolution_core`, misma razón (`expense_from_avg`) que `simulate_projection` |
+| `actual_txn_count` + `has_actual_data`; `avg`/`delta_vs_budget`/`delta_vs_avg` nullable (`GET /v1/transactions/summary`) | **Tool actualizada**: `get_transactions_summary` comparte `transactions_summary_core` |
+| `has_data` por punto + `first_month_with_data`; 2 códigos 400 nuevos donde antes 200 con serie vacía (`GET /v1/transactions/category-series`) | **Tool actualizada**: `get_category_monthly_series` comparte `category_monthly_series_core` |
+| Guardia `<campo>_set_and_clear` (5 códigos) en `PATCH /v1/transactions/{id}` | **Tool actualizada**: `update_transaction` comparte `patch_transaction_core`, así que la guardia llega sin tocar `server.rs` salvo la `description` |
+| 409 `rule_duplicate` alcanza ahora a las reglas sin `source` (`POST /v1/transactions/rules`) | **Tool actualizada**: `create_categorization_rule` comparte `create_categorization_rule_core` |
+| `assigns_nothing`/`shadowed_transactions`/`note` en `ApplyRuleOutcome` (preview de `DELETE /v1/transactions/rules/{id}`) | **Tool actualizada, sin fila HTTP propia**: `apply_categorization_rule` comparte `apply_categorization_rule_core` en `dry_run` con el preview de `delete_categorization_rule` — las dos heredan el fix sin cambiar de firma |
+| `UpdateFireSettingsParams`: alias `annual_inflation_percent` + `deny_unknown_fields` | **Tool actualizada, invisible al fixture de contrato**: `update_fire_settings` no tiene equivalente HTTP con ese nombre de campo (persiste vía `patch_fire_settings_core`, propia de MCP), y como el alias no añade una `property` nueva al JSON Schema, `mcp-catalog.json` no detecta el cambio — es el reverso exacto del incidente que 4.0.0 cerró en `simulate_projection` (simular con el nombre corto, guardar con el mismo nombre, la inflación se descartaba en silencio), y quedaba **sin arreglar en la dirección de escritura** sobre el eje que más mueve la proyección |
+| SQLSTATE `22003` → 400 `amount_out_of_range` (`error.rs`) | **n/a**: mapeo de error transversal en el `impl From<sqlx::Error>` central; no cambia el schema de ninguna tool, todas heredan el código estable igual que cualquier otro 400 de dominio |
+| Migración `20260828120000_categorization_rules_unique_agnostic.sql` | **n/a**: no es una ruta ni cambia un contrato observable por MCP; la superficie visible es el 409 de `create_categorization_rule`, ya en la fila de arriba |
+
+**Nueve tools con `description`/payload actualizados** (`get_projection`, `simulate_projection`,
+`get_allocation_resolution`, `get_history`, `get_history_cashflow`, `get_transactions_summary`,
+`get_category_monthly_series`, `update_transaction`, `create_categorization_rule`) **+ una décima
+tocada solo en su struct de params** (`update_fire_settings`, sin `description` reescrita — ver
+fila de arriba). Cero tools nuevas, cero retiradas: el catálogo sigue en **52**. Ninguna fila
+necesitó promoción HTTP→tool nueva ni omisión — todo lo demás ya estaba cubierto y lo único que
+cambió fue lo que esa cobertura devuelve. Detalle campo a campo, con el porqué de cada nulabilidad:
+`.claude/api-routes.md` §MCP y las secciones HTTP de cada endpoint (History series, History
+cash-flow, Projection, Allocation rules, Transactions).
+
 Re-verify before trusting:
 
 - Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22, recontado
-  52/21/31/31 el 2026-08-27**; 50/21/29/29/10/1 on 2026-08-20). El tren 4.3.1 **no los mueve**.
+  52/21/31/31 el 2026-08-27 y de nuevo el 2026-08-28**; 50/21/29/29/10/1 on 2026-08-20). Ningún
+  tren desde 4.0.0 los mueve — ni siquiera este, que toca 10 tools sin añadir ni retirar ninguna.
+- El fixture de contrato detecta 9 de las 10 tools tocadas por este tren (`update_fire_settings`
+  es la excepción — ver la fila de la tabla de arriba):
+  `UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http tools_list_freezes_the_input_contract_of_every_tool`
+  y compara el diff contra `git diff -- apps/api/tests/fixtures/mcp-catalog.json` (debe tocar
+  exactamente `create_categorization_rule`, `get_allocation_resolution`,
+  `get_category_monthly_series`, `get_history`, `get_history_cashflow`, `get_projection`,
+  `get_transactions_summary`, `simulate_projection`, `update_transaction`).
 - `POST /v1/auth/sso` sigue sin tool (fila §3.1): `grep -n 'sso' apps/api/src/mcp/server.rs` (vacío)
   frente a `grep -n 'sso' apps/api/src/routes/mod.rs` (la ruta existe y se monta siempre).
 - Las dos rutas de HA-IdP siguen sin tool (fila §3.1, 4.3.1):

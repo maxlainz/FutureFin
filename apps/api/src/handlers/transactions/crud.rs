@@ -1018,6 +1018,55 @@ pub(crate) async fn patch_transaction_core(
         return Err(ApiError::NotFound);
     };
 
+    // Poner y borrar el mismo campo en la MISMA llamada: error, no «gana el clear». Hasta 4.3.1
+    // el `clear_*` ganaba en silencio y la respuesta era un 200 con el campo a NULL: un agente que
+    // arma el patch desde una plantilla creía recategorizar y dejaba el movimiento SIN categoría —
+    // los totales siguen cuadrando y la atribución miente (y en los modos B/C mueve el promedio).
+    //
+    // El camino de lote (`patch_transactions_batch_core`) y el de reglas (`patch_rule_core`) ya
+    // tenían la guardia; el PATCH individual era el único hueco, y lo compartían HTTP y MCP porque
+    // ambos entran por esta core. Códigos por campo (`<campo>_set_and_clear`), que es el estilo del
+    // lote y de `cap_set_and_clear`, no el `rule_patch_conflict` de un solo código con el campo en
+    // el texto. La lista es EXHAUSTIVA sobre los `clear_*` del body: los cinco, no los cuatro con
+    // consecuencia contable — `value_date` no mueve ninguna cifra, pero dejar uno solo sin guardia
+    // reproduce el mismo 200 mentiroso en el único campo que nadie mira.
+    //
+    // Los mensajes van COMPLETOS y literales, no compuestos con `format!` desde el código y el
+    // nombre del campo: `error_codes_parity.rs` extrae los códigos estables de los literales del
+    // fuente, así que un mensaje ensamblado en trozos deja el código invisible para el catálogo y
+    // el usuario acaba viendo la frase genérica. Costó descubrirlo una vez; que no se repita.
+    for (msg, puesto, borrado) in [
+        (
+            "value_date_set_and_clear: value_date and clear_value_date are mutually exclusive",
+            body.value_date.is_some(),
+            body.clear_value_date == Some(true),
+        ),
+        (
+            "category_set_and_clear: category_id and clear_category are mutually exclusive",
+            body.category_id.is_some(),
+            body.clear_category == Some(true),
+        ),
+        (
+            "linked_asset_set_and_clear: linked_asset_id and clear_linked_asset are mutually exclusive",
+            body.linked_asset_id.is_some(),
+            body.clear_linked_asset == Some(true),
+        ),
+        (
+            "linked_liability_set_and_clear: linked_liability_id and clear_linked_liability are mutually exclusive",
+            body.linked_liability_id.is_some(),
+            body.clear_linked_liability == Some(true),
+        ),
+        (
+            "notes_set_and_clear: notes and clear_notes are mutually exclusive",
+            body.notes.is_some(),
+            body.clear_notes == Some(true),
+        ),
+    ] {
+        if puesto && borrado {
+            return Err(ApiError::BadRequest(msg.into()));
+        }
+    }
+
     // op_date/amount/concept son editables tanto en manuales como en importadas. La diferencia está
     // en la huella de dedup (ver más abajo): en manuales se recomputa; en importadas queda anclada a
     // la del CSV original, para que un re-import del mismo archivo siga detectando el duplicado

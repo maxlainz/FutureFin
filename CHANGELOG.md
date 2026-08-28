@@ -39,6 +39,75 @@ bump y la publicación van al final.
 - Test `every_input_schema_forbids_unknown_properties` añadido **como `#[ignore]`**: hoy 51 de 52
   tools aceptan campos desconocidos en silencio. Es la diana de la Fase 2 (#83).
 
+### Números que mienten (Fase 1 — issue #82)
+
+Trece arreglos de cifras que el servidor devolvía mal o de forma no interpretable. Cinco eran
+críticos y todos se verificaron llamando a las tools, no solo leyendo el código.
+
+**`update_fire_settings` descartaba la inflación en silencio.** Su gemela `simulate_projection`
+acepta el alias `annual_inflation_percent` desde 4.0.0; la tool de ESCRITURA no lo aceptaba ni
+rechazaba lo desconocido. El flujo natural —simular con ese nombre, convencerse, guardar con el
+mismo nombre— respondía `200` con `applied: true`, persistía el SWR y **tiraba la inflación**. El
+incidente de 4.0.0 sin arreglar en la dirección de escritura, sobre el eje que más mueve la
+proyección. Ahora el alias es legítimo y el struct lleva `deny_unknown_fields` (**breaking**:
+rechaza campos que antes se ignoraban).
+
+**`clear_*` ganaba en silencio sobre el campo puesto** en `PATCH /v1/transactions/{id}` y en la
+tool `update_transaction`. Pasar `category_id` y `clear_category` a la vez devolvía `200` y dejaba
+el movimiento **sin categoría**: el total seguía cuadrando y la atribución mentía. El camino de
+lote ya tenía la guardia; la de fila, no. Ahora los **cinco** `clear_*` la tienen, en la core
+compartida, así que HTTP y MCP quedan cubiertos a la vez (**breaking**, 5 códigos nuevos).
+
+**`get_history` devolvía los activos en un campo llamado `net_worth`.** Sin snapshots de pasivo,
+`net_worth` era idéntico a `assets_total` — y la descripción de la tool prometía en su primera
+frase que «cuadra con `get_summary.net_worth`» antes de desmentirse a sí misma más abajo. Ahora es
+**`null` en toda la serie** cuando el pasivo del scope no está fotografiado entero: es imposible
+dar el número equivocado (**breaking**, nulabilidad). El flag `liabilities_snapshotted` pasa además
+de `any` a **`all` por usuario**: con `any`, un hogar donde solo un miembro fotografía su deuda
+publicaría `activos − deuda_de_uno`, un número que ya no coincide con `assets_total` y que **por eso
+parece correcto** — el mismo bug, pero indetectable a ojo. La salida es capturar un snapshot de
+pasivo, que escribe la cabecera aunque no haya ni una deuda: convierte «no debo nada» en un hecho
+afirmado por el usuario en vez de una ausencia interpretada por el servidor. Mismo tratamiento en
+`GET /v1/history/cashflow` → `fine.net_worth`, que tenía el defecto **y ni siquiera publicaba el
+flag**; ahora lo publica.
+
+**`jubilacion_month_index` no indexaba ninguna serie devuelta.** Es un número de MES, y `points` es
+de densidad híbrida: con la densidad que la tool MCP fuerza, la serie tiene ~42 posiciones y un mes
+de cruce típico se sale de todas. El objetivo FIRE nominal del mes del cruce era **inobtenible**;
+un modelo que cayera en `fire_target_series[0]` presentaba el objetivo de hoy como el de dentro de
+décadas — **1,48× de error** medido, creciendo con horizonte e inflación. Añadidos
+`jubilacion_series_position` (último punto con `month_index <=` el del cruce) y
+`jubilacion_target_net_worth_nominal` (calculado exacto, no interpolado).
+
+**Huecos que se reportaban como ceros.** Un mes sin movimientos devolvía `actual: 0` y deltas
+iguales al presupuesto entero en negativo, así que la respuesta a «¿mi gasto de este mes va bien?»
+era «vas muy por debajo de tu media» cuando lo cierto es que no hay datos. Ahora
+`GET /v1/transactions/summary` publica `actual_txn_count` y `has_actual_data`, y `delta_vs_budget` /
+`delta_vs_avg` / `avg` llegan **`null`** sin base (**breaking**, nulabilidad). Los `actual` NO se
+anulan: una suma sobre el conjunto vacío es 0 de verdad. La serie por categoría gana `has_data` por
+punto y `first_month_with_data` en la raíz. La SPA pinta guion donde antes pintaba «0 €» y avisa
+`Sin movimientos este mes.`
+
+**Otros siete.** `final_net_worth_real_delta` daba **signos opuestos** para la misma magnitud al
+simular la inflación (cada lado se deflacta con la suya) → `null` + `real_delta_absent_reason`.
+`debt_service` valía `0` con un préstamo vivo cuando la cuota ya está dentro del gasto real → `null`
++ razón; el gate correcto es `expense_from_avg`, **no** el modo, porque el fallback del promedio es
+por lado y hay casos donde el modo dice «transactions_avg» y la cuota sí se cobra. El preview de
+`delete_categorization_rule` **reventaba** con una regla sin `assign_kind` (el borrado ciego
+funcionaba y el previsualizado no); ahora responde, y de paso dice si esa regla **tapa** a otra
+(`shadowed_transactions`), que es lo que de verdad se pierde al borrarla. Un `category_id` de otro
+scope devolvía `200` con la serie vacía, indistinguible de «no gastaste nada ahí» → 400 tipado. Un
+importe absurdo desbordaba `NUMERIC(18,4)` y salía como **`internal error` pelado**: el único error
+que un cliente no podía clasificar, y justo el que dispara retry-on-5xx contra una entrada que
+jamás será válida → SQLSTATE `22003` mapeado a 400 `amount_out_of_range` en el mismo sitio que los
+23505/23503, cubriendo toda la API de una vez. `due_date: "9999-12-31"` se aceptaba y contaminaba
+`upcoming_outflows_total`. Y dos reglas de categorización agnósticas idénticas se creaban las dos
+(`source IS NULL`, y en SQL `NULL != NULL`) pese al 409 que promete la descripción: migración con
+índice único parcial + dedup previo — el dedup es **demostrablemente inocuo** porque las filas que
+borra empatan en los tres primeros componentes de la precedencia y pierden en el cuarto, así que no
+podían ganar ningún matching. Los `.ffbackup` antiguos con duplicados **siguen importando**
+(`ON CONFLICT DO NOTHING`): romper esa vía habría dejado sin recuperación a quien la necesitara.
+
 ## [4.3.1] - 2026-08-27
 
 ### «Entrar con Home Assistant» — HA como proveedor de identidad (solo add-on)

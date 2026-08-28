@@ -280,13 +280,16 @@ async fn summary_avg_window_ytd() {
     approx(parse_dec(&sup["actual"]), 120.0);
     approx(parse_dec(&sup["avg"]), 40.0); // (30 + 50) / 2
 
-    // Mes seleccionado enero: tramo vacío → months_with_data 0, window_months 0, avg 0.
+    // Mes seleccionado enero: tramo vacío → months_with_data 0, window_months 0 y la media NO
+    // existe. Desde la Fase 1 (issue #82) eso se dice con `null`, no con un "0.0000" que se leía
+    // como «de media no gastas nada» — y arrastraba un `delta_vs_avg` igual al gasto entero.
     let url = format!("/v1/transactions/summary?year={year}&month=1&avg_window=ytd");
     let b = app.get_with_cookie(&url, &owner.cookie).await.json();
     assert_eq!(b["window_months"].as_u64().unwrap(), 0);
     assert_eq!(b["months_with_data"].as_u64().unwrap(), 0);
     let sup = line(&b["expense_categories"], "Super");
-    approx(parse_dec(&sup["avg"]), 0.0);
+    assert_eq!(sup["avg"], Value::Null, "{sup}");
+    assert_eq!(sup["delta_vs_avg"], Value::Null, "{sup}");
 }
 
 /// ALL = desde el mes del MIN(op_date) hasta el seleccionado (exclusive). Sin historial → vacío.
@@ -733,6 +736,187 @@ async fn window_without_real_months_reports_no_avg_and_why() {
     assert_eq!(b["avg_months"].as_u64().unwrap(), 0, "…pero ninguno real");
     assert!(b.get("avg_basis").is_none());
     assert_eq!(b["avg_unavailable_reason"], "only_recurring_months");
-    // Medias a 0, nunca a un número inventado.
-    approx(parse_dec(&b["totals"]["expense_avg"]), 0.0);
+    // Medias a `null`, nunca a un número inventado NI a un 0 que se lee como un número. Hasta la
+    // Fase 1 (issue #82) la raíz decía «no hay promedio» y cada fila traía `avg: "0.0000"`.
+    assert_eq!(b["totals"]["expense_avg"], Value::Null, "{b}");
+}
+
+// ---------------------------------------------------------------------------
+// Huecos vs ceros (Fase 1, issue #82)
+// ---------------------------------------------------------------------------
+
+/// Un mes SIN movimientos se reportaba exactamente igual que un mes de gasto cero: `actual`
+/// «0.0000» por categoría y `delta_vs_budget`/`delta_vs_avg` iguales al presupuesto entero en
+/// negativo. La respuesta del servidor a «¿mi gasto de este mes va bien?» era «vas muy por debajo
+/// de tu media», que es falso: no hay datos. `is_partial` no servía para distinguirlo (dice si el
+/// mes civil ha terminado, no si tiene movimientos).
+///
+/// Predicción: mes seleccionado = hoy−2 (vacío); movimientos en hoy−3 y hoy−4, dentro de la
+/// ventana de 3 meses `[sel−3, sel)` = {hoy−5, hoy−4, hoy−3}. Luego `avg_months = 2` y la media SÍ
+/// existe: lo que se anula es la comparación, no el promedio.
+#[tokio::test]
+async fn a_month_without_movements_is_a_gap_not_a_zero() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            json!({ "category_id": super_cat, "amount": "300" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -2); // mes seleccionado: vacío
+    let (y3, m3) = shift_month(today.year(), today.month(), -3);
+    let (y4, m4) = shift_month(today.year(), today.month(), -4);
+    for (y, m) in [(y3, m3), (y4, m4)] {
+        manual(&app, &owner.cookie, &date_in(y, m, 10), "SUPER", "-200", "expense", Some(&super_cat)).await;
+    }
+
+    let body = app
+        .get_with_cookie(
+            &format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=3"),
+            &owner.cookie,
+        )
+        .await
+        .json();
+
+    assert_eq!(body["actual_txn_count"], 0, "{body}");
+    assert_eq!(body["has_actual_data"], false, "{body}");
+    assert_eq!(body["avg_months"], 2, "hay media, lo que falta es el mes: {body}");
+
+    let l = line(&body["expense_categories"], "Super");
+    approx(parse_dec(&l["actual"]), 0.0);
+    approx(parse_dec(&l["budget"]), 300.0);
+    approx(parse_dec(&l["avg"]), 200.0);
+    assert_eq!(l["delta_vs_budget"], Value::Null, "{l}");
+    assert_eq!(l["delta_vs_avg"], Value::Null, "{l}");
+
+    // El mismo mes CON un movimiento sí compara: el cero deja de ser un hueco.
+    manual(&app, &owner.cookie, &date_in(sy, sm, 5), "SUPER", "-250", "expense", Some(&super_cat)).await;
+    let body = app
+        .get_with_cookie(
+            &format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=3"),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    assert_eq!(body["actual_txn_count"], 1, "{body}");
+    assert_eq!(body["has_actual_data"], true, "{body}");
+    let l = line(&body["expense_categories"], "Super");
+    approx(parse_dec(&l["delta_vs_budget"]), -50.0);
+}
+
+/// Con la ventana del promedio vacía, la raíz decía correctamente `avg_months: 0` y
+/// `avg_unavailable_reason: "empty_window"`, pero **cada fila** traía `avg: "0.0000"` y un
+/// `delta_vs_avg` igual al gasto entero: el campo de procedencia bien y el dato que un modelo va a
+/// resumir, mal. Filas y totales siguen ahora la misma regla.
+///
+/// Predicción: todos los movimientos caen en el mes seleccionado, así que con `avg_window=all` el
+/// tramo `[window_start, selected)` es vacío → `avg_months = 0`.
+#[tokio::test]
+async fn an_empty_average_window_emits_null_not_zero() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+    let nomina_cat = app.create_category(&owner, "income", "Nómina").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(sy, sm, 3), "SUPER", "-120", "expense", Some(&super_cat)).await;
+    manual(&app, &owner.cookie, &date_in(sy, sm, 4), "NOMINA", "2000", "income", Some(&nomina_cat)).await;
+    manual(&app, &owner.cookie, &date_in(sy, sm, 5), "APORTACION", "-300", "savings", None).await;
+
+    let body = app
+        .get_with_cookie(
+            &format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=all"),
+            &owner.cookie,
+        )
+        .await
+        .json();
+
+    assert_eq!(body["avg_months"], 0, "{body}");
+    assert_eq!(body["avg_unavailable_reason"], "empty_window", "{body}");
+    assert_eq!(body["has_actual_data"], true, "{body}");
+
+    let l = line(&body["expense_categories"], "Super");
+    approx(parse_dec(&l["actual"]), 120.0);
+    assert_eq!(l["avg"], Value::Null, "sin ventana no hay media: {l}");
+    assert_eq!(l["delta_vs_avg"], Value::Null, "{l}");
+    // El delta contra el presupuesto SÍ existe: el mes tiene datos, es la media la que falta.
+    assert!(l["delta_vs_budget"].is_string(), "{l}");
+
+    // Totales y bloques, con la misma regla que las filas (nada de sumar nadas).
+    for key in ["expense_avg", "income_avg", "savings_avg"] {
+        assert_eq!(body["totals"][key], Value::Null, "totals.{key}: {body}");
+    }
+    assert_eq!(body["savings"]["avg"], Value::Null, "{body}");
+    assert_eq!(body["income"]["avg"], Value::Null, "{body}");
+    // Los `actual` NO se anulan: son mediciones, no comparaciones.
+    approx(parse_dec(&body["totals"]["expense_actual"]), 120.0);
+    approx(parse_dec(&body["savings"]["actual"]), 300.0);
+}
+
+/// `kind=expense` con el id de una categoría de scope `income` devolvía `{series: []}` y un 200:
+/// «no has gastado nada ahí» y «esa categoría no es de gasto» se veían idénticas. Y un UUID que no
+/// existe, igual. Ahora cada caso tiene su código.
+///
+/// De paso, el otro medio hueco de la serie: `total: "0.00"` en un mes cero-rellenado no decía si
+/// ese mes tenía datos. `has_data` por punto y `first_month_with_data` en la raíz lo dicen.
+#[tokio::test]
+async fn category_series_names_the_scope_mismatch_and_marks_months_without_data() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let super_cat = app.create_category(&owner, "expense", "Super").await;
+    let nomina_cat = app.create_category(&owner, "income", "Nómina").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -1);
+    manual(&app, &owner.cookie, &date_in(sy, sm, 10), "SUPER", "-80", "expense", Some(&super_cat)).await;
+
+    // Scope equivocado → 400 tipado, no una serie vacía.
+    let r = app
+        .get_with_cookie(
+            &format!("/v1/transactions/category-series?kind=expense&category_id={nomina_cat}"),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "category_scope_mismatch", "{}", r.json());
+
+    // UUID inexistente → otro código, porque es otro problema.
+    let r = app
+        .get_with_cookie(
+            "/v1/transactions/category-series?kind=expense&category_id=11111111-2222-3333-4444-555555555555",
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "category_not_found", "{}", r.json());
+
+    // Camino bueno: la serie marca qué meses tienen datos y desde cuándo hay historia.
+    let body = app
+        .get_with_cookie(
+            &format!("/v1/transactions/category-series?kind=expense&category_id={super_cat}&window_months=6"),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    let esperado = format!("{sy:04}-{sm:02}");
+    assert_eq!(body["first_month_with_data"], esperado, "{body}");
+    let months = body["series"][0]["months"].as_array().unwrap();
+    assert_eq!(months.len(), 6, "{body}");
+    let con_datos: Vec<&Value> = months.iter().filter(|m| m["has_data"] == true).collect();
+    assert_eq!(con_datos.len(), 1, "solo un mes tiene movimientos: {body}");
+    assert_eq!(con_datos[0]["month"], esperado, "{body}");
+    approx(parse_dec(&con_datos[0]["total"]), 80.0);
+    // Los demás meses son ceros de relleno, y ahora se sabe.
+    for m in months.iter().filter(|m| m["month"] != esperado) {
+        assert_eq!(m["has_data"], false, "{m}");
+        approx(parse_dec(&m["total"]), 0.0);
+    }
 }

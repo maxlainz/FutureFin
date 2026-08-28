@@ -391,6 +391,23 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
   (projection.rs:1062-1118). `milestones_real` is empty when inflation = 0 and the web reuses
   `milestones`. The FIRE crossover (`jubilacion_month_index`) is likewise detected on the full
   series (projection.rs:1126-1134).
+- **`jubilacion_month_index` does NOT index any served series (issue #82, 4.4.0) — it never did.**
+  It is a MONTH number; `points`/`fire_target_series`/`asset_series[].values` are **position**-
+  indexed and, under `density=hybrid` (the density the MCP tool `get_projection` forces), carry
+  far fewer positions than months. Indexing an array with the raw month either falls off the end
+  or — worse — silently lands on `[0]`, presenting today's FIRE target as if it were the target
+  decades out. Two fields close the hole, both `null` iff there is no crossing:
+  - **`jubilacion_series_position`** — the array position to use instead. Convention: the LAST
+    served position `p` with `points[p].month_index <= jubilacion_month_index` (the crossing
+    falls in the segment `[p, p+1)`; chosen over "next" because reading `points[p]` is
+    conservative — it underweights net worth instead of overstating it).
+  - **`jubilacion_target_net_worth_nominal`** — the FIRE target AT the crossing month, in NOMINAL
+    euros of that month. `jubilacion_target_net_worth` (the older field) is in TODAY's euros
+    (`FireTarget.base_amount`, undeflated); with inflation the two diverge by a growing factor
+    over decades. Evaluated EXACTLY via `fire_target_at_month_index(ft, jubilacion_month_index)`
+    — never interpolated between two points of `fire_target_series`, which under `hybrid` may not
+    even contain the crossing month as a served point.
+  Pin: `apps/api/tests/projection_number_semantics.rs`.
 - **Horizon rule** — `projection_horizon_months` (projection.rs:598-627): 90-year lifespan.
   `years = clamp(90 − completed_age, 5, 70)` using the session user's `birth_date`, falling back
   to the primary household person's (projection.rs:965-989); no birth date anywhere →
@@ -470,6 +487,8 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 - Budget retirement fields: `grep -n "persists_after_retirement\|ends_at_retirement" apps/api/src/handlers/budget.rs | head`
 - Fixture case count + tolerance: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (7 as of 2026-07-09, incl. the mode-B avg-style tripwire) and `grep -n "_tolerance_eur" apps/api/tests/fixtures/fire-parity.json`
 - If line anchors look stale: `git log --oneline -3 -- crates/engine/src/projection.rs apps/api/src/handlers/projection.rs`
+- `jubilacion_series_position`/`jubilacion_target_net_worth_nominal` (issue #82, 4.4.0):
+  `grep -n "jubilacion_series_position\|jubilacion_target_net_worth_nominal" apps/api/src/handlers/projection.rs` and the pin `grep -n "jubilacion_series_position_indexes_the_arrays" apps/api/tests/projection_number_semantics.rs`
 
 If you change anything this file describes, update this skill in the same change (CLAUDE.md
 rule: keep `.claude/` docs of record current) and re-run both parity suites.

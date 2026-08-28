@@ -127,6 +127,10 @@ struct BucketRow {
     /// Movimientos NO recurrentes del bucket. Σ por mes `> 0` ⟺ el mes es real (ver
     /// `in_avg_window`). Mismo predicado que `MonthAgg::real_txns` de `transactions_avg`.
     real_txns: i32,
+    /// TODOS los movimientos del bucket (recurrentes incluidos, conciliadas ya excluidas por el
+    /// `WHERE`). Σ por mes `> 0` ⟺ ese mes tiene datos. No se puede reutilizar `real_txns` para
+    /// esto: un mes solo-recurrente no promedia, pero sus movimientos SÍ suman en `actual`.
+    txns: i32,
 }
 
 /// Suma raw firmada de `(ym, kind, category)`.
@@ -371,18 +375,21 @@ pub async fn get_transactions_summary(
     Ok(Json(out))
 }
 
-/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_transactions_summary`.
-/// La validación de parámetros vive AQUÍ para que ambos caminos devuelvan los mismos
-/// códigos 400 estables.
-#[allow(clippy::too_many_arguments)]
 /// Escala de salida de los importes de la comparativa: 4 decimales, la de `NUMERIC(18,4)`.
 ///
 /// Hace dos cosas a la vez. La primera, dar una escala única a todas las cifras del bloque, que
 /// hoy mezclaba `"-23.5000"` con `"47.00"`. La segunda, matar el `-0`: el lado gasto se publica
 /// como magnitud con `-Σ`, y `impl Neg for Decimal` voltea el bit de signo **también sobre el
 /// cero**, así que una categoría sin movimientos serializaba `"actual":"-0"` (auditoría MCP §7).
+///
+/// (El `use` estaba metido ENTRE el doc-comment de la core y su `#[allow]`, con lo que el atributo
+/// colgaba del `use` y no de la función: `clippy::useless_attribute` lo rompía. Movido aquí.)
 use crate::money::money_out;
 
+/// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_transactions_summary`.
+/// La validación de parámetros vive AQUÍ para que ambos caminos devuelvan los mismos
+/// códigos 400 estables.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn transactions_summary_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -498,7 +505,8 @@ pub(crate) async fn transactions_summary_core(
     let sql = format!(
         "SELECT to_char(t.op_date, 'YYYY-MM') AS ym, t.kind AS kind,
                 t.category_id AS category_id, SUM(t.amount) AS total,
-                COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL)::int AS real_txns
+                COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL)::int AS real_txns,
+                COUNT(*)::int AS txns
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.transfer_counterpart_id IS NULL
@@ -514,11 +522,23 @@ pub(crate) async fn transactions_summary_core(
     let mut buckets: HashMap<(String, String, Option<Uuid>), Decimal> = HashMap::new();
     // Movimientos NO recurrentes por mes, para decidir qué meses son reales.
     let mut real_txns_by_ym: HashMap<String, i32> = HashMap::new();
+    // Movimientos de CUALQUIER tipo del mes seleccionado: el contador que distingue «mes a cero»
+    // de «mes sin datos».
+    let mut selected_txns: i64 = 0;
     for r in raw {
         let kind = r.kind.unwrap_or_default();
         *real_txns_by_ym.entry(r.ym.clone()).or_insert(0) += r.real_txns;
+        if r.ym == selected_ym {
+            selected_txns += r.txns as i64;
+        }
         *buckets.entry((r.ym, kind, r.category_id)).or_insert(Decimal::ZERO) += r.total;
     }
+    // «Hay datos» ⟺ hay al menos un movimiento que la comparativa cuente. `is_partial` NO sirve
+    // para esto (dice si el mes civil ha terminado), y hasta 4.3.1 no había ningún otro campo:
+    // pedir el mes en curso sin importar nada devolvía `actual: "0.0000"` por categoría y un
+    // `delta_vs_avg` igual al gasto entero en negativo, o sea la respuesta «vas muy por debajo de
+    // tu media» a una pregunta cuya respuesta correcta es «no hay datos».
+    let has_actual_data = selected_txns > 0;
 
     // `months_with_data` = meses distintos del tramo con ≥1 transacción de cualquier kind/categoría,
     // recurrentes incluidos. Es lo que HAY, y por eso sigue siendo la cifra de la pestaña Movimientos.
@@ -644,6 +664,16 @@ pub(crate) async fn transactions_summary_core(
     // `in_avg_window`, así que todos los numeradores son 0 y las medias salen 0 igualmente.
     let avg_denom = Decimal::from(avg_months.max(1));
 
+    // Las dos condiciones que hacen `null` a una cifra derivada. Se aplican IGUAL en las filas y en
+    // los totales; la contradicción anterior era que la raíz decía correctamente
+    // `avg_months: 0` / `avg_unavailable_reason: "empty_window"` y cada fila traía `avg: "0.0000"`
+    // con un `delta_vs_avg` igual al gasto entero — el campo de procedencia bien y el dato que un
+    // modelo va a resumir, mal.
+    //
+    // `actual` NO se anula: es una medición honesta (Σ sobre el conjunto vacío = 0). Lo que no
+    // puede existir sin base es la COMPARACIÓN, que es la que afirma «vas bien/mal».
+    let has_avg = avg_months > 0;
+
     let build_lines = |scope_kind: &str,
                        budget_map: &HashMap<Uuid, Decimal>,
                        income_sign: bool|
@@ -690,9 +720,10 @@ pub(crate) async fn transactions_summary_core(
                     category_name: name,
                     actual: money_out(actual),
                     budget: money_out(budget),
-                    avg: money_out(avg),
-                    delta_vs_budget: money_out(actual - budget),
-                    delta_vs_avg: money_out(actual - avg),
+                    avg: has_avg.then(|| money_out(avg)),
+                    delta_vs_budget: has_actual_data.then(|| money_out(actual - budget)),
+                    delta_vs_avg: (has_actual_data && has_avg)
+                        .then(|| money_out(actual - avg)),
                 }
             })
             .collect();
@@ -716,14 +747,18 @@ pub(crate) async fn transactions_summary_core(
         .filter(|((y, k, _), _)| k == "savings" && in_avg_window(y.as_str()))
         .map(|(_, v)| *v)
         .sum();
-    let savings_avg = money_out(-savings_win / avg_denom);
+    let savings_avg = has_avg.then(|| money_out(-savings_win / avg_denom));
 
     let income_actual: Decimal = money_out(income_categories.iter().map(|l| l.actual).sum());
-    let income_avg: Decimal = money_out(income_categories.iter().map(|l| l.avg).sum());
+    // Los `avg` de las filas son `Some` exactamente cuando `has_avg`, así que el `filter_map` no
+    // puede sumar de menos: o están todos o no está ninguno.
+    let income_avg: Option<Decimal> =
+        has_avg.then(|| money_out(income_categories.iter().filter_map(|l| l.avg).sum()));
 
     // ---- Totales -----------------------------------------------------------------------------
     let expense_actual: Decimal = money_out(expense_categories.iter().map(|l| l.actual).sum());
-    let expense_avg: Decimal = money_out(expense_categories.iter().map(|l| l.avg).sum());
+    let expense_avg: Option<Decimal> =
+        has_avg.then(|| money_out(expense_categories.iter().filter_map(|l| l.avg).sum()));
     // Σ presupuesto de categorías de gasto — sin línea derivada de cuotas (sin doble conteo).
     let expense_budget_total: Decimal =
         money_out(expense_categories.iter().map(|l| l.budget).sum());
@@ -735,6 +770,8 @@ pub(crate) async fn transactions_summary_core(
         year,
         month,
         is_partial,
+        actual_txn_count: selected_txns,
+        has_actual_data,
         avg_window: window.as_str(),
         window_months,
         months_with_data,
@@ -854,6 +891,41 @@ pub(crate) async fn category_monthly_series_core(
         .unwrap_or(DEFAULT_CATEGORY_SERIES_WINDOW)
         .clamp(1, MAX_CATEGORY_SERIES_WINDOW);
 
+    // La categoría pedida tiene que existir Y ser del `kind` pedido. Antes no se validaba: pedir
+    // `kind: "expense"` con el id de una categoría de scope `income` (o de `savings`/`liability`,
+    // o un UUID que no existe) devolvía `{series: []}` y un 200 — «no has gastado nada ahí» y «esa
+    // categoría no es de gasto» eran la MISMA respuesta, y con categorías de nombres parecidos
+    // equivocarse de UUID es lo normal.
+    //
+    // Los dos son 400 y no 404: el recurso es la serie, que existe; lo que está mal es un
+    // parámetro. Es además lo que ya hacen `assert_transaction_category` y `budget.rs` con estos
+    // mismos dos códigos, así que un cliente no tiene que aprender una segunda convención. Los
+    // códigos SÍ se distinguen (`category_not_found` vs `category_scope_mismatch`): son problemas
+    // distintos y piden acciones distintas.
+    if let Some(cid) = category_id {
+        let scope: Option<String> = sqlx::query_scalar(
+            r#"SELECT scope FROM categories WHERE id = $1 AND installation_id = $2"#,
+        )
+        .bind(cid)
+        .bind(iid)
+        .fetch_optional(pool)
+        .await?;
+        match scope {
+            None => {
+                return Err(ApiError::BadRequest(
+                    "category_not_found: category_id must reference a category in this installation"
+                        .into(),
+                ))
+            }
+            Some(s) if s != kind => {
+                return Err(ApiError::BadRequest(format!(
+                    "category_scope_mismatch: kind '{kind}' requires a category of scope '{kind}' (got '{s}')"
+                )))
+            }
+            Some(_) => {}
+        }
+    }
+
     let today = installation_naive_today(pool, iid).await?;
     // Ventana: `window` meses civiles ascendentes que TERMINAN en el mes en curso (parcial).
     let (sy, sm) = shift_month(today.year(), today.month(), -(window as i32 - 1));
@@ -899,6 +971,48 @@ pub(crate) async fn category_monthly_series_core(
     }
     let rows: Vec<(String, Option<Uuid>, Decimal)> = query.fetch_all(pool).await?;
 
+    // Meses de la ventana con ALGÚN movimiento (cualquier `kind`, conciliadas fuera). La serie es
+    // cero-rellenada, así que sin este bit un `total: "0.00"` no distingue «ese mes no gastaste en
+    // esta categoría» de «de ese mes no hay datos» — la clase de error más frecuente al leer una
+    // serie. Query aparte porque la de arriba filtra por `kind`, y un mes con solo ingresos SÍ es
+    // un mes con datos.
+    let months_with_data: HashSet<String> = {
+        let scope = view.scope_where("t");
+        let arg = view.next_arg_index();
+        let sql = format!(
+            "SELECT DISTINCT to_char(t.op_date, 'YYYY-MM')
+             FROM transactions t
+             WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
+               AND t.transfer_counterpart_id IS NULL",
+            end = arg + 1
+        );
+        let yms: Vec<String> = view
+            .bind_scope_as(sqlx::query_as::<_, (String,)>(&sql), iid, user_id)
+            .bind(window_start)
+            .bind(month_end)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|(ym,)| ym)
+            .collect();
+        yms.into_iter().collect()
+    };
+
+    // Primer mes con datos de TODA la historia (no solo de la ventana): con él, los ceros del
+    // arranque de la serie se leen como lo que son.
+    let first_month_with_data: Option<String> = {
+        let scope = view.scope_where("t");
+        let sql = format!(
+            "SELECT MIN(t.op_date) FROM transactions t
+             WHERE {scope} AND t.transfer_counterpart_id IS NULL"
+        );
+        let min_op: Option<NaiveDate> = view
+            .bind_scope_scalar(sqlx::query_scalar::<_, Option<NaiveDate>>(&sql), iid, user_id)
+            .fetch_one(pool)
+            .await?;
+        min_op.map(|d| ym_string(d.year(), d.month()))
+    };
+
     // Magnitud ≥ 0: gasto guarda cargos negativos → se niega; ingreso queda tal cual.
     let sign = if kind == "expense" {
         -Decimal::ONE
@@ -937,6 +1051,7 @@ pub(crate) async fn category_monthly_series_core(
                 .map(|ym| CategoryMonthPoint {
                     month: ym.clone(),
                     total: money(by_month.get(ym).copied().unwrap_or(Decimal::ZERO)),
+                    has_data: months_with_data.contains(ym),
                 })
                 .collect();
             CategoryMonthlySeriesEntry {
@@ -962,6 +1077,7 @@ pub(crate) async fn category_monthly_series_core(
         },
         kind: kind.into(),
         window_months: window,
+        first_month_with_data,
         series,
     })
 }

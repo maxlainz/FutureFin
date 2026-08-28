@@ -422,7 +422,10 @@ export type HistorySnapshotKindApi = "asset" | "liability";
  */
 export type HistoryPointApi = {
   month_index: number;
-  net_worth: number;
+  /** `null` en TODA la serie cuando `liabilities_snapshotted` es `false`: sin el pasivo
+   *  fotografiado entero, `assets_total − liabilities_total` no es un patrimonio neto sino el
+   *  total de activos con otro nombre. El campo siempre viaja (como `null`), nunca se omite. */
+  net_worth: number | null;
   assets_total: number;
   liabilities_total: number;
 };
@@ -456,9 +459,11 @@ export type HistorySeriesApi = {
   points: HistoryPointApi[];
   asset_series: HistoryAssetSeriesApi[];
   markers: HistoryMarkerApi[];
-  /** `false` ⇒ `points[].liabilities_total` vale 0 por falta de snapshots de pasivo, no porque no
-   *  haya deuda. El chart no lo usa (descarta el punto `month_index >= 0` y el pasado sale de los
-   *  snapshots que haya); existe para el consumidor MCP, que lee la cifra sin contexto. */
+  /** `false` ⇒ el pasivo del scope NO está fotografiado entero (ningún snapshot de pasivo, o
+   *  —en hogar— algún miembro sin ninguno), así que `points[].liabilities_total` está a 0 o
+   *  incompleto por falta de datos, no porque no haya deuda. Es el interruptor de
+   *  `points[].net_worth`: `net_worth === null` ⟺ este flag es `false`. El chart lo consume vía
+   *  `mergeProjectionWithHistory`, que en ese caso pinta `assets_total` y lo dice en la leyenda. */
   liabilities_snapshotted: boolean;
 };
 
@@ -720,27 +725,35 @@ export type CategoryComparisonLineApi = {
   category_name: string;
   actual: string;
   budget: string;
-  avg: string;
-  delta_vs_budget: string;
-  delta_vs_avg: string;
+  /** `null` ⟺ `avg_months == 0` (sin meses reales que promediar en la ventana). */
+  avg: string | null;
+  /** `actual − budget`. `null` ⟺ `has_actual_data == false` (el mes no tiene ningún movimiento). */
+  delta_vs_budget: string | null;
+  /** `actual − avg`. `null` ⟺ `avg_months == 0` o `has_actual_data == false`. */
+  delta_vs_avg: string | null;
 };
 
 /** Bloque {actual, avg} para savings e income. */
 export type SummaryBlockActualAvgApi = {
   actual: string;
-  avg: string;
+  /** `null` ⟺ `avg_months == 0` (misma regla que `CategoryComparisonLineApi.avg`). */
+  avg: string | null;
 };
 
 /** Totales de la comparativa. */
 export type SummaryTotalsApi = {
   expense_actual: string;
   expense_budget: string;
-  expense_avg: string;
+  /** `null` ⟺ `avg_months == 0`. Sigue la misma regla que las filas: si una fila no tiene media,
+   *  el total tampoco puede tenerla (sería la suma de nada). */
+  expense_avg: string | null;
   income_actual: string;
   income_budget: string;
-  income_avg: string;
+  /** `null` ⟺ `avg_months == 0`. */
+  income_avg: string | null;
   savings_actual: string;
-  savings_avg: string;
+  /** `null` ⟺ `avg_months == 0`. */
+  savings_avg: string | null;
   net_actual: string;
 };
 
@@ -761,7 +774,16 @@ export type TransactionsSummaryApi = {
   year: number;
   /** 1-12. */
   month: number;
+  /** `true` si el mes seleccionado es el mes civil en curso. NO significa «faltan datos»: significa
+   *  «el mes no ha terminado». Para eso está `has_actual_data`. */
   is_partial: boolean;
+  /** Movimientos del mes seleccionado que entran en la comparativa (cualquier kind, recurrentes
+   *  materializados incluidos, transferencias conciliadas excluidas). */
+  actual_txn_count: number;
+  /** `actual_txn_count > 0`. Un mes sin importar y un mes de gasto cero producían la misma
+   *  respuesta (`actual: "0.0000"` en todas las filas); con `false` todos los `delta_vs_*` van a
+   *  `null` en vez de comparar contra un mes vacío. */
+  has_actual_data: boolean;
   /** Ventana del promedio solicitada: `3` | `6` | `12` | `ytd` | `all`. */
   avg_window: string;
   /** Nº de meses que abarca la ventana del promedio. */
@@ -787,6 +809,48 @@ export type TransactionsSummaryApi = {
   savings: SummaryBlockActualAvgApi;
   income: SummaryBlockActualAvgApi;
   totals: SummaryTotalsApi;
+};
+
+// ---------------------------------------------------------------------------
+// Serie mensual por categoría (`GET /v1/transactions/category-series`, v4.3.1 — hoy solo
+// consumida por la tool MCP `get_category_monthly_series`; sin caller en la SPA todavía).
+// ---------------------------------------------------------------------------
+
+/** Un mes de la serie de una categoría. Magnitudes ≥ 0 (misma convención de signos que la
+ *  comparativa: gasto = `−Σ(amount)`, ingreso = `+Σ(amount)`); un reembolso puede dejarla negativa. */
+export type CategoryMonthPointApi = {
+  /** `YYYY-MM`. */
+  month: string;
+  total: string;
+  /** `true` ⟺ ese mes tiene al menos un movimiento (cualquier kind, conciliadas aparte) en el
+   *  scope pedido. Distingue las dos lecturas de un `total` a cero que la serie cero-rellenada
+   *  volvía indistinguibles: «ese mes no gastaste en esta categoría» (`true`) frente a «de ese mes
+   *  no hay datos» (`false`). */
+  has_data: boolean;
+};
+
+/** Serie de una categoría: un punto por cada mes de la ventana (cero-relleno). */
+export type CategoryMonthlySeriesEntryApi = {
+  /** `null` = movimientos sin categoría. */
+  category_id?: string;
+  category_name?: string;
+  months: CategoryMonthPointApi[];
+};
+
+/** Respuesta de `GET /v1/transactions/category-series`. El último mes de la ventana es el mes
+ *  civil en curso (parcial). */
+export type CategoryMonthlySeriesResponseApi = {
+  /** `household` | `mine`. */
+  view: string;
+  /** `expense` | `income`. */
+  kind: string;
+  /** Amplitud efectiva de la ventana (1..=60). */
+  window_months: number;
+  /** Primer mes (`YYYY-MM`) con algún movimiento en el scope, de toda la historia, no solo de la
+   *  ventana. Ausente ⟺ el usuario no tiene ni un movimiento. */
+  first_month_with_data?: string;
+  /** Solo categorías con ≥1 movimiento del `kind` en la ventana. */
+  series: CategoryMonthlySeriesEntryApi[];
 };
 
 /** Una regla recurrente (`GET /v1/transactions/recurring`). Amount = string decimal firmado. */
@@ -856,8 +920,10 @@ export type CashflowFineApi = {
   resolution: "weekly" | "daily";
   grid: CashflowFineGridPointApi[];
   asset_series: CashflowFineAssetSeriesApi[];
-  /** Paralelo a `grid`: Σ assets moldeados − Σ pasivos amortizados. f64. */
-  net_worth: number[];
+  /** Paralelo a `grid`: Σ assets moldeados − Σ pasivos amortizados. f64.
+   *  `null` cuando `liabilities_snapshotted` es false: sin el pasivo fotografiado entero esto
+   *  serían los activos disfrazados de neto (mismo invariante que `HistorySeriesPointApi`). */
+  net_worth: number[] | null;
 };
 
 /**
@@ -869,6 +935,9 @@ export type HistoryCashflowApi = {
   anchor_month_first_ymd: string;
   view: string;
   months: CashflowMonthApi[];
+  /** `true` solo si TODOS los usuarios del scope tienen algún snapshot de pasivo. Con `false`
+   *  no hay patrimonio neto histórico y `fine.net_worth` llega `null`. */
+  liabilities_snapshotted: boolean;
   fine?: CashflowFineApi;
 };
 

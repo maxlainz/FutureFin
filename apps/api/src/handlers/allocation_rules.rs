@@ -879,7 +879,9 @@ pub struct AllocationResolutionResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub base_cash: Decimal,
-    /// `income − expense − debt_service`: la parte estable.
+    /// `income − expense − debt_service`: la parte estable. Cuando `debt_service` es `null` el
+    /// sustraendo es 0 (la cuota ya está dentro del gasto), así que la identidad sigue cerrando
+    /// como `income − expense`.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub recurring_net: Decimal,
@@ -887,9 +889,18 @@ pub struct AllocationResolutionResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub planning_component: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub debt_service: Decimal,
+    /// Cuota mensual de los pasivos activos que la cascada descuenta. **`null` cuando la cifra no
+    /// aplica**: con la base de gasto salida del promedio real (modos B/C con datos de gasto) la
+    /// cuota ya es un movimiento dentro de ese promedio y publicarla aparte la contaría dos veces.
+    /// Hasta 4.3.1 ese caso viajaba como `"0"` — y un `0` numérico no puede significar «no aplica»:
+    /// se leía como «no pagas servicio de deuda» con un préstamo vivo.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub debt_service: Option<Decimal>,
+    /// `included_in_real_expense` ⟺ `debt_service` es `null`. `null` ⟺ la cuota viaja (y entonces
+    /// un `0` sí significa «no hay pasivos con cuota activa»).
+    #[schema(value_type = Option<String>)]
+    pub debt_service_absent_reason: Option<&'static str>,
     /// `true` cuando `planning_component != 0`: avisa de que `base_cash` lleva dentro un término
     /// que se agota en 90 días y que por tanto **no** es un importe mensual estable.
     pub base_includes_transient: bool,
@@ -1004,7 +1015,14 @@ pub(crate) async fn allocation_resolution_core(
         base_cash: alloc.base_cash.round_dp(4),
         recurring_net: alloc.recurring_net.round_dp(4),
         planning_component: alloc.planning_component.round_dp(4),
-        debt_service: alloc.debt_service.round_dp(4),
+        // Misma regla que `simulate_projection`: la razón se decide en el ensamblado
+        // (`BuiltProjection::debt_service_absent_reason`, gate `expense_from_avg`) y las dos
+        // superficies la consumen — nunca se re-deriva aquí a partir del modo.
+        debt_service: built
+            .debt_service_absent_reason
+            .is_none()
+            .then(|| alloc.debt_service.round_dp(4)),
+        debt_service_absent_reason: built.debt_service_absent_reason,
         base_includes_transient: !alloc.planning_component.is_zero(),
         allocated_total: allocated_total.round_dp(4),
         leftover_to_surplus_cash: alloc.leftover.round_dp(4),
