@@ -13,9 +13,23 @@ use common::{LoggedInOwner, TestApp};
 use futurefin_engine::{add_months_signed, month_index_of};
 use uuid::Uuid;
 
-/// Epsilon relativo 1e-6 (los valores cruzaron Decimal→f64).
+/// Epsilon relativo 1e-6 (los valores cruzaron Decimal→f64) **con un suelo absoluto de 0,005**:
+/// desde 4.4.0 las series de chart se publican redondeadas a 2 decimales (`CHART_DP` en
+/// `handlers/history.rs`), así que ningún valor puede coincidir con la predicción más allá de medio
+/// céntimo. El suelo es exactamente la mitad del último decimal publicado — más laxo aceptaría un
+/// error de redondeo real, más estricto exigiría una precisión que la respuesta ya no promete.
 fn assert_close(got: f64, expected: f64, ctx: &str) {
-    let tol = 1e-6_f64 * expected.abs().max(1.0);
+    let tol = (1e-6_f64 * expected.abs().max(1.0)).max(0.005);
+    assert!(
+        (got - expected).abs() <= tol,
+        "{ctx}: got {got}, expected {expected} (tol {tol})"
+    );
+}
+
+/// Igual, para `month_fraction`, que se publica a 4 decimales (`MONTH_FRACTION_DP`): medio
+/// diezmilésimo.
+fn assert_close_fraction(got: f64, expected: f64, ctx: &str) {
+    let tol = 0.00005_f64;
     assert!(
         (got - expected).abs() <= tol,
         "{ctx}: got {got}, expected {expected} (tol {tol})"
@@ -468,7 +482,7 @@ async fn series_markers_carry_dates_kinds_and_totals() {
         assert_eq!(m["kind"], kind);
         assert_eq!(i32_of(&m["month_index"]), month_index_of(date, anchor));
         assert_close(f64_of(&m["total"]), total, "marker total");
-        assert_close(f64_of(&m["month_fraction"]), fraction, "marker fraction");
+        assert_close_fraction(f64_of(&m["month_fraction"]), fraction, "marker fraction");
         assert_eq!(m["owner_user_id"].as_str().unwrap(), owner.user_id.to_string());
     }
 }
@@ -529,7 +543,7 @@ async fn series_single_snapshot_today() {
     let days_in_month =
         (add_months_signed(anchor_mf, 1) - anchor_mf).num_days() as f64;
     let expected_fraction = (anchor_date.day() as f64 - 1.0) / days_in_month;
-    assert_close(f64_of(&markers[0]["month_fraction"]), expected_fraction, "fraction hoy");
+    assert_close_fraction(f64_of(&markers[0]["month_fraction"]), expected_fraction, "fraction hoy");
     assert_close(f64_of(&markers[0]["total"]), 10_000.0, "marker total");
 }
 

@@ -52,6 +52,9 @@ errors are silent (numbers look plausible but wrong). Eyeballing a chart is neve
 | Comparing money values in tests | API serializes `Decimal` as strings like `"1000.0000"`, never `"1000"`. Parse to `f64` and compare with tolerance: `let v: f64 = body["x"].as_str().unwrap().parse().unwrap(); assert!((v - 1000.0).abs() < 0.01)`. Or `starts_with("15000")` for coarse checks. | `assert_eq!(body["x"], "1000")` — will fail on scale |
 | Visual change | Verify light AND dark theme manually (`<html data-theme>`); there are no rendering tests. | Checking one theme |
 | Asserting an **absence** (a route that does not exist, a feature that is off) | Mount the same fallback stack the published image has (`TestConfig::web_static_root` → `spa::mount_static_spa`, the exact function `main.rs` calls). Absence is only observable against the real fallback. | A stripped-down test router with no static/SPA fallback — it silently proves the wrong thing. Lesson from issue #85 (MCP Fase 4, 4.4.0): the old kill-switch test built its router by hand with no fallback and confirmed a 404 the shipped image never returned — in production `FUTUREFIN_MCP_ENABLED=0` gave a bare 405 to `POST /mcp` and the SPA shell (200 `text/html`) to a `GET .well-known` route, because `ServeDir` only calls its fallback for GET/HEAD |
+| Adding a **context field** (provenance, window, absence-reason — anything meant to tell a caller *where a number came from* or *why something is missing*) | A test that demonstrates the field **distinguishes the two cases that used to be indistinguishable**. Existence is not evidence: `financial_health.basis` is not proven by a test that reads `"plan"` once, it's proven by a test that also drives the field to `"actual"`/`"mixed"` and shows the two are different. Example family: `apps/api/tests/context_fields.rs` (issue #86, Fase 5, 4.4.0) — every one of its 11 tests is shaped this way (`markers_declare_capture_versus_backfill` proves a `capture` snapshot and a `backfill` snapshot produce different `source` values; `snapshots_distinguish_suppressed_detail_from_an_empty_snapshot` proves `item_count: 0, items_included: false` reads differently from an actually-empty snapshot; etc.) | A test that only asserts the field is present, or that its one observed value matches its default — that proves serialization, not meaning |
+
+**Norm this table's last row generalizes**: a context field is not "done" because it compiles and shows up in a response once. It is done when a test forces the field through both branches of the ambiguity it exists to resolve, and shows the reader can tell them apart. Write the two-case test before calling the field shipped.
 
 Jargon used below, defined once: **SWR** = safe withdrawal rate (annual % of net worth
 withdrawn in retirement); **gross-up** = inflating a net annual need to the pre-tax gross
@@ -73,9 +76,15 @@ not authoritative — recount with the commands in "Provenance and maintenance".
 lib unit tests + integration. Ask the runner for totals; a `grep` of attributes is an approximation
 (loops generate tests on the frontend, and an attribute is not always an executed test).
 
-Plus **57** API lib unit tests run by `cargo test --workspace` (no Postgres, 2026-08-22): notably
-`apps/api/src/handlers/backup_user/schema.rs` `mod tests` (**14**; 2 added in v1.6.0 for `.ffbackup`
-v5 and 2 in v1.8.0 for v6 migration/round-trip).
+Plus API lib unit tests run by `cargo test --workspace` (no Postgres; count with
+`grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l` rather than trusting the 57 this
+line used to freeze — that count predates Fases 2–4 of the same MCP-audit train, already merged
+to `main` and not re-audited here): notably `apps/api/src/handlers/backup_user/schema.rs`
+`mod tests` (**14**; 2 added in v1.6.0 for `.ffbackup` v5 and 2 in v1.8.0 for v6
+migration/round-trip). **Fase 5 (issue #86) added 1**: `apps/api/src/handlers/person_view.rs`
+gains `LedgerView::as_str()` (the inverse of `resolve`, used to echo `view` at the response root —
+see `context_fields.rs` above) and its test `as_str_round_trips_through_resolve`, taking that
+file from 4 to 5.
 
 > **Correction (2026-08-22) — this skill used to claim `handlers/transactions/` carried unit tests
 > for "CSV presets, fingerprint/ordinal, rule precedence". It did not, and the false claim cost
@@ -207,12 +216,23 @@ it introduced is the pattern every future outbound integration must copy:
    remains is I/O against a real HA, verified by a live smoke, not by a double that would only
    assert our own assumptions back at us.
 
-### Integration test files (**44** on 2026-08-27)
+### Integration test files (recount, don't trust a frozen number here)
 
-Recount before trusting: `ls apps/api/tests/*.rs | wc -l` (**44** on 2026-08-27 — 43 after
-`feat/home-assistant-addon`, +1 for `ha_idp_login.rs` in 4.3.1; 33 on 2026-08-22) and
-`grep -rc '#\[tokio::test\]\|#\[test\]' apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'`
-(**449** attributes on 2026-08-27; 375 across 33 files on 2026-08-22). On any disagreement between a
+Recount before trusting: `ls apps/api/tests/*.rs | wc -l` and
+`grep -rc '#\[tokio::test\]\|#\[test\]' apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'`.
+The **44** files / **449** attributes this section used to freeze (2026-08-27) is stale on two
+independent fronts and neither correction is exhaustive here: **Fase 5** (issue #86) adds exactly
+one file, `context_fields.rs` (11 tests — see its row above), which is fully documented in this
+change; separately, Fases 2 and 3 of the same MCP-audit train (issues #83/#92, already merged to
+`main` before this branch) added 13 more files this skill was never updated for:
+`allocation_resolution.rs`, `budget_patch_guards.rs`, `liabilities_repayment_model.rs`,
+`liability_derived_principal.rs`, `liability_derived_principal_parity.rs`,
+`mcp_audit_and_scope.rs`, `mcp_confirm_and_impact.rs`, `projection_liability_interest.rs`,
+`projection_number_semantics.rs`, `query_param_validation.rs`, `summary_net_return.rs`,
+`transactions_rules_hardening.rs`, `write_safety_phase3.rs`. That drift is **out of scope for
+this change** (Fase 5 doc work only) and is called out here so nobody mistakes the table above
+for a complete inventory; a full re-sync of those rows is separate work.
+On any disagreement between a
 row's description here and `.claude/tests.md` (refreshed every release train), tests.md wins —
 fix this table in the same change.
 
@@ -244,8 +264,8 @@ fix this table in the same change.
 | `history_cashflow.rs` | 6 | `GET /v1/history/cashflow`: exact monthly aggregates (Decimal-string, household + mine), fine series passes through snapshots, `/v1/history/series` byte-identical with and without transactions (tier-1 regression), `daily` with window >6m → 400, `fine` absent without links |
 | `oauth_flow.rs` | 35 | Embedded OAuth 2.1 (v3.1.0), the largest suite by test count: `.well-known` metadata is JSON and not the SPA fallback, issuer follows `X-Forwarded-*` and a malformed `Host` → 400, the `/mcp` **401** advertises `resource_metadata` while the **403** carries no `WWW-Authenticate` (anti-loop), DCR happy paths + 8 rejected `redirect_uris` + unknown metadata ignored, `authorization_code`+PKCE end-to-end to `/mcp` (`expires_in: 3600`, `no-store`, `state` echo + `iss`), code/refresh **reuse-detection** revoking the whole grant with `revoked_reason` `code_reuse`/`refresh_token_reuse`, refresh rotation, unknown `client_id` → **401 `invalid_client`**, consent fatal-vs-redirectable split (fatal never returns `redirect_to`), `plain` PKCE and foreign `resource` redirectable, deny/pending/no-session gating, re-consent reuses **one** grant row, panel + RFC 7009 revocation cutting `/mcp` instantly, cross-user isolation, kill-switch (protocol 404 but `/v1/oauth/connections` still 200, rewritten in 4.4.0 with the real static fallback mounted — see the harness-knobs section above), the `GET /oauth/authorize` route-shadowing guard (now also guards against a **401**, the signature of `/mcp`'s router applying `Router::layer` instead of `route_layer` and dragging its Bearer auth onto every unknown route — caught once during Fase 4), `.ffbackup` export unaffected, and no crossing between the `ffp_`/`ffo_` schemes. Real PKCE via `OsRng`+SHA-256; expiries forced with SQL (no clock mock). **4.4.0 (issue #85)**: `expired_oauth_credentials_are_collected_on_the_next_token_request` (no `DELETE` on the OAuth credential tables existed before this — lazy GC now runs inside `POST /oauth/token`, never a GET, pruning expired codes/access tokens but sparing a refresh that is consumed-but-not-yet-expired, which reuse-detection still needs alive), `discovery_metadata_is_never_cached_and_varies_on_the_forwarded_headers` (the two metadata endpoints now carry `Cache-Control: no-store` + `Vary: X-Forwarded-Proto, X-Forwarded-Host` — the one OAuth response that lacked it), `public_url_with_a_subpath_prefixes_every_advertised_url` (`FUTUREFIN_PUBLIC_URL` now accepts a subpath, validated with the same `prefix::normalize_prefix` as `FUTUREFIN_BASE_PATH`; fixes issuer, `resource`, all four endpoints, and the `WWW-Authenticate` challenge). **Note**: the whole `apps/api/src/oauth/` module has zero in-source unit tests — coverage is 100 % here |
 | `api_tokens.rs` | 8 | API tokens (v3.0.0) + the `/mcp` Bearer gate: 201 exposes the `ffp_` secret exactly once with a coherent `token_prefix`, listing never returns secret or hash, revoked/expired/malformed/foreign-prefix/random all collapse to the same 401, pending user → 403 on create, a viewer's token authenticates, cross-user isolation (list + foreign DELETE → 404), 400 validations and the 10-active-token limit (`token_limit_reached`) released by revoking |
-| `mcp_http.rs` | 18 | MCP end-to-end over `/mcp` (stateless 2026-07-28 + SEP-2243 headers): initialize, `tools/list` freezing the **full 50-tool catalog** (`tools_list_returns_exactly_the_v1_catalog` — every new tool must be added there consciously) and asserting annotations on every tool (hints derived from the name prefix), **byte-for-byte parity** `get_summary` vs `GET /v1/summary` + the issue-#2 read tools vs their GETs, `get_projection` fixed-hybrid + opt-in `asset_series` + shares the handler's cache, validation error → `is_error: true` with the HTTP wire JSON, `view: "mine"` scoping, `list_transactions` SQL pagination, `get_settings` user block, and `mcp_enabled=false` → 404 (router built by hand) |
-| `mcp_write.rs` | 17 | MCP write tools: viewer → `forbidden`, the live `mcp_write_enabled` toggle (cuts the next write without restart, reads survive), MCP-created rows indistinguishable via HTTP, the **FULL/COND/NONE cache contract through the MCP path** (`warm`/`assert_invalidated` helpers), preview/confirm on every destructive tool (preview is SUCCESS and does not execute), `update_fire_settings` owner-gate + field-by-field merge, reconcile tools (3.5.0), and the post-3.5.0 CRUD-parity test (`update_asset` full body incl. `clear_purchase_price`, `update_liability` editing the SAME row via `patch_liability_core`, both FULL, shared 400s, toggle cutting both) |
+| `mcp_http.rs` | count with `grep -c '#\[tokio::test\]\|#\[test\]' apps/api/tests/mcp_http.rs` (the 18 this row used to freeze predates Fases 2–4 of the same MCP-audit train, already merged to `main` and not re-audited here) | MCP end-to-end over `/mcp` (stateless 2026-07-28 + SEP-2243 headers): initialize, `tools/list` freezing the **full 52-tool catalog** (`tools_list_returns_exactly_the_v1_catalog` — every new tool must be added there consciously) and asserting annotations on every tool (hints derived from the name prefix), **byte-for-byte parity** `get_summary` vs `GET /v1/summary` + the issue-#2 read tools vs their GETs, `get_projection` fixed-hybrid + opt-in `asset_series` + shares the handler's cache, validation error → `is_error: true` with the HTTP wire JSON, `view: "mine"` scoping, `list_transactions` SQL pagination, `get_settings` user block, and `mcp_enabled=false` → 404 (router built by hand). **Fase 5 (issue #86) added 4**: `list_tools_echo_the_applied_view_and_keep_content_parity` (the 7 tools that wrap or paginate their GET echo the applied `view` and their envelope content matches `GET ?view=…` for both scopes, while the underlying GET stays a bare array), `list_snapshots_paginates_and_declares_item_suppression`, `list_transaction_imports_paginates_and_echoes_the_view`, `tool_descriptions_stay_within_the_context_budget` (merge gate, `PER_TOOL_MAX = 600` / `TOTAL_BUDGET = 24_000` — see § 4) |
+| `mcp_write.rs` | count with `grep -c '#\[tokio::test\]\|#\[test\]' apps/api/tests/mcp_write.rs` (the 17 this row used to freeze predates Fases 2–4, already merged to `main` and not re-audited here) | MCP write tools: viewer → `forbidden`, the live `mcp_write_enabled` toggle (cuts the next write without restart, reads survive), MCP-created rows indistinguishable via HTTP, the **FULL/COND/NONE cache contract through the MCP path** (`warm`/`assert_invalidated` helpers), preview/confirm on every destructive tool (preview is SUCCESS and does not execute), `update_fire_settings` owner-gate + field-by-field merge, reconcile tools (3.5.0), and the post-3.5.0 CRUD-parity test (`update_asset` full body incl. `clear_purchase_price`, `update_liability` editing the SAME row via `patch_liability_core`, both FULL, shared 400s, toggle cutting both). **Fase 5 (issue #86) added 1**: `liability_type_tag_is_writable_and_reaches_the_summary_breakdown` (`create_liability`/`update_liability` gain a tri-state `type_tag` — omit keeps, empty string clears, no `clear_type_tag` needed — and the value reaches `summary.liabilities_by_type_tag`) |
 | `mcp_simulate.rs` | 6 | `simulate_projection`: baseline ≡ `get_projection`, the discriminating override pair (real expense moves the target, neutral adjustments don't), `one_off_expense` by date ≡ by month_index, return override sinks final NW, bounds re-validated, and **cache neutrality** (simulating never creates nor touches cache entries) |
 | `transactions_reconcile.rs` | 19 | Transfer reconciliation (3.5.0): deterministic auto-pass (±5-day window with exact 5/6 boundary, cross-import pair, greedy with multiple candidates, fixed-point idempotence, distinct owners never), unreconcile persists the anti-resurrection rejection, PATCH of `amount`/`op_date` breaks the pair WITHOUT rejection, deleting a leg/batch unreconciles the survivor, manual pairing without window + its 400s, viewer 403, owner-guard 404 |
 | `base_path.rs` (2026-08-27) | 4 | Per-request public prefix in the SPA shell, seen through the whole router. **The master invariant goes first**: with no proxy headers the HTML is served **byte-identical** to the file (`root_without_proxy_headers_is_the_shell_verbatim`) — compose mode does not change one character. Then `X-Forwarded-Prefix` rewrites every absolute `src`/`href` and injects `window.__FF_BASE__`; `X-Ingress-Path` **wins** over `X-Forwarded-Prefix`; an invalid ingress header is ignored and the next valid source is used. Needs `TestConfig { with_spa_index: Some(html) }` — the harness mounts `spa::serve_index` as fallback, never a `ServeDir` |
@@ -255,6 +275,7 @@ fix this table in the same change.
 | `ha_idp_login.rs` (4.3.1) | 17 | «Entrar con Home Assistant» (`GET /v1/auth/ha/start` + `/callback`, D19), in the order its own header declares. **The door is closed by default**: routes always mounted, but with no `FUTUREFIN_HA_SSO_URL` the start is 401 `ha_sso_disabled`, sets no cookie and provisions nobody. **Parity with header-SSO** is the cornerstone: `header_sso_and_ha_login_resolve_to_the_same_user` — hyphenated UUID through `POST /v1/auth/sso`, the same id as 32 bare hex through the HA flow, **one** `users` row (I16). **The `state` is the whole security boundary**: four ways of not having it (foreign state, no state, no cookie, garbage cookie) all end in `ha_state_mismatch` with **zero users and zero calls to the provider**, and the cookie is single-use. **Call order** pinned on `FakeHaIdp::calls()`: `[Exchange, Identity, Revoke]` with a byte-identical `client_id`, no `Revoke` when HA returned no refresh token. Plus the redirect shape (three exact params, `no-store`, `HttpOnly`/`Lax`/`Max-Age=600`/scoped `Path`, and under `base_path` the cookie is scoped while the `client_id` stays the bare origin), provider failures → `ha_exchange_failed` / `ha_identity_failed`, `?error=access_denied` never touching the provider, the `next` anti-open-redirect battery (prefixed exactly once), username collision → `maria`/`maria-2`, and the shell announcing `__FF_HA_LOGIN__`. Needs `TestConfig { ha_idp: Some(FakeHaIdp::happy(..)) }` |
 | `migration_guard.rs` (2026-08-27) | 2 | Downgrade refusal. Uses **only** `common::isolated_pool()` (no `TestApp`): applies the real migrations to a fresh schema, then inserts a fake `_sqlx_migrations` row from "the future" — exactly what an older binary sees after an upgrade — and asserts `run_migrations` returns `MigrationError::Downgrade` with the operator banner. Tests the contract (don't lose sqlx's `VersionMissing`, translate it into something actionable), not the implementation |
 | `budget_liability_quotas.rs` | 10 | Liability quotas inside `GET /v1/budget` (renamed from `budget_derived.rs` in 3.7.0, when the quota became an ordinary `entries` row): entry shape (`source`, `liability_id`, `label`, expense category) and coexistence with the manual entry of the same category; totals (`expense_regular` = sum of expense entries, no `expense_derived`); quota excluded from `expense_retirement_*`; **quota excluded from the engine expense base** (`monthly_delta_assumption` — hand-predicted double-count regression); active-liability predicate (NULL end date derives, expired doesn't, `>=` boundary, no payment plan → nothing), weekly ×52/12, household/mine scoping, quota without `expense_category_id` still counts |
+| `context_fields.rs` (new, Fase 5 — issue #86) | 11 | The context-field contract (provenance/window/absence-reason), pinned over **HTTP, not MCP** — the core sets these fields, so the HTTP handler is the right level to test, and the MCP tools inherit them for free. Every test follows the two-case norm of § 1: `every_view_aware_response_echoes_the_view_it_applied` (`summary`/`budget`/`projection/series`/`allocation-rules/resolution` all carry `view` at the root, for both `household` and `mine`), `budget_and_summary_declare_whether_their_totals_are_plan_or_actual` (`financial_health.basis` moves between `plan`/`actual`/`mixed`; `budget.totals.basis` is always `"plan"`), `upcoming_totals_publish_the_horizon_they_are_summing` (`upcoming_flows_count` + `upcoming_last_due_date_ymd`), `untagged_liabilities_group_under_null_not_a_spanish_literal` (`liabilities_by_type_tag[].type_tag` is `Option<String>` now — `null`, not the old `"(sin etiqueta)"` string), `history_series_default_window_is_bounded_and_says_it_truncated` (omitted `window_months` = 120, `window_truncated` says so), `history_chart_values_are_published_with_two_decimals`, `markers_declare_capture_versus_backfill` (`source: "capture"` or `"backfill"`), `cashflow_says_why_the_fine_curve_is_missing` (`fine_absent_reason` across its four values), `snapshots_distinguish_suppressed_detail_from_an_empty_snapshot` (`item_count` + `items_included`), `import_batches_point_at_their_possible_duplicates` (`possible_duplicate_of`, matched on `original_filename` + `account_asset_id` **within the loaded page only**), `projection_publishes_the_dated_planning_flows_that_move_the_curve` (`events` + `events_truncated`, capped at 100) |
 
 ### Frontend Vitest files (no congeles el total aquí — cuéntalo con `npm test --workspace futurefin-web 2>&1 | grep Tests`; **368 en 16 ficheros a 2026-08-22**)
 
@@ -398,6 +419,32 @@ covering all three modes, taxes on/off, multi-bracket gross-up, and the null-tar
 - Historical motivation: the client once passed `expense_regular_monthly_equivalent` where
   the server used `expense_retirement_monthly_equivalent` → 2–3× preview divergence, found
   during the v1.3.0 refactor. The fixture exists so that class of drift fails a test.
+
+### `apps/api/tests/fixtures/mcp-catalog.json` + `tool_descriptions_stay_within_the_context_budget` — the MCP context-budget gate
+
+Fase 5 (issue #86, 4.4.0) turned "the catalog fits in context" from a subjective read into two
+mechanical gates:
+
+- **The input contract is frozen**: `mcp_http.rs::tools_list_freezes_the_input_contract_of_every_tool`
+  pins each tool's `inputSchema` keys, its `required` list, and a hash of its `description` in
+  `apps/api/tests/fixtures/mcp-catalog.json`. Regenerate with
+  `UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract`
+  (same `UPDATE_*=1` pattern as `error_codes_parity.rs`) — never hand-edit the JSON.
+- **The size is a hard merge gate**: `mcp_http.rs::tool_descriptions_stay_within_the_context_budget`
+  asserts `PER_TOOL_MAX = 600` chars per tool description and `TOTAL_BUDGET = 24_000` chars across
+  all 52. **When it fails, the fix is never to raise the constant** — the failure message says so
+  explicitly. The fix is to move the prose that pushed a description over budget to a **provenance
+  field** in the response (the pattern this Fase introduced: `basis`, `source`, `*_absent_reason`,
+  `window_truncated` — a field that tells the model *where a number came from* the moment it looks
+  at it, instead of a paragraph repeated in every tool's description that might touch that number),
+  or to the server's `instructions` (`mcp/server.rs::get_info`) if the fact is true once for the
+  whole catalog rather than per-tool. This is exactly how Fase 5 itself got from 37,214 to 21,319
+  description characters: 30 warnings came out of individual descriptions and went to one field or
+  one `instructions` block each, instead of thirty near-duplicate sentences.
+- **Measuring the budget**: see `futurefin-diagnostics-and-tooling` § "MCP catalog context cost"
+  for the read-the-fixture one-liner and the live `tools/list` recipe that also weighs
+  `inputSchema` (found in the Fase-5 audit to be ~2.7× the descriptions — the next lever if this
+  budget is ever tightened further).
 
 ### `projection_marker.rs` — the regression-capture exemplar
 
@@ -564,10 +611,28 @@ harness knobs and the five new suites (`base_path.rs`, `frame_options.rs`,
 `feat/ha-idp-login`): the outbound-integration house style (fake behind a trait, §Outbound
 integrations), the `ha_idp` / `ha_sso_url` knobs of `TestConfig`, the `ha_idp_login.rs` row and the
 file/attribute counts — read from `apps/api/tests/{ha_idp_login.rs,common/mod.rs}` and
-`apps/api/src/ha_idp/`. Re-verify volatile facts with:
+`apps/api/src/ha_idp/`. **Extended 2026-08-28 for the 4.4.0 Fase 5 work** (issue #86, branch
+`feat/mcp-fase-5-contexto`, uncommitted at verification time, `Cargo.toml` still 4.3.1): the new
+§ 1 evidence-standard row for context fields, the new `context_fields.rs` suite row (11 tests, all
+read from the file), the `mcp_http.rs` (+4) and `mcp_write.rs` (+1) additions, the 1 new
+`handlers/person_view.rs` unit test, and the `mcp-catalog.json` / context-budget-gate write-up in
+§ 4 — every fact in that pass was read from the diff against `main` and cross-checked against the
+running source, not copied from the CHANGELOG's own `[4.4.0]` Fase-5 entry: that entry's "antes
+había 12" (descriptions over 600 chars pre-Fase-5) does not match a direct count of `main`'s
+source — the real count is 26; see the MCP-catalog subsection of § 4. **This pass did NOT re-sync the rest of
+the table**: Fases 2/3 of the same MCP-audit train (issues #83/#92) had already added 13 more
+`apps/api/tests/*.rs` files to `main` with no matching rows here, and that drift is called out
+but left unresolved (§ "Integration test files") — treat every count in this skill outside the
+Fase-5 additions as unverified until recounted. Re-verify volatile facts with:
 
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
-- Workspace total: `cargo test --workspace 2>&1 | grep "test result"` (**498 on 2026-08-22**)
+- Workspace total: `cargo test --workspace 2>&1 | grep "test result"` (**498 on 2026-08-22** — stale, do not trust without recounting; several files were added since)
+- **Fase 5 additions (2026-08-28)**: `grep -c '#\[tokio::test\]' apps/api/tests/context_fields.rs`
+  (**11**); `git diff main -- apps/api/tests/mcp_http.rs apps/api/tests/mcp_write.rs | grep '^+.*async fn'`
+  for the exact new test names; `git diff main -- apps/api/src/handlers/person_view.rs | grep 'fn as_str'`;
+  the pre/post description-budget numbers: `grep -n 'PER_TOOL_MAX\|TOTAL_BUDGET' apps/api/tests/mcp_http.rs`
+  and the reproducible descriptions-count script in `futurefin-diagnostics-and-tooling` § "MCP
+  catalog context cost"
 - **HA-IdP seam (4.3.1)**: `grep -n "struct FakeHaIdp\|enum FakeCall\|ha_idp:\|ha_sso_url:" apps/api/tests/common/mod.rs`;
   `grep -c '#\[tokio::test\]' apps/api/tests/ha_idp_login.rs` (**17**);
   `grep -c '#\[test\]' apps/api/src/ha_idp/mod.rs` (**11**) vs

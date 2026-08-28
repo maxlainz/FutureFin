@@ -43,6 +43,17 @@ const RUNWAY_DP: u32 = 1;
 /// exacto y solo se recorta lo publicado.
 const PCT_DP: u32 = 4;
 
+/// `plan` | `actual` | `mixed` a partir de la procedencia de los dos lados del ahorro. Es una
+/// función pura sobre los `SavingsAvgBasis` que ya se publican, así que no puede desincronizarse
+/// de ellos: si algún día un lado gana una tercera procedencia, este `match` deja de compilar.
+fn financial_health_basis(income: &SavingsAvgBasis, expense: &SavingsAvgBasis) -> &'static str {
+    match (income.basis, expense.basis) {
+        ("budget", "budget") => "plan",
+        ("average", "average") => "actual",
+        _ => "mixed",
+    }
+}
+
 /// Redondeo de **presentación** de un ratio. Se aplica SIEMPRE en el último paso (al construir la
 /// respuesta) y nunca sobre un valor que alimente otro cálculo: el gross-up, el umbral SWR y el
 /// runway se computan con la precisión completa y solo el resultado publicado se recorta.
@@ -54,31 +65,49 @@ use uuid::Uuid;
 
 /// Agregados budget ↔ summary: equivalentes mensuales del presupuesto (cuotas de pasivo ya
 /// incluidas dentro desde la 3.7.0), runway sobre los activos líquidos y sumas de Próximos.
+/// Agregados budget ↔ summary.
+///
+/// **UNIDADES.** Este objeto es plano y mezcla cinco escalas: importes (euros/mes), fracciones,
+/// porcentajes, un ratio adimensional y meses. Cada campo declara la suya abajo con la marca
+/// `**Unidad:**`, que viaja al schema de OpenAPI y a la descripción de la tool MCP. **No están en
+/// los nombres a propósito**: renombrar `savings_rate` → `savings_rate_fraction` (y su gemelo
+/// `debt_to_assets_ratio`) es un cambio breaking sobre dos KPIs de portada que toca la SPA, las dos
+/// superficies MCP y el catálogo de textos de ayuda, y compra menos que declararlo — la unidad es
+/// una propiedad del CAMPO, constante en todas las respuestas, así que su sitio es el esquema y no
+/// 200 bytes repetidos en el endpoint más caliente de la app. Regla de lectura: `savings_rate`
+/// `0.35` es 35 %; `net_return_nominal_annual_pct` `3.5556` es 3,5556 %.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct FinancialHealthMetrics {
+    /// **Unidad: euros/mes.** Ingreso mensual equivalente según el modo (`savings_source`); ver
+    /// `basis`.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub income_monthly_equivalent: Decimal,
+    /// **Unidad: euros/mes.**
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_regular_monthly_equivalent: Decimal,
-    /// Gasto mensual total: el del presupuesto (cuotas de pasivo incluidas) en modo A; **gasto real
-    /// promedio 12m crudo** (cuotas incluidas dentro) en los modos B/C con datos.
+    /// **Unidad: euros/mes.** Gasto mensual total: el del presupuesto (cuotas de pasivo incluidas)
+    /// en modo A; **gasto real promedio 12m crudo** (cuotas incluidas dentro) en los modos B/C con
+    /// datos.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_total_monthly_equivalent: Decimal,
+    /// **Unidad: euros/mes.** `income_monthly_equivalent − expense_total_monthly_equivalent`.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub net_monthly_equivalent: Decimal,
-    /// `net / income` when income is positive.
+    /// **Unidad: fracción** (`0.35` = 35 %, NO 0,35 %). `net / income` cuando el ingreso es
+    /// positivo; ausente si no lo es.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub savings_rate: Option<Decimal>,
+    /// **Unidad: euros** (saldo, no flujo). Σ `current_value` de los activos con `is_liquid`.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub liquid_assets_total: Decimal,
-    /// Meses que los activos **líquidos** cubren el gasto total mensual, componiendo la rentabilidad
+    /// **Unidad: meses.** Meses que los activos **líquidos** cubren el gasto total mensual, componiendo la rentabilidad
     /// esperada de esos activos (media ponderada por valor) y con el gasto creciendo a la inflación
     /// de la instalación (`futurefin_engine::liquid_runway_months`). `null` cuando no hay base de
     /// gasto (`expense_total == 0`) **o** cuando el runway es indefinido (ver `runway_is_indefinite`).
@@ -94,17 +123,39 @@ pub struct FinancialHealthMetrics {
     /// gasto 0 el runway tampoco existe pero este campo es `false` (no hay base). Con
     /// `swr_pct = 0` nunca es `true`.
     pub runway_is_indefinite: bool,
-    /// Sum of **expected_amount** for income-category flows (not annualized).
+    /// Σ de `expected_amount` de **TODOS** los Próximos (`planning_flows`) del scope cuya
+    /// categoría es de scope `income`. **Sin ventana temporal y sin anualizar**: entra igual un
+    /// cobro previsto para el mes que viene que uno con `due_date` a dieciséis años, y entran
+    /// también los que **no tienen fecha**. No es un flujo mensual ni comparable con
+    /// `income_monthly_equivalent`. Para saber hasta dónde llega el horizonte que se está sumando,
+    /// mira `upcoming_last_due_date_ymd`; para cuántos conceptos, `upcoming_flows_count`.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub upcoming_inflows_total: Decimal,
+    /// Lo mismo para las categorías de scope `expense`. Mismas advertencias: sin ventana, sin
+    /// anualizar, con los flujos sin fecha dentro.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub upcoming_outflows_total: Decimal,
+    /// **Unidad: ratio adimensional** (`1.5` = las entradas cubren 1,5 veces las salidas).
+    /// `upcoming_inflows_total / upcoming_outflows_total` cuando el denominador es > 0; ausente si
+    /// no hay salidas previstas. Es una **fracción** (1.5 = las entradas cubren 1,5 veces las
+    /// salidas), no un porcentaje, y hereda la ausencia de ventana de sus dos operandos: puede
+    /// dividir un cobro a dieciséis años vista entre un pago del mes que viene. No lo compares con
+    /// `runway_months`, que sí es una medida temporal.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub upcoming_coverage_ratio: Option<Decimal>,
+    /// Nº de Próximos (entradas + salidas) que suman en los dos totales anteriores. `0` ⟺ ambos
+    /// totales son 0 de verdad, y no «hay flujos pero se anulan».
+    pub upcoming_flows_count: i64,
+    /// `due_date` **más lejana** entre los Próximos contados, `YYYY-MM-DD`. `null` cuando ninguno
+    /// tiene fecha (o no hay ninguno). Es la ventana que los totales de arriba NO declaran: sin
+    /// esto, `upcoming_outflows_total` mezcla un pago del mes que viene con uno de 2042 y las dos
+    /// lecturas son indistinguibles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upcoming_last_due_date_ymd: Option<String>,
     /// Fuente **efectiva** del ahorro que produjo los equivalentes mensuales anteriores (tras el
     /// fallback: en modo `transactions_avg` sin datos cae a `budget`). Contrato con el frontend.
     pub savings_source: SavingsSource,
@@ -114,13 +165,30 @@ pub struct FinancialHealthMetrics {
     pub savings_income_basis: SavingsAvgBasis,
     /// Procedencia del lado GASTO.
     pub savings_expense_basis: SavingsAvgBasis,
-    /// Ahorro mensual **esperado** (KPI «ahorro real vs esperado»): el neto del presupuesto
+    /// **Plan o realidad**, en una palabra: `"plan"` | `"actual"` | `"mixed"`.
+    ///
+    /// Se deriva de los dos `*_basis` de arriba (`plan` ⟺ los dos lados salieron del presupuesto;
+    /// `actual` ⟺ los dos promediaron movimientos reales; `mixed` ⟺ uno de cada, que es lo normal
+    /// en el modo C y lo que pasa en el B cuando un lado se queda sin meses reales).
+    ///
+    /// Existe por una colisión de nombres, no por gusto: `income_monthly_equivalent`,
+    /// `expense_regular_monthly_equivalent`, `expense_total_monthly_equivalent` y
+    /// `net_monthly_equivalent` se llaman **exactamente igual** aquí y en
+    /// `GET /v1/budget` → `totals`, y allí son SIEMPRE el plan (`totals.basis == "plan"`), mientras
+    /// que aquí siguen a `savings_source`. Con `basis != "plan"` las dos cuartetas describen cosas
+    /// distintas y restarlas no significa nada. La información ya estaba repartida entre
+    /// `savings_source` y los dos `*_basis`; lo que faltaba era el campo que se lee de un vistazo.
+    pub basis: &'static str,
+    /// **Unidad: euros/mes.** Ahorro mensual **esperado** (KPI «ahorro real vs esperado»): el neto del presupuesto
     /// (`net_monthly_equivalent` del snapshot de budget, cuotas derivadas incluidas), capturado
     /// ANTES del override B/C — no sigue el modo `savings_source`, así que en B/C puede diferir
     /// del `net_monthly_equivalent` servido arriba.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub savings_expected_monthly_equivalent: Decimal,
+    /// **Unidad: porcentaje anual** (`"3.5556"` = 3,5556 %/año), NO fracción — al revés que
+    /// `savings_rate`.
+    ///
     /// Rendimiento anual **nominal** esperado del patrimonio neto, en porcentaje (`"3.5556"` =
     /// 3,5556 %/año). Numerador: la suma de `current_value × expected_annual_return_percent` de
     /// TODOS los activos del scope menos la de `principal × apr_percent` de los pasivos **no
@@ -132,6 +200,8 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub net_return_nominal_annual_pct: Option<Decimal>,
+    /// **Unidad: porcentaje anual**, igual que su hermano nominal.
+    ///
     /// El mismo rendimiento descontada `installation.annual_inflation_assumption_percent`, por
     /// **división de factores** (`(1+n/100)/(1+i/100) − 1`), no por resta de puntos. Presente y
     /// ausente exactamente a la vez que `net_return_nominal_annual_pct`; con inflación 0 son
@@ -146,6 +216,19 @@ pub struct FinancialHealthMetrics {
 struct PlanningScopeAgg {
     scope: String,
     total: Decimal,
+    /// Nº de flujos del scope (fechados y sin fechar).
+    flow_count: i64,
+    /// `due_date` máxima del scope; `NULL` si ninguno de sus flujos lleva fecha.
+    last_due_date: Option<NaiveDate>,
+}
+
+/// Los tres agregados de Próximos que publica `financial_health`: totales por scope, cuántos
+/// flujos los componen y hasta dónde llegan en el calendario.
+struct UpcomingAgg {
+    inflows: Decimal,
+    outflows: Decimal,
+    count: i64,
+    last_due_date: Option<NaiveDate>,
 }
 
 #[derive(Debug, Serialize, ToSchema, FromRow)]
@@ -160,8 +243,19 @@ pub struct CategoryBreakdownLine {
 
 #[derive(Debug, Serialize, ToSchema, FromRow)]
 pub struct TypeTagBreakdownLine {
-    /// Normalized `liabilities.type_tag`; empty/null aggregated as «(sin etiqueta)».
-    pub type_tag: String,
+    /// `liabilities.type_tag` normalizado (trim). **`null` = pasivos sin etiqueta**, agregados en
+    /// una sola línea.
+    ///
+    /// Hasta 4.4.0 ese caso viajaba como la cadena literal `"(sin etiqueta)"`: texto de interfaz,
+    /// en español, dentro de un campo de datos — indistinguible de un usuario que hubiera
+    /// etiquetado de verdad un pasivo con ese nombre, y una cadena que ningún cliente puede
+    /// reenviar como filtro. `null` es el mismo criterio que ya usa `category_id` en
+    /// `CategoryMonthlySeriesEntry` para «movimientos sin categoría».
+    ///
+    /// La dimensión se escribe con `type_tag` en `POST`/`PATCH /v1/liabilities` (y viaja en
+    /// `LiabilityResponse.type_tag`): es texto libre del usuario, no un enum del servidor, así que
+    /// aquí no hay lista cerrada de valores.
+    pub type_tag: Option<String>,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub total: Decimal,
@@ -219,7 +313,7 @@ async fn load_breakdown_lines(
     let liab_tag_sql = format!(
         r#"SELECT
                CASE
-                   WHEN l.type_tag IS NULL OR trim(l.type_tag) = '' THEN '(sin etiqueta)'
+                   WHEN l.type_tag IS NULL OR trim(l.type_tag) = '' THEN NULL
                    ELSE trim(l.type_tag)
                END AS type_tag,
                SUM(l.principal) AS total
@@ -239,15 +333,21 @@ async fn load_breakdown_lines(
     Ok((assets, liabilities_cat, liabilities_tag))
 }
 
+/// Agregado de Próximos por scope. **Sin ventana temporal**: suma todos los `planning_flows` del
+/// scope, con y sin `due_date`. La misma query devuelve ahora el recuento y la fecha máxima, que
+/// son lo que permite leer los totales sin inventarse un horizonte (ver `upcoming_*` en
+/// [`FinancialHealthMetrics`]); no añade ninguna consulta, solo dos columnas al `GROUP BY` que ya
+/// existía.
 async fn planning_flow_totals_in_out(
     pool: &sqlx::PgPool,
     installation_id: Uuid,
     session_user_id: Uuid,
     view: LedgerView,
-) -> Result<(Decimal, Decimal), ApiError> {
+) -> Result<UpcomingAgg, ApiError> {
     let scope_where = view.scope_where("p");
     let sql = format!(
-        r#"SELECT c.scope AS scope, COALESCE(SUM(p.expected_amount), 0::numeric) AS total
+        r#"SELECT c.scope AS scope, COALESCE(SUM(p.expected_amount), 0::numeric) AS total,
+                  COUNT(*)::bigint AS flow_count, MAX(p.due_date) AS last_due_date
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE {scope_where}
@@ -258,20 +358,39 @@ async fn planning_flow_totals_in_out(
         .fetch_all(pool)
         .await?;
 
-    let mut inflows = Decimal::ZERO;
-    let mut outflows = Decimal::ZERO;
+    let mut agg = UpcomingAgg {
+        inflows: Decimal::ZERO,
+        outflows: Decimal::ZERO,
+        count: 0,
+        last_due_date: None,
+    };
     for r in rows {
+        // Solo `income` y `expense` suman: una categoría de otro scope no es un Próximo, y su
+        // recuento tampoco debe describir cifras en las que no entra.
         match r.scope.as_str() {
-            "income" => inflows += r.total,
-            "expense" => outflows += r.total,
-            _ => {}
+            "income" => agg.inflows += r.total,
+            "expense" => agg.outflows += r.total,
+            _ => continue,
         }
+        agg.count += r.flow_count;
+        agg.last_due_date = match (agg.last_due_date, r.last_due_date) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
     }
-    Ok((inflows, outflows))
+    Ok(agg)
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SummaryResponse {
+    /// Vista efectivamente aplicada: `household` | `mine`. **Eco de `?view`, no un dato nuevo.**
+    ///
+    /// Existe porque en una instalación de un solo usuario `?view=mine` y `?view` omitido
+    /// devolvían payloads byte a byte idénticos: era imposible distinguir «mine coincide con el
+    /// hogar» de «el parámetro se ignoró». En un hogar de dos personas ésa es exactamente la
+    /// pregunta que decide si la cifra que estás citando es la del hogar o la tuya. Reenviar este
+    /// valor como `?view=` reproduce esta misma respuesta (`LedgerView::as_str`).
+    pub view: &'static str,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub total_assets: Decimal,
@@ -281,7 +400,8 @@ pub struct SummaryResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub net_worth: Decimal,
-    /// Liabilities ÷ assets when assets > 0; omitted otherwise.
+    /// **Unidad: fracción** (`0.42` = 42 %, NO 0,42 %), misma escala que
+    /// `financial_health.savings_rate`. Pasivos ÷ activos cuando hay activos; ausente si no.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
@@ -290,7 +410,12 @@ pub struct SummaryResponse {
     /// Activos por categoría (solo filas con total positivo).
     pub assets_by_category: Vec<CategoryBreakdownLine>,
     pub liabilities_by_category: Vec<CategoryBreakdownLine>,
-    /// Pasivos agrupados por `type_tag`.
+    /// Pasivos **no vencidos** agrupados por `type_tag` (el mismo filtro
+    /// `payment_end_date IS NULL OR >= hoy` que `total_liabilities`), solo líneas con
+    /// `SUM(principal) > 0`, orden `total DESC`. La línea con `type_tag: null` agrupa los pasivos
+    /// sin etiquetar. Es un corte por una dimensión que el usuario escribe libremente en
+    /// `POST`/`PATCH /v1/liabilities` (`type_tag`), no por categoría: el desglose por categoría es
+    /// `liabilities_by_category`, y los dos suman lo mismo.
     pub liabilities_by_type_tag: Vec<TypeTagBreakdownLine>,
 }
 
@@ -478,8 +603,9 @@ pub(crate) async fn summary_core(
     let net_return_nominal_annual_pct = net_return.as_ref().map(|r| r.nominal_pct.round_dp(PCT_DP));
     let net_return_real_annual_pct = net_return.as_ref().map(|r| r.real_pct.round_dp(PCT_DP));
 
-    let (upcoming_inflows_total, upcoming_outflows_total) =
-        planning_flow_totals_in_out(pool, iid, user_id, view).await?;
+    let upcoming = planning_flow_totals_in_out(pool, iid, user_id, view).await?;
+    let upcoming_inflows_total = upcoming.inflows;
+    let upcoming_outflows_total = upcoming.outflows;
 
     let upcoming_coverage_ratio = if upcoming_outflows_total > Decimal::ZERO {
         Some(round_ratio(upcoming_inflows_total / upcoming_outflows_total))
@@ -502,7 +628,13 @@ pub(crate) async fn summary_core(
         upcoming_inflows_total,
         upcoming_outflows_total,
         upcoming_coverage_ratio,
+        upcoming_flows_count: upcoming.count,
+        upcoming_last_due_date_ymd: upcoming
+            .last_due_date
+            .map(|d| d.format("%Y-%m-%d").to_string()),
         savings_source: effective_savings_source,
+        // Se deriva ANTES de mover los dos basis al struct (ambos se consumen por valor).
+        basis: financial_health_basis(&savings_income_basis, &savings_expense_basis),
         savings_income_basis,
         savings_expense_basis,
         savings_expected_monthly_equivalent: money_out(savings_expected_monthly_equivalent),
@@ -522,6 +654,7 @@ pub(crate) async fn summary_core(
         load_breakdown_lines(pool, iid, user_id, view, today).await?;
 
     Ok(SummaryResponse {
+        view: view.as_str(),
         total_assets,
         total_liabilities,
         net_worth,

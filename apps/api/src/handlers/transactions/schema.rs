@@ -235,7 +235,17 @@ pub struct TransactionResponse {
     pub import_id: Option<Uuid>,
     /// `myinvestor` | `n26` | `manual` | …
     pub source: String,
+    /// **La fecha que manda.** `YYYY-MM-DD`. TODOS los cortes por mes y por ventana —la
+    /// comparativa, el promedio ponderado, las series por categoría, el agregado de cash-flow, la
+    /// lista de meses— agrupan por `op_date`.
     pub op_date: String,
+    /// Fecha VALOR del banco, `YYYY-MM-DD`, cuando el extracto la trae y el preset la mapea.
+    /// Ausente en los movimientos manuales y en los bancos que no la publican.
+    ///
+    /// **Es informativa: ningún agregado la usa.** Un cargo con `op_date` el 31 de enero y
+    /// `value_date` el 1 de febrero cuenta entero en enero. Se conserva porque es lo que el usuario
+    /// ve en su banco y sirve para casar un movimiento con su extracto, no para hacer cuentas: si
+    /// una cifra mensual no te cuadra con el banco, la explicación suele estar aquí.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_date: Option<String>,
     pub concept: String,
@@ -295,8 +305,19 @@ pub struct TransactionResponse {
 pub struct MonthEntry {
     /// `YYYY-MM`.
     pub month: String,
-    /// `false` si es el mes civil en curso de la instalación.
+    /// `false` **solo** para el mes civil en curso de la instalación: el mes no ha terminado, así
+    /// que sus totales aún van a crecer. No significa «faltan datos».
+    ///
+    /// El mes en curso viaja **siempre**, aunque no tenga ni un movimiento (`txn_count: 0`). Hasta
+    /// 4.4.0 salía de un `GROUP BY`, así que un mes en curso vacío simplemente no aparecía: la
+    /// rama `is_complete = false` no se materializaba nunca en esa instalación, la descripción de
+    /// la tool prometía un caso inalcanzable, y —peor— el mes seguía consumiendo su hueco en las
+    /// series (`/v1/transactions/category-series` y `/v1/history/cashflow` lo cuentan igual). Una
+    /// lista de meses que omite el mes que las series sí incluyen no sirve para orientar consultas,
+    /// que es justo para lo que existe.
     pub is_complete: bool,
+    /// Movimientos del mes (cualquier `kind`, recurrentes y conciliados incluidos). `0` es un dato
+    /// real: solo puede darse en el mes en curso, que ahora siempre viaja.
     pub txn_count: i64,
 }
 
@@ -315,6 +336,23 @@ pub struct ImportBatchResponse {
     #[schema(value_type = String, format = "date-time")]
     pub created_at: DateTime<Utc>,
     pub txn_count: i64,
+    /// **Otros lotes del mismo scope con el mismo `original_filename` y la misma cuenta vinculada**
+    /// (`account_asset_id`). Vacío en el caso normal.
+    ///
+    /// El doble import es el accidente clásico de esta pantalla: se sube el mismo extracto dos
+    /// veces, la deduplicación por huella canónica salva los movimientos idénticos pero no los que
+    /// difieren en un byte, y el usuario acaba con dos lotes del mismo fichero. Ese dato ya estaba
+    /// en la respuesta —dos filas con el mismo `original_filename`— pero exigía que el consumidor
+    /// lo cruzara por su cuenta, y ninguno lo hacía. Aquí cada lote apunta a sus gemelos: la
+    /// relación es simétrica (si A lista a B, B lista a A) y basta con mirar una fila.
+    ///
+    /// Es una **sospecha**, no un veredicto: importar enero dos veces con el mismo nombre de
+    /// fichero desde dos cuentas distintas no aparece aquí (la cuenta forma parte de la clave), y
+    /// dos lotes legítimos del mismo fichero (por ejemplo, un extracto corregido) sí aparecen. Para
+    /// confirmarlo, compara `txn_count` y `created_at`, o pide los movimientos de cada lote con
+    /// `import_id`.
+    #[schema(value_type = Vec<String>, format = "uuid")]
+    pub possible_duplicate_of: Vec<Uuid>,
 }
 
 // ---------------------------------------------------------------------------
@@ -825,8 +863,8 @@ pub struct TransactionsSummaryResponse {
     /// `null` cuando sí hay promedio.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_unavailable_reason: Option<String>,
-    /// `household` | `mine`.
-    pub view: String,
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `?view`.
+    pub view: &'static str,
     pub expense_categories: Vec<CategoryComparisonLine>,
     pub income_categories: Vec<CategoryComparisonLine>,
     pub savings: BlockActualAvg,
@@ -870,8 +908,8 @@ pub struct CategoryMonthlySeriesEntry {
 /// curso (parcial).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CategoryMonthlySeriesResponse {
-    /// `household` | `mine`.
-    pub view: String,
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `?view`.
+    pub view: &'static str,
     /// `expense` | `income`.
     pub kind: String,
     /// Amplitud efectiva de la ventana (1..=60).

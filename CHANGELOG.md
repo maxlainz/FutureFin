@@ -39,6 +39,67 @@ bump y la publicación van al final.
 - Test `every_input_schema_forbids_unknown_properties` añadido **como `#[ignore]`**: hoy 51 de 52
   tools aceptan campos desconocidos en silencio. Es la diana de la Fase 2 (#83).
 
+### Coste de contexto y ergonomía del catálogo (Fase 5 — issue #86)
+
+El servidor defendía su corrección con **prosa**, y esa estrategia fallaba justo donde importa: en
+la auditoría en vivo, la descripción de `get_summary` llegó al cliente **truncada**, y lo que quedó
+fuera empezaba en mitad de una advertencia sobre inconsistencia entre tools.
+
+Confesión de parte: **las fases 1–4 de este mismo trabajo empeoraron el problema** —de 27 KB a
+36 KB de descripciones—, porque cada arreglo de una cifra añadía su aviso a la prosa. Esta fase
+paga esa deuda.
+
+- **Descripciones: 37.214 → 21.319 caracteres (−42,7 %)**, ninguna por encima de 600 (antes las superaban **26**,
+  y la mayor eran 3.821). La idea no es «escribir menos» sino aplicar del todo lo que este servidor
+  ya había inventado a medias: **campos de procedencia** en la respuesta. Un campo así le dice al
+  modelo de dónde sale la cifra **en el momento en que la mira**, en vez de cobrarle el contexto en
+  cada turno. Los 30 avisos retirados fueron a un campo, al `instructions` (una vez, en lugar de
+  repetidos en doce descripciones) o al CHANGELOG, si lo que contaban era historia.
+  Guardia nueva `tool_descriptions_stay_within_the_context_budget`, con la instrucción escrita de
+  **no subir la constante** cuando falle.
+- **Hallazgo que reordena lo que queda por hacer**: medido después del recorte, el `inputSchema`
+  son 55 KB, **2,7× las descripciones**. La prosa ha dejado de ser el coste dominante; la palanca
+  que queda son los ~250 doc-comments de parámetros.
+- **`view` en la raíz de las respuestas.** Verificado en la auditoría: `?view=mine` y omitirlo
+  devolvían payloads **byte a byte idénticos** en una instalación de un usuario, así que era
+  imposible distinguir «mine == household» de «el parámetro se ignoró». En un hogar de dos, ésa es
+  la pregunta que decide si la cifra es correcta.
+- **Plan vs real, declarado en el dato.** Cuatro campos de `get_budget.totals` tienen nombre
+  idéntico a cuatro de `get_summary.financial_health` y valen otra cosa. En vez de renombrar
+  (breaking, sobre seis campos que la SPA lee, y que **no** haría la cifra más legible: seguirías
+  sin saber en qué modo está el summary), ahora ambos declaran su `basis`: si
+  `financial_health.basis != "plan"`, las dos cuartetas no son comparables. Comprobable en el dato.
+- **El histórico dejó de traer el peor caso por defecto.** Sin `window_months` devolvía la serie
+  **desde la fecha de nacimiento del usuario** —~290 puntos, con los primeros 200 interpolando
+  entre 0 € y unos cientos, a 15 decimales cada uno—. Default de 120 meses (`1200` sigue
+  significando «todo») y series redondeadas a 2 decimales: **−70 %** en el peor caso medido, de
+  53,6 KB a 16,1 KB. La curva fina del cash-flow, acotada a 36 meses: **−69 %**, de 64 KB a 20 KB —
+  y se **omite con motivo** en vez de dar error, porque el agregado mensual seguía siendo servible.
+- **`simulate_projection`: `net_monthly` devolvía el ahorro del baseline**, un delta de exactamente
+  0 en el campo que el usuario preguntó. No se podía «arreglar» sin mentir —está definido como
+  `income − expense_total`, y los ejes de caja no tocan ni el ingreso ni el gasto—, así que pasa a
+  llamarse `net_recurring_monthly` (identidad intacta, nombre honesto) y aparece
+  `net_cash_monthly`, que es el que sí se mueve. Y gana `model_note`, que es donde más faltaba:
+  bajar la inflación adelanta la jubilación años porque el motor capitaliza en nominal y **solo el
+  objetivo FIRE** se infla — subes la rentabilidad real de todo y congelas el objetivo, gratis.
+- **Sentinelas que engañaban**: `items: []` era indistinguible de «sin ítems» (ahora
+  `items_included` + `item_count`); los markers no distinguían una foto de la app de un valor
+  tecleado a posteriori (`source: capture|backfill`, que es lo que hacía que a «¿cuándo empecé a
+  ahorrar?» las tools respondieran con un ancla de backfill); el mes en curso vacío desaparecía de
+  `list_transaction_months` pero **sí** consumía slot en las series, así que la lista contradecía a
+  las curvas; y `"(sin etiqueta)"` era un literal español **dentro de un campo de datos** — ahora
+  es `null`.
+- **La densidad híbrida escondía saltos grandes sin explicarlos** (en la auditoría, una caída de
+  ~98 k€ entre dos puntos anuales). Se añade `events` con los planning flows datados que mueven la
+  curva. Se descartó exponer `density` como parámetro: traería 841 puntos y seguiría sin decir
+  **por qué** cayó, solo dónde.
+- Paginación en `list_snapshots` y `list_transaction_imports`, que crecían sin cota ni `total_count`;
+  `possible_duplicate_of` para detectar el doble import que sus propios datos delataban; y
+  documentados los campos que se devolvían sin que nadie los explicara (`upcoming_*` —que no tienen
+  ventana temporal y pueden mezclar un evento a 16 años vista con un runway de meses—,
+  `horizon_basis`, `compound_outpaces_true_savings_month_index` —que es un **mes**, no una posición
+  de array— y `value_date`, que es informativa: ningún agregado la usa).
+
 ### Transporte, CORS y kill-switch (Fase 4 — issue #85)
 
 Nada de esto era explotable sin credencial válida. Son fallos de plataforma y de diagnóstico:

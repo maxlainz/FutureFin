@@ -62,6 +62,21 @@ impl LedgerView {
         }
     }
 
+    /// Etiqueta pública de la vista: `"household"` | `"mine"`. Es la cadena que las respuestas
+    /// **ecoan** en su campo `view`, y la que `LedgerViewQuery::resolve` acepta de vuelta:
+    /// `resolve(as_str(v)) == v` para las dos variantes (test `as_str_round_trips_through_resolve`).
+    ///
+    /// Existe para que el eco no se escriba a mano. Antes vivía como
+    /// `if view == LedgerView::Mine { "mine" } else { "household" }` copiado en cuatro handlers, y
+    /// el brazo `else` convertía cualquier variante nueva en `"household"` sin avisar — la misma
+    /// forma del comodín silencioso que `resolve` eliminó en 4.0.0.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LedgerView::Household => "household",
+            LedgerView::Mine => "mine",
+        }
+    }
+
     /// Índice del siguiente placeholder libre tras los binds del scope: 2 para Household, 3 para Mine.
     pub fn next_arg_index(&self) -> usize {
         match self {
@@ -158,6 +173,21 @@ mod tests {
                 "`{bad}` debería dar invalid_view, dio {err:?}"
             );
         }
+    }
+
+    /// El eco (`as_str`) y el parser (`resolve`) son inversos: una respuesta que diga
+    /// `view: "mine"` describe exactamente la vista que se obtiene reenviando ese valor.
+    #[test]
+    fn as_str_round_trips_through_resolve() {
+        for v in [LedgerView::Household, LedgerView::Mine] {
+            let echoed = v.as_str();
+            let back = LedgerViewQuery { view: Some(echoed.to_string()) }
+                .resolve()
+                .expect("el eco debe ser un valor aceptado");
+            assert_eq!(back, v, "round-trip roto para {echoed}");
+        }
+        assert_eq!(LedgerView::Household.as_str(), "household");
+        assert_eq!(LedgerView::Mine.as_str(), "mine");
     }
 
     #[test]

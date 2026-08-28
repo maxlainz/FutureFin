@@ -25,9 +25,12 @@ Bearer-authenticated wrapper over the same `*_core` fn its HTTP handler uses. De
 rot silently — an endpoint gains a field, a handler changes semantics, a new feature ships
 HTTP-only — unless something forces the question at merge time. This skill is that something.
 
-Volatile facts date-stamped **2026-08-28, Fases 0–4 del tren 4.4.0** (52 tools, sin cambio de
+Volatile facts date-stamped **2026-08-28, Fases 0–5 del tren 4.4.0** (52 tools, sin cambio de
 catálogo desde 4.0.0; recount con los comandos de §5 antes de fiarte de cualquier número de aquí).
-Previamente 2026-08-22, tren 4.0.0 (52); 2026-08-20, tren 3.8.0 (50); 2026-08-19, tren 3.6.0 (47).
+La Fase 5 (issue #86, coste de contexto y ergonomía del catálogo) no mueve un solo contador —
+52/21/31/14/7 siguen exactos — porque reescribe prosa, formas de respuesta y contratos de campo
+compartidos con la HTTP API, no el inventario de tools. Previamente 2026-08-22, tren 4.0.0 (52);
+2026-08-20, tren 3.8.0 (50); 2026-08-19, tren 3.6.0 (47).
 
 ## When NOT to use this skill
 
@@ -185,6 +188,58 @@ SPA sí tiene** (estado de cliente, pantalla previa, sesión). Una cuarta tool-s
 nombrar cuál de esas tres formas es, o traer un argumento nuevo a esta tabla — no basta con que sea
 cómoda.
 
+### 3.4 View echo — object responses vs `list_*` envelopes (Fase 5, issue #86)
+
+Every scope-aware response must echo which `view` it actually applied. The failure mode this
+closes: in a single-user installation, `view: "mine"` and `view` omitted returned byte-identical
+payloads, so there was no way to tell "mine happens to equal household" from "the parameter was
+silently ignored." In a two-person household that ambiguity is exactly the question that decides
+whether the number being quoted is the household's or the caller's.
+
+**Object responses get it for free.** `SummaryResponse`, `BudgetSnapshotResponse`,
+`ProjectionSeriesResponse` and `AllocationResolutionResponse` gained a `view` field on the
+**core** (`HistorySeriesResponse`, `CashflowResponse`, `TransactionsSummaryResponse` and
+`CategoryMonthlySeriesResponse` already had it) — `LedgerView::as_str()` in
+`handlers/person_view.rs` is the single source now, replacing four separate copies of
+`if view == Mine { "mine" } else { "household" }`. Because every tool calls the same core its
+HTTP handler calls, every object-shaped tool inherits the field with **zero code in
+`server.rs`**.
+
+**Listings cannot do that.** Every `GET /v1/*` list endpoint returns a bare JSON array on
+purpose — REST convention, and the SPA deserializes it as one. Wrapping that array to smuggle in
+a `view` field would be a breaking HTTP change for a field the SPA doesn't even need (it already
+knows its own `view` — it's the query param it sent). So for a scoped `list_*`, the echo has to
+be put on by **the tool itself**, in an envelope: `{"view": "...", "<entity_key>": [...]}`.
+
+This is a **design consequence, not a workaround**. It moves 7 tools out of the byte-for-byte
+loop (`mcp_http.rs::new_read_tools_match_http_endpoints`) and into content parity
+(`mcp_http.rs::list_tools_echo_the_applied_view_and_keep_content_parity`, which asserts
+`envelope[key] == GET?view=…` for both views, AND that the bare `GET` still returns an array).
+It's the same path `list_categorization_rules` already walked when it grew pagination in 4.0.0 —
+an enveloped listing is not a new kind of problem, it's the second occurrence of one. See
+`NOTA-VIEW-ENVELOPE` in `apps/api/src/mcp/server.rs` for the comment block this section mirrors.
+
+The 7 (tool → envelope key): `list_assets` → `assets`, `list_liabilities` → `liabilities`,
+`list_planning_flows` → `planning_flows`, `list_allocation_rules` → `allocation_rules`,
+`list_transaction_months` → `months`, `list_transactions` → `transactions`,
+`list_transaction_imports` → `imports`.
+
+Still in the byte-for-byte loop (5): `list_categories`, `get_budget`, `list_recurring_rules`,
+`get_history_cashflow`, `get_category_monthly_series`. None of them need a tool-side echo:
+`list_categories` neither scopes nor paginates; the three `get_*` are objects whose core already
+carries `view` when it's scope-aware (see above), and all five are `to_tool_result(core(...))`
+verbatim — byte parity IS the contract they promise, not an aspiration.
+
+No `view` field at all (3, own-user): `list_snapshots`, `list_categorization_rules`,
+`list_recurring_rules`. Their cores don't accept `view` in the first place —
+`list_recurring_rules_core`'s own doc-comment says so explicitly ("siempre own-user… no
+inventarlo en la tool"). Adding a `view` field there wouldn't be an echo, it would be asserting a
+scope the tool never had.
+
+**Rule for future `list_*` tools**: if the new listing's core accepts `view`, the envelope is
+**mandatory** and its parity row belongs in the content-parity test, never the byte-parity one.
+If the core is own-user (no `view` param), do **not** invent a `view` field in the tool's output.
+
 ## 4. Recipe — add or update a tool
 
 Model commits: `82a43cb` (reconcile tools, 43→45), the post-3.5.0 `update_asset`/
@@ -224,6 +279,21 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
    `apply_categorization_rule` already publishes `out.sample` as `summary`: the catalog must
    speak ONE language, because a client that learned `summary` from ten tools reads
    `result.summary` on the eleventh and gets `undefined` with no error at all.
+
+   **Description has a hard budget** (Fase 5, issue #86): **≤600 characters per tool, ≤24,000 for
+   the whole catalog**, enforced by
+   `mcp_http.rs::tool_descriptions_stay_within_the_context_budget`. The incident that forced it:
+   a client received `get_summary`'s 2,278-character description **truncated**, mid-warning,
+   about an inconsistency between two other tools. When the guard fails, **do not raise the
+   constant** — its own failure message says so. Move the overflow to a response-field caveat
+   (the pattern this server already uses: `savings_income_basis`, `avg_basis`,
+   `fire_target_absent_reason`, `skipped_reason`) or to `get_info`'s `instructions`, which every
+   client reads once per session instead of once per tool. Reproduce the current numbers with:
+   ```bash
+   python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"
+   ```
+   (today: `52 21319 596`; before Fase 5: 37,214 total, one description at 3,821, 26 tools over
+   600 chars).
 4. **Annotations are mandatory and pattern-bound**: `title` in Spanish + `read_only_hint` +
    `destructive_hint` + `idempotent_hint` + `open_world_hint = false`. The annotations test
    *derives* expectations from the name (`update_*`/`delete_*` ⇒ destructive+idempotent;
@@ -429,6 +499,33 @@ kill-switch»; catálogo **sin cambios en 52**, recontado 52/21/31/31/14/7 el 20
 | Sesión Streamable HTTP sin ligar a la credencial (decisión, no olvido) | **n/a hoy, con disparador nombrado**: la ligadura solo compraría algo si el servidor emitiera datos por iniciativa propia. La **primera capacidad server→cliente** (notificaciones, `progress`) es a la vez un cambio de catálogo y el momento de reabrir esto — cuando llegue, no será `n/a` por partida doble |
 | `spa::mount_static_spa` extraída a la lib; tres ejes nuevos en `TestConfig` | **n/a**: andamiaje de tests y de arranque, sin ruta ni campo. Sí importa para §5: un test que afirme que una tool o una ruta **no** existe tiene que montar `web_static_root`, o está probando un router que no se publica |
 
+Evaluación de la rama **`feat/mcp-fase-5-contexto`** (Fase 5, issue #86 — «coste de contexto y
+ergonomía del catálogo»; catálogo **sin cambios en 52**, recontado 52/21/31/31/14/7 el
+2026-08-28). Como las Fases 1 y 3, esta fase no añade superficie REST nueva — reescribe el
+**coste de lectura** del catálogo (prosa) y **completa contratos de campo** que la Fase 1 ya había
+puesto en marcha (nulabilidad → ahora también scope, ventana y motivo). Una sola pareja de tools
+gana un parámetro nuevo de verdad:
+
+| Superficie tocada (4.4.0, Fase 5) | Parity outcome |
+|---|---|
+| `type_tag` en `create_liability` / `update_liability` | **Dos tools actualizadas**. Tri-estado sin `clear_*` (omitir conserva, cadena vacía borra) — mismo patrón que `clear_expense_end_date`/`clear_cap`. Cierra `get_summary.liabilities_by_type_tag` como la dimensión que se leía y no se escribía: sin esto, un agente que veía la partida no tenía forma de corregirla salvo destruir y recrear el pasivo. Test: `mcp_write.rs::liability_type_tag_is_writable_and_reaches_the_summary_breakdown`. **Es la única fila de esta tabla que es realmente «tool actualizada» en el sentido de §4** — el resto llega heredado por las cores compartidas, igual que en la Fase 1 |
+| Eco de `view` en 4 respuestas-objeto (`get_summary`, `get_budget`, `get_projection`, `get_allocation_resolution`) vía `LedgerView::as_str()` | **Heredado, cero código en `server.rs`**: la core ya pone el campo, la tool solo lo transporta. Ver §3.4 (nueva) — la parte que sí costó trabajo de tool es la fila siguiente |
+| 7 listados con scope pasan a sobre `{"view", "<key>": [...]}` (`list_assets`, `list_liabilities`, `list_planning_flows`, `list_allocation_rules`, `list_transaction_months`, `list_transactions`, `list_transaction_imports`) | **7 tools actualizadas**, salen del bucle byte a byte y pasan a paridad de contenido — regla nueva documentada en §3.4, con el porqué y el precedente (`list_categorization_rules`, 4.0.0) |
+| Paginación nueva en `list_snapshots` (`limit`/`offset`, `item_count`/`items_included`, orden `snapshot_date DESC, kind ASC, id ASC`) | **Tool actualizada**, sin sobre `view` (own-user, §3.4) — `list_snapshots_core` gana la firma ampliada; el mismo patrón `limit = None` ⇒ sin `LIMIT`/`OFFSET`/`COUNT` que ya usaba `list_transactions_core`, así que el camino HTTP sin `limit` no cambia. Test: `list_snapshots_paginates_and_declares_item_suppression` |
+| Campos nuevos en respuestas-objeto ya cubiertas (`financial_health.basis`, `totals.basis`, `upcoming_flows_count`, `upcoming_last_due_date_ymd`, `window_months`/`window_truncated`/`first_snapshot_date_ymd`/`first_snapshot_month_index`, `markers[].source`, `fine_absent_reason`, `events`/`events_truncated`, `possible_duplicate_of`) | **Heredados por 6 tools** (`get_summary`, `get_budget`, `get_history`, `get_history_cashflow`, `get_projection`, `list_transaction_imports`) sin código propio — comparten core con el HTTP handler. Contrato probado del lado HTTP, no MCP, en `context_fields.rs` (11 tests) porque el campo lo pone la core |
+| `summary.liabilities_by_type_tag[].type_tag`: `String` (literal `"(sin etiqueta)"`) → `Option<String>` (`null`) | **Breaking en lectura, heredado por `get_summary`**. Mismo criterio que `category_id` en `CategoryMonthlySeriesEntry` (Fase 1): un sentinela en español dentro de un campo de datos deja de ser un valor de negocio y pasa a ser ausencia real |
+| `simulate_projection`: `net_monthly`→`net_recurring_monthly`, `net_monthly_delta`→`net_recurring_monthly_delta`; nuevos `monthly_cash_adjustment`, `net_cash_monthly`, `net_cash_monthly_delta`, `model_note` | **Tool actualizada en su propia core** (`SimKpis`/`simulate_projection_core`) — no hay ruta HTTP homóloga (§3.3, tool-without-endpoint), así que la evaluación recae enteramente sobre la tool. Breaking del único lado que existe: `net_monthly` no se podía «arreglar» sin mentir (sigue siendo `income − expense_total`, los ejes de caja no lo tocan), así que se movió el **nombre**, no la fórmula |
+| `GET /v1/history/series` sin `window_months` = 120 meses (antes, todo el histórico); `GET /v1/history/cashflow` curva fina acotada a 36 meses con `fine_absent_reason` nuevo | **Heredado por `get_history`/`get_history_cashflow`**: mismas cores, `description` reescrita para avisar del default acotado. Peor caso medido: 53,6 KB→16,1 KB y 64 KB→20 KB |
+| Recorte de `description` (37.214→21.319 caracteres; 26 tools por encima de 600→0) + guardia `tool_descriptions_stay_within_the_context_budget` | **n/a como fila de catálogo** (no es una tool, es un test transversal) **pero toca las 52 descripciones**: ver el paso nuevo en §4 (Tool fn) para el presupuesto y cómo respetarlo al escribir la próxima |
+
+**Dos tools con parámetro nuevo de verdad** (`create_liability`, `update_liability`), **7 tools
+con forma de respuesta nueva** (el sobre de vista), **1 tool con paginación nueva**
+(`list_snapshots`), y **el resto heredado** vía cores compartidas o, en el caso de
+`simulate_projection`, tocado en su propia core por no tener ruta HTTP. Cero tools nuevas, cero
+retiradas: el catálogo sigue en **52**. Ninguna fila necesitó promoción HTTP→tool nueva ni omisión
+deliberada nueva — el único hueco que esta fase cierra (`type_tag` escribible) ya estaba cubierto
+por tools existentes, solo les faltaba el parámetro.
+
 Re-verify before trusting:
 
 - El fixture de contrato detecta las 22 tools tocadas por este tren:
@@ -484,3 +581,19 @@ Re-verify before trusting:
 - Choke points still route here: `grep -n 'mcp-parity' CLAUDE.md .claude/adding-handler.md .claude/skills/futurefin-change-control/SKILL.md .claude/skills/futurefin-docs-and-writing/SKILL.md .claude/api-routes.md`
 - Recipe step 4's derivation still holds: read the `is_write`/`expect_destructive`/`expect_idempotent`
   match arms in `mcp_http.rs::tools_list_exposes_annotations_on_every_tool`.
+- Context budget (Fase 5) still respected — the test fails only if the total goes UP, never down:
+  `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http tool_descriptions_stay_within_the_context_budget`,
+  and the exact fixture snapshot: `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
+  (`52 21319 596` today; `37214`/`3821`/26-over-600 before Fase 5 — neither number lives anywhere
+  but this skill and the CHANGELOG, so don't freeze it into the guard's constant).
+- View echo on the 7 enveloped listings, and the content parity that replaces byte parity for them:
+  `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http list_tools_echo_the_applied_view_and_keep_content_parity`;
+  the 5 still on byte parity: `… --test mcp_http new_read_tools_match_http_endpoints`.
+- `type_tag` writable via MCP:
+  `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_write liability_type_tag_is_writable_and_reaches_the_summary_breakdown`.
+- The 11 Fase-5 context fields (`basis`, `upcoming_flows_count`, `window_truncated`,
+  `markers[].source`, `fine_absent_reason`, `possible_duplicate_of`, `events`, …) have their own
+  suite, run over the HTTP path — not MCP — because the core is what sets the field:
+  `TEST_DATABASE_URL=… cargo test -p futurefin-api --test context_fields`.
+- Tool counts after Fase 5: same six numbers as Fase 4, **52/21/31/31/14/7**, recounted
+  2026-08-28 with the §5 commands — no tool added or removed, so nothing here moves.

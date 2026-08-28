@@ -871,6 +871,10 @@ pub struct ResolvedAssetContribution {
 /// Resolución completa de la cascada del mes en curso.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AllocationResolutionResponse {
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `?view` — ver
+    /// `SummaryResponse::view` para el porqué. Aquí decide qué reglas y qué activos entran en la
+    /// cascada, así que dos resoluciones distintas pueden diferir solo en este campo.
+    pub view: &'static str,
     /// Mes al que corresponde la resolución (`YYYY-MM`).
     pub month: String,
     /// La caja que la cascada reparte de verdad. **Incluye el tramo transitorio de planning**, así
@@ -1011,6 +1015,7 @@ pub(crate) async fn allocation_resolution_core(
     let allocated_total: Decimal = alloc.per_asset.iter().copied().sum();
 
     Ok(AllocationResolutionResponse {
+        view: view.as_str(),
         month: today.format("%Y-%m").to_string(),
         base_cash: alloc.base_cash.round_dp(4),
         recurring_net: alloc.recurring_net.round_dp(4),

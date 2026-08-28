@@ -779,7 +779,7 @@ pub(crate) async fn transactions_summary_core(
         avg_months,
         avg_basis,
         avg_unavailable_reason,
-        view: if view == LedgerView::Mine { "mine".into() } else { "household".into() },
+        view: view.as_str(),
         expense_categories,
         income_categories,
         savings: BlockActualAvg {
@@ -1078,11 +1078,7 @@ pub(crate) async fn category_monthly_series_core(
     });
 
     Ok(CategoryMonthlySeriesResponse {
-        view: if view == LedgerView::Mine {
-            "mine".into()
-        } else {
-            "household".into()
-        },
+        view: view.as_str(),
         kind: kind.into(),
         window_months: window,
         first_month_with_data,
