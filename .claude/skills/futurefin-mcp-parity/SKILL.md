@@ -149,18 +149,29 @@ the blocking reason changes (noted per row).
 | `GET /v1/history/snapshots/prefill` | **defer** | Only meaningful as companion of snapshot backfill | Gap #3 below is implemented |
 | Full-body `PATCH /v1/installation` tool | **restricted** | `mcp_write_enabled` self-reference (§2.1); FIRE subset already covered by `update_fire_settings` (owner-only) | Only ever as explicit field-allowlist tool, never `PatchInstallationBody` passthrough |
 
-### 3.2 Pending pertinent gaps (open backlog, priority order)
+### 3.2 Pertinent gaps — BACKLOG VACÍO (cero filas abiertas)
 
-**Las cuatro filas están CERRADAS desde 2026-08-28 (Fase 6, issue #87). El backlog está vacío.**
-Se deja la tabla con su desenlace en vez de borrarla: una fila cerrada dice qué se decidió y por
-qué, y una tabla vacía sin historia invita a reabrir lo mismo dentro de seis meses.
+> **Estado: 0 huecos abiertos.** Las cuatro filas que esta sección tuvo se **cerraron** el
+> 2026-08-28 (Fase 6, issue #87). Lo que sigue es el **archivo** de esas cuatro, no una lista
+> de trabajo pendiente: cada fila dice con qué se cerró y qué hubo que decidir. Si buscas qué
+> falta por hacer, la respuesta es «nada en esta tabla» — salta a *¿Y si el backlog está
+> vacío?*, al final de la sección.
+
+Se archiva en vez de borrarse porque una fila cerrada dice qué se decidió y por qué, y una tabla
+vacía sin historia invita a reabrir lo mismo dentro de seis meses. **Antes de añadir una fila
+nueva aquí, muévela arriba de este aviso**: el estado de la sección se lee en el encabezado, no
+en la letra pequeña. Deriva que esto arregla (Fase 7, 2026-08-29): la sección se titulaba
+«Pending pertinent gaps (open backlog, priority order)» con cuatro filas debajo, así que quien
+escaneara la tabla —lo normal— contaba cuatro huecos abiertos que llevaban un día cerrados.
+
+#### Archivo de filas cerradas (Fase 6, 2026-08-28)
 
 | # | Tool(s) | Cerrada con | Lo que hubo que decidir, y que no se ve en el código |
 |---|---|---|---|
-| 1 | `create_snapshot` (backfill) + `update_snapshot` | `create_snapshot_core` / `update_snapshot_core` extraídas de `history.rs`; cache **NONE por contrato (D12)** | Era «el diferencial conversacional» del registro: grabar el pasado («en enero de 2023 tenía 40.000 € en el fondo») es lo que el chat hace mejor que un formulario. La ausencia de `impact` **no es un olvido**: publican `"affects_projection": false`, porque un bloque de ceros se leería como «no ha pasado nada» y no como «esto no mueve la proyección». `kind` inmutable en el update; omitir `items` conserva, mandarlos —incluso `[]`— **reemplaza la lista entera** |
-| 2 | `create_allocation_rule` + `delete_allocation_rule` | cores extraídas; cache **FULL**, con `impact`; `delete` exige **`confirm_token`** | El aviso de esta fila («the sink invariant lives spread across the handler») era el trabajo real: encapsularlo destapó **dos bugs vivos** (`futurefin-failure-archaeology` §2.20). Decisión propia de la superficie: **`create_allocation_rule` NO puede crear el sumidero** (`SinkPolicy::Forbidden`, aplicado **dentro de la core**, no en el esquema) — crearlo donde no había redirige todo el sobrante de golpe y **no se deshace por el mismo canal**. El `confirm_token` del delete tiene su propio motivo: recrear la regla no restaura su prioridad, y mientras tanto el sobrante se ha ido por otro sitio. **Hueco conocido**: `patch_allocation_rule_core` no recibe `SinkPolicy`, así que `update_allocation_rule` + `clear_cap` sí crea el sumidero en dos llamadas — la `description` de esa tool afirma lo contrario (errata en `futurefin-docs-and-writing`) |
-| 3 | `update_category` + `delete_category` (con `remap_to`) | cores extraídas de `categories.rs`; cache **NONE**; delete con preview/confirm **sin** `confirm_token` | `create_category` sin contraparte era un pozo sin fondo en un catálogo que comparte toda la instalación. El delete encaja perfecto en preview/confirm: el preview desglosa las referencias **por tabla** y separa las bloqueantes de las que solo se degradan. Cerrarla destapó un bug real: el `remap_to` se ignoraba en silencio cuando el contador daba 0 (§2.21 de la arqueología) |
-| 4 | `update_installation_settings` (allowlist `calendar_tz`, `show_age_mode`, `base_currency`) | `patch_presentation_settings_core` (**tool-without-endpoint**, §3.3); owner-only comprobado **dentro de la core**; cache **FULL**, con `impact` | Allowlist estricta y **exhaustiva por construcción**: el `is_empty()` del patchset hace destructuring sin `..`, así que añadir un eje deja de compilar. **Jamás** `mcp_write_enabled` (§2.1, autorreferencia del kill-switch) **ni** `onboarding_completed` (estado de UI: que un agente lo ponga a `true` no cambia un dato del hogar, solo le quita a una persona una pantalla que quizá no había visto). Owner-only vive en la core y no en la tool **precisamente** para que una superficie nueva no se lo deje. FULL porque `calendar_tz` mueve el mes 0 de la proyección entera |
+| 1 ✅ | `create_snapshot` (backfill) + `update_snapshot` | `create_snapshot_core` / `update_snapshot_core` extraídas de `history.rs`; cache **NONE por contrato (D12)** | Era «el diferencial conversacional» del registro: grabar el pasado («en enero de 2023 tenía 40.000 € en el fondo») es lo que el chat hace mejor que un formulario. La ausencia de `impact` **no es un olvido**: publican `"affects_projection": false`, porque un bloque de ceros se leería como «no ha pasado nada» y no como «esto no mueve la proyección». `kind` inmutable en el update; omitir `items` conserva, mandarlos —incluso `[]`— **reemplaza la lista entera** |
+| 2 ✅ | `create_allocation_rule` + `delete_allocation_rule` | cores extraídas; cache **FULL**, con `impact`; `delete` exige **`confirm_token`** | El aviso de esta fila («the sink invariant lives spread across the handler») era el trabajo real: encapsularlo destapó **dos bugs vivos** (`futurefin-failure-archaeology` §2.20). Decisión propia de la superficie: **`create_allocation_rule` NO puede crear el sumidero** (`SinkPolicy::Forbidden`, aplicado **dentro de la core**, no en el esquema) — crearlo donde no había redirige todo el sobrante de golpe y **no se deshace por el mismo canal**. El `confirm_token` del delete tiene su propio motivo: recrear la regla no restaura su prioridad, y mientras tanto el sobrante se ha ido por otro sitio. **Hueco conocido**: `patch_allocation_rule_core` no recibe `SinkPolicy`, así que `update_allocation_rule` + `clear_cap` sí crea el sumidero en dos llamadas — la `description` de esa tool afirma lo contrario (errata en `futurefin-docs-and-writing`) |
+| 3 ✅ | `update_category` + `delete_category` (con `remap_to`) | cores extraídas de `categories.rs`; cache **NONE**; delete con preview/confirm **sin** `confirm_token` | `create_category` sin contraparte era un pozo sin fondo en un catálogo que comparte toda la instalación. El delete encaja perfecto en preview/confirm: el preview desglosa las referencias **por tabla** y separa las bloqueantes de las que solo se degradan. Cerrarla destapó un bug real: el `remap_to` se ignoraba en silencio cuando el contador daba 0 (§2.21 de la arqueología) |
+| 4 ✅ | `update_installation_settings` (allowlist `calendar_tz`, `show_age_mode`, `base_currency`) | `patch_presentation_settings_core` (**tool-without-endpoint**, §3.3); owner-only comprobado **dentro de la core**; cache **FULL**, con `impact` | Allowlist estricta y **exhaustiva por construcción**: el `is_empty()` del patchset hace destructuring sin `..`, así que añadir un eje deja de compilar. **Jamás** `mcp_write_enabled` (§2.1, autorreferencia del kill-switch) **ni** `onboarding_completed` (estado de UI: que un agente lo ponga a `true` no cambia un dato del hogar, solo le quita a una persona una pantalla que quizá no había visto). Owner-only vive en la core y no en la tool **precisamente** para que una superficie nueva no se lo deje. FULL porque `calendar_tz` mueve el mes 0 de la proyección entera |
 
 Closed since the register was created: las **cuatro filas de arriba** (Fase 6, 2026-08-28);
 **`update_categorization_rule` + `delete_categorization_rule`
@@ -186,21 +197,32 @@ pregunta que hay que hacerse**, no la de si falta un CRUD.
 
 ### 3.3 Reverse direction (tools without an endpoint)
 
-**Ya no es una excepción única: son tres, y eso cambia lo que hay que exigirle a la cuarta.**
+**Ya no es una excepción única: son CUATRO, y eso cambia lo que hay que exigirle a la quinta.**
 Cuando esta sección decía «`simulate_projection` is the only one», la lectura implícita era que
 tool-sin-endpoint es un caso singular que se justifica por sí mismo. No lo es — es un patrón
-aceptado, con tres formas distintas:
+aceptado, con cuatro formas distintas. Recuento reproducible (cores que **solo** llama `mcp/`):
+
+```bash
+for c in simulate_projection_core patch_fire_settings_core settings_user_core \
+         patch_presentation_settings_core; do
+  echo "$c -> $(grep -rln "$c" apps/api/src/ | tr '\n' ' ')"
+done   # cada uno: su handlers/*.rs de definición + mcp/server.rs, nunca un handler HTTP
+```
 
 | Tool | Qué le falta en HTTP | Por qué se acepta |
 |---|---|---|
 | `simulate_projection` | **todo**: no hay recurso REST que representar | What-if puro y cache-neutral por construcción; la SPA previsualiza en cliente |
 | `update_fire_settings` | **la core**: `patch_fire_settings_core` no la llama ningún handler (`installation.rs`, y el comentario del propio código lo dice) | El `PATCH /v1/installation` reemplaza el objeto `FireSettings` entero; desde el chat eso obliga a leer-modificar-escribir y a arriesgar pisar un campo que el modelo no miró. La tool es **campo a campo** (`FireSettingsPatch`), que es la única forma segura de tocar ajustes desde una conversación |
 | `get_settings` | **media respuesta**: el bloque `user {id, username, birth_date}` sale de `settings_user_core`, que el endpoint HTTP no expone | La SPA ya tiene al usuario en su estado; un cliente MCP no tiene sesión de la que sacarlo, y sin `birth_date` no puede convertir `jubilacion_month_index` en una edad |
+| `update_installation_settings` (Fase 6, 2026-08-28) | **la core**: `patch_presentation_settings_core` no la llama ningún handler | **Misma forma que `update_fire_settings`** — y esa es justo la exigencia de esta tabla cumplida: no trajo un argumento nuevo, nombró la forma que repetía. El `PATCH /v1/installation` reemplaza el objeto entero, que desde el chat obliga a leer-modificar-escribir; la tool es una **allowlist estricta** (`calendar_tz`, `show_age_mode`, `base_currency`) exhaustiva por construcción, con el owner-only comprobado **dentro** de la core |
 
-Las tres comparten la propiedad que sí es exigible: **el consumidor MCP no tiene el contexto que la
-SPA sí tiene** (estado de cliente, pantalla previa, sesión). Una cuarta tool-sin-endpoint necesita
-nombrar cuál de esas tres formas es, o traer un argumento nuevo a esta tabla — no basta con que sea
-cómoda.
+Las cuatro comparten la propiedad que sí es exigible: **el consumidor MCP no tiene el contexto que
+la SPA sí tiene** (estado de cliente, pantalla previa, sesión). Una quinta tool-sin-endpoint
+necesita nombrar cuál de esas formas es, o traer un argumento nuevo a esta tabla — no basta con que
+sea cómoda. **Dos de las cuatro son ya la misma forma** («la core existe, el PATCH HTTP reemplaza
+el objeto entero, el chat necesita campo a campo»), así que esa vía está agotada como novedad: la
+quinta que la invoque no está argumentando nada, solo está aplicando un precedente — legítimo, pero
+dilo así.
 
 ### 3.4 View echo — object responses vs `list_*` envelopes (Fase 5, issue #86)
 
@@ -238,17 +260,36 @@ The 7 (tool → envelope key): `list_assets` → `assets`, `list_liabilities` �
 `list_transaction_months` → `months`, `list_transactions` → `transactions`,
 `list_transaction_imports` → `imports`.
 
-Still in the byte-for-byte loop (5): `list_categories`, `get_budget`, `list_recurring_rules`,
-`get_history_cashflow`, `get_category_monthly_series`. None of them need a tool-side echo:
-`list_categories` neither scopes nor paginates; the three `get_*` are objects whose core already
-carries `view` when it's scope-aware (see above), and all five are `to_tool_result(core(...))`
-verbatim — byte parity IS the contract they promise, not an aspiration.
+Still in the byte-for-byte loop — **11 tras la Fase 6** (eran 5 cuando se escribió esta sección;
+recuéntalas, no las copies):
 
-No `view` field at all (3, own-user): `list_snapshots`, `list_categorization_rules`,
-`list_recurring_rules`. Their cores don't accept `view` in the first place —
-`list_recurring_rules_core`'s own doc-comment says so explicitly ("siempre own-user… no
-inventarlo en la tool"). Adding a `view` field there wouldn't be an echo, it would be asserting a
-scope the tool never had.
+```bash
+# los pares (tool, endpoint) del bucle, sin contarlos a mano
+sed -n '/fn new_read_tools_match_http_endpoints/,/^}/p' apps/api/tests/mcp_http.rs \
+  | grep -oE '"(list|get|find|suggest|aggregate|deflate)[a-z_]*"' | sort -u    # → 11
+```
+
+Las cinco originales (`list_categories`, `get_budget`, `list_recurring_rules`,
+`get_history_cashflow`, `get_category_monthly_series`) más las **seis lecturas nuevas de la Fase 6**
+(`aggregate_transactions`, `find_duplicate_transactions`, `suggest_transfer_matches`, `list_goals`,
+`deflate_amount`, `get_liability_schedule`). Ninguna necesita eco por parte de la tool:
+`list_categories` ni scopea ni pagina, y todas las demás son **objetos** cuya core ya lleva `view`
+cuando es scope-aware — las once son `to_tool_result(core(...))` literal, así que la paridad byte a
+byte ES el contrato que prometen, no una aspiración.
+
+**La séptima lectura de la Fase 6, `list_recent_changes`, se queda fuera de los dos bucles**: su
+campo `now` es el instante de la consulta, así que dos llamadas no pueden coincidir byte a byte.
+Tiene test propio (`mcp_http.rs`, paridad `list_recent_changes` ↔ `GET /v1/changes` **ignorando
+`now`**). Toda tool futura cuya respuesta lleve un reloj, un id aleatorio o un cursor hereda ese
+patrón: tercera vía, no una excepción — y hay que nombrar el campo que se ignora.
+
+No `view` field at all — **4 tras la Fase 6** (own-user por construcción): `list_snapshots`,
+`list_categorization_rules`, `list_recurring_rules` y **`suggest_transfer_matches`** (nueva en la
+Fase 6). Sus cores no aceptan `view` de entrada — el doc-comment de `list_recurring_rules_core` lo
+dice explícito («siempre own-user… no inventarlo en la tool»). Añadir ahí un campo `view` no sería
+un eco, sería afirmar un scope que la tool nunca tuvo. Caso vecino que **no** es este: `deflate_amount`
+tampoco acepta `view`, pero no porque sea own-user sino porque la inflación es de la instalación —
+no confundas «sin scope de usuario» con «own-user» al clasificar la quinta.
 
 **Rule for future `list_*` tools**: if the new listing's core accepts `view`, the envelope is
 **mandatory** and its parity row belongs in the content-parity test, never the byte-parity one.
@@ -380,9 +421,16 @@ grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 28 — rea
 grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 40 — writes
 grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 40 — MUST equal writes
 grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 17 — preview/confirm (Fase 6: +3)
-grep -c 'confirm_token.as_deref' apps/api/src/mcp/server.rs         # 8 — las que exigen token de dos fases
-#   (OJO: `grep -c 'confirm_token'` a secas da 45 — cuenta también el campo del schema y su prosa
-#   en las 8 tools; el comando de arriba cuenta solo la lectura del argumento en `two_phase(...)`)
+grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 8 — las que exigen token de dos fases
+#   (OJO 1: `grep -c 'confirm_token'` a secas da 47 — cuenta también el campo del schema y su prosa.
+#    OJO 2: el comando de esta línea fue `grep -c 'confirm_token.as_deref'` hasta la Fase 7, y hoy
+#    da **10**, no 8: el propio doc-comment de `DeleteWithTokenParams` en `server.rs` menciona esa
+#    cadena dos veces —una de ellas al prescribir este mismo grep—, así que el patrón se cuenta a sí
+#    mismo. Es la trampa de todo contador auto-referencial: el comando que un comentario recomienda
+#    deja de funcionar en cuanto el comentario lo escribe literal. `= two_phase(` no la tiene (las
+#    dos menciones en prosa son `[`two_phase`]`, con backticks). Alternativa igual de buena:
+#    `grep -c 'p\.confirm_token\.as_deref()'` → 8. **`server.rs` sigue prescribiendo el grep viejo**
+#    y no se puede arreglar desde documentación — reportado como deriva código↔contrato.)
 grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 40 — == escrituras: toda escritura cierra su fila de auditoría
 #   (el patrón lleva `&self.state.pool` a propósito: `grep -c 'settled('` da 41, contando la definición)
 grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 18 — escrituras que publican el bloque `impact`
@@ -509,7 +557,7 @@ filas que cierran los huecos que la auditoría de la propia fase encontró:
 
 | Surface tocada | Parity outcome |
 |---|---|
-| `constraints` + `constraints_sha256_12` en `mcp-catalog.json` | **Gate, no tool**: el congelador (`tools_list_freezes_the_input_contract_of_every_tool`) fijaba `properties`, `required` y el hash de la `description` — es decir, era **ciego a todo lo que la Fase 2 acababa de construir**. Quitar un `enum` o un `deny_unknown_fields` no rompía un solo test. Ahora congela también las restricciones del `inputSchema` recorrido **recursivamente** (`properties`, `items`, `$defs`, combinadores, `additionalProperties` sub-schema): `additionalProperties`, `enum`, `pattern`, `type`, `required`, `format`, `const`, `$ref` y las cotas `minimum`/`maximum`/`minLength`/`maxLength`/`minItems`/`maxItems`/`multipleOf`/`uniqueItems`, **a cada nivel**. 296 nodos sobre las 52 tools. El hash es estable por construcción (claves de objeto ordenadas, `enum`/`type`/`required` tratados como conjuntos y ordenados también), así que ni el orden de emisión de schemars ni una actualización de dependencia lo mueven |
+| `constraints` + `constraints_sha256_12` en `mcp-catalog.json` | **Gate, no tool**: el congelador (`tools_list_freezes_the_input_contract_of_every_tool`) fijaba `properties`, `required` y el hash de la `description` — es decir, era **ciego a todo lo que la Fase 2 acababa de construir**. Quitar un `enum` o un `deny_unknown_fields` no rompía un solo test. Ahora congela también las restricciones del `inputSchema` recorrido **recursivamente** (`properties`, `items`, `$defs`, combinadores, `additionalProperties` sub-schema): `additionalProperties`, `enum`, `pattern`, `type`, `required`, `format`, `const`, `$ref` y las cotas `minimum`/`maximum`/`minLength`/`maxLength`/`minItems`/`maxItems`/`multipleOf`/`uniqueItems`, **a cada nivel**. 296 nodos sobre las 52 tools **de entonces** (hoy son **427 sobre 68** — recuéntalo, no lo copies: `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];print(len(t),sum(len(x.get('constraints') or []) for x in t))"`). El hash es estable por construcción (claves de objeto ordenadas, `enum`/`type`/`required` tratados como conjuntos y ordenados también), así que ni el orden de emisión de schemars ni una actualización de dependencia lo mueven |
 | Clave `resumen` → **`summary`** en los 11 payloads de confirmación de escritura | **Once tools actualizadas, breaking**. `{id, resumen}` era la última clave en español del wire MCP (la norma del repo es «UI copy en español, código e identificadores en inglés»), y la misma fase ya había unificado los `effects` de los previews a `entity`/`side_effects`. Diez tools sintetizan la cadena en el propio MCP; `update_transactions` **traduce** los campos `resumen`/`resumen_truncated` de `BatchPatchResponse` (contrato HTTP de `PATCH /v1/transactions/batch`, que **no** cambia). Se traduce en vez de dejar una excepción porque el fallo de la excepción es silencioso: un cliente que aprendió `summary` en diez tools lee `result.summary` en la onceava y recibe `undefined` sin error. Cero tools nuevas, cero retiradas |
 
 Evaluación de la rama **`feat/mcp-fase-3-escritura-segura`** (Fase 3, issue #84 — «escritura

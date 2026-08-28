@@ -97,6 +97,15 @@
   --cf-income: oklch(0.58 0.10 165);
   --cf-expense: oklch(0.58 0.13 25);
   --cf-savings: var(--ff-accent);
+
+  /* Overlay flotante (tooltips): oscuro SIEMPRE, en los dos temas. No se
+     redefinen más abajo a propósito — esa ausencia ES la decisión. Existen como
+     token, y no como hex suelto con `!important`, porque el invariante «nada de
+     hex hardcodeado» no admite excepciones tácitas: una excepción que no se
+     puede nombrar acaba copiándose a sitios donde sí importa el tema. */
+  --ff-overlay-bg: rgba(10, 10, 10, 0.92);
+  --ff-overlay-fg: #fafafa;
+  --ff-overlay-border: rgba(64, 64, 64, 0.9);
 }
 
 [data-theme="dark"] {

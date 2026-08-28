@@ -87,7 +87,7 @@ exception: it names a mechanism CI asserts, and it deliberately stops short of "
 | Claim you might be tempted to write | Minimum evidence required first |
 |---|---|
 | "Monte Carlo / percentile bands" | Engine module + tests proving seeded reproducibility AND zero-volatility degeneration to the deterministic series (item 6) |
-| "Deterministic / bit-exact projections" | A replay test asserting two runs of `project_net_worth_series` on the same input are `assert_eq!`-identical, running in CI (`cargo test -p futurefin-engine --locked` — CI runs engine tests; the Postgres integration tests do NOT run in CI, they need local `TEST_DATABASE_URL`) |
+| "Deterministic / bit-exact projections" | A replay test asserting two runs of `project_net_worth_series` on the same input are `assert_eq!`-identical, running in CI (`cargo test -p futurefin-engine --locked` — CI runs engine tests **and, since 4.0.0, the Postgres integration ones too** — job `integration`, `cargo test --workspace --locked` against a service Postgres; this parenthesis claimed the opposite until the Fase-7 sweep) |
 | "Property-tested engine invariants" | proptest suite merged and green (item 1), named properties listed in the CHANGELOG entry |
 | "Tax-aware withdrawals" | Engine drawdown tax model + regenerated parity fixture with both suites green (item 7) |
 | "Safe upgrades / never lose data" | Pre-migration dump hook + a restore actually exercised in a test or documented drill (item 2). **Partly earned in 3.0.0**: the automatic pre-migration dump exists and the CI `docker-stack` job exercises V2→V3 with real data, automigration and pg_upgrade 15→16. **The downgrade guard was earned on 2026-08-27** (`db.rs` → `MigrationError::Downgrade` + operator banner, pinned by `apps/api/tests/migration_guard.rs`), so "refuses to start instead of running an old schema over new data, and says so in words you can act on" is now claimable. Still unearned, and therefore still unclaimable: a restore drill run against a *production-shaped* dump. Word claims to what the evidence covers — "backs itself up before every migration" and "refuses to downgrade" are provable today; "never lose data" is not. |
@@ -620,7 +620,7 @@ nothing automatically un-lists a shipped item here. Re-verify before relying on 
   (since 3.0.0 it `compose exec`s into the single `futurefin` service and `ENV_FILE` is optional)
 - Migration runner (auto on startup, fails loud): `cat apps/api/src/db.rs`
 - Parity fixture + consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
-- CI covers engine tests but NOT Postgres integration tests: `grep -n 'cargo test' .github/workflows/ci.yml`
+- ~~CI covers engine tests but NOT Postgres integration tests~~ — **falso desde 4.0.0**: el job `integration` corre `cargo test --workspace --locked` contra un Postgres de servicio. Corregido en la Fase 7: `grep -n 'cargo test' .github/workflows/ci.yml`
   (since 3.0.0 the `docker-stack` job also exercises the container's data paths end-to-end:
   `grep -n '^      - name:' .github/workflows/ci.yml`)
 - README still claim-free on MC/determinism: `grep -in 'monte\|stochastic\|bit-exact\|deterministic' README.md` (empty = good)

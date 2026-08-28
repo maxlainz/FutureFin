@@ -2341,12 +2341,13 @@
   border-radius: 0.6rem;
   font-size: 0.8rem;
   line-height: 1.45;
-  /* Tooltip estilo overlay: fondo casi negro, texto claro — independiente
-     del tema. Forzamos color absoluto para que el modo oscuro no acabe
-     con texto oscuro sobre fondo oscuro. */
-  color: #fafafa !important;
-  background: rgba(10, 10, 10, 0.92);
-  border: 1px solid rgba(64, 64, 64, 0.9);
+  /* Tooltip estilo overlay: oscuro en los DOS temas, a propósito — si heredara
+     el tema, el modo oscuro acabaría con texto oscuro sobre fondo oscuro. Los
+     tokens no se redefinen en el bloque de tema oscuro, así que la
+     independencia está declarada donde se lee, y el `!important` sobra. */
+  color: var(--ff-overlay-fg);
+  background: var(--ff-overlay-bg);
+  border: 1px solid var(--ff-overlay-border);
   box-shadow:
     0 10px 28px rgba(0, 0, 0, 0.28),
     0 2px 8px rgba(0, 0, 0, 0.18);

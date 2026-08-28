@@ -1146,9 +1146,9 @@
       "constraints": {
         "$": "additionalProperties=false type=\"object\"",
         "$.limit": "format=\"int64\" maximum=100 minimum=1 type=[\"integer\",\"null\"]",
-        "$.window_days": "format=\"int32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]"
+        "$.window_days": "format=\"int32\" maximum=365 minimum=1 type=[\"integer\",\"null\"]"
       },
-      "constraints_sha256_12": "be24bf9c30b2",
+      "constraints_sha256_12": "887a68211a10",
       "description_len": 176,
       "description_sha256_12": "0b7e0e32853f",
       "name": "suggest_transfer_matches",

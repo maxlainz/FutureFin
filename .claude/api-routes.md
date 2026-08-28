@@ -313,7 +313,7 @@ español:
 - **Omisión deliberada del catálogo MCP** (registro fechado en `futurefin-mcp-parity` §3.1): es un
   mecanismo de redirect de navegador que termina en una cookie, no en un token; una tool MCP no
   puede conducirlo.
-- Regresión: `apps/api/tests/ha_idp_login.rs` (17 tests) + los 11 unitarios de `ha_idp/mod.rs`.
+- Regresión: `apps/api/tests/ha_idp_login.rs` (18 tests) + los 11 unitarios de `ha_idp/mod.rs`.
 
 ### Installation
 | Method | Path | Notes |
@@ -1184,12 +1184,11 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `summary` de hasta 20 movimientos + `summary_truncated`. Cache **COND**, una sola vez por lote.
   **Ojo con esta pareja**: son los campos `resumen`/`resumen_truncated` de `BatchPatchResponse`
   (el nombre que sigue viajando por el wire HTTP de `PATCH /v1/transactions/batch`), traducidos
-  en la capa MCP. Es el único sitio del catálogo donde la clave de salida no coincide con la
-  del handler, y se hace a conciencia: el catálogo MCP habla inglés entero.
+  en la capa MCP. Es el único sitio del catálogo donde una clave del handler se **traduce**, y se hace a conciencia: el catálogo MCP habla inglés entero. **No es el único sitio donde la salida no coincide con el handler**: `update_allocation_rule` además *inventa* las claves `antes`/`despues`, que ningún handler publica — y encima en español (**issue #97**, preexistente, no se arregla aquí).
 - **`apply_categorization_rule` (3.8.0, auditoría MCP)**: backfill de una regla sobre el histórico —
   `rule_id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`, y
   **desde la Fase 3 (issue #84) `confirm_token`** (obligatorio junto a `confirm: true`: el lote
-  puede tocar cientos de movimientos, así que entra en las 7 tools con confirmación en dos fases —
+  puede tocar cientos de movimientos, así que entra en las **8** tools con confirmación en dos fases (`grep -c '= two_phase(' apps/api/src/mcp/server.rs`; eran 7 hasta que la Fase 6 añadió `delete_allocation_rule`, y el bloque `confirm_token` de más abajo ya decía 8 mientras esta línea decía 7) —
   ver el bloque `confirm_token` más abajo). Sin `confirm` devuelve preview con `would_match` /
   `already_correct` / `would_change_kind` /
   `skipped_by_source` / `matched_by_other_rule` / `skipped_reconciled` / `by_current_category` /
@@ -1461,10 +1460,16 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   escribe quien la envía). Va en el `instructions` y no en 68 descripciones por la misma razón que
   la Fase 5: un aviso transversal se paga una vez por sesión, no una vez por tool y por turno.
 
-- **Cero deriva handler↔tool**: cada tool llama a la MISMA core fn que el endpoint HTTP
+- **Cero deriva handler↔tool**: cada tool llama a la MISMA core fn que su endpoint HTTP **cuando
+  lo hay** — hoy hay **cuatro** tools cuya core no la llama ningún handler (`simulate_projection`,
+  `update_fire_settings`, `update_installation_settings`, y la mitad `settings_user_core` de
+  `get_settings`), registradas y argumentadas en `futurefin-mcp-parity` §3.3. La regla dura que NO
+  admite excepción es la otra: **cero SQL propio** (`grep -c 'sqlx::query' apps/api/src/mcp/server.rs`
+  → 0). Formulado como universal («cada tool»), este bullet se leía como que una tool sin endpoint
+  es un bug; es un patrón aceptado con su propio registro. Donde la core SÍ es compartida
   (`summary_core`, `projection_series_cached`, `budget_snapshot_core`, `transactions_summary_core`,
   `list_transactions_query`, `history_series_core`, `list_assets_core`, `list_liabilities_core`,
-  `list_planning_flows_core`, `installation_access_core`) y serializa el mismo struct serde →
+  `list_planning_flows_core`, `installation_access_core`), la tool serializa el mismo struct serde →
   Decimal-as-string intacto. Paridad congelada en `apps/api/tests/mcp_http.rs`.
 - **Errores**: dominio/validación → `CallToolResult{is_error:true}` con el JSON
   **`{error, code, message}`** de `ErrorBody` — el mismo struct y el mismo **código estable** que el
@@ -1492,9 +1497,7 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   Fase 2 del issue #83**: la clave se llamaba `resumen`; la
   norma del repo es «UI en español, identificadores en inglés», y la misma fase ya había
   unificado los `effects` de los previews a `entity`/`side_effects`). **Catorce tools la publican
-  desde la Fase 6** (eran once): en doce es una cadena sintetizada por el propio MCP, y en
-  `update_transactions` y `create_batch` es un array — el primero traducido del
-  `resumen`/`resumen_truncated` del handler, el segundo sintetizado. **Ojo: la Fase 2 afirmó que
+  desde la Fase 6** (eran once): en **once** es una cadena sintetizada por el propio MCP, y en **tres** un array — `update_transactions` (traducido del `resumen`/`resumen_truncated` del handler), `create_batch` (sintetizado) y **`apply_categorization_rule`** (`applied.sample`, `Vec<String>` en `handlers/transactions/rules.rs`), que esta frase contaba como cadena. Reparto reproducible: `grep -n '"summary":' apps/api/src/mcp/server.rs` → 14 sitios, los que no llevan `format!(` son los tres arrays. **Ojo: la Fase 2 afirmó que
   `resumen` era «la última clave en español del wire MCP» y no lo era** —
   `update_allocation_rule` sigue devolviendo `{id, antes, despues}` (**issue #97**, abierto: es
   breaking y espera al próximo cambio que ya vaya a romper el catálogo). Tramo 1:
@@ -1523,11 +1526,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   con confirm; NONE). Todos los anteriores excepto delete_recurring_rule invalidan FULL. La capa
   API valida además `expected_annual_return_percent > −100` en create/patch de assets (el engine
   clampa ≤ −100 a pérdida total). **Bloque `impact` (Fase 3, issue #84)**: las escrituras que
-  invalidan FULL — quince en total: `create_planning_flow`/`update_planning_flow`/
+  invalidan FULL — **dieciocho** en total: `create_planning_flow`/`update_planning_flow`/
   `delete_planning_flow`, `create_asset`/`update_asset`/`update_asset_value`,
   `create_liability`/`update_liability`, `create_budget_entry`/`update_budget_entry`/
   `delete_budget_entry`, `update_allocation_rule`, `update_fire_settings`, `delete_asset`,
-  `delete_liability` — devuelven además `impact`: antes/después/delta de las cuatro cifras de
+  `delete_liability`, y desde la Fase 6 `create_allocation_rule`, `delete_allocation_rule` y
+  `update_installation_settings` — devuelven además `impact`: antes/después/delta de las cuatro cifras de
   `get_summary` (`net_worth`, `savings_expected_monthly`, `net_return_real_annual_pct`,
   `debt_to_assets_ratio`), medidas alrededor de la propia escritura con la MISMA core que
   `get_summary` (`summary_core`, dos lecturas extra, best-effort — si fallan, `impact: null` y la
@@ -1536,10 +1540,10 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   con cualquier lectura concurrente — se pide aparte con `get_projection` cuando hace falta. Las
   escrituras COND (transacciones) NO llevan `impact`: es la escritura más frecuente del catálogo y
   solo mueve el motor a través de un promedio 12m, no vale la pena la lectura doble en el camino
-  caliente. **Con la Fase 6 son 18** (recuento reproducible:
-  `grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs`): se suman
-  `create_allocation_rule`, `delete_allocation_rule` y `update_installation_settings`, las tres
-  FULL. Las dos tools de snapshot **tampoco** lo llevan, y ahí la ausencia es contrato: publican
+  caliente. Recuento reproducible, nunca la lista de arriba a ojo:
+  `grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs` → **18** (eran quince hasta la
+  Fase 6; hasta el barrido de la Fase 7 la enumeración de esta misma frase se había quedado en
+  las quince mientras el párrafo ya decía 18 — copiar la lista daba tres nombres de menos). Las dos tools de snapshot **tampoco** lo llevan, y ahí la ausencia es contrato: publican
   `"affects_projection": false` en su lugar, porque los snapshots no son input del engine (D12) y un
   `impact` de ceros se leería como «no ha pasado nada» en vez de como «esto no mueve la proyección».
   Tramo 3 (destructivas, todas preview/confirm):
@@ -1573,8 +1577,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   pese a ser uno de los cinco críticos del issue). Conciliación (3.5.0; **Fase 3, issue #84,
   ganan preview/confirm las tres**): `materialize_recurring` (convergencia: idempotente **por
   existencia**, sin cursor desde 3.9.0, y **poda** instancias → `pruned`; `destructive_hint =
-  true`. Es el único preview del catálogo que NO puede dar cifras — la core calcula y escribe en
-  la misma transacción, sin dry-run — así que publica `would_materialize`/`would_prune` como
+  true`. Es **uno de los dos** previews del catálogo que NO pueden dar cifras — la core calcula y escribe en
+  la misma transacción, sin dry-run; el otro es `reconcile_transfers`, tres líneas más abajo, que el texto ya reconocía («mismo motivo») mientras esta frase decía «el único» — así que publica `would_materialize`/`would_prune` como
   `null` con `counts_unavailable_reason`, más `your_recurring_rules` y el aviso de que el ámbito
   es la instalación entera; exige `confirm` + `confirm_token`), `reconcile_transfers` (pase
   explícito, idempotente — `reconcile_now_core`; COND solo si enlaza algo; `destructive_hint =

@@ -40,9 +40,10 @@ respuestas llevan, junto al número, el dato que evita confundirlo:
   viaje) que producen los escalones, para que un salto entre dos puntos anuales tenga explicación
   en vez de parecer un error.
 
-También ha bajado mucho lo que el catálogo ocupa en la conversación (las descripciones de las
-herramientas pasaron de ~37.000 a ~21.000 caracteres, y siguen por debajo del tope pese a las 16
-herramientas nuevas): en la práctica, Claude llega a tus datos con más ventana libre para razonar
+También ha bajado mucho lo que el catálogo ocupa en la conversación: las descripciones de las
+herramientas pasaron de ~37.000 a ~21.000 caracteres, y aunque las 16 herramientas nuevas las han
+devuelto a ~24.000, siguen por debajo del tope. En la práctica, Claude llega a tus datos con más
+ventana libre para razonar
 sobre ellos. Una descripción demasiado larga llegó a viajar **truncada** a un cliente real, cortada
 justo en mitad de una advertencia.
 
@@ -194,9 +195,10 @@ Escribir vía MCP pasa por **tres puertas**, y las tres tienen que estar abierta
    reintente.
 3. **La confirmación, en las destructivas.** Las herramientas que borran o cambian cosas en lote
    solo actúan con `confirm: true`. Sin ese campo devuelven un **preview** de lo que pasaría. Así,
-   un borrado nunca ocurre "de paso". Y las de radio no acotado o sin vuelta atrás (deshacer una
-   importación, borrar un activo, un pasivo o un snapshot, aplicar una regla al histórico,
-   desconciliar una transferencia, materializar recurrentes) piden **además** un código que solo
+   un borrado nunca ocurre "de paso". Y las ocho de radio no acotado o sin vuelta atrás (deshacer
+   una importación, borrar un activo, un pasivo, un snapshot o una regla de la cascada de reparto,
+   aplicar una regla al histórico, desconciliar una transferencia, materializar recurrentes) piden
+   **además** un código que solo
    emite ese preview: dura 10 minutos, sirve una vez y va atado a los efectos exactos que se te
    enseñaron — si cambian entre el preview y la confirmación, hay que volver a previsualizar. No hay
    forma de confirmarlas a ciegas, y es deliberado: el `confirm: true` lo escribe el propio modelo,
