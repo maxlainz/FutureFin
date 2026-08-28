@@ -6,7 +6,8 @@ description: >
   responses, "VersionMismatch"/checksum error on startup, stale data after an edit, chart wrong
   only at one density or only in dark mode, broken table layout / overlapping action buttons,
   Docker container unhealthy (diagnosing WHY — for operating/restarting/rolling back the stack
-  use futurefin-run-and-operate), login loop / session not sticking, Vite dev 404s on /v1. It maps
+  use futurefin-run-and-operate), login loop / session not sticking, Vite dev 404s on /v1, an MCP
+  client ("connection failed" with no detail) or OAuth connector failing to reach `/mcp`. It maps
   each symptom to a first move and a discriminating experiment, and lists the traps that already
   cost real time. Do NOT use it for deep projection-model redesign (futurefin-projection-realism-campaign),
   for writing new tests (futurefin-validation-and-qa), for environment setup from scratch
@@ -89,6 +90,7 @@ Vocabulary you need (one line each; full domain detail in
 | `pg_upgrade needed: PostgreSQL 15 -> 16` followed by a failure | Read the pg_upgrade logs inside the `ffdata` volume | Major upgrade aborted; old cluster preserved untouched (nothing is ever deleted) | Trap 12f |
 | Login "succeeds" but next request is 401; login loop | Check `Set-Cookie` in devtools: is `Secure` set? Are you on HTTP? | `COOKIE_SECURE=true` behind non-HTTPS | Trap 10 |
 | Split-dev: UI loads but every `/v1/*` call 404s or connection-refused | `curl http://127.0.0.1:8081/v1/health` directly | Vite proxy port mismatch (`.env` at repo root) | Trap 11 |
+| MCP client (claude.ai connector, etc.) says "connection failed", nothing more | `curl -sS -X POST http://127.0.0.1:8080/mcp` — look for 404 JSON with `code: "mcp_disabled"` | Kill-switch (`FUTUREFIN_MCP_ENABLED=0`) misread as an outage; on images ≤4.3.1 it was a mute 405/`text/html` instead of a readable 404 | Trap 13 |
 
 ## Traps, stories, and discriminating experiments
 
@@ -431,6 +433,42 @@ not bundle your old major at all the entrypoint says so and names the two escape
 restore into a fresh volume with `scripts/restore-postgres.sh`). CI pins the whole
 path in the "pg_upgrade 15→16 (seeded PG15 volume)" step.
 
+### 13. MCP/OAuth client can't connect — the silent kill-switch, and other discriminators
+
+**First move.** Check whether `FUTUREFIN_MCP_ENABLED` is 0. Since 4.4.0 the answer is in the
+response itself:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/mcp
+```
+
+`FUTUREFIN_MCP_ENABLED=0` → HTTP 404, JSON body with `"code": "mcp_disabled"`. Anything else — a
+401, a 200, an empty body — means the kill-switch is not the story; keep looking below.
+
+**Story — why this earned a whole test phase (issue #85, Fase 4, 4.4.0).** Before 4.4.0 the
+switch **unmounted** the MCP/OAuth routes instead of changing their handler, and the router's
+final fallback is a `ServeDir` that **does not call its fallback for methods other than
+GET/HEAD**. So on any image at 4.3.1 or older, the exact same switch produced:
+
+- `POST /mcp` → **405 with an empty body**
+- `GET /.well-known/oauth-authorization-server` → **200 `text/html`** (the SPA shell)
+
+Neither response names MCP, OAuth, or the switch. The connector's JSON parse fails and it shows
+«connection failed» with no cause — a security control that, once switched on, is
+indistinguishable from an outage. **On an image at 4.3.1 or older, this exact signature IS the
+kill-switch being on.** 4.4.0 mounts the routes unconditionally and lets the handler answer
+instead — same doctrine as `POST /v1/auth/sso`, which answers `sso_disabled` rather than
+disappearing.
+
+Other discriminators worth a row each:
+
+| Symptom | Command | Expected if this is the cause |
+|---|---|---|
+| Discovery metadata comes back as HTML, not JSON | `curl -sS -D- http://127.0.0.1:8080/.well-known/oauth-authorization-server` | `content-type: text/html` — the SPA fallback answered instead of the API. On 4.4.0+ this should never happen (routes always answer JSON, switch on or off); seeing it means the image predates 4.4.0 — see the kill-switch story above |
+| A **browser** MCP client fails at the CORS preflight with an error that never mentions MCP | DevTools → Network → the `OPTIONS /mcp` request → `Access-Control-Allow-Headers` | Missing `MCP-Protocol-Version` or `Last-Event-ID` from the allow-list — fixed in 4.4.0 (`mcp::mcp_cors_layer`); worth recognizing the *shape* (an opaque CORS error, not anything that says MCP) if it ever regresses |
+| `/mcp` returns 403 and it's neither the role nor the `mcp_write_enabled` toggle | `curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8080/mcp -H 'Origin: https://evil.example' -H "Authorization: Bearer $TOKEN"` | An `Origin` outside `CORS_ORIGINS` (anti-DNS-rebinding, 4.4.0). A request **without** `Origin` always passes rmcp's check, so this only ever bites browser-based clients — Claude Desktop, Claude Code and `curl` never send one and are unaffected |
+| An OAuth client behind a reverse proxy with a subpath fetches URLs the proxy doesn't route | `docker compose logs futurefin \| grep FUTUREFIN_PUBLIC_URL` | Missing `FUTUREFIN_PUBLIC_URL`: the issuer/`resource`/endpoint URLs are derived without the prefix. Fix: `FUTUREFIN_PUBLIC_URL=https://host/prefijo` (bounds and syntax in `futurefin-config-and-flags`). Since 4.4.0 the log also emits a one-shot `warn` naming the variable the first time a prefixed request hits OAuth metadata — before that it was a mute 404 on `/oauth/token` with no clue why |
+
 ## Where the evidence lives
 
 - **API logs**: `RUST_LOG` env filter; default (in `main.rs` and compose)
@@ -498,8 +536,9 @@ Written 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); traps 9 and 12, the c
 evidence sections and the vocabulary entry rewritten 2026-08-16 for **v3.0.0** (self-contained
 image); **traps 12b/12c and their two symptom-table rows rewritten 2026-08-22 for v4.0.0**, which
 removed the external-database mode from the entrypoint (the old FATAL `…the external database does
-not answer` and the boxed `DEPRECATED` banner can no longer occur). All mechanisms verified by
-reading code, not by running services. Re-verify before trusting:
+not answer` and the boxed `DEPRECATED` banner can no longer occur). **Trap 13 added 2026-08-28 for
+v4.4.0** (MCP transport hardening, issue #85) — the first mention of MCP/OAuth in this file. All
+mechanisms verified by reading code, not by running services. Re-verify before trusting:
 
 - Error mapping (23505→409, 23503→400): `grep -n "23505\|23503" apps/api/src/error.rs`
 - Body limits (1 MiB / 16 MiB): `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`
@@ -532,6 +571,10 @@ reading code, not by running services. Re-verify before trusting:
 - Migration count (34 as of 2026-08-16; 31 as of 2026-07-02): `ls apps/api/migrations | wc -l`
 - Default log filter: `grep -n "EnvFilter" apps/api/src/main.rs`
 - Parity fixture still dual-consumed: `grep -rn "fire-parity.json" apps/api/tests/ apps/web/src/`
+- Kill-switch answers JSON, routes always mounted (trap 13): `grep -n "mcp_disabled\|MCP_DISABLED_MESSAGE" apps/api/src/mcp/mod.rs apps/api/src/oauth/mod.rs`
+- `Origin` validation on `/mcp` + no-`Origin`-always-passes: `grep -n "with_allowed_origins\|validate_origin_header" apps/api/src/mcp/mod.rs`
+- `/mcp` CORS layer has no `allow_credentials` (separate from the API's): `grep -n "mcp_cors_layer\|allow_credentials" apps/api/src/mcp/mod.rs apps/api/src/routes/mod.rs`
+- `FUTUREFIN_PUBLIC_URL` subpath support + the one-shot warn: `grep -n "normalize_prefix\|warn_missing_public_url_for_prefix" apps/api/src/oauth/url.rs apps/api/src/main.rs`
 - Incident quotes (v1.0.2, v1.0.10, v1.0.12, v1.0.18–20, v1.2.0, v1.3.0, v1.4.0, v1.4.2, 3.0.0):
   `CHANGELOG.md`
 - Doc drift record: the standing-errata table lives in futurefin-docs-and-writing §7 (empty as

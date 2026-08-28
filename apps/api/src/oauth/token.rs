@@ -28,6 +28,20 @@ const ACCESS_TOKEN_INTERVAL: &str = "1 hour";
 /// Sliding por construcción: cada rotación emite un refresh nuevo con 90 días.
 const REFRESH_TOKEN_INTERVAL: &str = "90 days";
 
+/// Gracia del GC para codes (TTL 2 min) y access tokens (TTL 1 h): un día después de caducar.
+///
+/// No es «por si acaso»: el reuso de un code ya consumido es lo que dispara la revocación del
+/// grant (§7.5), y esa detección necesita que la FILA siga existiendo. Un día cubre con holgura
+/// cualquier replay con sentido de un secreto que vivió dos minutos.
+const SHORT_LIVED_GRACE: &str = "1 day";
+/// Gracia del GC para refresh tokens (TTL 90 días sin uso): 30 días más.
+///
+/// Misma razón, escalada al TTL: la reuse-detection de la rotación mira `consumed_at` ANTES que
+/// la expiración (ver `refresh`), así que un refresh consumido sigue matando el grant aunque haya
+/// caducado. Se borra a los 120 días de emitido, cuando presentarlo ya no prueba nada que la
+/// propia expiración no rechace primero.
+const REFRESH_GRACE: &str = "30 days";
+
 /// Mismo criterio que DCR: el token endpoint ignora campos desconocidos (los clientes
 /// mandan extras como `audience` con normalidad) — no añadas `deny_unknown_fields`.
 #[derive(Debug, Deserialize)]
@@ -72,6 +86,12 @@ pub async fn token(
         _ => return Err(OAuthError::unsupported_grant_type()),
     };
 
+    // GC perezoso: este POST es EXACTAMENTE el camino que hace crecer las tres tablas (cada
+    // rotación de refresh inserta dos filas), así que es donde se podan. Va después de que el
+    // grant type haya cerrado su transacción y es best-effort: un fallo aquí no puede convertir
+    // un token ya emitido en un 5xx.
+    gc_expired_tokens(&state.pool).await;
+
     let mut resp = Json(body).into_response();
     // RFC 6749 §5.1: la respuesta transporta secretos.
     resp.headers_mut().insert(
@@ -79,6 +99,52 @@ pub async fn token(
         http::HeaderValue::from_static("no-store"),
     );
     Ok(resp)
+}
+
+/// Poda de credenciales OAuth caducadas. **Best-effort y jamás en un GET** (D5: reads never
+/// mutate) — mismo patrón y mismo sitio que `gc_orphan_clients` en `POST /oauth/register` y que
+/// la poda de `mcp_write_audit` en el camino de escritura.
+///
+/// Hasta ahora no existía ningún `DELETE` sobre estas tres tablas: cada rotación de refresh
+/// insertaba un access y un refresh que **no se borraban nunca**. No tumba una instalación
+/// doméstica, pero engorda para siempre los dumps pre-migración y los índices `UNIQUE` de
+/// `token_hash`.
+///
+/// Autorregulado: una instalación que no emite tokens tampoco crece, así que no podar no cuesta
+/// nada. Las tres consultas son independientes a propósito — que una falle no debe impedir las
+/// otras dos. `oauth_refresh_tokens` no tiene índice por `expires_at` (sí lo tienen las otras
+/// dos): es un seq scan sobre una tabla que este mismo GC mantiene pequeña, y añadir el índice
+/// costaría una migración que no compra nada a escala de self-host.
+///
+/// `replaced_by` es `ON DELETE SET NULL`, así que borrar un eslabón viejo de la cadena de
+/// rotación no rompe la fila que lo sucede.
+async fn gc_expired_tokens(pool: &PgPool) {
+    let statements = [
+        (
+            "oauth_access_tokens",
+            "DELETE FROM oauth_access_tokens WHERE expires_at < now() - $1::interval",
+            SHORT_LIVED_GRACE,
+        ),
+        (
+            "oauth_authorization_codes",
+            "DELETE FROM oauth_authorization_codes WHERE expires_at < now() - $1::interval",
+            SHORT_LIVED_GRACE,
+        ),
+        (
+            "oauth_refresh_tokens",
+            "DELETE FROM oauth_refresh_tokens WHERE expires_at < now() - $1::interval",
+            REFRESH_GRACE,
+        ),
+    ];
+    for (table, sql, grace) in statements {
+        if let Err(e) = sqlx::query(sql).bind(grace).execute(pool).await {
+            tracing::warn!(
+                table,
+                error = ?e,
+                "no se pudo podar credenciales OAuth caducadas; se reintenta en el siguiente token"
+            );
+        }
+    }
 }
 
 async fn exchange_code(

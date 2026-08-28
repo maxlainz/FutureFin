@@ -1,24 +1,59 @@
 //! Documentos de descubrimiento OAuth: RFC 9728 (Protected Resource Metadata) y
 //! RFC 8414 (Authorization Server Metadata). SELECT-free y mutación-free (D5): solo
 //! reflejan la URL pública derivada del request (o `FUTUREFIN_PUBLIC_URL`).
+//!
+//! **Cabeceras de caché (issue #85, hallazgo 7).** `.claude/api-routes.md` afirmaba que
+//! «toda respuesta OAuth lleva `Cache-Control: no-store`»; era cierto para `OAuthError`, para
+//! el token endpoint y para la revocación, pero **no para la metadata**, que es justo la que
+//! puede depender de cabeceras de proxy. Ahora las dos van con `no-store` + `Vary` sobre las
+//! cabeceras que gobiernan el issuer.
+//!
+//! Ese `Vary` + `no-store` es lo que cierra el vector de envenenamiento por
+//! `X-Forwarded-Host`, que se honra **sin peer de confianza** — y se sigue honrando, a
+//! propósito. La asimetría de D17/D18 (peer obligatorio para relajar el anti-clickjacking y
+//! para aceptar identidad) es sobre **autoridad**: una cabecera que concede algo. Aquí no se
+//! concede nada, se **refleja**: un `X-Forwarded-Host` falsificado solo deforma la respuesta
+//! del propio atacante — el mismo argumento que `prefix.rs` da para no exigirle peer al
+//! prefijo. Lo único que convertía esa reflexión en algo más era la cacheabilidad, y eso es
+//! lo que quitan estas dos líneas. Exigir peer aquí, en cambio, rompería el despliegue
+//! corriente (Cloudflare Tunnel, nginx) en cuanto el operador no configurase además
+//! `FUTUREFIN_TRUSTED_PROXY_IPS`, una variable nacida para el add-on de Home Assistant: sería
+//! fail-closed contra el caso mayoritario para cerrar algo que ya no está abierto.
 
 use super::error::OAuthError;
 use super::url::{mcp_resource_url, public_base_url};
 use crate::state::AppState;
 use axum::extract::Extension;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use http::HeaderMap;
-use serde_json::{json, Value};
+use http::{HeaderMap, HeaderValue};
+use serde_json::json;
 use std::sync::Arc;
+
+/// Cabeceras de las que depende el issuer que sale de aquí (`oauth/url.rs::public_base_url`).
+/// `Host` no entra: los cachés ya distinguen por host de forma implícita.
+const ISSUER_VARY: &str = "X-Forwarded-Proto, X-Forwarded-Host";
+
+/// Envuelve un documento de descubrimiento con sus cabeceras de caché.
+fn discovery_response(body: serde_json::Value) -> Response {
+    let mut resp = Json(body).into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    h.insert(http::header::VARY, HeaderValue::from_static(ISSUER_VARY));
+    resp
+}
 
 /// RFC 9728 — apunta al AS (nosotros mismos). Servida en
 /// `/.well-known/oauth-protected-resource` y con el sufijo `/mcp` (inserción de path §3.1).
 pub async fn protected_resource(
     Extension(state): Extension<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Value>, OAuthError> {
+) -> Result<Response, OAuthError> {
     let base = public_base_url(&state, &headers)?;
-    Ok(Json(json!({
+    Ok(discovery_response(json!({
         "resource": mcp_resource_url(&base),
         "authorization_servers": [base],
         "bearer_methods_supported": ["header"],
@@ -49,9 +84,9 @@ pub async fn protected_resource(
 pub async fn authorization_server(
     Extension(state): Extension<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Value>, OAuthError> {
+) -> Result<Response, OAuthError> {
     let base = public_base_url(&state, &headers)?;
-    Ok(Json(json!({
+    Ok(discovery_response(json!({
         "issuer": base,
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),

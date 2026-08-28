@@ -19,6 +19,12 @@ All routes in `apps/api/src/routes/mod.rs`. Routes under `/v1/` require valid se
 > `GET /oauth/authorize` **no tiene ruta backend**: la sirve el fallback SPA de `main.rs`. Ver la
 > sección OAuth abajo — registrarla es un error que rompe la pantalla de consentimiento.
 
+> **Las ocho filas de arriba se montan SIEMPRE, `FUTUREFIN_MCP_ENABLED` incluido.** El kill-switch
+> cambia el *handler*, no la tabla de rutas: con `0`, `/mcp` y las siete rutas de protocolo OAuth
+> responden **404 JSON `mcp_disabled`** (`ApiError::NotFoundWith`, mensaje compartido en
+> `mcp::MCP_DISABLED_MESSAGE`), con cualquier método. Por qué, en §Kill-switch de la sección OAuth.
+> La forma del router no depende del entorno — misma doctrina que `/v1/auth/sso` (D18).
+
 ### El `index.html` lo sirve un handler, no `ServeDir`
 
 Todo lo que no es API ni un asset existente cae en `ServeDir(WEB_STATIC_ROOT)`, montado con
@@ -53,6 +59,51 @@ protocol-relative `//…` y las absolutas con esquema no se tocan) e inserta, ju
   HTML pasa a depender de cabeceras de proxy y ningún caché intermedio debe servir el shell de un
   despliegue con el prefijo de otro.
 - Regresión: `apps/api/tests/base_path.rs` (+ los unit tests de `spa.rs`).
+
+### CORS y topes de body — **dos superficies, dos privilegios** (4.4.0, issue #85)
+
+`CORS_ORIGINS` sigue siendo **una sola lista** de orígenes, pero desde el issue #85 alimenta **dos
+capas distintas**, y la diferencia es el privilegio que conceden:
+
+| Capa | Dónde | `allow_credentials` | `allow_headers` | Se aplica a |
+|---|---|---|---|---|
+| API | `routes::app_router` → `api_cors_layer` | **`true`** — su credencial es la cookie `ff_session` | `Content-Type`, `Accept`, `Authorization` (esta última por `client_secret_basic` del protocolo OAuth) | `/v1/*`, `/health`, `/openapi.json`, `/oauth/*`, `/.well-known/*` |
+| MCP | `mcp::mcp_cors_layer` | **ausente** — su credencial es el header `Authorization` | + `Mcp-Session-Id`, `MCP-Protocol-Version`, `Last-Event-ID`, `Mcp-Method`, `Mcp-Name`; expone además `WWW-Authenticate` | solo `/mcp` |
+
+- **Por qué dos**: hasta 4.3.1 la capa era una sola sobre el router entero, con `allow_credentials(true)`.
+  Añadir un origen para que funcionara un cliente MCP de navegador (el Inspector) concedía **de paso**
+  acceso con cookie a `/v1/backup/user-export`, `/v1/api-tokens` y `/v1/installation`. Ahora la lista
+  se comparte y el privilegio no.
+- **El orden del `merge` es el que separa las capas** y no es cosmético: `Router::layer` solo envuelve
+  las rutas **ya registradas**, así que `mcp` se mergea **después** del `.layer(api_cors_layer(...))`
+  para quedar fuera de él. Si mueves ese `merge` arriba, `/mcp` hereda `allow_credentials(true)`.
+- **`route_layer`, nunca `layer`, dentro del router de `/mcp`** (capa CORS y middleware Bearer):
+  `Router::layer` envuelve también el *fallback* del router, y un `merge` arrastra ese fallback al
+  router de destino — el resultado sería que **toda ruta desconocida**, `/oauth/authorize` incluida,
+  pasaría por la auth Bearer del MCP y devolvería 401. Lo cazó
+  `oauth_flow.rs::get_oauth_authorize_is_not_handled_by_the_api`, que por eso vigila también el 401
+  y no solo el 405.
+- **`WWW-Authenticate` va en `expose_headers`** porque no es una cabecera de respuesta *safelisted*:
+  sin exponerla, un cliente de navegador no puede leer el `resource_metadata=` del 401 y **nunca
+  descubre el authorization server** (RFC 9728 §5.1).
+- **`Mcp-Param-*` (SEP-2243) NO está en la lista**: es un *prefijo*, no un nombre, y `allow_headers`
+  solo admite nombres. Ningún cliente conocido los manda hoy; la alternativa
+  (`AllowHeaders::mirror_request`) cambiaría una lista auditable por un espejo.
+
+**Topes de body** (`routes::app_router` + `mcp::MCP_MAX_REQUEST_BODY_BYTES`):
+
+| Superficie | Tope | Mecanismo |
+|---|---|---|
+| Todo lo que pasa por un extractor | **1 MiB** | `DefaultBodyLimit::max` global |
+| `/v1/backup/user-import*` | **16 MiB** | `DefaultBodyLimit` propio de esas rutas |
+| `/mcp` | **1 MiB** | `StreamableHttpServerConfig::with_max_request_body_bytes` — **explícito y obligatorio** |
+
+> `/mcp` necesita su propia línea porque `DefaultBodyLimit` de axum actúa **a través de los
+> extractores**, y `/mcp` es un `route_service`: el servicio de rmcp lee el body por su cuenta, con
+> su propio default de **4 MiB**. El invariante «1 MiB global» que este documento y las skills
+> afirmaban era falso justo en la única ruta del binario que no pasa por un extractor. Regresión:
+> `body_limits.rs::oversized_mcp_body_returns_413` (2 MiB: por encima del global, por debajo del
+> default del SDK — exactamente el hueco).
 
 ### OpenAPI (`GET /openapi.json`) — cómo declara la autenticación (4.0.0)
 
@@ -610,7 +661,7 @@ Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26
 | POST | `/v1/transactions/batch` | write | Alta manual multifila (1..=1000). Body `{transactions:[CreateTransactionRequest]}`. Cada item acepta `recurrence` (misma semántica que el alta simple, backfill de meses intermedios incluido; item con `op_date` a >10 años → **422** `recurrence_too_old`). Ordinal de huella se avanza dentro del batch. **`idempotency_key` por ítem se RECHAZA, no se ignora** (Fase 3, issue #84): cualquier ítem con la clave → **400** `idempotency_key_batch_unsupported` **antes** de tocar la BD (todo el lote, cero filas). Un lote es todo-o-nada en una sola transacción; aceptar el campo para descartarlo dejaría al llamante creyéndose protegido — la idempotencia solo cubre el alta individual. → **201** `[TransactionResponse]`. |
 | GET | `/v1/transactions/months?view=` | lectura | Meses con datos (`GROUP BY YYYY-MM`), orden DESC; `is_complete=false` para el mes en curso. → **200** `[MonthEntry]`. |
 | GET | `/v1/transactions/category-series?view=&kind=&category_id=&window_months=` | lectura | Serie mensual por categoría (issue #2): para cada categoría del `kind` (`expense`\|`income`, obligatorio) con ≥1 movimiento en la ventana, un punto por mes **cero-relleno** (`{month: "YYYY-MM", total}`; magnitudes ≥ 0 Decimal-string escala 2, misma convención de signos que el summary). `window_months` default 12, clamp 1..=60; el último mes es el actual (parcial). Orden: nombre ASC, pseudo-categoría `null` (sin categorizar) al final. **Fase 1 (issue #82)**: cada punto lleva `has_data` (¿ese mes tiene ALGÚN movimiento en el scope, de cualquier `kind`?) y la raíz publica `first_month_with_data` (`YYYY-MM` del primer movimiento de toda la historia, omitido si no hay ninguno) — sin ellos, el cero-relleno hacía indistinguibles «no gastaste en esta categoría» y «de ese mes no hay datos». Y un `category_id` del scope equivocado ya no devuelve `{series: []}` con 200: **400 `category_scope_mismatch`** si el scope no casa con el `kind`, **400 `category_not_found`** si el UUID no existe (400 y no 404, igual que `assert_transaction_category` y `budget.rs`: el recurso existe, lo que está mal es un parámetro). 400 `category_series_kind_invalid`. → **200** `CategoryMonthlySeriesResponse`. Espejo MCP: `get_category_monthly_series`. |
-| GET | `/v1/transactions/summary?view=&year=&month=&avg_window=&avg_months=` | lectura | Comparativa del mes (default: último mes **completo**). **Ventana del promedio** con `avg_window` ∈ {`3`,`6`,`12`,`ytd`,`all`} (default `6`; trim + case-insensitive; inválido → 400 `avg_window must be one of 3, 6, 12, ytd, all`); `avg_months` (1..24) es **alias legado** y `avg_window` gana si vienen ambos. Promedio **ponderado**: denominador = `avg_months` = meses **reales** del tramo `[window_start, selected)` (≥1 transacción del scope con `recurring_rule_id IS NULL`), **no** el nº de meses del tramo ni todos los que tienen algo. Un mes no real queda fuera del **numerador Y del denominador** — excluirlo solo del denominador dejaría su importe arriba y dispararía las categorías presentes en él. Denominador **único** para todas las líneas (no por categoría), así que `Σ avg de categorías == totals.expense_avg` y la tasa de ahorro promedio no se infla; la contrapartida aceptada es que un mes real sin movimientos de una categoría concreta sí cuenta como cero para ella. YTD = meses del año del mes seleccionado estrictamente anteriores (enero → tramo vacío); ALL = desde el mes del primer movimiento. Magnitudes ≥0 para comparar con budget (gasto = `−Σ`, ingreso = `+Σ`, ahorro = `−Σ`). **Cuotas atribuidas por categoría (3.4.0)**: cada pasivo activo EN EL MES seleccionado (`payment_end_date IS NULL OR >= primer día del mes`) con `expense_category_id` asignada suma su equivalente mensual al lado **budget** de esa categoría — se empareja con los recibos reales (que ya viven categorizados) y `totals.expense_budget` = Σ budget de categorías de gasto **+ cuotas atribuidas**. Una categoría solo-cuota materializa su fila (budget = plan, actual = 0). Pasivos sin asignar (NULL, pre-3.4.0): sin atribución (comportamiento previo). Sigue **sin** `derived_debt_line` (la fila sintética sin pareja de la v1.6-1.8 no vuelve). Response añade `avg_window: string`, `window_months: u32`, `months_with_data: u32` (meses con ≥1 movimiento de **cualquier** tipo, recurrentes incluidos — describe lo que hay, **no** es el denominador), `avg_months: u32` (**el denominador**), `avg_basis: {months, first_month, last_month, has_gaps}` (omitido ⟺ `avg_months == 0`; `has_gaps` impide etiquetar «abr–jun» una media de abril y junio) y `avg_unavailable_reason: "empty_window" | "only_recurring_months"` (omitido cuando sí hay promedio). **API breaking, Fase 1 (issue #82) — un cero ya no puede confundirse con un hueco**: (a) la respuesta añade `actual_txn_count: i64` y `has_actual_data: bool` (movimientos del mes seleccionado, conciliadas fuera) porque `is_partial` dice si el mes civil ha terminado, **no** si tiene datos; (b) sin meses reales las medias ya **no son 0 sino `null`** — `CategoryComparisonLine.avg`, `BlockActualAvg.avg` y `totals.{expense,income,savings}_avg` pasan a `string | null`, con `null ⟺ avg_months == 0`; (c) `delta_vs_budget` es `null ⟺ has_actual_data == false` y `delta_vs_avg` es `null` si falla cualquiera de los dos operandos. Los `actual` **no** se anulan: son mediciones (Σ∅ = 0); lo que no puede existir sin base es la comparación, que era la que afirmaba «vas muy por debajo de tu media» a quien no había importado nada. `avg_months` como campo de query sigue siendo el **alias legado** de `avg_window`; no confundir con el campo homónimo del response. Ya **no** trae `derived_debt_line`. 400: `year`/`month` fuera de rango o desapareados, `avg_window`/`avg_months` inválidos. → **200** `TransactionsSummaryResponse`. |
+| GET | `/v1/transactions/summary?view=&year=&month=&avg_window=&avg_months=` | lectura | Comparativa del mes (default: último mes **completo**). **Ventana del promedio** con `avg_window` ∈ {`3`,`6`,`12`,`ytd`,`all`} (default `6`; trim + case-insensitive; inválido → 400 `avg_window must be one of 3, 6, 12, ytd, all`); `avg_months` (1..24) es **alias legado** y `avg_window` gana si vienen ambos. Promedio **ponderado**: denominador = `avg_months` = meses **reales** del tramo `[window_start, selected)` (≥1 transacción del scope con `recurring_rule_id IS NULL`), **no** el nº de meses del tramo ni todos los que tienen algo. Un mes no real queda fuera del **numerador Y del denominador** — excluirlo solo del denominador dejaría su importe arriba y dispararía las categorías presentes en él. Denominador **único** para todas las líneas (no por categoría), así que `Σ avg de categorías == totals.expense_avg` y la tasa de ahorro promedio no se infla; la contrapartida aceptada es que un mes real sin movimientos de una categoría concreta sí cuenta como cero para ella. YTD = meses del año del mes seleccionado estrictamente anteriores (enero → tramo vacío); ALL = desde el mes del primer movimiento. Magnitudes ≥0 para comparar con budget (gasto = `−Σ`, ingreso = `+Σ`, ahorro = `−Σ`). **Cuotas atribuidas por categoría (3.4.0)**: cada pasivo activo EN EL MES seleccionado (`payment_end_date IS NULL OR >= primer día del mes`) con `expense_category_id` asignada suma su equivalente mensual al lado **budget** de esa categoría — se empareja con los recibos reales (que ya viven categorizados) y `totals.expense_budget` = Σ budget de categorías de gasto **+ cuotas atribuidas**. Una categoría solo-cuota materializa su fila (budget = plan, actual = 0). Pasivos sin asignar (NULL, pre-3.4.0): sin atribución (comportamiento previo). Sigue **sin** `derived_debt_line` (la fila sintética sin pareja de la v1.6-1.8 no vuelve). Response añade `avg_window: string`, `window_months: u32`, `months_with_data: u32` (meses con ≥1 movimiento de **cualquier** tipo, recurrentes incluidos — describe lo que hay, **no** es el denominador), `avg_months: u32` (**el denominador**), `avg_basis: {months, first_month, last_month, has_gaps}` (omitido ⟺ `avg_months == 0`; `has_gaps` impide etiquetar «abr–jun» una media de abril y junio) y `avg_unavailable_reason: "empty_window" \| "only_recurring_months"` (omitido cuando sí hay promedio). **API breaking, Fase 1 (issue #82) — un cero ya no puede confundirse con un hueco**: (a) la respuesta añade `actual_txn_count: i64` y `has_actual_data: bool` (movimientos del mes seleccionado, conciliadas fuera) porque `is_partial` dice si el mes civil ha terminado, **no** si tiene datos; (b) sin meses reales las medias ya **no son 0 sino `null`** — `CategoryComparisonLine.avg`, `BlockActualAvg.avg` y `totals.{expense,income,savings}_avg` pasan a `string \| null`, con `null ⟺ avg_months == 0`; (c) `delta_vs_budget` es `null ⟺ has_actual_data == false` y `delta_vs_avg` es `null` si falla cualquiera de los dos operandos. Los `actual` **no** se anulan: son mediciones (Σ∅ = 0); lo que no puede existir sin base es la comparación, que era la que afirmaba «vas muy por debajo de tu media» a quien no había importado nada. `avg_months` como campo de query sigue siendo el **alias legado** de `avg_window`; no confundir con el campo homónimo del response. Ya **no** trae `derived_debt_line`. 400: `year`/`month` fuera de rango o desapareados, `avg_window`/`avg_months` inválidos. → **200** `TransactionsSummaryResponse`. |
 | POST | `/v1/transactions/import/preview` | write | **Stateless**, sin escrituras. Body `{source (auto\|myinvestor\|n26), file_b64, account_asset_id?}`. Autodetección por cabecera; dedup por huella (estado `new`/`already_imported`), heurísticas de transferencia y savings, matching de reglas. Devuelve `file_sha256` (a reenviar en confirm). 400: `csv_preset_unrecognized`, `csv_date_invalid`, `csv_amount_invalid`, base64 inválido. → **200** `ImportPreviewResponse`. |
 | POST | `/v1/transactions/import/confirm` | write | Aplica el import. Body `{source, file_b64, file_sha256, decisions:[ImportDecision] (paralelo por índice a las filas), learn_rules=true, account_asset_id?, original_filename?}`. `file_sha256`/nº de filas deben coincidir con el preview → si no, 400 `preview_confirm_mismatch`. `decision.discard`/`force` por fila; solo la divisa base del hogar (`currency_mismatch`; configurable desde 3.10.0). `learn_rules` hace upsert de una regla por decisión categorizada. Lote vacío → cabecera borrada, `import_id: null`. Doble-confirm concurrente → **409**. Post-commit corre el **pase de auto-conciliación** sobre todo el dataset del owner (la contrapartida puede venir de un lote anterior) — best-effort, reportado en `reconciled_pairs` (0 si falló). → **200** `ImportConfirmResponse {import_id?, imported, skipped_already_imported, discarded, rules_learned, reconciled_pairs}`. |
 | GET | `/v1/transactions/imports?view=` | lectura | Lotes de import (orden `created_at DESC`), con `txn_count` y nombre de cuenta origen. → **200** `[ImportBatchResponse]`. |
@@ -796,7 +847,31 @@ Handlers should just `?` any `sqlx::Error`; never write per-call `.map_err(...)`
 Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los issues #2/#3), módulo `apps/api/src/mcp/` con el SDK oficial
 `rmcp` 3.1 (spec 2026-07-28 sessionless + `LocalSessionManager` para clientes legacy con
 `Mcp-Session-Id`). Mismo binario y puerto que el API; se monta en el router raíz junto a `/health`
-(gana siempre al fallback SPA). Kill-switch: `FUTUREFIN_MCP_ENABLED=0` → el router ni se monta (404).
+(gana siempre al fallback SPA). **Kill-switch: `FUTUREFIN_MCP_ENABLED=0` NO desmonta la ruta** — la
+monta igual y el handler responde **404 JSON `mcp_disabled`** (§Kill-switch de la sección OAuth).
+CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
+
+- **Validación de `Origin` (4.4.0, issue #85)**: `StreamableHttpServerConfig::with_allowed_origins`
+  alimentado por `CORS_ORIGINS`. Es la mitad del anti-DNS-rebinding que el spec MCP pide y que se
+  puede exigir sin conocer el Host; hasta 4.3.1 su default era **lista vacía = validación apagada**.
+  Un `Origin` fuera de la lista → **403**. **Dato que decide que esto no rompa nada**: rmcp
+  (`validate_origin_header`) devuelve `Ok(())` cuando la cabecera **falta**, aunque la lista no esté
+  vacía — Claude Desktop, Claude Code y `curl` no mandan `Origin` y siguen entrando. Regresión:
+  `mcp_http.rs::mcp_validates_the_origin_header` (los tres casos: sin `Origin`, de la lista, ajeno).
+- **`disable_allowed_hosts()` sigue puesto, y por su motivo original**: el default de rmcp solo
+  acepta Hosts loopback, pensado para servidores locales; aquí el despliegue objetivo es
+  LAN/Cloudflare Tunnel con Host arbitrario y el gate es el Bearer. Es el `Host` lo que no se
+  valida; el `Origin` sí, desde 4.4.0.
+- **La sesión de Streamable HTTP NO está ligada a la credencial, y es una decisión, no un olvido**
+  (razonada entera en la cabecera de `mcp/mod.rs`): el middleware Bearer corre ANTES del protocolo
+  en *cada* request, la identidad se re-resuelve viva (D14) y toda tool se ejecuta como el usuario
+  del token presentado — nunca como «el de la sesión»; y el servidor **no emite nada por iniciativa
+  propia**, así que ninguna sesión transporta datos que no haya pedido esa misma request
+  autenticada. Ese es el único hecho que la hace segura. Además la capa de sesión la está retirando
+  el propio protocolo (SEP-2567). **Disparador para reabrirlo**: la primera capacidad server→cliente
+  (notificaciones, `progress`, SSE reanudable con datos). Entonces hay dos salidas — un
+  `SessionManager` propio que ate sesión→credencial, o `legacy_session_mode: false` y solo el camino
+  stateless.
 
 - **Auth (dos esquemas Bearer)**: middleware `mcp/auth.rs::mcp_bearer_auth` corta ANTES del
   protocolo y despacha **por prefijo del Bearer** → `ffo_` = access token OAuth
@@ -806,11 +881,18 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `McpIdentity {user_id, installation_id, role, credential}` en las extensions del request, con
   `credential: McpCredential::{ApiToken{token_id} | OAuth{grant_id, token_id}}`; rmcp propaga las
   `http::request::Parts` hasta el `RequestContext` de cada tool. Fallo → 401/403 JSON
-  `{error, message}`; **solo el 401** añade `WWW-Authenticate` (ver la nota del challenge en la
-  sección OAuth).
-- **Tools de lectura — 19 en total: las 10 iniciales en este bullet, las 9 del issue #2 en el
-  siguiente** (la vigésima con `read_only_hint = true` es `simulate_projection`, que tiene bullet
-  propio): `get_summary`, `get_projection` (density **hybrid fija**,
+  `{error, code, message}` (el `ErrorBody` del API, con su código estable); **solo el 401** añade
+  `WWW-Authenticate` (ver la nota del challenge en la sección OAuth).
+- **Tools de lectura — 20**, más `simulate_projection`, que tiene bullet propio: **21 con
+  `read_only_hint = true`** de las 52 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
+  este bullet, las 9 del issue #2 en el siguiente) y la vigésima es `get_allocation_resolution`, que
+  vive en el bullet de la cascada más abajo. **Los contadores no se cuentan a mano**: los congela
+  `mcp_write.rs::every_write_tool_in_the_source_calls_require_mcp_write` (un `#[test]` sin BD que
+  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — 52 tools / 21 lectura /
+  31 escritura / 14 con preview-confirm / 7 con `confirm_token`. Verificación de un vistazo:
+  `grep -c '#\[tool(' apps/api/src/mcp/server.rs` y
+  `grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs`.
+  Las 10 iniciales: `get_summary`, `get_projection` (density **hybrid fija**,
   `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler;
   `months` declara su rango real 12..840 en el schema y solo la variante sin `months` sale de
   cache), `get_budget`, `get_transactions_summary` (denominador = `avg_months`, meses reales;
@@ -1063,8 +1145,12 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `list_transactions_core`, `history_series_core`, `list_assets_core`, `list_liabilities_core`,
   `list_planning_flows_core`, `installation_access_core`) y serializa el mismo struct serde →
   Decimal-as-string intacto. Paridad congelada en `apps/api/tests/mcp_http.rs`.
-- **Errores**: dominio/validación → `CallToolResult{is_error:true}` con el JSON `{error, message}`
-  de `ErrorBody`; `Db`/`Unavailable` → `ErrorData::internal_error` sanitizado (detalle a tracing).
+- **Errores**: dominio/validación → `CallToolResult{is_error:true}` con el JSON
+  **`{error, code, message}`** de `ErrorBody` — el mismo struct y el mismo **código estable** que el
+  API HTTP desde 3.10.0. Escribir un error MCP sin `code` es la deriva que este documento causó
+  (afirmaba `{error, message}` en dos sitios): el prefijo `snake_code:` del mensaje **es** el código,
+  y `error_codes_parity` lo exige catalogado. `Db`/`Unavailable` → `ErrorData::internal_error`
+  sanitizado (detalle a tracing).
 - **Tools de escritura (issue #3)** — todas pasan primero por `require_mcp_write` (`mcp/auth.rs`),
   que desde la **Fase 3 (issue #84)** son **tres puertas** en orden, de la más fundamental a la
   más circunstancial: (1) **rol vivo** — `role_can_write`, viewer → `forbidden`; (2) **scope de la
@@ -1250,8 +1336,8 @@ no acepta un Bearer pegado a mano. FutureFin es a la vez **authorization server 
 
 | Method | Path | Notas |
 |--------|------|-------|
-| GET | `/.well-known/oauth-protected-resource[/mcp]` | RFC 9728. `{resource: "{base}/mcp", authorization_servers: [base], bearer_methods_supported: ["header"]}`. Sin SELECT y sin mutación: solo refleja la URL pública. |
-| GET | `/.well-known/oauth-authorization-server[/mcp]` | RFC 8414. `issuer`, `authorization_endpoint` (`{base}/oauth/authorize`), `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `code_challenge_methods_supported: ["S256"]` (único), `grant_types_supported: [authorization_code, refresh_token]`, `authorization_response_iss_parameter_supported: true`. **Sin `scopes_supported`, y sigue así tras la Fase 3 (issue #84)** — aunque el argumento original («no hay scopes con función») ya no es literal: los tokens de API sí tienen `scope` (`api_tokens.scope`, ver §API tokens y `auth-and-membership.md`). El motivo por el que NO se extiende a OAuth es distinto: un scope solo restringe **si lo elige la persona** — en un token de API lo elige ella misma con cookie de sesión; en OAuth el `scope` del authorization request lo elige la **aplicación cliente**, así que anunciarlo sin una pantalla de consentimiento que lo recorte no restringiría nada, solo mentiría en la metadata. El techo de una conexión OAuth sigue siendo el rol vivo del usuario + el toggle `installation.mcp_write_enabled`, comprobados por request. |
+| GET | `/.well-known/oauth-protected-resource[/mcp]` | RFC 9728. `{resource: "{base}/mcp", authorization_servers: [base], bearer_methods_supported: ["header"]}`. Sin SELECT y sin mutación: solo refleja la URL pública. **`Cache-Control: no-store` + `Vary: X-Forwarded-Proto, X-Forwarded-Host`** (4.4.0 — ver §Envenenamiento del issuer). |
+| GET | `/.well-known/oauth-authorization-server[/mcp]` | RFC 8414. `issuer`, `authorization_endpoint` (`{base}/oauth/authorize`), `token_endpoint`, `registration_endpoint`, `revocation_endpoint`, `code_challenge_methods_supported: ["S256"]` (único), `grant_types_supported: [authorization_code, refresh_token]`, `authorization_response_iss_parameter_supported: true`. Mismas cabeceras de caché que la anterior (`no-store` + `Vary`). **Sin `scopes_supported`, y sigue así tras la Fase 3 (issue #84)** — aunque el argumento original («no hay scopes con función») ya no es literal: los tokens de API sí tienen `scope` (`api_tokens.scope`, ver §API tokens y `auth-and-membership.md`). El motivo por el que NO se extiende a OAuth es distinto: un scope solo restringe **si lo elige la persona** — en un token de API lo elige ella misma con cookie de sesión; en OAuth el `scope` del authorization request lo elige la **aplicación cliente**, así que anunciarlo sin una pantalla de consentimiento que lo recorte no restringiría nada, solo mentiría en la metadata. El techo de una conexión OAuth sigue siendo el rol vivo del usuario + el toggle `installation.mcp_write_enabled`, comprobados por request. |
 | POST | `/oauth/register` | DCR (RFC 7591), **público y sin autenticación**. Body `{redirect_uris (1..5, requerido), client_name?, client_uri?, token_endpoint_auth_method?, grant_types?, response_types?}` → **201** `{client_id ("ffc_…"), client_id_issued_at, client_secret? ("ffcs_…"), client_secret_expires_at? (0 = no caduca), …}`. `token_endpoint_auth_method` omitido ⇒ `client_secret_basic` (default RFC 7591 §2) y se emite secreto; `none` ⇒ cliente público sin secreto (el caso de claude.ai). Errores `invalid_client_metadata` / `invalid_redirect_uri`. |
 | POST | `/oauth/token` | `grant_type=authorization_code` (PKCE **S256 obligatorio**) o `grant_type=refresh_token` (rotación). Form-urlencoded. → `{access_token ("ffo_…"), token_type: "Bearer", expires_in: 3600, refresh_token ("ffr_…"), scope?}` + `Cache-Control: no-store`. |
 | POST | `/oauth/revoke` | RFC 7009. Un `ffr_…` revoca el **grant entero** (§2.1: "desconectar" en claude corta todo); un `ffo_…` revoca solo su fila. Token desconocido → **200** igualmente (§2.2). |
@@ -1308,11 +1394,26 @@ method-mismatch **no cae al fallback**: mataría la pantalla en producción. Fij
 - **Anti-flood del registro abierto**: `POST /oauth/register` hace GC perezoso (borra clientes de
   >24 h **sin ningún grant** — jamás uno consentido) y corta con `503 temporarily_unavailable` si
   quedan ≥1000 clientes. El GC vive en el POST y no en un GET (D5, reads never mutate).
+- **GC de credenciales caducadas (4.4.0, issue #85)**: hasta 4.3.1 **no existía ni un `DELETE`**
+  sobre `oauth_access_tokens`, `oauth_refresh_tokens` ni `oauth_authorization_codes`; cada rotación
+  de refresh insertaba dos filas que no se borraban jamás. No tumba un self-host, pero engorda para
+  siempre los dumps pre-migración y los índices `UNIQUE` de `token_hash`. `token::gc_expired_tokens`
+  poda en `POST /oauth/token` —el camino que **hace crecer** las tablas, autorregulado: quien no
+  emite tokens no crece— y **jamás en un GET** (D5), mismo patrón que `gc_orphan_clients`. Es
+  best-effort y las tres sentencias son independientes: un fallo se loguea y no convierte un token
+  ya emitido en un 5xx. **Las gracias no son «por si acaso»**: 1 día para codes y access (TTL 2 min
+  y 1 h), **30 días para refresh** (TTL 90 días) — la reuse-detection mira `consumed_at` **antes**
+  que la expiración, así que un refresh consumido sigue matando el grant aunque haya caducado y
+  necesita la fila viva. `replaced_by` es `ON DELETE SET NULL`: podar un eslabón viejo de la cadena
+  de rotación no rompe el que lo sucede. `oauth_refresh_tokens` no tiene índice por `expires_at`
+  (las otras dos sí) — es un seq scan sobre una tabla que este mismo GC mantiene pequeña, y el
+  índice costaría una migración que no compra nada a escala de self-host. Regresión:
+  `oauth_flow.rs::expired_oauth_credentials_are_collected_on_the_next_token_request`.
 
 ### Formato de error — **no es `ApiError`**
 
 Las rutas de protocolo devuelven `OAuthError` (`oauth/error.rs`): JSON
-`{"error": "...", "error_description": "..."}` de RFC 6749 §5.2, no el `{error, message}` del API
+`{"error": "...", "error_description": "..."}` de RFC 6749 §5.2, no el `{error, code, message}` del API
 propio, porque el body y los códigos (`invalid_request`, `invalid_client`, `invalid_grant`,
 `invalid_target`, `unsupported_grant_type`, `invalid_client_metadata`, `invalid_redirect_uri`,
 `server_error`, `temporarily_unavailable`) los fija la RFC. Toda respuesta lleva
@@ -1330,14 +1431,41 @@ los clientes lo descubren por los documentos `.well-known`, no por nuestro esque
 (`__path_authorize_details`, `__path_authorize_decision`, `__path_list_connections`,
 `__path_revoke_connection`, tag `oauth`, en `openapi.rs`) porque son API propio.
 
-### Kill-switch — con una excepción
+### Kill-switch — el switch cambia el handler, no la tabla de rutas (4.4.0, issue #85)
 
-`FUTUREFIN_MCP_ENABLED=0` desmonta el router de protocolo completo (`oauth_protocol_router()` no se
-construye: las 7 rutas raíz caen al fallback) **y** los dos endpoints del flujo
-(`/v1/oauth/authorize-details`, `POST /v1/oauth/authorize`). **`GET/DELETE /v1/oauth/connections[/{id}]`
-se montan SIEMPRE** — precedente de `/v1/api-tokens`: con MCP apagado sigues pudiendo *ver y revocar*
-credenciales que ya existen. La bifurcación está en `oauth_consent_router(mcp_enabled)` y en
-`routes/mod.rs`; OAuth hoy no sirve a nada más que a MCP, de ahí que compartan el interruptor.
+`FUTUREFIN_MCP_ENABLED=0` apaga `/mcp` **y** el protocolo OAuth entero — hoy OAuth no sirve a nada
+más que a MCP, de ahí el interruptor compartido. Lo que cambió en 4.4.0 es **cómo**:
+
+| Superficie | Con el switch echado | Dónde |
+|---|---|---|
+| `/mcp` | ruta montada, **404 JSON `mcp_disabled`**, cualquier método | `mcp::mcp_router` → `mcp_disabled` |
+| Las **7** rutas de protocolo (`/.well-known/oauth-{protected-resource,authorization-server}[/mcp]`, `/oauth/{register,token,revoke}`) | rutas montadas, **404 JSON `mcp_disabled`**, cualquier método | `oauth::oauth_protocol_router(false)` → `oauth_disabled` |
+| `/v1/oauth/authorize-details`, `POST /v1/oauth/authorize` | **no se montan** → 404 JSON `not_found` del fallback de `/v1` | `oauth_consent_router(mcp_enabled)` |
+| `GET/DELETE /v1/oauth/connections[/{id}]` | **se montan SIEMPRE** | idem |
+
+- **Por qué las rutas ya no se desmontan.** Hasta 4.3.1 `oauth_protocol_router()` y `mcp_router()`
+  simplemente no se construían, y las rutas caían al fallback. Eso solo se veía mal **en la imagen
+  publicada**, no en los tests: el fallback final es un `ServeDir` con fallback al `index.html`, y
+  **`ServeDir` no llama a su fallback para métodos distintos de GET/HEAD**. El resultado real era
+  `POST /mcp` → **405 con cuerpo vacío** y `GET /.well-known/oauth-authorization-server` →
+  **200 `text/html`** con el shell de la SPA. El conector fallaba al parsear JSON y enseñaba
+  «connection failed» sin causa: **un control de seguridad que, al activarse, se diagnostica como
+  avería**. El test antiguo montaba el router *sin* SPA, así que confirmaba un 404 que en producción
+  no ocurría — describía un binario de laboratorio.
+- **Doctrina**: la forma del router no depende del entorno (D18, la misma por la que
+  `POST /v1/auth/sso` se monta siempre y responde `sso_disabled`). Un apagado se anuncia; no se
+  disfraza de ruta inexistente.
+- **Un solo código para un solo interruptor**: `mcp_disabled`, literal completo en
+  `mcp::MCP_DISABLED_MESSAGE` y reutilizado por `oauth/mod.rs`. La causa es literalmente la misma
+  variable; dos códigos obligarían a traducir dos frases que dicen lo mismo. Está en
+  `errorMessages.ts` y en `fixtures/error-codes.json`.
+- **`/v1/oauth/connections` sigue montado siempre** — precedente de `/v1/api-tokens`: con MCP
+  apagado sigues pudiendo *ver y revocar* credenciales que ya existen. Sus dos compañeros de flujo
+  sí se desmontan, y ahí está bien: viven bajo `/v1`, cuyo fallback **ya** devolvía JSON.
+- Regresión: `mcp_http.rs::mcp_disabled_answers_json_even_with_the_spa_mounted` y
+  `oauth_flow.rs::oauth_protocol_disabled_with_mcp_but_connections_panel_survives`, los dos ahora
+  con `WEB_STATIC_ROOT` montado por `spa::mount_static_spa` —la **misma** función que llama
+  `main.rs`— y con un assert previo de que el `ServeDir` está de verdad ahí.
 
 ### El challenge del 401 de `/mcp` — solo el 401
 
@@ -1358,18 +1486,62 @@ sigue sin requerir ninguna env var (promesa 3.0.0). Ver [`env-and-config.md`](en
 Los redirects se construyen **siempre** con `oauth::url::append_query` (escaping de `url::Url`) —
 concatenar a mano es donde nacen los open redirect.
 
-#### El issuer NO lleva el prefijo público — y eso acota dónde funciona MCP
+#### Envenenamiento del issuer: `X-Forwarded-Host` se honra sin peer de confianza, a propósito
 
-`public_base_url` deriva **origen** (esquema + host + puerto) y nada más: no consulta
-`crate::prefix` ni `AppState::base_path`. Consecuencia directa: bajo un subpath (`/futurefin/`, o
-el Ingress de Home Assistant) la metadata anunciaría `https://host/.well-known/…` y
-`resource: https://host/mcp`, URLs que el proxy no enruta a FutureFin.
+Esto **contradice en apariencia** la asimetría de D17/D18, que exigen peer de confianza para relajar
+el anti-clickjacking y para aceptar identidad. No es una excepción, es la misma regla: aquellas
+cabeceras **conceden autoridad**; esta solo se **refleja**. Un `X-Forwarded-Host` falsificado deforma
+la respuesta del propio atacante y de nadie más — el argumento literal que `prefix.rs` da para no
+exigirle peer al prefijo.
 
-**MCP y OAuth necesitan el origen en la raíz**: no están soportados detrás de un subpath ni detrás
-del Ingress. La vía es el **puerto directo** del contenedor (en el add-on de Home Assistant, el
-puerto publicado del host — no la URL de ingress), con `FUTUREFIN_PUBLIC_URL` si el proxy delantero
-no manda `X-Forwarded-Proto`/`X-Forwarded-Host`. La SPA y toda la API `/v1` sí funcionan bajo
-subpath: lo que resuelve el navegador pasa por `apiUrl` (§Prefijo público).
+Lo único que convertía esa reflexión en algo más era la **cacheabilidad**: un caché intermedio podía
+servirle a otro el issuer derivado de un `X-Forwarded-Host` inyectado. Desde 4.4.0 las dos metadatas
+salen con **`Cache-Control: no-store`** y **`Vary: X-Forwarded-Proto, X-Forwarded-Host`**
+(`oauth/metadata.rs::discovery_response`), y con eso el vector se cierra. `Host` no entra en el
+`Vary`: los cachés ya distinguen por host de forma implícita.
+
+> Ojo con la afirmación que este documento hacía antes: «toda respuesta OAuth lleva
+> `Cache-Control: no-store`». Era cierta para `OAuthError`, para el token endpoint y para la
+> revocación, y **falsa justo para la metadata** — la única que depende de cabeceras de proxy. Ahora
+> es cierta, y la fija `oauth_flow.rs::discovery_metadata_is_never_cached_and_varies_on_the_forwarded_headers`.
+
+Exigir peer de confianza aquí, en cambio, sería fail-closed contra el caso mayoritario: rompería
+cualquier despliegue corriente (Cloudflare Tunnel, nginx) en cuanto el operador no configurase
+además `FUTUREFIN_TRUSTED_PROXY_IPS`, una variable que nació para el add-on de Home Assistant.
+
+#### El issuer NO se deriva del prefijo del request — se **declara** (4.4.0, issue #85)
+
+`public_base_url` **no** consulta `crate::prefix` ni `AppState::base_path`. Bajo un proxy con
+subpath (`location /futurefin/` en nginx) el issuer tiene que llevar el prefijo, o el cliente
+descubre URLs que el proxy no enruta; hasta 4.3.1 **ninguna configuración lo conseguía** —
+`FUTUREFIN_PUBLIC_URL` hacía `panic!` con cualquier path, y el prefijo del request no entraba en el
+issuer. Era un despliegue que `prefix.rs` documenta como soportado, con el OAuth roto sin salida.
+
+**La salida es declararlo**: `FUTUREFIN_PUBLIC_URL=https://ejemplo.com/futurefin`. De ahí cuelgan el
+`issuer`, el `resource` de RFC 8707 y los cuatro endpoints anunciados; el path se valida con
+`prefix::normalize_prefix`, la **misma** función ya probada que valida `FUTUREFIN_BASE_PATH`.
+Regresión: `oauth_flow.rs::public_url_with_a_subpath_prefixes_every_advertised_url`, que recorre el
+flujo entero (metadata → challenge del 401 → `resource` aceptado y el sin prefijo rechazado con
+`invalid_target` → canje → `initialize` con el access token).
+
+**Por qué NO se compone con `prefix::request_prefix`**, que era la otra opción:
+
+1. **El issuer es una identidad, no una decoración.** `prefix.rs` no le exige peer al prefijo porque
+   un `X-Forwarded-Prefix` falsificado solo deforma los assets de la respuesta del atacante; en
+   cuanto ese mismo texto entra en un **documento de descubrimiento**, deja de ser inocuo por la
+   misma razón por la que existe la sección anterior. Un valor de operador (fail-loud al arrancar)
+   no lo puede mover una cabecera.
+2. **Bajo el Ingress de Home Assistant el prefijo es `/api/hassio_ingress/<token>`, un token
+   efímero de sesión**: componerlo lo hornearía dentro del issuer. Y el Ingress no es este caso —
+   el add-on documenta que MCP/OAuth van por el **puerto directo**, no por la URL de ingress.
+
+Con prefijo en la request y sin `FUTUREFIN_PUBLIC_URL` el issuer sale sin prefijo; eso no se
+adivina, **se avisa**: `warn_missing_public_url_for_prefix` emite un `warn` **una vez por proceso**
+diciendo exactamente qué variable falta. Sin esa línea el síntoma era un 404 mudo en `/oauth/token`
+que no dice de dónde viene.
+
+> La SPA y toda la API `/v1` funcionan bajo subpath sin declarar nada: lo que resuelve el navegador
+> pasa por `apiUrl` (§Prefijo público). Lo que necesita la declaración es **solo** el issuer OAuth.
 
 ### Prefijo público de la request (`apps/api/src/prefix.rs`)
 

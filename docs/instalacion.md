@@ -297,18 +297,31 @@ http:
           X-Forwarded-Prefix: "/futurefin"
 ```
 
-### Lo que NO funciona en un subpath
+### MCP y OAuth en un subpath
 
-**MCP y OAuth.** El descubrimiento de OAuth 2.1 exige servir `/.well-known/oauth-authorization-server`
-y `/.well-known/oauth-protected-resource` en la **raíz del origen**, y en un subpath esa raíz es de
-otro. Si vas a conectar un cliente de IA, sirve FutureFin en la raíz de un dominio (o subdominio)
-propio. Ver [mcp.md](mcp.md).
+El descubrimiento de OAuth 2.1 exige servir `/.well-known/oauth-authorization-server` y
+`/.well-known/oauth-protected-resource` en la **raíz del origen que anuncias**. El servidor sigue
+montando todas sus rutas en su propia raíz —eso no cambia con el prefijo—, así que si vas a
+conectar un cliente MCP en un subpath tienes que decirle qué origen anuncia, o publicará URLs que
+tu proxy no sabe enrutar.
 
-**Y no hay atajo por `FUTUREFIN_PUBLIC_URL`.** Esa variable fija el origen del issuer de OAuth, no
-una base con prefijo: acepta un **origen a secas** y **aborta el arranque** si le pones un path
-(`FUTUREFIN_PUBLIC_URL must be a bare origin (no path/query/fragment)`). Es deliberado — anunciar
-un issuer con path no movería los `/.well-known` a donde el cliente los busca, solo dejaría el
-descubrimiento roto de otra manera.
+La receta es declarar el mismo prefijo en `FUTUREFIN_PUBLIC_URL`:
+
+```env
+FUTUREFIN_PUBLIC_URL=https://tu-host/futurefin
+```
+
+Con eso el issuer, el `resource` MCP (RFC 8707) y los cuatro endpoints anunciados salen ya con el
+prefijo (`https://tu-host/futurefin/mcp`, etc.), y el mismo proxy que recorta `/futurefin` para el
+resto de la app los enruta igual de bien. Sigue siendo fail-loud: query o fragmento en la variable
+abortan el arranque, igual que un path con caracteres fuera de `[A-Za-z0-9._~/-]`. Detalles en
+[mcp.md](mcp.md#mcp-en-subpath-hace-falta-declarar-el-origen-público).
+
+**Excepción: el ingress del add-on de Home Assistant.** Su prefijo
+(`/api/hassio_ingress/<token>`) lleva un **token efímero de sesión**, así que no hay un valor fijo
+que declarar aquí sin hornear ese secreto dentro del issuer. Ahí la receta sigue siendo publicar el
+**puerto directo** del add-on. Ver
+[home-assistant.md §4](home-assistant.md#4-mcp-y-claudeai-por-qué-hace-falta-el-puerto-directo).
 
 ## Parar, reiniciar y desinstalar
 

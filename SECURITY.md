@@ -81,6 +81,15 @@ defecto—, mandar esa cabecera a mano no relaja nada: la respuesta lleva `DENY`
 El CORS nunca usa comodín: se sirve con una lista explícita de orígenes (`CORS_ORIGINS`, con los de
 `localhost` por defecto) y el arranque **aborta** si esa lista queda vacía.
 
+Desde la 4.4.0 esa misma lista gobierna **dos capas con privilegios distintos**: la de `/v1/*` (y
+`/oauth/*`, `/.well-known/*`) permite credenciales —la cookie `ff_session`— porque es la que
+protege el resto de la app; la de `/mcp` **no** las permite, porque su credencial es la cabecera
+`Authorization`, no una cookie. Añadir un origen a `CORS_ORIGINS` para que funcione un cliente MCP
+de navegador (el MCP Inspector, por ejemplo) no concede de paso acceso con cookie a `/v1`. `/mcp`
+además rechaza con **403** cualquier petición cuya cabecera `Origin` no esté en la lista — pero una
+petición **sin** `Origin` (Claude Desktop, Claude Code, `curl`) sigue pasando siempre, así que esto
+solo afecta a clientes de navegador.
+
 ### Contraseñas
 
 Se guardan como hash **Argon2id** (versión 0x13) con salt aleatorio por usuario, en formato PHC,
@@ -144,10 +153,16 @@ Está **activado por defecto** (variable sin definir = activo). Lo activan expl�
 `true`, `TRUE`, `yes` o `YES`; **cualquier otro valor lo desactiva**, así que `FUTUREFIN_MCP_ENABLED=0`
 hace lo que esperas.
 
-Desactivado no se monta ni `/mcp`, ni los `.well-known` de metadata, ni `/oauth/register`,
-`/oauth/token` o `/oauth/revoke`, ni los dos endpoints de la pantalla de consentimiento. Se
-mantienen a propósito el panel de conexiones y el CRUD de tokens de API: apagar la integración
-nunca debe quitarte la capacidad de **revocar** credenciales que ya concediste.
+Desactivado, las rutas de `/mcp`, de los `.well-known` de metadata y de `/oauth/register`,
+`/oauth/token` y `/oauth/revoke` **siguen montadas**, pero responden **404** con un cuerpo JSON
+(`code: "mcp_disabled"`) a cualquier método, en vez de desaparecer del router: desmontarlas del
+todo se comportaba distinto en la imagen publicada (un `POST /mcp` sin ruta caía en un `405` con
+cuerpo vacío, y un `GET` a un `.well-known` en el HTML de la propia SPA), y un cliente como el
+conector de claude.ai no sabía interpretar ninguna de las dos cosas — mostraba «conexión fallida»
+sin explicar que el servidor la tenía apagada a propósito. Los dos endpoints de la pantalla de
+consentimiento (`/v1/oauth/authorize*`) no dependen de este interruptor. Se mantienen a propósito
+el panel de conexiones y el CRUD de tokens de API: apagar la integración nunca debe quitarte la
+capacidad de **revocar** credenciales que ya concediste.
 
 Sobre las credenciales: tanto los tokens de API (`ffp_…`) como las de OAuth (`ffc_`, `ffcs_`,
 `ffo_`, `ffr_`) son **32 bytes de aleatoriedad del sistema** y se guardan **solo como SHA-256** —
@@ -155,6 +170,27 @@ el secreto en claro se enseña una vez y no se puede recuperar. Un hash rápido 
 precisamente porque el secreto no es una contraseña humana, sino 256 bits aleatorios. Ninguna
 credencial congela nada: el rol y la pertenencia a la instalación se resuelven de nuevo en cada
 petición, y la escritura por MCP exige además el interruptor de la propia instalación.
+
+**Un token de API puede limitarse a solo lectura.** Cada token lleva un `scope`
+(`read_write` por defecto, o `read_only`), elegible al crearlo. Un token `read_only` no escribe
+nunca, aunque tu rol pueda y aunque la instalación tenga la escritura activada: es una restricción
+que le pones al propio token, independiente de tu cuenta. Los conectores OAuth (`ffo_…`) no
+negocian `scope` — siempre pueden escribir, con el mismo techo que el rol vivo y el interruptor.
+
+**Cada intento de escritura por MCP queda registrado.** La tabla `mcp_write_audit` guarda, por
+llamada, quién la hizo, con qué credencial, con qué rol, qué herramienta, el desenlace
+(`denied`/`ok`/`failed`) y qué filas mutó — nunca los argumentos de la llamada. Retención de
+**365 días**, podada de forma perezosa en la propia escritura. No está expuesta por ninguna ruta
+HTTP ni por ninguna herramienta MCP, y no entra en el `.ffbackup`: es un rastro operativo, no un
+dato del hogar.
+
+**Las herramientas más destructivas piden un segundo secreto.** Además del `confirm: true`
+habitual, las siete herramientas de mayor radio (borrar un activo, un pasivo, un snapshot o un
+lote de importación; aplicar una regla de categorización en bloque; hacer converger los movimientos
+recurrentes; desconciliar una transferencia) exigen un `confirm_token` de un solo uso que solo se
+emite dentro de su propio *preview* y caduca a los 10 minutos. Resuelve un hueco real: el booleano
+`confirm: true` lo escribe el propio modelo, así que por sí solo nunca demuestra que hubo un
+*preview* de por medio.
 
 El registro dinámico de clientes OAuth (`POST /oauth/register`) **sigue abierto sin
 autenticación** en la 4.0.0, como exige el RFC 7591. Registrar un cliente no concede acceso a nada
