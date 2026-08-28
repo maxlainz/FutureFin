@@ -516,6 +516,96 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     assert!(body["message"].as_str().unwrap().starts_with("mcp_write_disabled"), "{body}");
 }
 
+/// Fase 5 (issue #86) — **`type_tag` deja de ser una dimensión de solo lectura**.
+///
+/// `get_summary.liabilities_by_type_tag` desglosa la deuda por una etiqueta que el usuario
+/// escribe libremente… y que hasta ahora ninguna tool podía escribir: `create_liability` y
+/// `update_liability` mandaban `type_tag: None` fijo. Desde MCP el desglose existía, pero todos
+/// los pasivos que un agente diera de alta caían en la línea `type_tag: null` y no había forma
+/// de sacarlos de ahí sin abrir la SPA. Es el hueco exacto que la §2.2 de la skill de paridad
+/// llama «una dimensión que se lee pero no se escribe».
+///
+/// Cubre el ciclo entero: alta con etiqueta → aparece en el desglose de `get_summary` → cambio
+/// de etiqueta → borrado con cadena vacía (el tri-estado del PATCH sin inventar un `clear_*`).
+#[tokio::test]
+async fn liability_type_tag_is_writable_and_reaches_the_summary_breakdown() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat_liab = app.create_category(&owner, "liability", "Préstamos").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vivienda").await;
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_liability",
+            json!({
+                "label": "Hipoteca", "type_tag": "hipoteca", "category_id": cat_liab,
+                "expense_category_id": cat_exp, "principal": "120000",
+            }),
+        ),
+    )
+    .await;
+    let liability_id = tool_json(&envelope)["id"].as_str().unwrap().to_string();
+
+    // Misma core que el POST HTTP: la fila es indistinguible por HTTP.
+    let row_tag = |app_rows: serde_json::Value| -> serde_json::Value {
+        app_rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["id"] == liability_id.as_str())
+            .expect("pasivo visible por HTTP")["type_tag"]
+            .clone()
+    };
+    let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    assert_eq!(row_tag(rows), "hipoteca");
+
+    // Y llega al desglose que sólo se podía LEER desde MCP.
+    let summary = tool_json(
+        &mcp_post(&app, &token, tool_call("get_summary", json!({}))).await,
+    );
+    let line = summary["liabilities_by_type_tag"]
+        .as_array()
+        .expect("liabilities_by_type_tag")
+        .iter()
+        .find(|l| l["type_tag"] == "hipoteca")
+        .cloned()
+        .unwrap_or_else(|| panic!("sin línea 'hipoteca': {summary}"));
+    assert_eq!(line["type_tag"], "hipoteca", "{line}");
+
+    // Cambiar la etiqueta.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_liability",
+            json!({"liability_id": liability_id, "type_tag": "vivienda"}),
+        ),
+    )
+    .await;
+    tool_json(&envelope);
+    let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    assert_eq!(row_tag(rows), "vivienda");
+
+    // Cadena vacía = borrar (el tri-estado del PATCH; `None` conservaría la actual). El campo
+    // desaparece del wire, que es como el handler publica «sin etiqueta».
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_liability", json!({"liability_id": liability_id, "type_tag": ""})),
+    )
+    .await;
+    tool_json(&envelope);
+    let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    assert!(
+        row_tag(rows).is_null(),
+        "la cadena vacía debía borrar el type_tag"
+    );
+}
+
 #[tokio::test]
 async fn recurring_create_and_materialize_are_idempotent() {
     let app = TestApp::spawn().await;
@@ -1032,8 +1122,10 @@ async fn planning_flow_summary_uses_the_wire_form_of_the_direction() {
     assert!(!summary.contains("Outflow"), "el Debug de Rust no debe salir al wire: {summary}");
 
     // Y coincide con lo que devuelve la lectura para la misma fila.
+    // Fase 5: los listados van envueltos con el eco de la vista aplicada.
     let flows = tool_json(&mcp_post(&app, &token, tool_call("list_planning_flows", json!({}))).await);
-    assert_eq!(flows[0]["direction"], "outflow", "{flows}");
+    assert_eq!(flows["view"], "household", "{flows}");
+    assert_eq!(flows["planning_flows"][0]["direction"], "outflow", "{flows}");
 }
 
 /// Cuarteto de `update_categorization_rule`: core compartida, cache NONE, errores de dominio con
@@ -1646,10 +1738,11 @@ async fn delete_import_previews_txn_count_and_cascades() {
     assert!(c.status.is_success(), "{c:?}");
     assert_eq!(app.count_rows("transactions").await, 2);
 
+    // Fase 5: la tool pagina y ecoa la vista → los lotes van bajo `imports`.
     let batches = tool_json(
         &mcp_post(&app, &token, tool_call("list_transaction_imports", json!({}))).await,
     );
-    let import_id = batches[0]["id"].as_str().unwrap().to_string();
+    let import_id = batches["imports"][0]["id"].as_str().unwrap().to_string();
 
     let envelope = mcp_post(&app, &token, tool_call("delete_import", json!({"id": import_id}))).await;
     let preview = tool_json(&envelope);
@@ -2789,10 +2882,11 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         )
         .await;
     assert!(c.status.is_success(), "{c:?}");
+    // Fase 5: la tool pagina y ecoa la vista → los lotes van bajo `imports`.
     let batches = tool_json(
         &mcp_post(&app, &token, tool_call("list_transaction_imports", json!({}))).await,
     );
-    let import_id = batches[0]["id"].as_str().unwrap().to_string();
+    let import_id = batches["imports"][0]["id"].as_str().unwrap().to_string();
 
     // Par auto-conciliado (importes opuestos a un día): el preview de `unreconcile_transfer`
     // necesita una pata con contrapartida para poder enseñar las dos.

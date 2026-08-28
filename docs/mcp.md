@@ -20,6 +20,31 @@ A fecha de agosto de 2026 (4.4.0) el catálogo son **52 herramientas**, que se r
 Las herramientas no son una API paralela: llaman **a las mismas funciones internas** que los
 endpoints HTTP de la app. Lo que ves por MCP es exactamente lo que ves en la interfaz.
 
+### Las respuestas dicen de dónde sale cada cifra (4.4.0)
+
+Una cifra correcta con el contexto equivocado es una respuesta equivocada. Desde la 4.4.0 las
+respuestas llevan, junto al número, el dato que evita confundirlo:
+
+- **De quién es**: toda respuesta que dependa del ámbito dice qué vista aplicó (`view: "household"`
+  o `"mine"`). Antes, en un hogar de una sola persona, pedir «solo lo mío» y no pedir nada daban
+  respuestas idénticas: no había forma de saber si el filtro se había aplicado. En un hogar de dos,
+  eso decide si la cifra que Claude te está citando es tuya o del hogar.
+- **Si es plan o realidad**: el presupuesto declara `basis: "plan"` y el resumen declara si sus
+  cifras salen del plan, de tus movimientos reales o de una mezcla. Cuatro campos se llaman igual en
+  los dos sitios y valen cosas distintas; ahora Claude puede verlo en el propio dato en vez de
+  suponerlo.
+- **Por qué falta algo**: cuando un dato no viene, viene el motivo. Un histórico recortado dice que
+  lo está y desde cuándo hay datos; una curva de detalle ausente dice si es que no la pediste, si no
+  hay movimientos que la dibujen o si la ventana era demasiado ancha.
+- **Qué mueve la curva**: la proyección lista los eventos con fecha (una paga extra, el IRPF, un
+  viaje) que producen los escalones, para que un salto entre dos puntos anuales tenga explicación
+  en vez de parecer un error.
+
+También ha bajado mucho lo que el catálogo ocupa en la conversación (las descripciones de las
+herramientas pasan de ~37.000 a ~21.000 caracteres): en la práctica, Claude llega a tus datos con
+más ventana libre para razonar sobre ellos. Una descripción demasiado larga llegó a viajar
+**truncada** a un cliente real, cortada justo en mitad de una advertencia.
+
 ## Dos formas de conectarse
 
 | Credencial | Prefijo | Para quién |
@@ -149,7 +174,13 @@ Escribir vía MCP pasa por **tres puertas**, y las tres tienen que estar abierta
    reintente.
 3. **La confirmación, en las destructivas.** Las herramientas que borran o cambian cosas en lote
    solo actúan con `confirm: true`. Sin ese campo devuelven un **preview** de lo que pasaría. Así,
-   un borrado nunca ocurre "de paso".
+   un borrado nunca ocurre "de paso". Y las de radio no acotado o sin vuelta atrás (deshacer una
+   importación, borrar un activo, un pasivo o un snapshot, aplicar una regla al histórico,
+   desconciliar una transferencia, materializar recurrentes) piden **además** un código que solo
+   emite ese preview: dura 10 minutos, sirve una vez y va atado a los efectos exactos que se te
+   enseñaron — si cambian entre el preview y la confirmación, hay que volver a previsualizar. No hay
+   forma de confirmarlas a ciegas, y es deliberado: el `confirm: true` lo escribe el propio modelo,
+   así que por sí solo nunca demostró que hubiera habido un preview.
 
 A esas tres se le suma una cuarta si conectas con un **token de API de solo lectura**: ese token no
 escribe aunque las tres anteriores estén abiertas — el límite lo pone el propio token. Los

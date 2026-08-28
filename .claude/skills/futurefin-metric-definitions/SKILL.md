@@ -141,11 +141,81 @@ cuando el cambio no se siente como «tocar una métrica». Regla práctica: si t
 filas entran en un agregado** o **cómo se llama algo que un texto cita**, `grep` el id en
 `helpTexts.ts` antes de cerrar.
 
-## 7. Provenance and maintenance
+## 7. Campos declarativos que no son texto de ayuda: `basis` y las marcas de unidad (4.4.0)
+
+La Fase 5 del tren MCP (issue #86) añadió dos campos **declarativos** — no cambian ninguna cifra,
+declaran su procedencia —: `financial_health.basis` (`GET /v1/summary`, `"plan"` | `"actual"` |
+`"mixed"`, derivado de los dos `savings_*_basis` que ya existían) y `totals.basis`
+(`GET /v1/budget`, constante `"plan"`, `BUDGET_TOTALS_BASIS` en `handlers/budget.rs`).
+
+**Decisión: no entran en `helpTexts.ts`.** Dos razones, no una:
+
+1. **Hoy no tienen consumidor en la SPA.** `apps/web/src/api/types.ts` no tipa ninguno de los dos
+   campos (verificado: ningún `basis` en `FinancialHealthMetrics`/`BudgetTotalsApi`) y ningún
+   `.tsx` los lee. Una entrada sin `helpId=` que la cite es exactamente la mitad huérfana que el
+   test de cobertura (§5) existe para cazar — añadirla habría sido un texto correcto el día de
+   hoy y sin dueño, la misma clase de deriva silenciosa que §6.1 documenta.
+2. **Su prosa ya tiene sitio, y no es este catálogo.** Ambos campos hablan a quien lee el JSON
+   directamente — un cliente MCP comparando `get_budget.totals` con
+   `get_summary.financial_health` —, no a una persona mirando una tarjeta del Resumen. Esa prosa
+   vive donde debe: el doc-comment de `basis` en `FinancialHealthMetrics`
+   (`apps/api/src/handlers/summary.rs`) y en `BudgetTotalsResponse`
+   (`apps/api/src/handlers/budget.rs`), que fluye a OpenAPI y a la descripción de la tool MCP.
+
+Si algún día la SPA pinta un badge «plan» / «real» sobre estas tarjetas, ESE es el momento de
+darle entrada aquí — el mismo criterio que hizo esperar a `retirement.target` hasta que 4.0.0 le
+puso una tarjeta (§6). Hasta entonces, `grep -rn 'financial_health\.basis\|totals\.basis'
+apps/web/src` en vacío es la señal de que la decisión sigue vigente — ojo, un `grep 'basis'` a
+secas NO sirve de prueba: `SavingsAvgBasisApi` (`savings_income_basis`/`savings_expense_basis`,
+ya consumidos por `ProjectionNetWorthChart.tsx`) y el `basis` de los markers históricos son campos
+homónimos preexistentes y no tienen nada que ver con este.
+
+**Lo que sí es una regla de lectura permanente, entre o no en el catálogo**: `get_budget.totals`
+y `get_summary.financial_health` comparten CUATRO nombres de campo —
+`income_monthly_equivalent`, `expense_regular_monthly_equivalent`,
+`expense_total_monthly_equivalent`, `net_monthly_equivalent` — y valen cosas distintas. Los de
+`budget` son SIEMPRE el plan (`totals.basis == "plan"`, constante). Los de `summary` siguen
+`fire_settings.savings_source`: modo A (`budget`, default) coincide con el plan; modos B
+(`transactions_avg`) y C (`budget_income_real_expense`) son el promedio real. **Regla: si
+`financial_health.basis != "plan"`, las dos cuartetas NO son comparables campo a campo** — restar
+una de la otra no es un error de tipos, es un error semántico silencioso. Es la misma familia de
+incidente que abrió este catálogo (§1: las tres cifras de ahorro de 3.9.0, correctas y
+mutuamente irreconciliables porque nada decía su base). La diferencia esta vez es que el propio
+dato declara su base — por eso el arreglo fue un campo nuevo, no una entrada de texto nueva.
+
+**Por qué no se renombraron los cuatro campos en su lugar**: renombrar (p. ej.
+`net_monthly_equivalent` → algo que lleve el modo en el nombre dentro de `financial_health`) es
+breaking sobre seis campos que la SPA ya lee, y **no** habría arreglado nada — seguirías sin saber
+en qué modo está el summary sin mirar `basis`. Lo que faltaba no era un nombre distinto: era
+declarar la procedencia.
+
+**Marcas de unidad (`**Unidad:**`) — el mismo argumento, un nivel más abajo.** La misma auditoría
+anotó cada campo de `FinancialHealthMetrics` con su unidad en el doc-comment
+(`apps/api/src/handlers/summary.rs`) en vez de sufijarla en el nombre (`savings_rate` →
+`savings_rate_fraction`, `debt_to_assets_ratio` → …). Motivo: la unidad es propiedad del CAMPO,
+constante en todas las respuestas — su sitio es el esquema (fluye a OpenAPI y a la tool MCP), no
+200 bytes repetidos en el endpoint más caliente de la app. Regla de lectura vigente en todo el
+API, no solo en `financial_health`: un campo `_rate`/`_ratio` es **fracción** (`0.35` = 35 %); uno
+`_pct`/`_percent` es **porcentaje** (`3.5` = 3,5 %). No es una convención nueva — ya regía
+(`swr_pct`, `savings_rate`); lo nuevo es que ahora está escrita donde un cliente la puede leer sin
+adivinar. Verificable sin compilar: `grep -n '\*\*Unidad:' apps/api/src/handlers/summary.rs`.
+
+**Deriva comprobada en esta pasada**: releídas las 16 entradas de `helpTexts.ts` contra la Fase 5
+(nuevo default de ventana en `/v1/history/series`, `view` ecoado, `events` en la proyección,
+`source: capture|backfill`, `fine_absent_reason`…), ninguna quedó falsa — la Fase 5 no tocó base
+ni ventana de ninguna métrica ya catalogada, solo añadió procedencia a datos que el catálogo no
+describe (no hay entrada de histórico ni de proyección-como-serie en `helpTexts.ts`; esas vistas
+usan el chart, no tarjetas con popover).
+
+## 8. Provenance and maintenance
 
 Introducido en 3.9.0 junto al popover de ayuda. **Re-verificado y ampliado el 2026-08-22 (4.0.0)**:
 §6 (estado del catálogo, `retirement.target`) y §6.1 (las cuatro derivas de la auditoría previa a la
-publicación, ya corregidas en `helpTexts.ts`). Re-verificación:
+publicación, ya corregidas en `helpTexts.ts`). **Ampliado el 2026-08-28 (Fase 5 del tren 4.4.0,
+issue #86)**: §7 — decisión razonada de NO dar entrada a `financial_health.basis`/`totals.basis`
+(sin consumidor en la SPA hoy) y la regla permanente de las cuatro cuartetas homónimas
+`get_budget.totals` ↔ `get_summary.financial_health`. El catálogo en sí (§6) no cambió: sigue en
+16 entradas — este pase fue sobre campos que deliberadamente NO entraron. Re-verificación:
 
 ```bash
 # Entradas del catálogo y consumidores
@@ -154,6 +224,13 @@ grep -rn 'helpId=' apps/web/src --include='*.tsx' | wc -l
 # Los dos hechos que §6.1 afirma sobre el código, sin compilar:
 grep -n 'in_window\|window_start_ym' apps/api/src/handlers/transactions/summary.rs  # tramo medio-abierto
 grep -n 'plan:' apps/web/src/lib/navigation.ts                                      # la sub-pestaña se llama «Plan»
+# Los hechos que §7 afirma sobre el código, sin compilar:
+grep -n 'pub basis: &.static str' apps/api/src/handlers/summary.rs apps/api/src/handlers/budget.rs
+grep -n 'BUDGET_TOTALS_BASIS' apps/api/src/handlers/budget.rs
+grep -n '\*\*Unidad:' apps/api/src/handlers/summary.rs
+# vacío hoy = todavía sin consumidor en la SPA. NO uses `grep 'basis'` a secas: da falsos
+# positivos por SavingsAvgBasisApi y el `basis` de los markers históricos, que no son este campo.
+grep -rn 'financial_health\.basis\|totals\.basis' apps/web/src
 # Las dos direcciones de cobertura
 npm test --workspace futurefin-web -- helpTexts
 ```

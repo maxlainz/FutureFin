@@ -309,6 +309,22 @@ look at the nominal chart with the moving target or the deflated chart with a fl
 milestones are reached later than nominal ones (test at projection.rs:1446-1482), hence the
 separate `milestones_real` field.
 
+**`simulate_projection`'s `model_note` (MCP-only what-if, Fase 5/issue #86, 4.4.0)**: the tool
+restates this section's warning at the point of use, because the two axes a caller varies most —
+`annual_inflation_percent` and `swr_pct` — are exactly the two that interact this way.
+`SIMULATE_MODEL_NOTE` (`handlers/projection.rs`): lowering `annual_inflation_percent` raises every
+asset's REAL return (nominal returns are unchanged — only the frame moved, same nominal-model fact
+as above) **and** freezes the FIRE target at the same time, in the same move — jubilación can land
+years earlier with nothing about the plan actually improved. Read a change to either as a change of
+*assumption*, never as an improvement. `swr_pct` the same way in miniature: raising it lowers the
+target by division, not by saving more. Neither is a tool bug — it is this file's nominal model,
+surfaced to a caller (often an agent) that has no access to this document. Two more `model_note`
+facts worth knowing here: the cash axes (`extra_monthly_savings`, `extra_monthly_cash_adjustment`,
+`one_off_expense`) do NOT touch income or expense — they move `net_cash_monthly`, never
+`net_recurring_monthly`/`savings_rate` (§2b); and `final_net_worth` is nominal euros of the
+horizon's last month, comparable across scenarios only via `final_net_worth_real`, and only when
+`deltas.real_delta_absent_reason` is `null`.
+
 ## 5. The monthly simulation loop, step by step
 
 `project_net_worth_series` (projection.rs:386-575). Series index 0 = today's state; month `k`
@@ -489,6 +505,7 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 - If line anchors look stale: `git log --oneline -3 -- crates/engine/src/projection.rs apps/api/src/handlers/projection.rs`
 - `jubilacion_series_position`/`jubilacion_target_net_worth_nominal` (issue #82, 4.4.0):
   `grep -n "jubilacion_series_position\|jubilacion_target_net_worth_nominal" apps/api/src/handlers/projection.rs` and the pin `grep -n "jubilacion_series_position_indexes_the_arrays" apps/api/tests/projection_number_semantics.rs`
+- `simulate_projection`'s `model_note` (Fase 5, issue #86, 4.4.0): `grep -n "const SIMULATE_MODEL_NOTE" -A3 apps/api/src/handlers/projection.rs` (full text of the warning); `apps/api/tests/mcp_simulate.rs` pins the cache-neutral behavior this note sits next to.
 
 If you change anything this file describes, update this skill in the same change (CLAUDE.md
 rule: keep `.claude/` docs of record current) and re-run both parity suites.

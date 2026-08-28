@@ -84,8 +84,27 @@ pub struct BudgetEntryResponse {
     pub expense_end_date: Option<NaiveDate>,
 }
 
+/// Valor único de `BudgetTotalsResponse::basis`. Constante y no una cadena suelta: el mismo
+/// literal lo consumen el test de contrato y la descripción de la tool MCP `get_budget`.
+pub(crate) const BUDGET_TOTALS_BASIS: &str = "plan";
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BudgetTotalsResponse {
+    /// **Siempre `"plan"`.** Declara que estos totales son el PRESUPUESTO —lo que el usuario dijo
+    /// que ingresaría y gastaría— y nunca lo realmente medido, en ningún modo de `savings_source`.
+    ///
+    /// No es decoración. Cuatro de estos campos —`income_monthly_equivalent`,
+    /// `expense_regular_monthly_equivalent`, `expense_total_monthly_equivalent` y
+    /// `net_monthly_equivalent`— se llaman **exactamente igual** que cuatro de
+    /// `GET /v1/summary` → `financial_health`, y allí siguen el modo: en `budget` (modo A) valen lo
+    /// mismo que aquí, y en `transactions_avg` / `budget_income_real_expense` (modos B y C) valen
+    /// el promedio real. Dos cifras distintas con el mismo nombre en el mismo catálogo es
+    /// exactamente el incidente de las tres cifras de ahorro de 3.9.0. Los nombres no se renombran
+    /// (rompería la SPA y el `.ffbackup` de nadie mejoraría por ello): lo que faltaba era que cada
+    /// lado **declarase su base**, que es lo que este campo y su gemelo
+    /// `financial_health.basis` hacen. Regla de lectura: si `financial_health.basis` no dice
+    /// `"plan"`, esas cuatro cifras y éstas NO son comparables uno a uno.
+    pub basis: &'static str,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub income_monthly_equivalent: Decimal,
@@ -120,6 +139,10 @@ pub struct BudgetTotalsResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BudgetSnapshotResponse {
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `?view` — ver
+    /// `SummaryResponse::view` para el porqué (en una instalación de un solo usuario las dos
+    /// respuestas eran byte a byte idénticas).
+    pub view: &'static str,
     /// Partidas del presupuesto: las persistidas (`source = manual`) **y** las cuotas de los
     /// pasivos activos (`source = liability`, solo lectura, atribuidas a su categoría de gasto).
     pub entries: Vec<BudgetEntryResponse>,
@@ -393,6 +416,7 @@ pub(crate) fn ledger_budget_totals_from_parts(
     let net = income_m - expense_reg;
 
     Ok(BudgetTotalsResponse {
+        basis: BUDGET_TOTALS_BASIS,
         income_monthly_equivalent: income_m,
         income_retirement_monthly_equivalent: income_retirement_m,
         expense_regular_monthly_equivalent: expense_reg,
@@ -631,7 +655,11 @@ pub(crate) async fn budget_snapshot_core(
         entries.push(liability_row_to_entry(d)?);
     }
 
-    Ok(BudgetSnapshotResponse { entries, totals })
+    Ok(BudgetSnapshotResponse {
+        view: view.as_str(),
+        entries,
+        totals,
+    })
 }
 
 #[utoipa::path(

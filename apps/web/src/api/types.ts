@@ -441,9 +441,12 @@ export type HistoryAssetSeriesApi = {
 export type HistoryMarkerApi = {
   date_ymd: string;
   month_index: number;
-  /** `month_index + (día−1)/días_del_mes`. */
+  /** `month_index + (día−1)/días_del_mes`, redondeado a 4 decimales por el servidor. */
   month_fraction: number;
   kind: HistorySnapshotKindApi;
+  /** `capture` = foto que tomó la app; `backfill` = valores tecleados a posteriori para una fecha
+   *  pasada. Un backfill puede estar en cualquier fecha, incluso muy remota. */
+  source: "capture" | "backfill";
   owner_user_id: string;
   total: number;
 };
@@ -456,6 +459,14 @@ export type HistorySeriesApi = {
   anchor_date_ymd: string;
   anchor_month_first_ymd: string;
   view: string;
+  /** Ventana emitida, en meses hacia atrás desde el mes 0. Omitir `window_months` en la petición
+   *  ya NO devuelve todo el histórico (default 120 desde 4.4.0): el chart pide 1200 a propósito. */
+  window_months: number;
+  /** `true` ⇒ hay snapshots anteriores a la ventana y la serie está recortada. */
+  window_truncated: boolean;
+  /** Snapshot más antiguo del scope, esté o no dentro de la ventana. */
+  first_snapshot_date_ymd?: string;
+  first_snapshot_month_index?: number;
   points: HistoryPointApi[];
   asset_series: HistoryAssetSeriesApi[];
   markers: HistoryMarkerApi[];
@@ -939,6 +950,9 @@ export type HistoryCashflowApi = {
    *  no hay patrimonio neto histórico y `fine.net_worth` llega `null`. */
   liabilities_snapshotted: boolean;
   fine?: CashflowFineApi;
+  /** Por qué falta `fine`: `not_requested` | `window_too_large_for_curve` |
+   *  `no_asset_linked_transactions` | `no_snapshots_to_anchor`. `null` ⟺ `fine` viaja. */
+  fine_absent_reason?: string | null;
 };
 
 /**

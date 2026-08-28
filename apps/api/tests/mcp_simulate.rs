@@ -425,7 +425,9 @@ async fn a_negative_expense_override_actually_cuts_and_moves_every_dependent_kpi
     let d = &sim["deltas"];
     assert_eq!(dec(&sim["scenario"]["expense_base_monthly"]), 800.0, "{}", sim["scenario"]);
     assert_eq!(dec(&d["expense_total_monthly_delta"]), -200.0, "{d}");
-    assert_eq!(dec(&d["net_monthly_delta"]), 200.0, "{d}");
+    assert_eq!(dec(&d["net_recurring_monthly_delta"]), 200.0, "{d}");
+    // Un recorte de gasto SÍ mueve las dos: cambia el neto recurrente y, con él, la caja.
+    assert_eq!(dec(&d["net_cash_monthly_delta"]), 200.0, "{d}");
     assert!(dec(&d["savings_rate_delta"]) > 0.0, "recortar sube la tasa de ahorro: {d}");
     assert!(dec(&d["runway_months_delta"]) > 0.0, "y alarga el runway: {d}");
     // Y el objetivo baja: menos gasto, menos patrimonio necesario (modo annual_expense).
@@ -447,7 +449,7 @@ async fn a_negative_expense_override_actually_cuts_and_moves_every_dependent_kpi
     );
     for campo in [
         "expense_total_monthly_delta",
-        "net_monthly_delta",
+        "net_recurring_monthly_delta",
         "savings_rate_delta",
         "runway_months_delta",
     ] {
@@ -458,6 +460,39 @@ async fn a_negative_expense_override_actually_cuts_and_moves_every_dependent_kpi
             caja["deltas"]
         );
     }
+    // …pero SÍ mueve el campo que existe justo para eso (4.4.0). Antes de este par de campos, el
+    // eje de caja devolvía delta 0 en TODO lo que se parecía a «ahorro», que es exactamente lo que
+    // el usuario acababa de preguntar: `net_monthly` era el neto recurrente con nombre ambiguo.
+    assert_eq!(
+        dec(&caja["deltas"]["net_cash_monthly_delta"]),
+        200.0,
+        "el eje de caja mueve la caja mensual: {}",
+        caja["deltas"]
+    );
+    assert_eq!(
+        dec(&caja["scenario"]["monthly_cash_adjustment"]),
+        200.0,
+        "el escenario declara su ajuste constante: {}",
+        caja["scenario"]
+    );
+    assert_eq!(
+        dec(&caja["baseline"]["monthly_cash_adjustment"]),
+        0.0,
+        "el baseline nunca lleva ajuste: {}",
+        caja["baseline"]
+    );
+    assert_eq!(
+        dec(&caja["scenario"]["net_cash_monthly"]),
+        dec(&caja["scenario"]["net_recurring_monthly"])
+            + dec(&caja["scenario"]["monthly_cash_adjustment"]),
+        "identidad net_cash = net_recurring + ajuste: {}",
+        caja["scenario"]
+    );
+    // Y la nota de modelo viaja siempre: es la única tool que deja mover los supuestos.
+    assert!(
+        caja["model_note"].as_str().is_some_and(|n| n.len() > 60),
+        "simulate_projection debe publicar model_note: {caja}"
+    );
 }
 
 #[tokio::test]
@@ -1014,7 +1049,7 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
              exacto de la cuota, `expense_total_monthly` está leyendo `expense_regular_monthly`"
         );
         assert_eq!(
-            dec(&k["net_monthly"]),
+            dec(&k["net_recurring_monthly"]),
             dec(&h["net_monthly_equivalent"]),
             "modo {mode}: neto"
         );
@@ -1040,9 +1075,16 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
 
         // Identidad interna del propio KPI, en los tres modos.
         assert_eq!(
-            dec(&k["net_monthly"]),
+            dec(&k["net_recurring_monthly"]),
             dec(&k["income_monthly"]) - dec(&k["expense_total_monthly"]),
-            "modo {mode}: net = income − expense_total"
+            "modo {mode}: net_recurring = income − expense_total"
+        );
+        // Sin overrides de caja el ajuste es 0 en los DOS lados, así que las dos cifras coinciden.
+        assert_eq!(dec(&k["monthly_cash_adjustment"]), 0.0, "modo {mode}: sin ajuste");
+        assert_eq!(
+            dec(&k["net_cash_monthly"]),
+            dec(&k["net_recurring_monthly"]),
+            "modo {mode}: sin ajuste, caja = recurrente"
         );
 
         // El servicio de deuda solo es una cifra en modo A; en B/C la cuota ya es un movimiento
@@ -1070,7 +1112,8 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
         for field in [
             "income_monthly_delta",
             "expense_total_monthly_delta",
-            "net_monthly_delta",
+            "net_recurring_monthly_delta",
+            "net_cash_monthly_delta",
             "savings_rate_delta",
         ] {
             assert_eq!(dec(&d[field]), 0.0, "modo {mode}: {field} sin overrides");

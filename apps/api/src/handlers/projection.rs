@@ -255,11 +255,27 @@ pub struct AssetSeries {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ProjectionSeriesResponse {
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `?view` — ver
+    /// `SummaryResponse::view` para el porqué. Aquí importa además porque el horizonte y la
+    /// demografía (`viewer_birth_date`, `jubilacion_age`) son SIEMPRE del solicitante, también en
+    /// `household`: sin este campo, dos respuestas con el mismo horizonte y distinto scope de
+    /// patrimonio se leen igual.
+    pub view: &'static str,
     pub points: Vec<ProjectionPoint>,
     pub months: u32,
     /// Años de horizonte efectivos (`months / 12`).
     pub horizon_years: u32,
-    /// `lifespan_90` | `fallback_no_demographics` | `months_override`
+    /// **De dónde sale `months`.** Enumeración cerrada, exactamente tres valores:
+    ///
+    /// - `lifespan_90` — derivado de una fecha de nacimiento: los meses que faltan hasta los 90
+    ///   años del solicitante (o del primer miembro del hogar si él no tiene DOB).
+    /// - `fallback_no_demographics` — no hay ninguna fecha de nacimiento en el hogar: 30 años
+    ///   (360 meses) por convención.
+    /// - `months_override` — lo pidió el llamante con `?months=` / `months`, y se sirvió tal cual
+    ///   (fuera de 12..=840 es un 400 `months_out_of_range`, nunca un clamp silencioso).
+    ///
+    /// Sin este campo, un horizonte de 360 meses es indistinguible de uno elegido a ciegas, y una
+    /// respuesta de 360 meses «porque no sabemos la edad» se lee como una decisión del usuario.
     pub horizon_basis: String,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
@@ -286,7 +302,18 @@ pub struct ProjectionSeriesResponse {
     /// poder adquisitivo de hoy*, no en euros del futuro. La web los usa cuando el toggle
     /// «Inflation Adjusted» está encendido. Vacío cuando la inflación es 0 (coincide con `milestones`).
     pub milestones_real: Vec<ProjectionMilestone>,
-    /// Primer mes en que el componente de interés/mercado supera el ahorro mensual base (sin Próximos ni plan de pagos de deudas).
+    /// **«El mes en que tu dinero empieza a trabajar más que tú»**: primer mes de la simulación en
+    /// que el rendimiento del patrimonio (intereses/mercado del mes) supera el ahorro mensual base.
+    ///
+    /// El ahorro base es el neto recurrente del modelo — **sin** los Próximos (`planning_flows`) ni
+    /// el plan de amortización de las deudas: los dos son flujos puntuales o decrecientes y harían
+    /// que el cruce dependiera de un pago suelto. `null` = no cruza dentro del horizonte, ni
+    /// siquiera en el último mes; no es «no calculado».
+    ///
+    /// Es un **número de MES** (misma base que `points[].month_index`), no una posición de array:
+    /// con `density=hybrid` casi nunca coincide con un punto servido — la misma trampa que
+    /// `jubilacion_month_index`, que por eso lleva su `jubilacion_series_position` al lado. Aquí no
+    /// hay posición equivalente porque la cifra no se lee de la serie.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compound_outpaces_true_savings_month_index: Option<u32>,
     // Los cuatro campos de jubilación viajan como `null` EXPLÍCITO, sin `skip_serializing_if`.
@@ -344,8 +371,20 @@ pub struct ProjectionSeriesResponse {
     pub fire_target_series: Vec<f64>,
     /// Valor de cada activo mes a mes (paralelo a `points`). Un elemento por activo, en el mismo orden que la consulta de activos.
     pub asset_series: Vec<AssetSeries>,
-    /// Densidad de los puntos serializados: `monthly` (default) o `hybrid`.
+    /// Densidad de los puntos serializados: `monthly` (default en HTTP) o `hybrid` (la que fuerza
+    /// la tool MCP `get_projection`). Es un **eco de la decisión del servidor**, no un dato del
+    /// dominio: con `hybrid` los puntos son mensuales hasta el mes 12 y anuales a partir del 24,
+    /// más siempre el último mes del horizonte, así que entre dos puntos consecutivos pueden caber
+    /// doce meses. Cuando ese hueco esconda un salto, la explicación está en `events` — no en
+    /// pedir más puntos.
     pub density: String,
+    /// Saltos puntuales de la curva: los Próximos **con fecha** que caen dentro del horizonte, con
+    /// su mes, su rótulo, su importe y su dirección. Vacío si no hay ninguno. Ver
+    /// [`ProjectionEvent`] para qué entra y qué no.
+    pub events: Vec<ProjectionEvent>,
+    /// `true` ⟺ había más de `PROJECTION_EVENTS_MAX` (100) eventos y `events` está recortado.
+    /// Los que faltan son los de los meses más lejanos (el orden es cronológico).
+    pub events_truncated: bool,
     /// Fuente del ahorro **efectiva** que produjo `monthly_delta_assumption` (tras el fallback: en
     /// modo `transactions_avg` / `budget_income_real_expense` sin meses reales cae a `budget`).
     /// Mismo naming y semántica que el campo homónimo de `/v1/summary`.
@@ -405,6 +444,9 @@ pub(crate) struct PlanningFlowProjRow {
     pub scope: String,
     pub expected_amount: Decimal,
     pub due_date: Option<NaiveDate>,
+    /// Rótulo del flujo. No entra en ninguna cuenta: existe para que
+    /// `ProjectionSeriesResponse::events` pueda **nombrar** el salto que produce.
+    pub title: String,
 }
 
 /// Días civiles: reparto equitativo del total entre `ref_date` y `ref_date + 89` (90 días inclusive).
@@ -439,6 +481,95 @@ fn overlap_inclusive_days(
         return 0;
     }
     end.signed_duration_since(start).num_days() + 1
+}
+
+/// Un salto puntual de la serie de proyección: el mes en que un **Próximo con fecha**
+/// (`planning_flows.due_date`) entra en la caja del modelo.
+///
+/// Existe porque `density=hybrid` —la que sirve la tool MCP— emite un punto por AÑO a partir del
+/// mes 24: entre dos puntos consecutivos caben doce meses, y una caída de decenas de miles de euros
+/// entre ellos no tiene en la respuesta **nada** que la explique. Subir la densidad no lo arregla:
+/// `density=monthly` multiplica el payload por ~5 y sigue sin decir POR QUÉ cayó, solo dónde. Un
+/// evento son ~90 bytes y contesta la pregunta entera.
+///
+/// **Solo flujos CON fecha.** Los Próximos sin `due_date` se reparten a partes iguales sobre 90
+/// días naturales (`PLANNING_UNDATED_SPREAD_DAYS`), así que por construcción no producen un salto:
+/// listarlos aquí llamaría «evento» a una rampa. Tampoco entran los pasivos ni las partidas de
+/// presupuesto con fecha de fin: esos cambian la PENDIENTE de la curva, no producen un escalón.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ProjectionEvent {
+    /// Mes de la serie en que impacta, **misma base que `points[].month_index`** (0 = mes ancla).
+    /// Es un número de MES, no una posición de array: con `density=hybrid` el mes del evento
+    /// normalmente NO es un punto servido — ése es justamente el motivo de que este array exista.
+    pub month_index: u32,
+    /// `due_date` del flujo, `YYYY-MM-DD`.
+    pub date_ymd: String,
+    /// Rótulo que el usuario le puso al Próximo.
+    pub title: String,
+    /// Importe como **magnitud ≥ 0**; el signo lo lleva `direction`. Mismo criterio que la
+    /// comparativa de movimientos, y evita que un `-0` o un doble signo cambien la lectura.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+    /// `inflow` (categoría de scope `income`) | `outflow` (scope `expense`).
+    pub direction: &'static str,
+}
+
+/// Tope de eventos publicados. Los Próximos son pocos por naturaleza, pero nada en el modelo de
+/// datos lo garantiza y este array viaja en el endpoint más caliente de la app.
+const PROJECTION_EVENTS_MAX: usize = 100;
+
+/// Eventos de la serie a partir de los flujos ya cargados. **Comparte la regla de mapeo
+/// fecha→mes con `planning_monthly_cash_adjustments_from_flows`** (mismo `anchor_month_first`,
+/// mismo descarte de lo anterior al mes ancla, misma búsqueda del mes que contiene la fecha):
+/// si divergieran, la respuesta señalaría un mes distinto de aquel en el que la curva salta.
+///
+/// Devuelve `(eventos, truncados)` ordenados por `month_index` ASC y, dentro del mes, por importe
+/// descendente — el que más mueve la curva primero.
+fn projection_events_from_flows(
+    ref_date: NaiveDate,
+    horizon_months: u32,
+    flows: &[PlanningFlowProjRow],
+) -> (Vec<ProjectionEvent>, bool) {
+    let anchor_month_first = proj_month_first(ref_date);
+    let mut out: Vec<ProjectionEvent> = Vec::new();
+
+    for flow in flows {
+        let direction = match flow.scope.as_str() {
+            "income" => "inflow",
+            "expense" => "outflow",
+            _ => continue,
+        };
+        // Sin fecha no hay escalón: se reparte sobre 90 días (ver el doc de `ProjectionEvent`).
+        let Some(due) = flow.due_date else { continue };
+        if due < anchor_month_first {
+            continue;
+        }
+        for idx in 0..horizon_months {
+            let m_first = proj_add_months(anchor_month_first, idx);
+            let m_last = proj_month_last(m_first);
+            if due >= m_first && due <= m_last {
+                out.push(ProjectionEvent {
+                    month_index: idx,
+                    date_ymd: due.format("%Y-%m-%d").to_string(),
+                    title: flow.title.clone(),
+                    amount: money_out(flow.expected_amount.abs()),
+                    direction,
+                });
+                break;
+            }
+        }
+    }
+
+    out.sort_by(|a, b| {
+        a.month_index
+            .cmp(&b.month_index)
+            .then_with(|| b.amount.cmp(&a.amount))
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    let truncated = out.len() > PROJECTION_EVENTS_MAX;
+    out.truncate(PROJECTION_EVENTS_MAX);
+    (out, truncated)
 }
 
 fn planning_monthly_cash_adjustments_from_flows(
@@ -1207,7 +1338,7 @@ pub(crate) async fn build_installation_projection_input(
 
     let plan_scope = view.scope_where("p");
     let plan_sql = format!(
-        r#"SELECT c.scope AS scope, p.expected_amount, p.due_date
+        r#"SELECT c.scope AS scope, p.expected_amount, p.due_date, p.title
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE {plan_scope}"#
@@ -1748,6 +1879,9 @@ pub async fn compute_projection_series_response(
 
     let milestone_baseline_adjustment =
         planning_upcoming_net_for_milestone_baseline(today, &planning_rows);
+    // Eventos: mismo `planning_rows` ya cargado, misma regla fecha→mes que los ajustes de caja.
+    // Ninguna query nueva.
+    let (events, events_truncated) = projection_events_from_flows(today, months, &planning_rows);
     let milestones = projection_unique_reached_milestones(
         &points_full,
         today,
@@ -1834,6 +1968,7 @@ pub async fn compute_projection_series_response(
     );
 
     Ok(ProjectionSeriesResponse {
+        view: view.as_str(),
         points,
         months,
         horizon_years,
@@ -1866,6 +2001,8 @@ pub async fn compute_projection_series_response(
             Density::Monthly => "monthly".into(),
             Density::Hybrid => "hybrid".into(),
         },
+        events,
+        events_truncated,
         savings_source: effective_savings_source,
         savings_income_basis,
         savings_expense_basis,
@@ -1950,12 +2087,37 @@ pub(crate) struct SimKpis {
     /// `included_in_real_expense` ⟺ `debt_service_monthly` es `null`. `null` ⟺ la cuota viaja (y
     /// entonces un `0` sí significa «no hay pasivos con cuota activa»).
     pub debt_service_absent_reason: Option<&'static str>,
-    /// `income_monthly − expense_total_monthly`. Es el neto recurrente, NO el `net_cash_month` que
-    /// reparte la cascada: ese incluye además el tramo de planning flows del mes en curso.
+    /// `income_monthly − expense_total_monthly`: el neto **recurrente** del lado.
+    ///
+    /// Se llamaba `net_monthly` y era la trampa más cara de esta tool. `extra_monthly_savings` y
+    /// `extra_monthly_cash_adjustment` no tocan el ingreso ni el gasto: entran como ajuste de caja
+    /// mensual (el mismo mecanismo que un Próximo), así que este número salía **idéntico en
+    /// baseline y escenario** y su delta era exactamente 0 — en el campo por el que el usuario
+    /// acababa de preguntar, dentro de un objeto llamado `scenario`. Estaba documentado como
+    /// contrato, y aun así el nombre prometía otra cosa.
+    ///
+    /// La identidad `income_monthly − expense_total_monthly` se conserva a propósito: quien lea la
+    /// respuesta puede comprobarla con una resta. Lo que se movió es el NOMBRE, y lo que faltaba
+    /// es `net_cash_monthly` — ahí abajo — que sí recoge el ajuste.
     #[serde(with = "rust_decimal::serde::str")]
-    pub net_monthly: Decimal,
-    /// `net_monthly / income_monthly`, redondeado a 6 decimales igual que en `/v1/summary` (misma
-    /// precisión en las dos superficies). `None` si no hay ingreso.
+    pub net_recurring_monthly: Decimal,
+    /// Ajuste de caja mensual **constante** que los overrides de este lado aplican a TODOS los
+    /// meses del horizonte: `extra_monthly_savings − extra_monthly_cash_adjustment`.
+    /// **Siempre `0` en el baseline** (el baseline no lleva overrides). No incluye el gasto
+    /// puntual (`one_off_expense`, que afecta a un solo mes) ni los Próximos reales del hogar, que
+    /// no son constantes y ya viven dentro de la simulación.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub monthly_cash_adjustment: Decimal,
+    /// `net_recurring_monthly + monthly_cash_adjustment`: la caja mensual estable que este lado
+    /// mete de verdad en la cascada. **Es el campo que se mueve** cuando simulas ahorrar 200 € más
+    /// al mes. Sigue sin ser el `net_cash_month` del motor mes a mes, que suma además el tramo de
+    /// Próximos del mes en curso y el one-off donde caiga.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub net_cash_monthly: Decimal,
+    /// `net_recurring_monthly / income_monthly`, redondeado a 6 decimales igual que en
+    /// `/v1/summary` (misma precisión en las dos superficies). `None` si no hay ingreso.
+    /// Deliberadamente sobre el neto RECURRENTE: es la tasa de ahorro comparable con
+    /// `financial_health.savings_rate`, que tampoco conoce ajustes de caja.
     #[serde(with = "rust_decimal::serde::str_option")]
     pub savings_rate: Option<Decimal>,
 
@@ -2025,8 +2187,18 @@ pub(crate) struct SimDeltas {
     pub income_monthly_delta: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     pub expense_total_monthly_delta: Decimal,
+    /// `scenario − baseline` del neto **recurrente**. Vale 0 para todo override que solo mueva
+    /// caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`): eso es
+    /// correcto y ahora el nombre lo dice. El delta que responde a esos ejes es
+    /// `net_cash_monthly_delta`.
     #[serde(with = "rust_decimal::serde::str")]
-    pub net_monthly_delta: Decimal,
+    pub net_recurring_monthly_delta: Decimal,
+    /// `scenario − baseline` de la caja mensual estable. Con el baseline siempre a
+    /// `monthly_cash_adjustment = 0`, esto es `net_recurring_monthly_delta + el ajuste del
+    /// escenario`: el número que un agente debe citar cuando el usuario pregunta «¿y si ahorro X
+    /// más al mes?».
+    #[serde(with = "rust_decimal::serde::str")]
+    pub net_cash_monthly_delta: Decimal,
     /// Diferencia de tasas calculada sobre los ratios **sin redondear** y redondeada al final:
     /// restar dos valores ya recortados a 6 dp propagaría el error de presentación al delta.
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -2048,7 +2220,8 @@ pub(crate) struct SimulateProjectionResponse {
     /// `fallback_no_demographics` (30 años, no hay ninguna) o `months_override` (lo pediste tú).
     /// Sin él, un horizonte de 360 meses no se distingue de uno elegido a ciegas.
     pub horizon_basis: String,
-    pub view: String,
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `view`.
+    pub view: &'static str,
     /// Mes 0 de la simulación (`YYYY-MM-DD`), en el calendario de la instalación. Va aquí para que
     /// la respuesta sea autocontenida: sin ancla, convertir un índice de mes obligaba a encadenar
     /// una llamada a `get_projection`.
@@ -2058,6 +2231,8 @@ pub(crate) struct SimulateProjectionResponse {
     /// Fecha de nacimiento con la que se resolvieron las edades. `null` si no hay ninguna.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewer_birth_date: Option<String>,
+    /// Supuestos del modelo con los que hay que leer los deltas. Ver [`SIMULATE_MODEL_NOTE`].
+    pub model_note: String,
     pub baseline: SimKpis,
     pub scenario: SimKpis,
     pub deltas: SimDeltas,
@@ -2077,6 +2252,7 @@ fn require_non_negative(name: &str, v: Option<Decimal>) -> Result<Decimal, ApiEr
 /// `input` es el que se SIMULÓ de verdad (en el escenario, el clon ya mutado por los overrides
 /// post-build); `built` es el ensamblado de ese mismo lado, del que salen el servicio de deuda y
 /// el eco de contexto. Van separados a propósito: `built.input` es el de antes de mutar.
+#[allow(clippy::too_many_arguments)]
 fn sim_kpis(
     input: &ProjectionInput,
     output: &futurefin_engine::ProjectionOutput,
@@ -2085,6 +2261,11 @@ fn sim_kpis(
     fs: &FireSettings,
     today: NaiveDate,
     birth_date: Option<NaiveDate>,
+    // `monthly_cash_adjustment`: ajuste de caja mensual constante de ESTE lado (0 en el baseline).
+    // Se pasa desde el llamante, que es quien lo aplicó al `planning_monthly_cash_adjustment` del
+    // input: derivarlo aquí a partir del array significaría adivinar qué parte de él es el
+    // override y qué parte son los Próximos reales del hogar.
+    monthly_cash_adjustment: Decimal,
 ) -> SimKpis {
     let debt_service_monthly = built.debt_service_monthly;
     let jubilacion_month_index = fire_crossover_month(input.fire_target.as_ref(), &output.net_worth);
@@ -2126,9 +2307,9 @@ fn sim_kpis(
     };
 
     let income_monthly = input.income_regular_monthly;
-    let net_monthly = income_monthly - monthly_expense;
+    let net_recurring_monthly = income_monthly - monthly_expense;
     let savings_rate = (income_monthly > Decimal::ZERO)
-        .then(|| (net_monthly / income_monthly).round_dp(SIM_RATIO_DP));
+        .then(|| (net_recurring_monthly / income_monthly).round_dp(SIM_RATIO_DP));
 
     SimKpis {
         jubilacion_month_index,
@@ -2149,7 +2330,9 @@ fn sim_kpis(
             .is_none()
             .then(|| money_out(debt_service_monthly)),
         debt_service_absent_reason: built.debt_service_absent_reason,
-        net_monthly: money_out(net_monthly),
+        net_recurring_monthly: money_out(net_recurring_monthly),
+        monthly_cash_adjustment: money_out(monthly_cash_adjustment),
+        net_cash_monthly: money_out(net_recurring_monthly + monthly_cash_adjustment),
         savings_rate,
         savings_source: built.effective_savings_source,
         savings_income_basis: built.savings_income_basis.clone(),
@@ -2165,6 +2348,16 @@ fn sim_kpis(
         expense_retirement_base_monthly: money_out(input.expense_retirement_monthly),
     }
 }
+
+/// Nota de modelo de `simulate_projection`. Era la única tool de proyección sin ella, y la que
+/// más la necesita: es la única que deja **mover los supuestos**, así que sus deltas se pueden
+/// leer como una predicción cuando son la consecuencia mecánica de un cambio de hipótesis.
+///
+/// El caso que la motiva: simular `annual_inflation_percent: "0"` adelanta la jubilación años. No
+/// porque el plan mejore, sino porque el motor capitaliza en NOMINAL y solo el objetivo FIRE crece
+/// con la inflación — bajarla sube la rentabilidad real de todos los activos y congela el objetivo
+/// a la vez, gratis, en el mismo movimiento. Lo mismo, en pequeño, con `swr_pct`.
+const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos del hogar (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. El motor capitaliza en euros NOMINALES y solo el objetivo FIRE se ajusta por inflación, así que bajar `annual_inflation_percent` sube la rentabilidad real de todos los activos Y congela el objetivo al mismo tiempo: puede adelantar la jubilación años sin que nada del plan haya mejorado. Léelo como un cambio de supuesto, no como una mejora. Igual con `swr_pct`: subirlo baja el objetivo por división, no por ahorrar más. Los ejes de caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, no `net_recurring_monthly` ni `savings_rate`. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null.";
 
 /// Decimales de `SimKpis::savings_rate`. Debe seguir siendo el mismo que el `RATIO_DP` de
 /// `handlers/summary.rs`: si divergen, se reabre la incoherencia de precisión entre superficies que
@@ -2326,6 +2519,7 @@ pub(crate) async fn simulate_projection_core(
                     scope: "expense".into(),
                     expected_amount: amount,
                     due_date: Some(date),
+                    title: "one_off_expense".into(),
                 };
                 let adj = planning_monthly_cash_adjustments_from_flows(
                     ctx.today,
@@ -2388,6 +2582,8 @@ pub(crate) async fn simulate_projection_core(
         &ctx.fire_settings,
         ctx.today,
         ctx.birth_date,
+        // El baseline es la instalación tal cual: por definición no lleva ajuste de caja.
+        Decimal::ZERO,
     );
     let scenario = sim_kpis(
         &scenario_input,
@@ -2397,6 +2593,8 @@ pub(crate) async fn simulate_projection_core(
         &fs_eff,
         ctx.today,
         ctx.birth_date,
+        // El MISMO `monthly_adj` que se sumó a `planning_monthly_cash_adjustment` arriba.
+        monthly_adj,
     );
 
     // Deflactores comparables ⟺ las dos inflaciones EFECTIVAS coinciden. Se lee del eco de cada
@@ -2428,12 +2626,18 @@ pub(crate) async fn simulate_projection_core(
         expense_total_monthly_delta: money_out(
             scenario.expense_total_monthly - baseline.expense_total_monthly,
         ),
-        net_monthly_delta: money_out(scenario.net_monthly - baseline.net_monthly),
+        net_recurring_monthly_delta: money_out(
+            scenario.net_recurring_monthly - baseline.net_recurring_monthly,
+        ),
+        net_cash_monthly_delta: money_out(
+            scenario.net_cash_monthly - baseline.net_cash_monthly,
+        ),
         // Se recalcula desde `net`/`income` (que viajan EXACTOS) en vez de restar los dos
         // `savings_rate` ya redondeados.
         savings_rate_delta: {
             let raw = |k: &SimKpis| {
-                (k.income_monthly > Decimal::ZERO).then(|| k.net_monthly / k.income_monthly)
+                (k.income_monthly > Decimal::ZERO)
+                    .then(|| k.net_recurring_monthly / k.income_monthly)
             };
             match (raw(&baseline), raw(&scenario)) {
                 (Some(b), Some(s)) => Some((s - b).round_dp(SIM_RATIO_DP)),
@@ -2462,14 +2666,11 @@ pub(crate) async fn simulate_projection_core(
     Ok(SimulateProjectionResponse {
         horizon_months: months,
         horizon_basis: ctx.horizon_basis.clone(),
-        view: if view == LedgerView::Mine {
-            "mine".into()
-        } else {
-            "household".into()
-        },
+        view: view.as_str(),
         anchor_date_ymd: ctx.today.format("%Y-%m-%d").to_string(),
         show_age_mode: ctx.show_age_mode.clone(),
         viewer_birth_date: ctx.birth_date.map(|d| d.format("%Y-%m-%d").to_string()),
+        model_note: SIMULATE_MODEL_NOTE.into(),
         baseline,
         scenario,
         deltas,
@@ -2600,6 +2801,7 @@ mod planning_distribution_tests {
             scope: "expense".into(),
             expected_amount: Decimal::from(500),
             due_date: Some(NaiveDate::from_ymd_opt(2026, 5, 2).unwrap()),
+            title: "Derrama".into(),
         }];
         let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 4, &flows);
         assert_eq!(adj[2], Decimal::from(-500));
@@ -2613,6 +2815,7 @@ mod planning_distribution_tests {
             scope: "income".into(),
             expected_amount: Decimal::from(9999),
             due_date: Some(NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()),
+            title: "Cobro pasado".into(),
         }];
         let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 3, &flows);
         assert!(adj.iter().all(|x| *x == Decimal::ZERO));
@@ -2625,6 +2828,7 @@ mod planning_distribution_tests {
             scope: "expense".into(),
             expected_amount: Decimal::from(900),
             due_date: None,
+            title: "Sin fecha".into(),
         }];
         let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 3, &flows);
         assert_eq!(adj.iter().sum::<Decimal>(), Decimal::from(-900));
@@ -2647,16 +2851,19 @@ mod milestone_tests {
                 scope: "income".into(),
                 expected_amount: Decimal::from(1200),
                 due_date: Some(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()),
+                title: "Paga extra".into(),
             },
             PlanningFlowProjRow {
                 scope: "expense".into(),
                 expected_amount: Decimal::from(300),
                 due_date: Some(NaiveDate::from_ymd_opt(2026, 4, 5).unwrap()),
+                title: "IRPF".into(),
             },
             PlanningFlowProjRow {
                 scope: "expense".into(),
                 expected_amount: Decimal::from(100),
                 due_date: None,
+                title: "Varios".into(),
             },
         ];
         // 1200 (dated within 90d) -100 (undated expense); April expense fuera ventana.

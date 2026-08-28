@@ -956,7 +956,7 @@ pub(crate) async fn patch_transactions_batch_core(
     tag = "transactions",
     params(("view" = Option<String>, Query, description = "`mine` | household.")),
     responses(
-        (status = 200, description = "Meses con datos (orden DESC)", body = [MonthEntry]),
+        (status = 200, description = "Meses con datos (orden DESC). El mes civil en curso viaja siempre, con `txn_count: 0` si está vacío.", body = [MonthEntry]),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Not an installation member"),
         (status = 404, description = "Installation missing"),
@@ -995,14 +995,33 @@ pub(crate) async fn list_months_core(
         .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
         .fetch_all(pool)
         .await?;
-    Ok(rows
+    let mut out: Vec<MonthEntry> = rows
         .into_iter()
         .map(|(month, txn_count)| MonthEntry {
             is_complete: month != current_month,
             month,
             txn_count,
         })
-        .collect())
+        .collect();
+
+    // El mes en curso SIEMPRE está en la lista, aunque el `GROUP BY` no lo haya devuelto por estar
+    // vacío. Ver el doc de `MonthEntry::is_complete`: sin esto la única rama que puede producir
+    // `is_complete = false` desaparecía justo en el caso en que importa, y la lista contradecía a
+    // las series, que sí reservan hueco para ese mes.
+    if !out.iter().any(|m| m.month == current_month) {
+        out.insert(
+            0,
+            MonthEntry {
+                month: current_month,
+                is_complete: false,
+                txn_count: 0,
+            },
+        );
+    }
+    // `ORDER BY month DESC` en SQL + el mes en curso al frente: el mes en curso es siempre el más
+    // reciente (las fechas futuras no existen en este agregado), así que `insert(0)` conserva el
+    // orden sin reordenar.
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1410,19 +1429,35 @@ pub async fn list_imports(
 ) -> Result<Json<Vec<ImportBatchResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_imports_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
+    // Camino HTTP: conjunto entero, sin `COUNT` — contrato REST intacto.
+    let (out, _total) =
+        list_imports_page(&state.pool, iid, user.id.0, q.resolve()?, None, 0).await?;
     Ok(Json(out))
 }
 
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_transaction_imports`.
-pub(crate) async fn list_imports_core(
+///
+/// **Paginación con el mismo contrato que `list_transactions_core`**: `limit = None` (HTTP) no
+/// emite `LIMIT`/`OFFSET` ni la query de `COUNT`; `limit = Some(n)` (MCP) baja la paginación a SQL
+/// y saca `total_count` de un `COUNT(*)`. Este listado crece un lote por cada CSV importado —un
+/// usuario con dos años de extractos mensuales de dos bancos lleva ~48— y no tenía cota ninguna.
+///
+/// El cruce de **posibles duplicados** se hace en Rust sobre la página ya cargada, sin ninguna
+/// query extra. Consecuencia documentada: solo ve duplicados **dentro de la misma página**, así
+/// que un lote y su gemelo separados por una frontera de paginación no se señalan. Es el precio
+/// de no añadir un self-join a un endpoint de listado; con el orden `created_at DESC` dos imports
+/// del mismo fichero caen casi siempre juntos, y quien quiera la certeza puede pedir la página
+/// entera (`limit` alto) o filtrar por `original_filename`.
+pub(crate) async fn list_imports_page(
     pool: &sqlx::PgPool,
     iid: Uuid,
     user_id: Uuid,
     view: LedgerView,
-) -> Result<Vec<ImportBatchResponse>, ApiError> {
+    limit: Option<i64>,
+    offset: i64,
+) -> Result<(Vec<ImportBatchResponse>, i64), ApiError> {
     let scope = view.scope_where("ti");
-    let sql = format!(
+    let mut sql = format!(
         "SELECT ti.id, ti.source, ti.account_asset_id, a.name AS account_asset_name,
                 ti.original_filename, ti.created_at,
                 (SELECT COUNT(*)::bigint FROM transactions t WHERE t.import_id = ti.id) AS txn_count
@@ -1431,22 +1466,58 @@ pub(crate) async fn list_imports_core(
          WHERE {scope}
          ORDER BY ti.created_at DESC, ti.id DESC"
     );
-    let rows: Vec<ImportRow> = view
-        .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .into_iter()
+    if limit.is_some() {
+        let ph = view.next_arg_index();
+        sql.push_str(&format!(" LIMIT ${ph} OFFSET ${}", ph + 1));
+    }
+    let mut q = view.bind_scope_as(sqlx::query_as(&sql), iid, user_id);
+    if let Some(n) = limit {
+        q = q.bind(n).bind(offset);
+    }
+    let rows: Vec<ImportRow> = q.fetch_all(pool).await?;
+
+    // Sin `limit` el total ES la página.
+    let total_count: i64 = match limit {
+        None => rows.len() as i64,
+        Some(_) => {
+            let count_sql = format!("SELECT COUNT(*) FROM transaction_imports ti WHERE {scope}");
+            view.bind_scope_scalar(sqlx::query_scalar(&count_sql), iid, user_id)
+                .fetch_one(pool)
+                .await?
+        }
+    };
+
+    // Gemelos por (fichero, cuenta). `original_filename` NULL no agrupa: un import manual sin
+    // fichero no es duplicado de otro por el hecho de no tener nombre.
+    let mut by_key: HashMap<(&str, Option<Uuid>), Vec<Uuid>> = HashMap::new();
+    for r in &rows {
+        if let Some(name) = r.original_filename.as_deref() {
+            by_key
+                .entry((name, r.account_asset_id))
+                .or_default()
+                .push(r.id);
+        }
+    }
+
+    let page: Vec<ImportBatchResponse> = rows
+        .iter()
         .map(|r| ImportBatchResponse {
             id: r.id,
-            source: r.source,
+            source: r.source.clone(),
             account_asset_id: r.account_asset_id,
-            account_asset_name: r.account_asset_name,
-            original_filename: r.original_filename,
+            account_asset_name: r.account_asset_name.clone(),
+            original_filename: r.original_filename.clone(),
             created_at: r.created_at,
             txn_count: r.txn_count,
+            possible_duplicate_of: r
+                .original_filename
+                .as_deref()
+                .and_then(|name| by_key.get(&(name, r.account_asset_id)))
+                .map(|ids| ids.iter().copied().filter(|id| *id != r.id).collect())
+                .unwrap_or_default(),
         })
-        .collect())
+        .collect();
+    Ok((page, total_count))
 }
 
 #[derive(Debug, Deserialize)]
