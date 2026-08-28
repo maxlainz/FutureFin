@@ -33,7 +33,9 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use sqlx::{FromRow, PgConnection};
+use sqlx::postgres::PgArguments;
+use sqlx::query::{QueryAs, QueryScalar};
+use sqlx::{FromRow, PgConnection, Postgres};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -314,11 +316,11 @@ pub(crate) async fn create_transaction_core(
     tag = "transactions",
     request_body = BatchCreateBody,
     responses(
-        (status = 201, description = "Transacciones manuales creadas", body = [TransactionResponse]),
-        (status = 400, description = "Validación"),
+        (status = 201, description = "Transacciones manuales creadas. Con `idempotency_key`, un reenvío del MISMO lote devuelve otra vez ESTOS movimientos (mismos ids) sin crear nada", body = [TransactionResponse]),
+        (status = 400, description = "Validación; `idempotency_key_batch_unsupported` si la clave viaja dentro de un ítem en vez de en la raíz"),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
-        (status = 409, description = "Huella duplicada"),
+        (status = 409, description = "Huella duplicada, o `idempotency_key` reutilizada con un lote distinto"),
     )
 )]
 pub async fn create_batch(
@@ -331,6 +333,24 @@ pub async fn create_batch(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let out = create_batch_core(&state, iid, user.id.0, body).await?;
+    Ok((axum::http::StatusCode::CREATED, Json(out)))
+}
+
+/// Core sin HTTP del alta en lote: lo comparten el handler POST y la tool MCP. Todo-o-nada en una
+/// sola transacción; la invalidación condicionada (COND: solo modos B/C) vive DENTRO, post-commit.
+/// El caller ya validó sesión + rol.
+///
+/// ## Idempotencia
+/// `body.idempotency_key` es la clave del LOTE (no una por ítem — esas se siguen rechazando). Ver
+/// el doc de `transactions/idempotency.rs` para el contrato completo y por qué el «3 de 5 se
+/// reproducen» que bloqueaba esto no era una pregunta con respuesta, sino una pregunta mal hecha.
+pub(crate) async fn create_batch_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    body: BatchCreateBody,
+) -> Result<Vec<TransactionResponse>, ApiError> {
     if body.transactions.is_empty() {
         return Err(ApiError::BadRequest(
             "batch_empty: batch must contain at least one transaction".into(),
@@ -342,15 +362,15 @@ pub async fn create_batch(
         )));
     }
 
-    // La idempotencia es del alta INDIVIDUAL. Aquí se rechaza en vez de ignorarse: un lote es
-    // todo-o-nada en una sola transacción, así que una clave por ítem tendría que responder «3 de
-    // 5 se reproducen», y aceptar el campo para tirarlo dejaría al llamante creyéndose protegido
-    // — el fallo silencioso exacto que la clave viene a cerrar.
+    // Una clave POR ÍTEM sigue rechazada: un lote es todo-o-nada, así que una clave por ítem
+    // tendría que responder «3 de 5 se reproducen», y aceptar el campo para tirarlo dejaría al
+    // llamante creyéndose protegido. La clave del lote va en la raíz del cuerpo.
     if body.transactions.iter().any(|b| b.idempotency_key.is_some()) {
         return Err(ApiError::BadRequest(
-            "idempotency_key_batch_unsupported: idempotency_key is only supported on POST /v1/transactions, not in a batch".into(),
+            "idempotency_key_batch_unsupported: put idempotency_key at the root of the batch body, not inside an item".into(),
         ));
     }
+    let batch_key = idempotency::normalize_batch_key(body.idempotency_key)?;
     let items: Vec<&CreateTransactionBody> =
         body.transactions.iter().map(|b| &b.transaction).collect();
 
@@ -358,8 +378,9 @@ pub async fn create_batch(
     for b in &items {
         prepared.push(validate_manual(&state.pool, iid, b).await?);
     }
+    let recurring: Vec<bool> = items.iter().map(|b| b.recurrence.is_some()).collect();
     // "Hoy" de la instalación para el backfill (solo si algún ítem trae recurrencia).
-    let today = if items.iter().any(|b| b.recurrence.is_some()) {
+    let today = if recurring.iter().any(|r| *r) {
         Some(installation_naive_today(&state.pool, iid).await?)
     } else {
         None
@@ -373,6 +394,27 @@ pub async fn create_batch(
         }
     }
 
+    // Huella del lote ENTERO (mismo hash en las N filas de clave), solo si hay clave.
+    let batch_hash = batch_key
+        .as_ref()
+        .map(|_| idempotency::batch_request_hash(&prepared, &recurring));
+
+    // Camino de réplica: si la clave ya está tomada no se inserta NADA. La poda de claves
+    // caducadas va aquí, en la escritura, nunca en un GET (D5).
+    if let (Some(key), Some(hash)) = (batch_key.as_deref(), batch_hash.as_deref()) {
+        idempotency::gc_expired(&state.pool).await;
+        let anchor = idempotency::batch_item_key(key, 0);
+        if idempotency::lookup(&state.pool, iid, user_id, &anchor)
+            .await?
+            .is_some()
+        {
+            let ids =
+                idempotency::lookup_batch_ids(&state.pool, iid, user_id, key, prepared.len(), hash)
+                    .await?;
+            return load_many(&state.pool, &ids).await;
+        }
+    }
+
     let mut tx = state.pool.begin().await?;
     // Contador de ordinal por huella dentro del batch (arranca en el MAX+1 de la BD).
     let mut next_ord: HashMap<String, i32> = HashMap::new();
@@ -381,24 +423,70 @@ pub async fn create_batch(
     for (b, p) in items.iter().zip(prepared.iter()) {
         let ord = match next_ord.get(&p.fingerprint) {
             Some(&o) => o,
-            None => next_fingerprint_ordinal(&mut tx, iid, user.id.0, &p.fingerprint).await?,
+            None => next_fingerprint_ordinal(&mut tx, iid, user_id, &p.fingerprint).await?,
         };
         let id =
-            insert_manual_with_recurrence(&mut tx, iid, user.id.0, p, ord, b.recurrence.is_some())
+            insert_manual_with_recurrence(&mut tx, iid, user_id, p, ord, b.recurrence.is_some())
                 .await?;
         next_ord.insert(p.fingerprint.clone(), ord + 1);
         ids.push(id);
     }
+    // Las N claves derivadas se reclaman DENTRO de la misma transacción que los N INSERT: o
+    // existen las 2N filas o no existe ninguna. Eso es lo que hace que «3 de 5» no pueda ocurrir.
+    if let (Some(key), Some(hash)) = (batch_key.as_deref(), batch_hash.as_deref()) {
+        let mut lost = false;
+        for (i, id) in ids.iter().enumerate() {
+            let derived = idempotency::batch_item_key(key, i);
+            if !idempotency::claim(&mut tx, iid, user_id, &derived, hash, *id).await? {
+                lost = true;
+                break;
+            }
+        }
+        if lost {
+            tx.rollback().await?;
+            // Perder la carrera en el ancla significa que el rival commiteó (el `ON CONFLICT DO
+            // NOTHING` espera a que termine): se reproduce su lote. Perderla en un ítem posterior
+            // con el ancla libre no es una carrera, es una colisión con una clave INDIVIDUAL que
+            // el cliente llamó literalmente `{clave}#b{i}` → 409 ruidoso, nunca un lote a medias.
+            let anchor = idempotency::batch_item_key(key, 0);
+            if idempotency::lookup(&state.pool, iid, user_id, &anchor)
+                .await?
+                .is_some()
+            {
+                let ids = idempotency::lookup_batch_ids(
+                    &state.pool,
+                    iid,
+                    user_id,
+                    key,
+                    prepared.len(),
+                    hash,
+                )
+                .await?;
+                return load_many(&state.pool, &ids).await;
+            }
+            return Err(ApiError::ConflictWith(
+                "idempotency_key_conflict: one of the keys this batch derives is already taken by another write; use a different idempotency_key".into(),
+            ));
+        }
+    }
     tx.commit().await?;
 
-    auto_reconcile_after_mutation(&state, iid, user.id.0).await;
-        recurring::converge_recurring_after_mutation(&state, iid).await;
-    invalidate_projection_if_savings_uses_transactions(&state, iid, user.id.0).await;
+    auto_reconcile_after_mutation(state, iid, user_id).await;
+    recurring::converge_recurring_after_mutation(state, iid).await;
+    invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+    load_many(&state.pool, &ids).await
+}
+
+/// Recarga N movimientos por id, en orden.
+async fn load_many(
+    pool: &sqlx::PgPool,
+    ids: &[Uuid],
+) -> Result<Vec<TransactionResponse>, ApiError> {
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
-        out.push(load_txn(&state.pool, id).await?);
+        out.push(load_txn(pool, *id).await?);
     }
-    Ok((axum::http::StatusCode::CREATED, Json(out)))
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +504,9 @@ pub struct ListTxnQuery {
     pub kind: Option<String>,
     #[serde(default)]
     pub category_id: Option<Uuid>,
+    /// `true` → solo movimientos SIN categoría. Excluyente con `category_id`.
+    #[serde(default)]
+    pub uncategorized: Option<bool>,
     #[serde(default)]
     pub import_id: Option<Uuid>,
     /// Subcadena del concepto, insensible a mayúsculas y a tildes.
@@ -487,6 +578,7 @@ fn parse_month(raw: &str) -> Result<(NaiveDate, NaiveDate), ApiError> {
         ("month" = Option<String>, Query, description = "`YYYY-MM`; filtra por `op_date` en ese mes."),
         ("kind" = Option<String>, Query, description = "`expense` | `income` | `savings`."),
         ("category_id" = Option<Uuid>, Query, description = "Filtra por categoría."),
+        ("uncategorized" = Option<bool>, Query, description = "`true` → solo los movimientos SIN categoría (`category_id IS NULL`). Excluyente con `category_id` (400 `category_filter_exclusive`). Los `savings` NO llevan categoría por diseño, así que quedan fuera salvo que se pida `kind=savings` explícitamente."),
         ("import_id" = Option<Uuid>, Query, description = "Filtra por lote de import."),
         ("concept_contains" = Option<String>, Query, description = "Subcadena del concepto (1–200), insensible a mayúsculas y a tildes: `cafe` encuentra `CAFÉ`. Los comodines `%` y `_` se tratan como texto literal."),
         ("min_amount" = Option<String>, Query, description = "Cota inferior del importe CON SIGNO (los gastos son negativos)."),
@@ -513,193 +605,338 @@ pub async fn list_transactions(
         view: q.view.clone(),
     }
     .resolve()?;
-    let (out, _total) = list_transactions_core(
+    let (out, _total) = list_transactions_query(
         &state.pool,
         iid,
         user.id.0,
         view,
-        TxnFilters {
-            month: q.month.as_deref(),
-            kind: q.kind.as_deref(),
-            category_id: q.category_id,
-            import_id: q.import_id,
-            concept_contains: q.concept_contains.as_deref(),
-            min_amount: q.min_amount,
-            max_amount: q.max_amount,
-            date_from: q.date_from,
-            date_to: q.date_to,
+        TxnListQuery {
+            filters: TxnFilters {
+                month: q.month.as_deref(),
+                kind: q.kind.as_deref(),
+                category_id: q.category_id,
+                import_id: q.import_id,
+                concept_contains: q.concept_contains.as_deref(),
+                min_amount: q.min_amount,
+                max_amount: q.max_amount,
+                date_from: q.date_from,
+                date_to: q.date_to,
+            },
+            uncategorized: q.uncategorized.unwrap_or(false),
+            limit: None,
+            offset: 0,
         },
-        None,
-        0,
     )
     .await?;
     Ok(Json(out))
 }
 
-/// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_transactions`.
-/// La validación de filtros vive aquí para que ambos caminos devuelvan los mismos 400.
+/// Ejes del listado agrupados en UN solo valor.
+///
+/// Existe porque `list_transactions_core` ya tomaba siete parámetros posicionales y **cada eje
+/// nuevo cambiaba su firma** — la misma firma que consume la tool MCP. Con esta struct (`Default`
+/// + sintaxis de actualización) añadir un eje no toca a ningún llamante que no lo use.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TxnListQuery<'a> {
+    pub filters: TxnFilters<'a>,
+    /// `true` ⇒ **solo** movimientos sin categoría. Ver [`PreparedFilters::prepare`] para la
+    /// exclusión de `savings` (que no llevan categoría por diseño) y para la exclusividad con
+    /// `filters.category_id`.
+    pub uncategorized: bool,
+    /// `None` ⇒ sin `LIMIT`/`OFFSET` ni query de `COUNT`: el conjunto entero, contrato REST del
+    /// GET intacto.
+    pub limit: Option<i64>,
+    pub offset: i64,
+}
+
+/// Filtros de ledger YA validados: el fragmento de `WHERE`, el índice del siguiente placeholder
+/// libre y los valores a bindear **en el mismo orden en que se emitieron los placeholders**.
+///
+/// Es el punto ÚNICO de la cláusula de filtrado del ledger: lo comparten el listado, su `COUNT` y
+/// la agregación (`aggregate.rs`). Duplicar el constructor sería el fallo característico del
+/// módulo — una agregación a la que se le olvida un filtro devuelve un número plausible y falso,
+/// sin ningún síntoma.
+pub(crate) struct PreparedFilters {
+    sql: String,
+    next_arg: usize,
+    month_range: Option<(NaiveDate, NaiveDate)>,
+    kind: Option<String>,
+    category_id: Option<Uuid>,
+    import_id: Option<Uuid>,
+    concept_needle: Option<String>,
+    min_amount: Option<Decimal>,
+    max_amount: Option<Decimal>,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
+}
+
+/// Aplica los binds de filtro en el orden de emisión de los placeholders.
+///
+/// Macro y no función genérica porque las familias de query de sqlx (`QueryAs`, `QueryScalar`) no
+/// comparten un trait con `bind`; la macro es textual y sirve para las dos sin duplicar el cuerpo.
+macro_rules! bind_prepared {
+    ($p:expr, $q:expr) => {{
+        let p = $p;
+        let mut query = $q;
+        if let Some((start, end)) = p.month_range {
+            query = query.bind(start).bind(end);
+        }
+        if let Some(ref k) = p.kind {
+            query = query.bind(k.clone());
+        }
+        if let Some(cid) = p.category_id {
+            query = query.bind(cid);
+        }
+        if let Some(imp) = p.import_id {
+            query = query.bind(imp);
+        }
+        if let Some(ref n) = p.concept_needle {
+            query = query.bind(n.clone());
+        }
+        if let Some(lo) = p.min_amount {
+            query = query.bind(lo);
+        }
+        if let Some(hi) = p.max_amount {
+            query = query.bind(hi);
+        }
+        if let Some(from) = p.date_from {
+            query = query.bind(from);
+        }
+        if let Some(to) = p.date_to {
+            query = query.bind(to);
+        }
+        query
+    }};
+}
+
+impl PreparedFilters {
+    /// Valida los filtros y emite su fragmento de SQL. La validación vive AQUÍ para que todos los
+    /// caminos (GET del listado, GET de la agregación, tools MCP) devuelvan los mismos 400.
+    ///
+    /// ## `uncategorized` y el falso positivo de `savings`
+    /// `category_id` solo sabe hacer igualdad de UUID, así que hasta ahora **no había forma de
+    /// pedir «sin categoría»**: había que paginar el ledger entero detectando la AUSENCIA de una
+    /// clave. `uncategorized = true` es ese filtro (`category_id IS NULL`).
+    ///
+    /// Pero «sin categoría» tiene un falso positivo estructural: los movimientos `savings` **no
+    /// llevan categoría por diseño** (`assert_transaction_category` los rechaza con
+    /// `savings_no_category`). Incluirlos convertiría la respuesta a «¿qué me falta por
+    /// categorizar?» en una lista encabezada por aportaciones que no se pueden categorizar nunca —
+    /// trabajo imposible presentado como pendiente.
+    ///
+    /// Regla: `uncategorized = true` **excluye `savings` salvo que el llamante nombre un `kind`**.
+    /// La exclusión es un DEFAULT, no una amputación: `uncategorized=true&kind=savings` devuelve
+    /// exactamente las aportaciones, porque pedirlas explícitamente es una petición distinta
+    /// («enséñame las que no llevan categoría porque no deben llevarla»). Nunca hay un conjunto
+    /// inalcanzable.
+    ///
+    /// `category_id` + `uncategorized` a la vez es contradictorio (`= $x AND IS NULL` es el
+    /// conjunto vacío) → 400 `category_filter_exclusive`, mismo criterio que
+    /// `month_and_range_exclusive`: devolver la lista vacía sería una respuesta plausible
+    /// («no gastaste nada ahí») a una pregunta que nadie quiso hacer.
+    pub(crate) fn prepare(
+        view: LedgerView,
+        f: TxnFilters<'_>,
+        uncategorized: bool,
+    ) -> Result<Self, ApiError> {
+        let TxnFilters {
+            month,
+            kind,
+            category_id,
+            import_id,
+            concept_contains,
+            min_amount,
+            max_amount,
+            date_from,
+            date_to,
+        } = f;
+
+        let kind = match kind {
+            Some(k) => Some(normalize_kind(k)?),
+            None => None,
+        };
+        // `month` y el rango libre son dos formas de decir lo mismo: aceptar ambas obligaría a
+        // definir qué gana, y cualquier respuesta sería una trampa silenciosa para el llamante.
+        if month.is_some() && (date_from.is_some() || date_to.is_some()) {
+            return Err(ApiError::BadRequest(
+                "month_and_range_exclusive: month and date_from/date_to are mutually exclusive: use one or the other".into(),
+            ));
+        }
+        if uncategorized && category_id.is_some() {
+            return Err(ApiError::BadRequest(
+                "category_filter_exclusive: category_id and uncategorized are mutually exclusive: uncategorized=true already means category_id IS NULL".into(),
+            ));
+        }
+        if let (Some(from), Some(to)) = (date_from, date_to) {
+            if from > to {
+                return Err(ApiError::BadRequest(
+                    "date_range_inverted: date_from must not be after date_to".into(),
+                ));
+            }
+        }
+        if let (Some(lo), Some(hi)) = (min_amount, max_amount) {
+            if lo > hi {
+                return Err(ApiError::BadRequest(
+                    "amount_range_inverted: min_amount must not be greater than max_amount (both are signed: expenses are negative)".into(),
+                ));
+            }
+        }
+        let concept_needle = match concept_contains {
+            Some(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() || trimmed.chars().count() > 200 {
+                    return Err(ApiError::BadRequest(
+                        "concept_contains_length: concept_contains must be between 1 and 200 characters".into(),
+                    ));
+                }
+                Some(like_needle(trimmed))
+            }
+            None => None,
+        };
+        let month_range = match month {
+            Some(m) => Some(parse_month(m)?),
+            None => None,
+        };
+
+        let mut arg = view.next_arg_index();
+        let mut sql = String::new();
+        if month_range.is_some() {
+            sql.push_str(&format!(
+                " AND t.op_date >= ${} AND t.op_date < ${}",
+                arg,
+                arg + 1
+            ));
+            arg += 2;
+        }
+        if kind.is_some() {
+            sql.push_str(&format!(" AND t.kind = ${arg}"));
+            arg += 1;
+        }
+        if category_id.is_some() {
+            sql.push_str(&format!(" AND t.category_id = ${arg}"));
+            arg += 1;
+        }
+        if import_id.is_some() {
+            sql.push_str(&format!(" AND t.import_id = ${arg}"));
+            arg += 1;
+        }
+        if concept_needle.is_some() {
+            // El patrón llega ya plegado y escapado desde `like_needle`; la columna se pliega con
+            // la misma tabla vía `translate` (colación-independiente, ver `schema.rs`).
+            sql.push_str(&format!(
+                " AND {} LIKE ${arg} ESCAPE '\\'",
+                sql_fold_concept_expr("t.concept")
+            ));
+            arg += 1;
+        }
+        if min_amount.is_some() {
+            sql.push_str(&format!(" AND t.amount >= ${arg}"));
+            arg += 1;
+        }
+        if max_amount.is_some() {
+            sql.push_str(&format!(" AND t.amount <= ${arg}"));
+            arg += 1;
+        }
+        if date_from.is_some() {
+            sql.push_str(&format!(" AND t.op_date >= ${arg}"));
+            arg += 1;
+        }
+        if date_to.is_some() {
+            // Inclusivo: «hasta el 31» incluye el 31. Un `<` exclusivo es el off-by-one-day clásico.
+            sql.push_str(&format!(" AND t.op_date <= ${arg}"));
+            arg += 1;
+        }
+        if uncategorized {
+            // Literal, sin placeholder: no hay valor que bindear.
+            sql.push_str(" AND t.category_id IS NULL");
+            if kind.is_none() {
+                // `IS DISTINCT FROM` y no `<>`: un `kind` NULL sigue siendo un movimiento sin
+                // categorizar y debe salir; con `<>` NULL se evaluaría a NULL y lo perdería.
+                sql.push_str(" AND t.kind IS DISTINCT FROM 'savings'");
+            }
+        }
+
+        Ok(PreparedFilters {
+            sql,
+            next_arg: arg,
+            month_range,
+            kind,
+            category_id,
+            import_id,
+            concept_needle,
+            min_amount,
+            max_amount,
+            date_from,
+            date_to,
+        })
+    }
+
+    /// Fragmento ` AND …` que se concatena tras el `WHERE {scope}` del caller.
+    pub(crate) fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    /// Índice del siguiente placeholder libre (tras los binds del scope y los de los filtros).
+    pub(crate) fn next_arg(&self) -> usize {
+        self.next_arg
+    }
+
+    pub(crate) fn bind_as<'q, T>(
+        &self,
+        q: QueryAs<'q, Postgres, T, PgArguments>,
+    ) -> QueryAs<'q, Postgres, T, PgArguments> {
+        bind_prepared!(self, q)
+    }
+
+    pub(crate) fn bind_scalar<'q, O>(
+        &self,
+        q: QueryScalar<'q, Postgres, O, PgArguments>,
+    ) -> QueryScalar<'q, Postgres, O, PgArguments>
+    where
+        O: Send + Unpin,
+        (O,): for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow>,
+        O: sqlx::Type<Postgres>,
+    {
+        bind_prepared!(self, q)
+    }
+}
+
+/// Core sin HTTP del listado. **Punto único**: el handler GET, la tool MCP `list_transactions` y
+/// cualquier eje futuro entran por aquí. La validación de filtros vive en
+/// [`PreparedFilters::prepare`] para que todos los caminos devuelvan los mismos 400.
 ///
 /// Paginación: con `limit = None` (el handler HTTP) no se emite `LIMIT`/`OFFSET` ni la query de
 /// `COUNT` — el conjunto entero, contrato REST intacto. Con `limit = Some(n)` (la tool MCP) la
 /// paginación baja a SQL y `total_count` sale de un `COUNT(*)` con los mismos filtros: la DB ya
 /// no materializa el conjunto entero para servir una página.
-pub(crate) async fn list_transactions_core(
+pub(crate) async fn list_transactions_query(
     pool: &sqlx::PgPool,
     iid: Uuid,
     user_id: Uuid,
     view: LedgerView,
-    f: TxnFilters<'_>,
-    limit: Option<i64>,
-    offset: i64,
+    q: TxnListQuery<'_>,
 ) -> Result<(Vec<TransactionResponse>, i64), ApiError> {
-    let TxnFilters {
-        month,
-        kind,
-        category_id,
-        import_id,
-        concept_contains,
-        min_amount,
-        max_amount,
-        date_from,
-        date_to,
-    } = f;
-
-    let kind = match kind {
-        Some(k) => Some(normalize_kind(k)?),
-        None => None,
-    };
-    // `month` y el rango libre son dos formas de decir lo mismo: aceptar ambas obligaría a definir
-    // qué gana, y cualquier respuesta sería una trampa silenciosa para el llamante.
-    if month.is_some() && (date_from.is_some() || date_to.is_some()) {
-        return Err(ApiError::BadRequest(
-            "month_and_range_exclusive: month and date_from/date_to are mutually exclusive: use one or the other".into(),
-        ));
-    }
-    if let (Some(from), Some(to)) = (date_from, date_to) {
-        if from > to {
-            return Err(ApiError::BadRequest(
-                "date_range_inverted: date_from must not be after date_to".into(),
-            ));
-        }
-    }
-    if let (Some(lo), Some(hi)) = (min_amount, max_amount) {
-        if lo > hi {
-            return Err(ApiError::BadRequest(
-                "amount_range_inverted: min_amount must not be greater than max_amount (both are signed: expenses are negative)".into(),
-            ));
-        }
-    }
-    let concept_needle = match concept_contains {
-        Some(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() || trimmed.chars().count() > 200 {
-                return Err(ApiError::BadRequest(
-                    "concept_contains_length: concept_contains must be between 1 and 200 characters".into(),
-                ));
-            }
-            Some(like_needle(trimmed))
-        }
-        None => None,
-    };
-    let month_range = match month {
-        Some(m) => Some(parse_month(m)?),
-        None => None,
-    };
-
+    let TxnListQuery {
+        filters,
+        uncategorized,
+        limit,
+        offset,
+    } = q;
+    let p = PreparedFilters::prepare(view, filters, uncategorized)?;
     let scope = view.scope_where("t");
-    let mut arg = view.next_arg_index();
-    let mut filters = String::new();
-    if month_range.is_some() {
-        filters.push_str(&format!(
-            " AND t.op_date >= ${} AND t.op_date < ${}",
-            arg,
-            arg + 1
-        ));
-        arg += 2;
-    }
-    if kind.is_some() {
-        filters.push_str(&format!(" AND t.kind = ${arg}"));
-        arg += 1;
-    }
-    if category_id.is_some() {
-        filters.push_str(&format!(" AND t.category_id = ${arg}"));
-        arg += 1;
-    }
-    if import_id.is_some() {
-        filters.push_str(&format!(" AND t.import_id = ${arg}"));
-        arg += 1;
-    }
-    if concept_needle.is_some() {
-        // El patrón llega ya plegado y escapado desde `like_needle`; la columna se pliega con la
-        // misma tabla vía `translate` (colación-independiente, ver `schema.rs`).
-        filters.push_str(&format!(
-            " AND {} LIKE ${arg} ESCAPE '\\'",
-            sql_fold_concept_expr("t.concept")
-        ));
-        arg += 1;
-    }
-    if min_amount.is_some() {
-        filters.push_str(&format!(" AND t.amount >= ${arg}"));
-        arg += 1;
-    }
-    if max_amount.is_some() {
-        filters.push_str(&format!(" AND t.amount <= ${arg}"));
-        arg += 1;
-    }
-    if date_from.is_some() {
-        filters.push_str(&format!(" AND t.op_date >= ${arg}"));
-        arg += 1;
-    }
-    if date_to.is_some() {
-        // Inclusivo: «hasta el 31» incluye el 31. Un `<` exclusivo es el off-by-one-day clásico.
-        filters.push_str(&format!(" AND t.op_date <= ${arg}"));
-        arg += 1;
-    }
+    let filters_sql = p.sql();
 
-    let mut sql = format!("{TXN_SELECT} WHERE {scope}{filters}");
+    let mut sql = format!("{TXN_SELECT} WHERE {scope}{filters_sql}");
     sql.push_str(" ORDER BY t.op_date DESC, t.created_at DESC, t.id DESC");
     if limit.is_some() {
-        sql.push_str(&format!(" LIMIT ${} OFFSET ${}", arg, arg + 1));
+        sql.push_str(&format!(
+            " LIMIT ${} OFFSET ${}",
+            p.next_arg(),
+            p.next_arg() + 1
+        ));
     }
 
-    // Cierre que aplica los binds de filtro en el MISMO orden en que se emitieron los
-    // placeholders — compartido por la query principal y el COUNT.
-    macro_rules! bind_filters {
-        ($q:expr) => {{
-            let mut query = $q;
-            if let Some((start, end)) = month_range {
-                query = query.bind(start).bind(end);
-            }
-            if let Some(ref k) = kind {
-                query = query.bind(k.clone());
-            }
-            if let Some(cid) = category_id {
-                query = query.bind(cid);
-            }
-            if let Some(imp) = import_id {
-                query = query.bind(imp);
-            }
-            if let Some(ref n) = concept_needle {
-                query = query.bind(n.clone());
-            }
-            if let Some(lo) = min_amount {
-                query = query.bind(lo);
-            }
-            if let Some(hi) = max_amount {
-                query = query.bind(hi);
-            }
-            if let Some(from) = date_from {
-                query = query.bind(from);
-            }
-            if let Some(to) = date_to {
-                query = query.bind(to);
-            }
-            query
-        }};
-    }
-
-    let mut query =
-        bind_filters!(view.bind_scope_as(sqlx::query_as::<_, TxnRow>(&sql), iid, user_id));
+    let mut query = p.bind_as(view.bind_scope_as(sqlx::query_as::<_, TxnRow>(&sql), iid, user_id));
     if let Some(l) = limit {
         query = query.bind(l).bind(offset);
     }
@@ -709,8 +946,8 @@ pub(crate) async fn list_transactions_core(
         None => rows.len() as i64,
         Some(_) => {
             let count_sql =
-                format!("SELECT COUNT(*)::bigint FROM transactions t WHERE {scope}{filters}");
-            bind_filters!(view.bind_scope_scalar(sqlx::query_scalar(&count_sql), iid, user_id))
+                format!("SELECT COUNT(*)::bigint FROM transactions t WHERE {scope}{filters_sql}");
+            p.bind_scalar(view.bind_scope_scalar(sqlx::query_scalar(&count_sql), iid, user_id))
                 .fetch_one(pool)
                 .await?
         }
@@ -718,6 +955,7 @@ pub(crate) async fn list_transactions_core(
 
     Ok((rows.into_iter().map(row_to_response).collect(), total_count))
 }
+
 
 // ---------------------------------------------------------------------------
 // PATCH /v1/transactions/batch — reclasificación en lote

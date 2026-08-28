@@ -521,10 +521,10 @@ trusting:
 - Guarda de la tienda de add-ons: `grep -n 'Guardia de config' -A20 .github/workflows/ci.yml`; la
   lista esperada debe casar con
   `find . \( -name .git -o -name node_modules -o -name target \) -prune -o \( -name 'config.yaml' -o -name 'config.yml' -o -name 'config.json' \) -print | sort`
-- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**43** on 2026-08-27 — las cinco altas
+- Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**62** on 2026-08-28, tren 4.4.0 completo; **43** on 2026-08-27 — las cinco altas
   de la rama del add-on son `base_path.rs`, `frame_options.rs`, `session_cookie_path.rs`,
   `sso_login.rs` y `migration_guard.rs`; **33** on 2026-08-22 — las cinco altas del tren 4.0.0 son `account_and_members.rs`, `openapi_contract.rs`, `query_param_validation.rs`, `error_codes_parity.rs` y `fixtures_shape.rs`; 28 on 2026-08-21); test-attribute count: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375** on 2026-08-22). Totales del runner, que es lo autoritativo: `cargo test --workspace` **498**, Vitest **368** en 16 ficheros (2026-08-22)
-- MCP catalog: `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**52** on 2026-08-22) — debe cuadrar con CLAUDE.md ×2, `.claude/api-routes.md` §MCP y `futurefin-mcp-parity` §5
+- MCP catalog: `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**68** on 2026-08-28, Fase 6/issue #87; **52** on 2026-08-22) — debe cuadrar con CLAUDE.md ×2, `.claude/api-routes.md` §MCP y `futurefin-mcp-parity` §5
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: `secrets-scan` / `rust` / `web` /
   `integration` / `docker-stack`; el `main-guard` se retiró con el modelo de dos ramas) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list.

@@ -108,6 +108,25 @@ pub struct ProjectionLiabilityInput {
     /// deliberada: el import de un `.ffbackup` puede colar un pasivo `french` sin TIN, y el
     /// engine jamás debe panicar ni devolver error por eso — devuelve la serie sin intereses.
     pub apr_percent: Option<Decimal>,
+    /// **Amortización extra mensual** por encima de la cuota (eje what-if, 4.4.0). `0` reproduce
+    /// bit a bit el comportamiento anterior.
+    ///
+    /// Vive en el input del MOTOR y no como un ajuste de caja del handler porque amortizar es
+    /// dos cosas a la vez: una **salida de caja** y una **reducción de principal**. Un ajuste de
+    /// caja solo puede hacer la primera — y hacer solo la primera es exactamente el «gasto
+    /// puntual» que ya existía y que responde a otra pregunta (drena caja sin tocar la deuda ni
+    /// liberar la cuota). Al ser las dos, el efecto instantáneo sobre el patrimonio es **nulo**
+    /// (−caja, +principal amortizado): la ganancia aparece después, en los intereses que ya no
+    /// se devengan y en la cuota que se libera antes.
+    ///
+    /// Se aplica DESPUÉS de la cuota del mes, se topa al saldo de cierre (jamás deja el
+    /// principal en negativo ni «paga de más») y **solo con plan de pago activo**, igual que el
+    /// devengo: sin cuota no hay nada que adelantar.
+    pub extra_principal_monthly: Decimal,
+    /// **Amortizaciones puntuales** `(mes 1-based, importe)` (eje what-if, 4.4.0). Misma
+    /// semántica que [`Self::extra_principal_monthly`] pero en un solo mes; varias entradas del
+    /// mismo mes se suman. Vacío = ninguna.
+    pub extra_principal_lump_sums: Vec<(u32, Decimal)>,
 }
 
 /// ¿Tiene el pasivo un plan de pago vivo en el mes que empieza en `m_start`?
@@ -183,6 +202,36 @@ fn liability_month(
     }
 }
 
+/// Amortización extra del mes `month` (1-based), ya topada al saldo que quedaría tras la cuota.
+///
+/// Única implementación, como [`liability_month`]: la consumen el bucle de simulación, el
+/// calendario de amortización y `first_month_allocation`. Devuelve siempre un importe en
+/// `0 ..= closing_after_payment`, así que sumarla al servicio de deuda y restarla del principal
+/// no puede producir ni caja fantasma ni principal negativo.
+///
+/// Sin plan de pago activo devuelve 0: amortizar «extra» un pasivo que no cobra cuota no
+/// adelanta nada (no hay devengo que evitar ni cuota que liberar) y además rompería el contrato
+/// de los modos B/C del handler, donde el principal es una resta CONSTANTE al patrimonio.
+fn liability_extra_principal(
+    liab: &ProjectionLiabilityInput,
+    month: u32,
+    closing_after_payment: Decimal,
+    active: bool,
+) -> Decimal {
+    if !active {
+        return Decimal::ZERO;
+    }
+    let mut wanted = liab.extra_principal_monthly.max(Decimal::ZERO);
+    for (m, amount) in &liab.extra_principal_lump_sums {
+        if *m == month {
+            wanted += (*amount).max(Decimal::ZERO);
+        }
+    }
+    wanted
+        .min(closing_after_payment.max(Decimal::ZERO))
+        .max(Decimal::ZERO)
+}
+
 /// Valor actual de una renta de `months` cuotas mensuales de `monthly_payment`, descontada al
 /// TIN nominal anual `apr_percent` (misma convención que
 /// [`ProjectionLiabilityInput::apr_percent`]: `i = apr / 1200`):
@@ -215,6 +264,214 @@ pub fn present_value_of_payments(
         monthly_payment.checked_mul(numerator)?.checked_div(i)
     })()
     .unwrap_or(plain)
+}
+
+// ---------------------------------------------------------------------------
+// Calendario de amortización (4.4.0)
+// ---------------------------------------------------------------------------
+
+/// Tope del calendario de amortización: 70 años, el mismo `MAX_PROJECTION_MONTHS` del horizonte
+/// de proyección. No es una elección de producto sino de terminación: `interest_only` y una cuota
+/// por debajo del interés **nunca** extinguen la deuda, así que el bucle necesita una cota dura
+/// que además sea la misma que ya acota la simulación (un calendario más largo que el horizonte
+/// describiría meses que ninguna otra superficie modela).
+pub const MAX_LIABILITY_SCHEDULE_MONTHS: u32 = 840;
+
+/// Por qué el calendario **no** llega a saldar la deuda. `None` ⟺ hay `payoff_month_index`.
+///
+/// Las cuatro razones tienen remedios distintos y por eso no se colapsan en un booleano, mismo
+/// criterio que [`AllocationSkipReason`]: «no tienes plan de pago» se arregla dando de alta la
+/// cuota, «tu plan se acaba antes» se arregla alargando la fecha, «la cuota no reduce el
+/// principal» se arregla subiendo la cuota, y «no cabe en 70 años» es simplemente un préstamo
+/// larguísimo. El engine no conoce literales de wire: el handler los mapea.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiabilityPayoffAbsence {
+    /// El pasivo no tiene plan de pago activo en el primer mes (`monthly_payment ≤ 0`, o
+    /// `payment_end` ya pasado). El calendario sale **vacío**: no hay nada que devengar ni
+    /// amortizar, y el principal es una resta constante al patrimonio.
+    NoPaymentPlan,
+    /// El plan de pago (`payment_end`) termina con principal vivo. El calendario acaba en el
+    /// último mes con cuota y `final_principal` es lo que queda debiendo.
+    PaymentPlanEndsBeforePayoff,
+    /// Al agotar el horizonte el principal **no ha bajado** respecto al de partida: es
+    /// `interest_only` (principal congelado por definición) o una cuota por debajo del interés
+    /// devengado (amortización negativa: la deuda crece).
+    PaymentDoesNotReducePrincipal,
+    /// El principal baja, pero no llega a cero dentro de los meses simulados.
+    NotWithinHorizon,
+}
+
+/// Un mes del calendario de amortización.
+///
+/// **Identidad exacta en `Decimal`, en los cuatro modelos y en todos los meses**:
+/// `payment + extra_principal == interest_accrued + principal_repaid`.
+/// Se cumple *por construcción* — `principal_repaid` se deriva de los saldos
+/// (`opening − closing`) y `interest_accrued` de la cuota (`payment − lo que la cuota amortizó`),
+/// nunca al revés. Una implementación que devengara el interés por su cuenta podría separarse de
+/// [`liability_month`] en silencio, que es la recurrencia que de verdad pinta el chart.
+#[derive(Debug, Clone)]
+pub struct LiabilityScheduleMonth {
+    /// Mes 1-based, misma base que el bucle de simulación: el mes `k` es el mes civil que empieza
+    /// en `month_first_calendar(ref_date) + (k−1)`. **No es una posición de array** — el
+    /// calendario puede empezar en un mes distinto de 1 si el llamante lo recorta.
+    pub month_index: u32,
+    /// Saldo al abrir el mes (antes del devengo).
+    pub opening_principal: Decimal,
+    /// Interés devengado en el mes. `0` en `fixed_payments` (no devenga) y en cualquier modelo con
+    /// TIN ausente o ≤ 0. En `interest_only` es la cuota entera: el principal no se mueve, así que
+    /// todo lo que paga es interés.
+    pub interest_accrued: Decimal,
+    /// Principal amortizado en el mes, cuota **y** amortización extra incluidas
+    /// (`opening_principal − closing_principal`). Puede ser **negativo** cuando la cuota no cubre
+    /// el devengo: la deuda crece, y publicarlo como 0 escondería justo eso.
+    pub principal_repaid: Decimal,
+    /// Parte de `principal_repaid` que viene de una amortización extra what-if. `0` en el
+    /// calendario real de un pasivo guardado.
+    pub extra_principal: Decimal,
+    /// Caja que sale por la **cuota** (topada al saldo de cancelación del mes: el último mes de un
+    /// préstamo es de cuota parcial). No incluye `extra_principal`.
+    pub payment: Decimal,
+    /// Saldo al cerrar el mes. Nunca negativo.
+    pub closing_principal: Decimal,
+}
+
+/// Calendario de amortización completo de UN pasivo, más los agregados que responden las dos
+/// preguntas que hoy son incontestables desde el chat: «¿cuánto pago de intereses?» y «¿cuándo
+/// termino?».
+///
+/// **Cero matemática nueva**: cada mes sale de [`liability_month`] —la misma recurrencia que el
+/// bucle de proyección ejecuta hasta 840 veces por request y cuyo principal de cierre tiraba a la
+/// basura— más [`liability_extra_principal`]. Por eso el mes de extinción que devuelve este
+/// calendario y el que se deduce de `ProjectionOutput` son el mismo número, no dos aproximaciones.
+#[derive(Debug, Clone)]
+pub struct LiabilitySchedule {
+    /// Meses simulados, en orden, desde el mes 1 hasta la extinción, el fin del plan de pago o el
+    /// horizonte — lo que llegue antes. Vacío ⟺ no había plan de pago activo (o el principal ya
+    /// era 0).
+    pub months: Vec<LiabilityScheduleMonth>,
+    /// Saldo de partida (mes 0), ya saneado a ≥ 0.
+    pub opening_principal: Decimal,
+    /// Saldo tras el último mes simulado.
+    pub final_principal: Decimal,
+    /// Σ `interest_accrued`. Es el interés que **queda por pagar** desde hoy: el calendario
+    /// arranca en el saldo actual, no en el original del préstamo.
+    pub total_interest: Decimal,
+    /// Σ `payment` (solo cuotas).
+    pub total_payments: Decimal,
+    /// Σ `extra_principal`.
+    pub total_extra_principal: Decimal,
+    /// `total_payments + total_extra_principal`: todo lo que sale de la caja. Es el «total a
+    /// pagar» de la pregunta.
+    pub total_cash_out: Decimal,
+    /// Mes en que el saldo llega a **cero exacto**. `Some(0)` ⟺ el pasivo ya estaba saldado al
+    /// arrancar. `None` ⟺ hay `payoff_absent`.
+    pub payoff_month_index: Option<u32>,
+    /// Por qué no hay mes de extinción. **Invariante**: `payoff_month_index.is_some() ==
+    /// payoff_absent.is_none()`.
+    pub payoff_absent: Option<LiabilityPayoffAbsence>,
+    /// Meses que se llegaron a simular como cota (tras el clamp a [`MAX_LIABILITY_SCHEDULE_MONTHS`]),
+    /// no los que salen en `months`.
+    pub horizon_months: u32,
+}
+
+/// Calendario de amortización de un pasivo desde `ref_date`, mes a mes.
+///
+/// Pura y determinista como el resto del crate. `horizon_months` se clampa a
+/// `1..=MAX_LIABILITY_SCHEDULE_MONTHS`; el bucle además corta antes en cuanto (a) el saldo llega a
+/// cero o (b) el plan de pago deja de estar activo — y esa segunda condición es **monótona**
+/// (`monthly_payment > 0` no cambia con el tiempo y `payment_end >= inicio_de_mes` solo puede
+/// pasar de cierta a falsa), así que cortar ahí no se salta ningún mes con actividad.
+pub fn liability_amortization_schedule(
+    liab: &ProjectionLiabilityInput,
+    ref_date: NaiveDate,
+    horizon_months: u32,
+) -> LiabilitySchedule {
+    let horizon = horizon_months.clamp(1, MAX_LIABILITY_SCHEDULE_MONTHS);
+    let opening_principal = liab.principal.max(Decimal::ZERO);
+    let start_month_first = month_first_calendar(ref_date);
+
+    let mut principal = opening_principal;
+    let mut months: Vec<LiabilityScheduleMonth> = Vec::new();
+    let mut total_interest = Decimal::ZERO;
+    let mut total_payments = Decimal::ZERO;
+    let mut total_extra_principal = Decimal::ZERO;
+    // Un pasivo con saldo 0 ya está extinguido HOY: `Some(0)` y calendario vacío. No se deja caer
+    // al bucle porque emitiría meses de ceros que no describen nada.
+    let mut payoff_month_index = principal.is_zero().then_some(0u32);
+    let mut plan_ended = false;
+
+    if !principal.is_zero() {
+        for k in 1..=horizon {
+            let month_first = add_months(start_month_first, k - 1);
+            let (m_start, _m_end) = month_window(month_first);
+            let active = liability_active(liab, m_start);
+            if !active {
+                plan_ended = true;
+                break;
+            }
+
+            let (payment, closing_after_payment) = liability_month(
+                liab.repayment_model,
+                principal,
+                liab.monthly_payment,
+                liab.apr_percent,
+                true,
+            );
+            let extra = liability_extra_principal(liab, k, closing_after_payment, true);
+            let closing = closing_after_payment - extra;
+
+            // Derivación en este orden a propósito: los saldos mandan, el interés es el residuo.
+            // Así `payment + extra == interest + principal_repaid` es exacto por construcción y
+            // no una coincidencia numérica que un cambio de modelo pueda romper.
+            let repaid_by_payment = principal - closing_after_payment;
+            let interest_accrued = payment - repaid_by_payment;
+            let principal_repaid = principal - closing;
+
+            months.push(LiabilityScheduleMonth {
+                month_index: k,
+                opening_principal: principal,
+                interest_accrued,
+                principal_repaid,
+                extra_principal: extra,
+                payment,
+                closing_principal: closing,
+            });
+            total_interest += interest_accrued;
+            total_payments += payment;
+            total_extra_principal += extra;
+            principal = closing;
+
+            if principal.is_zero() {
+                payoff_month_index = Some(k);
+                break;
+            }
+        }
+    }
+
+    let payoff_absent = if payoff_month_index.is_some() {
+        None
+    } else if months.is_empty() {
+        Some(LiabilityPayoffAbsence::NoPaymentPlan)
+    } else if plan_ended {
+        Some(LiabilityPayoffAbsence::PaymentPlanEndsBeforePayoff)
+    } else if principal >= opening_principal {
+        Some(LiabilityPayoffAbsence::PaymentDoesNotReducePrincipal)
+    } else {
+        Some(LiabilityPayoffAbsence::NotWithinHorizon)
+    };
+
+    LiabilitySchedule {
+        months,
+        opening_principal,
+        final_principal: principal,
+        total_interest,
+        total_payments,
+        total_extra_principal,
+        total_cash_out: total_payments + total_extra_principal,
+        payoff_month_index,
+        payoff_absent,
+        horizon_months: horizon,
+    }
 }
 
 /// Target FIRE evaluado mes a mes. `base_amount` es el patrimonio necesario en euros de hoy
@@ -656,16 +913,19 @@ pub fn first_month_allocation(
 
     let mut debt_service = Decimal::ZERO;
     for (i, liab) in input.liabilities.iter().enumerate() {
-        // Mismo helper que el bucle de simulación; el principal de cierre se descarta aquí
-        // porque esta función solo resuelve el mes 1.
-        let (cash, _closing) = liability_month(
+        // Mismos helpers que el bucle de simulación; el principal de cierre se descarta aquí
+        // porque esta función solo resuelve el mes 1 — pero la amortización extra SÍ entra en el
+        // servicio de deuda, que es lo que decide cuánto sobrante llega a la cascada.
+        let active = liability_active(liab, m_start);
+        let opening = principals.get(i).copied().unwrap_or(Decimal::ZERO);
+        let (cash, closing) = liability_month(
             liab.repayment_model,
-            principals.get(i).copied().unwrap_or(Decimal::ZERO),
+            opening,
             liab.monthly_payment,
             liab.apr_percent,
-            liability_active(liab, m_start),
+            active,
         );
-        debt_service += cash;
+        debt_service += cash + liability_extra_principal(liab, 1, closing, active);
     }
 
     let planning_adj = input.planning_monthly_cash_adjustment[0];
@@ -822,15 +1082,20 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             if i >= principals.len() {
                 break;
             }
+            let active = liability_active(liab, m_start);
             let (cash, closing) = liability_month(
                 liab.repayment_model,
                 principals[i],
                 liab.monthly_payment,
                 liab.apr_percent,
-                liability_active(liab, m_start),
+                active,
             );
-            debt_service += cash;
-            closing_principals.push(closing);
+            // Amortización extra (what-if): sale de la caja del mes como servicio de deuda Y baja
+            // el principal el mismo importe. Las dos cosas o ninguna — hacer solo la primera
+            // drenaría caja sin reducir deuda, y solo la segunda imprimiría dinero.
+            let extra = liability_extra_principal(liab, k, closing, active);
+            debt_service += cash + extra;
+            closing_principals.push(closing - extra);
         }
 
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
@@ -1315,6 +1580,8 @@ mod tests {
             payment_end: Some(NaiveDate::from_ymd_opt(2040, 1, 1).unwrap()),
             repayment_model: RepaymentModel::FixedPayments,
             apr_percent: None,
+            extra_principal_monthly: Decimal::ZERO,
+            extra_principal_lump_sums: Vec::new(),
         }];
 
         // (a) Sin componente de planning: base == neto recurrente.
@@ -1736,9 +2003,12 @@ mod tests {
             monthly_payment: Decimal::from(500),
             payment_end: Some(NaiveDate::from_ymd_opt(2090, 1, 1).unwrap()),
             // El pin es del modelo histórico: sin intereses. La reforma 4.2.0 añade los campos
-            // pero no toca sus valores esperados.
+            // pero no toca sus valores esperados; la 4.4.0 añade los de amortización extra
+            // (a cero: el pin describe un pasivo real, no un what-if).
             repayment_model: RepaymentModel::FixedPayments,
             apr_percent: None,
+            extra_principal_monthly: Decimal::ZERO,
+            extra_principal_lump_sums: Vec::new(),
         }];
         inp.planning_monthly_cash_adjustment[0] = Decimal::from(250);
         inp.planning_monthly_cash_adjustment[5] = Decimal::from(-100);
@@ -1861,6 +2131,8 @@ mod tests {
             payment_end: None,
             repayment_model: model,
             apr_percent: apr,
+            extra_principal_monthly: Decimal::ZERO,
+            extra_principal_lump_sums: Vec::new(),
         }];
         inp
     }
@@ -2173,6 +2445,589 @@ mod tests {
         let p1 = implicit_principal(&out, 839);
         let p2 = implicit_principal(&out, 840);
         assert_eq!(p1 - p2, Decimal::from(500), "saturado, la cuota va a principal");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4.4.0 — calendario de amortización (`liability_amortization_schedule`)
+    // -----------------------------------------------------------------------
+
+    fn liab(
+        principal: Decimal,
+        payment: Decimal,
+        model: RepaymentModel,
+        apr: Option<Decimal>,
+    ) -> ProjectionLiabilityInput {
+        ProjectionLiabilityInput {
+            principal,
+            monthly_payment: payment,
+            payment_end: None,
+            repayment_model: model,
+            apr_percent: apr,
+            extra_principal_monthly: Decimal::ZERO,
+            extra_principal_lump_sums: Vec::new(),
+        }
+    }
+
+    fn ref_2026() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()
+    }
+
+    /// **La identidad contable del calendario**, exacta en `Decimal`, en los cuatro modelos y en
+    /// todos los meses: `payment + extra_principal == interest_accrued + principal_repaid`.
+    ///
+    /// No es decorativa: es la única garantía de que el desglose que se publica describe la
+    /// recurrencia que el motor ejecuta de verdad. Si alguien devengara el interés por su cuenta
+    /// (`P·i` recalculado) en vez de derivarlo de los saldos, esta igualdad se rompería en el mes
+    /// en que las dos implementaciones se separaran — que es exactamente el aviso que se quiere.
+    #[test]
+    fn schedule_payment_identity_holds_in_every_model() {
+        for model in [
+            RepaymentModel::FixedPayments,
+            RepaymentModel::French,
+            RepaymentModel::InterestOnly,
+            RepaymentModel::Revolving,
+        ] {
+            for apr in [None, Some(Decimal::from(6))] {
+                let mut l = liab(Decimal::from(30_000), Decimal::from(400), model, apr);
+                l.extra_principal_monthly = Decimal::from(50);
+                l.extra_principal_lump_sums = vec![(7, Decimal::from(1_000))];
+                let sch = liability_amortization_schedule(&l, ref_2026(), 120);
+                assert!(!sch.months.is_empty(), "{model:?}/{apr:?}: calendario vacío");
+                for m in &sch.months {
+                    assert_eq!(
+                        m.payment + m.extra_principal,
+                        m.interest_accrued + m.principal_repaid,
+                        "{model:?}/{apr:?}: identidad rota en el mes {}",
+                        m.month_index
+                    );
+                    assert_eq!(
+                        m.closing_principal,
+                        m.opening_principal - m.principal_repaid,
+                        "{model:?}/{apr:?}: saldos incoherentes en el mes {}",
+                        m.month_index
+                    );
+                    assert!(
+                        m.closing_principal >= Decimal::ZERO,
+                        "{model:?}/{apr:?}: principal negativo en el mes {}",
+                        m.month_index
+                    );
+                }
+                // Invariante de la ausencia: o hay mes de extinción, o hay razón. Nunca las dos,
+                // nunca ninguna.
+                assert_eq!(
+                    sch.payoff_month_index.is_some(),
+                    sch.payoff_absent.is_none(),
+                    "{model:?}/{apr:?}: payoff y razón deben excluirse"
+                );
+            }
+        }
+    }
+
+    /// **Amortización francesa contra su fórmula cerrada.** P = 100.000 €, TIN 3 % ⇒ i = 0,0025
+    /// exacto, n = 240. La cuota teórica es
+    ///
+    /// `M = P·i / (1 − (1+i)^−n) = 100.000·0,0025 / (1 − 1,0025^−240) = 554,597597853912… €`
+    ///
+    /// verificada a 60 dígitos con aritmética decimal exacta. Redondeada como la redondearía un
+    /// banco, **554,60 €**, la predicción es: el préstamo se extingue **exactamente en el mes
+    /// 240**, el mes 239 deja **552,4302949… €** vivos y la última cuota es **parcial**
+    /// (553,8113706… €, ocho céntimos menos que la cuota redondeada porque redondear hacia arriba
+    /// amortiza un pelín más rápido). Total pagado **133.103,2114 €**, interés total
+    /// **33.103,2114 €**.
+    ///
+    /// El segundo contraste es cruzado y no depende de esta predicción: `present_value_of_payments`
+    /// —la otra implementación de la misma matemática que ya vive en el crate, la que usa
+    /// `liabilities.rs` para derivar el principal— tiene que devolver los 100.000 € de partida
+    /// desde esa misma cuota y ese mismo plazo.
+    #[test]
+    fn schedule_french_matches_the_closed_form_annuity() {
+        let m = dec("554.60");
+        let l = liab(
+            Decimal::from(100_000),
+            m,
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let sch = liability_amortization_schedule(&l, ref_2026(), 840);
+
+        assert_eq!(
+            sch.payoff_month_index,
+            Some(240),
+            "la cuota de la fórmula cerrada salda el préstamo en su plazo"
+        );
+        assert_eq!(sch.payoff_absent, None);
+        assert_eq!(sch.months.len(), 240);
+        assert_eq!(sch.final_principal, Decimal::ZERO);
+
+        // Mes 1, exacto: interés = 100.000 · 0,0025 = 250; principal = 554,60 − 250 = 304,60.
+        let m1 = &sch.months[0];
+        assert_eq!(m1.opening_principal, Decimal::from(100_000));
+        assert_eq!(m1.interest_accrued, dec("250.0000"));
+        assert_eq!(m1.principal_repaid, dec("304.6000"));
+        assert_eq!(m1.closing_principal, dec("99695.4000"));
+
+        // Saldo al cerrar el mes 239 y última cuota, parcial.
+        let m239 = &sch.months[238];
+        assert!(
+            (m239.closing_principal - dec("552.4302949022704995")).abs() < dec("0.0001"),
+            "saldo tras 239 meses esperado ≈ 552,4303 €, obtenido {}",
+            m239.closing_principal
+        );
+        let last = sch.months.last().unwrap();
+        assert!(
+            last.payment < m && last.payment > Decimal::ZERO,
+            "la última cuota es parcial, obtenida {}",
+            last.payment
+        );
+        assert!(
+            (last.payment - dec("553.8113706395")).abs() < dec("0.0001"),
+            "última cuota esperada ≈ 553,8114 €, obtenida {}",
+            last.payment
+        );
+
+        // Agregados: la respuesta a «¿cuánto pago de intereses?» y «¿cuánto pago en total?».
+        assert!(
+            (sch.total_cash_out - dec("133103.2113706395")).abs() < dec("0.01"),
+            "total a pagar esperado ≈ 133.103,21 €, obtenido {}",
+            sch.total_cash_out
+        );
+        assert!(
+            (sch.total_interest - dec("33103.2113706395")).abs() < dec("0.01"),
+            "interés total esperado ≈ 33.103,21 €, obtenido {}",
+            sch.total_interest
+        );
+        // Telescopio exacto: Σ interés = Σ caja − (saldo inicial − saldo final).
+        assert!(
+            (sch.total_interest
+                - (sch.total_cash_out - sch.opening_principal + sch.final_principal))
+                .abs()
+                < dec("0.0001"),
+            "Σ interés debe cuadrar con Σ caja − principal amortizado"
+        );
+
+        // Contraste cruzado con la OTRA implementación de la misma matemática que ya vive en el
+        // crate: el valor actual de 240 cuotas de 554,60 al 3 % son los 100.000 de partida.
+        let pv = present_value_of_payments(m, Decimal::from(240), Some(Decimal::from(3)));
+        assert!(
+            (pv - Decimal::from(100_000)).abs() < Decimal::ONE,
+            "PV(554,60; 240; 3 %) esperado ≈ 100.000 €, obtenido {pv}"
+        );
+    }
+
+    /// **Once meses a mano, con aritmética exacta.** P = 1.000 €, TIN 12 % ⇒ i = 12/1200 = 0,01
+    /// **exacto** en `Decimal` (no hay `powd` por medio, solo multiplicaciones), cuota 100 €.
+    ///
+    /// | mes | interés | principal | cierre |
+    /// |----:|--------:|----------:|-------:|
+    /// | 1 | 10,00 | 90,00 | 910,00 |
+    /// | 2 | 9,10 | 90,90 | 819,10 |
+    /// | 3 | 8,191 | 91,809 | 727,291 |
+    /// | 11 | 0,58400871299… | 58,40087129915940991 | 0 |
+    ///
+    /// Extinción en el **mes 11** con cuota parcial de **58,984880012151004009 €**; interés total
+    /// **58,984880012151004009 €** (que aquí coincide con la última cuota por casualidad
+    /// aritmética: el interés total es `total pagado − 1.000`). `assert_eq!` sin tolerancia.
+    #[test]
+    fn schedule_hand_checked_eleven_months_exact() {
+        let l = liab(
+            Decimal::from(1_000),
+            Decimal::from(100),
+            RepaymentModel::French,
+            Some(Decimal::from(12)),
+        );
+        let sch = liability_amortization_schedule(&l, ref_2026(), 60);
+
+        assert_eq!(sch.payoff_month_index, Some(11));
+        assert_eq!(sch.months.len(), 11);
+        assert_eq!(sch.months[0].interest_accrued, dec("10.00"));
+        assert_eq!(sch.months[0].principal_repaid, dec("90.00"));
+        assert_eq!(sch.months[0].closing_principal, dec("910.00"));
+        assert_eq!(sch.months[1].interest_accrued, dec("9.1000"));
+        assert_eq!(sch.months[1].closing_principal, dec("819.1000"));
+        assert_eq!(sch.months[2].closing_principal, dec("727.291000"));
+        assert_eq!(
+            sch.months[9].closing_principal,
+            dec("58.40087129915940991000")
+        );
+        assert_eq!(
+            sch.months[10].payment,
+            dec("58.9848800121510040091000")
+        );
+        assert_eq!(sch.months[10].closing_principal, Decimal::ZERO);
+        assert_eq!(
+            sch.total_interest,
+            dec("58.9848800121510040091000"),
+            "interés total = total pagado − principal"
+        );
+        assert_eq!(sch.total_cash_out, dec("1058.9848800121510040091000"));
+        assert_eq!(sch.total_extra_principal, Decimal::ZERO);
+    }
+
+    /// **El calendario y la simulación cuentan la misma historia.** Mismo input que
+    /// `french_extinction_at_month_278` (100.000 € al 3 % con 500 €/mes): el mes de extinción que
+    /// devuelve el calendario y el que se deduce del `ProjectionOutput` completo tienen que ser el
+    /// MISMO número —278—, y el saldo de cierre de cada mes tiene que coincidir mes a mes.
+    ///
+    /// Es la prueba de que «cero matemática nueva» es literal: el calendario publica el principal
+    /// de cierre que el bucle ya calculaba y tiraba, no una segunda derivación de él.
+    #[test]
+    fn schedule_agrees_month_by_month_with_the_projection_loop() {
+        let inp = one_liability_input(
+            300,
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let out = project_net_worth_series(&inp).unwrap();
+        let sch = liability_amortization_schedule(&inp.liabilities[0], inp.ref_date, 300);
+
+        assert_eq!(sch.payoff_month_index, Some(278));
+        for m in &sch.months {
+            // Tolerancia de 1e−6 € y no `assert_eq!` por una razón que NO es el motor: el helper
+            // `implicit_principal` deduce el principal restándoselo a un patrimonio de seis
+            // cifras (`Σ activos − net_worth`), y esa resta pierde los últimos dígitos de la
+            // mantisa de 28 de `Decimal`. La recurrencia es literalmente la misma llamada a
+            // `liability_month`; quien redondea es el test. Medido: la mayor discrepancia sobre
+            // los 278 meses está en el orden de 1e−24 €.
+            let del_bucle = implicit_principal(&out, m.month_index as usize);
+            assert!(
+                (m.closing_principal - del_bucle).abs() < dec("0.000001"),
+                "el saldo del mes {} debe ser el mismo en el calendario ({}) y en la simulación ({})",
+                m.month_index,
+                m.closing_principal,
+                del_bucle
+            );
+        }
+        // El mes de extinción sí es exacto: el saldo llega a CERO en los dos sitios.
+        assert_eq!(implicit_principal(&out, 278), Decimal::ZERO);
+        assert!(
+            (sch.total_interest - dec("38802.7999")).abs() < dec("0.01"),
+            "interés total esperado ≈ 38.802,80 €, obtenido {}",
+            sch.total_interest
+        );
+        assert!(
+            (sch.total_cash_out - dec("138802.7999")).abs() < dec("0.01"),
+            "total a pagar esperado ≈ 138.802,80 €, obtenido {}",
+            sch.total_cash_out
+        );
+    }
+
+    /// `fixed_payments` —el default de la columna— no devenga: todos los meses tienen interés
+    /// **exactamente 0** y el total a pagar es el principal, con TIN o sin él. El calendario de un
+    /// pasivo histórico sigue siendo el de siempre.
+    #[test]
+    fn schedule_fixed_payments_never_charges_interest() {
+        for apr in [None, Some(Decimal::from(9))] {
+            let l = liab(
+                Decimal::from(1_200),
+                Decimal::from(100),
+                RepaymentModel::FixedPayments,
+                apr,
+            );
+            let sch = liability_amortization_schedule(&l, ref_2026(), 60);
+            assert_eq!(sch.payoff_month_index, Some(12), "{apr:?}");
+            assert_eq!(sch.total_interest, Decimal::ZERO, "{apr:?}");
+            assert_eq!(sch.total_cash_out, Decimal::from(1_200), "{apr:?}");
+            for m in &sch.months {
+                assert_eq!(m.interest_accrued, Decimal::ZERO);
+                assert_eq!(m.payment, Decimal::from(100));
+            }
+        }
+    }
+
+    /// Las cuatro razones por las que no hay mes de extinción, cada una con su remedio distinto.
+    #[test]
+    fn schedule_payoff_absent_reasons_are_distinguishable() {
+        // (1) Sin plan de pago: cuota 0 ⇒ calendario vacío, ni devengo ni amortización.
+        let sin_plan = liab(
+            Decimal::from(50_000),
+            Decimal::ZERO,
+            RepaymentModel::French,
+            Some(Decimal::from(5)),
+        );
+        let s1 = liability_amortization_schedule(&sin_plan, ref_2026(), 120);
+        assert_eq!(s1.payoff_absent, Some(LiabilityPayoffAbsence::NoPaymentPlan));
+        assert!(s1.months.is_empty());
+        assert_eq!(s1.final_principal, Decimal::from(50_000));
+        assert_eq!(s1.total_cash_out, Decimal::ZERO);
+
+        // (2) El plan termina antes: `ref_date` = 2026-01-15 ⇒ el mes k abre el 2026-01-01 + (k−1);
+        // con `payment_end` = 2026-03-15 el último mes con cuota es el 3.
+        let mut corto = liab(
+            Decimal::from(50_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(5)),
+        );
+        corto.payment_end = Some(NaiveDate::from_ymd_opt(2026, 3, 15).unwrap());
+        let s2 = liability_amortization_schedule(&corto, ref_2026(), 120);
+        assert_eq!(
+            s2.payoff_absent,
+            Some(LiabilityPayoffAbsence::PaymentPlanEndsBeforePayoff)
+        );
+        assert_eq!(s2.months.len(), 3, "solo tres meses con cuota");
+        assert!(s2.final_principal > Decimal::ZERO);
+
+        // (3) La cuota no reduce el principal: `interest_only` (congelado) y cuota por debajo del
+        // devengo (la deuda crece) comparten razón porque comparten remedio: subir la cuota.
+        let solo_interes = liab(
+            Decimal::from(80_000),
+            Decimal::from(400),
+            RepaymentModel::InterestOnly,
+            Some(Decimal::from(6)),
+        );
+        let s3 = liability_amortization_schedule(&solo_interes, ref_2026(), 120);
+        assert_eq!(
+            s3.payoff_absent,
+            Some(LiabilityPayoffAbsence::PaymentDoesNotReducePrincipal)
+        );
+        assert_eq!(s3.final_principal, Decimal::from(80_000));
+        assert_eq!(
+            s3.total_interest, s3.total_cash_out,
+            "en interest_only todo lo que se paga es interés"
+        );
+
+        let bola_de_nieve = liab(
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::Revolving,
+            Some(Decimal::from(12)),
+        );
+        let s3b = liability_amortization_schedule(&bola_de_nieve, ref_2026(), 120);
+        assert_eq!(
+            s3b.payoff_absent,
+            Some(LiabilityPayoffAbsence::PaymentDoesNotReducePrincipal)
+        );
+        assert!(s3b.final_principal > Decimal::from(100_000), "la deuda crece");
+
+        // (4) Baja, pero no llega a cero dentro de los meses pedidos.
+        let largo = liab(
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let s4 = liability_amortization_schedule(&largo, ref_2026(), 100);
+        assert_eq!(
+            s4.payoff_absent,
+            Some(LiabilityPayoffAbsence::NotWithinHorizon)
+        );
+        assert_eq!(s4.months.len(), 100);
+
+        // (5) Ya saldado hoy: mes 0, sin razón y sin meses.
+        let saldado = liab(
+            Decimal::ZERO,
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let s5 = liability_amortization_schedule(&saldado, ref_2026(), 120);
+        assert_eq!(s5.payoff_month_index, Some(0));
+        assert_eq!(s5.payoff_absent, None);
+        assert!(s5.months.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // 4.4.0 — amortización extra (ejes what-if de `simulate_projection`)
+    // -----------------------------------------------------------------------
+
+    /// **Amortizar antes no imprime dinero.** Con `fixed_payments` —que no devenga interés—
+    /// adelantar la amortización no puede mejorar el patrimonio en NINGÚN mes: lo que sale de más
+    /// por la caja entra igual de principal amortizado, y como no hay interés que evitar, el
+    /// beneficio futuro es exactamente cero.
+    ///
+    /// Es el test que caza el error más caro de este eje: reducir el principal sin cobrar la caja
+    /// (o cobrarla sin reducir el principal). Cualquiera de los dos movería esta serie.
+    #[test]
+    fn extra_principal_is_net_worth_neutral_without_interest() {
+        let base = one_liability_input(
+            15,
+            Decimal::from(1_000),
+            Decimal::from(100),
+            RepaymentModel::FixedPayments,
+            None,
+        );
+        let mut con_extra = base.clone();
+        con_extra.liabilities[0].extra_principal_monthly = Decimal::from(100);
+
+        let a = project_net_worth_series(&base).unwrap();
+        let b = project_net_worth_series(&con_extra).unwrap();
+        assert_eq!(
+            a.net_worth, b.net_worth,
+            "sin intereses, amortizar antes es un intercambio de balance: mismo patrimonio"
+        );
+
+        // Y la deuda sí desaparece antes: 200 €/mes la liquidan en 5 meses en vez de 10.
+        assert_eq!(implicit_principal(&b, 5), Decimal::ZERO);
+        assert_eq!(implicit_principal(&a, 5), Decimal::from(500));
+    }
+
+    /// **La cuota liberada vuelve a la cascada — y no por una decisión nueva.**
+    ///
+    /// Cuando el principal llega a 0, `liability_month` devuelve `cash = min(M, 0) = 0`: la cuota
+    /// deja de salir de la caja sola, el sobrante del mes sube en ese importe y la cascada lo
+    /// encamina como cualquier otro euro. Es el comportamiento que el motor YA tenía para un
+    /// préstamo que se acaba antes de su `payment_end`; el eje de amortización extra solo hace
+    /// que ese momento llegue antes. Suprimir ese dinero exigiría añadir maquinaria para esconder
+    /// caja que el modelo tiene — y respondería a una pregunta que nadie hace.
+    ///
+    /// Aquí: cuota 100, extra 100, deuda 1.000 ⇒ liquidada en el mes 5. Desde el mes 6 el activo
+    /// crece 2.500 €/mes (4.000 − 1.500) en vez de 2.300, y el activo es el destino del sumidero.
+    #[test]
+    fn extra_principal_frees_the_quota_into_the_cascade() {
+        let mut inp = one_liability_input(
+            8,
+            Decimal::from(1_000),
+            Decimal::from(100),
+            RepaymentModel::FixedPayments,
+            None,
+        );
+        inp.liabilities[0].extra_principal_monthly = Decimal::from(100);
+        let out = project_net_worth_series(&inp).unwrap();
+        let asset = &out.per_asset_series[0];
+
+        for k in 1..=5usize {
+            assert_eq!(
+                asset[k] - asset[k - 1],
+                Decimal::from(2_300),
+                "con deuda viva salen 200 €/mes (cuota + extra) — mes {k}"
+            );
+        }
+        for k in 6..=8usize {
+            assert_eq!(
+                asset[k] - asset[k - 1],
+                Decimal::from(2_500),
+                "liquidada la deuda, la cuota liberada entra en la cascada — mes {k}"
+            );
+        }
+    }
+
+    /// **Con intereses sí compensa, y por cuánto.** 100.000 € al 3 % con 500 €/mes se extinguen en
+    /// el mes 278 y cuestan 138.802,7999 € de caja; con 100 €/mes de amortización extra se
+    /// extinguen en el **216** y cuestan **129.520,8776 €**. La diferencia, **9.281,9223 €**, es
+    /// interés que no se devenga — y tiene que aparecer, exacta, como más patrimonio al final del
+    /// horizonte (el activo no compone, así que cada euro que no sale de la caja se queda en él).
+    ///
+    /// Números verificados a 60 dígitos con aritmética decimal exacta antes de correr el test.
+    #[test]
+    fn extra_principal_saves_exactly_the_interest_not_accrued() {
+        let base = one_liability_input(
+            300,
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let mut con_extra = base.clone();
+        con_extra.liabilities[0].extra_principal_monthly = Decimal::from(100);
+
+        let sch_base = liability_amortization_schedule(&base.liabilities[0], base.ref_date, 300);
+        let sch_extra =
+            liability_amortization_schedule(&con_extra.liabilities[0], base.ref_date, 300);
+        assert_eq!(sch_base.payoff_month_index, Some(278));
+        assert_eq!(sch_extra.payoff_month_index, Some(216));
+        let ahorro = sch_base.total_cash_out - sch_extra.total_cash_out;
+        assert!(
+            (ahorro - dec("9281.9223")).abs() < dec("0.01"),
+            "ahorro esperado ≈ 9.281,92 €, obtenido {ahorro}"
+        );
+
+        let a = project_net_worth_series(&base).unwrap();
+        let b = project_net_worth_series(&con_extra).unwrap();
+        let delta_nw = b.net_worth[300] - a.net_worth[300];
+        assert!(
+            (delta_nw - ahorro).abs() < dec("0.01"),
+            "el patrimonio final debe mejorar exactamente en la caja no desembolsada: \
+             ahorro {ahorro}, delta patrimonio {delta_nw}"
+        );
+    }
+
+    /// Amortización puntual: 20.000 € en el mes 13 sobre la misma hipoteca la extinguen en el
+    /// **207** (en vez del 278) con **123.361,6899 €** de caja. Y el importe se topa al saldo: un
+    /// lump sum de 10 millones paga lo que se debe y ni un céntimo más.
+    #[test]
+    fn extra_principal_lump_sum_lands_on_its_month_and_caps_at_the_balance() {
+        let base = liab(
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let mut lump = base.clone();
+        lump.extra_principal_lump_sums = vec![(13, Decimal::from(20_000))];
+        let sch = liability_amortization_schedule(&lump, ref_2026(), 300);
+        assert_eq!(sch.payoff_month_index, Some(207));
+        assert!(
+            (sch.total_cash_out - dec("123361.6899")).abs() < dec("0.01"),
+            "total a pagar esperado ≈ 123.361,69 €, obtenido {}",
+            sch.total_cash_out
+        );
+        assert_eq!(sch.months[12].extra_principal, Decimal::from(20_000));
+        assert_eq!(sch.months[11].extra_principal, Decimal::ZERO);
+
+        let mut absurdo = base.clone();
+        absurdo.extra_principal_lump_sums = vec![(2, Decimal::from(10_000_000))];
+        let s = liability_amortization_schedule(&absurdo, ref_2026(), 300);
+        assert_eq!(s.payoff_month_index, Some(2), "liquida en el mes 2");
+        assert_eq!(s.final_principal, Decimal::ZERO);
+        assert!(
+            s.total_cash_out < Decimal::from(101_000),
+            "el lump sum se topa al saldo, no se paga de más: {}",
+            s.total_cash_out
+        );
+    }
+
+    /// **Sin amortización extra, nada se mueve.** Los campos nuevos a cero reproducen el pin
+    /// pre-4.4.0 punto por punto: quien no simule nada no puede notar que este eje existe.
+    #[test]
+    fn zero_extra_principal_is_bit_identical_to_the_pin() {
+        let base = liability_pin_input();
+        let mut explicito = liability_pin_input();
+        explicito.liabilities[0].extra_principal_monthly = Decimal::ZERO;
+        explicito.liabilities[0].extra_principal_lump_sums = vec![(3, Decimal::ZERO)];
+
+        let a = project_net_worth_series(&base).unwrap();
+        let b = project_net_worth_series(&explicito).unwrap();
+        assert_eq!(a.net_worth, b.net_worth);
+        assert_eq!(a.contributed_capital, b.contributed_capital);
+        assert_eq!(a.per_asset_series, b.per_asset_series);
+    }
+
+    /// Sin plan de pago activo no hay amortización extra que valga: es el contrato que explotan
+    /// los modos B/C del handler (`payment_amount = 0` en memoria, principal como resta
+    /// constante). Si la amortización extra se colara ahí, un what-if movería el principal de un
+    /// hogar cuyas cuotas ya están dentro del promedio de gasto — contándolas dos veces.
+    #[test]
+    fn extra_principal_needs_an_active_payment_plan() {
+        let mut sin_cuota = liab(
+            Decimal::from(50_000),
+            Decimal::ZERO,
+            RepaymentModel::French,
+            Some(Decimal::from(5)),
+        );
+        sin_cuota.extra_principal_monthly = Decimal::from(1_000);
+        let sch = liability_amortization_schedule(&sin_cuota, ref_2026(), 60);
+        assert_eq!(sch.payoff_absent, Some(LiabilityPayoffAbsence::NoPaymentPlan));
+        assert_eq!(sch.final_principal, Decimal::from(50_000));
+        assert_eq!(sch.total_extra_principal, Decimal::ZERO);
+
+        let mut inp = one_liability_input(
+            12,
+            Decimal::from(50_000),
+            Decimal::ZERO,
+            RepaymentModel::French,
+            Some(Decimal::from(5)),
+        );
+        inp.liabilities[0].extra_principal_monthly = Decimal::from(1_000);
+        let out = project_net_worth_series(&inp).unwrap();
+        for k in 0..=12 {
+            assert_eq!(
+                implicit_principal(&out, k),
+                Decimal::from(50_000),
+                "sin plan de pago el principal es constante (mes {k})"
+            );
+        }
     }
 
     /// Valor actual de una renta. Tres contratos:

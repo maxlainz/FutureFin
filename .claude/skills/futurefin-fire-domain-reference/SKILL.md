@@ -18,11 +18,23 @@ description: >
 # FutureFin FIRE Domain Reference
 
 Everything here is the model **as implemented** (verified against code on 2026-07-02,
-v1.4.3; §2b/§2c re-verified 2026-08-14 against v2.2.0), not textbook FIRE theory. Line anchors are as
-of that date; re-verify with the commands in "Provenance and maintenance" if the files have changed.
+v1.4.3; §2b re-verified 2026-08-14 against v2.2.0; §2c, §4, §5, §7 y §9 revisados 2026-08-28 con la
+Fase 6 del tren 4.4.0), not textbook FIRE theory.
+
+> **⚠️ Los números de línea de este fichero son masivamente obsoletos y NO se han corregido uno a
+> uno.** `crates/engine/src/projection.rs` creció ~880 líneas con la Fase 6 (issue #87) y
+> `apps/api/src/handlers/projection.rs` otras ~515, así que casi todo `projection.rs:NNN` de aquí
+> apunta a otra cosa — y **varios ya estaban podridos antes**: en `main`,
+> `project_net_worth_series` ya vivía en la línea 739, no en la 386 que decía el §5, así que sus
+> anclajes llevaban releases señalando `distribute_contributions`. Los del §5 se **retiraron** en favor de nombres de función; el resto se
+> conservan solo como pista de en qué fichero mirar. **Localiza por nombre de símbolo, nunca por
+> número**, y usa los `grep` de «Provenance and maintenance». Un anclaje numérico en un fichero vivo
+> caduca en silencio y miente con más credibilidad que la ausencia.
 
 Primary sources (ground truth, in this order):
-- `crates/engine/src/projection.rs` — the simulation (pure, `Decimal`-only, 22 unit tests).
+- `crates/engine/src/projection.rs` — the simulation (pure, `Decimal`-only, **56** unit tests tras
+  la Fase 6; esta línea decía 22 desde v1.4.3 — cuéntalos con
+  `grep -c '#\[test\]' crates/engine/src/projection.rs`).
 - `apps/api/src/handlers/projection.rs` — FIRE number, gross-up, horizon, deflation, milestones.
 - `apps/api/src/handlers/installation.rs` — `FireSettings` defaults + validation.
 - `apps/web/src/lib/fire.ts` — client-side duplicate for the live preview (server stays source of truth).
@@ -195,8 +207,9 @@ full contract in `.claude/engine.md` §Runway.
   (`m = Σ vₐ·monthly_multiplier(rₐ) / Σ vₐ`) and the expense grows with
   `annual_inflation_assumption_percent` (clamped ≥ 0 by the handler).
 - **Same frame as the simulation**: nominal euros, withdraw-then-grow order, and *literally* the
-  engine's `monthly_multiplier` (made `pub(crate)` for this) — including the "rates ≤ 0 → no growth"
-  rule. A KPI that used a different annual→monthly conversion would drift from the chart.
+  engine's `monthly_multiplier` (made `pub(crate)` for this) — including how it treats non-positive
+  rates (see §4: only `None` and exactly `0` mean factor 1; **negative rates compound**). A KPI that
+  used a different annual→monthly conversion would drift from the chart.
 - **Value-weighted = prorated drain**, deliberately *conservative*: the engine's real drain empties
   the lowest-return liquids first, so it would last slightly longer. The KPI must never promise more
   than the simulation.
@@ -270,8 +283,16 @@ The single most important idea in the codebase. Philosophy: **"haciendo lo que h
 - Income, expenses, contributions and planning flows stay **constant in nominal euros** for the
   whole horizon. They are never inflated.
 - Asset returns (`expected_annual_return_percent`) are **nominal**, compounded monthly via
-  `(1 + p/100)^(1/12)` (projection.rs:154-162). Note: rates ≤ 0 are treated as **no growth**
-  (factor 1) — the engine does not model negative expected returns.
+  `(1 + p/100)^(1/12)` (`monthly_multiplier`). **Corrección 2026-08-28 — este bullet decía lo
+  contrario de lo que hace el código, y llevaba tiempo diciéndolo**: afirmaba que «rates ≤ 0 are
+  treated as no growth (factor 1) — the engine does not model negative expected returns». Falso.
+  Solo `None` y **exactamente `0`** dan factor 1; **una tasa negativa compone de verdad** (−50 %
+  anual ⇒ ×0,5 en doce meses), y `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs
+  con error tipado). Lo confirman tres tests del engine —`monthly_multiplier_none_and_zero_are_flat`,
+  `negative_return_composes_downward` y `minus_100_or_less_clamps_to_zero_factor`— y
+  [`engine.md`](../../engine.md) §Simulation loop paso 7, que siempre lo tuvo bien. Deriva
+  preexistente, no causada por la Fase 6; se arregla aquí porque un lector que la creyera
+  concluiría que un activo con rentabilidad esperada negativa se queda plano.
 - **Only the FIRE target moves with inflation.** `FireTarget { base_amount,
   annual_inflation_percent }` (projection.rs:83-87); the handler clamps inflation to ≥ 0
   (projection.rs:662,983).
@@ -318,54 +339,82 @@ as above) **and** freezes the FIRE target at the same time, in the same move —
 years earlier with nothing about the plan actually improved. Read a change to either as a change of
 *assumption*, never as an improvement. `swr_pct` the same way in miniature: raising it lowers the
 target by division, not by saving more. Neither is a tool bug — it is this file's nominal model,
-surfaced to a caller (often an agent) that has no access to this document. Two more `model_note`
+surfaced to a caller (often an agent) that has no access to this document. **Three** more `model_note`
 facts worth knowing here: the cash axes (`extra_monthly_savings`, `extra_monthly_cash_adjustment`,
 `one_off_expense`) do NOT touch income or expense — they move `net_cash_monthly`, never
-`net_recurring_monthly`/`savings_rate` (§2b); and `final_net_worth` is nominal euros of the
+`net_recurring_monthly`/`savings_rate` (§2b); `final_net_worth` is nominal euros of the
 horizon's last month, comparable across scenarios only via `final_net_worth_real`, and only when
-`deltas.real_delta_absent_reason` is `null`.
+`deltas.real_delta_absent_reason` is `null`; and — **desde 4.4.0 (Fase 6, issue #87)** — el eje
+`liability_overrides` (amortización anticipada: `extra_monthly_principal`, `lump_sum_*`,
+`apr_percent`, `repayment_model` por pasivo) es el bloque más extenso del `model_note` —que es una
+sola cadena sin saltos de línea, así que «párrafo» aquí es una forma de hablar—, y la
+identidad de caja cambia con él: `net_cash_monthly = net_recurring_monthly +
+monthly_cash_adjustment − liability_extra_principal_monthly` (el último es un campo publicado
+nuevo, pineado en `simulate_liability_kpis.rs::net_cash_monthly_stays_verifiable_by_subtraction`).
+**No está disponible en los modos B/C** (`liability_overrides_unavailable_in_real_expense_mode`):
+ahí las cuotas ya viven dentro del promedio de gasto, así que amortizar dos veces el mismo euro
+sería doble conteo.
 
 ## 5. The monthly simulation loop, step by step
 
-`project_net_worth_series` (projection.rs:386-575). Series index 0 = today's state; month `k`
-(1-based) simulates the calendar month `month_first(ref_date) + (k−1)`. Net worth identity
-(projection.rs:437-441): `NW = Σ asset values + surplus_cash − Σ liability principals −
-undrained_cumulative`.
+`project_net_worth_series` en `crates/engine/src/projection.rs`. Series index 0 = today's state;
+month `k` (1-based) simulates the calendar month `month_first(ref_date) + (k−1)`. Net worth
+identity: `NW = Σ asset values + surplus_cash − Σ liability principals − undrained_cumulative`.
+
+> **Los números de línea de esta sección estaban obsoletos y se han retirado** (2026-08-28): el
+> fichero creció ~880 líneas con la Fase 6 y cada anclaje apuntaba a otra cosa —
+> `project_net_worth_series` pasó de la línea 386 a ~1000. Localiza cada paso por nombre de
+> función, no por número; un anclaje numérico en un fichero vivo caduca sin avisar y **miente con
+> más credibilidad que la ausencia**.
 
 For each month `k = 1..=horizon_months`:
 
-1. **Debt service** (458-471): for each liability active this month (`payment_end` is null or
-   ≥ month start, payment > 0), pay `min(monthly_payment, remaining principal)`; sum.
-   Weekly payments were normalized to monthly (`×52/12`) by the handler (projection.rs:572-580).
-2. **Retirement check** (475-481): `fire_reached = nw_prev ≥ target(k−1)` via
+1. **Debt service** (`liability_month` + `liability_extra_principal`): for each liability active
+   this month (`payment_end` is null or ≥ month start, payment > 0), charge the model's cash leg
+   **plus any what-if extra principal**; sum. Weekly payments were normalized to monthly (`×52/12`)
+   by the handler. **Dos correcciones sobre lo que decía este paso**: (a) desde **4.2.0** el tope de
+   la cuota en los modelos que devengan es el **payoff** (`P·(1+i)`), no el principal — «pay
+   `min(monthly_payment, remaining principal)`» solo describe `fixed_payments`; (b) desde **4.4.0**
+   `debt_service` incluye la amortización extra, y el principal de cierre que se asienta en el paso
+   8 es `closing − extra`. **Las dos mitades o ninguna**: cobrar el extra sin bajar el principal
+   drenaría caja sin reducir deuda, y bajarlo sin cobrarlo *imprimiría dinero*. Efecto instantáneo
+   sobre el patrimonio: cero exacto **en el balance** (con un matiz de coste de oportunidad que
+   explica [`engine.md`](../../engine.md) §Calendario de amortización). Efecto de segundo orden a
+   conocer: el techo de un cap `months_expense` es `N × (expense + debt_service)`, así que **se mueve**
+   en un what-if que amortiza — alcanzable solo desde `simulate_projection` y **sin test que lo
+   cubra**.
+2. **Retirement check**: `fire_reached = nw_prev ≥ target(k−1)` via
    `fire_target_at_month_index`. `in_retirement = fire_reached || k ≥ retirement_start_month`.
    The handler always passes `retirement_start_month = None` and
-   `retirement_monthly_withdrawal = 0` (projection.rs:790,793) — FIRE crossover is the sole
+   `retirement_monthly_withdrawal = 0` — FIRE crossover is the sole
    trigger, and the drain is driven purely by the income drop. Once NW dips below the target
    again, `in_retirement` can flip back off next month (the model re-checks every month; there
    is no latch).
-3. **Pick the budget** (482-497): in retirement use `income_retirement_monthly` /
+3. **Pick the budget**: in retirement use `income_retirement_monthly` /
    `expense_retirement_monthly`; otherwise the regular pair.
-4. **Net cash** (499-503): `income − expense − debt_service + planning_adj[k−1] −
+4. **Net cash**: `income − expense − debt_service + planning_adj[k−1] −
    retirement_withdrawal`. Planning flows with a `due_date` land in their calendar month; undated
-   ones are spread over 90 days from `ref_date` (projection.rs:331-384). Budget expenses with an
-   `expense_end_date` are cancelled from the following month via positive adjustments
-   (projection.rs:386-406).
-5. **Surplus** (`net_cash > 0`, not retired) (517-533): run the cascade (§6). Routed euros are
+   ones are spread over 90 days from `ref_date`. Budget expenses with an
+   `expense_end_date` are cancelled from the following month via positive adjustments.
+5. **Surplus** (`net_cash > 0`, not retired): run the cascade (§6). Routed euros are
    added to asset values AND to `contributed_capital`; cascade leftover goes to `surplus_cash`
-   and ALSO counts as contributed. **In retirement** (514-516) any surplus goes to
+   and ALSO counts as contributed. **In retirement** any surplus goes to
    `surplus_cash` only — no contributions, not counted as contributed capital.
-6. **Deficit** (`net_cash ≤ 0`) (505-513): drain `surplus_cash` first; remaining need drains
-   assets via `drain_from_assets` (184-216) — order: **liquid before illiquid, and within each
+6. **Deficit** (`net_cash ≤ 0`): drain `surplus_cash` first; remaining need drains
+   assets via `drain_from_assets` — order: **liquid before illiquid, and within each
    group lowest `expected_annual_return_percent` first** (ties by input order; illiquid assets
    ARE drained if liquids run out). Any shortfall the assets cannot cover accumulates in
    `undrained_cumulative`, which is *subtracted* from NW (implicit debt).
-7. **Compound growth** (535-538): each asset value ×= monthly multiplier. Growth applies AFTER
+7. **Compound growth**: each asset value ×= monthly multiplier. Growth applies AFTER
    this month's contribution/drain.
-8. **Principal reduction** (540-555): each active liability's principal −= its payment.
-9. Push NW, contributed capital, and per-asset values (557-567).
+8. **Principal reduction**: each liability is **assigned the closing balance computed in step 1**
+   (`principals[i] = closing`), never a fresh `P − payment`. It only equals «principal −= payment»
+   in `fixed_payments` with no extra repayment: with an accruing model the closing is
+   `P(1+i) − cash`, and since 4.4.0 the extra principal is already subtracted from it. Recomputing
+   it here would recompute the accrual, and the two copies would drift.
+9. Push NW, contributed capital, and per-asset values.
 
-`contributed_capital[0]` = sum of positive asset `purchase_price` (424-432).
+`contributed_capital[0]` = sum of positive asset `purchase_price`.
 
 ## 6. Allocation cascade semantics
 
@@ -396,11 +445,26 @@ with a signed-off, no-data-migration column drop — see futurefin-change-contro
 All anchors in this section are in the HANDLER file `apps/api/src/handlers/projection.rs`
 (not the engine file of the same name used in §5).
 
-- **Deflate by `month_index`, never by array index.** `deflate_points_to_today`
-  (handlers/projection.rs:466-486) divides by `(1+i/100)^(month_index/12)`. v1.4.2 bug: the web chart
+- **Deflate by `month_index`, never by array index.** El núcleo es `deflator_at_month_index`
+  (`handlers/projection.rs`), que devuelve `1/(1+i/100)^(month_index/12)`. v1.4.2 bug: the web chart
   deflated by array index — invisible with `density=monthly` (indices coincide), wrong with
   `density=hybrid` (points 0..12 monthly then annual: non-equidistant). Any code touching
   decimated series must use `month_index`.
+- **Desde 4.4.0 (Fase 6) el deflactado también se SIRVE** —la SPA **sigue rehaciéndolo**, y tiene que:
+  solo `net_worth` viaja deflactado y el chart necesita además `contributed_capital`, la serie del
+  objetivo FIRE y cada `asset_series[].values` (`deflationFactorAt`,
+  `apps/web/src/lib/projection-chart.ts`)—. Y hay **un solo deflactor, con cuatro consumidores**: `points[].net_worth_real` de cada punto servido,
+  `milestones_real`, `final_net_worth_real` (y su delta) de `simulate_projection`, y el endpoint
+  dedicado `GET /v1/projection/deflate` (que además publica las dos
+  direcciones y un `deflator` a 10 decimales para que multiplicar a mano reproduzca la cifra).
+  `deflate_points_to_today` sigue existiendo pero opera sobre un tipo interno (`NwPoint`), no sobre
+  el `ProjectionPoint` serializado. **Esto NO reabre el motor «real puro»** rechazado en v1.2.0
+  (`futurefin-failure-archaeology` §1 fila 3), y la afirmación es **testable**: `net_worth_real` es
+  exactamente `net_worth / (1+i)^(month_index/12)`, o sea no lleva información que el motor no haya
+  producido ya. El motor sigue simulando 100 % en nominal. **Se publica siempre, también con
+  inflación 0** (deflactor exactamente `1`), para que «no hay inflación» no se confunda con «esta
+  versión no publica el campo» — contraste deliberado con `milestones_real`, que sí queda vacío con
+  inflación 0 porque su contrato es anterior. Regresión: `apps/api/tests/projection_deflation.rs`.
 - **Milestones** (nominal) and **`milestones_real`** (same 1/2.5/5×10^n thresholds crossed on the
   deflated series) are both computed on the FULL monthly series (`points_full`), not the
   decimated one, to keep `reached_month_index` exact under `hybrid`
@@ -429,8 +493,8 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
   to the primary household person's (projection.rs:965-989); no birth date anywhere →
   **30 years**. `?months=N` overrides; fuera de 12–840 **rechaza** con 400 `months_out_of_range` (hasta 4.3.1 clampaba en silencio, así que `get_projection` y `simulate_projection` respondían distinto al mismo valor). `horizon_basis` reports `lifespan_90` |
   `fallback_no_demographics` | `months_override`.
-- Large arrays (`points[].net_worth`, `fire_target_series`, `asset_series[].values`) serialize as
-  f64 for wire size; scalar KPIs (`jubilacion_target_net_worth`, milestones targets,
+- Large arrays (`points[].net_worth`, **`points[].net_worth_real`** desde 4.4.0,
+  `fire_target_series`, `asset_series[].values`) serialize as f64 for wire size; scalar KPIs (`jubilacion_target_net_worth`, milestones targets,
   `starting_net_worth`) stay Decimal-as-string. This f64 boundary is deliberate (v1.4.0,
   precision < 1 € over 70y) — do not extend it to scalars.
 
@@ -463,6 +527,13 @@ Carlo, no sequence-of-returns risk, no variable/guardrail SWR, no tax-aware with
 withdrawal time), no per-asset inflation, no contribution indexation to wage growth. These are
 open research directions — see `.claude/skills/futurefin-research-frontier/SKILL.md`; any move
 on them goes through `.claude/skills/futurefin-projection-realism-campaign/SKILL.md`.
+
+**Lo que sí hace desde 4.4.0 y conviene no confundir con la lista de arriba**: amortización
+anticipada (mensual y puntual) como **eje what-if** de `simulate_projection`, con tres límites
+reales — solo con plan de pago activo (el gate `liability_active`), tope al saldo del mes, y un
+coste de oportunidad implícito por el orden cascada → crecimiento → asiento del principal. Y publica
+el calendario de amortización (`GET /v1/liabilities/{id}/schedule`), que **no es modelo nuevo** sino
+el `closing_principal` que el motor ya derivaba y tiraba.
 
 ## When NOT to use this skill
 
@@ -497,12 +568,26 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 - Defaults (SWR 3.5, ES brackets): `grep -n -A8 "fn default_fire_settings" apps/api/src/handlers/installation.rs`
 - SWR bound 0–4: `grep -n "swr_pct must be between" apps/api/src/handlers/installation.rs`
 - Horizon constants (90/5/70/30, basis strings): `grep -n "LIFESPAN_AGE\|FALLBACK_YEARS\|lifespan_90" apps/api/src/handlers/projection.rs`
-- Deflation by month_index: `grep -n -A6 "fn deflate_points_to_today" apps/api/src/handlers/projection.rs`
+- Deflation by month_index (**el núcleo desde 4.4.0 es `deflator_at_month_index`, con tres consumidores**):
+  `grep -n -A10 "fn deflator_at_month_index" apps/api/src/handlers/projection.rs` y
+  `grep -n "net_worth_real\|deflation_annual_inflation_percent\|deflate_amount_core" apps/api/src/handlers/projection.rs`
+- **Negative returns DO compound** (§4, corrección 2026-08-28):
+  `grep -n -A14 "fn monthly_multiplier" crates/engine/src/projection.rs` — solo `None` y `0` dan
+  factor 1; `p ≤ −100` se clampa a 0. Si vuelves a leer «rates ≤ 0 → no growth» en algún doc, es drift.
+- Calendario de amortización y amortización extra (4.4.0, Fase 6):
+  `grep -n "pub fn liability_amortization_schedule\|MAX_LIABILITY_SCHEDULE_MONTHS\|enum LiabilityPayoffAbsence\|extra_principal_monthly\|fn liability_extra_principal" crates/engine/src/projection.rs`;
+  la identidad contable la pinea `schedule_payment_identity_holds_in_every_model` y el contraste
+  entre superficies, `apps/api/tests/simulate_liability_kpis.rs::the_what_if_debt_kpis_agree_with_the_liability_schedule`.
 - Sink invariant: `grep -n "uncapped_remainder\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs`
 - Client still binary-search (90 iters): `grep -n "for (let i = 0; i < 90" apps/web/src/lib/fire.ts`
 - Budget retirement fields: `grep -n "persists_after_retirement\|ends_at_retirement" apps/api/src/handlers/budget.rs | head`
 - Fixture case count + tolerance: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (7 as of 2026-07-09, incl. the mode-B avg-style tripwire) and `grep -n "_tolerance_eur" apps/api/tests/fixtures/fire-parity.json`
-- If line anchors look stale: `git log --oneline -3 -- crates/engine/src/projection.rs apps/api/src/handlers/projection.rs`
+- If line anchors look stale: `git log --oneline -3 -- crates/engine/src/projection.rs apps/api/src/handlers/projection.rs`.
+  **INCIDENTE (2026-08-28)**: TODOS los anclajes numéricos del §5 estaban obsoletos —
+  `crates/engine/src/projection.rs` creció ~880 líneas con la Fase 6 y `project_net_worth_series`
+  pasó de la línea 386 a ~1000, así que cada «(458-471)» apuntaba a otra función. Se retiraron en
+  favor de nombres de función. **No vuelvas a poner números de línea en esta skill**: un anclaje
+  numérico en un fichero vivo caduca en silencio y miente con más credibilidad que la ausencia.
 - `jubilacion_series_position`/`jubilacion_target_net_worth_nominal` (issue #82, 4.4.0):
   `grep -n "jubilacion_series_position\|jubilacion_target_net_worth_nominal" apps/api/src/handlers/projection.rs` and the pin `grep -n "jubilacion_series_position_indexes_the_arrays" apps/api/tests/projection_number_semantics.rs`
 - `simulate_projection`'s `model_note` (Fase 5, issue #86, 4.4.0): `grep -n "const SIMULATE_MODEL_NOTE" -A3 apps/api/src/handlers/projection.rs` (full text of the warning); `apps/api/tests/mcp_simulate.rs` pins the cache-neutral behavior this note sits next to.

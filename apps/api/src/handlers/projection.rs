@@ -11,7 +11,7 @@ use crate::handlers::installation::{
 use crate::handlers::person_view::LedgerView;
 /// Alias local: `RepaymentModel` a secas es el del **engine** en este fichero (ver el `use` de
 /// `futurefin_engine`); este es el del lado API, que sabe hablar con la columna SQL.
-use crate::handlers::liabilities::RepaymentModel as LiabRepaymentModel;
+use crate::handlers::liabilities::{payoff_absence_code, RepaymentModel as LiabRepaymentModel};
 use crate::handlers::installation::AvgWindowMode;
 use crate::handlers::transactions::summary::{transactions_avg, AvgSide, TransactionsAvg};
 use crate::handlers::session::require_session_user;
@@ -234,15 +234,55 @@ pub(crate) fn serialize_decimal_as_f64<S: serde::Serializer>(d: &Decimal, s: S) 
     s.serialize_f64(d.to_f64().unwrap_or(0.0))
 }
 
+/// Punto **servido** de la serie. Los tres importes son números f64 (excepción chart-only D4/I3).
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ProjectionPoint {
+    /// Número de MES desde `anchor_date_ymd`, **nunca** la posición en el array: con
+    /// `density=hybrid` los puntos no son equidistantes.
     pub month_index: u32,
+    /// Patrimonio neto en euros **NOMINALES** del mes `month_index` (euros del momento).
     #[serde(serialize_with = "serialize_decimal_as_f64")]
     #[schema(value_type = f64)]
     pub net_worth: Decimal,
     #[serde(serialize_with = "serialize_decimal_as_f64")]
     #[schema(value_type = f64)]
     pub contributed_capital: Decimal,
+    /// El mismo patrimonio en **euros de HOY**: `net_worth / (1 + inflación%)^(month_index/12)`,
+    /// con la `deflation_annual_inflation_percent` que la respuesta declara al lado.
+    ///
+    /// **Esto es capa de PRESENTACIÓN, no un cambio de modelo.** El motor sigue simulando en
+    /// nominal y solo el objetivo FIRE se ajusta por inflación (`fire_target_at_month_index`);
+    /// aquí se divide un resultado ya calculado. Simular EN euros de hoy es el modelo «real puro»
+    /// de la v1.0.12, **rechazado** en la v1.2.0 porque mezclaba marcos —deflactaba las
+    /// rentabilidades y dejaba los flujos y el objetivo fijos— y drenaba los activos ANTES de la
+    /// jubilación con la inflación encendida (guardia viva:
+    /// `fire_target_with_inflation_does_not_trigger_early_drain`). Deflactar el output no reabre
+    /// nada de eso: la comparación patrimonio↔objetivo, el mes de cruce y la cascada se siguen
+    /// decidiendo en el mismo marco nominal de siempre, y el cruce es además invariante
+    /// (`nominal ≥ base·(1+i)^(k/12)` ⟺ `deflactado ≥ base`).
+    ///
+    /// Se sirve **siempre**, con inflación 0 incluida: ahí el deflactor es exactamente `1` y este
+    /// campo es el mismo valor que `net_worth`. Omitirlo cuando no hay inflación dejaría a un
+    /// consumidor sin poder distinguir «no hay inflación» de «esta versión no publica el campo»
+    /// — el mismo fallo que ya costó los cuatro campos de jubilación.
+    ///
+    /// Deliberadamente NO hay `contributed_capital_real`: la pregunta es «mi patrimonio en euros
+    /// de hoy», el coste aportado en euros de hoy no lo pide nadie, y `milestones_real` ya sienta
+    /// el precedente de deflactar solo el patrimonio.
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
+    pub net_worth_real: Decimal,
+}
+
+/// Punto **interno** para los cálculos que recorren la serie mensual completa (milestones,
+/// deflactado). Existe para que [`ProjectionPoint`] sea exclusivamente el tipo que se serializa:
+/// mientras `points_full` era un `ProjectionPoint`, añadirle `net_worth_real` obligaba a rellenar
+/// ese campo con un valor que nadie lee — y un campo con un valor inventado en una estructura de
+/// dinero es exactamente cómo nacen las cifras plausibles y falsas de este repo.
+#[derive(Debug, Clone, Copy)]
+struct NwPoint {
+    month_index: u32,
+    net_worth: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -395,6 +435,13 @@ pub struct ProjectionSeriesResponse {
     pub savings_income_basis: SavingsAvgBasis,
     /// Procedencia del lado GASTO.
     pub savings_expense_basis: SavingsAvgBasis,
+    /// Inflación anual (%) con la que se calculó `points[].net_worth_real` y `milestones_real`.
+    /// Es la asunción de la instalación, clampada a ≥ 0. **Sin este campo `net_worth_real` sería
+    /// una cifra sin base declarada**: la misma disciplina que `basis` en `/v1/budget` y
+    /// `/v1/summary` (declarar la base, no renombrar el campo).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub deflation_annual_inflation_percent: Decimal,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -428,6 +475,10 @@ struct AllocationRuleEngineRow {
 
 #[derive(Debug, FromRow)]
 struct LiabEngineRow {
+    /// Necesario desde 4.4.0 para que `simulate_projection` pueda apuntar sus overrides a UN
+    /// pasivo concreto (mismo patrón que `asset_id_name` para las rentabilidades por activo).
+    id: Uuid,
+    label: String,
     principal: Decimal,
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
@@ -734,27 +785,24 @@ pub(crate) fn deflator_at_month_index(
 /// `hybrid`, donde el cliente solo recibe puntos anuales. Con inflación 0 devuelve una copia sin
 /// cambios.
 fn deflate_points_to_today(
-    points: &[ProjectionPoint],
+    points: &[NwPoint],
     annual_inflation_percent: Decimal,
-) -> Vec<ProjectionPoint> {
+) -> Vec<NwPoint> {
     if annual_inflation_percent <= Decimal::ZERO {
         return points.to_vec();
     }
     points
         .iter()
-        .map(|p| {
-            let deflator = deflator_at_month_index(annual_inflation_percent, p.month_index);
-            ProjectionPoint {
-                month_index: p.month_index,
-                net_worth: p.net_worth * deflator,
-                contributed_capital: p.contributed_capital * deflator,
-            }
+        .map(|p| NwPoint {
+            month_index: p.month_index,
+            net_worth: p.net_worth
+                * deflator_at_month_index(annual_inflation_percent, p.month_index),
         })
         .collect()
 }
 
 fn projection_unique_reached_milestones(
-    points: &[ProjectionPoint],
+    points: &[NwPoint],
     anchor_date: NaiveDate,
     baseline_adjustment: Decimal,
     limit: usize,
@@ -1110,6 +1158,10 @@ pub(crate) struct BuiltProjection {
     pub allocation_rule_ids: Vec<Uuid>,
     /// `(id, name)` por activo en el mismo orden que `input.assets` — evita un segundo SELECT.
     pub asset_id_name: Vec<(Uuid, String)>,
+    /// `(id, label)` por pasivo, **alineado posición a posición** con `input.liabilities`. Misma
+    /// razón que `allocation_rule_ids`: el índice del engine es una propiedad de construcción, no
+    /// algo que se pueda re-derivar de la tabla sin volver a la BD y arriesgarse a otro orden.
+    pub liability_id_label: Vec<(Uuid, String)>,
     /// Flujos de planificación crudos (scope + amount + due_date) — los reusa el handler para
     /// calcular el baseline de milestones sin tener que volver a la BD.
     pub planning_rows: Vec<PlanningFlowProjRow>,
@@ -1179,7 +1231,7 @@ pub(crate) async fn build_installation_projection_input(
     let liab_scope = view.scope_where("");
     let liab_today_ph = view.next_arg_index();
     let liab_sql = format!(
-        r#"SELECT principal, payment_amount, payment_frequency, payment_end_date,
+        r#"SELECT id, label, principal, payment_amount, payment_frequency, payment_end_date,
                   apr_percent, repayment_model
            FROM liabilities
            WHERE {liab_scope}
@@ -1418,9 +1470,12 @@ pub(crate) async fn build_installation_projection_input(
         })
         .collect();
 
+    let mut liability_id_label: Vec<(Uuid, String)> = Vec::with_capacity(liabs.len());
     let liabilities: Vec<ProjectionLiabilityInput> = liabs
         .into_iter()
-        .map(|r| ProjectionLiabilityInput {
+        .map(|r| {
+            liability_id_label.push((r.id, r.label.clone()));
+            ProjectionLiabilityInput {
             principal: r.principal.max(Decimal::ZERO),
             monthly_payment: liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()),
             payment_end: r.payment_end_date,
@@ -1434,6 +1489,13 @@ pub(crate) async fn build_installation_projection_input(
                 .map(LiabRepaymentModel::to_engine)
                 .unwrap_or(RepaymentModel::FixedPayments),
             apr_percent: r.apr_percent,
+            // Ejes what-if de `simulate_projection`: el ensamblado REAL nunca los pone. Los
+            // aplica el override post-build sobre el input clonado del escenario, igual que
+            // `asset_return_overrides` — una proyección de verdad no simula amortizaciones que
+            // el usuario no ha hecho.
+            extra_principal_monthly: Decimal::ZERO,
+            extra_principal_lump_sums: Vec::new(),
+            }
         })
         .collect();
 
@@ -1458,6 +1520,7 @@ pub(crate) async fn build_installation_projection_input(
         monthly_net_regular,
         allocation_rule_ids,
         asset_id_name,
+        liability_id_label,
         planning_rows,
         effective_savings_source,
         savings_income_basis,
@@ -1790,6 +1853,7 @@ pub async fn compute_projection_series_response(
         monthly_net_regular: monthly_delta_assumption,
         allocation_rule_ids: _,
         asset_id_name,
+        liability_id_label: _,
         planning_rows,
         effective_savings_source,
         savings_income_basis,
@@ -1842,6 +1906,12 @@ pub async fn compute_projection_series_response(
                 month_index: i,
                 net_worth: *nw,
                 contributed_capital: *cc,
+                // Deflactado por el `month_index` del punto, JAMÁS por su posición en el array:
+                // con `density=hybrid` los puntos no son equidistantes y la versión ingenua
+                // deflacta 70 años como si fueran 30 — el bug del chart de la v1.4.2, que aquí
+                // no puede reproducirse porque el helper solo acepta un número de mes.
+                net_worth_real: *nw
+                    * deflator_at_month_index(inflation_annual_percent, i),
             })
         })
         .collect();
@@ -1849,15 +1919,13 @@ pub async fn compute_projection_series_response(
     // Milestones se computan sobre TODOS los meses (no sobre los serializados),
     // si no, con `density=hybrid` se perderían milestones que caen entre dos
     // puntos anuales.
-    let points_full: Vec<ProjectionPoint> = output
+    let points_full: Vec<NwPoint> = output
         .net_worth
         .iter()
-        .zip(output.contributed_capital.iter())
         .enumerate()
-        .map(|(i, (nw, cc))| ProjectionPoint {
+        .map(|(i, nw)| NwPoint {
             month_index: i as u32,
             net_worth: *nw,
-            contributed_capital: *cc,
         })
         .collect();
 
@@ -2006,6 +2074,7 @@ pub async fn compute_projection_series_response(
         savings_source: effective_savings_source,
         savings_income_basis,
         savings_expense_basis,
+        deflation_annual_inflation_percent: money_out(inflation_annual_percent),
     })
 }
 
@@ -2033,7 +2102,35 @@ pub(crate) struct SimulationSpec {
     pub fire_settings_overrides: Option<crate::handlers::installation::FireSettingsPatch>,
     pub retirement_annual_expense: Option<Decimal>,
     pub asset_return_overrides: Vec<(Uuid, Decimal)>,
+    /// Ejes what-if por PASIVO (4.4.0). Mismo molde que `asset_return_overrides`: se aplican
+    /// post-build sobre el input clonado del escenario, porque ninguno de ellos mueve el target
+    /// FIRE ni las bases de los caps (que dependen de `payment_amount`, que NO se toca).
+    pub liability_overrides: Vec<LiabilityOverrideSpec>,
     pub include_series: bool,
+}
+
+/// Un override what-if sobre un pasivo. Los cuatro ejes están **gateados contra el no-op
+/// silencioso** en el core: un override que no puede hacer nada devuelve un 400 con su código,
+/// nunca un escenario idéntico al baseline sin explicación.
+#[derive(Debug, Clone)]
+pub(crate) struct LiabilityOverrideSpec {
+    pub liability_id: Uuid,
+    /// Amortización extra mensual (≥ 0) mientras dure la deuda.
+    pub extra_monthly_principal: Option<Decimal>,
+    /// Amortización puntual: importe > 0 + exactamente uno de (`month_index`, `date`).
+    pub lump_sum_amount: Option<Decimal>,
+    pub lump_sum_month_index: Option<u32>,
+    pub lump_sum_date: Option<NaiveDate>,
+    /// TIN nominal anual (0..=100). Solo devenga en `french`/`revolving`.
+    pub apr_percent: Option<Decimal>,
+    /// Modelo de amortización efectivo del escenario.
+    ///
+    /// No estaba en el mínimo pedido y se añade por una razón medible: `fixed_payments` es el
+    /// **default de la columna**, así que la mayoría de los pasivos guardados no devengan — y sin
+    /// este eje el override de TIN sería un no-op para casi todo el mundo, o un 400 que no deja
+    /// hacer la pregunta. Con él, «mi hipoteca está guardada sin intereses; simúlala como francés
+    /// al 3 %» es una sola llamada.
+    pub repayment_model: Option<LiabRepaymentModel>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2108,12 +2205,39 @@ pub(crate) struct SimKpis {
     /// no son constantes y ya viven dentro de la simulación.
     #[serde(with = "rust_decimal::serde::str")]
     pub monthly_cash_adjustment: Decimal,
-    /// `net_recurring_monthly + monthly_cash_adjustment`: la caja mensual estable que este lado
-    /// mete de verdad en la cascada. **Es el campo que se mueve** cuando simulas ahorrar 200 € más
-    /// al mes. Sigue sin ser el `net_cash_month` del motor mes a mes, que suma además el tramo de
-    /// Próximos del mes en curso y el one-off donde caiga.
+    /// `net_recurring_monthly + monthly_cash_adjustment − liability_extra_principal_monthly`: la
+    /// caja mensual estable que este lado mete de verdad en la cascada. **Es el campo que se
+    /// mueve** cuando simulas ahorrar 200 € más al mes — o cuando amortizas deuda por encima de la
+    /// cuota, que también deja de estar disponible para aportar.
+    ///
+    /// Sigue sin ser el `net_cash_month` del motor mes a mes, que suma además el tramo de Próximos
+    /// del mes en curso y el one-off donde caiga. Y el término de amortización extra **no dura
+    /// todo el horizonte**: se acaba con la deuda, y desde ese mes la cuota liberada vuelve
+    /// también a la cascada. Así que esta cifra describe los meses CON deuda viva, que es cuando
+    /// el override aprieta.
     #[serde(with = "rust_decimal::serde::str")]
     pub net_cash_monthly: Decimal,
+    /// Suma de las amortizaciones extra MENSUALES de `liability_overrides` en este lado.
+    /// **Siempre `0` en el baseline.** Va publicado aparte para que la resta de
+    /// `net_cash_monthly` siga siendo comprobable a mano. No incluye los lump sums, que afectan a
+    /// un solo mes (igual que `one_off_expense` queda fuera de `monthly_cash_adjustment`).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub liability_extra_principal_monthly: Decimal,
+    /// Interés que los pasivos de este lado devengarán dentro del horizonte, con el mismo
+    /// calendario que sirve `GET /v1/liabilities/{id}/schedule`. **Es la cifra que responde «¿me
+    /// compensa amortizar antes?»**: su delta es el interés que el escenario NO paga. `0` cuando
+    /// ningún pasivo devenga (todos `fixed_payments`, sin TIN, o sin plan de pago activo).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub liability_total_interest: Decimal,
+    /// Mes en que **todos** los pasivos de este lado quedan saldados (el máximo de sus meses de
+    /// extinción). `0` = ya no hay deuda hoy. `null` ⟺ hay `liability_debt_free_absent_reason`.
+    /// Es un número de MES desde `anchor_date_ymd`.
+    pub liability_debt_free_month_index: Option<u32>,
+    /// Por qué no hay mes libre de deuda: mismos códigos que el calendario
+    /// (`no_payment_plan`, `payment_plan_ends_before_payoff`,
+    /// `payment_does_not_reduce_principal`, `not_within_horizon`), del primer pasivo que no salda.
+    /// `null` ⟺ hay `liability_debt_free_month_index`.
+    pub liability_debt_free_absent_reason: Option<&'static str>,
     /// `net_recurring_monthly / income_monthly`, redondeado a 6 decimales igual que en
     /// `/v1/summary` (misma precisión en las dos superficies). `None` si no hay ingreso.
     /// Deliberadamente sobre el neto RECURRENTE: es la tasa de ahorro comparable con
@@ -2203,6 +2327,17 @@ pub(crate) struct SimDeltas {
     /// restar dos valores ya recortados a 6 dp propagaría el error de presentación al delta.
     #[serde(with = "rust_decimal::serde::str_option")]
     pub savings_rate_delta: Option<Decimal>,
+    /// `scenario − baseline` de la amortización extra mensual. Con el baseline siempre a 0, es
+    /// literalmente lo que pediste amortizar de más.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub liability_extra_principal_monthly_delta: Decimal,
+    /// `scenario − baseline` del interés de los pasivos. **NEGATIVO = interés ahorrado**, que es
+    /// la respuesta numérica a «¿me compensa amortizar antes?».
+    #[serde(with = "rust_decimal::serde::str")]
+    pub liability_total_interest_delta: Decimal,
+    /// `scenario − baseline` en meses hasta quedar libre de deuda. Negativo = te libras antes.
+    /// `null` si alguno de los dos lados no llega a saldar dentro del horizonte.
+    pub liability_debt_free_months_delta: Option<i64>,
 }
 
 /// Series decimadas (hybrid) opt-in — números f64 como el resto de series de chart.
@@ -2311,6 +2446,42 @@ fn sim_kpis(
     let savings_rate = (income_monthly > Decimal::ZERO)
         .then(|| (net_recurring_monthly / income_monthly).round_dp(SIM_RATIO_DP));
 
+    // Agregados de deuda de ESTE lado, con el MISMO calendario que sirve
+    // `GET /v1/liabilities/{id}/schedule` — cero matemática nueva, y por tanto imposible que la
+    // tool del calendario y el what-if den meses de extinción distintos para los mismos datos.
+    // Horizonte = el de la simulación: «libre de deuda» tiene que significar lo mismo aquí que en
+    // la serie que se está pintando.
+    let liability_extra_principal_monthly: Decimal = input
+        .liabilities
+        .iter()
+        .map(|l| l.extra_principal_monthly.max(Decimal::ZERO))
+        .sum();
+    let mut liability_total_interest = Decimal::ZERO;
+    // `Some(0)` con cero pasivos: no deber nada es estar libre de deuda hoy, no «no se sabe».
+    let mut liability_debt_free_month_index = Some(0u32);
+    let mut liability_debt_free_absent_reason: Option<&'static str> = None;
+    for l in &input.liabilities {
+        let sch = futurefin_engine::liability_amortization_schedule(
+            l,
+            input.ref_date,
+            input.horizon_months,
+        );
+        liability_total_interest += sch.total_interest;
+        match (sch.payoff_month_index, sch.payoff_absent) {
+            (Some(k), _) => {
+                // El hogar queda libre de deuda cuando cae el ÚLTIMO pasivo.
+                liability_debt_free_month_index =
+                    liability_debt_free_month_index.map(|acc| acc.max(k));
+            }
+            (None, absent) => {
+                liability_debt_free_month_index = None;
+                if liability_debt_free_absent_reason.is_none() {
+                    liability_debt_free_absent_reason = absent.map(payoff_absence_code);
+                }
+            }
+        }
+    }
+
     SimKpis {
         jubilacion_month_index,
         jubilacion_date_ymd,
@@ -2332,7 +2503,13 @@ fn sim_kpis(
         debt_service_absent_reason: built.debt_service_absent_reason,
         net_recurring_monthly: money_out(net_recurring_monthly),
         monthly_cash_adjustment: money_out(monthly_cash_adjustment),
-        net_cash_monthly: money_out(net_recurring_monthly + monthly_cash_adjustment),
+        net_cash_monthly: money_out(
+            net_recurring_monthly + monthly_cash_adjustment - liability_extra_principal_monthly,
+        ),
+        liability_extra_principal_monthly: money_out(liability_extra_principal_monthly),
+        liability_total_interest: money_out(liability_total_interest),
+        liability_debt_free_month_index,
+        liability_debt_free_absent_reason,
         savings_rate,
         savings_source: built.effective_savings_source,
         savings_income_basis: built.savings_income_basis.clone(),
@@ -2357,7 +2534,7 @@ fn sim_kpis(
 /// porque el plan mejore, sino porque el motor capitaliza en NOMINAL y solo el objetivo FIRE crece
 /// con la inflación — bajarla sube la rentabilidad real de todos los activos y congela el objetivo
 /// a la vez, gratis, en el mismo movimiento. Lo mismo, en pequeño, con `swr_pct`.
-const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos del hogar (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. El motor capitaliza en euros NOMINALES y solo el objetivo FIRE se ajusta por inflación, así que bajar `annual_inflation_percent` sube la rentabilidad real de todos los activos Y congela el objetivo al mismo tiempo: puede adelantar la jubilación años sin que nada del plan haya mejorado. Léelo como un cambio de supuesto, no como una mejora. Igual con `swr_pct`: subirlo baja el objetivo por división, no por ahorrar más. Los ejes de caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, no `net_recurring_monthly` ni `savings_rate`. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null.";
+const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos del hogar (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. El motor capitaliza en euros NOMINALES y solo el objetivo FIRE se ajusta por inflación, así que bajar `annual_inflation_percent` sube la rentabilidad real de todos los activos Y congela el objetivo al mismo tiempo: puede adelantar la jubilación años sin que nada del plan haya mejorado. Léelo como un cambio de supuesto, no como una mejora. Igual con `swr_pct`: subirlo baja el objetivo por división, no por ahorrar más. Los ejes de caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, no `net_recurring_monthly` ni `savings_rate`. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO — lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga) y en que la cuota liberada al extinguirse la deuda vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
 
 /// Decimales de `SimKpis::savings_rate`. Debe seguir siendo el mismo que el `RATIO_DP` de
 /// `handlers/summary.rs`: si divergen, se reabre la incoherencia de precisión entre superficies que
@@ -2415,6 +2592,66 @@ pub(crate) async fn simulate_projection_core(
             )));
         }
     }
+    // Ejes por pasivo: forma y cotas. Lo que depende del pasivo concreto (que exista en el
+    // scope, que tenga plan de pago, que su modelo devengue) se comprueba abajo, cuando el
+    // ensamblado ya ha leído la tabla.
+    {
+        let mut vistos: Vec<Uuid> = Vec::with_capacity(spec.liability_overrides.len());
+        for ov in &spec.liability_overrides {
+            if vistos.contains(&ov.liability_id) {
+                return Err(ApiError::BadRequest(
+                    "liability_override_duplicate: liability_overrides must not repeat the same liability_id".into(),
+                ));
+            }
+            vistos.push(ov.liability_id);
+            if ov.extra_monthly_principal.is_some_and(|v| v < Decimal::ZERO) {
+                return Err(ApiError::BadRequest(
+                    "liability_extra_principal_negative: liability_overrides[].extra_monthly_principal must be >= 0".into(),
+                ));
+            }
+            if ov.apr_percent.is_some_and(|v| v < Decimal::ZERO) {
+                return Err(ApiError::BadRequest(
+                    "liability_apr_negative: liability_overrides[].apr_percent must be >= 0".into(),
+                ));
+            }
+            match (
+                ov.lump_sum_amount,
+                ov.lump_sum_month_index,
+                ov.lump_sum_date,
+            ) {
+                (None, None, None) => {}
+                (Some(a), mi, d) => {
+                    if a <= Decimal::ZERO {
+                        return Err(ApiError::BadRequest(
+                            "liability_lump_sum_not_positive: liability_overrides[].lump_sum.amount must be > 0".into(),
+                        ));
+                    }
+                    if mi.is_some() == d.is_some() {
+                        return Err(ApiError::BadRequest(
+                            "liability_lump_sum_timing_ambiguous: liability_overrides[].lump_sum requires exactly one of month_index or date".into(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(ApiError::BadRequest(
+                        "liability_lump_sum_amount_required: liability_overrides[].lump_sum.amount is required with month_index/date".into(),
+                    ))
+                }
+            }
+            // Un override que no pide NADA es un error de llamada, no una petición vacía: lo
+            // silencioso sería aceptarlo y devolver un escenario idéntico al baseline.
+            if ov.extra_monthly_principal.is_none()
+                && ov.lump_sum_amount.is_none()
+                && ov.apr_percent.is_none()
+                && ov.repayment_model.is_none()
+            {
+                return Err(ApiError::BadRequest(
+                    "liability_override_empty: each entry of liability_overrides must set at least one of extra_monthly_principal, lump_sum, apr_percent or repayment_model".into(),
+                ));
+            }
+        }
+    }
+
     match (
         spec.one_off_amount,
         spec.one_off_month_index,
@@ -2543,6 +2780,101 @@ pub(crate) async fn simulate_projection_core(
         }
     }
 
+    // Ejes por pasivo. Post-build como `asset_return_overrides`: ninguno mueve el target FIRE ni
+    // las bases de los caps, que dependen de `payment_amount` — y `payment_amount` no se toca.
+    if !spec.liability_overrides.is_empty() {
+        // En modo real (B/C con datos de gasto) el ensamblado anula la cuota EN MEMORIA porque
+        // las cuotas pagadas ya viven dentro del promedio: los pasivos no tocan la caja y su
+        // principal es una resta constante. Un override de amortización aquí no haría nada —o
+        // peor, contaría la cuota dos veces si alguien relajara el gate. Se rechaza en vez de
+        // devolver un escenario idéntico al baseline sin decir por qué.
+        if scenario_built.debt_service_absent_reason.is_some() {
+            return Err(ApiError::BadRequest(
+                "liability_overrides_unavailable_in_real_expense_mode: liability_overrides do not apply when the expense base comes from the real transactions average (savings_source transactions_avg or budget_income_real_expense) — in that mode the paid instalments already live inside the average, so liabilities have no cash flow and their principal is a constant subtraction".into(),
+            ));
+        }
+        let anchor = proj_month_first(ctx.today);
+        for ov in &spec.liability_overrides {
+            let Some(idx) = scenario_built
+                .liability_id_label
+                .iter()
+                .position(|(id, _)| *id == ov.liability_id)
+            else {
+                return Err(ApiError::BadRequest(format!(
+                    "liability_not_in_scope: unknown liability_id {} (not in scope for this view, or its payment plan already ended)",
+                    ov.liability_id
+                )));
+            };
+            let target = &mut scenario_input.liabilities[idx];
+
+            // Modelo efectivo del escenario: el override si lo hay, si no el guardado.
+            let effective_model = ov
+                .repayment_model
+                .map(LiabRepaymentModel::to_engine)
+                .unwrap_or(target.repayment_model);
+            let effective_apr = ov.apr_percent.or(target.apr_percent);
+            let accrues = matches!(
+                effective_model,
+                RepaymentModel::French | RepaymentModel::Revolving
+            );
+
+            // Tres puertas contra el no-op silencioso. Las tres describen configuraciones que el
+            // motor acepta sin quejarse y que producen exactamente los mismos números que el
+            // baseline — un 400 con su código dice qué falta; un escenario idéntico, no.
+            if ov.apr_percent.is_some() && !accrues {
+                return Err(ApiError::BadRequest(
+                    "liability_apr_ignored_by_repayment_model: apr_percent only accrues with repayment_model french or revolving — fixed_payments charges no interest and in interest_only the instalment already IS the interest; set repayment_model in the same override if that is what you mean".into(),
+                ));
+            }
+            if accrues && !effective_apr.is_some_and(|v| v > Decimal::ZERO) {
+                return Err(ApiError::BadRequest(
+                    "liability_repayment_model_needs_apr: repayment_model french or revolving needs an apr_percent > 0 (stored on the liability or set in the same override) — without it the model degenerates into fixed_payments and the scenario would equal the baseline".into(),
+                ));
+            }
+            let wants_amortization =
+                ov.extra_monthly_principal.is_some() || ov.lump_sum_amount.is_some();
+            if wants_amortization && target.monthly_payment <= Decimal::ZERO {
+                return Err(ApiError::BadRequest(
+                    "liability_override_needs_payment_plan: extra_monthly_principal and lump_sum require the liability to have an active payment plan (payment_amount > 0) — without one the projection freezes its principal and there is no instalment to bring forward".into(),
+                ));
+            }
+
+            if let Some(m) = ov.repayment_model {
+                target.repayment_model = m.to_engine();
+            }
+            if let Some(apr) = ov.apr_percent {
+                target.apr_percent = Some(apr);
+            }
+            if let Some(extra) = ov.extra_monthly_principal {
+                target.extra_principal_monthly = extra;
+            }
+            if let Some(amount) = ov.lump_sum_amount {
+                // Mes 1-based, misma rejilla que `points[].month_index`: el mes 1 es el mes civil
+                // del ancla. Se resuelve a un índice discreto (y no por el reparto de un planning
+                // flow) porque una amortización es un acto puntual en un mes concreto.
+                let k = match (ov.lump_sum_month_index, ov.lump_sum_date) {
+                    (Some(k), None) => k,
+                    (None, Some(d)) => {
+                        let diff = month_diff(anchor, proj_month_first(d));
+                        if diff < 0 {
+                            return Err(ApiError::BadRequest(
+                                "liability_lump_sum_date_out_of_horizon: liability_overrides[].lump_sum.date is outside the projection horizon".into(),
+                            ));
+                        }
+                        (diff as u32).saturating_add(1)
+                    }
+                    _ => unreachable!("validated above"),
+                };
+                if !(1..=months).contains(&k) {
+                    return Err(ApiError::BadRequest(
+                        "liability_lump_sum_month_out_of_range: liability_overrides[].lump_sum.month_index must be between 1 and the projection horizon in months".into(),
+                    ));
+                }
+                target.extra_principal_lump_sums.push((k, amount));
+            }
+        }
+    }
+
     // Tasas por activo (los negativos > −100 son válidos desde el fix de `monthly_multiplier`).
     for (asset_id, pct) in &spec.asset_return_overrides {
         let Some(idx) = scenario_built
@@ -2644,6 +2976,19 @@ pub(crate) async fn simulate_projection_core(
                 _ => None,
             }
         },
+        liability_extra_principal_monthly_delta: money_out(
+            scenario.liability_extra_principal_monthly - baseline.liability_extra_principal_monthly,
+        ),
+        liability_total_interest_delta: money_out(
+            scenario.liability_total_interest - baseline.liability_total_interest,
+        ),
+        liability_debt_free_months_delta: match (
+            baseline.liability_debt_free_month_index,
+            scenario.liability_debt_free_month_index,
+        ) {
+            (Some(b), Some(s)) => Some(s as i64 - b as i64),
+            _ => None,
+        },
     };
 
     let series = if spec.include_series {
@@ -2678,8 +3023,187 @@ pub(crate) async fn simulate_projection_core(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Deflactado servido (4.4.0) — GET /v1/projection/deflate
+// ---------------------------------------------------------------------------
+
+/// Tope del mes a deflactar: el mismo horizonte máximo de proyección. Más allá, la respuesta
+/// describiría un punto que ninguna otra superficie modela.
+const MAX_DEFLATE_MONTH_INDEX: u32 = MAX_PROJECTION_MONTHS;
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct DeflateQuery {
+    /// Importe a convertir, como string decimal.
+    pub amount: String,
+    /// Mes desde el ancla (0..=840). Exactamente uno de `month_index` o `date`.
+    pub month_index: Option<u32>,
+    /// Fecha civil `YYYY-MM-DD`. Exactamente uno de `month_index` o `date`.
+    pub date: Option<String>,
+}
+
+/// Conversión entre euros nominales de un mes futuro y euros de hoy, en **las dos direcciones a
+/// la vez**.
+///
+/// Se publican las dos porque `amount` por sí solo es ambiguo —¿está en euros de aquel mes o en
+/// los de hoy?— y elegir una dirección por el llamante es exactamente cómo se cuela un error de
+/// signo en una respuesta que parece razonable. Con las dos etiquetadas, no hay nada que adivinar.
+///
+/// **Capa de presentación.** Aplica el MISMO `deflator_at_month_index` que produce
+/// `milestones_real` y `points[].net_worth_real`, sobre la misma asunción de inflación de la
+/// instalación. No simula nada y no toca el motor, que sigue capitalizando en nominal (ver el
+/// doc-comment de `ProjectionPoint::net_worth_real` para por qué eso importa).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeflateResponse {
+    /// Eco del importe recibido.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+    /// Mes efectivo (0 = hoy). Número de MES, no una posición de serie.
+    pub month_index: u32,
+    /// Primero del mes civil correspondiente (`YYYY-MM-DD`).
+    pub month_ymd: String,
+    /// Mes 0 (`YYYY-MM-DD`): el «hoy» civil de la instalación.
+    pub anchor_date_ymd: String,
+    /// Inflación anual (%) usada. Es la asunción de la instalación, clampada a ≥ 0.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub annual_inflation_percent: Decimal,
+    /// `1 / (1 + inflación%)^(month_index/12)`. Exactamente `1` con inflación ≤ 0 o mes 0.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub deflator: Decimal,
+    /// Si `amount` está en euros NOMINALES del mes `month_index`, esto es lo que vale HOY:
+    /// `amount × deflator`. Es la conversión que hace `net_worth_real`.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount_in_today_euros: Decimal,
+    /// Si `amount` está en euros de HOY, esto es lo que costará lo mismo en el mes `month_index`:
+    /// `amount / deflator`. Es la conversión inversa (inflar), la que responde «¿cuánto
+    /// necesitaré entonces para comprar lo que hoy cuesta esto?».
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount_in_month_euros: Decimal,
+    pub model_note: String,
+}
+
+const DEFLATE_MODEL_NOTE: &str = "Capa de PRESENTACIÓN: convierte un importe ya calculado, no simula nada. El motor de proyección capitaliza siempre en euros NOMINALES y solo el objetivo FIRE se ajusta por inflación; deflactar aquí no cambia ninguna proyección, ningún mes de jubilación y ninguna cascada. Usa la asunción `annual_inflation_assumption_percent` de la instalación, así que dos llamadas con inflaciones distintas NO son comparables. Di siempre en qué euros está la cifra que cites.";
+
+/// Core compartida con la tool MCP `deflate_amount`.
+pub(crate) async fn deflate_amount_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    amount: Decimal,
+    month_index: Option<u32>,
+    date: Option<NaiveDate>,
+) -> Result<DeflateResponse, ApiError> {
+    // Exactamente uno de los dos. Aceptar ambos obligaría a inventar una precedencia y a que un
+    // llamante que se contradiga reciba una respuesta plausible en vez de un error.
+    if month_index.is_some() == date.is_some() {
+        return Err(ApiError::BadRequest(
+            "deflate_timing_ambiguous: provide exactly one of month_index or date".into(),
+        ));
+    }
+
+    let today = crate::handlers::installation::installation_naive_today(pool, iid).await?;
+    let inflation_annual_percent: Decimal = sqlx::query_scalar(
+        r#"SELECT annual_inflation_assumption_percent FROM installation WHERE id = $1"#,
+    )
+    .bind(iid)
+    .fetch_one(pool)
+    .await
+    .map(|v: Decimal| v.max(Decimal::ZERO))?;
+    let anchor = proj_month_first(today);
+
+    let k = match (month_index, date) {
+        (Some(k), None) => k,
+        (None, Some(d)) => {
+            // Mismo mapeo fecha→mes que la serie: meses civiles completos desde el ancla.
+            let months = month_diff(anchor, proj_month_first(d));
+            if months < 0 {
+                return Err(ApiError::BadRequest(
+                    "deflate_date_in_past: date must not be before the anchor month".into(),
+                ));
+            }
+            months as u32
+        }
+        _ => unreachable!("validated above"),
+    };
+    if k > MAX_DEFLATE_MONTH_INDEX {
+        return Err(ApiError::BadRequest(
+            "deflate_month_out_of_range: month_index must be between 0 and 840".into(),
+        ));
+    }
+
+    let deflator = deflator_at_month_index(inflation_annual_percent, k);
+    // `deflator` nunca es 0 (`1/(1+i)^y` con i ≥ 0), así que la división inversa es segura; el
+    // `checked_div` está por disciplina, no por un caso conocido.
+    let inflated = amount
+        .checked_div(deflator)
+        .unwrap_or(amount);
+
+    Ok(DeflateResponse {
+        amount: money_out(amount),
+        month_index: k,
+        month_ymd: proj_add_months(anchor, k).format("%Y-%m-%d").to_string(),
+        anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
+        annual_inflation_percent: money_out(inflation_annual_percent),
+        // El deflactor no es dinero: se publica con más resolución que `money_out` para que
+        // multiplicarlo a mano reproduzca la cifra. 10 decimales sobre un factor de orden 1 son
+        // ~1e−10 de error relativo, muy por debajo del céntimo en cualquier patrimonio real.
+        deflator: deflator.round_dp(10),
+        amount_in_today_euros: money_out(amount * deflator),
+        amount_in_month_euros: money_out(inflated),
+        model_note: DEFLATE_MODEL_NOTE.into(),
+    })
+}
+
+/// Meses civiles completos entre dos primeros-de-mes (`b − a`). Negativo si `b` es anterior.
+fn month_diff(a: NaiveDate, b: NaiveDate) -> i32 {
+    (b.year() - a.year()) * 12 + (b.month() as i32 - a.month() as i32)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/projection/deflate",
+    tag = "projection",
+    params(DeflateQuery),
+    responses(
+        (status = 200, description = "Importe convertido entre euros nominales y euros de hoy", body = DeflateResponse),
+        (status = 400, description = "Parámetros inválidos"),
+        (status = 401, description = "Unauthorized")
+    )
+)]
+pub async fn get_projection_deflate(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Query(q): Query<DeflateQuery>,
+) -> Result<Json<DeflateResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
+    let amount = q.amount.trim().parse::<Decimal>().map_err(|_| {
+        ApiError::BadRequest(
+            "decimal_invalid: amount must be a decimal string — use '.' as the decimal separator, with no currency symbol and no thousands separator (\"1234.56\", not \"1.234,56 €\")".into(),
+        )
+    })?;
+    let date = q
+        .date
+        .as_deref()
+        .map(|raw| {
+            raw.trim().parse::<NaiveDate>().map_err(|_| {
+                ApiError::BadRequest(
+                    "date_invalid: date must be a calendar date as \"YYYY-MM-DD\" (e.g. \"2026-03-01\"), never \"01/03/2026\" nor a month alone".into(),
+                )
+            })
+        })
+        .transpose()?;
+    let res = deflate_amount_core(&state.pool, iid, amount, q.month_index, date).await?;
+    Ok(Json(res))
+}
+
 pub fn projection_router() -> Router {
-    Router::new().route("/series", get(get_projection_series))
+    Router::new()
+        .route("/series", get(get_projection_series))
+        .route("/deflate", get(get_projection_deflate))
 }
 
 /// Recompute de la proyección `view=household` (ambas densidades) y guardado
@@ -2876,30 +3400,25 @@ mod milestone_tests {
     #[test]
     fn milestones_deduplicate_by_year_keeping_highest_target() {
         let points = vec![
-            ProjectionPoint {
+            NwPoint {
                 month_index: 0,
                 net_worth: Decimal::from(900),
-                contributed_capital: Decimal::ZERO,
             },
-            ProjectionPoint {
+            NwPoint {
                 month_index: 1,
                 net_worth: Decimal::from(1200),
-                contributed_capital: Decimal::ZERO,
             },
-            ProjectionPoint {
+            NwPoint {
                 month_index: 3,
                 net_worth: Decimal::from(2700),
-                contributed_capital: Decimal::ZERO,
             },
-            ProjectionPoint {
+            NwPoint {
                 month_index: 9,
                 net_worth: Decimal::from(6000),
-                contributed_capital: Decimal::ZERO,
             },
-            ProjectionPoint {
+            NwPoint {
                 month_index: 15,
                 net_worth: Decimal::from(11000),
-                contributed_capital: Decimal::ZERO,
             },
         ];
         let out = projection_unique_reached_milestones(
@@ -2917,36 +3436,31 @@ mod milestone_tests {
     #[test]
     fn deflate_points_to_today_is_identity_with_zero_inflation() {
         let points = vec![
-            ProjectionPoint {
+            NwPoint {
                 month_index: 0,
                 net_worth: Decimal::from(1000),
-                contributed_capital: Decimal::ZERO,
             },
-            ProjectionPoint {
+            NwPoint {
                 month_index: 12,
                 net_worth: Decimal::from(2000),
-                contributed_capital: Decimal::from(100),
             },
         ];
         let out = deflate_points_to_today(&points, Decimal::ZERO);
         assert_eq!(out[0].net_worth, Decimal::from(1000));
         assert_eq!(out[1].net_worth, Decimal::from(2000));
-        assert_eq!(out[1].contributed_capital, Decimal::from(100));
     }
 
     #[test]
     fn deflate_points_to_today_discounts_future_to_present() {
         // Con 10% anual, 1.100 € dentro de un año equivalen a 1.000 € de hoy.
         let points = vec![
-            ProjectionPoint {
+            NwPoint {
                 month_index: 0,
                 net_worth: Decimal::from(1000),
-                contributed_capital: Decimal::ZERO,
             },
-            ProjectionPoint {
+            NwPoint {
                 month_index: 12,
                 net_worth: Decimal::from(1100),
-                contributed_capital: Decimal::ZERO,
             },
         ];
         let out = deflate_points_to_today(&points, Decimal::from(10));
@@ -2963,11 +3477,10 @@ mod milestone_tests {
     fn real_milestones_are_reached_later_than_nominal() {
         // Patrimonio nominal que alcanza 10.000 € al final del horizonte. Deflactado al 8% anual,
         // el mismo umbral en euros de hoy se cruza más tarde (o no se cruza dentro del horizonte).
-        let points: Vec<ProjectionPoint> = (0u32..=120)
-            .map(|m| ProjectionPoint {
+        let points: Vec<NwPoint> = (0u32..=120)
+            .map(|m| NwPoint {
                 month_index: m,
                 net_worth: Decimal::from(1000) + Decimal::from(75) * Decimal::from(m),
-                contributed_capital: Decimal::ZERO,
             })
             .collect();
         let anchor = NaiveDate::from_ymd_opt(2026, 1, 10).unwrap();
@@ -3023,6 +3536,8 @@ mod milestone_tests {
                 payment_end: None,
                 repayment_model: RepaymentModel::FixedPayments,
                 apr_percent: None,
+                extra_principal_monthly: Decimal::ZERO,
+                extra_principal_lump_sums: Vec::new(),
             }],
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
             retirement_start_month: None,

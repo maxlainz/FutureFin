@@ -7,6 +7,7 @@ use crate::handlers::backup_user::{
 };
 use crate::handlers::budget::budget_router;
 use crate::handlers::categories::categories_router;
+use crate::handlers::changes::changes_router;
 use crate::handlers::fallback;
 use crate::handlers::ha_sso::{ha_callback, ha_start};
 use crate::handlers::health::{health_check, ready_check};
@@ -77,6 +78,7 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
             crate::handlers::oauth_consent::oauth_consent_router(state.mcp_enabled),
         )
         .nest("/categories", categories_router())
+        .nest("/changes", changes_router())
         .nest("/assets", assets_router())
         .nest("/allocation-rules", allocation_rules_router())
         .nest("/liabilities", liabilities_router())

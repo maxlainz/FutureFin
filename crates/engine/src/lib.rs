@@ -13,9 +13,11 @@ pub use history::{
 pub use net_return::{net_return_percentages, NetReturn};
 pub use projection::{
     fire_target_at_month_index, first_month_allocation,
-    first_month_per_asset_contribution_nominals, present_value_of_payments,
-    project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, AllocationSkipReason,
-    EngineError, FireTarget, FirstMonthAllocation, ProjectionInput, ProjectionLiabilityInput,
-    ProjectionOutput, RepaymentModel, RuleOutcome, SimAsset,
+    first_month_per_asset_contribution_nominals, liability_amortization_schedule,
+    present_value_of_payments, project_net_worth_series, AllocationCap, AllocationKind,
+    AllocationRule, AllocationSkipReason, EngineError, FireTarget, FirstMonthAllocation,
+    LiabilityPayoffAbsence, LiabilitySchedule, LiabilityScheduleMonth, ProjectionInput,
+    ProjectionLiabilityInput, ProjectionOutput, RepaymentModel, RuleOutcome, SimAsset,
+    MAX_LIABILITY_SCHEDULE_MONTHS,
 };
 pub use runway::{liquid_runway_months, RunwayOutcome, MAX_RUNWAY_MONTHS};

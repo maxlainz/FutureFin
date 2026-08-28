@@ -3,14 +3,17 @@ use crate::handlers::budget::{budget_line_removed_with_liability, BudgetLineRemo
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::refresh_projection_after_mutation;
+use crate::handlers::projection::{
+    liability_monthly_payment, refresh_projection_after_mutation,
+};
+use crate::money::money_out;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
-use chrono::{Months, NaiveDate};
+use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -1130,8 +1133,367 @@ pub(crate) async fn delete_liability_core(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Calendario de amortización (4.4.0) — GET /v1/liabilities/{id}/schedule
+// ---------------------------------------------------------------------------
+
+/// Meses que se simulan SIEMPRE por dentro, con independencia de cuántos se publiquen. Es el
+/// tope del engine ([`futurefin_engine::MAX_LIABILITY_SCHEDULE_MONTHS`], 70 años = el horizonte
+/// máximo de proyección): los agregados —interés total, mes de extinción— tienen que describir el
+/// préstamo entero, no la ventana que el llamante pidió mirar.
+const SCHEDULE_HORIZON_MONTHS: u32 = futurefin_engine::MAX_LIABILITY_SCHEDULE_MONTHS;
+
+/// Ventana publicada por defecto. Doce meses es «el próximo año, mes a mes», que es la pregunta
+/// concreta; el préstamo entero se lee en `years`, que resume 40 años en 40 filas en vez de en
+/// 480. Misma disciplina de coste de contexto que las cotas de `/v1/history/series`.
+const DEFAULT_SCHEDULE_WINDOW_MONTHS: u32 = 12;
+
+/// Tope duro de la ventana. 480 meses = 40 años, el plazo de la hipoteca más larga que se firma.
+const MAX_SCHEDULE_WINDOW_MONTHS: u32 = 480;
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct LiabilityScheduleQuery {
+    /// Vista del ledger (`mine` | `household`).
+    pub view: Option<String>,
+    /// Primer mes de la ventana publicada (1-based, default 1). No afecta a los agregados.
+    pub from_month_index: Option<u32>,
+    /// Meses de la ventana publicada (1..=480, default 12). No afecta a los agregados.
+    pub months: Option<u32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LiabilityScheduleMonthResponse {
+    /// Mes 1-based desde `anchor_date_ymd`. Es un número de MES, no una posición de array: la
+    /// ventana puede empezar en cualquier mes.
+    pub month_index: u32,
+    /// Primero del mes civil correspondiente (`YYYY-MM-DD`).
+    pub month_ymd: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub opening_principal: Decimal,
+    /// Interés devengado ese mes. Siempre `0` con `repayment_model = fixed_payments` (no
+    /// devenga) o sin TIN. En `interest_only` es la cuota entera.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub interest_accrued: Decimal,
+    /// Principal amortizado. **Puede ser negativo** cuando la cuota no cubre el devengo: la deuda
+    /// crece ese mes, y publicarlo como 0 escondería justo eso.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub principal_repaid: Decimal,
+    /// Caja que sale ese mes. El último mes de un préstamo es de **cuota parcial**: solo lo que
+    /// queda por pagar.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub payment: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub closing_principal: Decimal,
+}
+
+/// Resumen por año **civil** (no por bloques de 12 meses desde hoy): es como el usuario piensa el
+/// gasto financiero y es lo que hace legible una hipoteca de 40 años sin servir 480 filas.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LiabilityScheduleYearResponse {
+    pub year: i32,
+    /// Meses del calendario que caen en ese año (el primero y el último suelen ser parciales).
+    pub months_count: u32,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub interest_accrued: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub principal_repaid: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub paid: Decimal,
+    /// Saldo al cerrar el último mes del año.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub closing_principal: Decimal,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LiabilityScheduleResponse {
+    #[schema(value_type = String, format = "uuid")]
+    pub liability_id: Uuid,
+    pub label: String,
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `?view`.
+    pub view: &'static str,
+    /// Mes 0 del calendario (`YYYY-MM-DD`), en el calendario civil de la instalación.
+    pub anchor_date_ymd: String,
+    pub repayment_model: RepaymentModel,
+    /// TIN nominal anual en % (`i = apr/1200`). Ausente = sin interés.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub apr_percent: Option<Decimal>,
+    /// Cuota **mensual equivalente** que simula el calendario. Con `payment_frequency = weekly` es
+    /// `payment_amount × 52 / 12` — la misma normalización que usa la proyección, así que el
+    /// calendario y el chart hablan de la misma cuota.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub monthly_payment: Decimal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_frequency: Option<PaymentFrequency>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "date")]
+    pub payment_end_date: Option<NaiveDate>,
+    /// Saldo de HOY. El calendario arranca aquí, no en el principal original del préstamo.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub opening_principal: Decimal,
+    /// Saldo tras el último mes simulado. `0` ⟺ hay `payoff_month_index`.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub final_principal: Decimal,
+    /// Interés que **queda por pagar** desde hoy hasta el final del calendario.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub total_interest_remaining: Decimal,
+    /// Todo lo que saldrá de la caja: `opening_principal + total_interest_remaining` cuando el
+    /// préstamo se salda dentro del calendario.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub total_to_pay: Decimal,
+    /// Mes en que el saldo llega a cero. `0` = ya saldado hoy. `null` ⟺ hay
+    /// `payoff_absent_reason`. Es un número de MES desde `anchor_date_ymd`.
+    pub payoff_month_index: Option<u32>,
+    /// Fecha civil de ese mes (`YYYY-MM-DD`). `null` ⟺ `payoff_month_index` es `null`.
+    pub payoff_date_ymd: Option<String>,
+    /// Por qué no hay mes de extinción, con remedios distintos cada uno:
+    /// `no_payment_plan` (no hay cuota activa: da de alta `payment_amount`),
+    /// `payment_plan_ends_before_payoff` (tu `payment_end_date` llega antes que el saldo cero),
+    /// `payment_does_not_reduce_principal` (`interest_only`, o cuota por debajo del interés: la
+    /// deuda no baja) y `not_within_horizon` (baja, pero tarda más de 70 años).
+    /// `null` ⟺ hay `payoff_month_index`.
+    pub payoff_absent_reason: Option<&'static str>,
+    /// Meses que tiene el calendario COMPLETO (no los publicados en `months`).
+    pub months_total: u32,
+    pub window_from_month_index: u32,
+    pub window_months: u32,
+    /// `true` ⟺ `months` no contiene el calendario entero. El resumen anual (`years`) sí lo
+    /// cubre siempre.
+    pub window_truncated: bool,
+    /// Ventana mes a mes.
+    pub months: Vec<LiabilityScheduleMonthResponse>,
+    /// Resumen por año civil del calendario COMPLETO.
+    pub years: Vec<LiabilityScheduleYearResponse>,
+    pub model_note: String,
+}
+
+const SCHEDULE_MODEL_NOTE: &str = "Calendario proyectado con la MISMA recurrencia que el chart de proyección (interés sobre el saldo de apertura, cuota a fin de mes: P' = P·(1+i) − M, con i = apr_percent/1200), arrancando en el saldo de HOY y no en el principal original. Solo devenga con plan de pago activo y solo en repayment_model french o revolving: fixed_payments no cobra intereses y en interest_only la cuota ES el interés. Los importes son nominales (euros del momento), sin deflactar. No modela comisiones, seguros vinculados, revisiones de tipo variable ni carencias.";
+
+pub(crate) fn payoff_absence_code(a: futurefin_engine::LiabilityPayoffAbsence) -> &'static str {
+    match a {
+        futurefin_engine::LiabilityPayoffAbsence::NoPaymentPlan => "no_payment_plan",
+        futurefin_engine::LiabilityPayoffAbsence::PaymentPlanEndsBeforePayoff => {
+            "payment_plan_ends_before_payoff"
+        }
+        futurefin_engine::LiabilityPayoffAbsence::PaymentDoesNotReducePrincipal => {
+            "payment_does_not_reduce_principal"
+        }
+        futurefin_engine::LiabilityPayoffAbsence::NotWithinHorizon => "not_within_horizon",
+    }
+}
+
+/// Core compartida con la tool MCP `get_liability_schedule`.
+///
+/// El calendario se simula SIEMPRE entero (`SCHEDULE_HORIZON_MONTHS`) y la ventana solo recorta lo
+/// que se publica: un agregado que dependiera de cuántos meses pidió mirar el llamante sería un
+/// «interés total» distinto en cada llamada.
+pub(crate) async fn liability_schedule_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    user_id: Uuid,
+    view: LedgerView,
+    id: Uuid,
+    from_month_index: Option<u32>,
+    window_months: Option<u32>,
+) -> Result<LiabilityScheduleResponse, ApiError> {
+    let from = from_month_index.unwrap_or(1);
+    if from < 1 {
+        return Err(ApiError::BadRequest(
+            "schedule_from_month_out_of_range: from_month_index must be >= 1".into(),
+        ));
+    }
+    let window = window_months.unwrap_or(DEFAULT_SCHEDULE_WINDOW_MONTHS);
+    if window < 1 || window > MAX_SCHEDULE_WINDOW_MONTHS {
+        return Err(ApiError::BadRequest(
+            "schedule_window_out_of_range: months must be between 1 and 480".into(),
+        ));
+    }
+
+    let today = installation_naive_today(pool, iid).await?;
+    let scope = view.scope_where("");
+    let id_ph = view.next_arg_index();
+    let today_ph = id_ph + 1;
+    // Mismo filtro de pasivo vencido que TODAS las lecturas (contrato «reads never mutate»): un
+    // pasivo con el plan ya cumplido no existe para las lecturas, así que aquí es un 404 y no un
+    // calendario vacío que se leería como «no debes nada» sin decir por qué.
+    let sql = format!(
+        r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
+                  payment_amount, payment_frequency, payment_end_date, notes,
+                  sort_index, principal_derived_from_plan, repayment_model
+           FROM liabilities
+           WHERE {scope}
+             AND id = ${id_ph}
+             AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph})"#
+    );
+    let row: LiabilityRow = view
+        .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
+        .bind(id)
+        .bind(today)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let model = RepaymentModel::parse(&row.repayment_model)?;
+    let payment_frequency = row
+        .payment_frequency
+        .as_deref()
+        .map(PaymentFrequency::parse)
+        .transpose()?;
+    let monthly_payment =
+        liability_monthly_payment(row.payment_amount, row.payment_frequency.as_deref());
+
+    // Sin campos de amortización extra: el calendario de un pasivo GUARDADO es el real. El
+    // what-if de «¿me compensa amortizar antes?» vive en `simulate_projection`, que sí los mueve.
+    let liab = futurefin_engine::ProjectionLiabilityInput {
+        principal: row.principal.max(Decimal::ZERO),
+        monthly_payment,
+        payment_end: row.payment_end_date,
+        repayment_model: model.to_engine(),
+        apr_percent: row.apr_percent,
+        extra_principal_monthly: Decimal::ZERO,
+        extra_principal_lump_sums: Vec::new(),
+    };
+    let sch =
+        futurefin_engine::liability_amortization_schedule(&liab, today, SCHEDULE_HORIZON_MONTHS);
+
+    let anchor = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+    let month_date = |k: u32| -> NaiveDate {
+        anchor.checked_add_months(Months::new(k)).unwrap_or(anchor)
+    };
+
+    let months_total = sch.months.len() as u32;
+    let months: Vec<LiabilityScheduleMonthResponse> = sch
+        .months
+        .iter()
+        .filter(|m| m.month_index >= from && m.month_index < from.saturating_add(window))
+        .map(|m| LiabilityScheduleMonthResponse {
+            month_index: m.month_index,
+            // El mes `k` es el que empieza en `primero_de_mes(hoy) + (k−1)`, exactamente igual
+            // que el índice `k` de la serie de proyección.
+            month_ymd: month_date(m.month_index - 1).format("%Y-%m-%d").to_string(),
+            opening_principal: money_out(m.opening_principal),
+            interest_accrued: money_out(m.interest_accrued),
+            principal_repaid: money_out(m.principal_repaid),
+            payment: money_out(m.payment),
+            closing_principal: money_out(m.closing_principal),
+        })
+        .collect();
+
+    // Resumen por año civil sobre el calendario COMPLETO.
+    let mut years: Vec<LiabilityScheduleYearResponse> = Vec::new();
+    for m in &sch.months {
+        let year = month_date(m.month_index - 1).year();
+        match years.last_mut() {
+            Some(last) if last.year == year => {
+                last.months_count += 1;
+                last.interest_accrued += m.interest_accrued;
+                last.principal_repaid += m.principal_repaid;
+                last.paid += m.payment + m.extra_principal;
+                last.closing_principal = m.closing_principal;
+            }
+            _ => years.push(LiabilityScheduleYearResponse {
+                year,
+                months_count: 1,
+                interest_accrued: m.interest_accrued,
+                principal_repaid: m.principal_repaid,
+                paid: m.payment + m.extra_principal,
+                closing_principal: m.closing_principal,
+            }),
+        }
+    }
+    for y in &mut years {
+        y.interest_accrued = money_out(y.interest_accrued);
+        y.principal_repaid = money_out(y.principal_repaid);
+        y.paid = money_out(y.paid);
+        y.closing_principal = money_out(y.closing_principal);
+    }
+
+    Ok(LiabilityScheduleResponse {
+        liability_id: row.id,
+        label: row.label,
+        view: view.as_str(),
+        anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
+        repayment_model: model,
+        apr_percent: row.apr_percent,
+        monthly_payment: money_out(monthly_payment),
+        payment_frequency,
+        payment_end_date: row.payment_end_date,
+        opening_principal: money_out(sch.opening_principal),
+        final_principal: money_out(sch.final_principal),
+        total_interest_remaining: money_out(sch.total_interest),
+        total_to_pay: money_out(sch.total_cash_out),
+        payoff_month_index: sch.payoff_month_index,
+        payoff_date_ymd: sch
+            .payoff_month_index
+            .map(|k| month_date(k.saturating_sub(1)).format("%Y-%m-%d").to_string()),
+        payoff_absent_reason: sch.payoff_absent.map(payoff_absence_code),
+        months_total,
+        window_from_month_index: from,
+        window_months: window,
+        window_truncated: (months.len() as u32) < months_total,
+        months,
+        years,
+        model_note: SCHEDULE_MODEL_NOTE.into(),
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/liabilities/{id}/schedule",
+    tag = "liabilities",
+    params(
+        ("id" = Uuid, Path, description = "Liability id"),
+        LiabilityScheduleQuery
+    ),
+    responses(
+        (status = 200, description = "Calendario de amortización", body = LiabilityScheduleResponse),
+        (status = 400, description = "Parámetros de ventana fuera de rango"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Pasivo inexistente, fuera de la vista o con el plan ya vencido")
+    )
+)]
+pub async fn get_liability_schedule(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Path(id): Path<Uuid>,
+    Query(q): Query<LiabilityScheduleQuery>,
+) -> Result<Json<LiabilityScheduleResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
+    let view = LedgerViewQuery {
+        view: q.view.clone(),
+    }
+    .resolve()?;
+    let res = liability_schedule_core(
+        &state.pool,
+        iid,
+        user.id.0,
+        view,
+        id,
+        q.from_month_index,
+        q.months,
+    )
+    .await?;
+    Ok(Json(res))
+}
+
 pub fn liabilities_router() -> Router {
     Router::new()
         .route("/", get(list_liabilities).post(create_liability))
         .route("/{id}", patch(patch_liability).delete(delete_liability))
+        .route("/{id}/schedule", get(get_liability_schedule))
 }

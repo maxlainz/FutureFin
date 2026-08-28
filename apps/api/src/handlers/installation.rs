@@ -901,6 +901,141 @@ pub(crate) async fn patch_fire_settings_core(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Ejes de PRESENTACIÓN de la instalación (allowlist estricta)
+// ---------------------------------------------------------------------------
+
+/// Los tres ejes de presentación del hogar, tal y como están guardados.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PresentationSettings {
+    /// Zona horaria IANA con la que se resuelve el «hoy» civil de la instalación.
+    pub calendar_tz: String,
+    /// `dates` | `ages`: cómo rotula la app el eje temporal.
+    pub show_age_mode: String,
+    /// `EUR` | `USD` | `GBP`. **Una sola por instalación**: FutureFin no convierte ni mezcla.
+    pub base_currency: String,
+}
+
+/// Patchset campo a campo de los ejes de presentación. Omitir = conservar.
+///
+/// **Allowlist estricta, y las dos ausencias son deliberadas**:
+/// - `mcp_write_enabled` **jamás**: es el kill-switch de la escritura por MCP, y un interruptor
+///   que puede reencenderse a sí mismo es decorativo (rubrica §2.1 de la skill de paridad).
+/// - `onboarding_completed` **tampoco**: es estado de la UI (marca que la SPA ya no debe enseñar
+///   el asistente de alta). Ponerlo a `true` no cambia ni un dato del hogar; solo le quita a una
+///   persona una pantalla que quizá no había visto.
+/// - `fire_settings` y `annual_inflation_assumption_percent` no están porque ya los cubre
+///   `patch_fire_settings_core`, campo a campo y con su propio preview.
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone)]
+pub(crate) struct PresentationSettingsPatch {
+    pub calendar_tz: Option<String>,
+    pub show_age_mode: Option<String>,
+    pub base_currency: Option<String>,
+}
+
+impl PresentationSettingsPatch {
+    #[allow(dead_code)]
+    pub(crate) fn is_empty(&self) -> bool {
+        // Destructuring exhaustivo y sin `..`: añadir un eje a la allowlist deja de compilar hasta
+        // que alguien decida si cuenta como «algo que actualizar».
+        let PresentationSettingsPatch {
+            calendar_tz,
+            show_age_mode,
+            base_currency,
+        } = self;
+        calendar_tz.is_none() && show_age_mode.is_none() && base_currency.is_none()
+    }
+}
+
+/// Before/after del merge (el preview de la tool los enseña; el apply además persiste).
+#[allow(dead_code)]
+#[derive(Debug, Serialize)]
+pub(crate) struct PresentationSettingsOutcome {
+    pub before: PresentationSettings,
+    pub after: PresentationSettings,
+}
+
+/// Core de la tool MCP `update_installation_settings` (no hay endpoint HTTP equivalente: el
+/// `PATCH /v1/installation` de la SPA manda el objeto entero, incluidos los dos ejes que esta
+/// allowlist prohíbe). Lee el estado actual, aplica SOLO los campos presentes con **las mismas
+/// validaciones** que el PATCH real (`normalize_calendar_tz`, `validate_show_age_mode`,
+/// `normalize_currency`) y — con `apply = true` — persiste e invalida FULL. Con `apply = false`
+/// valida y devuelve el before/after sin tocar nada (preview).
+///
+/// **Owner-only, comprobado AQUÍ DENTRO** (y no solo en la superficie que llama): el `PATCH`
+/// HTTP exige `MembershipRole::Owner` y estos ejes son los mismos. Que la comprobación viva en la
+/// core es lo que impide que una superficie nueva se la deje.
+///
+/// **Cache FULL** cuando aplica: `calendar_tz` mueve el «hoy» civil —o sea el mes 0 de la
+/// proyección entera— y `show_age_mode` viaja DENTRO de `ProjectionSeriesResponse`. Solo
+/// `base_currency` sería inocua, y no vale la pena una invalidación condicional por eje.
+#[allow(dead_code)]
+pub(crate) async fn patch_presentation_settings_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    patchset: PresentationSettingsPatch,
+    apply: bool,
+) -> Result<PresentationSettingsOutcome, ApiError> {
+    if patchset.is_empty() {
+        return Err(ApiError::BadRequest(
+            "patch_empty: provide at least one of calendar_tz, show_age_mode, base_currency".into(),
+        ));
+    }
+    if !user_is_installation_owner(&state.pool, user_id, iid).await? {
+        return Err(ApiError::Forbidden);
+    }
+
+    let (calendar_tz, show_age_mode, base_currency): (String, String, String) = sqlx::query_as(
+        r#"SELECT calendar_tz, show_age_mode, base_currency FROM installation WHERE id = $1"#,
+    )
+    .bind(iid)
+    .fetch_one(&state.pool)
+    .await?;
+    let before = PresentationSettings {
+        calendar_tz,
+        show_age_mode,
+        base_currency,
+    };
+
+    let after = PresentationSettings {
+        calendar_tz: match &patchset.calendar_tz {
+            Some(raw) => normalize_calendar_tz(raw)?,
+            None => before.calendar_tz.clone(),
+        },
+        show_age_mode: match &patchset.show_age_mode {
+            Some(raw) => {
+                let trimmed = raw.trim();
+                validate_show_age_mode(trimmed)?;
+                trimmed.to_string()
+            }
+            None => before.show_age_mode.clone(),
+        },
+        base_currency: match &patchset.base_currency {
+            Some(raw) => normalize_currency(raw)?,
+            None => before.base_currency.clone(),
+        },
+    };
+
+    if apply {
+        sqlx::query(
+            r#"UPDATE installation
+               SET calendar_tz = $1, show_age_mode = $2, base_currency = $3
+               WHERE id = $4"#,
+        )
+        .bind(&after.calendar_tz)
+        .bind(&after.show_age_mode)
+        .bind(&after.base_currency)
+        .bind(iid)
+        .execute(&state.pool)
+        .await?;
+        refresh_projection_after_mutation(state, iid, user_id).await;
+    }
+
+    Ok(PresentationSettingsOutcome { before, after })
+}
+
 /// Identidad mínima del usuario del token para la tool MCP `get_settings` (el endpoint HTTP
 /// `GET /v1/installation` NO la incluye — la sesión web ya conoce a su usuario).
 #[derive(Debug, Serialize)]

@@ -29,8 +29,10 @@
 //! auto-conciliación (`reconcile.rs`) corre post-commit tras toda mutación del conjunto, en
 //! best-effort, ANTES de la invalidación de cache (una sola invalidación cubre mutación + pase).
 
+pub mod aggregate;
 pub mod crud;
 pub mod csv_presets;
+pub mod duplicates;
 pub mod idempotency;
 pub mod import;
 pub mod reconcile;
@@ -52,12 +54,17 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 // Re-exports para el wiring de openapi.rs.
+pub use aggregate::aggregate_transactions;
 pub use crud::{
     create_batch, create_transaction, delete_import, delete_transaction, list_imports,
     list_months, list_transactions, patch_batch, patch_transaction,
 };
+pub use duplicates::list_duplicates;
 pub use import::{import_confirm, import_preview};
-pub use reconcile::{reconcile_now, reconcile_pair, unreconcile_transaction};
+pub use reconcile::{
+    confirm_transfer_match, reconcile_now, reconcile_pair, suggest_transfer_matches,
+    unreconcile_transaction,
+};
 pub use recurring::{delete_recurring_rule, list_recurring_rules, materialize_recurring};
 pub use rules::{apply_rule, create_rule, delete_rule, list_rules, patch_rule};
 pub use summary::{get_category_series, get_transactions_summary};
@@ -295,6 +302,8 @@ pub fn transactions_router() -> Router {
         .route("/batch", post(create_batch).patch(patch_batch))
         .route("/months", get(list_months))
         .route("/summary", get(get_transactions_summary))
+        .route("/aggregate", get(aggregate_transactions))
+        .route("/duplicates", get(list_duplicates))
         .route("/category-series", get(get_category_series))
         .route(
             "/import/preview",
@@ -313,8 +322,13 @@ pub fn transactions_router() -> Router {
         .route("/recurring", get(list_recurring_rules))
         .route("/recurring/materialize", post(materialize_recurring))
         .route("/recurring/{id}", delete(delete_recurring_rule))
-        // Conciliación de transferencias: el segmento estático antes que `/{id}`.
+        // Conciliación de transferencias: los segmentos estáticos antes que `/{id}`.
         .route("/reconcile", post(reconcile_now))
+        // Sugerencias (GET, lectura pura) y confirmación de una de ellas por su `match_id`. El
+        // GET va aparte del POST del pase a propósito: un `?dry_run` sobre el POST sería un GET
+        // que muta, que es la clase de decisión que ya costó cara en este repositorio.
+        .route("/transfer-matches", get(suggest_transfer_matches))
+        .route("/transfer-matches/{match_id}", post(confirm_transfer_match))
         .route(
             "/{id}/reconcile",
             post(reconcile_pair).delete(unreconcile_transaction),

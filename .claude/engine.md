@@ -30,9 +30,9 @@ pub fn first_month_per_asset_contribution_nominals(input: &ProjectionInput) -> R
 pub struct FirstMonthAllocation {
     pub per_asset: Vec<Decimal>,
     pub base_cash: Decimal,            // what the cascade really distributes (`net_cash_month`)
-    pub recurring_net: Decimal,        // income − expense − debt_service (stable)
+    pub recurring_net: Decimal,        // income − expense − debt_service (stable en el camino de lectura)
     pub planning_component: Decimal,   // planning_adjustment[0] − retirement_withdrawal (transient)
-    pub debt_service: Decimal,
+    pub debt_service: Decimal,         // 4.4.0: incluye la amortización extra del mes 1 (0 en el camino de lectura)
     pub leftover: Decimal,             // ends up in `surplus_cash`
     pub rules: Vec<RuleOutcome>,
 }
@@ -90,6 +90,53 @@ pub fn net_return_percentages(
     liabilities: &[(Decimal, Option<Decimal>)], // (principal, apr_percent)
     annual_inflation_percent: Decimal,
 ) -> Option<NetReturn>
+
+// Calendario de amortización de UN pasivo (4.4.0, Fase 6). NO es matemática nueva: publica el
+// `closing_principal` que el bucle de simulación ya derivaba hasta 840 veces por request y tiraba
+// (`ProjectionOutput` nunca lo expuso), así que «¿cuánto interés pago?» y «¿cuándo termino?» eran
+// incontestables desde fuera del motor. Pura y determinista; `horizon_months` se CLAMPA a 1..=840
+// (a diferencia de `project_net_worth_series`, que con < 1 devuelve `EngineError::InvalidHorizon`).
+pub const MAX_LIABILITY_SCHEDULE_MONTHS: u32 = 840;
+pub fn liability_amortization_schedule(
+    liab: &ProjectionLiabilityInput,
+    ref_date: NaiveDate,
+    horizon_months: u32,
+) -> LiabilitySchedule
+
+pub struct LiabilityScheduleMonth {
+    pub month_index: u32,            // 1-based desde month_first_calendar(ref_date). NO es índice de array.
+    pub opening_principal: Decimal,  // saldo al abrir, antes del devengo
+    pub interest_accrued: Decimal,   // RESIDUO: payment − (opening − closing_tras_cuota). Ver abajo.
+    pub principal_repaid: Decimal,   // opening − closing (cuota + extra). PUEDE SER NEGATIVO.
+    pub extra_principal: Decimal,    // la parte de `principal_repaid` que viene del what-if
+    pub payment: Decimal,            // caja de la CUOTA, topada al saldo de cancelación del mes
+                                     // (`payoff = P(1+i)` en french/revolving; el principal en
+                                     // fixed_payments/interest_only). No incluye `extra_principal`.
+    pub closing_principal: Decimal,  // nunca negativo
+}
+
+pub struct LiabilitySchedule {
+    pub months: Vec<LiabilityScheduleMonth>, // vacío ⟺ no había plan activo (o principal ya 0)
+    pub opening_principal: Decimal,          // saldo de partida (mes 0)
+    pub final_principal: Decimal,
+    pub total_interest: Decimal,             // interés que queda POR PAGAR desde hoy, no el del préstamo original
+    pub total_payments: Decimal,             // Σ payment (solo cuotas)
+    pub total_extra_principal: Decimal,
+    pub total_cash_out: Decimal,             // total_payments + total_extra_principal
+    pub payoff_month_index: Option<u32>,     // Some(0) ⟺ ya saldado hoy
+    pub payoff_absent: Option<LiabilityPayoffAbsence>, // invariante: exactamente uno de los dos
+    pub horizon_months: u32,                 // la COTA tras el clamp, no len(months)
+}
+
+// Cuatro variantes porque tienen remedios distintos: no colapsarlas es el mismo criterio que
+// `AllocationSkipReason`. El motor no conoce literales de wire — los mapea `payoff_absence_code`
+// en `apps/api/src/handlers/liabilities.rs`.
+pub enum LiabilityPayoffAbsence {
+    NoPaymentPlan,
+    PaymentPlanEndsBeforePayoff,
+    PaymentDoesNotReducePrincipal,
+    NotWithinHorizon,
+}
 ```
 
 ## ProjectionInput fields
@@ -125,6 +172,8 @@ pub struct ProjectionLiabilityInput {
     pub payment_end: Option<NaiveDate>,
     pub repayment_model: RepaymentModel,   // 4.2.0
     pub apr_percent: Option<Decimal>,      // 4.2.0 — TIN nominal anual en puntos (3 = 3 %/año)
+    pub extra_principal_monthly: Decimal,          // 4.4.0 — amortización extra mensual. 0 = pre-4.4.0 bit a bit.
+    pub extra_principal_lump_sums: Vec<(u32, Decimal)>, // 4.4.0 — (mes 1-based, importe); varios del mismo mes SUMAN
 }
 
 pub enum RepaymentModel { FixedPayments, French, InterestOnly, Revolving }
@@ -141,11 +190,16 @@ handler, no un cambio de fórmula aquí.
 puede colar un `french` sin TIN y el engine no debe panicar ni fallar — devuelve la serie sin
 intereses. La validación de coherencia vive en el handler (`liabilities.rs`), no aquí.
 
-Un único helper privado, `liability_month(model, principal, monthly_payment, apr, active) →
-(cash, closing_principal)`, resuelve la recurrencia; lo consumen el bucle de simulación y
-`first_month_allocation` (antes eran tres copias del `min(cuota, principal)`). El predicado de
-actividad es también único, `liability_active`: `monthly_payment > 0` **y** (`payment_end` ausente
-o `>= m_start`).
+**Dos** helpers privados, y **tres** consumidores de ambos desde 4.4.0.
+`liability_month(model, principal, monthly_payment, apr, active) → (cash, closing_principal)`
+resuelve la recurrencia (antes eran tres copias del `min(cuota, principal)`), y
+`liability_extra_principal(liab, k, closing_tras_cuota, active) → Decimal` resuelve la
+amortización extra: suma `extra_principal_monthly` + todos los lump sums de ese mes, **topa al
+saldo** (`0 ..= closing_tras_cuota`, por eso el cierre nunca es negativo) y devuelve **0 si el plan
+no está activo**. Los tres consumidores son el bucle de simulación, `first_month_allocation` y el
+calendario. El predicado de actividad es también único, `liability_active`: `monthly_payment > 0`
+**y** (`payment_end` ausente o `>= m_start`). Ese gate es lo que impide que un what-if de
+amortización mueva el principal en los modos B/C, donde el handler pone `monthly_payment = 0`.
 
 | Modelo | Caja del mes | Principal de cierre | Notas |
 |---|---|---|---|
@@ -153,7 +207,13 @@ o `>= m_start`).
 | `French` | `min(M, payoff)` | `payoff − cash` | `payoff = P·(1 + i)`: interés sobre el **saldo de apertura**, cuota a **fin de mes**. Misma recurrencia que `theo(y)` en `history.rs`. |
 | `InterestOnly` | `min(M, P)` | `P` (constante) | La cuota declarada YA es el interés; recalcularlo lo cobraría dos veces. El TIN es informativo. |
 | `Revolving` | igual que `French` | igual que `French` | **Recurrencia compartida con `French` en 4.2.0**, a propósito y pineado (`revolving_matches_french_recurrence`). Existe como concepto aparte porque su evolución (disposiciones, cuota mínima como % del saldo) sí diverge. |
-| cualquiera, **inactivo** | `0` | `P` | Sin plan activo no hay caja, ni amortización, ni **devengo**. |
+| cualquiera, **inactivo** | `0` | `P` | Sin plan activo no hay caja, ni amortización, ni **devengo**, **ni amortización extra**. |
+
+**La tabla describe solo la pata de la CUOTA.** Desde 4.4.0 hay una segunda pata: la caja real del
+mes es `cash + extra` y el cierre real es `closing − extra`, con `extra` de
+`liability_extra_principal`. Consecuencia que la fila `InterestOnly → P (constante)` ya no cuenta
+entera: con amortización extra activa **el principal sí baja** en `interest_only` — el modelo
+congela lo que hace la cuota, no lo que hace una amortización anticipada.
 
 Consecuencias verificadas por tests del engine:
 
@@ -203,6 +263,83 @@ unidas en el mismo chart. La divergencia es **preexistente** (el histórico siem
 francesa); 4.2.0 no la crea, solo la vuelve nombrable — y la cierra para quien declare su deuda como
 `french`.
 
+## Calendario de amortización y amortización extra (4.4.0, Fase 6)
+
+`liability_amortization_schedule` publica lo que el bucle **ya derivaba y tiraba**. No hay
+matemática nueva: reutiliza `liability_month` + `liability_extra_principal`, así que el calendario
+y la proyección no pueden separarse.
+
+**El interés es un RESIDUO, no un devengo aparte.** El orden de derivación es deliberado — mandan
+los saldos:
+
+```rust
+let (payment, closing_after_payment) = liability_month(model, principal, M, apr, true);
+let extra    = liability_extra_principal(liab, k, closing_after_payment, true);
+let closing  = closing_after_payment - extra;
+
+let repaid_by_payment = principal - closing_after_payment;
+let interest_accrued  = payment - repaid_by_payment;   // ← residuo
+let principal_repaid  = principal - closing;
+```
+
+De ahí sale, **por construcción y en los cuatro modelos**, la identidad contable
+
+```
+payment + extra  ==  interest_accrued + principal_repaid
+```
+
+La cancelación es algebraica y no mira el `RepaymentModel`, así que seguiría valiendo si mañana se
+añade un modelo nuevo. **Lo que valida es la coherencia interna del desglose publicado, no el
+modelo económico** — su valor real es que rompe en cuanto alguien devengue el interés por su cuenta
+en vez de derivarlo de los saldos. Pin: `schedule_payment_identity_holds_in_every_model`
+(4 modelos × TIN ausente/6 %, con extra mensual y lump sum), espejo HTTP en
+`apps/api/tests/liability_schedule.rs`.
+
+Se puede comprobar que el residuo ES el devengo real en `french`/`revolving`: con
+`payoff = P(1+i)` y `cash = min(M, payoff)`, sale `interest = P·i` — **también en el mes final de
+cuota parcial**, donde `cash = payoff` y el cierre es 0.
+
+**`principal_repaid` puede ser NEGATIVO y no se clampa.** Con `french`/`revolving` y una cuota por
+debajo del devengo (`M < P·i`), el saldo crece y la resta sale negativa. Publicarlo como 0
+escondería justo el caso que el modelo pre-4.2.0 no sabía ni representar. Lo único que se clampa es
+el **saldo**: `closing ≥ 0`, porque `liability_extra_principal` topa al saldo. *(Cobertura: hoy
+ningún test asserta directamente `principal_repaid < 0`; el caso «la deuda crece» se pinea de forma
+indirecta con `final_principal > 100.000` en `schedule_payoff_absent_reasons_are_distinguishable`.)*
+
+**Ausencia de payoff: cuatro variantes, cuatro remedios.** `payoff_month_index` y `payoff_absent`
+son mutuamente excluyentes por invariante. `NoPaymentPlan` (no hay cuota),
+`PaymentPlanEndsBeforePayoff` (la fecha fin llega con saldo vivo), `PaymentDoesNotReducePrincipal` (la cuota no cubre el
+devengo, o el modelo no amortiza) y `NotWithinHorizon` (no cabe en los meses simulados). Colapsarlas
+en un `null` sería el mismo error que colapsar `AllocationSkipReason`.
+
+**Amortización extra: las dos mitades o ninguna.** La cuota liberada al extinguir un préstamo
+**vuelve a la cascada, y eso NO es una decisión nueva**: es lo que el motor ya hacía cuando un
+préstamo se extingue solo — `liability_month` devuelve `cash = min(M, 0) = 0`, el sobrante sube en
+el importe de la cuota y la cascada lo encamina como cualquier euro. Suprimirlo exigiría **añadir**
+código para esconder caja que el modelo tiene, y haría que un préstamo extinguido por amortización
+extra se comportara distinto de uno extinguido de forma natural. La contrapartida es obligatoria:
+la amortización extra **se cobra a la caja del mes** (`debt_service += cash + extra`), porque hacer
+solo la mitad que baja el principal *imprimiría dinero*. Pins:
+`extra_principal_is_net_worth_neutral_without_interest` (el único cuyo nombre declara la
+neutralidad),
+`extra_principal_frees_the_quota_into_the_cascade`,
+`extra_principal_saves_exactly_the_interest_not_accrued` (100k @ 3 %: extinción 278 → 216, ahorro
+9.281,9223 € == Δ`net_worth[300]`), `extra_principal_lump_sum_lands_on_its_month_and_caps_at_the_balance`,
+`zero_extra_principal_is_bit_identical_to_the_pin` y `extra_principal_needs_an_active_payment_plan`.
+
+**Matiz honesto sobre «efecto instantáneo cero»**: es exacto **en el balance** (los dos `−E` se
+cancelan en `NW = Σ activos + surplus_cash − Σ principales − undrained`), y por eso el test que la pinea
+usa un activo de rentabilidad **nula**. En la serie de un hogar cuyo activo marginal
+compone a `g` mensual, el mes queda `E·g` por debajo: el euro sale de la caja **antes** del paso de
+crecimiento y el principal baja **después**. Efecto colateral: `contributed_capital` también baja
+en `E` en los meses con sobrante, porque la cascada reparte menos.
+
+**El deflactado NO vive aquí.** El motor sigue simulando 100 % en nominal; `net_worth_real` y
+`GET /v1/projection/deflate` son capa de presentación del handler — ver el bloque de
+`deflator_at_month_index` en `.claude/api-routes.md` §Projection y la fila 3 de
+`futurefin-failure-archaeology` §1 (el motor «real puro» sigue rechazado).
+
+
 ## Inflación y target FIRE móvil
 - Ingresos, gastos y aportaciones se mantienen **constantes en euros nominales** a lo largo de la simulación (filosofía «haciendo lo que hago ahora, ¿qué tal voy?»). No se inflan.
 - El rendimiento de activos (`expected_annual_return_percent`) es **nominal**, sin deflactar.
@@ -224,7 +361,7 @@ pub struct AllocationRule {
 }
 ```
 Rules are evaluated **in vector order** (caller passes them sorted by priority ASC). Per rule:
-- Resolve `ceiling` via the cap variant: `MonthsExpense(N)` → `N × (expense + debt_service)`; `IncomeMultiple(N)` → `N × income`; `Amount(v)` → `v`. `None` = no ceiling.
+- Resolve `ceiling` via the cap variant: `MonthsExpense(N)` → `N × (expense + debt_service)`; `IncomeMultiple(N)` → `N × income`; `Amount(v)` → `v`. `None` = no ceiling. **Second-order effect since 4.4.0**: `debt_service` now includes the extra principal repayment, so a `months_expense` ceiling **moves** in a what-if that amortizes early. Only reachable through `simulate_projection`'s `liability_overrides` (the read paths pass both extra fields as zero), and there is **no test covering it** — treat it as known, unpinned behavior.
 - `cap_room = max(0, ceiling − current_value(target))`. If 0, skip.
 - Intent: `Fixed` → `min(amount, remaining)`; `Percent` → `remaining × amount / 100`; `Remainder` → `remaining`.
 - `take = min(intent, cap_room?, remaining)` is added to `alloc[target]` and subtracted from `remaining`.
@@ -233,12 +370,20 @@ Rules are evaluated **in vector order** (caller passes them sorted by priority A
 All monetary state is **nominal** throughout (euros del momento). El ajuste por inflación se aplica
 únicamente al target FIRE, que crece cada mes para mantener el poder adquisitivo del usuario.
 
-1. Compute `debt_service` = Σ of the **cash** leg returned by `liability_month` for every liability
-   (0 when the plan is not active). The same call returns each liability's **closing principal**,
-   which is stashed in `closing_principals` and merely *applied* in step 8 — the recurrence is
-   resolved **once per month per liability** since 4.2.0. Recomputing it in step 8 would recompute
-   the accrual, and the two copies would eventually diverge. Nothing mutates `principals` between
-   the two steps, and the step order is unchanged.
+1. Compute `debt_service` = Σ of `liability_month`'s **cash** leg **plus `liability_extra_principal`**
+   for every liability (0 when the plan is not active). The same call returns each liability's
+   **closing principal**, which is stashed in `closing_principals` **minus the extra** and merely
+   *applied* in step 8 — the recurrence is resolved **once per month per liability** since 4.2.0.
+   Recomputing it in step 8 would recompute the accrual, and the two copies would eventually
+   diverge. Nothing mutates `principals` between the two steps, and the step order is unchanged.
+   **The extra is charged to cash AND subtracted from the principal — both halves or neither**
+   (4.4.0): only the first would drain cash without reducing debt; only the second would print
+   money. On the balance the two `−E` cancel out, so the instantaneous effect on net worth is
+   exactly zero — **but read the caveat in the amortization-schedule section below**: the month's
+   order is cascade → asset growth → principal assignment, so the euro leaves before compounding
+   and the principal drops after it. In a household whose marginal asset grows at `g`, that month
+   ends `E·g` lower (opportunity cost). The engine tests that pin the neutrality use a
+   zero-return asset on purpose, to isolate the axis.
 2. Determine `in_retirement = fire_reached || k >= retirement_start_month`. `fire_reached` compara `nw_prev` contra el target FIRE del mes `k`, que es `base × (1 + inflation/100)^((k-1)/12)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares.
 3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
