@@ -7,6 +7,12 @@
 //! filosofía que las sesiones en DB). La gestión (crear/listar/revocar) va autenticada
 //! por cookie de sesión como el resto del API; cualquier miembro puede crear los suyos
 //! (un token no puede hacer nada que su dueño no pueda ya).
+//!
+//! Desde la Fase 3 (issue #84) el token lleva además un **scope** (`read_write` | `read_only`)
+//! que solo RESTA: `read_only` corta las 31 tools de escritura de `/mcp` sin tocar el rol de la
+//! persona, que sigue escribiendo en la web. Se lee VIVO en cada request —en el mismo SELECT que
+//! autentica, sobre la misma fila que autoriza— así que no contradice D14: no hay nada congelado
+//! en el secreto, solo una columna que se consulta cada vez, igual que `revoked_at`.
 
 use crate::auth::secret::{generate_opaque_secret, sha256_hex};
 use crate::error::ApiError;
@@ -32,10 +38,50 @@ const VISIBLE_PREFIX_LEN: usize = 12;
 /// Tokens activos (no revocados, no expirados) máximos por usuario.
 const MAX_ACTIVE_TOKENS_PER_USER: i64 = 10;
 
+/// Qué puede hacer una credencial de `/mcp`, con independencia del rol de su dueño.
+///
+/// `read_write` es el default de la columna y reproduce el comportamiento anterior al scope.
+/// `read_only` es una restricción pura: nunca concede nada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenScope {
+    ReadWrite,
+    ReadOnly,
+}
+
+impl TokenScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TokenScope::ReadWrite => "read_write",
+            TokenScope::ReadOnly => "read_only",
+        }
+    }
+
+    /// Lee el valor de la columna. Un valor desconocido **falla cerrado** (`read_only`): el CHECK
+    /// de la tabla ya impide que exista, así que llegar aquí significa que algo va mal — y en ese
+    /// caso conceder escritura es el error caro.
+    pub fn from_db(raw: &str) -> Self {
+        match raw {
+            "read_write" => TokenScope::ReadWrite,
+            "read_only" => TokenScope::ReadOnly,
+            other => {
+                tracing::warn!(scope = other, "api_tokens.scope desconocido; se trata como read_only");
+                TokenScope::ReadOnly
+            }
+        }
+    }
+
+    pub fn can_write(self) -> bool {
+        matches!(self, TokenScope::ReadWrite)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiTokenIdentity {
     pub user_id: Uuid,
     pub token_id: Uuid,
+    /// Scope VIVO leído en el mismo SELECT que autentica.
+    pub scope: TokenScope,
 }
 
 /// Valida un header `Authorization: Bearer ffp_…` contra `api_tokens`.
@@ -59,8 +105,8 @@ pub async fn require_api_token(
     }
 
     let hash = sha256_hex(token.as_bytes());
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        r#"SELECT id, user_id FROM api_tokens
+    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        r#"SELECT id, user_id, scope FROM api_tokens
            WHERE token_hash = $1
              AND revoked_at IS NULL
              AND (expires_at IS NULL OR expires_at > now())"#,
@@ -68,7 +114,7 @@ pub async fn require_api_token(
     .bind(&hash)
     .fetch_optional(pool)
     .await?;
-    let Some((token_id, user_id)) = row else {
+    let Some((token_id, user_id, scope)) = row else {
         return Err(ApiError::Unauthorized);
     };
 
@@ -81,7 +127,11 @@ pub async fn require_api_token(
     .execute(pool)
     .await;
 
-    Ok(ApiTokenIdentity { user_id, token_id })
+    Ok(ApiTokenIdentity {
+        user_id,
+        token_id,
+        scope: TokenScope::from_db(&scope),
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
@@ -98,6 +148,9 @@ pub struct ApiTokenResponse {
     pub last_used_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<DateTime<Utc>>,
+    /// `read_write` (default histórico) o `read_only`. Un token `read_only` autentica igual y
+    /// lee igual, pero ninguna tool de escritura de `/mcp` lo acepta.
+    pub scope: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -106,6 +159,11 @@ pub struct CreateApiTokenBody {
     /// Omitido = el token no expira.
     #[serde(default)]
     pub expires_in_days: Option<u32>,
+    /// `read_write` | `read_only`. Omitido = `read_write`, que es el comportamiento de todos los
+    /// tokens emitidos antes de que existiera el scope. Se valida a mano (y no por serde) para
+    /// devolver `token_scope_invalid` en vez del error de deserialización genérico.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -117,7 +175,7 @@ pub struct CreateApiTokenResponse {
 }
 
 const TOKEN_COLUMNS: &str =
-    "id, label, token_prefix, created_at, expires_at, last_used_at, revoked_at";
+    "id, label, token_prefix, created_at, expires_at, last_used_at, revoked_at, scope";
 
 #[utoipa::path(
     get,
@@ -181,6 +239,17 @@ pub async fn create_api_token(
             ));
         }
     }
+    // Literal completo, nunca compuesto con `format!`: `error_codes_parity` extrae los códigos
+    // del fuente y uno compuesto degradaría en silencio al mensaje genérico de la SPA.
+    let scope = match body.scope.as_deref() {
+        None | Some("read_write") => TokenScope::ReadWrite,
+        Some("read_only") => TokenScope::ReadOnly,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "token_scope_invalid: scope must be 'read_write' or 'read_only'".into(),
+            ))
+        }
+    };
 
     let active: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)::bigint FROM api_tokens
@@ -202,8 +271,8 @@ pub async fn create_api_token(
     let token_prefix: String = token.chars().take(VISIBLE_PREFIX_LEN).collect();
 
     let sql = format!(
-        r#"INSERT INTO api_tokens (user_id, label, token_hash, token_prefix, expires_at)
-           VALUES ($1, $2, $3, $4, now() + make_interval(days => $5))
+        r#"INSERT INTO api_tokens (user_id, label, token_hash, token_prefix, expires_at, scope)
+           VALUES ($1, $2, $3, $4, now() + make_interval(days => $5), $6)
            RETURNING {TOKEN_COLUMNS}"#
     );
     // make_interval(days => NULL) => NULL → expires_at queda NULL cuando no se pide caducidad.
@@ -213,6 +282,7 @@ pub async fn create_api_token(
         .bind(&token_hash)
         .bind(&token_prefix)
         .bind(body.expires_in_days.map(|d| d as i32))
+        .bind(scope.as_str())
         .fetch_one(&state.pool)
         .await?;
 

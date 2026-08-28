@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod confirm_token;
 pub mod db;
 pub mod error;
 pub mod ha_idp;

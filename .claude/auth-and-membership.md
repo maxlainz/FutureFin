@@ -120,6 +120,21 @@ hoy, el servidor MCP embebido (`/mcp`). Diseño espejo de las sesiones-en-DB (no
   (`Bearer realm="FutureFin", resource_metadata="…"`); ya no viaja en el 403 (ver §OAuth abajo y
   `api-routes.md` §MCP).
 - Máx. 10 tokens activos por usuario; `last_used_at` con throttle de 60 s.
+- **Scope, desde la Fase 3 (issue #84)** (migración `20260828140100_api_tokens_scope.sql`):
+  `api_tokens.scope ∈ {read_write, read_only}`, default `read_write` (preserva byte a byte el
+  comportamiento de todos los tokens emitidos antes de que existiera la columna). Se elige al
+  crear el token (`POST /v1/api-tokens {scope}`, selector en Ajustes → Integraciones) y se lee
+  **vivo** en el mismo `SELECT` que autentica (`require_api_token` → `TokenScope::from_db`,
+  `handlers/api_tokens.rs`) — no hay nada congelado, igual que el resto de D14. Un valor
+  desconocido en la columna (no debería poder existir: hay `CHECK`) falla **cerrado** a
+  `read_only`. El scope **solo resta**: nunca concede nada que el rol vivo de la persona no
+  conceda ya — un token `read_write` de un `viewer` sigue sin poder escribir.
+- **OAuth NO tiene scope propio**: `mcp/auth.rs::authenticate` asigna `TokenScope::ReadWrite` a
+  todo access token `ffo_…`, sin negociarlo. Ver la nota de `oauth/metadata.rs` (y el bloque OAuth
+  más abajo) sobre por qué `scopes_supported` sigue ausente de la metadata RFC 8414: en un token
+  de API el scope lo elige la persona con cookie de sesión; en OAuth el `scope` del authorization
+  request lo elige la aplicación cliente, así que anunciarlo sin una pantalla de consentimiento
+  que lo recorte no restringiría nada — solo mentiría en la metadata.
 
 ## OAuth 2.1 — tercer esquema de credencial (v3.1.0)
 
@@ -182,9 +197,26 @@ arqueología.
 no congela nada**. Membership y rol se re-resuelven en cada request (`require_installation_member`),
 así que degradar a `viewer`, revocar la membership o expulsar al usuario corta o recorta el acceso al
 instante, sin esperar a que el token caduque. Un `ffo_` nunca puede hacer más de lo que su dueño
-ya puede hacer: las lecturas siguen su rol, y las tools de escritura re-comprueban por request
-`role_can_write` + el toggle vivo `installation.mcp_write_enabled` (`require_mcp_write`) — apagar
-el toggle en Ajustes → Integraciones corta la escritura de TODOS los tokens en la siguiente llamada.
+ya puede hacer: las lecturas siguen su rol, y las tools de escritura re-comprueban por request las
+**tres puertas de `require_mcp_write`** (`mcp/auth.rs`, Fase 3, issue #84), de la más fundamental a
+la más circunstancial:
+
+1. **Rol vivo** — `role_can_write(role)`: `viewer` nunca escribe → `forbidden`.
+2. **Scope de la credencial** — un token de API `read_only` corta aquí aunque el rol escriba →
+   `mcp_token_read_only`. Los `ffo_…` de OAuth siempre llevan `read_write` (no negocian scope, ver
+   arriba), así que esta puerta nunca los frena — solo la 1 y la 3.
+3. **Toggle de la instalación** — `installation.mcp_write_enabled` → `mcp_write_disabled`. Apagarlo
+   en Ajustes → Integraciones corta la escritura de TODAS las credenciales (tokens de API y OAuth)
+   en la siguiente llamada, sin reinicio.
+
+Las dos últimas responden `BadRequest` (no `Forbidden`): es la única variante que propaga el
+mensaje al wire, y un cliente MCP necesita leer el motivo para explicárselo al usuario en vez de
+reintentar a ciegas. Cada llamada a `require_mcp_write` —gane o pierda el gate— deja una fila en
+`mcp_write_audit` (`outcome ∈ {denied, attempted}` en el momento del gate, cerrada después a
+`ok`/`failed` por la propia tool): quién, con qué credencial, con qué **rol vivo**, qué tool, qué
+desenlace y qué UUIDs mutó — nunca los argumentos. Retención 365 días, poda perezosa en el propio
+camino de escritura (D5: nunca en un GET). Esquema y contrato completos:
+[`data-model.md`](data-model.md) §`mcp_write_audit`.
 
 **Revocación — un solo punto de corte**: la query de auth hace JOIN con `oauth_grants` y exige
 `g.revoked_at IS NULL`, así que marcar **una fila** (el grant) mata todos los access y refresh tokens

@@ -279,7 +279,7 @@ boundary — every member sees household data. Handlers must build the WHERE via
 
 | Param | Values | Default | Semantics |
 |---|---|---|---|
-| `months` | u32, **clamped to 12–840** (no error on out-of-range) | omitted | Horizon override. Omitted → horizon derived from demographics: years until age 90 from ONE resolved birth date (session user's `users.birth_date`, else the first `persons` row by `is_primary DESC, sort_index ASC` — NOT the oldest member), clamped 5–70 years; no birth date at all → 30 years. `horizon_basis` in the response reports which path: `lifespan_90`, `fallback_no_demographics`, or `months_override`. (Implementation: `projection_horizon_months()`, `handlers/projection.rs` ~599–627.) |
+| `months` | u32, **must be 12–840 or the request is rejected** — since 4.4.0 out-of-range is **400 `months_out_of_range`**, NOT a silent clamp (`validate_months_override`, `handlers/projection.rs`) | omitted | Horizon override. Omitted → horizon derived from demographics: years until age 90 from ONE resolved birth date (session user's `users.birth_date`, else the first `persons` row by `is_primary DESC, sort_index ASC` — NOT the oldest member), clamped 5–70 years; no birth date at all → 30 years. `horizon_basis` in the response reports which path: `lifespan_90`, `fallback_no_demographics`, or `months_override`. (Implementation: `projection_horizon_months()`, `handlers/projection.rs` ~599–627.) |
 | `density` | `monthly` \| `hybrid` (trimmed; anything else → `monthly`) | `monthly` | Serialization-only decimation: `monthly` ≈ one point per month (~841 at max horizon); `hybrid` = months 0..12 monthly + 24, 36, … annually (~82 points, ~5× smaller JSON). The engine always computes the **full** series; milestones/crossover indices are computed pre-decimation, so a `reached_month_index` may not exist as a point in a hybrid response — match by `month_index`, never by array position (the v1.4.2 chart bug). |
 | `view` | as above | `household` | Also selects the cache partition. |
 
@@ -519,7 +519,7 @@ auditing for drift (all confirmed working on 2026-08-17):
 - Pool constants: `grep -n "connections\|timeout\|lifetime" apps/api/src/db.rs`
 - Cache TTL + key + Density docs: `grep -n "PROJECTION_CACHE_TTL\|pub enum Density\|ProjectionCacheKey" -A 6 apps/api/src/state.rs`
 - Body limits: `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`
-- `?months` clamp + horizon: `grep -n "clamp(12, 840)\|LIFESPAN_AGE\|FALLBACK_YEARS\|lifespan_90" apps/api/src/handlers/projection.rs`
+- `?months` rejection (NOT a clamp since 4.4.0) + horizon: `grep -n "fn validate_months_override\|months_out_of_range\|LIFESPAN_AGE\|FALLBACK_YEARS\|lifespan_90" apps/api/src/handlers/projection.rs` — `clamp(12, 840)` as a live pattern now finds only the doc comment noting it was retired ("Hasta 4.3.1 … hacía `m.clamp(12, 840)`"), which is itself the tell that the clamp is gone
 - `?density` / hybrid indices: `grep -n "resolve_density\|density_month_indices" -A 10 apps/api/src/handlers/projection.rs`
 - `?view` resolution: `grep -n "fn resolve" -A 5 apps/api/src/handlers/person_view.rs`
 - Installation validation bounds: `grep -n "normalize_currency\|validate_show_age_mode\|validate_annual_inflation\|normalize_calendar_tz\|swr_pct\|from(99u32)" apps/api/src/handlers/installation.rs`

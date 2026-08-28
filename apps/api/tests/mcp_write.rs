@@ -83,6 +83,30 @@ fn tool_error(envelope: &serde_json::Value, code: &str) -> serde_json::Value {
     body
 }
 
+/// Confirma en DOS FASES una tool con `confirm_token` (Fase 3, issue #84): previsualiza, saca el
+/// token del preview y repite la llamada con `confirm` + `confirm_token`. Devuelve el envelope de
+/// la confirmación.
+async fn preview_then_confirm(
+    app: &TestApp,
+    bearer: &str,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    let preview = tool_json(&mcp_post(app, bearer, tool_call(name, args.clone())).await);
+    assert_eq!(
+        preview["preview"], true,
+        "se esperaba un preview de {name}: {preview}"
+    );
+    let ct = preview["confirm_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{name} debe emitir confirm_token en su preview: {preview}"))
+        .to_string();
+    let mut confirmed = args;
+    confirmed["confirm"] = json!(true);
+    confirmed["confirm_token"] = json!(ct);
+    mcp_post(app, bearer, tool_call(name, confirmed)).await
+}
+
 async fn create_token_for(app: &TestApp, cookie: &str) -> String {
     let created = app
         .post_json_with_cookie("/v1/api-tokens", json!({"label": "write tests"}), cookie)
@@ -529,7 +553,18 @@ async fn recurring_create_and_materialize_are_idempotent() {
     let rules = tool_json(&envelope);
     assert_eq!(rules.as_array().unwrap().len(), 1);
 
-    let envelope = mcp_post(&app, &token, tool_call("materialize_recurring", json!({}))).await;
+    // Desde la Fase 3 poda bajo dos fases: el preview declara que NO puede dar cifras y emite el
+    // token; la confirmación lo consume.
+    let preview = tool_json(
+        &mcp_post(&app, &token, tool_call("materialize_recurring", json!({}))).await,
+    );
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert!(
+        preview["effects"]["side_effects"]["would_prune"].is_null(),
+        "el preview no puede inventarse un número que la core no sabe dar: {preview}"
+    );
+    assert_eq!(preview["effects"]["side_effects"]["your_recurring_rules"], 1, "{preview}");
+    let envelope = preview_then_confirm(&app, &token, "materialize_recurring", json!({})).await;
     let out = tool_json(&envelope);
     assert_eq!(out["rules_processed"], 1);
     assert_eq!(out["materialized"], 0, "el alta ya backfilleó: {out}");
@@ -1498,12 +1533,8 @@ async fn destructive_deletes_preview_then_execute() {
         "{preview}"
     );
     assert_eq!(app.count_rows("assets").await, 1);
-    let envelope = mcp_post(
-        &app,
-        &token,
-        tool_call("delete_asset", json!({"id": asset_id, "confirm": true})),
-    )
-    .await;
+    let envelope =
+        preview_then_confirm(&app, &token, "delete_asset", json!({"id": asset_id})).await;
     let _ = tool_json(&envelope);
     assert_eq!(app.count_rows("assets").await, 0);
     assert_eq!(app.count_rows("transactions").await, 1, "la transacción sobrevive");
@@ -1531,12 +1562,8 @@ async fn destructive_deletes_preview_then_execute() {
     let envelope = mcp_post(&app, &token, tool_call("delete_snapshot", json!({"id": snap_id}))).await;
     let preview = tool_json(&envelope);
     assert_eq!(preview["effects"]["side_effects"]["items_deleted"], 1, "{preview}");
-    let envelope = mcp_post(
-        &app,
-        &token,
-        tool_call("delete_snapshot", json!({"id": snap_id, "confirm": true})),
-    )
-    .await;
+    let envelope =
+        preview_then_confirm(&app, &token, "delete_snapshot", json!({"id": snap_id})).await;
     let _ = tool_json(&envelope);
     assert_eq!(app.count_rows("history_snapshots").await, 0);
 
@@ -1632,12 +1659,8 @@ async fn delete_import_previews_txn_count_and_cascades() {
     );
     assert_eq!(app.count_rows("transactions").await, 2, "el preview no borra");
 
-    let envelope = mcp_post(
-        &app,
-        &token,
-        tool_call("delete_import", json!({"id": import_id, "confirm": true})),
-    )
-    .await;
+    let envelope =
+        preview_then_confirm(&app, &token, "delete_import", json!({"id": import_id})).await;
     let _ = tool_json(&envelope);
     assert_eq!(app.count_rows("transactions").await, 0, "cascada del lote");
     assert_eq!(app.count_rows("transaction_imports").await, 0);
@@ -1675,7 +1698,17 @@ async fn reconcile_tools_share_core_and_respect_write_gates() {
         .json();
     assert_eq!(b["transfer_counterpart_id"], a["id"], "precondición: conciliadas");
 
-    let envelope = mcp_post(&app, &token, tool_call("reconcile_transfers", json!({}))).await;
+    // Sin confirm es preview y no ejecuta nada (y no emite token: es reversible).
+    let preview =
+        tool_json(&mcp_post(&app, &token, tool_call("reconcile_transfers", json!({}))).await);
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert!(preview["confirm_token"].is_null(), "reversible: sin token: {preview}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("reconcile_transfers", json!({"confirm": true})),
+    )
+    .await;
     let body = tool_json(&envelope);
     assert_eq!(body["pairs_created"].as_u64(), Some(0), "punto fijo vía MCP: {body}");
 
@@ -1684,10 +1717,11 @@ async fn reconcile_tools_share_core_and_respect_write_gates() {
     let iid = app.installation_id().await;
     let key = app.household_key(iid, owner.user_id);
     app.warm_household(&owner.cookie, &key).await;
-    let envelope = mcp_post(
+    let envelope = preview_then_confirm(
         &app,
         &token,
-        tool_call("unreconcile_transfer", json!({"transaction_id": a["id"]})),
+        "unreconcile_transfer",
+        json!({"transaction_id": a["id"]}),
     )
     .await;
     let body = tool_json(&envelope);
@@ -1822,14 +1856,17 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         assert_eq!(t["kind"], "income", "el preview no debe escribir: {t}");
     }
 
-    // 2. CONFIRM: escribe, y el resultado es indistinguible vía HTTP.
+    // 2. CONFIRM: escribe, y el resultado es indistinguible vía HTTP. Desde la Fase 3 exige el
+    //    confirm_token del preview — el paso 1 lo emitió.
+    let ct = preview["confirm_token"].as_str().expect("token del preview");
     let out = tool_json(
         &mcp_post(
             &app,
             &token,
             tool_call(
                 "apply_categorization_rule",
-                json!({"rule_id": rule_id, "apply_to_existing": "all", "confirm": true}),
+                json!({"rule_id": rule_id, "apply_to_existing": "all", "confirm": true,
+                       "confirm_token": ct}),
             ),
         )
         .await,
@@ -2079,11 +2116,12 @@ fn classify(envelope: &serde_json::Value) -> Outcome {
 /// **Por qué existe esta tabla** (la trampa que haría falso el test sin ella). Dos medidas
 /// tomadas el 2026-08-28 sobre `src/mcp/server.rs`, y las dos apuntan al mismo sitio:
 ///
-///   * **Estructural**: en **27 de las 31** tools de escritura el parseo de parámetros corre
+///   * **Estructural**: en **28 de las 31** tools de escritura el parseo de parámetros corre
 ///     ANTES del gate — el patrón `let run = || { … parse … }; match run() { Err(e) =>
-///     return to_tool_outcome(e) }`. Sólo cuatro (`capture_snapshot`,
-///     `materialize_recurring`, `reconcile_transfers`, `unreconcile_transfer`) llaman a
-///     `require_mcp_write` en la primera línea del bloque asíncrono.
+///     return to_tool_outcome(e) }`. Sólo tres (`capture_snapshot`, `materialize_recurring`,
+///     `reconcile_transfers`) llaman a `require_mcp_write` en la primera línea del bloque
+///     asíncrono. (`unreconcile_transfer` pasó a parsear primero en la Fase 3: su preview
+///     necesita el UUID para cargar las dos patas del par.)
 ///   * **Observable**: **27 de las 31** declaran algún parámetro `required`, así que con
 ///     `{}` mueren en la deserialización de rmcp y **nunca ejecutan el gate**. Con
 ///     argumentos vacíos sólo lo alcanzan `capture_snapshot`, `materialize_recurring`,
@@ -2101,10 +2139,11 @@ fn write_probe(name: &str) -> Option<serde_json::Value> {
     // UUID v4 sintácticamente válido que no existe en ninguna instalación.
     const ID: &str = "00000000-0000-4000-8000-000000000001";
     Some(match name {
-        // Gate primero: estas cuatro ya llegan al gate con `{}`.
+        // Gate primero: estas tres ya llegan al gate con `{}`.
         "capture_snapshot" => json!({}),
         "materialize_recurring" => json!({}),
         "reconcile_transfers" => json!({}),
+        // Parseo primero desde la Fase 3 (el preview carga las dos patas del par).
         "unreconcile_transfer" => json!({"transaction_id": ID}),
         // Parseo primero: necesitan argumentos con forma válida.
         "create_transaction" => {
@@ -2354,8 +2393,30 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     );
     assert_eq!(
         SRC.matches("p.confirm.unwrap_or(false)").count(),
-        11,
-        "tools con preview/confirm (§5). Toda destructiva nueva debería sumar aquí"
+        14,
+        "tools con preview/confirm (§5). Toda destructiva nueva debería sumar aquí. Subió de 11 \
+         a 14 en la Fase 3 (issue #84): `materialize_recurring`, `reconcile_transfers` y \
+         `unreconcile_transfer` eran destructivas SIN preview — dos de ellas irreversibles —, así \
+         que la regla «sin confirm en el esquema ⇒ no destructiva» era falsa en tres sitios"
+    );
+    // Las 7 que además exigen el token de un solo uso del preview (Fase 3). El `confirm`
+    // booleano lo escribe el propio modelo, así que por sí solo nunca fue un control: sólo el
+    // token demuestra que hubo un preview, y va ligado a la huella de los efectos.
+    assert_eq!(
+        SRC.matches("p.confirm_token.as_deref()").count(),
+        7,
+        "tools con confirmación en dos fases: las de cascada de tamaño no acotado \
+         (delete_import, delete_asset, delete_liability, apply_categorization_rule, \
+         materialize_recurring) y las puertas de un solo sentido (unreconcile_transfer, \
+         delete_snapshot). Los borrados de UNA fila cuyo contenido entero viaja en el preview NO \
+         llevan token a propósito: encarecerlos a dos viajes convierte la ceremonia en ruido"
+    );
+    // Y la auditoría: cada gate abre una fila, y `settled` es el ÚNICO sitio donde se cierra.
+    assert_eq!(
+        SRC.matches("settled(&self.state.pool, audit").count(),
+        31,
+        "toda escritura cierra su fila de auditoría con `settled`; sin él la fila se queda en \
+         `attempted` y el log calla el desenlace de justo las llamadas que fallaron"
     );
 
     for block in &blocks {
@@ -2465,12 +2526,8 @@ async fn delete_liability_previews_effects_then_deletes() {
     assert_eq!(app.count_rows("transactions").await, 2);
 
     // Confirm: borra el pasivo; los movimientos sobreviven desvinculados.
-    let envelope = mcp_post(
-        &app,
-        &token,
-        tool_call("delete_liability", json!({"id": liab_id, "confirm": true})),
-    )
-    .await;
+    let envelope =
+        preview_then_confirm(&app, &token, "delete_liability", json!({"id": liab_id})).await;
     let done = tool_json(&envelope);
     assert_eq!(done["deleted"], true, "{done}");
     assert_eq!(done["id"], liab_id, "{done}");
@@ -2737,7 +2794,31 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
     );
     let import_id = batches[0]["id"].as_str().unwrap().to_string();
 
-    // --- Los once previews. NINGUNO lleva `confirm`, así que nada se escribe.
+    // Par auto-conciliado (importes opuestos a un día): el preview de `unreconcile_transfer`
+    // necesita una pata con contrapartida para poder enseñar las dos.
+    let leg = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-07-20", "concept": "Traspaso salida", "amount": "-75",
+                   "kind": "expense"}),
+            &owner.cookie,
+        )
+        .await;
+    let leg_id = leg.json()["id"].as_str().unwrap().to_string();
+    let back = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-07-21", "concept": "Traspaso entrada", "amount": "75",
+                   "kind": "income"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(
+        back.json()["transfer_counterpart_id"], json!(leg_id),
+        "precondición: el par queda conciliado por el pase automático"
+    );
+
+    // --- Los catorce previews. NINGUNO lleva `confirm`, así que nada se escribe.
     let cases: Vec<(&'static str, serde_json::Value)> = vec![
         ("delete_asset", json!({"id": asset_id})),
         ("delete_liability", json!({"id": liab_id})),
@@ -2750,8 +2831,12 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         ("delete_recurring_rule", json!({"id": recurring_id})),
         ("apply_categorization_rule", json!({"rule_id": rule_id})),
         ("update_fire_settings", json!({"swr_pct": "3.5"})),
+        // Fase 3 (issue #84): las tres destructivas que NO tenían preview y ahora lo tienen.
+        ("materialize_recurring", json!({})),
+        ("reconcile_transfers", json!({})),
+        ("unreconcile_transfer", json!({"transaction_id": leg_id})),
     ];
-    assert_eq!(cases.len(), 11, "los 11 previews del catálogo");
+    assert_eq!(cases.len(), 14, "los 14 previews del catálogo");
     for (tool, args) in cases {
         let preview = preview_of(args, tool).await;
         assert_shape(tool, &preview);

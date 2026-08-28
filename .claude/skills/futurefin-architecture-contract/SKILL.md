@@ -23,7 +23,9 @@ again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-0
 (recurring-transaction rules, backup schema_version 6) on 2026-07-08, for **Unreleased** on
 2026-07-09 (D12a: the transactions no-cache contract became conditional on `savings_source`), and for
 **v3.0.0** on 2026-08-16 (D13: the image now contains the store; W8: the container is a two-process
-supervisor). This is the
+supervisor), and for the **Fase 3 (issue #84) train** on 2026-08-28 (D20: append-only MCP write
+audit, subtractive API-token scope, a real two-phase `confirm_token`, and a third semaphore around
+projection simulations — same pass fixed a standing "`?months=` is clamped" drift in D11). This is the
 contract a retiring principal engineer would make you sign: the decisions
 below are settled, most of them by a documented incident. Do not re-litigate them casually; if you must change one, go through
 `.claude/skills/futurefin-change-control/SKILL.md`.
@@ -248,10 +250,18 @@ first month net worth ≥ the inflation-adjusted target (`fire_reached` in
 - Horizon = `(90 − completed_age)` years, clamped to **[5, 70]**, × 12 months;
   `horizon_basis = "lifespan_90"`.
 - No birth date anywhere → **30 years** (360 months), `horizon_basis = "fallback_no_demographics"`.
-- Explicit `?months=` → clamped **12–840**, `horizon_basis = "months_override"`, uncached (D7).
+- Explicit `?months=` → must be **12–840** or the request is **rejected** (400
+  `months_out_of_range`), `horizon_basis = "months_override"`, uncached (D7). **Since 4.4.0 it is
+  a rejection, not a clamp**: until then `resolve_projection_context` did `m.clamp(12, 840)` and
+  returned 200 with `horizon_basis: "months_override"` on an out-of-range value — the response
+  claimed "I did what you asked" while silently substituting a different horizon
+  (`validate_months_override`, `handlers/projection.rs`).
 (The old target-age model lingered in `.claude/data-model.md`, `.claude/engine.md` and the
-`horizon_basis` doc comment in `projection.rs` until 2026-07-02 — all fixed since. If in doubt,
-`projection_horizon_months` and its unit tests are the ground truth.)
+`horizon_basis` doc comment in `projection.rs` until 2026-07-02 — all fixed since. The clamp→reject
+change (4.4.0) itself lingered as a stale "clamped 12–840" claim in this file,
+`futurefin-config-and-flags` and `.claude/api-routes.md` until 2026-08-28 — fixed in the same
+sweep as the Fase 3 (issue #84) docs. If in doubt, `projection_horizon_months` /
+`validate_months_override` and their unit tests are the ground truth.)
 
 ### D12. Historical snapshots are per-user and are NOT a projection input (v1.5.0)
 Each user manually captures net-worth **snapshots** (their asset + liability items) into
@@ -450,6 +460,12 @@ already killed; duplicating query logic in tools reintroduces silent handler↔t
 *(v3.1.0 makes this the second of THREE schemes: OAuth access tokens — D15 — are dispatched by
 Bearer prefix in `mcp/auth.rs::authenticate` and obey every rule above.)*
 
+*(Fase 3/4.4.0 — D20 — adds a scope axis to the API-token half of this pair (`read_write` |
+`read_only`, subtractive only), an append-only audit trail on every `require_mcp_write` call, and
+a real two-phase `confirm_token` on the seven destructive tools whose preview can't be undone by
+re-asking the model. None of it touches the credential contract above — it's what sits between
+"the gate passed" and "the write happened".)*
+
 ### D15. FutureFin as its own OAuth 2.1 authorization server for MCP (v3.1.0)
 The claude.ai web connector requires the MCP authorization spec (OAuth 2.1 + PKCE S256 + RFC
 8414/9728 metadata + DCR RFC 7591). The decision: the **same binary is authorization server AND
@@ -600,6 +616,74 @@ path to the process; it is never the default (`Disabled`), and an unknown peer (
   la env fuera del add-on pintaría el botón en instalaciones compose (decisión explícita del
   owner en contra); meter `next` en el `state` es una fábrica de open-redirects.
 
+### D20. Escrituras MCP: auditoría append-only, scope como resta, y una confirmación en dos fases de verdad (Fase 3, issue #84, 4.4.0)
+
+- **Contexto**: hasta aquí, un token de API podía vaciar el ledger del hogar sin dejar rastro
+  persistente — `delete_transaction` es hard delete, y `api_tokens.last_used_at` (throttle 60 s) no
+  cuenta llamadas ni dice cuáles. Y el patrón preview/confirm del issue #3 se leía como una
+  salvaguarda de dos fases sin serlo: `confirm` es un booleano del propio esquema de la tool, así
+  que el modelo podía escribirlo en la PRIMERA llamada — un `delete_import` con `confirm: true` de
+  entrada borraba el lote y sus movimientos sin que nadie hubiera visto nunca el preview. Tres
+  decisiones cierran ambos huecos sin tocar D14 (el contrato de credenciales) ni D2 (view scoping
+  sigue sin ser un límite de autorización):
+  1. **Auditoría append-only, nunca de los argumentos.** `mcp_write_audit` (una fila por llamada a
+     `require_mcp_write`) registra quién, con qué credencial, con qué **rol vivo**, qué tool, el
+     desenlace y los UUIDs mutados — **nunca** el contenido de los argumentos, ni en claro ni como
+     digest. Dos razones estructurales, no solo de gusto: los argumentos llevan texto escrito por
+     la persona (conceptos, notas) y guardarlos crearía un segundo domicilio para ese contenido
+     fuera del `.ffbackup` cifrado que, al ser append-only, convertiría el borrado del usuario en
+     una mentira; y un digest tampoco vale porque el espacio de entrada (fecha + importe + un
+     concepto de vocabulario corto) es lo bastante pequeño para fuerza-bruta un SHA-256. El
+     esquema es tipado sin JSONB ni texto libre **a propósito**, para que la disciplina de higiene
+     no dependa de que el siguiente que toque la tabla se acuerde de ella. El orden que hace el log
+     imposible de falsear: `attempted` (el gate dejó pasar, aún no hay desenlace) → `settle` cierra
+     UNA vez a `ok`/`failed`; `denied` nace ya cerrado (el gate ES toda la operación); un
+     `CHECK ((settled_at IS NULL) = (outcome = 'attempted'))` hace el resto write-once. Retención
+     365 días, poda perezosa dentro del propio camino de escritura (D5: nunca en un GET).
+  2. **El scope de un token de API solo RESTA.** `api_tokens.scope ∈ {read_write, read_only}`,
+     default `read_write` (preserva byte a byte todo token ya emitido), leído **vivo** en el mismo
+     SELECT que autentica — la misma filosofía de D14, aplicada a un eje nuevo. Es la puerta
+     intermedia de `require_mcp_write`, entre el rol vivo (puerta 1) y el toggle de la instalación
+     (puerta 3): nunca puede conceder lo que el rol de la persona no concede ya, así que degradar a
+     `viewer` sigue siendo el techo real. Los access tokens OAuth (`ffo_…`) **no** negocian scope
+     propio (siempre `read_write`) por una asimetría deliberada: en un token de API el scope lo
+     elige la PERSONA con su propia cookie de sesión; en OAuth el `scope` del authorization request
+     lo elige la APLICACIÓN CLIENTE, así que anunciarlo en `scopes_supported` sin una pantalla de
+     consentimiento que lo recorte no restringiría nada — solo mentiría en la metadata RFC 8414.
+  3. **`confirm_token`: la confirmación deja de ser un booleano.** Solo el preview (`confirm:
+     false`, la única llamada honesta) puede emitir un secreto hash-only (`ffpv_…`, un solo uso,
+     TTL 10 min) ligado a la tool, a los argumentos normalizados y a la **huella de los efectos que
+     acaba de enseñar**. La confirmación exige ese token, y el servidor **recalcula** los efectos
+     en ese instante y compara huellas: si el mundo se movió entre las dos llamadas (el lote
+     creció, el pasivo ganó movimientos vinculados), `confirm_token_stale` en vez de ejecutar sobre
+     algo distinto de lo que se enseñó. El precedente exacto es `oauth_authorization_codes` (mismo
+     patrón hash-only + un solo uso + `consumed_at` marcado dentro del propio UPDATE que valida);
+     la diferencia deliberada es el TTL — 10 min, no los 2 min de un code OAuth, porque aquí hay
+     una PERSONA leyendo un preview en un chat, no una máquina respondiendo al instante. Se exige
+     solo en 7 de las 14 tools con preview: cascadas de tamaño no acotado y puertas de un solo
+     sentido — nunca en un borrado de una fila cuyo contenido íntegro ya viajó en el preview,
+     porque encarecer cada borrado trivial a dos viajes es la forma más rápida de que la ceremonia
+     se lea como ruido y de que la gente aprenda a ignorarla.
+- **Consequences**: `materialize_recurring`, `reconcile_transfers` y `unreconcile_transfer` — las
+  tres tools destructivas que llevaban desde el issue #3 SIN preview porque sus cores calculan y
+  escriben en la misma transacción — ganan preview aunque no puedan dar cifras (publican
+  `would_materialize`/`would_prune: null` **con el motivo**, en vez de inventar un número: un
+  número inventado sería peor que ninguno, porque el humano aprobaría un borrado creyendo conocer
+  su tamaño). Las 15 escrituras que invalidan FULL devuelven además un bloque `impact` —
+  antes/después/delta de las cuatro cifras de `get_summary` medidas con la MISMA core, best-effort
+  — pero **nunca** la fecha de jubilación: eso costaría una simulación de hasta 840 meses justo
+  después de invalidar la cache, así que un tercer semáforo (`heavy::run_projection_sim`, mismo
+  módulo que ya acotaba Argon2id y el cripto de `.ffbackup`) pasa a envolver también las
+  simulaciones de proyección — sin él, `simulate_projection` en bucle desde un agente (o cualquier
+  `GET /v1/projection/series?months=…`, que salta la cache por D7) podía agotar el pool de blocking
+  de Tokio y tumbar `/v1/ready`, con el PostgreSQL embebido dentro del mismo contenedor.
+- **Breaks if violated**: auditar los argumentos (o un digest suyo) convierte el log en un segundo
+  domicilio de datos personales que el borrado del usuario no puede alcanzar; dejar que `confirm`
+  siga siendo un booleano puro deja el patrón preview/confirm en pura decoración — un modelo con
+  prisa siempre puede saltárselo escribiendo `true` a la primera; dejar que el scope de un token
+  conceda más que el rol vivo (o anunciar `scopes_supported` en OAuth sin consentimiento real)
+  rompe la propiedad central de D14: que ninguna credencial pueda hacer más que su dueño.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
@@ -703,14 +787,19 @@ Written 2026-07-02 against branch `claude/skill-library-handoff-rtfotl` at v1.4.
 files cited inline (not from memory of the docs — docs can drift, see W6). D13 and W8 written
 2026-08-16 for **v3.0.0** against branch `claude/docker-self-contained-v3-skg8jm`, by reading
 `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose.yml`,
-`apps/api/src/main.rs`, `apps/api/src/handlers/health.rs` and `.github/workflows/ci.yml`.
-Re-verify volatile claims with:
+`apps/api/src/main.rs`, `apps/api/src/handlers/health.rs` and `.github/workflows/ci.yml`. D20
+written 2026-08-28 for the Fase 3 (issue #84) train, branch `feat/mcp-fase-3-escritura-segura`, by
+reading `apps/api/src/mcp/auth.rs`, `apps/api/src/confirm_token.rs`, `apps/api/src/heavy.rs`, the
+four migrations under `apps/api/migrations/20260828*.sql` and the Fase 3 diff of
+`apps/api/src/mcp/server.rs`. Same pass fixed a standing drift in D11: several docs (this one
+included) still said `?months=` was *clamped* to 12–840 — it has been a **rejection**
+(400 `months_out_of_range`) since 4.4.0, and the doc lagged for a while. Re-verify volatile claims with:
 
 - Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md` (4.2.1 on
   2026-08-27; 3.1.0 on 2026-08-17).
-- Migration count: `ls apps/api/migrations/*.sql | wc -l` (44 on 2026-08-27; 36 on 2026-08-17; 34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
+- Migration count: `ls apps/api/migrations/*.sql | wc -l` (49 on 2026-08-28, Fase 3/issue #84; 44 on 2026-08-27; 36 on 2026-08-17; 34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
 - Engine purity deps (I8): `grep -E "tokio|sqlx|reqwest|axum" crates/engine/Cargo.toml` → empty.
-- Horizon rule (D11): `grep -n "LIFESPAN_AGE\|FALLBACK_YEARS\|clamp(12, 840)\|fallback_no_demographics" apps/api/src/handlers/projection.rs`.
+- Horizon rule (D11): `grep -n "fn validate_months_override\|months_out_of_range\|LIFESPAN_AGE\|FALLBACK_YEARS\|fallback_no_demographics" apps/api/src/handlers/projection.rs`. **`?months=` is a REJECTION since 4.4.0, not a clamp** — `clamp(12, 840)` as a live pattern now finds only the doc comment noting it was retired.
 - Cache TTL/keys (D7): `grep -n "PROJECTION_CACHE_TTL\|ProjectionCacheKey\|invalidate_projection" apps/api/src/state.rs`.
 - No-warm-up-after-mutation rationale: `grep -n -A6 "refresh_projection_after_mutation" apps/api/src/handlers/projection.rs`.
 - f64 exception boundary (D4/I3): `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) and `.claude/api-routes.md` §projection + §history series.
@@ -780,6 +869,17 @@ Re-verify volatile claims with:
   `grep -n "Guardia de config" -A20 .github/workflows/ci.yml` (the store-shape guard);
   `find . -name .git -prune -o -name 'config.yaml' -o -name 'config.yml' -o -name 'config.json' -print`
   → exactly `.github/ISSUE_TEMPLATE/config.yml` and `addon/futurefin/config.yaml`.
+- **D20 — MCP write safety: audit, scope, two-phase confirm (added 2026-08-28, Fase 3/issue #84,
+  4.4.0)**: `grep -n "outcome\|settled_at\|CHECK" apps/api/migrations/20260828140000_mcp_write_audit.sql`
+  (the write-once shape); `grep -n "pub async fn settle" -A20 apps/api/src/mcp/auth.rs` (`WHERE id =
+  \$1 AND settled_at IS NULL`); `grep -c 'settled(&self.state.pool, audit' apps/api/src/mcp/server.rs`
+  → must equal the write count (31); `grep -n "TokenScope\|can_write" apps/api/src/handlers/api_tokens.rs`
+  (scope reads live, subtractive only); `grep -n "evaluate_write_gate" -A15 apps/api/src/mcp/auth.rs`
+  (three gates in order: role → scope → toggle); `grep -n "scopes_supported" apps/api/src/oauth/metadata.rs`
+  (still absent, reasoning updated); `cat apps/api/src/confirm_token.rs | grep -n "pub fn digest\|pub async fn issue\|pub async fn consume"`
+  (canonical-order hash, single-use `consumed_at`, TTL 10 min); `grep -c 'confirm_token.as_deref()' apps/api/src/mcp/server.rs`
+  → 7 (the token-gated subset); `grep -n "fn projection_permits" -A10 apps/api/src/heavy.rs` (third
+  semaphore, floor 2 ceiling 8, same `available_parallelism()` pattern as the KDF one).
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the
