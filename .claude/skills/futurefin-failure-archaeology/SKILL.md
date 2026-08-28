@@ -611,7 +611,7 @@ and direct code inspection. §1 row 19 and §2.11 (embedded PostgreSQL) added 20
 - §2.17 (session not bound to credential, reasoned in the module doc-comment):
   `grep -n 'Mcp-Session-Id\|LocalSessionManager' apps/api/src/mcp/mod.rs`.
 - Counters unmoved by this phase (transport-only, no tool/route surface change):
-  `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (expect 52).
+  `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**68** desde la Fase 6 del tren 4.4.0; eran 52 cuando se escribió esta línea — no lo congeles, recuéntalo).
 
 **§1 rows 22–23 and §2.18–§2.19 added 2026-08-28 for v4.4.0** (MCP Fase 5, issue #86), by reading
 `apps/api/src/handlers/projection.rs` (`ProjectionEvent` doc-comment) and
@@ -619,7 +619,7 @@ and direct code inspection. §1 row 19 and §2.11 (embedded PostgreSQL) added 20
 argued in the source, not just in the PR description. Re-verify:
 - §2.18 (`density` rejected, `events` shipped): `grep -n "PROJECTION_EVENTS_MAX\|struct ProjectionEvent" -B12 apps/api/src/handlers/projection.rs` (doc-comment states the ~5× multiplier and "sigue sin decir POR QUÉ").
 - §2.19 (rename rejected, `basis` shipped): `grep -n "BUDGET_TOTALS_BASIS\|Los nombres no se renombran" -A3 apps/api/src/handlers/budget.rs`; the summary-side twin: `grep -n "financial_health.basis\|fn.*basis" apps/api/src/handlers/summary.rs`.
-- Counter unmoved by this phase either (context/pagination/view-echo only, no tool added/removed): `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (still 52).
+- Counter unmoved by **that** phase (context/pagination/view-echo only, no tool added/removed): `grep -c '#\[tool(' apps/api/src/mcp/server.rs`. Sí lo movió la **Fase 6** (issue #87): 52 → **68**, 16 altas y cero bajas.
 
 Re-verify volatile facts before relying on them:
 
@@ -654,7 +654,7 @@ Re-verify volatile facts before relying on them:
 - Chart deflation by month_index: `grep -n 'deflator' apps/web/src/views/ProjectionNetWorthChart.tsx`.
 - Parity fixture pair: `ls apps/api/tests/fixtures/fire-parity.json apps/web/src/lib/fire.test.ts`.
 - f64 boundary: `grep -n 'serialize_decimal_as_f64' apps/api/src/handlers/projection.rs`.
-- RetirementView field: `grep -c 'expense_retirement_monthly_equivalent' apps/web/src/views/RetirementView.tsx` (expect ≥4).
+- RetirementView field: `grep -c 'expense_retirement_monthly_equivalent\|fireExpenseM' apps/web/src/views/RetirementView.tsx` (expect ≥4; **6** hoy). El grep de solo el nombre de campo da **1**: la vista se refactorizó para leerlo una vez en la local `fireExpenseM` y reutilizar esa. El dato sigue vivo, el patrón viejo ya no lo demostraba.
 - Doc drift record: the stale docs found while authoring this library (projection_target_age
   remnants, "no CI yet", "33 migrations"…) were fixed on 2026-07-02; the standing-errata table
   lives in futurefin-docs-and-writing §7. CI still does NOT run `apps/api/tests/`.

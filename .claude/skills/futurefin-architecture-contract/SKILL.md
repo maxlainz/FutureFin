@@ -73,7 +73,7 @@ Cargo workspace (Cargo.toml: members = ["apps/api", "crates/domain", "crates/eng
                      openapi, routes, state. main.rs = bin (env loading, CORS, gzip, static SPA).
 
 npm workspace
-└── apps/web         futurefin-web: React 19 + TS + Vite SPA. App.tsx (3229 LOC) is the
+└── apps/web         futurefin-web: React 19 + TS + Vite SPA. App.tsx (4057 LOC) is the
                      composition root; lib/, api/, components/, views/ per .claude/frontend-structure.md.
 ```
 
@@ -478,8 +478,10 @@ Bearer prefix in `mcp/auth.rs::authenticate` and obey every rule above.)*
 
 *(Fase 3/4.4.0 — D20 — adds a scope axis to the API-token half of this pair (`read_write` |
 `read_only`, subtractive only), an append-only audit trail on every `require_mcp_write` call, and
-a real two-phase `confirm_token` on the seven destructive tools whose preview can't be undone by
-re-asking the model. None of it touches the credential contract above — it's what sits between
+a real two-phase `confirm_token` on the **eight** destructive tools whose preview can't be undone
+by re-asking the model (were seven until Fase 6 added `delete_allocation_rule`; count them with
+`grep -c '= two_phase(' apps/api/src/mcp/server.rs`, never in prose — D20 below already said eight
+while this line still said seven). None of it touches the credential contract above — it's what sits between
 "the gate passed" and "the write happened".)*
 
 ### D15. FutureFin as its own OAuth 2.1 authorization server for MCP (v3.1.0)
@@ -692,7 +694,7 @@ path to the process; it is never the default (`Disabled`), and an unknown peer (
   escriben en la misma transacción — ganan preview aunque no puedan dar cifras (publican
   `would_materialize`/`would_prune: null` **con el motivo**, en vez de inventar un número: un
   número inventado sería peor que ninguno, porque el humano aprobaría un borrado creyendo conocer
-  su tamaño). Las 15 escrituras que invalidan FULL devuelven además un bloque `impact` —
+  su tamaño). Las **18** escrituras que invalidan FULL (`grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs`; eran 15 hasta que la Fase 6 sumó `create_allocation_rule`, `delete_allocation_rule` y `update_installation_settings`) devuelven además un bloque `impact` —
   antes/después/delta de las cuatro cifras de `get_summary` medidas con la MISMA core, best-effort
   — pero **nunca** la fecha de jubilación: eso costaría una simulación de hasta 840 meses justo
   después de invalidar la cache, así que un tercer semáforo (`heavy::run_projection_sim`, mismo
@@ -811,7 +813,7 @@ curve travels); `item_count`/`items_included` (`SnapshotResponse`); `events_trun
 / `totals.basis` (plan vs actual vs mixed); and `view` echoed by every scope-dependent core
 (`LedgerView::as_str`, `handlers/person_view.rs`) in `SummaryResponse`, `BudgetSnapshotResponse`,
 `ProjectionSeriesResponse`, `AllocationResolutionResponse` — plus an envelope wrapper on the seven
-MCP list tools whose HTTP twin still returns a bare array (§I4 note below), so the tool side gets
+MCP list tools whose HTTP twin still returns a bare array (ver **I18** y el bloque `NOTA-VIEW-ENVELOPE` de `apps/api/src/mcp/server.rs`; esta referencia apuntaba a §I4, que no habla de sobres), so the tool side gets
 the same self-declared scope a JSON-RPC caller cannot otherwise infer. Same principle,
 smaller blast radius: `liabilities_by_type_tag[].type_tag` moved from `String` (with the
 `"(sin etiqueta)"` literal) to `Option<String>` → `null`, a typed absence instead of a string
@@ -840,7 +842,7 @@ family above) and `apps/api/tests/mcp_http.rs::list_tools_echo_the_applied_view_
 | I7 | `planning_monthly_cash_adjustment.len() == horizon_months`; allocation `target_index` in bounds; horizon ≥ 1 | Engine input validation → `EngineError::{InvalidPlanningAdjustments, InvalidAllocationRuleTarget, InvalidHorizon}` → 400 | `cargo test -p futurefin-engine` |
 | I8 | Engine has zero I/O/async deps (purity, §1) | `crates/engine/Cargo.toml` deps are exactly: chrono, rust_decimal, serde, thiserror, uuid | `grep -E "tokio\|sqlx\|reqwest\|axum" crates/engine/Cargo.toml` → must be empty |
 | I9 | Milestones, `milestones_real` and the FIRE crossover are computed on the FULL monthly series, never on density-decimated points | `handlers/projection.rs` (`points_full`, crossover loop over `output.net_worth`) — v1.4.2 incident: client deflated by array index instead of `month_index`, wrong under `hybrid` | `grep -n "points_full" apps/api/src/handlers/projection.rs` |
-| I10 | SQLSTATE→HTTP mapping only in `error.rs` (D9) | `impl From<sqlx::Error> for ApiError` | `grep -rn "23505\|23503" apps/api/src/ --include=*.rs` → only `error.rs` |
+| I10 | SQLSTATE→HTTP mapping only in `error.rs` (D9) | `impl From<sqlx::Error> for ApiError` | `grep -rn "23505\|23503\|22003" apps/api/src/ --include=*.rs` → only `error.rs` (22003 → `amount_out_of_range`, añadido en 4.4.0; el grep viejo no lo cubría, así que un mapeo suyo fuera de `error.rs` habría pasado desapercibido) |
 | I11 | Body limits: 1 MiB global, 16 MiB on `/v1/backup/user-import*`, **1 MiB on `/mcp` fijado aparte**. `DefaultBodyLimit` actúa vía **extractores**, así que NO alcanza a `/mcp` (un `route_service` que lee el body con el tope del SDK, 4 MiB por defecto): hasta 4.4.0 este invariante era falso justo ahí (D21) | `routes/mod.rs` constants + `mcp::MCP_MAX_REQUEST_BODY_BYTES` vía `with_max_request_body_bytes` | `apps/api/tests/body_limits.rs` (local; la fila de `/mcp` es `oversized_mcp_body_returns_413`). **Toda ruta nueva que no pase por un extractor necesita su propia fila aquí** |
 | I12 | No hardcoded hex colors; tokens `var(--ff-*)` only; icons only in `components/icons.tsx` | frontend convention (CLAUDE.md, design-system.md) | `grep -rn "#[0-9a-fA-F]\{6\}" apps/web/src/App.css apps/web/src/components/ \| grep -v icons.tsx` |
 | I13 | Every response carries `X-Frame-Options: DENY` **except** trusted peer + `X-Ingress-Path`, which instead gets `Content-Security-Policy: frame-ancestors 'self'` **and no `X-Frame-Options`** (D17). The header alone never relaxes it | `handlers/frame.rs::frame_policy`, applied via `with_frame_policy` to the FINAL router (after the SPA fallback) in both `main.rs` and the test harness | `apps/api/tests/frame_options.rs` (both halves); `grep -n "X_FRAME_OPTIONS\|frame-ancestors" apps/api/src/handlers/frame.rs` |
@@ -848,7 +850,7 @@ family above) and `apps/api/tests/mcp_http.rs::list_tools_echo_the_applied_view_
 | I15 | Without proxy headers the shell HTML is served **byte-identical** to the file on disk and the session cookie keeps `Path=/` — the compose deployment is unchanged by the subpath machinery | `handlers/spa.rs::inject` returns `Cow::Borrowed`; `handlers/auth.rs::session_cookie_path` | `apps/api/tests/base_path.rs`, `apps/api/tests/session_cookie_path.rs`; `cargo test -p futurefin-api --lib prefix::` |
 | I16 | An HA-IdP login and an ingress header-SSO with the same HA user resolve to the **same** `users` row (`external_user_id`, one `resolve_or_provision`); and the HA refresh token is revoked before any DB write (D19) | `handlers/ha_sso.rs::ha_callback` step order; `handlers/sso.rs::resolve_or_provision` (single provisioning path) | `apps/api/tests/ha_idp_login.rs::header_sso_and_ha_login_resolve_to_the_same_user`; call-order assertion `[Exchange, Identity, Revoke]` in the same suite |
 | I17 | **`/mcp` never carries `Access-Control-Allow-Credentials`**, and the API surface always does — one `CORS_ORIGINS` list, two layers (D21). Adding an origin for a browser MCP client must never grant cookie access to `/v1` | `routes/mod.rs` (`api_cors_layer`, applied **before** `merge(mcp)`) + `mcp::mcp_cors_layer` (applied with `route_layer`, never `layer`) | `apps/api/tests/mcp_http.rs::mcp_preflight_is_complete_and_grants_no_cookie_access` (asserts both halves: absent on `/mcp`, `true` on `/v1/backup/user-export`, same origin); `oauth_flow.rs::get_oauth_authorize_is_not_handled_by_the_api` guards the `layer`/`route_layer` half — a **401** there means the MCP auth escaped onto the fallback |
-| I18 | A response never lets suppressed/capped/derived content be indistinguishable from "there is nothing here": every window, cap, suppression, scope or basis is echoed as a named field, never inferred from array length or absence (D22) | Field-level, no single choke point: `handlers/history.rs` (`window_truncated`, `fine_absent_reason`, `item_count`/`items_included`), `handlers/projection.rs` (`events_truncated`), `handlers/person_view.rs` (`LedgerView::as_str` echoed view), `mcp/server.rs` (pagination envelopes) | `apps/api/tests/context_fields.rs` (one test per field family); `grep -n "window_truncated\|fine_absent_reason\|items_included\|events_truncated" apps/api/src/handlers/` |
+| I18 | A response never lets suppressed/capped/derived content be indistinguishable from "there is nothing here": every window, cap, suppression, scope or basis is echoed as a named field, never inferred from array length or absence (D22) | Field-level, no single choke point: `handlers/history.rs` (`window_truncated`, `fine_absent_reason`, `item_count`/`items_included`), `handlers/projection.rs` (`events_truncated`), `handlers/person_view.rs` (`LedgerView::as_str` echoed view), `mcp/server.rs` (pagination envelopes) | `apps/api/tests/context_fields.rs` (one test per field family); `grep -rn "window_truncated\|fine_absent_reason\|items_included\|events_truncated" apps/api/src/handlers/` (**con `-r`**: sin él grep falla con «Is a directory» y el invariante queda sin comprobar) |
 
 ## 4. Known weak points (stated plainly, as of 2026-07-02)
 
@@ -859,7 +861,7 @@ family above) and `apps/api/tests/mcp_http.rs::list_tools_echo_the_applied_view_
   `TEST_DATABASE_URL`, so a green CI did NOT mean those invariants held. The job `integration`
   closes that hole. Still run them locally before
   any release.
-- **W2 — `App.tsx` is still a 3229-LOC composition root** (down from 10,384 pre-v1.3.0, but still
+- **W2 — `App.tsx` is still a 4057-LOC composition root** (down from 10,384 pre-v1.3.0, back UP from the 3229 this line claimed until 2026-08-29, but still
   the single riskiest frontend file: auth gate, global state, route dispatch, two-phase projection
   loading all live there). Prefer extracting into `lib/`/`views/` per
   `.claude/frontend-structure.md` over growing it.
@@ -952,12 +954,12 @@ included) still said `?months=` was *clamped* to 12–840 — it has been a **re
 - CI coverage (W1): `cat .github/workflows/ci.yml` — check whether a job now sets `TEST_DATABASE_URL`; if so, update W1 here and `.claude/tests.md` §CI.
 - Session mechanics (D3): `grep -n "expires_at\|SESSION_COOKIE" apps/api/src/handlers/session.rs` and `grep -n "SESSION_TTL_DAYS" apps/api/src/main.rs`.
 - Default ES brackets (W4): `grep -n -A24 "default_es_tax_brackets" apps/api/src/handlers/installation.rs` vs `DEFAULT_ES_TAX_BRACKETS_API` in `apps/web/src/lib/fire.ts`.
-- App.tsx size (W2): `wc -l apps/web/src/App.tsx`.
+- App.tsx size (W2): `wc -l apps/web/src/App.tsx` (**4057** el 2026-08-29; la cifra de 3229 que W2 y el mapa del sistema de §1 citaban es de antes del tren 4.x).
 - Doc drift (W6): the standing-errata table in futurefin-docs-and-writing §7 is the record.
 - **D14 — API tokens + MCP (added 2026-08-16, v3.0.0)**: `grep -n "token_hash\|require_api_token" apps/api/src/handlers/api_tokens.rs`
   (hash-only storage, single 401); `grep -n "require_installation_member" apps/api/src/mcp/auth.rs`
   (live role per request); `grep -rn "_core\b" apps/api/src/mcp/server.rs` (tools call handler
-  cores, no SQL in tools); `grep -n "mcp" apps/api/src/routes/mod.rs` (conditional mount);
+  cores, no SQL in tools); `grep -n "mcp" apps/api/src/routes/mod.rs` (**montaje incondicional desde 4.4.0** — el router va siempre y `state.mcp_enabled` elige el *handler*, no la ruta: ver `mcp/mod.rs::mcp_router` y D21; esta línea decía «conditional mount» y describía el mundo anterior a la Fase 4);
   `grep -rn "api_tokens" apps/api/src/handlers/backup_user/` → **must be empty** (excluded from
   `.ffbackup` on purpose).
 - **D15 — embedded OAuth 2.1 AS/RS (added 2026-08-17, v3.1.0)**:
@@ -1012,18 +1014,18 @@ included) still said `?months=` was *clamped* to 12–840 — it has been a **re
   (prebuilt GHCR image, `init: false`, `backup: cold`, ingress 8080, direct port `null`);
   `grep -n "options.json\|PGDATA=/data/pgdata\|FUTUREFIN_STATE_DIR=/data/state\|is_persisted" apps/api/docker-entrypoint.sh`;
   `grep -n "Guardia de config" -A20 .github/workflows/ci.yml` (the store-shape guard);
-  `find . -name .git -prune -o -name 'config.yaml' -o -name 'config.yml' -o -name 'config.json' -print`
+  `find . -name .git -prune -o \( -name 'config.yaml' -o -name 'config.yml' -o -name 'config.json' \) -print` (**las alternativas agrupadas con `\( \)`**: sin agrupar, `-print` solo se aplica a la última rama y el comando no imprime lo que promete — es la misma forma que ya usa `ci.yml`)
   → exactly `.github/ISSUE_TEMPLATE/config.yml` and `addon/futurefin/config.yaml`.
 - **D20 — MCP write safety: audit, scope, two-phase confirm (added 2026-08-28, Fase 3/issue #84,
   4.4.0)**: `grep -n "outcome\|settled_at\|CHECK" apps/api/migrations/20260828140000_mcp_write_audit.sql`
   (the write-once shape); `grep -n "pub async fn settle" -A20 apps/api/src/mcp/auth.rs` (`WHERE id =
   \$1 AND settled_at IS NULL`); `grep -c 'settled(&self.state.pool, audit' apps/api/src/mcp/server.rs`
-  → must equal the write count (31); `grep -n "TokenScope\|can_write" apps/api/src/handlers/api_tokens.rs`
+  → must equal the write count (**40** tras la Fase 6; decía 31, la foto de la Fase 3); `grep -n "TokenScope\|can_write" apps/api/src/handlers/api_tokens.rs`
   (scope reads live, subtractive only); `grep -n "evaluate_write_gate" -A15 apps/api/src/mcp/auth.rs`
   (three gates in order: role → scope → toggle); `grep -n "scopes_supported" apps/api/src/oauth/metadata.rs`
   (still absent, reasoning updated); `cat apps/api/src/confirm_token.rs | grep -n "pub fn digest\|pub async fn issue\|pub async fn consume"`
   (canonical-order hash, single-use `consumed_at`, TTL 10 min); `grep -c 'confirm_token.as_deref()' apps/api/src/mcp/server.rs`
-  → 7 (the token-gated subset); `grep -n "fn projection_permits" -A10 apps/api/src/heavy.rs` (third
+  → **8** (the token-gated subset; said 7 until 2026-08-29 — `delete_allocation_rule` joined in Fase 6. **Keep the parentheses**: `grep -c 'confirm_token.as_deref'` without them returns 10, because a doc-comment in `server.rs` contains the bare string twice); `grep -n "fn projection_permits" -A10 apps/api/src/heavy.rs` (third
   semaphore, floor 2 ceiling 8, same `available_parallelism()` pattern as the KDF one).
 - **D21 + I17 — MCP transport: kill-switch shape, CORS split, `Origin`, body cap, issuer subpath
   (added 2026-08-28, Fase 4/issue #85, 4.4.0)**:

@@ -185,9 +185,10 @@ HTTP ni por ninguna herramienta MCP, y no entra en el `.ffbackup`: es un rastro 
 dato del hogar.
 
 **Las herramientas más destructivas piden un segundo secreto.** Además del `confirm: true`
-habitual, las siete herramientas de mayor radio (borrar un activo, un pasivo, un snapshot o un
-lote de importación; aplicar una regla de categorización en bloque; hacer converger los movimientos
-recurrentes; desconciliar una transferencia) exigen un `confirm_token` de un solo uso que solo se
+habitual, las ocho herramientas de mayor radio (borrar un activo, un pasivo, un snapshot, un
+lote de importación o una regla de la cascada de reparto; aplicar una regla de categorización en
+bloque; hacer converger los movimientos recurrentes; desconciliar una transferencia) exigen un
+`confirm_token` de un solo uso que solo se
 emite dentro de su propio *preview* y caduca a los 10 minutos. Resuelve un hueco real: el booleano
 `confirm: true` lo escribe el propio modelo, así que por sí solo nunca demuestra que hubo un
 *preview* de por medio.

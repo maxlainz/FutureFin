@@ -157,7 +157,7 @@ docker rm -f ff-test-db
 
 ### Qué corre la integración continua
 
-`.github/workflows/ci.yml`, seis trabajos:
+`.github/workflows/ci.yml`, cinco trabajos (`sed -n '/^jobs:/,$p' .github/workflows/ci.yml | grep -E '^  [a-z_-]+:$'`):
 
 - **`secrets-scan`** — ningún dato personal en ficheros trackeados. Bloqueante y el primero.
 - **`rust`** — el CHANGELOG cubre la versión de `Cargo.toml`, build de la API y tests del engine.

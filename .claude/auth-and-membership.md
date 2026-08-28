@@ -357,7 +357,7 @@ constructor compartido):
   `window.__FF_HA_LOGIN__` tanto en el login como en la pantalla de consentimiento OAuth — que es
   el caso que lo motiva: sin él, una cuenta sin contraseña no podía autorizar el conector MCP en el
   origen directo.
-- Regresión: `apps/api/tests/sso_login.rs` (11 tests) y `apps/api/tests/ha_idp_login.rs` (17), más
+- Regresión: `apps/api/tests/sso_login.rs` (12 tests) y `apps/api/tests/ha_idp_login.rs` (18), más
   los 11 unitarios puros de `apps/api/src/ha_idp/mod.rs`.
 
 ## Key functions

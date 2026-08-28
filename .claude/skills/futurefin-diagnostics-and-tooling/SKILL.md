@@ -512,7 +512,7 @@ trusting:
 
 - Route paths / new endpoints: `grep -n 'route(' apps/api/src/routes/mod.rs`
 - Cache TTL + key shape: `grep -n 'PROJECTION_CACHE_TTL\|pub struct ProjectionCacheKey' -A6 apps/api/src/state.rs`
-- Density pattern + months clamp + cache bypass: `grep -n 'density_month_indices\|validate_months_override\|q.months.is_none' apps/api/src/handlers/projection.rs`
+- Density pattern + months clamp + cache bypass: `grep -n 'density_month_indices\|validate_months_override\|months_override' apps/api/src/handlers/projection.rs` (el término `q.months.is_none` ya no casa: el parámetro se renombró a `months_override` dentro de `projection_series_cached`)
 - horizon_basis values: `grep -n '"months_override"\|lifespan_90\|fallback_no_demographics' apps/api/src/handlers/projection.rs`
 - Cache log messages grepped in §1: `grep -rn '"projection cache\|warm-up' apps/api/src/handlers/projection.rs apps/api/src/state.rs`
 - gzip layer: `grep -n 'CompressionLayer' apps/api/src/main.rs`

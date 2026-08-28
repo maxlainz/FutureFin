@@ -29,15 +29,15 @@
 //!
 //! ## Dónde se exige (y dónde NO)
 //!
-//! El token cuesta un round-trip extra por operación, así que **no** se exige en las 14 tools con
+//! El token cuesta un round-trip extra por operación, así que **no** se exige en todas las tools con
 //! preview: solo donde confirmar sin haber mirado destruye algo que la conversación no puede
 //! reconstruir. El gating vive **inline en cada tool** de `mcp/server.rs` (no hay constante que
-//! listarlas: `grep -c 'confirm_token.as_deref()' apps/api/src/mcp/server.rs` da las 7).
+//! listarlas: `grep -c 'confirm_token.as_deref()' apps/api/src/mcp/server.rs` las cuenta).
 //!
 //! ## Por qué vive aquí y no en `mcp/`
 //!
-//! Es maquinaria de protocolo con estado propio, como `oauth/`: `apps/api/src/mcp/` no contiene
-//! SQL salvo el `SELECT` del kill-switch en `auth.rs` (D14 — una tool con SQL propio es un bloqueo
+//! Es maquinaria de protocolo con estado propio, como `oauth/`: `apps/api/src/mcp/server.rs` no contiene
+//! SQL — `auth.rs` sí (el kill-switch y la auditoría de escrituras) (D14 — una tool con SQL propio es un bloqueo
 //! de revisión automático), y este módulo no es una core de dominio que puedan compartir los
 //! handlers HTTP: **no hay** camino HTTP con dos fases. Sí es `pub` para que la suite de
 //! integración pueda probar el ciclo completo emitir→consumir sin pasar por una tool.

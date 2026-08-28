@@ -32,7 +32,7 @@ src/
 │   │                             #   TODO importe tecleado pasa por ahí; ver la nota «Importes tecleados» abajo
 │   ├── format.test.ts            # (cuenta: `grep -c 'it('`)
 │   ├── dates.ts                  # civil-calendar arithmetic (parallel to crates/engine), TZ-aware "today", interval counts
-│   ├── dates.test.ts             # 29 tests (incl. formatDateDm)
+│   ├── dates.test.ts             # 32 tests (incl. formatDateDm)
 │   ├── ledger.ts                 # shared by views: ledgerViewQs, groupRowsByCategoryOrdered, asset/liability portfolio helpers,
 │   │                             #   PAYMENT_FREQ_LABEL, formatProjectionMilestoneCompactLabel, budgetCategoryMap,
 │   │                             #   sortBudgetEntriesMacStyle, formatAxisMoney, LedgerPersonScope, LiabilityPaymentFreq
@@ -105,7 +105,7 @@ src/
 │   ├── MetricCard.tsx            # KPI con paren-slot siempre presente (prop `trend?` ocupa el mismo slot, prioridad sobre `parenthetical`) + tone hero/accent/accent-2
 │   ├── SnapshotButton.tsx        # botón «Guardar snapshot» (idle→busy→success/error) en panel-head de Activos y Pasivos
 │   ├── SnapshotPromptModal.tsx   # modal «¿Guardar snapshot?» (paso assets → paso liabilities); tonto, lógica en App.tsx
-│   ├── icons.tsx                 # set unificado 16×16 stroke 1.5 (~25 iconos)
+│   ├── icons.tsx                 # set unificado 16×16 stroke 1.5 (29 iconos)
 │   └── charts/
 │       ├── summary.tsx           # SummaryDonutChart + SummaryBreakdownBlock (palette fría=activos / cálida=pasivos)
 │       ├── PlanningDirectionChart.tsx   # barra inflow/outflow — usada en Upcoming Y Budget
