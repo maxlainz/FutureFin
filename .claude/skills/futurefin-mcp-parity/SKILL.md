@@ -197,9 +197,16 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
 3. **Tool fn** inside the `#[tool_router] impl FutureFinMcp`, placed next to its thematic
    neighbors. Canonical body: `identity(&ctx)?` → a `run()` closure mapping params to the
    handler's body struct (fail early via `to_tool_outcome`) → async block: `require_mcp_write`
-   FIRST for any write → the core fn → compact `serde_json::json!({id, resumen, …})` →
+   FIRST for any write → the core fn → compact `serde_json::json!({id, summary, …})` →
    `to_tool_result`. Reads return the core's serde struct unmodified (Decimal-as-string
-   intact).
+   intact). **`summary`, in English** — until Fase 2 of issue #83 this key was named
+   `resumen`, the last Spanish key on the MCP wire (repo norm: "UI copy en español, código e
+   identificadores en inglés"). When the handler names the field in Spanish — today only
+   `BatchPatchResponse.resumen`/`resumen_truncated`, the HTTP contract of
+   `PATCH /v1/transactions/batch` — **translate it in the tool**, exactly as
+   `apply_categorization_rule` already publishes `out.sample` as `summary`: the catalog must
+   speak ONE language, because a client that learned `summary` from ten tools reads
+   `result.summary` on the eleventh and gets `undefined` with no error at all.
 4. **Annotations are mandatory and pattern-bound**: `title` in Spanish + `read_only_hint` +
    `destructive_hint` + `idempotent_hint` + `open_world_hint = false`. The annotations test
    *derives* expectations from the name (`update_*`/`delete_*` ⇒ destructive+idempotent;
@@ -341,6 +348,18 @@ cambió fue lo que esa cobertura devuelve. Detalle campo a campo, con el porqué
 `.claude/api-routes.md` §MCP y las secciones HTTP de cada endpoint (History series, History
 cash-flow, Projection, Allocation rules, Transactions).
 
+Evaluación de la rama **`feat/mcp-fase-2-esquema`** (Fase 2 de la revisión adversarial del MCP,
+issue #83 — «el esquema no valida lo que la prosa promete»; catálogo **sin cambios en 52**,
+recontado 52/21/31/31/11/1 el 2026-08-28). Como la Fase 1, no añade superficie: endurece el
+**contrato de entrada** (`deny_unknown_fields` en las 52, `enum`/`pattern`/cotas en el JSON
+Schema en vez de solo en la prosa) y unifica el **contrato de salida** de las escrituras. Las dos
+filas que cierran los huecos que la auditoría de la propia fase encontró:
+
+| Surface tocada | Parity outcome |
+|---|---|
+| `constraints` + `constraints_sha256_12` en `mcp-catalog.json` | **Gate, no tool**: el congelador (`tools_list_freezes_the_input_contract_of_every_tool`) fijaba `properties`, `required` y el hash de la `description` — es decir, era **ciego a todo lo que la Fase 2 acababa de construir**. Quitar un `enum` o un `deny_unknown_fields` no rompía un solo test. Ahora congela también las restricciones del `inputSchema` recorrido **recursivamente** (`properties`, `items`, `$defs`, combinadores, `additionalProperties` sub-schema): `additionalProperties`, `enum`, `pattern`, `type`, `required`, `format`, `const`, `$ref` y las cotas `minimum`/`maximum`/`minLength`/`maxLength`/`minItems`/`maxItems`/`multipleOf`/`uniqueItems`, **a cada nivel**. 296 nodos sobre las 52 tools. El hash es estable por construcción (claves de objeto ordenadas, `enum`/`type`/`required` tratados como conjuntos y ordenados también), así que ni el orden de emisión de schemars ni una actualización de dependencia lo mueven |
+| Clave `resumen` → **`summary`** en los 11 payloads de confirmación de escritura | **Once tools actualizadas, breaking**. `{id, resumen}` era la última clave en español del wire MCP (la norma del repo es «UI copy en español, código e identificadores en inglés»), y la misma fase ya había unificado los `effects` de los previews a `entity`/`side_effects`. Diez tools sintetizan la cadena en el propio MCP; `update_transactions` **traduce** los campos `resumen`/`resumen_truncated` de `BatchPatchResponse` (contrato HTTP de `PATCH /v1/transactions/batch`, que **no** cambia). Se traduce en vez de dejar una excepción porque el fallo de la excepción es silencioso: un cliente que aprendió `summary` en diez tools lee `result.summary` en la onceava y recibe `undefined` sin error. Cero tools nuevas, cero retiradas |
+
 Re-verify before trusting:
 
 - Tool counts + gate invariants: the §5 block (**52/21/31/31/11/1 on 2026-08-22, recontado
@@ -358,6 +377,15 @@ Re-verify before trusting:
 - Las dos rutas de HA-IdP siguen sin tool (fila §3.1, 4.3.1):
   `grep -rn 'ha_idp\|ha_sso\|auth/ha' apps/api/src/mcp/` (vacío) frente a
   `grep -n 'ha/start\|ha/callback' apps/api/src/routes/mod.rs` (las dos, montadas siempre).
+- Las restricciones del esquema siguen congeladas (Fase 2): el fixture trae `constraints` +
+  `constraints_sha256_12` por tool, y el fallo nombra la tool, la ruta del schema (`$`, `$.kind`,
+  `$defs.TaxBracketParam.pct`) y **qué restricción se perdió**. Comprobación de que el gate sigue
+  vivo: quita un `#[schemars(extend("enum" = …))]` o un `#[serde(deny_unknown_fields)]` y el test
+  debe decir «PERDIDA la restricción». Regenerar el fixture ante una línea así **no arregla nada,
+  borra la prueba**.
+- Ninguna clave en español en el wire MCP:
+  `grep -n '"resumen"' apps/api/src/mcp/server.rs` (vacío; los `out.resumen` sin comillas son los
+  campos del handler HTTP, que sí siguen en español y no son de este módulo).
 - Frozen catalog still matches the code (never count quotes — run the test):
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http tools_list_returns`
 - Cores still own invalidation, MCP module still SQL-free:

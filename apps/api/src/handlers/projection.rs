@@ -40,7 +40,8 @@ use uuid::Uuid;
 pub struct ProjectionSeriesQuery {
     #[serde(default)]
     pub view: Option<String>,
-    /// Meses a proyectar (12–840). Si se omite: horizonte derivado de la instalación (véase `horizon_basis`).
+    /// Meses a proyectar (12–840; fuera de rango es 400 `months_out_of_range`, NO se clampa).
+    /// Si se omite: horizonte derivado de la instalación (véase `horizon_basis`).
     pub months: Option<u32>,
     /// `monthly` (default) o `hybrid` (mes 0..12 mensual + anual desde 24). Reduce el JSON ~5× con `hybrid`.
     #[serde(default)]
@@ -1424,7 +1425,7 @@ pub(crate) async fn assets_projection_context(
     tag = "projection",
     params(
         ("view" = Option<String>, Query, description = "`mine` | `household`; ausente = household. Cualquier otro valor → 400 `invalid_view`"),
-        ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840); omitir = horizonte derivado (`lifespan_90` | `fallback_no_demographics`), ver `horizon_basis` en la respuesta"),
+        ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840; fuera de rango → 400 `months_out_of_range`); omitir = horizonte derivado (`lifespan_90` | `fallback_no_demographics`), ver `horizon_basis` en la respuesta"),
         ("density" = Option<String>, Query, description = "`monthly` (default) | `hybrid` (mensual el primer año, anual después). Cualquier otro valor → 400 `invalid_density`"),
     ),
     responses(
@@ -1502,6 +1503,36 @@ pub(crate) async fn projection_series_cached(
 /// (c) warm-up post-mutación. `density` solo afecta a la serialización (qué
 /// puntos incluir en `points`/`fire_target_series`/`asset_series.values`);
 /// el compute interno del engine siempre es el horizonte mensual completo.
+/// Cotas del horizonte EXPLÍCITO (`GET /v1/projection/series?months=`, tool `get_projection.months`
+/// y `simulate_projection.months`). Son las mismas que declara el JSON Schema de las tools.
+pub(crate) const MIN_PROJECTION_MONTHS: u32 = 12;
+pub(crate) const MAX_PROJECTION_MONTHS: u32 = 840;
+
+/// Un `months` fuera de rango se **rechaza**, no se clampa (4.3.2).
+///
+/// Hasta 4.3.1 `resolve_projection_context` hacía `m.clamp(12, 840)` y devolvía 200 con
+/// `horizon_basis: "months_override"` — o sea: la respuesta afirmaba «te he hecho caso» mientras
+/// contestaba a una pregunta distinta de la que se hizo. Pedir 1.200 meses y recibir 840 rotulados
+/// como override es indistinguible de un horizonte de 1.200 para quien lee la respuesta, y las dos
+/// tools hermanas discrepaban sobre el MISMO valor: `simulate_projection` ya rechazaba (aquí
+/// abajo) y `get_projection` clampaba. El esquema declara `range(min = 12, max = 840)`; esto es
+/// simplemente cumplirlo.
+///
+/// **Es breaking**: un cliente que enviaba 1.200 pasa de 200 a 400. La SPA no manda nunca `months`
+/// (`projectionSeriesUrl` en `apps/web/src/App.tsx` solo compone `view` y `density`), así que la
+/// ruptura es real solo para clientes de API/MCP — y exactamente sobre los valores que el esquema
+/// ya declaraba inválidos.
+pub(crate) fn validate_months_override(months: Option<u32>) -> Result<(), ApiError> {
+    if let Some(m) = months {
+        if !(MIN_PROJECTION_MONTHS..=MAX_PROJECTION_MONTHS).contains(&m) {
+            return Err(ApiError::BadRequest(format!(
+                "months_out_of_range: months must be between {MIN_PROJECTION_MONTHS} and {MAX_PROJECTION_MONTHS}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Contexto resuelto de una proyección: `today` en la TZ de la instalación, inflación efectiva,
 /// `show_age_mode`, `fire_settings` resueltos, DOB para demografía y la regla de horizonte.
 /// Extraído de `compute_projection_series_response` para que la tool MCP `simulate_projection`
@@ -1567,7 +1598,13 @@ pub(crate) async fn resolve_projection_context(
     let birth_dates: Vec<Option<NaiveDate>> = vec![birth_date];
 
     let (months, horizon_basis): (u32, String) = match months_override {
-        Some(m) => (m.clamp(12, 840), "months_override".into()),
+        // Rechazo, no clamp: ver `validate_months_override`. Se comprueba también aquí (y no solo
+        // en los extractores) porque ESTA es la core compartida por HTTP, `get_projection` y
+        // `simulate_projection`: una cota que viva en el borde vuelve a divergir entre superficies.
+        Some(m) => {
+            validate_months_override(Some(m))?;
+            (m, "months_override".into())
+        }
         None => {
             let (m, b) = projection_horizon_months(today, &birth_dates);
             (m, b.into())
@@ -2149,11 +2186,10 @@ pub(crate) async fn simulate_projection_core(
     spec: SimulationSpec,
 ) -> Result<SimulateProjectionResponse, ApiError> {
     // ---- Cotas de dominio (mismas que sus ejes de settings reales) --------------------------
-    if let Some(m) = spec.months {
-        if !(12..=840).contains(&m) {
-            return Err(ApiError::BadRequest("months_out_of_range: months must be between 12 and 840".into()));
-        }
-    }
+    // Mismo helper que el `?months=` de la proyección real: un solo literal, un solo código.
+    // Redundante con `resolve_projection_context` (más abajo) a propósito — aquí fija la
+    // PRECEDENCIA: `months` se valida antes que el resto de ejes del escenario.
+    validate_months_override(spec.months)?;
     // Único eje con signo: es el que tiene semántica de GASTO (mueve runway, caps y —en
     // `annual_expense`— el objetivo), así que es el único donde un recorte no tiene sustituto.
     // Los dos ejes de caja siguen exigiendo `>= 0` porque entre ellos ya cubren ambos signos:

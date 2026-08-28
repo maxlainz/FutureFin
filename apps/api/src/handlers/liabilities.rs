@@ -329,7 +329,7 @@ fn validate_payment_pair(
 /// body sobre la fila actual—, porque las tres reglas hablan del pasivo que va a quedar guardado,
 /// no de los campos que llegaron en la petición.
 ///
-/// Orden de comprobación (determinista, para que el código de error sea predecible):
+/// Las cuatro condiciones (orden determinista, para que el código de error sea predecible):
 /// 1. `payment_plan_required_for_model` — sin cuota no hay ni interés ni amortización: el engine
 ///    exige plan activo para devengar (`liability_active`), así que un `french` sin cuota sería un
 ///    `fixed_payments` disfrazado que no mueve un solo número. Se rechaza en vez de mentir.
@@ -344,6 +344,26 @@ fn validate_payment_pair(
 ///    en `fixed_payments` (Σ cuotas) y `french` (valor actual). En `interest_only` la cuota no
 ///    amortiza (el principal no se deduce del plan) y en `revolving` el plan no describe un
 ///    calendario cerrado.
+///
+/// **Las cuatro se evalúan SIEMPRE antes de decidir el error** (4.3.2). Hasta entonces se devolvía
+/// la primera y se salía: un `french` sin plan ni TIN gastaba tres turnos —
+/// `payment_plan_required_for_model` → (añades la cuota) → `apr_required_for_model` → (añades el
+/// TIN) → 201 —, y un `revolving` con `derive` los gastaba cuatro. El servidor conoce las cuatro
+/// condiciones desde la PRIMERA llamada; devolverlas de una en una no es informar menos, es
+/// **invitar a rellenar el hueco**: para un agente cada rebote es una oportunidad de inventarse un
+/// TIN plausible para desatascarse, y aquí un TIN inventado mueve la amortización entera.
+///
+/// La política de códigos es deliberadamente conservadora:
+/// - **Exactamente un problema** → el código específico de siempre, con su mensaje intacto. Es el
+///   caso de todo lo que hoy existe (fixture `error-codes.json`, frases de `errorMessages.ts`,
+///   `liabilities_repayment_model.rs`): cero ruptura y el código más accionable posible.
+/// - **Dos o más** → el código nuevo `repayment_model_state_invalid`, cuyo mensaje ENUMERA todos.
+///   Es exactamente el caso que antes mentía por omisión, así que no hay comportamiento anterior
+///   que preservar: sustituye a un código que describía *parte* del problema.
+///
+/// El prefijo de cada mensaje va como literal (aunque el resto se componga con `format!`):
+/// `error_codes_parity.rs` extrae el código del literal del fuente, y un prefijo interpolado sería
+/// invisible para el catálogo.
 fn validate_repayment_model_state(
     model: RepaymentModel,
     apr: Option<Decimal>,
@@ -357,31 +377,59 @@ fn validate_repayment_model_state(
         return Ok(());
     }
 
+    // `.0` = mensaje completo del código específico (el que se devuelve si es el ÚNICO problema);
+    // `.1` = la exigencia en corto, para enumerarlas todas cuando hay más de una. Ninguna de las
+    // frases cortas lleva ": ", para no fabricar códigos fantasma en el extractor de paridad.
+    let mut problems: Vec<(String, &'static str)> = Vec::new();
+
     if payment_amount.is_none() || payment_frequency.is_none() {
-        return Err(ApiError::BadRequest(format!(
-            "payment_plan_required_for_model: repayment_model {model} requires payment_amount and payment_frequency"
-        )));
+        problems.push((
+            format!(
+                "payment_plan_required_for_model: repayment_model {model} requires payment_amount and payment_frequency"
+            ),
+            "payment_amount and payment_frequency are required",
+        ));
     }
 
     if model.requires_apr() && !matches!(apr, Some(a) if a > Decimal::ZERO) {
-        return Err(ApiError::BadRequest(format!(
-            "apr_required_for_model: repayment_model {model} requires apr_percent > 0"
-        )));
+        problems.push((
+            format!("apr_required_for_model: repayment_model {model} requires apr_percent > 0"),
+            "apr_percent > 0 is required",
+        ));
     }
 
     if payment_frequency == Some(PaymentFrequency::Weekly) {
-        return Err(ApiError::BadRequest(format!(
-            "weekly_not_supported_for_model: payment_frequency weekly is only supported with repayment_model fixed_payments (got {model})"
-        )));
+        problems.push((
+            format!(
+                "weekly_not_supported_for_model: payment_frequency weekly is only supported with repayment_model fixed_payments (got {model})"
+            ),
+            "payment_frequency must not be weekly",
+        ));
     }
 
     if derive && matches!(model, RepaymentModel::InterestOnly | RepaymentModel::Revolving) {
-        return Err(ApiError::BadRequest(format!(
-            "derive_not_supported_for_model: derive_principal_from_plan is not supported with repayment_model {model}"
-        )));
+        problems.push((
+            format!(
+                "derive_not_supported_for_model: derive_principal_from_plan is not supported with repayment_model {model}"
+            ),
+            "derive_principal_from_plan must be false",
+        ));
     }
 
-    Ok(())
+    match problems.len() {
+        0 => Ok(()),
+        1 => Err(ApiError::BadRequest(problems.remove(0).0)),
+        _ => {
+            let all = problems
+                .iter()
+                .map(|(_, short)| *short)
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(ApiError::BadRequest(format!(
+                "repayment_model_state_invalid: repayment_model {model} needs all of these fixed at once: {all}"
+            )))
+        }
+    }
 }
 
 /// Principal = payment × intervals from **today**

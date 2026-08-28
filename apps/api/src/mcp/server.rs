@@ -3,7 +3,7 @@
 //! cero validación paralela: cada tool de lectura serializa el MISMO struct serde que el
 //! endpoint (Decimal-as-string intacto) y cada tool de escritura llama a la misma core de
 //! mutación (que lleva DENTRO la invalidación de cache), así handler y tool no pueden
-//! divergir. Las escrituras devuelven respuestas compactas `{id, resumen}`, no el response
+//! divergir. Las escrituras devuelven respuestas compactas `{id, summary}`, no el response
 //! HTTP entero.
 //!
 //! Gate de escritura: TODA tool de escritura pasa primero por `require_mcp_write` (rol
@@ -137,19 +137,56 @@ fn to_tool_outcome(e: ApiError) -> Result<CallToolResult, ErrorData> {
     }
 }
 
+/// Patrones y enumerados que las tools publican **en su JSON Schema**.
+///
+/// Son DECLARATIVOS: rmcp deserializa los argumentos con serde_json y no valida contra el
+/// schema, así que esto no rechaza nada por sí solo — la validación real sigue viviendo en
+/// `parse_decimal_param`, `parse_uuid_param`, `parse_date_param` y las cores compartidas con
+/// HTTP. Lo que fijan es el contrato que el cliente lee **antes** de llamar, que es lo que un
+/// modelo usa para construir la llamada: hasta la Fase 2 la cota vivía solo en la prosa de la
+/// `description`, y una descripción se lee entera (o se trunca) mientras que un `pattern` o un
+/// `enum` se leen siempre.
+///
+/// Dos patrones decimales y no uno: el signo es semántica, no formato. `min_amount`/`amount` de
+/// un movimiento aceptan negativo porque el gasto ES negativo; `current_value` o `principal` no.
+const DECIMAL_SIGNED: &str = r"^-?\d+(\.\d+)?$";
+const DECIMAL_NON_NEGATIVE: &str = r"^\d+(\.\d+)?$";
+const DATE_YMD_STRING: &str = r"^\d{4}-\d{2}-\d{2}$";
+const MONTH_YM_STRING: &str = r"^\d{4}-\d{2}$";
+const UUID_STRING: &str =
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+
+/// Params de las tools que no aceptan ninguno.
+///
+/// Existe solo para que su `inputSchema` publique `additionalProperties: false` como el de las
+/// otras 48: sin struct, rmcp emite el schema vacío genérico, que acepta cualquier campo. Una
+/// tool sin parámetros que traga `{"view": "mine"}` en silencio es exactamente el fallo de esta
+/// fase — `list_recurring_rules` es siempre own-user y `materialize_recurring` toca el hogar
+/// entero, así que ese `view` fantasma habría hecho creer al modelo que acotó algo.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+// `properties: {}` explícito: schemars lo omite en un struct sin campos, y el schema vacío que
+// rmcp genera por su cuenta sí lo trae. Publicarlo mantiene la forma que los clientes ya veían.
+#[schemars(extend("properties" = {}))]
+pub struct NoParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ViewParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`) — no cae a "household" en silencio.
     #[serde(default)]
+    #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectionParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
+    #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
     /// Horizonte en meses (12–840; fuera de rango se clampa). Omitido = horizonte derivado de
     /// la instalación — y única variante servida desde cache: un `months` explícito recomputa
@@ -165,10 +202,12 @@ pub struct ProjectionParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct HistoryParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
+    #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
     /// Limita la serie a los últimos N meses (1–1200). Omitido = desde el snapshot más
     /// antiguo (un backfill de años puede ser mucho payload: acota si solo necesitas lo
@@ -182,57 +221,74 @@ pub struct HistoryParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransactionsSummaryParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
+    #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
-    /// Año del mes seleccionado. Se pasa junto con `month`; omitidos = último mes completo.
+    /// Año del mes seleccionado (1900–3000). Se pasa junto con `month`; omitidos = último mes
+    /// completo.
     #[serde(default)]
+    #[schemars(range(min = 1900, max = 3000))]
     pub year: Option<i32>,
     /// Mes 1..12 del mes seleccionado.
     #[serde(default)]
+    #[schemars(range(min = 1, max = 12))]
     pub month: Option<u32>,
     /// Ventana del promedio ponderado: "3" | "6" | "12" | "ytd" | "all". Default "6".
     #[serde(default)]
+    #[schemars(extend("enum" = ["3", "6", "12", "ytd", "all"]))]
     pub avg_window: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListTransactionsParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
+    #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
     /// Filtra por mes "YYYY-MM" (op_date dentro del mes).
     #[serde(default)]
+    #[schemars(regex(pattern = MONTH_YM_STRING))]
     pub month: Option<String>,
     /// Filtra por tipo: "expense" | "income" | "savings".
     #[serde(default)]
+    #[schemars(extend("enum" = ["expense", "income", "savings"]))]
     pub kind: Option<String>,
     /// Filtra por id de categoría (UUID).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// Filtra por lote de import (UUID de `list_transaction_imports`).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub import_id: Option<String>,
     /// Busca una subcadena en el concepto (1–200 caracteres). Insensible a mayúsculas Y a tildes:
     /// "cafe" encuentra "CAFÉ". Los comodines `%` y `_` se buscan como texto literal.
     #[serde(default)]
+    #[schemars(length(min = 1, max = 200))]
     pub concept_contains: Option<String>,
     /// Cota INFERIOR del importe, con signo (los gastos son negativos). Decimal como string.
     /// Ej.: min_amount "0" = solo ingresos y ahorro.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub min_amount: Option<String>,
     /// Cota SUPERIOR del importe, con signo. Decimal como string. Ej.: max_amount "-50" = gastos
     /// de 50 € o MÁS (porque -104 < -50); max_amount "0" = solo gastos.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub max_amount: Option<String>,
     /// Desde esta fecha "YYYY-MM-DD", inclusive. Excluyente con `month`.
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub date_from: Option<String>,
     /// Hasta esta fecha "YYYY-MM-DD", inclusive. Excluyente con `month`.
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub date_to: Option<String>,
     /// Máximo de movimientos devueltos (1–500). Default 100. La respuesta indica
     /// `total_count` y `truncated`.
@@ -245,23 +301,29 @@ pub struct ListTransactionsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CategoriesParams {
     /// Filtra por scope: "asset" | "liability" | "income" | "expense". Omitido = todas.
     #[serde(default)]
+    #[schemars(extend("enum" = ["asset", "liability", "income", "expense"]))]
     pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CategorySeriesParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
+    #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
     /// "expense" | "income".
+    #[schemars(extend("enum" = ["expense", "income"]))]
     pub kind: String,
     /// Limita la serie a una categoría (UUID de list_categories). Omitido = todas las del
     /// kind con datos.
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// Ventana en meses (1–60, default 12). El último mes es el actual (parcial).
     #[serde(default)]
@@ -270,10 +332,12 @@ pub struct CategorySeriesParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CashflowParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
+    #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
     /// Meses de ventana (1–120, default 24).
     #[serde(default)]
@@ -286,10 +350,12 @@ pub struct CashflowParams {
     /// "weekly" (default) | "daily". "daily" exige window_months <= 6. Solo aplica con
     /// include_curve.
     #[serde(default)]
+    #[schemars(extend("enum" = ["weekly", "daily"]))]
     pub resolution: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotsParams {
     /// Filtra por año del snapshot (1900–3000). Omitido = todos.
     #[serde(default)]
@@ -297,6 +363,7 @@ pub struct SnapshotsParams {
     pub year: Option<i32>,
     /// Filtra por tipo: "asset" | "liability". Omitido = ambos.
     #[serde(default)]
+    #[schemars(extend("enum" = ["asset", "liability"]))]
     pub kind: Option<String>,
     /// Incluir el detalle por ítem de cada snapshot. Default false (solo cabecera y total).
     #[serde(default)]
@@ -304,22 +371,30 @@ pub struct SnapshotsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OneOffExpenseParam {
     /// Importe del gasto puntual (> 0), string decimal.
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub amount: String,
-    /// Mes de la proyección (1..=horizonte). Exactamente uno de month_index o date.
+    /// Mes de la proyección (1..=horizonte; el horizonte máximo es 840). Exactamente uno de
+    /// month_index o date.
     #[serde(default)]
+    #[schemars(range(min = 1, max = 840))]
     pub month_index: Option<u32>,
     /// Fecha "YYYY-MM-DD" (se mapea al mes como un planning flow real).
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub date: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AssetReturnOverrideParam {
     /// UUID del activo (de list_assets).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub asset_id: String,
     /// Rentabilidad anual esperada en % (> -100; los negativos componen pérdidas), string decimal.
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub expected_annual_return_percent: String,
 }
 
@@ -333,6 +408,24 @@ pub struct AssetReturnOverrideParam {
 /// emitiéndose en runtime, pero ningún literal estático los nombraba— y el fixture los dio por
 /// desaparecidos. El extractor solo ve literales; que el helper no se los coma es parte del
 /// contrato.
+///
+/// **Por qué el parámetro sigue siendo `Option<String>` y no el enum de dominio** (decisión de
+/// la Fase 2, issue #83). Tipar el parámetro como `SavingsSource`/`RepaymentModel`/… habría dado
+/// el `enum` del schema gratis y borrado este helper, pero también habría movido el error: un
+/// literal desconocido dejaría de ser un 400 NUESTRO —con su código estable y su frase en la
+/// SPA— para convertirse en el fallo de deserialización de rmcp. Y eso es exactamente lo que la
+/// 4.2.0 decidió al revés y por escrito: `RepaymentModel::parse` existe «para el camino MCP,
+/// donde el parámetro llega como `String` suelto y el error debe ser un 400 nuestro»
+/// (CHANGELOG 4.2.0: «`repayment_model_invalid` (literal desconocido por MCP; por HTTP lo corta
+/// serde con un 422)»). Cambiarlo habría hecho desaparecer del fixture de códigos
+/// `repayment_model_invalid`, `payment_frequency_invalid`, `savings_source`, `fire_number_mode`
+/// y los dos `*_avg_window_mode`.
+///
+/// La salida es `#[schemars(extend("enum" = [...]))]` sobre el `Option<String>`: el schema
+/// publica el enumerado de verdad Y el error sigue siendo el tipado. El precio es una segunda
+/// lista de variantes, la del atributo — la vigila
+/// `enumerated_params_publish_a_real_enum_in_the_json_schema` (`tests/mcp_http.rs`), que además
+/// barre el catálogo buscando descripciones que enumeran valores sin publicar `enum`.
 fn parse_enum_param<T: serde::de::DeserializeOwned>(
     raw: &Option<String>,
 ) -> Result<Option<T>, serde_json::Error> {
@@ -378,12 +471,15 @@ pub struct FireSettingsOverrideParam {
     /// OJO: si pides B o C y no hay meses reales, el ensamblado cae al presupuesto y el escenario
     /// sale idéntico al baseline — `savings_source` de la respuesta dice cuál se usó de verdad.
     #[serde(default)]
+    #[schemars(extend("enum" = ["budget", "transactions_avg", "budget_income_real_expense"]))]
     pub savings_source: Option<String>,
     /// "manual" | "annual_expense" | "current_income".
     #[serde(default)]
+    #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
     pub fire_number_mode: Option<String>,
     /// Objetivo manual > 0, string decimal (requerido si el modo efectivo acaba siendo "manual").
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub fire_number_manual_amount: Option<String>,
     /// Simular con y sin impuestos sobre la plusvalía en el gross-up del objetivo.
     #[serde(default)]
@@ -401,6 +497,7 @@ pub struct FireSettingsOverrideParam {
     /// "data" (los N meses CON DATOS más recientes, saltando huecos) | "calendar" (solo los meses
     /// con datos dentro de los últimos N civiles).
     #[serde(default)]
+    #[schemars(extend("enum" = ["data", "calendar"]))]
     pub income_avg_window_mode: Option<String>,
     /// Ventana del promedio de GASTO en meses (1–60). La usan los modos B y C.
     #[serde(default)]
@@ -408,6 +505,7 @@ pub struct FireSettingsOverrideParam {
     pub expense_avg_window_months: Option<u32>,
     /// "data" | "calendar".
     #[serde(default)]
+    #[schemars(extend("enum" = ["data", "calendar"]))]
     pub expense_avg_window_mode: Option<String>,
 }
 
@@ -443,6 +541,7 @@ pub struct SimulateParams {
     /// "mine" = solo los datos del usuario del token; "household" u omitido = hogar completo.
     /// Cualquier otro valor es error (`invalid_view`).
     #[serde(default)]
+    #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
     /// Horizonte en meses (12–840). Omitido = horizonte de la instalación.
     #[serde(default)]
@@ -465,23 +564,24 @@ pub struct SimulateParams {
     /// quedó. Con base 0 y `fire_number_mode = annual_expense` no hay objetivo FIRE, y
     /// `fire_target_absent_reason` lo dice: sin gasto no hay número FIRE.
     #[serde(default)]
-    #[schemars(regex(pattern = r"^-?\d+(\.\d+)?$"))]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub extra_monthly_expense: Option<String>,
     /// Ajuste de caja mensual NEUTRO (>= 0, se resta): menos ahorro sin mover el target FIRE
     /// ni los caps. Es el MISMO mando que `extra_monthly_savings` con el signo cambiado.
     #[serde(default)]
-    #[schemars(regex(pattern = r"^\d+(\.\d+)?$"))]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub extra_monthly_cash_adjustment: Option<String>,
     /// Ahorro mensual extra (>= 0): más caja asignable vía la cascada, sin mover el target.
     /// Es el mando para simular MENOS gasto en términos de caja — idéntico a un
     /// `extra_monthly_cash_adjustment` negativo, que por eso no hace falta aceptar.
     #[serde(default)]
-    #[schemars(regex(pattern = r"^\d+(\.\d+)?$"))]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub extra_monthly_savings: Option<String>,
     /// SWR en % (0–4, string decimal): «¿y si el SWR fuera 3?». **`"0"` se acepta pero no es un
     /// escenario conservador, es «jamás»**: anula el objetivo FIRE entero (`fire_target_base` y
     /// `jubilacion_month_index` salen `null` y la serie del target, vacía)..
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub swr_pct: Option<String>,
     /// Inflación anual asumida en % (0–50, string decimal).
     #[serde(default)]
@@ -489,12 +589,14 @@ pub struct SimulateParams {
     /// `get_settings` y en `update_fire_settings`. Sin él, el nombre que el modelo acababa de
     /// leer se descartaba en silencio y el escenario salía idéntico al baseline.
     #[serde(alias = "annual_inflation_assumption_percent")]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub annual_inflation_percent: Option<String>,
     /// Gasto ANUAL de jubilación (> 0, string decimal): sustituye **siempre** el gasto
     /// post-jubilación, y la base del target FIRE **solo con
     /// `fire_number_mode = annual_expense`** (en `current_income` y `manual` el objetivo no mira
     /// el gasto).
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub retirement_annual_expense: Option<String>,
     /// Overrides de rentabilidad por activo.
     #[serde(default)]
@@ -506,14 +608,32 @@ pub struct SimulateParams {
 }
 
 /// Parsea un string decimal de un parámetro de tool con error tipado.
+///
+/// El mensaje dice el FORMATO, no solo que está mal. La UI es española y el usuario dicta «once
+/// con ochenta y tres»: el modelo escribe `"11,83"`, y un mensaje que solo decía «must be a
+/// decimal string» no desambiguaba entre «cambia la coma por un punto» y «quita el separador».
+/// Un reintento a ciegas puede mandar `"1183"` — dos órdenes de magnitud, aceptado sin ruido.
+///
+/// El prefijo `decimal_invalid: ` es un literal COMPLETO a propósito: `error_codes_parity`
+/// extrae los códigos del fuente y solo ve literales, así que un `format!("{code}: …")` con el
+/// código interpolado lo dejaría fuera del fixture y la SPA caería al mensaje genérico.
 fn parse_decimal_param(name: &str, raw: &str) -> Result<rust_decimal::Decimal, ApiError> {
-    raw.trim()
-        .parse::<rust_decimal::Decimal>()
-        .map_err(|_| ApiError::BadRequest(format!("{name} must be a decimal string")))
+    raw.trim().parse::<rust_decimal::Decimal>().map_err(|_| {
+        ApiError::BadRequest(format!(
+            "decimal_invalid: {name} must be a decimal string — use '.' as the decimal separator, \
+             with no currency symbol and no thousands separator (\"1234.56\", not \"1.234,56 €\")"
+        ))
+    })
 }
 
 fn parse_uuid_param(name: &str, raw: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(raw.trim()).map_err(|_| ApiError::BadRequest(format!("{name} must be a UUID")))
+    Uuid::parse_str(raw.trim()).map_err(|_| {
+        ApiError::BadRequest(format!(
+            "uuid_invalid: {name} must be a UUID (8-4-4-4-12 hex, e.g. \
+             \"1f2e3d4c-5b6a-7988-9a0b-1c2d3e4f5061\"); copy it verbatim from the tool that \
+             listed the resource"
+        ))
+    })
 }
 
 fn parse_opt_uuid_param(name: &str, raw: &Option<String>) -> Result<Option<Uuid>, ApiError> {
@@ -521,9 +641,12 @@ fn parse_opt_uuid_param(name: &str, raw: &Option<String>) -> Result<Option<Uuid>
 }
 
 fn parse_date_param(name: &str, raw: &str) -> Result<chrono::NaiveDate, ApiError> {
-    raw.trim()
-        .parse()
-        .map_err(|_| ApiError::BadRequest(format!("{name} must be YYYY-MM-DD")))
+    raw.trim().parse().map_err(|_| {
+        ApiError::BadRequest(format!(
+            "date_invalid: {name} must be a calendar date as \"YYYY-MM-DD\" (e.g. \
+             \"2026-03-01\"), never \"01/03/2026\" nor a month alone"
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -533,23 +656,30 @@ fn parse_date_param(name: &str, raw: &str) -> Result<chrono::NaiveDate, ApiError
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTransactionParams {
     /// Fecha de la operación "YYYY-MM-DD".
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub op_date: String,
     pub concept: String,
     /// Importe FIRMADO como string decimal: gasto negativo ("-23.50"), ingreso positivo,
     /// aportación de ahorro negativa. Nunca 0.
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub amount: String,
     /// "expense" | "income" | "savings" (savings SIN categoría).
+    #[schemars(extend("enum" = ["expense", "income", "savings"]))]
     pub kind: String,
     /// Categoría (UUID de list_categories; el scope debe casar con el kind).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// Activo vinculado (destino de una aportación savings).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub linked_asset_id: Option<String>,
     /// Pasivo vinculado (cuota de un préstamo).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub linked_liability_id: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
@@ -560,29 +690,38 @@ pub struct CreateTransactionParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateTransactionParams {
     /// UUID del movimiento (propio) a editar.
+    #[schemars(regex(pattern = UUID_STRING))]
     pub id: String,
+    /// Fecha de la operación "YYYY-MM-DD".
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub op_date: Option<String>,
     #[serde(default)]
     pub concept: Option<String>,
     /// Importe firmado como string decimal (nunca 0).
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub amount: Option<String>,
     /// "expense" | "income" | "savings".
     #[serde(default)]
+    #[schemars(extend("enum" = ["expense", "income", "savings"]))]
     pub kind: Option<String>,
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// true = quitar la categoría.
     #[serde(default)]
     pub clear_category: Option<bool>,
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub linked_asset_id: Option<String>,
     #[serde(default)]
     pub clear_linked_asset: Option<bool>,
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub linked_liability_id: Option<String>,
     #[serde(default)]
     pub clear_linked_liability: Option<bool>,
@@ -593,21 +732,27 @@ pub struct UpdateTransactionParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureSnapshotParams {
     /// Qué capturar: ["asset"], ["liability"] o ambos. Omitido = ambos.
     #[serde(default)]
+    #[schemars(extend("items" = {"type": "string", "enum": ["asset", "liability"]}))]
     pub kinds: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePlanningFlowParams {
     pub title: String,
     /// Categoría income|expense (UUID de list_categories).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: String,
     /// Importe > 0 como string decimal (el signo lo da el scope de la categoría).
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub expected_amount: String,
     /// "YYYY-MM-DD" opcional. Sin fecha, el flujo se reparte en los próximos 90 días.
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub due_date: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
@@ -617,18 +762,24 @@ pub struct CreatePlanningFlowParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePlanningFlowParams {
     /// UUID del flujo (de list_planning_flows).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub id: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// Categoría income|expense (UUID de list_categories).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// Importe > 0 como string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub expected_amount: Option<String>,
     /// "YYYY-MM-DD". Incompatible con clear_due_date.
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub due_date: Option<String>,
     /// true = borrar la fecha (el flujo pasa a repartirse en 90 días y sale del chart).
     #[serde(default)]
@@ -640,8 +791,10 @@ pub struct UpdatePlanningFlowParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateCategoryParams {
     /// "asset" | "liability" | "income" | "expense".
+    #[schemars(extend("enum" = ["asset", "liability", "income", "expense"]))]
     pub scope: String,
     pub name: String,
     #[serde(default)]
@@ -649,32 +802,41 @@ pub struct CreateCategoryParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateCategorizationRuleParams {
     /// Patrón a buscar en el concepto normalizado (p.ej. "MERCADONA").
     pub pattern: String,
     /// "substring" (default) | "prefix" | "exact".
     #[serde(default)]
+    #[schemars(extend("enum" = ["substring", "prefix", "exact"]))]
     pub match_kind: Option<String>,
     /// Banco de origen ("myinvestor" | "n26"…); omitido = agnóstica (cualquier banco).
     #[serde(default)]
     pub source: Option<String>,
     /// "expense" | "income" | "savings" (savings sin categoría).
+    #[schemars(extend("enum" = ["expense", "income", "savings"]))]
     pub assign_kind: String,
     /// Categoría a asignar (UUID; scope acorde al assign_kind).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub assign_category_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateTransactionsParams {
     /// UUIDs de los movimientos a reclasificar (1..=200), todos PROPIOS. Todo o nada: si alguno no
     /// existe o no es tuyo, no se toca ninguno y el error nombra los culpables.
+    #[schemars(length(min = 1, max = 200))]
+    #[schemars(inner(regex(pattern = UUID_STRING)))]
     pub ids: Vec<String>,
     /// "expense" | "income" | "savings".
     #[serde(default)]
+    #[schemars(extend("enum" = ["expense", "income", "savings"]))]
     pub kind: Option<String>,
     /// UUID de la categoría a asignar a TODOS los movimientos del lote.
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// true = deja los movimientos sin categoría (excluyente con category_id).
     #[serde(default)]
@@ -688,15 +850,23 @@ pub struct UpdateTransactionsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ApplyCategorizationRuleParams {
     /// UUID de la regla (de list_categorization_rules).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub rule_id: String,
     /// "uncategorized" (default): solo movimientos sin categoría. "all": también reasigna los ya
     /// categorizados — el caso «desglosar una categoría cajón».
     #[serde(default)]
+    // El parser acepta además "none" (no toca nada). No se publica a propósito: es un no-op
+    // sobre una tool cuyo objetivo es escribir, y ofrecérselo al modelo solo invita a llamadas
+    // que no hacen nada. Se sigue aceptando en runtime — el schema es más estrecho que el
+    // parser, nunca al revés.
+    #[schemars(extend("enum" = ["uncategorized", "all"]))]
     pub apply_to_existing: Option<String>,
     /// Acota el backfill hacia atrás: "YYYY-MM", inclusive. Omitido = todo el histórico.
     #[serde(default)]
+    #[schemars(regex(pattern = MONTH_YM_STRING))]
     pub from_month: Option<String>,
     /// Sin confirm=true NO escribe: devuelve el preview con cuántos movimientos cambiarían,
     /// desglosados por su categoría actual, y si eso movería la proyección.
@@ -705,33 +875,42 @@ pub struct ApplyCategorizationRuleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAssetValueParams {
     /// UUID del activo (de list_assets).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub asset_id: String,
     /// Valor actual >= 0 como string decimal («mi fondo vale ahora 52300»).
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub current_value: Option<String>,
     /// Rentabilidad anual esperada en % (> -100; negativos componen pérdidas), string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub expected_annual_return_percent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAssetParams {
     /// UUID del activo (de list_assets).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub asset_id: String,
     /// Nuevo nombre.
     #[serde(default)]
     pub name: Option<String>,
     /// Nueva categoría con scope asset (UUID de list_categories).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// Valor actual >= 0, string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub current_value: Option<String>,
     /// Precio de compra >= 0 (base de coste), string decimal. Incompatible con
     /// clear_purchase_price.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub purchase_price: Option<String>,
     /// true = borrar el precio de compra.
     #[serde(default)]
@@ -742,42 +921,52 @@ pub struct UpdateAssetParams {
     pub is_liquid: Option<bool>,
     /// Rentabilidad anual esperada en % (> -100; negativos componen pérdidas), string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub expected_annual_return_percent: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAssetParams {
     pub name: String,
     /// Categoría con scope asset (UUID de list_categories).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: String,
     /// Valor actual >= 0, string decimal.
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub current_value: String,
     /// Líquido = drenable para gastos (default true).
     #[serde(default)]
     pub is_liquid: Option<bool>,
     /// Rentabilidad anual esperada en % (> -100), string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub expected_annual_return_percent: Option<String>,
     /// Precio de compra >= 0 (base de coste), string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub purchase_price: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateLiabilityParams {
     pub label: String,
     /// Categoría con scope liability (UUID de list_categories).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: String,
     /// Categoría de GASTO donde vive la cuota (UUID de list_categories, scope expense).
     /// Obligatoria: el presupuesto y la comparativa de Movimientos atribuyen ahí el
     /// equivalente mensual del plan.
+    #[schemars(regex(pattern = UUID_STRING))]
     pub expense_category_id: String,
     /// Principal >= 0 como string decimal. Obligatorio salvo derive_principal_from_plan.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub principal: Option<String>,
     /// true = derivar el principal del plan de pago (exige payment_amount, payment_frequency y
     /// payment_end_date). Con repayment_model fixed_payments el principal es cuota × nº de pagos
@@ -790,39 +979,49 @@ pub struct CreateLiabilityParams {
     /// "interest_only" (la cuota es el interés, el principal no baja) o "revolving".
     /// Todos menos fixed_payments exigen plan de pago mensual (weekly no se admite).
     #[serde(default)]
+    #[schemars(extend("enum" = ["fixed_payments", "french", "interest_only", "revolving"]))]
     pub repayment_model: Option<String>,
     /// TAE en % >= 0, string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub apr_percent: Option<String>,
     /// Cuota como string decimal (> 0 si se pasa).
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub payment_amount: Option<String>,
     /// "monthly" | "weekly" (obligatoria si hay payment_amount).
     #[serde(default)]
+    #[schemars(extend("enum" = ["monthly", "weekly"]))]
     pub payment_frequency: Option<String>,
     /// "YYYY-MM-DD" — fin del plan de pago.
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub payment_end_date: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateLiabilityParams {
     /// UUID del pasivo (de list_liabilities).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub liability_id: String,
     /// Nuevo label.
     #[serde(default)]
     pub label: Option<String>,
     /// Nueva categoría con scope liability (UUID de list_categories).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// Categoría de GASTO de la cuota (UUID de list_categories, scope expense). Set-only:
     /// asignar o cambiar; no se puede volver a NULL.
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub expense_category_id: Option<String>,
     /// Principal >= 0, string decimal. Ignorado si el principal queda derivado del plan.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub principal: Option<String>,
     /// true = derivar el principal del plan de pago (cuota + frecuencia + fecha fin; Σ cuotas en
     /// fixed_payments, valor actual al TIN en french); false = volver a principal explícito.
@@ -832,28 +1031,36 @@ pub struct UpdateLiabilityParams {
     /// Nuevo modelo de amortización: "fixed_payments" | "french" | "interest_only" |
     /// "revolving". Set-only: omitirlo conserva el actual.
     #[serde(default)]
+    #[schemars(extend("enum" = ["fixed_payments", "french", "interest_only", "revolving"]))]
     pub repayment_model: Option<String>,
     /// TAE en % >= 0, string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub apr_percent: Option<String>,
     /// Cuota como string decimal (> 0 si se pasa).
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub payment_amount: Option<String>,
     /// "monthly" | "weekly".
     #[serde(default)]
+    #[schemars(extend("enum" = ["monthly", "weekly"]))]
     pub payment_frequency: Option<String>,
     /// "YYYY-MM-DD" — fin del plan de pago.
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub payment_end_date: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateBudgetEntryParams {
     /// Categoría income|expense (UUID de list_categories).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: String,
     /// Importe mensual > 0 como string decimal.
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub amount: String,
     /// El ingreso persiste tras la jubilación (pensión, alquileres…). Default false.
     #[serde(default)]
@@ -863,19 +1070,25 @@ pub struct CreateBudgetEntryParams {
     pub ends_at_retirement: Option<bool>,
     /// "YYYY-MM-DD" — el gasto termina en esa fecha. Incompatible con ends_at_retirement.
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub expense_end_date: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateBudgetEntryParams {
     /// UUID de la entrada (de get_budget).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub id: String,
+    /// Categoría income|expense (UUID de list_categories).
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
     /// Importe mensual > 0 como string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub amount: Option<String>,
     #[serde(default)]
     pub persists_after_retirement: Option<bool>,
@@ -883,6 +1096,7 @@ pub struct UpdateBudgetEntryParams {
     pub ends_at_retirement: Option<bool>,
     /// "YYYY-MM-DD". Incompatible con clear_expense_end_date.
     #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub expense_end_date: Option<String>,
     /// true = borrar la fecha fin del gasto.
     #[serde(default)]
@@ -892,22 +1106,27 @@ pub struct UpdateBudgetEntryParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAllocationRuleParams {
     /// UUID de la regla (de list_allocation_rules).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub rule_id: String,
     /// Importe de la regla como string decimal: euros/mes para kind=fixed, % para
     /// kind=percent. (El kind y el orden no se editan desde chat.)
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub amount: Option<String>,
     /// Tipo de tope: `"amount"` | `"months_expense"` | `"income_multiple"`. Va SUELTO, junto a
     /// `cap_value` — no es un objeto anidado. El doc decía `{"kind": …, "value": …}`, así que
     /// invitaba a mandar un campo `cap` que no existe: se descartaba en silencio, la llamada
     /// devolvía 200, y el tope no se ponía.
     #[serde(default)]
+    #[schemars(extend("enum" = ["amount", "months_expense", "income_multiple"]))]
     pub cap_kind: Option<String>,
     /// Valor del tope, string decimal. La UNIDAD depende de `cap_kind`: euros con `amount`,
     /// nº de meses de gasto con `months_expense`, múltiplo del ingreso con `income_multiple`.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub cap_value: Option<String>,
     /// true = quitar el cap.
     #[serde(default)]
@@ -917,11 +1136,14 @@ pub struct UpdateAllocationRuleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateCategorizationRuleParams {
     /// UUID de la regla (de list_categorization_rules).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub rule_id: String,
     /// "substring" | "prefix" | "exact".
     #[serde(default)]
+    #[schemars(extend("enum" = ["substring", "prefix", "exact"]))]
     pub match_kind: Option<String>,
     /// Texto a buscar en el concepto del movimiento.
     #[serde(default)]
@@ -934,12 +1156,14 @@ pub struct UpdateCategorizationRuleParams {
     pub clear_source: Option<bool>,
     /// "expense" | "income" | "savings". Incompatible con clear_assign_kind.
     #[serde(default)]
+    #[schemars(extend("enum" = ["expense", "income", "savings"]))]
     pub assign_kind: Option<String>,
     /// true = la regla deja de asignar kind (y por tanto tampoco categoría).
     #[serde(default)]
     pub clear_assign_kind: Option<bool>,
     /// UUID de categoría (de list_categories). Incompatible con clear_assign_category.
     #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
     pub assign_category_id: Option<String>,
     /// true = la regla deja de asignar categoría.
     #[serde(default)]
@@ -947,8 +1171,10 @@ pub struct UpdateCategorizationRuleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteCategorizationRuleParams {
     /// UUID de la regla (de list_categorization_rules).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub rule_id: String,
     /// Sin confirm=true NO borra: devuelve un preview con la regla y su huella actual.
     #[serde(default)]
@@ -956,6 +1182,7 @@ pub struct DeleteCategorizationRuleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListCategorizationRulesParams {
     /// Máximo de reglas devueltas (1–200). Default 50. La respuesta indica `total_count` y
     /// `truncated`.
@@ -968,14 +1195,18 @@ pub struct ListCategorizationRulesParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct UnreconcileTransferParams {
     /// UUID de una de las dos patas del par conciliado (de list_transactions).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub transaction_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteRecurringRuleParams {
     /// UUID de la plantilla (de list_recurring_rules).
+    #[schemars(regex(pattern = UUID_STRING))]
     pub id: String,
     /// Sin confirm=true la tool NO borra: devuelve un preview de la plantilla.
     #[serde(default)]
@@ -984,8 +1215,10 @@ pub struct DeleteRecurringRuleParams {
 
 /// Params comunes de los deletes con preview/confirm del tramo 3.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteByIdParams {
     /// UUID del recurso a borrar.
+    #[schemars(regex(pattern = UUID_STRING))]
     pub id: String,
     /// Sin confirm=true la tool NO borra: devuelve un preview con los efectos.
     #[serde(default)]
@@ -993,11 +1226,14 @@ pub struct DeleteByIdParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TaxBracketParam {
     /// Umbral superior del tramo como string decimal; null/omitido SOLO en el último tramo.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub up_to: Option<String>,
     /// Porcentaje del tramo (0–99), string decimal.
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub pct: String,
 }
 
@@ -1014,16 +1250,19 @@ pub struct TaxBracketParam {
 pub struct UpdateFireSettingsParams {
     /// SWR en % (0–4), string decimal.
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub swr_pct: Option<String>,
     /// Inflación anual asumida en % (0–50), string decimal.
     #[serde(default)]
     /// Alias aceptado: `annual_inflation_percent`, que es como se llama en
     /// `simulate_projection`. Simular y guardar deben aceptar el mismo nombre.
     #[serde(alias = "annual_inflation_percent")]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub annual_inflation_assumption_percent: Option<String>,
     /// "budget" (A: plan) | "transactions_avg" (B: ingreso y gasto reales) |
     /// "budget_income_real_expense" (C: ingreso del plan + gasto real).
     #[serde(default)]
+    #[schemars(extend("enum" = ["budget", "transactions_avg", "budget_income_real_expense"]))]
     pub savings_source: Option<String>,
     /// Ventana del promedio de INGRESO en meses (1–60). Solo la usa el modo B.
     #[serde(default)]
@@ -1032,6 +1271,7 @@ pub struct UpdateFireSettingsParams {
     /// Semántica de la ventana de ingreso: "data" (los N meses CON DATOS más recientes, saltando
     /// huecos) | "calendar" (solo los meses con datos dentro de los últimos N civiles).
     #[serde(default)]
+    #[schemars(extend("enum" = ["data", "calendar"]))]
     pub income_avg_window_mode: Option<String>,
     /// Ventana del promedio de GASTO en meses (1–60). La usan los modos B y C.
     #[serde(default)]
@@ -1039,12 +1279,15 @@ pub struct UpdateFireSettingsParams {
     pub expense_avg_window_months: Option<u32>,
     /// Semántica de la ventana de gasto: "data" | "calendar".
     #[serde(default)]
+    #[schemars(extend("enum" = ["data", "calendar"]))]
     pub expense_avg_window_mode: Option<String>,
     /// "manual" | "annual_expense" | "current_income".
     #[serde(default)]
+    #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
     pub fire_number_mode: Option<String>,
     /// Objetivo manual > 0, string decimal (requerido con mode=manual).
     #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub fire_number_manual_amount: Option<String>,
     #[serde(default)]
     pub taxes_enabled: Option<bool>,
@@ -1187,24 +1430,20 @@ impl FutureFinMcp {
 
         let limit = p.limit.map(|l| l as usize).unwrap_or(LIST_TRANSACTIONS_DEFAULT_LIMIT);
         if limit == 0 || limit > LIST_TRANSACTIONS_MAX_LIMIT {
+            // Mismo código que su hermana `list_categorization_rules`, que sí lo llevaba: sin el
+            // prefijo este 400 llegaba a la SPA como `bad_request` genérico.
             return to_tool_outcome(ApiError::BadRequest(format!(
-                "limit must be between 1 and {LIST_TRANSACTIONS_MAX_LIMIT}"
+                "limit_out_of_range: limit must be between 1 and {LIST_TRANSACTIONS_MAX_LIMIT}"
             )));
         }
         let offset = p.offset.unwrap_or(0) as i64;
-        let parse_uuid = |raw: &Option<String>, field: &str| -> Result<Option<Uuid>, ApiError> {
-            match raw {
-                Some(raw) => Uuid::parse_str(raw.trim())
-                    .map(Some)
-                    .map_err(|_| ApiError::BadRequest(format!("{field} must be a UUID"))),
-                None => Ok(None),
-            }
-        };
-        let category_id = match parse_uuid(&p.category_id, "category_id") {
+        // El closure local duplicaba el mensaje de `parse_uuid_param` sin su código: una sola
+        // puerta para los UUID de toda la superficie MCP.
+        let category_id = match parse_opt_uuid_param("category_id", &p.category_id) {
             Ok(v) => v,
             Err(e) => return to_tool_outcome(e),
         };
-        let import_id = match parse_uuid(&p.import_id, "import_id") {
+        let import_id = match parse_opt_uuid_param("import_id", &p.import_id) {
             Ok(v) => v,
             Err(e) => return to_tool_outcome(e),
         };
@@ -1359,6 +1598,7 @@ impl FutureFinMcp {
     )]
     async fn get_settings(
         &self,
+        Parameters(_): Parameters<NoParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
@@ -1407,14 +1647,11 @@ impl FutureFinMcp {
                 spec.one_off_amount =
                     Some(parse_decimal_param("one_off_expense.amount", &one_off.amount)?);
                 spec.one_off_month_index = one_off.month_index;
-                spec.one_off_date = match &one_off.date {
-                    Some(raw) => Some(raw.trim().parse().map_err(|_| {
-                        ApiError::BadRequest(
-                            "one_off_expense.date must be YYYY-MM-DD".into(),
-                        )
-                    })?),
-                    None => None,
-                };
+                spec.one_off_date = one_off
+                    .date
+                    .as_deref()
+                    .map(|raw| parse_date_param("one_off_expense.date", raw))
+                    .transpose()?;
             }
             let parse_opt = |name: &str, raw: &Option<String>| -> Result<_, ApiError> {
                 raw.as_ref()
@@ -1441,9 +1678,8 @@ impl FutureFinMcp {
                 .transpose()?;
             if let Some(overrides) = &p.asset_return_overrides {
                 for o in overrides {
-                    let asset_id = Uuid::parse_str(o.asset_id.trim()).map_err(|_| {
-                        ApiError::BadRequest("asset_return_overrides.asset_id must be a UUID".into())
-                    })?;
+                    let asset_id =
+                        parse_uuid_param("asset_return_overrides.asset_id", &o.asset_id)?;
                     let pct = parse_decimal_param(
                         "asset_return_overrides.expected_annual_return_percent",
                         &o.expected_annual_return_percent,
@@ -1541,16 +1777,9 @@ impl FutureFinMcp {
             Ok(v) => v,
             Err(e) => return to_tool_outcome(e),
         };
-        let category_id = match &p.category_id {
-            Some(raw) => match Uuid::parse_str(raw.trim()) {
-                Ok(u) => Some(u),
-                Err(_) => {
-                    return to_tool_outcome(ApiError::BadRequest(
-                        "category_id must be a UUID".into(),
-                    ))
-                }
-            },
-            None => None,
+        let category_id = match parse_opt_uuid_param("category_id", &p.category_id) {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
         };
         to_tool_result(
             category_monthly_series_core(
@@ -1602,6 +1831,7 @@ impl FutureFinMcp {
     )]
     async fn list_recurring_rules(
         &self,
+        Parameters(_): Parameters<NoParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
@@ -1747,7 +1977,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": t.id,
-                "resumen": format!("{} · {} · {} ({})", t.op_date, t.concept, t.amount, t.kind.as_deref().unwrap_or("-")),
+                "summary": format!("{} · {} · {} ({})", t.op_date, t.concept, t.amount, t.kind.as_deref().unwrap_or("-")),
                 "category_name": t.category_name,
                 "recurring_rule_id": t.recurring_rule_id,
             }))
@@ -1804,7 +2034,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": t.id,
-                "resumen": format!("{} · {} · {} ({})", t.op_date, t.concept, t.amount, t.kind.as_deref().unwrap_or("-")),
+                "summary": format!("{} · {} · {} ({})", t.op_date, t.concept, t.amount, t.kind.as_deref().unwrap_or("-")),
                 "category_name": t.category_name,
             }))
         }
@@ -1852,6 +2082,7 @@ impl FutureFinMcp {
     )]
     async fn materialize_recurring(
         &self,
+        Parameters(_): Parameters<NoParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
@@ -1870,6 +2101,7 @@ impl FutureFinMcp {
     )]
     async fn reconcile_transfers(
         &self,
+        Parameters(_): Parameters<NoParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
@@ -1937,7 +2169,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": f.id,
-                "resumen": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
+                "summary": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
                     f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
             }))
         }
@@ -1960,7 +2192,8 @@ impl FutureFinMcp {
             let flow_id = parse_uuid_param("id", &p.id)?;
             if p.due_date.is_some() && p.clear_due_date == Some(true) {
                 return Err(ApiError::BadRequest(
-                    "provide either due_date or clear_due_date, not both".into(),
+                    "due_date_set_and_clear: due_date and clear_due_date are mutually exclusive"
+                        .into(),
                 ));
             }
             // Tri-state del PATCH HTTP: omitido = sin cambio; null = borrar; string = fijar.
@@ -1999,7 +2232,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": f.id,
-                "resumen": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
+                "summary": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
                     f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
             }))
         }
@@ -2083,7 +2316,7 @@ impl FutureFinMcp {
             .await?;
             Ok(serde_json::json!({
                 "id": r.id,
-                "resumen": format!("{} «{}» → {} {}", r.match_kind, r.pattern,
+                "summary": format!("{} «{}» → {} {}", r.match_kind, r.pattern,
                     r.assign_kind.as_deref().unwrap_or("-"),
                     r.assign_category_name.as_deref().unwrap_or("(sin categoría)")),
             }))
@@ -2094,7 +2327,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_transactions",
-        description = "Reclasifica VARIOS movimientos propios de una vez (1..=200 ids): categoría, kind y/o notas. Es el lote de «clasificar», no de «reescribir»: NO admite amount, op_date ni concept — para eso está update_transaction de uno en uno. Todo o nada: un id ajeno o inexistente y no se toca ninguno (el error los nombra). Devuelve `resumen` de hasta 20 movimientos para verificar que se tocó lo correcto. En los modos de ahorro que leen transacciones invalida la cache de proyección UNA sola vez, no una por ítem.",
+        description = "Reclasifica VARIOS movimientos propios de una vez (1..=200 ids): categoría, kind y/o notas. Es el lote de «clasificar», no de «reescribir»: NO admite amount, op_date ni concept — para eso está update_transaction de uno en uno. Todo o nada: un id ajeno o inexistente y no se toca ninguno (el error los nombra). Devuelve `summary` de hasta 20 movimientos para verificar que se tocó lo correcto. En los modos de ahorro que leen transacciones invalida la cache de proyección UNA sola vez, no una por ítem.",
         annotations(title = "Reclasificar movimientos en lote", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_transactions(
@@ -2130,10 +2363,18 @@ impl FutureFinMcp {
                 body,
             )
             .await?;
+            // Único sitio donde `summary` NO es una síntesis propia del MCP: son los campos
+            // `resumen`/`resumen_truncated` de `BatchPatchResponse`, el contrato HTTP de
+            // `PATCH /v1/transactions/batch`. Se traducen aquí, en la capa MCP —igual que
+            // `apply_categorization_rule` publica `out.sample` como `summary`—, porque el
+            // catálogo tiene que hablar UN idioma: con 10 tools devolviendo `summary` y una
+            // devolviendo `resumen`, un cliente que aprendió la forma en las otras lee
+            // `result.summary` aquí y recibe `undefined` sin ningún error. Las dos claves
+            // españolas siguen vivas en el wire HTTP, que no es de este módulo.
             Ok(serde_json::json!({
                 "updated": out.updated,
-                "resumen": out.resumen,
-                "resumen_truncated": out.resumen_truncated,
+                "summary": out.resumen,
+                "summary_truncated": out.resumen_truncated,
             }))
         }
         .await;
@@ -2181,20 +2422,25 @@ impl FutureFinMcp {
                     "confirm_required": true,
                     "action": "apply_categorization_rule",
                     "effects": {
-                        "would_match": out.matched,
-                        "already_correct": out.already_correct,
-                        "would_change_kind": out.would_change_kind,
-                        "skipped_by_source": out.skipped_by_source,
-                        "matched_by_other_rule": out.matched_by_other_rule,
-                        "skipped_reconciled": out.skipped_reconciled,
-                        "by_current_category": out.by_current_category,
-                        "sample": out.sample,
-                        // Ver el preview de delete_categorization_rule: una regla que no asigna
-                        // nada sigue ganando precedencia y puede tapar a otra.
-                        "assigns_nothing": out.assigns_nothing,
-                        "shadowed_transactions": out.shadowed_transactions,
-                        "note": out.note,
-                        "moves_projection_in_modes_b_and_c": out.would_change_kind > 0,
+                        // Forma común de los 11 previews: `entity` = sobre qué se actúa,
+                        // `side_effects` = todo lo que cambia MÁS ALLÁ de esa entidad.
+                        "entity": {"rule_id": rule_id},
+                        "side_effects": {
+                            "would_match": out.matched,
+                            "already_correct": out.already_correct,
+                            "would_change_kind": out.would_change_kind,
+                            "skipped_by_source": out.skipped_by_source,
+                            "matched_by_other_rule": out.matched_by_other_rule,
+                            "skipped_reconciled": out.skipped_reconciled,
+                            "by_current_category": out.by_current_category,
+                            "sample": out.sample,
+                            // Ver el preview de delete_categorization_rule: una regla que no
+                            // asigna nada sigue ganando precedencia y puede tapar a otra.
+                            "assigns_nothing": out.assigns_nothing,
+                            "shadowed_transactions": out.shadowed_transactions,
+                            "note": out.note,
+                            "moves_projection_in_modes_b_and_c": out.would_change_kind > 0,
+                        },
                     },
                 }));
             }
@@ -2204,7 +2450,7 @@ impl FutureFinMcp {
                 "skipped_by_source": out.skipped_by_source,
                 "matched_by_other_rule": out.matched_by_other_rule,
                 "skipped_reconciled": out.skipped_reconciled,
-                "resumen": out.sample,
+                "summary": out.sample,
             }))
         }
         .await;
@@ -2225,7 +2471,8 @@ impl FutureFinMcp {
         let run = || -> Result<(Uuid, crate::handlers::assets::PatchAssetBody), ApiError> {
             if p.current_value.is_none() && p.expected_annual_return_percent.is_none() {
                 return Err(ApiError::BadRequest(
-                    "provide current_value and/or expected_annual_return_percent".into(),
+                    "patch_empty: provide current_value and/or expected_annual_return_percent"
+                        .into(),
                 ));
             }
             Ok((
@@ -2295,7 +2542,9 @@ impl FutureFinMcp {
         let run = || -> Result<(Uuid, crate::handlers::assets::PatchAssetBody), ApiError> {
             if p.purchase_price.is_some() && p.clear_purchase_price.unwrap_or(false) {
                 return Err(ApiError::BadRequest(
-                    "purchase_price and clear_purchase_price are incompatible".into(),
+                    "purchase_price_set_and_clear: purchase_price and clear_purchase_price are \
+                     mutually exclusive"
+                        .into(),
                 ));
             }
             // El PATCH distingue omitir (sin cambio) de null (borrar): clear_purchase_price
@@ -2341,7 +2590,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": a.id,
-                "resumen": format!("{} · {} ({})", a.name, a.current_value,
+                "summary": format!("{} · {} ({})", a.name, a.current_value,
                     if a.is_liquid { "líquido" } else { "ilíquido" }),
                 "expected_annual_return_percent": a.expected_annual_return_percent.map(|v| v.to_string()),
             }))
@@ -2390,7 +2639,7 @@ impl FutureFinMcp {
             let a = create_asset_core(&self.state, id.installation_id, id.user_id, body).await?;
             Ok(serde_json::json!({
                 "id": a.id,
-                "resumen": format!("{} · {} ({})", a.name, a.current_value,
+                "summary": format!("{} · {} ({})", a.name, a.current_value,
                     if a.is_liquid { "líquido" } else { "ilíquido" }),
             }))
         }
@@ -2463,7 +2712,7 @@ impl FutureFinMcp {
                 .await?;
             Ok(serde_json::json!({
                 "id": l.id,
-                "resumen": format!("{} · principal {}", l.label, l.principal),
+                "summary": format!("{} · principal {}", l.label, l.principal),
                 "principal_derived_from_plan": l.principal_derived_from_plan,
             }))
         }
@@ -2550,7 +2799,7 @@ impl FutureFinMcp {
             .await?;
             Ok(serde_json::json!({
                 "id": l.id,
-                "resumen": format!("{} · principal {}", l.label, l.principal),
+                "summary": format!("{} · principal {}", l.label, l.principal),
                 "principal_derived_from_plan": l.principal_derived_from_plan,
             }))
         }
@@ -2616,9 +2865,16 @@ impl FutureFinMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
         let run = || -> Result<(Uuid, crate::handlers::budget::PatchBudgetEntryBody), ApiError> {
+            // Mismo código que la guardia gemela de `patch_budget_entry_core`
+            // (`expense_end_set_and_clear`), no uno nuevo: es LA MISMA condición vista desde el
+            // otro lado del wire, y dos códigos para una condición obligan a la SPA a traducir
+            // dos veces lo mismo. Se queda aquí además de en la core porque adelanta el error al
+            // parseo de params, antes de tocar la base.
             if p.expense_end_date.is_some() && p.clear_expense_end_date == Some(true) {
                 return Err(ApiError::BadRequest(
-                    "provide either expense_end_date or clear_expense_end_date, not both".into(),
+                    "expense_end_set_and_clear: expense_end_date and clear_expense_end_date are \
+                     mutually exclusive"
+                        .into(),
                 ));
             }
             Ok((
@@ -2849,23 +3105,29 @@ impl FutureFinMcp {
                     "confirm_required": true,
                     "action": "delete_categorization_rule",
                     "effects": {
-                        "regla": rule,
-                        "huella": {
-                            // `ya_conformes` es la cifra que responde a «¿cuánto gobierna esta
-                            // regla?». `cambiarian` cuenta lo que aún NO ha aplicado, así que una
-                            // regla ya aplicada da 0 y parecería inofensiva.
-                            "ya_conformes": huella.already_correct,
-                            "cambiarian": huella.matched,
-                            "pierde_frente_a_otra_regla": huella.matched_by_other_rule,
-                            "descartados_por_source": huella.skipped_by_source,
+                        "entity": rule,
+                        // Los contadores de la huella se llaman IGUAL que en el preview de
+                        // `apply_categorization_rule`: los dos salen de la misma core
+                        // (`apply_categorization_rule_core` en dry-run), así que dos juegos de
+                        // nombres para los mismos números solo servían para que el cliente
+                        // creyera estar leyendo cosas distintas. (Iban además en español,
+                        // únicos en todo el catálogo.)
+                        "side_effects": {
+                            // `already_correct` es la cifra que responde a «¿cuánto gobierna
+                            // esta regla?». `would_match` cuenta lo que aún NO ha aplicado, así
+                            // que una regla ya aplicada da 0 y parecería inofensiva.
+                            "already_correct": huella.already_correct,
+                            "would_match": huella.matched,
+                            "matched_by_other_rule": huella.matched_by_other_rule,
+                            "skipped_by_source": huella.skipped_by_source,
                             // Una regla sin `assign_kind` no asigna nada, pero SÍ participa en la
                             // precedencia: puede estar TAPANDO a otra que sí asignaría. Sin estos
                             // dos campos su preview era cuatro ceros —parecía inofensiva— y
                             // borrarla cambia la categorización de los imports futuros.
-                            "no_asigna_nada": huella.assigns_nothing,
-                            "tapa_a_otra_regla": huella.shadowed_transactions,
+                            "assigns_nothing": huella.assigns_nothing,
+                            "shadowed_transactions": huella.shadowed_transactions,
+                            "note": huella.note.clone().unwrap_or_else(|| "borrar la regla NO recategoriza ningún movimiento: los que ya tienen categoría la conservan. Solo deja de aplicarse a los imports futuros.".to_string()),
                         },
-                        "nota": huella.note.clone().unwrap_or_else(|| "borrar la regla NO recategoriza ningún movimiento: los que ya tienen categoría la conservan. Solo deja de aplicarse a los imports futuros.".to_string()),
                     },
                 }));
             }
@@ -2905,8 +3167,11 @@ impl FutureFinMcp {
                     "confirm_required": true,
                     "action": "delete_recurring_rule",
                     "effects": {
-                        "rule": rule,
-                        "nota": "solo se borra la plantilla; las instancias materializadas se conservan",
+                        "entity": rule,
+                        "side_effects": {
+                            "materialized_instances_deleted": 0,
+                            "note": "solo se borra la plantilla; las instancias ya materializadas se conservan",
+                        },
                     },
                 }));
             }
@@ -2943,7 +3208,9 @@ impl FutureFinMcp {
                     "preview": true,
                     "confirm_required": true,
                     "action": "delete_transaction",
-                    "effects": {"transaction": txn},
+                    // `side_effects` vacío no es un hueco: es la afirmación de que borrar este
+                    // movimiento no arrastra ninguna otra fila.
+                    "effects": {"entity": txn, "side_effects": {}},
                 }));
             }
             delete_transaction_core(&self.state, id.installation_id, id.user_id, txn_id).await?;
@@ -3027,7 +3294,13 @@ impl FutureFinMcp {
                     "preview": true,
                     "confirm_required": true,
                     "action": "update_fire_settings",
-                    "effects": outcome,
+                    "effects": {
+                        "entity": outcome,
+                        // El único preview cuyo efecto colateral no es una fila: `fire_settings`
+                        // vive en la instalación, así que el cambio mueve la proyección de TODOS
+                        // los miembros, no solo la del usuario del token.
+                        "side_effects": {"scope": "installation", "affects_every_member": true},
+                    },
                 }))
             }
         }
@@ -3067,7 +3340,7 @@ impl FutureFinMcp {
                     "preview": true,
                     "confirm_required": true,
                     "action": "delete_planning_flow",
-                    "effects": {"flow": flow},
+                    "effects": {"entity": flow, "side_effects": {}},
                 }));
             }
             delete_planning_flow_core(&self.state, id.installation_id, id.user_id, flow_id)
@@ -3111,7 +3384,7 @@ impl FutureFinMcp {
                     "preview": true,
                     "confirm_required": true,
                     "action": "delete_budget_entry",
-                    "effects": {"entry": entry},
+                    "effects": {"entity": entry, "side_effects": {}},
                 }));
             }
             delete_budget_entry_core(&self.state, id.installation_id, id.user_id, entry_id)
@@ -3124,7 +3397,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "delete_asset",
-        description = "Borra un activo del hogar. Sin confirm=true devuelve un preview con los efectos colaterales. Los movimientos y lotes de import vinculados quedan DESVINCULADOS (SET NULL), no se borran. Pero las reglas de reparto que apuntan a este activo SÍ se borran con él, y eso no tiene vuelta atrás: `allocation_rules_deleted` dice cuántas y `allocation_remainder_rules_deleted` cuántas de ellas eran el sumidero de la cascada (`remainder` sin tope). Si ese número no es cero, dilo explícitamente antes de confirmar: a partir del borrado el sobrante mensual se reparte de otra manera. Mueve la proyección entera.",
+        description = "Borra un activo del hogar. Sin confirm=true devuelve un preview con los efectos colaterales. Los movimientos y lotes de import vinculados quedan DESVINCULADOS (SET NULL), no se borran. Pero las reglas de reparto que apuntan a este activo SÍ se borran con él, y eso no tiene vuelta atrás: `side_effects.allocation_rules_deleted` dice cuántas y `side_effects.allocation_remainder_rules_deleted` cuántas de ellas eran el sumidero de la cascada (`remainder` sin tope). Si ese número no es cero, dilo explícitamente antes de confirmar: a partir del borrado el sobrante mensual se reparte de otra manera. Mueve la proyección entera.",
         annotations(title = "Borrar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn delete_asset(
@@ -3157,8 +3430,13 @@ impl FutureFinMcp {
                     "confirm_required": true,
                     "action": "delete_asset",
                     "effects": {
-                        "asset": {"id": asset.id, "name": asset.name, "current_value": asset.current_value.to_string()},
-                        "unlinked": effects,
+                        "entity": {"id": asset.id, "name": asset.name, "current_value": asset.current_value.to_string()},
+                        // `allocation_rules_deleted` y `allocation_remainder_rules_deleted` son
+                        // el único efecto IRREVERSIBLE del borrado, y vivían bajo una clave
+                        // llamada `unlinked` — la palabra que describe justo lo contrario (los
+                        // movimientos, que solo se desvinculan). Ahora cuelgan de
+                        // `side_effects` como el resto.
+                        "side_effects": effects,
                     },
                 }));
             }
@@ -3205,8 +3483,8 @@ impl FutureFinMcp {
                     "confirm_required": true,
                     "action": "delete_liability",
                     "effects": {
-                        "liability": {"id": liab.id, "label": liab.label, "principal": liab.principal.to_string()},
-                        "transactions_unlinked": unlinked,
+                        "entity": {"id": liab.id, "label": liab.label, "principal": liab.principal.to_string()},
+                        "side_effects": {"transactions_unlinked": unlinked},
                     },
                 }));
             }
@@ -3246,13 +3524,15 @@ impl FutureFinMcp {
                     "confirm_required": true,
                     "action": "delete_snapshot",
                     "effects": {
-                        "snapshot": {
+                        "entity": {
                             "id": snap.id,
                             "kind": snap.kind,
                             "snapshot_date": snap.snapshot_date_ymd,
                             "total": snap.total.to_string(),
-                            "items_deleted": snap.items.len(),
                         },
+                        // Los items caen en cascada: son filas distintas del snapshot, así que
+                        // su cuenta es un efecto colateral, no un campo de la cabecera.
+                        "side_effects": {"items_deleted": snap.items.len()},
                     },
                 }));
             }
@@ -3296,7 +3576,10 @@ impl FutureFinMcp {
                     "preview": true,
                     "confirm_required": true,
                     "action": "delete_import",
-                    "effects": {"transactions_deleted": batch.txn_count, "import": batch},
+                    "effects": {
+                        "entity": batch,
+                        "side_effects": {"transactions_deleted": batch.txn_count},
+                    },
                 }));
             }
             delete_import_core(&self.state, id.installation_id, id.user_id, import_id).await?;

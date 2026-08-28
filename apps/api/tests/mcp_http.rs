@@ -1312,11 +1312,23 @@ fn tool_signature(tool: &serde_json::Value) -> serde_json::Value {
     // schemars decida emitirlos.
     required.sort();
 
+    // Restricciones del schema ENTERO, recorrido recursivamente. `properties` + `required`
+    // congelan QUÉ parámetros hay; esto congela QUÉ SE ACEPTA en cada uno.
+    let constraints = collect_constraints_of(schema);
+    let constraints_canonical = canonical_constraints_text(&constraints);
+
     let description = tool["description"].as_str().unwrap_or("");
     serde_json::json!({
         "name": tool["name"].as_str().unwrap_or_default(),
         "properties": properties,
         "required": required,
+        // El cuerpo legible de las restricciones. A diferencia de la descripción (27 KB de
+        // prosa, ilegible en un diff y por eso sólo hasheada), esto cabe en una línea por
+        // nodo: se guarda ENTERO a propósito, porque un gate cuyo fallo no se puede leer se
+        // "arregla" regenerando el fixture a ciegas — justo lo que este test viene a impedir.
+        "constraints": constraints_as_json(&constraints),
+        // Y su hash corto, la señal de una línea: "algo del contrato de esta tool se movió".
+        "constraints_sha256_12": sha256_12(&constraints_canonical),
         // Señal de la descripción: longitud + hash corto. Congelar los 27 KB de prosa del
         // catálogo dentro del test lo volvería ilegible y nadie revisaría el diff; con esto,
         // vaciar, invertir o volver falsa una descripción rompe el test igual, y el diff del
@@ -1325,6 +1337,218 @@ fn tool_signature(tool: &serde_json::Value) -> serde_json::Value {
         "description_len": description.chars().count(),
         "description_sha256_12": sha256_12(description),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Fase 2 (issue #83) — congelar también las RESTRICCIONES, no sólo los nombres de parámetro.
+//
+// `properties` + `required` + el hash de la descripción dejaban ciega justo la superficie que
+// la Fase 2 construyó: `additionalProperties: false`, los `enum`, los `pattern` y las cotas
+// numéricas. Con sólo aquello, borrar mañana un `#[serde(deny_unknown_fields)]` o un
+// `#[schemars(extend("enum" = [...]))]` no rompía un solo test: los parámetros seguirían
+// llamándose igual y la descripción seguiría diciendo lo mismo — mentira incluida.
+// ---------------------------------------------------------------------------
+
+/// Claves de un nodo de JSON Schema que **son contrato de entrada**: lo que un cliente puede o
+/// no puede mandar. Todo lo demás (`description`, `title`, `default`, `examples`) es prosa y
+/// queda deliberadamente fuera — la prosa ya la cubre `description_sha256_12`.
+const CONSTRAINT_KEYS: &[&str] = &[
+    "type",
+    "enum",
+    "const",
+    "format",
+    "$ref",
+    "additionalProperties",
+    "pattern",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "required",
+];
+
+/// Claves cuyo valor es un CONJUNTO, no una secuencia: se ordenan antes de renderizar. Reordenar
+/// `["mine", "household"]` no cambia lo que el servidor acepta, y un gate que salta por eso
+/// entrena a la gente a regenerar sin mirar. (El ORDEN de los `enum` sí lo fija, tool a tool,
+/// `enumerated_params_publish_a_real_enum_in_the_json_schema`.)
+const SET_VALUED_KEYS: &[&str] = &["enum", "type", "required"];
+
+/// Renderizado canónico de un valor JSON: **claves de objeto ordenadas**, siempre. Es la pieza
+/// que hace el hash estable: ni schemars ni serde_json prometen un orden de emisión, y sin esto
+/// una actualización de dependencia movería los 52 hashes sin que cambiara ningún contrato.
+fn canonical_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let body: Vec<String> = keys
+                .iter()
+                .map(|k| format!("{k}:{}", canonical_json(&map[k.as_str()])))
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        serde_json::Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        scalar => scalar.to_string(),
+    }
+}
+
+fn canonical_constraint(key: &str, v: &serde_json::Value) -> String {
+    match v.as_array() {
+        Some(items) if SET_VALUED_KEYS.contains(&key) => {
+            let mut rendered: Vec<String> = items.iter().map(canonical_json).collect();
+            rendered.sort();
+            format!("[{}]", rendered.join(","))
+        }
+        _ => canonical_json(v),
+    }
+}
+
+/// Recorre el schema entero y anota, por posición, las restricciones que publica ese nodo.
+///
+/// Baja por `properties`, `items`, `$defs` (donde viven los anidados de `simulate_projection`),
+/// los combinadores `anyOf`/`oneOf`/`allOf` (schemars emite ahí algunos `Option<T>`) y un
+/// `additionalProperties` que sea un sub-schema en vez de `false`. Rutas: `$` la raíz,
+/// `$.months` una propiedad, `$.kinds[]` los items de un array, `$defs.Nombre.campo` un anidado.
+fn collect_constraints(
+    node: &serde_json::Value,
+    path: &str,
+    out: &mut std::collections::BTreeMap<String, String>,
+) {
+    let Some(obj) = node.as_object() else {
+        return;
+    };
+
+    let mut parts: Vec<String> = CONSTRAINT_KEYS
+        .iter()
+        .filter_map(|key| obj.get(*key).map(|v| format!("{key}={}", canonical_constraint(key, v))))
+        .collect();
+    parts.sort();
+    if !parts.is_empty() {
+        out.insert(path.to_string(), parts.join(" "));
+    }
+
+    if let Some(children) = obj.get("properties").and_then(|v| v.as_object()) {
+        let mut names: Vec<&String> = children.keys().collect();
+        names.sort();
+        for name in names {
+            collect_constraints(&children[name.as_str()], &format!("{path}.{name}"), out);
+        }
+    }
+    if let Some(defs) = obj.get("$defs").and_then(|v| v.as_object()) {
+        let mut names: Vec<&String> = defs.keys().collect();
+        names.sort();
+        for name in names {
+            collect_constraints(&defs[name.as_str()], &format!("$defs.{name}"), out);
+        }
+    }
+    match obj.get("items") {
+        Some(serde_json::Value::Array(items)) => {
+            for (i, item) in items.iter().enumerate() {
+                collect_constraints(item, &format!("{path}[{i}]"), out);
+            }
+        }
+        Some(item) => collect_constraints(item, &format!("{path}[]"), out),
+        None => {}
+    }
+    if let Some(extra @ serde_json::Value::Object(_)) = obj.get("additionalProperties") {
+        collect_constraints(extra, &format!("{path}.*"), out);
+    }
+    for combinator in ["anyOf", "oneOf", "allOf"] {
+        if let Some(branches) = obj.get(combinator).and_then(|v| v.as_array()) {
+            for (i, branch) in branches.iter().enumerate() {
+                collect_constraints(branch, &format!("{path}|{combinator}[{i}]"), out);
+            }
+        }
+    }
+}
+
+fn collect_constraints_of(schema: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    collect_constraints(schema, "$", &mut out);
+    out
+}
+
+/// Texto que se hashea: una línea `ruta\trestricciones` por nodo, en orden de ruta (el
+/// `BTreeMap` ya lo garantiza). Mismo schema ⇒ mismo texto ⇒ mismo hash, venga en el orden
+/// que venga del serializador.
+fn canonical_constraints_text(constraints: &std::collections::BTreeMap<String, String>) -> String {
+    constraints
+        .iter()
+        .map(|(path, value)| format!("{path}\t{value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Descompone una línea `clave=valor clave=valor …` en sus pares.
+///
+/// Se corta buscando ` clave=` con las claves CONOCIDAS, nunca por espacios: un `pattern` puede
+/// llevar un espacio dentro y partir a ciegas inventaría restricciones que nadie escribió.
+fn split_constraints(line: &str) -> std::collections::BTreeMap<String, String> {
+    let mut cuts: Vec<usize> = vec![0];
+    for key in CONSTRAINT_KEYS {
+        let needle = format!(" {key}=");
+        let mut from = 0;
+        while let Some(i) = line[from..].find(&needle) {
+            cuts.push(from + i + 1);
+            from += i + 1;
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut out = std::collections::BTreeMap::new();
+    for (i, start) in cuts.iter().enumerate() {
+        let end = cuts.get(i + 1).copied().unwrap_or(line.len());
+        if let Some((k, v)) = line[*start..end].trim_end().split_once('=') {
+            out.insert(k.to_string(), v.to_string());
+        }
+    }
+    out
+}
+
+/// Diferencia legible entre las restricciones de un mismo nodo, restricción a restricción.
+/// Decir «cambió» y volcar las dos líneas enteras deja al lector buscando la diferencia a ojo;
+/// lo que hay que leer de un vistazo es QUÉ dejó de validarse.
+fn constraint_delta_lines(tool: &str, path: &str, before: &str, after: &str) -> String {
+    let (b, a) = (split_constraints(before), split_constraints(after));
+    let mut keys: Vec<&String> = b.keys().chain(a.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    let mut out = String::new();
+    for key in keys {
+        match (b.get(key), a.get(key)) {
+            (Some(x), None) => out.push_str(&format!(
+                "      ✗ {tool} → {path}: PERDIDA la restricción `{key}` (validaba {x})\n"
+            )),
+            (None, Some(y)) => out.push_str(&format!(
+                "      + {tool} → {path}: restricción nueva `{key}` = {y}\n"
+            )),
+            (Some(x), Some(y)) if x != y => out.push_str(&format!(
+                "      ~ {tool} → {path}: `{key}` {x} → {y}\n"
+            )),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn constraints_as_json(
+    constraints: &std::collections::BTreeMap<String, String>,
+) -> serde_json::Value {
+    serde_json::Value::Object(
+        constraints
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect(),
+    )
 }
 
 fn sha256_12(s: &str) -> String {
@@ -1342,8 +1566,21 @@ fn catalog_fixture_path() -> std::path::PathBuf {
 /// `tools_list_returns_exactly_the_v1_catalog` (arriba) compara un `Vec<String>` de nombres y
 /// nada más: con él en verde se puede vaciar una descripción, invertir su sentido, quitar un
 /// parámetro obligatorio o añadir uno nuevo sin que falle un solo test. Este hermano fija, por
-/// tool: las claves de `inputSchema.properties` ordenadas, el array `required`, y una señal de
-/// la descripción (longitud + SHA-256 corto).
+/// tool: las claves de `inputSchema.properties` ordenadas, el array `required`, una señal de
+/// la descripción (longitud + SHA-256 corto) y —desde la Fase 2 (issue #83)— las
+/// **restricciones** del schema recorrido recursivamente (`constraints` +
+/// `constraints_sha256_12`).
+///
+/// Las restricciones son la superficie que la Fase 2 acaba de construir y que este congelador
+/// no miraba: `additionalProperties: false`, los `enum`, los `pattern`, las cotas
+/// `minimum`/`maximum`/`minLength`/`minItems`, el `type` y el `required` **a cada nivel** —
+/// bajando por `properties`, `items`, `$defs` (los anidados de `simulate_projection`), los
+/// combinadores y un `additionalProperties` que sea sub-schema. Sin esto, borrar un
+/// `deny_unknown_fields` o un `enum` dejaba el catálogo idéntico a ojos de todos los tests.
+///
+/// El hash es **estable por construcción**: cada valor se renderiza con las claves de objeto
+/// ordenadas, los conjuntos (`enum`, `type`, `required`) se ordenan también, y las rutas van en
+/// un `BTreeMap`. Ni el orden de emisión de schemars ni el del serializador entran en el hash.
 ///
 /// **Regenerar el fixture cuando el cambio es intencionado** (mismo patrón que
 /// `UPDATE_ERROR_CODES=1` en `error_codes_parity.rs`):
@@ -1354,7 +1591,8 @@ fn catalog_fixture_path() -> std::path::PathBuf {
 /// ```
 ///
 /// …y después revisa el diff de `tests/fixtures/mcp-catalog.json` como parte del PR: un
-/// `description_sha256_12` que se mueve sin que la descripción deba cambiar es la señal.
+/// `description_sha256_12` que se mueve sin que la descripción deba cambiar es la señal, y una
+/// línea de `constraints` que desaparece es una restricción que alguien acaba de perder.
 #[tokio::test]
 async fn tools_list_freezes_the_input_contract_of_every_tool() {
     let app = TestApp::spawn().await;
@@ -1374,7 +1612,11 @@ async fn tools_list_freezes_the_input_contract_of_every_tool() {
         "_doc": "Contrato de entrada de las tools MCP. GENERADO — no editar a mano: \
                  UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- \
                  tools_list_freezes_the_input_contract. `description_sha256_12` son los 6 \
-                 primeros bytes del SHA-256 de la descripción publicada.",
+                 primeros bytes del SHA-256 de la descripción publicada. `constraints` son las \
+                 restricciones del inputSchema por posición ($ = raíz, $.x = propiedad, $.x[] = \
+                 items, $defs.T.x = anidado), y `constraints_sha256_12` su hash: cubren \
+                 additionalProperties, enum, pattern, type, required y las cotas numéricas y de \
+                 longitud a cada nivel.",
         "tool_count": tools.len(),
         "tools": tools,
     });
@@ -1403,14 +1645,44 @@ async fn tools_list_freezes_the_input_contract_of_every_tool() {
         match old_tools.iter().find(|t| t["name"] == tool["name"]) {
             None => report.push_str(&format!("  + tool NUEVA: {name}\n")),
             Some(before) if before != tool => {
-                for field in ["properties", "required", "description_len", "description_sha256_12"]
-                {
+                for field in [
+                    "properties",
+                    "required",
+                    "description_len",
+                    "description_sha256_12",
+                    "constraints_sha256_12",
+                ] {
                     if before[field] != tool[field] {
                         report.push_str(&format!(
                             "  ~ {name}.{field}: {} → {}\n",
                             before[field], tool[field]
                         ));
                     }
+                }
+                // Un hash que no cuadra no se puede revisar: hay que decir QUÉ restricción se
+                // movió y DÓNDE. Sin este bloque el único arreglo practicable sería regenerar
+                // el fixture sin mirar, que es la forma de que este gate deje de existir sin
+                // que nadie lo borre.
+                let empty = serde_json::Map::new();
+                let before_c = before["constraints"].as_object().unwrap_or(&empty);
+                let after_c = tool["constraints"].as_object().unwrap_or(&empty);
+                let mut paths: Vec<&String> = before_c.keys().chain(after_c.keys()).collect();
+                paths.sort();
+                paths.dedup();
+                let text = |v: Option<&serde_json::Value>| {
+                    v.and_then(|v| v.as_str()).unwrap_or("").to_string()
+                };
+                for path in paths {
+                    let (b, a) = (text(before_c.get(path)), text(after_c.get(path)));
+                    if b == a {
+                        continue;
+                    }
+                    if a.is_empty() {
+                        report.push_str(&format!("      ✗ NODO DESAPARECIDO en {name} → {path}\n"));
+                    } else if b.is_empty() {
+                        report.push_str(&format!("      + nodo nuevo en {name} → {path}\n"));
+                    }
+                    report.push_str(&constraint_delta_lines(name, path, &b, &a));
                 }
             }
             Some(_) => {}
@@ -1433,7 +1705,9 @@ async fn tools_list_freezes_the_input_contract_of_every_tool() {
          UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- \
          tools_list_freezes_the_input_contract\n\
          …y revisa el diff en el PR (una descripción que cambia de hash sin motivo es la señal \
-         que este test busca)."
+         que este test busca). Una línea «PERDIDA la restricción» casi nunca es intencionada: \
+         significa que una tool acaba de dejar de validar algo que validaba — regenerar el \
+         fixture ahí no arregla nada, sólo borra la prueba."
     );
 }
 
@@ -1449,10 +1723,13 @@ async fn tools_list_freezes_the_input_contract_of_every_tool() {
 /// `cap_value`, el bug real de la auditoría MCP §5) se descarta hoy **en silencio** y la
 /// llamada devuelve 200 sin haber hecho lo que se le pidió.
 ///
-/// El test se escribe ahora, ignorado, para que ese trabajo tenga diana: al cerrar la Fase 2
-/// se quita el `#[ignore]` en el mismo commit y deja de poder reabrirse el agujero.
+/// El test se escribió ignorado para que ese trabajo tuviera diana. **Cerrado en la Fase 2**
+/// (2026-08-28): las 52 tools publican `additionalProperties: false`, incluidas las cuatro que
+/// no tenían struct de params (`get_settings`, `list_recurring_rules`, `materialize_recurring`,
+/// `reconcile_transfers`) — sin struct, rmcp emite un schema vacío que acepta cualquier campo,
+/// así que se les dio `NoParams`. El `#[ignore]` se retira aquí: a partir de ahora, añadir una
+/// tool sin `deny_unknown_fields` rompe el build de tests.
 #[tokio::test]
-#[ignore = "Fase 2 (issue #83): falta `deny_unknown_fields` en 51 de las 52 tools"]
 async fn every_input_schema_forbids_unknown_properties() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
@@ -1472,3 +1749,261 @@ async fn every_input_schema_forbids_unknown_properties() {
          `#[serde(deny_unknown_fields)]` en su struct de Params): {offenders:?}"
     );
 }
+
+
+/// Fase 2 (issue #83) — **los enumerados son `enum` en el JSON Schema, no prosa**.
+///
+/// Antes de la Fase 2, los ~25 parámetros enumerados del catálogo eran `Option<String>` con la
+/// lista de valores solo en el `///` y la validación en runtime. El cliente lee el esquema ANTES
+/// que la descripción (y a veces la descripción se trunca), así que `view: "MINE"` o
+/// `resolution: "hourly"` se escribían con total confianza y el error llegaba después.
+///
+/// Se comprueba una muestra representativa de las tres familias —vista, dominio del ledger y
+/// configuración FIRE— más las dos formas que no son un `Option<String>` suelto: un campo
+/// OBLIGATORIO (`get_category_monthly_series.kind`) y un array cuyo `enum` va en los `items`
+/// (`capture_snapshot.kinds`).
+#[tokio::test]
+async fn enumerated_params_publish_a_real_enum_in_the_json_schema() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(&app, &token, tools_list_body()).await;
+    let tools = resp["result"]["tools"].as_array().expect("tools array");
+    let schema_of = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} en el catálogo"))["inputSchema"]
+            .clone()
+    };
+
+    let cases: &[(&str, &str, &[&str])] = &[
+        ("get_summary", "view", &["mine", "household"]),
+        ("list_transactions", "kind", &["expense", "income", "savings"]),
+        ("list_categories", "scope", &["asset", "liability", "income", "expense"]),
+        ("get_transactions_summary", "avg_window", &["3", "6", "12", "ytd", "all"]),
+        ("get_history_cashflow", "resolution", &["weekly", "daily"]),
+        ("list_snapshots", "kind", &["asset", "liability"]),
+        ("apply_categorization_rule", "apply_to_existing", &["uncategorized", "all"]),
+        ("update_allocation_rule", "cap_kind", &["amount", "months_expense", "income_multiple"]),
+        (
+            "update_liability",
+            "repayment_model",
+            &["fixed_payments", "french", "interest_only", "revolving"],
+        ),
+        ("create_liability", "payment_frequency", &["monthly", "weekly"]),
+        (
+            "update_categorization_rule",
+            "match_kind",
+            &["substring", "prefix", "exact"],
+        ),
+        (
+            "update_fire_settings",
+            "savings_source",
+            &["budget", "transactions_avg", "budget_income_real_expense"],
+        ),
+        (
+            "update_fire_settings",
+            "fire_number_mode",
+            &["manual", "annual_expense", "current_income"],
+        ),
+        ("update_fire_settings", "expense_avg_window_mode", &["data", "calendar"]),
+        ("simulate_projection", "view", &["mine", "household"]),
+    ];
+    for (tool, param, expected) in cases {
+        let schema = schema_of(tool);
+        let got = schema["properties"][param]["enum"]
+            .as_array()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{tool}.{param} debe publicar `enum` en el schema, y publica {}",
+                    schema["properties"][param]
+                )
+            })
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(got, *expected, "{tool}.{param}");
+    }
+
+    // Campo obligatorio: mismo trato, y además sigue en `required`.
+    let series = schema_of("get_category_monthly_series");
+    assert_eq!(series["properties"]["kind"]["enum"], serde_json::json!(["expense", "income"]));
+    assert!(
+        series["required"]
+            .as_array()
+            .expect("required")
+            .contains(&serde_json::json!("kind")),
+        "kind sigue siendo obligatorio: {series}"
+    );
+
+    // Array: el `enum` va en `items`, no en la propiedad (un `enum` en la raíz diría que el
+    // ARRAY entero vale "asset", que es justo lo que no se quiere decir).
+    let capture = schema_of("capture_snapshot");
+    assert_eq!(
+        capture["properties"]["kinds"]["items"]["enum"],
+        serde_json::json!(["asset", "liability"]),
+        "{capture}"
+    );
+    assert!(
+        capture["properties"]["kinds"]["enum"].is_null(),
+        "el enum de un array va en items, no en la raíz: {capture}"
+    );
+
+    // --- Barrido: la tabla de arriba fija los VALORES, pero se queda vieja sola. Esto pilla al
+    // parámetro enumerado NUEVO que nadie añadió a la tabla, usando la convención del propio
+    // repo: una descripción que enumera alternativas entrecomilladas separadas por `|`.
+    //
+    // Excepciones, con su porqué (sin la explicación nadie sabrá si se pueden quitar):
+    const NOT_ENUMS: &[(&str, &str)] = &[
+        // El catálogo de presets de banco crece con cada importador nuevo, y la lista de la
+        // descripción es de EJEMPLOS (acaba en «…»), no el dominio cerrado del parámetro.
+        ("create_categorization_rule", "source"),
+        ("update_categorization_rule", "source"),
+    ];
+    let mut swept = 0usize;
+    for tool in resp["result"]["tools"].as_array().expect("tools array") {
+        let name = tool["name"].as_str().unwrap_or("?");
+        let Some(props) = tool["inputSchema"]["properties"].as_object() else {
+            continue;
+        };
+        for (param, schema) in props {
+            let is_string = schema["type"] == "string"
+                || schema["type"]
+                    .as_array()
+                    .is_some_and(|t| t.contains(&serde_json::json!("string")));
+            let desc = schema["description"].as_str().unwrap_or("");
+            // «"a" | "b"»: la forma con la que este repo escribe un enumerado en prosa.
+            let looks_enumerated = is_string
+                && desc.contains("\" | \"")
+                && desc.matches('"').count() >= 4;
+            if !looks_enumerated || NOT_ENUMS.contains(&(name, param.as_str())) {
+                continue;
+            }
+            swept += 1;
+            assert!(
+                schema["enum"].is_array(),
+                "{name}.{param} enumera valores en su descripción pero no publica `enum` en el \
+                 schema (o es un enumerado y le falta el `#[schemars(extend(\"enum\" = …))]`, o \
+                 no lo es y le falta una fila en NOT_ENUMS con el porqué): {schema}"
+            );
+        }
+    }
+    assert!(swept >= 10, "el barrido solo miró {swept} parámetros enumerados");
+}
+
+/// Fase 2 (issue #83) — **las cotas de los strings viajan en el esquema**.
+///
+/// Hermano generalizado de `simulate_cash_axes_carry_their_bound_in_the_json_schema`: los
+/// importes decimales viajan como string, así que `range` no les sirve y su cota vivía en la
+/// prosa. Dos patrones y no uno, porque el signo es semántica: el `amount` de un movimiento
+/// acepta negativo (el gasto ES negativo) y el de una partida de presupuesto no.
+///
+/// Barre TODO el catálogo —**incluidos los objetos anidados** de `simulate_projection`
+/// (`one_off_expense`, `asset_return_overrides`, `fire_settings_overrides`, `tax_brackets`)— en
+/// vez de listar campos: un parámetro decimal nuevo sin patrón, o un UUID, o una fecha, falla
+/// aquí sin que nadie tenga que acordarse de ampliar el test.
+#[tokio::test]
+async fn every_decimal_uuid_and_date_param_carries_its_pattern() {
+    const SIGNED: &str = r"^-?\d+(\.\d+)?$";
+    const NON_NEGATIVE: &str = r"^\d+(\.\d+)?$";
+    const YMD: &str = r"^\d{4}-\d{2}-\d{2}$";
+    const YM: &str = r"^\d{4}-\d{2}$";
+    const UUID: &str =
+        r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+
+    /// Los ÚNICOS decimales con signo, nombrados uno a uno: el signo es una decisión de dominio
+    /// y una lista por sufijo la borraría (`create_budget_entry.amount` es > 0 y
+    /// `create_transaction.amount` no).
+    const SIGNED_PARAMS: &[(&str, &str)] = &[
+        ("create_transaction", "amount"),
+        ("update_transaction", "amount"),
+        ("list_transactions", "min_amount"),
+        ("list_transactions", "max_amount"),
+        ("simulate_projection", "extra_monthly_expense"),
+        ("create_asset", "expected_annual_return_percent"),
+        ("update_asset", "expected_annual_return_percent"),
+        ("update_asset_value", "expected_annual_return_percent"),
+        ("simulate_projection", "expected_annual_return_percent"),
+    ];
+
+    /// Recorre un schema entero y devuelve `(nombre_del_parámetro, subschema)` de cada
+    /// propiedad, bajando por `properties`, `items` y `$defs`.
+    fn walk(schema: &serde_json::Value, out: &mut Vec<(String, serde_json::Value)>) {
+        match schema {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    if k == "properties" {
+                        if let Some(props) = v.as_object() {
+                            for (name, sub) in props {
+                                out.push((name.clone(), sub.clone()));
+                                walk(sub, out);
+                            }
+                        }
+                    } else if k == "items" || k == "$defs" || k == "definitions" {
+                        walk(v, out);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            _ => {}
+        }
+    }
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let resp = mcp_post(&app, &token, tools_list_body()).await;
+
+    let mut checked = 0usize;
+    for tool in resp["result"]["tools"].as_array().expect("tools array") {
+        let name = tool["name"].as_str().unwrap_or("?");
+        let mut params = Vec::new();
+        walk(&tool["inputSchema"], &mut params);
+        for (param, schema) in params {
+            // Solo strings: los enteros llevan `range`, cubierto por los otros tests.
+            let is_string = schema["type"] == "string"
+                || schema["type"]
+                    .as_array()
+                    .is_some_and(|t| t.contains(&serde_json::json!("string")));
+            if !is_string {
+                continue;
+            }
+            let expected = if param.ends_with("_id") {
+                UUID
+            } else if param.ends_with("_date") || param == "op_date" || param == "date" {
+                YMD
+            } else if param == "month" || param == "from_month" {
+                YM
+            } else if param.ends_with("_amount")
+                || param.ends_with("_percent")
+                || param == "amount"
+                || param == "principal"
+                || param == "current_value"
+                || param == "purchase_price"
+                || param == "swr_pct"
+                || param == "cap_value"
+                || param == "pct"
+                || param == "up_to"
+            {
+                if SIGNED_PARAMS.contains(&(name, param.as_str())) {
+                    SIGNED
+                } else {
+                    NON_NEGATIVE
+                }
+            } else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                schema["pattern"].as_str(),
+                Some(expected),
+                "{name}.{param} debe publicar su formato como `pattern`; publica {schema}"
+            );
+        }
+    }
+    // Suelo defensivo: si un refactor deja el barrido sin encontrar nada, el test pasaría vacío.
+    assert!(checked >= 60, "el barrido solo miró {checked} parámetros");
+}
+
