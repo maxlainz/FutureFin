@@ -171,8 +171,12 @@ the add-on's `version:` as the image tag. Operational consequences:
 
 **Turning on «Entrar con Home Assistant» (4.3.1).** By default the add-on only offers automatic
 login *inside* the panel (ingress SSO). If the household also opens FutureFin through the direct
-port or a tunnel — which is the only way to reach `/mcp` and the OAuth consent screen — those
-accounts have **no password by design** and cannot log in there. The fix is one option:
+port or a tunnel — under HA's own Ingress that is still the only way to reach `/mcp` and the
+OAuth consent screen, because the Ingress prefix carries a **per-session token** that cannot back
+a stable `FUTUREFIN_PUBLIC_URL` (§3.9 explains why); a plain reverse proxy in front of the direct
+port is a different case, and since 4.4.0 it no longer needs the direct port either — declaring
+`FUTUREFIN_PUBLIC_URL` with that proxy's path fixes it (§3.9) — those accounts have **no password
+by design** and cannot log in there. The fix is one option:
 
 ```
 Settings → Add-ons → FutureFin → Configuration
@@ -522,6 +526,79 @@ docker compose restart futurefin       # full restart: PG bounces too. Clears th
 Note the change of blast radius: in 2.x `docker compose restart futurefin` only bounced the
 API. Now it restarts PostgreSQL as well — still safe (ordered shutdown, then normal start), but
 it is no longer a "free" operation on a busy instance.
+
+### 3.8 `FUTUREFIN_MCP_ENABLED=0` — routes stay mounted, only the answer changes (4.4.0)
+
+Before 4.4.0 the kill-switch **unmounted** `/mcp` and the seven OAuth protocol routes. In the
+published image that produced a pair of symptoms nobody could tell apart from a broken
+deployment: the final fallback is a `ServeDir` with a fallback to `index.html`, and `ServeDir`
+does **not** invoke its fallback for methods other than GET/HEAD. So an unmounted `POST /mcp`
+fell through to axum's own **405 with an empty body**, while an unmounted
+`GET /.well-known/oauth-authorization-server` fell through to the **200 `text/html`** SPA shell.
+The claude.ai connector could not parse either as JSON and showed "connection failed" with no
+usable cause — **a security control that, once activated, diagnosed as an outage**. The test that
+shipped this behaviour mounted the router *without* the SPA static fallback, so it asserted a
+clean 404 that the production binary never actually returned.
+
+**Since 4.4.0**: the routes are **always mounted** — `/mcp` and the seven OAuth protocol routes
+(`/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server[/mcp]`,
+`/oauth/register`, `/oauth/token`, `/oauth/revoke`) — and with the switch off, every one of them
+answers **404 JSON with `code: "mcp_disabled"`**, for any HTTP method. `GET`/`DELETE
+/v1/oauth/connections[/{id}]` is unaffected by the switch (always mounted); `POST
+/v1/oauth/authorize` and `GET /v1/oauth/authorize-details` were never mounted by it either way.
+Same doctrine as `POST /v1/auth/sso` answering `sso_disabled` instead of disappearing: the shape
+of the router does not depend on the environment.
+
+Verify from the host (works whether or not the switch is set — a healthy "on" answers something
+other than `mcp_disabled`):
+
+```bash
+curl -sS -o- -w '%{http_code}\n' -X POST http://127.0.0.1:8080/mcp
+```
+
+A healthy "off" prints a JSON body ending in `"code":"mcp_disabled"` followed by `404` on its own
+line. A `405` with an empty body, or a `200` with an HTML body, means you are looking at a
+pre-4.4.0 image with the switch off — that is the incident this fixed, not a new one. Full
+rationale and test names: `futurefin-failure-archaeology` §2.13.
+
+### 3.9 `FUTUREFIN_PUBLIC_URL` behind a reverse-proxy subpath (4.4.0)
+
+Until 4.4.0 the variable had to be a **bare origin** — no path at all — so a deployment reachable
+at `https://midominio.com/futurefin/` had no way to tell the OAuth issuer and the `/mcp` resource
+metadata about that prefix; the only workaround was reaching `/mcp` and the OAuth consent screen
+through the container's **direct port**, bypassing the proxied subpath entirely. **Since 4.4.0
+the variable accepts a path**, so that workaround is no longer needed for a plain reverse proxy:
+
+```env
+FUTUREFIN_PUBLIC_URL=https://midominio.com/futurefin
+```
+
+Everything the discovery documents advertise (`issuer`, the RFC 8707 `resource`, the four
+`.well-known` endpoints) is derived from that value. It stays fail-loud on anything else — a
+query string, a fragment, `//`, `.`/`..` segments or a `%` in the path all abort startup with the
+same panic as before; only the path component is new. Full validation bounds and defaults live in
+`futurefin-config-and-flags`.
+
+**This does NOT change the Home Assistant Ingress case.** Its prefix
+(`/api/hassio_ingress/<token>`) carries a **per-session token**, and baking a token into a
+process-lifetime `FUTUREFIN_PUBLIC_URL` would be wrong the moment the session rotates — so under
+the add-on's own panel, `/mcp` and the OAuth consent screen still go through the **direct port**
+(§2.1). The line to hold onto: a *stable* reverse-proxy subpath is fixed by this variable since
+4.4.0; Ingress's *rotating-token* subpath is not, and is not meant to be — the add-on documents
+MCP/OAuth as direct-port-only for exactly this reason.
+
+**Missing-variable diagnostic.** If a request arrives carrying a proxy path prefix
+(`X-Ingress-Path` or `X-Forwarded-Prefix`) while `FUTUREFIN_PUBLIC_URL` is unset, the API logs a
+**one-shot `warn`** (once per process, on the first such request) that names the missing
+variable. Before this existed, the only symptom was a mute 404 on `/oauth/token` — this line is
+what turns that into something actionable:
+
+```bash
+docker compose logs futurefin | grep -i 'FUTUREFIN_PUBLIC_URL'
+```
+
+If you see it and you are NOT behind Home Assistant's own Ingress, set `FUTUREFIN_PUBLIC_URL` as
+above (matching your proxy's actual path) and restart.
 
 ## 4. The embedded database: guards, leftovers and one-shot upgrades
 
@@ -946,6 +1023,16 @@ against v4.0.0** (which removed the external-database mode: `exec_api_external`,
 `feat/ha-idp-login`), read from `addon/futurefin/config.yaml`, `apps/api/docker-entrypoint.sh`,
 `apps/api/src/main.rs` and `apps/api/src/handlers/ha_sso.rs`.
 
+**§3.8 and §3.9 added 2026-08-28 for v4.4.0** (MCP Fase 4, issue #85), read from
+`apps/api/src/mcp/mod.rs` (`mcp_router`, `mcp_disabled`, `MCP_DISABLED_MESSAGE`),
+`apps/api/src/oauth/mod.rs` (`oauth_protocol_router`, `oauth_disabled`),
+`apps/api/src/main.rs` (`public_url`, `warn_missing_public_url_for_prefix`) and
+`apps/api/src/prefix.rs` (`normalize_prefix`, shared by `FUTUREFIN_BASE_PATH` and
+`FUTUREFIN_PUBLIC_URL`); pinned by `apps/api/tests/mcp_http.rs` and `apps/api/tests/oauth_flow.rs`
+(both now spawn through `TestApp::spawn_with` with `web_static_root` set, the same
+`spa::mount_static_spa` function `main.rs` calls). Also corrected §2.1's stale claim that the
+direct port was "the only way" to reach `/mcp`/OAuth under any subpath — see §3.9.
+
 Notes on facts that are asserted rather than measured: the ≈320–360 MB image size is an
 estimate from the image's contents (Debian slim + two PG majors, JIT stripped), not a reading
 off a published manifest — check with `docker image ls` after a local build if it matters.
@@ -1002,3 +1089,10 @@ Re-verify before trusting volatile facts:
 - **Downgrade refusal banner (§2.3, added 2026-08-27)**:
   `grep -n 'NO ARRANCA\|MigrationError::Downgrade\|VersionMissing' apps/api/src/db.rs`;
   pinned by `apps/api/tests/migration_guard.rs` (run with `TEST_DATABASE_URL` set).
+- **MCP kill-switch answers 404 JSON instead of unmounting (§3.8, v4.4.0)**:
+  `grep -n 'mcp_disabled\|MCP_DISABLED_MESSAGE' apps/api/src/mcp/mod.rs apps/api/src/oauth/mod.rs`;
+  `grep -n 'mcp_disabled_answers_json_even_with_the_spa_mounted' apps/api/tests/mcp_http.rs`.
+- **`FUTUREFIN_PUBLIC_URL` accepts a subpath + the missing-variable warn (§3.9, v4.4.0)**:
+  `grep -n 'fn public_url\|normalize_prefix' apps/api/src/main.rs`;
+  `grep -n 'warn_missing_public_url_for_prefix' apps/api/src/main.rs`;
+  `grep -n 'public_url_with_a_subpath_prefixes_every_advertised_url' apps/api/tests/oauth_flow.rs`.

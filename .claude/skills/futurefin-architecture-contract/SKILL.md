@@ -25,7 +25,11 @@ again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-0
 **v3.0.0** on 2026-08-16 (D13: the image now contains the store; W8: the container is a two-process
 supervisor), and for the **Fase 3 (issue #84) train** on 2026-08-28 (D20: append-only MCP write
 audit, subtractive API-token scope, a real two-phase `confirm_token`, and a third semaphore around
-projection simulations — same pass fixed a standing "`?months=` is clamped" drift in D11). This is the
+projection simulations — same pass fixed a standing "`?months=` is clamped" drift in D11), and for
+the **Fase 4 (issue #85) train** on 2026-08-28 (D21 + I17: the MCP transport — a kill-switch that
+changes the handler and not the route table, two CORS layers over one origin list, `Origin`
+validation, an explicit body cap on `/mcp`, and an issuer that accepts a subpath; I4 and I11 were
+false before this pass). This is the
 contract a retiring principal engineer would make you sign: the decisions
 below are settled, most of them by a documented incident. Do not re-litigate them casually; if you must change one, go through
 `.claude/skills/futurefin-change-control/SKILL.md`.
@@ -445,8 +449,9 @@ non-cookie credential. The decision mirrors D3 (sessions-in-DB, not JWT), delibe
   `projection_series_cached`, `budget_snapshot_core`, …): read handlers were split into
   extractors+auth vs `*_core(pool, iid, user_id, view, …)`. A tool with its own SQL or its own
   response type is the D2/D8 dual-branch drift bug reborn — don't.
-- `/mcp` is **deliberately not in OpenAPI** (JSON-RPC, self-described via `tools/list`), and
-  `FUTUREFIN_MCP_ENABLED=0` unmounts the router entirely.
+- `/mcp` is **deliberately not in OpenAPI** (JSON-RPC, self-described via `tools/list`).
+  `FUTUREFIN_MCP_ENABLED=0` does **not** unmount the router — since 4.4.0 the route is mounted
+  either way and the handler answers 404 JSON `mcp_disabled` (D21).
 - This decision governs **how** a tool is built, never **whether** it should exist. The catalog is
   a derived surface of the HTTP API, so every API-surface change owes a parity evaluation (tool
   added/updated, deliberate omission recorded, or n/a) — that discipline, its rubric and the
@@ -493,12 +498,17 @@ read-only access to a client app after explicit consent.
   break "consent via tunnel domain, query via LAN IP" for zero real security.
 - **Issuer derived from the request** (`X-Forwarded-Proto`/`X-Forwarded-Host`/`Host`, strict host
   charset) so no env var became mandatory; `FUTUREFIN_PUBLIC_URL` is an optional fail-loud
-  override. The `/mcp` 401 advertises `resource_metadata` (RFC 9728 §5.1) — **only the 401**: a
-  403 (pending user) with that header sends clients into an infinite re-auth loop.
+  override, which **since 4.4.0 accepts a subpath** — the only way to run OAuth behind a
+  prefix-mounting proxy (D21). The `/mcp` 401 advertises `resource_metadata` (RFC 9728 §5.1) —
+  **only the 401**: a 403 (pending user) with that header sends clients into an infinite re-auth
+  loop.
 - **The consent screen is the SPA** (`/oauth/authorize` served by the static fallback, resolved in
   `main.tsx`); protocol endpoints are flat root routes and there is **never** a backend route at
-  `/oauth/authorize` (an axum 405 does not fall through to the SPA fallback). Everything OAuth
-  mounts under `mcp_enabled` **except** `GET/DELETE /v1/oauth/connections`, mounted always
+  `/oauth/authorize` (an axum 405 does not fall through to the SPA fallback). The seven protocol
+  routes are **always mounted** and answer 404 JSON `mcp_disabled` when `mcp_enabled` is false
+  (D21); what still unmounts under the flag are the two consent-flow endpoints
+  (`/v1/oauth/authorize-details`, `POST /v1/oauth/authorize`), which live under `/v1` whose
+  fallback already returned JSON. `GET/DELETE /v1/oauth/connections` is mounted always regardless
   (precedent `/v1/api-tokens`: killing MCP must not strand existing grants unrevocable).
 
 **Breaks if violated**: a JWT access token (or any role/installation claim) resurrects the exact
@@ -533,7 +543,9 @@ attacker nothing. The two details that are load-bearing:
 Note the deliberate asymmetry with the **prefix** detection (`prefix::request_prefix`), which does
 NOT require a trusted peer: a forged `X-Forwarded-Prefix` only deforms the attacker's own response
 (assets that fail to load). Relaxing frame policy and accepting identity (D18) are the two things
-that do require the peer.
+that do require the peer. The **OAuth issuer** (`X-Forwarded-Proto`/`X-Forwarded-Host`) falls on the
+prefix side of that line for the same reason — it reflects, it does not grant — and what made the
+reflection dangerous was cacheability, closed in 4.4.0 with `no-store` + `Vary` (D21).
 
 **Consequences / breaks if violated.** Restoring a static `SetResponseHeaderLayer` of
 `X-Frame-Options: DENY` breaks the HA add-on silently (blank panel, no console error that names the
@@ -684,6 +696,81 @@ path to the process; it is never the default (`Disabled`), and an unknown peer (
   conceda más que el rol vivo (o anunciar `scopes_supported` en OAuth sin consentimiento real)
   rompe la propiedad central de D14: que ninguna credencial pueda hacer más que su dueño.
 
+### D21. El transporte de `/mcp`: la forma del router no depende del entorno, y una lista de orígenes no es un privilegio (Fase 4, issue #85, 4.4.0)
+
+**Context.** Cuatro fallos distintos con una raíz común: el binario que se prueba no era el binario
+que se publica, y una lista de configuración se estaba usando para dos cosas con consecuencias
+distintas. Ninguno era explotable sin credencial válida; los cuatro se diagnosticaban como averías.
+
+**Decision (cinco reglas, cada una con su incidente).**
+
+1. **Un kill-switch cambia el handler, nunca la tabla de rutas.** `FUTUREFIN_MCP_ENABLED=0` monta
+   `/mcp` y las siete rutas de protocolo OAuth igual, y responde **404 JSON `mcp_disabled`** con
+   cualquier método. Es la generalización literal de la frase que D18 ya escribió para
+   `/v1/auth/sso`. *El incidente*: desmontarlas solo se veía mal en la imagen publicada, cuyo
+   fallback final es un `ServeDir` con fallback al `index.html` — y **`ServeDir` no llama a su
+   fallback para métodos distintos de GET/HEAD**. `POST /mcp` devolvía **405 con cuerpo vacío** y
+   `GET /.well-known/oauth-authorization-server` devolvía **`200 text/html`** (el shell de la SPA).
+   El conector fallaba al parsear JSON y enseñaba «connection failed» sin causa. El test que lo
+   cubría montaba el router *sin* SPA, así que **afirmaba una ausencia contra un fallback que la
+   producción no tiene**: la lección general es que un test que afirma que algo NO existe solo vale
+   si monta la misma pila de fallback que la imagen (por eso `spa::mount_static_spa` es ahora una
+   función de la lib que llaman `main.rs` **y** los tests).
+2. **Una lista, dos capas CORS, dos privilegios.** `CORS_ORIGINS` alimenta `api_cors_layer` **con**
+   `allow_credentials(true)` (credencial = cookie) y `mcp_cors_layer` **sin** credenciales
+   (credencial = header `Authorization`). *El incidente*: con una sola capa sobre todo el router,
+   añadir un origen para que funcionara un cliente MCP de navegador concedía de paso acceso **con
+   cookie** a `/v1/backup/user-export` y `/v1/api-tokens`. Compartir la lista está bien; compartir
+   el privilegio no. Dos trampas de axum que esto fija: `Router::layer` solo envuelve las rutas ya
+   registradas (el `merge` de `mcp` va **después**), y dentro del router de `/mcp` se usa
+   `route_layer` y **jamás** `layer` — `layer` envuelve también el *fallback*, y un `merge` lo
+   arrastra al router destino, mandando toda ruta desconocida (incluida `/oauth/authorize`, la
+   pantalla de consentimiento) a la auth Bearer del MCP: 401 en vez de la pantalla.
+3. **El `Origin` se valida; el `Host` no, y las dos mitades tienen su razón.**
+   `disable_allowed_hosts()` sigue puesto porque el despliegue objetivo es LAN/túnel con `Host`
+   arbitrario y el gate es el Bearer. `with_allowed_origins(CORS_ORIGINS)` se enciende porque es la
+   mitad del anti-DNS-rebinding que sí se puede exigir sin conocer el `Host`, y su default en rmcp
+   era lista vacía = apagada. **No rompe a ningún cliente sin navegador**: rmcp deja pasar una
+   request **sin** `Origin` aunque la lista no esté vacía, y Claude Desktop, Claude Code y `curl`
+   no la mandan. Ese hecho es el que hace aceptable la regla — sin él sería un cambio de ruptura.
+4. **Un invariante enforced por un `Layer` solo vale para las rutas que ese layer alcanza.**
+   `DefaultBodyLimit` de axum actúa vía **extractores**; `/mcp` es un `route_service` que lee el
+   body por su cuenta. El «1 MiB global» de I11 era falso justo ahí (regía el default de rmcp, 4
+   MiB). Ahora se fija explícitamente en `mcp::MCP_MAX_REQUEST_BODY_BYTES`.
+5. **El issuer OAuth es una identidad: se declara, no se refleja.** `FUTUREFIN_PUBLIC_URL` acepta
+   subpath (validado con `prefix::normalize_prefix`, la misma función de `FUTUREFIN_BASE_PATH`), y
+   el prefijo **no** se compone de `X-Forwarded-Prefix`. Dos razones: un valor de operador
+   (fail-loud al arrancar) no lo puede mover una cabecera; y bajo el Ingress de HA el prefijo lleva
+   un **token efímero de sesión** que quedaría horneado dentro del issuer.
+
+**Rationale — la asimetría con D17/D18 es aparente, no real.** Aquellas dos exigen peer de
+confianza porque las cabeceras en juego **conceden autoridad**: relajar el anti-clickjacking, o
+aceptar una identidad. `X-Forwarded-Host` en el issuer **no concede nada, refleja**: un valor
+falsificado deforma la respuesta del propio atacante y de nadie más — el argumento literal que
+`prefix.rs` ya daba para no exigirle peer al prefijo. Lo único que convertía esa reflexión en algo
+más era la **cacheabilidad**, y eso lo cierran dos líneas: `Cache-Control: no-store` +
+`Vary: X-Forwarded-Proto, X-Forwarded-Host` en las dos metadatas. Exigir peer aquí sería fail-closed
+contra el caso mayoritario (Cloudflare Tunnel, nginx) para cerrar algo que ya no está abierto.
+
+**Deliberately NOT done, with a named trigger.** La sesión de Streamable HTTP **no** se liga a la
+credencial. Hoy no compra nada: el Bearer corre antes del protocolo en *cada* request, la identidad
+se re-resuelve viva (D14) y el servidor no emite nada por iniciativa propia — ese último hecho es el
+único que lo hace seguro. Y la capa de sesión la está retirando el propio protocolo (SEP-2567).
+**Trigger para reabrirlo: la primera capacidad server→cliente** (notificaciones, `progress`, SSE
+reanudable con datos). Entonces, o un `SessionManager` propio que ate sesión→credencial, o
+`legacy_session_mode: false`. No antes: sería un cambio de comportamiento del transporte sin un
+riesgo que lo justifique.
+
+**Breaks if violated**: volver a desmontar rutas bajo un flag devuelve el 405 mudo y el
+`200 text/html` — un apagado indistinguible de una avería; devolver `/mcp` a la capa CORS del API
+(o mover su `merge` por encima del `.layer`) le regala la cookie a un origen añadido para otra
+cosa; cambiar `route_layer` por `layer` en el router de `/mcp` manda toda ruta desconocida a la auth
+Bearer; confiar en `DefaultBodyLimit` para un `route_service` deja el tope real en manos del SDK; y
+componer el issuer con un prefijo de cabecera hornea un token de sesión efímero dentro de una
+identidad pública. Pinned por `mcp_http.rs` (kill-switch **con SPA montada**, `Origin`, preflight),
+`oauth_flow.rs` (metadata sin caché, subpath, GC, y el 401 que vigila `get_oauth_authorize_is_not_handled_by_the_api`)
+y `body_limits.rs::oversized_mcp_body_returns_413`.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
@@ -691,19 +778,20 @@ path to the process; it is never the default (`Disabled`), and an unknown peer (
 | I1 | Exactly one **uncapped `remainder`** allocation rule per scope, always **last** in the cascade (the "sink") | `handlers/allocation_rules.rs` create/patch/delete/reorder; API errors `remainder_required`, `uncapped_remainder_exists`, `sink_must_be_last` | `grep -n "remainder_required\|uncapped_remainder_exists\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs` |
 | I2 | `fire_target_at_month_index` is the ONLY FIRE-target formula — engine crossover and API `fire_target_series` both call it | `crates/engine/src/projection.rs` (public fn + regression test for the old off-by-one) | `grep -rn "fire_target_at_month_index" crates/ apps/api/src/` — every inflation-compounding of a FIRE target must route through it |
 | I3 | Amounts serialize as decimal strings, EXCEPT the documented f64 arrays of `/v1/projection/series` and the per-point arrays of `/v1/history/series` (D4) | ONE `pub(crate)` definition of `serialize_decimal_as_f64` in `handlers/projection.rs`, used by the projection and history responses only | `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) |
-| I4 | All routes live under `/v1/`, except root `/health`, `/openapi.json`, `/mcp` (v3.0.0) and the OAuth protocol routes (v3.1.0: `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server[/mcp]`, `/oauth/register`, `/oauth/token`, `/oauth/revoke` — root-level because RFC 8414/9728 fix the `.well-known` URLs and the metadata advertises the rest); `/mcp` + OAuth protocol mounted only when `mcp_enabled`. `/oauth/authorize` has NO backend route (SPA fallback serves it; a 405 would not fall through). Plus the SPA static fallback when `WEB_STATIC_ROOT` is set | `routes/mod.rs` (`nest("/v1", v1)` + conditional `merge(mcp)` + `merge(oauth_protocol)`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest\|mcp\|oauth" apps/api/src/routes/mod.rs` |
+| I4 | All routes live under `/v1/`, except root `/health`, `/openapi.json`, `/mcp` (v3.0.0) and the OAuth protocol routes (v3.1.0: `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server[/mcp]`, `/oauth/register`, `/oauth/token`, `/oauth/revoke` — root-level because RFC 8414/9728 fix the `.well-known` URLs and the metadata advertises the rest). **`/mcp` and the seven protocol routes are mounted UNCONDITIONALLY** since 4.4.0 — `mcp_enabled` picks the handler (404 JSON `mcp_disabled`), not the route table (D21). `/oauth/authorize` has NO backend route (SPA fallback serves it; a 405 would not fall through). Plus the SPA static fallback when `WEB_STATIC_ROOT` is set | `routes/mod.rs` (`nest("/v1", v1)` + unconditional `merge(mcp)` + `merge(oauth_protocol(state.mcp_enabled))`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest\|mcp\|oauth" apps/api/src/routes/mod.rs`; `cargo test -p futurefin-api --test mcp_http -- mcp_disabled_answers_json_even_with_the_spa_mounted` |
 | I5 | Reads never mutate (D5): expired liabilities filtered, never deleted, by GETs — since 3.4.0 the projection input query also filters them (fix C-10: an expired principal used to depress net worth forever, diverging from `/v1/summary`), pinned by `projection_excludes_expired_liability_principal` | WHERE clauses in liabilities/summary/budget/assets/projection handlers | `TEST_DATABASE_URL=... cargo test --workspace liabilities_purge` (en local; **desde 4.0.0 también en CI**, job `integration`) |
 | I6 | In charts, the stacked per-asset areas sum EXACTLY to the (visible) net-worth line at every x | `MiniProjection.tsx` rescales each asset share by `visibleNw × (asset_i / Σassets)` — necessary because raw engine `net_worth = Σassets + surplus_cash − Σprincipals − undrained`, so raw `per_asset_series` does NOT sum to NW | Read the `cumulative` block in `apps/web/src/components/charts/MiniProjection.tsx` (~lines 164–190); any new stacked chart must reuse `MiniProjection`, not re-derive |
 | I7 | `planning_monthly_cash_adjustment.len() == horizon_months`; allocation `target_index` in bounds; horizon ≥ 1 | Engine input validation → `EngineError::{InvalidPlanningAdjustments, InvalidAllocationRuleTarget, InvalidHorizon}` → 400 | `cargo test -p futurefin-engine` |
 | I8 | Engine has zero I/O/async deps (purity, §1) | `crates/engine/Cargo.toml` deps are exactly: chrono, rust_decimal, serde, thiserror, uuid | `grep -E "tokio\|sqlx\|reqwest\|axum" crates/engine/Cargo.toml` → must be empty |
 | I9 | Milestones, `milestones_real` and the FIRE crossover are computed on the FULL monthly series, never on density-decimated points | `handlers/projection.rs` (`points_full`, crossover loop over `output.net_worth`) — v1.4.2 incident: client deflated by array index instead of `month_index`, wrong under `hybrid` | `grep -n "points_full" apps/api/src/handlers/projection.rs` |
 | I10 | SQLSTATE→HTTP mapping only in `error.rs` (D9) | `impl From<sqlx::Error> for ApiError` | `grep -rn "23505\|23503" apps/api/src/ --include=*.rs` → only `error.rs` |
-| I11 | Body limits: 1 MiB global, 16 MiB on `/v1/backup/user-import*` | `routes/mod.rs` constants | `apps/api/tests/body_limits.rs` (local) |
+| I11 | Body limits: 1 MiB global, 16 MiB on `/v1/backup/user-import*`, **1 MiB on `/mcp` fijado aparte**. `DefaultBodyLimit` actúa vía **extractores**, así que NO alcanza a `/mcp` (un `route_service` que lee el body con el tope del SDK, 4 MiB por defecto): hasta 4.4.0 este invariante era falso justo ahí (D21) | `routes/mod.rs` constants + `mcp::MCP_MAX_REQUEST_BODY_BYTES` vía `with_max_request_body_bytes` | `apps/api/tests/body_limits.rs` (local; la fila de `/mcp` es `oversized_mcp_body_returns_413`). **Toda ruta nueva que no pase por un extractor necesita su propia fila aquí** |
 | I12 | No hardcoded hex colors; tokens `var(--ff-*)` only; icons only in `components/icons.tsx` | frontend convention (CLAUDE.md, design-system.md) | `grep -rn "#[0-9a-fA-F]\{6\}" apps/web/src/App.css apps/web/src/components/ \| grep -v icons.tsx` |
 | I13 | Every response carries `X-Frame-Options: DENY` **except** trusted peer + `X-Ingress-Path`, which instead gets `Content-Security-Policy: frame-ancestors 'self'` **and no `X-Frame-Options`** (D17). The header alone never relaxes it | `handlers/frame.rs::frame_policy`, applied via `with_frame_policy` to the FINAL router (after the SPA fallback) in both `main.rs` and the test harness | `apps/api/tests/frame_options.rs` (both halves); `grep -n "X_FRAME_OPTIONS\|frame-ancestors" apps/api/src/handlers/frame.rs` |
 | I14 | Identity from `X-Remote-User-*` is honored only with `FUTUREFIN_TRUSTED_PROXY_AUTH=1` **and** a peer in `FUTUREFIN_TRUSTED_PROXY_IPS`; `AUTH` without `IPS` panics at startup (D18) | `handlers/sso.rs` (`sso_disabled` / `sso_untrusted_peer`), `prefix.rs::PeerPolicy`, guard in `main.rs` | `apps/api/tests/sso_login.rs`; `grep -n "sso_disabled\|sso_untrusted_peer" apps/api/src/handlers/sso.rs`; `grep -n "TRUSTED_PROXY_AUTH=1 requires" apps/api/src/main.rs` |
 | I15 | Without proxy headers the shell HTML is served **byte-identical** to the file on disk and the session cookie keeps `Path=/` — the compose deployment is unchanged by the subpath machinery | `handlers/spa.rs::inject` returns `Cow::Borrowed`; `handlers/auth.rs::session_cookie_path` | `apps/api/tests/base_path.rs`, `apps/api/tests/session_cookie_path.rs`; `cargo test -p futurefin-api --lib prefix::` |
 | I16 | An HA-IdP login and an ingress header-SSO with the same HA user resolve to the **same** `users` row (`external_user_id`, one `resolve_or_provision`); and the HA refresh token is revoked before any DB write (D19) | `handlers/ha_sso.rs::ha_callback` step order; `handlers/sso.rs::resolve_or_provision` (single provisioning path) | `apps/api/tests/ha_idp_login.rs::header_sso_and_ha_login_resolve_to_the_same_user`; call-order assertion `[Exchange, Identity, Revoke]` in the same suite |
+| I17 | **`/mcp` never carries `Access-Control-Allow-Credentials`**, and the API surface always does — one `CORS_ORIGINS` list, two layers (D21). Adding an origin for a browser MCP client must never grant cookie access to `/v1` | `routes/mod.rs` (`api_cors_layer`, applied **before** `merge(mcp)`) + `mcp::mcp_cors_layer` (applied with `route_layer`, never `layer`) | `apps/api/tests/mcp_http.rs::mcp_preflight_is_complete_and_grants_no_cookie_access` (asserts both halves: absent on `/mcp`, `true` on `/v1/backup/user-export`, same origin); `oauth_flow.rs::get_oauth_authorize_is_not_handled_by_the_api` guards the `layer`/`route_layer` half — a **401** there means the MCP auth escaped onto the fallback |
 
 ## 4. Known weak points (stated plainly, as of 2026-07-02)
 
@@ -880,6 +968,23 @@ included) still said `?months=` was *clamped* to 12–840 — it has been a **re
   (canonical-order hash, single-use `consumed_at`, TTL 10 min); `grep -c 'confirm_token.as_deref()' apps/api/src/mcp/server.rs`
   → 7 (the token-gated subset); `grep -n "fn projection_permits" -A10 apps/api/src/heavy.rs` (third
   semaphore, floor 2 ceiling 8, same `available_parallelism()` pattern as the KDF one).
+- **D21 + I17 — MCP transport: kill-switch shape, CORS split, `Origin`, body cap, issuer subpath
+  (added 2026-08-28, Fase 4/issue #85, 4.4.0)**:
+  `grep -n "MCP_DISABLED_MESSAGE\|fn mcp_disabled" apps/api/src/mcp/mod.rs` and
+  `grep -n "fn oauth_disabled\|oauth_protocol_router" apps/api/src/oauth/mod.rs` (routes mounted
+  either way; the switch picks the handler); `grep -n "route_layer\|\.layer(" apps/api/src/mcp/mod.rs`
+  → **`route_layer` only**, never `layer` (a `layer` here escapes onto the merged fallback);
+  `grep -rn '\.allow_credentials(' apps/api/src/` → **exactly one hit, in `routes/mod.rs`**
+  (`mcp/mod.rs` mentions it only in prose); `grep -n "fn api_cors_layer\|fn cors_origins" apps/api/src/routes/mod.rs`;
+  `grep -n "with_allowed_origins\|disable_allowed_hosts\|with_max_request_body_bytes" apps/api/src/mcp/mod.rs`
+  (all three present: Host off, Origin on, body cap explicit);
+  `grep -n "normalize_prefix" apps/api/src/main.rs` (the issuer accepts a subpath, validated by the
+  same function as `FUTUREFIN_BASE_PATH`);
+  `grep -n "CACHE_CONTROL\|VARY\|ISSUER_VARY" apps/api/src/oauth/metadata.rs` (`no-store` + `Vary`);
+  `grep -n "fn gc_expired_tokens" -A8 apps/api/src/oauth/token.rs` (lazy GC in the POST, D5);
+  `grep -n "fn mount_static_spa" apps/api/src/handlers/spa.rs` — **must be called from both
+  `main.rs` and `apps/api/tests/common/mod.rs`**, which is the mechanism that keeps the tested
+  router the same shape as the shipped one.
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the

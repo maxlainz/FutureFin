@@ -11,7 +11,8 @@
 //! request). Las lecturas no lo consultan.
 //!
 //! Errores: los de dominio/validación devuelven `CallToolResult{is_error:true}` con el
-//! mismo JSON `{error, message}` del wire HTTP (el LLM puede leerlo y corregir el input);
+//! mismo JSON `{error, code, message}` del wire HTTP — **tres** campos desde 3.10.0, y `code` es
+//! por el que el cliente ramifica (el LLM puede leerlo y corregir el input);
 //! `Db`/`Unavailable` se sanitizan a `ErrorData` interno (detalle solo a tracing), espejo
 //! del contrato de `error.rs`.
 
@@ -122,7 +123,8 @@ fn to_tool_result<T: serde::Serialize>(
 }
 
 /// Mapea `ApiError` al contrato MCP. Dominio/validación → tool error legible (mismo JSON
-/// `{error, message}` que HTTP). Infraestructura → error de protocolo sanitizado.
+/// `{error, code, message}` que HTTP; `code` es el identificador estable por el que ramificar).
+/// Infraestructura → error de protocolo sanitizado.
 fn to_tool_outcome(e: ApiError) -> Result<CallToolResult, ErrorData> {
     match &e {
         ApiError::Db(err) => {
@@ -132,8 +134,12 @@ fn to_tool_outcome(e: ApiError) -> Result<CallToolResult, ErrorData> {
         ApiError::Unavailable => Err(ErrorData::internal_error("dependency unavailable", None)),
         _ => {
             let body = ErrorBody::from_api_error(&e);
-            let json = serde_json::to_string(&body)
-                .unwrap_or_else(|_| r#"{"error":"internal","message":"internal error"}"#.into());
+            // El fallback lleva `code` como todo lo demás: es el campo por el que el cliente
+            // ramifica, y un camino —por improbable que sea— que lo omita le entrega `undefined`
+            // justo cuando menos contexto tiene. Tres campos siempre, sin excepciones.
+            let json = serde_json::to_string(&body).unwrap_or_else(|_| {
+                r#"{"error":"internal","code":"internal","message":"internal error"}"#.into()
+            });
             Ok(CallToolResult::error(vec![ContentBlock::text(json)]))
         }
     }

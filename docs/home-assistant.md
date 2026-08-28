@@ -120,9 +120,9 @@ variables de entorno de siempre ([configuracion.md](configuracion.md)).
 |---|---|---|---|
 | `log_level` | `info` | Verbosidad del log. `debug` y `trace` fijan `RUST_LOG=futurefin_api=debug,tower_http=debug,sqlx=warn`; `warn` y `error` bajan a `warn`. `info` no toca nada. | Solo para diagnosticar. `debug` genera mucho ruido y `trace` hoy hace lo mismo que `debug`. |
 | `sso` | `true` | Activa la identidad delegada: exporta `FUTUREFIN_TRUSTED_PROXY_AUTH=1` y confía en el peer `172.30.32.2` (el ingress del Supervisor, y solo él). | Desactívala si prefieres el login clásico de FutureFin. Ver §2. |
-| `mcp` | `true` | Monta `/mcp` y todo el protocolo OAuth embebido. En `false` exporta `FUTUREFIN_MCP_ENABLED=0` y los desmonta (el panel de Conexiones sigue, para poder revocar). | Ponla en `false` si no vas a conectar ningún cliente de IA. **Ojo**: dejarla en `true` no basta para que MCP funcione — ver §4. |
-| `cors_origins` | *(vacío)* | Orígenes extra permitidos (`CORS_ORIGINS`), separados por comas. Vacío = los de por defecto. **Una entrada inválida aborta el arranque** a propósito. | Solo si llamas a la API de FutureFin desde otra página web. |
-| `public_url` | *(vacío)* | Origen público con el que FutureFin se anuncia como issuer de OAuth (`FUTUREFIN_PUBLIC_URL`). Tiene que ser un origen pelado, sin path ni barra final; **si está y es inválido, no arranca**. | Obligatoria si expones el add-on por un túnel o un proxy con dominio propio. Ver §4. |
+| `mcp` | `true` | Monta `/mcp` y todo el protocolo OAuth embebido. En `false` exporta `FUTUREFIN_MCP_ENABLED=0`: las rutas **siguen montadas**, pero responden 404 JSON (`mcp_disabled`) a cualquier método (el panel de Conexiones sigue funcionando igual, para poder revocar). | Ponla en `false` si no vas a conectar ningún cliente de IA. **Ojo**: dejarla en `true` no basta para que MCP funcione — ver §4. |
+| `cors_origins` | *(vacío)* | Orígenes extra permitidos (`CORS_ORIGINS`), separados por comas. Vacío = los de por defecto. **Una entrada inválida aborta el arranque** a propósito. | Solo si llamas a la API de FutureFin desde otra página web, o si vas a conectar un cliente MCP de navegador (ver [mcp.md](mcp.md)). |
+| `public_url` | *(vacío)* | Origen público con el que FutureFin se anuncia como issuer de OAuth (`FUTUREFIN_PUBLIC_URL`). Puede llevar un path si expones el puerto directo tras un proxy con subpath; query y fragmento siguen prohibidos y una barra final se recorta sola. **Si está y es inválido, no arranca**. | Obligatoria si expones el add-on por un túnel o un proxy con dominio propio. Ver §4. |
 | `ha_sso_url` | *(vacío)* | URL pública de **tu Home Assistant**. Habilita el botón «Entrar con Home Assistant» en el login y en la pantalla de consentimiento de OAuth, para entrar desde fuera del panel con la misma cuenta. Origen pelado, `http(s)://`; **si está y es inválida, no arranca**. | Si abres FutureFin por el puerto directo o por un túnel — sobre todo si tu cuenta es SSO y no tiene contraseña. Ver la sección siguiente. |
 | Puerto directo `8080/tcp` | **no publicado** | Publica el puerto del contenedor en la red local. Se configura en la sección **Red** de la misma pestaña: escribe el puerto del host (`8080`, o el que quieras) y reinicia. | Necesario para MCP y OAuth, y **solo** para eso. Ver §4 y el aviso de seguridad. |
 
@@ -236,9 +236,16 @@ Supervisor cuelga la aplicación de una ruta larga y efímera (`/api/hassio_ingr
 su propia sesión. El cliente pediría `https://tu-home-assistant/.well-known/…` y ahí no hay ningún
 FutureFin al que preguntar.
 
-La solución es la misma que en cualquier despliegue: **publicar el puerto directo** y apuntar el
-cliente ahí. Lo demás (tokens, permisos, roles, el interruptor de escritura) funciona igual que
-siempre — ver [mcp.md](mcp.md).
+**Esto es distinto de un subpath normal.** Detrás de un proxy inverso corriente
+([instalacion.md](instalacion.md#mcp-y-oauth-en-un-subpath)), declarar `FUTUREFIN_PUBLIC_URL` con
+el mismo prefijo arregla MCP y OAuth sin tocar nada más. Bajo el ingress no vale ese mismo truco:
+`/api/hassio_ingress/<token>` lleva un **token efímero de sesión**, así que no hay un prefijo fijo
+que declarar sin hornear ese secreto dentro del issuer de OAuth. Aquí no hay atajo por variable de
+entorno.
+
+La solución es la misma que en cualquier despliegue con ingress: **publicar el puerto directo** y
+apuntar el cliente ahí. Lo demás (tokens, permisos, roles, el interruptor de escritura) funciona
+igual que siempre — ver [mcp.md](mcp.md).
 
 ### Receta A — un cliente MCP en tu red local
 

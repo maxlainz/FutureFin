@@ -39,6 +39,49 @@ bump y la publicación van al final.
 - Test `every_input_schema_forbids_unknown_properties` añadido **como `#[ignore]`**: hoy 51 de 52
   tools aceptan campos desconocidos en silencio. Es la diana de la Fase 2 (#83).
 
+### Transporte, CORS y kill-switch (Fase 4 — issue #85)
+
+Nada de esto era explotable sin credencial válida. Son fallos de plataforma y de diagnóstico:
+cosas que, al activarse, se leen como una avería.
+
+- **El kill-switch no fallaba limpio en la imagen que se publica.** Con `FUTUREFIN_MCP_ENABLED=0`
+  las rutas se desmontaban, así que `POST /mcp` devolvía un **405 vacío** y
+  `GET /.well-known/oauth-authorization-server` devolvía **`200 text/html`** — el shell de la SPA,
+  porque `ServeDir` no llama a su fallback para métodos distintos de GET/HEAD. El conector fallaba
+  al parsear JSON y decía «connection failed» sin causa: **un control de seguridad que al activarse
+  se diagnostica como avería**. Ahora las rutas se montan siempre y el handler responde **404 JSON
+  `mcp_disabled`**, que es la doctrina que D18 ya aplicaba a `/v1/auth/sso`. El test viejo no lo veía
+  porque construía el router **sin la SPA**: describía un binario de laboratorio, no el publicado.
+- **OAuth quedaba irreparable bajo un proxy con subpath**: el prefijo público no entraba en el
+  issuer ni en los endpoints anunciados, y la salida manual estaba cerrada porque
+  `FUTUREFIN_PUBLIC_URL` hacía `panic!` con un path. Ahora lo admite. Se eligió eso y **no**
+  componer el prefijo del request: el issuer es una **identidad**, no decoración, y bajo el Ingress
+  de Home Assistant el prefijo lleva un **token efímero de sesión** que quedaría horneado dentro.
+  Con esa decisión, además, ninguna cabecera entra ya en el path del issuer.
+- **`CORS_ORIGINS` gobernaba dos superficies con una sola lista** y `allow_credentials(true)`: añadir
+  un origen para hacer funcionar un cliente MCP de navegador concedía de paso acceso **con cookie**
+  a `/v1/backup/user-export` y `/v1/api-tokens`. Ahora son dos capas, y la de `/mcp` va **sin
+  credenciales** — no tienen sentido en una superficie autenticada por header.
+- **Validación de `Origin` activada** en `/mcp` (la defensa anti-DNS-rebinding que el spec pide).
+  Dato que decidía si esto rompía a Claude Desktop y a Claude Code: una request **sin** `Origin`
+  pasa aunque la lista no esté vacía, así que los clientes sin navegador no se ven afectados.
+- **Preflight completo**: faltaban `MCP-Protocol-Version` (obligatoria desde la revisión 2025-06-18)
+  y `Last-Event-ID`, y sin exponer `WWW-Authenticate` un cliente de navegador no puede leer el
+  `resource_metadata=` del 401 y **nunca descubre el authorization server**.
+- **El tope de body de `/mcp` era 4 MiB, no el 1 MiB que declaraba el invariante**: `DefaultBodyLimit`
+  de axum va por extractores, y `/mcp` es un `route_service` que leía con el default del SDK.
+- **Metadata OAuth sin `Cache-Control: no-store`**, pese a que la documentación afirmaba que toda
+  respuesta OAuth lo llevaba. Ahora es cierto, y con `Vary` cierra el vector de envenenamiento del
+  issuer vía `X-Forwarded-Host`. No se exige peer de confianza para esas cabeceras: no conceden
+  autoridad, solo reflejan — y lo único que hacía peligrosa esa reflexión era la cacheabilidad.
+- **Sin GC de credenciales OAuth**: cada rotación de refresh insertaba dos filas que no se borraban
+  jamás. Ahora se podan en `POST /oauth/token`, nunca en un GET. El refresh aguanta **30 días**
+  porque la reuse-detection mira `consumed_at` antes que la expiración y necesita la fila viva.
+- Las sesiones de Streamable HTTP siguen **sin ligarse a la credencial, por decisión razonada**: hoy
+  no compra nada (el Bearer corre antes en cada request y el servidor no emite nada por iniciativa
+  propia) y es una capa que SEP-2567 está retirando. El disparador para reabrirlo queda escrito en
+  el código: la primera capacidad server→cliente.
+
 ### Escritura segura y automatización desatendida (Fase 3 — issue #84)
 
 La fase que decide si se pueden dejar correr agentes sin nadie delante. El diagnóstico de la

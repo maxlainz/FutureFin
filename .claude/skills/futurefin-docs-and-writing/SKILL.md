@@ -17,8 +17,9 @@ description: >
 # FutureFin — Docs of Record & House Writing Style
 
 Facts below verified against the repo on **2026-07-02, v1.4.3** (`apps/api/Cargo.toml`),
-re-verified **2026-08-16 for v3.0.0** (self-contained Docker image) and again **2026-08-22 for
-4.0.0** (the public-release audit), which is where §7's errata rows come from. This skill
+re-verified **2026-08-16 for v3.0.0** (self-contained Docker image), again **2026-08-22 for
+4.0.0** (the public-release audit) and again **2026-08-28 for 4.4.0** (MCP Fase 4, issue #85),
+which is where §7's errata rows come from. This skill
 tells you (a) which file owns which facts, (b) what to update when you change something, (c) how
 entries must be written, and (d) which documented facts are currently WRONG (standing errata).
 
@@ -324,13 +325,19 @@ on 401 *and* 403 — true at 3.0.0, wrong at 3.1.0 (only the 401, and it now car
 `realm` + `resource_metadata`). **Lesson**: §3.1's "prefer commands over hard counts" is not a style
 preference — every count frozen without a date-stamp in this library has now been wrong at least once.
 
+**Swept 2026-08-28 for MCP Fase 4 (issue #85/#88) — two source-comment errata found, left
+unfixed because this pass was documentation-only (`apps/` was explicitly out of scope for the
+change that produced it).** Both are Rust doc-comments, not `.claude/*.md`/CHANGELOG prose, which
+is exactly the case this table exists for: a disagreement you find but cannot fix in the same
+change.
+
 The rule stands: when you find a doc/code disagreement, verify against code (the code is ground
 truth), then fix the doc in the same change. If you cannot, add a row here with "verified <date>"
 — never leave a known-wrong fact unrecorded:
 
 | # | Doc & location | It says | Reality (verified in repo) |
 |---|---|---|---|
-| — | *(empty)* | | |
+| — | _(vacía)_ | — | Las dos erratas que vivían aquí (`TOKEN_GATED_TOOLS` inexistente en `confirm_token.rs`, y el wire descrito como `{error, message}` en dos doc-comments de `mcp/server.rs`) se **arreglaron** el 2026-08-28 en la Fase 4 del issue #85, junto con el literal de fallback de `to_tool_outcome`, que construía un error sin `code`. Una errata registrada aquí es deuda, no un archivo: cuando el arreglo cabe en el mismo cambio, se arregla y la fila se borra. |
 
 ## Provenance and maintenance
 

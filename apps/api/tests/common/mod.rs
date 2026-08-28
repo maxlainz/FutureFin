@@ -359,6 +359,19 @@ pub struct TestConfig {
     /// HTML del shell SPA: con `Some(_)` se monta el fallback `spa::serve_index` igual que
     /// main.rs (sin `ServeDir`: los tests no sirven assets del disco).
     pub with_spa_index: Option<String>,
+    /// `WEB_STATIC_ROOT`: monta el fallback estático **real** del binario publicado
+    /// (`spa::mount_static_spa` = `ServeDir` + shell), la misma función que llama `main.rs`.
+    ///
+    /// No es lo mismo que `with_spa_index`, y la diferencia importa: `ServeDir` **no llama a su
+    /// fallback para métodos distintos de GET/HEAD**, así que una ruta ausente devuelve 405 con
+    /// cuerpo vacío a un POST y 200 `text/html` a un GET. Los tests que afirman algo sobre lo que
+    /// pasa cuando una ruta NO existe (el kill-switch de MCP/OAuth) tienen que usar este eje, o
+    /// describen un binario de laboratorio. Gana sobre `with_spa_index` si se dan los dos.
+    pub web_static_root: Option<std::path::PathBuf>,
+    /// `FUTUREFIN_MCP_ENABLED=0`. Por defecto el MCP va encendido, como en `spawn()`.
+    pub mcp_disabled: bool,
+    /// `FUTUREFIN_PUBLIC_URL` ya validada (puede llevar subpath: `https://host/futurefin`).
+    pub public_url: Option<String>,
     /// Proveedor falso de «Entrar con Home Assistant». Con `Some(_)`, `AppState.ha_sso` queda
     /// puesto y las rutas `/v1/auth/ha/*` funcionan sin un Home Assistant de verdad.
     pub ha_idp: Option<Arc<FakeHaIdp>>,
@@ -471,6 +484,29 @@ impl HaIdp for FakeHaIdp {
     }
 }
 
+/// Raíz estática temporal con un `index.html` dentro, para los tests que necesitan el
+/// `ServeDir` del binario publicado (`TestConfig::web_static_root`). Se borra sola al soltarse.
+#[allow(dead_code)]
+pub struct TempWebRoot {
+    pub path: std::path::PathBuf,
+}
+
+#[allow(dead_code)]
+impl TempWebRoot {
+    pub fn with_index(html: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("ff_web_{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&path).expect("crear la raíz estática temporal");
+        std::fs::write(path.join("index.html"), html).expect("escribir index.html");
+        Self { path }
+    }
+}
+
+impl Drop for TempWebRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 impl TestApp {
     pub async fn spawn() -> Self {
         Self::spawn_with(TestConfig::default()).await
@@ -488,8 +524,8 @@ impl TestApp {
                 pool.clone(),
                 false,
                 30,
-                true,
-                None,
+                !cfg.mcp_disabled,
+                cfg.public_url,
             )
             .with_trusted_proxy(
                 cfg.base_path,
@@ -511,7 +547,10 @@ impl TestApp {
         let mut router = Router::new()
             .merge(routes::app_router(&state))
             .layer(Extension(state.clone()));
-        if let Some(html) = cfg.with_spa_index {
+        if let Some(root) = cfg.web_static_root {
+            // La MISMA función que main.rs: `ServeDir` incluido.
+            router = spa::mount_static_spa(router, &root, state.clone());
+        } else if let Some(html) = cfg.with_spa_index {
             router = router.fallback_service(
                 axum::routing::get(spa::serve_index)
                     .with_state((state.clone(), Arc::new(SpaIndex::from_html(html)))),

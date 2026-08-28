@@ -31,7 +31,8 @@
 //!
 //! El token cuesta un round-trip extra por operación, así que **no** se exige en las 14 tools con
 //! preview: solo donde confirmar sin haber mirado destruye algo que la conversación no puede
-//! reconstruir. Ver `mcp/server.rs::TOKEN_GATED_TOOLS` para la lista y el criterio.
+//! reconstruir. El gating vive **inline en cada tool** de `mcp/server.rs` (no hay constante que
+//! listarlas: `grep -c 'confirm_token.as_deref()' apps/api/src/mcp/server.rs` da las 7).
 //!
 //! ## Por qué vive aquí y no en `mcp/`
 //!

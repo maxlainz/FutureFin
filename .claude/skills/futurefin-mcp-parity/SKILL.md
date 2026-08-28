@@ -25,9 +25,9 @@ Bearer-authenticated wrapper over the same `*_core` fn its HTTP handler uses. De
 rot silently — an endpoint gains a field, a handler changes semantics, a new feature ships
 HTTP-only — unless something forces the question at merge time. This skill is that something.
 
-Volatile facts date-stamped **2026-08-22, tren 4.0.0** (52 tools; recount with the
-commands in §5 before trusting any number here). Previously 2026-08-20, tren 3.8.0 (50) y
-2026-08-19, tren 3.6.0 (47).
+Volatile facts date-stamped **2026-08-28, Fases 0–4 del tren 4.4.0** (52 tools, sin cambio de
+catálogo desde 4.0.0; recount con los comandos de §5 antes de fiarte de cualquier número de aquí).
+Previamente 2026-08-22, tren 4.0.0 (52); 2026-08-20, tren 3.8.0 (50); 2026-08-19, tren 3.6.0 (47).
 
 ## When NOT to use this skill
 
@@ -131,12 +131,13 @@ the blocking reason changes (noted per row).
 | Surface | Decision | Rationale (short) | Revisit when |
 |---|---|---|---|
 | auth/session, api-tokens, OAuth protocol+consent, membership/pending-users, backup, probes | **never** | §2.1 categories | Category-level change of posture only |
+| `GET /v1/installation/session-context` (**Infra probes**, clasificada 2026-08-28) | **never** | Era la ÚNICA pareja método-ruta sin clasificar del registro — daño real cero, pero §5 define exactamente eso como «the finding», así que se clasifica en vez de dejarse. Es el sondeo de arranque de la SPA (`{installation_initialized, access}`) para decidir qué pantalla pintar: no devuelve dato financiero alguno, y lo poco que dice (¿hay instalación?, ¿qué acceso tengo?) ya lo cubre `get_settings` con más contexto. Una tool aquí sería un round-trip para saber si merece la pena hacer el round-trip siguiente | Category-level change of posture only |
 | `POST /v1/auth/password` (4.0.0) | **never** | §2.1 session lifecycle / credential brake. Rotating the password revokes every other session, every `ffp_` token and every OAuth grant — including, quite possibly, the token making the call. It also requires the plaintext current password, which is exactly what must not travel through a model's context. It is the lever a compromised agent must not have and the human must always have | Category-level change of posture only |
 | `POST /v1/auth/sso` (2026-08-27) | **never** | §2.1 session lifecycle. It is a **browser-session mechanism**: it turns a trusted proxy's `X-Remote-User-*` headers into an `ff_session` cookie. MCP clients already hold their own first-class credentials (`ffp_` API tokens, `ffo_` OAuth access tokens), so a tool would buy nothing — and it would buy it by moving identity assertion into a channel where the peer check that makes the endpoint safe (`FUTUREFIN_TRUSTED_PROXY_IPS`, D18) does not mean the same thing. Also note the ingress does not reach `/mcp` at all: an add-on user talking MCP is on the direct port, i.e. exactly the peer this endpoint refuses | Category-level change of posture only |
 | `GET /v1/auth/ha/start` + `GET /v1/auth/ha/callback` (4.3.1, 2026-08-27) | **never** | §2.1 session lifecycle, and the sharpest case in this table: the credential is not a value at all, it is a **browser round-trip** — a 302 to Home Assistant, a human approving there, a 302 back carrying a `code` that only matches a single-use `HttpOnly` cookie this server set. An MCP client cannot drive that: it has no browser, cannot receive the redirect, cannot hold the cookie, and the thing that comes out the far end is an `ff_session` cookie, **not a token** it could use on `/mcp`. A tool would have to either invent a headless HA login (a second, weaker auth path) or hand the model an HA access token — exactly what the flow revokes seconds after using it (D19: identity, never authorization; FutureFin retains no HA credential). Same rationale as the `POST /v1/auth/sso` row: identity plumbing for the browser, not an operation over data | Category-level change of posture only |
 | `GET/PATCH/DELETE /v1/installation/members` (4.0.0) | **never** | §2.1 membership boundaries. `PATCH` can promote to `owner` and `DELETE` cuts all four credentials at once; both are the human's control over *who* is in the household, which `role_can_write` deliberately never governs. The `GET` follows them: its only real use is choosing a target for those writes, and a household roster is not financial data | Category-level change of posture only |
 | `POST /v1/transactions/{id}/reconcile` (manual pair; `reconcile_pair_core` EXISTS) | **omit** | Hand-picking two UUIDs among hundreds; a wrong pair silently leaves all flow aggregates and moves modes B/C savings | A server-side *suggestions* tool ships (candidates with opposite amounts), reducing the LLM's choice to confirming a proposed pair |
-| `/v1/transactions/import/preview|confirm` | **omit** | §2.1 context-window abuse + untrusted third-party content | MCP gains an out-of-band attachment channel |
+| `/v1/transactions/import/preview\|confirm` | **omit** | §2.1 context-window abuse + untrusted third-party content | MCP gains an out-of-band attachment channel |
 | `POST /v1/transactions/batch` (create) | **defer** | `create_transaction` loops fine; batch adds all-or-nothing tx semantics + shared fingerprint ordinals that complicate preview. **Sigue vigente en 3.8.0**: lo que se hizo tool-able fue el PATCH, no el POST | Real demand for >10-item batches from chat |
 | `POST /v1/transactions/rules` con `apply_to_existing` (el eje de backfill del body HTTP) | **omit** | En el momento del preview la regla todavía no existe, así que no hay nada que simular; y un `create_*` capaz de reescribir cientos de filas haría mentir a sus propias annotations, que es lo que el cliente MCP usa para decidir si pide permiso al humano. Desde el chat: `create_categorization_rule` → `apply_categorization_rule`, con un único gate de confirmación (3.8.0) | Que el SPA necesite el round-trip único también desde MCP, cosa que hoy no pasa |
 | `POST /v1/allocation-rules/reorder` | **omit** | Requires echoing the exact full id set; one missing id = 400; near-zero conversational value | UX rethink of the cascade |
@@ -151,7 +152,7 @@ the blocking reason changes (noted per row).
 | 1 | `create_snapshot` (backfill) + `update_snapshot` | extract from `history.rs` backfill/PUT handlers (validations `normalize_kind`, `validate_snapshot_date`, 409 on (user, kind, date)) | NONE (D12) | The strongest conversational case: recording the past |
 | 2 | `create_allocation_rule` + `delete_allocation_rule` | extract; **careful**: the sink invariant (exactly one uncapped remainder, always last) lives spread across the handler | FULL | Completes cascade control; `update_allocation_rule` exists |
 | 3 | `update_category` + `delete_category` (with `remap_to`) | extract from `categories.rs` PATCH/DELETE | NONE | delete fits preview/confirm perfectly (preview shows `refs`, forces naming the remap target) |
-| 4 | `update_installation_settings` (allowlist: `calendar_tz`, `show_age_mode`, `base_currency`) | partial — only the FIRE slice has a core | FULL | **Corrección 2026-08-22: la inflación YA es escribible por MCP.** `update_fire_settings` acepta `annual_inflation_assumption_percent` y lo persiste vía `FireSettingsPatch` (`mcp/server.rs`; su preview `{before, after}` lo incluye), aunque la columna viva en `installation` y no dentro del JSONB de `fire_settings`. Esta fila decía «today read-only via MCP» y llevaba tiempo siendo falsa — con ella, el eje que más mueve la proyección parecía un hueco pendiente cuando ya estaba cubierto. Lo que queda son los ejes de presentación (tz, modo de edad, divisa). **NUNCA incluir `mcp_write_enabled`** (§2.1, autorreferencia del kill-switch) |
+| 4 | `update_installation_settings` (allowlist: `calendar_tz`, `show_age_mode`, `base_currency`) | partial — only the FIRE slice has a core | FULL | **Corrección 2026-08-22: la inflación YA es escribible por MCP.** `update_fire_settings` acepta `annual_inflation_assumption_percent` y lo persiste vía `FireSettingsPatch` (`mcp/server.rs`; su preview `{before, after}` lo incluye), aunque la columna viva en `installation` y no dentro del JSONB de `fire_settings`. Esta fila decía «today read-only via MCP» y llevaba tiempo siendo falsa — con ella, el eje que más mueve la proyección parecía un hueco pendiente cuando ya estaba cubierto. Lo que queda son los ejes de presentación (tz, modo de edad, divisa). **NUNCA incluir `mcp_write_enabled`** (§2.1, autorreferencia del kill-switch) **ni `onboarding_completed`** — el body del PATCH lo acepta (`PatchInstallationBody.onboarding_completed`, `installation.rs`), pero es **estado de la UI**: marca que la SPA ya no debe enseñar el asistente de alta. Que un agente lo ponga a `true` no cambia ni un dato del hogar; solo le quita a una persona una pantalla que quizá no había visto. Es una omisión **decidida**, no un olvido, y por eso está escrita |
 
 Closed since the register was created: **`update_categorization_rule` + `delete_categorization_rule`
 (4.0.0, auditoría MCP §10 — era la fila #4; `patch_rule_core`/`delete_rule_core` extraídas de `rules.rs`,
@@ -168,9 +169,21 @@ history matters, the table stays short.
 
 ### 3.3 Reverse direction (tools without an endpoint)
 
-`simulate_projection` is the only one, and deliberately so: pure what-if, cache-neutral by
-construction, no REST resource to represent (the SPA previews client-side). Any new
-tool-without-endpoint needs the same two properties or an explicit new argument here.
+**Ya no es una excepción única: son tres, y eso cambia lo que hay que exigirle a la cuarta.**
+Cuando esta sección decía «`simulate_projection` is the only one», la lectura implícita era que
+tool-sin-endpoint es un caso singular que se justifica por sí mismo. No lo es — es un patrón
+aceptado, con tres formas distintas:
+
+| Tool | Qué le falta en HTTP | Por qué se acepta |
+|---|---|---|
+| `simulate_projection` | **todo**: no hay recurso REST que representar | What-if puro y cache-neutral por construcción; la SPA previsualiza en cliente |
+| `update_fire_settings` | **la core**: `patch_fire_settings_core` no la llama ningún handler (`installation.rs`, y el comentario del propio código lo dice) | El `PATCH /v1/installation` reemplaza el objeto `FireSettings` entero; desde el chat eso obliga a leer-modificar-escribir y a arriesgar pisar un campo que el modelo no miró. La tool es **campo a campo** (`FireSettingsPatch`), que es la única forma segura de tocar ajustes desde una conversación |
+| `get_settings` | **media respuesta**: el bloque `user {id, username, birth_date}` sale de `settings_user_core`, que el endpoint HTTP no expone | La SPA ya tiene al usuario en su estado; un cliente MCP no tiene sesión de la que sacarlo, y sin `birth_date` no puede convertir `jubilacion_month_index` en una edad |
+
+Las tres comparten la propiedad que sí es exigible: **el consumidor MCP no tiene el contexto que la
+SPA sí tiene** (estado de cliente, pantalla previa, sesión). Una cuarta tool-sin-endpoint necesita
+nombrar cuál de esas tres formas es, o traer un argumento nuevo a esta tabla — no basta con que sea
+cómoda.
 
 ## 4. Recipe — add or update a tool
 
@@ -397,6 +410,24 @@ grupo de `impact` — de ahí que no sumen 22 a secas) + `reconcile_transfers` (
 (`idempotency_key`, ajeno a los otros dos ejes). El fixture `mcp-catalog.json` cambia exactamente
 **22 entradas** — reprodúcelo con el diff de abajo. Cero tools nuevas, cero retiradas: el catálogo
 sigue en **52**.
+
+Evaluación de la rama **`feat/mcp-fase-4-transporte`** (Fase 4, issue #85 — «transporte, CORS y
+kill-switch»; catálogo **sin cambios en 52**, recontado 52/21/31/31/14/7 el 2026-08-28):
+
+> **Resultado: `n/a`, y se registra en vez de omitirse.** Es la tercera salida válida del contrato
+> de §1 y la menos escrita de las tres, precisamente porque «no hay nada que hacer» es la conclusión
+> que la gente no documenta. Ninguna tool cambió, ninguna ruta `/v1` cambió y el fixture
+> `mcp-catalog.json` no se movió: lo que esta fase toca es el **transporte** de `/mcp` y el
+> **protocolo OAuth**, dos capas por debajo de la superficie que este registro gobierna.
+
+| Superficie tocada (4.4.0, Fase 4) | Parity outcome |
+|---|---|
+| Kill-switch: `/mcp` y las 7 rutas de protocolo pasan de desmontarse a responder 404 JSON `mcp_disabled` | **n/a**. No es una tool ni un campo: es la respuesta de un endpoint **apagado**. Un cliente MCP con el switch echado no ve un catálogo distinto, ve que no hay servidor — y ahora se lo dicen con un código estable en vez de con un 405 mudo. El código nuevo (`mcp_disabled`) vive en `error-codes.json` y `errorMessages.ts`, no en el fixture del catálogo |
+| Capa CORS propia de `/mcp`, sin credenciales; preflight completo (`MCP-Protocol-Version`, `Last-Event-ID`, `WWW-Authenticate` expuesta) | **n/a**: cabeceras HTTP del transporte. Ninguna tool las declara ni las lee; `tools/list` es idéntico antes y después. Lo que cambia es **qué origen de navegador puede hablar con qué superficie**, que es política de despliegue (`futurefin-config-and-flags`), no contrato de catálogo |
+| Validación de `Origin` (`with_allowed_origins`) y tope de body de 1 MiB en `/mcp` | **n/a**: dos rechazos del transporte (403 y 413) **antes** de que rmcp deserialice nada. Ninguna tool puede observarlos — si se disparan, no llegó a haber llamada a tool. Nota para quien añada una tool con payloads grandes: el tope real de `/mcp` es ahora 1 MiB, no los 4 MiB del SDK |
+| `FUTUREFIN_PUBLIC_URL` acepta subpath; `no-store` + `Vary` en la metadata; GC de credenciales OAuth caducadas | **n/a**: protocolo OAuth, explícitamente fuera del catálogo por la fila «OAuth protocol+consent» de §3.1. Cambian **dónde** vive el authorization server y cuánto duran sus filas, no qué puede hacer un token una vez emitido |
+| Sesión Streamable HTTP sin ligar a la credencial (decisión, no olvido) | **n/a hoy, con disparador nombrado**: la ligadura solo compraría algo si el servidor emitiera datos por iniciativa propia. La **primera capacidad server→cliente** (notificaciones, `progress`) es a la vez un cambio de catálogo y el momento de reabrir esto — cuando llegue, no será `n/a` por partida doble |
+| `spa::mount_static_spa` extraída a la lib; tres ejes nuevos en `TestConfig` | **n/a**: andamiaje de tests y de arranque, sin ruta ni campo. Sí importa para §5: un test que afirme que una tool o una ruta **no** existe tiene que montar `web_static_root`, o está probando un router que no se publica |
 
 Re-verify before trusting:
 

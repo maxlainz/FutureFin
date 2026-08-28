@@ -80,7 +80,10 @@ El servidor MCP **no funciona a través del ingress**. El descubrimiento de OAut
 2.1 exige servir `/.well-known/oauth-authorization-server` y
 `/.well-known/oauth-protected-resource` en la **raíz del origen**, y esa raíz es
 de Home Assistant, no del add-on: el ingress cuelga la aplicación de una ruta
-larga y con sesión propia. No hay forma de arreglarlo desde este lado.
+larga y con sesión propia. A diferencia de un subpath normal (que sí se arregla
+declarando `public_url` con el mismo prefijo), aquí no hay forma de arreglarlo
+desde este lado: el prefijo del ingress lleva un token efímero de sesión, no un
+valor fijo que se pueda anunciar.
 
 La receta es publicar el puerto directo y apuntar el cliente ahí.
 
