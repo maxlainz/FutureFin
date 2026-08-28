@@ -1007,11 +1007,22 @@ async fn insert_payload(
             None => None,
         };
         let source = r.source.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        sqlx::query(
+        // `ON CONFLICT DO NOTHING` porque un `.ffbackup` viejo PUEDE traer reglas duplicadas: hasta
+        // 4.3.1 la unicidad de las agnósticas (`source IS NULL`) no existía —en SQL `NULL <> NULL`—
+        // y dos POST idénticos creaban dos reglas. Desde
+        // `20260828120000_categorization_rules_unique_agnostic` ese estado ya no se puede crear,
+        // pero sí puede venir dentro de un backup exportado antes: sin esta cláusula, el INSERT
+        // daría 23505 → 409 y el fichero pasaría a ser **inimportable**, rompiendo el
+        // no-negociable «nunca se rompe el import de un backup antiguo: es la única vía de
+        // recuperación del usuario». Se descarta la copia, que es el patrón documentado desde
+        // v1.1.0, y el contador refleja lo que ENTRÓ (no lo que traía el fichero), así que el
+        // usuario ve la diferencia en vez de que se la escondan.
+        let done = sqlx::query(
             r#"INSERT INTO categorization_rules
                    (id, installation_id, owner_user_id, match_kind, pattern, source,
                     assign_kind, assign_category_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT DO NOTHING"#,
         )
         .bind(Uuid::new_v4())
         .bind(iid)
@@ -1023,7 +1034,7 @@ async fn insert_payload(
         .bind(assign_category_id)
         .execute(&mut **tx)
         .await?;
-        categorization_rules += 1;
+        categorization_rules += done.rows_affected() as u32;
     }
 
     Ok(ImportCounts {

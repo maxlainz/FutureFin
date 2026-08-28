@@ -40,6 +40,31 @@ describe("buildStructuralLegendItems", () => {
     ]);
   });
 
+  it("historyIsAssetsOnly renombra el tramo pasado a «Activos (histórico)»", () => {
+    // Sin patrimonio neto histórico (el pasivo no está fotografiado entero) el chart pinta
+    // activos: la leyenda tiene que decirlo, o las dos mitades de la curva se leen como la misma
+    // magnitud — el error que el `net_worth: null` del servidor acaba de cerrar.
+    const items = buildStructuralLegendItems({
+      hasFire: false,
+      hasHistory: true,
+      historyIsAssetsOnly: true,
+    });
+    expect(items.map((i) => i.label)).toEqual([
+      "Patrimonio neto",
+      "Capital aportado",
+      "Activos (histórico)",
+    ]);
+    // El color no cambia: sigue siendo el token del tramo pasado.
+    expect(items[2]!.color).toBe("var(--proj-nw-past)");
+    // Y lleva explicación en el title (tooltip nativo del chip).
+    expect(items[2]!.title).toContain("activos");
+
+    // Omitido o false → etiqueta de siempre, sin title propio.
+    const plain = buildStructuralLegendItems({ hasFire: false, hasHistory: true });
+    expect(plain[2]!.label).toBe("Histórico");
+    expect(plain[2]!.title).toBeUndefined();
+  });
+
   it("todos los colores son tokens var(--…)", () => {
     for (const i of buildStructuralLegendItems({ hasFire: true, hasHistory: true })) {
       expect(i.color.startsWith("var(--")).toBe(true);

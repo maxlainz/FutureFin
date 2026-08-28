@@ -275,6 +275,23 @@ pub async fn create_planning_flow(
 
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_planning_flow`.
 /// Invalidación FULL post-insert dentro (los planning flows son inputs del engine).
+/// Cota superior de `due_date`. El código va como literal completo a propósito: ver la nota en
+/// `handlers::max_user_settable_future_date`.
+async fn validate_due_date_range(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    due_date: Option<NaiveDate>,
+) -> Result<(), ApiError> {
+    let Some(d) = due_date else { return Ok(()) };
+    let today = crate::handlers::installation::installation_naive_today(pool, iid).await?;
+    if d > crate::handlers::max_user_settable_future_date(today) {
+        return Err(ApiError::BadRequest(
+            "due_date_out_of_range: due_date must not be more than 100 years in the future".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn create_planning_flow_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -288,6 +305,7 @@ pub(crate) async fn create_planning_flow_core(
             "amount_not_positive: expected_amount must be greater than zero".into(),
         ));
     }
+    validate_due_date_range(&state.pool, iid, body.due_date).await?;
 
     let title = normalize_title(&body.title)?;
     let notes = normalize_notes(&body.notes)?;
@@ -427,6 +445,11 @@ pub(crate) async fn patch_planning_flow_core(
         Some(v) => patch_due_date_from_json(v)?,
         None => current.due_date,
     };
+    // Solo se valida lo que el patch INTRODUCE: una fila antigua fuera de cota se puede seguir
+    // editando en otros campos (y arreglando), que es lo contrario de dejarla intocable.
+    if body.due_date.is_some() {
+        validate_due_date_range(&state.pool, iid, new_due).await?;
+    }
 
     let new_notes = match &body.notes {
         Some(_) => normalize_notes(&body.notes)?,

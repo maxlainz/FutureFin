@@ -59,7 +59,9 @@ src/
 │   │                             #   collapsedAssetLegendCap / applyLegendCollapse (chip «+N más»; nunca esconde
 │   │                             #   uno solo), topAssetTooltipRows (top-5 por |valor| + «Otros»). Test: chart-legend.test.ts
 │   ├── history-merge.ts          # mergeProjectionWithHistory(series, history): une la serie histórica (month_index<0) con la
-│   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto
+│   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto.
+│   │                             #   Con net_worth null (pasivo sin fotografiar entero) cae a assets_total y marca pastIsAssetsOnly:
+│   │                             #   el pasado son ACTIVOS y el chart lo etiqueta así (leyenda «Activos (histórico)» + tooltip)
 │   ├── snapshot-tracker.ts       # trigger del modal: EditLog (Map<assetId, epochMs>), SNAPSHOT_EDIT_WINDOW_MS, pruneEditLog,
 │   │                             #   liquidCoverageComplete (todos los activos líquidos editados dentro de la ventana rodante ~1h)
 │   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH (incl. expenses → «Movimientos», slug canónico /movimientos + alias de lectura /gastos en tabFromPathname), SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath

@@ -270,9 +270,23 @@ async fn fine_series_passes_through_snapshots_and_is_shaped() {
     assert_eq!(series[0]["asset_id"].as_str().unwrap(), asset_id);
     assert_eq!(series[0]["asset_name"], "Cuenta N26");
     let values = series[0]["values"].as_array().unwrap();
-    let net_worth = fine["net_worth"].as_array().unwrap();
     assert_eq!(values.len(), grid.len());
-    assert_eq!(net_worth.len(), grid.len());
+
+    // 4.4.0 (issue #82): este escenario NO tiene snapshots de pasivo, así que aquí no existe
+    // patrimonio neto histórico y `fine.net_worth` viaja como null EXPLÍCITO. Antes valía
+    // exactamente Σ activos y se seguía llamando `net_worth` — el mismo campo mal nombrado que
+    // la serie mensual, y peor: esta respuesta ni siquiera publicaba el flag con el que
+    // sospechar. Ahora lo publica.
+    assert_eq!(
+        body["liabilities_snapshotted"], false,
+        "sin snapshots de pasivo el flag debe decirlo"
+    );
+    assert!(
+        fine["net_worth"].is_null(),
+        "sin el pasivo fotografiado no hay patrimonio neto: null explícito, no los activos \
+         disfrazados de neto. Recibido: {:?}",
+        fine["net_worth"]
+    );
 
     // Índice de rejilla por fecha.
     let idx_of = |date: NaiveDate| -> usize {
@@ -300,8 +314,9 @@ async fn fine_series_passes_through_snapshots_and_is_shaped() {
         "debe haber un salto claro por el cash-flow"
     );
 
-    // net_worth == valor del asset (sin pasivos).
-    assert_close(net_worth[idx_of(charge_date)].as_f64().unwrap(), 750.0, "net_worth = asset");
+    // Lo que sí hay en este caso es la serie de activos, que es lo que el chart pinta cuando el
+    // pasado es «solo activos» — y mide lo mismo que medía el viejo `net_worth` aquí.
+    assert_close(val(charge_date), 750.0, "asset_series en el cargo");
 
     // La serie mensual ve el gasto: mes del cargo tiene expense = -500.00.
     let charge_mi = (charge_date.year() - today.year()) * 12

@@ -308,6 +308,35 @@ pub struct ProjectionSeriesResponse {
     /// `(1 + inflación%)^(meses/12)`, así que el objetivo nominal el mes de la jubilación es
     /// bastante mayor que esta cifra. `null` cuando no hay configuración FIRE válida.
     pub jubilacion_target_net_worth: Option<String>,
+    /// **Posición** (índice de array, base 0) dentro de `points` / `fire_target_series` /
+    /// `asset_series[].values` que corresponde al mes de jubilación. `null` ⟺ no hay cruce.
+    ///
+    /// Existe porque `jubilacion_month_index` **no indexa nada**: es un número de MES, y con
+    /// `density=hybrid` (la que fuerza la tool MCP `get_projection`) los arrays llevan ~42 puntos
+    /// para 361 meses. Indexar con el mes daba basura o se salía del array; caer en `[0]`
+    /// presentaba el objetivo de hoy como si fuera el de dentro de décadas.
+    ///
+    /// **Convención: el punto servido inmediatamente ANTERIOR o igual** — la última posición `p`
+    /// con `points[p].month_index <= jubilacion_month_index`. Invariantes:
+    /// - `points[p].month_index <= jubilacion_month_index` **siempre**, con igualdad ⟺ el mes del
+    ///   cruce es un punto servido (siempre con `density=monthly`).
+    /// - `p+1 == points.len()` o `points[p+1].month_index > jubilacion_month_index`: el cruce cae
+    ///   en el segmento `[p, p+1)`, que es donde un chart pinta el marcador.
+    ///
+    /// Se eligió «anterior» y no «siguiente» porque es la semántica estándar de «en qué bucket cae
+    /// este mes», porque hace comprobable la exactitud (`month_index` del punto vs el del cruce) y
+    /// porque su error es **conservador**: leer el patrimonio de ese punto lo infravalora en vez de
+    /// inflarlo. Para las cifras exactas del mes del cruce no uses la serie: usa
+    /// `jubilacion_target_net_worth_nominal`, que va calculado, no interpolado.
+    pub jubilacion_series_position: Option<u32>,
+    /// Objetivo FIRE **del mes del cruce**, en euros **NOMINALES** de ese mes. `null` ⟺ no hay cruce.
+    ///
+    /// Es el número que faltaba: `jubilacion_target_net_worth` está en euros de HOY, y el objetivo
+    /// crece con la inflación, así que a décadas vista los dos difieren por más de 2×. Se evalúa
+    /// **exacto** con la misma `fire_target_at_month_index` del motor sobre el mes del cruce
+    /// (`base × (1 + inflación%)^(mes/12)`) — no se interpola entre puntos de la serie ni se lee de
+    /// `fire_target_series`, que con `density=hybrid` puede no tener el mes del cruce.
+    pub jubilacion_target_net_worth_nominal: Option<String>,
     /// Serie mensual del target FIRE ajustado por inflación, paralela a `points`. Cada valor =
     /// `target_base × (1 + inflación%)^(month_index/12)`. Vacío cuando no hay FIRE configurado.
     /// Serializado como f64 (ver `serialize_decimal_as_f64`).
@@ -967,6 +996,15 @@ pub(crate) struct BuiltProjection {
     /// amortiza los pasivos aparte); lo consumen los caps `months_expense` de `assets.rs`. En modo
     /// real (B/C con datos) es **0 por contrato**: la cuota ya vive dentro del promedio de gasto.
     pub debt_service_monthly: Decimal,
+    /// Por qué `debt_service_monthly` **no es medible** en este ensamblado. `Some("included_in_real_expense")`
+    /// ⟺ la base de gasto salió del promedio real, así que la cuota ya está contada dentro y
+    /// volver a publicarla la duplicaría; `None` ⟺ el cero (o el importe) significa lo que dice.
+    ///
+    /// El gate es `expense_from_avg`, **no** `effective_savings_source.uses_transactions()`: el
+    /// fallback del promedio es POR LADO, así que un modo B con datos de ingreso y sin datos de
+    /// gasto publica `savings_source: "transactions_avg"` y sin embargo **sí** cobra la cuota
+    /// (los pasivos no se anulan). Cablear la razón al modo mentiría exactamente en ese caso.
+    pub debt_service_absent_reason: Option<&'static str>,
 }
 
 /// Overrides what-if de `simulate_projection` que deben aplicarse DENTRO del ensamblado, en el
@@ -1110,6 +1148,12 @@ pub(crate) async fn build_installation_projection_input(
         .map(|r| liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()))
         .filter(|p| *p > Decimal::ZERO)
         .sum();
+    // Un `0` numérico no puede significar «no aplica»: con la base de gasto salida del promedio
+    // real, la cuota ya es un movimiento dentro de ese promedio y publicarla aparte la contaría dos
+    // veces — así que el 0 no mide un hogar sin deuda, mide que la cifra no existe en este modo.
+    // Se deriva del MISMO `expense_from_avg` que anuló `payment_amount` unas líneas más arriba: una
+    // sola condición gobierna el hecho y su explicación.
+    let debt_service_absent_reason = expense_from_avg.then_some("included_in_real_expense");
 
     let monthly_net_regular = inputs.income - inputs.expense;
 
@@ -1288,6 +1332,7 @@ pub(crate) async fn build_installation_projection_input(
         savings_expense_basis,
         fire_target_absent_reason,
         debt_service_monthly,
+        debt_service_absent_reason,
     })
 }
 
@@ -1583,6 +1628,7 @@ pub async fn compute_projection_series_response(
         savings_expense_basis,
         fire_target_absent_reason: _,
         debt_service_monthly: _,
+        debt_service_absent_reason: _,
     } = built;
 
     // Las dos simulaciones (principal + marker «compound supera ahorro») son CPU-bound y se
@@ -1687,30 +1733,57 @@ pub async fn compute_projection_series_response(
     };
 
     let fire_target_ref = projection_input.fire_target.as_ref();
-    let (fire_target_series, jubilacion_month_index, jubilacion_target_net_worth) =
-        match fire_target_ref {
-            Some(ft) if ft.base_amount > Decimal::ZERO => {
-                let crossed_at = fire_crossover_month(Some(ft), &output.net_worth);
-                // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
-                // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
-                // auditoría MCP §8), así que el paralelismo tiene que ser estructural. Antes `points`
-                // usaba `filter_map` (descarta índices fuera de rango) y esta serie un `map` que
-                // no descartaba nada: coincidían solo porque `density_month_indices` nunca emite
-                // un índice > months-1. Un cambio ahí las habría desalineado en silencio.
-                let series: Vec<f64> = points
-                    .iter()
-                    .map(|p| {
-                        fire_target_at_month_index(Some(ft), p.month_index)
-                            .unwrap_or(Decimal::ZERO)
-                            .to_f64()
-                            .unwrap_or(0.0)
-                    })
-                    .collect();
-                debug_assert_eq!(series.len(), points.len(), "fire_target_series ∥ points");
-                (series, crossed_at, Some(money_out(ft.base_amount).to_string()))
-            }
-            _ => (Vec::new(), None, None),
-        };
+    let (
+        fire_target_series,
+        jubilacion_month_index,
+        jubilacion_target_net_worth,
+        jubilacion_target_net_worth_nominal,
+    ) = match fire_target_ref {
+        Some(ft) if ft.base_amount > Decimal::ZERO => {
+            let crossed_at = fire_crossover_month(Some(ft), &output.net_worth);
+            // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
+            // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
+            // auditoría MCP §8), así que el paralelismo tiene que ser estructural. Antes `points`
+            // usaba `filter_map` (descarta índices fuera de rango) y esta serie un `map` que
+            // no descartaba nada: coincidían solo porque `density_month_indices` nunca emite
+            // un índice > months-1. Un cambio ahí las habría desalineado en silencio.
+            let series: Vec<f64> = points
+                .iter()
+                .map(|p| {
+                    fire_target_at_month_index(Some(ft), p.month_index)
+                        .unwrap_or(Decimal::ZERO)
+                        .to_f64()
+                        .unwrap_or(0.0)
+                })
+                .collect();
+            debug_assert_eq!(series.len(), points.len(), "fire_target_series ∥ points");
+            // Target del mes del cruce en euros NOMINALES, calculado EXACTO con el helper del
+            // motor sobre `crossed_at`. Ni se interpola entre dos puntos de la serie ni se lee
+            // de `fire_target_series[pos]`: con `density=hybrid` el mes del cruce puede no ser
+            // un punto servido, y `base_amount` sin redondear es el mismo que usó el motor para
+            // decidir el cruce.
+            let nominal = crossed_at
+                .and_then(|k| fire_target_at_month_index(Some(ft), k))
+                .map(|v| money_out(v).to_string());
+            (
+                series,
+                crossed_at,
+                Some(money_out(ft.base_amount).to_string()),
+                nominal,
+            )
+        }
+        _ => (Vec::new(), None, None, None),
+    };
+    // Posición del mes del cruce dentro de los arrays paralelos: el ÚLTIMO punto servido cuyo
+    // `month_index` no pasa del mes del cruce (convención documentada en el campo). `rposition`
+    // sobre `points`, no aritmética sobre `kept_indices`: la posición es una propiedad del array
+    // que se serializa, así que se deriva de él.
+    let jubilacion_series_position = jubilacion_month_index.and_then(|k| {
+        points
+            .iter()
+            .rposition(|p| p.month_index <= k)
+            .map(|p| p as u32)
+    });
     // Lectura civil del cruce, resuelta en servidor: el índice suelto obliga al consumidor a hacer
     // aritmética de calendario y de edad, que es donde se equivoca en silencio.
     let (jubilacion_date_ymd, jubilacion_age) = jubilacion_civil(
@@ -1744,6 +1817,8 @@ pub async fn compute_projection_series_response(
         jubilacion_date_ymd,
         jubilacion_age,
         jubilacion_target_net_worth,
+        jubilacion_series_position,
+        jubilacion_target_net_worth_nominal,
         fire_target_series,
         asset_series,
         density: match density {
@@ -1823,10 +1898,17 @@ pub(crate) struct SimKpis {
     /// por `debt_service_monthly`.
     #[serde(with = "rust_decimal::serde::str")]
     pub expense_total_monthly: Decimal,
-    /// Cuota mensual de los pasivos activos. 0 en los modos B y C por contrato (ahí las cuotas ya
-    /// son movimientos reales dentro del promedio de gasto).
-    #[serde(with = "rust_decimal::serde::str")]
-    pub debt_service_monthly: Decimal,
+    /// Cuota mensual de los pasivos activos. **`null` cuando la cifra no aplica**: con la base de
+    /// gasto salida del promedio real (modos B/C con datos de gasto), la cuota ya es un movimiento
+    /// dentro de ese promedio y publicarla aparte la contaría dos veces. Hasta 4.3.1 ese caso
+    /// viajaba como `"0"`, y un `0` numérico no puede significar «no aplica»: un cliente leía «no
+    /// pagas servicio de deuda» de un usuario con un préstamo vivo. `debt_service_absent_reason`
+    /// dice por qué falta.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub debt_service_monthly: Option<Decimal>,
+    /// `included_in_real_expense` ⟺ `debt_service_monthly` es `null`. `null` ⟺ la cuota viaja (y
+    /// entonces un `0` sí significa «no hay pasivos con cuota activa»).
+    pub debt_service_absent_reason: Option<&'static str>,
     /// `income_monthly − expense_total_monthly`. Es el neto recurrente, NO el `net_cash_month` que
     /// reparte la cascada: ese incluye además el tramo de planning flows del mes en curso.
     #[serde(with = "rust_decimal::serde::str")]
@@ -1881,10 +1963,19 @@ pub(crate) struct SimDeltas {
     pub jubilacion_months_delta: Option<i64>,
     #[serde(with = "rust_decimal::serde::str")]
     pub final_net_worth_delta: Decimal,
-    /// El mismo delta en euros de hoy. Con inflaciones distintas entre lados NO es el nominal
-    /// deflactado: cada lado se deflacta con la suya, que es lo que hace comparable la cifra.
-    #[serde(with = "rust_decimal::serde::str")]
-    pub final_net_worth_real_delta: Decimal,
+    /// El mismo delta en euros de hoy — **solo cuando las dos inflaciones coinciden**. Cada lado se
+    /// deflacta con la suya, así que en cuanto el eje simulado ES la inflación los dos deflactores
+    /// dejan de ser el mismo y la resta no compara nada: simulando
+    /// `annual_inflation_percent: "0"` sobre una instalación con inflación, este delta salía muy
+    /// positivo mientras `final_net_worth_delta` salía muy negativo — misma magnitud, signos
+    /// opuestos. Cualquier frase redactada con eso es basura, así que ahora es `null` y
+    /// `real_delta_absent_reason` lo explica.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub final_net_worth_real_delta: Option<Decimal>,
+    /// `incomparable_deflators` ⟺ `final_net_worth_real_delta` es `null` (las inflaciones efectivas
+    /// de baseline y escenario difieren). `null` ⟺ el delta real viaja. Mismo patrón que
+    /// `fire_target_absent_reason` de `SimKpis`.
+    pub real_delta_absent_reason: Option<&'static str>,
     #[serde(with = "rust_decimal::serde::str_option")]
     pub fire_target_base_delta: Option<Decimal>,
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -2009,7 +2100,14 @@ fn sim_kpis(
         runway_is_indefinite,
         income_monthly: money_out(income_monthly),
         expense_total_monthly: money_out(monthly_expense),
-        debt_service_monthly: money_out(debt_service_monthly),
+        // `null` + razón cuando la cuota ya vive dentro del gasto real: la aritmética interna
+        // (`monthly_expense`) sigue usando el `Decimal` — es solo la PUBLICACIÓN la que distingue
+        // «cero euros de cuota» de «esta cifra no existe en este modo».
+        debt_service_monthly: built
+            .debt_service_absent_reason
+            .is_none()
+            .then(|| money_out(debt_service_monthly)),
+        debt_service_absent_reason: built.debt_service_absent_reason,
         net_monthly: money_out(net_monthly),
         savings_rate,
         savings_source: built.effective_savings_source,
@@ -2258,6 +2356,12 @@ pub(crate) async fn simulate_projection_core(
         ctx.birth_date,
     );
 
+    // Deflactores comparables ⟺ las dos inflaciones EFECTIVAS coinciden. Se lee del eco de cada
+    // lado (`SimKpis::annual_inflation_percent`) y no de `ctx`/`inflation_eff` sueltos: así la
+    // condición mira exactamente los dos números que produjeron los `*_real` que se restan.
+    let deflators_comparable =
+        baseline.annual_inflation_percent == scenario.annual_inflation_percent;
+
     let deltas = SimDeltas {
         jubilacion_months_delta: match (baseline.jubilacion_month_index, scenario.jubilacion_month_index)
         {
@@ -2265,9 +2369,10 @@ pub(crate) async fn simulate_projection_core(
             _ => None,
         },
         final_net_worth_delta: money_out(scenario.final_net_worth - baseline.final_net_worth),
-        final_net_worth_real_delta: money_out(
-            scenario.final_net_worth_real - baseline.final_net_worth_real,
-        ),
+        final_net_worth_real_delta: deflators_comparable.then(|| {
+            money_out(scenario.final_net_worth_real - baseline.final_net_worth_real)
+        }),
+        real_delta_absent_reason: (!deflators_comparable).then_some("incomparable_deflators"),
         fire_target_base_delta: match (baseline.fire_target_base, scenario.fire_target_base) {
             (Some(b), Some(s)) => Some(money_out(s - b)),
             _ => None,

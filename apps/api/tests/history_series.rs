@@ -34,6 +34,36 @@ fn i32_of(v: &serde_json::Value) -> i32 {
     v.as_i64().unwrap_or_else(|| panic!("expected int, got {v:?}")) as i32
 }
 
+/// `points[].net_worth`: `None` cuando el pasivo del scope no está fotografiado entero.
+/// El campo NUNCA se omite (viaja como `null` explícito), así que la ausencia de la clave
+/// es un fallo, no un `None`.
+fn nw_of(p: &serde_json::Value) -> Option<f64> {
+    let v = p
+        .get("net_worth")
+        .unwrap_or_else(|| panic!("net_worth debe estar SIEMPRE presente, aunque sea null: {p}"));
+    if v.is_null() {
+        None
+    } else {
+        Some(f64_of(v))
+    }
+}
+
+/// Todos los puntos con `net_worth = null` (el contrato es «en TODA la serie», no punto a punto).
+fn assert_all_nw_null(body: &serde_json::Value, ctx: &str) {
+    assert_eq!(
+        body["liabilities_snapshotted"],
+        serde_json::json!(false),
+        "{ctx}: se esperaba el flag en false"
+    );
+    for p in body["points"].as_array().expect("points array") {
+        assert!(
+            nw_of(p).is_none(),
+            "{ctx}: net_worth debe ser null en k={} — {p}",
+            i32_of(&p["month_index"])
+        );
+    }
+}
+
 /// GET /v1/history/series → (JSON, anchor_date, anchor_month_first).
 async fn get_series(app: &TestApp, cookie: &str, qs: &str) -> (serde_json::Value, NaiveDate, NaiveDate) {
     let resp = app
@@ -162,10 +192,12 @@ async fn series_linear_between_two_asset_snapshots() {
         expect(d2),                            // 400
         0.0,
     ];
+    // `net_worth` NO se publica: solo hay snapshots de asset, así que el pasivo no está
+    // fotografiado y la resta sería `assets_total` con nombre de patrimonio neto.
+    assert_all_nw_null(&body, "solo snapshots de asset");
     for (p, exp) in pts.iter().zip(expected) {
         let k = i32_of(&p["month_index"]);
         assert_close(f64_of(&p["assets_total"]), exp, &format!("assets_total k={k}"));
-        assert_close(f64_of(&p["net_worth"]), exp, &format!("net_worth k={k}"));
         assert_close(f64_of(&p["liabilities_total"]), 0.0, &format!("liabilities k={k}"));
     }
 
@@ -227,7 +259,9 @@ async fn series_joins_last_snapshot_to_live_values() {
     assert_close(f64_of(&point_at(&body, -2)["assets_total"]), 100.0, "k=-2");
     assert_close(f64_of(&point_at(&body, -1)["assets_total"]), expect(add_months_signed(anchor, -1)), "k=-1");
     assert_close(f64_of(&point_at(&body, 0)["assets_total"]), 400.0, "k=0 = valor vivo exacto");
-    assert_close(f64_of(&point_at(&body, 0)["net_worth"]), 400.0, "k=0 net_worth = valor vivo");
+    // El empalme con lo vivo se comprueba sobre `assets_total`: sin snapshots de pasivo,
+    // `net_worth` es null en toda la serie (es lo que antes valía 400 y se leía como patrimonio).
+    assert_all_nw_null(&body, "empalme con valores vivos, sin pasivo fotografiado");
 
     // Nombre: el asset vivo gana sobre el label del snapshot.
     let series = body["asset_series"].as_array().unwrap();
@@ -282,7 +316,14 @@ async fn series_amortization_curve_above_chord_and_hits_endpoints() {
     //   k=-12 (= d1) → liabilities_total = 200000, net_worth = -200000.
     //   k=-2  (= d2) → 190000.
     assert_close(f64_of(&point_at(&body, -12)["liabilities_total"]), 200_000.0, "k=-12");
-    assert_close(f64_of(&point_at(&body, -12)["net_worth"]), -200_000.0, "nw k=-12");
+    // Alice es la única que aporta serie y SÍ tiene snapshots de pasivo → el pasivo del scope está
+    // fotografiado entero y `net_worth` sí se publica (aquí, negativo: solo hay deuda).
+    assert_eq!(body["liabilities_snapshotted"], serde_json::json!(true), "{body}");
+    assert_close(
+        nw_of(point_at(&body, -12)).expect("net_worth con pasivo fotografiado"),
+        -200_000.0,
+        "nw k=-12",
+    );
     assert_close(f64_of(&point_at(&body, -2)["liabilities_total"]), 190_000.0, "k=-2");
 
     // Predicción interior: la curva francesa es cóncava decreciente → estrictamente POR
@@ -357,7 +398,9 @@ async fn series_household_sums_users_and_mine_filters() {
     assert_eq!(hh["view"], "household");
     assert_eq!(hh["points"].as_array().unwrap().len(), 2);
     assert_close(f64_of(&point_at(&hh, -1)["assets_total"]), 1600.0, "household k=-1");
-    assert_close(f64_of(&point_at(&hh, -1)["net_worth"]), 1600.0, "household nw k=-1");
+    // Bob tiene un pasivo VIVO sin fotografiar: el neto del hogar no se publica (antes valía
+    // 1600, es decir, los activos, ignorando los 5.000 € de Bob).
+    assert_all_nw_null(&hh, "household con pasivo vivo sin fotografiar");
     assert_close(f64_of(&point_at(&hh, 0)["assets_total"]), 0.0, "household k=0");
     for p in hh["points"].as_array().unwrap() {
         assert_close(f64_of(&p["liabilities_total"]), 0.0, "household liabilities");
@@ -467,8 +510,9 @@ async fn series_single_snapshot_today() {
     assert_eq!(pts.len(), 1);
     assert_eq!(i32_of(&pts[0]["month_index"]), 0);
     assert_close(f64_of(&pts[0]["assets_total"]), 10_000.0, "assets k=0");
-    assert_close(f64_of(&pts[0]["net_worth"]), 10_000.0, "nw k=0");
     assert_close(f64_of(&pts[0]["liabilities_total"]), 0.0, "liabilities k=0");
+    // Capture solo de `asset` → el pasivo no está fotografiado → sin `net_worth`.
+    assert_all_nw_null(&body, "capture solo de kind asset");
 
     // asset_series: la serie del asset vivo, nombre vivo, un valor.
     let series = body["asset_series"].as_array().unwrap();
@@ -591,11 +635,14 @@ async fn series_reaches_snapshots_taken_this_month() {
     );
 }
 
-/// `liabilities_snapshotted` distingue «no lo he fotografiado» de «no debo nada».
+/// `liabilities_snapshotted` distingue «no lo he fotografiado» de «no debo nada», y **manda sobre
+/// `net_worth`**.
 ///
 /// Sin snapshots de pasivo no hay timeline de ese kind y no hay fallback a las filas vivas, así que
-/// `liabilities_total` es 0 en toda la serie aunque haya una hipoteca abierta. La cifra no cambia
-/// —el histórico es lo que fotografiaste, y ése es su contrato—, pero deja de ser muda.
+/// `liabilities_total` es 0 en toda la serie aunque haya una hipoteca abierta. Esas dos cifras no
+/// cambian —el histórico es lo que fotografiaste, y ése es su contrato—, pero `net_worth` sí:
+/// pasa a `null`, porque `assets_total − 0` no es un patrimonio neto. Antes se publicaba como
+/// número, idéntico a `assets_total`, y contradecía a `GET /v1/summary` en la misma conversación.
 #[tokio::test]
 async fn liabilities_snapshotted_tells_missing_data_from_no_debt() {
     let app = TestApp::spawn().await;
@@ -650,8 +697,17 @@ async fn liabilities_snapshotted_tells_missing_data_from_no_debt() {
         0.0,
         "la cifra NO cambia: el histórico sigue siendo lo fotografiado",
     );
+    // `assets_total` sigue publicándose intacto…
+    assert_close(
+        f64_of(&point_at(&body, -1)["assets_total"]),
+        4000.0,
+        "assets_total intacto con el flag en false",
+    );
+    // …y `net_worth` desaparece de TODOS los puntos (no solo del último).
+    assert_all_nw_null(&body, "deuda viva sin fotografiar");
 
-    // Con una foto de pasivo, el flag se enciende.
+    // Con una foto de pasivo, el flag se enciende y `net_worth` vuelve, ya restando de verdad:
+    // en k=-1 (la fecha de ambos snapshots) vale 4000 − 600 = 3400 exacto.
     backfill(
         &app,
         &owner,
@@ -662,4 +718,74 @@ async fn liabilities_snapshotted_tells_missing_data_from_no_debt() {
     .await;
     let (body2, _, _) = get_series(&app, &owner.cookie, "").await;
     assert_eq!(body2["liabilities_snapshotted"], serde_json::json!(true), "{body2}");
+    assert_close(
+        nw_of(point_at(&body2, -1)).expect("net_worth con el flag en true"),
+        3400.0,
+        "nw k=-1 = 4000 − 600",
+    );
+}
+
+/// EL CASO DIFÍCIL: el hogar es la **suma** de las series de cada usuario, así que basta con que
+/// UNO no haya fotografiado su pasivo para que el neto agregado esté inflado.
+///
+/// El flag es por eso un `all`, no un `any`: con Alice fotografiando su préstamo y Bob no, un `any`
+/// daría `true` y el hogar publicaría `activos − deuda_de_Alice`, un número que ya no coincide con
+/// `assets_total` y que por tanto **parece** un patrimonio neto correcto. Es la misma mentira que
+/// el flag existe para impedir, solo que indetectable a ojo.
+///
+/// Y `?view=mine` no se contagia: el scope de Alice está completo, así que ella sí ve su neto.
+#[tokio::test]
+async fn household_net_worth_needs_every_member_to_have_snapshotted_liabilities() {
+    let app = TestApp::spawn().await;
+    let alice = app.register_and_login_owner("alice").await;
+    let bob = app.register_and_approve_member(&alice, "bob", "member").await;
+    let (_, anchor) = server_today(&app, &alice.cookie).await;
+    let d = add_months_signed(anchor, -1);
+
+    // Alice: activos 1000 + pasivo 300, ambos fotografiados. Bob: solo activos 600 (su deuda,
+    // exista o no, nunca se ha fotografiado).
+    backfill(&app, &alice, "asset", d, serde_json::json!([{"label": "A1", "value": "1000"}])).await;
+    backfill(&app, &alice, "liability", d, serde_json::json!([{"label": "L1", "value": "300"}])).await;
+    backfill(&app, &bob, "asset", d, serde_json::json!([{"label": "B1", "value": "600"}])).await;
+
+    // Household: assets 1600, liabilities 300 (solo las de Alice) → `any` habría publicado
+    // net_worth = 1300, que no es el neto del hogar ni el de nadie.
+    let (hh, _, _) = get_series(&app, &alice.cookie, "").await;
+    assert_close(f64_of(&point_at(&hh, -1)["assets_total"]), 1600.0, "household assets k=-1");
+    assert_close(f64_of(&point_at(&hh, -1)["liabilities_total"]), 300.0, "household liabs k=-1");
+    assert_all_nw_null(&hh, "hogar con un miembro sin pasivo fotografiado");
+
+    // Mine de Alice: su scope está completo → 1000 − 300 = 700.
+    let (mine_a, _, _) = get_series(&app, &alice.cookie, "?view=mine").await;
+    assert_eq!(mine_a["liabilities_snapshotted"], serde_json::json!(true), "{mine_a}");
+    assert_close(
+        nw_of(point_at(&mine_a, -1)).expect("net_worth de Alice"),
+        700.0,
+        "mine alice nw k=-1",
+    );
+
+    // Mine de Bob: incompleto → sin neto, con sus activos intactos.
+    let (mine_b, _, _) = get_series(&app, &bob.cookie, "?view=mine").await;
+    assert_close(f64_of(&point_at(&mine_b, -1)["assets_total"]), 600.0, "mine bob assets k=-1");
+    assert_all_nw_null(&mine_b, "mine de bob, sin pasivo fotografiado");
+
+    // Bob DECLARA que no debe nada capturando un snapshot de pasivo (la cabecera se escribe aunque
+    // no tenga ni una fila viva). El hogar recupera su neto: 1600 − 300 = 1300 — el mismo número
+    // que el `any` habría dado, pero ahora respaldado por un hecho que Bob ha afirmado.
+    let cap = app
+        .post_json_with_cookie(
+            "/v1/history/snapshots/capture",
+            serde_json::json!({"kinds": ["liability"]}),
+            &bob.cookie,
+        )
+        .await;
+    assert_eq!(cap.status, http::StatusCode::OK, "{cap:?}");
+
+    let (hh2, _, _) = get_series(&app, &alice.cookie, "").await;
+    assert_eq!(hh2["liabilities_snapshotted"], serde_json::json!(true), "{hh2}");
+    assert_close(
+        nw_of(point_at(&hh2, -1)).expect("net_worth del hogar ya completo"),
+        1300.0,
+        "household nw k=-1 = 1600 − 300",
+    );
 }

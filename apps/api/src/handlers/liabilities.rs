@@ -638,6 +638,25 @@ pub async fn create_liability(
 /// `principal` explícito o `derive_principal_from_plan` (cuota + frecuencia + fecha fin →
 /// principal = Σ cuotas en `fixed_payments`, valor actual al TIN en `french`). Invalidación FULL
 /// dentro.
+/// Cota superior de `payment_end_date`. Literal completo en el error a propósito: ver la nota en
+/// `handlers::max_user_settable_future_date`.
+async fn validate_payment_end_date_range(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    payment_end_date: Option<NaiveDate>,
+) -> Result<(), ApiError> {
+    let Some(d) = payment_end_date else {
+        return Ok(());
+    };
+    let today = crate::handlers::installation::installation_naive_today(pool, iid).await?;
+    if d > crate::handlers::max_user_settable_future_date(today) {
+        return Err(ApiError::BadRequest(
+            "payment_end_date_out_of_range: payment_end_date must not be more than 100 years in the future".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn create_liability_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -646,6 +665,7 @@ pub(crate) async fn create_liability_core(
 ) -> Result<LiabilityResponse, ApiError> {
     assert_liability_category(&state.pool, iid, body.category_id).await?;
     assert_expense_category(&state.pool, iid, body.expense_category_id).await?;
+    validate_payment_end_date_range(&state.pool, iid, body.payment_end_date).await?;
 
     let label = normalize_label(&body.label)?;
     let type_tag = normalize_type_tag(&body.type_tag)?;
@@ -879,6 +899,10 @@ pub(crate) async fn patch_liability_core(
     )?;
 
     let new_pay_end = body.payment_end_date.or(current.payment_end_date);
+    // Solo lo que el patch INTRODUCE: una fila antigua fuera de cota sigue siendo editable.
+    if body.payment_end_date.is_some() {
+        validate_payment_end_date_range(&state.pool, iid, new_pay_end).await?;
+    }
 
     let new_notes = match &body.notes {
         Some(_) => normalize_notes(&body.notes)?,

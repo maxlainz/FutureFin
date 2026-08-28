@@ -387,6 +387,37 @@ pub(crate) async fn create_categorization_rule_core(
         validate_rule_assignment(pool, iid, k, body.assign_category_id).await?;
     }
 
+    // Duplicado → 409, que es lo que el contrato promete desde siempre («Ya existe una regla con
+    // ese (source, pattern)») y lo que hasta 4.3.1 NO pasaba con las reglas agnósticas: la
+    // constraint UNIQUE no atrapa `source IS NULL` porque en SQL `NULL <> NULL`, así que dos
+    // llamadas idénticas sin `source` creaban dos reglas y devolvían 200 las dos veces. Es el caso
+    // por defecto (el campo es opcional) y el caso del reintento tras un timeout.
+    //
+    // La comparación es `COALESCE(source,'')` —`normalize_source` ya convierte `""` en NULL, así
+    // que no hay colisión espuria— y NO mira `match_kind`, para que la promesa se cumpla igual con
+    // `source` y sin él. El índice parcial de 20260828120000 es el respaldo en carrera; es más
+    // estrecho a propósito (ver la cabecera de esa migración).
+    let dup: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM categorization_rules
+           WHERE installation_id = $1 AND owner_user_id = $2
+             AND COALESCE(source, '') = COALESCE($3, '')
+             AND pattern = $4
+           LIMIT 1"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .bind(source.as_deref())
+    .bind(&pattern)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(existing) = dup {
+        return Err(ApiError::ConflictWith(format!(
+            "rule_duplicate: a rule for source {} and pattern '{}' already exists ({existing}); patch it instead of creating a second one",
+            source.as_deref().unwrap_or("(any bank)"),
+            pattern
+        )));
+    }
+
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO categorization_rules
                (installation_id, owner_user_id, match_kind, pattern, source,
@@ -509,7 +540,23 @@ pub struct ApplyRuleOutcome {
     /// Desglose de las filas que cambiarían por su categoría ACTUAL.
     pub by_current_category: Vec<ApplyRuleCategoryCount>,
     /// Hasta 10 `resumen` de ejemplo, para verificar que se tocaría lo correcto sin releer nada.
+    /// Con `assigns_nothing = true` los ejemplos son de los movimientos **ensombrecidos**, no de
+    /// los que cambiarían (no cambia ninguno).
     pub sample: Vec<String>,
+    /// `true` ⟺ la regla no tiene `assign_kind`, así que **no asigna nada**. Alcanzable desde el
+    /// propio catálogo (`clear_assign_kind`). Solo puede salir `true` en `dry_run`: aplicarla de
+    /// verdad sigue siendo `rule_not_applicable` (400), porque no hay nada que escribir.
+    pub assigns_nothing: bool,
+    /// Movimientos donde ESTA regla gana la precedencia sin asignar nada Y otra regla se la
+    /// habría llevado. Es la huella real de una regla que no asigna: no categoriza, **tapa**.
+    /// Retirarla deja que esas otras reglas actúen en los imports futuros. `0` salvo con
+    /// `assigns_nothing = true` (no se calcula en el caso normal: costaría un pase extra de
+    /// precedencia por fila para un dato que allí no significa nada).
+    pub shadowed_transactions: i64,
+    /// Explicación en prosa cuando la huella necesita una, hoy solo el caso `assigns_nothing`.
+    /// `null` en el caso normal — los contadores ya se explican solos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -550,12 +597,29 @@ pub(crate) async fn apply_categorization_rule_core(
             .find(|r| r.id == rule_id)
             .ok_or(ApiError::NotFound)?
     };
-    let assign_kind = target
-        .assign_kind
-        .clone()
-        .ok_or_else(|| ApiError::BadRequest("rule_not_applicable: rule has no assign_kind to apply".into()))?;
-    // La categoría pudo cambiar de scope desde que se creó la regla: revalidar una vez, no por fila.
-    super::assert_transaction_category(pool, iid, &assign_kind, target.assign_category_id).await?;
+    // Una regla SIN `assign_kind` no asigna nada (y por el invariante de `patch_rule_core`,
+    // tampoco puede llevar categoría). Aplicarla de verdad sigue siendo un 400: no hay nada que
+    // escribir. **Previsualizarla, en cambio, es una pregunta legítima y hasta 4.3.1 reventaba**:
+    // el preview de `delete_categorization_rule` entra por aquí con `dry_run = true`, así que
+    // borrar la regla a ciegas (`confirm: true`) funcionaba y previsualizarla fallaba con
+    // «rule_not_applicable», un mensaje que en ese contexto no quiere decir nada. El peor patrón
+    // posible: lo destructivo pasa y lo seguro no.
+    //
+    // ¿Qué es la huella de una regla que no asigna nada? No es «cero movimientos afectados»: la
+    // regla SÍ participa en la precedencia de `match_rule`, así que puede **tapar** a otra que sí
+    // asignaría (`suggest_kind_category` cae al default por signo cuando gana una regla sin
+    // `assign_kind`). Eso es lo que cuenta `shadowed_transactions` y lo que dice `note`.
+    let assign_kind = target.assign_kind.clone();
+    match &assign_kind {
+        // La categoría pudo cambiar de scope desde que se creó la regla: revalidar una vez, no por fila.
+        Some(k) => super::assert_transaction_category(pool, iid, k, target.assign_category_id).await?,
+        None if !dry_run => {
+            return Err(ApiError::BadRequest(
+                "rule_not_applicable: rule has no assign_kind to apply".into(),
+            ))
+        }
+        None => {}
+    }
 
     let rules = load_rules(pool, iid, user_id).await?;
 
@@ -599,6 +663,14 @@ pub(crate) async fn apply_categorization_rule_core(
     let mut to_update: Vec<Uuid> = Vec::new();
     let mut by_cat: Vec<(Option<Uuid>, Option<String>, i64)> = Vec::new();
 
+    // Conjunto de reglas SIN esta, para responder «¿quién ganaría si no existiera?». Solo hace
+    // falta en el caso `assigns_nothing`; en el normal ni se materializa.
+    let others: Vec<LoadedRule> = if assign_kind.is_none() {
+        rules.iter().filter(|r| r.id != rule_id).cloned().collect()
+    } else {
+        Vec::new()
+    };
+
     for r in &rows {
         if r.transfer_counterpart_id.is_some() {
             out.skipped_reconciled += 1;
@@ -619,13 +691,31 @@ pub(crate) async fn apply_categorization_rule_core(
             }
             continue;
         }
-        if r.kind.as_deref() == Some(assign_kind.as_str())
+        let Some(assign_kind) = assign_kind.as_deref() else {
+            // Gana la precedencia y no asigna nada: el movimiento se queda como está. Solo cuenta
+            // como ensombrecido si OTRA regla se lo habría llevado — si no la hay, esta regla no
+            // le está tapando nada a nadie y retirarla no cambiaría el import.
+            if match_rule(&others, &r.source, &r.concept).is_some() {
+                out.shadowed_transactions += 1;
+                if out.sample.len() < 10 {
+                    out.sample.push(format!(
+                        "{} · {} · {} ({})",
+                        r.op_date,
+                        r.concept,
+                        r.amount,
+                        r.kind.as_deref().unwrap_or("-")
+                    ));
+                }
+            }
+            continue;
+        };
+        if r.kind.as_deref() == Some(assign_kind)
             && r.category_id == target.assign_category_id
         {
             out.already_correct += 1;
             continue;
         }
-        if r.kind.as_deref() != Some(assign_kind.as_str()) {
+        if r.kind.as_deref() != Some(assign_kind) {
             out.would_change_kind += 1;
         }
         match by_cat.iter_mut().find(|(id, _, _)| *id == r.category_id) {
@@ -653,6 +743,19 @@ pub(crate) async fn apply_categorization_rule_core(
         })
         .collect();
 
+    if assign_kind.is_none() {
+        // `dry_run` garantizado: sin él ya se devolvió `rule_not_applicable` arriba.
+        out.assigns_nothing = true;
+        out.note = Some(format!(
+            "Esta regla no asigna nada (sin `assign_kind`), así que no categoriza ningún movimiento: \
+             su huella de cambio es cero por definición, no porque no haya trabajo. Lo que sí hace es \
+             ganar la precedencia y TAPAR a otras reglas en {n} movimiento(s) ({muestra}); retirarla \
+             dejaría que esas reglas se apliquen en los imports futuros.",
+            n = out.shadowed_transactions,
+            muestra = if out.sample.is_empty() { "sin ejemplos" } else { "ver `sample`" },
+        ));
+    }
+
     if dry_run || to_update.is_empty() {
         return Ok(out);
     }
@@ -661,7 +764,7 @@ pub(crate) async fn apply_categorization_rule_core(
         r#"UPDATE transactions SET kind = $1, category_id = $2, updated_at = now()
            WHERE id = ANY($3)"#,
     )
-    .bind(&assign_kind)
+    .bind(assign_kind.as_deref())
     .bind(target.assign_category_id)
     .bind(&to_update)
     .execute(pool)
@@ -684,6 +787,9 @@ impl ApplyRuleOutcome {
             skipped_reconciled: 0,
             by_current_category: Vec::new(),
             sample: Vec::new(),
+            assigns_nothing: false,
+            shadowed_transactions: 0,
+            note: None,
         }
     }
 }

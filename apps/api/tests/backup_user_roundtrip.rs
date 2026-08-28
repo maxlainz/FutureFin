@@ -1173,3 +1173,55 @@ async fn v10_french_liability_without_apr_still_imports() {
         .await;
     assert_eq!(series.status, http::StatusCode::OK, "series: {series:?}");
 }
+
+/// **Un `.ffbackup` antiguo con reglas de categorización duplicadas sigue importándose.**
+///
+/// Hasta 4.3.1 la unicidad de las reglas agnósticas (`source` ausente) no existía —en SQL
+/// `NULL <> NULL`—, así que dos POST idénticos creaban dos reglas y ese estado pudo exportarse.
+/// El índice único parcial que cierra el agujero (migración
+/// `20260828120000_categorization_rules_unique_agnostic`) convertiría ese fichero en
+/// **inimportable**: el segundo INSERT daría 23505 → 409 y el usuario se quedaría sin su única vía
+/// de recuperación. El import descarta la copia y **cuenta lo que entró**, no lo que traía el
+/// fichero.
+#[tokio::test]
+async fn a_legacy_backup_with_duplicate_agnostic_rules_still_imports() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let regla = serde_json::json!({
+        "match_kind": "substring", "pattern": "MERCADONA",
+        "source": null, "assign_kind": "expense", "assign_category_ref": null
+    });
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [],
+        "categorization_rules": [regla.clone(), regla],
+        "recurring_transaction_rules": [],
+        "transfer_match_rejections": []
+    });
+    let b64 = craft_ffbackup_b64(10, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(
+        applied.status,
+        http::StatusCode::OK,
+        "un backup con duplicados no puede volverse inimportable: {applied:?}"
+    );
+    assert_eq!(
+        applied.json()["imported"]["categorization_rules"].as_u64(),
+        Some(1),
+        "el contador dice lo que ENTRÓ, no lo que traía el fichero: {}",
+        applied.json()
+    );
+    assert_eq!(app.count_rows("categorization_rules").await, 1);
+}

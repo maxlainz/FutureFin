@@ -62,8 +62,8 @@
       ]
     },
     {
-      "description_len": 376,
-      "description_sha256_12": "7155d23b6499",
+      "description_len": 747,
+      "description_sha256_12": "7ff1acd50e38",
       "name": "create_categorization_rule",
       "properties": [
         "assign_category_id",
@@ -263,8 +263,8 @@
       ]
     },
     {
-      "description_len": 920,
-      "description_sha256_12": "de12bdd09caa",
+      "description_len": 1265,
+      "description_sha256_12": "f9e52a45169b",
       "name": "get_allocation_resolution",
       "properties": [
         "view"
@@ -281,8 +281,8 @@
       "required": []
     },
     {
-      "description_len": 251,
-      "description_sha256_12": "f7d78955b6e4",
+      "description_len": 753,
+      "description_sha256_12": "8cb3ff87c7cf",
       "name": "get_category_monthly_series",
       "properties": [
         "category_id",
@@ -295,8 +295,8 @@
       ]
     },
     {
-      "description_len": 701,
-      "description_sha256_12": "fb31cfa42c27",
+      "description_len": 1046,
+      "description_sha256_12": "7fd798d6e63c",
       "name": "get_history",
       "properties": [
         "include_asset_series",
@@ -306,8 +306,8 @@
       "required": []
     },
     {
-      "description_len": 650,
-      "description_sha256_12": "17edffd427a8",
+      "description_len": 990,
+      "description_sha256_12": "7e92bdb60492",
       "name": "get_history_cashflow",
       "properties": [
         "include_curve",
@@ -318,8 +318,8 @@
       "required": []
     },
     {
-      "description_len": 1154,
-      "description_sha256_12": "3bd5372a4ab4",
+      "description_len": 1607,
+      "description_sha256_12": "f856420b86ba",
       "name": "get_projection",
       "properties": [
         "include_asset_series",
@@ -345,8 +345,8 @@
       "required": []
     },
     {
-      "description_len": 964,
-      "description_sha256_12": "631fab21038c",
+      "description_len": 1538,
+      "description_sha256_12": "ae81b8ae8aaf",
       "name": "get_transactions_summary",
       "properties": [
         "avg_window",
@@ -482,8 +482,8 @@
       "required": []
     },
     {
-      "description_len": 3055,
-      "description_sha256_12": "e776a7904b5d",
+      "description_len": 3821,
+      "description_sha256_12": "5ed53e0cbdfa",
       "name": "simulate_projection",
       "properties": [
         "annual_inflation_percent",
@@ -658,8 +658,8 @@
       ]
     },
     {
-      "description_len": 238,
-      "description_sha256_12": "bae2e57a2857",
+      "description_len": 599,
+      "description_sha256_12": "711198c55c78",
       "name": "update_transaction",
       "properties": [
         "amount",
