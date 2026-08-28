@@ -29,7 +29,7 @@ counts refreshed **2026-08-22 for the
 4.0.0 train** (apertura pública + auditoría previa): **33** integration-test files in
 `apps/api/tests/` (nuevos `account_and_members.rs` y `openapi_contract.rs`), **42** migraciones,
 `.ffbackup` `CURRENT_SCHEMA_VERSION` = **9**, catálogo MCP en **52** tools
-(`grep -c '#[tool(' apps/api/src/mcp/server.rs`), suite en **498** (`cargo test --workspace`) y
+(`grep -c '#\[tool(' apps/api/src/mcp/server.rs` — **con el corchete escapado**: sin escapar, `#[tool(` es una clase de caracteres sin cerrar y grep aborta con un error de sintaxis en vez de dar un número), suite en **498** (`cargo test --workspace`) y
 Vitest en **368** en 16 ficheros. `apps/api/Cargo.toml` lee `4.0.0` y `CHANGELOG.md` lleva su sección
 `## [4.0.0] - 2026-08-22`. **Cambia además una puerta**: desde 4.0.0 CI corre la integración, ESLint y
 Vitest (job `integration` con servicio Postgres + job `web`), así que «verde en CI» ya significa algo
@@ -88,9 +88,14 @@ a real Postgres (Section 6); they are **not** run in CI, so running them locally
 | **Docs-only** | `CLAUDE.md`, `.claude/*.md`, `README.md`, CHANGELOG wording | No test gates. Gate = accuracy: verify every command/path/claim against the code before writing it (docs have drifted before — eight errata were found and fixed on 2026-07-02; prefer commands over frozen counts, e.g. `ls apps/api/migrations \| wc -l`). Record unfixable drift in futurefin-docs-and-writing §7. |
 | **Infra-release** | `Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose*.yml`, `.github/workflows/*`, **`addon/` y `repository.yaml`** (el paquete del add-on de Home Assistant: la misma imagen distribuida por un segundo canal — un `config.yaml` mal formado llega a la tienda de todos los suscriptores, y HA lee CUALQUIER `config.{yaml,yml,json}` del repo como add-on, de ahí la guarda del job `secrets-scan`), version bump, tag | CI green on `dev` — **including the `docker-stack` job, which since 3.0.0 is the only automated evidence of "no data loss"; never merge on a red or skipped one**; full local Docker-stack test (Section 4.2) before tagging, **plus the V2→V3 upgrade drill with real seeded data** (4.2, step B) — the published image now carries the database, so a bad entrypoint destroys installations that never ran your code path in CI; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. Any edit to `docker-entrypoint.sh` also needs `shellcheck -S warning` clean (CI gates it). |
 
-CI (`.github/workflows/ci.yml`, runs on push/PR to `main` and `dev`) covers three jobs:
+CI (`.github/workflows/ci.yml`, runs on push/PR to `main`) covers **five** jobs
+(`sed -n '/^jobs:/,$p' .github/workflows/ci.yml | grep -E '^  [a-z_-]+:$'` — el grep a secas sobre todo el fichero da 8, porque `push:`/`pull_request:`/`workflow_dispatch:` cuelgan de `on:` con la misma indentación):
+- `secrets-scan` — blocking and first: ningún dato personal en ficheros trackeados.
 - `rust` — `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked`.
-- `web` — `npm run typecheck:web` + `npm run build:web`.
+- `web` — `npm run typecheck:web` + `lint:web` + `npm test --workspace futurefin-web` + `build:web`.
+- `integration` — servicio `postgres:16.4-alpine` + `cargo test --workspace --locked`. **Es la
+  mayor parte de la suite**, y desmiente la frase «CI no corre los tests de integración» que aún
+  arrastran otras tres skills (corregidas en la Fase 7).
 - `docker-stack` — `shellcheck` on the entrypoint and `scripts/*.sh`, an image build, then the
   container's real data paths: image sanity + **no-volume guard** (a volume-less `docker run` must
   abort), fresh install → `/v1/ready` + seeded data, watchtower-style `--force-recreate` keeping
@@ -542,8 +547,7 @@ trusting:
   `grep -n 'db-only' apps/api/docker-entrypoint.sh`
 - Shellcheck gate reproduces locally: `shellcheck -S warning apps/api/docker-entrypoint.sh scripts/*.sh scripts/diagnostics/*.sh`
 - Publish trigger + registries: `cat .github/workflows/publish-image.yml`
-- Coherencia CHANGELOG/tags/Releases: `./scripts/audit-releases.sh` (38 tags = 38 Releases el 2026-08-21;
-  12 secciones sin tag, todas deliberadas)
+- Coherencia CHANGELOG/tags/Releases: `./scripts/audit-releases.sh` (**el 2026-08-29: 64 secciones, 51 tags, 13 sin tag, 0 tags sin Release, «Sin deriva bloqueante»**; eran 38 tags = 38 Releases y 12 secciones sin tag el 2026-08-21). Lo que el gate vigila es la lista de «Tags SIN sección en el CHANGELOG», que debe estar **vacía** — los totales son informativos y envejecen solos
 - Backup schema version + chain: `grep -n 'CURRENT_SCHEMA_VERSION\|migrate_to_current' apps/api/src/handlers/backup_user/schema.rs`
 - Scope helpers exist: `grep -n 'pub fn scope_where\|bind_scope' apps/api/src/handlers/person_view.rs`
 - f64 wire exception boundary: `grep -n 'f64' .claude/api-routes.md`
@@ -555,8 +559,7 @@ trusting:
   resucitó el modelo de dos ramas
 - Una sola rama viva: `git ls-remote --heads origin | grep -c 'refs/heads/dev$'` debe dar **0**, y
   `ls scripts/release-to-main.sh` debe fallar
-- Workflows completos y su gate: `ls .github/workflows/` (**6** on 2026-08-24, incl.
-  `dependabot-alerts-mirror.yml`) y `grep -n actionlint .github/workflows/ci.yml` (debe imprimir)
+- Workflows completos y su gate: `ls .github/workflows/` (**7** el 2026-08-29 — eran 6 el 2026-08-24; el séptimo es `routine-lock-janitor.yml`, que borra la rama `ops/routine-lock` al ver su punta `LIBERADO`) y `grep -n actionlint .github/workflows/ci.yml` (debe imprimir)
 - Ramas protegidas y ajustes de seguridad de GitHub (viven fuera del repo, no en git):
   `gh api repos/maxlainz/FutureFin/rulesets --jq '.[].name'` (**Proteger main**) y
   `gh api repos/maxlainz/FutureFin --jq '.security_and_analysis'` (secret scanning + push

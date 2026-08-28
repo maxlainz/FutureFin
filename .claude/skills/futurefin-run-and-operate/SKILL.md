@@ -873,8 +873,11 @@ is NEWER than the image (contains migrations the binary does not ship), the down
 ### 5.4 Application backup: per-user `.ffbackup`
 
 Verified against `apps/api/src/routes/mod.rs` and `apps/api/src/handlers/backup_user/`.
-Unchanged by 3.0.0 — same endpoints, same `schema_version` **6**. (`GET /v1/backup/export.zip`
-has not existed since v1.0.9.) The real endpoints (all POST, session cookie required):
+Unchanged by 3.0.0 — same endpoints. **`schema_version` is 10 as of 4.2.0** (this section said
+**6** until the Fase-7 sweep of 2026-08-29, i.e. it had missed four format bumps: never trust the
+number here, read it from the source of truth —
+`grep -n 'CURRENT_SCHEMA_VERSION: u32' apps/api/src/handlers/backup_user/schema.rs`). (`GET
+/v1/backup/export.zip` has not existed since v1.0.9.) The real endpoints (all POST, session cookie required):
 
 | Endpoint | Role required | Notes |
 |---|---|---|
@@ -900,15 +903,30 @@ Semantics you must not misremember:
   decrypting. Wrong password ⇒ generic decrypt failure (indistinguishable from corruption,
   by design). **If the user forgets the password that was current at export time, the file is
   unrecoverable.**
-- **`schema_version` compatibility** (currently 6): v1..v5 files still import — they are
-  migrated forward in memory (v1/v2 legacy per-asset contribution fields are **dropped**, not
+- **`schema_version` compatibility** (currently **10**; recount with the `grep` above): every
+  older file still imports — the chain is applied in memory, `payload_v1_to_v2` → … →
+  `payload_v9_to_v10`, so a v1 file walks all nine steps. Verify the chain has no hole with
+  `grep -n 'fn payload_v[0-9]*_to_v[0-9]*' apps/api/src/handlers/backup_user/schema.rs`. The
+  older steps: (v1/v2 legacy per-asset contribution fields are **dropped**, not
   converted to allocation rules; v3→v4 fills an empty history-snapshot list; v4→v5 fills empty
   transactions/imports/rules; v5→v6 fills an empty recurring-rules list; the user reconfigures
   rules after import — deliberate, owner-signed-off in v1.1.0). v4 (v1.5.0) added the user's
   history snapshots; on import each snapshot item is re-linked to the freshly-created
   asset/liability UUIDs (`ledger_index`) or keeps its `item_key` verbatim. v5 (v1.6.0) added the
   spending transactions/imports/categorization rules; v6 (v1.8.0) added recurring-transaction
-  rules (+ `BackupTransaction.recurring_rule_index`), all re-linked by index on import. Files with
+  rules (+ `BackupTransaction.recurring_rule_index`), all re-linked by index on import. **Los
+  cuatro saltos que esta sección se había perdido**: **v7** (3.9.0) *retira* el `day_of_month` por
+  regla — las reglas son de resolución mensual y el materializador fecha las instancias a fin de
+  mes; el campo se descarta. **v8** (3.5.0/3.6.0) añade la conciliación de transferencias: los
+  ficheros ≤v7 entran sin contrapartida y con la lista de rechazos vacía, y el pase post-import
+  re-concilia lo que corresponda. **v9** sustituye el cursor `last_materialized_month` por el ancla
+  `origin_month` — el cursor NO es el origen (es el mes más reciente ya materializado), así que se
+  reconstruye desde la instancia MÁS ANTIGUA de la regla presente en el propio payload, con el
+  cursor solo como cota de último recurso; es la misma regla que aplica la migración de BD
+  `20260821120000_recurring_converge_on_real_movement`, para que importar un backup y actualizar una
+  instalación den el mismo ancla. **v10** (4.2.0) marca todo pasivo de un backup anterior como
+  `fixed_payments`, que es EXACTAMENTE el modelo con el que se calcularon sus números al exportar:
+  restaurar un backup viejo **no puede mover una proyección**. Files with
   a schema_version NEWER than the server's are rejected with "update FutureFin to import this
   backup" — so **a v6 `.ffbackup` cannot be imported into a ≤1.7.x server** (clean rejection, not
   corruption). Format/DTO code:
@@ -1084,7 +1102,7 @@ Re-verify before trusting volatile facts:
   (fail-loud parsing, the add-on-only panic, and the `ha_sso_url=…` field of the `server config`
   startup line); error codes seen by the user:
   `grep -n 'ha_state_mismatch\|ha_exchange_failed\|ha_identity_failed\|ha_sso_disabled' apps/api/src/handlers/ha_sso.rs`.
-  Pinned by `apps/api/tests/ha_idp_login.rs` (17 tests). No migration ships with it — clearing the
+  Pinned by `apps/api/tests/ha_idp_login.rs` (18 tests). No migration ships with it — clearing the
   option is a complete rollback.
 - **Downgrade refusal banner (§2.3, added 2026-08-27)**:
   `grep -n 'NO ARRANCA\|MigrationError::Downgrade\|VersionMissing' apps/api/src/db.rs`;
@@ -1094,5 +1112,5 @@ Re-verify before trusting volatile facts:
   `grep -n 'mcp_disabled_answers_json_even_with_the_spa_mounted' apps/api/tests/mcp_http.rs`.
 - **`FUTUREFIN_PUBLIC_URL` accepts a subpath + the missing-variable warn (§3.9, v4.4.0)**:
   `grep -n 'fn public_url\|normalize_prefix' apps/api/src/main.rs`;
-  `grep -n 'warn_missing_public_url_for_prefix' apps/api/src/main.rs`;
+  `grep -n 'warn_missing_public_url_for_prefix' apps/api/src/oauth/url.rs` (**no `main.rs`**: la función vive en `oauth/url.rs` y este grep daba vacío; `futurefin-config-and-flags` ya apuntaba al fichero correcto);
   `grep -n 'public_url_with_a_subpath_prefixes_every_advertised_url' apps/api/tests/oauth_flow.rs`.

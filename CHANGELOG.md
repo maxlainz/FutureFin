@@ -39,6 +39,39 @@ bump y la publicación van al final.
 - Test `every_input_schema_forbids_unknown_properties` añadido **como `#[ignore]`**: hoy 51 de 52
   tools aceptan campos desconocidos en silencio. Es la diana de la Fase 2 (#83).
 
+### Deriva documental: verificar en vez de escribir (Fase 7 — issue #88)
+
+Última fase. Los ocho puntos del issue ya estaban cerrados por los barridos de las fases 4–6, así
+que ésta no fue escribir documentación: fue **comprobar afirmación por afirmación** lo que siete
+fases de cambios habían dejado obsoleto.
+
+- **Se ejecutaron los 528 comandos de re-verificación** que las skills llevan en sus secciones de
+  procedencia. Varios ya no encontraban nada — y un `grep` que no encuentra nada es **deriva
+  silenciosa**: o el comando está mal escrito (uno abortaba por un corchete sin escapar, otro
+  buscaba en un fichero donde la función ya no vive) o describe algo que se retiró. Tres daban
+  falsos positivos dentro de otra palabra, que se leen como «esto ya se empezó».
+- **La afirmación más cara: «CI no corre los tests de integración contra Postgres».** Es falsa
+  desde 4.0.0 y estaba en **cinco skills**. Cualquiera que la leyera se saltaría evidencia creyendo
+  que no existe.
+- **«Las rentabilidades negativas se clampan a 0 %»** también era falsa: el motor las compone hacia
+  abajo y tiene test propio desde hace tiempo. El grep de re-verificación de esa misma fila salía
+  vacío y nadie lo había mirado.
+- El registro de paridad tenía cuatro filas bajo el título **«gaps pendientes»** que el texto de
+  debajo declaraba cerradas: quien escaneara la tabla veía cuatro huecos que ya no existían.
+- Y una que llegaba al usuario final: `SECURITY.md` y `docs/mcp.md` enumeraban **siete** tools con
+  `confirm_token` y omitían la octava — la misma errata que el servidor ya había corregido en su
+  `instructions`.
+
+Además, arreglado en código lo que no era documentación: el esquema de `suggest_transfer_matches`
+—el texto que **lee el modelo**— anunciaba «default 15» cuando el real es 30, y topaba en 60 días
+mientras la core acepta 365, así que `window_days: 90` funcionaba por HTTP y fallaba por MCP. Y el
+hex hardcodeado de los tooltips pasa a ser un token con el mismo valor en los dos temas: era una
+excepción legítima, pero tácita, y una excepción que no se puede nombrar acaba copiándose a sitios
+donde el tema sí importa.
+
+**Cinco incoherencias código↔contrato quedan abiertas como issues** (#95, #96, #97, #99), todas
+preexistentes y ninguna arreglable desde documentación.
+
 ### Capacidades nuevas: el catálogo pasa de 52 a 68 tools (Fase 6 — issue #87)
 
 La paridad de **rutas** era casi perfecta, pero paridad de rutas ≠ paridad de **capacidades**: la

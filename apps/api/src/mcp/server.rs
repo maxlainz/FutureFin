@@ -1721,7 +1721,7 @@ pub struct DeleteByIdParams {
 /// `apply_categorization_rule`, `materialize_recurring` y `unreconcile_transfer`, que no usan este
 /// struct). Enumerarla a mano en prosa ya se quedó corta una vez —el `instructions` decía siete y
 /// omitía `delete_allocation_rule`—, así que si vuelves a escribir el número, cuéntalo con
-/// `grep -c 'confirm_token.as_deref' apps/api/src/mcp/server.rs`.
+/// `grep -c 'two_phase(' apps/api/src/mcp/server.rs` (contar por `confirm_token.as_deref` falla: este comentario contiene la cadena y se cuenta a sí mismo).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteWithTokenParams {
@@ -1903,10 +1903,11 @@ pub struct FindDuplicateTransactionsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SuggestTransferMatchesParams {
-    /// Días máximos entre las dos patas (1–60, default 15). El pase automático usa 5, y
-    /// `within_auto_window` dice si la propuesta cae dentro.
+    /// Días máximos entre las dos patas (1–365, default 30). El pase automático usa 5, y
+    /// `within_auto_window` dice si la propuesta cae dentro. La ventana es más ancha que la del
+    /// pase a propósito: los pares de ≤5 días ya los concilia él solo.
     #[serde(default)]
-    #[schemars(range(min = 1, max = 60))]
+    #[schemars(range(min = 1, max = 365))]
     pub window_days: Option<i32>,
     /// Propuestas devueltas (1–100, default 20).
     #[serde(default)]
@@ -3563,7 +3564,9 @@ impl FutureFinMcp {
             // El aviso de proyección se calcula aquí y no en la core: la core no debe saber
             // cómo se presenta su resultado.
             let effects = serde_json::json!({
-                // Forma común de los 14 previews: `entity` = sobre qué se actúa,
+                // Forma común de TODOS los previews (el contador vive en §5 de la skill de paridad: NO lo
+                // escribas aquí con su propio patrón de grep, o el comentario se cuenta a sí mismo):
+                // `entity` = sobre qué se actúa,
                 // `side_effects` = todo lo que cambia MÁS ALLÁ de esa entidad.
                 "entity": {"rule_id": rule_id},
                 "side_effects": {

@@ -245,6 +245,6 @@ v1.1.0, v1.2.0, v1.3.0, v1.4.0, v1.4.2) and the working tree. Re-verify before t
 - Parity fixture + both consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
 - Cache smoke script: `ls scripts/smoke-projection-cache.sh`
 - Migration count (do not quote a stale number): `ls apps/api/migrations | wc -l`
-- CI still excludes Postgres integration tests: `grep -n "cargo test" .github/workflows/ci.yml`
+- ~~CI still excludes Postgres integration tests~~ — **falso desde 4.0.0** (job `integration`, `cargo test --workspace --locked` contra un Postgres de servicio). Corregido en la Fase 7: `grep -n "cargo test" .github/workflows/ci.yml`
 - Case citations: `grep -n "1.0.20\|inline-flex" CHANGELOG.md`, `grep -n "month_index" CHANGELOG.md` (v1.4.2 entry), `grep -n "warm-up\|Sin warm-up" CHANGELOG.md`
 - Sibling skills referenced here: `ls .claude/skills/` (some may still be in authoring as of 2026-07-02)

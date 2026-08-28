@@ -350,11 +350,43 @@ bug que sigue vivo**, que es peor que la errata.
 | 5 | `apps/api/tests/query_param_validation.rs`, `VIEW_ROUTES` | La tabla enumera las rutas que aceptan `?view=` | **Le faltan dos de la Fase 6**: `/v1/changes` y `/v1/allocation-rules/goals` aceptan `view` y no están en la tabla (el diff solo añadió `aggregate` y `duplicates`). Es un hueco de cobertura del test que existe precisamente para cazar el enum que cae al default en silencio. Verificado 2026-08-28 |
 | 7 | `apps/api/tests/mcp_http.rs`, doc-comments de siete tests («las 52 tools», «51 de las 52») — **no `server.rs`, que no tiene ninguna** | 7 menciones a un catálogo de 52 | Son **68** desde la Fase 6. Las siete están en `apps/api/tests/mcp_http.rs` (líneas ~2219, 2399, 2471, 2551, 2562, 2592, 2608) y describen mediciones **fechadas** de fases anteriores, así que varias son históricamente correctas — pero al menos dos (`tools_list_freezes_…` y el tope por descripción) hablan del estado **actual**. Verificado 2026-08-28 |
 
-| 8 | `apps/api/src/mcp/server.rs`, el `instructions` del servidor (bloque ESCRITURA) | Enumera **siete** tools que exigen `confirm_token`: `delete_import`, `delete_asset`, `delete_liability`, `delete_snapshot`, `apply_categorization_rule`, `unreconcile_transfer`, `materialize_recurring` | **Son ocho desde la Fase 6**: falta **`delete_allocation_rule`** (`grep -c 'confirm_token.as_deref' apps/api/src/mcp/server.rs` → 8). **Es la errata más cara de esta tabla**: el `instructions` es el único texto que TODA sesión lee, y es exactamente el modo de fallo que la Fase 5 existe para evitar — una descripción que se queda falsa en silencio al añadir una tool. La documentación (`CLAUDE.md`, `data-model.md`, `api-routes.md`) sí dice ocho y las lista. Verificado 2026-08-28 |
 | 9 | `apps/api/src/handlers/projection.rs`, comentario junto a los ejes de `liability_overrides` | Dice que esos ejes no mueven el objetivo FIRE «ni las bases de los caps» | La segunda mitad es falsa: `debt_service` incluye ahora la amortización extra y el techo de un cap `months_expense` es `N × (expense + debt_service)`, así que **sí se mueve** en un what-if que amortiza. Efecto de segundo orden, alcanzable solo desde `simulate_projection` y **sin test que lo cubra**; documentado como tal en `.claude/engine.md` §AllocationRule y en `futurefin-fire-domain-reference` §5. Verificado 2026-08-28 |
 | 10 | `apps/api/src/handlers/projection.rs`, doc-comment de `deflator_at_month_index` | «Un único helper con **dos** callers» | Son **cuatro**: `deflate_points_to_today` (→ `milestones_real`), `points[].net_worth_real`, `final_net_worth_real` de `simulate_projection` (+ su delta) y `deflate_amount_core`. La afirmación de unicidad sigue siendo cierta y es la que importa; lo que caducó es el recuento. Verificado 2026-08-28 |
 | 11 | `apps/api/tests/mcp_http.rs`, doc-comment de `tool_descriptions_stay_within_the_context_budget` | «con **cinco** por encima de 1.200» (medición pre-Fase 5) | Son **seis** en el fixture de aquel commit. Medición histórica congelada en prosa, del tipo que §3.1 desaconseja: es reproducible (`git show 51b7675:apps/api/tests/fixtures/mcp-catalog.json`) y aun así se escribió a mano. Verificado 2026-08-28 |
 
+
+**Barrido 2026-08-29 para MCP Fase 7 (issue #88) — ocho erratas nuevas, TODAS del lado del CÓDIGO**
+(la pasada volvía a ser documentación-only). Seis son contadores que la Fase 3 escribió en prosa y
+que la Fase 6 movió sin que nadie los tocara; las otras dos son peores porque **desarman su propia
+comprobación**:
+
+| # | Doc & location | It says | Reality (verified 2026-08-29) |
+|---|---|---|---|
+| 12 | `apps/api/src/mcp/server.rs`, doc-comment de `DeleteWithTokenParams` (≈L1720/L1724) | Prescribe contar las tools de dos fases con `grep -c 'confirm_token.as_deref' apps/api/src/mcp/server.rs` y dice que da **8** | Ese comando da **10**: el propio comentario contiene la cadena dos veces —una de ellas es la línea que prescribe el grep—, así que **el patrón se cuenta a sí mismo**. Contador auto-referencial. Comandos que sí dan 8: `grep -c '= two_phase('` o `grep -c 'p\.confirm_token\.as_deref()'`. Ironía documentada: ese mismo comentario advierte de que «enumerarla a mano en prosa ya se quedó corta una vez». `futurefin-mcp-parity` §5 ya usa el comando bueno |
+| 13 | `apps/api/src/confirm_token.rs` (≈L35) | «`grep -c 'confirm_token.as_deref()' apps/api/src/mcp/server.rs` da las **7**» | El **comando** es correcto (con paréntesis no se autocuenta: da **8**); el **número** es de antes de la Fase 6. Cambiar solo el 7 por un 8 basta |
+| 14 | `apps/api/src/confirm_token.rs` (≈L32) | «no se exige en las **14** tools con preview» | **17** (`grep -c 'p.confirm.unwrap_or(false)'`) |
+| 15 | `apps/api/src/confirm_token.rs` (≈L40) | «`apps/api/src/mcp/` no contiene SQL salvo el `SELECT` del kill-switch en `auth.rs`» | `grep -c 'sqlx::query' apps/api/src/mcp/auth.rs` → **4** desde la Fase 3: el SELECT del toggle **más** el INSERT, el UPDATE y la poda de `mcp_write_audit`. El invariante que sigue siendo absoluto es el de `server.rs` (**0**), y así lo formula ya `futurefin-mcp-parity` §4 paso 1 |
+| 16 | `apps/api/src/mcp/auth.rs` (≈L233) | «este gate es el único punto por el que pasan las **31** escrituras» | **40** (`grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs`) |
+| 17 | `apps/api/src/mcp/server.rs` (≈L3566) | «Forma común de los **14** previews» | **17** |
+| 18 | `apps/api/src/mcp/server.rs` (≈L401, doc de `NoParams`) | «para que su `inputSchema` publique `additionalProperties: false` como el de las otras **48**» | Son **67** las otras (68 tools). El 48 es de un catálogo de 49; ni siquiera casa con el 52 de la Fase 2 |
+| 19 | `apps/api/tests/mcp_write.rs` (≈L2524) | Comentario: «Las **7** que además exigen el token» | Su propio `assert_eq!(…, 8)` dos líneas más abajo. **El comentario contradice al assert que acompaña**, que es la peor variante: el test está bien y el humano que lo lea se lleva el número malo |
+
+Dos observaciones de esta pasada que **no** son erratas de un número sino asimetrías de diseño,
+anotadas por si el owner quiere issue:
+
+- **`confirm_token.rs` ≈L216 vs L219**: el doc dice que la poda barre «los caducados **y
+  consumidos**», pero el `DELETE` filtra solo `expires_at < now()`. No es un bug (un token consumido
+  se va cuando caduca, ≤10 min después), pero la frase promete una segunda condición que no existe.
+- **Owner-only comprobado en dos sitios distintos**: `update_fire_settings` lo comprueba **en la
+  tool** (`server.rs`), `update_installation_settings` **en la core** (`installation.rs`), y el
+  comentario de esta última dice explícitamente que la core es el sitio correcto «así una superficie
+  nueva no puede dejárselo». `patch_fire_settings_core` no comprueba owner, así que por HTTP lo pone
+  el handler: **dos comprobaciones paralelas del mismo permiso**, que es el patrón que D14 llama
+  *dual-branch drift*.
+
+**Retirada en esta pasada**: la antigua fila 8 (el `instructions` del servidor enumeraba siete tools
+con `confirm_token` y omitía `delete_allocation_rule`) — **ya está arreglada en el código**: el
+bloque ESCRITURA de `instructions` lista las ocho. Se borra la fila, según la norma de abajo.
 
 Tres **incoherencias preexistentes** con issue abierto que esta documentación describe tal cual son,
 sin propagar la promesa rota:
@@ -390,8 +422,9 @@ Re-verify with:
 - §7 sweep reproducible: `grep -rn 'split-dev\|futurefin-database\|POSTGRES_PASSWORD' --include='*.md' .`
   — every hit must be 2.x history, an explicit "no longer exists" note, or the test-DB `docker run`
 - Old errata stay fixed? (all must return empty/clean): `grep -n "no CI yet" .claude/tests.md`;
-  `grep -rn projection_target_age .claude/*.md apps/api/src crates` (only the historical mention
-  in data-model.md's "eliminada" note is expected); `grep -n AUTH_MODEL .claude/auth-and-membership.md`;
+  `grep -rn projection_target_age .claude/*.md apps/api/src crates` (**two** historical mentions are
+  expected, not one: data-model.md's "eliminada" note and engine.md's horizon-derivation note — cero
+  en `apps/api/src` y `crates`, que es lo que el check realmente vigila); `grep -n AUTH_MODEL .claude/auth-and-membership.md`;
   `grep -n export.zip README.md`; `grep -rn mac_target_age apps/api/src .claude/*.md`
 - CI scope claim — **since 4.0.0 both must PRINT something** (they used to have to print nothing;
   see §7's lesson on negative claims):
@@ -401,5 +434,5 @@ Re-verify with:
   `grep -n -A 9 'SETTINGS_SUBTAB_LABEL' apps/web/src/lib/navigation.ts`
 - Exemplar quotes intact: `grep -n "fix definitivo del solape" CHANGELOG.md` and
   `grep -n "Fix de deflactación del chart" CHANGELOG.md`
-- Release steps unchanged: `grep -n "Merge completo" CLAUDE.md`
+- Release steps unchanged: `grep -n "El merge del bump ES la publicación" CLAUDE.md` (**la cita vieja, «Merge completo», ya no existe**: el ritual se reescribió para el auto-tag-on-merge de 4.0.6, así que el grep anterior salía vacío y se leía como «la sección desapareció»)
 - Skill inventory for cross-refs: `ls .claude/skills/`

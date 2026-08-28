@@ -245,12 +245,15 @@ TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_
 Each integration test creates its own schema `ff_test_<uuid>` inside `futurefin_test`, applies all
 migrations there, and runs against the real router. Schemas are leaked on purpose (see trap T8).
 
-What CI runs (as of 2026-08-16, `.github/workflows/ci.yml`, three jobs): `rust` = `cargo build -p
-futurefin-api --locked` + `cargo test -p futurefin-engine --locked`; `web` = Node 24, `npm
-install` + `typecheck:web` + `build:web`; `docker-stack` = the shellcheck + image-sanity +
-five-scenario container suite described in §4. **CI still does NOT run the Postgres integration
-tests** — no `TEST_DATABASE_URL` in CI — so run `cargo test --workspace` locally before
-considering backend changes verified.
+What CI runs (**re-verified 2026-08-29; `.github/workflows/ci.yml` has FIVE jobs**, recount with
+`sed -n '/^jobs:/,$p' .github/workflows/ci.yml | grep -E '^  [a-z_-]+:$'`): `secrets-scan` (blocking, first); `rust` =
+`cargo build -p futurefin-api --locked` + `cargo test -p futurefin-engine --locked`; `web` = Node
+24, `npm install` + `typecheck:web` + `lint:web` + `npm test --workspace futurefin-web` +
+`build:web`; **`integration` = a `postgres:16.4-alpine` service + `cargo test --workspace
+--locked`**; `docker-stack` = the shellcheck + image-sanity + container suite described in §4.
+**This paragraph said "three jobs" and "CI still does NOT run the Postgres integration tests"
+until the Fase-7 sweep — both false since 4.0.0.** Running `cargo test --workspace` locally is
+still the fast loop, but it is no longer the only place those tests run.
 
 ## 6. How migrations run in dev
 

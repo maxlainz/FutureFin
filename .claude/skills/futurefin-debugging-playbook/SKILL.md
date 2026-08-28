@@ -556,7 +556,7 @@ mechanisms verified by reading code, not by running services. Re-verify before t
   `grep -n "socket-only\|unix_socket_directories\|listen_addresses\|logging_collector" apps/api/docker-entrypoint.sh`
 - Startup/shutdown milestones (trap 9, "Where the evidence lives"): entrypoint side
   `grep -n 'log "\|warn "' apps/api/docker-entrypoint.sh`; API side
-  `grep -n "futurefin starting\|database connected\|migrations applied\|server config\|serving web UI\|listening\|http server stopped\|database pool closed\|shutdown signal" apps/api/src/main.rs`
+  `grep -n "futurefin starting\|database connected\|migrations applied\|server config\|listening\|http server stopped\|database pool closed\|shutdown signal" apps/api/src/main.rs` (**`serving web UI` retirado del patrón**: ese hito de arranque ya no se emite, así que buscarlo solo añadía un término que nunca casa)
 - The exact FATAL strings of trap 12:
   `grep -n "no persistent volume\|refuse_external_database\|se ignora\|pre-migration backup FAILED\|cannot connect as role\|pg_upgrade needed" apps/api/docker-entrypoint.sh`
 - Nothing is ever deleted (moved aside instead):
