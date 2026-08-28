@@ -683,8 +683,8 @@ path to the process; it is never the default (`Disabled`), and an unknown peer (
      patrón hash-only + un solo uso + `consumed_at` marcado dentro del propio UPDATE que valida);
      la diferencia deliberada es el TTL — 10 min, no los 2 min de un code OAuth, porque aquí hay
      una PERSONA leyendo un preview en un chat, no una máquina respondiendo al instante. Se exige
-     solo en 7 de las 14 tools con preview: cascadas de tamaño no acotado y puertas de un solo
-     sentido — nunca en un borrado de una fila cuyo contenido íntegro ya viajó en el preview,
+     solo en 8 de las 17 tools con preview (7 de 14 hasta la Fase 6): cascadas de tamaño no
+     acotado y puertas de un solo sentido — nunca en un borrado de una fila cuyo contenido íntegro ya viajó en el preview,
      porque encarecer cada borrado trivial a dos viajes es la forma más rápida de que la ceremonia
      se lea como ruido y de que la gente aprenda a ignorarla.
 - **Consequences**: `materialize_recurring`, `reconcile_transfers` y `unreconcile_transfer` — las

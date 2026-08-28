@@ -253,7 +253,7 @@ writes:
 python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print('tools',len(t),'chars',sum(l),'max',max(l))"
 ```
 
-As of Fase 5: `tools 52 chars 21319 max 596`. Before Fase 5 (verified by diffing
+As of Fase 6 (issue #87): `tools 68 chars 23874 max 596` — **126 chars from the 24.000 budget**, so the next tool forces another rebalancing round before it can ship. As of Fase 5 it read `tools 52 chars 21319 max 596`. Before Fase 5 (verified by diffing
 `apps/api/src/mcp/server.rs` against `main`): 37,214 chars total, max 3,821, and **26**
 descriptions over 600 chars — not 12; that number appears in the CHANGELOG but does not
 match a direct count of the pre-Fase-5 source. Re-derive rather than trust either

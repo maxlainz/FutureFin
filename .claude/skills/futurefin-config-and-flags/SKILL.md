@@ -344,7 +344,7 @@ four share the pattern: `limit` omitted → the tool's default; `limit == 0` or 
 
 **The HTTP path is unchanged for the two new ones**: `GET /v1/history/snapshots` and
 `GET /v1/transactions/imports` call the same widened core with `limit = None`, which still skips
-`LIMIT`/`OFFSET` and the `COUNT` query — same pattern `list_transactions_core` already used for the
+`LIMIT`/`OFFSET` and the `COUNT` query — same pattern `list_transactions_query` already used for the
 HTTP/MCP split. Pagination here is an **MCP-tool-only** axis; it does not add HTTP query params.
 
 ### `GET /v1/transactions/*` — histórico de gasto query params (`apps/api/src/handlers/transactions/`, v1.6.0)

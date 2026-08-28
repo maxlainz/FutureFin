@@ -159,29 +159,39 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
     assert_eq!(
         names,
         vec![
+            "aggregate_transactions",
             "apply_categorization_rule",
             "capture_snapshot",
+            "confirm_transfer_match",
+            "create_allocation_rule",
             "create_asset",
+            "create_batch",
             "create_budget_entry",
             "create_categorization_rule",
             "create_category",
             "create_liability",
             "create_planning_flow",
+            "create_snapshot",
             "create_transaction",
+            "deflate_amount",
+            "delete_allocation_rule",
             "delete_asset",
             "delete_budget_entry",
             "delete_categorization_rule",
+            "delete_category",
             "delete_import",
             "delete_liability",
             "delete_planning_flow",
             "delete_recurring_rule",
             "delete_snapshot",
             "delete_transaction",
+            "find_duplicate_transactions",
             "get_allocation_resolution",
             "get_budget",
             "get_category_monthly_series",
             "get_history",
             "get_history_cashflow",
+            "get_liability_schedule",
             "get_projection",
             "get_settings",
             "get_summary",
@@ -190,8 +200,10 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "list_assets",
             "list_categories",
             "list_categorization_rules",
+            "list_goals",
             "list_liabilities",
             "list_planning_flows",
+            "list_recent_changes",
             "list_recurring_rules",
             "list_snapshots",
             "list_transaction_imports",
@@ -200,15 +212,19 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "materialize_recurring",
             "reconcile_transfers",
             "simulate_projection",
+            "suggest_transfer_matches",
             "unreconcile_transfer",
             "update_allocation_rule",
             "update_asset",
             "update_asset_value",
             "update_budget_entry",
             "update_categorization_rule",
+            "update_category",
             "update_fire_settings",
+            "update_installation_settings",
             "update_liability",
             "update_planning_flow",
+            "update_snapshot",
             "update_transaction",
             "update_transactions",
         ],
@@ -799,10 +815,16 @@ async fn tools_list_exposes_annotations_on_every_tool() {
         let is_write = name.starts_with("create_")
             || name.starts_with("update_")
             || name.starts_with("delete_")
+            // Verbos fuera de la convención `create_/update_/delete_`. `confirm_transfer_match`
+            // (4.4.0) escribe: enlaza las dos patas de un par y las saca de todos los agregados
+            // de flujo. Que su nombre empiece por `confirm_` es deliberado —el argumento es la
+            // confirmación de una propuesta del servidor, no un par de ids— y por eso el brazo
+            // tiene que ser explícito aquí en vez de derivarse del prefijo.
             || matches!(
                 name,
                 "capture_snapshot" | "materialize_recurring" | "reconcile_transfers"
                     | "unreconcile_transfer" | "apply_categorization_rule"
+                    | "confirm_transfer_match"
             );
         if is_write {
             assert_eq!(ann["readOnlyHint"], false, "tool {name}");
@@ -829,6 +851,10 @@ async fn tools_list_exposes_annotations_on_every_tool() {
                     name,
                     "capture_snapshot" | "materialize_recurring" | "reconcile_transfers"
                         | "apply_categorization_rule"
+                        // Reconfirmar un par ya conciliado devuelve el mismo par sin escribir
+                        // nada: `confirm_transfer_match_core` resuelve también los pares YA
+                        // casados entre sí, justo para poder anunciarlo.
+                        | "confirm_transfer_match"
                 );
             assert_eq!(ann["idempotentHint"], expect_idempotent, "tool {name}");
         } else {
@@ -1233,6 +1259,7 @@ async fn new_read_tools_match_http_endpoints() {
         )
         .await;
     assert_eq!(liab.status, http::StatusCode::CREATED, "{liab:?}");
+    let liab_id = liab.json()["id"].as_str().unwrap().to_string();
     let budget = app
         .post_json_with_cookie(
             "/v1/budget/entries",
@@ -1265,6 +1292,37 @@ async fn new_read_tools_match_http_endpoints() {
             "/v1/transactions/category-series?kind=expense",
             serde_json::json!({"kind": "expense"}),
         ),
+        // Fase 6 (issue #87). Las siete lecturas nuevas devuelven un OBJETO cuya core ya ecoa
+        // `view`, así que la tool es `to_tool_result(core(...))` a pelo y la paridad byte a byte
+        // es exactamente el contrato que prometen — ninguna necesita el sobre de
+        // NOTA-VIEW-ENVELOPE. La única que se queda fuera es `list_recent_changes`, porque su
+        // `now` es el instante de la consulta: dos llamadas no pueden coincidir byte a byte, y
+        // su paridad se prueba aparte ignorando ese campo.
+        (
+            "aggregate_transactions",
+            "/v1/transactions/aggregate",
+            serde_json::json!({}),
+        ),
+        (
+            "find_duplicate_transactions",
+            "/v1/transactions/duplicates",
+            serde_json::json!({}),
+        ),
+        (
+            "suggest_transfer_matches",
+            "/v1/transactions/transfer-matches",
+            serde_json::json!({}),
+        ),
+        (
+            "list_goals",
+            "/v1/allocation-rules/goals",
+            serde_json::json!({}),
+        ),
+        (
+            "deflate_amount",
+            "/v1/projection/deflate?amount=1000&month_index=120",
+            serde_json::json!({"amount": "1000", "month_index": 120}),
+        ),
     ] {
         let via_http = app.get_with_cookie(path, &owner.cookie).await;
         assert_eq!(via_http.status, http::StatusCode::OK, "{path}");
@@ -1275,6 +1333,197 @@ async fn new_read_tools_match_http_endpoints() {
             "paridad {tool} ↔ {path}"
         );
     }
+
+    // `get_liability_schedule` va suelto porque su ruta lleva el id en el path.
+    let path = format!("/v1/liabilities/{liab_id}/schedule");
+    let via_http = app.get_with_cookie(&path, &owner.cookie).await;
+    assert_eq!(via_http.status, http::StatusCode::OK, "{via_http:?}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_liability_schedule",
+            serde_json::json!({"liability_id": liab_id}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        tool_text_json(&envelope),
+        via_http.json(),
+        "paridad get_liability_schedule ↔ {path}"
+    );
+}
+
+/// `list_recent_changes` ↔ `GET /v1/changes`, **ignorando `now`**.
+///
+/// Es la única lectura de la Fase 6 que no puede compararse byte a byte: `now` es el instante en
+/// que se resolvió la consulta (y el `since` del siguiente sondeo), así que dos llamadas
+/// consecutivas difieren ahí por diseño. Todo lo demás —incluidos los avisos que hacen honesta a
+/// esta lectura: `covers_deletions`, `deletions_absent_reason` y `tables_missing_updated_at`—
+/// tiene que ser idéntico, y se comprueba aquí.
+#[tokio::test]
+async fn recent_changes_tool_matches_the_endpoint_except_for_now() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat = app.create_category(&owner, "expense", "Comida").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({
+                "op_date": "2026-07-10", "amount": "-25.00", "kind": "expense",
+                "concept": "mercado", "category_id": cat,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let since = "2000-01-01";
+    let via_http = app
+        .get_with_cookie(&format!("/v1/changes?since={since}"), &owner.cookie)
+        .await;
+    assert_eq!(via_http.status, http::StatusCode::OK, "{via_http:?}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_recent_changes", serde_json::json!({"since": since})),
+    )
+    .await;
+
+    let mut a = via_http.json();
+    let mut b = tool_text_json(&envelope);
+    // El aviso que hace honesta a esta lectura, comprobado antes de recortar nada.
+    assert_eq!(a["covers_deletions"], false, "{a}");
+    assert_eq!(a["deletions_absent_reason"], "no_tombstones", "{a}");
+    assert_eq!(
+        a["tables_missing_updated_at"],
+        serde_json::json!(["categories", "allocation_rules"]),
+        "las dos tablas sin updated_at se publican, no se omiten en silencio: {a}"
+    );
+    for v in [&mut a, &mut b] {
+        v.as_object_mut().unwrap().remove("now");
+    }
+    assert_eq!(b, a, "paridad list_recent_changes ↔ /v1/changes (sin `now`)");
+}
+
+/// La capacidad `prompts` (Fase 6, issue #87): tres flujos estáticos, sin argumentos y sin I/O.
+///
+/// **Qué cliente los ve**: el conector remoto de claude.ai soporta hoy sólo `tools` — prompts y
+/// resources no están soportados todavía en MCP remoto—, así que estos guiones sirven a Claude
+/// Code (donde aparecen como `/mcp__<servidor>__<prompt>`) y a los clientes MCP genéricos. El
+/// test existe igualmente: lo que se publica tiene que estar bien publicado.
+#[tokio::test]
+async fn prompts_are_listed_and_retrievable() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // La capacidad se anuncia en `initialize`: sin esto un cliente conforme ni pregunta.
+    let init = mcp_post(&app, &token, initialize_body()).await;
+    assert!(
+        init["result"]["capabilities"]["prompts"].is_object(),
+        "el servidor debe anunciar la capacidad `prompts`: {init}"
+    );
+
+    let listed = mcp_post(
+        &app,
+        &token,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "prompts/list",
+            "params": {"_meta": request_meta()}
+        }),
+    )
+    .await;
+    let mut names: Vec<String> = listed["result"]["prompts"]
+        .as_array()
+        .unwrap_or_else(|| panic!("prompts array: {listed}"))
+        .iter()
+        .map(|p| p["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "amortizar_o_invertir",
+            "auditoria_categorizacion",
+            "revision_mensual",
+        ],
+        "catálogo congelado de prompts"
+    );
+    for prompt in listed["result"]["prompts"].as_array().unwrap() {
+        assert!(prompt["title"].is_string(), "title legible: {prompt}");
+        assert!(prompt["description"].is_string(), "descripción: {prompt}");
+        // Sin argumentos a propósito: interpolar texto del cliente dentro de un guion que el
+        // modelo lee como instrucciones es exactamente lo que no queremos.
+        assert!(prompt.get("arguments").is_none(), "sin argumentos: {prompt}");
+    }
+
+    let got = mcp_post(
+        &app,
+        &token,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "prompts/get",
+            "params": {"name": "revision_mensual", "_meta": request_meta()}
+        }),
+    )
+    .await;
+    let messages = got["result"]["messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("messages: {got}"));
+    assert_eq!(messages.len(), 1, "{got}");
+    assert_eq!(messages[0]["role"], "user", "{got}");
+    let body = messages[0]["content"]["text"].as_str().unwrap();
+    // Las tres salvedades que este flujo existe para no dejar que un modelo se salte.
+    for needle in [
+        "savings_source",
+        "reconciled_excluded_count",
+        "`null` no es cero",
+    ] {
+        assert!(
+            body.contains(needle),
+            "el guion de la revisión mensual debe nombrar «{needle}»: {body}"
+        );
+    }
+
+    // Un nombre desconocido es un `invalid_params` que NOMBRA los que existen. Va por
+    // `app.request` y no por `mcp_post` porque rmcp devuelve los errores de protocolo con
+    // HTTP 400, no dentro de un envelope 200 (que es como viajan los errores de TOOL).
+    let bad = app
+        .request(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/mcp")
+                .header(http::header::HOST, "futurefin.test")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::ACCEPT, "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", PROTOCOL)
+                .header("Mcp-Method", "prompts/get")
+                .header("Mcp-Name", "no_existe")
+                .header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "prompts/get",
+                        "params": {"name": "no_existe", "_meta": request_meta()}
+                    }))
+                    .unwrap(),
+                ))
+                .expect("build MCP request"),
+        )
+        .await;
+    assert_eq!(bad.status, http::StatusCode::BAD_REQUEST, "{bad:?}");
+    let body = String::from_utf8(bad.body.clone()).expect("utf8");
+    assert!(
+        body.contains("revision_mensual"),
+        "el error debe listar los prompts disponibles: {body}"
+    );
 }
 
 #[tokio::test]
@@ -2554,6 +2803,7 @@ async fn every_decimal_uuid_and_date_param_carries_its_pattern() {
     const YM: &str = r"^\d{4}-\d{2}$";
     const UUID: &str =
         r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+    const MATCH_ID: &str = r"^[0-9a-f]{24}$";
 
     /// Los ÚNICOS decimales con signo, nombrados uno a uno: el signo es una decisión de dominio
     /// y una lista por sufijo la borraría (`create_budget_entry.amount` es > 0 y
@@ -2563,6 +2813,13 @@ async fn every_decimal_uuid_and_date_param_carries_its_pattern() {
         ("update_transaction", "amount"),
         ("list_transactions", "min_amount"),
         ("list_transactions", "max_amount"),
+        // Fase 6: la agregación comparte los filtros del listado, así que comparte su signo.
+        ("aggregate_transactions", "min_amount"),
+        ("aggregate_transactions", "max_amount"),
+        // El ítem del lote es el mismo alta que `create_transaction`: gasto negativo.
+        ("create_batch", "amount"),
+        // Deflactar un patrimonio negativo es una pregunta legítima.
+        ("deflate_amount", "amount"),
         ("simulate_projection", "extra_monthly_expense"),
         ("create_asset", "expected_annual_return_percent"),
         ("update_asset", "expected_annual_return_percent"),
@@ -2612,7 +2869,12 @@ async fn every_decimal_uuid_and_date_param_carries_its_pattern() {
             if !is_string {
                 continue;
             }
-            let expected = if param.ends_with("_id") {
+            // `match_id` acaba en `_id` y NO es un UUID: es el hash corto de una propuesta de
+            // `suggest_transfer_matches`, y ése es justo el punto (no nombra una fila, nombra
+            // un par que el servidor considera candidato). Publica su formato real.
+            let expected = if (name, param.as_str()) == ("confirm_transfer_match", "match_id") {
+                MATCH_ID
+            } else if param.ends_with("_id") {
                 UUID
             } else if param.ends_with("_date") || param == "op_date" || param == "date" {
                 YMD

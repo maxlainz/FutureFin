@@ -416,10 +416,22 @@ pub struct CreateTransactionRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct BatchCreateBody {
-    /// Los ítems aceptan la misma forma que el alta individual, pero `idempotency_key` **se
-    /// rechaza** en el lote (`idempotency_key_batch_unsupported`): un lote es todo-o-nada y
-    /// aceptar el campo para ignorarlo dejaría al llamante creyéndose protegido.
+    /// Los ítems aceptan la misma forma que el alta individual, pero un `idempotency_key` **por
+    /// ítem** se rechaza (`idempotency_key_batch_unsupported`): un lote es todo-o-nada, así que
+    /// una clave por ítem tendría que responder «3 de 5 se reproducen», que no significa nada.
+    /// La clave del lote es la de abajo.
     pub transactions: Vec<CreateTransactionRequest>,
+    /// Clave de idempotencia **del lote entero** (1–180 caracteres). Opcional y opt-in, igual que
+    /// la del alta individual.
+    ///
+    /// Un lote es UNA unidad de trabajo atómica, así que lleva UNA clave: misma clave + mismos
+    /// ítems en el mismo orden ⇒ se devuelven los N movimientos originales sin crear nada; misma
+    /// clave + cualquier cambio (un importe, el orden, el número de ítems) ⇒ 409
+    /// `idempotency_key_conflict`. El caso parcial no existe: los N INSERT y las N reclamaciones
+    /// de clave viajan en la misma transacción. Ámbito por usuario, caduca a las 24 h.
+    /// Ver `handlers/transactions/idempotency.rs`.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

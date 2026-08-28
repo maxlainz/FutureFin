@@ -49,7 +49,7 @@ use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
 use rust_decimal::Decimal;
 use sqlx::{FromRow, PgConnection, PgPool};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -66,14 +66,17 @@ pub struct ReconcileOutcome {
     pub transactions_reconciled: u32,
 }
 
-/// Candidatos a par sobre TODO el dataset del owner, con la pata de salida (`a.amount < 0`)
-/// primero — cada par aparece una única vez. `FOR UPDATE OF a, b` bloquea las filas devueltas y
-/// re-evalúa el predicado bajo concurrencia (READ COMMITTED): todo lo que llega al greedy sigue
-/// sin conciliar y es nuestro hasta el commit.
-fn candidates_sql() -> String {
-    let w = AUTO_MATCH_WINDOW_DAYS;
+/// EL predicado de candidatura, en un único sitio: mismo owner, misma divisa, importes
+/// exactamente opuestos, ninguna pata conciliada, par no rechazado y `|Δop_date| ≤ window_days`.
+///
+/// Lo comparten el pase de escritura (`auto_reconcile_owner`) y la lectura de sugerencias
+/// (`suggest_transfer_matches_core`). Es la razón de que exista esta función: dos copias del
+/// predicado divergirían, y entonces la lista de sugerencias propondría pares que el pase no
+/// haría —o callaría los que sí— sin que nada fallara.
+fn candidates_from_where(window_days: i32) -> String {
+    let w = window_days;
     format!(
-        r#"SELECT a.id AS out_id, b.id AS in_id
+        r#"
     FROM transactions a
     JOIN transactions b
       ON b.installation_id = a.installation_id
@@ -91,9 +94,24 @@ fn candidates_sql() -> String {
             SELECT 1 FROM transfer_match_rejections r
             WHERE r.transaction_a_id = LEAST(a.id, b.id)
               AND r.transaction_b_id = GREATEST(a.id, b.id)
-      )
-    ORDER BY abs(b.op_date - a.op_date) ASC, a.op_date ASC, b.op_date ASC, a.id ASC, b.id ASC
-    FOR UPDATE OF a, b"#
+      )"#
+    )
+}
+
+/// Orden TOTAL de los candidatos → el greedy es función del contenido de la BD, no del plan de
+/// Postgres ni del reloj. También compartido por lectura y escritura: si el orden divergiera, la
+/// sugerencia y el pase elegirían pares distintos entre los mismos candidatos.
+const CANDIDATES_ORDER: &str =
+    " ORDER BY abs(b.op_date - a.op_date) ASC, a.op_date ASC, b.op_date ASC, a.id ASC, b.id ASC";
+
+/// Candidatos a par sobre TODO el dataset del owner, con la pata de salida (`a.amount < 0`)
+/// primero — cada par aparece una única vez. `FOR UPDATE OF a, b` bloquea las filas devueltas y
+/// re-evalúa el predicado bajo concurrencia (READ COMMITTED): todo lo que llega al greedy sigue
+/// sin conciliar y es nuestro hasta el commit.
+fn candidates_sql() -> String {
+    format!(
+        "SELECT a.id AS out_id, b.id AS in_id{}{CANDIDATES_ORDER}\n    FOR UPDATE OF a, b",
+        candidates_from_where(AUTO_MATCH_WINDOW_DAYS)
     )
 }
 
@@ -101,6 +119,24 @@ fn candidates_sql() -> String {
 struct CandidateRow {
     out_id: Uuid,
     in_id: Uuid,
+}
+
+/// Desambiguación greedy sobre la lista YA ordenada: la primera aparición de cada pata gana y el
+/// resto de candidatos que la involucren se descartan en este pase. Función pura y compartida por
+/// el pase de escritura y la lectura de sugerencias — lo que se propone es exactamente lo que se
+/// haría.
+fn greedy_pairs(candidates: &[CandidateRow]) -> Vec<(Uuid, Uuid)> {
+    let mut used: HashSet<Uuid> = HashSet::new();
+    let mut out = Vec::new();
+    for c in candidates {
+        if used.contains(&c.out_id) || used.contains(&c.in_id) {
+            continue;
+        }
+        used.insert(c.out_id);
+        used.insert(c.in_id);
+        out.push((c.out_id, c.in_id));
+    }
+    out
 }
 
 /// Pase de auto-conciliación sobre todo el dataset del owner. Idempotente por construcción
@@ -119,21 +155,14 @@ pub(crate) async fn auto_reconcile_owner(
         .fetch_all(&mut *tx)
         .await?;
 
-    // Greedy sobre la lista ya ordenada (orden total → determinista): la primera aparición de
-    // cada pata gana; el resto de candidatos que la involucren se descartan en este pase.
-    let mut used: HashSet<Uuid> = HashSet::new();
+    // Greedy compartido con la lectura de sugerencias (orden total → determinista).
     let mut ids: Vec<Uuid> = Vec::new();
     let mut counterparts: Vec<Uuid> = Vec::new();
-    for c in candidates {
-        if used.contains(&c.out_id) || used.contains(&c.in_id) {
-            continue;
-        }
-        used.insert(c.out_id);
-        used.insert(c.in_id);
-        ids.push(c.out_id);
-        counterparts.push(c.in_id);
-        ids.push(c.in_id);
-        counterparts.push(c.out_id);
+    for (out_id, in_id) in greedy_pairs(&candidates) {
+        ids.push(out_id);
+        counterparts.push(in_id);
+        ids.push(in_id);
+        counterparts.push(out_id);
     }
     if ids.is_empty() {
         tx.rollback().await?;
@@ -509,6 +538,320 @@ pub(crate) async fn reconcile_now_core(
 }
 
 // ---------------------------------------------------------------------------
+// Sugerencias de par (LECTURA) y confirmación de una sugerencia
+// ---------------------------------------------------------------------------
+
+/// Ventana por defecto de la lista de sugerencias, en días.
+///
+/// Deliberadamente MÁS ANCHA que la del pase automático (5 días). El pase es de punto fijo, así
+/// que en una instalación sana **no queda ni un par dentro de sus 5 días**: una lista de
+/// sugerencias acotada a esa ventana saldría casi siempre vacía y no serviría para nada. El valor
+/// de esta ruta son justamente los pares que el pase NO puede hacer solo —SEPA lento, traspaso a
+/// caballo de dos meses—, que son los que necesitan que alguien mire.
+pub const DEFAULT_SUGGEST_WINDOW_DAYS: i32 = 30;
+/// Tope de la ventana pedible. También es el universo sobre el que se resuelve un `match_id`.
+pub const MAX_SUGGEST_WINDOW_DAYS: i32 = 365;
+const DEFAULT_SUGGEST_LIMIT: i64 = 20;
+const MAX_SUGGEST_LIMIT: i64 = 100;
+
+#[derive(Debug, FromRow)]
+struct SuggestRow {
+    out_id: Uuid,
+    in_id: Uuid,
+    out_op_date: chrono::NaiveDate,
+    in_op_date: chrono::NaiveDate,
+    out_concept: String,
+    in_concept: String,
+    out_amount: Decimal,
+    in_amount: Decimal,
+    out_kind: Option<String>,
+    in_kind: Option<String>,
+    currency: String,
+    day_gap: i32,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct TransferMatchLeg {
+    #[schema(value_type = String, format = "uuid")]
+    pub id: Uuid,
+    /// `YYYY-MM-DD`.
+    pub op_date: String,
+    pub concept: String,
+    /// Importe con signo.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct TransferMatchSuggestion {
+    /// Identificador **opaco y derivado** del par. Es lo único que hace falta para conciliarlo
+    /// (`POST /v1/transactions/transfer-matches/{match_id}`): no se puede fabricar para dos ids
+    /// cualesquiera, porque al confirmarlo el servidor solo lo busca entre SUS candidatos.
+    pub match_id: String,
+    /// Pata de salida (importe negativo).
+    pub outgoing: TransferMatchLeg,
+    /// Pata de entrada (importe positivo, exactamente opuesto).
+    pub incoming: TransferMatchLeg,
+    /// Magnitud del traspaso (siempre ≥ 0).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub amount: Decimal,
+    pub currency: String,
+    /// Días entre las dos fechas de operación.
+    pub day_gap: i64,
+    /// `true` ⇒ está dentro de la ventana del pase automático. En una instalación al día esto es
+    /// raro: el pase ya lo habría conciliado solo.
+    pub within_auto_window: bool,
+    /// `true` ⇒ alguna de las dos patas casaba también con OTRO movimiento. La propuesta sigue
+    /// siendo la que el pase automático elegiría (mismo orden total, mismo greedy), pero conviene
+    /// mirarla antes de confirmar.
+    pub ambiguous: bool,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct TransferMatchSuggestionsResponse {
+    /// Ventana aplicada, en días.
+    pub window_days: i64,
+    /// Ventana del pase automático, para interpretar `within_auto_window`.
+    pub auto_window_days: i64,
+    pub limit: i64,
+    /// Propuestas devueltas (tras el greedy y el `limit`).
+    pub suggestion_count: i64,
+    /// Pares candidatos ANTES del greedy. Mayor que `suggestion_count` ⇒ había ambigüedad.
+    pub candidate_pair_count: i64,
+    /// `true` ⇒ `limit` ha recortado la lista de propuestas.
+    pub truncated: bool,
+    /// Pares que cumplirían el criterio pero están **rechazados** (alguien los desconcilió a
+    /// mano). No se proponen; se cuentan para poder explicar por qué falta un par «obvio».
+    pub rejected_pairs_excluded: i64,
+    pub suggestions: Vec<TransferMatchSuggestion>,
+}
+
+/// Identificador derivado y estable de un par. Determinista sobre `(instalación, owner, ids
+/// ordenados)`, así que el mismo par produce el mismo `match_id` en dos peticiones seguidas y
+/// **nadie puede construir uno para un par que el servidor no considere candidato** (al
+/// confirmarlo, la única forma de resolverlo es re-encontrar el par entre los candidatos vivos).
+fn match_id_of(iid: Uuid, owner: Uuid, a: Uuid, b: Uuid) -> String {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let seed = format!("ffm1|{iid}|{owner}|{lo}|{hi}");
+    crate::auth::secret::sha256_hex(seed.as_bytes())[..24].to_string()
+}
+
+/// Candidatos crudos (pre-greedy) del owner dentro de `window_days`, con los datos para pintarlos.
+/// Usa EL MISMO predicado y EL MISMO orden que el pase de escritura — sin `FOR UPDATE`, porque
+/// esto es una lectura y una lectura no bloquea filas (ni las muta: D5).
+async fn suggest_candidates(
+    pool: &PgPool,
+    iid: Uuid,
+    owner: Uuid,
+    window_days: i32,
+) -> Result<Vec<SuggestRow>, ApiError> {
+    let sql = format!(
+        "SELECT a.id AS out_id, b.id AS in_id,
+                a.op_date AS out_op_date, b.op_date AS in_op_date,
+                a.concept AS out_concept, b.concept AS in_concept,
+                a.amount AS out_amount, b.amount AS in_amount,
+                a.kind AS out_kind, b.kind AS in_kind,
+                a.currency AS currency,
+                abs(b.op_date - a.op_date)::int AS day_gap{}{CANDIDATES_ORDER}",
+        candidates_from_where(window_days)
+    );
+    let rows: Vec<SuggestRow> = sqlx::query_as(&sql)
+        .bind(iid)
+        .bind(owner)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
+/// Core de LECTURA de las sugerencias de conciliación (`GET /v1/transactions/transfer-matches` +
+/// tool MCP `suggest_transfer_matches`).
+///
+/// **Es un GET y no muta nada.** Hasta 4.4.0 la única forma de ver un par candidato era
+/// **escribir** (`POST /v1/transactions/reconcile` ejecutaba el pase), y la tentación evidente
+/// —un `?dry_run` sobre ese POST— está descartada de antemano: un GET que muta ya costó caro en
+/// este repositorio (los GET que borraban pasivos vencidos) y tiene su propia entrada en la
+/// arqueología. Rutas distintas, verbos distintos.
+///
+/// Es **own-user** (como el resto de la conciliación: `reconcile_pair_core` exige que las dos
+/// patas sean del usuario), así que no acepta `view` ni publica ninguno.
+///
+/// Cache: NONE.
+pub(crate) async fn suggest_transfer_matches_core(
+    pool: &PgPool,
+    iid: Uuid,
+    owner: Uuid,
+    window_days: Option<i32>,
+    limit: Option<i64>,
+) -> Result<TransferMatchSuggestionsResponse, ApiError> {
+    let window_days = window_days.unwrap_or(DEFAULT_SUGGEST_WINDOW_DAYS);
+    if !(1..=MAX_SUGGEST_WINDOW_DAYS).contains(&window_days) {
+        return Err(ApiError::BadRequest(format!(
+            "window_days_out_of_range: window_days must be between 1 and {MAX_SUGGEST_WINDOW_DAYS}"
+        )));
+    }
+    let limit = limit.unwrap_or(DEFAULT_SUGGEST_LIMIT);
+    if !(1..=MAX_SUGGEST_LIMIT).contains(&limit) {
+        return Err(ApiError::BadRequest(format!(
+            "limit_out_of_range: limit must be between 1 and {MAX_SUGGEST_LIMIT}"
+        )));
+    }
+
+    let rows = suggest_candidates(pool, iid, owner, window_days).await?;
+    // Ambigüedad: una pata que aparece en más de un candidato. Se calcula ANTES del greedy, que
+    // es justo lo que la esconde.
+    let mut leg_hits: HashMap<Uuid, u32> = HashMap::new();
+    for r in &rows {
+        *leg_hits.entry(r.out_id).or_insert(0) += 1;
+        *leg_hits.entry(r.in_id).or_insert(0) += 1;
+    }
+    let candidate_pair_count = rows.len() as i64;
+
+    let flat: Vec<CandidateRow> = rows
+        .iter()
+        .map(|r| CandidateRow {
+            out_id: r.out_id,
+            in_id: r.in_id,
+        })
+        .collect();
+    let chosen = greedy_pairs(&flat);
+    let suggestion_count_total = chosen.len() as i64;
+
+    let by_pair: HashMap<(Uuid, Uuid), &SuggestRow> =
+        rows.iter().map(|r| ((r.out_id, r.in_id), r)).collect();
+    let suggestions: Vec<TransferMatchSuggestion> = chosen
+        .iter()
+        .take(limit as usize)
+        .filter_map(|pair| by_pair.get(pair).copied())
+        .map(|r| TransferMatchSuggestion {
+            match_id: match_id_of(iid, owner, r.out_id, r.in_id),
+            outgoing: TransferMatchLeg {
+                id: r.out_id,
+                op_date: r.out_op_date.format("%Y-%m-%d").to_string(),
+                concept: r.out_concept.clone(),
+                amount: crate::money::money_out(r.out_amount),
+                kind: r.out_kind.clone(),
+            },
+            incoming: TransferMatchLeg {
+                id: r.in_id,
+                op_date: r.in_op_date.format("%Y-%m-%d").to_string(),
+                concept: r.in_concept.clone(),
+                amount: crate::money::money_out(r.in_amount),
+                kind: r.in_kind.clone(),
+            },
+            amount: crate::money::money_out(r.in_amount.abs()),
+            currency: r.currency.clone(),
+            day_gap: r.day_gap as i64,
+            within_auto_window: r.day_gap <= AUTO_MATCH_WINDOW_DAYS,
+            ambiguous: leg_hits.get(&r.out_id).copied().unwrap_or(0) > 1
+                || leg_hits.get(&r.in_id).copied().unwrap_or(0) > 1,
+        })
+        .collect();
+
+    // Pares que el criterio encontraría pero que alguien rechazó al desconciliar. Se cuentan para
+    // que «¿por qué no me propone este par obvio?» tenga respuesta sin leer la BD a mano.
+    let rejected_pairs_excluded: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)::bigint
+           FROM transfer_match_rejections r
+           JOIN transactions a ON a.id = r.transaction_a_id
+           JOIN transactions b ON b.id = r.transaction_b_id
+           WHERE r.installation_id = $1
+             AND r.owner_user_id = $2
+             AND a.transfer_counterpart_id IS NULL
+             AND b.transfer_counterpart_id IS NULL
+             AND a.currency = b.currency
+             AND a.amount = -b.amount
+             AND abs(b.op_date - a.op_date) <= $3"#,
+    )
+    .bind(iid)
+    .bind(owner)
+    .bind(window_days)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(TransferMatchSuggestionsResponse {
+        window_days: window_days as i64,
+        auto_window_days: AUTO_MATCH_WINDOW_DAYS as i64,
+        limit,
+        suggestion_count: suggestions.len() as i64,
+        candidate_pair_count,
+        truncated: suggestion_count_total > suggestions.len() as i64,
+        rejected_pairs_excluded,
+        suggestions,
+    })
+}
+
+/// Confirma una sugerencia por su `match_id` (`POST /v1/transactions/transfer-matches/{match_id}`
+/// + tool MCP `confirm_transfer_match`).
+///
+/// ## Por qué esta forma y no dos UUID
+/// El registro de omisiones del MCP dejó `reconcile_pair` fuera del catálogo por un motivo que
+/// sigue vigente: emparejar **dos UUID elegidos a dedo** entre cientos es un footgun donde un
+/// error saca en silencio los dos movimientos de todos los agregados de flujo (y, en los modos B/C,
+/// mueve el ahorro que alimenta la proyección). Un `confirm: true` no arregla eso: el modelo
+/// confirmaría con la misma confianza con la que se equivocó.
+///
+/// Aquí el argumento **no es un par de ids: es el identificador de una propuesta del servidor**.
+/// El `match_id` se deriva de `(instalación, owner, ids ordenados)` y solo se resuelve
+/// re-buscándolo entre los candidatos vivos, así que el espacio de acciones alcanzables es
+/// exactamente el de los pares que el servidor propondría — un par arbitrario **no es
+/// expresable**. Y si el par dejó de ser candidato entre la sugerencia y la confirmación (una
+/// pata borrada, un importe editado, el pase automático adelantándose), el `match_id` no resuelve
+/// y sale un 404 `transfer_match_not_found` en vez de conciliar algo que ya no es lo mirado.
+///
+/// La validación de fondo (mismo owner, importes opuestos, misma divisa, idempotencia si ya están
+/// casados entre sí) y la invalidación COND siguen viviendo en `reconcile_pair_core`: esto no
+/// duplica nada, solo cambia CÓMO se nombra el par.
+pub(crate) async fn confirm_transfer_match_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    owner: Uuid,
+    match_id: &str,
+) -> Result<ReconcilePairResponse, ApiError> {
+    // Universo de resolución: la ventana MÁXIMA, superconjunto de cualquier ventana con la que se
+    // hayan pedido las sugerencias. Sigue siendo estrictamente más estrecho que el
+    // `reconcile_pair` manual, que no tiene ventana ninguna.
+    let rows = suggest_candidates(&state.pool, iid, owner, MAX_SUGGEST_WINDOW_DAYS).await?;
+    // Se busca sobre TODOS los candidatos, no solo sobre los ganadores del greedy: si el servidor
+    // llegó a considerar el par, confirmarlo es legítimo.
+    if let Some(r) = rows
+        .iter()
+        .find(|r| match_id_of(iid, owner, r.out_id, r.in_id) == match_id)
+    {
+        return reconcile_pair_core(state, iid, owner, r.out_id, r.in_id).await;
+    }
+
+    // Segundo universo: pares YA conciliados **entre sí**. Sin esto, reintentar la confirmación
+    // (un timeout de red, un cliente que reenvía) daría 404 sobre un trabajo que sí se hizo, y la
+    // tool MCP no podría anunciarse como idempotente. `reconcile_pair_core` ya devuelve el par tal
+    // cual cuando las dos patas se apuntan mutuamente, así que aquí basta con resolver el id.
+    let done: Vec<CandidateRow> = sqlx::query_as(
+        r#"SELECT a.id AS out_id, b.id AS in_id
+           FROM transactions a
+           JOIN transactions b ON b.id = a.transfer_counterpart_id
+           WHERE a.installation_id = $1
+             AND a.owner_user_id = $2
+             AND a.amount < 0"#,
+    )
+    .bind(iid)
+    .bind(owner)
+    .fetch_all(&state.pool)
+    .await?;
+    if let Some(r) = done
+        .iter()
+        .find(|r| match_id_of(iid, owner, r.out_id, r.in_id) == match_id)
+    {
+        return reconcile_pair_core(state, iid, owner, r.out_id, r.in_id).await;
+    }
+
+    Err(ApiError::NotFoundWith(
+        "transfer_match_not_found: no candidate transfer pair matches this match_id any more; list the suggestions again".into(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Handlers HTTP
 // ---------------------------------------------------------------------------
 
@@ -588,5 +931,69 @@ pub async fn unreconcile_transaction(
         return Err(ApiError::Forbidden);
     }
     let resp = unreconcile_core(&state, iid, user.id.0, id).await?;
+    Ok(Json(resp))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SuggestMatchesQuery {
+    /// Ventana máxima entre las dos fechas, en días (1..365, default 30).
+    #[serde(default)]
+    pub window_days: Option<i32>,
+    /// Propuestas a devolver (1..100, default 20).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/transactions/transfer-matches",
+    tag = "transactions",
+    params(
+        ("window_days" = Option<i32>, Query, description = "|Δop_date| máxima entre las dos patas (1..365, default 30). Más ancha que la del pase automático (5) a propósito: los pares de ≤5 días ya los concilia el pase solo."),
+        ("limit" = Option<i64>, Query, description = "Propuestas a devolver (1..100, default 20)."),
+    ),
+    responses(
+        (status = 200, description = "Pares candidatos a transferencia interna, propios del usuario. LECTURA pura: no concilia nada", body = TransferMatchSuggestionsResponse),
+        (status = 400, description = "`window_days_out_of_range` | `limit_out_of_range`"),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Not an installation member"),
+    )
+)]
+pub async fn suggest_transfer_matches(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    axum::extract::Query(q): axum::extract::Query<SuggestMatchesQuery>,
+) -> Result<Json<TransferMatchSuggestionsResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
+    let out =
+        suggest_transfer_matches_core(&state.pool, iid, user.id.0, q.window_days, q.limit).await?;
+    Ok(Json(out))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/transactions/transfer-matches/{match_id}",
+    tag = "transactions",
+    params(("match_id" = String, Path, description = "`match_id` devuelto por `GET /v1/transactions/transfer-matches`")),
+    responses(
+        (status = 200, description = "Par conciliado (ambas patas)", body = ReconcilePairResponse),
+        (status = 400, description = "`already_reconciled` | `transfer_amounts_not_opposite` | `transfer_currency_mismatch`"),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Viewer or not a member"),
+        (status = 404, description = "`transfer_match_not_found`: el par ya no es candidato (pata borrada, importe editado o conciliado entre medias)"),
+    )
+)]
+pub async fn confirm_transfer_match(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Path(match_id): Path<String>,
+) -> Result<Json<ReconcilePairResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
+    if !role_can_write(role.as_str()) {
+        return Err(ApiError::Forbidden);
+    }
+    let resp = confirm_transfer_match_core(&state, iid, user.id.0, &match_id).await?;
     Ok(Json(resp))
 }

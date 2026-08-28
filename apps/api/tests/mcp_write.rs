@@ -2150,7 +2150,7 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
 // Fase 0 del plan de mejora del MCP (issue #81) — la red que faltaba alrededor
 // del gate de escritura.
 //
-// Hasta aquí, la invariante «31 tools de escritura == 31 llamadas a
+// Hasta aquí, la invariante «N tools de escritura == N llamadas a
 // `require_mcp_write`» solo vivía en un `grep` dentro de un `.md`
 // (`futurefin-mcp-parity` §5). Una tool nueva que se olvidara del gate pasaba
 // TODA la CI en verde, y con ella un `viewer` podía escribir — o se podía
@@ -2209,19 +2209,21 @@ fn classify(envelope: &serde_json::Value) -> Outcome {
 /// **Por qué existe esta tabla** (la trampa que haría falso el test sin ella). Dos medidas
 /// tomadas el 2026-08-28 sobre `src/mcp/server.rs`, y las dos apuntan al mismo sitio:
 ///
-///   * **Estructural**: en **28 de las 31** tools de escritura el parseo de parámetros corre
+///   * **Estructural**: en **35 de las 40** tools de escritura el parseo de parámetros corre
 ///     ANTES del gate — el patrón `let run = || { … parse … }; match run() { Err(e) =>
-///     return to_tool_outcome(e) }`. Sólo tres (`capture_snapshot`, `materialize_recurring`,
-///     `reconcile_transfers`) llaman a `require_mcp_write` en la primera línea del bloque
+///     return to_tool_outcome(e) }`. Sólo cinco (`capture_snapshot`, `materialize_recurring`,
+///     `reconcile_transfers` y, desde la Fase 6, `confirm_transfer_match` —su `match_id` es una
+///     cadena opaca que no se parsea— y `update_installation_settings` —sus tres ejes son
+///     `Option<String>`—) llaman a `require_mcp_write` en la primera línea del bloque
 ///     asíncrono. (`unreconcile_transfer` pasó a parsear primero en la Fase 3: su preview
 ///     necesita el UUID para cargar las dos patas del par.)
-///   * **Observable**: **27 de las 31** declaran algún parámetro `required`, así que con
+///   * **Observable**: **35 de las 40** declaran algún parámetro `required`, así que con
 ///     `{}` mueren en la deserialización de rmcp y **nunca ejecutan el gate**. Con
 ///     argumentos vacíos sólo lo alcanzan `capture_snapshot`, `materialize_recurring`,
-///     `reconcile_transfers` y `update_fire_settings`.
+///     `reconcile_transfers`, `update_fire_settings` y `update_installation_settings`.
 ///
-/// Es decir: un test que barriera las 31 con `{}` y aceptara «cualquier error» daría verde
-/// aunque el gate no existiera en 27 de ellas. De ahí la tabla.
+/// Es decir: un test que barriera las 40 con `{}` y aceptara «cualquier error» daría verde
+/// aunque el gate no existiera en 35 de ellas. De ahí la tabla.
 ///
 /// Decisión (issue #81, punto 1): se implementan **las dos vías**, y la tabla es
 /// **exhaustiva** — una tool de escritura nueva sin fila aquí hace fallar el test con
@@ -2272,6 +2274,24 @@ fn write_probe(name: &str) -> Option<serde_json::Value> {
         "delete_snapshot" => json!({"id": ID}),
         "delete_import" => json!({"id": ID}),
         "update_fire_settings" => json!({"swr_pct": "3.5"}),
+        // Fase 6 (issue #87).
+        "create_batch" => json!({
+            "transactions": [
+                {"op_date": "2026-07-01", "concept": "probe", "amount": "-1.00", "kind": "expense"}
+            ]
+        }),
+        "create_snapshot" => json!({"kind": "asset", "snapshot_date": "2026-07-01"}),
+        "update_snapshot" => json!({"id": ID}),
+        "create_allocation_rule" => {
+            json!({"target_asset_id": ID, "kind": "fixed", "amount": "10.00"})
+        }
+        "delete_allocation_rule" => json!({"id": ID}),
+        "update_category" => json!({"id": ID, "name": "probe"}),
+        "delete_category" => json!({"id": ID}),
+        // Gate primero: no parsea nada antes (el `match_id` es una cadena opaca del servidor).
+        "confirm_transfer_match" => json!({"match_id": "0123456789abcdef01234567"}),
+        // Gate primero: los tres ejes son `Option<String>` y no se parsean.
+        "update_installation_settings" => json!({"base_currency": "EUR"}),
         _ => return None,
     })
 }
@@ -2323,9 +2343,12 @@ async fn every_write_tool_rejects_a_viewer_and_the_disabled_toggle() {
     let writes = write_tool_names(&catalog);
     assert_eq!(
         writes.len(),
-        31,
-        "contador de futurefin-mcp-parity §5: 31 tools de escritura. Si has añadido o \
-         retirado una, actualiza el contador AQUÍ, en la skill y en CLAUDE.md a la vez: {writes:?}"
+        40,
+        "contador de futurefin-mcp-parity §5: 40 tools de escritura (31 hasta la Fase 5; la \
+         Fase 6 añade create_batch, create_snapshot, update_snapshot, create_allocation_rule, \
+         delete_allocation_rule, update_category, delete_category, confirm_transfer_match y \
+         update_installation_settings). Si has añadido o retirado una, actualiza el contador \
+         AQUÍ, en la skill y en CLAUDE.md a la vez: {writes:?}"
     );
 
     // --- Fase 1: barrido laxo con argumentos vacíos -------------------------
@@ -2466,12 +2489,12 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     const SRC: &str = include_str!("../src/mcp/server.rs");
     let blocks = tool_blocks();
 
-    // Contadores de futurefin-mcp-parity §5 (52 / 21 / 31 / 31, a 2026-08-27).
+    // Contadores de futurefin-mcp-parity §5 (68 / 28 / 40 / 40, a 2026-08-28, Fase 6).
     let read_only = blocks.iter().filter(|b| b.read_only).count();
     let writes = blocks.iter().filter(|b| !b.read_only).count();
-    assert_eq!(blocks.len(), 52, "total de tools (§5 de futurefin-mcp-parity)");
-    assert_eq!(read_only, 21, "tools de lectura + simulate (§5)");
-    assert_eq!(writes, 31, "tools de escritura (§5)");
+    assert_eq!(blocks.len(), 68, "total de tools (§5 de futurefin-mcp-parity)");
+    assert_eq!(read_only, 28, "tools de lectura + simulate (§5)");
+    assert_eq!(writes, 40, "tools de escritura (§5)");
     assert_eq!(
         read_only + writes,
         blocks.len(),
@@ -2479,35 +2502,43 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     );
     assert_eq!(
         SRC.matches("require_mcp_write(&self.state.pool").count(),
-        31,
+        40,
         "el nº de llamadas al gate debe ser EXACTAMENTE el nº de escrituras: una escritura \
          sin gate es un fallo de seguridad (viewer escribiendo, o escritura con el \
          kill-switch apagado); una llamada de más es una lectura que ya no lo es"
     );
     assert_eq!(
         SRC.matches("p.confirm.unwrap_or(false)").count(),
-        14,
+        17,
         "tools con preview/confirm (§5). Toda destructiva nueva debería sumar aquí. Subió de 11 \
          a 14 en la Fase 3 (issue #84): `materialize_recurring`, `reconcile_transfers` y \
          `unreconcile_transfer` eran destructivas SIN preview — dos de ellas irreversibles —, así \
-         que la regla «sin confirm en el esquema ⇒ no destructiva» era falsa en tres sitios"
+         que la regla «sin confirm en el esquema ⇒ no destructiva» era falsa en tres sitios. Y a \
+         17 en la Fase 6: `delete_allocation_rule`, `delete_category` y \
+         `update_installation_settings`. Las otras seis escrituras de la Fase 6 NO llevan preview \
+         a propósito: cuatro son altas (`create_*`), `update_snapshot` edita en sitio, y \
+         `confirm_transfer_match` ya tiene su preview en OTRA tool — `suggest_transfer_matches` \
+         es literalmente la fase 1, y el `match_id` que emite es lo que acota el espacio de \
+         acciones alcanzables"
     );
     // Las 7 que además exigen el token de un solo uso del preview (Fase 3). El `confirm`
     // booleano lo escribe el propio modelo, así que por sí solo nunca fue un control: sólo el
     // token demuestra que hubo un preview, y va ligado a la huella de los efectos.
     assert_eq!(
         SRC.matches("p.confirm_token.as_deref()").count(),
-        7,
+        8,
         "tools con confirmación en dos fases: las de cascada de tamaño no acotado \
          (delete_import, delete_asset, delete_liability, apply_categorization_rule, \
          materialize_recurring) y las puertas de un solo sentido (unreconcile_transfer, \
-         delete_snapshot). Los borrados de UNA fila cuyo contenido entero viaja en el preview NO \
-         llevan token a propósito: encarecerlos a dos viajes convierte la ceremonia en ruido"
+         delete_snapshot, y desde la Fase 6 delete_allocation_rule: borrar la regla redirige el \
+         sobrante mensual y recrearla no restaura su prioridad). Los borrados de UNA fila cuyo \
+         contenido entero viaja en el preview NO llevan token a propósito: encarecerlos a dos \
+         viajes convierte la ceremonia en ruido"
     );
     // Y la auditoría: cada gate abre una fila, y `settled` es el ÚNICO sitio donde se cierra.
     assert_eq!(
         SRC.matches("settled(&self.state.pool, audit").count(),
-        31,
+        40,
         "toda escritura cierra su fila de auditoría con `settled`; sin él la fila se queda en \
          `attempted` y el log calla el desenlace de justo las llamadas que fallaron"
     );
@@ -2912,7 +2943,29 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         "precondición: el par queda conciliado por el pase automático"
     );
 
-    // --- Los catorce previews. NINGUNO lleva `confirm`, así que nada se escribe.
+    // Una regla de cascada (el sumidero) y una categoría suelta, para los previews de la Fase 6.
+    // La regla apunta a un activo APARTE: colgarla de `asset_id` cambiaría los efectos
+    // colaterales que el preview de `delete_asset` comprueba al final de este test.
+    let asset2 = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_ast, "name": "Colchón", "current_value": "500"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset2_id = asset2.json()["id"].as_str().unwrap().to_string();
+    let alloc = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({"target_asset_id": asset2_id, "kind": "remainder"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(alloc.status, http::StatusCode::CREATED, "{alloc:?}");
+    let alloc_id = alloc.json()["id"].as_str().unwrap().to_string();
+    let spare_cat = app.create_category(&owner, "expense", "Ocio").await;
+
+    // --- Los diecisiete previews. NINGUNO lleva `confirm`, así que nada se escribe.
     let cases: Vec<(&'static str, serde_json::Value)> = vec![
         ("delete_asset", json!({"id": asset_id})),
         ("delete_liability", json!({"id": liab_id})),
@@ -2929,8 +2982,12 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         ("materialize_recurring", json!({})),
         ("reconcile_transfers", json!({})),
         ("unreconcile_transfer", json!({"transaction_id": leg_id})),
+        // Fase 6 (issue #87).
+        ("delete_allocation_rule", json!({"id": alloc_id})),
+        ("delete_category", json!({"id": spare_cat})),
+        ("update_installation_settings", json!({"base_currency": "EUR"})),
     ];
-    assert_eq!(cases.len(), 14, "los 14 previews del catálogo");
+    assert_eq!(cases.len(), 17, "los 17 previews del catálogo");
     for (tool, args) in cases {
         let preview = preview_of(args, tool).await;
         assert_shape(tool, &preview);
@@ -3144,4 +3201,566 @@ async fn mcp_only_errors_carry_a_stable_code() {
             "{tool}: el mensaje debe contener {needle:?}: {body}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fase 6 (issue #87) — las decisiones que hacen seguras las nueve escrituras nuevas.
+// ---------------------------------------------------------------------------
+
+/// `create_allocation_rule` **no puede crear el sumidero**, y sí una regla capada.
+///
+/// La asimetría que justifica el `SinkPolicy::Forbidden`: crear el sumidero donde no había
+/// redirige TODO el sobrante de golpe y **no se deshace por el mismo canal** — borrar el único
+/// sumidero devuelve `remainder_required`, así que la única salida es un `update` que lo
+/// convierta en otra cosa. Un formulario que enseña la cascada entera hace evidente ese estado;
+/// una conversación, no.
+#[tokio::test]
+async fn create_allocation_rule_refuses_the_sink_and_shares_the_core() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid, owner.user_id);
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_ast, "name": "Indexado", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+
+    // El sumidero: `remainder` SIN tope. Rechazado con su código propio, no con un 500 ni con
+    // un éxito silencioso.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_allocation_rule",
+            json!({"target_asset_id": asset_id, "kind": "remainder"}),
+        ),
+    )
+    .await;
+    match classify(&envelope) {
+        Outcome::ToolError { message, .. } => assert!(
+            message.starts_with("sink_creation_not_allowed"),
+            "el rechazo del sumidero debe llevar su código: {message}"
+        ),
+        other => panic!("crear el sumidero desde MCP debe fallar, y devolvió {other:?}"),
+    }
+
+    // Un `remainder` CON tope sí: deja de ser el sumidero.
+    app.warm_household(&owner.cookie, &key).await;
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_allocation_rule",
+                json!({"target_asset_id": asset_id, "kind": "remainder",
+                       "cap_kind": "amount", "cap_value": "5000"}),
+            ),
+        )
+        .await,
+    );
+    let rule_id = out["id"].as_str().expect("id de la regla creada").to_string();
+    assert!(out["impact"].is_object(), "la cascada mueve la proyección: {out}");
+    app.assert_invalidated(&key, "create_allocation_rule").await;
+
+    // Core compartida: la fila es indistinguible por HTTP.
+    let via_http = app.get_with_cookie("/v1/allocation-rules", &owner.cookie).await;
+    let rules = via_http.json();
+    let row = rules
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(rule_id))
+        .unwrap_or_else(|| panic!("la regla creada por MCP no aparece por HTTP: {rules}"));
+    assert_eq!(row["cap_kind"], "amount", "{row}");
+    assert_eq!(row["cap_value"], "5000.0000", "{row}");
+
+    // Y el preview del borrado dice A DÓNDE deja de ir el dinero, no solo que hay una fila menos.
+    let preview = tool_json(
+        &mcp_post(&app, &token, tool_call("delete_allocation_rule", json!({"id": rule_id}))).await,
+    );
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert!(
+        preview["effects"]["entity"]
+            .as_object()
+            .unwrap()
+            .contains_key("amount_resolved_this_month"),
+        "el preview debe traer lo que la regla encamina este mes: {preview}"
+    );
+    assert!(
+        preview["confirm_token"].is_string(),
+        "delete_allocation_rule exige el token de dos fases: {preview}"
+    );
+}
+
+/// `delete_category`: el preview **obliga a nombrar el destino** del remap.
+#[tokio::test]
+async fn delete_category_preview_demands_a_remap_target() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "expense", "Comida").await;
+    let other = app.create_category(&owner, "expense", "Ocio").await;
+    let txn = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_transaction",
+                json!({"op_date": "2026-07-01", "concept": "cena", "amount": "-20.00",
+                       "kind": "expense", "category_id": cat}),
+            ),
+        )
+        .await,
+    );
+    let txn_id = txn["id"].as_str().unwrap().to_string();
+
+    // El hogar arranca con un catálogo por defecto, así que los contadores van en relativo.
+    let before_delete = app.count_rows("categories").await;
+
+    let preview = tool_json(
+        &mcp_post(&app, &token, tool_call("delete_category", json!({"id": cat}))).await,
+    );
+    let side = &preview["effects"]["side_effects"];
+    assert_eq!(side["remap_to_required"], true, "{preview}");
+    assert_eq!(side["references"]["transactions"], 1, "{preview}");
+    assert!(side["remap_to_given"].is_null(), "{preview}");
+
+    // Confirmar SIN destino es el 400 que el preview anunciaba, no un borrado silencioso.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("delete_category", json!({"id": cat, "confirm": true})),
+    )
+    .await;
+    match classify(&envelope) {
+        Outcome::ToolError { message, .. } => assert!(
+            message.starts_with("category_in_use"),
+            "confirmar sin remap_to debe dar category_in_use: {message}"
+        ),
+        other => panic!("esperaba category_in_use y llegó {other:?}"),
+    }
+    assert_eq!(
+        app.count_rows("categories").await,
+        before_delete,
+        "nada se ha borrado"
+    );
+
+    // Con destino: la categoría desaparece y el movimiento SIGUE, reasignado.
+    let done = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "delete_category",
+                json!({"id": cat, "remap_to": other, "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(done["deleted"], true, "{done}");
+    assert_eq!(
+        app.count_rows("categories").await,
+        before_delete - 1,
+        "exactamente una categoría menos"
+    );
+    assert_eq!(app.count_rows("transactions").await, 1, "el movimiento sobrevive");
+    let moved = tool_json(&mcp_post(&app, &token, tool_call("list_transactions", json!({}))).await);
+    let row = &moved["transactions"][0];
+    assert_eq!(row["id"], json!(txn_id), "{moved}");
+    assert_eq!(row["category_id"], json!(other), "remapeado, no huérfano: {moved}");
+}
+
+/// `confirm_transfer_match`: el argumento es una PROPUESTA del servidor, no dos UUID.
+#[tokio::test]
+async fn confirm_transfer_match_only_accepts_a_server_issued_match_id() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // Par a 10 días: fuera de la ventana del pase automático (5), así que llega sin conciliar.
+    let out = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-07-01", "concept": "Traspaso salida", "amount": "-300",
+                   "kind": "expense"}),
+            &owner.cookie,
+        )
+        .await;
+    let back = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-07-11", "concept": "Traspaso entrada", "amount": "300",
+                   "kind": "income"}),
+            &owner.cookie,
+        )
+        .await;
+    assert!(
+        back.json()["transfer_counterpart_id"].is_null(),
+        "precondición: a 10 días el pase automático NO los empareja: {:?}", back.json()
+    );
+    let out_id = out.json()["id"].as_str().unwrap().to_string();
+
+    // Un `match_id` inventado con la forma correcta no resuelve: el espacio de acciones
+    // alcanzables es exactamente el de los pares que el servidor propondría.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "confirm_transfer_match",
+            json!({"match_id": "0123456789abcdef01234567"}),
+        ),
+    )
+    .await;
+    match classify(&envelope) {
+        Outcome::ToolError { message, .. } => assert!(
+            message.starts_with("transfer_match_not_found"),
+            "un match_id inventado debe dar transfer_match_not_found: {message}"
+        ),
+        other => panic!("esperaba transfer_match_not_found y llegó {other:?}"),
+    }
+
+    let suggestions = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("suggest_transfer_matches", json!({"window_days": 15})),
+        )
+        .await,
+    );
+    assert_eq!(suggestions["suggestion_count"], 1, "{suggestions}");
+    let match_id = suggestions["suggestions"][0]["match_id"]
+        .as_str()
+        .expect("match_id")
+        .to_string();
+    assert_eq!(
+        suggestions["suggestions"][0]["within_auto_window"], false,
+        "a 10 días queda fuera de la ventana del pase automático: {suggestions}"
+    );
+
+    let done = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("confirm_transfer_match", json!({"match_id": match_id.clone()})),
+        )
+        .await,
+    );
+    assert_eq!(done["transaction"]["id"], json!(out_id), "{done}");
+    assert!(
+        !done["transaction"]["transfer_counterpart_id"].is_null(),
+        "el par queda conciliado: {done}"
+    );
+
+    // Idempotente: reconfirmar el MISMO par devuelve el par, no un 404 sobre trabajo ya hecho.
+    let again = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("confirm_transfer_match", json!({"match_id": match_id})),
+        )
+        .await,
+    );
+    assert_eq!(again["transaction"]["id"], done["transaction"]["id"], "{again}");
+
+    // Y el par conciliado sale de los agregados de flujo, que es de lo que iba todo esto.
+    let agg = tool_json(
+        &mcp_post(&app, &token, tool_call("aggregate_transactions", json!({}))).await,
+    );
+    assert_eq!(agg["transaction_count"], 0, "{agg}");
+    assert_eq!(agg["reconciled_excluded_count"], 2, "{agg}");
+}
+
+/// `create_batch`: todo-o-nada, y la clave de idempotencia reproduce EL MISMO lote.
+#[tokio::test]
+async fn create_batch_is_all_or_nothing_and_replays_by_key() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "expense", "Comida").await;
+
+    // Un ítem inválido (categoría inexistente) y no se crea NINGUNO.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_batch",
+            json!({"transactions": [
+                {"op_date": "2026-07-01", "concept": "ok", "amount": "-10.00", "kind": "expense",
+                 "category_id": cat},
+                {"op_date": "2026-07-02", "concept": "malo", "amount": "-11.00", "kind": "expense",
+                 "category_id": "00000000-0000-4000-8000-000000000001"}
+            ]}),
+        ),
+    )
+    .await;
+    assert!(
+        !matches!(classify(&envelope), Outcome::Success),
+        "un ítem inválido debe tumbar el lote entero: {envelope}"
+    );
+    assert_eq!(app.count_rows("transactions").await, 0, "todo o nada");
+
+    let args = json!({"transactions": [
+        {"op_date": "2026-07-01", "concept": "uno", "amount": "-10.00", "kind": "expense",
+         "category_id": cat},
+        {"op_date": "2026-07-02", "concept": "dos", "amount": "-20.00", "kind": "expense",
+         "category_id": cat}
+    ], "idempotency_key": "lote-de-la-semana"});
+    let first = tool_json(&mcp_post(&app, &token, tool_call("create_batch", args.clone())).await);
+    assert_eq!(first["transaction_count"], 2, "{first}");
+    assert_eq!(first["summary"].as_array().unwrap().len(), 2, "{first}");
+    assert_eq!(app.count_rows("transactions").await, 2);
+
+    // Reenvío del MISMO lote: los mismos ids, sin crear nada.
+    let replay = tool_json(&mcp_post(&app, &token, tool_call("create_batch", args)).await);
+    assert_eq!(replay["ids"], first["ids"], "la réplica devuelve los ids originales");
+    assert_eq!(app.count_rows("transactions").await, 2, "la réplica no crea filas");
+}
+
+/// Snapshots por MCP: `kind` inmutable, reemplazo total de ítems y **cache intacta** (D12).
+#[tokio::test]
+async fn snapshot_tools_backfill_the_past_without_touching_the_projection_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid, owner.user_id);
+
+    app.warm_household(&owner.cookie, &key).await;
+    let snap = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_snapshot",
+                json!({"kind": "asset", "snapshot_date": "2023-01-31",
+                       "items": [{"label": "Fondo", "value": "40000"}]}),
+            ),
+        )
+        .await,
+    );
+    let snap_id = snap["id"].as_str().unwrap().to_string();
+    assert_eq!(snap["affects_projection"], false, "{snap}");
+    assert!(
+        app.cache_contains(&key).await,
+        "contrato D12: un snapshot NO es input del engine, la cache debe sobrevivir"
+    );
+
+    // Repetir (usuario, kind, día) es 409, no un segundo snapshot del mismo día.
+    let dup = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_snapshot",
+            json!({"kind": "asset", "snapshot_date": "2023-01-31"}),
+        ),
+    )
+    .await;
+    match classify(&dup) {
+        Outcome::ToolError { code, .. } => assert_eq!(code, "conflict", "{dup}"),
+        other => panic!("esperaba 409 y llegó {other:?}"),
+    }
+
+    // `items` omitido conserva; presente reemplaza. Y `kind` ni siquiera se puede pedir.
+    let moved = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_snapshot",
+                json!({"id": snap_id, "snapshot_date": "2023-02-28"}),
+            ),
+        )
+        .await,
+    );
+    assert!(moved["summary"].as_str().unwrap().contains("1 ítems"), "{moved}");
+    let replaced = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_snapshot",
+                json!({"id": snap_id, "items": [
+                    {"label": "Fondo", "value": "41000"},
+                    {"label": "Cuenta", "value": "3000"}
+                ]}),
+            ),
+        )
+        .await,
+    );
+    assert!(replaced["summary"].as_str().unwrap().contains("2 ítems"), "{replaced}");
+    assert!(
+        app.cache_contains(&key).await,
+        "contrato D12 también en la edición"
+    );
+
+    let bad = mcp_post(
+        &app,
+        &token,
+        tool_call("update_snapshot", json!({"id": snap_id, "kind": "liability"})),
+    )
+    .await;
+    assert!(
+        matches!(classify(&bad), Outcome::RpcError | Outcome::ToolError { .. }),
+        "`kind` no está en el esquema de update_snapshot: {bad}"
+    );
+}
+
+/// `update_installation_settings`: allowlist estricta, owner-only y preview reversible.
+///
+/// La ausencia que importa: **`mcp_write_enabled` no está y no puede estar**. Un kill-switch que
+/// la propia superficie que corta puede reencender es decorativo.
+#[tokio::test]
+async fn installation_settings_tool_cannot_reach_the_write_kill_switch() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app
+        .register_and_approve_member(&owner, "mario", "member")
+        .await;
+    let token = create_token(&app, &owner).await;
+    let member_token = create_token_for(&app, &member.cookie).await;
+
+    for forbidden in ["mcp_write_enabled", "onboarding_completed"] {
+        let envelope = mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_installation_settings",
+                json!({forbidden: true, "confirm": true}),
+            ),
+        )
+        .await;
+        assert!(
+            !matches!(classify(&envelope), Outcome::Success),
+            "`{forbidden}` no puede llegar a esta tool: {envelope}"
+        );
+    }
+
+    // Preview: valida y devuelve before/after sin persistir.
+    let preview = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("update_installation_settings", json!({"show_age_mode": "ages"})),
+        )
+        .await,
+    );
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert_eq!(preview["effects"]["entity"]["before"]["show_age_mode"], "dates", "{preview}");
+    assert_eq!(preview["effects"]["entity"]["after"]["show_age_mode"], "ages", "{preview}");
+    let live = app.get_with_cookie("/v1/installation", &owner.cookie).await;
+    assert_eq!(
+        live.json()["installation"]["show_age_mode"], "dates",
+        "el preview no persiste"
+    );
+
+    // Un `member` con permiso de escritura sigue sin poder: la comprobación es owner-only y
+    // vive DENTRO de la core, no en esta superficie.
+    let envelope = mcp_post(
+        &app,
+        &member_token,
+        tool_call(
+            "update_installation_settings",
+            json!({"show_age_mode": "ages", "confirm": true}),
+        ),
+    )
+    .await;
+    match classify(&envelope) {
+        Outcome::ToolError { code, .. } => assert_eq!(code, "forbidden", "{envelope}"),
+        other => panic!("un member no puede tocar los ajustes y llegó {other:?}"),
+    }
+
+    // Y el owner sí, con su bloque `impact`.
+    let done = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_installation_settings",
+                json!({"show_age_mode": "ages", "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(done["applied"], true, "{done}");
+    assert!(done["impact"].is_object(), "mueve la proyección: {done}");
+    let live = app.get_with_cookie("/v1/installation", &owner.cookie).await;
+    assert_eq!(live.json()["installation"]["show_age_mode"], "ages");
+}
+
+/// La puerta del sumidero era saltable **en dos pasos**: crear un `remainder` CON tope (legítimo
+/// desde MCP) y quitárselo después con `cap: null`. `SinkPolicy` solo llegaba a la core de
+/// creación, así que la descripción de la tool prometía algo que el catálogo no cumplía.
+///
+/// El arreglo es la misma doctrina que el invariante del módulo: la puerta mira el **estado
+/// resultante**, no la operación. Este test recorre el camino completo, porque una guardia solo
+/// en el `create` deja verde cualquier test que solo pruebe el `create`.
+#[tokio::test]
+async fn the_sink_cannot_be_forged_by_editing_a_capped_remainder() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_ast, "name": "Indexado", "current_value": "1000"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+
+    // Paso 1: un `remainder` CON tope sí se puede crear desde MCP — no es el sumidero.
+    let created = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_allocation_rule",
+            json!({
+                "target_asset_id": asset_id,
+                "kind": "remainder",
+                "cap_kind": "amount",
+                "cap_value": "5000",
+            }),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(classify(&created), Outcome::Success),
+        "un remainder CON tope debe poder crearse: {created:?}"
+    );
+    let rule_id = tool_json(&created)["id"]
+        .as_str()
+        .expect("id de la regla")
+        .to_string();
+
+    // Paso 2: quitarle el tope lo convertiría en el sumidero. Es el agujero que había.
+    let patched = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_allocation_rule",
+            json!({"rule_id": rule_id, "clear_cap": true}),
+        ),
+    )
+    .await;
+    match classify(&patched) {
+        Outcome::ToolError { message, .. } => assert!(
+            message.starts_with("sink_creation_not_allowed"),
+            "editar hasta el sumidero debe rechazarse con el mismo código que crearlo: {message}"
+        ),
+        other => panic!("el sumidero se fabricó editando — el agujero sigue abierto: {other:?}"),
+    }
+
+    // Y la regla sobrevive intacta: un rechazo no puede dejarla a medio editar.
+    let rules = app.get_with_cookie("/v1/allocation-rules", &owner.cookie).await;
+    let still_capped = rules.json().as_array().expect("array de reglas").iter().any(|r| {
+        r["id"].as_str() == Some(rule_id.as_str()) && !r["cap_kind"].is_null()
+    });
+    assert!(still_capped, "la regla debe conservar su tope tras el rechazo");
 }

@@ -78,36 +78,97 @@ pub struct DeleteCategoryQuery {
     pub remap_to: Option<Uuid>,
 }
 
-async fn category_reference_count(
+/// Quién apunta a una categoría, **desglosado por tabla**. Es el preview de `delete_category`.
+///
+/// El total es el que decide si `remap_to` es obligatorio; el desglose es lo que convierte un
+/// «hay 214 referencias» en una decisión informada («213 son movimientos y 1 es una partida de
+/// presupuesto»). Sin desglose, confirmar un borrado desde el chat es confirmar a ciegas.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct CategoryDeleteEffects {
+    /// `asset` | `liability` | `income` | `expense`. `remap_to` debe compartirlo.
+    pub scope: String,
+    pub name: String,
+    /// Suma de los seis contadores con FK bloqueante. **`liabilities_expense_attribution` NO entra**
+    /// (su FK es `SET NULL`), igual que las `categorization_rules`.
+    pub references_total: i64,
+    pub assets: i64,
+    pub liabilities: i64,
+    pub budget_entries: i64,
+    pub planning_flows: i64,
+    pub transactions: i64,
+    pub recurring_rules: i64,
+    /// Cuotas de pasivo cuya **atribución de gasto** (`liabilities.expense_category_id`) apunta
+    /// aquí. No bloquea el borrado —la FK es `ON DELETE SET NULL`— pero un remap **sí** se la
+    /// lleva consigo: si se borra sin remap, la atribución se degrada a `NULL` en silencio.
+    pub liabilities_expense_attribution: i64,
+    /// Reglas de categorización que asignan esta categoría. Su FK es `ON DELETE SET NULL`, así que
+    /// no bloquean ni se remapean: quedan **degradadas** (una regla que ya no asigna nada).
+    pub categorization_rules_degraded: i64,
+    /// `true` ⟺ `references_total > 0`, es decir: el borrado exige nombrar `remap_to`.
+    pub remap_required: bool,
+}
+
+pub(crate) async fn category_delete_effects(
     pool: &sqlx::PgPool,
     installation_id: Uuid,
     category_id: Uuid,
-) -> Result<i64, ApiError> {
-    // Nota: las `categorization_rules` NO cuentan aquí (su `assign_category_id` es ON DELETE SET
-    // NULL → una regla degradada nunca bloquea el borrado de una categoría). Las `transactions` y
-    // las `recurring_transaction_rules` sí (su `category_id` es ON DELETE RESTRICT → deben
-    // remapearse antes de borrar).
-    let n: Option<i64> = sqlx::query_scalar(
-        r#"SELECT (
+) -> Result<CategoryDeleteEffects, ApiError> {
+    // Nota: las `categorization_rules` NO cuentan en el total (su `assign_category_id` es ON DELETE
+    // SET NULL → una regla degradada nunca bloquea el borrado de una categoría), ni tampoco
+    // `liabilities.expense_category_id` (también SET NULL). Las `transactions` y las
+    // `recurring_transaction_rules` sí (su `category_id` es ON DELETE RESTRICT → deben remapearse
+    // antes de borrar). Los dos contadores no bloqueantes viajan aparte porque el remap SÍ mueve
+    // la atribución de las cuotas, y quien confirma un borrado tiene que poder verlo.
+    type Counts = (i64, i64, i64, i64, i64, i64, i64, i64);
+    let row: Option<(String, String)> =
+        sqlx::query_as(r#"SELECT scope, name FROM categories WHERE id = $1 AND installation_id = $2"#)
+            .bind(category_id)
+            .bind(installation_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((scope, name)) = row else {
+        return Err(ApiError::NotFound);
+    };
+
+    let c: Counts = sqlx::query_as(
+        r#"SELECT
                COALESCE((SELECT COUNT(*)::bigint FROM assets
-                         WHERE installation_id = $1 AND category_id = $2), 0)
-             + COALESCE((SELECT COUNT(*)::bigint FROM liabilities
-                         WHERE installation_id = $1 AND category_id = $2), 0)
-             + COALESCE((SELECT COUNT(*)::bigint FROM budget_entries
-                         WHERE installation_id = $1 AND category_id = $2), 0)
-             + COALESCE((SELECT COUNT(*)::bigint FROM planning_flows
-                         WHERE installation_id = $1 AND category_id = $2), 0)
-             + COALESCE((SELECT COUNT(*)::bigint FROM transactions
-                         WHERE installation_id = $1 AND category_id = $2), 0)
-             + COALESCE((SELECT COUNT(*)::bigint FROM recurring_transaction_rules
-                         WHERE installation_id = $1 AND category_id = $2), 0)
-            )"#,
+                         WHERE installation_id = $1 AND category_id = $2), 0),
+               COALESCE((SELECT COUNT(*)::bigint FROM liabilities
+                         WHERE installation_id = $1 AND category_id = $2), 0),
+               COALESCE((SELECT COUNT(*)::bigint FROM budget_entries
+                         WHERE installation_id = $1 AND category_id = $2), 0),
+               COALESCE((SELECT COUNT(*)::bigint FROM planning_flows
+                         WHERE installation_id = $1 AND category_id = $2), 0),
+               COALESCE((SELECT COUNT(*)::bigint FROM transactions
+                         WHERE installation_id = $1 AND category_id = $2), 0),
+               COALESCE((SELECT COUNT(*)::bigint FROM recurring_transaction_rules
+                         WHERE installation_id = $1 AND category_id = $2), 0),
+               COALESCE((SELECT COUNT(*)::bigint FROM liabilities
+                         WHERE installation_id = $1 AND expense_category_id = $2), 0),
+               COALESCE((SELECT COUNT(*)::bigint FROM categorization_rules
+                         WHERE installation_id = $1 AND assign_category_id = $2), 0)"#,
     )
     .bind(installation_id)
     .bind(category_id)
     .fetch_one(pool)
     .await?;
-    Ok(n.unwrap_or(0))
+
+    let references_total = c.0 + c.1 + c.2 + c.3 + c.4 + c.5;
+    Ok(CategoryDeleteEffects {
+        scope,
+        name,
+        references_total,
+        assets: c.0,
+        liabilities: c.1,
+        budget_entries: c.2,
+        planning_flows: c.3,
+        transactions: c.4,
+        recurring_rules: c.5,
+        liabilities_expense_attribution: c.6,
+        categorization_rules_degraded: c.7,
+        remap_required: references_total > 0,
+    })
 }
 
 async fn category_scope_row(
@@ -307,11 +368,36 @@ pub async fn patch_category(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    let resp = patch_category_core(&state.pool, iid, id, body).await?;
+    Ok(Json(resp))
+}
 
-    if body.name.is_none() && body.sort_index.is_none() {
-        return Err(ApiError::BadRequest(
-            "patch_empty: provide name and/or sort_index".into(),
-        ));
+/// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_category`.
+///
+/// `scope` es **inmutable** — no está en el body y no puede estarlo: mover una categoría de
+/// `expense` a `income` dejaría a cada fila que la referencia apuntando a una categoría del scope
+/// equivocado, y ninguna FK lo impide (la comprobación de scope vive en los handlers de assets,
+/// liabilities, budget y planning, no en la base).
+///
+/// **Cache NONE** (contrato histórico del módulo: ningún handler de categorías invalida). Renombrar
+/// una categoría no mueve ni un número de la proyección; su `category_id` es lo que viaja al engine.
+/// 409 en duplicado `(instalación, scope, nombre)` vía el mapeo global de sqlx.
+pub(crate) async fn patch_category_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    id: Uuid,
+    body: PatchCategoryBody,
+) -> Result<CategoryResponse, ApiError> {
+    // Destructuring EXHAUSTIVO y sin `..`: añadir un campo al body deja de compilar hasta que
+    // alguien decida si cuenta como «algo que actualizar» (mismo criterio que
+    // `patch_allocation_rule_core`).
+    {
+        let PatchCategoryBody { name, sort_index } = &body;
+        if name.is_none() && sort_index.is_none() {
+            return Err(ApiError::BadRequest(
+                "patch_empty: provide name and/or sort_index".into(),
+            ));
+        }
     }
 
     let row: Option<CategoryRow> = sqlx::query_as(
@@ -321,7 +407,7 @@ pub async fn patch_category(
     )
     .bind(id)
     .bind(iid)
-    .fetch_optional(&state.pool)
+    .fetch_optional(pool)
     .await?;
 
     let Some(current) = row else {
@@ -344,10 +430,10 @@ pub async fn patch_category(
     .bind(new_sort)
     .bind(id)
     .bind(iid)
-    .fetch_one(&state.pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok(Json(row_to_response(updated)?))
+    row_to_response(updated)
 }
 
 #[utoipa::path(
@@ -377,26 +463,60 @@ pub async fn delete_category(
     if !role_can_write(role.as_str()) {
         return Err(ApiError::Forbidden);
     }
+    delete_category_core(&state.pool, iid, id, q.remap_to).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
 
-    let Some(scope_src) = category_scope_row(&state.pool, iid, id).await? else {
+/// Core sin HTTP: lo comparten el handler DELETE y la tool MCP `delete_category`.
+///
+/// Un `create_category` sin contraparte es un pozo sin fondo: el catálogo es **compartido por toda
+/// la instalación**, así que cada categoría que un agente cree por error se queda ahí para siempre.
+/// Esta core es la contraparte, y su preview natural es [`category_delete_effects`]: enseña quién
+/// apunta a la categoría y obliga a **nombrar el destino** del remap antes de confirmar.
+///
+/// Reglas del remap, todas comprobadas antes de tocar nada:
+/// - con referencias bloqueantes y sin `remap_to` → 400 `category_in_use`;
+/// - `remap_to` == la propia categoría → 400 `remap_to_same_category`;
+/// - `remap_to` inexistente en la instalación → 400 `remap_to_not_found`;
+/// - `remap_to` de otro scope → 400 `remap_to_scope_mismatch`.
+///
+/// **Cache NONE** (contrato histórico del módulo). Ojo: el remap TOCA `assets`, `liabilities`,
+/// `budget_entries` y `planning_flows`, que sí son inputs del engine — pero solo cambia su
+/// `category_id`, que el engine no lee: agrega por importe, no por categoría.
+pub(crate) async fn delete_category_core(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    id: Uuid,
+    remap_to: Option<Uuid>,
+) -> Result<(), ApiError> {
+    let Some(scope_src) = category_scope_row(pool, iid, id).await? else {
         return Err(ApiError::NotFound);
     };
 
-    let refs = category_reference_count(&state.pool, iid, id).await?;
+    let refs = category_delete_effects(pool, iid, id).await?.references_total;
 
-    if refs > 0 {
-        let Some(target) = q.remap_to else {
-            return Err(ApiError::BadRequest(
-                "category_in_use: category is in use; pass remap_to query parameter with another category id of the same scope"
-                    .into(),
-            ));
-        };
+    // El remap corre **siempre que se pida**, no solo cuando hay referencias bloqueantes.
+    //
+    // Hasta 4.4.0 la condición era `refs > 0`, y con `refs == 0` el `remap_to` se ignoraba en
+    // silencio: la llamada devolvía 204 y quien la hizo no tenía forma de saber que su destino no
+    // se había usado. El caso concreto que lo destapa es `liabilities.expense_category_id`, cuya
+    // FK es `ON DELETE SET NULL` y por eso NO cuenta en `references_total`: borrar con `remap_to`
+    // una categoría de gasto usada solo como atribución de cuotas degradaba esa atribución a
+    // `NULL` — justo lo que el `remap_to` pedía evitar.
+    if refs > 0 && remap_to.is_none() {
+        return Err(ApiError::BadRequest(
+            "category_in_use: category is in use; pass remap_to query parameter with another category id of the same scope"
+                .into(),
+        ));
+    }
+
+    if let Some(target) = remap_to {
         if target == id {
             return Err(ApiError::BadRequest(
                 "remap_to_same_category: remap_to must differ from the category being deleted".into(),
             ));
         }
-        let Some(scope_tgt) = category_scope_row(&state.pool, iid, target).await? else {
+        let Some(scope_tgt) = category_scope_row(pool, iid, target).await? else {
             return Err(ApiError::BadRequest(
                 "remap_to_not_found: remap_to category was not found in this installation".into(),
             ));
@@ -407,7 +527,7 @@ pub async fn delete_category(
             ));
         }
 
-        let mut tx = state.pool.begin().await?;
+        let mut tx = pool.begin().await?;
 
         sqlx::query(
             r#"UPDATE assets SET category_id = $1, updated_at = now()
@@ -473,7 +593,7 @@ pub async fn delete_category(
         .await?;
 
         // `liabilities.expense_category_id` (3.4.0) es SET NULL — no cuenta en
-        // `category_reference_count` ni bloquea el borrado — pero cuando el usuario remapea una
+        // `references_total` ni bloquea el borrado — pero cuando el usuario remapea una
         // categoría de gasto, la atribución de las cuotas debe seguirla en vez de degradarse a
         // NULL por el FK al borrar.
         if scope_src == "expense" {
@@ -499,20 +619,20 @@ pub async fn delete_category(
         if del.rows_affected() == 0 {
             return Err(ApiError::NotFound);
         }
-        return Ok(axum::http::StatusCode::NO_CONTENT);
+        return Ok(());
     }
 
     let res = sqlx::query(r#"DELETE FROM categories WHERE id = $1 AND installation_id = $2"#)
         .bind(id)
         .bind(iid)
-        .execute(&state.pool)
+        .execute(pool)
         .await?;
 
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
 
-    Ok(axum::http::StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 pub fn categories_router() -> Router {

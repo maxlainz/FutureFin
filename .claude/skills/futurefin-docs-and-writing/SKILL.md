@@ -335,9 +335,41 @@ The rule stands: when you find a doc/code disagreement, verify against code (the
 truth), then fix the doc in the same change. If you cannot, add a row here with "verified <date>"
 — never leave a known-wrong fact unrecorded:
 
+**Barrido 2026-08-28 para MCP Fase 6 (issue #87) — siete erratas nuevas, todas del lado del CÓDIGO
+o de un issue abierto, y por eso registradas en vez de arregladas**: la pasada que las encontró era
+documentación-only, con `apps/` y `crates/` explícitamente fuera de alcance. Las que dependen de un
+issue abierto llevan su número: **arreglar la doc antes que el código dejaría la doc describiendo un
+bug que sigue vivo**, que es peor que la errata.
+
 | # | Doc & location | It says | Reality (verified in repo) |
 |---|---|---|---|
-| — | _(vacía)_ | — | Las dos erratas que vivían aquí (`TOKEN_GATED_TOOLS` inexistente en `confirm_token.rs`, y el wire descrito como `{error, message}` en dos doc-comments de `mcp/server.rs`) se **arreglaron** el 2026-08-28 en la Fase 4 del issue #85, junto con el literal de fallback de `to_tool_outcome`, que construía un error sin `code`. Una errata registrada aquí es deuda, no un archivo: cuando el arreglo cabe en el mismo cambio, se arregla y la fila se borra. |
+| 1 | `apps/api/src/mcp/server.rs`, `description` de `update_allocation_rule` | «el SUMIDERO (remainder sin tope) **solo se pone desde la app**» | **Más fuerte que lo que el código garantiza.** `SinkPolicy::Forbidden` solo lo recibe `create_allocation_rule_core`; `patch_allocation_rule_core` **no recibe `SinkPolicy`**, así que `update_allocation_rule` con `clear_cap: true` sobre un `remainder` **con** tope lo convierte en sumidero. Secuencia entera alcanzable por MCP en dos llamadas. Verificado 2026-08-28: `grep -n 'SinkPolicy' apps/api/src/handlers/allocation_rules.rs` da 5 hits (`490, 567, 579, 592, 603`), **ninguno dentro de `patch_allocation_rule_core`** |
+| 2 | `apps/api/src/mcp/server.rs`, doc-comment de `SuggestTransferMatchesParams.window_days` | «Días máximos entre las dos patas (1–60, **default 15**)» | El default es **30** (`DEFAULT_SUGGEST_WINDOW_DAYS`, `handlers/transactions/reconcile.rs`): la tool pasa `p.window_days` tal cual y la core aplica el suyo. El `range(max = 60)` del esquema **sí** es una restricción deliberada frente a los 365 de la core; lo falso es solo el default. Verificado 2026-08-28 |
+| 3 | `apps/web/src/lib/errorMessages.ts`, `idempotency_key_batch_unsupported` | «La clave de idempotencia solo vale para dar de alta un movimiento suelto, **no para un lote**» | **Dejó de ser cierto con la Fase 6**: el lote SÍ acepta clave, en la **raíz** del body. Lo que se rechaza es la clave **por ítem**. El mensaje inglés del servidor ya se corrigió («put idempotency_key at the root of the batch body»); la traducción de la SPA no. Verificado 2026-08-28 |
+| 4 | `apps/web/src/lib/errorMessages.ts`, `idempotency_key_invalid` | «entre 1 y 200 caracteres» | Hay **dos** cotas desde la Fase 6: **200** en el alta individual y **180** en el lote (`MAX_BATCH_KEY_CHARS`, el margen es para el sufijo derivado `#b{i}`). Verificado 2026-08-28 |
+| 5 | `apps/api/tests/query_param_validation.rs`, `VIEW_ROUTES` | La tabla enumera las rutas que aceptan `?view=` | **Le faltan dos de la Fase 6**: `/v1/changes` y `/v1/allocation-rules/goals` aceptan `view` y no están en la tabla (el diff solo añadió `aggregate` y `duplicates`). Es un hueco de cobertura del test que existe precisamente para cazar el enum que cae al default en silencio. Verificado 2026-08-28 |
+| 7 | `apps/api/tests/mcp_http.rs`, doc-comments de siete tests («las 52 tools», «51 de las 52») — **no `server.rs`, que no tiene ninguna** | 7 menciones a un catálogo de 52 | Son **68** desde la Fase 6. Las siete están en `apps/api/tests/mcp_http.rs` (líneas ~2219, 2399, 2471, 2551, 2562, 2592, 2608) y describen mediciones **fechadas** de fases anteriores, así que varias son históricamente correctas — pero al menos dos (`tools_list_freezes_…` y el tope por descripción) hablan del estado **actual**. Verificado 2026-08-28 |
+
+| 8 | `apps/api/src/mcp/server.rs`, el `instructions` del servidor (bloque ESCRITURA) | Enumera **siete** tools que exigen `confirm_token`: `delete_import`, `delete_asset`, `delete_liability`, `delete_snapshot`, `apply_categorization_rule`, `unreconcile_transfer`, `materialize_recurring` | **Son ocho desde la Fase 6**: falta **`delete_allocation_rule`** (`grep -c 'confirm_token.as_deref' apps/api/src/mcp/server.rs` → 8). **Es la errata más cara de esta tabla**: el `instructions` es el único texto que TODA sesión lee, y es exactamente el modo de fallo que la Fase 5 existe para evitar — una descripción que se queda falsa en silencio al añadir una tool. La documentación (`CLAUDE.md`, `data-model.md`, `api-routes.md`) sí dice ocho y las lista. Verificado 2026-08-28 |
+| 9 | `apps/api/src/handlers/projection.rs`, comentario junto a los ejes de `liability_overrides` | Dice que esos ejes no mueven el objetivo FIRE «ni las bases de los caps» | La segunda mitad es falsa: `debt_service` incluye ahora la amortización extra y el techo de un cap `months_expense` es `N × (expense + debt_service)`, así que **sí se mueve** en un what-if que amortiza. Efecto de segundo orden, alcanzable solo desde `simulate_projection` y **sin test que lo cubra**; documentado como tal en `.claude/engine.md` §AllocationRule y en `futurefin-fire-domain-reference` §5. Verificado 2026-08-28 |
+| 10 | `apps/api/src/handlers/projection.rs`, doc-comment de `deflator_at_month_index` | «Un único helper con **dos** callers» | Son **cuatro**: `deflate_points_to_today` (→ `milestones_real`), `points[].net_worth_real`, `final_net_worth_real` de `simulate_projection` (+ su delta) y `deflate_amount_core`. La afirmación de unicidad sigue siendo cierta y es la que importa; lo que caducó es el recuento. Verificado 2026-08-28 |
+| 11 | `apps/api/tests/mcp_http.rs`, doc-comment de `tool_descriptions_stay_within_the_context_budget` | «con **cinco** por encima de 1.200» (medición pre-Fase 5) | Son **seis** en el fixture de aquel commit. Medición histórica congelada en prosa, del tipo que §3.1 desaconseja: es reproducible (`git show 51b7675:apps/api/tests/fixtures/mcp-catalog.json`) y aun así se escribió a mano. Verificado 2026-08-28 |
+
+
+Tres **incoherencias preexistentes** con issue abierto que esta documentación describe tal cual son,
+sin propagar la promesa rota:
+
+| Issue | Dónde muerde | Qué documenta esta pasada |
+|---|---|---|
+| **#95** | `PATCH /v1/assets`: el doc-comment de `purchase_price` (que viaja a OpenAPI) promete que `null` borra el precio de compra, y esa rama es **inalcanzable por HTTP** — serde colapsa `null` presente y clave ausente en `None`, así que sale 400 `patch_empty` | `.claude/api-routes.md` §Assets lo dice explícitamente al presentar la plusvalía latente, nombra la vía viva (el flag `clear_purchase_price` de la tool MCP) y el test que fija el 400 actual. **La doc NO repite la promesa rota** |
+| **#96** | El motor emite `cap_ceiling: null` para todas las reglas cuando no hay sobrante, así que un consumidor no distingue «sin tope» de «no lo calculé» | `.claude/api-routes.md` §Allocation rules explica por qué `resolve_cap_ceiling_eur` existe **fuera** del motor y por qué el test que cruza las dos definiciones solo puede hacerlo en el camino donde el motor sí publica el techo |
+| **#97** | `update_allocation_rule` devuelve `{id, antes, despues}` (claves en español) y pide `rule_id` donde el resto del catálogo usa `id` | No se documenta como si estuviera arreglado. La afirmación de `futurefin-mcp-parity` §4 de que `resumen`→`summary` fue «la última clave en español del wire» **era falsa** y el issue lo recoge; esta pasada no la repite en ningún sitio nuevo |
+
+Las dos erratas que vivían aquí antes (`TOKEN_GATED_TOOLS` inexistente en `confirm_token.rs`, y el
+wire descrito como `{error, message}` en dos doc-comments de `mcp/server.rs`) se **arreglaron** el
+2026-08-28 en la Fase 4 del issue #85, junto con el literal de fallback de `to_tool_outcome`, que
+construía un error sin `code`. Una errata registrada aquí es deuda, no un archivo: cuando el arreglo
+cabe en el mismo cambio, se arregla y la fila se borra.
 
 ## Provenance and maintenance
 

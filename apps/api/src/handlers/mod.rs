@@ -5,6 +5,7 @@ pub mod auth;
 pub mod backup_user;
 pub mod budget;
 pub mod categories;
+pub mod changes;
 pub mod fallback;
 pub mod frame;
 pub mod ha_sso;
