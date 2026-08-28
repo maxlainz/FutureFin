@@ -1128,8 +1128,14 @@ export default function App() {
     // cruzado). Al vaciarla, el chart degrada a solo-futuro hasta que resuelva el nuevo fetch.
     setHistorySeries(null);
     try {
+      // `window_months=1200` (el máximo de la API) = «todo el histórico». Desde 4.4.0 omitir el
+      // parámetro devuelve los últimos 120 meses, un default pensado para clientes que leen la
+      // serie como texto; el chart quiere la serie entera, así que lo pide explícitamente. Sin
+      // esta línea el eje pasado se cortaría en 10 años sin ningún aviso.
       const data = await apiGet<HistorySeriesApi>(
-        `/v1/history/series${ledgerViewQs(ledgerPersonScope)}`,
+        `/v1/history/series?window_months=1200${
+          ledgerPersonScope === "mine" ? "&view=mine" : ""
+        }`,
       );
       setHistorySeries(data);
     } catch {

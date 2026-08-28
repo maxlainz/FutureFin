@@ -16,7 +16,6 @@ use crate::handlers::installation::{installation_naive_today, require_installati
 use crate::handlers::membership::role_can_write;
 use crate::handlers::validate_window_months;
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::serialize_decimal_as_f64;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -75,7 +74,19 @@ pub struct SnapshotResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub total: Decimal,
-    /// Items ordenados por `label ASC`.
+    /// Nº de items del snapshot **según la base de datos**, independiente de que `items` viaje o
+    /// no. Con `items_included = false` es la única forma de saber si el snapshot tiene contenido.
+    pub item_count: i64,
+    /// `true` ⟺ `items` trae el detalle. Con `false`, `items` llega **vacío por supresión**, no
+    /// porque el snapshot esté vacío.
+    ///
+    /// Hasta 4.4.0 la supresión del detalle (la que hace la tool MCP `list_snapshots` sin
+    /// `include_items`) dejaba `items: []`, exactamente el mismo JSON que un snapshot sin ningún
+    /// ítem. Un consumidor no podía distinguir «no te he mandado el detalle» de «aquí no hay
+    /// nada», y `total` seguía siendo correcto, lo que hacía la contradicción aún más confusa
+    /// (un total de 12.000 € con cero ítems).
+    pub items_included: bool,
+    /// Items ordenados por `label ASC`. Vacío si `items_included` es `false` — mira `item_count`.
     pub items: Vec<SnapshotItemResponse>,
     #[schema(value_type = String, format = "date-time")]
     pub created_at: DateTime<Utc>,
@@ -313,24 +324,45 @@ fn validate_and_prepare_items(
 // ---------------------------------------------------------------------------
 
 fn build_response(h: SnapshotHeaderRow, items: Vec<SnapshotItemRow>) -> SnapshotResponse {
+    build_response_with_items(h, items, true)
+}
+
+/// Igual que [`build_response`] pero pudiendo **suprimir** el detalle por ítem.
+///
+/// La supresión vive aquí, en la core, y no en el llamante: cuando la hacía la capa MCP borrando
+/// `items` de la respuesta ya construida, `item_count`/`items_included` no existían y el resultado
+/// era indistinguible de un snapshot vacío. `total` e `item_count` se calculan SIEMPRE sobre los
+/// ítems reales, se manden o no.
+fn build_response_with_items(
+    h: SnapshotHeaderRow,
+    items: Vec<SnapshotItemRow>,
+    include_items: bool,
+) -> SnapshotResponse {
     let total: Decimal = items.iter().map(|i| i.value).sum();
+    let item_count = items.len() as i64;
     SnapshotResponse {
         id: h.id,
         kind: h.kind,
         snapshot_date_ymd: h.snapshot_date.format("%Y-%m-%d").to_string(),
         source: h.source,
         total,
-        items: items
-            .into_iter()
-            .map(|i| SnapshotItemResponse {
-                item_id: i.source_item_id,
-                label: i.label,
-                value: i.value,
-                apr_percent: i.apr_percent,
-                payment_amount: i.payment_amount,
-                payment_frequency: i.payment_frequency,
-            })
-            .collect(),
+        item_count,
+        items_included: include_items,
+        items: if include_items {
+            items
+                .into_iter()
+                .map(|i| SnapshotItemResponse {
+                    item_id: i.source_item_id,
+                    label: i.label,
+                    value: i.value,
+                    apr_percent: i.apr_percent,
+                    payment_amount: i.payment_amount,
+                    payment_frequency: i.payment_frequency,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
         created_at: h.created_at,
         updated_at: h.updated_at,
     }
@@ -543,19 +575,38 @@ pub async fn list_snapshots(
 ) -> Result<Json<Vec<SnapshotResponse>>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = list_snapshots_core(&state.pool, iid, user.id.0, q.year, q.kind.as_deref()).await?;
+    // Camino HTTP: conjunto entero, detalle incluido, sin `COUNT` — contrato REST intacto (mismo
+    // patrón que `list_transactions`).
+    let (out, _total) =
+        list_snapshots_core(&state.pool, iid, user.id.0, q.year, q.kind.as_deref(), true, None, 0)
+            .await?;
     Ok(Json(out))
 }
 
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `list_snapshots`. Siempre own-user
 /// (el CRUD de snapshots no acepta `?view`).
+///
+/// **Paginación con el mismo contrato que `list_transactions_core`**: con `limit = None` (el
+/// handler HTTP) no se emite `LIMIT`/`OFFSET` ni la query de `COUNT`; con `limit = Some(n)` (la
+/// tool MCP) la paginación baja a SQL y `total_count` sale de un `COUNT(*)` con los mismos
+/// filtros. Hasta 4.4.0 este listado no tenía cota ninguna: cada snapshot son dos fechas, un
+/// total y N ítems, y un usuario que fotografía su patrimonio cada mes acumula uno por mes y kind
+/// indefinidamente — crecía con el uso normal, igual que las reglas de categorización que ya
+/// llevaban paginación desde 3.8.0.
+///
+/// `include_items = false` suprime el detalle por ítem **dentro de la core**, que es donde se puede
+/// declarar la supresión (`items_included` / `item_count`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn list_snapshots_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
     user_id: Uuid,
     year: Option<i32>,
     kind: Option<&str>,
-) -> Result<Vec<SnapshotResponse>, ApiError> {
+    include_items: bool,
+    limit: Option<i64>,
+    offset: i64,
+) -> Result<(Vec<SnapshotResponse>, i64), ApiError> {
     if let Some(y) = year {
         if !(1900..=3000).contains(&y) {
             return Err(ApiError::BadRequest(
@@ -585,23 +636,70 @@ pub(crate) async fn list_snapshots_core(
     }
     if kind.is_some() {
         sql.push_str(&format!(" AND kind = ${next}"));
+        next += 1;
     }
-    sql.push_str(" ORDER BY snapshot_date DESC, kind ASC");
+    // Desempate por `id` para que la paginación sea estable: `snapshot_date DESC, kind ASC` deja
+    // empatados los snapshots del mismo día y kind, y sin orden total dos páginas consecutivas
+    // pueden repetir u omitir filas.
+    sql.push_str(" ORDER BY snapshot_date DESC, kind ASC, id ASC");
+    if limit.is_some() {
+        sql.push_str(&format!(" LIMIT ${next} OFFSET ${}", next + 1));
+    }
+
+    let year_range = year.map(|y| {
+        (
+            NaiveDate::from_ymd_opt(y, 1, 1).expect("valid Jan 1"),
+            NaiveDate::from_ymd_opt(y + 1, 1, 1).expect("valid next Jan 1"),
+        )
+    });
 
     let mut query = sqlx::query_as::<_, SnapshotHeaderRow>(&sql)
         .bind(iid)
         .bind(user_id);
-    if let Some(y) = year {
-        let start = NaiveDate::from_ymd_opt(y, 1, 1).expect("valid Jan 1");
-        let end = NaiveDate::from_ymd_opt(y + 1, 1, 1).expect("valid next Jan 1");
+    if let Some((start, end)) = year_range {
         query = query.bind(start).bind(end);
     }
-    if let Some(k) = kind {
+    if let Some(k) = kind.clone() {
         query = query.bind(k);
     }
+    if let Some(n) = limit {
+        query = query.bind(n).bind(offset);
+    }
     let headers: Vec<SnapshotHeaderRow> = query.fetch_all(pool).await?;
+
+    // Sin `limit` el total ES la página: nos ahorramos el COUNT y el camino HTTP no cambia.
+    let total_count: i64 = match limit {
+        None => headers.len() as i64,
+        Some(_) => {
+            let mut count_sql = String::from(
+                "SELECT COUNT(*) FROM history_snapshots \
+                 WHERE installation_id = $1 AND owner_user_id = $2",
+            );
+            let mut cnext = 3;
+            if year_range.is_some() {
+                count_sql.push_str(&format!(
+                    " AND snapshot_date >= ${} AND snapshot_date < ${}",
+                    cnext,
+                    cnext + 1
+                ));
+                cnext += 2;
+            }
+            if kind.is_some() {
+                count_sql.push_str(&format!(" AND kind = ${cnext}"));
+            }
+            let mut cq = sqlx::query_scalar::<_, i64>(&count_sql).bind(iid).bind(user_id);
+            if let Some((start, end)) = year_range {
+                cq = cq.bind(start).bind(end);
+            }
+            if let Some(k) = kind {
+                cq = cq.bind(k);
+            }
+            cq.fetch_one(pool).await?
+        }
+    };
+
     if headers.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), total_count));
     }
 
     let ids: Vec<Uuid> = headers.iter().map(|h| h.id).collect();
@@ -621,13 +719,14 @@ pub(crate) async fn list_snapshots_core(
         by_parent.entry(r.snapshot_id).or_default().push(r);
     }
 
-    Ok(headers
+    let page: Vec<SnapshotResponse> = headers
         .into_iter()
         .map(|h| {
             let items = by_parent.remove(&h.id).unwrap_or_default();
-            build_response(h, items)
+            build_response_with_items(h, items, include_items)
         })
-        .collect())
+        .collect();
+    Ok((page, total_count))
 }
 
 #[utoipa::path(
@@ -825,8 +924,9 @@ pub(crate) async fn delete_snapshot_core(
 // ---------------------------------------------------------------------------
 
 /// Punto de la serie histórica agregada. `month_index ≤ 0`, contiguo `k_min..=0`.
-/// Los numéricos por punto se serializan como **f64** (misma excepción chart-only
-/// que los arrays de `/v1/projection/series` — D4/I3 del architecture contract).
+/// Los numéricos por punto se serializan como **f64 redondeado a 2 decimales** (misma excepción
+/// chart-only que los arrays de `/v1/projection/series` — D4/I3 del architecture contract — más
+/// el recorte de publicación de [`CHART_DP`]).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HistorySeriesPoint {
     pub month_index: i32,
@@ -844,26 +944,63 @@ pub struct HistorySeriesPoint {
     /// «campo ausente en una versión vieja».
     // `required` explícito: `Option<T>` saldría de `required` por defecto y el contrato diría
     // «puede faltar», que es justo lo que este campo NO hace. Es nullable **y** obligatorio.
-    #[serde(serialize_with = "serialize_opt_decimal_as_f64")]
+    #[serde(serialize_with = "serialize_opt_decimal_as_chart_f64")]
     #[schema(value_type = Option<f64>, required = true)]
     pub net_worth: Option<Decimal>,
-    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[serde(serialize_with = "serialize_decimal_as_chart_f64")]
     #[schema(value_type = f64)]
     pub assets_total: Decimal,
-    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[serde(serialize_with = "serialize_decimal_as_chart_f64")]
     #[schema(value_type = f64)]
     pub liabilities_total: Decimal,
 }
 
-/// `Option<Decimal>` → f64 o `null` explícito. Misma excepción chart-only que
-/// `serialize_decimal_as_f64` (D4/I3): solo para arrays de chart, jamás para un KPI escalar.
-/// `serialize_none` emite `null`, no omite el campo — el punto SIEMPRE lleva `net_worth`.
-fn serialize_opt_decimal_as_f64<S: serde::Serializer>(
+/// Decimales de publicación de las series de chart del histórico: **2**.
+///
+/// Los valores nacen de una interpolación (`(v1 − v0) · días/días` para los activos, la
+/// amortización francesa para los pasivos), así que arrastraban la escala completa de
+/// `rust_decimal` hasta el f64 y de ahí al JSON: `78012.333333333333333333333` ocupa 25 caracteres
+/// por punto y ~290 puntos × (activos + 3 totales) los multiplica. Ningún consumidor los usa a esa
+/// precisión — el chart posiciona píxeles y un agente cita euros —, así que la única función de
+/// los otros trece decimales es gastar ventana de contexto y sugerir una exactitud que la
+/// interpolación no tiene.
+///
+/// Es redondeo de **publicación**, igual que `money_out` y `round_ratio`: la interpolación y el
+/// anclaje siguen calculándose exactos y solo se recorta la copia que se serializa.
+const CHART_DP: u32 = 2;
+
+/// Decimales de `month_fraction`. 4 decimales = 1/10.000 de mes ≈ 4 minutos; la rejilla más fina
+/// que existe es diaria (1/31 ≈ 0,032). Lo que sobra es ruido de la división en f64
+/// (`0.4838709677419355`).
+const MONTH_FRACTION_DP: f64 = 10_000.0;
+
+/// `Decimal` → f64 de chart, ya recortado a [`CHART_DP`].
+fn chart_f64(d: Decimal) -> f64 {
+    d.round_dp(CHART_DP).to_f64().unwrap_or(0.0)
+}
+
+/// Redondeo de publicación de `month_fraction` (ver [`MONTH_FRACTION_DP`]).
+fn round_month_fraction(f: f64) -> f64 {
+    (f * MONTH_FRACTION_DP).round() / MONTH_FRACTION_DP
+}
+
+/// `Decimal` → f64 recortado a [`CHART_DP`]. Excepción chart-only D4/I3: solo para arrays de
+/// chart, jamás para un KPI escalar.
+fn serialize_decimal_as_chart_f64<S: serde::Serializer>(
+    d: &Decimal,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.serialize_f64(chart_f64(*d))
+}
+
+/// `Option<Decimal>` → f64 recortado a [`CHART_DP`] o `null` explícito. Misma excepción chart-only
+/// (D4/I3). `serialize_none` emite `null`, no omite el campo — el punto SIEMPRE lleva `net_worth`.
+fn serialize_opt_decimal_as_chart_f64<S: serde::Serializer>(
     d: &Option<Decimal>,
     s: S,
 ) -> Result<S::Ok, S::Error> {
     match d {
-        Some(v) => s.serialize_f64(v.to_f64().unwrap_or(0.0)),
+        Some(v) => s.serialize_f64(chart_f64(*v)),
         None => s.serialize_none(),
     }
 }
@@ -875,7 +1012,7 @@ pub struct HistoryAssetSeries {
     #[schema(value_type = String, format = "uuid")]
     pub asset_id: Uuid,
     pub asset_name: String,
-    /// Valores f64 paralelos a `points`.
+    /// Valores f64 paralelos a `points`, redondeados a 2 decimales ([`CHART_DP`]).
     pub values: Vec<f64>,
 }
 
@@ -884,14 +1021,29 @@ pub struct HistoryAssetSeries {
 pub struct HistoryMarker {
     pub date_ymd: String,
     pub month_index: i32,
-    /// Posición x fraccional del marcador: `month_index + (día − 1) / días_del_mes`.
+    /// Posición x fraccional del marcador dentro de la rejilla de `points`:
+    /// `month_index + (día − 1) / días_del_mes`, redondeada a 4 decimales
+    /// ([`MONTH_FRACTION_DP`]). Sirve para dibujar el marcador **entre** dos puntos mensuales sin
+    /// que el consumidor tenga que saber cuántos días tiene ese mes; `month_index` a secas lo
+    /// pegaría al día 1.
     pub month_fraction: f64,
     /// `asset` | `liability`.
     pub kind: String,
+    /// **De dónde sale este snapshot**: `capture` (foto que la app tomó de los activos/pasivos
+    /// vivos en esa fecha) | `backfill` (valores que el usuario tecleó a posteriori para una fecha
+    /// pasada).
+    ///
+    /// No es cosmético. Un `backfill` puede estar en CUALQUIER fecha pasada, y un hogar que ancla
+    /// su histórico muy atrás —hasta su propia fecha de nacimiento— genera cientos de puntos de
+    /// interpolación entre ese ancla y el primer dato real. Sin este campo, ese ancla se presenta
+    /// entre los markers exactamente igual que una foto tomada por la app, y a la pregunta
+    /// «¿cuándo empecé a ahorrar?» la serie contesta con la fecha del ancla. Con `source` y
+    /// `total` a la vista, un backfill de importe ~0 en una fecha remota se reconoce por lo que es.
+    pub source: String,
     #[schema(value_type = String, format = "uuid")]
     pub owner_user_id: Uuid,
     /// Σ de los `value` de los items del snapshot.
-    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[serde(serialize_with = "serialize_decimal_as_chart_f64")]
     #[schema(value_type = f64)]
     pub total: Decimal,
 }
@@ -905,8 +1057,31 @@ pub struct HistorySeriesResponse {
     /// su día 1, y el mes en curso, que está a medias, en hoy — así el último punto empalma con el
     /// patrimonio vivo y cuadra con `GET /v1/summary`.
     pub anchor_month_first_ymd: String,
-    /// `household` | `mine`.
-    pub view: String,
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `?view`.
+    pub view: &'static str,
+    /// **Ventana efectivamente emitida**, en meses hacia atrás desde el mes 0 (`points.len()` es
+    /// como mucho `window_months + 1`). Eco del `window_months` pedido o, si se omitió, del
+    /// default [`DEFAULT_HISTORY_WINDOW_MONTHS`].
+    ///
+    /// Hasta 4.4.0 omitir el parámetro devolvía la serie **desde el snapshot más antiguo del
+    /// scope**, y nada en la respuesta lo decía. Un hogar que hubiera anclado su histórico muy
+    /// atrás recibía ~290 puntos —los primeros doscientos interpolando entre 0 € y unos cientos—
+    /// en el default, es decir en el peor caso posible. Ahora el default está acotado y la
+    /// respuesta declara qué ventana usó.
+    pub window_months: u32,
+    /// `true` ⟺ hay snapshots **anteriores** a la ventana emitida: la serie está recortada y
+    /// existe más histórico. Pídelo con `window_months` mayor (máximo 1200, que en la práctica es
+    /// «todo»). Con `false`, lo que ves es todo lo que hay.
+    pub window_truncated: bool,
+    /// Fecha del snapshot **más antiguo del scope**, `YYYY-MM-DD` — esté dentro o fuera de la
+    /// ventana. `null` ⟺ no hay ningún snapshot. Junto a `window_truncated` responde «¿desde
+    /// cuándo hay datos?» sin obligar a repetir la llamada con la ventana máxima.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_snapshot_date_ymd: Option<String>,
+    /// El mismo snapshot expresado en la rejilla de `points` (`≤ 0`; menor que `-window_months`
+    /// cuando `window_truncated` es `true`). `null` ⟺ no hay ninguno.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_snapshot_month_index: Option<i32>,
     /// Puntos contiguos ascendentes `k_min..=0` (incluye el mes 0). Vacío sin snapshots.
     pub points: Vec<HistorySeriesPoint>,
     /// Series por asset (solo kind `asset`), orden `asset_name ASC, asset_id ASC`.
@@ -935,6 +1110,8 @@ struct SeriesHeaderRow {
     owner_user_id: Uuid,
     kind: String,
     snapshot_date: NaiveDate,
+    /// `capture` | `backfill`. Solo lo consume el marker: la interpolación no distingue.
+    source: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1051,7 +1228,7 @@ async fn fetch_history_scope(
     //    (owner_user_id es NOT NULL en todos); mine = solo los del usuario.
     let h_scope = view.scope_where("s");
     let headers_sql = format!(
-        "SELECT s.id, s.owner_user_id, s.kind, s.snapshot_date
+        "SELECT s.id, s.owner_user_id, s.kind, s.snapshot_date, s.source
          FROM history_snapshots s
          WHERE {h_scope}
          ORDER BY s.snapshot_date ASC, s.kind ASC, s.owner_user_id ASC"
@@ -1322,6 +1499,11 @@ pub struct HistorySeriesQuery {
     /// Limita la rejilla emitida a los últimos N meses (1..=1200; fuera de rango es 400
     /// `window_months_out_of_range`, NO se clampa). La interpolación sigue anclándose en TODOS los
     /// snapshots; solo se recortan los puntos/markers devueltos.
+    ///
+    /// **Omitido = [`DEFAULT_HISTORY_WINDOW_MONTHS`]**, no «todo». Para pedir todo el histórico,
+    /// `window_months=1200` (el máximo; nada puede haber más atrás porque el tope de la ventana ES
+    /// el tope del producto). La respuesta declara la ventana usada y si recortó algo
+    /// (`window_months`, `window_truncated`, `first_snapshot_date_ymd`).
     #[serde(default)]
     pub window_months: Option<i64>,
     /// `false` omite `asset_series` (payload por activo × puntos). Default true en HTTP.
@@ -1329,8 +1511,21 @@ pub struct HistorySeriesQuery {
     pub include_asset_series: Option<bool>,
 }
 
-/// Cota del windowing de la serie histórica (100 años, el mismo techo que el runway).
+/// Cota del windowing de la serie histórica (100 años, el mismo techo que el runway). Pedirla
+/// explícitamente es la forma de decir «todo el histórico».
 const MAX_HISTORY_WINDOW_MONTHS: i64 = 1200;
+
+/// Ventana por defecto de `GET /v1/history/series` cuando no se pide `window_months`: **10 años**.
+///
+/// El default anterior era «desde el snapshot más antiguo», que es literalmente el peor caso: en
+/// una instalación con un ancla de backfill remota son ~290 puntos y ~26 KB, con los primeros
+/// doscientos interpolando entre 0 € y unos cientos de euros. Ningún consumidor —ni el chart ni un
+/// agente— pide «todo» por defecto; lo pide quien de verdad lo quiere, y ahora tiene que decirlo
+/// (`window_months=1200`).
+///
+/// 10 años y no 5: es el tramo en el que un patrimonio real ya tiene forma (una hipoteca, un
+/// cambio de trabajo, un mercado bajista) y sigue cabiendo en ~121 puntos.
+const DEFAULT_HISTORY_WINDOW_MONTHS: i64 = 120;
 
 
 #[utoipa::path(
@@ -1339,7 +1534,7 @@ const MAX_HISTORY_WINDOW_MONTHS: i64 = 1200;
     tag = "history",
     params(
         ("view" = Option<String>, Query, description = "`mine` = solo mis snapshots; omitido u otro valor → `household` (todos los usuarios de la instalación)."),
-        ("window_months" = Option<i64>, Query, description = "Limita la serie a los últimos N meses (1..=1200; fuera de rango → 400 `window_months_out_of_range`). Omitido = desde el snapshot más antiguo."),
+        ("window_months" = Option<i64>, Query, description = "Limita la serie a los últimos N meses (1..=1200; fuera de rango → 400 `window_months_out_of_range`). Omitido = 120 (10 años); usa 1200 para todo el histórico. La respuesta ecoa `window_months` y marca `window_truncated`."),
         ("include_asset_series" = Option<bool>, Query, description = "`false` omite `asset_series`. Default `true`."),
     ),
     responses(
@@ -1380,7 +1575,7 @@ pub(crate) async fn history_series_core(
     include_asset_series: bool,
 ) -> Result<HistorySeriesResponse, ApiError> {
     validate_window_months(window_months, MAX_HISTORY_WINDOW_MONTHS)?;
-    let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
+    let view_label = view.as_str();
 
     let today = installation_naive_today(pool, iid).await?;
     // `add_months_signed(d, 0)` devuelve el día 1 del mes de `d` → ancla del mes 0.
@@ -1394,18 +1589,32 @@ pub(crate) async fn history_series_core(
     // `liabilities_total` sí es significativo. Con `headers` vacío da `false` sin caso especial.
     let liabilities_snapshotted = liabilities_fully_snapshotted(&scope.headers);
 
+    // Ventana efectiva. Se resuelve ANTES del early-return para que una respuesta vacía declare
+    // igualmente qué ventana se aplicó (si no, «no hay datos» y «no hay datos EN ESTA VENTANA»
+    // volverían a ser indistinguibles, que es la clase de hueco que esta fase cierra).
+    let window = window_months.unwrap_or(DEFAULT_HISTORY_WINDOW_MONTHS);
+
     // 0 snapshots en scope → 200 con arrays vacíos.
     if scope.headers.is_empty() {
         return Ok(HistorySeriesResponse {
             anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
             anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
-            view: view_label.into(),
+            view: view_label,
+            window_months: window as u32,
+            window_truncated: false,
+            first_snapshot_date_ymd: None,
+            first_snapshot_month_index: None,
             points: Vec::new(),
             asset_series: Vec::new(),
             markers: Vec::new(),
             liabilities_snapshotted,
         });
     }
+
+    // Snapshot más antiguo del SCOPE (antes de recortar): es lo que permite decir «hay más
+    // histórico del que estás viendo» sin repetir la llamada con la ventana máxima. `headers` ya
+    // viene `ORDER BY snapshot_date ASC` de `fetch_history_scope`.
+    let first_snapshot_date = scope.headers.first().map(|h| h.snapshot_date);
 
     // ---- Markers: uno por cabecera; total = Σ items -----------------------------------------
     let markers: Vec<HistoryMarker> = scope
@@ -1420,8 +1629,9 @@ pub(crate) async fn history_series_core(
             HistoryMarker {
                 date_ymd: h.snapshot_date.format("%Y-%m-%d").to_string(),
                 month_index: month_index_of(h.snapshot_date, anchor),
-                month_fraction: month_fraction(h.snapshot_date, anchor),
+                month_fraction: round_month_fraction(month_fraction(h.snapshot_date, anchor)),
                 kind: h.kind.clone(),
+                source: h.source.clone(),
                 owner_user_id: h.owner_user_id,
                 total,
             }
@@ -1434,12 +1644,12 @@ pub(crate) async fn history_series_core(
     // `window_months` recorta la rejilla emitida (y los markers devueltos); la interpolación
     // sigue anclándose en TODOS los snapshots del scope.
     let k_min_full = markers.iter().map(|m| m.month_index).min().unwrap_or(0).min(0);
-    let k_min = match window_months {
-        // Ya validado en la entrada de la core (`validate_window_months`): aquí el valor es de
-        // rango, no clampado. Un clamp aquí volvería a inventar una ventana distinta en silencio.
-        Some(w) => k_min_full.max(-(w as i32)),
-        None => k_min_full,
-    };
+    // Ya validado en la entrada de la core (`validate_window_months`): `window` es un valor de
+    // rango, no clampado. Un clamp aquí volvería a inventar una ventana distinta en silencio.
+    let k_min = k_min_full.max(-(window as i32));
+    // ¿Se ha quedado histórico fuera? Es la mitad honesta del default acotado: recortar sin
+    // decirlo sería exactamente el fallo que 4.3.1 arregló en `window_months` fuera de rango.
+    let window_truncated = k_min_full < k_min;
     let markers: Vec<HistoryMarker> = markers
         .into_iter()
         .filter(|m| m.month_index >= k_min)
@@ -1501,7 +1711,7 @@ pub(crate) async fn history_series_core(
                 HistoryAssetSeries {
                     asset_id: *asset_id,
                     asset_name,
-                    values: values.iter().map(|v| v.to_f64().unwrap_or(0.0)).collect(),
+                    values: values.iter().map(|v| chart_f64(*v)).collect(),
                 }
             })
             .collect()
@@ -1517,7 +1727,12 @@ pub(crate) async fn history_series_core(
     Ok(HistorySeriesResponse {
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
-        view: view_label.into(),
+        view: view_label,
+        window_months: window as u32,
+        window_truncated,
+        first_snapshot_date_ymd: first_snapshot_date.map(|d| d.format("%Y-%m-%d").to_string()),
+        // Mismo `month_index_of` que los markers: la referencia es la rejilla, no el calendario.
+        first_snapshot_month_index: first_snapshot_date.map(|d| month_index_of(d, anchor)),
         points,
         asset_series,
         markers,
@@ -1584,7 +1799,13 @@ pub struct CashflowMonth {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CashflowFineGridPoint {
     pub date_ymd: String,
+    /// Mes de la rejilla mensual en que cae este punto (`≤ 0`). Varios puntos finos comparten
+    /// `month_index`: es la etiqueta del mes, no la posición del punto.
     pub month_index: i32,
+    /// Posición x **fraccional** dentro de la rejilla mensual:
+    /// `month_index + (día − 1) / días_del_mes`, redondeada a 4 decimales
+    /// ([`MONTH_FRACTION_DP`]). Es lo que separa dos puntos del mismo mes; sin ella la curva fina
+    /// se apilaría toda sobre el día 1.
     pub month_fraction: f64,
 }
 
@@ -1595,6 +1816,7 @@ pub struct CashflowFineAssetSeries {
     #[schema(value_type = String, format = "uuid")]
     pub asset_id: Uuid,
     pub asset_name: String,
+    /// Valores paralelos a `grid`, redondeados a 2 decimales ([`CHART_DP`]).
     pub values: Vec<f64>,
 }
 
@@ -1623,17 +1845,34 @@ pub struct CashflowResponse {
     pub anchor_date_ymd: String,
     /// Primero-de-mes de `anchor_date_ymd` — la fecha del punto `month_index = 0`.
     pub anchor_month_first_ymd: String,
-    /// `household` | `mine`.
-    pub view: String,
+    /// Vista efectivamente aplicada: `household` | `mine`. Eco de `?view`.
+    pub view: &'static str,
     /// Agregado mensual contiguo `-window_months..=0`, ascendente por `month_index`.
     pub months: Vec<CashflowMonth>,
     /// `true` sólo si TODOS los usuarios del scope tienen algún snapshot de pasivo. Cuando es
     /// false no existe patrimonio neto histórico y `fine.net_worth` no viaja: lo que hay son
     /// activos (`fine.asset_series`). Mismo predicado `all`-por-usuario que `/v1/history/series`.
     pub liabilities_snapshotted: bool,
-    /// Curva fina moldeada. Ausente si no hay transacciones vinculadas a assets (o sin snapshots).
+    /// Curva fina moldeada. `null` cuando no se ha podido (o no se ha pedido) construir; el porqué
+    /// está en `fine_absent_reason`, nunca hay que adivinarlo.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fine: Option<CashflowFine>,
+    /// **Por qué falta `fine`.** `null` ⟺ `fine` viaja. Valores:
+    ///
+    /// - `not_requested` — el llamante no la pidió (`include_curve` de la tool MCP; el endpoint
+    ///   HTTP la pide siempre).
+    /// - `window_too_large_for_curve` — la ventana supera
+    ///   [`MAX_FINE_CURVE_WINDOW_MONTHS`]; el agregado mensual `months[]` sí cubre la ventana
+    ///   entera. Pide la curva con una ventana menor.
+    /// - `no_asset_linked_transactions` — no hay ninguna transacción ligada a un activo (ni por
+    ///   cuenta de import ni por destino de ahorro), así que no hay nada que moldee la curva.
+    /// - `no_snapshots_to_anchor` — hay movimientos pero ningún snapshot al que anclar la curva;
+    ///   sin ancla sería una curva de deltas flotando en el vacío.
+    ///
+    /// Hasta 4.4.0 las tres últimas causas producían exactamente la misma respuesta —el campo
+    /// simplemente no estaba— y «no tengo datos», «no me lo has pedido» y «te lo he recortado por
+    /// tamaño» eran indistinguibles.
+    pub fine_absent_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1672,17 +1911,31 @@ const MAX_CASHFLOW_WINDOW_MONTHS: i64 = 120;
 /// `resolution=daily` solo se permite con ventanas acotadas (coste del grid diario).
 const MAX_DAILY_WINDOW_MONTHS: i32 = 6;
 
+/// Ventana máxima con **curva fina**. El agregado mensual sigue llegando hasta
+/// `MAX_CASHFLOW_WINDOW_MONTHS` (120); lo que se acota es la capa que crece por ACTIVO.
+///
+/// Es el peor caso del catálogo: la rejilla weekly avanza de 7 en 7 días, así que 120 meses son
+/// ~522 puntos **por activo** — un hogar con cinco activos vinculados se lleva ~2.600 números en
+/// una sola respuesta. Con 36 meses son ~157 puntos por activo, y la curva sigue contando la
+/// historia que un overlay de patrimonio necesita (el propio chart de la app pide 24 semanales y 6
+/// diarios).
+///
+/// **No es un 400.** Pasarse no rompe la llamada: se devuelve el agregado mensual completo, `fine`
+/// llega `null` y `fine_absent_reason` dice `window_too_large_for_curve`. Un error habría obligado
+/// a reintentar para conseguir unos `months[]` que sí eran servibles.
+const MAX_FINE_CURVE_WINDOW_MONTHS: i32 = 36;
+
 #[utoipa::path(
     get,
     path = "/v1/history/cashflow",
     tag = "history",
     params(
         ("view" = Option<String>, Query, description = "`mine` = solo mis transacciones/snapshots; omitido u otro valor → `household`."),
-        ("window_months" = Option<i64>, Query, description = "Meses de ventana (default 24, rango 1..=120; fuera de rango → 400 `window_months_out_of_range`)."),
+        ("window_months" = Option<i64>, Query, description = "Meses de ventana (default 24, rango 1..=120; fuera de rango → 400 `window_months_out_of_range`). Por encima de 36 el agregado mensual llega igual, pero la curva fina se omite con `fine_absent_reason = window_too_large_for_curve`."),
         ("resolution" = Option<String>, Query, description = "`weekly` (default) | `daily`. `daily` requiere `window_months <= 6`."),
     ),
     responses(
-        (status = 200, description = "Cash-flow mensual + curva fina opcional.", body = CashflowResponse),
+        (status = 200, description = "Cash-flow mensual + curva fina opcional (`fine`; cuando falta, `fine_absent_reason` dice por qué).", body = CashflowResponse),
         (status = 400, description = "`daily_window_too_large` (daily con ventana > 6 meses)."),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Not an installation member"),
@@ -1725,7 +1978,7 @@ pub(crate) async fn history_cashflow_core(
     resolution: Option<&str>,
     include_fine: bool,
 ) -> Result<CashflowResponse, ApiError> {
-    let view_label = if view == LedgerView::Mine { "mine" } else { "household" };
+    let view_label = view.as_str();
 
     validate_window_months(window_months, MAX_CASHFLOW_WINDOW_MONTHS)?;
     let window_months: i32 = window_months.unwrap_or(DEFAULT_CASHFLOW_WINDOW_MONTHS) as i32;
@@ -1825,8 +2078,14 @@ pub(crate) async fn history_cashflow_core(
     // de X, entra en Y) aunque no sea gasto ni ingreso. Excluirlas haría divergir la curva de los
     // snapshots a los que está anclada y el anclaje absorbería la diferencia como un salto falso.
     // Test que fija la asimetría: `history_cashflow.rs::reconciled_excluded_from_months_but_not_from_fine_curve`.
+    // ¿Se intenta siquiera la curva? Dos puertas antes de tocar la BD: que la pidan y que la
+    // ventana quepa. Las dos producen una razón publicada, no un silencio.
+    let curve_requested = include_fine;
+    let curve_window_ok = window_months <= MAX_FINE_CURVE_WINDOW_MONTHS;
+    let try_fine = curve_requested && curve_window_ok;
+
     let mut cashflow: HashMap<(Uuid, Uuid), Vec<CashFlowEntry>> = HashMap::new();
-    if include_fine {
+    if try_fine {
         let acc_scope = view.scope_where("t");
         let account_sql = format!(
             "SELECT ti.account_asset_id AS asset_id, t.owner_user_id AS owner_user_id,
@@ -1867,12 +2126,23 @@ pub(crate) async fn history_cashflow_core(
     // El flag se resuelve dentro de la rama fina (es donde se carga el scope) y sale por aquí:
     // sin capa fina no hay serie de neto que cualificar, y `false` es la lectura honesta.
     let mut liabilities_snapshotted = false;
-    let fine = if cashflow.is_empty() {
+    // `fine_absent_reason` se decide en el MISMO sitio que `fine`: una sola expresión produce el
+    // par, así que no pueden desincronizarse (un `Some(fine)` con razón, o un `None` sin ella).
+    let mut fine_absent_reason: Option<&'static str> = None;
+    let fine = if !curve_requested {
+        fine_absent_reason = Some("not_requested");
+        None
+    } else if !curve_window_ok {
+        fine_absent_reason = Some("window_too_large_for_curve");
+        None
+    } else if cashflow.is_empty() {
+        fine_absent_reason = Some("no_asset_linked_transactions");
         None
     } else {
         let scope = fetch_history_scope(pool, view, iid, user_id, today).await?;
         liabilities_snapshotted = liabilities_fully_snapshotted(&scope.headers);
         if scope.headers.is_empty() {
+            fine_absent_reason = Some("no_snapshots_to_anchor");
             None
         } else {
             // Rejilla fina hacia atrás desde HOY (último punto = hoy exacto → empalma con el vivo),
@@ -1914,12 +2184,12 @@ pub(crate) async fn history_cashflow_core(
                 .map(|d| CashflowFineGridPoint {
                     date_ymd: d.format("%Y-%m-%d").to_string(),
                     month_index: month_index_of(*d, anchor),
-                    month_fraction: month_fraction(*d, anchor),
+                    month_fraction: round_month_fraction(month_fraction(*d, anchor)),
                 })
                 .collect();
 
             let net_worth: Vec<f64> = (0..fine_grid.len())
-                .map(|g| (acc.assets_total[g] - acc.liabilities_total[g]).to_f64().unwrap_or(0.0))
+                .map(|g| chart_f64(acc.assets_total[g] - acc.liabilities_total[g]))
                 .collect();
 
             let mut asset_series: Vec<CashflowFineAssetSeries> = acc
@@ -1934,7 +2204,7 @@ pub(crate) async fn history_cashflow_core(
                     CashflowFineAssetSeries {
                         asset_id: *asset_id,
                         asset_name,
-                        values: values.iter().map(|v| v.to_f64().unwrap_or(0.0)).collect(),
+                        values: values.iter().map(|v| chart_f64(*v)).collect(),
                     }
                 })
                 .collect();
@@ -1958,10 +2228,11 @@ pub(crate) async fn history_cashflow_core(
     Ok(CashflowResponse {
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         anchor_month_first_ymd: anchor.format("%Y-%m-%d").to_string(),
-        view: view_label.into(),
+        view: view_label,
         months,
         liabilities_snapshotted,
         fine,
+        fine_absent_reason,
     })
 }
 

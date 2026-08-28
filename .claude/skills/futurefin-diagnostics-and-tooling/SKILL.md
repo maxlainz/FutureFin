@@ -22,7 +22,11 @@ description: >
 
 Everything here is verified against the code as of 2026-07-02 (v1.4.3, 31 migration
 files); the container/DB sections and `db-stats.sh` were re-verified 2026-08-16 for
-**v3.0.0** (34 migration files, self-contained image). All commands run from the repo
+**v3.0.0** (34 migration files, self-contained image). The history/cash-flow payload
+sections, the MCP-catalog context-cost recipe and the projection `events` field were
+added/verified 2026-08-28 against branch `feat/mcp-fase-5-contexto` (issue #86, Fase 5
+of the 4.4.0 MCP-audit train — unreleased at verification time, `Cargo.toml` still
+4.3.1). All commands run from the repo
 root. The three scripts shipped with this skill live in
 `scripts/diagnostics/` and were **written against
 the API contract as of 2026-07-02, verified by code reading**
@@ -172,9 +176,137 @@ months_override`.
 **`?months=N`** (12–840; fuera de rango **rechaza** con 400 `months_out_of_range` desde 4.4.0 — antes clampaba en silencio): bypasses the cache entirely (`q.months.is_none()`
 gate in `get_projection_series`) — use it to force a true compute measurement.
 
+**`events` / `events_truncated`** (Fase 5, issue #86): `GET /v1/projection/series` now
+also carries dated Próximos (planning flows with a `payment_start_date`) that fall
+inside the horizon — `month_index`, `date_ymd`, `title`, `amount` (≥ 0),
+`direction` (`inflow`|`outflow`) — capped at `PROJECTION_EVENTS_MAX = 100`
+(`apps/api/src/handlers/projection.rs`), month ASC then amount DESC, with
+`events_truncated = true` past the cap. No new query — it reuses the existing planning-
+flows join. Budget it as **~90 bytes per event**, not per NW point. This field is the
+answer to "the hybrid density hides a jump" (in the Fase-5 audit: a ~98 k€ drop between
+two annual `hybrid` points with nothing in the response explaining it) — **do not**
+"fix" that symptom by raising `density`, which was deliberately rejected as a query
+param: it would bring back all 841 monthly points and still only say *where* the curve
+moved, not *why*. `events` says why without changing the density at all.
+
+**`view` echoed at the response root** (Fase 5): `GET /v1/summary`, `/v1/budget`,
+`/v1/projection/series` and `/v1/allocation-rules/resolution` now all carry
+`"view": "household" | "mine"` at the top level, put there by the core (so it is on the
+HTTP response and therefore on `openapi.json` too), via `LedgerView::as_str()`
+(`apps/api/src/handlers/person_view.rs`). Before this, `?view=mine` and omitting the
+param could return **byte-identical** payloads on a single-user installation, so there
+was no way to tell "mine == household" from "the param was silently ignored". **Read
+this field first** whenever two measurements that are supposed to differ by scope
+don't — it tells you which scope the server actually applied before you spend time
+diffing bytes.
+
 **view=mine vs household diff**: use `projection-diff.sh "" "view=mine"` (below), or
 manually fetch both and compare `starting_net_worth` / `asset_series` — they SHOULD
 differ if members own different rows; `mine` has its own cache key.
+
+### History and cash-flow payload sizes (Fase 5, issue #86 — defaults changed under you)
+
+`GET /v1/history/series` **no longer defaults to "the whole history"**. Omitting
+`window_months` now means `DEFAULT_HISTORY_WINDOW_MONTHS = 120` months (10 years);
+`window_months=1200` (`MAX_HISTORY_WINDOW_MONTHS`) is the new spelling of "everything"
+(nothing can exist further back — the window cap itself is 100 years). **Any recipe
+written before Fase 5 that measured "`/v1/history/series` with no params" as the
+worst-case payload is now measuring a smaller, bounded response** — re-baseline before
+comparing before/after numbers. Worst case measured in the Fase-5 audit: **53.6 KB →
+16.1 KB (−70 %)**, because the old unbounded default walked all the way back to the
+user's `birth_date` — for a young installation that is ~290 points, the first ~200 of
+them interpolating between €0 and a few hundred euros at 15 decimal places.
+
+Chart numerics are now rounded at **publication** time, not computation time:
+`CHART_DP = 2` decimals for every series value, `month_fraction` to 4 decimals
+(`MONTH_FRACTION_DP`, `(f * 10_000.0).round() / 10_000.0`). Applies to both
+`/v1/history/series` and the cash-flow fine curve. The interpolation itself
+(`crates/engine/src/history.rs`) stays exact `Decimal` math — this is publication
+rounding only, same family as `money_out`/`round_ratio`. If you are diffing payload
+bytes before/after some unrelated refactor, remember this rounding alone trims
+trailing digits and will show up as a byte-size delta that has nothing to do with your
+change.
+
+`GET /v1/history/cashflow`'s fine (sub-monthly) curve is capped at
+`MAX_FINE_CURVE_WINDOW_MONTHS = 36` months. Asking for a wider window is **not a 400**:
+the monthly aggregate `months[]` still comes back in full (up to the 120-month window
+cap), `fine` is `null`, and `fine_absent_reason = "window_too_large_for_curve"` says
+why — the other three values are `not_requested`, `no_asset_linked_transactions`,
+`no_snapshots_to_anchor`; `null` iff `fine` actually travels. Worst case measured:
+**64 KB → 20 KB (−69 %)**.
+
+Measure it:
+
+```bash
+curl -sf -b "$JAR" -o /dev/null -w 'default (120mo): %{size_download} B\n' "$BASE/v1/history/series"
+curl -sf -b "$JAR" -o /dev/null -w 'all (1200mo):    %{size_download} B\n' "$BASE/v1/history/series?window_months=1200"
+curl -sf -b "$JAR" "$BASE/v1/history/cashflow?window_months=48" | python3 -c \
+  'import json,sys; d=json.load(sys.stdin); print("fine present:", d["fine"] is not None, "reason:", d["fine_absent_reason"])'
+```
+
+### MCP catalog context cost (Fase 5, issue #86)
+
+Cheapest measurement — no server needed, just read the fixture the catalog-freeze test
+writes:
+
+```bash
+python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print('tools',len(t),'chars',sum(l),'max',max(l))"
+```
+
+As of Fase 5: `tools 52 chars 21319 max 596`. Before Fase 5 (verified by diffing
+`apps/api/src/mcp/server.rs` against `main`): 37,214 chars total, max 3,821, and **26**
+descriptions over 600 chars — not 12; that number appears in the CHANGELOG but does not
+match a direct count of the pre-Fase-5 source. Re-derive rather than trust either
+figure:
+
+```bash
+python3 - <<'EOF'
+import re
+src = open('apps/api/src/mcp/server.rs', encoding='utf-8').read()
+d = [x.replace('\\"', '"').replace('\\n', '\n')
+     for x in re.findall(r'^\s+description = "((?:[^"\\]|\\.)*)",\s*$', src, re.M)]
+print(len(d), sum(map(len, d)), max(map(len, d)), 'over600:', sum(1 for x in d if len(x) > 600))
+EOF
+```
+
+The fixture regenerates with:
+
+```bash
+UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract
+```
+
+The merge gate is `apps/api/tests/mcp_http.rs::tool_descriptions_stay_within_the_context_budget`
+(`PER_TOOL_MAX = 600`, `TOTAL_BUDGET = 24_000`) — see `futurefin-validation-and-qa` for
+what to do when it fails (never raise the constant).
+
+**Descriptions are no longer the dominant cost.** Measured in the Fase-5 audit, the
+`inputSchema` of the 52-tool catalog is **~55 KB — about 2.7× the descriptions**. That
+number lives only in CHANGELOG prose, not in a fixture or a test assertion: treat it as
+a one-time audit measurement, not a frozen constant, and re-derive it against a live
+server rather than quoting 55 KB going forward:
+
+```bash
+BASE=http://127.0.0.1:8080
+curl -s -X POST "$BASE/mcp" \
+  -H "Authorization: Bearer ffp_…" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+| python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+tools = d["result"]["tools"]
+schema_bytes = sum(len(json.dumps(t["inputSchema"])) for t in tools)
+desc_bytes = sum(len(t.get("description", "")) for t in tools)
+print("tools", len(tools), "schema_bytes", schema_bytes, "desc_bytes", desc_bytes)
+'
+```
+
+(`/mcp` is Streamable HTTP over SSE, hence the `Accept` header carrying both content
+types; a Bearer API token from Ajustes → Integraciones or an OAuth access token both
+work.) If a future change needs to cut context further, this is where the remaining
+budget is — the ~250 parameter doc-comments that `schemars` publishes as each field's
+own `description` inside `inputSchema`, not the tool-level `description` string this
+Fase 5 already cut.
 
 ## 3. DB-level diagnosis
 
@@ -405,6 +537,11 @@ trusting:
 - Scripts stay shellcheck-clean (CI enforces):
   `shellcheck -S warning scripts/diagnostics/*.sh`
 - Two-phase fetch + chunking: `grep -n 'fetchProjectionTwoPhase\|density=hybrid\|import("./views/ProjectionView")' apps/web/src/App.tsx`
+- History window default/max + chart rounding (Fase 5): `grep -n 'DEFAULT_HISTORY_WINDOW_MONTHS\|MAX_HISTORY_WINDOW_MONTHS\|CHART_DP\|MONTH_FRACTION_DP' apps/api/src/handlers/history.rs`
+- Cash-flow fine-curve cap + absence reasons (Fase 5): `grep -n 'MAX_FINE_CURVE_WINDOW_MONTHS\|fine_absent_reason = Some' apps/api/src/handlers/history.rs`
+- `events`/`events_truncated` cap (Fase 5): `grep -n 'PROJECTION_EVENTS_MAX' apps/api/src/handlers/projection.rs`
+- `view` echoed at the response root (Fase 5): `grep -rn 'view: view.as_str()' apps/api/src/handlers/{summary,budget,projection,allocation_rules}.rs`
+- MCP catalog description budget + fixture (Fase 5): `grep -n 'PER_TOOL_MAX\|TOTAL_BUDGET\|UPDATE_MCP_CATALOG' apps/api/tests/mcp_http.rs`; the fixture itself is `apps/api/tests/fixtures/mcp-catalog.json`
 - Smoke script env/behavior: `sed -n '1,45p' scripts/smoke-projection-cache.sh`
 - Size/timing norms (~260→30 KB, ~5 KB hybrid, ~82 vs ~841 points, sub-ms hit,
   ~500 ms compute): `.claude/api-routes.md` §Projection + CHANGELOG.md v1.4.0.

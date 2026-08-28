@@ -12,8 +12,8 @@
         "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "95505b46efbf",
-      "description_len": 1106,
-      "description_sha256_12": "e7cf08ed2f45",
+      "description_len": 570,
+      "description_sha256_12": "261539f88af1",
       "name": "apply_categorization_rule",
       "properties": [
         "apply_to_existing",
@@ -33,8 +33,8 @@
         "$.kinds[]": "enum=[\"asset\",\"liability\"] type=\"string\""
       },
       "constraints_sha256_12": "c2bf8051e468",
-      "description_len": 298,
-      "description_sha256_12": "f0120edf5141",
+      "description_len": 257,
+      "description_sha256_12": "2d6d20a01f97",
       "name": "capture_snapshot",
       "properties": [
         "kinds"
@@ -53,8 +53,8 @@
         "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "5512eefd8b12",
-      "description_len": 440,
-      "description_sha256_12": "2e29aec17699",
+      "description_len": 210,
+      "description_sha256_12": "98bdda9164f9",
       "name": "create_asset",
       "properties": [
         "category_id",
@@ -82,8 +82,8 @@
         "$.persists_after_retirement": "type=[\"boolean\",\"null\"]"
       },
       "constraints_sha256_12": "1c665ae43d01",
-      "description_len": 525,
-      "description_sha256_12": "8a3f7e356194",
+      "description_len": 301,
+      "description_sha256_12": "4e5a1f79b3ad",
       "name": "create_budget_entry",
       "properties": [
         "amount",
@@ -108,8 +108,8 @@
         "$.source": "type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "b61a3238dcf7",
-      "description_len": 747,
-      "description_sha256_12": "7ff1acd50e38",
+      "description_len": 549,
+      "description_sha256_12": "94dfd50c0847",
       "name": "create_categorization_rule",
       "properties": [
         "assign_category_id",
@@ -157,11 +157,12 @@
         "$.payment_end_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
         "$.payment_frequency": "enum=[\"monthly\",\"weekly\"] type=[\"null\",\"string\"]",
         "$.principal": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
-        "$.repayment_model": "enum=[\"fixed_payments\",\"french\",\"interest_only\",\"revolving\"] type=[\"null\",\"string\"]"
+        "$.repayment_model": "enum=[\"fixed_payments\",\"french\",\"interest_only\",\"revolving\"] type=[\"null\",\"string\"]",
+        "$.type_tag": "maxLength=120 minLength=1 type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "284b42284286",
-      "description_len": 1285,
-      "description_sha256_12": "69367746bde5",
+      "constraints_sha256_12": "88bc5eb72418",
+      "description_len": 581,
+      "description_sha256_12": "7204b93a6246",
       "name": "create_liability",
       "properties": [
         "apr_percent",
@@ -174,7 +175,8 @@
         "payment_end_date",
         "payment_frequency",
         "principal",
-        "repayment_model"
+        "repayment_model",
+        "type_tag"
       ],
       "required": [
         "category_id",
@@ -193,8 +195,8 @@
         "$.title": "type=\"string\""
       },
       "constraints_sha256_12": "5e3bef85ba0a",
-      "description_len": 490,
-      "description_sha256_12": "fd3bcf44bb25",
+      "description_len": 253,
+      "description_sha256_12": "9f2e8a06b1ff",
       "name": "create_planning_flow",
       "properties": [
         "category_id",
@@ -225,8 +227,8 @@
         "$.recurring": "type=[\"boolean\",\"null\"]"
       },
       "constraints_sha256_12": "3f24273e519d",
-      "description_len": 852,
-      "description_sha256_12": "7e8250f92383",
+      "description_len": 577,
+      "description_sha256_12": "413b7a59cd20",
       "name": "create_transaction",
       "properties": [
         "amount",
@@ -255,8 +257,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "55f9daf6f16d",
-      "description_len": 800,
-      "description_sha256_12": "ac160b635e67",
+      "description_len": 557,
+      "description_sha256_12": "cdabef50c31a",
       "name": "delete_asset",
       "properties": [
         "confirm",
@@ -274,8 +276,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "d9b763ce74d3",
-      "description_len": 616,
-      "description_sha256_12": "f209fb4326fa",
+      "description_len": 334,
+      "description_sha256_12": "8fd7fe06fa1e",
       "name": "delete_budget_entry",
       "properties": [
         "confirm",
@@ -292,8 +294,8 @@
         "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "56ad48dea7cf",
-      "description_len": 503,
-      "description_sha256_12": "abf3fbfae01b",
+      "description_len": 406,
+      "description_sha256_12": "6ec0a047d4e2",
       "name": "delete_categorization_rule",
       "properties": [
         "confirm",
@@ -311,8 +313,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "55f9daf6f16d",
-      "description_len": 432,
-      "description_sha256_12": "5af0ebaac368",
+      "description_len": 289,
+      "description_sha256_12": "9b297d3dd0dd",
       "name": "delete_import",
       "properties": [
         "confirm",
@@ -331,8 +333,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "55f9daf6f16d",
-      "description_len": 790,
-      "description_sha256_12": "c0eca0313bde",
+      "description_len": 485,
+      "description_sha256_12": "36b68e19f100",
       "name": "delete_liability",
       "properties": [
         "confirm",
@@ -350,8 +352,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "d9b763ce74d3",
-      "description_len": 343,
-      "description_sha256_12": "b6b9341ebb59",
+      "description_len": 90,
+      "description_sha256_12": "1376dce52e3f",
       "name": "delete_planning_flow",
       "properties": [
         "confirm",
@@ -368,8 +370,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "d9b763ce74d3",
-      "description_len": 231,
-      "description_sha256_12": "b26cdee52b31",
+      "description_len": 192,
+      "description_sha256_12": "94c10fde50fa",
       "name": "delete_recurring_rule",
       "properties": [
         "confirm",
@@ -387,8 +389,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "55f9daf6f16d",
-      "description_len": 326,
-      "description_sha256_12": "cdd2a1bc38c6",
+      "description_len": 261,
+      "description_sha256_12": "b12a8bf35208",
       "name": "delete_snapshot",
       "properties": [
         "confirm",
@@ -406,8 +408,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "d9b763ce74d3",
-      "description_len": 155,
-      "description_sha256_12": "f468003c9109",
+      "description_len": 126,
+      "description_sha256_12": "7edd594edad7",
       "name": "delete_transaction",
       "properties": [
         "confirm",
@@ -423,8 +425,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 1265,
-      "description_sha256_12": "f9e52a45169b",
+      "description_len": 579,
+      "description_sha256_12": "175b3dfafd4b",
       "name": "get_allocation_resolution",
       "properties": [
         "view"
@@ -437,8 +439,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 426,
-      "description_sha256_12": "861cdbfe6c47",
+      "description_len": 540,
+      "description_sha256_12": "952e2855e652",
       "name": "get_budget",
       "properties": [
         "view"
@@ -454,8 +456,8 @@
         "$.window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "f1a75650cda8",
-      "description_len": 753,
-      "description_sha256_12": "8cb3ff87c7cf",
+      "description_len": 448,
+      "description_sha256_12": "747eaaaa3f29",
       "name": "get_category_monthly_series",
       "properties": [
         "category_id",
@@ -475,8 +477,8 @@
         "$.window_months": "format=\"int64\" maximum=1200 minimum=1 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "0baf22866d5b",
-      "description_len": 1046,
-      "description_sha256_12": "7fd798d6e63c",
+      "description_len": 574,
+      "description_sha256_12": "8cf45a55142b",
       "name": "get_history",
       "properties": [
         "include_asset_series",
@@ -494,8 +496,8 @@
         "$.window_months": "format=\"int64\" maximum=120 minimum=1 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "98f6a7bce371",
-      "description_len": 990,
-      "description_sha256_12": "7e92bdb60492",
+      "description_len": 595,
+      "description_sha256_12": "4bf120b7840b",
       "name": "get_history_cashflow",
       "properties": [
         "include_curve",
@@ -513,8 +515,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "5bbdcf2de7e5",
-      "description_len": 1607,
-      "description_sha256_12": "f856420b86ba",
+      "description_len": 591,
+      "description_sha256_12": "4d7e5eac68bc",
       "name": "get_projection",
       "properties": [
         "include_asset_series",
@@ -528,8 +530,8 @@
         "$": "additionalProperties=false type=\"object\""
       },
       "constraints_sha256_12": "e3fc94c62797",
-      "description_len": 380,
-      "description_sha256_12": "be5b6ae9af47",
+      "description_len": 338,
+      "description_sha256_12": "184b61da3516",
       "name": "get_settings",
       "properties": [],
       "required": []
@@ -540,8 +542,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 2278,
-      "description_sha256_12": "746e8e2e2540",
+      "description_len": 596,
+      "description_sha256_12": "264064911c9b",
       "name": "get_summary",
       "properties": [
         "view"
@@ -557,8 +559,8 @@
         "$.year": "format=\"int32\" maximum=3000 minimum=1900 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "35306683141e",
-      "description_len": 1538,
-      "description_sha256_12": "ae81b8ae8aaf",
+      "description_len": 592,
+      "description_sha256_12": "1077a2e57f5b",
       "name": "get_transactions_summary",
       "properties": [
         "avg_window",
@@ -588,8 +590,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 729,
-      "description_sha256_12": "db8245acbb1a",
+      "description_len": 582,
+      "description_sha256_12": "8618c7370776",
       "name": "list_assets",
       "properties": [
         "view"
@@ -617,8 +619,8 @@
         "$.offset": "format=\"uint32\" minimum=0 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "3e0ffff16d85",
-      "description_len": 469,
-      "description_sha256_12": "1da84c2c2f51",
+      "description_len": 371,
+      "description_sha256_12": "70d01a5cd004",
       "name": "list_categorization_rules",
       "properties": [
         "limit",
@@ -632,8 +634,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 527,
-      "description_sha256_12": "57754d52d6a8",
+      "description_len": 445,
+      "description_sha256_12": "02bd0c4ee063",
       "name": "list_liabilities",
       "properties": [
         "view"
@@ -659,8 +661,8 @@
         "$": "additionalProperties=false type=\"object\""
       },
       "constraints_sha256_12": "e3fc94c62797",
-      "description_len": 315,
-      "description_sha256_12": "82d5578569e6",
+      "description_len": 289,
+      "description_sha256_12": "1a12f0486cf3",
       "name": "list_recurring_rules",
       "properties": [],
       "required": []
@@ -670,15 +672,19 @@
         "$": "additionalProperties=false type=\"object\"",
         "$.include_items": "type=[\"boolean\",\"null\"]",
         "$.kind": "enum=[\"asset\",\"liability\"] type=[\"null\",\"string\"]",
+        "$.limit": "format=\"uint32\" maximum=200 minimum=1 type=[\"integer\",\"null\"]",
+        "$.offset": "format=\"uint32\" minimum=0 type=[\"integer\",\"null\"]",
         "$.year": "format=\"int32\" maximum=3000 minimum=1900 type=[\"integer\",\"null\"]"
       },
-      "constraints_sha256_12": "4019d89ae3ea",
-      "description_len": 209,
-      "description_sha256_12": "dbc58d58a2ff",
+      "constraints_sha256_12": "b1394d43f4bd",
+      "description_len": 359,
+      "description_sha256_12": "9964ffc6fc46",
       "name": "list_snapshots",
       "properties": [
         "include_items",
         "kind",
+        "limit",
+        "offset",
         "year"
       ],
       "required": []
@@ -686,13 +692,17 @@
     {
       "constraints": {
         "$": "additionalProperties=false type=\"object\"",
+        "$.limit": "format=\"uint32\" maximum=200 minimum=1 type=[\"integer\",\"null\"]",
+        "$.offset": "format=\"uint32\" minimum=0 type=[\"integer\",\"null\"]",
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 191,
-      "description_sha256_12": "eca615bcea11",
+      "constraints_sha256_12": "69bb880b7c84",
+      "description_len": 408,
+      "description_sha256_12": "e37b2fd447db",
       "name": "list_transaction_imports",
       "properties": [
+        "limit",
+        "offset",
         "view"
       ],
       "required": []
@@ -703,8 +713,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 180,
-      "description_sha256_12": "bbc77df0abb6",
+      "description_len": 227,
+      "description_sha256_12": "d71e5c35a21c",
       "name": "list_transaction_months",
       "properties": [
         "view"
@@ -728,8 +738,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "b5fc8c9ab48c",
-      "description_len": 395,
-      "description_sha256_12": "721ae9b7b07e",
+      "description_len": 344,
+      "description_sha256_12": "993eddae2257",
       "name": "list_transactions",
       "properties": [
         "category_id",
@@ -754,8 +764,8 @@
         "$.confirm_token": "maxLength=200 minLength=1 type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "ffbe2eb3027d",
-      "description_len": 1038,
-      "description_sha256_12": "a165a4dee0a9",
+      "description_len": 592,
+      "description_sha256_12": "3394bc3f8870",
       "name": "materialize_recurring",
       "properties": [
         "confirm",
@@ -769,8 +779,8 @@
         "$.confirm": "type=[\"boolean\",\"null\"]"
       },
       "constraints_sha256_12": "506034ee05c5",
-      "description_len": 741,
-      "description_sha256_12": "66c2f9521d4f",
+      "description_len": 546,
+      "description_sha256_12": "91481c188935",
       "name": "reconcile_transfers",
       "properties": [
         "confirm"
@@ -818,8 +828,8 @@
         "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "e38d37593828",
-      "description_len": 3821,
-      "description_sha256_12": "5ed53e0cbdfa",
+      "description_len": 591,
+      "description_sha256_12": "a8b12c41d8a3",
       "name": "simulate_projection",
       "properties": [
         "annual_inflation_percent",
@@ -845,8 +855,8 @@
         "$.transaction_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "dfdb27ed0266",
-      "description_len": 898,
-      "description_sha256_12": "65abe2bde19f",
+      "description_len": 569,
+      "description_sha256_12": "86eb8e621dd3",
       "name": "unreconcile_transfer",
       "properties": [
         "confirm",
@@ -868,8 +878,8 @@
         "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "c255b4e30e86",
-      "description_len": 612,
-      "description_sha256_12": "60b0b661df15",
+      "description_len": 377,
+      "description_sha256_12": "89027368a552",
       "name": "update_allocation_rule",
       "properties": [
         "amount",
@@ -897,8 +907,8 @@
         "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "95950f1c68a5",
-      "description_len": 608,
-      "description_sha256_12": "7be534c4349c",
+      "description_len": 376,
+      "description_sha256_12": "2e8a4cd402ee",
       "name": "update_asset",
       "properties": [
         "asset_id",
@@ -923,8 +933,8 @@
         "$.expected_annual_return_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "4d33fcf99be9",
-      "description_len": 655,
-      "description_sha256_12": "1fe8f942ccdc",
+      "description_len": 404,
+      "description_sha256_12": "c8eb13e4b6f1",
       "name": "update_asset_value",
       "properties": [
         "asset_id",
@@ -948,8 +958,8 @@
         "$.persists_after_retirement": "type=[\"boolean\",\"null\"]"
       },
       "constraints_sha256_12": "52b9a1745aca",
-      "description_len": 662,
-      "description_sha256_12": "be92dcc86bdb",
+      "description_len": 407,
+      "description_sha256_12": "027dc4a9a21e",
       "name": "update_budget_entry",
       "properties": [
         "amount",
@@ -979,8 +989,8 @@
         "$.source": "type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "cfdb99dd6ac1",
-      "description_len": 657,
-      "description_sha256_12": "ebaac7acb163",
+      "description_len": 539,
+      "description_sha256_12": "e399642775a2",
       "name": "update_categorization_rule",
       "properties": [
         "assign_category_id",
@@ -1018,8 +1028,8 @@
         "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "4806c51fd66f",
-      "description_len": 839,
-      "description_sha256_12": "b14922557b48",
+      "description_len": 580,
+      "description_sha256_12": "b5c35aa33f0d",
       "name": "update_fire_settings",
       "properties": [
         "annual_inflation_assumption_percent",
@@ -1051,11 +1061,12 @@
         "$.payment_end_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
         "$.payment_frequency": "enum=[\"monthly\",\"weekly\"] type=[\"null\",\"string\"]",
         "$.principal": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
-        "$.repayment_model": "enum=[\"fixed_payments\",\"french\",\"interest_only\",\"revolving\"] type=[\"null\",\"string\"]"
+        "$.repayment_model": "enum=[\"fixed_payments\",\"french\",\"interest_only\",\"revolving\"] type=[\"null\",\"string\"]",
+        "$.type_tag": "maxLength=120 type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "170010fafb00",
-      "description_len": 1106,
-      "description_sha256_12": "33a139c3d817",
+      "constraints_sha256_12": "adc6e4b8d90d",
+      "description_len": 564,
+      "description_sha256_12": "5b48d39e8060",
       "name": "update_liability",
       "properties": [
         "apr_percent",
@@ -1069,7 +1080,8 @@
         "payment_end_date",
         "payment_frequency",
         "principal",
-        "repayment_model"
+        "repayment_model",
+        "type_tag"
       ],
       "required": [
         "liability_id"
@@ -1088,8 +1100,8 @@
         "$.title": "type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "53abad6fdf51",
-      "description_len": 382,
-      "description_sha256_12": "94f43b947657",
+      "description_len": 148,
+      "description_sha256_12": "220d408d09a7",
       "name": "update_planning_flow",
       "properties": [
         "category_id",
@@ -1123,8 +1135,8 @@
         "$.op_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "a02b114fe676",
-      "description_len": 599,
-      "description_sha256_12": "711198c55c78",
+      "description_len": 460,
+      "description_sha256_12": "50ed9a35466d",
       "name": "update_transaction",
       "properties": [
         "amount",
@@ -1157,8 +1169,8 @@
         "$.notes": "type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1b295ddee3bb",
-      "description_len": 501,
-      "description_sha256_12": "0365b91dcce8",
+      "description_len": 392,
+      "description_sha256_12": "83ef462c0058",
       "name": "update_transactions",
       "properties": [
         "category_id",

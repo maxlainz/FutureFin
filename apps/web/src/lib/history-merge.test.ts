@@ -41,6 +41,8 @@ function makeHistory(
     anchor_date_ymd: ANCHOR,
     anchor_month_first_ymd: "2026-07-01",
     view: "household",
+    window_months: 1200,
+    window_truncated: false,
     liabilities_snapshotted: true,
     points: [
       { month_index: -1, net_worth: 900, assets_total: 900, liabilities_total: 0 },
@@ -58,6 +60,7 @@ function makeHistory(
         month_index: -2,
         month_fraction: -1.5484,
         kind: "asset",
+        source: "capture",
         owner_user_id: "u1",
         total: 800,
       },

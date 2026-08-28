@@ -91,6 +91,7 @@ exception: it names a mechanism CI asserts, and it deliberately stops short of "
 | "Property-tested engine invariants" | proptest suite merged and green (item 1), named properties listed in the CHANGELOG entry |
 | "Tax-aware withdrawals" | Engine drawdown tax model + regenerated parity fixture with both suites green (item 7) |
 | "Safe upgrades / never lose data" | Pre-migration dump hook + a restore actually exercised in a test or documented drill (item 2). **Partly earned in 3.0.0**: the automatic pre-migration dump exists and the CI `docker-stack` job exercises V2→V3 with real data, automigration and pg_upgrade 15→16. **The downgrade guard was earned on 2026-08-27** (`db.rs` → `MigrationError::Downgrade` + operator banner, pinned by `apps/api/tests/migration_guard.rs`), so "refuses to start instead of running an old schema over new data, and says so in words you can act on" is now claimable. Still unearned, and therefore still unclaimable: a restore drill run against a *production-shaped* dump. Word claims to what the evidence covers — "backs itself up before every migration" and "refuses to downgrade" are provable today; "never lose data" is not. |
+| "The MCP catalog fits in context" / "context-efficient MCP" | Split the claim by which half you mean. **Descriptions**: earned — `apps/api/tests/mcp_http.rs::tool_descriptions_stay_within_the_context_budget` (`PER_TOOL_MAX = 600`, `TOTAL_BUDGET = 24_000`) is green in CI, cutting 37.214 → 21.319 chars (Fase 5, issue #86). **`inputSchema`**: NOT earned — measured after that cut it is ~55 KB, ~2,7× the descriptions, and no guard test exists for it (item 10). Do not let "the catalog is context-efficient" stand as a whole claim until item 10's guard exists too — today it is true for one half of the payload and open for the larger half. |
 
 Rule of thumb: the CHANGELOG entry that introduces a capability must name the test(s) that prove
 it. If you cannot name the test, the claim is not ready.
@@ -100,7 +101,8 @@ it. If you cannot name the test, the claim is not ready.
 Ranking = value for a solo self-hosted household app ÷ effort, discounted by risk. Items 4–7
 change the economic model and therefore execute through
 `futurefin-projection-realism-campaign` (item 5 already did — shipped 4.2.0); ALL items gate
-through `futurefin-change-control`.
+through `futurefin-change-control`. Item 10 touches the MCP catalog surface, so it additionally
+gates through `futurefin-mcp-parity` when executed.
 
 | # | Item | Axis | Value | Effort | Risk | Verdict |
 |---|---|---|---|---|---|---|
@@ -113,6 +115,7 @@ through `futurefin-change-control`.
 | 7 | Tax-aware drawdown path | 1 | Med | Med–High | Med | Candidate, via campaign |
 | 8 | Variable/dynamic SWR strategies | 1 | Low–Med | Med | Med | Deferred until 6 exists |
 | 9 | Multi-currency correctness | — | Low | High | Med | Demoted — see inventory |
+| 10 | MCP catalog context budget: descriptions done, `inputSchema` next | 3 | Med | Low | Low | Do next |
 
 ---
 
@@ -437,6 +440,109 @@ Ajustes UI (they are already user-editable via `PATCH /v1/installation` fire_set
 
 ---
 
+### 10. MCP catalog context budget: descriptions are done, `inputSchema` is next
+
+**Why it belongs on axis 3:** for a self-hosted household operated (in part) through Claude, the
+MCP catalog IS the product's AI-native interface — every tool description and every parameter
+description inside `tools/list` travels in full into any conversation that touches `/mcp`,
+whether or not a single tool ends up called. That is a real, ongoing product cost, the same way a
+slow endpoint or an unreadable error is: it degrades the app for its AI-agent users specifically.
+
+Fase 5 (issue #86) proved the pattern that fixes this — move what can be checked in the RESPONSE
+out of prose that gets paid every turn — and applied it to tool-level descriptions:
+**37.214 → 21.319 characters (−42,7 %)**, every tool now ≤ 600 chars (before, 26 tools exceeded
+600, worst at 3.821 — re-derive this pre-Fase-5 figure yourself before quoting it; a number
+already circulating in this repo's own CHANGELOG for it, 12, does not match a direct count of the
+pre-Fase-5 source). Gate:
+`apps/api/tests/mcp_http.rs::tool_descriptions_stay_within_the_context_budget`
+(`PER_TOOL_MAX = 600`, `TOTAL_BUDGET = 24_000`) — its failure message is explicit: do not raise
+the constant, move the overflow to a response provenance field or to the server's `instructions`.
+
+**The confession that makes this credible — read before pitching a shortcut here:** phases 1–4 of
+this same effort made the description number WORSE, not better — **27,280 raw literal chars at
+`v4.3.1` → 37,228 at `main`** (measure any revision with
+`git show <rev>:apps/api/src/mcp/server.rs | python3 -c "import re,sys;d=re.findall(r'description = \"((?:[^\"\\\\]|\\\\.)*)\",', sys.stdin.read());print(len(d), sum(map(len,d)))"`)
+— because every fixed silent-wrong-number incident bolted its own warning onto some tool's prose.
+That one-liner counts the **raw** string literal, escapes included, so it runs a few characters
+above the authoritative figure (`description_len` in `apps/api/tests/fixtures/mcp-catalog.json`,
+which the guard test uses: 37,214 at `main`, 21,319 now). Use it for the trend across revisions,
+the fixture for the number of record. The
+generalizable lesson, and the one this item exists to keep applying: **an MCP server is not
+defended by prose repeated every turn — it is defended by provenance fields in the response that
+tell the model where a figure came from at the moment it is looking at that figure** (the
+`*_basis`, `*_absent_reason`, `source: capture|backfill` and `events` fields this same Fase 5
+added are the pattern already applied once). Reach for a response field or an `instructions` line
+before reaching for more words in a description — that instinct is what Fase 5 had to unlearn the
+hard way, and it is exactly the instinct this item asks you to apply one layer deeper.
+
+**What Fase 5 did NOT touch — the asset that makes this item tractable HERE:** measured with a
+live `tools/list` AFTER the description cut, the `inputSchema` block of the same 52-tool catalog
+is **~55 KB — roughly 2,7× the descriptions**. Prose stopped being the dominant cost; the lever
+left is the **~250 parameter doc-comments** that `schemars` publishes as the `description` of
+each JSON-Schema field (Fase 2, issue #83, already put the *structural* constraints — `enum`,
+`pattern`, numeric bounds — into the schema itself; the doc-comment sitting on top of that is
+often now pure duplication). Treat 55 KB as a one-time Fase-5 audit measurement, NOT a frozen
+constant: nothing in the repo asserts it today, and the catalog fixture
+(`apps/api/tests/fixtures/mcp-catalog.json`) deliberately stores only a canonicalized
+`constraints` summary plus a description hash — never the full schema — precisely so its diff
+stays readable (see the comment above `tool_signature` in `mcp_http.rs`). Re-derive both halves
+against a live server instead of quoting these numbers going forward:
+
+```bash
+BASE=http://127.0.0.1:8080
+curl -s -X POST "$BASE/mcp" \
+  -H "Authorization: Bearer ffp_…" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+| python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+tools = d["result"]["tools"]
+schema_bytes = sum(len(json.dumps(t["inputSchema"])) for t in tools)
+desc_bytes = sum(len(t.get("description", "")) for t in tools)
+print("tools", len(tools), "schema_bytes", schema_bytes, "desc_bytes", desc_bytes)
+'
+```
+
+The description half alone re-derives cheaply, no running server needed, straight from the
+frozen fixture:
+
+```bash
+python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"
+```
+→ today `52 21319 596`.
+
+**First three steps in this repo:**
+1. Extend the pattern of `tool_descriptions_stay_within_the_context_budget` in `mcp_http.rs` with
+   a throwaway, printed-not-asserted per-tool breakdown of `len(inputSchema)` vs
+   `len(description)` (the curl recipe above, turned into a `#[tokio::test]`). The aggregate says
+   the schema dominates; trimming needs to know WHICH tools carry the weight before touching any
+   doc-comment.
+2. From that breakdown, group by shared parameter TYPE rather than by tool. Request/response
+   fragments reused across many tools (`view`, pagination cursors, `confirm`/`confirm_token`,
+   `category_id`, date ranges…) surface as `$defs` entries in the JSON Schema and repeat the SAME
+   doc-comment once per tool that references them. Counting occurrences per shared `$defs` entry
+   shows where trimming one doc-comment saves bytes across the whole catalog, not just one tool —
+   the same multiplication effect that made tool descriptions expensive, one layer down.
+3. For each parameter doc-comment, classify it PAYLOAD (states a bound or enum the schema ALREADY
+   declares structurally via Fase 2's `#[schemars(range/pattern/extend)]` — pure duplication,
+   safe to shorten or drop) or PROSE (explains something the schema cannot express structurally —
+   candidate for the server's `instructions` block if it is transversal to several tools, or for
+   a response provenance field if it is checkable in the output — the exact move Fase 5 made for
+   tool descriptions, not yet made for parameters).
+
+**You have a result when:** a guard test analogous to
+`tool_descriptions_stay_within_the_context_budget`, but over total `inputSchema` bytes, is green
+in CI with a documented, deliberately-chosen budget, AND a first trimming pass (the top-N
+duplicated `$defs` doc-comments identified in step 2) lands without any test in
+`mcp_http.rs`/`mcp_write.rs` losing coverage — `constraints_sha256_12` may change (the prose
+moved), the underlying contract (`enum`, `pattern`, bounds, `required`) must not. Until that guard
+exists, do not describe the MCP catalog's context cost as solved anywhere public: the description
+half is (cite `tool_descriptions_stay_within_the_context_budget`); the schema half — ~2,7× larger
+— is not (claims table above).
+
+---
+
 ## Observables — watched, not proposed
 
 Things worth *noticing* that do not yet clear the bar for a ranked item (no evidence of need at
@@ -509,3 +615,21 @@ nothing automatically un-lists a shipped item here. Re-verify before relying on 
 - Currency/locale state: `grep -n 'EUR.*USD.*GBP' apps/api/src/handlers/installation.rs; grep -n DISPLAY_NUMBER_LOCALE apps/web/src/lib/format.ts`
 - Horizon basis strings: `grep -n '"lifespan_90"\|"fallback_no_demographics"\|"months_override"' apps/api/src/handlers/projection.rs`
 - Migration count: `ls apps/api/migrations | wc -l` (34 as of 2026-08-16; 31 as of 2026-07-02)
+
+**Item 10 added 2026-08-28 (MCP Fase 5 doc sweep, issue #86, branch `feat/mcp-fase-5-contexto`,
+unreleased at verification time — `Cargo.toml` still 4.3.1).** Verified against
+`apps/api/tests/mcp_http.rs`, `apps/api/tests/fixtures/mcp-catalog.json` and
+`CHANGELOG.md` (unreleased Fase-5 entry). Re-verify before relying on either headline number:
+
+- Description budget + guard: `grep -n 'PER_TOOL_MAX\|TOTAL_BUDGET' apps/api/tests/mcp_http.rs`
+  (must show `600` / `24_000`); cheap re-derivation:
+  `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
+  (`52 21319 596` on 2026-08-28).
+- `inputSchema` has NO guard yet — this absence IS the item, do not treat it as an oversight to
+  silently "fix" outside this item's steps: `grep -rn 'schema_bytes\|inputSchema.*len' apps/api/tests/mcp_http.rs`
+  (empty = still open). Re-derive the ~55 KB figure with the live-server curl recipe inside the
+  item itself; it is not stored in any fixture on purpose (`apps/api/tests/fixtures/mcp-catalog.json`
+  only carries `constraints` + a description hash — confirm with
+  `grep -n '"constraints"\|"description_len"\|inputSchema' apps/api/tests/fixtures/mcp-catalog.json | head`).
+- Fixture regeneration command (only if the catalog's contract itself changed, never to chase a
+  budget failure): `grep -n 'UPDATE_MCP_CATALOG' apps/api/tests/mcp_http.rs`.

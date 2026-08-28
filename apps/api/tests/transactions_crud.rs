@@ -392,13 +392,22 @@ async fn months_endpoint_marks_complete() {
     let m = app.get_with_cookie("/v1/transactions/months", &owner.cookie).await;
     let arr = m.json();
     let months = arr.as_array().unwrap();
-    assert_eq!(months.len(), 2);
-    // Orden DESC.
-    assert_eq!(months[0]["month"], "2020-02");
-    assert_eq!(months[1]["month"], "2020-01");
+    // Tres, no dos: desde 4.4.0 el MES EN CURSO viaja siempre, aunque esté vacío. Antes salía de
+    // un `GROUP BY` y un mes en curso sin movimientos simplemente no aparecía — la rama
+    // `is_complete = false` no se materializaba nunca, mientras las series (`category-series`,
+    // `history/cashflow`) sí le reservaban su hueco. La lista existe para orientar consultas y
+    // contradecía a lo que se iba a consultar.
+    assert_eq!(months.len(), 3, "mes en curso + los dos de 2020: {arr}");
+    // Orden DESC, con el mes en curso el primero (es el más reciente: no hay fechas futuras).
+    let hoy = chrono::Utc::now().format("%Y-%m").to_string();
+    assert_eq!(months[0]["month"], serde_json::json!(hoy), "{arr}");
+    assert_eq!(months[0]["is_complete"], false, "el mes en curso nunca es completo");
+    assert_eq!(months[0]["txn_count"], 0, "y su cuenta a 0 es un dato real, no una ausencia");
+    assert_eq!(months[1]["month"], "2020-02");
+    assert_eq!(months[2]["month"], "2020-01");
     // Meses de 2020 son completos (no el mes en curso).
-    assert_eq!(months[0]["is_complete"], true);
-    assert_eq!(months[0]["txn_count"], 1);
+    assert_eq!(months[1]["is_complete"], true);
+    assert_eq!(months[1]["txn_count"], 1);
 }
 
 #[tokio::test]

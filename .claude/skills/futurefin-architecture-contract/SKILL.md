@@ -25,11 +25,14 @@ again for **v1.6.0** (transactions module, backup schema_version 5) on 2026-07-0
 **v3.0.0** on 2026-08-16 (D13: the image now contains the store; W8: the container is a two-process
 supervisor), and for the **Fase 3 (issue #84) train** on 2026-08-28 (D20: append-only MCP write
 audit, subtractive API-token scope, a real two-phase `confirm_token`, and a third semaphore around
-projection simulations — same pass fixed a standing "`?months=` is clamped" drift in D11), and for
+projection simulations — same pass fixed a standing "`?months=` is clamped" drift in D11), for
 the **Fase 4 (issue #85) train** on 2026-08-28 (D21 + I17: the MCP transport — a kill-switch that
 changes the handler and not the route table, two CORS layers over one origin list, `Origin`
 validation, an explicit body cap on `/mcp`, and an issuer that accepts a subpath; I4 and I11 were
-false before this pass). This is the
+false before this pass), and for the **Fase 5 (issue #86) train** on 2026-08-28 (D22 + I18:
+suppressed/capped/derived content must declare itself in the payload — window caps, pagination,
+item suppression, scope echo, basis fields — plus the D4/I3 f64-exception boundary splitting into
+two definitions with a publication-rounding step). This is the
 contract a retiring principal engineer would make you sign: the decisions
 below are settled, most of them by a documented incident. Do not re-litigate them casually; if you must change one, go through
 `.claude/skills/futurefin-change-control/SKILL.md`.
@@ -144,13 +147,21 @@ pending-user demotion non-immediate and adds key rotation surface for no benefit
 Domain/schema/engine: `rust_decimal::Decimal`, never `f64` (see `crates/domain/src/lib.rs` header).
 API serializes amounts as decimal **strings** (`rust_decimal::serde::str`); the frontend does
 arithmetic via `parseDisplayDecimal`-style helpers, never `parseFloat` on money.
-**Exception (v1.4.0; extended 2026-07-06)**: the large parallel arrays in `GET /v1/projection/series` —
-`points[].net_worth`, `points[].contributed_capital`, `fire_target_series`,
-`asset_series[].values` — AND the per-point arrays of `GET /v1/history/series`
-(`points[].net_worth/assets_total/liabilities_total`, `asset_series[].values`,
-`markers[].total`) serialize as `f64` via `serialize_decimal_as_f64` — ONE `pub(crate)`
-definition in `handlers/projection.rs`, consumed only by projection and history
-responses. Documented in `.claude/api-routes.md`: "**`net_worth` y
+**Exception (v1.4.0; extended 2026-07-06; publication rounding added Fase 5/issue #86, 4.4.0)**: the
+large parallel arrays in `GET /v1/projection/series` — `points[].net_worth`,
+`points[].contributed_capital`, `fire_target_series`, `asset_series[].values` — AND the per-point
+arrays of `GET /v1/history/series` (`points[].net_worth/assets_total/liabilities_total`,
+`asset_series[].values`, `markers[].total`) serialize as `f64`. **Two separate
+`serialize_decimal_as_*` definitions since 4.4.0, not one**: `serialize_decimal_as_f64`
+(`pub(crate)`, `handlers/projection.rs`, full f64 precision) for projection responses, and
+`serialize_decimal_as_chart_f64` (private, `handlers/history.rs`) for history responses — the
+history one additionally rounds to `CHART_DP = 2` decimal places (`Decimal::round_dp` before the
+`to_f64` cast) before serializing: interpolation and anchoring still compute exact, only the
+published copy is clipped. Same family as `money_out`/`round_ratio` — a raw
+`78012.333333333333333333333` per point was pure context/wire cost, no consumer reads a history
+chart to 13 decimals. `month_fraction` on history markers gets the analogous publication-rounding
+treatment at 4 decimals (`MONTH_FRACTION_DP`, `round_month_fraction`, same file). Documented in
+`.claude/api-routes.md`: "**`net_worth` y
 `contributed_capital` se serializan como `f64`** (no Decimal-as-string) por rendimiento: ~30 KB
 menos en JSON y evita ~5.000 `parseDisplayDecimal` cliente. Precisión <1 € en horizontes de 70
 años." Scalars/KPIs (`starting_net_worth`, `jubilacion_target_net_worth`, milestone targets)
@@ -771,13 +782,58 @@ identidad pública. Pinned por `mcp_http.rs` (kill-switch **con SPA montada**, `
 `oauth_flow.rs` (metadata sin caché, subpath, GC, y el 401 que vigila `get_oauth_authorize_is_not_handled_by_the_api`)
 y `body_limits.rs::oversized_mcp_body_returns_413`.
 
+### D22. Suppressed/capped/derived content declares itself — never inferred from shape (Fase 5, issue #86, 4.4.0)
+
+**Context.** Six unrelated symptoms in the same pass shared one root cause: a server-side cap,
+window, suppression or derivation that a client (human or an MCP-driven agent) could not
+distinguish from "there is nothing more to show". `GET /v1/history/series` omitted `window_months`
+and returned the **entire** history — the worst case by default (~290 points for a household whose
+backfill anchor sits at a birth date, the first ~200 interpolating between €0 and a few hundred).
+Bounding that default to 120 months is what would have *created* the ambiguity — a short array
+meaning either "that's all there is" or "the server stopped there" — so the cap shipped **with** the
+fields that resolve it: `window_months`, `window_truncated` and `first_snapshot_date_ymd`. That is
+the shape of this decision: a cap is only allowed to exist alongside the field that declares it. `GET /v1/history/cashflow`'s fine-grain curve simply
+vanished above a size cap, with no field naming why. A `SnapshotResponse` with `items` suppressed
+for list-view efficiency was byte-for-byte the same shape as a snapshot with zero items. Untagged
+liabilities grouped under the Spanish string literal `"(sin etiqueta)"` — a label impersonating
+data. And every `?view=mine` response was shaped identically to its `household` counterpart: a
+caller that lost track of which it asked for had nothing in the body to recover that from.
+
+**Decision.** Whenever a response's content depends on something the client did not fully choose or
+fully see — a default window, a size cap, a suppressed field, an applied scope, a derivation basis
+— that fact travels IN the payload as a named field, never as an inferred property of shape (array
+length, presence/absence, a string that reads as a label). Concretely, since Fase 5:
+`window_months` + `window_truncated` + `first_snapshot_date_ymd`/`first_snapshot_month_index`
+(`GET /v1/history/series`); `fine_absent_reason` (`GET /v1/history/cashflow`, `null` ⟺ the fine
+curve travels); `item_count`/`items_included` (`SnapshotResponse`); `events_truncated` (`GET
+/v1/projection/series`); `total_count`/`offset`/`truncated` on every paginated `list_*` MCP tool
+(including the two new ones, `list_snapshots` and `list_transaction_imports`); `financial_health.basis`
+/ `totals.basis` (plan vs actual vs mixed); and `view` echoed by every scope-dependent core
+(`LedgerView::as_str`, `handlers/person_view.rs`) in `SummaryResponse`, `BudgetSnapshotResponse`,
+`ProjectionSeriesResponse`, `AllocationResolutionResponse` — plus an envelope wrapper on the seven
+MCP list tools whose HTTP twin still returns a bare array (§I4 note below), so the tool side gets
+the same self-declared scope a JSON-RPC caller cannot otherwise infer. Same principle,
+smaller blast radius: `liabilities_by_type_tag[].type_tag` moved from `String` (with the
+`"(sin etiqueta)"` literal) to `Option<String>` → `null`, a typed absence instead of a string
+dressed as a label.
+
+**Breaks if violated**: adding a new cap, window, suppression or derivation without a field that
+names it reintroduces the exact class this pass closed — an empty list or a short array stays
+silently ambiguous between "nothing exists" and "the server didn't show you everything", and a
+caller has no way to tell the difference without a second, disambiguating request it has no reason
+to make.
+
+Pinned by `apps/api/tests/context_fields.rs` (11 endpoint-level contract tests, one per field
+family above) and `apps/api/tests/mcp_http.rs::list_tools_echo_the_applied_view_and_keep_content_parity`
+/ `list_snapshots_paginates_and_declares_item_suppression`.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
 |---|-----------|----------------|--------------|
 | I1 | Exactly one **uncapped `remainder`** allocation rule per scope, always **last** in the cascade (the "sink") | `handlers/allocation_rules.rs` create/patch/delete/reorder; API errors `remainder_required`, `uncapped_remainder_exists`, `sink_must_be_last` | `grep -n "remainder_required\|uncapped_remainder_exists\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs` |
 | I2 | `fire_target_at_month_index` is the ONLY FIRE-target formula — engine crossover and API `fire_target_series` both call it | `crates/engine/src/projection.rs` (public fn + regression test for the old off-by-one) | `grep -rn "fire_target_at_month_index" crates/ apps/api/src/` — every inflation-compounding of a FIRE target must route through it |
-| I3 | Amounts serialize as decimal strings, EXCEPT the documented f64 arrays of `/v1/projection/series` and the per-point arrays of `/v1/history/series` (D4) | ONE `pub(crate)` definition of `serialize_decimal_as_f64` in `handlers/projection.rs`, used by the projection and history responses only | `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) |
+| I3 | Amounts serialize as decimal strings, EXCEPT the documented f64 arrays of `/v1/projection/series` and the per-point arrays of `/v1/history/series` (D4) | `serialize_decimal_as_f64` (`pub(crate)`, `handlers/projection.rs`, full precision) for projection responses; `serialize_decimal_as_chart_f64` (private, `handlers/history.rs`, since Fase 5/issue #86, additionally rounds to `CHART_DP = 2`) for history responses — two definitions, no cross-use | `grep -rn "serialize_decimal_as_f64\|serialize_decimal_as_chart_f64" apps/api/src/` (one definition in projection.rs, one in history.rs) |
 | I4 | All routes live under `/v1/`, except root `/health`, `/openapi.json`, `/mcp` (v3.0.0) and the OAuth protocol routes (v3.1.0: `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server[/mcp]`, `/oauth/register`, `/oauth/token`, `/oauth/revoke` — root-level because RFC 8414/9728 fix the `.well-known` URLs and the metadata advertises the rest). **`/mcp` and the seven protocol routes are mounted UNCONDITIONALLY** since 4.4.0 — `mcp_enabled` picks the handler (404 JSON `mcp_disabled`), not the route table (D21). `/oauth/authorize` has NO backend route (SPA fallback serves it; a 405 would not fall through). Plus the SPA static fallback when `WEB_STATIC_ROOT` is set | `routes/mod.rs` (`nest("/v1", v1)` + unconditional `merge(mcp)` + `merge(oauth_protocol(state.mcp_enabled))`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest\|mcp\|oauth" apps/api/src/routes/mod.rs`; `cargo test -p futurefin-api --test mcp_http -- mcp_disabled_answers_json_even_with_the_spa_mounted` |
 | I5 | Reads never mutate (D5): expired liabilities filtered, never deleted, by GETs — since 3.4.0 the projection input query also filters them (fix C-10: an expired principal used to depress net worth forever, diverging from `/v1/summary`), pinned by `projection_excludes_expired_liability_principal` | WHERE clauses in liabilities/summary/budget/assets/projection handlers | `TEST_DATABASE_URL=... cargo test --workspace liabilities_purge` (en local; **desde 4.0.0 también en CI**, job `integration`) |
 | I6 | In charts, the stacked per-asset areas sum EXACTLY to the (visible) net-worth line at every x | `MiniProjection.tsx` rescales each asset share by `visibleNw × (asset_i / Σassets)` — necessary because raw engine `net_worth = Σassets + surplus_cash − Σprincipals − undrained`, so raw `per_asset_series` does NOT sum to NW | Read the `cumulative` block in `apps/web/src/components/charts/MiniProjection.tsx` (~lines 164–190); any new stacked chart must reuse `MiniProjection`, not re-derive |
@@ -792,6 +848,7 @@ y `body_limits.rs::oversized_mcp_body_returns_413`.
 | I15 | Without proxy headers the shell HTML is served **byte-identical** to the file on disk and the session cookie keeps `Path=/` — the compose deployment is unchanged by the subpath machinery | `handlers/spa.rs::inject` returns `Cow::Borrowed`; `handlers/auth.rs::session_cookie_path` | `apps/api/tests/base_path.rs`, `apps/api/tests/session_cookie_path.rs`; `cargo test -p futurefin-api --lib prefix::` |
 | I16 | An HA-IdP login and an ingress header-SSO with the same HA user resolve to the **same** `users` row (`external_user_id`, one `resolve_or_provision`); and the HA refresh token is revoked before any DB write (D19) | `handlers/ha_sso.rs::ha_callback` step order; `handlers/sso.rs::resolve_or_provision` (single provisioning path) | `apps/api/tests/ha_idp_login.rs::header_sso_and_ha_login_resolve_to_the_same_user`; call-order assertion `[Exchange, Identity, Revoke]` in the same suite |
 | I17 | **`/mcp` never carries `Access-Control-Allow-Credentials`**, and the API surface always does — one `CORS_ORIGINS` list, two layers (D21). Adding an origin for a browser MCP client must never grant cookie access to `/v1` | `routes/mod.rs` (`api_cors_layer`, applied **before** `merge(mcp)`) + `mcp::mcp_cors_layer` (applied with `route_layer`, never `layer`) | `apps/api/tests/mcp_http.rs::mcp_preflight_is_complete_and_grants_no_cookie_access` (asserts both halves: absent on `/mcp`, `true` on `/v1/backup/user-export`, same origin); `oauth_flow.rs::get_oauth_authorize_is_not_handled_by_the_api` guards the `layer`/`route_layer` half — a **401** there means the MCP auth escaped onto the fallback |
+| I18 | A response never lets suppressed/capped/derived content be indistinguishable from "there is nothing here": every window, cap, suppression, scope or basis is echoed as a named field, never inferred from array length or absence (D22) | Field-level, no single choke point: `handlers/history.rs` (`window_truncated`, `fine_absent_reason`, `item_count`/`items_included`), `handlers/projection.rs` (`events_truncated`), `handlers/person_view.rs` (`LedgerView::as_str` echoed view), `mcp/server.rs` (pagination envelopes) | `apps/api/tests/context_fields.rs` (one test per field family); `grep -n "window_truncated\|fine_absent_reason\|items_included\|events_truncated" apps/api/src/handlers/` |
 
 ## 4. Known weak points (stated plainly, as of 2026-07-02)
 
@@ -890,7 +947,7 @@ included) still said `?months=` was *clamped* to 12–840 — it has been a **re
 - Horizon rule (D11): `grep -n "fn validate_months_override\|months_out_of_range\|LIFESPAN_AGE\|FALLBACK_YEARS\|fallback_no_demographics" apps/api/src/handlers/projection.rs`. **`?months=` is a REJECTION since 4.4.0, not a clamp** — `clamp(12, 840)` as a live pattern now finds only the doc comment noting it was retired.
 - Cache TTL/keys (D7): `grep -n "PROJECTION_CACHE_TTL\|ProjectionCacheKey\|invalidate_projection" apps/api/src/state.rs`.
 - No-warm-up-after-mutation rationale: `grep -n -A6 "refresh_projection_after_mutation" apps/api/src/handlers/projection.rs`.
-- f64 exception boundary (D4/I3): `grep -rn "serialize_decimal_as_f64" apps/api/src/` (definition in projection.rs; uses only in projection.rs + history.rs) and `.claude/api-routes.md` §projection + §history series.
+- f64 exception boundary (D4/I3): `grep -rn "serialize_decimal_as_f64\|serialize_decimal_as_chart_f64" apps/api/src/` (two separate definitions since Fase 5/issue #86 — `serialize_decimal_as_f64` in projection.rs, `serialize_decimal_as_chart_f64` in history.rs with the `CHART_DP`/`MONTH_FRACTION_DP` publication rounding) and `.claude/api-routes.md` §projection + §history series.
 - Sink invariant (I1): `grep -n "sink_must_be_last" apps/api/src/handlers/allocation_rules.rs`.
 - CI coverage (W1): `cat .github/workflows/ci.yml` — check whether a job now sets `TEST_DATABASE_URL`; if so, update W1 here and `.claude/tests.md` §CI.
 - Session mechanics (D3): `grep -n "expires_at\|SESSION_COOKIE" apps/api/src/handlers/session.rs` and `grep -n "SESSION_TTL_DAYS" apps/api/src/main.rs`.
@@ -985,6 +1042,18 @@ included) still said `?months=` was *clamped* to 12–840 — it has been a **re
   `grep -n "fn mount_static_spa" apps/api/src/handlers/spa.rs` — **must be called from both
   `main.rs` and `apps/api/tests/common/mod.rs`**, which is the mechanism that keeps the tested
   router the same shape as the shipped one.
+- **D22 + I18 — suppressed data declares itself (added 2026-08-28, Fase 5/issue #86, 4.4.0)**:
+  `grep -n "DEFAULT_HISTORY_WINDOW_MONTHS\|MAX_HISTORY_WINDOW_MONTHS\|window_truncated" apps/api/src/handlers/history.rs`
+  (series default 120, max 1200, echoed truncation flag); `grep -n "MAX_FINE_CURVE_WINDOW_MONTHS\|fine_absent_reason" apps/api/src/handlers/history.rs`
+  (cashflow fine-curve cap at 36 months, four named reasons); `grep -n "item_count\|items_included" apps/api/src/handlers/history.rs`
+  (`SnapshotResponse` suppression flag); `grep -n "PROJECTION_EVENTS_MAX\|events_truncated" apps/api/src/handlers/projection.rs`
+  (dated-flow events, capped at 100); `grep -n "fn as_str" -A6 apps/api/src/handlers/person_view.rs`
+  (`LedgerView::as_str`, the view-echo helper, and its round-trip test
+  `as_str_round_trips_through_resolve`); `grep -n "NOTA-VIEW-ENVELOPE" -A20 apps/api/src/mcp/server.rs`
+  (why 7 of the paginating/enveloping list tools wrap their content while `list_categories` and
+  `list_recurring_rules` stay bare arrays); `grep -n "type_tag" apps/api/src/handlers/summary.rs`
+  (the `Option<String>` change, `null` replacing the `"(sin etiqueta)"` literal);
+  `cargo test -p futurefin-api --test context_fields` (the 11-test contract suite).
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the

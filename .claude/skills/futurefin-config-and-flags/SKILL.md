@@ -36,8 +36,11 @@ release), plus the **v3.1.0 additions of 2026-08-17** (`FUTUREFIN_PUBLIC_URL`, t
 `FUTUREFIN_MCP_ENABLED` scope) and the **v4.4.0 MCP-transport hardening of 2026-08-28** (issue #85,
 §1.1's `FUTUREFIN_MCP_ENABLED`/`FUTUREFIN_PUBLIC_URL`/`CORS_ORIGINS` rows, §4's body-limit table);
 the query-param, body-limit and installation-settings sections were
-last verified 2026-07-02 (v1.4.3) plus the v1.5.x/v1.6.0/v1.8.0/v2.x additions noted inline — none
-of those introduced env vars. This skill is the single home for "what can be configured, where, with
+last verified 2026-07-02 (v1.4.3) plus the v1.5.x/v1.6.0/v1.8.0/v2.x additions noted inline — plus
+the **Fase 5 (issue #86) MCP-context pass, also 2026-08-28 (still 4.4.0)**, which changed §4's
+`GET /v1/history/series` window default and corrected a stale `GET /v1/history/cashflow` claim
+(§4 `window_months` rows), and added a new MCP-tool-pagination subsection — none of those
+introduced env vars either. This skill is the single home for "what can be configured, where, with
 what bounds".
 
 **What 4.4.0 changed (no new env var — read this before trusting the 3.1.0 note below)**: no new
@@ -312,16 +315,37 @@ handler invalidates the whole installation's entries (`refresh_projection_after_
 | `GET /v1/history/snapshots` | `year` | `i32`, validated **1900–3000** (out of range → 400) | omitted → all years | Filters by a civil-date range (index-friendly), always own-user (no `?view`). |
 | `GET /v1/history/snapshots` | `kind` | `asset` \| `liability` (anything else → 400 `invalid_kind`) | omitted → both | Note: **stricter than `?view`/`?density`** — an unknown `kind` here **errors 400**, it does not silently fall back. |
 | `GET /v1/history/series` | `view` | `household` \| `mine` (standard `LedgerViewQuery::resolve`) | `household` | Standard scope filter (§4.1). `mine` = own series; `household` = server-side sum of every user's interpolated series. |
+| `GET /v1/history/series` | `window_months` (default changed Fase 5/issue #86, 4.4.0) | `i64`, **1..=1200** (out of range → 400 `window_months_out_of_range`, shared `validate_window_months` helper — NOT a clamp) | omitted → `DEFAULT_HISTORY_WINDOW_MONTHS` = `120` (10 years) | Before 4.4.0, omitting it returned the **entire** history back to the first snapshot; a client reading a short array from a fresh install could not tell "little data" from "truncated". Now the default is bounded and the response says so: `window_months` (echo), `window_truncated` (more history exists beyond the emitted window), `first_snapshot_date_ymd`/`first_snapshot_month_index`. Ask for `window_months=1200` (`MAX_HISTORY_WINDOW_MONTHS`) to get everything — nothing can be older, since that value is also the cap. |
 | `GET /v1/history/snapshots/prefill` (v1.5.1) | `kind` | `asset` \| `liability` (anything else → 400 `invalid_kind`) | **required** | Which ledger side to pre-populate the backfill modal with. Always own-user (no `?view`). |
 | `GET /v1/history/snapshots/prefill` (v1.5.1) | `date` | civil date `YYYY-MM-DD`; a future date → 400 `snapshot_date_in_future` | **required** | Target date the suggested values are interpolated to (same math as `/v1/history/series`). Each item returns a `value` + `basis` ∈ `interpolated`\|`first_snapshot`\|`live`\|`not_owned`; items that didn't exist yet arrive `value:"0"`, `existed:false`. |
 | `GET /v1/history/cashflow` (v1.6.0) | `view` | standard `LedgerViewQuery::resolve` | `household` | Standard scope filter (§4.1) over transactions + snapshots. |
-| `GET /v1/history/cashflow` (v1.6.0) | `window_months` | `i64`, **clamped 1..=120** (no error) | `24` | Months of monthly aggregate + fine-grid window. |
+| `GET /v1/history/cashflow` (v1.6.0) | `window_months` | `i64`, **1..=120** (out of range → 400 `window_months_out_of_range`, same shared `validate_window_months` as `/v1/history/series` — **not** a silent clamp, corrected here) | `24` (`DEFAULT_CASHFLOW_WINDOW_MONTHS`) | Months of monthly aggregate + fine-grid window. **Since Fase 5/issue #86 (4.4.0)** the **fine** curve carries an additional, separate cap: `MAX_FINE_CURVE_WINDOW_MONTHS = 36`. Above 36, `window_months` itself is still accepted (up to 120) and `months[]` (the monthly aggregate) arrives in full — only `fine` comes back `null`, with `fine_absent_reason` ∈ `not_requested`\|`window_too_large_for_curve`\|`no_asset_linked_transactions`\|`no_snapshots_to_anchor` naming why. Going over 36 is **not** a 400. |
 | `GET /v1/history/cashflow` (v1.6.0) | `resolution` | `weekly` \| `daily` (trimmed; anything else → `weekly`) | `weekly` | `daily` **requires `window_months <= 6`** → else **400 `daily_window_too_large`** (grid cost). `daily` runs in `spawn_blocking`; `weekly` inline. |
 
 No new **env vars** and no new installation settings ship with the history feature (series,
 prefill or cashflow) — it is entirely per-user request/data surface. The series and prefill
 endpoints have **no cache** (sub-ms compute) and take no `?months`/`?density`; cashflow is also
 uncached.
+
+### MCP tool pagination (`limit`/`offset`) — `apps/api/src/mcp/server.rs`
+
+Four `list_*` MCP tools accept `limit`/`offset` and paginate in SQL, echoing
+`total_count`/`offset`/`truncated` in the envelope — never a bare array for these (the
+"suppression declares itself" pattern, `futurefin-architecture-contract` D22). All
+four share the pattern: `limit` omitted → the tool's default; `limit == 0` or `> max` → 400
+`limit_out_of_range`.
+
+| Tool | Default `limit` | Max `limit` | Notes |
+|---|---|---|---|
+| `list_transactions` | `LIST_TRANSACTIONS_DEFAULT_LIMIT` = 100 | `LIST_TRANSACTIONS_MAX_LIMIT` = 500 | Oldest of the four (pre-Fase-5). |
+| `list_categorization_rules` | `LIST_RULES_DEFAULT_LIMIT` = 50 | `LIST_RULES_MAX_LIMIT` = 200 | Paginating since **4.0.0** (commit `70417dc`, `git log -S LIST_RULES_DEFAULT_LIMIT`), not 3.8.0. |
+| `list_snapshots` (Fase 5, issue #86) | `LIST_SNAPSHOTS_DEFAULT_LIMIT` = 50 | `LIST_SNAPSHOTS_MAX_LIMIT` = 200 | New. `list_snapshots_core` gained `include_items`/`limit`/`offset`, returns `(page, total_count)`. Order `snapshot_date DESC, kind ASC, id ASC` — the `id` tiebreak is new: without a total order, two consecutive pages could repeat or skip rows. |
+| `list_transaction_imports` (Fase 5, issue #86) | `LIST_IMPORTS_DEFAULT_LIMIT` = 50 | `LIST_IMPORTS_MAX_LIMIT` = 200 | New. `list_imports_core` renamed to `list_imports_page` with the same widened signature. |
+
+**The HTTP path is unchanged for the two new ones**: `GET /v1/history/snapshots` and
+`GET /v1/transactions/imports` call the same widened core with `limit = None`, which still skips
+`LIMIT`/`OFFSET` and the `COUNT` query — same pattern `list_transactions_core` already used for the
+HTTP/MCP split. Pagination here is an **MCP-tool-only** axis; it does not add HTTP query params.
 
 ### `GET /v1/transactions/*` — histórico de gasto query params (`apps/api/src/handlers/transactions/`, v1.6.0)
 
@@ -568,6 +592,8 @@ auditing for drift (all confirmed working on 2026-08-28):
 - Cache TTL + key + Density docs: `grep -n "PROJECTION_CACHE_TTL\|pub enum Density\|ProjectionCacheKey" -A 6 apps/api/src/state.rs`
 - Body limits: `grep -n "BODY_LIMIT" apps/api/src/routes/mod.rs`
 - `?months` rejection (NOT a clamp since 4.4.0) + horizon: `grep -n "fn validate_months_override\|months_out_of_range\|LIFESPAN_AGE\|FALLBACK_YEARS\|lifespan_90" apps/api/src/handlers/projection.rs` — `clamp(12, 840)` as a live pattern now finds only the doc comment noting it was retired ("Hasta 4.3.1 … hacía `m.clamp(12, 840)`"), which is itself the tell that the clamp is gone
+- **History `window_months` defaults/caps (Fase 5, issue #86, 4.4.0)**: `grep -n "DEFAULT_HISTORY_WINDOW_MONTHS\|MAX_HISTORY_WINDOW_MONTHS\|DEFAULT_CASHFLOW_WINDOW_MONTHS\|MAX_CASHFLOW_WINDOW_MONTHS\|MAX_FINE_CURVE_WINDOW_MONTHS" apps/api/src/handlers/history.rs` and the shared validator `grep -n "fn validate_window_months" -A 12 apps/api/src/handlers/mod.rs` (both endpoints reject out-of-range, neither clamps)
+- **MCP list-tool pagination limits (Fase 5, issue #86, 4.4.0 for the two new ones)**: `grep -n "_DEFAULT_LIMIT\|_MAX_LIMIT" apps/api/src/mcp/server.rs`
 - `?density` / hybrid indices: `grep -n "resolve_density\|density_month_indices" -A 10 apps/api/src/handlers/projection.rs`
 - `?view` resolution: `grep -n "fn resolve" -A 5 apps/api/src/handlers/person_view.rs`
 - Installation validation bounds: `grep -n "normalize_currency\|validate_show_age_mode\|validate_annual_inflation\|normalize_calendar_tz\|swr_pct\|from(99u32)" apps/api/src/handlers/installation.rs`

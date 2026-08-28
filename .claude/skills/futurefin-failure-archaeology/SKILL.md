@@ -9,8 +9,10 @@ description: >
   ZIP/CSV export, Caddy/TLS overlay, Decimal-string serialization for large projection arrays, or
   any undo of the 3.0.0 self-contained image (Postgres back as its own compose service, a
   `postgres:*` runtime base, a `VOLUME` in the Dockerfile, SIGTERM to the postmaster, a `/dev/tcp`
-  healthcheck fallback), or of the 4.0.0 removal of the external-database mode (making the
-  container honour `DATABASE_URL` again, re-adding the one-shot automigration).
+  healthcheck fallback), of the 4.0.0 removal of the external-database mode (making the
+  container honour `DATABASE_URL` again, re-adding the one-shot automigration), a `density`
+  parameter on the `get_projection` MCP tool, or renaming a field to disambiguate it from a
+  same-named field elsewhere instead of declaring its basis/mode.
   Also load it when you hit a symptom that "smells historical": backup export 500s, projection
   numbers that look plausible but shift with inflation toggles, chart deflation wrong only at some
   densities, overlapping table action buttons, FIRE preview diverging from server target, inverted
@@ -62,6 +64,8 @@ Vocabulary used below (defined once):
 | 19 | Postgres as a separate compose service (`futurefin-database`, `postgres:16.4-alpine`) | Two moving parts, an externally-managed `POSTGRES_PASSWORD` and no snapshot before migrations, in an app whose stated axis is "upgrades that never lose data". Replaced in 3.0.0 by PostgreSQL **embedded in the image** (one container, socket-only). Five traps found doing it — read §2.11 before touching the image | 5ca91f4, v3.0.0; `apps/api/Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose.yml` (one service), CI job `docker-stack` |
 | 20 | **External-database mode** in the container (`DATABASE_URL` → `exec_api_external`, the `DEPRECATED` banner, the one-shot `automigrate_prepare`/`automigrate_restore`, `FUTUREFIN_DB_MODE=external`, `FUTUREFIN_EXTERNAL_WAIT_SECS`) | It was the one supported topology with **none** of the guarantees 3.0.0 was built to give: no pre-migration backup, no `pg_upgrade`, no ordered postmaster shutdown, no volume guard. Deprecated in 3.0.0 and announced there (README §«Actualizar desde 2.x» + env table, `.env.example`, and the start-up banner itself: «se eliminara en 4.0.0»); removed on schedule in 4.0.0. `DATABASE_URL` itself is untouched and still required in split-dev — what is gone is the *container* ever honouring it. Read §2.12 before proposing anything that talks to a database outside the image | v4.0.0; `apps/api/docker-entrypoint.sh` (`refuse_external_database` is all that remains), `.github/testdata/docker-compose.automigrate.yml` deleted, CI `docker-stack` scenarios 2b and 3 |
 | 21 | Binding the Streamable HTTP `Mcp-Session-Id` to the Bearer credential | Not a removal — a **deliberate non-addition**, reasoned in full in the code so it doesn't get re-proposed as an obvious hardening. Today it buys nothing: the Bearer middleware runs before the MCP protocol on *every* request, identity is re-resolved live (D14), and a stolen session id without a valid token never gets past 401. It also has a named trigger to revisit — see §2.17 | v4.4.0; `apps/api/src/mcp/mod.rs` module doc-comment |
+| 22 | Exposing `density` as a `get_projection` MCP-tool parameter | Would multiply the payload ~5× (`density=monthly`) and still would not say WHY the curve fell, only WHERE — the fix for "why" is naming the events that moved it, not serving more points | Fase 5, issue #86, v4.4.0; `apps/api/src/handlers/projection.rs` (`ProjectionEvent` doc-comment) — see §2.18 |
+| 23 | Renaming the four homonymous fields shared by `get_budget.totals` and `get_summary.financial_health` | Same names describe genuinely different bases (plan vs plan-or-actual, by `savings_source` mode) on purpose; renaming is breaking over six fields the SPA and both MCP surfaces read by name, and it would not have made either number more legible — what was missing was declaring the base, not renaming the field | Fase 5, issue #86, v4.4.0; `apps/api/src/handlers/budget.rs` (`BudgetTotalsResponse::basis` doc-comment) — see §2.19 |
 
 ## 2. Detailed entries
 
@@ -408,6 +412,44 @@ Vocabulary used below (defined once):
   complexity with no defender until then.
 - **Status**: deliberately not implemented, v4.4.0.
 
+### 2.18 `density` rejected as a `get_projection` parameter — a finer grid answers WHERE, never WHY (MCP Fase 5, issue #86, v4.4.0)
+- **Symptom prompting the idea**: `get_projection` (MCP) forces `density=hybrid`, so past month 24
+  the response carries roughly one point per year. A large net-worth drop between two consecutive
+  points has nothing in the payload explaining it — the obvious-looking fix was to let the tool ask
+  for `density=monthly` too.
+- **Why it was rejected**: `density=monthly` multiplies the payload size for the same horizon
+  (reproduce with the point-count harness in `futurefin-diagnostics-and-tooling` — don't freeze the
+  number, the horizon it's measured against changes) and still only answers WHERE the curve moved,
+  never WHY. The actual cause of a step is almost always a dated "Próximo" (planning flow) entering
+  the model that month — information no amount of numeric resolution can carry.
+- **Fix chosen instead**: `events`/`events_truncated` on `GET /v1/projection/series`
+  (`ProjectionEvent`, capped at `PROJECTION_EVENTS_MAX = 100`) — the dated Próximos landing inside
+  the horizon, each ~90 bytes (month, label, amount, direction), answering the question a finer grid
+  could only gesture at. Undated Próximos are deliberately excluded: they spread evenly over
+  `PLANNING_UNDATED_SPREAD_DAYS` (90 civil days), so by construction they produce a ramp, not a
+  step — listing one as an "event" would misdescribe it.
+- **Status**: rejected 4.4.0; `events` shipped instead. Grounded in the `ProjectionEvent`
+  doc-comment, `apps/api/src/handlers/projection.rs`.
+
+### 2.19 Renaming `get_budget.totals`/`get_summary.financial_health`'s homonyms — declare the base, don't rename the field (MCP Fase 5, issue #86, v4.4.0)
+- **Symptom prompting the idea**: `income_monthly_equivalent`, `expense_regular_monthly_equivalent`,
+  `expense_total_monthly_equivalent` and `net_monthly_equivalent` appear, spelled identically, in
+  both `GET /v1/budget` (`totals`) and `GET /v1/summary` (`financial_health`) — and in
+  `savings_source` modes B/C the two genuinely disagree (budget's plan figure vs the real
+  12-month-average `financial_health` reports). Two different numbers under the same name in the
+  same catalog is exactly the class of bug the 3.9.0 "three savings figures" incident already was.
+- **Why it was rejected**: a rename (e.g. `_plan`/`_actual` suffixes) is breaking over six fields —
+  the SPA reads them by name, and so does every MCP tool surfacing either response — and it would
+  not have made either number more legible on its own: a caller still could not tell, from the name
+  alone, whether *this particular* response's figures are plan or actual.
+- **Fix chosen instead**: a `basis` field on both. `BudgetTotalsResponse::basis` is the constant
+  `BUDGET_TOTALS_BASIS = "plan"` (never anything else, by construction — budget totals ARE the
+  plan); `financial_health.basis` ∈ `plan`\|`actual`\|`mixed`, derived from the two
+  `savings_*_basis` fields. Reading rule now documented at the source: if `financial_health.basis
+  != "plan"`, the four homonymous fields are not directly comparable pair-for-pair.
+- **Status**: rejected 4.4.0; `basis` fields shipped instead. Grounded in
+  `BudgetTotalsResponse::basis`'s doc-comment, `apps/api/src/handlers/budget.rs`.
+
 ## 3. Designs that were tried and replaced
 
 | Old design | Specific failure mode | Replacement (current) |
@@ -448,6 +490,8 @@ Vocabulary used below (defined once):
 | Configure CORS once for a whole router that mixes cookie-auth and Bearer-auth routes | §2.15 — one `allow_credentials` cannot express two privilege levels; split the layer |
 | Add a `.layer(...)` to a sub-router you are about to `merge` into another | §2.16 — `layer` wraps the fallback too and `merge` drags it along; use `route_layer` inside a sub-router meant to be merged |
 | Bind an MCP `Mcp-Session-Id` to its credential "just in case" | §2.17 — no defender exists until the server emits something on its own initiative; wait for that trigger |
+| Add `density` (or any resolution knob) as an MCP-tool parameter to explain a curve jump | §2.18 — a finer grid says WHERE, never WHY; add a named-event field instead |
+| Rename a field to disambiguate it from a same-named field elsewhere | §2.19 — declaring the field's `basis`/mode costs less than a rename and fixes legibility better |
 
 ## 5. When NOT to use this skill
 
@@ -485,6 +529,14 @@ and direct code inspection. §1 row 19 and §2.11 (embedded PostgreSQL) added 20
   `grep -n 'Mcp-Session-Id\|LocalSessionManager' apps/api/src/mcp/mod.rs`.
 - Counters unmoved by this phase (transport-only, no tool/route surface change):
   `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (expect 52).
+
+**§1 rows 22–23 and §2.18–§2.19 added 2026-08-28 for v4.4.0** (MCP Fase 5, issue #86), by reading
+`apps/api/src/handlers/projection.rs` (`ProjectionEvent` doc-comment) and
+`apps/api/src/handlers/budget.rs` (`BudgetTotalsResponse::basis` doc-comment) — both rejections are
+argued in the source, not just in the PR description. Re-verify:
+- §2.18 (`density` rejected, `events` shipped): `grep -n "PROJECTION_EVENTS_MAX\|struct ProjectionEvent" -B12 apps/api/src/handlers/projection.rs` (doc-comment states the ~5× multiplier and "sigue sin decir POR QUÉ").
+- §2.19 (rename rejected, `basis` shipped): `grep -n "BUDGET_TOTALS_BASIS\|Los nombres no se renombran" -A3 apps/api/src/handlers/budget.rs`; the summary-side twin: `grep -n "financial_health.basis\|fn.*basis" apps/api/src/handlers/summary.rs`.
+- Counter unmoved by this phase either (context/pagination/view-echo only, no tool added/removed): `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (still 52).
 
 Re-verify volatile facts before relying on them:
 

@@ -380,9 +380,14 @@ async fn view_mine_filters_to_token_user() {
         created.json()["token"].as_str().unwrap().to_string()
     };
 
-    // household (default) ve ambos; mine solo el del dueño del token (mario).
+    // household (default) ve ambos; mine solo el del dueño del token (mario). Desde la Fase 5 la
+    // tool envuelve el array en `{view, assets}` — y el eco de `view` es justo lo que hacía falta
+    // aquí: con un solo activo por usuario los dos arrays podían coincidir sin que nada dijera
+    // qué scope se aplicó.
     let envelope = mcp_post(&app, &token, tool_call_body("list_assets", serde_json::json!({}))).await;
-    assert_eq!(tool_text_json(&envelope).as_array().unwrap().len(), 2);
+    let all = tool_text_json(&envelope);
+    assert_eq!(all["view"], "household", "{all}");
+    assert_eq!(all["assets"].as_array().unwrap().len(), 2, "{all}");
 
     let envelope = mcp_post(
         &app,
@@ -391,8 +396,9 @@ async fn view_mine_filters_to_token_user() {
     )
     .await;
     let mine = tool_text_json(&envelope);
-    assert_eq!(mine.as_array().unwrap().len(), 1, "{mine}");
-    assert_eq!(mine[0]["name"], "De mario");
+    assert_eq!(mine["view"], "mine", "{mine}");
+    assert_eq!(mine["assets"].as_array().unwrap().len(), 1, "{mine}");
+    assert_eq!(mine["assets"][0]["name"], "De mario");
 }
 
 #[tokio::test]
@@ -1163,11 +1169,26 @@ async fn get_allocation_resolution_matches_http_endpoint() {
     );
 }
 
-/// Nota: `list_categorization_rules` **no** está en este bucle desde 4.0.0. La tool pagina y
-/// envuelve la respuesta en `{total_count, offset, truncated, rules}` mientras el GET sigue
-/// devolviendo el array entero (contrato REST intacto), así que ya no son byte-idénticas —
-/// exactamente como `list_transactions`, que tampoco está aquí. La paridad de contenido la cubre
-/// `list_categorization_rules_paginates_without_changing_the_http_contract`.
+/// **Quién NO está en este bucle, y por qué.** Salir de aquí es legítimo cuando la tool envuelve
+/// deliberadamente la respuesta; lo que no vale es ablandar la aserción para que pase. Cada
+/// salida tiene su prueba de paridad de CONTENIDO en otro test:
+///
+/// - `list_categorization_rules` (4.0.0) y `list_transactions`: paginan y devuelven
+///   `{total_count, offset, truncated, <entidad>}` mientras el GET sigue sirviendo el array
+///   entero (contrato REST intacto). Cubiertas por
+///   `list_categorization_rules_paginates_without_changing_the_http_contract` y por
+///   `list_tools_echo_the_applied_view_and_keep_content_parity`.
+/// - **Fase 5 (issue #86)** — `list_assets`, `list_liabilities`, `list_planning_flows`,
+///   `list_allocation_rules`, `list_transaction_months`: ecoan la vista aplicada en `{view, …}`.
+///   El eco no puede venir de la core porque el GET es un array desnudo a propósito, así que lo
+///   pone la tool. Cubiertas por `list_tools_echo_the_applied_view_and_keep_content_parity`.
+/// - **Fase 5** — `list_transaction_imports`: eco de `view` **y** paginación. Cubierta por
+///   `list_transaction_imports_paginates_and_echoes_the_view`.
+/// - **Fase 5** — `list_snapshots`: pagina y suprime el detalle por ítem por defecto (own-user,
+///   sin `view`). Cubierta por `list_snapshots_paginates_and_declares_item_suppression`.
+///
+/// Lo que queda aquí son las tools que siguen siendo `to_tool_result(core(...))` a pelo: su
+/// promesa ES la identidad byte a byte con el GET.
 #[tokio::test]
 async fn new_read_tools_match_http_endpoints() {
     let app = TestApp::spawn().await;
@@ -1193,9 +1214,9 @@ async fn new_read_tools_match_http_endpoints() {
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
 
-    // Un pasivo activo: hace que `list_liabilities` no sea el array vacío y que `get_budget`
-    // traiga además la partida derivada de su cuota — las dos filas nuevas de la tabla sólo
-    // prueban algo si los dos lados tienen datos que contradecirse.
+    // Un pasivo activo: hace que `get_budget` traiga la partida derivada de su cuota — la fila
+    // sólo prueba algo si los dos lados tienen datos que contradecirse. (`list_liabilities` salió
+    // del bucle en la Fase 5, pero el pasivo sigue haciendo falta para el presupuesto.)
     let liab = app
         .post_json_with_cookie(
             "/v1/liabilities",
@@ -1224,27 +1245,11 @@ async fn new_read_tools_match_http_endpoints() {
     // Paridad byte a byte tool ↔ endpoint para los listados extraídos en este cambio.
     for (tool, path, args) in [
         ("list_categories", "/v1/categories", serde_json::json!({})),
-        // Fase 0 (issue #81): `get_budget` y `list_liabilities` llevaban desde su alta sin
-        // ninguna aserción de paridad — sólo aparecían como cadenas en el catálogo congelado.
-        // Las dos son `to_tool_result(core(...))` directo, así que la paridad byte a byte es
-        // exactamente el contrato que prometen.
+        // Fase 0 (issue #81): `get_budget` llevaba desde su alta sin ninguna aserción de
+        // paridad — sólo aparecía como una cadena en el catálogo congelado. Es
+        // `to_tool_result(core(...))` directo, así que la paridad byte a byte es exactamente
+        // el contrato que promete (y desde la Fase 5 su `view` lo ecoa la core, no la tool).
         ("get_budget", "/v1/budget", serde_json::json!({})),
-        ("list_liabilities", "/v1/liabilities", serde_json::json!({})),
-        (
-            "list_allocation_rules",
-            "/v1/allocation-rules",
-            serde_json::json!({}),
-        ),
-        (
-            "list_transaction_months",
-            "/v1/transactions/months",
-            serde_json::json!({}),
-        ),
-        (
-            "list_transaction_imports",
-            "/v1/transactions/imports",
-            serde_json::json!({}),
-        ),
         (
             "list_recurring_rules",
             "/v1/transactions/recurring",
@@ -1353,16 +1358,19 @@ async fn list_snapshots_items_are_opt_in_and_year_validates() {
         .await;
     assert!(captured.status.is_success(), "{captured:?}");
 
-    // Default: cabecera con total pero items vacíos.
+    // Default: cabecera con total pero items vacíos — y desde la Fase 5 el sobre paginado dice
+    // que el vacío es SUPRESIÓN (`items_included: false`, `item_count > 0`), no un snapshot vacío.
     let envelope =
         mcp_post(&app, &token, tool_call_body("list_snapshots", serde_json::json!({}))).await;
     let snaps = tool_text_json(&envelope);
-    let arr = snaps.as_array().unwrap();
-    assert!(!arr.is_empty());
+    let arr = snaps["snapshots"].as_array().unwrap();
+    assert!(!arr.is_empty(), "{snaps}");
     assert!(arr[0]["items"].as_array().unwrap().is_empty(), "{snaps}");
+    assert_eq!(arr[0]["items_included"], false, "{snaps}");
+    assert!(arr[0]["item_count"].as_i64().unwrap() > 0, "{snaps}");
     assert!(arr[0]["total"].is_string());
 
-    // include_items → detalle presente.
+    // include_items → detalle presente y la supresión declarada como tal.
     let envelope = mcp_post(
         &app,
         &token,
@@ -1370,7 +1378,9 @@ async fn list_snapshots_items_are_opt_in_and_year_validates() {
     )
     .await;
     let snaps = tool_text_json(&envelope);
-    assert!(!snaps.as_array().unwrap()[0]["items"].as_array().unwrap().is_empty());
+    let first = &snaps["snapshots"][0];
+    assert!(!first["items"].as_array().unwrap().is_empty(), "{snaps}");
+    assert_eq!(first["items_included"], true, "{snaps}");
 
     // Año fuera de rango → mismo error tipado que HTTP.
     let envelope = mcp_post(
@@ -1509,6 +1519,355 @@ async fn list_categorization_rules_paginates_without_changing_the_http_contract(
         &app,
         &token,
         tool_call_body("list_categorization_rules", serde_json::json!({"limit": 999})),
+    )
+    .await;
+    assert_eq!(bad["result"]["isError"], true, "{bad}");
+}
+
+// ---------------------------------------------------------------------------
+// Fase 5 (issue #86) — el sobre de los listados: eco de `view` y paginación.
+// ---------------------------------------------------------------------------
+
+/// **Los listados ecoan la vista aplicada; el GET sigue devolviendo un array.**
+///
+/// El agujero que cierra: en una instalación de un solo usuario, `view: "mine"` y `view` omitido
+/// devolvían arrays **byte a byte idénticos**. Un cliente no podía distinguir «mine coincide con
+/// el hogar» de «el parámetro se ignoró», y en un hogar de dos personas ésa es exactamente la
+/// pregunta que decide si la cifra que está citando es la del hogar o la suya. Las respuestas de
+/// objeto ya ecoan `view` desde su core; los listados no pueden (su GET es un array desnudo a
+/// propósito y meterle un sobre rompería la SPA), así que el eco lo pone la tool.
+///
+/// Por eso estas tools salen del bucle byte a byte de `new_read_tools_match_http_endpoints`. Lo
+/// que se sigue exigiendo —y se exige aquí— es la paridad de **contenido**: `envelope[clave]` debe
+/// ser exactamente lo que devuelve el GET con el mismo scope.
+#[tokio::test]
+async fn list_tools_echo_the_applied_view_and_keep_content_parity() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let cat_asset = app.create_category(&owner, "asset", "Fondos").await;
+    let cat_liab = app.create_category(&owner, "liability", "Préstamos").await;
+    let cat_exp = app.create_category(&owner, "expense", "Comida").await;
+    let cat_inc = app.create_category(&owner, "income", "Nómina").await;
+
+    let asset = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "name": "Fondo", "category_id": cat_asset, "current_value": "10000",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
+    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
+
+    let liab = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            serde_json::json!({
+                "category_id": cat_liab, "expense_category_id": cat_exp, "label": "Hipoteca",
+                "principal": "50000", "payment_amount": "300", "payment_frequency": "monthly",
+                "payment_end_date": "2090-01-01",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(liab.status, http::StatusCode::CREATED, "{liab:?}");
+
+    let flow = app
+        .post_json_with_cookie(
+            "/v1/planning/flows",
+            serde_json::json!({
+                "title": "Paga extra", "category_id": cat_inc, "expected_amount": "1200",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(flow.status, http::StatusCode::CREATED, "{flow:?}");
+
+    let rule = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            serde_json::json!({"target_asset_id": asset_id, "kind": "remainder"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+
+    let txn = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            serde_json::json!({
+                "op_date": "2026-07-10", "amount": "-25.00", "kind": "expense",
+                "concept": "mercado", "category_id": cat_exp,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(txn.status, http::StatusCode::CREATED, "{txn:?}");
+
+    // (tool, GET, clave del sobre). El `limit` alto de `list_transactions` neutraliza su
+    // paginación: lo que se compara aquí es el CONTENIDO, no el tamaño de página.
+    let cases: &[(&str, &str, &str, serde_json::Value)] = &[
+        ("list_assets", "/v1/assets", "assets", serde_json::json!({})),
+        ("list_liabilities", "/v1/liabilities", "liabilities", serde_json::json!({})),
+        ("list_planning_flows", "/v1/planning/flows", "planning_flows", serde_json::json!({})),
+        (
+            "list_allocation_rules",
+            "/v1/allocation-rules",
+            "allocation_rules",
+            serde_json::json!({}),
+        ),
+        (
+            "list_transaction_months",
+            "/v1/transactions/months",
+            "months",
+            serde_json::json!({}),
+        ),
+        (
+            "list_transactions",
+            "/v1/transactions",
+            "transactions",
+            serde_json::json!({"limit": 500}),
+        ),
+        (
+            "list_transaction_imports",
+            "/v1/transactions/imports",
+            "imports",
+            serde_json::json!({}),
+        ),
+    ];
+
+    for (tool, path, key, extra) in cases {
+        for view in ["household", "mine"] {
+            let mut args = extra.clone();
+            args["view"] = serde_json::Value::String(view.to_string());
+            let envelope = tool_text_json(&mcp_post(&app, &token, tool_call_body(tool, args)).await);
+
+            assert_eq!(
+                envelope["view"], view,
+                "{tool} debe ecoar la vista aplicada, no ignorarla: {envelope}"
+            );
+            let sep = if path.contains('?') { '&' } else { '?' };
+            let via_http = app
+                .get_with_cookie(&format!("{path}{sep}view={view}"), &owner.cookie)
+                .await;
+            assert_eq!(via_http.status, http::StatusCode::OK, "{path}");
+            assert_eq!(
+                envelope[key],
+                via_http.json(),
+                "paridad de contenido {tool}[{key}] ↔ {path}?view={view}"
+            );
+        }
+
+        // El GET sigue siendo un ARRAY: el sobre es de la tool, no del contrato REST. Si esto
+        // empieza a fallar, alguien envolvió el endpoint HTTP y rompió la SPA.
+        let bare = app.get_with_cookie(path, &owner.cookie).await;
+        assert!(bare.json().is_array(), "{path} debe seguir sirviendo un array: {bare:?}");
+    }
+}
+
+/// **`list_snapshots` pagina y DECLARA que ha suprimido el detalle.**
+///
+/// Dos agujeros a la vez. (1) El listado no tenía cota ninguna: un usuario que fotografía su
+/// patrimonio cada mes acumula dos snapshots al mes y los recibía todos. (2) Sin `include_items`
+/// la tool devolvía `items: []`, exactamente el mismo JSON que un snapshot sin ningún ítem —
+/// «no te he mandado el detalle» y «aquí no hay nada» eran indistinguibles, con un `total` de
+/// miles de euros al lado para rematar la contradicción. La supresión vive ahora en la core, que
+/// es donde puede publicar `item_count` e `items_included`.
+///
+/// Sin `view`: el CRUD de snapshots es own-user y la tool no se inventa un scope que no tiene.
+#[tokio::test]
+async fn list_snapshots_paginates_and_declares_item_suppression() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let year = chrono::Utc::now().date_naive().format("%Y").to_string().parse::<i32>().unwrap() - 2;
+    for month in 1..=3 {
+        let date = format!("{year}-{month:02}-15");
+        let r = app
+            .post_json_with_cookie(
+                "/v1/history/snapshots",
+                serde_json::json!({
+                    "kind": "asset",
+                    "snapshot_date": date,
+                    "items": [
+                        {"label": "Cash", "value": "1000"},
+                        {"label": "Bolsa", "value": "2000"},
+                    ],
+                }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "backfill {date}: {r:?}");
+    }
+
+    // Sin `view` en el sobre: la tool es own-user y no lo inventa.
+    let page = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_snapshots", serde_json::json!({"limit": 2})),
+        )
+        .await,
+    );
+    assert!(page.get("view").is_none(), "list_snapshots es own-user, no debe ecoar view: {page}");
+    assert_eq!(page["total_count"], 3, "{page}");
+    assert_eq!(page["offset"], 0, "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    assert_eq!(page["snapshots"].as_array().expect("snapshots").len(), 2, "{page}");
+
+    // Supresión declarada, no adivinada: `items` vacío PERO `item_count` = 2.
+    let first = &page["snapshots"][0];
+    assert_eq!(first["items_included"], false, "{first}");
+    assert_eq!(first["item_count"], 2, "{first}");
+    assert_eq!(first["items"].as_array().expect("items").len(), 0, "{first}");
+
+    let last = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_snapshots", serde_json::json!({"limit": 2, "offset": 2})),
+        )
+        .await,
+    );
+    assert_eq!(last["truncated"], false, "la última página no está truncada: {last}");
+    assert_eq!(last["snapshots"].as_array().expect("snapshots").len(), 1, "{last}");
+
+    // Con el detalle pedido, el contenido es el del GET (que siempre lo incluye).
+    let http = app.get_with_cookie("/v1/history/snapshots", &owner.cookie).await;
+    assert_eq!(http.status, http::StatusCode::OK, "{http:?}");
+    assert!(http.json().is_array(), "el GET sigue sirviendo un array: {http:?}");
+    let full = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body(
+                "list_snapshots",
+                serde_json::json!({"limit": 200, "include_items": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(full["snapshots"], http.json(), "el contenido paginado debe ser el del GET");
+
+    let bad = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_snapshots", serde_json::json!({"limit": 999})),
+    )
+    .await;
+    assert_eq!(bad["result"]["isError"], true, "{bad}");
+}
+
+/// **`list_transaction_imports` pagina y ecoa la vista.** Crece un lote por cada CSV importado y
+/// no tenía cota. La paginación baja a SQL (`list_imports_page`), el GET sigue devolviendo el
+/// conjunto entero, y el puente `list_imports_core` —que existía sólo para no romper el build de
+/// la capa MCP— desaparece con este cambio.
+#[tokio::test]
+async fn list_transaction_imports_paginates_and_echoes_the_view() {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    for i in 0..3 {
+        // Conceptos distintos: la huella canónica deduplica filas idénticas y sin esto el
+        // segundo import no crearía movimiento alguno.
+        let csv = format!(
+            "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+             1{i}/06/2026;1{i}/06/2026;COMPRA {i};-1{i},00;EUR\n"
+        );
+        let b64 = B64.encode(csv.as_bytes());
+        let prev = app
+            .post_json_with_cookie(
+                "/v1/transactions/import/preview",
+                serde_json::json!({"source": "myinvestor", "file_b64": b64}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(prev.status, http::StatusCode::OK, "preview {i}: {prev:?}");
+        let pj = prev.json();
+        let decisions: Vec<serde_json::Value> = pj["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "kind": r["suggested_kind"],
+                    "category_id": r["suggested_category_id"],
+                })
+            })
+            .collect();
+        let conf = app
+            .post_json_with_cookie(
+                "/v1/transactions/import/confirm",
+                serde_json::json!({
+                    "source": "myinvestor",
+                    "file_b64": b64,
+                    "file_sha256": pj["file_sha256"],
+                    "decisions": decisions,
+                    "learn_rules": false,
+                }),
+                &owner.cookie,
+            )
+            .await;
+        assert!(conf.status.is_success(), "confirm {i}: {conf:?}");
+    }
+
+    let page = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_transaction_imports", serde_json::json!({"limit": 2})),
+        )
+        .await,
+    );
+    assert_eq!(page["view"], "household", "{page}");
+    assert_eq!(page["total_count"], 3, "{page}");
+    assert_eq!(page["truncated"], true, "{page}");
+    assert_eq!(page["imports"].as_array().expect("imports").len(), 2, "{page}");
+
+    let last = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body(
+                "list_transaction_imports",
+                serde_json::json!({"limit": 2, "offset": 2, "view": "mine"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(last["view"], "mine", "{last}");
+    assert_eq!(last["truncated"], false, "{last}");
+    assert_eq!(last["imports"].as_array().expect("imports").len(), 1, "{last}");
+
+    // Contenido == GET (que sigue siendo el array entero, sin sobre).
+    let http = app
+        .get_with_cookie("/v1/transactions/imports", &owner.cookie)
+        .await;
+    assert_eq!(http.status, http::StatusCode::OK, "{http:?}");
+    assert!(http.json().is_array(), "el GET sigue sirviendo un array: {http:?}");
+    let full = tool_text_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call_body("list_transaction_imports", serde_json::json!({"limit": 200})),
+        )
+        .await,
+    );
+    assert_eq!(full["imports"], http.json(), "el contenido paginado debe ser el del GET");
+
+    let bad = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_transaction_imports", serde_json::json!({"limit": 0})),
     )
     .await;
     assert_eq!(bad["result"]["isError"], true, "{bad}");
@@ -1977,6 +2336,62 @@ async fn every_input_schema_forbids_unknown_properties() {
     );
 }
 
+
+/// Fase 5 (issue #86) — **el catálogo cabe en el contexto**.
+///
+/// Las descripciones de `tools/list` viajan ENTERAS en cada conversación, se use el MCP o no.
+/// Antes de esta fase sumaban 37.214 caracteres (~36 KB) en 52 tools, con cinco por encima de
+/// 1.200 y una de 3.821 — y la estrategia fallaba justo donde importa: en la auditoría en vivo
+/// la descripción de `get_summary` (2.278) llegó al cliente **truncada**, cortada en mitad de
+/// una advertencia sobre inconsistencia entre tools. Una advertencia que no llega no protege de
+/// nada, así que la prosa larga no era «más segura»: era menos.
+///
+/// El tope no es estético. La disciplina que impone es la que arregló el problema: **lo que se
+/// puede comprobar en la respuesta no se explica en la descripción**. Cuando una advertencia
+/// deja de caber, la salida correcta casi siempre es un campo de procedencia
+/// (`*_absent_reason`, `*_basis`, `has_data`…) que se lee en el momento de mirar la cifra, o
+/// una línea en el `instructions` del servidor si es transversal a varias tools — no recortar
+/// el aviso hasta que deje de avisar.
+///
+/// Si este test falla, NO subas la constante: mueve la prosa a uno de esos dos sitios.
+#[tokio::test]
+async fn tool_descriptions_stay_within_the_context_budget() {
+    /// Tope por descripción. 600 nace de la medida, no de la estética: con las 52 tools por
+    /// debajo, el catálogo entero cabe holgadamente en `TOTAL_BUDGET`.
+    const PER_TOOL_MAX: usize = 600;
+    /// Tope del catálogo entero. Deja margen para tools nuevas sin volver a los ~36 KB.
+    const TOTAL_BUDGET: usize = 24_000;
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(&app, &token, tools_list_body()).await;
+    let tools = resp["result"]["tools"].as_array().expect("tools array");
+
+    let mut total = 0usize;
+    let mut offenders: Vec<(usize, String)> = Vec::new();
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap_or("?").to_string();
+        let len = tool["description"].as_str().unwrap_or("").chars().count();
+        total += len;
+        if len > PER_TOOL_MAX {
+            offenders.push((len, name));
+        }
+    }
+    offenders.sort_by(|a, b| b.0.cmp(&a.0));
+    assert!(
+        offenders.is_empty(),
+        "descripciones por encima de {PER_TOOL_MAX} caracteres: {offenders:?}. Mueve lo que \
+         sobra a un campo de procedencia de la respuesta o al `instructions` del servidor — \
+         subir la constante reintroduce el truncado que esta fase arregló"
+    );
+    assert!(
+        total <= TOTAL_BUDGET,
+        "el catálogo suma {total} caracteres de descripciones y el presupuesto es \
+         {TOTAL_BUDGET} (antes de la Fase 5 eran 37.214)"
+    );
+}
 
 /// Fase 2 (issue #83) — **los enumerados son `enum` en el JSON Schema, no prosa**.
 ///
