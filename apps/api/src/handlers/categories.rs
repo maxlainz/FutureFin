@@ -38,7 +38,7 @@ impl CategoryScope {
             "liability" => Ok(Self::Liability),
             "income" => Ok(Self::Income),
             "expense" => Ok(Self::Expense),
-            _ => Err(ApiError::BadRequest("category_scope_invalid: invalid category scope".into())),
+            _ => Err(ApiError::BadRequest("category_scope_invalid: category scope must be one of asset, liability, income, expense".into())),
         }
     }
 }

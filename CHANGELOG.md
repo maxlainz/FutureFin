@@ -39,6 +39,59 @@ bump y la publicación van al final.
 - Test `every_input_schema_forbids_unknown_properties` añadido **como `#[ignore]`**: hoy 51 de 52
   tools aceptan campos desconocidos en silencio. Es la diana de la Fase 2 (#83).
 
+### El esquema como contrato (Fase 2 — issue #83)
+
+El servidor defendía su corrección con **prosa**: ~27 KB de descripciones sobre un esquema casi
+decorativo. El cliente lee el esquema **antes** que la prosa, y a veces la prosa se trunca.
+
+- **51 de 52 tools aceptaban campos desconocidos en silencio.** `delete_asset {id, confirmed: true}`
+  —un typo por `confirm`— devolvía un **preview** que el modelo podía leer como «borrado hecho»;
+  `update_budget_entry {id, ammount: "250"}` devolvía `200` sin cambiar nada; `list_transactions`
+  con un filtro mal escrito devolvía la primera página **sin filtrar**. Ninguno fallaba. Ahora las
+  52 publican `additionalProperties: false` (**breaking**). Cuatro tools ni siquiera tenían struct
+  de parámetros, así que el atributo solo no bastaba: se les dio uno.
+- **Ningún enumerado era un `enum`.** Los ~30 parámetros enumerados eran `Option<String>` con la
+  lista solo en la prosa: el modelo tenía que leerla para acertar, y fallaba una vez antes.
+  Ahora el `enum` viaja en el esquema **conservando el error tipado** de runtime — la alternativa
+  (tipar el parámetro con el enum de dominio) habría movido el error al fallo de deserialización
+  de rmcp y **borrado seis códigos del catálogo**, degradando la SPA al mensaje genérico. La
+  decisión de 4.2.0 sobre `repayment_model_invalid` ya había elegido ese camino a propósito.
+- **`pattern` y cotas en el esquema**, no en la prosa: dos patrones decimales, fecha, mes y UUID;
+  rangos leídos del código, no inventados. Cubre también los anidados de `simulate_projection`.
+- **Los `effects` de los 11 previews tenían seis formas distintas**, y la peor escondía
+  `allocation_remainder_rules_deleted` —la cifra irreversible que su propia descripción destaca en
+  mayúsculas— bajo una clave llamada `unlinked`, la palabra que describe lo contrario. Ahora todos
+  son `{entity, side_effects}` con claves en inglés (**breaking**), y la clave `resumen` de los
+  payloads de escritura pasa a `summary`: era la última en español, la misma violación de la norma.
+- **Doce errores exclusivos de MCP caían a `bad_request` genérico** por faltarles el prefijo del
+  código — incluidos los tres helpers de parseo, que son los que más se disparan. `code` es lo
+  único estable por lo que un cliente puede ramificar.
+- **Mensajes accionables**: el error de decimal dice ahora «usa el punto como separador, sin
+  símbolo de divisa ni separador de miles», que en una app española no es un detalle —el usuario
+  dicta «once con ochenta y tres» y un reintento a ciegas puede colar un error de dos órdenes de
+  magnitud—; `category_scope_invalid` lista sus cuatro valores; y `rule_patch_conflict` deja de
+  nombrar `clear_assign_category_id`, un parámetro que **no existe**.
+- **Clamp silencioso → rechazo.** Cuatro parámetros declaraban cotas y las **clampaban**, así que
+  `get_projection` y `simulate_projection` respondían distinto al mismo valor fuera de rango: una
+  con un error y otra con una proyección etiquetada `months_override`, que el modelo lee como «me
+  hizo caso». Un clamp silencioso hace que la respuesta describa una pregunta distinta de la que se
+  hizo (**breaking**; verificado con greps que la SPA no manda ningún valor fuera de rango).
+- **`create_liability` validaba de una en una**: tres viajes para un alta, y tres oportunidades de
+  que un agente se invente un TIN plausible para desatascarse — que aquí mueve la amortización.
+  Ahora las condiciones del modelo llegan **todas juntas**; con un solo fallo se conserva el código
+  específico de siempre, que es más accionable.
+- **Una guardia vivía en la capa MCP y no en la core**: por HTTP se borraba la fecha de fin de
+  gasto en silencio y por MCP se rechazaba — la superficie derivada más estricta que la fuente,
+  justo lo contrario del contrato. El inventario completo de los ocho `clear_*` demostró que era
+  **el único** caso real: los otros tres «solo-MCP» son legítimos, porque el cuerpo HTTP usa
+  tri-estado JSON y es MCP quien lo aplana.
+- **El congelador de contrato era ciego a todo lo anterior.** Congelaba nombres de propiedades,
+  `required` y el hash de la descripción, pero no `additionalProperties`, ni `enum`, ni `pattern`,
+  ni las cotas: se podía borrar mañana un `enum` sin que fallara ningún test. Ahora congela también
+  las restricciones, recorriendo `properties`/`items`/`$defs`, y su fallo nombra **la tool, la ruta
+  del schema y la restricción que se perdió** — porque un fallo indescifrable se «arregla»
+  regenerando el fixture sin mirar, que es lo contrario de para lo que existe.
+
 ### Números que mienten (Fase 1 — issue #82)
 
 Trece arreglos de cifras que el servidor devolvía mal o de forma no interpretable. Cinco eran

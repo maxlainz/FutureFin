@@ -140,3 +140,83 @@ async fn unknown_projection_density_is_rejected() {
         "hybrid ({n_hybrid}) debería traer menos puntos que monthly ({n_monthly})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cotas numéricas: rechazo, no clamp silencioso (Fase 2, issue #83)
+// ---------------------------------------------------------------------------
+
+/// Misma clase de fallo que los enums de arriba, con otra cara. Cuatro parámetros DECLARABAN su
+/// rango en el JSON Schema de su tool (`range(min, max)`) y luego el handler **clampaba**: pedir
+/// 1.200 meses de proyección devolvía 840 puntos etiquetados `horizon_basis: "months_override"`
+/// —«te he hecho caso»— y pedir 500 meses de cash-flow devolvía 120. La respuesta describe una
+/// pregunta distinta de la que se hizo, y nada en ella lo dice.
+///
+/// Lo más caro era la discrepancia entre hermanas: `get_projection` y `simulate_projection`
+/// declaran el MISMO rango 12–840 y contestaban distinto al mismo valor (una clampaba, la otra
+/// devolvía `months_out_of_range`). Ahora las cuatro rechazan, que es lo que el esquema ya decía.
+///
+/// La SPA no envía ninguno de estos parámetros fuera de rango: `projectionSeriesUrl` no manda
+/// `months` nunca, y las dos llamadas de cash-flow son `window_months=24` y `window_months=6`.
+#[tokio::test]
+async fn out_of_range_numeric_windows_are_rejected_not_clamped() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("bounds_owner").await;
+
+    // (ruta, código esperado) — un caso por debajo y otro por encima de cada cota.
+    for (uri, code) in [
+        // `?months=` de la proyección: 12–840. Comparte código y mensaje con
+        // `simulate_projection.months`, que ya rechazaba (helper `validate_months_override`).
+        ("/v1/projection/series?months=11", "months_out_of_range"),
+        ("/v1/projection/series?months=841", "months_out_of_range"),
+        // Serie histórica: 1–1200.
+        ("/v1/history/series?window_months=0", "window_months_out_of_range"),
+        ("/v1/history/series?window_months=1201", "window_months_out_of_range"),
+        // Cash-flow: 1–120.
+        ("/v1/history/cashflow?window_months=0", "window_months_out_of_range"),
+        ("/v1/history/cashflow?window_months=500", "window_months_out_of_range"),
+        // Serie mensual por categoría: 1–60.
+        (
+            "/v1/transactions/category-series?kind=expense&window_months=0",
+            "window_months_out_of_range",
+        ),
+        (
+            "/v1/transactions/category-series?kind=expense&window_months=61",
+            "window_months_out_of_range",
+        ),
+    ] {
+        let resp = app.get_with_cookie(uri, &owner.cookie).await;
+        assert_bad_request(&resp, code, uri);
+    }
+
+    // Un valor NEGATIVO también (las ventanas de `history` son `i64`, así que llega al handler en
+    // vez de morir en el parseo). Antes `clamp(1, MAX)` lo subía a 1 y devolvía 200.
+    let resp = app
+        .get_with_cookie("/v1/history/cashflow?window_months=-3", &owner.cookie)
+        .await;
+    assert_bad_request(&resp, "window_months_out_of_range", "cashflow window_months=-3");
+}
+
+/// Y los extremos EXACTOS del rango siguen siendo válidos: el rechazo es de lo que está fuera, no
+/// un off-by-one que se come el borde. (`months=840` recomputa la proyección entera, así que solo
+/// se prueba el borde inferior de la proyección; las ventanas son baratas en ambos bordes.)
+#[tokio::test]
+async fn the_exact_bounds_of_every_numeric_window_still_work() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("bounds_ok_owner").await;
+
+    for uri in [
+        "/v1/projection/series?months=12",
+        "/v1/history/series?window_months=1",
+        "/v1/history/series?window_months=1200",
+        "/v1/history/cashflow?window_months=1",
+        "/v1/history/cashflow?window_months=120",
+        "/v1/transactions/category-series?kind=expense&window_months=1",
+        "/v1/transactions/category-series?kind=expense&window_months=60",
+        // Omitirlo sigue cayendo al default, que es lo que hace la SPA.
+        "/v1/history/cashflow",
+        "/v1/transactions/category-series?kind=expense",
+    ] {
+        let resp = app.get_with_cookie(uri, &owner.cookie).await;
+        assert_eq!(resp.status, StatusCode::OK, "{uri}: {resp:?}");
+    }
+}

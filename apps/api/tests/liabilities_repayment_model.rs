@@ -315,3 +315,166 @@ async fn the_database_check_rejects_a_bogus_model_written_outside_the_api() {
         "esperaba la violación del CHECK, llegó: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Validación agrupada: todo lo que falta, en un solo viaje (Fase 2, issue #83)
+// ---------------------------------------------------------------------------
+
+/// El caso del issue: `french` sin plan **y** sin TIN. Hasta 4.3.1 el servidor devolvía
+/// `payment_plan_required_for_model`, el cliente añadía la cuota, y en el SEGUNDO viaje aparecía
+/// `apr_required_for_model`. Tres turnos para un alta cuyas tres condiciones el servidor conocía
+/// desde la primera llamada — y cada rebote es una oportunidad de que un agente se invente un TIN
+/// plausible para desatascarse, con la amortización entera colgando de ese número.
+///
+/// Ahora sale un único 400 `repayment_model_state_invalid` que **enumera las dos** exigencias.
+#[tokio::test]
+async fn french_missing_plan_and_apr_reports_both_at_once() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cat, exp_cat) = categories(&app, &owner).await;
+
+    let r = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({ "principal": "100000", "repayment_model": "french" }),
+    )
+    .await;
+    assert_bad_request_code(&r, "repayment_model_state_invalid");
+
+    let msg = r.json()["message"].as_str().unwrap().to_string();
+    assert!(
+        msg.contains("payment_amount and payment_frequency are required"),
+        "el mensaje debe nombrar el plan que falta: {msg}"
+    );
+    assert!(
+        msg.contains("apr_percent > 0 is required"),
+        "el mensaje debe nombrar el TIN que falta: {msg}"
+    );
+
+    // Y con las DOS cosas aportadas de una vez, el alta pasa: el mensaje era la receta completa,
+    // no un primer paso. Esto es lo que convierte tres viajes en dos.
+    let r = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({
+            "principal": "100000",
+            "repayment_model": "french",
+            "payment_amount": "500",
+            "payment_frequency": "monthly",
+            "apr_percent": "3",
+        }),
+    )
+    .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    assert_eq!(r.json()["repayment_model"], "french");
+}
+
+/// El peor caso previo: `revolving` con `derive_principal_from_plan` y sin nada más. Cuatro
+/// condiciones, cuatro viajes. Aquí el plan falta (1) y el TIN falta (2) — `derive` no llega a
+/// contar porque `revolving` lo prohíbe siempre (3). Las TRES en la misma respuesta.
+#[tokio::test]
+async fn revolving_with_derive_reports_every_problem_at_once() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cat, exp_cat) = categories(&app, &owner).await;
+
+    let r = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({ "repayment_model": "revolving", "derive_principal_from_plan": true }),
+    )
+    .await;
+    assert_bad_request_code(&r, "repayment_model_state_invalid");
+
+    let msg = r.json()["message"].as_str().unwrap().to_string();
+    for esperado in [
+        "payment_amount and payment_frequency are required",
+        "apr_percent > 0 is required",
+        "derive_principal_from_plan must be false",
+    ] {
+        assert!(msg.contains(esperado), "falta «{esperado}» en: {msg}");
+    }
+}
+
+/// El PATCH agrupa igual que el POST, y sobre el estado **resultante**: la fila de partida es un
+/// `fixed_payments` pelado (sin plan ni TIN) y el body solo cambia el modelo.
+#[tokio::test]
+async fn patch_reports_every_problem_of_the_merged_state_at_once() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cat, exp_cat) = categories(&app, &owner).await;
+
+    let created = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({ "principal": "100000" }),
+    )
+    .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            json!({ "repayment_model": "french" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_bad_request_code(&r, "repayment_model_state_invalid");
+    let msg = r.json()["message"].as_str().unwrap().to_string();
+    assert!(msg.contains("payment_amount and payment_frequency are required"), "{msg}");
+    assert!(msg.contains("apr_percent > 0 is required"), "{msg}");
+}
+
+/// La contrapartida del agrupado: con UN solo problema sigue saliendo el código específico de
+/// siempre. Es lo que hace que el cambio no rompa el fixture `error-codes.json`, las frases de
+/// `errorMessages.ts` ni los tests de arriba — y es también el código más accionable cuando de
+/// verdad solo falta una cosa. Aquí se fija el contrato explícitamente, para que nadie lo
+/// «simplifique» a un único código agregado sin darse cuenta de lo que cuesta.
+#[tokio::test]
+async fn a_single_problem_still_yields_its_specific_code() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cat, exp_cat) = categories(&app, &owner).await;
+
+    // Solo falta el TIN.
+    let r = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({
+            "principal": "100000",
+            "repayment_model": "french",
+            "payment_amount": "500",
+            "payment_frequency": "monthly",
+        }),
+    )
+    .await;
+    assert_bad_request_code(&r, "apr_required_for_model");
+
+    // Solo sobra la frecuencia semanal.
+    let r = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({
+            "principal": "100000",
+            "repayment_model": "french",
+            "apr_percent": "3",
+            "payment_amount": "120",
+            "payment_frequency": "weekly",
+        }),
+    )
+    .await;
+    assert_bad_request_code(&r, "weekly_not_supported_for_model");
+}

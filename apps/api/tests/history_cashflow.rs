@@ -426,9 +426,21 @@ async fn resolution_daily_bounds_and_weekly_default() {
     assert_eq!(wk["view"], "household");
     assert_eq!(wk["months"].as_array().unwrap().len(), 13); // -12..=0
 
-    // window_months fuera de rango se clampa (200, sin crash): 500 → clamp 120.
-    let (clamped, _, _) = get_cashflow(&app, &owner.cookie, "?window_months=500").await;
-    assert_eq!(clamped["months"].as_array().unwrap().len(), 121); // -120..=0
+    // `window_months` fuera de rango se RECHAZA (4.3.2): antes se clampaba a 120 y se devolvía
+    // 200, así que quien pedía 500 meses leía 121 puntos como si fueran los 501 que pidió. La
+    // respuesta ecoa la ventana: contestar otra pregunta sin decirlo era el fallo, no el número.
+    // La cota exacta sigue siendo válida (120 → 121 puntos, `-120..=0`).
+    let rejected = app
+        .get_with_cookie("/v1/history/cashflow?window_months=500", &owner.cookie)
+        .await;
+    assert_eq!(rejected.status, http::StatusCode::BAD_REQUEST, "{rejected:?}");
+    assert_eq!(
+        rejected.json()["code"], "window_months_out_of_range",
+        "{}",
+        rejected.json()
+    );
+    let (max_window, _, _) = get_cashflow(&app, &owner.cookie, "?window_months=120").await;
+    assert_eq!(max_window["months"].as_array().unwrap().len(), 121); // -120..=0
 }
 
 // ---------------------------------------------------------------------------

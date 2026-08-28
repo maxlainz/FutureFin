@@ -948,7 +948,11 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
 - **`update_transactions` (3.8.0, auditoría MCP)**: reclasificación en lote (1..=200 ids propios) de
   `kind` / categoría / notas. Sin preview/confirm — son ids que el llamante acaba de enumerar
   (criterio del skill §4.5) — pero `destructive_hint = true` e `idempotent_hint = true`. Devuelve
-  `resumen` de hasta 20 movimientos + `resumen_truncated`. Cache **COND**, una sola vez por lote.
+  `summary` de hasta 20 movimientos + `summary_truncated`. Cache **COND**, una sola vez por lote.
+  **Ojo con esta pareja**: son los campos `resumen`/`resumen_truncated` de `BatchPatchResponse`
+  (el nombre que sigue viajando por el wire HTTP de `PATCH /v1/transactions/batch`), traducidos
+  en la capa MCP. Es el único sitio del catálogo donde la clave de salida no coincide con la
+  del handler, y se hace a conciencia: el catálogo MCP habla inglés entero.
 - **`apply_categorization_rule` (3.8.0, auditoría MCP)**: backfill de una regla sobre el histórico —
   `rule_id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`. Sin
   `confirm` devuelve preview con `would_match` / `already_correct` / `would_change_kind` /
@@ -1054,7 +1058,12 @@ Servidor MCP embebido (v3.0.0; **lectura + simulación + escritura** desde los i
   `role_can_write` con el rol vivo + kill-switch `installation.mcp_write_enabled` leído por
   request; viewer → `forbidden`, toggle apagado → `bad_request` con prefijo `mcp_write_disabled:`),
   llaman a la MISMA core fn de mutación que su handler HTTP (la invalidación de cache vive DENTRO
-  de la core, post-commit) y devuelven respuestas compactas `{id, resumen}`. Tramo 1:
+  de la core, post-commit) y devuelven respuestas compactas `{id, summary}` (**breaking, Fase 2
+  del issue #83**: la clave se llamaba `resumen` y era la última en español del wire MCP; la
+  norma del repo es «UI en español, identificadores en inglés», y la misma fase ya había
+  unificado los `effects` de los previews a `entity`/`side_effects`). Once tools la publican:
+  en diez es una cadena sintetizada por el propio MCP y en `update_transactions` es un array,
+  traducido del `resumen`/`resumen_truncated` del handler. Tramo 1:
   `create_transaction` (con `recurring` opcional; reenvíos idénticos crean OTRO movimiento —
   ordinal de huella, mismo contrato que HTTP), `update_transaction` (owner-guard → `not_found`),
   `capture_snapshot` (upsert por día civil — sobrescribe), `materialize_recurring` (convergencia:

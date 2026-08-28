@@ -348,8 +348,11 @@ async fn previewing_the_deletion_of_a_rule_that_assigns_nothing_works() {
     assert_eq!(body["preview"], true, "{body}");
     // Una regla que no asigna nada no cambia ni deja conforme a ningún movimiento: su huella de
     // CAMBIO es cero por definición, no por falta de trabajo.
-    assert_eq!(body["effects"]["huella"]["cambiarian"], 0, "{body}");
-    assert_eq!(body["effects"]["huella"]["ya_conformes"], 0, "{body}");
+    // Fase 2 (issue #83): la huella se publica bajo `side_effects` y con los MISMOS nombres que
+    // el preview de `apply_categorization_rule` — comparten core, así que compartir vocabulario
+    // deja de dar dos lecturas de los mismos números.
+    assert_eq!(body["effects"]["side_effects"]["would_match"], 0, "{body}");
+    assert_eq!(body["effects"]["side_effects"]["already_correct"], 0, "{body}");
     // La regla sigue ahí: el preview no borra.
     let quedan = app
         .get_with_cookie("/v1/transactions/rules", &owner.cookie)

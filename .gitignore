@@ -24,3 +24,9 @@ apps/web/package-lock.json
 
 # Claude local settings (personal, not project docs)
 .claude/settings.local.json
+
+# Worktrees efímeros de agentes (cada uno es un clon completo del repo, con su propio
+# target/). Sin esta línea, un `git add -A` los mete como repos embebidos — pasó el
+# 2026-08-28 durante la Fase 1 del issue #82 y hubo que sacarlos del índice a mano.
+# Además guardaban 7,3 GB en sus target/, invisibles para `docker system df`.
+.claude/worktrees/

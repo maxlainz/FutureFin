@@ -163,7 +163,8 @@ pub struct PatchBudgetEntryBody {
     pub ends_at_retirement: Option<bool>,
     #[serde(default)]
     pub expense_end_date: Option<NaiveDate>,
-    /// Set to `true` to explicitly clear `expense_end_date` to NULL.
+    /// Set to `true` to explicitly clear `expense_end_date` to NULL. Mutually exclusive with
+    /// `expense_end_date`: enviar los dos es 400 `expense_end_set_and_clear`, no «gana el clear».
     #[serde(default)]
     pub clear_expense_end_date: Option<bool>,
 }
@@ -643,7 +644,8 @@ pub async fn patch_budget_entry(
 }
 
 /// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_budget_entry`.
-/// Exclusión mutua `ends_at_retirement` ⊕ `expense_end_date` re-verificada tras el merge.
+/// Exclusión mutua `ends_at_retirement` ⊕ `expense_end_date` re-verificada tras el merge, y
+/// exclusión mutua `expense_end_date` ⊕ `clear_expense_end_date` sobre el body (4.3.1+).
 pub(crate) async fn patch_budget_entry_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -662,6 +664,30 @@ pub(crate) async fn patch_budget_entry_core(
     {
         return Err(ApiError::BadRequest(
             "patch_empty: provide at least one field to update".into(),
+        ));
+    }
+
+    // Poner y borrar el MISMO campo en la MISMA llamada: error, no «gana el clear». Hasta 4.3.1
+    // esta core dejaba ganar al `clear` en silencio (200 con `expense_end_date` a NULL) y la
+    // guardia vivía SOLO en la tool MCP `update_budget_entry`: la superficie **derivada** era más
+    // estricta que la fuente, que es exactamente lo contrario del contrato D14. Por HTTP/SPA un
+    // patch armado desde plantilla (fecha + flag) borraba la fecha fin de la partida sin avisar, y
+    // esa fecha es la que corta el gasto en la proyección: los totales siguen cuadrando y el
+    // horizonte del gasto miente. La guardia va AQUÍ para que HTTP y MCP compartan la misma
+    // respuesta, y la tool ya no necesita la suya.
+    //
+    // Va junto al `patch_empty` (antes del SELECT) porque este módulo NO tiene owner-guard: aquí
+    // un 404 no oculta nada, así que validar la forma del body primero es lo coherente con el
+    // orden que el propio fichero ya usaba. (`patch_transaction_core` la pone tras el SELECT
+    // porque allí el SELECT ES el owner-guard y el 404 debe ganar.)
+    //
+    // Mensaje literal COMPLETO, jamás compuesto con `format!`: `error_codes_parity.rs` extrae los
+    // códigos estables de los literales del fuente, y un código ensamblado en trozos queda
+    // invisible para el catálogo y degrada al mensaje genérico de la SPA. Misma nota que en
+    // `patch_transaction_core`; costó descubrirlo una vez.
+    if body.expense_end_date.is_some() && body.clear_expense_end_date == Some(true) {
+        return Err(ApiError::BadRequest(
+            "expense_end_set_and_clear: expense_end_date and clear_expense_end_date are mutually exclusive".into(),
         ));
     }
 

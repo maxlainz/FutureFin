@@ -886,18 +886,28 @@ pub(crate) async fn patch_rule_core(
     // Poner y borrar el mismo campo a la vez: error, no «gana el clear». Hasta 4.0.0 el `clear`
     // ganaba en silencio, que es la misma clase de fallo que `cap_value` — un 200 y no lo que
     // pediste. El propio auditoría MCP elogia que `due_date` + `clear_due_date` juntos den error.
-    for (campo, puesto, borrado) in [
-        ("source", source.is_some(), set(clear_source)),
-        ("assign_kind", assign_kind.is_some(), set(clear_assign_kind)),
+    // El nombre del FLAG va aparte del nombre del campo: componerlo como `clear_{campo}` daba
+    // `clear_assign_category_id` para `assign_category_id`, y ese parámetro NO EXISTE (el real es
+    // `clear_assign_category`). Los mensajes de error son documentación de facto: si nombran un
+    // campo inventado, dirigen mal el reintento del cliente hacia algo que nunca va a funcionar.
+    for (campo, flag, puesto, borrado) in [
+        ("source", "clear_source", source.is_some(), set(clear_source)),
+        (
+            "assign_kind",
+            "clear_assign_kind",
+            assign_kind.is_some(),
+            set(clear_assign_kind),
+        ),
         (
             "assign_category_id",
+            "clear_assign_category",
             assign_category_id.is_some(),
             set(clear_assign_category),
         ),
     ] {
         if puesto && borrado {
             return Err(ApiError::BadRequest(format!(
-                "rule_patch_conflict: {campo} and clear_{campo} are mutually exclusive"
+                "rule_patch_conflict: {campo} and {flag} are mutually exclusive"
             )));
         }
     }

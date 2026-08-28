@@ -46,3 +46,30 @@ pub(crate) fn max_user_settable_future_date(today: chrono::NaiveDate) -> chrono:
         .checked_add_months(chrono::Months::new(1200))
         .unwrap_or(chrono::NaiveDate::MAX)
 }
+
+/// Un `window_months` fuera de rango se **rechaza**, no se clampa (4.3.2). Lo comparten las tres
+/// ventanas del producto: `/v1/history/series` (1..=1200), `/v1/history/cashflow` (1..=120) y
+/// `/v1/transactions/category-series` (1..=60), con sus tools MCP hermanas.
+///
+/// Hasta 4.3.1 las tres hacían `clamp(1, MAX)` y devolvían 200. El problema no es que el número
+/// resultante sea otro: es que la respuesta ECOA `window_months` (o su rejilla) y describe una
+/// ventana **distinta de la pedida** sin decirlo, así que quien pidió 500 meses lee 120 puntos
+/// como si fueran los 500 que existen. El JSON Schema de las tools ya declaraba el rango
+/// (`range(min = 1, max = …)`); esto es cumplirlo en vez de contestar otra pregunta.
+///
+/// Un único código para las tres: el manejo del cliente es idéntico y el mensaje lleva la cota
+/// real. El prefijo va como literal (solo se interpola la cota) para que `error_codes_parity`
+/// siga viendo el código — misma regla que la nota de `max_user_settable_future_date`.
+pub(crate) fn validate_window_months(
+    window_months: Option<i64>,
+    max: i64,
+) -> Result<(), crate::error::ApiError> {
+    if let Some(w) = window_months {
+        if !(1..=max).contains(&w) {
+            return Err(crate::error::ApiError::BadRequest(format!(
+                "window_months_out_of_range: window_months must be between 1 and {max}"
+            )));
+        }
+    }
+    Ok(())
+}
