@@ -47,6 +47,46 @@ referencia como `(issue #N)` — convención que el repo ya usa. INCIDENTE: los 
 resolvieron enteros y se quedaron **abiertos** porque el commit no los mencionaba; nadie se enteró
 hasta la auditoría previa a hacer público el repositorio.
 
+## Norma — una incoherencia aparente se abre como issue, no se calla
+
+Cuando encuentres algo que **el contrato promete y el código no cumple** (o al revés), y no puedas
+arreglarlo en el mismo cambio, **abre un issue con la evidencia**. No lo dejes en un comentario del
+PR, no lo apuntes «para luego», y sobre todo **no lo propagues** escribiendo la promesa rota como si
+fuera cierta.
+
+Vale también aunque el contrato sea explícito y esté firmado: que una decisión esté escrita no la
+hace verdadera hoy. La revisión adversarial del MCP (agosto 2026) abrió cuatro issues así —#95, #96,
+#97, #99— y **ninguno era regresión del trabajo en curso**: eran deuda preexistente que solo apareció
+al construir encima.
+
+**Énfasis especial en las incoherencias NUMÉRICAS.** Un número en la documentación se lee como
+verificado, se copia sin comprobar y sobrevive a la realidad que describía. Los que más han mordido
+aquí:
+
+- **Contadores congelados** («52 tools», «19 de lectura», «11 previews», «31 escrituras»): quedan
+  obsoletos al primer cambio y nadie los recuenta. **Prefiere siempre el comando al número** — es la
+  norma de la casa y existe por esto.
+- **Defaults y cotas duplicados** entre el esquema y el runtime. El caso real: el schema de una tool
+  MCP —el texto que **lee el modelo**— anunciaba «default 15» cuando el real era 30, y topaba en 60
+  donde la core acepta 365; el mismo parámetro funcionaba por HTTP y fallaba por MCP.
+- **Greps de re-verificación que ya no encuentran nada.** Un `grep` vacío es deriva **silenciosa**:
+  o el comando está mal escrito, o describe algo que se retiró, y en ninguno de los dos casos avisa.
+- **Comandos que se cuentan a sí mismos**: si escribes el patrón dentro del comentario que lo
+  explica, el `grep` lo cuenta. Pasó dos veces en la misma sesión, la segunda **arreglando la
+  primera**.
+
+### Antes de abrirlo
+
+1. **Verifícalo tú** contra el código, con `path:line`. Un issue que resulta ser falso quema la
+   señal de todos los demás.
+2. **Si cabe arreglarlo en el mismo cambio, arréglalo** y no abras nada. La tabla de erratas de
+   [`futurefin-docs-and-writing`](.claude/skills/futurefin-docs-and-writing/SKILL.md) §7 es para lo
+   que **no** se puede arreglar ahí: una errata registrada es deuda, no un archivo. Cuando el arreglo
+   llega, la fila se borra.
+3. **Explica el coste, no solo el hecho.** Los issues útiles de esta tanda no decían «esto está
+   mal», decían qué se rompió por creerlo: uno ya había obligado a **duplicar** una función del
+   motor; otro señalaba que el guard que debía cazarlo miraba solo la mitad del contrato.
+
 ## Norm — delegate to subagents whenever possible (Opus or smaller, never Fable)
 
 **Default posture: delegate.** Any unit of work that can be handed to a subagent should be. **Pick the subagent's model by difficulty — at most Opus, never Fable** (the main session is the only place Fable runs; delegating on Fable duplicates its cost for work a smaller model does fine):
