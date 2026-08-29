@@ -4,10 +4,30 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [4.4.0] - sin publicar
+## [4.4.0] - 2026-08-29
 
-Revisión adversarial del servidor MCP (issues #81–#88). Esta sección se completa por fases; el
-bump y la publicación van al final.
+**Revisión adversarial del servidor MCP embebido** (issues #81–#88). Cinco agentes independientes
+auditaron `/mcp` desde ángulos distintos —caja negra en vivo contra una instalación real, escrituras
+bajo protocolo de crear-y-borrar, catálogo y paridad sobre las 3.300 líneas de `server.rs`,
+protocolo y transporte, y frontera de capacidades— y salieron ~110 hallazgos. Se arreglaron en siete
+fases, cada una con sus tests y su documentación.
+
+**Qué cambia para ti.** El catálogo pasa de **52 a 68 tools**: ahora se puede preguntar cuánto
+cuestan tus deudas en intereses y cuándo terminan, simular si compensa amortizar antes, sumar gastos
+con filtros sin que el modelo tenga que contar filas a mano, ver el patrimonio en euros de hoy,
+grabar el pasado desde la conversación y encaminar aportaciones a un activo nuevo. Y varias cifras
+que salían mal ahora salen bien: la que decía que tu patrimonio histórico era otro, la que hacía
+inobtenible el objetivo FIRE del mes en que te jubilas, y la que reportaba un mes sin datos como un
+mes de gasto cero con deltas enormes.
+
+**Qué cambia si dejas correr agentes.** Antes, un timeout duplicaba un movimiento que mueve tu fecha
+de jubilación, un borrado masivo no dejaba rastro de quién lo hizo, y el `confirm` era un booleano
+que rellenaba el propio modelo. Ahora hay auditoría de escrituras, credenciales de solo lectura,
+confirmación en dos fases donde el daño es irreparable, e idempotencia opcional.
+
+Las descripciones del catálogo pasan de 37 KB a 21 KB **sin perder ningún aviso**: los que evitaban
+un error se movieron a campos de la respuesta, que es donde el modelo los lee en el momento de mirar
+la cifra.
 
 ### Red de seguridad del catálogo MCP (Fase 0 — issue #81)
 
