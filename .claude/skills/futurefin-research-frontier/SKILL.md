@@ -273,7 +273,7 @@ ephemeral; disputes ("it said I'd retire in 2041 last month") are unresolvable.
    (Serialize Decimals as strings in this artifact — the f64 wire format of
    `/v1/projection/series` is a display optimization, NOT audit-grade; see
    `serialize_decimal_as_f64`, `apps/api/src/handlers/projection.rs:177`.)
-3. Add `GET /v1/projection/snapshot` (follow `.claude/adding-handler.md`): respond with
+3. Add `GET /v1/projection/snapshot` (follow `.claude/backend-structure.md` §Cómo añadir un handler): respond with
    `{engine_input, engine_output_sha256, app_version, anchor_date_ymd}` where the hash covers the
    canonical JSON of the output. Integration test in `apps/api/tests/projection_snapshot.rs`:
    fetch twice, hashes equal; mutate an asset, hash changes.

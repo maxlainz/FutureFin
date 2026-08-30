@@ -47,12 +47,13 @@ current drift is a duplicated or orphaned fact).
 | File | Owns (authoritative for) | Audience |
 |---|---|---|
 | `CLAUDE.md` | Commands (dev, test, build, deploy), architecture summary, UI conventions, git workflow/release steps, index of `.claude/*.md` | AI sessions |
-| `.claude/api-routes.md` | Full route map, auth pattern, view-scoping pattern, error mapping, projection response shape/cache/density, **the MCP tool catalog (§MCP: per-tool semantics, cache class, preview/confirm)** | AI sessions |
+| `.claude/api-routes.md` | Full route map, auth pattern, view-scoping pattern, error mapping, projection response shape/cache/density | AI sessions |
+| `.claude/mcp-catalog.md` | The MCP tool catalog: per-tool semantics, cache class, preview/confirm, listing envelopes, and `/mcp` transport (CORS, body limit, kill-switch) | AI sessions |
 | `.claude/data-model.md` | Tables, columns, invariants, `fire_settings` JSONB shape, `.ffbackup` schema notes | AI sessions |
 | `.claude/engine.md` | Engine public API, `ProjectionInput`/`Output`, simulation loop, inflation model, handler↔engine boundary notes | AI sessions |
 | `.claude/auth-and-membership.md` | Auth flow, roles table, cookie attrs, pending users, key auth functions | AI sessions |
 | `.claude/env-and-config.md` | Every env var + default (API binary **and**, since 3.0.0, the container entrypoint's `FUTUREFIN_*` / `POSTGRES_*` vars), `.env` loading order, Vite config, and the compose-file matrix — which since 3.0.0 is `docker-compose.yml` (production, **one service** with PostgreSQL inside the image), `docker-compose.local.yml` (`pull_policy: never` for a locally built image) and `docker-compose.dev.yml` (standalone dev Postgres on 127.0.0.1:5432, replacing the deleted `docker-compose.split-dev.yml`) | AI sessions |
-| `.claude/adding-handler.md` | The canonical new-handler recipe (handler → mod.rs → routes → openapi → migration → test) | AI sessions |
+| `.claude/backend-structure.md` | `apps/api/src/` module map (mirror of frontend-structure.md) + the canonical new-handler recipe (handler → mod.rs → routes → openapi → migration → test) | AI sessions |
 | `.claude/frontend-structure.md` | `apps/web/src/` layout, import rules, "where to add new code" table, prefetch/perf notes | AI sessions |
 | `.claude/design-system.md` | Tokens (`--ff-*`, `--proj-*`), palette rules, theme, icon set, rules for new UI | AI sessions |
 | `.claude/tests.md` | How to run/write backend integration tests + frontend Vitest, TestApp helpers, shared fixtures, CI status | AI sessions |
@@ -82,7 +83,7 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 | Visual/UI: token, palette, component convention, icon | `.claude/design-system.md` (+ `frontend-structure.md` if a new component/file) |
 | Frontend module layout, new view/lib/component file | `.claude/frontend-structure.md` |
 | Test infra: TestApp helper, fixture, CI workflow, test command | `.claude/tests.md` |
-| Handler-authoring pattern itself (new mandatory step) | `.claude/adding-handler.md` |
+| Handler-authoring pattern itself (new mandatory step) | `.claude/backend-structure.md` §Cómo añadir un handler |
 | Dev/build/deploy command, git workflow | `CLAUDE.md` |
 | Container behavior: `Dockerfile`, `apps/api/docker-entrypoint.sh`, any `docker-compose*.yml` (embedded PG, automatic backups, shutdown, upgrade paths) | `.claude/env-and-config.md` (entrypoint vars + compose matrix) **and** `README.md` (self-hoster steps: quick start, "Actualizar", "Actualizar desde 2.x") **and** `CLAUDE.md` if a command changed **and** `CHANGELOG.md` |
 | Anything a user or self-hoster can observe | `CHANGELOG.md` entry (under `## [Unreleased]` until release) |
