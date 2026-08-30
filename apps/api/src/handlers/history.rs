@@ -1559,7 +1559,11 @@ pub struct HistorySeriesQuery {
 
 /// Cota del windowing de la serie histórica (100 años, el mismo techo que el runway). Pedirla
 /// explícitamente es la forma de decir «todo el histórico».
-const MAX_HISTORY_WINDOW_MONTHS: i64 = 1200;
+///
+/// `pub(crate)` **solo** para que `mcp::schema_bounds_parity` pueda compararla con el literal del
+/// `#[schemars(range(max = 1200))]` de `HistoryParams`: la macro exige un literal, así que la
+/// única red posible es un test que los enfrente.
+pub(crate) const MAX_HISTORY_WINDOW_MONTHS: i64 = 1200;
 
 /// Ventana por defecto de `GET /v1/history/series` cuando no se pide `window_months`: **10 años**.
 ///
