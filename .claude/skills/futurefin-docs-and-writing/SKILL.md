@@ -73,7 +73,7 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 | You changed… | Update |
 |---|---|
 | Route added/removed/renamed, auth requirement, query param | `.claude/api-routes.md` (+ `openapi.rs` schemas in code) **and the MCP parity evaluation** (futurefin-mcp-parity §1: tool, recorded omission, or n/a) |
-| MCP tool added/changed/omitted | `.claude/api-routes.md` §MCP (catalog) + CLAUDE.md counters (module map + MCP paragraph) + `.claude/tests.md` suite rows + futurefin-mcp-parity §3 register |
+| MCP tool added/changed/omitted | `.claude/mcp-catalog.md` (owner of the catalog and its counters since the 2026-08-30 consolidation) + `.claude/tests.md` suite rows + futurefin-mcp-parity §3 register |
 | Response/request field, serialization format (Decimal-string vs f64 boundary) | `.claude/api-routes.md`; if FIRE/projection shape: `.claude/engine.md` handler-notes section |
 | Table/column/constraint, new migration | `.claude/data-model.md` (+ CHANGELOG "Migración / compatibilidad" note if data-affecting — template §4.3) |
 | Engine input/output struct, simulation-loop step, inflation semantics | `.claude/engine.md` (+ `futurefin-fire-domain-reference` skill if FIRE math) |
