@@ -1,5 +1,9 @@
 # Projection Engine (crates/engine)
 
+> Este doc describe el CÓMO (API pública y bucle). El QUÉ de cada magnitud — unidad, convención,
+> por qué refleja (o no) la realidad española, y las divergencias conocidas con su issue — vive en
+> [`financial-contracts.md`](financial-contracts.md) (auditoría 2026-08).
+
 Pure Rust crate — no I/O, no DB, no async. Pure financial math (projection + history interpolation).
 Only `Decimal` arithmetic. Four modules:
 - `projection.rs` — monthly net-worth / FIRE simulation (this doc's main subject).
