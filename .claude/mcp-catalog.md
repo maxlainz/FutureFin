@@ -662,8 +662,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   (footgun para un LLM; el registro de omisiones deliberadas vive en la skill
   `futurefin-mcp-parity`). Paridad CRUD del ledger (tras 3.5.0): `update_asset` (body completo
   del PATCH vía la misma `patch_asset_core` — rename, categoría, liquidez, precio de compra con
-  `clear_purchase_price` materializando el null del tri-state; `update_asset_value` queda como
-  subset de valoración) y `update_liability` (cerraba la única asimetría create/delete-sin-update
+  `clear_purchase_price` materializando en Rust el «borrar» del tri-estado que JSON Schema no sabe
+  expresar (desde 4.4.2 el PATCH HTTP también lo expresa, con `null`; el flag se queda — paridad de
+  capacidad, no de forma); `update_asset_value` queda como subset de valoración) y `update_liability` (cerraba la única asimetría create/delete-sin-update
   del catálogo, que empujaba al agente al borrar-y-recrear destructivo; merge campo a campo vía
   `patch_liability_core` extraída del PATCH, re-derivación del principal si
   `derive_principal_from_plan` queda activo). Ambas FULL, sin preview/confirm (editar no

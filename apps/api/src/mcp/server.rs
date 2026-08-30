@@ -3732,11 +3732,16 @@ impl FutureFinMcp {
                 ));
             }
             // El PATCH distingue omitir (sin cambio) de null (borrar): clear_purchase_price
-            // materializa ese null que el JSON Schema de la tool no puede expresar.
+            // materializa ese null que el JSON Schema de la tool no puede expresar. Desde 4.4.2
+            // (issue #95) el tri-estado del PATCH es un `Option<Option<…>>` de verdad, así que el
+            // borrado se escribe `Some(None)` en vez de `Some(Value::Null)` — misma semántica,
+            // mismo flag: la superficie MCP no cambia (doctrina de la Fase 2).
             let purchase_price = if p.clear_purchase_price.unwrap_or(false) {
-                Some(serde_json::Value::Null)
+                Some(None)
             } else {
-                p.purchase_price.clone().map(serde_json::Value::String)
+                p.purchase_price
+                    .clone()
+                    .map(|s| Some(serde_json::Value::String(s)))
             };
             Ok((
                 parse_uuid_param("asset_id", &p.asset_id)?,
