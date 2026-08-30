@@ -341,10 +341,16 @@ documentación-only, con `apps/` y `crates/` explícitamente fuera de alcance. L
 issue abierto llevan su número: **arreglar la doc antes que el código dejaría la doc describiendo un
 bug que sigue vivo**, que es peor que la errata.
 
+**Retiradas el 2026-08-30 (auditoría de coherencia)**: las antiguas filas 1 y 2 de esta tabla —
+el hueco `SinkPolicy` de `patch_allocation_rule_core` y el «default 15, max 60» de
+`suggest_transfer_matches.window_days` — **ya están arregladas en el código**: la core de patch
+recibe `SinkPolicy` y la tool pasa `Forbidden` (guarda `sink_creation_not_allowed` en
+`allocation_rules.rs`, Fase 6), y schema+core del `window_days` dicen ambos 1–365 default 30
+(`DEFAULT_SUGGEST_WINDOW_DAYS`/`MAX_SUGGEST_WINDOW_DAYS`, Fase 7). Se borran las filas según la
+norma de abajo — una errata registrada es deuda, no un archivo.
+
 | # | Doc & location | It says | Reality (verified in repo) |
 |---|---|---|---|
-| 1 | `apps/api/src/mcp/server.rs`, `description` de `update_allocation_rule` | «el SUMIDERO (remainder sin tope) **solo se pone desde la app**» | **Más fuerte que lo que el código garantiza.** `SinkPolicy::Forbidden` solo lo recibe `create_allocation_rule_core`; `patch_allocation_rule_core` **no recibe `SinkPolicy`**, así que `update_allocation_rule` con `clear_cap: true` sobre un `remainder` **con** tope lo convierte en sumidero. Secuencia entera alcanzable por MCP en dos llamadas. Verificado 2026-08-28: `grep -n 'SinkPolicy' apps/api/src/handlers/allocation_rules.rs` da 5 hits (`490, 567, 579, 592, 603`), **ninguno dentro de `patch_allocation_rule_core`** |
-| 2 | `apps/api/src/mcp/server.rs`, doc-comment de `SuggestTransferMatchesParams.window_days` | «Días máximos entre las dos patas (1–60, **default 15**)» | El default es **30** (`DEFAULT_SUGGEST_WINDOW_DAYS`, `handlers/transactions/reconcile.rs`): la tool pasa `p.window_days` tal cual y la core aplica el suyo. El `range(max = 60)` del esquema **sí** es una restricción deliberada frente a los 365 de la core; lo falso es solo el default. Verificado 2026-08-28 |
 | 3 | `apps/web/src/lib/errorMessages.ts`, `idempotency_key_batch_unsupported` | «La clave de idempotencia solo vale para dar de alta un movimiento suelto, **no para un lote**» | **Dejó de ser cierto con la Fase 6**: el lote SÍ acepta clave, en la **raíz** del body. Lo que se rechaza es la clave **por ítem**. El mensaje inglés del servidor ya se corrigió («put idempotency_key at the root of the batch body»); la traducción de la SPA no. Verificado 2026-08-28 |
 | 4 | `apps/web/src/lib/errorMessages.ts`, `idempotency_key_invalid` | «entre 1 y 200 caracteres» | Hay **dos** cotas desde la Fase 6: **200** en el alta individual y **180** en el lote (`MAX_BATCH_KEY_CHARS`, el margen es para el sufijo derivado `#b{i}`). Verificado 2026-08-28 |
 | 5 | `apps/api/tests/query_param_validation.rs`, `VIEW_ROUTES` | La tabla enumera las rutas que aceptan `?view=` | **Le faltan dos de la Fase 6**: `/v1/changes` y `/v1/allocation-rules/goals` aceptan `view` y no están en la tabla (el diff solo añadió `aggregate` y `duplicates`). Es un hueco de cobertura del test que existe precisamente para cazar el enum que cae al default en silencio. Verificado 2026-08-28 |
