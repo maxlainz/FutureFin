@@ -45,6 +45,15 @@ puerto; el default documentado sigue siendo el TCP de 5433.
 - `net_return.rs` `mod tests`: **9** tests (`net_return_percentages`): ponderación por valor (y que NO es la media aritmética de las tasas), el interés de los pasivos restando + amplificación por apalancamiento, deuda cara → rendimiento negativo, `None` en la tasa contando como 0 % **sin salir del denominador** (activo y pasivo), tasa esperada negativa, `NW ≤ 0` → `None` (deuda mayor, empate exacto y cartera vacía), inflación 0 → real ≡ nominal exacto, real por **división de factores** estrictamente por debajo de la resta simple, y el caso trabajado de la documentación (3,5556 % / 1,5251 %). Números predichos en el comentario de cada test.
 - Engine total: **100** as of 2026-08-28 (56 + 22 + 13 + 9; **eran 88** el 2026-08-25 con 44 en `projection.rs` — los 12 nuevos son el bloque de la Fase 6: calendario de amortización (`schedule_payment_identity_holds_in_every_model`, `schedule_payoff_absent_reasons_are_distinguishable`…) y amortización extra (`extra_principal_is_net_worth_neutral_without_interest`, `extra_principal_frees_the_quota_into_the_cascade`, `extra_principal_saves_exactly_the_interest_not_accrued`, `extra_principal_lump_sum_lands_on_its_month_and_caps_at_the_balance`, `zero_extra_principal_is_bit_identical_to_the_pin`, `extra_principal_needs_an_active_payment_plan`); eran 76 = 32+22+13+9 antes de la reforma de pasivos de 4.2.0; eran 67 el 2026-08-22 sin `net_return.rs`; antes 61 = 27+21+13 el 2026-08-18; los 5 nuevos cubren `monthly_multiplier` con tasas negativas — composición, clamp ≤ −100, pin de las positivas y decaimiento en simulación) — recuéntalo con `cargo test -p futurefin-engine 2>&1 | grep "test result"` o, sin compilar, `grep -c '#\[test\]' crates/engine/src/{projection,history,runway,net_return}.rs`.
 - Pure: no Postgres, no env. `cargo test -p futurefin-engine` runs both. **Desde 4.0.0 CI corre TODO** — engine, unitarios de la lib e integración contra Postgres: ver §CI.
+- **4.5.0 (auditoría del modelo financiero)** añade al inline `mod tests`:
+  `absurd_return_overflows_with_typed_error_not_panic` (overflow de crecimiento → `Err(AssetValueOverflow)`,
+  predicho a mano: 1.000 € al 1000 % desborda en k ≈ 298) y
+  `first_month_allocation_skips_cascade_in_retirement_like_the_loop` (en jubilación la resolución
+  publica ceros + `InRetirement`, y el bucle coincide: NW(1) = 200.600). Además nace el **arnés de
+  auditoría** `crates/engine/tests/audit_dump.rs` (2 tests que no afirman nada: vuelcan CSV de la
+  batería de casos límite L1-L6/P1-P6 para compararlos con oráculos externos —
+  `cargo test -p futurefin-engine --test audit_dump -- --nocapture`), y el test de integración
+  `apps/api/tests/asset_order_determinism.rs` (orden total `sort_index, name, id`).
 
 ### Integration tests (`apps/api/tests/`)
 - Each test spins up the full Axum router (`routes::app_router()`) and drives it via `tower::ServiceExt::oneshot` against a real Postgres.

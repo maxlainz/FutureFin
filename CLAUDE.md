@@ -123,6 +123,7 @@ Extended reference — read these before working on the relevant area:
 | [`.claude/mcp-catalog.md`](.claude/mcp-catalog.md) | Catálogo MCP: semántica por tool, preview/confirm, sobres de listado, transporte de `/mcp` y sus contadores |
 | [`.claude/data-model.md`](.claude/data-model.md) | DB schema, table invariants, FIRE JSONB shape |
 | [`.claude/engine.md`](.claude/engine.md) | Projection engine public API and simulation loop |
+| [`.claude/financial-contracts.md`](.claude/financial-contracts.md) | Contratos financieros canónicos: qué magnitud representa cada cifra, con qué unidad y convención, y las divergencias conocidas con la realidad española (deuda contabilizada, cada una con su issue) |
 | [`.claude/auth-and-membership.md`](.claude/auth-and-membership.md) | Auth flow, roles, cookie, pending users |
 | [`.claude/env-and-config.md`](.claude/env-and-config.md) | All env vars, `.env` loading order, Vite config |
 | [`.claude/backend-structure.md`](.claude/backend-structure.md) | apps/api/src module map + step-by-step pattern for adding a new API handler |

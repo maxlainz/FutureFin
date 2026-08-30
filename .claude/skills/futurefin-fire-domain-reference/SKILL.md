@@ -17,6 +17,11 @@ description: >
 
 # FutureFin FIRE Domain Reference
 
+> **Contratos canónicos y divergencias con la realidad**: la ficha
+> [`.claude/financial-contracts.md`](../../financial-contracts.md) (auditoría 2026-08) es la fuente
+> de verdad de qué convención rige cada magnitud y de la deuda de modelo pendiente (§4, con issues).
+> Este skill explica la matemática TAL COMO ESTÁ IMPLEMENTADA; aquella dice qué es defecto conocido.
+
 Everything here is the model **as implemented** (verified against code on 2026-07-02,
 v1.4.3; §2b re-verified 2026-08-14 against v2.2.0; §2c, §4, §5, §7 y §9 revisados 2026-08-28 con la
 Fase 6 del tren 4.4.0), not textbook FIRE theory.

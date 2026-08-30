@@ -4,6 +4,77 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+**Auditoría del modelo financiero — cubo «arreglar ahora»** (2026-08-30). La vara de medir fue la
+realidad española (liquidación bancaria, escala del ahorro, IPC del INE), verificada con un oráculo
+independiente que coincidió con el engine en 2.131/2.131 filas: el motor implementa exactamente su
+contrato; lo que se corrige aquí son los puntos donde una superficie mentía sobre ese contrato o
+donde un input válido lo rompía. El resto de divergencias de modelo quedan contabilizadas —
+cada una con su coste en un escenario sintético y su issue — en el nuevo
+[`.claude/financial-contracts.md`](.claude/financial-contracts.md) §4.
+
+### Engine — desbordar componiendo una tasa absurda era un panic, ahora es un 400 tipado
+
+- Sin cota superior de `expected_annual_return_percent`, un valor desorbitado (fat-finger `7.125`
+  leído como 7.125 %, o un import) hacía que `values[i] *= m` desbordara `Decimal` y **panicara**:
+  el pool blocking lo servía como 400 `task_panic` permanente que tumbaba `/v1/projection/series`,
+  el chart, los KPIs de jubilación y la tool `get_projection` hasta editar el activo a mano. Ahora
+  `checked_mul` + `EngineError::AssetValueOverflow` → 400 `engine_rejected_input` con causa
+  legible. Deliberadamente NO se satura como el payoff de un pasivo: congelar el valor publicaría
+  un patrimonio gigante y plausible. Ejemplo pineado: 1.000 € al 1000 % anual desborda en el mes
+  ~298 de 840 → error tipado, ningún input válido cambia de valor.
+
+### Engine/API — la resolución de la cascada decía aportaciones que la simulación jamás hace
+
+- En jubilación con superávit el bucle manda TODO el sobrante a `surplus_cash` y la cascada no se
+  ejecuta; pero `first_month_allocation` la ejecutaba igualmente, y `GET /v1/assets` y
+  `GET /v1/allocation-rules/resolution` (y sus tools MCP, que comparten core) publicaban «aportas
+  600 €/mes → Fondo» para un hogar ya por encima de su número FIRE. Ahora: `per_asset` a cero,
+  sobrante íntegro en `leftover`, y cada regla con la razón nueva **`in_retirement`** — distinta
+  de `no_cash` a propósito, porque caja HAY (viaja en `base_cash`). Cambia cifras publicadas SOLO
+  para hogares en fase FIRE (antes eran ficticias). Ejemplo pineado a mano: NW 200.000 ≥ target
+  100.000, pensión 2.200 − gasto 1.600 ⇒ per_asset [0], leftover 600, y el bucle coincide
+  (NW(1) = 200.600 con el activo intacto).
+
+### API — el desglose por activo no era determinista con empates
+
+- `ORDER BY sort_index, name` no es un orden total: dos activos empatados podían salir en orden
+  distinto entre peticiones, y ese orden alimenta `per_asset_series` y el desempate del drenaje.
+  Ahora `ORDER BY sort_index, name, id` (proyección y `GET /v1/assets`). Agregados idénticos,
+  0 € de cambio.
+
+### Web — «6.000 €» en un umbral de tramo eran seis euros
+
+- El input «Hasta base (€)» de la escala del ahorro hacía `replace(",", ".")` a pelo en vez de
+  pasar por `toApiDecimalString`: la escala entera tecleada a la española
+  (6.000/50.000/200.000/300.000) llegaba como 6/50/200/300 €, seguía siendo creciente, pasaba la
+  validación y el objetivo FIRE subía ~+13 % **en silencio** (escenario sintético: 24.000 € netos
+  → objetivo 978.852 € en vez de 863.653 €). Ahora usa la función canónica de la app. El campo de
+  porcentaje del tramo no cambia (decisión del owner: la regla de millares de los campos % queda
+  como trampa documentada).
+
+### Paridad y prosa
+
+- `fire-parity.json` ejercita por fin los tramos del 27 % y del 30 % (2 casos nuevos con la
+  aritmética en `_calc_note`; el gross-up TS por bisección coincide con la forma cerrada del
+  servidor también ahí). Hasta ahora el fixture topaba en gross 146.597 € y el lado cliente por
+  encima de 200.000 € iba sin red.
+- Dos erratas que el código desmentía: el texto de ayuda del Rendimiento neto omitía que la
+  proyección solo devenga interés **con plan de pagos vivo**, y `.claude/engine.md` decía que el
+  drenaje toca solo los líquidos cuando siempre ha continuado sobre los ilíquidos.
+
+### Documentación
+
+- Nace **`.claude/financial-contracts.md`**: contratos financieros canónicos (unidad, convención y
+  por qué refleja la realidad española, con fuentes BdE/BOE/INE), lo que el modelo YA acierta y no
+  hay que «arreglar», y la tabla de divergencias conocidas con su coste sintético, su estado y su
+  issue. La tabla Phase 1 de `futurefin-projection-realism-campaign` se reduce a un puntero (dos
+  copias fueron lo que dejó su fila #4 siendo falsa durante meses).
+- Arnés permanente de auditoría: `crates/engine/tests/audit_dump.rs` vuelca en CSV los casos
+  límite del modelo (vencimiento con saldo vivo, cuota < interés, degeneración sin TIN, déficit
+  crónico, FIRE en mes 0, bordes ±100 %…) para compararlos con oráculos externos.
+
 ## [4.4.1] - 2026-08-30
 
 **Cuatro verdades restauradas** — el lote «cero comportamiento observable» de la auditoría de

@@ -15,7 +15,7 @@ use std::cmp::Ordering;
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
     #[error("horizon_months must be >= 1")]
     InvalidHorizon,
@@ -23,6 +23,13 @@ pub enum EngineError {
     InvalidPlanningAdjustments,
     #[error("allocation_rules contains an out-of-bounds target_index")]
     InvalidAllocationRuleTarget,
+    /// El valor de un activo desbordó el rango de `Decimal` (~7,9e28) al componer su
+    /// rentabilidad. Error tipado y no saturación silenciosa: a diferencia del payoff de un
+    /// pasivo (donde saturar conserva una serie finita y conservadora), congelar aquí el valor
+    /// produciría un patrimonio gigante y PLAUSIBLE — exactamente la clase de número que esta
+    /// casa no publica. El input es corregible por el usuario (una rentabilidad absurda).
+    #[error("asset value overflowed Decimal range while compounding expected_annual_return_percent over the horizon")]
+    AssetValueOverflow,
     #[error("history timeline dates must be strictly ascending")]
     InvalidHistoryTimeline,
 }
@@ -669,6 +676,11 @@ pub enum AllocationSkipReason {
     /// `target_index` fuera de rango. Inalcanzable desde el handler, que valida antes; el bucle
     /// principal lo tolera en silencio y aquí se hace explícito.
     InvalidTarget,
+    /// El mes 1 cae en fase de jubilación: el bucle de simulación manda TODO el superávit a
+    /// `surplus_cash` y la cascada no se ejecuta en ningún mes de esa fase. Distinto de
+    /// [`Self::NoCash`] a propósito: aquí HAY caja (se publica en `base_cash`), lo que no hay
+    /// es asignación — decir «no_cash» sería mentir con un enum.
+    InRetirement,
 }
 
 /// Traza de UNA regla en la cascada de un mes. `amount_intent` es lo que la regla pidió y
@@ -968,14 +980,35 @@ pub fn first_month_allocation(
     let net_cash_month = recurring_net + planning_component;
 
     let mut rules_trace: Vec<RuleOutcome> = Vec::new();
-    let (alloc, leftover) = distribute_contributions(
-        net_cash_month,
-        &input.allocation_rules,
-        &values,
-        input.expense_regular_monthly + debt_service,
-        input.income_regular_monthly,
-        Some(&mut rules_trace),
-    );
+    // En jubilación con superávit el bucle de simulación NO ejecuta la cascada: todo el
+    // sobrante va a `surplus_cash` (rama `in_retirement` del bucle). Hasta la auditoría de
+    // 2026-08 esta función sí la ejecutaba, y `/v1/assets` y `/v1/allocation-rules/resolution`
+    // publicaban aportaciones regla a regla que la simulación no hace en ningún mes
+    // (H-cascada-1). Misma verdad que el bucle: ceros, sobrante íntegro, y cada regla
+    // marcada `InRetirement` — no `NoCash`, porque caja hay.
+    let (alloc, leftover) = if in_retirement && net_cash_month > Decimal::ZERO {
+        for (rule_index, rule) in input.allocation_rules.iter().enumerate() {
+            rules_trace.push(RuleOutcome {
+                rule_index,
+                target_index: rule.target_index,
+                amount_intent: Decimal::ZERO,
+                amount_resolved: Decimal::ZERO,
+                cap_ceiling: None,
+                cap_room: None,
+                skipped_reason: Some(AllocationSkipReason::InRetirement),
+            });
+        }
+        (vec![Decimal::ZERO; n], net_cash_month)
+    } else {
+        distribute_contributions(
+            net_cash_month,
+            &input.allocation_rules,
+            &values,
+            input.expense_regular_monthly + debt_service,
+            input.income_regular_monthly,
+            Some(&mut rules_trace),
+        )
+    };
     // `distribute_contributions` ya devuelve ceros y `leftover = max(pool, 0)` con caja ≤ 0, así
     // que no hace falta el corte temprano de antes: el resultado es idéntico.
     for i in 0..n {
@@ -1164,7 +1197,12 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
         for i in 0..values.len() {
             let m = monthly_multiplier(rates[i]);
-            values[i] *= m;
+            // `checked_mul`, no `*`: con una tasa desorbitada y horizonte largo el producto
+            // desborda Decimal y `*` PANICA — el pool blocking lo convertía en un 400
+            // `task_panic` permanente e ininteligible (auditoría 2026-08). Error tipado.
+            values[i] = values[i]
+                .checked_mul(m)
+                .ok_or(EngineError::AssetValueOverflow)?;
         }
 
         // Amortización: solo se asienta el cierre ya calculado arriba. Sin recomputar nada.
@@ -1309,6 +1347,58 @@ mod tests {
             (final_nw - Decimal::from(5_000)).abs() < Decimal::new(1, 2),
             "esperado ≈ 5000 tras 12 meses a −50 % anual, obtenido {final_nw}"
         );
+    }
+
+    /// Regresión (auditoría 2026-08): componer una tasa absurda desbordaba Decimal y PANICABA
+    /// (`Multiplication overflowed`), y el pool blocking lo servía como 400 `task_panic`
+    /// permanente. Predicción a mano: 1.000 € al 1000 % anual es factor mensual 11^(1/12);
+    /// el valor cruza el techo de Decimal (~7,9e28) en el mes k con 1000·11^(k/12) ≈ 7,9e28
+    /// ⇒ k ≈ 12·log₁₁(7,9e25) ≈ 298 < 840, así que la simulación DEBE devolver el error
+    /// tipado, jamás panicar ni publicar un valor congelado plausible.
+    #[test]
+    fn absurd_return_overflows_with_typed_error_not_panic() {
+        let a = mk_asset(1, Decimal::from(1_000), true, Some(Decimal::from(1_000)));
+        let inp = base_input(840, Decimal::ZERO, Decimal::ZERO, vec![a], vec![]);
+        let err = project_net_worth_series(&inp).unwrap_err();
+        assert_eq!(err, EngineError::AssetValueOverflow);
+    }
+
+    /// Regresión (auditoría 2026-08, H-cascada-1): en jubilación con superávit el bucle manda
+    /// todo el sobrante a `surplus_cash`, pero `first_month_allocation` ejecutaba la cascada y
+    /// publicaba aportaciones que la simulación no hace jamás. A mano: NW(0) = 200.000 ≥ target
+    /// 100.000 ⇒ jubilado; caja = 2.200 − 1.600 = 600 ⇒ per_asset = [0], leftover = 600, la
+    /// regla marcada `InRetirement` (no `NoCash`: caja hay). Y el bucle coincide:
+    /// NW(1) = 200.000 + 600 = 200.600 con el activo intacto en 200.000.
+    #[test]
+    fn first_month_allocation_skips_cascade_in_retirement_like_the_loop() {
+        let a = mk_asset(1, Decimal::from(200_000), true, None);
+        let mut inp = base_input(
+            2,
+            Decimal::from(3_000),
+            Decimal::from(1_000),
+            vec![a],
+            vec![rule_remainder(0)],
+        );
+        inp.income_retirement_monthly = Decimal::from(2_200);
+        inp.expense_retirement_monthly = Decimal::from(1_600);
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from(100_000),
+            annual_inflation_percent: Decimal::ZERO,
+        });
+
+        let fma = first_month_allocation(&inp).unwrap();
+        assert_eq!(fma.per_asset, vec![Decimal::ZERO]);
+        assert_eq!(fma.leftover, Decimal::from(600));
+        assert_eq!(fma.base_cash, Decimal::from(600));
+        assert_eq!(fma.rules.len(), 1);
+        assert_eq!(
+            fma.rules[0].skipped_reason,
+            Some(AllocationSkipReason::InRetirement)
+        );
+
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth[1], Decimal::from(200_600));
+        assert_eq!(out.per_asset_series[0][1], Decimal::from(200_000));
     }
 
     #[test]

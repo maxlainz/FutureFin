@@ -56,7 +56,9 @@ export const HELP_TEXTS = {
       "una expectativa, no tu rentabilidad pasada. Aquí cuenta el interés de todas tus deudas; la " +
       "proyección solo le cobra intereses a las que hayas declarado con un modelo que los devengue " +
       "(francés o revolving), así que si alguna sigue en cuota fija esta cifra es algo más " +
-      "prudente que la simulación. Si debes más de lo que tienes, la tarjeta desaparece: el " +
+      "prudente que la simulación. Y la simulación, además, solo devenga mientras el plan de " +
+      "pagos está vivo: una deuda sin cuota o con el plan vencido no genera intereses en la " +
+      "proyección, aunque aquí sí reste. Si debes más de lo que tienes, la tarjeta desaparece: el " +
       "porcentaje diría lo " +
       "contrario de lo que pasa.",
   },
