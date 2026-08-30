@@ -4,6 +4,51 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.6.0] - 2026-08-31
+
+**Ola 2 de la resolución — «Una sola fuente de verdad»** (issues #118, #119, #131, #132, #133,
+#134 parcial, #136 parcial, #138 parcial, #147). El cliente deja de recalcular lo que el servidor
+ya sabe, y los estados de fallo que el motor calculaba en silencio llegan al wire. **El motor no
+cambia ninguna cifra**; cambian cifras MOSTRADAS que eran recomputaciones divergentes.
+
+### Los estados de fallo llegan al wire (#119)
+
+- `GET /v1/projection/series` publica lo que el motor ya calculaba y la superficie HTTP tiraba:
+  `assets_depleted_month_index` (primer mes cuyo déficit iguala o supera TODO lo drenable — la
+  cartera se vacía ese mes; pin a mano: 200.000 € al 0 % gastando 2.000 €/mes ⇒ mes **100**
+  exacto y NW(360) = −520.000), `uncovered_deficit_total`, `liabilities_negative_amortization[]`
+  (cuota < devengo ⇒ la deuda CRECE; pin: francés 200.000 €@6 %/800 € ⇒ P₁ = 200.200,00 — un
+  `interest_only` congelado NO aparece, esa distinción es el campo) y `fire_target_absent_reason`
+  (mismos literales que `simulate_projection` — paridad por construcción). `simulate_projection`
+  gana el mes de agotamiento en ambos lados y su delta. Norma de la casa: NULL nunca es cero.
+
+### La vista Jubilación lee el servidor (#118) — y el fixture gana la red que faltaba
+
+- «Primer cruce», «Años hasta el cruce» y el objetivo leen los campos del servidor (exactos,
+  serie completa); el cálculo local queda SOLO para la vista previa con ajustes sin guardar,
+  marcada como tal. `grossUpNetAnnualFire` pasa de bisección f64 con techo mágico a la MISMA
+  forma cerrada del servidor: con un tramo alto el techo saturaba EN SILENCIO y la misma pantalla
+  podía enseñar un objetivo un 20 % más bajo que el del chart. El 10.º caso de `fire-parity.json`
+  (tramo único abierto al 80 %) va rojo con la bisección (Δ 3,43 M€) y verde con la forma
+  cerrada, en ambos lados. El cuarto cruce recalculado (`MiniProjection`) lee
+  `jubilacion_series_position`; `findFirstMonthNetWorthAtLeastInflated` se borra.
+
+### El jubilado ve su drawdown entero (#132)
+
+- Regla del owner: el recorte «cruce + 12 meses» se mantiene mientras NO estás jubilado; con el
+  cruce ya alcanzado (`jubilacion_month_index == 0`) el gráfico enseña el horizonte completo —
+  los 348 de 360 meses que quedaban fuera eran justo la pregunta de esa vista. «Años hasta el
+  cruce» pasa de `Math.round` a «años y meses» («5 meses», no «0 años»).
+
+### El catálogo de métricas dice la verdad completa (#131, #133, #134, #138, #147)
+
+- 6 entradas nuevas (rentabilidad esperada — «nominal, la que publica tu fondo, ya neta de
+  comisiones»; ratio deuda/activos; los 4 KPIs de Pasivos con sus bases y divergencias
+  declaradas) y 3 editadas: `summary.runway` y `settings.inflation` dejan de contradecirse
+  (la Autonomía SÍ infla su gasto de comparación; la simulación NO infla flujos — hasta la
+  Ola 5 —; el objetivo SÍ se infla), y los importes del presupuesto se declaran **NETOS** en
+  etiquetas y ayuda (#147). Convenciones de #138 añadidas donde tocan.
+
 ## [4.5.0] - 2026-08-30
 
 **Ola 1 de la resolución de la auditoría — «Las puertas y las formas»** (issues #95, #96, #97,

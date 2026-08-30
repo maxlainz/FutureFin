@@ -204,7 +204,7 @@ export function LiabilitiesView({
       {hasMembership && (liabilitiesBusy || liabilities.length > 0) ? (
         <div className="metric-grid workspace-kpi-strip">
           <MetricCard
-            label="Principal total"
+            label="Principal total" helpId="liabilities.principal_total"
             value={
               liabilityMetricsReady && liabilityPrincipalSum !== null
                 ? formatCurrencyNumber(liabilityPrincipalSum, currencyIso)
@@ -212,7 +212,7 @@ export function LiabilitiesView({
             }
           />
           <MetricCard
-            label="Servicio mensual equivalente"
+            label="Servicio mensual equivalente" helpId="liabilities.monthly_service"
             value={
               liabilityMetricsReady && liabilitiesMonthlyServiceSum !== null
                 ? formatCurrencyNumber(liabilitiesMonthlyServiceSum, currencyIso)
@@ -220,7 +220,7 @@ export function LiabilitiesView({
             }
           />
           <MetricCard
-            label="TAE media ponderada"
+            label="TAE media ponderada" helpId="liabilities.weighted_apr"
             value={
               liabilityMetricsReady && liabilitiesWeightedApr !== null
                 ? formatPercentDisplay(liabilitiesWeightedApr)
@@ -228,7 +228,7 @@ export function LiabilitiesView({
             }
           />
           <MetricCard
-            label="Interés mensual aprox."
+            label="Interés mensual aprox." helpId="liabilities.approx_monthly_interest"
             value={
               liabilityMetricsReady && liabilitiesApproxMonthlyInterest !== null
                 ? formatCurrencyNumber(

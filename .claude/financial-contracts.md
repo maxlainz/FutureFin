@@ -134,10 +134,16 @@ realidad** o entre superficies, no error de aritmética.
 Estado 2026-08-30. «Decidida» = el owner eligió dirección (constan en el issue); «aceptada» = el
 owner decidió no actuar (consta aquí, con fecha). Cifras de escenarios SINTÉTICOS.
 
-**Resueltas en 4.5.0** (ya no son deuda; detalle en el CHANGELOG): overflow del engine tipado
-(D32-motor), resolución de cascada en jubilación con `in_retirement` (D27), orden total de activos
-(D34), parsing de umbrales de tramos (D33-tramos), fixture de paridad en tramos 27/30 % y dos
-erratas de prosa (parte de S1).
+**Resueltas en 4.5.0**: overflow del engine tipado (D32-motor), cascada en jubilación con
+`in_retirement` (D27), orden total de activos (D34), parsing de umbrales (D33-tramos), fixture
+27/30 %, dos erratas de prosa (S1 parcial); más la Ola 1 completa (#95 #96 #97 #99 #105 #113
+#135 #137 — null-que-borra, techo del cap siempre resuelto, MCP en inglés con `id`, owner-only
+en la core, puertas de escritura, campos muertos).
+**Resueltas en 4.6.0 (Ola 2)**: estados de fallo publicados (#119 — agotamiento, descubierto,
+amortización negativa, razón del objetivo ausente, con paridad MCP), la vista Jubilación lee el
+servidor y la forma cerrada TS sustituye a la bisección con el 10.º caso de paridad (#118), el
+drawdown completo para el ya-jubilado (#132), prosa reconciliada + 6 contratos de métrica nuevos
++ importes declarados netos (#131 #133 #134-parcial #138-parcial #147).
 
 ### Con dirección decidida por el owner (2026-08-30) — pendientes de implementar
 
@@ -162,8 +168,6 @@ erratas de prosa (parte de S1).
 | Divergencia | Coste (sintético) | Issue |
 |---|---|---|
 | Gasto medio real: denominador con meses sin clasificar; ventanas desplazadas; euros de años distintos | 300 k€ / 180 k€ / 120 k€ | [#125](https://github.com/maxlainz/FutureFin/issues/125) |
-| El cliente recalcula gross-up/cruce/deflactor sin fixture completo | 2,86 M€ en el extremo; 5-11 meses de fecha | [#118](https://github.com/maxlainz/FutureFin/issues/118) |
-| Estados de fallo no publicados (agotamiento, amortización negativa, target ausente) | agujero subestimado ~220 k€; mes de ruina invisible | [#119](https://github.com/maxlainz/FutureFin/issues/119) |
 | Partida de gasto vencida: KPIs y target la suman, el motor la cancela | +150 k€ (+33 %) de objetivo | [#124](https://github.com/maxlainz/FutureFin/issues/124) |
 | «Autonomía: indefinida» ciega a la rentabilidad | etiqueta falsa sobre saldo que se agota en 28,6 a | [#128](https://github.com/maxlainz/FutureFin/issues/128) |
 | Tres bases de interés incompatibles (portada/Pasivos/proyección) | 83 k€ afirmados y nunca cobrados; 3 pp de brecha | [#121](https://github.com/maxlainz/FutureFin/issues/121) |
@@ -171,9 +175,7 @@ erratas de prosa (parte de S1).
 | `contributed_capital` nunca decrece, 0 sin purchase_price | 720 k€ sin contabilizar; bloquea g de #140 | [#120](https://github.com/maxlainz/FutureFin/issues/120) |
 | Histórico de pasivos siempre francés (repayment_model no viaja al snapshot) | 6 % del principal; quiebro en «hoy» | [#129](https://github.com/maxlainz/FutureFin/issues/129) |
 | sim_kpis vs first_month_allocation: dos «cajas del mes» | 124 k€ explicados con la cifra equivocada | [#127](https://github.com/maxlainz/FutureFin/issues/127) |
-| Unidad del retorno esperado sin declarar (nominal/real, TER) | 12,3 años de retraso en el peor malentendido | [#131](https://github.com/maxlainz/FutureFin/issues/131) |
 | Planning flows: fecha pasada descartada; rampa dependiente del día | 3 k€ desaparecidos; ±29 % en la cifra del mes 1 | [#126](https://github.com/maxlainz/FutureFin/issues/126) |
-| Vista Jubilación recortada a cruce+12 | oculta el 96,7 % del plan | [#132](https://github.com/maxlainz/FutureFin/issues/132) |
 | `payment_interval_count` degrada el día ancla en meses cortos | +1 cuota (~1 k€) | [#123](https://github.com/maxlainz/FutureFin/issues/123) |
 | Histórico: item ausente de una captura cae a 0 € | desplome falso de 40 k€ | [#130](https://github.com/maxlainz/FutureFin/issues/130) |
 | Barridos: prosa contradictoria · métricas sin contrato · validaciones asimétricas · duplicados cliente sin fixture · campos muertos (ref. #96) · convenciones no declaradas | — | [#133](https://github.com/maxlainz/FutureFin/issues/133)-[#138](https://github.com/maxlainz/FutureFin/issues/138) |

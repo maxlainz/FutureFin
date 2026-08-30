@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   deflationFactorAt,
+  formatYearsEsFromMonths,
   lastPointIndexAtOrBeforeMonth,
   projectionMaxXTicks,
   projectionXTicks,
@@ -140,6 +141,24 @@ describe("projectionMaxXTicks — techo de etiquetas por ancho", () => {
   it("acotado a [5, 18] en los extremos", () => {
     expect(projectionMaxXTicks(60, "dates")).toBe(5);
     expect(projectionMaxXTicks(4000, "dates")).toBe(18);
+  });
+});
+
+describe("formatYearsEsFromMonths — cinco casos del issue #132", () => {
+  it("mes 0 → «Ya alcanzado» (ya jubilado, no «0 años»)", () => {
+    expect(formatYearsEsFromMonths(0)).toBe("Ya alcanzado");
+  });
+  it("mes 5 → «5 meses» (no «0 años»)", () => {
+    expect(formatYearsEsFromMonths(5)).toBe("5 meses");
+  });
+  it("mes 12 → «1 año» (singular, sin resto)", () => {
+    expect(formatYearsEsFromMonths(12)).toBe("1 año");
+  });
+  it("mes 17 → «1 año y 5 meses» (no «1 años»)", () => {
+    expect(formatYearsEsFromMonths(17)).toBe("1 año y 5 meses");
+  });
+  it("mes 199 → «16 años y 7 meses» (no «17 años»)", () => {
+    expect(formatYearsEsFromMonths(199)).toBe("16 años y 7 meses");
   });
 });
 

@@ -18,6 +18,10 @@ function makeSeries(
   return {
     points,
     milestones: [],
+    assets_depleted_month_index: null,
+    uncovered_deficit_total: "0",
+    liabilities_negative_amortization: [],
+    fire_target_absent_reason: null,
     months: 1,
     horizon_years: 1,
     horizon_basis: "months_override",

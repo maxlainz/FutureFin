@@ -1,4 +1,6 @@
 import { useMemo, type Dispatch, type FormEvent, type SetStateAction } from "react";
+import { HelpPopover } from "../components/HelpPopover";
+import { HELP_TEXTS } from "../lib/helpTexts";
 import type {
   AssetApiRow,
   CategoryRow,
@@ -325,7 +327,13 @@ export function AssetsView({
                 <span>Líquido</span>
               </label>
               <label className="field">
-                <span>Rentab. anual esperada % (opc.)</span>
+                <span className="label-with-help">
+                Rentab. anual esperada % (opc.)
+                <HelpPopover
+                  title={HELP_TEXTS["assets.expected_return"].title}
+                  body={HELP_TEXTS["assets.expected_return"].body}
+                />
+              </span>
                 <input
                   value={assetFormExpectedReturn}
                   onChange={(e) => setAssetFormExpectedReturn(e.target.value)}
@@ -495,7 +503,7 @@ export function AssetsView({
                           {!isMobile && showReturn ? (
                             <th
                               className="num"
-                              title="Rentabilidad anual esperada (proyección)"
+                              title="Nominal, ya neta de comisiones — no la rentabilidad real."
                             >
                               Rent. % a.a.
                             </th>
