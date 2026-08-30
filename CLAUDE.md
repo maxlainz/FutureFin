@@ -354,12 +354,18 @@ directamente — la protección lo rechaza, y ese es el objetivo.
    Con la imagen ya verificada en el registry y el Release creado, `publish-image.yml` sube el
    `version:` de `addon/futurefin/config.yaml` en `main` por la **contents API** (los checkouts van
    con `persist-credentials: false`: no hay credencial para un `git push`). El Supervisor usa ese
-   número como tag de imagen, así que sin este paso la tienda se queda clavada. **Requisito**: la
-   app «GitHub Actions» debe ser *bypass actor* del ruleset «Proteger main» — si no, la API
-   responde 403. Si el paso falla, la imagen y el Release ya están fuera y el add-on se queda **una
-   versión por detrás**: se arregla con un PR normal que suba el `version:`. El commit lleva
-   `[skip ci]` y no reentra (un push con `GITHUB_TOKEN` no dispara workflows). Comprueba la
-   sincronía con `./scripts/audit-releases.sh --addon`.
+   número como tag de imagen, así que sin este paso la tienda se queda clavada. **Requisito
+   (2026-08-30)**: el commit va autenticado como la GitHub App propia **`futurefin-release-bot`**
+   (secrets `ADDON_BUMP_APP_ID` + `ADDON_BUMP_APP_PRIVATE_KEY`; token emitido en el paso previo con
+   `actions/create-github-app-token`), que es *bypass actor* del ruleset «Proteger main». **No puede
+   ser el `GITHUB_TOKEN`**: la app integrada de GitHub Actions no es admisible como bypass actor en
+   un repo personal (422 «must be part of the ruleset source or owner organization»), y sin bypass
+   el push muere con 409 «Changes must be made through a pull request» — el fallo real del run de
+   4.4.0, que obligó al PR manual #103. Si el paso falla, la imagen y el Release ya están fuera y el
+   add-on se queda **una versión por detrás**: se arregla con un PR normal que suba el `version:`.
+   El commit lleva `[skip ci]` y no reentra (un push de una App SÍ dispara workflows, a diferencia
+   del `GITHUB_TOKEN`; el `[skip ci]` es lo que lo corta). Comprueba la sincronía con
+   `./scripts/audit-releases.sh --addon`.
 
 Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKERHUB_USERNAME` +
 `DOCKERHUB_TOKEN`.
