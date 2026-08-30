@@ -44,6 +44,13 @@ Radii: `--ff-radius-{frame=12, panel=14, kpi=12, pill=999, input=10}px`.
 
 Áreas de activos: `--proj-area-1` a `--proj-area-10` (paleta polícroma — azul/teal/violeta/... en claro, pasteles más claros en oscuro). Consumidos por [`ASSET_LINE_COLORS`](../apps/web/src/lib/projection-chart.ts).
 
+Direccionales: **`--proj-pos` / `--proj-neg`** (alias de `--ff-pos`/`--ff-neg` en las dos ramas de
+[`theme.css`](../apps/web/src/styles/theme.css)). Consumidores: las líneas/labels de planning inflow–outflow del
+chart de proyección (`App.css`, `.projection-chart-planning-inflow-line` y hermanas) y las barras de
+`PlanningDirectionChart` (`.planning-dir-bar-in/-out`; ver
+§Componentes nuevos (charts)). Son colores **funcionales de serie**, amparados por la excepción de
+charts — mismas restricciones que `--cf-income`/`--cf-expense`: prohibidos en chrome, texto o iconos.
+
 #### Región histórica (pasado) — v1.5.0
 
 El chart se extiende a la izquierda con la serie histórica de patrimonio (meses `< 0`). Cuatro tokens nuevos, todos grises deliberados (el pasado es "atenuado", nunca acento):
@@ -184,6 +191,26 @@ HTML normal —nunca dentro de un `<svg>`— con `flex-wrap` real.
   owner en duplicados, colapso, top-N del tooltip) vive PURA en
   [`lib/chart-legend.ts`](../apps/web/src/lib/chart-legend.ts) y está testeada en Vitest.
 
+### `PlanningDirectionChart` — [`components/charts/PlanningDirectionChart.tsx`](../apps/web/src/components/charts/PlanningDirectionChart.tsx)
+
+Barra apilada inflow/outflow de la pestaña Próximos (`<svg viewBox="0 0 100 12">`). SVG inline
+**amparado por la excepción de charts** (renderizado de datos, no icono — no puede vivir en
+`icons.tsx`); colores por clase CSS a `var(--proj-pos)`/`var(--proj-neg)`, cero hex.
+
+### Formateo de importes en charts — las DOS excepciones sancionadas a los 4 helpers canónicos
+
+La regla de CLAUDE.md («usa `formatCurrencyAmount`/`formatCurrencyNumber`, nunca concatenación
+manual») tiene exactamente dos excepciones, ambas en [`lib/ledger.ts`](../apps/web/src/lib/ledger.ts)
+y ambas de **chart**, donde el espacio manda:
+
+- **`formatAxisMoney`** (etiquetas del eje Y del chart grande): construye su propio
+  `Intl.NumberFormat` de moneda porque necesita `notation: "compact"` («1,2 M€»), que los helpers
+  canónicos no exponen.
+- **`formatProjectionMilestoneCompactLabel`** (etiquetas de hito del chart): sufijos `K/M/B/T`
+  manuales; por debajo de 1.000 delega en `formatMoneyAmount`.
+
+No añadas una tercera vía: si un caso nuevo necesita compactación, reutiliza estas dos o extiende
+los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 ## Componentes nuevos (UI)
 
 | Componente | Propósito |
