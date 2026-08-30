@@ -87,8 +87,12 @@ Workspace layout: Cargo workspace members `apps/api`, `crates/domain`, `crates/e
   reload.
 - The Rust API listens on `PORT` (**8081** in split-dev).
 - `apps/web/vite.config.ts` loads the **repo-root** `.env` (it resolves two levels up from
-  `apps/web`) and proxies exactly three path prefixes to `http://127.0.0.1:${FUTUREFIN_API_PORT ?? 8081}`:
-  `/v1`, `/health`, `/openapi.json`. Everything else is the SPA.
+  `apps/web`) and proxies the path prefixes enumerated in its `server.proxy` block to
+  `http://127.0.0.1:${FUTUREFIN_API_PORT ?? 8081}` — `/v1`, `/health`, `/openapi.json` plus, since
+  the embedded MCP/OAuth, `/.well-known`, `/oauth/token`, `/oauth/register`, `/oauth/revoke` and
+  `/mcp` (**never `/oauth` bare**: it would capture `/oauth/authorize`, which is an SPA view — the
+  config says so in a comment). Everything else is the SPA. Count them in the file, not here:
+  `grep -c 'target: apiTarget' apps/web/vite.config.ts`.
 - `FUTUREFIN_API_PORT` and `WEB_DEV_PORT` are read without a `VITE_` prefix and are not in
   `.env.example`; the defaults (8081/8080) match the split-dev values. If you change `PORT`, you
   must set `FUTUREFIN_API_PORT` to the same value or the proxy points at a dead port.
@@ -378,7 +382,7 @@ self-contained image). Re-verify before trusting volatile facts — every comman
 2026-08-16:
 
 - Version: `grep '^version' apps/api/Cargo.toml` (3.0.0)
-- Migration count/list: `ls apps/api/migrations | wc -l` (34)
+- Migration count/list: `ls apps/api/migrations | wc -l` (**49** on 2026-08-30; 34 on 2026-08-16)
 - Compose files present — must be exactly three, and **no** `split-dev`: `ls docker-compose*.yml`
 - Dev DB definition (project name, service, port, volume): `cat docker-compose.dev.yml`
 - Production stack is one service, two volumes, `/v1/ready` healthcheck: `cat docker-compose.yml`

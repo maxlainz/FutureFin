@@ -239,7 +239,9 @@ pub fn present_value_of_payments(monthly_payment: Decimal, months: Decimal,
 Valor actual de una renta de `months` cuotas al TIN: `P = M·(1 − (1+i)^−n)/i`. Con `apr_percent`
 ausente o `≤ 0` devuelve `M · n` **exacto**, sin pasar por `powd` (el límite cuando `i → 0`, y el
 caso más común). `n` puede ser fraccionario. Cualquier `checked_*` que falle cae al mismo `M · n`.
-Lo consume la derivación de principal del handler de pasivos: `PV(500 × 200 @ 3 %) = 78.618,1542 €`
+Lo consume la derivación de principal del handler de pasivos **solo en `french`** (brazo
+`RepaymentModel::French` de `derive_principal` en `handlers/liabilities.rs`; el resto de modelos
+deriva la suma nominal `M · n`): `PV(500 × 200 @ 3 %) = 78.618,1542 €`
 frente a los 100.000 € de la suma nominal.
 
 **Per-mode liability contract (handler-side — reform 3.4.0, extendido en 4.2.0):** the engine always
