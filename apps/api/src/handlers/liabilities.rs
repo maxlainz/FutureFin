@@ -1318,9 +1318,9 @@ pub(crate) async fn liability_schedule_core(
     }
     let window = window_months.unwrap_or(DEFAULT_SCHEDULE_WINDOW_MONTHS);
     if window < 1 || window > MAX_SCHEDULE_WINDOW_MONTHS {
-        return Err(ApiError::BadRequest(
-            "schedule_window_out_of_range: months must be between 1 and 480".into(),
-        ));
+        return Err(ApiError::BadRequest(format!(
+            "schedule_window_out_of_range: months must be between 1 and {MAX_SCHEDULE_WINDOW_MONTHS}"
+        )));
     }
 
     let today = installation_naive_today(pool, iid).await?;
