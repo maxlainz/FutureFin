@@ -15,7 +15,7 @@ use std::cmp::Ordering;
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum EngineError {
     #[error("horizon_months must be >= 1")]
     InvalidHorizon,
@@ -23,6 +23,13 @@ pub enum EngineError {
     InvalidPlanningAdjustments,
     #[error("allocation_rules contains an out-of-bounds target_index")]
     InvalidAllocationRuleTarget,
+    /// El valor de un activo desbordó el rango de `Decimal` (~7,9e28) al componer su
+    /// rentabilidad. Error tipado y no saturación silenciosa: a diferencia del payoff de un
+    /// pasivo (donde saturar conserva una serie finita y conservadora), congelar aquí el valor
+    /// produciría un patrimonio gigante y PLAUSIBLE — exactamente la clase de número que esta
+    /// casa no publica. El input es corregible por el usuario (una rentabilidad absurda).
+    #[error("asset value overflowed Decimal range while compounding expected_annual_return_percent over the horizon")]
+    AssetValueOverflow,
     #[error("history timeline dates must be strictly ascending")]
     InvalidHistoryTimeline,
 }
@@ -1164,7 +1171,12 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
         for i in 0..values.len() {
             let m = monthly_multiplier(rates[i]);
-            values[i] *= m;
+            // `checked_mul`, no `*`: con una tasa desorbitada y horizonte largo el producto
+            // desborda Decimal y `*` PANICA — el pool blocking lo convertía en un 400
+            // `task_panic` permanente e ininteligible (auditoría 2026-08). Error tipado.
+            values[i] = values[i]
+                .checked_mul(m)
+                .ok_or(EngineError::AssetValueOverflow)?;
         }
 
         // Amortización: solo se asienta el cierre ya calculado arriba. Sin recomputar nada.
@@ -1309,6 +1321,20 @@ mod tests {
             (final_nw - Decimal::from(5_000)).abs() < Decimal::new(1, 2),
             "esperado ≈ 5000 tras 12 meses a −50 % anual, obtenido {final_nw}"
         );
+    }
+
+    /// Regresión (auditoría 2026-08): componer una tasa absurda desbordaba Decimal y PANICABA
+    /// (`Multiplication overflowed`), y el pool blocking lo servía como 400 `task_panic`
+    /// permanente. Predicción a mano: 1.000 € al 1000 % anual es factor mensual 11^(1/12);
+    /// el valor cruza el techo de Decimal (~7,9e28) en el mes k con 1000·11^(k/12) ≈ 7,9e28
+    /// ⇒ k ≈ 12·log₁₁(7,9e25) ≈ 298 < 840, así que la simulación DEBE devolver el error
+    /// tipado, jamás panicar ni publicar un valor congelado plausible.
+    #[test]
+    fn absurd_return_overflows_with_typed_error_not_panic() {
+        let a = mk_asset(1, Decimal::from(1_000), true, Some(Decimal::from(1_000)));
+        let inp = base_input(840, Decimal::ZERO, Decimal::ZERO, vec![a], vec![]);
+        let err = project_net_worth_series(&inp).unwrap_err();
+        assert_eq!(err, EngineError::AssetValueOverflow);
     }
 
     #[test]
