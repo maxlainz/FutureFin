@@ -946,8 +946,8 @@ four migrations under `apps/api/migrations/20260828*.sql` and the Fase 3 diff of
 included) still said `?months=` was *clamped* to 12–840 — it has been a **rejection**
 (400 `months_out_of_range`) since 4.4.0, and the doc lagged for a while. Re-verify volatile claims with:
 
-- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md` (4.2.1 on
-  2026-08-27; 3.1.0 on 2026-08-17).
+- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md` (4.4.0 on
+  2026-08-30; 4.2.1 on 2026-08-27; 3.1.0 on 2026-08-17).
 - Migration count: `ls apps/api/migrations/*.sql | wc -l` (49 on 2026-08-28, Fase 3/issue #84; 44 on 2026-08-27; 36 on 2026-08-17; 34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
 - Engine purity deps (I8): `grep -E "tokio|sqlx|reqwest|axum" crates/engine/Cargo.toml` → empty.
 - Horizon rule (D11): `grep -n "fn validate_months_override\|months_out_of_range\|LIFESPAN_AGE\|FALLBACK_YEARS\|fallback_no_demographics" apps/api/src/handlers/projection.rs`. **`?months=` is a REJECTION since 4.4.0, not a clamp** — `clamp(12, 840)` as a live pattern now finds only the doc comment noting it was retired.
