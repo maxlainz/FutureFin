@@ -336,7 +336,7 @@ async fn previewing_the_deletion_of_a_rule_that_assigns_nothing_works() {
     let envelope = mcp_post(
         &app,
         &token,
-        tool_call("delete_categorization_rule", json!({ "rule_id": muda_id })),
+        tool_call("delete_categorization_rule", json!({ "id": muda_id })),
     )
     .await;
     assert_ne!(
@@ -377,7 +377,7 @@ async fn previewing_the_deletion_of_a_rule_that_assigns_nothing_works() {
         &token,
         tool_call(
             "delete_categorization_rule",
-            json!({ "rule_id": muda_id, "confirm": true }),
+            json!({ "id": muda_id, "confirm": true }),
         ),
     )
     .await;
