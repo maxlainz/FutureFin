@@ -133,6 +133,51 @@ function hexHits(): Hit[] {
   return hits;
 }
 
+/**
+ * `rgba(0, 0, 0, …)` — o cualquier variante de espaciado — fuera de `theme.css`. Mismo espíritu
+ * que HEX_PATTERN: un negro-con-alfa suelto en un componente no cambia con el tema. Cubre
+ * `rgba(0,0,0,` y `rgba(0, 0, 0,` (y cualquier cantidad de espacios entre comas).
+ */
+const RGBA_ZERO_PATTERN = /rgba\(\s*0\s*,\s*0\s*,\s*0\s*,/g;
+
+/**
+ * Excepción puntual documentada (issue #105): el box-shadow del tooltip del chart de proyección
+ * se queda como `rgba(0,0,0,…)` a propósito — ver el comentario en el propio App.css junto a
+ * `.projection-chart-tooltip`. Cerrada por file+línea, no por patrón, para que cualquier OTRO
+ * `rgba(0,0,0,…)` que aparezca (incluida una futura línea 2356/2357 movida) siga cazándose: si
+ * el tooltip se mueve, este test empieza a fallar en la línea nueva hasta que se actualice aquí,
+ * en vez de dejar pasar en silencio un `rgba(0,0,0,…)` distinto que caiga en las mismas líneas.
+ */
+const RGBA_ZERO_EXCEPTIONS: ReadonlySet<string> = new Set([
+  "App.css:2356",
+  "App.css:2357",
+]);
+
+function rgbaZeroHits(): Hit[] {
+  const files: string[] = [];
+  collectFiles(SRC_ROOT, files);
+  files.sort();
+
+  const hits: Hit[] = [];
+  for (const file of files) {
+    const relFile = path.relative(SRC_ROOT, file);
+    const cleaned = blankNonColorContexts(readFileSync(file, "utf8"));
+    cleaned.split("\n").forEach((line, i) => {
+      const lineNumber = i + 1;
+      if (RGBA_ZERO_EXCEPTIONS.has(`${relFile}:${lineNumber}`)) return;
+      for (const m of line.matchAll(RGBA_ZERO_PATTERN)) {
+        hits.push({
+          file: relFile,
+          line: lineNumber,
+          text: line.trim(),
+          match: m[0],
+        });
+      }
+    });
+  }
+  return hits;
+}
+
 describe("FREEZER hex — la paleta vive solo en theme.css", () => {
   it("el barrido encuentra ficheros que mirar", () => {
     // Anti-deriva silenciosa: un barrido que no barre nada pasaría siempre. Si alguien mueve
@@ -197,6 +242,25 @@ describe("FREEZER hex — la paleta vive solo en theme.css", () => {
             "Si de verdad NO es un color (un id de fragmento SVG, un ancla), NO relajes el patrón: " +
             "añade una exclusión estrecha y documentada en `blankNonColorContexts`, como las tres " +
             "que ya hay.",
+    ).toEqual([]);
+  });
+
+  it("no hay rgba(0,0,0,…) hardcoded fuera de styles/theme.css (barrido issue #105)", () => {
+    const hits = rgbaZeroHits();
+    const detail = hits
+      .map((h) => `  ${h.file}:${h.line}  ${h.match}   →   ${h.text}`)
+      .join("\n");
+
+    expect(
+      hits,
+      hits.length === 0
+        ? ""
+        : `rgba(0, 0, 0, …) hardcoded fuera de src/styles/theme.css (${hits.length}):\n${detail}\n\n` +
+            "Las sombras/negros con alfa viven en tokens de theme.css (--ff-shadow-*). Define (o " +
+            "reutiliza) el token con el mismo valor rgba y sustituye por `var(--ff-shadow-loquesea)`.\n" +
+            "Si es una excepción deliberada de verdad (como el tooltip del chart de proyección), " +
+            "documéntala junto al CSS y añade su file:línea a RGBA_ZERO_EXCEPTIONS en este fichero " +
+            "— no relajes RGBA_ZERO_PATTERN.",
     ).toEqual([]);
   });
 });

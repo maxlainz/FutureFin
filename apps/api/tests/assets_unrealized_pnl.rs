@@ -146,12 +146,11 @@ async fn unrealized_pnl_follows_an_edit_of_the_valuation() {
     assert_eq!(dec(&b["unrealized_pnl"]), 250.0, "{b}");
     assert_eq!(dec(&b["unrealized_pnl_pct"]), 25.0, "{b}");
 
-    // NOTA para quien venga: **`{"purchase_price": null}` por HTTP no borra el precio**, devuelve
-    // 400 `patch_empty`. No es un fallo de esta cifra: `Option<serde_json::Value>` con serde mapea
-    // el `null` de JSON a `None` (= campo ausente), así que la rama `is_null()` de
-    // `merge_optional_decimal_patch` es inalcanzable por este camino. La vía viva para borrarlo es
-    // la tool MCP `update_asset` con `clear_purchase_price: true`, que construye el `Value::Null`
-    // en Rust. Se fija aquí para que el comportamiento no se lea como un descuido de la plusvalía.
+    // INVERTIDO A PROPÓSITO (Ola 1, #95): este bloque pinneaba el contrato ROTO — el `null`
+    // presente era inalcanzable por serde y `{"purchase_price": null}` devolvía 400
+    // `patch_empty`; la propia nota de entonces lo declaraba deuda. Con
+    // `deserialize_double_option` la promesa de OpenAPI se cumple: `null` borra el precio y la
+    // plusvalía desaparece CON su razón (`no_purchase_price`) — NULL nunca es cero.
     let r = app
         .patch_json_with_cookie(
             &format!("/v1/assets/{id}"),
@@ -159,6 +158,9 @@ async fn unrealized_pnl_follows_an_edit_of_the_valuation() {
             &owner.cookie,
         )
         .await;
-    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
-    assert_eq!(r.json()["code"], "patch_empty");
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let b = r.json();
+    assert!(b["purchase_price"].is_null(), "{b}");
+    assert!(b["unrealized_pnl"].is_null(), "{b}");
+    assert_eq!(b["unrealized_pnl_absent_reason"], "no_purchase_price", "{b}");
 }

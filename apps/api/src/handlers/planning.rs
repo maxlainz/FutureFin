@@ -95,8 +95,9 @@ pub struct PatchPlanningFlowBody {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub expected_amount: Option<Decimal>,
-    /// Omit = leave unchanged; `null` = clear; `"YYYY-MM-DD"` = set.
-    #[serde(default)]
+    /// Omit = leave unchanged; `null` = clear; `"YYYY-MM-DD"` = set. (La cadena vacía `""`
+    /// también borra — escape hatch heredado, conservado y ahora documentado.)
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
     #[schema(value_type = Option<String>, format = "date")]
     pub due_date: Option<Value>,
     pub notes: Option<String>,

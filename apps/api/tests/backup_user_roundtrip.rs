@@ -1225,3 +1225,42 @@ async fn a_legacy_backup_with_duplicate_agnostic_rules_still_imports() {
     );
     assert_eq!(app.count_rows("categorization_rules").await, 1);
 }
+
+/// S3/#135 (Ola 1): el import valida el retorno con LA MISMA puerta que la escritura. Antes un
+/// backup con `expected_annual_return_percent <= -100` creaba la fila que la API jamás habría
+/// aceptado, y esa fila dejaba `/v1/projection/series` en el overflow tipado del engine.
+#[tokio::test]
+async fn import_rejects_asset_with_impossible_return_and_rolls_back() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": "1990-01-01" },
+        "categories_used": [{ "scope": "asset", "name": "Cash", "sort_index": 0 }],
+        "assets": [{
+            "category_ref": { "scope": "asset", "name": "Cash" },
+            "name": "Fondo imposible",
+            "current_value": "1000.00",
+            "is_liquid": true,
+            "expected_annual_return_percent": "-150",
+            "sort_index": 0
+        }],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json()
+    });
+    let b64 = craft_ffbackup_b64(3, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::BAD_REQUEST, "{applied:?}");
+    let msg = String::from_utf8_lossy(&applied.body).to_string();
+    assert!(
+        msg.contains("backup_asset_return_invalid") && msg.contains("Fondo imposible"),
+        "el error debe nombrar la puerta y el activo: {msg}"
+    );
+    // Rollback: no quedó ningún activo a medias.
+    assert_eq!(app.count_rows("assets").await, 0);
+}

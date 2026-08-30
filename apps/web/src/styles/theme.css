@@ -48,6 +48,18 @@
     0 10px 24px -8px rgba(10, 10, 10, 0.08);
   --ff-shadow-flat: 0 1px 2px rgba(10, 10, 10, 0.04);
 
+  /* Barrido de nits (issue #105): App.css tenía `rgba(0, 0, 0, …)` sueltos que no encajaban
+     en --ff-shadow-flat/--ff-shadow-elev (offsets y alfa distintos por sitio). Se extraen aquí
+     como color puro — App.css conserva el offset/forma y solo sustituye el color por el token.
+     Ninguno de estos sitios variaba antes con el tema (App.css no tenía reglas `[data-theme="dark"]`
+     propias para ellos), así que se definen UNA sola vez y no se redefinen más abajo, a propósito
+     —igual que --ff-overlay-bg—: así el render queda byte-idéntico al de antes del barrido. */
+  --ff-shadow-backdrop: rgba(0, 0, 0, 0.45);
+  --ff-shadow-drawer: rgba(0, 0, 0, 0.15);
+  --ff-shadow-inset: rgba(0, 0, 0, 0.06);
+  --ff-shadow-inset-strong: rgba(0, 0, 0, 0.12);
+  --ff-shadow-switch: rgba(0, 0, 0, 0.2);
+
   /* ============================================================
      Chart de proyección — tokens.
      ProjectionNetWorthChart.tsx usa estas vars en vez de hex

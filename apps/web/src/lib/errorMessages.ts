@@ -455,6 +455,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
   tax_brackets_not_increasing:
     "Los límites de los tramos deben ir siempre a más. Corrige el que se repite o baja.",
   inflation_out_of_range: "La inflación anual debe estar entre 0 y 50 %.",
+  apr_out_of_range:
+    "El TIN anual debe estar entre 0 y 100 %. Si has escrito 350 queriendo decir 3,50, usa la coma decimal.",
+  backup_asset_return_invalid:
+    "El backup trae un activo con una rentabilidad esperada imposible (≤ −100 %); corrígela en la instalación de origen y vuelve a exportar.",
   inflation_not_a_number:
     "La inflación no se entiende como número. Escríbela solo con cifras y, si hace falta, un decimal.",
   currency_format_invalid: "El código de moneda debe tener tres letras.",
