@@ -60,57 +60,26 @@ Workspace layout: Cargo workspace members `apps/api`, `crates/domain`, `crates/e
 
 ## 2. From zero to split-dev (the normal dev setup)
 
-Copy-pasteable sequence from a fresh clone:
+**The happy path is OWNED by `docs/desarrollo.md`** (2026-08-30 consolidation) — follow it there:
+`cp .env.example .env` + uncomment the three dev vars, `./scripts/dev-db.sh` (wraps
+`docker-compose.dev.yml` and waits for `pg_isready`), then `cargo run` in `apps/api` and
+`npm run dev:web`. This section keeps only what an agent needs BEYOND the manual:
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env`: since 3.0.0 **every line ships commented out** (production needs no variable at all),
-so for split-dev uncomment the three dev vars in the "Desarrollo" block:
-
-```env
-PORT=8081
-DATABASE_URL=postgres://futurefin:futurefin@127.0.0.1:5432/futurefin
-RUST_LOG=futurefin_api=info,tower_http=info
-```
-
-`POSTGRES_PASSWORD` is no longer needed: `docker-compose.dev.yml` defaults user/password/db to
-`futurefin`/`futurefin`/`futurefin`, which is exactly what that `DATABASE_URL` expects. If you do
-set `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` in `.env`, the dev compose picks them up and
-your `DATABASE_URL` must be updated to match — they must agree.
-
-> **Be careful with the dev `DATABASE_URL` if you also run the production compose on this
-> machine.** The image reads any `DATABASE_URL` not pointing at `/var/run/postgresql` as "an
-> *external* database", and since 4.0.0 those are gone: with a populated volume it ignores the
-> variable with a warning, with an empty one it **refuses to start**. Keep the dev and prod `.env`
-> files separate — see trap T10, which also explains why a `.env` alone is usually not enough to
-> leak it into the container.
-
-Start the dev Postgres — a **standalone** compose file, not an override (see trap T4):
-
-```bash
-docker compose -f docker-compose.dev.yml up -d
-```
-
-That file (project name `futurefin-dev`, service `db`, container `futurefin-dev-db`, volume
-`devdata`) publishes `127.0.0.1:5432:5432` so your local `cargo run` can connect. It replaced
-`docker-compose.split-dev.yml`, which is **deleted**: the production compose no longer has a
-database service to override — PostgreSQL now lives inside the app image. Coming from a 2.x
-checkout and want to keep your old dev data? A comment inside `docker-compose.dev.yml` shows how:
-declare `devdata` as `external: true` with `name: futurefin_pgdata`.
-
-```bash
-# Terminal 1 — API on :8081 (applies migrations on startup)
-cd apps/api && cargo run
-
-# Terminal 2 — UI on :8080, from repo root
-npm install
-npm run dev:web
-```
-
-Open `http://127.0.0.1:8080`. Register a user — the **first user to register becomes the
-installation owner** automatically; later registrants are "pending" until the owner approves them.
+- **The `POSTGRES_*` agreement**: `docker-compose.dev.yml` defaults user/password/db to
+  `futurefin`/`futurefin`/`futurefin`, exactly what the example `DATABASE_URL` expects. If you set
+  `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` in `.env`, the dev compose picks them up and
+  your `DATABASE_URL` must be updated to match — they must agree.
+- **The dev `DATABASE_URL` vs the production compose on the same machine**: the image reads any
+  `DATABASE_URL` not pointing at `/var/run/postgresql` as "external", and since 4.0.0 those are
+  gone (populated volume → ignored with a warning; empty volume → refuses to start). See trap T10
+  for why a `.env` alone usually cannot leak it into the container.
+- **`docker-compose.dev.yml` is standalone, not an override** (trap T4): project `futurefin-dev`,
+  service `db`, container `futurefin-dev-db`, volume `devdata`, publishes `127.0.0.1:5432`. It
+  replaced the deleted `docker-compose.split-dev.yml` — production no longer has a DB service to
+  override. Keeping 2.x dev data: a comment inside the file shows the `external: true` +
+  `name: futurefin_pgdata` recipe.
+- **First registered user becomes the installation owner**; later registrants stay "pending" until
+  approved.
 
 ### Dual-port architecture (why two ports)
 
@@ -143,28 +112,13 @@ Validates the complete production artifact (API + embedded frontend + **embedded
 without waiting for CI to publish an image. This flow is also the release gate: run it before
 tagging any release.
 
-```bash
-# 1. Build the image locally (slow the first time; cached on rebuilds)
-#    --load is mandatory with BuildKit so the image lands in Docker's local store
-docker build --load -f apps/api/Dockerfile -t futurefin-local:dev .
-
-# 2. Make sure .env contains (nothing else is required since 3.0.0):
-#      FUTUREFIN_IMAGE=futurefin-local
-#      FUTUREFIN_TAG=dev
-#    …and does NOT contain an uncommented DATABASE_URL (see trap T10).
-
-# 3. Start the stack with the local override (stops Compose from pulling the local-only image)
-docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d
-
-# 4. Smoke test — /v1/ready also proves the embedded Postgres answers
-curl -sf http://127.0.0.1:8080/v1/ready
-docker compose logs futurefin | grep "initializing fresh PostgreSQL 16"   # first boot only
-
-# 5. Rebuild loop after changes (Docker layer cache reuses unchanged stages)
-docker build --load -f apps/api/Dockerfile -t futurefin-local:dev . \
-  && docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env \
-     up -d --no-deps futurefin
-```
+**The step sequence is OWNED by `docs/desarrollo.md` §Construir la imagen en local** (2026-08-30
+consolidation), and has a citable name: **`./scripts/build-local-image.sh`** — build with `--load`
+(mandatory with BuildKit or Compose pulls a nonexistent image), stack up with the local override,
+poll `/v1/ready`, print the served version. Prereqs it assumes: `.env` with
+`FUTUREFIN_IMAGE=futurefin-local` + `FUTUREFIN_TAG=dev` and **no uncommented `DATABASE_URL`**
+(trap T10). Rebuild loop after changes: re-run the script (layer cache reuses unchanged stages) or
+`docker compose … up -d --no-deps futurefin` after a rebuild.
 
 `docker-compose.local.yml` still only adds `pull_policy: never` to the `futurefin` service so
 Compose uses the image that exists only locally. Note there is **no `futurefin-database` service

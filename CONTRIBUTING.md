@@ -121,8 +121,16 @@ Antes de retomar el trabajo: `git pull --ff-only`.
 
 **Córrelas en local aunque CI las repita.** Desde 4.0.0 CI ejecuta las mismas suites, pero
 enterarte en tres minutos en tu máquina es mejor que en quince en un runner — y hay cosas que
-ningún job puede ver (la interfaz de verdad, en tema claro **y** oscuro). Literalmente, desde la
-raíz del repositorio:
+ningún job puede ver (la interfaz de verdad, en tema claro **y** oscuro).
+
+**La puerta entera con un solo comando** (los mismos gates, en orden, falla al primero):
+
+```bash
+./scripts/test-all.sh              # necesita la base de test del paso 2 en el 5433
+SKIP_DB=1 ./scripts/test-all.sh    # solo los gates sin base de datos
+```
+
+Paso a paso, para iterar sobre una puerta concreta:
 
 ```bash
 # 1. Build de Rust + tests del engine (no necesitan base de datos)
