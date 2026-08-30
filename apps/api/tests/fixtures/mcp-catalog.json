@@ -40,14 +40,14 @@
     },
     {
       "constraints": {
-        "$": "additionalProperties=false required=[\"rule_id\"] type=\"object\"",
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
         "$.apply_to_existing": "enum=[\"all\",\"uncategorized\"] type=[\"null\",\"string\"]",
         "$.confirm": "type=[\"boolean\",\"null\"]",
         "$.confirm_token": "maxLength=200 minLength=1 type=[\"null\",\"string\"]",
         "$.from_month": "pattern=\"^\\\\d{4}-\\\\d{2}$\" type=[\"null\",\"string\"]",
-        "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
-      "constraints_sha256_12": "95505b46efbf",
+      "constraints_sha256_12": "9f91ff01dcca",
       "description_len": 570,
       "description_sha256_12": "261539f88af1",
       "name": "apply_categorization_rule",
@@ -56,10 +56,10 @@
         "confirm",
         "confirm_token",
         "from_month",
-        "rule_id"
+        "id"
       ],
       "required": [
-        "rule_id"
+        "id"
       ]
     },
     {
@@ -467,20 +467,20 @@
     },
     {
       "constraints": {
-        "$": "additionalProperties=false required=[\"rule_id\"] type=\"object\"",
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
         "$.confirm": "type=[\"boolean\",\"null\"]",
-        "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
-      "constraints_sha256_12": "56ad48dea7cf",
+      "constraints_sha256_12": "d9b763ce74d3",
       "description_len": 406,
       "description_sha256_12": "6ec0a047d4e2",
       "name": "delete_categorization_rule",
       "properties": [
         "confirm",
-        "rule_id"
+        "id"
       ],
       "required": [
-        "rule_id"
+        "id"
       ]
     },
     {
@@ -1180,15 +1180,15 @@
     },
     {
       "constraints": {
-        "$": "additionalProperties=false required=[\"rule_id\"] type=\"object\"",
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
         "$.amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.cap_kind": "enum=[\"amount\",\"income_multiple\",\"months_expense\"] type=[\"null\",\"string\"]",
         "$.cap_value": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.clear_cap": "type=[\"boolean\",\"null\"]",
         "$.enabled": "type=[\"boolean\",\"null\"]",
-        "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
-      "constraints_sha256_12": "c255b4e30e86",
+      "constraints_sha256_12": "0c101275fe64",
       "description_len": 344,
       "description_sha256_12": "15bb462ced1f",
       "name": "update_allocation_rule",
@@ -1198,10 +1198,10 @@
         "cap_value",
         "clear_cap",
         "enabled",
-        "rule_id"
+        "id"
       ],
       "required": [
-        "rule_id"
+        "id"
       ]
     },
     {
@@ -1288,18 +1288,18 @@
     },
     {
       "constraints": {
-        "$": "additionalProperties=false required=[\"rule_id\"] type=\"object\"",
+        "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
         "$.assign_category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
         "$.assign_kind": "enum=[\"expense\",\"income\",\"savings\"] type=[\"null\",\"string\"]",
         "$.clear_assign_category": "type=[\"boolean\",\"null\"]",
         "$.clear_assign_kind": "type=[\"boolean\",\"null\"]",
         "$.clear_source": "type=[\"boolean\",\"null\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
         "$.match_kind": "enum=[\"exact\",\"prefix\",\"substring\"] type=[\"null\",\"string\"]",
         "$.pattern": "type=[\"null\",\"string\"]",
-        "$.rule_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
         "$.source": "type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "cfdb99dd6ac1",
+      "constraints_sha256_12": "bc81071ada40",
       "description_len": 539,
       "description_sha256_12": "e399642775a2",
       "name": "update_categorization_rule",
@@ -1309,13 +1309,13 @@
         "clear_assign_category",
         "clear_assign_kind",
         "clear_source",
+        "id",
         "match_kind",
         "pattern",
-        "rule_id",
         "source"
       ],
       "required": [
-        "rule_id"
+        "id"
       ]
     },
     {

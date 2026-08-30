@@ -1259,7 +1259,7 @@ pub struct UpdateTransactionsParams {
 pub struct ApplyCategorizationRuleParams {
     /// UUID de la regla (de list_categorization_rules).
     #[schemars(regex(pattern = UUID_STRING))]
-    pub rule_id: String,
+    pub id: String,
     /// "uncategorized" (default): solo movimientos sin categoría. "all": también reasigna los ya
     /// categorizados — el caso «desglosar una categoría cajón».
     #[serde(default)]
@@ -1534,7 +1534,7 @@ pub struct UpdateBudgetEntryParams {
 pub struct UpdateAllocationRuleParams {
     /// UUID de la regla (de list_allocation_rules).
     #[schemars(regex(pattern = UUID_STRING))]
-    pub rule_id: String,
+    pub id: String,
     /// Importe de la regla como string decimal: euros/mes para kind=fixed, % para
     /// kind=percent. (El kind y el orden no se editan desde chat.)
     #[serde(default)]
@@ -1564,7 +1564,7 @@ pub struct UpdateAllocationRuleParams {
 pub struct UpdateCategorizationRuleParams {
     /// UUID de la regla (de list_categorization_rules).
     #[schemars(regex(pattern = UUID_STRING))]
-    pub rule_id: String,
+    pub id: String,
     /// "substring" | "prefix" | "exact".
     #[serde(default)]
     #[schemars(extend("enum" = ["substring", "prefix", "exact"]))]
@@ -1599,7 +1599,7 @@ pub struct UpdateCategorizationRuleParams {
 pub struct DeleteCategorizationRuleParams {
     /// UUID de la regla (de list_categorization_rules).
     #[schemars(regex(pattern = UUID_STRING))]
-    pub rule_id: String,
+    pub id: String,
     /// Sin confirm=true NO borra: devuelve un preview con la regla y su huella actual.
     #[serde(default)]
     pub confirm: Option<bool>,
@@ -3524,7 +3524,7 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let rule_id = match parse_uuid_param("rule_id", &p.rule_id) {
+        let rule_id = match parse_uuid_param("id", &p.id) {
             Ok(v) => v,
             Err(e) => return to_tool_outcome(e),
         };
@@ -4177,7 +4177,7 @@ impl FutureFinMcp {
             // no participaba ni en la guardia ni en la construcción del cap: con otro campo
             // presente, la llamada devolvía 200, `antes == despues` y el tope no se ponía.
             let UpdateAllocationRuleParams {
-                rule_id,
+                id: rule_id,
                 amount,
                 cap_kind,
                 cap_value,
@@ -4204,7 +4204,7 @@ impl FutureFinMcp {
             // La guardia de patch vacío vive ahora en `patch_allocation_rule_core`, como en el
             // resto de handlers: un solo sitio para HTTP y MCP.
             Ok((
-                parse_uuid_param("rule_id", rule_id)?,
+                parse_uuid_param("id", rule_id)?,
                 crate::handlers::allocation_rules::PatchAllocationRuleBody {
                     target_asset_id: None,
                     kind: None,
@@ -4243,8 +4243,8 @@ impl FutureFinMcp {
             Ok((
                 serde_json::json!({
                     "id": r.id,
-                    "antes": before,
-                    "despues": r,
+                    "before": before,
+                    "after": r,
                     "impact": impact,
                 }),
                 vec![rule_id],
@@ -4268,7 +4268,7 @@ impl FutureFinMcp {
         // alguien lo mapee. Las guardias de patch vacío y de conflicto `clear_*` NO viven aquí sino
         // en `patch_rule_core`, para que HTTP y MCP no puedan divergir (la lección de `cap_value`).
         let UpdateCategorizationRuleParams {
-            rule_id,
+            id: rule_id,
             match_kind,
             pattern,
             source,
@@ -4280,7 +4280,7 @@ impl FutureFinMcp {
         } = p;
         let run = || -> Result<(Uuid, PatchRuleBody), ApiError> {
             Ok((
-                parse_uuid_param("rule_id", &rule_id)?,
+                parse_uuid_param("id", &rule_id)?,
                 PatchRuleBody {
                     match_kind,
                     pattern,
@@ -4326,7 +4326,7 @@ impl FutureFinMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
-        let rule_id = match parse_uuid_param("rule_id", &p.rule_id) {
+        let rule_id = match parse_uuid_param("id", &p.id) {
             Ok(v) => v,
             Err(e) => return to_tool_outcome(e),
         };
@@ -4557,10 +4557,8 @@ impl FutureFinMcp {
         };
         let installation_id = id.installation_id;
         settled(&self.state.pool, audit, async {
-            // El PATCH de instalación es owner-only también por HTTP.
-            if id.role != crate::handlers::membership::MembershipRole::Owner {
-                return Err(ApiError::Forbidden);
-            }
+            // Owner-only: la comprobación vive en `patch_fire_settings_core` (D14, issue #99) —
+            // protegida por construcción para CUALQUIER llamante, no solo esta tool.
             let apply = p.confirm.unwrap_or(false);
             let impact_before = if apply {
                 impact_probe(&self.state, id.installation_id, id.user_id).await
