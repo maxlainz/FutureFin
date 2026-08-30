@@ -647,12 +647,26 @@ jobs:
       # Si este paso falla, la imagen y el Release YA están fuera: el add-on se queda
       # una versión por detrás y se arregla con un PR normal que suba el `version:`.
       #
-      # REQUISITO: la app «GitHub Actions» debe estar como bypass actor del ruleset
-      # «Proteger main»; si no, la API responde 403 y el paso falla.
+      # REQUISITO (2026-08-30): el commit va autenticado como la GitHub App propia
+      # `futurefin-release-bot` (secrets ADDON_BUMP_APP_ID + ADDON_BUMP_APP_PRIVATE_KEY),
+      # que ES bypass actor del ruleset «Proteger main». No puede ser el GITHUB_TOKEN:
+      # la app integrada de GitHub Actions NO es admisible como bypass actor en un repo
+      # personal («Actor … must be part of the ruleset source or owner organization», 422),
+      # y sin bypass el push directo muere con 409 «Changes must be made through a pull
+      # request» — medido en el run del build de 4.4.0, que es por lo que existe este paso
+      # previo. El [skip ci] del mensaje sigue evitando la reentrada: un push de una App
+      # SÍ dispara workflows (a diferencia del GITHUB_TOKEN), pero [skip ci] los corta.
+      - name: Token de la App para el bump del add-on
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag)
+        id: addon_bump_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ADDON_BUMP_APP_ID }}
+          private-key: ${{ secrets.ADDON_BUMP_APP_PRIVATE_KEY }}
       - name: Bump de la versión del add-on en main
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag)
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.addon_bump_token.outputs.token }}
           TAG: ${{ steps.ref.outputs.tag }}
         run: |
           set -euo pipefail
