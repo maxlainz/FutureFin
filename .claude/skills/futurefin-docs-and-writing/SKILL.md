@@ -46,7 +46,7 @@ current drift is a duplicated or orphaned fact).
 
 | File | Owns (authoritative for) | Audience |
 |---|---|---|
-| `CLAUDE.md` | Commands (dev, test, build, deploy), architecture summary, UI conventions, git workflow/release steps, index of `.claude/*.md` | AI sessions |
+| `CLAUDE.md` | Entry point, deliberately short since the 2026-08-30 consolidation: skill routing, index of `.claude/*.md` with owners, the «Contrato en vigor» table (rules + their freezer tests), session norms, compact command block, UI conventions, five-line git/release summary. It SUMMARIZES; the owners it points at hold the detail | AI sessions |
 | `.claude/api-routes.md` | Full route map, auth pattern, view-scoping pattern, error mapping, projection response shape/cache/density | AI sessions |
 | `.claude/mcp-catalog.md` | The MCP tool catalog: per-tool semantics, cache class, preview/confirm, listing envelopes, and `/mcp` transport (CORS, body limit, kill-switch) | AI sessions |
 | `.claude/data-model.md` | Tables, columns, invariants, `fire_settings` JSONB shape, `.ffbackup` schema notes | AI sessions |
@@ -106,6 +106,20 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 - Prefer commands over hard counts in docs ("`ls apps/api/migrations | wc -l`" ages better than
   "33 migrations" — that frozen number sat wrong in tests.md until 2026-07-02). If you must
   state a count, date-stamp it: "31 migrations as of 2026-07-02".
+- **Las cuatro lecciones numéricas de la casa** (antes en CLAUDE.md; este es su hogar desde la
+  consolidación de 2026-08-30 — cada una tiene incidente real detrás):
+  1. **Contadores congelados** («52 tools», «19 de lectura»): quedan obsoletos al primer cambio y
+     nadie los recuenta. Es la forma general de la regla de arriba.
+  2. **Defaults y cotas duplicados schema↔runtime**: el schema de una tool MCP —el texto que LEE
+     el modelo— anunció «default 15» cuando el real era 30, y topaba en 60 donde la core acepta
+     365; el mismo parámetro funcionaba por HTTP y fallaba por MCP. Hoy los pares macro↔const
+     están pinneados por `schema_bounds_parity.rs`.
+  3. **Greps de re-verificación que ya no encuentran nada**: un `grep` vacío es deriva silenciosa
+     (comando mal escrito, o describe algo retirado — y no avisa). Peor aún el grep que casa la
+     mitad verdadera de una frase y pasa en verde con la otra mitad falsa (caso GHCR, 2026-08-30).
+  4. **Comandos que se cuentan a sí mismos**: si escribes el patrón dentro del comentario que lo
+     explica, el `grep` lo cuenta. Pasó dos veces en la misma sesión —la segunda arreglando la
+     primera— y una tercera al escribir el freezer de f64 (resuelto con `concat!("f","64")`).
 
 ### 3.2 CHANGELOG entries are forensic, not just descriptive
 
@@ -218,10 +232,11 @@ Model to imitate: the v1.1.0 "Migración / compatibilidad" section (allocation_r
 ## 5. Release documentation ritual
 
 The full release gate (what to test before tagging) is owned by
-`.claude/skills/futurefin-change-control/SKILL.md`. The **writing** half, from CLAUDE.md "Git
-workflow", in order:
+`.claude/skills/futurefin-change-control/SKILL.md` §4 — since the 2026-08-30 consolidation it is
+also the owner of the ritual's steps (CLAUDE.md keeps a five-line summary). The **writing** half,
+in order:
 
-1. On `dev`: move `## [Unreleased]` content into a new `## [X.Y.Z] — YYYY-MM-DD` section
+1. On a branch: move `## [Unreleased]` content into a new `## [X.Y.Z] — YYYY-MM-DD` section
    (today's date), leaving an empty `[Unreleased]` bucket.
 2. Bump `version` in `apps/api/Cargo.toml` **and** sync `Cargo.lock` (a `cargo build` regenerates
    it; committing Cargo.toml without the lock is a classic miss).
