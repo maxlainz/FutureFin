@@ -6,13 +6,15 @@ Espejo de [`frontend-structure.md`](frontend-structure.md) para el backend: qué
 
 ## Módulos de `apps/api/src/`
 
+Entry point: `main.rs` (bin); los módulos compartidos del crate se declaran en `lib.rs`.
+
 - `routes/mod.rs` — full route map; all routes under `/v1/` except `/health`, `/openapi.json`, `/mcp` y el protocolo OAuth. `DefaultBodyLimit` caps requests at 1 MiB globally, 16 MiB on `/backup/user-import*` — **pero `DefaultBodyLimit` actúa vía extractores y `/mcp` es un `route_service`**, así que su tope se fija aparte y explícitamente en `mcp::MCP_MAX_REQUEST_BODY_BYTES` (1 MiB; sin esa línea regía el default de rmcp, 4 MiB). Aquí viven también las **dos** capas CORS: la del API con `allow_credentials(true)` y la de `/mcp` sin credenciales — el `merge` de `mcp` va **después** del `.layer(...)` a propósito, porque `Router::layer` solo envuelve lo ya registrado.
 - `state.rs` — `AppState` (pool, cookie_secure, session_ttl_days, version)
 - `error.rs` — `ApiError` → `(StatusCode, JSON {error, code, message})` via `IntoResponse`, donde `code` es el **código estable** que sale del prefijo `snake_code:` del mensaje (desde 3.10.0; sin prefijo válido cae a la clase HTTP). Ese mismo `ErrorBody` es el que viaja en los errores de las tools MCP. `impl From<sqlx::Error>` detects SQLSTATE 23505 → `Conflict` (409), 23503 → `BadRequest`; handlers can just `?` any `sqlx::Error` without manual mapping.
 - `auth/` — password hashing (Argon2id)
 - `handlers/session.rs` — `require_session_user` reads cookie `ff_session` → validates against `sessions` table
 - `handlers/api_tokens.rs` — tokens de API por usuario (Bearer `ffp_…`, solo se persiste el SHA-256; CRUD `/v1/api-tokens` por cookie) + `require_api_token`, la credencial del servidor MCP
-- `mcp/` — servidor MCP embebido (`/mcp`, Streamable HTTP, rmcp 3.1): **68 tools** (28 de lectura+simulación, 40 de escritura) que llaman a las mismas core fns `*_core` que los handlers HTTP (cero deriva, Decimal-as-string intacto; la invalidación de cache vive dentro de las cores de mutación). Auth = middleware Bearer (`mcp/auth.rs`) con identidad y rol vivos por request; toda escritura pasa por `require_mcp_write`, que son **tres puertas en orden** — rol vivo → scope de la credencial (`api_tokens.scope`, `read_only` corta) → toggle `installation.mcp_write_enabled` (Ajustes → Integraciones) — y **cada llamada al gate abre una fila en `mcp_write_audit`** que la tool cierra con `settled(...)`. Las 17 con preview piden `confirm: true` (sin él devuelven un preview) y **8 de ellas exigen además el `confirm_token` de un solo uso que solo emite ese preview**; 18 escrituras publican además el bloque `impact`. Desde la Fase 6 el servidor declara también la capacidad **`prompts`** (3 flujos, `prompts/list` + `prompts/get`, sin tocar la BD). `FUTUREFIN_MCP_ENABLED=0` **no lo desmonta**: la ruta se monta igual y responde 404 JSON `mcp_disabled`. Los contadores no se cuentan a mano — los congela `mcp_write.rs::every_write_tool_in_the_source_calls_require_mcp_write` (sin BD)
+- `mcp/` — servidor MCP embebido (`/mcp`, Streamable HTTP, rmcp 3.1): **68 tools** (28 de lectura+simulación, 40 de escritura) que llaman a las mismas core fns `*_core` que los handlers HTTP (cero deriva, Decimal-as-string intacto; la invalidación de cache vive dentro de las cores de mutación). Auth = middleware Bearer (`mcp/auth.rs`) con identidad y rol vivos por request; toda escritura pasa por `require_mcp_write`, que son **tres puertas en orden** — rol vivo → scope de la credencial (`api_tokens.scope`, `read_only` corta) → toggle `installation.mcp_write_enabled` (Ajustes → Integraciones) — y **cada llamada al gate abre una fila en `mcp_write_audit`** que la tool cierra con `settled(...)`. Las 17 con preview piden `confirm: true` (sin él devuelven un preview) y **8 de ellas exigen además el `confirm_token` de un solo uso que solo emite ese preview**; 18 escrituras publican además el bloque `impact`. Desde la Fase 6 el servidor declara también la capacidad **`prompts`** (3 flujos, `prompts/list` + `prompts/get`, sin tocar la BD). `FUTUREFIN_MCP_ENABLED=0` **no lo desmonta**: la ruta se monta igual y responde 404 JSON `mcp_disabled`. Los contadores no se cuentan a mano — los congela `every_write_tool_in_the_source_calls_require_mcp_write` (test de integración en `apps/api/tests/mcp_write.rs`, sin BD)
 - `handlers/changes.rs` — `GET /v1/changes`: qué se ha tocado desde una fecha, leyendo los `updated_at` que ya se mantienen en varias tablas. **No cubre borrados** (no hay tombstones) y la respuesta lo declara: no es una auditoría, es «qué ha cambiado de lo que sigue existiendo»
 - `handlers/installation.rs` — singleton installation, FIRE settings, `require_installation_member`
 - `handlers/membership.rs` — roles: `owner`, `member`, `viewer`; `role_can_write` used by handlers
@@ -140,9 +142,10 @@ Add `FooResponse`, `CreateFooBody` to the `components(schemas(...))` list, and t
 
 **Autenticación en la spec (4.0.0)**: `openapi.rs` declara `security(("ff_session" = []))` **global**,
 así que un handler con sesión no necesita decir nada. Un endpoint **público** debe llevar
-`security(())` en su `#[utoipa::path]` — hoy lo llevan exactamente cinco (`health_check`,
-`ready_check`, `register`, `login` y, desde 4.3.0, `sso_login`: no lleva credencial de FutureFin
-porque la credencial la pone el proxy de confianza en una cabecera). Sin esa declaración global la spec presentaba 81 operaciones con
+`security(())` en su `#[utoipa::path]` — hoy lo llevan exactamente **siete** (`grep -rn 'security(())' apps/api/src | wc -l`): `health_check`,
+`ready_check`, `register`, `login`, `sso_login` (desde 4.3.0: no lleva credencial de FutureFin
+porque la credencial la pone el proxy de confianza en una cabecera) y, desde 4.3.1, los dos de
+«Entrar con Home Assistant» (`/v1/auth/ha/start` + `/v1/auth/ha/callback`, `handlers/ha_sso.rs`). Sin esa declaración global la spec presentaba 81 operaciones con
 sesión obligatoria como públicas y cualquier cliente generado nacía sin credencial.
 
 **Dos trampas que `tests/openapi_contract.rs` ya vigila** — si tu handler las dispara, el test falla
