@@ -1,165 +1,331 @@
 {
-  "version": 1,
-  "_doc": "Casos canónicos compartidos entre el backend (apps/api/tests/fire_parity.rs) y el frontend (apps/web/src/lib/fire.test.ts). Si añades o cambias un caso aquí, los tests de ambos lados deben seguir pasando. Si divergen → uno de los dos cálculos está mal alineado.",
-  "_formula": "target_nw = gross_up(annual_need_net, brackets, taxes_enabled) / (swr_pct / 100). annual_need_net depende del modo: manual = fire_number_manual_amount; annual_expense = max(0, expense_retirement_monthly - income_retirement_monthly) * 12; current_income = max(0, income_monthly - income_retirement_monthly) * 12.",
-  "_default_brackets_es": [
-    { "up_to": "6000",   "pct": "19" },
-    { "up_to": "50000",  "pct": "21" },
-    { "up_to": "200000", "pct": "23" },
-    { "up_to": "300000", "pct": "27" },
-    { "up_to": null,     "pct": "30" }
-  ],
-  "_tolerance_eur": 1.0,
-  "cases": [
-    {
-      "name": "manual mode, taxes off — passes through",
-      "fire_settings": {
-        "fire_number_mode": "manual",
-        "fire_number_manual_amount": "500000",
-        "swr_pct": "3.5",
-        "taxes_enabled": false,
-        "tax_brackets": []
-      },
-      "monthly": {
-        "income": "3000",
-        "income_retirement": "0",
-        "expense_retirement": "1500"
-      },
-      "expected_target_nw": 14285714.286,
-      "_calc_note": "500000 / 0.035 (sin taxes)"
-    },
-    {
-      "name": "manual mode, taxes on (ES default) — gross-up applies",
-      "fire_settings": {
-        "fire_number_mode": "manual",
-        "fire_number_manual_amount": "30000",
-        "swr_pct": "3.5",
-        "taxes_enabled": true,
-        "tax_brackets": [
-          { "up_to": "6000",   "pct": "19" },
-          { "up_to": "50000",  "pct": "21" },
-          { "up_to": "200000", "pct": "23" },
-          { "up_to": "300000", "pct": "27" },
-          { "up_to": null,     "pct": "30" }
-        ]
-      },
-      "monthly": {
-        "income": "0",
-        "income_retirement": "0",
-        "expense_retirement": "0"
-      },
-      "expected_target_nw": 1080650.995,
-      "_calc_note": "gross_up(30000, ES brackets) ≈ 37822.78 → / 0.035 = 1080650.99"
-    },
-    {
-      "name": "annual_expense mode, no taxes, no retirement income",
-      "fire_settings": {
-        "fire_number_mode": "annual_expense",
-        "fire_number_manual_amount": null,
-        "swr_pct": "4",
-        "taxes_enabled": false,
-        "tax_brackets": []
-      },
-      "monthly": {
-        "income": "5000",
-        "income_retirement": "0",
-        "expense_retirement": "2000"
-      },
-      "expected_target_nw": 600000.0,
-      "_calc_note": "(2000 * 12) / 0.04 = 600000 (sin taxes, sin retirement income)"
-    },
-    {
-      "name": "annual_expense mode, retirement income reduces need to zero → null target",
-      "fire_settings": {
-        "fire_number_mode": "annual_expense",
-        "fire_number_manual_amount": null,
-        "swr_pct": "3.5",
-        "taxes_enabled": true,
-        "tax_brackets": [
-          { "up_to": "6000",   "pct": "19" },
-          { "up_to": "50000",  "pct": "21" },
-          { "up_to": "200000", "pct": "23" },
-          { "up_to": "300000", "pct": "27" },
-          { "up_to": null,     "pct": "30" }
-        ]
-      },
-      "monthly": {
-        "income": "3000",
-        "income_retirement": "2000",
-        "expense_retirement": "1500"
-      },
-      "expected_target_nw": null,
-      "_calc_note": "expense_retirement (1500) − income_retirement (2000) = -500 ≤ 0 → no target"
-    },
-    {
-      "name": "current_income mode, with ES taxes — top bracket reached",
-      "fire_settings": {
-        "fire_number_mode": "current_income",
-        "fire_number_manual_amount": null,
-        "swr_pct": "3.5",
-        "taxes_enabled": true,
-        "tax_brackets": [
-          { "up_to": "6000",   "pct": "19" },
-          { "up_to": "50000",  "pct": "21" },
-          { "up_to": "200000", "pct": "23" },
-          { "up_to": "300000", "pct": "27" },
-          { "up_to": null,     "pct": "30" }
-        ]
-      },
-      "monthly": {
-        "income": "10000",
-        "income_retirement": "500",
-        "expense_retirement": "0"
-      },
-      "expected_target_nw": 4188497.217,
-      "_calc_note": "(10000−500)*12 = 114000 → gross_up ≈ 146597.40 → /0.035 = 4188497.22 (cruza 2 tramos)"
-    },
-    {
-      "name": "annual_expense mode, ES taxes, modest expense",
-      "fire_settings": {
-        "fire_number_mode": "annual_expense",
-        "fire_number_manual_amount": null,
-        "swr_pct": "3.5",
-        "taxes_enabled": true,
-        "tax_brackets": [
-          { "up_to": "6000",   "pct": "19" },
-          { "up_to": "50000",  "pct": "21" },
-          { "up_to": "200000", "pct": "23" },
-          { "up_to": "300000", "pct": "27" },
-          { "up_to": null,     "pct": "30" }
-        ]
-      },
-      "monthly": {
-        "income": "2000",
-        "income_retirement": "0",
-        "expense_retirement": "1500"
-      },
-      "expected_target_nw": 646654.611,
-      "_calc_note": "(1500*12)=18000 → gross_up ≈ 22632.91 → /0.035 = 646654.61 (tramo 2)"
-    },
-    {
-      "name": "annual_expense mode, ES taxes, avg-style non-round expense (no cuotas)",
-      "_tripwire": "Gasto mensual 'tipo promedio sin cuotas' (Decimal no redondo). Fija que cliente y servidor derivan el MISMO need/target con una base como la que produce el modo B (transactions_avg). La fórmula es la misma en ambos modos; solo cambia la procedencia de expense_retirement.",
-      "fire_settings": {
-        "fire_number_mode": "annual_expense",
-        "fire_number_manual_amount": null,
-        "swr_pct": "3.5",
-        "taxes_enabled": true,
-        "tax_brackets": [
-          { "up_to": "6000",   "pct": "19" },
-          { "up_to": "50000",  "pct": "21" },
-          { "up_to": "200000", "pct": "23" },
-          { "up_to": "300000", "pct": "27" },
-          { "up_to": null,     "pct": "30" }
-        ]
-      },
-      "monthly": {
-        "income": "3200",
-        "income_retirement": "0",
-        "expense_retirement": "2137.5"
-      },
-      "expected_target_nw": 923327.306,
-      "_calc_note": "(2137.5*12)=25650 → gross_up: 0.79*g+120=25650 → g=32316.4557 → /0.035 = 923327.31 (tramo 2)"
-    }
-  ]
+ "version": 1,
+ "_doc": "Casos canónicos compartidos entre el backend (apps/api/tests/fire_parity.rs) y el frontend (apps/web/src/lib/fire.test.ts). Si añades o cambias un caso aquí, los tests de ambos lados deben seguir pasando. Si divergen → uno de los dos cálculos está mal alineado.",
+ "_formula": "target_nw = gross_up(annual_need_net, brackets, taxes_enabled) / (swr_pct / 100). annual_need_net depende del modo: manual = fire_number_manual_amount; annual_expense = max(0, expense_retirement_monthly - income_retirement_monthly) * 12; current_income = max(0, income_monthly - income_retirement_monthly) * 12.",
+ "_default_brackets_es": [
+  {
+   "up_to": "6000",
+   "pct": "19"
+  },
+  {
+   "up_to": "50000",
+   "pct": "21"
+  },
+  {
+   "up_to": "200000",
+   "pct": "23"
+  },
+  {
+   "up_to": "300000",
+   "pct": "27"
+  },
+  {
+   "up_to": null,
+   "pct": "30"
+  }
+ ],
+ "_tolerance_eur": 1.0,
+ "cases": [
+  {
+   "name": "manual mode, taxes off — passes through",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "500000",
+    "swr_pct": "3.5",
+    "taxes_enabled": false,
+    "tax_brackets": []
+   },
+   "monthly": {
+    "income": "3000",
+    "income_retirement": "0",
+    "expense_retirement": "1500"
+   },
+   "expected_target_nw": 14285714.286,
+   "_calc_note": "500000 / 0.035 (sin taxes)"
+  },
+  {
+   "name": "manual mode, taxes on (ES default) — gross-up applies",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "30000",
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ]
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 1080650.995,
+   "_calc_note": "gross_up(30000, ES brackets) ≈ 37822.78 → / 0.035 = 1080650.99"
+  },
+  {
+   "name": "annual_expense mode, no taxes, no retirement income",
+   "fire_settings": {
+    "fire_number_mode": "annual_expense",
+    "fire_number_manual_amount": null,
+    "swr_pct": "4",
+    "taxes_enabled": false,
+    "tax_brackets": []
+   },
+   "monthly": {
+    "income": "5000",
+    "income_retirement": "0",
+    "expense_retirement": "2000"
+   },
+   "expected_target_nw": 600000.0,
+   "_calc_note": "(2000 * 12) / 0.04 = 600000 (sin taxes, sin retirement income)"
+  },
+  {
+   "name": "annual_expense mode, retirement income reduces need to zero → null target",
+   "fire_settings": {
+    "fire_number_mode": "annual_expense",
+    "fire_number_manual_amount": null,
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ]
+   },
+   "monthly": {
+    "income": "3000",
+    "income_retirement": "2000",
+    "expense_retirement": "1500"
+   },
+   "expected_target_nw": null,
+   "_calc_note": "expense_retirement (1500) − income_retirement (2000) = -500 ≤ 0 → no target"
+  },
+  {
+   "name": "current_income mode, with ES taxes — top bracket reached",
+   "fire_settings": {
+    "fire_number_mode": "current_income",
+    "fire_number_manual_amount": null,
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ]
+   },
+   "monthly": {
+    "income": "10000",
+    "income_retirement": "500",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 4188497.217,
+   "_calc_note": "(10000−500)*12 = 114000 → gross_up ≈ 146597.40 → /0.035 = 4188497.22 (cruza 2 tramos)"
+  },
+  {
+   "name": "annual_expense mode, ES taxes, modest expense",
+   "fire_settings": {
+    "fire_number_mode": "annual_expense",
+    "fire_number_manual_amount": null,
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ]
+   },
+   "monthly": {
+    "income": "2000",
+    "income_retirement": "0",
+    "expense_retirement": "1500"
+   },
+   "expected_target_nw": 646654.611,
+   "_calc_note": "(1500*12)=18000 → gross_up ≈ 22632.91 → /0.035 = 646654.61 (tramo 2)"
+  },
+  {
+   "name": "annual_expense mode, ES taxes, avg-style non-round expense (no cuotas)",
+   "_tripwire": "Gasto mensual 'tipo promedio sin cuotas' (Decimal no redondo). Fija que cliente y servidor derivan el MISMO need/target con una base como la que produce el modo B (transactions_avg). La fórmula es la misma en ambos modos; solo cambia la procedencia de expense_retirement.",
+   "fire_settings": {
+    "fire_number_mode": "annual_expense",
+    "fire_number_manual_amount": null,
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ]
+   },
+   "monthly": {
+    "income": "3200",
+    "income_retirement": "0",
+    "expense_retirement": "2137.5"
+   },
+   "expected_target_nw": 923327.306,
+   "_calc_note": "(2137.5*12)=25650 → gross_up: 0.79*g+120=25650 → g=32316.4557 → /0.035 = 923327.31 (tramo 2)"
+  },
+  {
+   "name": "manual mode, ES taxes — 27% bracket engaged (auditoría 2026-08)",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "200000",
+    "swr_pct": "4",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ]
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 6536986.301,
+   "_calc_note": "tramo 27%: tax(g)=44880+0.27(g−200000) ⇒ g=(200000−9120)/0.73=261479.45 (∈(200k,300k] ✓; tax=61479.45, neto=200000 ✓) → /0.04 = 6536986.30. Primer caso que ejercita el tramo del 27% — hasta 2026-08 el fixture topaba en gross 146597.40 y el lado TS >200k iba sin red."
+  },
+  {
+   "name": "manual mode, ES taxes — open 30% bracket (auditoría 2026-08)",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "250000",
+    "swr_pct": "4",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ]
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 8281428.571,
+   "_calc_note": "tramo abierto 30%: tax(g)=71880+0.30(g−300000) ⇒ g=(250000−18120)/0.7=331257.14 (>300k ✓; tax=81257.14, neto=250000 ✓) → /0.04 = 8281428.57. La forma cerrada del servidor en este tramo se verificó además en vivo (net 240000 → gross 316971.4286)."
+  }
+ ]
 }
