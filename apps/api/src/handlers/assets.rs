@@ -412,7 +412,7 @@ pub(crate) async fn list_assets_core(
                   notes, sort_index, owner_user_id
            FROM assets
            WHERE {assets_scope}
-           ORDER BY sort_index ASC, name ASC"#
+           ORDER BY sort_index ASC, name ASC, id ASC"#
     );
     let rows: Vec<AssetRow> = view
         .bind_scope_as(sqlx::query_as(&assets_sql), iid, user_id)

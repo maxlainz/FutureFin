@@ -1369,7 +1369,7 @@ pub(crate) async fn build_installation_projection_input(
                   expected_annual_return_percent
            FROM assets
            WHERE {assets_scope}
-           ORDER BY sort_index ASC, name ASC"#
+           ORDER BY sort_index ASC, name ASC, id ASC"#
     );
     let assets_rows: Vec<AssetEngineRow> = view
         .bind_scope_as(sqlx::query_as(&assets_sql), iid, session_user_id)
