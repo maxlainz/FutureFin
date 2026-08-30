@@ -122,7 +122,7 @@ Extended reference — read these before working on the relevant area:
 | [`.claude/engine.md`](.claude/engine.md) | Projection engine public API and simulation loop |
 | [`.claude/auth-and-membership.md`](.claude/auth-and-membership.md) | Auth flow, roles, cookie, pending users |
 | [`.claude/env-and-config.md`](.claude/env-and-config.md) | All env vars, `.env` loading order, Vite config |
-| [`.claude/adding-handler.md`](.claude/adding-handler.md) | Step-by-step pattern for adding a new API handler |
+| [`.claude/backend-structure.md`](.claude/backend-structure.md) | apps/api/src module map + step-by-step pattern for adding a new API handler |
 | [`.claude/frontend-structure.md`](.claude/frontend-structure.md) | SPA layout post-refactor (lib/, api/, components/, views/, auth/) and where to put what |
 | [`.claude/design-system.md`](.claude/design-system.md) | V1 redesign — tokens, paleta, reglas para añadir UI nueva (LEE ANTES de tocar estilos) |
 | [`.claude/tests.md`](.claude/tests.md) | How to run + write backend integration tests (Postgres schemas) and frontend Vitest tests |
