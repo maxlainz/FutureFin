@@ -1367,13 +1367,18 @@ pub(crate) fn resolve_cap_ceiling_eur(
     income_monthly: Decimal,
     expense_with_debt: Decimal,
 ) -> Option<Decimal> {
-    let v = cap_value.max(Decimal::ZERO);
-    match cap_kind {
-        "amount" => Some(v),
-        "months_expense" => Some((v * expense_with_debt).max(Decimal::ZERO)),
-        "income_multiple" => Some((v * income_monthly).max(Decimal::ZERO)),
-        _ => None,
-    }
+    // Adaptador string→enum SIN fórmula propia: desde la Ola 1 (issue #96) la única
+    // implementación del techo es `futurefin_engine::resolve_cap_ceiling` — este helper existía
+    // porque el motor emitía `cap_ceiling: null` en meses sin sobrante y había que duplicar la
+    // resolución; el motor ya lo resuelve siempre, y duplicar la aritmética aquí es exactamente
+    // lo que dejó de hacer falta.
+    let cap = match cap_kind {
+        "amount" => futurefin_engine::AllocationCap::Amount(cap_value),
+        "months_expense" => futurefin_engine::AllocationCap::MonthsExpense(cap_value),
+        "income_multiple" => futurefin_engine::AllocationCap::IncomeMultiple(cap_value),
+        _ => return None,
+    };
+    futurefin_engine::resolve_cap_ceiling(Some(cap), expense_with_debt, income_monthly)
 }
 
 /// Un objetivo de la cascada: una regla **con tope**, su techo en euros y cuándo se alcanza.
