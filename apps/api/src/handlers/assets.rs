@@ -459,7 +459,7 @@ pub async fn create_asset(
 
 /// Rentabilidad esperada válida: > −100 %. El engine clampa ≤ −100 a pérdida total, pero la
 /// capa API rechaza inputs nuevos absurdos (misma cota que los overrides de simulate_projection).
-fn assert_return_percent(pct: Option<Decimal>) -> Result<(), ApiError> {
+pub(crate) fn assert_return_percent(pct: Option<Decimal>) -> Result<(), ApiError> {
     if let Some(p) = pct {
         if p <= Decimal::from(-100) {
             return Err(ApiError::BadRequest(

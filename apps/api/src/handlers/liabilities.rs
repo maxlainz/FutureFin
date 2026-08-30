@@ -299,6 +299,19 @@ fn normalize_notes(raw: &Option<String>) -> Result<Option<String>, ApiError> {
     }
 }
 
+/// Cota superior del TIN (auditoría 2026-08, S3/#135): ningún tipo real de mercado se acerca
+/// (usura ≈ TEDR+6pp ≈ 27 % TAE); el vector real es el desliz de coma es-ES (350 por 3,50), que
+/// antes entraba, hacía crecer el saldo ×1,29/mes y acababa en el overflow tipado del engine.
+/// Mejor rechazarlo en la puerta con nombre que dejarlo llegar al motor.
+fn assert_apr_percent_range(d: Decimal) -> Result<(), ApiError> {
+    if d > Decimal::from(100) {
+        return Err(ApiError::BadRequest(
+            "apr_out_of_range: apr_percent must be between 0 and 100".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn assert_non_negative(d: Decimal, field: &'static str) -> Result<(), ApiError> {
     if d.is_sign_negative() {
         return Err(ApiError::BadRequest(format!("amount_negative: {field} must be >= 0")));
@@ -771,6 +784,7 @@ pub(crate) async fn create_liability_core(
 
     if let Some(apr) = body.apr_percent {
         assert_non_negative(apr, "apr_percent")?;
+        assert_apr_percent_range(apr)?;
     }
 
     let notes = normalize_notes(&body.notes)?;
@@ -915,6 +929,7 @@ pub(crate) async fn patch_liability_core(
     let new_apr = match body.apr_percent {
         Some(apr) => {
             assert_non_negative(apr, "apr_percent")?;
+            assert_apr_percent_range(apr)?;
             Some(apr)
         }
         None => current.apr_percent,

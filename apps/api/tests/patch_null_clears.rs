@@ -236,3 +236,45 @@ async fn fire_settings_null_resets_to_defaults() {
         .clone();
     assert_eq!(fs, defaults, "null presente debe resetear a defaults");
 }
+
+/// S3/#135 (Ola 1): cota superior del TIN. El desliz de coma es-ES (350 por 3,50) entraba, hacía
+/// crecer el saldo ×1,29/mes y acababa en el overflow tipado del engine. Ahora: 400 con nombre.
+#[tokio::test]
+async fn apr_percent_above_100_is_rejected_on_create_and_patch() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("fmt").await;
+    let cat = app.create_category(&owner, "liability", "Deudas").await;
+    let exp = app.create_category(&owner, "expense", "Cuotas").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({"category_id": cat, "expense_category_id": exp, "label": "Coma perdida",
+                   "principal": "200000", "apr_percent": "350",
+                   "payment_amount": "1000", "payment_frequency": "monthly",
+                   "repayment_model": "french"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    let msg = String::from_utf8_lossy(&r.body).to_string();
+    assert!(msg.contains("apr_out_of_range"), "{msg}");
+
+    // Un TIN de mercado (27) entra; y el PATCH aplica la misma puerta.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({"category_id": cat, "expense_category_id": exp, "label": "Revolving",
+                   "principal": "5000", "apr_percent": "27",
+                   "payment_amount": "150", "payment_frequency": "monthly",
+                   "repayment_model": "french"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let id = r.json()["id"].as_str().unwrap().to_string();
+    let r = app
+        .patch_json_with_cookie(&format!("/v1/liabilities/{id}"), json!({"apr_percent": "101"}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+}
