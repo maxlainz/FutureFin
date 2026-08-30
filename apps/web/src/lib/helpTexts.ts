@@ -40,10 +40,12 @@ export const HELP_TEXTS = {
     body:
       "Meses que tus activos líquidos cubrirían tu gasto si dejaras de ingresar hoy. No es una " +
       "división simple: mientras se consumen, los líquidos siguen rindiendo su rentabilidad " +
-      "esperada y el gasto crece con la inflación que tengas configurada. Qué gasto se usa " +
-      "depende de la fuente del ahorro (Ajustes → Plan): con el presupuesto, el presupuestado; " +
-      "con los movimientos reales, tu gasto real promediado. «+100 años» es un suelo, no una " +
-      "medida exacta.",
+      "esperada, y el gasto con el que se compara crece cada año con la inflación que tengas " +
+      "configurada —aquí sí, aunque la simulación de tu patrimonio (la que ves en Proyección) " +
+      "mantenga ese mismo gasto congelado en euros de hoy—. Qué gasto se usa depende de la " +
+      "fuente del ahorro (Ajustes → Plan): con el presupuesto, el presupuestado; con los " +
+      "movimientos reales, tu gasto real promediado. «+100 años» es un suelo, no una medida " +
+      "exacta.",
   },
   "summary.net_return": {
     title: "Rendimiento neto",
@@ -58,9 +60,63 @@ export const HELP_TEXTS = {
       "(francés o revolving), así que si alguna sigue en cuota fija esta cifra es algo más " +
       "prudente que la simulación. Y la simulación, además, solo devenga mientras el plan de " +
       "pagos está vivo: una deuda sin cuota o con el plan vencido no genera intereses en la " +
-      "proyección, aunque aquí sí reste. Si debes más de lo que tienes, la tarjeta desaparece: el " +
+      "proyección, aunque aquí sí reste. Tu rentabilidad de activos compone mes a mes; el " +
+      "interés de tus deudas se aplica como un tipo simple sobre lo que debes, y no distingue " +
+      "meses cortos de largos —un 3 % de activo y un 3 % de deuda no son la misma velocidad—. " +
+      "Si debes más de lo que tienes, la tarjeta desaparece: el " +
       "porcentaje diría lo " +
       "contrario de lo que pasa.",
+  },
+  "assets.expected_return": {
+    title: "Rentabilidad anual esperada",
+    body:
+      "La tasa con la que la simulación hace crecer este activo cada año. Es NOMINAL —sin " +
+      "descontar la inflación, que se aplica aparte— y es la que tu fondo o cuenta YA publica, " +
+      "neta de sus comisiones: no le restes nada tú. Si metes la rentabilidad «real» (la ya " +
+      "descontada de inflación) en vez de la nominal, tu fecha de cruce con el objetivo FIRE se " +
+      "retrasa sin que sepas por qué.",
+  },
+  "summary.debt_to_assets_ratio": {
+    title: "Ratio deuda / activos",
+    body:
+      "Cuánta deuda tienes por cada euro de activo: tus pasivos entre tus activos totales. Los " +
+      "préstamos ya vencidos no cuentan, igual que en el resto del Resumen —así que puede subir " +
+      "sin que hayas pedido nada nuevo, si simplemente caduca un préstamo que ya no sumaba—. Sin " +
+      "activos registrados, esta cifra no se calcula.",
+  },
+  "liabilities.principal_total": {
+    title: "Principal total",
+    body:
+      "Suma del principal pendiente de los pasivos de esta lista. Los que ya vencieron no " +
+      "aparecen aquí, así que tampoco suman. No incluye los intereses que te queden por pagar, " +
+      "solo el capital.",
+  },
+  "liabilities.monthly_service": {
+    title: "Servicio mensual equivalente",
+    body:
+      "Suma de la cuota de cada pasivo, llevada a mensual: la que declaraste mensual se queda " +
+      "igual, la semanal se multiplica por 52 semanas y se reparte entre 12 meses. Es la cuota " +
+      "que tú registraste, no una estimación de lo que deberías pagar; un pasivo sin cuota o sin " +
+      "frecuencia cuenta como 0 €.",
+  },
+  "liabilities.weighted_apr": {
+    title: "TAE media ponderada",
+    body:
+      "Media de la TAE de tus pasivos, ponderada por el principal de cada uno. A diferencia del " +
+      "Rendimiento neto del Resumen, aquí un pasivo SIN TAE puesta queda fuera del cálculo " +
+      "entero —no cuenta como 0 %—, así que la media puede moverse solo porque cambia qué " +
+      "pasivos tienen tipo declarado, no porque cambien los tipos.",
+  },
+  "liabilities.approx_monthly_interest": {
+    title: "Interés mensual aprox.",
+    body:
+      "Estimación de orden de magnitud: para cada pasivo con TAE puesta, tu principal actual × " +
+      "TAE ÷ 12, como si todo ese principal devengara interés cada mes sin descontar " +
+      "amortización. Cuenta TODOS los pasivos con tipo, sea cual sea su modelo de amortización; " +
+      "la proyección, en cambio, solo cobra interés de verdad a los que tienen un modelo que " +
+      "devenga (francés o revolving) con un plan de pagos vivo — así que esta cifra puede ir " +
+      "por delante de lo que tu patrimonio simulado de verdad paga, hasta que se unifiquen " +
+      "ambas bases (issue 121 del repositorio).",
   },
   "summary.net_worth": {
     title: "Patrimonio neto",
@@ -73,11 +129,14 @@ export const HELP_TEXTS = {
   "retirement.target": {
     title: "Patrimonio objetivo",
     body:
-      "Lo que necesitas acumular para vivir de tu patrimonio: tu gasto anual en jubilación, " +
-      "con los impuestos por delante si los tienes activados, dividido entre la tasa segura de " +
-      "retirada. La cifra grande está en euros de hoy. El paréntesis es ese mismo objetivo " +
-      "llevado al mes del cruce con la inflación que tengas configurada, que es lo que de " +
-      "verdad tendrás que haber reunido para entonces.",
+      "Lo que necesitas acumular para vivir de tu patrimonio: tu gasto anual en jubilación —de " +
+      "tus partidas de presupuesto marcadas para jubilación, sin la cuota de tus préstamos, así " +
+      "que no es el mismo total que ves en Presupuesto—, con los impuestos por delante si los " +
+      "tienes activados, dividido entre la tasa segura de retirada. Esas partidas van en NETO: " +
+      "lo que de verdad gastas o cobras cada mes (una pensión, por ejemplo), nunca la cifra " +
+      "bruta antes de impuestos — el cálculo ya lo asume así. La cifra grande está en euros de " +
+      "hoy; el paréntesis es ese mismo objetivo llevado al mes del cruce con la inflación " +
+      "configurada, lo que de verdad tendrás que haber reunido para entonces.",
   },
 
   // --- Ajustes · Proyección -------------------------------------------------
@@ -123,9 +182,11 @@ export const HELP_TEXTS = {
   "settings.inflation": {
     title: "Inflación anual asumida",
     body:
-      "Cuánto encarece cada año lo que compras. La simulación trabaja en euros corrientes: no " +
-      "encoge tu patrimonio, pero sí hace crecer el objetivo FIRE, porque mantener tu nivel de " +
-      "vida costará más.",
+      "Cuánto encarece cada año lo que compras. La simulación de tu patrimonio trabaja en euros " +
+      "corrientes: tu ingreso, tu gasto y tus aportaciones NO suben con la inflación mes a mes " +
+      "—reflejan «lo que haces ahora», tal cual—. Dos cifras sí la usan: el objetivo FIRE, que " +
+      "crece porque mantener tu nivel de vida costará más, y la Autonomía del Resumen, cuyo " +
+      "gasto de comparación también se infla, aunque el patrimonio que proyectas no lo haga.",
   },
 
   // --- Movimientos ----------------------------------------------------------

@@ -565,7 +565,7 @@ export function BudgetView({
                 </select>
               </label>
               <label className="field">
-                <span>Importe mensual</span>
+                <span>Importe mensual (neto)</span>
                 <input
                   value={budgetFormAmount}
                   onChange={(e) => setBudgetFormAmount(e.target.value)}
@@ -695,7 +695,7 @@ export function BudgetView({
                   <thead>
                     <tr>
                       <th>Categoría</th>
-                      <th className="num">Importe mensual</th>
+                      <th className="num">Importe mensual (neto)</th>
                       {!isMobile && canEdit ? (
                         <th className="asset-actions-cell">
                           <span className="sr-only">Acciones</span>
@@ -813,7 +813,7 @@ export function BudgetView({
                     <thead>
                       <tr>
                         <th>Categoría</th>
-                        <th className="num">Importe mensual</th>
+                        <th className="num">Importe mensual (neto)</th>
                         {!isMobile && canEdit ? (
                           <th className="asset-actions-cell">
                             <span className="sr-only">Acciones</span>

@@ -245,7 +245,7 @@ export function SummaryView({
           />
           <MetricCard label="Activos totales" value={ta} />
           <MetricCard label="Pasivos totales" value={tl} />
-          <MetricCard label="Ratio deuda / activos" value={dta} />
+          <MetricCard label="Ratio deuda / activos" helpId="summary.debt_to_assets_ratio" value={dta} />
         </div>
       ) : null}
 

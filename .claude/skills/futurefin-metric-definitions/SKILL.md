@@ -80,7 +80,7 @@ Si retiras una métrica, **retira su texto**; no lo dejes «por si vuelve». El 
 
 ## 6. Estado del catálogo (2026-08-25)
 
-**16 entradas** repartidas en cuatro zonas de la app. `grep -c '^  "' apps/web/src/lib/helpTexts.ts` para el recuento;
+**22 entradas el 2026-08-31 (Ola 2: +6 —activos, ratio deuda/activos y los 4 KPIs de Pasivos— y 3 editadas)** repartidas en cinco zonas de la app. `grep -c '^  "' apps/web/src/lib/helpTexts.ts` para el recuento — no congeles este número;
 `grep -n '^  "' …` para la lista. Por si necesitas orientarte sin abrir el fichero:
 
 | Vista | Ids |
