@@ -144,6 +144,26 @@ instalación. Los toca el propietario.
 | **Permitir escritura vía MCP** | `Ajustes → Integraciones` | Interruptor vivo: al apagarlo, las herramientas de escritura de Claude se cortan al instante. Solo el propietario. Ver [mcp.md](mcp.md). |
 | **Asistente de primera vez** | `Ajustes → General` | Se puede reabrir cuando quieras. No borra nada. |
 
+### La fuente del ahorro: el ajuste que redefine tu proyección
+
+En `Ajustes → Plan → Fuente del ahorro de la simulación` eliges de dónde salen el ingreso y el
+gasto con los que FutureFin simula tu futuro — y con ellos, qué significan la curva de proyección,
+el objetivo FIRE y la fecha de jubilación que ves:
+
+| Opción | Qué alimenta la simulación |
+|---|---|
+| **Presupuesto** (por defecto) | Lo que planeas: los ingresos y gastos de tu pestaña Presupuesto. Tus movimientos importados no cambian la proyección. |
+| **Movimientos reales** | Lo que de verdad pasó: el promedio ponderado de tus movimientos, por meses con datos reales. Importar un CSV o corregir un movimiento **sí** mueve la proyección. Las cuotas de préstamos cuentan como un gasto más. |
+| **Ingresos de presupuesto + gasto real** | Mezcla: el ingreso sale del presupuesto (útil si tu nómina no pasa por los movimientos) y el gasto de los movimientos reales. Solo acierta mientras mantengas el presupuesto de ingresos al día. |
+
+Con movimientos reales, cada lado tiene su **ventana de promedio configurable** (en meses, ahí
+mismo): conviene **corta para el ingreso** (una subida de sueldo tarda en reflejarse con una
+ventana larga) y **larga para el gasto** (amortigua los meses atípicos). Si un lado no tiene
+movimientos con los que promediar, ese lado cae al presupuesto y la interfaz lo indica.
+
+Al conmutar el modo, la cifra de jubilación se recalcula — no es que «se mueva»: es que pasa a
+responder a otra pregunta (¿llego con lo que **planeo** o con lo que **de verdad gasto**?).
+
 ## Ver también
 
 - [Instalación](instalacion.md) · [Actualizar](actualizar.md) · [Copias de seguridad](backups.md)
