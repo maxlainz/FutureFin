@@ -4,6 +4,61 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.4.2] - 2026-08-30
+
+**Un PATCH ya puede decir «borra este campo»** (issue #95). Dos campos prometían en su
+doc-comment —que viaja a OpenAPI, así que era contrato **publicado**— que mandar `null` borraba el
+valor guardado. Los dos tenían la rama de borrado escrita en el handler. Ninguno de los dos podía
+ejecutarla.
+
+**Síntoma.** `PATCH /v1/installation` con `{"fire_settings": null}` devolvía **400 `patch_empty`**:
+«manda al menos un campo». Es decir, la respuesta te decía que no habías mandado nada justo cuando
+habías mandado el único cuerpo que la documentación describía para borrar. Lo mismo en
+`PATCH /v1/assets/{id}` con `{"purchase_price": null}`. Y el caso que de verdad mordía no daba error
+ninguno: la pantalla de activos manda `purchase_price: null` en **cada** edición cuyo campo de
+precio de compra se deja vacío, así que vaciarlo y guardar devolvía **200 y no borraba nada** —
+el activo seguía arrastrando una plusvalía latente calculada sobre un coste que el usuario acababa
+de retirar. Un 400 se ve; un 200 que no hace lo que dice, no.
+
+**Causa.** La implementación por defecto de `Option<T>` en serde **colapsa un `null` presente y una
+clave ausente en el mismo `None`**: son indistinguibles para el handler. `fire_settings` incluso
+estaba ya tecleado `Option<Option<FireSettings>>` —el autor eligió el diseño correcto— pero sin un
+deserializador tri-estado el `Option` externo se resuelve con esa misma implementación, así que la
+rama `Some(None) => None` era **código muerto que compila, se lee como implementado y nunca se
+ejecuta**. Nada avisaba: ni el compilador, ni un test (no había ninguno que cubriera el `null`), ni
+el schema.
+
+**Arreglo.** Un deserializador tri-estado propio y compartido, `handlers::deserialize_double_option`
+(seis líneas: deserializa el `Option` **interno** y envuelve en `Some`, porque si serde lo llama es
+que la clave estaba), aplicado a los dos campos con `#[serde(default, deserialize_with = …)]`. El
+contrato queda: **omitir** conserva, **`null`** borra, **valor** sustituye. El guard `patch_empty`
+mira el `Option` externo, así que `{"campo": null}` como cuerpo entero es un PATCH válido — y el
+cuerpo `{}` sigue siendo 400: el tri-estado abre `null`, no una puerta de atrás.
+
+- **API breaking (wire)**: `{"fire_settings": null}` pasa de **400 `patch_empty`** a **200 borrando**
+  el JSON almacenado (la columna vuelve a `NULL` y en la siguiente lectura aplican los defaults: SWR
+  3,5 %, modo `annual_expense`, tramos IRPF de España). `{"purchase_price": null}` pasa de 400 —o de
+  un 200 que no hacía nada, si viajaba acompañado de otros campos— a borrar de verdad. Ningún
+  cuerpo que funcionara antes cambia de comportamiento: lo que cambia es lo que antes **fallaba**.
+- **OpenAPI**: `PatchAssetBody.purchase_price` pasa de declararse `Object` a `String` (nullable). El
+  tipo anterior era sencillamente falso — un validador rechazaba `"1200"`, la única forma que el
+  endpoint acepta y la única que manda la SPA. El schema de `fire_settings` no cambia.
+- **MCP sin cambios, y es deliberado**: JSON Schema no distingue «clave ausente» de «`null`
+  presente», así que las tools conservan sus flags `clear_*` (`clear_purchase_price` y hermanos) —
+  doctrina de la Fase 2. Paridad de **capacidad**, no de forma: las dos superficies borran, con
+  sintaxis distinta. Catálogo intacto en 68 tools; `update_asset` solo cambia cómo construye el
+  borrado por dentro (`Some(None)` en vez de `Some(Value::Null)`, misma semántica).
+- **Tests**: `assets_unrealized_pnl.rs::patch_purchase_price_is_a_real_tristate` e
+  `installation_patch.rs::patch_fire_settings_is_a_real_tristate` cubren el trío completo por campo.
+  El segundo asserta contra la **columna**, no contra la respuesta: `resolve_fire_settings` rellena
+  los defaults al leer, así que «borrado» y «hay guardada una copia de los defaults» se ven
+  idénticos desde fuera y solo la BD distingue. El test que fijaba el 400 anterior se actualiza —
+  documentando por qué cambió de sentido — en vez de borrarse.
+- **Doctrina registrada** como corolario del lado petición de D22 en `futurefin-architecture-contract`
+  (una distinción que el llamante no puede *expresar* es hermana de una que no puede *observar*), y
+  la fila del #95 sale de la tabla de erratas de `futurefin-docs-and-writing`: ya no es deuda
+  documentada, es código arreglado.
+
 ## [4.4.0] - 2026-08-29
 
 **Revisión adversarial del servidor MCP embebido** (issues #81–#88). Cinco agentes independientes

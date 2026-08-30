@@ -241,7 +241,7 @@ fix this table in the same change.
 | `smoke.rs` | 5 | health/ready, 401 unauth, register→login→me roundtrip, first-user bootstrap → owner |
 | `liabilities_purge.rs` | 5 | expired liabilities hidden from GET/summary but **persist in DB** (reads never mutate) |
 | `body_limits.rs` | 3 | 1 MiB global body cap → 413; `/backup/user-import` accepts up to 16 MiB; **4.4.0 (issue #85)**: `oversized_mcp_body_returns_413` — `/mcp` is a `route_service`, so `DefaultBodyLimit` never reaches it (rmcp reads the body itself, default 4 MiB); the documented "1 MiB global" invariant was false there until `with_max_request_body_bytes` fixed it explicitly. Test body is 2 MiB — above the global, below rmcp's old default |
-| `installation_patch.rs` | 5 | unknown `fire_number_mode` rejected; legacy `annual_expense_adjusted` alias accepted; valid mode change |
+| `installation_patch.rs` | 6 | unknown `fire_number_mode` rejected; legacy `annual_expense_adjusted` alias accepted; valid mode change; **4.4.2 (issue #95)** `patch_fire_settings_is_a_real_tristate` — `null` clears / omit keeps / object replaces, and `{"fire_settings": null}` alone is a 200, not the old 400 `patch_empty`. It asserts on the **column**, not the response: `resolve_fire_settings` fills the defaults on read, so "cleared" and "a stored copy of the defaults" are byte-identical to a client and only the DB can tell them apart |
 | `unique_violation.rs` | 2 | duplicate username / duplicate category name → 409 via central `From<sqlx::Error>` |
 | `projection_marker.rs` | 1 | regression capture: stable marker + starting NW across the perf refactor (the template for capture-first) |
 | `fire_parity.rs` | 1 (×7 fixture cases) | server `jubilacion_target_net_worth` matches `fire-parity.json` ± 1 € |

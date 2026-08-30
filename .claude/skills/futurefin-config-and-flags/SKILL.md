@@ -463,7 +463,19 @@ Deserialization details that matter:
   (mode `annual_expense`, `swr_pct` 3.5, `taxes_enabled` true, Spanish IRPF brackets above).
 - In the PATCH body `fire_settings` is `Option<Option<FireSettings>>`: **omit** = unchanged,
   JSON **`null`** = clear stored JSON (defaults apply on read), **object** = validate + replace
-  wholesale (no deep merge — send the full object).
+  wholesale (no deep merge — send the full object). `{"fire_settings": null}` alone is a valid
+  PATCH: `Some(None)` counts as a present field in the `patch_empty` guard.
+  **The tri-state lives in the attribute, not in the type**: the field needs
+  `#[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]`. With only
+  `#[serde(default)]` — which is how it shipped from the start until **4.4.2** (issue #95) — serde
+  collapses a present `null` into the outer `None`, the `Some(None) => None` branch of the handler
+  is dead code, and this very line was a **published lie**: that body returned 400 `patch_empty`.
+  Nothing caught it for years, so if you ever see the `deserialize_with` disappear from a diff,
+  that is the bug coming back. Same attribute, same reason, on
+  `PatchAssetBody.purchase_price`. Pinned by
+  `installation_patch.rs::patch_fire_settings_is_a_real_tristate` — which asserts the **column** is
+  `NULL`, because `resolve_fire_settings` makes "cleared" and "a stored copy of the defaults" look
+  identical on read.
 
 Note: `installation.projection_target_age` no longer exists — dropped by migration
 `20260516120000_drop_projection_target_age.sql` (v1.0.6). The FIRE crossover is the sole
