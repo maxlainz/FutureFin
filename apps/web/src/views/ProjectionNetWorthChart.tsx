@@ -1341,11 +1341,15 @@ export function ProjectionNetWorthChart({
       : `prom. ${monthsLabel(incomeMonths)} ingreso / ${monthsLabel(expenseMonths)} gasto`
     : "presup.";
   const scopeShort = ledgerPersonScope === "mine" ? "Mi vista" : "Hogar";
+  // Sin fallback manual: cuando installationInflationPct > 0, inflationPctDisplay ya es no-nulo
+  // (ambas variables salen del mismo `annual_inflation_assumption_percent` en ProjectionView, y
+  // formatPercentAmount nunca devuelve null) — un `?? `${installationInflationPct}%`` aquí sería
+  // rama muerta con formato manual fuera de contrato (issue #105).
   const inflationShort =
     installationInflationPct > 0
       ? inflationAdjusted
-        ? `Dinero de hoy (deflactado ~${inflationPctDisplay ?? `${installationInflationPct}%`} anual)`
-        : `Patrimonio nominal · target FIRE +${inflationPctDisplay ?? `${installationInflationPct}%`} anual`
+        ? `Dinero de hoy (deflactado ~${inflationPctDisplay} anual)`
+        : `Patrimonio nominal · target FIRE +${inflationPctDisplay} anual`
       : "Sin inflación · target FIRE plano";
 
   return (

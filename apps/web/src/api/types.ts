@@ -38,7 +38,6 @@ export type TaxBracketApi = {
 export type FireSettingsApi = {
   fire_number_mode: FireNumberModeApi;
   fire_number_manual_amount: string | null;
-  fire_number_expense_adjustment_pct: string | null;
   swr_pct: string;
   taxes_enabled: boolean;
   tax_brackets: TaxBracketApi[];
