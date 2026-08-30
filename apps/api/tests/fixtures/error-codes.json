@@ -44,6 +44,7 @@
     "category_filter_exclusive",
     "category_in_use",
     "category_not_found",
+    "category_not_in_installation",
     "category_scope_invalid",
     "category_scope_mismatch",
     "category_series_kind_invalid",

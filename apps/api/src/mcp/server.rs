@@ -427,7 +427,7 @@ pub struct ProjectionParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
-    /// Horizonte en meses (12–840; fuera de rango se clampa). Omitido = horizonte derivado de
+    /// Horizonte en meses (12–840; fuera de rango es 400). Omitido = horizonte derivado de
     /// la instalación — y única variante servida desde cache: un `months` explícito recomputa
     /// la proyección entera (~centenares de ms), así que pásalo solo si de verdad necesitas
     /// otro horizonte.
