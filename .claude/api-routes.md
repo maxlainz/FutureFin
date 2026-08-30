@@ -1370,10 +1370,10 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     - `find_duplicate_transactions` — grupos por `(owner, fingerprint)`; **candidatos, no
       veredicto** (`spans_multiple_imports` es el discriminante). Acepta `view`. Cache NONE.
     - `suggest_transfer_matches` — pares candidatos **sin escribir**, con su `match_id`. **Sin
-      `view`**: la conciliación es own-user por construcción. Cache NONE. *(Deriva conocida: el
-      doc-comment del parámetro dice «default 15» y la core usa **30** —
-      `DEFAULT_SUGGEST_WINDOW_DAYS`—; el `range(max = 60)` del esquema sí es una restricción
-      deliberada frente a los 365 de la core.)*
+      `view`**: la conciliación es own-user por construcción. Cache NONE. `window_days` 1–365,
+      default 30 — schema y core alineados con `DEFAULT_SUGGEST_WINDOW_DAYS`/
+      `MAX_SUGGEST_WINDOW_DAYS` desde la Fase 7 (la deriva «default 15, max 60» que registró la
+      Fase 6 se corrigió ahí).
     - `get_liability_schedule` — calendario mes a mes + por año civil, desde el saldo de hoy. Acepta
       `view`. Los agregados salen del calendario COMPLETO, no de la ventana pedida.
     - `deflate_amount` — importe entre euros de un mes futuro y euros de hoy, **en las dos
@@ -1400,11 +1400,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     negocie. El porqué: crear el sumidero donde no había **redirige todo el sobrante mensual de
     golpe** y no se deshace por el mismo canal (borrar el único sumidero da `remainder_required`;
     la salida son dos llamadas). Un formulario que enseña la cascada entera hace ese estado
-    evidente; una conversación, no. **Límite conocido de esa promesa**: `SinkPolicy` solo lo recibe
-    la core de **creación**. `update_allocation_rule` con `clear_cap: true` sobre un `remainder`
-    **con** tope lo convierte en sumidero, así que la frase de su `description` («el SUMIDERO solo
-    se pone desde la app») es más fuerte que lo que el código garantiza — anotado en la errata de
-    `futurefin-docs-and-writing`.
+    evidente; una conversación, no. **El hueco de dos pasos está cerrado desde la Fase 6**:
+    `patch_allocation_rule_core` también recibe `SinkPolicy`, la tool `update_allocation_rule`
+    pasa `Forbidden`, y convertir en sumidero una regla que no lo era (p.ej. `clear_cap: true`
+    sobre un `remainder` con tope) devuelve el mismo 400 `sink_creation_not_allowed` — la guarda
+    vive en la core (`allocation_rules.rs`, comentario junto a `is_sink`), así que la
+    `description` de la tool («el SUMIDERO solo se pone desde la app») vuelve a ser verdad.
   - **`confirm_transfer_match` cierra la omisión de `reconcile_pair` sin reabrirla.** El registro
     §3.1 la excluía como *LLM footgun* con un *revisit trigger* literal: «que exista una tool de
     sugerencias». Existe — y lo que se implementó **no es `reconcile_pair`**: acepta **solo un

@@ -657,6 +657,8 @@ Re-verify volatile facts before relying on them:
 - RetirementView field: `grep -c 'expense_retirement_monthly_equivalent\|fireExpenseM' apps/web/src/views/RetirementView.tsx` (expect ≥4; **6** hoy). El grep de solo el nombre de campo da **1**: la vista se refactorizó para leerlo una vez en la local `fireExpenseM` y reutilizar esa. El dato sigue vivo, el patrón viejo ya no lo demostraba.
 - Doc drift record: the stale docs found while authoring this library (projection_target_age
   remnants, "no CI yet", "33 migrations"…) were fixed on 2026-07-02; the standing-errata table
-  lives in futurefin-docs-and-writing §7. CI still does NOT run `apps/api/tests/`.
+  lives in futurefin-docs-and-writing §7. Since 4.0.0 CI DOES run `apps/api/tests/` (job
+  `integration` — `grep -n TEST_DATABASE_URL .github/workflows/ci.yml` must print; W1 in
+  architecture-contract records the closure).
 - When a new incident is settled (root cause found, design rejected or removed), append it here:
   one table row in §1 plus a ≤15-line entry in §2 if it carries a lesson, citing commit + version.
