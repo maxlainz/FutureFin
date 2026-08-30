@@ -44,6 +44,10 @@
 //! riesgo que lo justifique.
 
 pub mod auth;
+/// PIN C6: el `#[schemars(range(...))]` de una tool contra la constante que valida en el handler.
+/// Solo test — la macro exige literales, así que no hay forma de atarlos en el compilador.
+#[cfg(test)]
+mod schema_bounds_parity;
 pub mod server;
 
 use crate::error::ApiError;
