@@ -413,7 +413,7 @@ pub struct PatchInstallationBody {
     #[serde(default)]
     pub annual_inflation_assumption_percent: Option<String>,
     /// Omit = unchanged; JSON `null` clears stored JSON (defaults apply on read).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
     pub fire_settings: Option<Option<FireSettings>>,
     /// Omit = unchanged. Kill-switch de la escritura vía MCP (owner-only como todo el PATCH).
     #[serde(default)]
@@ -853,6 +853,12 @@ pub(crate) async fn patch_fire_settings_core(
     patchset: FireSettingsPatch,
     apply: bool,
 ) -> Result<FireSettingsPatchOutcome, ApiError> {
+    // Owner-only EN LA CORE, no en la tool (D14, issue #99): así cualquier llamante futuro
+    // (HTTP, otra tool, un job) queda protegido por construcción. El dual-branch drift ya
+    // mordió dos veces (Fase 2: clear_* solo en MCP; Fase 6: SinkPolicy solo en una core).
+    if !user_is_installation_owner(&state.pool, user_id, iid).await? {
+        return Err(ApiError::Forbidden);
+    }
     if patchset.is_empty() {
         return Err(ApiError::BadRequest(
             "patch_empty: provide at least one FIRE setting to change".into(),

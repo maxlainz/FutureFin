@@ -306,7 +306,7 @@
 .ff-mobile-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--ff-shadow-backdrop);
   z-index: 80;
   animation: fadein 120ms ease;
 }
@@ -324,7 +324,7 @@
   width: min(18rem, 86vw);
   background: var(--ff-frame);
   border-left: 1px solid var(--ff-line-soft);
-  box-shadow: -10px 0 28px rgba(0, 0, 0, 0.15);
+  box-shadow: -10px 0 28px var(--ff-shadow-drawer);
   z-index: 90;
   display: flex;
   flex-direction: column;
@@ -967,7 +967,7 @@
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--ff-shadow-backdrop);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -1881,7 +1881,7 @@
   width: 4.5rem;
   height: 4.5rem;
   border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
+  box-shadow: inset 0 0 0 1px var(--ff-shadow-inset);
 }
 
 .summary-donut-legend {
@@ -1908,7 +1908,7 @@
   width: 0.55rem;
   height: 0.55rem;
   border-radius: 2px;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  box-shadow: inset 0 0 0 1px var(--ff-shadow-inset-strong);
 }
 
 .summary-donut-legend li .summary-donut-legend-label {
@@ -2159,7 +2159,7 @@
   height: 0.92rem;
   border-radius: 999px;
   background: var(--ff-frame);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 2px var(--ff-shadow-switch);
   transition: transform 150ms ease;
 }
 
@@ -2348,6 +2348,10 @@
   color: var(--ff-overlay-fg);
   background: var(--ff-overlay-bg);
   border: 1px solid var(--ff-overlay-border);
+  /* EXCEPCIÓN declarada (issue #105): estas dos sombras se quedan como rgba(0,0,0,…) sueltos,
+     a propósito. El fondo/borde del tooltip ya van por --ff-overlay-* (doctrina «tooltip
+     independiente del tema» de arriba); darle también token a la sombra no cambiaría nada
+     visualmente pero rompería el freezer si no se excluye explícitamente. */
   box-shadow:
     0 10px 28px rgba(0, 0, 0, 0.28),
     0 2px 8px rgba(0, 0, 0, 0.18);
@@ -3893,4 +3897,20 @@ fieldset.retirement-config-stack {
   gap: 0.4rem;
   font-size: 0.86rem;
   color: var(--ff-ink-soft);
+}
+
+/* S5/#137: la confesión de los supuestos del modelo (model_note), plegada bajo el chart. Solo
+   tokens — texto atenuado y filete estándar, idéntico en claro y oscuro. */
+.projection-model-note {
+  margin-top: 10px;
+  font-size: 0.82rem;
+  color: var(--ff-muted);
+}
+.projection-model-note summary {
+  cursor: pointer;
+}
+.projection-model-note p {
+  margin: 6px 0 0;
+  border-left: 2px solid var(--ff-line-soft);
+  padding-left: 10px;
 }

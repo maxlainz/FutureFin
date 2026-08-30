@@ -32,7 +32,6 @@ describe("normalizeInstallationFireSettings — savings_source", () => {
     const raw = {
       fire_number_mode: "annual_expense",
       fire_number_manual_amount: null,
-      fire_number_expense_adjustment_pct: null,
       swr_pct: "3.5",
       taxes_enabled: true,
       tax_brackets: [{ up_to: null, pct: "30" }],

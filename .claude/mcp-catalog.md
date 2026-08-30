@@ -234,9 +234,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `summary` de hasta 20 movimientos + `summary_truncated`. Cache **COND**, una sola vez por lote.
   **Ojo con esta pareja**: son los campos `resumen`/`resumen_truncated` de `BatchPatchResponse`
   (el nombre que sigue viajando por el wire HTTP de `PATCH /v1/transactions/batch`), traducidos
-  en la capa MCP. Es el único sitio del catálogo donde una clave del handler se **traduce**, y se hace a conciencia: el catálogo MCP habla inglés entero. **No es el único sitio donde la salida no coincide con el handler**: `update_allocation_rule` además *inventa* las claves `antes`/`despues`, que ningún handler publica — y encima en español (**issue #97**, preexistente, no se arregla aquí).
+  en la capa MCP. Es el único sitio del catálogo donde una clave del handler se **traduce**, y se hace a conciencia: el catálogo MCP habla inglés entero. **No es el único sitio donde la salida no coincide con el handler**: `update_allocation_rule` además *inventa* las claves `before`/`after`, que ningún handler publica (eran `antes`/`despues` hasta la Ola 1 de la resolución — issue #97, cerrado).
 - **`apply_categorization_rule` (3.8.0, auditoría MCP)**: backfill de una regla sobre el histórico —
-  `rule_id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`, y
+  `id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`, y
   **desde la Fase 3 (issue #84) `confirm_token`** (obligatorio junto a `confirm: true`: el lote
   puede tocar cientos de movimientos, así que entra en las **8** tools con confirmación en dos fases (`grep -c '= two_phase(' apps/api/src/mcp/server.rs`; eran 7 hasta que la Fase 6 añadió `delete_allocation_rule`, y el bloque `confirm_token` de más abajo ya decía 8 mientras esta línea decía 7) —
   ver el bloque `confirm_token` más abajo). Sin `confirm` devuelve preview con `would_match` /
@@ -550,8 +550,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   unificado los `effects` de los previews a `entity`/`side_effects`). **Catorce tools la publican
   desde la Fase 6** (eran once): en **once** es una cadena sintetizada por el propio MCP, y en **tres** un array — `update_transactions` (traducido del `resumen`/`resumen_truncated` del handler), `create_batch` (sintetizado) y **`apply_categorization_rule`** (`applied.sample`, `Vec<String>` en `handlers/transactions/rules.rs`), que esta frase contaba como cadena. Reparto reproducible: `grep -n '"summary":' apps/api/src/mcp/server.rs` → 14 sitios, los que no llevan `format!(` son los tres arrays. **Ojo: la Fase 2 afirmó que
   `resumen` era «la última clave en español del wire MCP» y no lo era** —
-  `update_allocation_rule` sigue devolviendo `{id, antes, despues}` (**issue #97**, abierto: es
-  breaking y espera al próximo cambio que ya vaya a romper el catálogo). Tramo 1:
+  `update_allocation_rule` emitía `{id, antes, despues}` hasta la Ola 1 de la resolución
+  (2026-08-30), que lo cerró como `{id, before, after}` — issue #97, breaking consciente con el
+  catálogo regenerado. Tramo 1:
   `create_transaction` (con `recurring` opcional; reenvíos idénticos crean OTRO movimiento —
   ordinal de huella, mismo contrato que HTTP; **desde la Fase 3, `idempotency_key` opt-in** —
   1..200 chars, misma clave + mismo cuerpo devuelve el movimiento original en vez de crear otro,

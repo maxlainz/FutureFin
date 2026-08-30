@@ -444,6 +444,16 @@ async fn insert_payload(
     let mut new_asset_ids: Vec<Uuid> = Vec::with_capacity(payload.assets.len());
     let mut assets = 0u32;
     for a in &payload.assets {
+        // La misma puerta que la escritura (S3/#135): un backup con un retorno ≤ −100 creaba la
+        // fila que la API jamás habría aceptado, y esa fila dejaba la proyección en el overflow
+        // tipado del engine. Rechazo con rollback, nombrando el activo.
+        crate::handlers::assets::assert_return_percent(a.expected_annual_return_percent)
+            .map_err(|_| {
+                ApiError::BadRequest(format!(
+                    "backup_asset_return_invalid: asset '{}' carries expected_annual_return_percent <= -100",
+                    a.name
+                ))
+            })?;
         let cid = resolve_category(cat_map, &a.category_ref.scope, &a.category_ref.name)?;
         let new_id = Uuid::new_v4();
         sqlx::query(

@@ -4,7 +4,65 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.5.0] - 2026-08-30
+
+**Ola 1 de la resolución de la auditoría — «Las puertas y las formas»** (issues #95, #96, #97,
+#99, #105, #113, #135, #137). Criterio de aceptación del tren: **cero euros de cambio** en ningún
+agregado del motor — todo es contrato, validación y superficie.
+
+### El `null` presente en un PATCH borra de verdad (#95, #113)
+
+- Serde colapsa `"campo": null` con clave-ausente en `Option<T>`, así que las ramas `Value::Null`
+  de SEIS campos eran código muerto: el contrato (OpenAPI incluido) prometía «`null` borra» y el
+  binario devolvía **200 sin efecto** — en `birth_date` sobre un input del engine (el horizonte).
+  Nuevos `deserialize_double_option`(+`_typed`) aplicados a `purchase_price`, `birth_date`,
+  `amount`, `cap`, `due_date` y `fire_settings`; trío de tests por campo (null→borra,
+  ausente→intacto, valor→aplica). Cambio observable: solo lo que antes NO hacía nada — y
+  `amount: null` sobre una regla `fixed` pasa de 200 mudo a 400 (la validación que la rama muerta
+  escondía). Las tools MCP siguen con sus flags `clear_*` (el tri-estado no es expresable en JSON
+  Schema).
+
+### El techo del cap se resuelve también sin sobrante (#96)
+
+- `cap_ceiling`/`cap_room` salían `null` en meses sin caja y en jubilación, y eso obligó a
+  duplicar la fórmula en el handler para publicar los objetivos. El motor los resuelve SIEMPRE
+  (el techo depende de la regla y de los escalares, no de la caja) y la copia del handler queda
+  como adaptador sin aritmética. Pin a mano: `MonthsExpense(6)` × gasto 1.500 ⇒ techo 9.000,00 €
+  publicado también con caja 0. Breaking suave: la nulabilidad publicada de esos campos cambia.
+
+### MCP: la familia entera pide `id` y habla inglés (#97) — breaking MCP
+
+- `update_allocation_rule` y las tres tools de reglas de categorización pedían `rule_id` donde
+  toda la familia usa `id` (un cliente que copiaba el `id` del listado recibía un error de campo
+  desconocido), y el payload de confirmación emitía `{id, antes, despues}` — claves en español en
+  el wire. Ahora `id` en las cuatro y `{id, before, after}`; catálogo congelado regenerado a
+  conciencia.
+
+### El owner-only de FIRE baja a la core (#99)
+
+- La guardia de `update_fire_settings` vivía en la tool mientras la de
+  `update_installation_settings` vivía en la core — el dual-branch drift que D14 nombra. Se muda
+  a `patch_fire_settings_core`: protegida por construcción para cualquier llamante futuro. El
+  error por MCP no cambia de forma (`member → forbidden`).
+
+### Dos puertas de escritura se cierran (#135, parcial consciente)
+
+- El import de `.ffbackup` valida el retorno con LA MISMA puerta que la escritura
+  (`backup_asset_return_invalid`, con rollback y nombrando el activo): antes un backup con
+  retorno ≤ −100 creaba la fila que dejaba la proyección en el overflow tipado del engine.
+- `apr_percent` gana cota superior **100 %/año** (`apr_out_of_range`): ningún tipo real se acerca
+  (usura ≈ 27 % TAE) y el vector real era el desliz de coma es-ES (350 por 3,50). Las puertas
+  3-5 del barrido quedan razonadas en el issue (la forma cerrada del cliente llega en la Ola 2;
+  `swr=0` es semántica documentada que #119 hará explicable; el literal corrupto tiene CHECK de
+  columna y degradación documentada).
+
+### Superficie y campos muertos (#105, #137)
+
+- `fire_number_expense_adjustment_pct` se retira del tipo cliente (el servidor lo descartaba al
+  deserializar; el cliente lo round-trippeaba a un agujero negro). `model_note` — los supuestos
+  del modelo que viajaban tipados sin que nadie los renderizara — se pliega bajo el chart como
+  «Supuestos del modelo». Las 6 sombras hardcoded pasan a tokens byte-idénticos y el freezer
+  no-hex congela también `rgba(0,0,0` fuera de `theme.css`.
 
 **Auditoría del modelo financiero — cubo «arreglar ahora»** (2026-08-30). La vara de medir fue la
 realidad española (liquidación bancaria, escala del ahorro, IPC del INE), verificada con un oráculo

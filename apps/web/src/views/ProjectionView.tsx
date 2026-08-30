@@ -312,6 +312,15 @@ export function ProjectionView({
             planningFlows={planningFlows}
             assetOwnerNames={assetOwnerNames}
           />
+          {/* S5/#137: model_note viajaba en la respuesta y estaba tipado, pero ningún
+              componente lo renderizaba — la confesión de los supuestos del modelo (flujos en
+              euros nominales, solo el objetivo se ajusta por inflación) no llegaba a nadie. */}
+          {projectionSeries.model_note ? (
+            <details className="projection-model-note">
+              <summary>Supuestos del modelo</summary>
+              <p>{projectionSeries.model_note}</p>
+            </details>
+          ) : null}
         </section>
       ) : null}
     </div>

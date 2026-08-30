@@ -31,7 +31,6 @@ export function defaultFireSettingsApi(): FireSettingsApi {
   return {
     fire_number_mode: "annual_expense",
     fire_number_manual_amount: null,
-    fire_number_expense_adjustment_pct: null,
     swr_pct: "3.5",
     taxes_enabled: true,
     tax_brackets: DEFAULT_ES_TAX_BRACKETS_API.map((b) => ({
@@ -80,10 +79,10 @@ export function normalizeInstallationFireSettings(
       raw.fire_number_manual_amount != null
         ? String(raw.fire_number_manual_amount)
         : null,
-    fire_number_expense_adjustment_pct:
-      raw.fire_number_expense_adjustment_pct != null
-        ? String(raw.fire_number_expense_adjustment_pct)
-        : null,
+    // fire_number_expense_adjustment_pct se RETIRÓ del tipo (Ola 1, S5/#137): el servidor
+    // no lo tiene en FireSettings y lo descartaba al deserializar — el cliente lo
+    // round-trippeaba a un agujero negro. Los backups antiguos que lo traen siguen
+    // importando: el import ya ignoraba campos desconocidos.
     swr_pct:
       raw.swr_pct != null && String(raw.swr_pct).trim() !== ""
         ? String(raw.swr_pct)

@@ -639,7 +639,11 @@ fn drain_from_assets(
 
 /// Resolve a rule's cap into an absolute € ceiling for the destination asset.
 /// Returns `None` for an uncapped rule.
-fn resolve_cap_ceiling(
+///
+/// `pub` desde la Ola 1 (issue #96): el techo de una regla depende de la regla y de los
+/// escalares del mes, NO de si hay sobrante — así que se resuelve siempre, y esta es la única
+/// implementación (la copia del handler `resolve_cap_ceiling_eur` delega aquí).
+pub fn resolve_cap_ceiling(
     cap: Option<AllocationCap>,
     monthly_expense_with_debt: Decimal,
     monthly_income: Decimal,
@@ -654,6 +658,28 @@ fn resolve_cap_ceiling(
             Some((n.max(Decimal::ZERO) * monthly_income).max(Decimal::ZERO))
         }
     }
+}
+
+/// Techo absoluto y hueco restante del cap de UNA regla, contra los valores VIVOS de los
+/// activos. `(None, None)` para regla sin tope o con `target_index` fuera de rango (esa
+/// invalidez la señala su propio `skipped_reason`, no este par).
+fn rule_cap_ceiling_and_room(
+    rule: &AllocationRule,
+    live_values: &[Decimal],
+    monthly_expense_with_debt: Decimal,
+    monthly_income: Decimal,
+) -> (Option<Decimal>, Option<Decimal>) {
+    let Some(ceiling) = resolve_cap_ceiling(
+        rule.cap.clone(),
+        monthly_expense_with_debt,
+        monthly_income,
+    ) else {
+        return (None, None);
+    };
+    let room = live_values
+        .get(rule.target_index)
+        .map(|v| (ceiling - *v).max(Decimal::ZERO));
+    (Some(ceiling), room)
 }
 
 /// Por qué una regla de la cascada no recibió (o recibió menos de lo que pedía).
@@ -734,13 +760,22 @@ fn distribute_contributions(
     if pool <= Decimal::ZERO || n == 0 {
         if let Some(t) = trace.as_deref_mut() {
             for (rule_index, rule) in rules.iter().enumerate() {
+                // Issue #96: el techo se resuelve TAMBIÉN sin sobrante — depende de la regla y
+                // de los escalares del mes, no de la caja. Antes aquí iba `None` y el llamante
+                // (goals/resolución) tenía que duplicar la fórmula para poder publicar el techo.
+                let (ceiling, room) = rule_cap_ceiling_and_room(
+                    rule,
+                    values,
+                    monthly_expense_with_debt,
+                    monthly_income,
+                );
                 t.push(RuleOutcome {
                     rule_index,
                     target_index: rule.target_index,
                     amount_intent: Decimal::ZERO,
                     amount_resolved: Decimal::ZERO,
-                    cap_ceiling: None,
-                    cap_room: None,
+                    cap_ceiling: ceiling,
+                    cap_room: room,
                     skipped_reason: Some(AllocationSkipReason::NoCash),
                 });
             }
@@ -988,13 +1023,21 @@ pub fn first_month_allocation(
     // marcada `InRetirement` — no `NoCash`, porque caja hay.
     let (alloc, leftover) = if in_retirement && net_cash_month > Decimal::ZERO {
         for (rule_index, rule) in input.allocation_rules.iter().enumerate() {
+            // Mismo criterio que la rama sin sobrante (#96): el techo del cap existe aunque la
+            // cascada no corra — se publica resuelto, no como null.
+            let (ceiling, room) = rule_cap_ceiling_and_room(
+                rule,
+                &values,
+                input.expense_regular_monthly + debt_service,
+                input.income_regular_monthly,
+            );
             rules_trace.push(RuleOutcome {
                 rule_index,
                 target_index: rule.target_index,
                 amount_intent: Decimal::ZERO,
                 amount_resolved: Decimal::ZERO,
-                cap_ceiling: None,
-                cap_room: None,
+                cap_ceiling: ceiling,
+                cap_room: room,
                 skipped_reason: Some(AllocationSkipReason::InRetirement),
             });
         }
@@ -1399,6 +1442,34 @@ mod tests {
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth[1], Decimal::from(200_600));
         assert_eq!(out.per_asset_series[0][1], Decimal::from(200_000));
+    }
+
+    /// Issue #96: el techo del cap se resuelve TAMBIÉN en un mes sin sobrante. A mano:
+    /// cap MonthsExpense(6) con gasto+deuda 1.500 ⇒ techo 9.000; activo en 704 ⇒ hueco 8.296.
+    /// Antes ambos salían `None` y el llamante duplicaba la fórmula para publicar el techo.
+    #[test]
+    fn cap_ceiling_is_resolved_even_without_surplus() {
+        let rules = vec![rule_fixed(
+            0,
+            Decimal::from(150),
+            Some(AllocationCap::MonthsExpense(Decimal::from(6))),
+        )];
+        let values = vec![Decimal::from(704)];
+        let mut trace = Vec::new();
+        let (alloc, leftover) = distribute_contributions(
+            Decimal::ZERO,
+            &rules,
+            &values,
+            Decimal::from(1_500),
+            Decimal::from(3_000),
+            Some(&mut trace),
+        );
+        assert_eq!(alloc, vec![Decimal::ZERO]);
+        assert_eq!(leftover, Decimal::ZERO);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].skipped_reason, Some(AllocationSkipReason::NoCash));
+        assert_eq!(trace[0].cap_ceiling, Some(Decimal::from(9_000)));
+        assert_eq!(trace[0].cap_room, Some(Decimal::from(8_296)));
     }
 
     #[test]

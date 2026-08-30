@@ -979,7 +979,7 @@ async fn allocation_rule_update_respects_sink_invariant() {
         &token,
         tool_call(
             "update_allocation_rule",
-            json!({"rule_id": rule_id, "cap_kind": "amount", "cap_value": "5000"}),
+            json!({"id": rule_id, "cap_kind": "amount", "cap_value": "5000"}),
         ),
     )
     .await;
@@ -995,13 +995,13 @@ async fn allocation_rule_update_respects_sink_invariant() {
         &token,
         tool_call(
             "update_allocation_rule",
-            json!({"rule_id": rule_id, "enabled": false}),
+            json!({"id": rule_id, "enabled": false}),
         ),
     )
     .await;
     let out = tool_json(&envelope);
-    assert_eq!(out["antes"]["enabled"], true);
-    assert_eq!(out["despues"]["enabled"], false);
+    assert_eq!(out["before"]["enabled"], true);
+    assert_eq!(out["after"]["enabled"], false);
 }
 
 /// REGRESIÓN (auditoría MCP §5) — `cap_value` sin `cap_kind` ya no se evapora con un 200.
@@ -1044,10 +1044,10 @@ async fn allocation_rule_update_never_drops_a_half_cap_silently() {
 
     // Las dos medias parejas dan el MISMO error. Antes solo lo daba una de las dos.
     for half in [
-        json!({"rule_id": rule_id, "enabled": true, "cap_value": "99999"}),
-        json!({"rule_id": rule_id, "enabled": true, "cap_kind": "amount"}),
-        json!({"rule_id": rule_id, "cap_value": "99999"}),
-        json!({"rule_id": rule_id, "cap_kind": "amount"}),
+        json!({"id": rule_id, "enabled": true, "cap_value": "99999"}),
+        json!({"id": rule_id, "enabled": true, "cap_kind": "amount"}),
+        json!({"id": rule_id, "cap_value": "99999"}),
+        json!({"id": rule_id, "cap_kind": "amount"}),
     ] {
         let envelope = mcp_post(
             &app,
@@ -1065,7 +1065,7 @@ async fn allocation_rule_update_never_drops_a_half_cap_silently() {
         &token,
         tool_call(
             "update_allocation_rule",
-            json!({"rule_id": rule_id, "cap_kind": "amount", "cap_value": "1", "clear_cap": true}),
+            json!({"id": rule_id, "cap_kind": "amount", "cap_value": "1", "clear_cap": true}),
         ),
     )
     .await;
@@ -1076,7 +1076,7 @@ async fn allocation_rule_update_never_drops_a_half_cap_silently() {
     let envelope = mcp_post(
         &app,
         &token,
-        tool_call("update_allocation_rule", json!({"rule_id": rule_id})),
+        tool_call("update_allocation_rule", json!({"id": rule_id})),
     )
     .await;
     assert_eq!(tool_error(&envelope, "bad_request")["code"], "patch_empty");
@@ -1177,7 +1177,7 @@ async fn update_categorization_rule_shares_core_and_rejects_ambiguous_tristate()
             &token,
             tool_call(
                 "update_categorization_rule",
-                json!({"rule_id": rule_id, "pattern": "FLORISTERIA LA GLORIETA",
+                json!({"id": rule_id, "pattern": "FLORISTERIA LA GLORIETA",
                        "clear_source": true, "clear_assign_category": true}),
             ),
         )
@@ -1210,16 +1210,16 @@ async fn update_categorization_rule_shares_core_and_rejects_ambiguous_tristate()
 
     // 4. Errores de dominio, con el código del wire.
     for (body, code) in [
-        (json!({"rule_id": rule_id}), "rule_patch_empty"),
+        (json!({"id": rule_id}), "rule_patch_empty"),
         (
-            json!({"rule_id": rule_id, "source": "n26", "clear_source": true}),
+            json!({"id": rule_id, "source": "n26", "clear_source": true}),
             "rule_patch_conflict",
         ),
         (
-            json!({"rule_id": rule_id, "assign_kind": "expense", "clear_assign_kind": true}),
+            json!({"id": rule_id, "assign_kind": "expense", "clear_assign_kind": true}),
             "rule_patch_conflict",
         ),
-        (json!({"rule_id": rule_id, "match_kind": "regex"}), "rule_match_kind_invalid"),
+        (json!({"id": rule_id, "match_kind": "regex"}), "rule_match_kind_invalid"),
     ] {
         let envelope = mcp_post(
             &app,
@@ -1236,7 +1236,7 @@ async fn update_categorization_rule_shares_core_and_rejects_ambiguous_tristate()
         &token,
         tool_call(
             "update_categorization_rule",
-            json!({"rule_id": rule_id, "pattern": "AMAZON", "source": "n26"}),
+            json!({"id": rule_id, "pattern": "AMAZON", "source": "n26"}),
         ),
     )
     .await;
@@ -1247,7 +1247,7 @@ async fn update_categorization_rule_shares_core_and_rejects_ambiguous_tristate()
         &token,
         tool_call(
             "update_categorization_rule",
-            json!({"rule_id": uuid::Uuid::new_v4().to_string(), "pattern": "X"}),
+            json!({"id": uuid::Uuid::new_v4().to_string(), "pattern": "X"}),
         ),
     )
     .await;
@@ -1265,7 +1265,7 @@ async fn update_categorization_rule_shares_core_and_rejects_ambiguous_tristate()
         &token,
         tool_call(
             "update_categorization_rule",
-            json!({"rule_id": rule_id, "pattern": "OTRA"}),
+            json!({"id": rule_id, "pattern": "OTRA"}),
         ),
     )
     .await;
@@ -1330,7 +1330,7 @@ async fn delete_categorization_rule_previews_then_deletes() {
         &mcp_post(
             &app,
             &token,
-            tool_call("delete_categorization_rule", json!({"rule_id": rule_id})),
+            tool_call("delete_categorization_rule", json!({"id": rule_id})),
         )
         .await,
     );
@@ -1353,7 +1353,7 @@ async fn delete_categorization_rule_previews_then_deletes() {
             &token,
             tool_call(
                 "delete_categorization_rule",
-                json!({"rule_id": rule_id, "confirm": true}),
+                json!({"id": rule_id, "confirm": true}),
             ),
         )
         .await,
@@ -1384,7 +1384,7 @@ async fn delete_categorization_rule_previews_then_deletes() {
         &token,
         tool_call(
             "delete_categorization_rule",
-            json!({"rule_id": rule_id, "confirm": true}),
+            json!({"id": rule_id, "confirm": true}),
         ),
     )
     .await;
@@ -1921,7 +1921,7 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
             &token,
             tool_call(
                 "apply_categorization_rule",
-                json!({"rule_id": rule_id, "apply_to_existing": "all"}),
+                json!({"id": rule_id, "apply_to_existing": "all"}),
             ),
         )
         .await,
@@ -1958,7 +1958,7 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
             &token,
             tool_call(
                 "apply_categorization_rule",
-                json!({"rule_id": rule_id, "apply_to_existing": "all", "confirm": true,
+                json!({"id": rule_id, "apply_to_existing": "all", "confirm": true,
                        "confirm_token": ct}),
             ),
         )
@@ -1990,7 +1990,7 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         &token,
         tool_call(
             "apply_categorization_rule",
-            json!({"rule_id": rule_id, "apply_to_existing": "all", "confirm": true}),
+            json!({"id": rule_id, "apply_to_existing": "all", "confirm": true}),
         ),
     )
     .await;
@@ -2019,7 +2019,7 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         &viewer_token,
         tool_call(
             "apply_categorization_rule",
-            json!({"rule_id": rule_id, "apply_to_existing": "all", "confirm": true}),
+            json!({"id": rule_id, "apply_to_existing": "all", "confirm": true}),
         ),
     )
     .await;
@@ -2254,9 +2254,9 @@ fn write_probe(name: &str) -> Option<serde_json::Value> {
         "delete_planning_flow" => json!({"id": ID}),
         "create_category" => json!({"scope": "expense", "name": "probe"}),
         "create_categorization_rule" => json!({"pattern": "PROBE", "assign_kind": "expense"}),
-        "update_categorization_rule" => json!({"rule_id": ID}),
-        "delete_categorization_rule" => json!({"rule_id": ID}),
-        "apply_categorization_rule" => json!({"rule_id": ID}),
+        "update_categorization_rule" => json!({"id": ID}),
+        "delete_categorization_rule" => json!({"id": ID}),
+        "apply_categorization_rule" => json!({"id": ID}),
         "create_asset" => json!({"name": "probe", "category_id": ID, "current_value": "1.00"}),
         "update_asset" => json!({"asset_id": ID}),
         "update_asset_value" => json!({"asset_id": ID, "current_value": "1.00"}),
@@ -2269,7 +2269,7 @@ fn write_probe(name: &str) -> Option<serde_json::Value> {
         "create_budget_entry" => json!({"category_id": ID, "amount": "1.00"}),
         "update_budget_entry" => json!({"id": ID}),
         "delete_budget_entry" => json!({"id": ID}),
-        "update_allocation_rule" => json!({"rule_id": ID, "enabled": true}),
+        "update_allocation_rule" => json!({"id": ID, "enabled": true}),
         "delete_recurring_rule" => json!({"id": ID}),
         "delete_snapshot" => json!({"id": ID}),
         "delete_import" => json!({"id": ID}),
@@ -2974,9 +2974,9 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         ("delete_planning_flow", json!({"id": flow["id"]})),
         ("delete_snapshot", json!({"id": snap_id})),
         ("delete_import", json!({"id": import_id})),
-        ("delete_categorization_rule", json!({"rule_id": rule_id})),
+        ("delete_categorization_rule", json!({"id": rule_id})),
         ("delete_recurring_rule", json!({"id": recurring_id})),
-        ("apply_categorization_rule", json!({"rule_id": rule_id})),
+        ("apply_categorization_rule", json!({"id": rule_id})),
         ("update_fire_settings", json!({"swr_pct": "3.5"})),
         // Fase 3 (issue #84): las tres destructivas que NO tenían preview y ahora lo tienen.
         ("materialize_recurring", json!({})),
@@ -3745,7 +3745,7 @@ async fn the_sink_cannot_be_forged_by_editing_a_capped_remainder() {
         &token,
         tool_call(
             "update_allocation_rule",
-            json!({"rule_id": rule_id, "clear_cap": true}),
+            json!({"id": rule_id, "clear_cap": true}),
         ),
     )
     .await;
