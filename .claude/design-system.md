@@ -87,6 +87,19 @@ Una gráfica de apoyo (`components/charts/CategoryComparisonBars.tsx` → export
   reorganizó en 3.10.0; los nombres vivos están en `SETTINGS_SUBTAB_LABEL`, `lib/navigation.ts`).
 - Helpers en [`apps/web/src/lib/theme.ts`](../apps/web/src/lib/theme.ts).
 
+## Formato de cifras y copy
+
+Reglas de presentación de toda cifra y texto del UI (los helpers viven en
+[`apps/web/src/lib/format.ts`](../apps/web/src/lib/format.ts)):
+
+- **Importes**: sin decimales, símbolo de moneda detrás del número (`1.234 €`). Usa
+  `formatCurrencyAmount` / `formatCurrencyNumber` — nunca `toString()` ni concatenación manual.
+  Las únicas excepciones sancionadas son dos, ambas de chart — ver §Formateo de importes en charts.
+- **Porcentajes**: exactamente un decimal, sufijo ` %` (`3,5 %`). Usa `formatPercentAmount` /
+  `formatPercentDisplay`. La función ya incluye el sufijo — no lo añadas encima.
+- **Copy**: mínimo — labels cortos, estados vacíos en pocas palabras (`Sin datos.`). Los estados
+  canónicos de panel están en §Paneles de Ajustes.
+
 ## Shell
 
 - **TopBar única** ([`components/TopBar.tsx`](../apps/web/src/components/TopBar.tsx)): marca `FF · FutureFin` izquierda, pills de navegación derecha, slot `extras` (selector de vista mío/hogar) anclado en esquina superior derecha, botón hamburguesa solo `≤720px`.
@@ -99,7 +112,7 @@ Una gráfica de apoyo (`components/charts/CategoryComparisonBars.tsx` → export
 - **Ancho de contenido**: `max-width: 66rem` (`app-main`). Antes era ancho completo; ahora el contenido se centra. Proyección sigue siendo full-bleed (`.app-main--projection-fullbleed`).
 - **KPIs**:
   - Tile con borde + paper, radius `--ff-radius-kpi`, `align-self: stretch` para alinear en altura.
-  - **Slot del paréntesis siempre presente** — `MetricCard` renderiza un `<div>` con `&nbsp;` cuando no hay valor, para que dos KPIs en la misma fila tengan baseline alineada.
+  - **Slot del paréntesis siempre presente** — `MetricCard` renderiza un `<div>` con `&nbsp;` cuando no hay valor, para que dos KPIs en la misma fila tengan baseline alineada. La info adicional de una KPI va **siempre en la prop `parenthetical`, nunca en `suffix`**.
   - **Slot compartido `trend`** — prop `trend?: ReactNode` de `MetricCard` que ocupa **ese mismo slot reservado** (baseline intacta) y tiene **prioridad** sobre `parenthetical`. Se usa en la banda de Movimientos para la tendencia «promedio vs presupuesto» (flecha + delta + «vs presupuesto»). CSS `.metric-trend` (una sola línea, `white-space: nowrap`) con hijos `.metric-trend-arrow` / `.metric-trend-delta` (flecha y cifra: prioritarios, nunca truncados, color solo aquí vía `num-pos`/`num-neg`) y `.metric-trend-label` (cede espacio con ellipsis en tarjetas estrechas, hereda muted).
   - Variantes: `tone="hero" | "accent" | "accent-2"` con tinte progresivo del acento.
 - **Adornos en celdas numéricas alineadas a la derecha**: cualquier adorno variable (flechas de tendencia, badges) va en un **slot de ancho fijo siempre reservado** tras la cifra (mismo principio que el paren-slot de `MetricCard`) — nunca condicional. Si el adorno solo aparece en algunas filas, las cifras se desalinean; el slot vacío mantiene la columna. Precedente: `.exp-trend-slot` en la comparativa de Movimientos.
@@ -153,7 +166,7 @@ Ninguna declaración nueva fuera de `@media (max-width: …)` salvo **tokens ine
 
 ### `MiniProjection` — [`components/charts/MiniProjection.tsx`](../apps/web/src/components/charts/MiniProjection.tsx)
 
-Chart compacto reutilizable, mismo lenguaje visual que la Proyección. Usado en Resumen (12 m) y Jubilación.
+Chart compacto reutilizable, mismo lenguaje visual que la Proyección. Usado en Resumen (12 m) y Jubilación. **Para cualquier chart pequeño nuevo, usa este componente en lugar de SVG custom** — comparte tokens con el chart grande y soporta `zoomY`, `clampToMonth`, `xAxis`, áreas escaladas al NW.
 
 Props clave:
 - `series: ProjectionSeriesApi | null` — la serie ya cargada por `App.tsx` desde `GET /v1/projection/series` (no hace fetch propio).
@@ -199,8 +212,8 @@ Barra apilada inflow/outflow de la pestaña Próximos (`<svg viewBox="0 0 100 12
 
 ### Formateo de importes en charts — las DOS excepciones sancionadas a los 4 helpers canónicos
 
-La regla de CLAUDE.md («usa `formatCurrencyAmount`/`formatCurrencyNumber`, nunca concatenación
-manual») tiene exactamente dos excepciones, ambas en [`lib/ledger.ts`](../apps/web/src/lib/ledger.ts)
+La regla de §Formato de cifras y copy («usa `formatCurrencyAmount`/`formatCurrencyNumber`, nunca
+concatenación manual») tiene exactamente dos excepciones, ambas en [`lib/ledger.ts`](../apps/web/src/lib/ledger.ts)
 y ambas de **chart**, donde el espacio manda:
 
 - **`formatAxisMoney`** (etiquetas del eje Y del chart grande): construye su propio
@@ -231,6 +244,8 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 
 - viewBox `16×16`, `stroke="currentColor"`, `strokeWidth=1.5`, `linecap/linejoin="round"`.
 - El color lo da el padre; el tamaño se controla por CSS (sin width/height fijos en los SVG).
+- **No introduzcas SVG nuevo fuera de `icons.tsx`.** La única excepción sancionada son los charts
+  (render de datos, no iconos — precedente: `PlanningDirectionChart`, §Componentes nuevos (charts)).
 - Iconos disponibles: `PlusIcon`, `RowEditIcon`, `RowTrashIcon`, `GearIcon`, `XIcon`, `CheckIcon`, `MoreIcon`, `ChevronIcon`, `ChevronLeftIcon`, `ChevronDownIcon`, `MenuIcon`, `UserIcon`, `DragIcon`, `DownloadIcon`, `CalendarIcon`, `FilterIcon`, `SortIcon`, `LinkIcon`, `RefreshIcon`, `EyeIcon`, `SearchIcon`, `ArrowUpIcon`, `ArrowDownIcon`, `DuplicateIcon`.
 
 ## Reglas para el chart de Proyección grande

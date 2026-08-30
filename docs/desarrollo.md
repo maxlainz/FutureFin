@@ -146,7 +146,7 @@ Necesitan su propio PostgreSQL, en el puerto **5433** para no chocar con el de d
 arranca una vez y se reutiliza siempre:
 
 ```bash
-docker run -d --name ff-test-db \
+docker run -d --name ff-test-db --shm-size=1g \
   -e POSTGRES_USER=futurefin -e POSTGRES_PASSWORD=futurefin_test \
   -e POSTGRES_DB=futurefin_test -p 5433:5432 postgres:16.4-alpine
 

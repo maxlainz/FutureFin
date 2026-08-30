@@ -15,7 +15,11 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-27 on branch
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-30 (reparto
+de CLAUDE.md en subdocumentos)**: **62** ficheros de test de integración (`ls apps/api/tests/*.rs | wc -l`),
+**49** migraciones (`ls apps/api/migrations/*.sql | wc -l`), `.ffbackup` `CURRENT_SCHEMA_VERSION` = **10**,
+catálogo MCP en **68** tools, `apps/api/Cargo.toml` en `4.4.1` (tag publicado, add-on sincronizado).
+Antes, counts refreshed **2026-08-27 on branch
 `feat/home-assistant-addon`** (add-on de Home Assistant: subpath por request, SSO de cabeceras,
 guarda de downgrade): **43** ficheros de test de integración en `apps/api/tests/`
 (`ls apps/api/tests/*.rs | wc -l`; nuevos `base_path.rs`, `frame_options.rs`,
