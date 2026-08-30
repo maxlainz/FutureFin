@@ -290,6 +290,16 @@ describe("toApiDecimalString — separador de miles (regresión: 250.000 se guar
     expect(toApiDecimalString("1.234.567")).toBe("1234567");
   });
 
+  it("regresión (auditoría 2026-08): los umbrales de la escala del ahorro a la española", () => {
+    // El input de tramos de Ajustes hacía t.replace(",", ".") a pelo: «6.000» llegaba al
+    // servidor como Decimal 6.000 = SEIS euros, y la escala entera colapsaba EN SILENCIO
+    // (6 < 50 < 200 < 300 sigue siendo creciente, así que pasaba la validación y el objetivo
+    // FIRE subía ~+13 % sin aviso). Por la función canónica, cada umbral vale lo escrito.
+    expect(
+      ["6.000", "50.000", "200.000", "300.000"].map((t) => toApiDecimalString(t)),
+    ).toEqual(["6000", "50000", "200000", "300000"]);
+  });
+
   it("sin coma: un punto que no forma grupo de miles es el decimal (campos de porcentaje)", () => {
     expect(toApiDecimalString("2.5")).toBe("2.5");
     expect(toApiDecimalString("2100.00")).toBe("2100.00");

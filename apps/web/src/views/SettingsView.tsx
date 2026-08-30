@@ -18,7 +18,7 @@ import type {
 } from "../api/types";
 import { HelpPopover } from "../components/HelpPopover";
 import { healthStatusLabel, roleLabel } from "../lib/enumLabels";
-import { parseDisplayDecimal } from "../lib/format";
+import { parseDisplayDecimal, toApiDecimalString } from "../lib/format";
 import { HELP_TEXTS } from "../lib/helpTexts";
 import { Modal, ModalFormError } from "../components/Modal";
 import { RowEditIcon, RowTrashIcon } from "../components/icons";
@@ -816,6 +816,20 @@ export function SettingsView({
                                 value={row.up_to ?? ""}
                                 onChange={(e) => {
                                   const t = e.target.value.trim();
+                                  // Por la función CANÓNICA de la app, no un replace a pelo:
+                                  // «6.000» es SEIS MIL en escritura española y así lo leen ya
+                                  // todos los importes (regla de millares de toApiDecimalString).
+                                  // Con el replace anterior llegaba al servidor como 6,000 € y
+                                  // la escala entera colapsaba a umbrales de céntimos EN
+                                  // SILENCIO (seguía siendo creciente y pasaba la validación).
+                                  // Si no parsea, se conserva el texto tal cual — el servidor
+                                  // lo rechaza con banner, igual que antes.
+                                  let normalized = t;
+                                  try {
+                                    normalized = toApiDecimalString(t);
+                                  } catch {
+                                    /* texto intermedio no parseable: se envía y el 400 avisa */
+                                  }
                                   setFireTaxDraft((p) => {
                                     const next = [...p.tax_brackets];
                                     next[idx] = {
@@ -825,7 +839,7 @@ export function SettingsView({
                                           ? idx === p.tax_brackets.length - 1
                                             ? null
                                             : next[idx].up_to
-                                          : t.replace(",", "."),
+                                          : normalized,
                                     };
                                     return { ...p, tax_brackets: next };
                                   });
