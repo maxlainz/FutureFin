@@ -395,12 +395,17 @@ anotadas por si el owner quiere issue:
 con `confirm_token` y omitía `delete_allocation_rule`) — **ya está arreglada en el código**: el
 bloque ESCRITURA de `instructions` lista las ocho. Se borra la fila, según la norma de abajo.
 
-Tres **incoherencias preexistentes** con issue abierto que esta documentación describe tal cual son,
+**Retirada en 4.4.2**: la fila del **#95** (el `null` que `PATCH /v1/assets` prometía para borrar
+`purchase_price` era inalcanzable). Ya no es una errata que documentar: el arreglo llegó —tri-estado
+real con `handlers::deserialize_double_option` en `purchase_price` **y** en
+`PatchInstallationBody.fire_settings`— y `.claude/api-routes.md` describe el contrato nuevo en las
+dos secciones, no la promesa rota. La fila se borra, según la norma de abajo.
+
+Dos **incoherencias preexistentes** con issue abierto que esta documentación describe tal cual son,
 sin propagar la promesa rota:
 
 | Issue | Dónde muerde | Qué documenta esta pasada |
 |---|---|---|
-| **#95** | `PATCH /v1/assets`: el doc-comment de `purchase_price` (que viaja a OpenAPI) promete que `null` borra el precio de compra, y esa rama es **inalcanzable por HTTP** — serde colapsa `null` presente y clave ausente en `None`, así que sale 400 `patch_empty` | `.claude/api-routes.md` §Assets lo dice explícitamente al presentar la plusvalía latente, nombra la vía viva (el flag `clear_purchase_price` de la tool MCP) y el test que fija el 400 actual. **La doc NO repite la promesa rota** |
 | **#96** | El motor emite `cap_ceiling: null` para todas las reglas cuando no hay sobrante, así que un consumidor no distingue «sin tope» de «no lo calculé» | `.claude/api-routes.md` §Allocation rules explica por qué `resolve_cap_ceiling_eur` existe **fuera** del motor y por qué el test que cruza las dos definiciones solo puede hacerlo en el camino donde el motor sí publica el techo |
 | **#97** | `update_allocation_rule` devuelve `{id, antes, despues}` (claves en español) y pide `rule_id` donde el resto del catálogo usa `id` | No se documenta como si estuviera arreglado. La afirmación de `futurefin-mcp-parity` §4 de que `resumen`→`summary` fue «la última clave en español del wire» **era falsa** y el issue lo recoge; esta pasada no la repite en ningún sitio nuevo |
 

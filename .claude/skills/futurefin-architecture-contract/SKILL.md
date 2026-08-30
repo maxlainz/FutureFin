@@ -823,15 +823,40 @@ smaller blast radius: `liabilities_by_type_tag[].type_tag` moved from `String` (
 `"(sin etiqueta)"` literal) to `Option<String>` → `null`, a typed absence instead of a string
 dressed as a label.
 
+**Corollary on the REQUEST side — the tri-state PATCH field (4.4.2, issue #95).** The same
+ambiguity has a mirror image: a caller that cannot *express* a distinction the handler claims to
+honour. The canonical pattern for "omit = unchanged / `null` = clear / value = replace" is
+`Option<Option<T>>` **plus** `#[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]`
+— the type alone is not enough, and that is the whole trap: serde's default `Option<T>` impl
+collapses a present `null` into the same `None` as an absent key, so the `Some(None)` arm compiles,
+reads as implemented, and never runs. Two fields shipped that way for years with the promise
+published in their doc-comment (hence in OpenAPI) — `PatchAssetBody.purchase_price` and
+`PatchInstallationBody.fire_settings`, the latter already typed `Option<Option<…>>` and missing only
+the attribute. Both answered 400 `patch_empty` — "you sent no fields" — to the one body documented
+for clearing, and the SPA's asset form had been sending `purchase_price: null` on every edit,
+getting a 200 and no clear. Corollaries: the `patch_empty` guard tests the **outer** `Option`, so
+`Some(None)` is a present field; and MCP does **not** converge here — its tools keep the explicit
+`clear_*` flags, because a tri-state is not expressible in JSON Schema (Fase 2 doctrine).
+
 **Breaks if violated**: adding a new cap, window, suppression or derivation without a field that
 names it reintroduces the exact class this pass closed — an empty list or a short array stays
 silently ambiguous between "nothing exists" and "the server didn't show you everything", and a
 caller has no way to tell the difference without a second, disambiguating request it has no reason
-to make.
+to make. On the request side, a nullable PATCH field without `deserialize_double_option` is a
+documented capability that silently does nothing.
 
 Pinned by `apps/api/tests/context_fields.rs` (11 endpoint-level contract tests, one per field
 family above) and `apps/api/tests/mcp_http.rs::list_tools_echo_the_applied_view_and_keep_content_parity`
-/ `list_snapshots_paginates_and_declares_item_suppression`.
+/ `list_snapshots_paginates_and_declares_item_suppression`. The request-side corollary is pinned by
+`assets_unrealized_pnl.rs::patch_purchase_price_is_a_real_tristate` and
+`installation_patch.rs::patch_fire_settings_is_a_real_tristate` (both assert the three arms **and**
+that an empty body is still 400 — the tri-state opens `null`, not a back door). Find every field
+that owes the attribute with
+`grep -rn "pub [a-z_]*: Option<Option<" apps/api/src/handlers/` (**two hits** on 2026-08-30:
+`installation.rs` `fire_settings`, `assets.rs` `purchase_price`) — each must also carry
+`deserialize_double_option`, or its clear branch is dead. The `pub …:` prefix is load-bearing: the
+bare pattern also matches the doc-comments that explain it, and a command that counts itself is the
+house's most repeated documentation bug.
 
 ## 3. Invariants table
 
