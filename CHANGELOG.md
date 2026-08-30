@@ -4,7 +4,7 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [4.5.0] - 2026-08-30
+## [Unreleased]
 
 **Auditoría del modelo financiero — cubo «arreglar ahora»** (2026-08-30). La vara de medir fue la
 realidad española (liquidación bancaria, escala del ahorro, IPC del INE), verificada con un oráculo
