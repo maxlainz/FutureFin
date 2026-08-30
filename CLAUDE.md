@@ -161,7 +161,8 @@ docker build --load -f apps/api/Dockerfile -t futurefin-local:dev .
 # 2. Asegúrate de que .env tiene (ya no hace falta POSTGRES_PASSWORD):
 #      FUTUREFIN_IMAGE=futurefin-local
 #      FUTUREFIN_TAG=dev
-#    OJO: sin DATABASE_URL descomentada — la imagen la interpretaría como DB externa.
+#    OJO: sin DATABASE_URL descomentada — desde 4.0.0 la imagen solo usa la BD embebida:
+#    con volumen vacío se NIEGA a arrancar si le llega una; con cluster, la ignora.
 
 # 3. Arrancar el stack con el override local (evita que Compose haga pull de la imagen local)
 docker compose -f docker-compose.yml -f docker-compose.local.yml --env-file .env up -d
@@ -258,7 +259,7 @@ npm workspace:   apps/web (futurefin-web)
 
 **Dual-port dev**: Vite `:8080`, API `:8081` (set in `.env.example`). `vite.config.ts` reads `FUTUREFIN_API_PORT` and `WEB_DEV_PORT` from repo-root `.env`. Docker image serves both on `:8080` via `WEB_STATIC_ROOT=/app/web`.
 
-**Imagen autocontenida (3.0.0)**: en producción PostgreSQL 16 corre **dentro** del contenedor `futurefin` (socket Unix, sin TCP), supervisado por `apps/api/docker-entrypoint.sh` (PID 1): adopción de volúmenes 2.x (chown + REINDEX una vez), backup automático pre-migración con retención, auto-`pg_upgrade` (15+16 empaquetados), automigración one-shot desde una `DATABASE_URL` externa (modo deprecado, se elimina en 4.0.0) y apagado ordenado (API con graceful shutdown primero, después **SIGINT** al postmaster — nunca SIGTERM). El entrypoint **jamás borra un cluster** (solo `mv`), la imagen **no declara `VOLUME`** y aborta si no hay volumen montado en `PGDATA`. Runbook completo: skill `futurefin-run-and-operate`; trampas de la migración: `futurefin-failure-archaeology`.
+**Imagen autocontenida (3.0.0)**: en producción PostgreSQL 16 corre **dentro** del contenedor `futurefin` (socket Unix, sin TCP), supervisado por `apps/api/docker-entrypoint.sh` (PID 1): adopción de volúmenes 2.x (chown + REINDEX una vez), backup automático pre-migración con retención, auto-`pg_upgrade` (15+16 empaquetados) y apagado ordenado (API con graceful shutdown primero, después **SIGINT** al postmaster — nunca SIGTERM). El entrypoint **jamás borra un cluster** (solo `mv`), la imagen **no declara `VOLUME`** y aborta si no hay volumen montado en `PGDATA`. Runbook completo: skill `futurefin-run-and-operate`; trampas de la migración: `futurefin-failure-archaeology`.
 
 **View scoping**: all ledger endpoints accept `?view=mine` to filter by `owner_user_id = current_user`. Default is `household` (full installation scope). This is a client-side filter, not an authorization boundary. Handlers must use `LedgerView::scope_where` + `bind_scope_as/scalar` so the two branches stay in sync. **Toda respuesta cuyo contenido dependa del scope ECOA la vista aplicada en un campo `view`** (4.4.0, Fase 5): lo pone la core en las respuestas de objeto (`/v1/summary`, `/v1/budget`, `/v1/projection/series`, `/v1/allocation-rules/resolution`, y las de historia y transacciones que ya lo llevaban) y lo pone la **tool MCP**, en un sobre, en los listados — porque su GET devuelve un array desnudo a propósito. El incidente: en una instalación de un solo usuario, `?view=mine` y omitirlo devolvían payloads **byte a byte idénticos**, así que era imposible distinguir «mine coincide con el hogar» de «el parámetro se ignoró»; en un hogar de dos, ésa es la pregunta que decide si la cifra que citas es la tuya o la del hogar.
 
