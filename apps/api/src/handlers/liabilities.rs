@@ -1141,7 +1141,11 @@ pub(crate) async fn delete_liability_core(
 /// tope del engine ([`futurefin_engine::MAX_LIABILITY_SCHEDULE_MONTHS`], 70 años = el horizonte
 /// máximo de proyección): los agregados —interés total, mes de extinción— tienen que describir el
 /// préstamo entero, no la ventana que el llamante pidió mirar.
-const SCHEDULE_HORIZON_MONTHS: u32 = futurefin_engine::MAX_LIABILITY_SCHEDULE_MONTHS;
+///
+/// `pub(crate)` **solo** para que `mcp::schema_bounds_parity` pueda compararla con el literal del
+/// `#[schemars(range(...))]` de `LiabilityScheduleParams`: la macro exige un literal, así que la
+/// única red posible es un test que los enfrente.
+pub(crate) const SCHEDULE_HORIZON_MONTHS: u32 = futurefin_engine::MAX_LIABILITY_SCHEDULE_MONTHS;
 
 /// Ventana publicada por defecto. Doce meses es «el próximo año, mes a mes», que es la pregunta
 /// concreta; el préstamo entero se lee en `years`, que resume 40 años en 40 filas en vez de en
@@ -1149,7 +1153,12 @@ const SCHEDULE_HORIZON_MONTHS: u32 = futurefin_engine::MAX_LIABILITY_SCHEDULE_MO
 const DEFAULT_SCHEDULE_WINDOW_MONTHS: u32 = 12;
 
 /// Tope duro de la ventana. 480 meses = 40 años, el plazo de la hipoteca más larga que se firma.
-const MAX_SCHEDULE_WINDOW_MONTHS: u32 = 480;
+///
+/// `pub(crate)` **solo** para el test de paridad `mcp::schema_bounds_parity` (ver
+/// [`SCHEDULE_HORIZON_MONTHS`]). Ojo: este valor está TRIPLICADO — aquí, en el
+/// `#[schemars(range(max = 480))]` de `LiabilityScheduleParams` y en el literal del mensaje
+/// `schedule_window_out_of_range` unas líneas más abajo.
+pub(crate) const MAX_SCHEDULE_WINDOW_MONTHS: u32 = 480;
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct LiabilityScheduleQuery {

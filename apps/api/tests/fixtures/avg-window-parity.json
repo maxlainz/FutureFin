@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "_doc": "PIN C7 — cotas y defaults de las VENTANAS DEL PROMEDIO (fire_settings.income_avg_window_months / expense_avg_window_months), duplicados a mano en Rust y en TypeScript. Fuente única que consumen los dos lados: apps/api/src/handlers/installation.rs (mod tests) y apps/web/src/lib/fire.avg-window.test.ts. Si un lado cambia sin el otro, UN test falla — misma disciplina que fire-parity.json.",
+  "_why": "El servidor acota (`clamp`) y valida contra MIN/MAX_AVG_WINDOW_MONTHS; el cliente reimplementa esa cota en `clampWindowMonths` («acotados a 1–60 igual que el servidor») y repite los defaults DOS veces (defaultFireSettingsApi y los fallbacks de normalizeInstallationFireSettings). Nada ata esas cuatro copias: fire-parity.json cubre el cálculo FIRE, no estas ventanas. Sin este fixture, subir el techo a 120 en el servidor deja al cliente devolviendo el fallback en silencio para todo lo que pase de 60 — y la UI enseña 12 donde el usuario guardó 90.",
+  "_sources": {
+    "min": "apps/api/src/handlers/installation.rs: MIN_AVG_WINDOW_MONTHS · apps/web/src/lib/fire.ts: clampWindowMonths (`n < 1`)",
+    "max": "apps/api/src/handlers/installation.rs: MAX_AVG_WINDOW_MONTHS · apps/web/src/lib/fire.ts: clampWindowMonths (`n > 60`)",
+    "income_default_months": "apps/api/src/handlers/installation.rs: default_fire_settings().income_avg_window_months · apps/web/src/lib/fire.ts: defaultFireSettingsApi() y el fallback de normalizeInstallationFireSettings",
+    "expense_default_months": "apps/api/src/handlers/installation.rs: default_fire_settings().expense_avg_window_months · apps/web/src/lib/fire.ts: defaultFireSettingsApi() y el fallback de normalizeInstallationFireSettings"
+  },
+  "_calc_note": "Ninguno es derivado: son decisiones de producto. min=1 porque una ventana de 0 meses dejaría el promedio sin denominador. max=60 (5 años). income=3 (ingreso corto: capta una subida de sueldo sin esperar un año), expense=12 (gasto largo: una compra grande no debe redefinir tu gasto estructural).",
+  "min": 1,
+  "max": 60,
+  "income_default_months": 3,
+  "expense_default_months": 12
+}
