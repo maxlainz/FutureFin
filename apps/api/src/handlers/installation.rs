@@ -1386,3 +1386,119 @@ pub async fn require_installation_member(
     let role = MembershipRole::parse(&role_str)?;
     Ok((iid, role))
 }
+
+#[cfg(test)]
+mod avg_window_parity_tests {
+    //! PIN C7 (lado Rust) — las cotas y los defaults de las ventanas del promedio contra el
+    //! fixture compartido con el frontend.
+    //!
+    //! Las cuatro cifras (`MIN`/`MAX_AVG_WINDOW_MONTHS` y los dos defaults) están **duplicadas a
+    //! mano** en TypeScript: `clampWindowMonths` reimplementa la cota («acotados a 1–60 igual que
+    //! el servidor») y los defaults aparecen DOS veces más en `apps/web/src/lib/fire.ts`
+    //! (`defaultFireSettingsApi` y los fallbacks de `normalizeInstallationFireSettings`).
+    //! `fire-parity.json` **no** las cubre: ese fixture pinea el cálculo FIRE, no estas ventanas.
+    //!
+    //! El fixture `avg-window-parity.json` es la fuente única. Su pareja al otro lado es
+    //! `apps/web/src/lib/fire.avg-window.test.ts`. Si un lado cambia sin el otro, UN test falla —
+    //! misma disciplina que `fire-parity.json`.
+    //!
+    //! Coste de no tenerlo: subir el techo del servidor a 120 deja al cliente devolviendo su
+    //! `fallback` en silencio para todo lo que pase de 60, así que la UI enseñaría 12 donde el
+    //! usuario guardó 90 — sin error, sin aviso, y con el servidor calculando el promedio con la
+    //! ventana buena. Divergencia visible solo comparando dos pantallas.
+
+    use super::{default_fire_settings, MAX_AVG_WINDOW_MONTHS, MIN_AVG_WINDOW_MONTHS};
+
+    const FIXTURE_JSON: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/avg-window-parity.json"
+    ));
+
+    fn fixture() -> serde_json::Value {
+        serde_json::from_str(FIXTURE_JSON).expect("avg-window-parity.json es JSON válido")
+    }
+
+    fn u32_field(f: &serde_json::Value, key: &str) -> u32 {
+        f[key]
+            .as_u64()
+            .unwrap_or_else(|| {
+                panic!(
+                    "avg-window-parity.json no tiene el entero `{key}`. Si lo renombraste, \
+                     actualiza LOS DOS consumidores: este test y \
+                     apps/web/src/lib/fire.avg-window.test.ts"
+                )
+            })
+            .try_into()
+            .unwrap_or_else(|_| panic!("`{key}` no cabe en u32"))
+    }
+
+    #[test]
+    fn avg_window_bounds_match_the_shared_fixture() {
+        let f = fixture();
+        assert_eq!(
+            MIN_AVG_WINDOW_MONTHS,
+            u32_field(&f, "min"),
+            "MIN_AVG_WINDOW_MONTHS ya no coincide con `min` de \
+             apps/api/tests/fixtures/avg-window-parity.json.\n    \
+             Si el suelo cambió a propósito, actualiza A LA VEZ: (1) esta const; \
+             (2) el fixture; (3) `clampWindowMonths` en apps/web/src/lib/fire.ts (el `n < 1`); \
+             (4) el comentario «acotados a 1–60 igual que el servidor» de esa misma función.\n    \
+             Si no cambió a propósito, el cliente y el servidor están acotando distinto: el \
+             cliente descartará en silencio (cae al fallback) valores que el servidor acepta."
+        );
+        assert_eq!(
+            MAX_AVG_WINDOW_MONTHS,
+            u32_field(&f, "max"),
+            "MAX_AVG_WINDOW_MONTHS ya no coincide con `max` de \
+             apps/api/tests/fixtures/avg-window-parity.json.\n    \
+             Actualiza A LA VEZ: (1) esta const; (2) el fixture; (3) el `n > 60` de \
+             `clampWindowMonths` en apps/web/src/lib/fire.ts; (4) su comentario «1–60».\n    \
+             Coste de divergir: con el techo del servidor por encima del del cliente, la SPA \
+             devuelve su `fallback` (3 o 12) al normalizar la respuesta, así que el usuario ve \
+             una ventana que NO es la que el servidor está usando para calcular su promedio."
+        );
+    }
+
+    #[test]
+    fn avg_window_defaults_match_the_shared_fixture() {
+        let f = fixture();
+        let d = default_fire_settings();
+        assert_eq!(
+            d.income_avg_window_months,
+            u32_field(&f, "income_default_months"),
+            "El default de la ventana de INGRESO divergió del fixture.\n    \
+             Actualiza A LA VEZ: (1) `default_fire_settings()` aquí; (2) el fixture; \
+             (3) `defaultFireSettingsApi()` en apps/web/src/lib/fire.ts; \
+             (4) el fallback `clampWindowMonths(raw?.income_avg_window_months, 3)` de \
+             `normalizeInstallationFireSettings` — es una TERCERA copia del mismo número."
+        );
+        assert_eq!(
+            d.expense_avg_window_months,
+            u32_field(&f, "expense_default_months"),
+            "El default de la ventana de GASTO divergió del fixture.\n    \
+             Actualiza A LA VEZ: (1) `default_fire_settings()` aquí; (2) el fixture; \
+             (3) `defaultFireSettingsApi()` en apps/web/src/lib/fire.ts; \
+             (4) el fallback `clampWindowMonths(raw?.expense_avg_window_months, 12)` de \
+             `normalizeInstallationFireSettings`."
+        );
+    }
+
+    #[test]
+    fn the_defaults_live_inside_the_bounds_they_are_clamped_to() {
+        // Invariante barata pero real: un default fuera de rango sería reescrito por el propio
+        // `clamp` de `resolve_fire_settings`, y entonces el fixture describiría un número que la
+        // instalación nunca llega a tener.
+        let d = default_fire_settings();
+        for (label, months) in [
+            ("income", d.income_avg_window_months),
+            ("expense", d.expense_avg_window_months),
+        ] {
+            assert!(
+                (MIN_AVG_WINDOW_MONTHS..=MAX_AVG_WINDOW_MONTHS).contains(&months),
+                "el default de la ventana de {label} ({months}) cae fuera de \
+                 {MIN_AVG_WINDOW_MONTHS}..={MAX_AVG_WINDOW_MONTHS}: el `clamp` lo reescribiría y \
+                 el fixture estaría documentando un valor inalcanzable"
+            );
+        }
+    }
+}
