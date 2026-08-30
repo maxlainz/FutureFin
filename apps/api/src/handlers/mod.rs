@@ -74,3 +74,38 @@ pub(crate) fn validate_window_months(
     }
     Ok(())
 }
+
+/// Hace ALCANZABLE el `null` presente en un cuerpo de PATCH (issues #95/#113).
+///
+/// La impl estándar de serde para `Option<T>` colapsa `"campo": null` con «clave ausente»
+/// (ambos llegan como `None`), así que toda rama `Value::Null` escrita tras un
+/// `Option<serde_json::Value>` plano es código muerto: el contrato publicado prometía «`null`
+/// borra» y el binario devolvía 200 sin efecto. Con
+/// `#[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]`:
+/// clave ausente → `None` (por el `default`), `"campo": null` → `Some(Value::Null)` (la rama
+/// revive), valor → `Some(valor)`.
+///
+/// El tri-estado NO es expresable en JSON Schema, así que las tools MCP siguen con sus flags
+/// `clear_*` explícitos (doctrina Fase 2 del MCP); este helper es solo para el wire HTTP.
+pub(crate) fn deserialize_double_option<'de, D>(
+    de: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <serde_json::Value as serde::Deserialize>::deserialize(de).map(Some)
+}
+
+/// Variante tipada de [`deserialize_double_option`] para campos `Option<Option<T>>` (p. ej.
+/// `fire_settings`): ausente → `None`, `"campo": null` → `Some(None)`, valor → `Some(Some(v))`.
+/// Sin este deserializador, serde colapsa el `null` presente en el `None` exterior y la rama
+/// `Some(None) => …` del handler es código muerto — el mismo bug de #95/#113 en su forma tipada.
+pub(crate) fn deserialize_double_option_typed<'de, D, T>(
+    de: D,
+) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(de).map(Some)
+}

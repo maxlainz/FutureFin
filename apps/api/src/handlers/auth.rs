@@ -102,7 +102,7 @@ pub struct UserResponse {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PatchMeBody {
     /// `null` borra la fecha; `"YYYY-MM-DD"` la fija. Omitir el campo no actualiza.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
     #[schema(nullable = true, value_type = Object)]
     pub birth_date: Option<Value>,
 }

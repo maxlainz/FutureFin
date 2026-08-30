@@ -133,7 +133,7 @@ pub struct PatchAssetBody {
     #[schema(value_type = Option<String>)]
     pub current_value: Option<Decimal>,
     /// Omitir sin cambio; `null` borra el precio de compra.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
     #[schema(value_type = Option<Object>, nullable = true)]
     pub purchase_price: Option<serde_json::Value>,
     pub is_liquid: Option<bool>,

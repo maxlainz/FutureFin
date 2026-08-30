@@ -79,11 +79,11 @@ pub struct PatchAllocationRuleBody {
     #[serde(default)]
     pub kind: Option<String>,
     /// `null` JSON clears the amount (only valid for `remainder`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
     #[schema(value_type = Option<Object>, nullable = true)]
     pub amount: Option<serde_json::Value>,
     /// `null` JSON clears the cap pair.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
     #[schema(value_type = Option<Object>, nullable = true)]
     pub cap: Option<serde_json::Value>,
     #[serde(default)]

@@ -413,7 +413,7 @@ pub struct PatchInstallationBody {
     #[serde(default)]
     pub annual_inflation_assumption_percent: Option<String>,
     /// Omit = unchanged; JSON `null` clears stored JSON (defaults apply on read).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
     pub fire_settings: Option<Option<FireSettings>>,
     /// Omit = unchanged. Kill-switch de la escritura vía MCP (owner-only como todo el PATCH).
     #[serde(default)]
