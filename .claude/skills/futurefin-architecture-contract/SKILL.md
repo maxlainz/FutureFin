@@ -324,8 +324,12 @@ average) **must** invalidate the projection cache — via
 `projection_savings_source(pool, iid)`, checks `uses_transactions()`, and only then calls
 `refresh_projection_after_mutation`. It is **best-effort post-commit**: the write is already persisted, so
 a failing `savings_source` SELECT is logged and swallowed — it must never turn a successful mutation into
-a 5xx (a retry could double-insert). `rules.rs`, previews, and deleting a recurring rule never invalidate
-(the set is unchanged). This is a **superseding decision, not a contradiction**: the mode toggle is
+a 5xx (a retry could double-insert). `rules.rs` and previews never invalidate (the set is unchanged).
+**Deleting a recurring rule DOES invalidate (COND) since the 4.0.0 correction**: the set is unchanged
+but its CLASSIFICATION is not — `ON DELETE SET NULL` turns already-materialized instances into REAL
+movements, which can activate a month the average ignored entirely (`delete_recurring_rule_core` used
+to take a bare `&PgPool` and was structurally unable to invalidate; it now takes `&Arc<AppState>` —
+see api-routes.md §Transactions «Corrección 4.0.0»). This is a **superseding decision, not a contradiction**: the mode toggle is
 precisely what turns display-only history into a real engine input, so the invalidation must follow the
 mode. Still no warm-up after mutation (D7 / failure-archaeology §2.7): B/C invalidation is delete-only.
 Regression for **all three** modes (A = no mutation invalidates; B and C = each invalidates; A↔B/C
