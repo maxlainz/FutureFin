@@ -160,9 +160,31 @@ the add-on's `version:` as the image tag. Operational consequences:
   `addon/futurefin/config.yaml` on `main` names the new version — the **last step of
   `publish-image.yml` bumps it via the contents API, after the image is verified in the registry and
   the Release is created**. So an add-on user can never be offered a version whose image does not
-  exist. If that step fails (e.g. the «GitHub Actions» app is not a bypass actor of the «Proteger
-  main» ruleset), the image is out but the store stays one version behind until someone lands a
-  normal PR raising `version:`. Check with `./scripts/audit-releases.sh --addon`.
+  exist. If that step fails, the image is out but the store stays one version behind until someone
+  lands a normal PR raising `version:`. Check with `./scripts/audit-releases.sh --addon`.
+
+  **Who signs that commit (since 2026-08-30): the owner's GitHub App `futurefin-release-bot`**
+  (id 4770261, sole permission `contents: write`, no webhook, installed only on this repo), the
+  bypass actor of the «Proteger main» ruleset. The step mints its token with
+  `actions/create-github-app-token` from secrets `ADDON_BUMP_APP_ID` + `ADDON_BUMP_APP_PRIVATE_KEY`.
+  It CANNOT be the `GITHUB_TOKEN`: on a personal repo the built-in GitHub Actions app is not
+  admissible as a bypass actor (422 «must be part of the ruleset source or owner organization»,
+  measured), and without bypass the push dies with 409 «Changes must be made through a pull
+  request» — the real failure of the 4.4.0 build run, patched then by manual PR #103.
+
+  **If the bump step goes red, check in this order** (each is a live setting outside git):
+  1. Secrets still present: `gh secret list --repo maxlainz/FutureFin | grep ADDON_BUMP` → 2 rows.
+  2. Bypass still on the ruleset:
+     `gh api repos/maxlainz/FutureFin/rulesets/21210270 --jq '.bypass_actors'` → must include
+     `actor_id: 4770261`.
+  3. App still installed on the repo (Settings → Integrations → GitHub Apps). Uninstalling it
+     silently invalidates both the token minting AND the bypass.
+  4. Whatever failed: the image and Release are already out — fix the store with a normal PR
+     raising `version:` (precedent #103), then repair the setting.
+
+  **Key rotation**: App settings → Generate a private key (the old one keeps working until
+  revoked) → update the `ADDON_BUMP_APP_PRIVATE_KEY` secret → revoke the old key. The `.pem`
+  never touches the repo or disk longer than the upload.
 - **The add-on ignores `FUTUREFIN_TAG`, `FUTUREFIN_IMAGE` and `.env` entirely** — §2.2's pinning
   advice does not apply there. Pinning = not pressing Update.
 - **Nothing about the container's internals changes**: same entrypoint as PID 1 (`init: false`),
@@ -1099,8 +1121,12 @@ Re-verify before trusting volatile facts:
   (the `/data` layout); `grep -n 'is_persisted' apps/api/docker-entrypoint.sh` (ancestor-walk volume
   guard, stops before `/`); `./scripts/audit-releases.sh --addon` (add-on version vs
   `apps/api/Cargo.toml`); `grep -n 'Bump de la versión del add-on en main' -A12 .github/workflows/publish-image.yml`
-  (the post-build step that makes the update visible in HA — requires the «GitHub Actions» app as a
-  bypass actor of the «Proteger main» ruleset).
+  (the post-build step that makes the update visible in HA). The step's credential is the owner's
+  GitHub App — three live settings outside git, re-verify with:
+  `grep -n 'create-github-app-token\|ADDON_BUMP' .github/workflows/publish-image.yml` (must print);
+  `gh secret list --repo maxlainz/FutureFin | grep -c ADDON_BUMP` (**2**);
+  `gh api repos/maxlainz/FutureFin/rulesets/21210270 --jq '.bypass_actors[].actor_id'` (**4770261**
+  — if empty, the 409 «Changes must be made through a pull request» of the 4.4.0 run is back).
 - **«Entrar con Home Assistant» (§2.1, added 2026-08-27 for v4.3.1, branch `feat/ha-idp-login`)**:
   `grep -n 'ha_sso_url' addon/futurefin/config.yaml addon/futurefin/DOCS.md` (option + user docs);
   `grep -n 'ha_sso_url\|FUTUREFIN_HA_ADDON' apps/api/docker-entrypoint.sh` (the mapping and the
