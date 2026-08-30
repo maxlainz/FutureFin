@@ -1,8 +1,8 @@
 /**
  * FREEZER hex — «cero hex fuera de `theme.css`» deja de ser prosa y pasa a ser un test.
  *
- * La regla es del design system (CLAUDE.md → «UI conventions → Palette», y
- * `.claude/design-system.md`): **nunca uses hex hardcoded en `App.css` o en componentes; consume
+ * La regla es del design system (`.claude/design-system.md` §Identidad y §Reglas para añadir UI
+ * nueva; resumen en CLAUDE.md §UI conventions): **nunca uses hex hardcoded en `App.css` o en componentes; consume
  * `var(--ff-*)`**. Los tokens viven en un único sitio, `src/styles/theme.css`, porque de ahí sale
  * el tema claro/oscuro: un `#71717a` suelto en un componente sobrevive al cambio de tema y produce
  * el fallo típico —texto invisible en oscuro, borde que no encaja en claro— que solo se ve mirando

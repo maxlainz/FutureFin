@@ -132,7 +132,7 @@ futurefin-failure-archaeology §2.4–2.5.
 `apps/api/tests/fixtures/fire-parity.json`. Run both suites:
 
 ```bash
-# Server side (needs the test Postgres from CLAUDE.md running on :5433):
+# Server side (needs the test Postgres from .claude/tests.md running on :5433):
 TEST_DATABASE_URL="postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test" \
   cargo test -p futurefin-api --test fire_parity
 # Client side:
