@@ -409,8 +409,16 @@ pub struct ProjectionOutput {
     pub net_worth: Vec<Decimal>,         // nominal, euros del momento, index 0..=horizon_months
     pub contributed_capital: Vec<Decimal>, // cumulative cost basis (nominal)
     pub per_asset_series: Vec<Vec<Decimal>>, // value per asset per month (nominal)
+    pub assets_depleted_month_index: Option<u32>, // 4.6.0 (#119): primer mes con déficit ≥ TODO lo drenable
+    pub uncovered_deficit_total: Decimal,         // 4.6.0 (#119): undrained_cumulative final
 }
 ```
+
+Sobre los dos campos de 4.6.0 (#119): la definición del mes de agotamiento vive en el bucle — el
+caso exacto usa `>=` («la cartera se vacía este mes»), no «primer mes con descubierto», que daría
+el mes siguiente; pineado con 200.000 € / 2.000 €/mes ⇒ mes 100 y NW(360) = −520.000. Cero series
+nuevas a propósito: la serie del descubierto es derivable de la identidad del NW, y un cuarto
+array de 841 Decimals no lo pinta nadie.
 
 ## Errors
 - `EngineError::InvalidHorizon` — horizon_months < 1

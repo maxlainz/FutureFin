@@ -325,6 +325,7 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::projection::ProjectionSeriesResponse,
         crate::handlers::projection::DeflateResponse,
         crate::handlers::projection::ProjectionPoint,
+        crate::handlers::projection::LiabilityNegativeAmortization,
         crate::handlers::history::SnapshotResponse,
         crate::handlers::history::SnapshotItemResponse,
         crate::handlers::history::CaptureResponse,

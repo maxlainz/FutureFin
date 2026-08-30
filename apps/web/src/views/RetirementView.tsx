@@ -28,7 +28,6 @@ import {
 import {
   computeFireAnnualNeedNetEur,
   defaultFireSettingsApi,
-  findFirstMonthNetWorthAtLeastInflated,
   grossUpNetAnnualFire,
   normalizeInstallationFireSettings,
   savingsSourceUsesTransactions,
@@ -43,6 +42,19 @@ import {
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
 } from "../lib/projection-chart";
+
+/**
+ * Prosa es-ES para `projectionSeries.fire_target_absent_reason` (#119) — los mismos tres
+ * literales que `SimKpis.fire_target_absent_reason` en el servidor. Antes la nota solo cubría
+ * el caso `swr_pct = 0`, recalculado en cliente; ahora lee el motivo real que ya calculó el
+ * servidor, que puede ser cualquiera de los tres.
+ */
+const FIRE_TARGET_ABSENT_REASON_ES: Record<string, string> = {
+  manual_amount_missing: "Falta el importe del objetivo manual: no se calcula fecha de cruce.",
+  net_need_not_positive:
+    "El gasto neto de jubilación no es positivo: no se calcula fecha de cruce.",
+  swr_not_positive: "SWR 0 %: no se calcula fecha de cruce.",
+};
 
 export function RetirementView({
   installation,
@@ -129,15 +141,23 @@ export function RetirementView({
     installation?.installation.fire_settings?.savings_source,
   );
 
+  // Las tres KPI del panel superior («Patrimonio objetivo», «Primer cruce», «Años hasta el
+  // cruce») leen ahora el servidor (#118): no dependen de `retirementBudgetSnapshot` ni de
+  // `summary`, así que dejan de esperar a `/v1/summary` en modos B/C (efecto colateral bueno —
+  // antes la KPI se calculaba en cliente y SÍ dependía de esos dos).
   const retirementMetricsReady =
+    hasMembership && !projectionBusy && !retirementBusy && projectionSeries != null;
+
+  // La vista previa LOCAL del draft sin guardar sí necesita el presupuesto (y, en modos B/C, el
+  // summary): es la misma dependencia que antes gobernaba `retirementMetricsReady` entera. Ahora
+  // solo gobierna el preview y las tres tarjetas de «Objetivo anual».
+  const firePreviewReady =
     hasMembership &&
-    !projectionBusy &&
     !retirementBusy &&
-    projectionSeries != null &&
     retirementBudgetSnapshot != null &&
-    // En modos B/C la cifra sale del summary: sin él la KPI se pintaba primero con la base del
-    // presupuesto y daba un salto al llegar (o se quedaba mal para siempre si el summary fallaba).
-    // Un número plausible pero equivocado es peor que un guion.
+    // En modos B/C la cifra sale del summary: sin él el preview se pintaba primero con la base
+    // del presupuesto y daba un salto al llegar (o se quedaba mal para siempre si el summary
+    // fallaba). Un número plausible pero equivocado es peor que un guion.
     (!configuredSavingsUsesTransactions || summary != null);
 
   const installationInflationPct = useMemo(() => {
@@ -165,7 +185,10 @@ export function RetirementView({
     ? summary?.financial_health.income_monthly_equivalent
     : retirementBudgetSnapshot?.totals.income_monthly_equivalent;
 
-  const fireKpis = useMemo(() => {
+  // Vista previa LOCAL del objetivo con los ajustes del draft (sin guardar). `computeFireAnnualNeedNetEur`
+  // y `grossUpNetAnnualFire` siguen duplicados en cliente solo para esto: el cruce (mes, fecha,
+  // objetivo al cruce) ya no se recalcula aquí — lee siempre del servidor (§2.1/§2.2 del spike).
+  const firePreview = useMemo(() => {
     const expenseM = fireExpenseM;
     const incomeM = fireIncomeM;
     const incomeRetM =
@@ -181,53 +204,50 @@ export function RetirementView({
     const taxOn = fireDraft.taxes_enabled;
 
     let targetNoPen: number | null = null;
-    let grossNoPen: number | null = null;
-
     if (needAnnual !== null && needAnnual > 0 && swrN !== null && swrN > 0) {
-      grossNoPen = grossUpNetAnnualFire(needAnnual, brackets, taxOn);
+      const grossNoPen = grossUpNetAnnualFire(needAnnual, brackets, taxOn);
       targetNoPen = grossNoPen / (swrN / 100);
     }
 
-    const pts = projectionSeries?.points ?? [];
-    const mc = projectionSeries?.months ?? 0;
-
-    let miNo: number | null = null;
-    if (targetNoPen !== null && targetNoPen > 0) {
-      miNo = findFirstMonthNetWorthAtLeastInflated(
-        pts,
-        targetNoPen,
-        installationInflationPct,
-      );
-    }
-
-    let targetAtCross: number | null = null;
-    if (
-      targetNoPen !== null &&
-      targetNoPen > 0 &&
-      miNo !== null &&
-      installationInflationPct > 0
-    ) {
-      targetAtCross =
-        targetNoPen * Math.pow(1 + installationInflationPct / 100, miNo / 12);
-    }
-
-    return {
-      needAnnual,
-      swrN,
-      targetNoPen,
-      targetAtCross,
-      miNo,
-      mc,
-    };
+    return { needAnnual, swrN, targetNoPen };
   }, [
     fireDraft,
-    installationInflationPct,
     fireExpenseM,
     fireIncomeM,
     retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent,
-    projectionSeries?.points,
-    projectionSeries?.months,
   ]);
+
+  // Ajustes REALMENTE guardados (prop reactiva de la instalación), normalizados igual que el
+  // draft — para poder comparar como iguales. Comparar contra `lastSavedFirePayloadRef` (un ref)
+  // no re-renderiza cuando el guardado automático completa, así que la tarjeta se quedaría
+  // mostrando la vista previa aunque el servidor ya hubiera recalculado (§2.3 del spike).
+  const savedFire = useMemo(
+    () => normalizeInstallationFireSettings(installation?.installation.fire_settings),
+    [installation?.installation.fire_settings],
+  );
+  const fireDraftDirty = JSON.stringify(fireDraft) !== JSON.stringify(savedFire);
+
+  // Lecturas del servidor — SIEMPRE, nunca recalculadas en cliente: el cruce depende de la
+  // simulación mensual completa y el cliente no puede rehacerla (ni debe fingirlo).
+  const jubMi =
+    typeof projectionSeries?.jubilacion_month_index === "number"
+      ? projectionSeries.jubilacion_month_index
+      : null;
+  const mc = projectionSeries?.months ?? 0;
+  const serverTargetToday =
+    projectionSeries?.jubilacion_target_net_worth != null
+      ? parseDisplayDecimal(projectionSeries.jubilacion_target_net_worth)
+      : null;
+  const targetAtCrossNominal =
+    projectionSeries?.jubilacion_target_net_worth_nominal != null
+      ? parseDisplayDecimal(projectionSeries.jubilacion_target_net_worth_nominal)
+      : null;
+  // «Patrimonio objetivo»: el servidor, salvo que el draft tenga cambios sin guardar — en ese
+  // caso la vista previa local (con paréntesis «vista previa · sin guardar») para que la tarjeta
+  // siga respondiendo al slider de SWR mientras llega el autosave + refetch.
+  const targetToday = fireDraftDirty ? firePreview.targetNoPen : serverTargetToday;
+  const targetTodayReady =
+    retirementMetricsReady && (fireDraftDirty ? firePreviewReady : true);
 
   const renderRetirementAmount = useCallback(
     (annual: number, monthly: number): ReactNode => (
@@ -398,35 +418,33 @@ export function RetirementView({
       {hasMembership ? (
         <>
           <div className="metric-grid workspace-kpi-strip">
-            {/* Los rótulos estaban cruzados: la cifra grande es `targetNoPen`, euros de HOY, y
-                llevaba el rótulo «(con inflación)»; la inflada (`targetAtCross`) iba en el
+            {/* Los rótulos estaban cruzados: la cifra grande es `targetToday`, euros de HOY, y
+                llevaba el rótulo «(con inflación)»; la inflada (target al cruce) iba en el
                 paréntesis sin rótulo ninguno, así que la única cifra etiquetada era la que no
                 correspondía. */}
             <MetricCard
               label="Patrimonio objetivo (euros de hoy)"
               helpId="retirement.target"
               value={
-                retirementMetricsReady &&
-                fireKpis.targetNoPen !== null &&
-                fireKpis.targetNoPen > 0
-                  ? formatCurrencyNumber(fireKpis.targetNoPen, currencyIso)
+                targetTodayReady && targetToday !== null && targetToday > 0
+                  ? formatCurrencyNumber(targetToday, currencyIso)
                   : METRIC_DASH
               }
               parenthetical={
-                retirementMetricsReady &&
-                fireKpis.targetAtCross !== null &&
-                fireKpis.targetAtCross > 0
-                  ? `${formatCurrencyNumber(fireKpis.targetAtCross, currencyIso)} al cruce`
-                  : undefined
+                !targetTodayReady
+                  ? undefined
+                  : fireDraftDirty
+                    ? "vista previa · sin guardar"
+                    : targetAtCrossNominal !== null && targetAtCrossNominal > 0
+                      ? `${formatCurrencyNumber(targetAtCrossNominal, currencyIso)} al cruce`
+                      : undefined
               }
             />
             <MetricCard
               label="Primer cruce"
               value={
-                retirementMetricsReady &&
-                fireKpis.miNo !== null &&
-                fireKpis.mc > 0
-                  ? `~${projectionXTickLabel(fireKpis.miNo, fireKpis.mc, {
+                retirementMetricsReady && jubMi !== null && mc > 0
+                  ? `~${projectionXTickLabel(jubMi, mc, {
                       ageUiMode: axisAgeMode,
                       birthDateIso: axisBirth,
                       anchorDateYmd: axisAnchor,
@@ -435,40 +453,24 @@ export function RetirementView({
                   : METRIC_DASH
               }
               parenthetical={
-                retirementMetricsReady &&
-                fireKpis.miNo !== null &&
-                fireKpis.mc > 0
-                  ? complementaryProjectionTickLabel(
-                      fireKpis.miNo,
-                      fireKpis.mc,
-                      axisAgeMode,
-                      lblOpts,
-                    )
+                retirementMetricsReady && jubMi !== null && mc > 0
+                  ? complementaryProjectionTickLabel(jubMi, mc, axisAgeMode, lblOpts)
                   : ""
               }
             />
             <MetricCard
               label="Años hasta el cruce"
               value={
-                retirementMetricsReady && fireKpis.miNo !== null
-                  ? formatYearsEsFromMonths(fireKpis.miNo)
+                retirementMetricsReady && jubMi !== null
+                  ? formatYearsEsFromMonths(jubMi)
                   : METRIC_DASH
-              }
-              parenthetical={
-                retirementMetricsReady &&
-                fireKpis.miNo !== null &&
-                fireKpis.mc > 0 &&
-                fireKpis.miNo > fireKpis.mc
-                  ? "Fuera del horizonte de la proyección actual."
-                  : ""
               }
             />
           </div>
-          {retirementMetricsReady &&
-          fireKpis.swrN !== null &&
-          fireKpis.swrN <= 0 ? (
+          {retirementMetricsReady && projectionSeries?.fire_target_absent_reason ? (
             <p className="muted tight">
-              SWR 0 %: no se calcula fecha de cruce.
+              {FIRE_TARGET_ABSENT_REASON_ES[projectionSeries.fire_target_absent_reason] ??
+                "No se calcula fecha de cruce."}
             </p>
           ) : null}
         </>
@@ -511,9 +513,13 @@ export function RetirementView({
           const hasFire =
             !!projectionSeries.fire_target_series &&
             projectionSeries.fire_target_series.length > 0;
-          // Si hay jubilación, recortamos la serie a jub+12 (un año después
-          // del cruce). El eje Y se zoom-ajusta entre NW(hoy) y NW(fin).
-          const clampToMonth = jubMi != null ? jubMi + 12 : null;
+          // `jubMi === 0` es «ya jubilado» — el cruce es HOY, el mes 0. `0` es falsy en JS: un
+          // `jubMi ? … : …` aquí reintroduce el bug al revés (#132). Con `alreadyRetired` no
+          // recortamos a "cruce + 12": el usuario quiere ver el horizonte completo, no un año.
+          const alreadyRetired = jubMi === 0;
+          // Si hay jubilación FUTURA, recortamos la serie a jub+12 (un año después del cruce). El
+          // eje Y se zoom-ajusta entre NW(hoy) y NW(fin).
+          const clampToMonth = jubMi != null && !alreadyRetired ? jubMi + 12 : null;
           // `clampToMonth` es un MES y `lastIdx` una POSICIÓN del array: con `density=hybrid`
           // (0..12, 24, 36…) no son lo mismo, así que el pie del panel enseñaba el patrimonio de
           // un punto que no era el último visible del chart. Misma traducción mes → posición que
@@ -537,7 +543,7 @@ export function RetirementView({
                   }}
                 >
                   {firstNwLabel && lastVisibleLabel
-                    ? `${firstNwLabel} → ${lastVisibleLabel}${jubMi != null ? " · cruce + 1 a" : ` · ${horizon} a`}`
+                    ? `${firstNwLabel} → ${lastVisibleLabel}${clampToMonth != null ? " · cruce + 1 a" : ` · ${horizon} a`}`
                     : `${horizon} a`}
                 </span>
               </div>

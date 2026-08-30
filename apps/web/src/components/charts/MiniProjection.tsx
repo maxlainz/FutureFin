@@ -205,14 +205,17 @@ export function MiniProjection({
       }
     }
 
-    // POSICIÓN del cruce, no mes: se usa para indexar `nw`, y `xAt` ya la traduce a su mes.
+    // POSICIÓN del cruce — publicada por el servidor (`jubilacion_series_position`), ya NO se
+    // escanea la rejilla local. Escanear `nw[i] >= fire[i]` sobre una serie diezmada
+    // (`density=hybrid`) encontraba el primer punto SERVIDO que ya superaba el target, que no es
+    // el mes exacto que calculó el motor sobre la simulación mensual completa. El guard
+    // `pos < total` hace que el marcador desaparezca cuando `clampToMonth` deja el cruce fuera de
+    // la ventana visible (misma convención que usa el pie del panel en RetirementView).
     let jubPos: number | null = null;
-    if (showJub && fire) {
-      for (let i = 0; i < total; i++) {
-        if ((nw[i] ?? 0) >= (fire[i] ?? Infinity)) {
-          jubPos = i;
-          break;
-        }
+    if (showJub) {
+      const pos = series.jubilacion_series_position;
+      if (typeof pos === "number" && pos < total) {
+        jubPos = pos;
       }
     }
 
