@@ -4,6 +4,43 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.4.1] - 2026-08-30
+
+**Cuatro verdades restauradas** — el lote «cero comportamiento observable» de la auditoría de
+coherencia contractual (2026-08-30; la parte de docs viajó aparte, PR #104). Ningún número cambia;
+cambia lo que el binario DICE de sí mismo.
+
+### MCP — el schema de `get_projection.months` prometía clamp donde la core rechaza
+
+- **El texto que lee el modelo mentía**: el doc-comment del parámetro (`server.rs`) decía «fuera de
+  rango se clampa», cuando un `months` fuera de 12–840 es **400 `months_out_of_range`** desde
+  4.4.0 (el clamp silencioso se retiró a propósito — la respuesta afirmaba «te he hecho caso»
+  mientras contestaba otra pregunta). Misma clase de bug que el «default 15 vs 30» que motivó la
+  norma de la casa, en otro parámetro. Sin cambio de comportamiento: la tool ya rechazaba (comparte
+  `projection_series_cached`); solo se corrige la promesa. El fixture congelado no se mueve — las
+  descripciones de parámetro no entran en él (las constraints, que sí, ya eran correctas).
+
+### API — un error sin código estable y un literal que podía mentir
+
+- **`category_not_in_installation`**: la validación de `category_id` en movimientos devolvía su
+  error **sin prefijo `snake_code:`** — caía a la clase genérica `bad_request` mientras su
+  validación hermana (`category_scope_mismatch`, mismo bloque) sí llevaba código. 359/362 del
+  resto del binario cumplían; este era uno de los tres que no. Con entrada en el catálogo de
+  traducciones de la SPA y en `error-codes.json` (regenerado). Cambio observable mínimo: el campo
+  `code` de ese error pasa de `bad_request` a `category_not_in_installation` (el status 400 y el
+  mensaje no cambian).
+- **`schedule_window_out_of_range` interpola su cota**: el mensaje decía «between 1 and 480» con
+  el 480 escrito a mano al lado de `MAX_SCHEDULE_WINDOW_MONTHS = 480` — si la constante cambiara,
+  el mensaje mentiría en silencio. Ahora interpola la constante (bytes idénticos hoy).
+
+### `/v1/changes` — la tercera categoría que el contrato no contemplaba
+
+- El doc-comment del módulo prometía «ninguna tabla se omite en silencio» con dos listas
+  (`covered` / `missing_updated_at`), y `persons` no estaba en ninguna: tiene `updated_at` pero
+  no es ledger y hoy nada la escribe. Queda **excluida por diseño y documentada** en la cabecera
+  del módulo, con la instrucción de revisar la exclusión el día que algo escriba en ella. No entra
+  en `tables_covered`: ampliar esa lista cambiaría el wire por una tabla muerta.
+
 ## [4.4.0] - 2026-08-29
 
 **Revisión adversarial del servidor MCP embebido** (issues #81–#88). Cinco agentes independientes

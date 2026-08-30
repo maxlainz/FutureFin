@@ -336,6 +336,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "El tipo de categoría no es válido. Usa activo, pasivo, ingreso o gasto.",
   category_scope_mismatch:
     "La categoría es de otro tipo del que hace falta aquí.",
+  category_not_in_installation:
+    "Esa categoría no existe en esta instalación. Elige una de la lista.",
   category_in_use:
     "Esa categoría está en uso. Elige a qué categoría traspasar sus datos antes de borrarla.",
   remap_to_same_category:

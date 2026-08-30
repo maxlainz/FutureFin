@@ -22,6 +22,13 @@
 //! `allocation_rules`. Se publican en `tables_missing_updated_at` en vez de omitirse en silencio:
 //! renombrar una categoría o cambiar una regla de reparto NO aparece aquí, y quien lea el feed
 //! tiene que poder saberlo sin auditar el esquema.
+//!
+//! Y una tercera categoría, **excluida por diseño**: `persons` SÍ tiene `updated_at`
+//! (migración `20260217120000_persons_installation.sql`) pero no es ledger — hoy ninguna ruta de
+//! la aplicación la escribe (solo la lee el fallback de fecha de nacimiento de la proyección),
+//! así que un feed de cambios sobre ella siempre estaría vacío. No va en `tables_covered` porque
+//! ampliar esa lista cambia el wire (y la paridad MCP de `list_recent_changes`) por una tabla
+//! muerta. **Revisar esta exclusión el día que algo escriba en `persons`.**
 
 use crate::error::ApiError;
 use crate::handlers::installation::require_installation_member;
