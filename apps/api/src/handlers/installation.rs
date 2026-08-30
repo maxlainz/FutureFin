@@ -413,7 +413,11 @@ pub struct PatchInstallationBody {
     #[serde(default)]
     pub annual_inflation_assumption_percent: Option<String>,
     /// Omit = unchanged; JSON `null` clears stored JSON (defaults apply on read).
-    #[serde(default)]
+    ///
+    /// Tri-estado real desde 4.4.2 (issue #95): el tipo ya era `Option<Option<…>>` pero le faltaba
+    /// el `deserialize_with`, así que serde colapsaba el `null` presente con la clave ausente y la
+    /// promesa de esta línea —publicada en OpenAPI— era inalcanzable: salía 400 `patch_empty`.
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
     pub fire_settings: Option<Option<FireSettings>>,
     /// Omit = unchanged. Kill-switch de la escritura vía MCP (owner-only como todo el PATCH).
     #[serde(default)]
@@ -1087,6 +1091,10 @@ pub async fn patch_my_installation(
         return Err(ApiError::Forbidden);
     }
 
+    // `fire_settings` es tri-estado: `.is_none()` mira el `Option` EXTERNO, así que
+    // `{"fire_settings": null}` (= `Some(None)`) cuenta como campo presente y no cae aquí — es un
+    // PATCH válido cuyo único contenido borra el JSON almacenado. Antes de 4.4.2 (issue #95) sí
+    // caía, y el 400 decía «no has mandado ningún campo» al único cuerpo documentado para borrar.
     if body.calendar_tz.is_none()
         && body.show_age_mode.is_none()
         && body.annual_inflation_assumption_percent.is_none()
@@ -1146,6 +1154,9 @@ pub async fn patch_my_installation(
         }
     };
 
+    // Las tres ramas son alcanzables desde 4.4.2 (issue #95). `Some(None)` deja la columna a NULL
+    // y `resolve_fire_settings` devuelve los defaults en la siguiente lectura: borrar es volver al
+    // estado de fábrica del eje FIRE, no dejar el hogar sin ajustes.
     let new_fire_settings_json: Option<SqlxJson<FireSettings>> = match &body.fire_settings {
         None => row_before.fire_settings.clone(),
         Some(None) => None,

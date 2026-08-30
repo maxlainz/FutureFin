@@ -146,18 +146,102 @@ async fn unrealized_pnl_follows_an_edit_of_the_valuation() {
     assert_eq!(dec(&b["unrealized_pnl"]), 250.0, "{b}");
     assert_eq!(dec(&b["unrealized_pnl_pct"]), 25.0, "{b}");
 
-    // NOTA para quien venga: **`{"purchase_price": null}` por HTTP no borra el precio**, devuelve
-    // 400 `patch_empty`. No es un fallo de esta cifra: `Option<serde_json::Value>` con serde mapea
-    // el `null` de JSON a `None` (= campo ausente), así que la rama `is_null()` de
-    // `merge_optional_decimal_patch` es inalcanzable por este camino. La vía viva para borrarlo es
-    // la tool MCP `update_asset` con `clear_purchase_price: true`, que construye el `Value::Null`
-    // en Rust. Se fija aquí para que el comportamiento no se lea como un descuido de la plusvalía.
+    // Retirar el coste declarado devuelve el activo a «sin coste declarado», y la plusvalía deja
+    // de existir con su motivo — no se queda en 0, que sería la afirmación distinta «no has ganado
+    // ni perdido».
+    //
+    // HISTORIA (issue #95, arreglado en 4.4.2): este bloque fijaba lo contrario — un 400
+    // `patch_empty` —, porque `Option<serde_json::Value>` con el `Deserialize` por defecto de
+    // serde mapea el `null` de JSON a `None` (= clave ausente) y la rama `is_null()` de
+    // `merge_optional_decimal_patch` era inalcanzable por HTTP. El campo es ahora un tri-estado de
+    // verdad (`Option<Option<…>>` + `deserialize_double_option`).
     let r = app
         .patch_json_with_cookie(
             &format!("/v1/assets/{id}"),
             json!({"purchase_price": null}),
             &owner.cookie,
         )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let b = r.json();
+    assert_eq!(b["purchase_price"], Value::Null, "{b}");
+    assert_eq!(b["unrealized_pnl"], Value::Null, "{b}");
+    assert_eq!(b["unrealized_pnl_absent_reason"], "no_purchase_price", "{b}");
+    assert_eq!(b["unrealized_pnl_pct"], Value::Null, "{b}");
+    assert_eq!(
+        b["unrealized_pnl_pct_absent_reason"], "no_purchase_price",
+        "{b}"
+    );
+}
+
+/// El trío del tri-estado de `PATCH /v1/assets/{id}` sobre `purchase_price`: **`null` borra**,
+/// **clave ausente conserva**, **valor sustituye**. Las tres en la misma fila y en ese orden,
+/// porque el bug de #95 era exactamente que las dos primeras eran indistinguibles.
+///
+/// El caso que lo hacía caro no es teórico: la SPA manda `purchase_price: null` en CADA edición de
+/// activo cuyo campo de compra se deja vacío (`App.tsx`, «PATCH: siempre enviar precio de compra»),
+/// así que vaciar el campo y guardar devolvía 200 y **no borraba nada**. Un 400 se ve; un 200 que
+/// no hace lo que dice, no.
+#[tokio::test]
+async fn patch_purchase_price_is_a_real_tristate() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Fondos").await;
+    let id = asset(
+        &app,
+        &owner,
+        &cat,
+        "Indexado",
+        json!({"current_value": "1000", "purchase_price": "800"}),
+    )
+    .await;
+
+    // 1. `null` presente → borra. Y es el ÚNICO campo del cuerpo: ya no es `patch_empty`.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{id}"),
+            json!({"purchase_price": null}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(
+        r.status,
+        http::StatusCode::OK,
+        "un PATCH cuyo único contenido es `purchase_price: null` es válido y borra: {r:?}"
+    );
+    assert_eq!(r.json()["purchase_price"], Value::Null, "{:?}", r.json());
+
+    // Persiste: no es solo la respuesta del PATCH.
+    let list = app.get_with_cookie("/v1/assets", &owner.cookie).await.json();
+    assert_eq!(by_name(&list, "Indexado")["purchase_price"], Value::Null);
+
+    // 2. Valor → aplica.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{id}"),
+            json!({"purchase_price": "950"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(dec(&r.json()["purchase_price"]), 950.0);
+
+    // 3. Clave ausente → intacto. El PATCH toca otro campo para no chocar con `patch_empty`.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{id}"),
+            json!({"current_value": "1100"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let b = r.json();
+    assert_eq!(dec(&b["purchase_price"]), 950.0, "omitir conserva: {b}");
+    assert_eq!(dec(&b["unrealized_pnl"]), 150.0, "{b}");
+
+    // El cuerpo VACÍO sigue siendo 400: el tri-estado abre `null`, no la puerta de atrás.
+    let r = app
+        .patch_json_with_cookie(&format!("/v1/assets/{id}"), json!({}), &owner.cookie)
         .await;
     assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
     assert_eq!(r.json()["code"], "patch_empty");
