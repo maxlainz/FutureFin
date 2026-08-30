@@ -26,6 +26,13 @@ jobs:
       - name: Datos sensibles en ficheros trackeados
         run: ./scripts/scan-sensitive.sh
 
+      # Las dos superficies que se publican FUERA de GitHub (portada de Docker Hub y el DOCS
+      # que Home Assistant enseña) son copias curadas sin barrido natural: aquí se verifica que
+      # sus HECHOS (compose de ejemplo, tabla de opciones, ingress) siguen diciendo lo que dicen
+      # docker-compose.yml y addon/futurefin/config.yaml. Consolidación 2026-08-30, decisión Q4.
+      - name: Superficies derivadas sin deriva (Docker Hub + DOCS del add-on)
+        run: ./scripts/check-derived-docs.sh
+
       # El Supervisor de Home Assistant clona este repo como tienda de add-ons y
       # recorre TODO el árbol: cada `config.{yaml,yml,json}` que encuentre lo
       # interpreta como un add-on. Un fichero de configuración cualquiera con ese

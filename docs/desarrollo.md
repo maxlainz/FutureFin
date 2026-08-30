@@ -53,10 +53,10 @@ RUST_LOG=futurefin_api=info,tower_http=info
 
 ### 2. Levanta el PostgreSQL de desarrollo
 
-Es un compose **autónomo**, no un override:
+Es un compose **autónomo**, no un override. Con nombre citable (además espera al `pg_isready`):
 
 ```bash
-docker compose -f docker-compose.dev.yml up -d
+./scripts/dev-db.sh          # equivale a: docker compose -f docker-compose.dev.yml up -d
 ```
 
 Publica `127.0.0.1:5432`, que es justo lo que necesita tu `cargo run`. Proyecto `futurefin-dev`,
@@ -120,7 +120,14 @@ silencio. Un checksum que no cuadra tiene que fallar a gritos.
 
 ## Comandos de build y verificación
 
-Todos desde la raíz del repositorio.
+Todos desde la raíz del repositorio. **La puerta completa tiene un solo nombre**:
+
+```bash
+./scripts/test-all.sh              # los mismos gates que CI, en orden; falla al primero
+SKIP_DB=1 ./scripts/test-all.sh    # solo los gates que no necesitan base de datos
+```
+
+Los comandos individuales, para iterar sobre uno:
 
 | Qué | Comando | ¿Necesita base de datos? |
 |---|---|---|
@@ -193,7 +200,14 @@ en el propio fichero.
 ## Construir la imagen en local
 
 Sirve para validar el artefacto de producción completo (API + frontend + PostgreSQL embebido) sin
-esperar a que CI publique nada.
+esperar a que CI publique nada. El camino con nombre — construye, levanta el stack y espera al
+`/v1/ready` imprimiendo la versión servida:
+
+```bash
+./scripts/build-local-image.sh
+```
+
+Paso a paso, lo que ese script hace (y las trampas que cubre):
 
 ```bash
 # 1. Construir. La primera vez tarda; después reutiliza caché.
