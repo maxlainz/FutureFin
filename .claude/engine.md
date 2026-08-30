@@ -390,7 +390,11 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
 5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
-6. If `net_cash <= 0` (deficit): drain `surplus_cash` first, then drain liquid assets (lowest-return first).
+6. If `net_cash <= 0` (deficit): drain `surplus_cash` first, then drain assets — ALL of them,
+   liquids first, then illiquids, each group lowest-return first (tiebreak by input index); any
+   need still uncovered accumulates in `undrained_cumulative` and is subtracted from net worth.
+   (Erratum fixed 2026-08: this line used to say only "liquid assets", but `drain_from_assets`
+   has always continued into illiquid assets once the liquids run dry.)
 7. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar. `monthly_multiplier` = raíz 12ª del factor anual `1 + p/100`; `None` y `0` → factor 1; **las tasas negativas componen de verdad** (−50 % anual ⇒ ×0,5 en 12 meses); `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs con error tipado).
 8. Assign each liability its `closing_principal` from step 1. No recomputation, no `min` — just the
    assignment.
