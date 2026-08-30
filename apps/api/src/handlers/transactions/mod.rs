@@ -187,7 +187,8 @@ pub async fn assert_transaction_category(
     .await?;
     let Some(scope) = scope else {
         return Err(ApiError::BadRequest(
-            "category_id must reference a category in this installation".into(),
+            "category_not_in_installation: category_id must reference a category in this installation"
+                .into(),
         ));
     };
     if scope != kind {
