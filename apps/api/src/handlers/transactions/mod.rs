@@ -17,8 +17,11 @@
 //! `invalidate_projection_if_savings_uses_transactions` (abajo, sobre `SavingsSource::uses_transactions`)
 //! y lo llaman las mutaciones de `crud.rs`/`import.rs`/`recurring.rs`/`reconcile.rs` tras commitear
 //! (conciliar/desconciliar cambia QUÉ cuenta en el promedio → también es mutación del conjunto).
-//! **Crear** una regla de categorización, los previews y el borrado de una regla recurrente (sus
-//! instancias sobreviven, el conjunto no cambia) **nunca** invalidan. Regresión de ambos casos:
+//! **Crear** una regla de categorización y los previews **nunca** invalidan. El **borrado de una
+//! plantilla recurrente SÍ invalida (COND, corrección 4.0.0)**: sus instancias sobreviven
+//! (`ON DELETE SET NULL`) pero pierden el enlace y pasan a contar como movimientos REALES — cambia
+//! la **clasificación**, no el conjunto, y eso puede activar un mes que el promedio ignoraba
+//! (mecanismo completo en la cabecera de `delete_recurring_rule_core`, `recurring.rs`). Regresión:
 //! `transactions_projection_cache.rs`. Ojo: **aplicar** una regla retroactivamente (backfill) sí es
 //! una mutación del conjunto y sí invalida COND — es otra ruta, con su propio test.
 //!
