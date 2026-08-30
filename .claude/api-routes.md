@@ -434,8 +434,12 @@ bucle corta al agotarse), lo que pasaba es que la base incluye un término trans
 
 Por regla: `amount_intent` vs `amount_resolved` (si difieren sin `skipped_reason`, la regla fue
 **recortada** por el cap — no saltada), `cap_ceiling`/`cap_room` y `skipped_reason` ∈ {`no_cash`,
-`not_reached`, `cap_full`, `zero_amount`, `invalid_target`}. `no_cash` y `not_reached` **no se
-colapsan**: «no te sobra dinero» y «las reglas de arriba se lo comieron» tienen remedios distintos.
+`not_reached`, `cap_full`, `zero_amount`, `invalid_target`, `in_retirement`}. `no_cash` y
+`not_reached` **no se colapsan**: «no te sobra dinero» y «las reglas de arriba se lo comieron»
+tienen remedios distintos. `in_retirement` (auditoría 2026-08) tampoco se colapsa con `no_cash`:
+en jubilación HAY caja (se publica en `base_cash`) pero el bucle la manda entera a `surplus_cash`
+y la cascada no se ejecuta — antes la resolución publicaba aportaciones que la simulación jamás
+hacía (H-cascada-1).
 Las reglas posteriores al corte por caja se emiten con `not_reached` en vez de desaparecer del
 informe. Cierra con `per_asset` y `leftover_to_surplus_cash`, y la identidad
 `Σ per_asset + leftover = base_cash` está pinneada en `allocation_resolution.rs`.

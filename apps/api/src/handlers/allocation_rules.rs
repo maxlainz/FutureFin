@@ -1344,6 +1344,7 @@ fn skip_reason_wire(r: futurefin_engine::AllocationSkipReason) -> &'static str {
         R::CapFull => "cap_full",
         R::ZeroAmount => "zero_amount",
         R::InvalidTarget => "invalid_target",
+        R::InRetirement => "in_retirement",
     }
 }
 
