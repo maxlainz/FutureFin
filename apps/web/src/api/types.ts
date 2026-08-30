@@ -311,6 +311,29 @@ export type ProjectionSeriesApi = {
    *  Vacío cuando la inflación es 0 — en ese caso reusa `milestones`. */
   milestones_real?: ProjectionMilestoneApi[];
   compound_outpaces_true_savings_month_index?: number | null;
+  /** Primer mes cuyo déficit de caja iguala o supera TODO lo drenable (`surplus_cash` + todos los
+   *  activos): la cartera se vacía ese mes y desde el siguiente el descubierto se acumula restando
+   *  del patrimonio para siempre. Número de MES (misma base que `points[].month_index`), nunca una
+   *  posición de array. `null` explícito = no se agota dentro del horizonte, no «no calculado». (#119) */
+  assets_depleted_month_index: number | null;
+  /** Déficit acumulado NO cubierto al final del horizonte, en euros. `"0.0000"` = cero euros
+   *  descubiertos, no «no aplica». Ya se restaba de `net_worth`; aquí se declara. (#119) */
+  uncovered_deficit_total: string;
+  /** Pasivos cuya cuota no cubre el devengo: la deuda CRECE mes a mes (amortización negativa).
+   *  Vacío = ninguno. Deliberadamente más estrecho que el `payment_does_not_reduce_principal` del
+   *  calendario de amortización: un `interest_only` (principal congelado) NO aparece aquí — esa
+   *  distinción es el valor del campo. (#119) */
+  liabilities_negative_amortization: Array<{
+    liability_id: string;
+    label: string;
+    opening_principal: string;
+    final_principal: string;
+    horizon_months: number;
+  }>;
+  /** Por qué NO hay objetivo FIRE (`manual_amount_missing` | `net_need_not_positive` |
+   *  `swr_not_positive` — este último también cubre `swr_pct = 0`). `null` ⟺ sí lo hay. Mismo
+   *  campo y literales que `simulate_projection` (`SimKpis.fire_target_absent_reason`). (#119) */
+  fire_target_absent_reason: string | null;
   months: number;
   horizon_years: number;
   horizon_basis: string;
@@ -331,6 +354,15 @@ export type ProjectionSeriesApi = {
   jubilacion_age?: number | null;
   /** Objetivo FIRE base en euros de hoy. El target real de cada mes crece con la inflación. */
   jubilacion_target_net_worth?: string | null;
+  /** Posición (índice de array, base 0) en `points` / `fire_target_series` / `asset_series[].values`
+   *  correspondiente al mes de jubilación. `null` ⟺ no hay cruce. Convención: el punto servido
+   *  inmediatamente ANTERIOR o igual al mes del cruce — existe porque `jubilacion_month_index` no
+   *  indexa nada (con `density=hybrid` los arrays llevan muchos menos puntos que meses). */
+  jubilacion_series_position?: number | null;
+  /** Objetivo FIRE del MES DEL CRUCE, en euros NOMINALES de ese mes (no en euros de hoy como
+   *  `jubilacion_target_net_worth`, que difiere en más de 2× a décadas vista). `null` ⟺ no hay
+   *  cruce. Evaluado exacto sobre el mes del cruce, no interpolado de la serie. */
+  jubilacion_target_net_worth_nominal?: string | null;
   /** Serie del target FIRE ajustado por inflación, paralela a `points`. f64[] (vacío cuando no hay FIRE). */
   fire_target_series?: number[];
   asset_series?: AssetSeriesApi[];

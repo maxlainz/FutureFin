@@ -12,7 +12,6 @@ import type {
   FireNumberModeApi,
   FireSettingsApi,
   AvgWindowModeApi,
-  ProjectionPointApi,
   SavingsAvgBasisApi,
   SavingsSourceApi,
   TaxBracketApi,
@@ -228,34 +227,39 @@ export function grossUpNetAnnualFire(
   brackets: TaxBracketApi[],
   taxesEnabled: boolean,
 ): number {
+  // Forma cerrada por tramos, espejo EXACTO de gross_up_net_annual_fire del servidor
+  // (apps/api/src/handlers/projection.rs) — Ola 2, #118. Hasta 4.6.0 aquí vivía una bisección
+  // de 90 iteraciones con techo mágico max(net·4, net+200.000): con un tramo alto el techo
+  // SATURABA en silencio y la vista previa publicaba un objetivo un 20 % más bajo que el del
+  // servidor (Δ 3,43 M€ en el caso del fixture nuevo). La forma cerrada no tiene techo: en
+  // cada tramo resuelve g = (net + K − r·prev)/(1 − r) y avanza si g supera el techo del tramo.
   if (!taxesEnabled || !(netAnnual > 0)) return Math.max(0, netAnnual);
-  let lo = netAnnual;
-  let hi = Math.max(netAnnual * 4, netAnnual + 200_000);
-  for (let i = 0; i < 90; i++) {
-    const mid = (lo + hi) / 2;
-    const after = mid - taxOnGrossCapitalAnnual(mid, brackets);
-    if (after < netAnnual) lo = mid;
-    else hi = mid;
+  let prevCeiling = 0;
+  let k = 0; // impuesto acumulado de los tramos completos ya recorridos
+  for (const b of brackets) {
+    const pct = parseDisplayDecimal(String(b.pct));
+    if (pct === null || !Number.isFinite(pct)) continue; // borrador a medio teclear (solo cliente)
+    const r = pct / 100;
+    const denom = 1 - r;
+    // Tramo ≥ 100 %: degeneración idéntica al servidor (devuelve el techo previo).
+    if (denom <= 0) return prevCeiling;
+    const gross = (netAnnual + k - r * prevCeiling) / denom;
+    const rawUp = b.up_to;
+    const isOpen = rawUp === null || rawUp === undefined || String(rawUp).trim() === "";
+    if (isOpen) return gross;
+    const ceiling = parseDisplayDecimal(String(rawUp));
+    if (ceiling === null || !Number.isFinite(ceiling)) continue;
+    if (gross <= ceiling) return gross;
+    k += r * (ceiling - prevCeiling);
+    prevCeiling = ceiling;
   }
-  return hi;
+  // Sin tramo abierto: espejo VERBATIM del servidor (return netAnnual). La configuración es
+  // inalcanzable persistida (validate_tax_brackets exige el último tramo abierto) y con
+  // brackets vacíos k = 0, así que solo iguala a la bisección de antes; se copia tal cual
+  // porque la paridad exige el MISMO algoritmo, no uno «mejor» en ramas muertas.
+  return netAnnual;
 }
 
-/** Devuelve el primer índice donde `nw[i] >= target_base × (1 + inflation/100)^(month_index/12)`. */
-export function findFirstMonthNetWorthAtLeastInflated(
-  points: ProjectionPointApi[],
-  baseTarget: number,
-  annualInflationPct: number,
-): number | null {
-  if (!(baseTarget > 0)) return null;
-  const inflFactor = 1 + Math.max(0, annualInflationPct) / 100;
-  for (const p of points) {
-    const nw = parseDisplayDecimal(String(p.net_worth));
-    if (nw === null) continue;
-    const target = baseTarget * Math.pow(inflFactor, p.month_index / 12);
-    if (nw >= target) return p.month_index;
-  }
-  return null;
-}
 
 export function computeFireAnnualNeedNetEur(
   fire: FireSettingsApi,

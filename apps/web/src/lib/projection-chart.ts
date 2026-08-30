@@ -479,10 +479,26 @@ export function niceYTicks(minV: number, maxV: number, tickCount: number): numbe
   return dedup.length > 8 ? dedup.filter((_, i) => i % 2 === 0) : dedup;
 }
 
+/**
+ * «Ya alcanzado» / «5 meses» / «1 año» / «1 año y 5 meses» — nunca redondea a años sueltos: con
+ * `Math.round(months/12)` el mes 17 salía «1 años» (ni exacto ni bien pluralizado) y el mes 5, que
+ * es "ya casi", salía «0 años». `months <= 0` es el caso del clamp «ya jubilado» (#132): `0` es un
+ * mes válido (el cruce es HOY), no la ausencia de cruce — ese caso ya se filtra antes de llamar.
+ */
 export function formatYearsEsFromMonths(months: number): string {
-  const y = Math.round(months / 12);
-  return `${new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(y)} años`;
+  if (months <= 0) return "Ya alcanzado";
+  const fmt = (n: number) =>
+    new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(n);
+  if (months < 12) {
+    return `${fmt(months)} ${months === 1 ? "mes" : "meses"}`;
+  }
+  const years = Math.floor(months / 12);
+  const remMonths = months - years * 12;
+  const yearsLabel = `${fmt(years)} ${years === 1 ? "año" : "años"}`;
+  return remMonths === 0
+    ? yearsLabel
+    : `${yearsLabel} y ${fmt(remMonths)} ${remMonths === 1 ? "mes" : "meses"}`;
 }
