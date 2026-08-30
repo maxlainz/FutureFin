@@ -265,7 +265,7 @@ Owner-confirmed rules, previously unwritten — now they ARE written:
 
 ## 4. Release discipline
 
-### 4.1 Release flow — one live branch, releases are tags (quoted from CLAUDE.md)
+### 4.1 Release flow — one live branch, releases are tags (OWNER of this ritual since the 2026-08-30 consolidation; CLAUDE.md keeps only the five-line summary and points here)
 
 `main` is the only long-lived branch: default, published, protected. Work happens on short-lived
 branches that come back through a Pull Request; **a release is a tag on `main`**, not a branch.
@@ -282,13 +282,13 @@ CHANGELOG with **no image behind any of them**; they were collapsed into a singl
 `./scripts/audit-releases.sh`, which lists sections without a tag.
 
 **`main` cannot be pushed to directly** — branch protection requires a PR with CI green. That is
-the gate; do not look for a way around it. CLAUDE.md, "Releases":
+the gate; do not look for a way around it. The canonical steps (this section is their home):
 
 > 1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`) y añadir la sección `## [X.Y.Z]` a `CHANGELOG.md`. **La sección debe existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde ahí, y el job `rust` lo comprueba con `./scripts/audit-releases.sh --version`.
 > 2. PR → CI verde → merge a `main`.
 > 3. **El merge del bump ES la publicación** (auto-tag on merge, 4.0.6): `publish-image.yml` corre en cada push a `main`; con una versión sin tag en `Cargo.toml`, ese run espera la CI verde del commit, comprueba el orden estricto, **crea el tag después** (un bump con CI rota no deja tag huérfano) y construye. Merge sin bump = no-op verde. Vías manuales que quedan como fallback/reconstrucción: `git tag vX.Y.Z && git push origin vX.Y.Z` desde `main`, o el `workflow_dispatch` con «Crear el tag sobre main» — ahora **idempotente** (tag ya creado → termina verde sin construir). Un workflow aparte NO serviría, porque un tag empujado con `GITHUB_TOKEN` no dispara `on: push: tags`.
 > 4. `publish-image.yml` construye la imagen multi-arch (~2 h) a GHCR y Docker Hub, y al terminar **crea él solo el GitHub Release** con las notas del CHANGELOG.
-> 5. **Último paso del mismo run: el add-on de Home Assistant apunta a la versión recién publicada.** Con la imagen ya verificada en el registry y el Release creado, `publish-image.yml` sube el `version:` de `addon/futurefin/config.yaml` en `main` por la **contents API** (los checkouts van con `persist-credentials: false`: no hay credencial para un `git push`). El Supervisor usa ese número como tag de imagen, así que sin este paso la tienda se queda clavada. **Requisito**: la app «GitHub Actions» debe ser *bypass actor* del ruleset «Proteger main» — si no, la API responde 403. Si el paso falla, la imagen y el Release ya están fuera y el add-on se queda **una versión por detrás**: se arregla con un PR normal que suba el `version:`. El commit lleva `[skip ci]` y no reentra (un push con `GITHUB_TOKEN` no dispara workflows).
+> 5. **Último paso del mismo run: el add-on de Home Assistant apunta a la versión recién publicada.** Con la imagen ya verificada en el registry y el Release creado, `publish-image.yml` sube el `version:` de `addon/futurefin/config.yaml` en `main` por la **contents API** (los checkouts van con `persist-credentials: false`: no hay credencial para un `git push`). El Supervisor usa ese número como tag de imagen, así que sin este paso la tienda se queda clavada. **Requisito**: la app «GitHub Actions» debe ser *bypass actor* del ruleset «Proteger main» — si no, la API lo rechaza con **409 «Repository rule violations found — Changes must be made through a pull request»** (medido en el run del build de 4.4.0, 2026-08-29, el primer release con este paso; la doc decía «403» sin haberlo visto fallar). Si el paso falla, la imagen y el Release ya están fuera y el add-on se queda **una versión por detrás**: se arregla con un PR normal que suba el `version:`. El commit lleva `[skip ci]` y no reentra (un push con `GITHUB_TOKEN` no dispara workflows).
 
 **El add-on es un segundo canal sobre la MISMA imagen** (`addon/futurefin/config.yaml` +
 `repository.yaml`): no construye nada, apunta a `maxlainz/futurefin` (Docker Hub — GHCR es privado y el Supervisor hace pull anónimo). Consecuencias de
@@ -304,8 +304,23 @@ Its merge policy: patch/minor-in-range → 5 green checks suffice; **major or 0.
 evidence bar** (release notes read from the PR body, every announced breaking change grepped in
 the repo with the output pasted as a PR comment, checks on the current SHA — no readable notes,
 no merge). Every image-affecting fix gets its own patch release («una versión, una imagen»).
-The routine's ephemeral lock branch `ops/routine-lock` and the `dependabot-mirror` issue are
-infrastructure — do not delete them by hand (CLAUDE.md § Dependencias explains both).
+The routine's two artifacts are infrastructure — **never "clean them up" by hand** (owner of this
+fact since the 2026-08-30 consolidation; it used to live in CLAUDE.md § Dependencias):
+
+- **`ops/routine-lock`**: ephemeral branch the routine uses as an anti-race lock (a burst of
+  webhooks → only one session processes). The routine's credential cannot delete refs (403), so
+  "releasing" means leaving a `lock: LIBERADO` commit at the tip; `routine-lock-janitor.yml`
+  deletes the branch when it sees it (and via `workflow_dispatch` also deletes a stale lock).
+  Seeing it alive during a pass is normal; with a `LIBERADO` tip it disappears on its own in
+  seconds. Older than ~2 h without release = stale, and the routine itself steals it. Deleting it
+  by hand mid-pass leaves two sessions writing at once.
+- **The issue labeled `dependabot-mirror`**: a mirror of the open alerts, regenerated by
+  `dependabot-alerts-mirror.yml` (the routine cannot read the alerts API from its sandbox and
+  reads this issue instead). Its STATE is part of the data and the workflow manages it — do not
+  touch it: open ⟺ there are alerts; with 0 alerts it sits **closed** with `SIN_ALERTAS: true`
+  (closed+fresh = zero; missing or `GENERADO` >36 h = broken mirror). Needs the
+  `DEPENDABOT_ALERTS_TOKEN` secret (the Actions `GITHUB_TOKEN` cannot read alerts; standing TODO:
+  replace it with a fine-grained read-only PAT).
 
 **The merge commit needs its own message.** Merging a PR from GitHub takes the subject from the PR
 title, so give the PR a title that reads a year from now. Caught the hard way on 4.0.0, back when
