@@ -134,7 +134,60 @@ realidad** o entre superficies, no error de aritmética.
 Estado 2026-08-30. «Decidida» = el owner eligió dirección (constan en el issue); «aceptada» = el
 owner decidió no actuar (consta aquí, con fecha). Cifras de escenarios SINTÉTICOS.
 
-<!-- AUDIT-ISSUES-TABLE -->
+**Resueltas en 4.5.0** (ya no son deuda; detalle en el CHANGELOG): overflow del engine tipado
+(D32-motor), resolución de cascada en jubilación con `in_retirement` (D27), orden total de activos
+(D34), parsing de umbrales de tramos (D33-tramos), fixture de paridad en tramos 27/30 % y dos
+erratas de prosa (parte de S1).
+
+### Con dirección decidida por el owner (2026-08-30) — pendientes de implementar
+
+| Divergencia | Coste (sintético) | Issue |
+|---|---|---|
+| Deuda en el objetivo: la cuota cuenta los meses que quedan de préstamo, en los 3 modos; en B/C la deuda vuelve a amortizar | hasta 3,28 M€ (+236 %) / 522 k€ / 442 k€ según pata | [#142](https://github.com/maxlainz/FutureFin/issues/142) |
+| Jubilación absorbente (latch, sin re-empleo automático) | 152-266 k€ de patrimonio fantasma (hasta 77 % del NW) | [#141](https://github.com/maxlainz/FutureFin/issues/141) |
+| Gastos indexados al IPC; ingresos planos («las subidas se pelean») | 334 k€ de gasto de jubilación no cobrado a 30 a | [#139](https://github.com/maxlainz/FutureFin/issues/139) |
+| Fiscalidad: retirada simulada grosseada + base plusvalía por fases (g, default 1,0) | 425 k€ de NW ficticio; objetivo −8/−13 % con g=0,5 | [#140](https://github.com/maxlainz/FutureFin/issues/140) |
+| Solo el patrimonio líquido decide el cruce FIRE | falso «FIRE hoy» con déficit real de 383 k€ | [#143](https://github.com/maxlainz/FutureFin/issues/143) |
+| Catálogo de amortización: default `french`, modelos honestos | ≥156 k€ por hipoteca en el default sin interés | [#144](https://github.com/maxlainz/FutureFin/issues/144) |
+| Préstamo vencido con saldo vivo: visible y marcado | +48 k€ de NW de un día para otro; Δ112 k€ a 30 a | [#145](https://github.com/maxlainz/FutureFin/issues/145) |
+| Inflación default 2,5 % + rango [−2, 50] | objetivo −64 % con el default 0 % actual | [#146](https://github.com/maxlainz/FutureFin/issues/146) |
+| Importes del presupuesto declarados «netos» en la GUI | ~103 k€ de objetivo si se teclea la pensión bruta | [#147](https://github.com/maxlainz/FutureFin/issues/147) |
+| «Próximos» con flujos recurrentes con fecha (dirección del owner) | 355 k€ de alquiler perpetuo; 607 k€ de pensión anticipada | [#148](https://github.com/maxlainz/FutureFin/issues/148) |
+| Horizonte: margen visible al final + edad límite configurable | 151-190 k€ de cola no financiada | [#149](https://github.com/maxlainz/FutureFin/issues/149) |
+| Regla remainder obligatoria (default: primer activo) | 360 k€ muertos vs ~1,22 M€ invertidos (30 a) | [#150](https://github.com/maxlainz/FutureFin/issues/150) |
+| Amortización anticipada: compensación legal + «reducir cuota» | ~400 € por operación tipo + opción legal irrepresentable | [#151](https://github.com/maxlainz/FutureFin/issues/151) |
+
+### Pendientes de decisión de arreglo (issue por divergencia)
+
+| Divergencia | Coste (sintético) | Issue |
+|---|---|---|
+| Gasto medio real: denominador con meses sin clasificar; ventanas desplazadas; euros de años distintos | 300 k€ / 180 k€ / 120 k€ | [#125](https://github.com/maxlainz/FutureFin/issues/125) |
+| El cliente recalcula gross-up/cruce/deflactor sin fixture completo | 2,86 M€ en el extremo; 5-11 meses de fecha | [#118](https://github.com/maxlainz/FutureFin/issues/118) |
+| Estados de fallo no publicados (agotamiento, amortización negativa, target ausente) | agujero subestimado ~220 k€; mes de ruina invisible | [#119](https://github.com/maxlainz/FutureFin/issues/119) |
+| Partida de gasto vencida: KPIs y target la suman, el motor la cancela | +150 k€ (+33 %) de objetivo | [#124](https://github.com/maxlainz/FutureFin/issues/124) |
+| «Autonomía: indefinida» ciega a la rentabilidad | etiqueta falsa sobre saldo que se agota en 28,6 a | [#128](https://github.com/maxlainz/FutureFin/issues/128) |
+| Tres bases de interés incompatibles (portada/Pasivos/proyección) | 83 k€ afirmados y nunca cobrados; 3 pp de brecha | [#121](https://github.com/maxlainz/FutureFin/issues/121) |
+| Campo rotulado TAE, consumido como TIN | +11 meses / +11 k€ al 20 % | [#122](https://github.com/maxlainz/FutureFin/issues/122) |
+| `contributed_capital` nunca decrece, 0 sin purchase_price | 720 k€ sin contabilizar; bloquea g de #140 | [#120](https://github.com/maxlainz/FutureFin/issues/120) |
+| Histórico de pasivos siempre francés (repayment_model no viaja al snapshot) | 6 % del principal; quiebro en «hoy» | [#129](https://github.com/maxlainz/FutureFin/issues/129) |
+| sim_kpis vs first_month_allocation: dos «cajas del mes» | 124 k€ explicados con la cifra equivocada | [#127](https://github.com/maxlainz/FutureFin/issues/127) |
+| Unidad del retorno esperado sin declarar (nominal/real, TER) | 12,3 años de retraso en el peor malentendido | [#131](https://github.com/maxlainz/FutureFin/issues/131) |
+| Planning flows: fecha pasada descartada; rampa dependiente del día | 3 k€ desaparecidos; ±29 % en la cifra del mes 1 | [#126](https://github.com/maxlainz/FutureFin/issues/126) |
+| Vista Jubilación recortada a cruce+12 | oculta el 96,7 % del plan | [#132](https://github.com/maxlainz/FutureFin/issues/132) |
+| `payment_interval_count` degrada el día ancla en meses cortos | +1 cuota (~1 k€) | [#123](https://github.com/maxlainz/FutureFin/issues/123) |
+| Histórico: item ausente de una captura cae a 0 € | desplome falso de 40 k€ | [#130](https://github.com/maxlainz/FutureFin/issues/130) |
+| Barridos: prosa contradictoria · métricas sin contrato · validaciones asimétricas · duplicados cliente sin fixture · campos muertos (ref. #96) · convenciones no declaradas | — | [#133](https://github.com/maxlainz/FutureFin/issues/133)-[#138](https://github.com/maxlainz/FutureFin/issues/138) |
+
+### Aceptadas por el owner (2026-08-30) — sin issue, deuda declarada aquí
+
+| Divergencia | Coste (sintético) | Razón de aceptación |
+|---|---|---|
+| Traspasos no conciliados cuentan como gasto (D23) | ~713 k€ en el peor escenario | La calidad del promedio depende de conciliar; no se inventa clasificación |
+| Sin rebalanceo (D12) | 1,93 M€ vs 1,15 M€ a 30 a (deriva de pesos) | Buy&hold deliberado; sin coste fiscal en España (traspasos exentos) |
+| Modo `current_income` incluye el ahorro en el objetivo (D37) | +52,6 % de objetivo | Útil para quien no ahorra mes a mes; conservador a sabiendas |
+| Regla de millares en campos % («7.125» = 7125 %) (D33-%) | proyección rechazada con 400 tipado (tras 4.5.0) | Trampa documentada; el 400 tipado de 4.5.0 la hace ruidosa |
+| Descubierto/`undrained` al 0 % (parte de D9) | agujero subestimado ~220 k€ al 18-20 % TEDR | El agujero se publica (issue #119); su coste financiero no se modela |
+| Estacionalidad del presupuesto alisada a doceavas (D25) | 0 € al horizonte; sin señal de tesorería | Presupuesto mensual por diseño |
 
 ## 5. Convenciones españolas de referencia (fuentes)
 
