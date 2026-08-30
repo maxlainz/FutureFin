@@ -269,7 +269,7 @@ Owner-confirmed rules, previously unwritten — now they ARE written:
 
 ## 4. Release discipline
 
-### 4.1 Release flow — one live branch, releases are tags (quoted from CLAUDE.md)
+### 4.1 Release flow — one live branch, releases are tags (quoted from `.claude/git-and-releases.md`)
 
 `main` is the only long-lived branch: default, published, protected. Work happens on short-lived
 branches that come back through a Pull Request; **a release is a tag on `main`**, not a branch.
@@ -286,7 +286,7 @@ CHANGELOG with **no image behind any of them**; they were collapsed into a singl
 `./scripts/audit-releases.sh`, which lists sections without a tag.
 
 **`main` cannot be pushed to directly** — branch protection requires a PR with CI green. That is
-the gate; do not look for a way around it. CLAUDE.md, "Releases":
+the gate; do not look for a way around it. `.claude/git-and-releases.md`, «Releases»:
 
 > 1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`) y añadir la sección `## [X.Y.Z]` a `CHANGELOG.md`. **La sección debe existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde ahí, y el job `rust` lo comprueba con `./scripts/audit-releases.sh --version`.
 > 2. PR → CI verde → merge a `main`.
@@ -309,7 +309,7 @@ evidence bar** (release notes read from the PR body, every announced breaking ch
 the repo with the output pasted as a PR comment, checks on the current SHA — no readable notes,
 no merge). Every image-affecting fix gets its own patch release («una versión, una imagen»).
 The routine's ephemeral lock branch `ops/routine-lock` and the `dependabot-mirror` issue are
-infrastructure — do not delete them by hand (CLAUDE.md § Dependencias explains both).
+infrastructure — do not delete them by hand (`.claude/git-and-releases.md` § Dependencias explains both).
 
 **The merge commit needs its own message.** Merging a PR from GitHub takes the subject from the PR
 title, so give the PR a title that reads a year from now. Caught the hard way on 4.0.0, back when
@@ -536,7 +536,7 @@ trusting:
 - Integration-test count: `ls apps/api/tests/*.rs | wc -l` (**62** on 2026-08-28, tren 4.4.0 completo; **43** on 2026-08-27 — las cinco altas
   de la rama del add-on son `base_path.rs`, `frame_options.rs`, `session_cookie_path.rs`,
   `sso_login.rs` y `migration_guard.rs`; **33** on 2026-08-22 — las cinco altas del tren 4.0.0 son `account_and_members.rs`, `openapi_contract.rs`, `query_param_validation.rs`, `error_codes_parity.rs` y `fixtures_shape.rs`; 28 on 2026-08-21); test-attribute count: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**375** on 2026-08-22). Totales del runner, que es lo autoritativo: `cargo test --workspace` **498**, Vitest **368** en 16 ficheros (2026-08-22)
-- MCP catalog: `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**68** on 2026-08-28, Fase 6/issue #87; **52** on 2026-08-22) — debe cuadrar con CLAUDE.md ×2, `.claude/api-routes.md` §MCP y `futurefin-mcp-parity` §5
+- MCP catalog: `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**68** on 2026-08-28, Fase 6/issue #87; **52** on 2026-08-22) — debe cuadrar con `.claude/mcp-catalog.md`, `.claude/backend-structure.md` (mapa de módulos) y `futurefin-mcp-parity` §5
 - CI actually run: `cat .github/workflows/ci.yml` (jobs: `secrets-scan` / `rust` / `web` /
   `integration` / `docker-stack`; el `main-guard` se retiró con el modelo de dos ramas) and
   `grep -n '^      - name:' .github/workflows/ci.yml` for the docker-stack scenario list.
@@ -561,7 +561,7 @@ trusting:
 - Fixture + both consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
 - Strict enum precedent: `grep -n "impl<'de> Deserialize" apps/api/src/handlers/installation.rs`
 - npm script names: `grep -n '"typecheck:web"\|"lint:web"\|"build:web"' package.json`
-- Release-flow wording drift: `grep -n 'Una sola rama viva' CLAUDE.md` (debe imprimir algo). Si
+- Release-flow wording drift: `grep -n 'Una sola rama viva' CLAUDE.md .claude/git-and-releases.md` (debe imprimir en AMBOS). Si
   reaparecen «espejo completo», «mantener `dev` al día con `main`» o `release-to-main.sh`, alguien
   resucitó el modelo de dos ramas
 - Una sola rama viva: `git ls-remote --heads origin | grep -c 'refs/heads/dev$'` debe dar **0**, y

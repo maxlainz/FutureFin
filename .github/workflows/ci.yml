@@ -173,7 +173,7 @@ jobs:
 
     services:
       postgres:
-        # Misma imagen que el `ff-test-db` local documentado en CLAUDE.md, para que
+        # Misma imagen que el `ff-test-db` local documentado en .claude/tests.md, para que
         # un fallo aquí sea reproducible en la máquina de quien manda la PR.
         image: postgres:16.4-alpine
         env:

@@ -64,9 +64,10 @@ jobs:
   #     también en tags solo duplicaría el trabajo (mismo commit, mismos tests) y
   #     dejaría el `workflow_dispatch` de reconstrucción sin cubrir.
   #   - Rama elegida: preguntar a la API por el resultado de ci.yml sobre el SHA
-  #     EXACTO al que apunta el tag. El flujo de release (CLAUDE.md § Git workflow)
-  #     hace merge completo dev→main, empuja main y después taguea, así que ese
-  #     commit siempre ha pasado por CI en main. Es una comprobación sobre un
+  #     EXACTO al que apunta el tag. El flujo de release (.claude/git-and-releases.md):
+  #     el bump entra a main por PR con CI verde y el tag se crea sobre ese commit
+  #     de main (auto-tag tras ver la CI verde, o tag manual sobre main), así que
+  #     ese commit siempre ha pasado por CI en main. Es una comprobación sobre un
   #     hecho ya ocurrido, no una carrera.
   # Espera con límite porque el tag suele empujarse segundos después del push de
   # main y la CI todavía está corriendo.

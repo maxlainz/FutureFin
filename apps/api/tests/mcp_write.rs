@@ -2348,7 +2348,7 @@ async fn every_write_tool_rejects_a_viewer_and_the_disabled_toggle() {
          Fase 6 añade create_batch, create_snapshot, update_snapshot, create_allocation_rule, \
          delete_allocation_rule, update_category, delete_category, confirm_transfer_match y \
          update_installation_settings). Si has añadido o retirado una, actualiza el contador \
-         AQUÍ, en la skill y en CLAUDE.md a la vez: {writes:?}"
+         AQUÍ, en la skill mcp-parity, en .claude/mcp-catalog.md y en .claude/backend-structure.md a la vez: {writes:?}"
     );
 
     // --- Fase 1: barrido laxo con argumentos vacíos -------------------------

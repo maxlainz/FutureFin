@@ -46,7 +46,7 @@ current drift is a duplicated or orphaned fact).
 
 | File | Owns (authoritative for) | Audience |
 |---|---|---|
-| `CLAUDE.md` | Commands (dev, test, build, deploy), architecture summary, UI conventions, git workflow/release steps, index of `.claude/*.md` | AI sessions |
+| `CLAUDE.md` | Entry point: always-on norms (issues, incoherencias, delegación), task routing (skills + reference docs), architecture summary, daily git flow, index of `.claude/*.md`. Commands live in `docs/desarrollo.md`/`docs/instalacion.md`; UI conventions in `design-system.md`; release detail in `git-and-releases.md` | AI sessions |
 | `.claude/api-routes.md` | Full route map, auth pattern, view-scoping pattern, error mapping, projection response shape/cache/density | AI sessions |
 | `.claude/mcp-catalog.md` | The MCP tool catalog: per-tool semantics, cache class, preview/confirm, listing envelopes, and `/mcp` transport (CORS, body limit, kill-switch) | AI sessions |
 | `.claude/data-model.md` | Tables, columns, invariants, `fire_settings` JSONB shape, `.ffbackup` schema notes | AI sessions |
@@ -57,6 +57,7 @@ current drift is a duplicated or orphaned fact).
 | `.claude/frontend-structure.md` | `apps/web/src/` layout, import rules, "where to add new code" table, prefetch/perf notes | AI sessions |
 | `.claude/design-system.md` | Tokens (`--ff-*`, `--proj-*`), palette rules, theme, icon set, rules for new UI | AI sessions |
 | `.claude/tests.md` | How to run/write backend integration tests + frontend Vitest, TestApp helpers, shared fixtures, CI status | AI sessions |
+| `.claude/git-and-releases.md` | One-branch model and its history, the full release ritual (auto-tag on merge, `publish-image.yml`, add-on bump), dependency-routine policy and its artifacts | AI sessions |
 | `CHANGELOG.md` | User-facing AND forensic history per release (Keep a Changelog 1.1.0 + SemVer). The project's memory of *why* | Users + future sessions |
 | `README.md` | Self-hoster quick start (Docker), update/rollback, env-var table (prod subset), image tag scheme | Self-hosters |
 | `SECURITY.md` | Supported versions, private disclosure channel, and the **honest** security posture of a self-hosted install: no TLS, no login rate limiting, open registration, open DCR, `?view=mine` is not an authorization boundary, what `.ffbackup` encryption does and does not protect. Every claim must be verified in code — the file says so itself. **The out-of-scope list is a contract**: adding a behavior there means "reporting this gets a link, not a fix" | Self-hosters + security reporters |
@@ -73,7 +74,7 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 | You changed… | Update |
 |---|---|
 | Route added/removed/renamed, auth requirement, query param | `.claude/api-routes.md` (+ `openapi.rs` schemas in code) **and the MCP parity evaluation** (futurefin-mcp-parity §1: tool, recorded omission, or n/a) |
-| MCP tool added/changed/omitted | `.claude/api-routes.md` §MCP (catalog) + CLAUDE.md counters (module map + MCP paragraph) + `.claude/tests.md` suite rows + futurefin-mcp-parity §3 register |
+| MCP tool added/changed/omitted | `.claude/mcp-catalog.md` (catalog + counters) + `.claude/backend-structure.md` (module-map counters) + `.claude/tests.md` suite rows + futurefin-mcp-parity §3 register |
 | Response/request field, serialization format (Decimal-string vs f64 boundary) | `.claude/api-routes.md`; if FIRE/projection shape: `.claude/engine.md` handler-notes section |
 | Table/column/constraint, new migration | `.claude/data-model.md` (+ CHANGELOG "Migración / compatibilidad" note if data-affecting — template §4.3) |
 | Engine input/output struct, simulation-loop step, inflation semantics | `.claude/engine.md` (+ `futurefin-fire-domain-reference` skill if FIRE math) |
@@ -84,8 +85,9 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 | Frontend module layout, new view/lib/component file | `.claude/frontend-structure.md` |
 | Test infra: TestApp helper, fixture, CI workflow, test command | `.claude/tests.md` |
 | Handler-authoring pattern itself (new mandatory step) | `.claude/backend-structure.md` §Cómo añadir un handler |
-| Dev/build/deploy command, git workflow | `CLAUDE.md` |
-| Container behavior: `Dockerfile`, `apps/api/docker-entrypoint.sh`, any `docker-compose*.yml` (embedded PG, automatic backups, shutdown, upgrade paths) | `.claude/env-and-config.md` (entrypoint vars + compose matrix) **and** `README.md` (self-hoster steps: quick start, "Actualizar", "Actualizar desde 2.x") **and** `CLAUDE.md` if a command changed **and** `CHANGELOG.md` |
+| Dev/build/deploy command | `docs/desarrollo.md` (dev + imagen local) / `docs/instalacion.md`+`docs/actualizar.md` (producción); `CLAUDE.md` solo si cambia un puntero de su §Commands |
+| Git workflow, release steps, dependency-routine policy | `.claude/git-and-releases.md` (+ el resumen de CLAUDE.md §Git workflow si cambia la esencia) |
+| Container behavior: `Dockerfile`, `apps/api/docker-entrypoint.sh`, any `docker-compose*.yml` (embedded PG, automatic backups, shutdown, upgrade paths) | `.claude/env-and-config.md` (entrypoint vars + compose matrix) **and** `README.md` (self-hoster steps: quick start, "Actualizar", "Actualizar desde 2.x") **and** `docs/desarrollo.md`/`docs/instalacion.md` if a command changed **and** `CHANGELOG.md` |
 | Anything a user or self-hoster can observe | `CHANGELOG.md` entry (under `## [Unreleased]` until release) |
 | Docker quick start, backup story, supported tags | `README.md` |
 | Any fact stated in a `.claude/skills/*/SKILL.md` | that skill, same PR (see §6) |
@@ -218,11 +220,11 @@ Model to imitate: the v1.1.0 "Migración / compatibilidad" section (allocation_r
 ## 5. Release documentation ritual
 
 The full release gate (what to test before tagging) is owned by
-`.claude/skills/futurefin-change-control/SKILL.md`. The **writing** half, from CLAUDE.md "Git
-workflow", in order:
+`.claude/skills/futurefin-change-control/SKILL.md`. The **writing** half, from
+`.claude/git-and-releases.md` §Releases, in order:
 
-1. On `dev`: move `## [Unreleased]` content into a new `## [X.Y.Z] — YYYY-MM-DD` section
-   (today's date), leaving an empty `[Unreleased]` bucket.
+1. On a short-lived branch off `main`: move `## [Unreleased]` content into a new
+   `## [X.Y.Z] — YYYY-MM-DD` section (today's date), leaving an empty `[Unreleased]` bucket.
 2. Bump `version` in `apps/api/Cargo.toml` **and** sync `Cargo.lock` (a `cargo build` regenerates
    it; committing Cargo.toml without the lock is a classic miss).
 3. Verify every entry in the new section meets the forensic bar (§3.2) and that every migration in
@@ -441,5 +443,5 @@ Re-verify with:
   `grep -n -A 9 'SETTINGS_SUBTAB_LABEL' apps/web/src/lib/navigation.ts`
 - Exemplar quotes intact: `grep -n "fix definitivo del solape" CHANGELOG.md` and
   `grep -n "Fix de deflactación del chart" CHANGELOG.md`
-- Release steps unchanged: `grep -n "El merge del bump ES la publicación" CLAUDE.md` (**la cita vieja, «Merge completo», ya no existe**: el ritual se reescribió para el auto-tag-on-merge de 4.0.6, así que el grep anterior salía vacío y se leía como «la sección desapareció»)
+- Release steps unchanged: `grep -n "El merge del bump ES la publicación" CLAUDE.md .claude/git-and-releases.md` (debe imprimir en AMBOS: el resumen de CLAUDE.md y el ritual completo, que vive en git-and-releases.md desde el reparto de 2026-08-30. **La cita vieja, «Merge completo», ya no existe**: el ritual se reescribió para el auto-tag-on-merge de 4.0.6, así que el grep anterior salía vacío y se leía como «la sección desapareció»)
 - Skill inventory for cross-refs: `ls .claude/skills/`

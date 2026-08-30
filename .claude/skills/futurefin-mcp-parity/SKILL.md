@@ -70,7 +70,7 @@ Two directions, both mandatory:
   quiet one: the feature ships, the SPA uses it, and the MCP client simply never learns it
   exists (nothing fails — `tools/list` is happily complete-looking at any size).
 - **MCP → docs/tests**: new/changed tool ⇒ frozen catalog test, annotations expectations,
-  `.claude/api-routes.md` §MCP, and the CLAUDE.md counters, same PR. The frozen-catalog test
+  `.claude/mcp-catalog.md`, and the module-map counters in `.claude/backend-structure.md`, same PR. The frozen-catalog test
   (`tools_list_returns_exactly_the_v1_catalog`) makes forgetting the test impossible; nothing
   mechanical protects the docs — that is why the recipe lists them explicitly.
 
@@ -407,9 +407,9 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
    error surfacing with the HTTP wire code; the `mcp_write_enabled` toggle cutting it live) +
    add the name to the **frozen catalog** in `mcp_http.rs::tools_list_returns_exactly_the_v1_
    catalog` (alphabetical). Read tools: byte-parity vs the GET instead of the quartet.
-8. **Docs, same PR**: `.claude/api-routes.md` §MCP (the catalog), CLAUDE.md counters (two
-   spots: module map + MCP paragraph), `.claude/tests.md` suite rows, this skill's §3 register
-   (close/open rows), CHANGELOG entry. Run §5's counters to catch what you missed.
+8. **Docs, same PR**: `.claude/mcp-catalog.md` (the catalog and its counters),
+   `.claude/backend-structure.md` (module-map counters), `.claude/tests.md` suite rows, this
+   skill's §3 register (close/open rows), CHANGELOG entry. Run §5's counters to catch what you missed.
 
 ## 5. Keeping it honest — verification and drift audit
 
@@ -445,7 +445,7 @@ enteros ese día. Antes de la Fase 6: 52/21/31/31/14/7/31/15.
 
 Invariant cross-checks: writes == `require_mcp_write` count (a write tool skipping the gate is
 a security bug); reads + writes == total; the frozen-catalog vec length == total. The doc-side
-counters (CLAUDE.md ×2, api-routes §MCP, this file) must all agree with the code counter — any
+counters (mcp-catalog.md, backend-structure.md module map, this file) must all agree with the code counter — any
 mismatch is the "3.0.0 bumped code but not the frozen counters" incident repeating
 (futurefin-docs-and-writing §7 owns that lesson).
 

@@ -143,7 +143,7 @@ separados.
 | File | Purpose |
 |------|---------|
 | `docker-compose.yml` | Producción: **un solo servicio** `futurefin` (PostgreSQL embebido, socket-only — ningún puerto de DB, ni al host ni interno). Volúmenes `pgdata` (datos, mismo nombre que 2.x) y `ffdata` (backups/estado). Healthcheck `curl /v1/ready` **sin** fallback `/dev/tcp`; `stop_grace_period: 60s`. |
-| `docker-compose.local.yml` | Override para usar imagen construida localmente (`futurefin-local:dev`). `pull_policy: never` en el servicio `futurefin`. Ver el bloque "Test local con Docker Desktop" del CLAUDE.md. |
+| `docker-compose.local.yml` | Override para usar imagen construida localmente (`futurefin-local:dev`). `pull_policy: never` en el servicio `futurefin`. Ver `docs/desarrollo.md` §Construir la imagen en local. |
 | `docker-compose.dev.yml` | **Compose autónomo** (no override) para split-dev (`cargo run` + `vite`): project `futurefin-dev`, servicio `db` en `127.0.0.1:5432`, volumen `devdata` (el fichero incluye cómo reutilizar el volumen antiguo `futurefin_pgdata`). Usar así: `docker compose -f docker-compose.dev.yml up -d`. **No usar en producción.** Sustituye al antiguo `docker-compose.split-dev.yml`. |
 
 ## Secrets de GitHub Actions (no son env vars del binario)

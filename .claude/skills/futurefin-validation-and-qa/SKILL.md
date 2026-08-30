@@ -375,8 +375,8 @@ npm run lint:web                         # eslint
 npm run typecheck:web                    # (CI also runs this, run anyway — it's fast)
 ```
 
-Before tagging a release, additionally run the full local Docker-stack test (CLAUDE.md § "Test
-local con Docker Desktop"). Release gates live in
+Before tagging a release, additionally run the full local Docker-stack test (`docs/desarrollo.md`
+§ "Construir la imagen en local"). Release gates live in
 `.claude/skills/futurefin-change-control/SKILL.md`.
 
 **If your change touches `apps/api/docker-entrypoint.sh`, `apps/api/Dockerfile`,

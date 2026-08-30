@@ -208,7 +208,9 @@ pero no toca `.claude/api-routes.md` está incompleto.
 | Tokens, componentes, convenciones visuales | `.claude/design-system.md` |
 | Estructura de `apps/web/src/` | `.claude/frontend-structure.md` |
 | Infraestructura de tests | `.claude/tests.md` |
-| Comandos, flujo de git, arquitectura | `CLAUDE.md` |
+| Comandos de dev/build/producción | `docs/desarrollo.md` / `docs/instalacion.md` |
+| Flujo de git, releases, rutina de dependencias | `.claude/git-and-releases.md` |
+| Arquitectura (resumen) y normas de sesión | `CLAUDE.md` |
 | Cualquier cosa que un usuario o quien autoaloja pueda notar | `CHANGELOG.md`, bajo `## [Unreleased]` |
 
 El CHANGELOG de este proyecto es **forense**: para un fix, la entrada tiene que dejar reconstruir
