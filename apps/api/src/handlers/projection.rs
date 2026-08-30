@@ -356,6 +356,27 @@ pub struct ProjectionSeriesResponse {
     /// hay posición equivalente porque la cifra no se lee de la serie.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compound_outpaces_true_savings_month_index: Option<u32>,
+    /// Primer mes cuyo déficit de caja iguala o supera TODO lo drenable (`surplus_cash` + todos
+    /// los activos): la cartera se vacía ese mes y desde el siguiente el descubierto se acumula
+    /// restando del patrimonio. Número de MES (misma base que `points[].month_index`), nunca una
+    /// posición de array. `null` explícito = no se agota dentro del horizonte — no «no
+    /// calculado». (#119)
+    pub assets_depleted_month_index: Option<u32>,
+    /// Déficit acumulado NO cubierto al final del horizonte, en euros. `"0.0000"` significa cero
+    /// euros descubiertos, no «no aplica». Ya se restaba de `net_worth`; ahora se declara. (#119)
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub uncovered_deficit_total: Decimal,
+    /// Pasivos cuya cuota no cubre el devengo: la deuda CRECE mes a mes (amortización negativa).
+    /// Vacío = ninguno. Deliberadamente más estrecho que el `payment_does_not_reduce_principal`
+    /// del calendario: un `interest_only` congela el principal y NO aparece aquí — esa
+    /// distinción es el valor del campo. (#119)
+    pub liabilities_negative_amortization: Vec<LiabilityNegativeAmortization>,
+    /// Por qué NO hay objetivo FIRE (`manual_amount_missing` | `net_need_not_positive` |
+    /// `swr_not_positive` — este último es también el caso `swr_pct = 0`). `null` ⟺ sí lo hay.
+    /// Mismo campo y literales que `simulate_projection`: hasta #119 la superficie HTTP lo
+    /// descartaba y la SPA no podía explicar un objetivo ausente. (#119)
+    pub fire_target_absent_reason: Option<&'static str>,
     // Los cuatro campos de jubilación viajan como `null` EXPLÍCITO, sin `skip_serializing_if`.
     //
     // Con `skip` el campo simplemente desaparecía cuando no había cruce, así que un consumidor no
@@ -451,6 +472,27 @@ pub struct ProjectionMilestone {
     pub target: Decimal,
     pub reached_month_index: u32,
     pub reached_date_ymd: String,
+}
+
+/// Un pasivo en amortización NEGATIVA: su cuota no cubre el devengo y la deuda crece mes a mes
+/// (#119). El predicado es «algún mes con `principal_repaid < 0`» del calendario canónico —
+/// deliberadamente más estrecho que `payment_does_not_reduce_principal`, que también atrapa a
+/// `interest_only` (principal congelado, deuda que NO crece).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct LiabilityNegativeAmortization {
+    #[schema(value_type = String, format = "uuid")]
+    pub liability_id: Uuid,
+    pub label: String,
+    /// Saldo de partida (hoy), en euros.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub opening_principal: Decimal,
+    /// Saldo al final del horizonte simulado — mayor que el de partida: eso ES el hallazgo.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub final_principal: Decimal,
+    /// Meses simulados para `final_principal` (el horizonte de esta respuesta).
+    pub horizon_months: u32,
 }
 
 #[derive(Debug, FromRow)]
@@ -1853,12 +1895,12 @@ pub async fn compute_projection_series_response(
         monthly_net_regular: monthly_delta_assumption,
         allocation_rule_ids: _,
         asset_id_name,
-        liability_id_label: _,
+        liability_id_label,
         planning_rows,
         effective_savings_source,
         savings_income_basis,
         savings_expense_basis,
-        fire_target_absent_reason: _,
+        fire_target_absent_reason,
         debt_service_monthly: _,
         debt_service_absent_reason: _,
     } = built;
@@ -1876,14 +1918,47 @@ pub async fn compute_projection_series_response(
     let marker_input = projection_input.clone();
     let assumption = monthly_delta_assumption;
     let (main_join, marker_join) = tokio::join!(
-        crate::heavy::run_projection_sim("projection", move || project_net_worth_series(
-            &main_input
-        )),
+        crate::heavy::run_projection_sim("projection", move || {
+            let output = project_net_worth_series(&main_input)?;
+            // #119: amortización negativa por pasivo, con la ÚNICA recurrencia del crate
+            // (liability_amortization_schedule) — nunca comparando cierres del bucle, que ya
+            // llevan restada la amortización extra what-if. `Some((opening, final))` ⟺ algún
+            // mes con `principal_repaid < 0`. Corre dentro del mismo permiso de CPU.
+            let neg_am: Vec<Option<(Decimal, Decimal)>> = main_input
+                .liabilities
+                .iter()
+                .map(|l| {
+                    let s = futurefin_engine::liability_amortization_schedule(
+                        l,
+                        main_input.ref_date,
+                        main_input.horizon_months,
+                    );
+                    s.months
+                        .iter()
+                        .any(|m| m.principal_repaid < Decimal::ZERO)
+                        .then_some((s.opening_principal, s.final_principal))
+                })
+                .collect();
+            Ok::<_, futurefin_engine::EngineError>((output, neg_am))
+        }),
         crate::heavy::run_projection_sim("compound marker", move || {
             compound_outpaces_true_savings_month(&marker_input, assumption)
         }),
     );
-    let output = main_join?.map_err(map_engine_err)?;
+    let (output, negative_amortization_flags) = main_join?.map_err(map_engine_err)?;
+    let liabilities_negative_amortization: Vec<LiabilityNegativeAmortization> = liability_id_label
+        .iter()
+        .zip(negative_amortization_flags.iter())
+        .filter_map(|((id, label), flag)| {
+            flag.map(|(opening, final_p)| LiabilityNegativeAmortization {
+                liability_id: *id,
+                label: label.clone(),
+                opening_principal: money_out(opening),
+                final_principal: money_out(final_p),
+                horizon_months: months,
+            })
+        })
+        .collect();
     let compound_outpaces_true_savings_month_index = marker_join?.map_err(map_engine_err)?;
 
     let starting_net_worth = output
@@ -2075,6 +2150,10 @@ pub async fn compute_projection_series_response(
         savings_income_basis,
         savings_expense_basis,
         deflation_annual_inflation_percent: money_out(inflation_annual_percent),
+        assets_depleted_month_index: output.assets_depleted_month_index,
+        uncovered_deficit_total: money_out(output.uncovered_deficit_total),
+        liabilities_negative_amortization,
+        fire_target_absent_reason,
     })
 }
 
@@ -2138,6 +2217,11 @@ pub(crate) struct SimKpis {
     /// Mes del cruce con el target FIRE (None = no se alcanza en el horizonte). Es la clave para
     /// indexar las series; la lectura humana son los dos campos siguientes.
     pub jubilacion_month_index: Option<u32>,
+    /// Primer mes en que la cartera se vacía del todo (misma definición y motor que el campo
+    /// homónimo de `/v1/projection/series`, #119). `null` = no se agota en el horizonte. Es la
+    /// respuesta a «si gasto X más, ¿cuándo me quedo sin nada?» — la pregunta que más justifica
+    /// un what-if.
+    pub assets_depleted_month_index: Option<u32>,
     /// Fecha civil del cruce (`YYYY-MM-DD`) = `anchor_date_ymd` + el índice, conservando el día
     /// del ancla con recorte a fin de mes. `null` ⟺ no hay cruce.
     /// Sin `skip_serializing_if`: su hermano `jubilacion_month_index` ya iba explícito y estos dos
@@ -2288,6 +2372,10 @@ pub(crate) struct SimKpis {
 pub(crate) struct SimDeltas {
     /// `scenario − baseline` en meses; None si alguno de los dos lados no alcanza el target.
     pub jubilacion_months_delta: Option<i64>,
+    /// `scenario − baseline` del mes de agotamiento; None si alguno de los dos lados no se agota
+    /// dentro del horizonte (misma regla que `jubilacion_months_delta`). Positivo = el escenario
+    /// aguanta MÁS meses. (#119)
+    pub assets_depleted_months_delta: Option<i64>,
     #[serde(with = "rust_decimal::serde::str")]
     pub final_net_worth_delta: Decimal,
     /// El mismo delta en euros de hoy — **solo cuando las dos inflaciones coinciden**. Cada lado se
@@ -2484,6 +2572,7 @@ fn sim_kpis(
 
     SimKpis {
         jubilacion_month_index,
+        assets_depleted_month_index: output.assets_depleted_month_index,
         jubilacion_date_ymd,
         jubilacion_age,
         final_net_worth: money_out(final_net_worth),
@@ -2938,6 +3027,13 @@ pub(crate) async fn simulate_projection_core(
     let deltas = SimDeltas {
         jubilacion_months_delta: match (baseline.jubilacion_month_index, scenario.jubilacion_month_index)
         {
+            (Some(b), Some(s)) => Some(s as i64 - b as i64),
+            _ => None,
+        },
+        assets_depleted_months_delta: match (
+            baseline.assets_depleted_month_index,
+            scenario.assets_depleted_month_index,
+        ) {
             (Some(b), Some(s)) => Some(s as i64 - b as i64),
             _ => None,
         },

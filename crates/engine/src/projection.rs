@@ -539,6 +539,16 @@ pub struct ProjectionOutput {
     /// Length == `assets.len()`; inner length == `horizon_months + 1` (months 0..=horizon).
     /// Nominal, igual que `net_worth`.
     pub per_asset_series: Vec<Vec<Decimal>>,
+    /// Primer mes (1-based, misma base que el bucle) cuyo déficit de caja iguala o supera TODO
+    /// lo drenable (`surplus_cash` + todos los activos): la cartera se vacía ese mes y desde el
+    /// siguiente el descubierto se acumula. `None` = no se agota dentro del horizonte — no es
+    /// «no calculado». La definición vive en el bucle (caso exacto con `>=`, no «primer mes con
+    /// descubierto», que daría el mes siguiente al vaciado). Issue #119.
+    pub assets_depleted_month_index: Option<u32>,
+    /// Déficit acumulado NO cubierto al final del horizonte (= `undrained_cumulative`). `0` es
+    /// cero euros descubiertos, no «no aplica». Ya se restaba del patrimonio publicado; ahora
+    /// además se declara. Issue #119.
+    pub uncovered_deficit_total: Decimal,
 }
 
 /// Primero-de-mes de una fecha (día 1 del mismo mes). Compartido con `history.rs`.
@@ -1120,6 +1130,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
     let mut contributed_cumulative = initial_contributed_basis;
     let mut undrained_cumulative = Decimal::ZERO;
+    let mut assets_depleted_month_index: Option<u32> = None;
     // Monthly savings not routed when remainder weights sum to zero.
     let mut surplus_cash = Decimal::ZERO;
 
@@ -1208,6 +1219,22 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
         if net_cash_month <= Decimal::ZERO {
             let mut need = -net_cash_month;
+            // Mes de agotamiento (#119): el primer mes cuyo déficit iguala o supera TODO lo
+            // drenable (surplus_cash + todos los activos — el drenaje continúa sobre los
+            // ilíquidos). En el caso exacto (need == available) la cartera se VACÍA este mes y
+            // el descubierto empieza el siguiente: por eso el predicado es `>=` y no «primer
+            // mes con undrained > 0», que daría el mes siguiente al vaciado. 200.000 € al 0 %
+            // gastando 2.000 €/mes ⇒ mes 100, y NW(360) = −520.000 solo cuadra así.
+            if need > Decimal::ZERO && assets_depleted_month_index.is_none() {
+                let drainable: Decimal = surplus_cash
+                    + values
+                        .iter()
+                        .map(|v| (*v).max(Decimal::ZERO))
+                        .sum::<Decimal>();
+                if need >= drainable {
+                    assets_depleted_month_index = Some(k);
+                }
+            }
             let from_surplus = surplus_cash.min(need);
             surplus_cash -= from_surplus;
             need -= from_surplus;
@@ -1270,6 +1297,8 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         net_worth: net_series,
         contributed_capital: contrib_series,
         per_asset_series,
+        assets_depleted_month_index,
+        uncovered_deficit_total: undrained_cumulative,
     })
 }
 
@@ -1470,6 +1499,33 @@ mod tests {
         assert_eq!(trace[0].skipped_reason, Some(AllocationSkipReason::NoCash));
         assert_eq!(trace[0].cap_ceiling, Some(Decimal::from(9_000)));
         assert_eq!(trace[0].cap_room, Some(Decimal::from(8_296)));
+    }
+
+    /// #119: el mes de agotamiento con números a mano. 30.000 € líquidos al 0 %, ingreso 1.000,
+    /// gasto 2.500 ⇒ déficit 1.500/mes. Tras el mes 19 quedan 30.000 − 19×1.500 = 1.500 €; en el
+    /// mes 20 need (1.500) == drenable (1.500) ⇒ la cartera se VACÍA en el 20 (caso exacto, por
+    /// eso `>=`), el descubierto empieza en el 21, y al mes 60 acumula 40 × 1.500 = 60.000 €
+    /// (NW(60) = −60.000, ya pineado por el arnés audit_dump como P1).
+    #[test]
+    fn depletion_month_and_uncovered_deficit_are_reported() {
+        let a = mk_asset(1, Decimal::from(30_000), true, None);
+        let inp = base_input(60, Decimal::from(1_000), Decimal::from(2_500), vec![a], vec![]);
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.assets_depleted_month_index, Some(20));
+        assert_eq!(out.uncovered_deficit_total, Decimal::from(60_000));
+        assert_eq!(out.net_worth[60], Decimal::from(-60_000));
+
+        // Control: con horizonte 19 no llega a agotarse — `None` significa «no en el horizonte».
+        let corto = base_input(
+            19,
+            Decimal::from(1_000),
+            Decimal::from(2_500),
+            vec![mk_asset(1, Decimal::from(30_000), true, None)],
+            vec![],
+        );
+        let out = project_net_worth_series(&corto).unwrap();
+        assert_eq!(out.assets_depleted_month_index, None);
+        assert_eq!(out.uncovered_deficit_total, Decimal::ZERO);
     }
 
     #[test]
