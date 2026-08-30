@@ -326,6 +326,28 @@
    },
    "expected_target_nw": 8281428.571,
    "_calc_note": "tramo abierto 30%: tax(g)=71880+0.30(g−300000) ⇒ g=(250000−18120)/0.7=331257.14 (>300k ✓; tax=81257.14, neto=250000 ✓) → /0.04 = 8281428.57. La forma cerrada del servidor en este tramo se verificó además en vivo (net 240000 → gross 316971.4286)."
+  },
+  {
+   "name": "manual mode, single open 80% bracket — guards the closed form against ceiling saturation (Ola 2, #118)",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "120000",
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": null,
+      "pct": "80"
+     }
+    ]
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 17142857.143,
+   "_calc_note": "tramo único abierto al 80 %: g = 120000/(1−0.80) = 600000 → /0.035 = 17142857.14. La bisección antigua del cliente saturaba en hi = max(4·net, net+200000) = 480000 → 13714285.71 (Δ 3.43 M€): este caso va ROJO con bisección y VERDE con la forma cerrada — es la red que los casos 8-9 no daban."
   }
  ]
 }
