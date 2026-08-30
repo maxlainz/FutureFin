@@ -9,7 +9,11 @@ name: Publish Docker image
 #   vX.Y.Z  →  :1.0.0  :1.0  :1  :latest
 #
 # Required secrets:
-#   (none)              — GHCR uses GITHUB_TOKEN automatically
+#   ADDON_BUMP_APP_ID          — id de la GitHub App futurefin-release-bot (4770261)
+#   ADDON_BUMP_APP_PRIVATE_KEY — su clave privada (rotable desde la página de la App)
+#     → firman el bump del add-on en main; la App es bypass actor del ruleset «Proteger
+#       main». Sin ellos, el último paso falla y el add-on queda una versión por detrás
+#       (la imagen y el Release salen igual). Runbook: futurefin-run-and-operate §canal add-on.
 #   DOCKERHUB_USERNAME  — Docker Hub user or org (optional)
 #   DOCKERHUB_TOKEN     — Docker Hub access token  (optional)
 #
