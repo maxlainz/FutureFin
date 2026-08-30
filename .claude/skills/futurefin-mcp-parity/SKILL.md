@@ -47,7 +47,7 @@ la HTTP API, no el inventario de tools. Previamente 2026-08-22, tren 4.0.0 (52);
   `.claude/skills/futurefin-change-control/SKILL.md`. Its "API contract" class routes to this
   skill; this skill never overrides its gates.
 - The whole-handler authoring recipe (routes, openapi, migration, test) →
-  `.claude/adding-handler.md` (its step 7 points here).
+  `.claude/backend-structure.md` §Cómo añadir un handler (its step 7 points here).
 
 ## 1. The parity contract
 
@@ -75,8 +75,8 @@ Two directions, both mandatory:
   mechanical protects the docs — that is why the recipe lists them explicitly.
 
 **Who enforces it**: `futurefin-change-control` §1, class "API contract", carries this
-evaluation as a gate, and `.claude/adding-handler.md` step 7 asks the question at authoring
-time. If you arrive here from either, do the evaluation, record the outcome (PR description or
+evaluation as a gate, and `.claude/backend-structure.md` §Cómo añadir un handler step 7 asks the
+question at authoring time. If you arrive here from either, do the evaluation, record the outcome (PR description or
 CHANGELOG entry: "MCP: tool X added" / "MCP: omisión deliberada, ver skill §3"), and go back.
 
 ## 2. Decision rubric — is a tool pertinent?
@@ -731,7 +731,7 @@ Re-verify before trusting:
 - §3.2 backlog **cerrado** desde la Fase 6 — la comprobación se invierte:
   `grep -c 'name = "create_snapshot"\|name = "update_snapshot"\|name = "create_allocation_rule"\|name = "delete_allocation_rule"\|name = "update_category"\|name = "delete_category"\|name = "update_installation_settings"' apps/api/src/mcp/server.rs`
   → **7** (mientras las filas estaban abiertas daba 0).
-- Choke points still route here: `grep -n 'mcp-parity' CLAUDE.md .claude/adding-handler.md .claude/skills/futurefin-change-control/SKILL.md .claude/skills/futurefin-docs-and-writing/SKILL.md .claude/api-routes.md`
+- Choke points still route here: `grep -n 'mcp-parity' CLAUDE.md .claude/backend-structure.md .claude/skills/futurefin-change-control/SKILL.md .claude/skills/futurefin-docs-and-writing/SKILL.md .claude/api-routes.md`
 - Recipe step 4's derivation still holds: read the `is_write`/`expect_destructive`/`expect_idempotent`
   match arms in `mcp_http.rs::tools_list_exposes_annotations_on_every_tool`.
 - Context budget (Fase 5) still respected — the test fails only if the total goes UP, never down:
