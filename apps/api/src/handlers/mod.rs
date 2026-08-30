@@ -74,3 +74,43 @@ pub(crate) fn validate_window_months(
     }
     Ok(())
 }
+
+/// Tri-estado de un campo de PATCH: **clave ausente** (`None`), **`null` explícito**
+/// (`Some(None)`) y **valor** (`Some(Some(v))`). Es la única forma de que un cuerpo de PATCH pueda
+/// decir «borra este campo» sin inventar un flag paralelo.
+///
+/// **El gotcha de serde que hace falta conocer**: la implementación por defecto de `Option<T>`
+/// **colapsa las dos primeras en `None`** — un `null` presente es indistinguible de no mandar la
+/// clave. Declarar el campo `Option<Option<T>>` con solo `#[serde(default)]` NO lo arregla: serde
+/// sigue resolviendo el `Option` externo con esa misma implementación, el `null` sigue cayendo en
+/// `None`, y la rama `Some(None)` queda como **código muerto que compila y se lee como
+/// implementado**. Solo este `deserialize_with` lleva el `null` al `Some(None)`, porque
+/// deserializa el `Option` **interno** y envuelve el resultado en `Some` incondicionalmente: si
+/// serde llama a esta función es que la clave estaba.
+///
+/// INCIDENTE (issue #95, 4.4.2): dos campos prometían en su doc-comment —que viaja a OpenAPI, así
+/// que es contrato **publicado**— que `null` borra el valor almacenado
+/// (`PatchAssetBody.purchase_price`, `PatchInstallationBody.fire_settings`). Los dos tenían la
+/// rama de borrado escrita y ninguno podía alcanzarla; peor, el `null` caía en el guard
+/// `patch_empty` y la respuesta era un 400 diciendo que no habías mandado ningún campo, justo
+/// cuando habías mandado el único que la doc documentaba para borrar. `fire_settings` ya estaba
+/// tecleado `Option<Option<…>>` desde el principio: al autor solo le faltó este atributo, y nada
+/// —ni el compilador, ni un test, ni el schema— avisó en años.
+///
+/// Doctrina **D14-adyacente**: el contrato lo fija el tipo, no la prosa que lo acompaña. Úsalo
+/// SIEMPRE en pareja, `#[serde(default, deserialize_with = "…")]` — el `default` es lo que produce
+/// el `None` de «clave ausente», y sin él un PATCH que omite el campo falla en vez de conservarlo.
+/// Y recuerda que el guard `patch_empty` del handler debe seguir usando `.is_none()` sobre el
+/// `Option` **externo**: `Some(None)` es un campo presente y un PATCH cuyo único contenido es
+/// `{"campo": null}` es válido y borra.
+///
+/// Nota de superficie: MCP **no** converge aquí. Sus tools conservan los flags `clear_*`
+/// (`clear_purchase_price`, `clear_cap`, `clear_due_date`) porque el tri-estado no es expresable
+/// en JSON Schema — doctrina de la Fase 2, intacta.
+pub(crate) fn deserialize_double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(de).map(Some)
+}

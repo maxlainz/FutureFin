@@ -132,10 +132,21 @@ pub struct PatchAssetBody {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub current_value: Option<Decimal>,
-    /// Omitir sin cambio; `null` borra el precio de compra.
-    #[serde(default)]
-    #[schema(value_type = Option<Object>, nullable = true)]
-    pub purchase_price: Option<serde_json::Value>,
+    /// Omitir sin cambio; `null` borra el precio de compra (el activo vuelve a «sin coste
+    /// declarado»: `unrealized_pnl` pasa a `null` con `no_purchase_price`).
+    ///
+    /// Tri-estado real desde 4.4.2 (issue #95): hasta entonces serde colapsaba el `null` presente
+    /// con la clave ausente y borrar era **imposible por HTTP** — salía 400 `patch_empty`.
+    ///
+    /// El tipo interno sigue siendo `Value` (no `Decimal`) porque el runtime acepta el string
+    /// decimal **y** un número JSON, y el error de un decimal mal formado es un 400
+    /// `decimal_invalid` del handler, no el 422 del extractor. El schema declara `String`: es la
+    /// forma documentada de todo importe en esta API (D4) y la única que manda la SPA — hasta
+    /// 4.4.2 declaraba `Object`, así que un validador OpenAPI rechazaba `"1200"`, el único valor
+    /// que este campo acepta de verdad.
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
+    #[schema(value_type = Option<String>, nullable = true)]
+    pub purchase_price: Option<Option<serde_json::Value>>,
     pub is_liquid: Option<bool>,
     #[serde(default)]
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -200,17 +211,26 @@ fn assert_non_negative(d: Decimal, field: &'static str) -> Result<(), ApiError> 
 }
 
 /// PATCH: clave ausente → conservar `current`; `null` JSON → `None` en BD; valor → sustituir.
+///
+/// Las tres ramas son alcanzables desde 4.4.2 (issue #95), y lo garantiza el **tipo** del campo
+/// (`Option<Option<…>>` + `deserialize_double_option`), no este `match`. Antes el `null` llegaba
+/// aquí como `None` —indistinguible de omitir— y la rama de borrado era código muerto.
+///
+/// El `if v.is_null()` que vivía dentro de la rama de valor **se retiró en el mismo cambio**: con
+/// el tri-estado en el tipo, ni el cable ni las tools MCP (que ahora construyen `Some(None)`)
+/// pueden producir un `Some(Some(Value::Null))`, así que conservarlo habría sido sustituir una
+/// rama inalcanzable por otra — el bug exacto de este issue, reencarnado. Si alguna vez llega,
+/// sale por `decimal_invalid`: un 400 explícito es mejor desenlace para lo imposible que un
+/// borrado silencioso.
 fn merge_optional_decimal_patch(
-    patch: &Option<serde_json::Value>,
+    patch: &Option<Option<serde_json::Value>>,
     current: Option<Decimal>,
     field: &'static str,
 ) -> Result<Option<Decimal>, ApiError> {
     match patch {
         None => Ok(current),
-        Some(v) => {
-            if v.is_null() {
-                return Ok(None);
-            }
+        Some(None) => Ok(None),
+        Some(Some(v)) => {
             let d: Decimal = if let serde_json::Value::String(s) = v {
                 s.trim().parse().map_err(|_| {
                     ApiError::BadRequest(format!("decimal_invalid: {field} must be a valid decimal string"))
@@ -582,6 +602,10 @@ pub(crate) async fn patch_asset_core(
     body: PatchAssetBody,
 ) -> Result<AssetResponse, ApiError> {
     assert_return_percent(body.expected_annual_return_percent)?;
+    // `purchase_price` es tri-estado: `.is_none()` mira el `Option` EXTERNO, así que
+    // `{"purchase_price": null}` (= `Some(None)`) cuenta como campo presente y no cae aquí — es un
+    // PATCH válido que borra. Antes de 4.4.2 (issue #95) sí caía, y el 400 decía justo lo
+    // contrario de lo que había pasado.
     if body.category_id.is_none()
         && body.name.is_none()
         && body.current_value.is_none()
