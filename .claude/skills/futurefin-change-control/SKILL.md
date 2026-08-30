@@ -76,7 +76,8 @@ simulates in nominal euros; only the FIRE target grows with inflation (v1.2.0 mo
 
 Classify every change into the FIRST matching row (a change may hit several rows — apply the
 union of gates). "Integration tests" means `TEST_DATABASE_URL=… cargo test --workspace` against
-a real Postgres (Section 6); they are **not** run in CI, so running them locally is YOUR gate.
+a real Postgres (Section 6); since 4.0.0 CI runs them too (job `integration`), but run them
+locally FIRST — the feedback loop is minutes shorter and CI is not a debugger.
 
 | Class | Examples | Mandatory gates |
 |---|---|---|
@@ -106,8 +107,10 @@ CI (`.github/workflows/ci.yml`, runs on push/PR to `main`) covers **five** jobs
   empty volume (both must exit non-zero, print the migration instructions, and leave the volume
   untouched). Plus **pg_upgrade 15→16** verified by row census.
 
-CI does **not** run: Postgres integration tests, `npm run lint:web`, or frontend Vitest. Those
-are local gates you must run yourself (Section 6).
+Since 4.0.0 CI runs the Postgres integration suite (job `integration`), `lint:web` and Vitest
+(job `web`) — `grep -n 'TEST_DATABASE_URL\|lint:web' .github/workflows/ci.yml` must print.
+What CI still does NOT cover: the visual light/dark verification (4.3) and the local
+Docker-stack drills before tagging (4.2). Run everything locally first regardless (Section 6).
 
 ## 2. Non-negotiables (each with rationale and incident)
 

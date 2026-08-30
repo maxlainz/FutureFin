@@ -44,6 +44,7 @@ requiere ninguna variable** (`docker compose up -d` funciona con `.env` vacío o
 | `POSTGRES_USER` / `POSTGRES_DB` | `futurefin` | Compat con instalaciones 2.x personalizadas. |
 | `POSTGRES_PASSWORD` | — | **Ya no es obligatoria** (socket local, auth trust). Si viene, se aplica al rol y nada más. |
 | `PGDATA` | `/var/lib/postgresql/data` | Avanzada; cambiarla rompe la compat con volúmenes 2.x. **Bajo Home Assistant el entrypoint la pisa** con `/data/pgdata` (ver §Modo add-on). |
+| `PG_MAJOR` | `16` | Major de PostgreSQL que arranca el entrypoint (resuelve `/usr/lib/postgresql/$PG_MAJOR/bin` y gobierna el auto-`pg_upgrade`). **No la toques**: la imagen solo empaqueta los binarios 15 y 16, y apuntar a un major no empaquetado aborta el arranque con error explícito en `maybe_pg_upgrade`. Documentada porque es un override real (`${PG_MAJOR:-16}`, `docker-entrypoint.sh`), no una constante. |
 
 ### Modo add-on de Home Assistant (entrypoint)
 

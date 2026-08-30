@@ -324,8 +324,12 @@ average) **must** invalidate the projection cache — via
 `projection_savings_source(pool, iid)`, checks `uses_transactions()`, and only then calls
 `refresh_projection_after_mutation`. It is **best-effort post-commit**: the write is already persisted, so
 a failing `savings_source` SELECT is logged and swallowed — it must never turn a successful mutation into
-a 5xx (a retry could double-insert). `rules.rs`, previews, and deleting a recurring rule never invalidate
-(the set is unchanged). This is a **superseding decision, not a contradiction**: the mode toggle is
+a 5xx (a retry could double-insert). `rules.rs` and previews never invalidate (the set is unchanged).
+**Deleting a recurring rule DOES invalidate (COND) since the 4.0.0 correction**: the set is unchanged
+but its CLASSIFICATION is not — `ON DELETE SET NULL` turns already-materialized instances into REAL
+movements, which can activate a month the average ignored entirely (`delete_recurring_rule_core` used
+to take a bare `&PgPool` and was structurally unable to invalidate; it now takes `&Arc<AppState>` —
+see api-routes.md §Transactions «Corrección 4.0.0»). This is a **superseding decision, not a contradiction**: the mode toggle is
 precisely what turns display-only history into a real engine input, so the invalidation must follow the
 mode. Still no warm-up after mutation (D7 / failure-archaeology §2.7): B/C invalidation is delete-only.
 Regression for **all three** modes (A = no mutation invalidates; B and C = each invalidates; A↔B/C
@@ -942,8 +946,8 @@ four migrations under `apps/api/migrations/20260828*.sql` and the Fase 3 diff of
 included) still said `?months=` was *clamped* to 12–840 — it has been a **rejection**
 (400 `months_out_of_range`) since 4.4.0, and the doc lagged for a while. Re-verify volatile claims with:
 
-- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md` (4.2.1 on
-  2026-08-27; 3.1.0 on 2026-08-17).
+- Version: `grep -n '^version' apps/api/Cargo.toml` and top of `CHANGELOG.md` (4.4.0 on
+  2026-08-30; 4.2.1 on 2026-08-27; 3.1.0 on 2026-08-17).
 - Migration count: `ls apps/api/migrations/*.sql | wc -l` (49 on 2026-08-28, Fase 3/issue #84; 44 on 2026-08-27; 36 on 2026-08-17; 34 on 2026-08-16; 33 on 2026-07-07; 32 on 2026-07-06; 31 on 2026-07-02).
 - Engine purity deps (I8): `grep -E "tokio|sqlx|reqwest|axum" crates/engine/Cargo.toml` → empty.
 - Horizon rule (D11): `grep -n "fn validate_months_override\|months_out_of_range\|LIFESPAN_AGE\|FALLBACK_YEARS\|fallback_no_demographics" apps/api/src/handlers/projection.rs`. **`?months=` is a REJECTION since 4.4.0, not a clamp** — `clamp(12, 840)` as a live pattern now finds only the doc comment noting it was retired.

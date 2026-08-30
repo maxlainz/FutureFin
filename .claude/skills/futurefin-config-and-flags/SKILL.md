@@ -629,7 +629,9 @@ auditing for drift (all confirmed working on 2026-08-28):
 - **Add-on options → env (§1.2.1)**:
   `grep -n "options.json\|ha_opt\|HA_ADDON\|PGDATA=/data/pgdata\|FUTUREFIN_STATE_DIR=/data/state" apps/api/docker-entrypoint.sh`
   (the block is the first ~45 lines, before the Configuración section);
-  `grep -n -A12 "^options:" addon/futurefin/config.yaml` (the five keys and their schema);
+  `grep -n -A12 "^options:" addon/futurefin/config.yaml` (the option keys and their schema — count
+  them from the output, don't trust a written number: «the five keys» sat here while `ha_sso_url`
+  made them six);
   `grep -n "is_persisted" -B10 apps/api/docker-entrypoint.sh` (ancestor walk that stops before `/`);
   `grep -n "jq" apps/api/Dockerfile` (the runtime dependency this mapping added)
 

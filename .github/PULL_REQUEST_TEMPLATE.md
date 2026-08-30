@@ -21,7 +21,9 @@ Qué demuestra que esto hace lo que dice:
 
 ## Puertas ejecutadas en local
 
-CI no ejecuta los tests de integración con PostgreSQL, ni `lint:web`, ni Vitest.
+CI también las corre desde 4.0.0, pero se ejecutan en local primero: el bucle es más corto y CI
+no es un depurador. Lo que CI NO cubre: la verificación visual claro/oscuro y los drills de
+Docker-stack previos a un release.
 
 - [ ] `cargo build -p futurefin-api --locked`
 - [ ] `cargo test -p futurefin-engine`

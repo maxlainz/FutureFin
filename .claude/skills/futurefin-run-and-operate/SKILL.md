@@ -220,10 +220,13 @@ the behaviour is byte-identical to 4.3.0 — **no migration, no data to undo**, 
 created through it are ordinary users (they keep working through the panel's SSO). No image change
 needed, so this is a rollback you can do without touching the version.
 
-GHCR housekeeping: `.github/workflows/cleanup-ghcr.yml` runs weekly (Mon 03:00 UTC),
-keeps anything tagged `vX.Y.Z` or `latest`, deletes `sha-*` versions older than 30 days and
-other untagged/dev versions older than 60 days. Release tags are never deleted, so pinned
-deployments stay pullable.
+GHCR housekeeping: `.github/workflows/cleanup-ghcr.yml` runs weekly (Mon 03:00 UTC) and deletes
+ONLY versions whose tags are ALL `sha-*` and older than `KEEP_SHA_DAYS` (30). **An untagged
+version is NEVER deleted** — since 2026-08-22 (commit `09c96df`): untagged versions are the
+per-arch child manifests of live releases, and deleting them left `:X.Y.Z` tags pointing at
+nothing (the workflow's own comment block narrates the incident). In practice it deletes nothing
+today, because `publish-image.yml` never emits `sha-*` tags. Release tags are never deleted, so
+pinned deployments stay pullable.
 
 ### 2.2 Pinning advice
 
@@ -1083,7 +1086,10 @@ Re-verify before trusting volatile facts:
 - Backup schema version: `grep -n 'CURRENT_SCHEMA_VERSION' apps/api/src/handlers/backup_user/schema.rs`
 - Container-path CI coverage: `grep -n 'docker-stack\|adopting ownership\|ya no habla con bases de datos externas\|pg_upgrade needed' .github/workflows/ci.yml`
 - Published registries/tags: `grep -nE 'images|semver|maxlainz' .github/workflows/publish-image.yml`
-- GHCR retention windows: `grep -nE 'KEEP_.*DAYS|KEEP_LATEST_DEV' .github/workflows/cleanup-ghcr.yml`
+- GHCR retention: `grep -n 'KEEP_SHA_DAYS' .github/workflows/cleanup-ghcr.yml` (must print) and
+  `grep -n 'KEEP_LATEST_DEV' .github/workflows/cleanup-ghcr.yml` (must be EMPTY — the
+  delete-untagged-after-60d policy was removed 2026-08-22, commit `09c96df`; if it prints,
+  someone resurrected the policy that broke multi-arch release manifests)
 - Projection cache TTL: `grep -n 'PROJECTION_CACHE_TTL' apps/api/src/state.rs`
 - **Home Assistant add-on channel (§2.1/§2.3/§5/§6, added 2026-08-27 on branch
   `feat/home-assistant-addon`)**: `cat repository.yaml`;
