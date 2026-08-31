@@ -446,8 +446,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "55f9daf6f16d",
-      "description_len": 464,
-      "description_sha256_12": "09dc5e2300d5",
+      "description_len": 394,
+      "description_sha256_12": "741d317faa78",
       "name": "delete_asset",
       "properties": [
         "confirm",
@@ -1203,8 +1203,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "0c101275fe64",
-      "description_len": 344,
-      "description_sha256_12": "15bb462ced1f",
+      "description_len": 405,
+      "description_sha256_12": "a872806a51c2",
       "name": "update_allocation_rule",
       "properties": [
         "amount",

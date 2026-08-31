@@ -142,11 +142,12 @@ async fn resolution_explains_the_cascade_and_holds_the_identities() {
         .sum();
     assert_eq!(per_asset_total, dec(&b["allocated_total"]), "{b}");
     assert_eq!(
-        per_asset_total + dec(&b["leftover_to_surplus_cash"]),
+        per_asset_total + dec(&b["leftover_unallocated"]),
         dec(&b["base_cash"]),
-        "Σ per_asset + leftover debe cuadrar con base_cash: {b}"
+        "Σ per_asset + leftover_unallocated debe cuadrar con base_cash: {b}"
     );
-    assert_eq!(dec(&b["leftover_to_surplus_cash"]), 0.0, "{b}");
+    assert_eq!(dec(&b["leftover_unallocated"]), 0.0, "{b}");
+    assert!(b["unallocated_savings_reason"].is_null(), "{b}");
 }
 
 /// El caso del issue: con un planning flow SIN fecha, `base_cash` deja de ser el neto recurrente y
@@ -163,7 +164,7 @@ async fn resolution_flags_the_transient_planning_tranche() {
     budget(&app, &owner.cookie, &cat_exp, "1000").await;
     // #150: "Sumidero" es el primer (y único) activo del owner, así que crearlo ya sembró el
     // sumidero apuntándole — no hace falta crear la regla a mano.
-    let sumidero = asset(&app, &owner.cookie, &cat_ast, "Sumidero", "0").await;
+    let _sumidero = asset(&app, &owner.cookie, &cat_ast, "Sumidero", "0").await;
 
     let plan = app
         .post_json_with_cookie(

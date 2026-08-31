@@ -855,6 +855,11 @@ pub(crate) async fn delete_asset_core(
     user_id: Uuid,
     id: Uuid,
 ) -> Result<(), ApiError> {
+    // 4.12.1 (#176): el sumidero es indestructible con activos vivos — si este activo es su
+    // destino y quedan otros, el borrado se rechaza (mueve antes la regla). El último activo
+    // del scope sí se borra.
+    crate::handlers::allocation_rules::assert_asset_delete_keeps_the_sink(&state.pool, iid, id)
+        .await?;
     let res =
         sqlx::query(r#"DELETE FROM assets WHERE id = $1 AND installation_id = $2"#)
             .bind(id)
