@@ -225,6 +225,8 @@ por encima de lo nominal (#146); la edad límite del horizonte es configurable
 | Deuda en el objetivo: la cuota cuenta los meses que quedan de préstamo, en los 3 modos; en B/C la deuda vuelve a amortizar | hasta 3,28 M€ (+236 %) / 522 k€ / 442 k€ según pata | [#142](https://github.com/maxlainz/FutureFin/issues/142) |
 | Jubilación absorbente (latch, sin re-empleo automático) | 152-266 k€ de patrimonio fantasma (hasta 77 % del NW) | [#141](https://github.com/maxlainz/FutureFin/issues/141) |
 | Fiscalidad: retirada simulada grosseada + base plusvalía por fases (g, default 1,0) | 425 k€ de NW ficticio; objetivo −8/−13 % con g=0,5 | [#140](https://github.com/maxlainz/FutureFin/issues/140) |
+| Objetivo FIRE vs pensión plana bajo #139: la necesidad se resta ANTES de inflar (decisión del owner 2026-08-31: SE ARREGLA, con el gross-up ya en el engine — Ola 6) | 166.610,54 € cortos (pensión 1.000 €/mes, 2 %, 20 a) | [#170](https://github.com/maxlainz/FutureFin/issues/170) |
+| `first_month_allocation` publica el techo de cap con el gasto REGULAR en la traza `InRetirement` (Ola 6) | traza engañosa, serie intacta | [#171](https://github.com/maxlainz/FutureFin/issues/171) |
 | Solo el patrimonio líquido decide el cruce FIRE | falso «FIRE hoy» con déficit real de 383 k€ | [#143](https://github.com/maxlainz/FutureFin/issues/143) |
 | Importes del presupuesto declarados «netos» en la GUI | ~103 k€ de objetivo si se teclea la pensión bruta | [#147](https://github.com/maxlainz/FutureFin/issues/147) |
 | «Próximos» con flujos recurrentes con fecha (dirección del owner) | 355 k€ de alquiler perpetuo; 607 k€ de pensión anticipada | [#148](https://github.com/maxlainz/FutureFin/issues/148) |
@@ -252,7 +254,6 @@ por encima de lo nominal (#146); la edad límite del horizonte es configurable
 | Regla de millares en campos % («7.125» = 7125 %) (D33-%) | proyección rechazada con 400 tipado (tras 4.5.0) | Trampa documentada; el 400 tipado de 4.5.0 la hace ruidosa |
 | Descubierto/`undrained` al 0 % (parte de D9) | agujero subestimado ~220 k€ al 18-20 % TEDR | El agujero se publica (issue #119); su coste financiero no se modela |
 | Estacionalidad del presupuesto alisada a doceavas (D25) | 0 € al horizonte; sin señal de tesorería | Presupuesto mensual por diseño |
-| Objetivo FIRE vs pensión plana bajo #139: la necesidad se resta ANTES de inflar y el objetivo se queda corto en `I_ret·(g^y − 1)/SWR` | 166.610,54 € (pensión 1.000 €/mes, 2 %, 20 a) | Corregirlo rompería la forma cerrada del objetivo — rediseño, no parche; evidencia y decisión pendiente en [#170](https://github.com/maxlainz/FutureFin/issues/170) |
 
 ## 5. Convenciones españolas de referencia (fuentes)
 

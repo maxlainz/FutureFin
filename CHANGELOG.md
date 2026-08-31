@@ -29,10 +29,11 @@ Decimal a 50 dígitos, validada contra 4 pins del repo al céntimo) ANTES de cor
 - En B/C se indexa el gasto efectivo YA restado de cuotas (#142): la cuota es nominal por
   contrato y no se infla. Los techos «N meses de gasto» de la cascada ahora CRECEN con la
   inflación (son N meses del gasto real del mes — pineado por primera vez).
-- **Divergencia aceptada y contabilizada (issue #170)**: el objetivo resta la pensión ANTES de
-  inflar, así que con pensión declarada e inflación positiva se queda corto en
-  `pensión·(factor^años − 1)/SWR` — 166.610,54 € con 1.000 €/mes, 2 % y 20 años. Corregirlo
-  rompe la forma cerrada del objetivo: rediseño, no parche.
+- **Divergencia nueva detectada y cuantificada (issue #170)**: el objetivo resta la pensión
+  ANTES de inflar, así que con pensión declarada e inflación positiva se queda corto en
+  `pensión·(factor^años − 1)/SWR` — 166.610,54 € con 1.000 €/mes, 2 % y 20 años. **Se arregla
+  en la siguiente ola** (decisión del owner: deuda mínima), donde el gross-up se muda al motor
+  y el objetivo puede evaluarse mes a mes sobre la necesidad real.
 
 ### La inflación negativa existe (#146)
 
