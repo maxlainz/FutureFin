@@ -4,6 +4,140 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.7.0] - 2026-08-31
+
+**Ola 3 de la resolución — «La deuda dice la verdad»** (issues #144, #122, #123, #145, #121,
+#151, #129, #130). Es la ola que SÍ mueve cifras del motor: el catálogo de amortización pasa a
+describir productos españoles reales, el vencido con saldo deja de esfumarse, y el histórico
+interpola con la ley del modelo capturado. Todo número nuevo de esta sección está calculado a
+mano antes de correr los tests que lo pinean.
+
+### El catálogo de amortización dice la verdad (#144) — BREAKING con migración firmada
+
+- **El default pasa a `french`** (columna + formulario): el sistema francés ES el préstamo
+  español. El default histórico (`fixed_payments`, la cuota íntegra a principal, 0 % de interés)
+  describía un producto que no existe y era lo que recibía cualquier alta sin tocar el
+  desplegable.
+- **Migración DATA-CHANGING firmada por el owner**: las filas `fixed_payments` que YA declaraban
+  TIN > 0 y cuota mensual se convierten a `french` — su proyección empieza a cobrar los
+  intereses que siempre anunciaron. El ejemplo canónico: una hipoteca de 200.000 € a 1.000 €/mes
+  al TIN 3 % pasa de extinguirse en el mes **200 con 0 € de intereses** al mes **278 con
+  ≈78.000 €** — el número honesto. Los dos números NO son intercambiables: bajar la cuota para
+  que el francés también dure 200 meses cambia el producto entero. El TIN residual inexpresable
+  como francés (cuota semanal o sin plan) se anula — el motor siempre lo ignoró.
+- `fixed_payments` queda como lo que es —el préstamo **sin intereses (0 %)**— y **rechaza** el
+  TIN (`apr_forbidden_for_model`): el «préstamo gratis silencioso» deja de ser representable.
+- **`interest_only` es una carencia real**: la cuota del mes ES el interés del período
+  (saldo × TIN/1200); la declarada solo topa por arriba y por debajo el déficit CAPITALIZA. A
+  mano: 300 € de deuda al 6 % cuestan **1,50 €/mes** — hasta ahora salían 300 €/mes (252.000 €
+  de «interés» sobre 300 € de deuda en 70 años). Con tope 400 € sobre 100.000 € al 12 %:
+  cierres 100.600,00 y 101.206,00.
+- **`revolving` cobra su cuota mínima real**: `max(min_payment_pct × saldo de apertura,
+  min_payment_eur)` — columnas nuevas, exigidas al crear una revolving. A mano (TIN 18 %, mín
+  3 % con suelo 30 €): saldo 3.000 € ⇒ cuota **90,00 €** y cierre 2.955,00; saldo 800 € ⇒ manda
+  el suelo, **30,00 €** y cierre 782,00. Las revolving existentes reciben un backfill
+  BIT-IDÉNTICO (pct 0, suelo = su cuota declarada = la recurrencia que ya tenían), pineado por
+  test contra la francesa.
+- El PATCH de `apr_percent` pasa a **tri-estado** (`null` limpia — patrón `purchase_price`), y
+  al salir de `revolving` sus mínimos se anulan solos: sin ambas cosas, las filas quedarían
+  atrapadas en su modelo. MCP: params `min_payment_*` y `clear_apr_percent` en
+  `create_liability`/`update_liability`.
+- El **import de `.ffbackup` ≤ v10 aplica la MISMA regla firmada** (tercer sitio del predicado):
+  cada restore habría re-fabricado el estado que la migración elimina.
+- La derivación del principal es **rama única**: valor actual de las cuotas al TIN
+  (`present_value_of_payments`); sin TIN degenera EXACTO en Σ cuotas — bit a bit el caso
+  `fixed_payments` de siempre.
+
+### La etiqueta dice TIN (#122)
+
+El campo siempre se consumió como **TIN nominal** (`i = apr/1200`, la convención correcta del
+cuadro de amortización español) pero se rotulaba «TAE» en 5 superficies. Solo cambian etiquetas y
+prosa — **ni una cifra**: formulario, columna, KPI («TIN medio ponderado»), schema MCP y textos
+de ayuda. Cierra el escenario medido: teclear la TAE del contrato (3,26 %) donde va el TIN
+(3,00 %) inventaba +11.000 € de intereses y 11 meses de deuda en una hipoteca de 200.000 €.
+
+### Los vencimientos se cuentan desde el día ancla (#123)
+
+`checked_add_months` encadenado degradaba el día 29-31 para siempre al cruzar febrero: un recibo
+domiciliado el 31 giraba «13 cuotas» donde el banco gira 12. Ahora cada vencimiento se recalcula
+desde el ancla (`hoy + n meses`). A mano: ancla 31-08-2026 → fin 30-08-2027 = **12** recibos
+(13.000 € de principal derivado pasan a **12.000 €**); un día más de ventana y el 13.º sí entra.
+Solo afecta a «derivar principal del plan» con día ancla 29-31.
+
+### El plan vencido con saldo vivo sigue siendo deuda (#145) — BREAKING de cifras
+
+La deuda no se extingue por calendario. El predicado de visibilidad de TODAS las lecturas pasa de
+«plan vivo» a «plan vivo O saldo vivo»: el vencido con saldo aparece en listado, Resumen,
+histórico y proyección — congelado (sin devengo ni cuota, decisión del owner: sin demora) y
+marcado **`plan_expired_with_balance: true`**, con su chip en la UI. Solo el vencido y saldado
+(principal 0) se oculta. Desaparece el salto de patrimonio de +saldo de un día para otro (48.000 €
+en el escenario medido). El calendario del vencido-con-saldo deja de ser 404: se sirve congelado
+con `payoff_absent_reason: no_payment_plan`. A mano en los tests invertidos: `total_liabilities`
+100 → **10.099,0** (9.999 vencido + 100 activo); patrimonio −50.000 → **−59.999,0**; el
+invariante `starting_net_worth == summary.net_worth` se CONSERVA. Excepción deliberada: el
+presupuesto y Movimientos siguen filtrando por plan vivo (sus queries son de CUOTA, y un plan
+vencido no gira cuota).
+
+### Una sola base de coste de la deuda (#121)
+
+Había tres copias de «¿cuánto cuesta esta deuda?» y las tres decían cosas distintas (hasta
+83.000 € de intereses afirmados en portada y nunca cobrados por la simulación). Predicado ÚNICO
+nuevo en el motor — `liability_interest_accrues`: modelo con intereses + TIN > 0 + plan vivo — y
+lo consumen el `net_return` del Resumen y las dos KPIs de Pasivos (espejo TS
+`liabilityAccruesInterest`). La fila que no devenga sigue pesando en el denominador, a coste 0. A
+mano (dos-caras, el MISMO pasivo): activo 100.000 @5 % + francés 50.000 @5 % con plan vencido ⇒
+**10,0000 %**; con plan vivo ⇒ **5,0000 %**. Préstamo sin intereses de 100.000 junto a 300.000
+@4 % ⇒ **6,0000 %** (diluye, no resta). Interés mensual aprox.: 100.000 @6 % vivo + 40.000 sin
+intereses + 9.999 vencido ⇒ **500,00 €** exactos.
+
+### Amortización anticipada realista en el what-if (#151) — BREAKING del default
+
+- **Compensación por reembolso anticipado**: default **2 %** del capital extra amortizado (el
+  techo legal a tipo fijo, Ley 5/2019 art. 23; cota dura [0, 2]; opt-out explícito con `"0"`).
+  Es la única línea de la ola que cambia el resultado de un caller existente de
+  `simulate_projection`: el what-if de amortizar deja de ser gratis por defecto. La comisión sale
+  de la caja y NO baja el principal — queda FUERA de la identidad `cuota + extra = interés +
+  amortizado` del calendario. A mano: lump de 20.000 € ⇒ **400,00 €** exactos, cargados al mes
+  del lump. KPIs nuevos `liability_early_repayment_fee_monthly`/`_total` + delta: «¿me compensa
+  amortizar?» tiene ahora sus dos columnas (interés ahorrado vs comisión pagada). No se modela:
+  la caída al 1,5 % tras el año 10, los topes de variable, la pérdida del prestamista.
+- **«Reducir cuota»** (`early_repayment_effect: reduce_payment`): λ-escala la cuota por el factor
+  que bajó el principal — en una renta francesa el plazo depende solo de `P·i/M`, así que el mes
+  de extinción NO se mueve (teorema pineado: francés 150.000 @2,5 %/800 € con lump de 20.000 € en
+  el mes 12 extingue en el **239** con y sin amortizar; la cuota baja a **688,95 €** y libera
+  111,05 €/mes). El default `reduce_term` es bit-idéntico a 4.6.0.
+
+### El modelo viaja al snapshot (#129) — `.ffbackup` 10 → 11
+
+La interpolación histórica de pasivos usaba SIEMPRE la curva francesa; ahora usa **la ley del
+modelo capturado** (`history_snapshot_items.repayment_model`, columna nueva): francés/revolving ⇒
+curva compuesta; sin intereses/carencia/foto anterior a 4.7.0 ⇒ la cuerda — que para cuota fija
+es exacta, no aproximada. A mano (50.000 → 26.000 en 365 días, TIN 15 %): al día 182 la curva
+decía 38.361,75 €; la cuerda dice **38.032,8767 €**. El quiebro de pendiente falso al llegar a
+«hoy» desaparece: pasado y futuro usan la misma ley. El `.ffbackup` sube a **v11** (el item de
+snapshot lleva el modelo); v1..v10 siguen importando por la cadena completa, con `null` = «la
+foto no lo sabía» ⇒ ley lineal. No se backfilla desde el ledger: el modelo de HOY no es el de la
+foto.
+
+### Una foto incompleta no desploma el patrimonio (#130)
+
+Un item ausente de UNA captura valía 0 € en todo su tramo — un activo de 40.000 € que faltaba en
+una foto desplomaba el agregado 40.000 € (test de integración con ese número). Ahora **arrastra
+su último valor observado** (LOCF); la ÚNICA ausencia que vale cero es la del ledger vivo
+(borrado/vendido de verdad, `last_is_live_ledger`). Y el empalme histórico↔proyección del chart
+pasa de igualdad exacta de anclas a **mismo mes civil**: cruzar la medianoche ya no borra el
+tramo histórico; cruzar la frontera de mes sigue siendo identidad (la rejilla se desplaza un mes
+entero — un «±1 día» ingenuo fusionaría rejillas desalineadas).
+
+### Tests
+
+18 tests invertidos A PROPÓSITO con nota (contrato 4.2.0 → 4.7.0) — engine, purga, schedule,
+modelo, backup v9, historia; suites nuevas de comisión, paridad de derivación (rama única),
+LOCF de integración y roundtrip v11. Fixtures regenerados conscientemente: `mcp-catalog.json`
+(params y descripciones nuevos), `error-codes.json` (+8 códigos),
+`liability-derived-principal-parity.json` (el caso fixed+TIN retirado, con su porqué en el
+propio fichero).
+
 ## [4.6.0] - 2026-08-31
 
 **Ola 2 de la resolución — «Una sola fuente de verdad»** (issues #118, #119, #131, #132, #133,
