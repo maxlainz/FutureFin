@@ -45,11 +45,21 @@ export function buildStructuralLegendItems(opts: {
   hasFire: boolean;
   hasHistory: boolean;
   historyIsAssetsOnly?: boolean;
+  /** #136-5a: `false` = modo euros de hoy, donde la línea «aportado» está retirada (su cifra
+   *  correcta no es computable desde la serie servida). Default `true` (nominal). */
+  hasContributed?: boolean;
 }): ChartLegendItem[] {
   const items: ChartLegendItem[] = [
     { key: "nw", label: "Patrimonio neto", color: "var(--proj-nw)", swatch: "line" },
-    { key: "cc", label: "Capital aportado", color: "var(--proj-cc)", swatch: "dashed" },
   ];
+  if (opts.hasContributed !== false) {
+    items.push({
+      key: "cc",
+      label: "Capital aportado",
+      color: "var(--proj-cc)",
+      swatch: "dashed",
+    });
+  }
   if (opts.hasFire) {
     items.push({
       key: "fire",

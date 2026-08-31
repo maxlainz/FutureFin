@@ -249,20 +249,35 @@ el fiscal drag capturado también sin pensión (+7.140,43 € a 30 años: los tr
 (#170); la traza `InRetirement` resuelve los techos con el presupuesto de jubilación — dos
 escalares × dos ramas (#171).
 
-### Con dirección decidida por el owner (2026-08-30) — pendientes de implementar
-
-| Divergencia | Coste (sintético) | Issue |
-|---|---|---|
-| Importes del presupuesto declarados «netos» en la GUI | ~103 k€ de objetivo si se teclea la pensión bruta | [#147](https://github.com/maxlainz/FutureFin/issues/147) |
-| «Próximos» con flujos recurrentes con fecha (dirección del owner) | 355 k€ de alquiler perpetuo; 607 k€ de pensión anticipada | [#148](https://github.com/maxlainz/FutureFin/issues/148) |
-| Regla remainder obligatoria (default: primer activo) | 360 k€ muertos vs ~1,22 M€ invertidos (30 a) | [#150](https://github.com/maxlainz/FutureFin/issues/150) |
-
-### Pendientes de decisión de arreglo (issue por divergencia)
-
-| Divergencia | Coste (sintético) | Issue |
-|---|---|---|
-| Planning flows: fecha pasada descartada; rampa dependiente del día | 3 k€ desaparecidos; ±29 % en la cifra del mes 1 | [#126](https://github.com/maxlainz/FutureFin/issues/126) |
-| Barridos: prosa contradictoria · métricas sin contrato · validaciones asimétricas · duplicados cliente sin fixture · campos muertos (ref. #96) · convenciones no declaradas | — | [#133](https://github.com/maxlainz/FutureFin/issues/133)-[#138](https://github.com/maxlainz/FutureFin/issues/138) |
+**Resueltas en 4.11.0 (Ola 7 — «Próximos con fecha y el sobrante que trabaja»)**: el Próximo
+vencido carga íntegro en el mes ancla, declarado (`overdue` en `events[]`) en vez de desaparecer
+— los 3 k€ del escenario del issue vuelven a la caja y recuperan 3.000 × 1,05²⁰ = **7.959,89 €**
+a 20 años —, la rampa sin fecha se ancla al día 1 del mes civil (el reparto es idéntico todos los
+días del mes; antes el mes 0 oscilaba 300 € — un 30 % de una aportación tipo) y el baseline de
+hitos deriva del mismo mapeo (#126); «Próximos» habla flujos recurrentes con ventana
+(`amount_basis = per_month`, €/MES en `[window_start_date, window_end_date]`) — el alquiler con
+contrato a 36 meses deja de cobrarse los 444 meses de más (480 − 36 = 444 × 800 =
+**355.200,00 €** de renta inexistente), los `upcoming_*` de portada dejan de mezclar € con €/mes
+y `.ffbackup` sube a 12 (#148; la cifra «607 k€ de pensión anticipada» que aquí vivió se RETIRÓ:
+no era derivable de ninguna construcción declarada); el primer activo de un scope virgen siembra
+la regla `remainder` por la misma función que la valida, la respuesta lo declara
+(`seeded_allocation_rule_id`) y la resolución publica `surplus_destination` — el escenario 1 del
+issue pasa de 108.000,00 € muertos a **147.622,45 €** (+39.622,45; el issue decía 147.378 en
+convención pospagable — el motor es prepagable, C1 del spike; la cifra «~1,22 M€» que aquí vivió
+exigía un 7,2 % nunca declarado y se retiró) (#150). **Alcance declarado de #150**: el escenario 2
+(jubilado) NO se entrega — en jubilación la cascada no corre y el superávit sigue en caja al 0 %;
+issue [#175](https://github.com/maxlainz/FutureFin/issues/175) con sus 229.348,92 €. La guarda
+dura contra borrar el activo del sumidero es
+[#176](https://github.com/maxlainz/FutureFin/issues/176). Y las siete magnitudes duplicadas en TS
+quedan disposicionadas (#136): dos ya habían muerto en la Ola 2 (`findFirstMonthNetWorthAtLeast…`,
+`jubPos`), dos estaban cerradas con fixture (gross-up de la vista previa — 17 casos —, principal
+derivado — 6), el deflactor del chart pasa a CONSUMIR `net_worth_real` y
+`deflation_annual_inflation_percent` del servidor en la línea principal (+ fixture cruzado
+`deflator-parity.json` para k ≥ 0), el interés mensual aproximado gana su fixture
+(`liability-interest-parity.json` sobre el predicado compartido #121), y la línea «aportado» SALE
+del modo euros de hoy (su cifra correcta —cada aportación deflactada por su mes: 135.606,13 € en
+el escenario del issue— no es computable desde la serie servida, y la aproximación de un solo
+factor daba 99.372,76 €, un 26,72 % corta; el servidor rechaza publicarla a propósito).
 
 ### Aceptadas por el owner (2026-08-30) — sin issue, deuda declarada aquí
 
@@ -273,6 +288,8 @@ escalares × dos ramas (#171).
 | Modo `current_income` incluye el ahorro en el objetivo (D37) | +52,6 % de objetivo | Útil para quien no ahorra mes a mes; conservador a sabiendas |
 | Regla de millares en campos % («7.125» = 7125 %) (D33-%) | proyección rechazada con 400 tipado (tras 4.5.0) | Trampa documentada; el 400 tipado de 4.5.0 la hace ruidosa |
 | Descubierto/`undrained` al 0 % (parte de D9) | agujero subestimado ~220 k€ al 18-20 % TEDR | El agujero se publica (issue #119); su coste financiero no se modela |
+| Duplicados cliente↔servidor que QUEDAN, todos con fixture cruzado (#136, 4.11.0): gross-up de la vista previa (`fire-parity.json`), principal derivado (`liability-derived-principal-parity.json`), deflactor TS para k < 0 y mes fraccionario (`deflator-parity.json` pina el dominio compartido k ≥ 0), interés mensual aprox. (`liability-interest-parity.json`) | 0 € mientras los fixtures estén verdes — una suite roja a solas = deriva detectada | Vista previa sin round-trip posible; el `deflator_at_month_index` u32 del servidor no puede servir el pasado ni el grid fino; no existe campo de hogar para el interés aprox. |
+| Superávit del jubilado en caja al 0 % (la cascada no corre tras el cruce) | 229.348,92 € en 30 años con pensión 1.500/gasto 1.000 al 5 % | Fuera del alcance de #150 (declarado); decisión de modelo pendiente en [#175](https://github.com/maxlainz/FutureFin/issues/175) |
 | Estacionalidad del presupuesto alisada a doceavas (D25) | 0 € al horizonte; sin señal de tesorería | Presupuesto mensual por diseño |
 
 ## 5. Convenciones españolas de referencia (fuentes)

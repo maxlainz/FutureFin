@@ -1,0 +1,47 @@
+{
+  "_note": "Fixture cruzado del deflactor (#136-4b, 4.11.0). El servidor deflacta con `deflator_at_month_index` (Decimal; servido por GET /v1/projection/deflate y detrás de net_worth_real/milestones_real) y el chart con `deflationFactorAt` (f64, apps/web/src/lib/projection-chart.ts) — que además cubre lo que el u32 del servidor NO puede: puntos históricos (k < 0) y el grid fino fraccionario. Este fixture casa las dos implementaciones en el dominio COMPARTIDO (k >= 0 entero); fuera de él la duplicación es divergencia ACEPTADA y declarada (financial-contracts §4). Esperados a 50 dígitos, 18 decimales; ambos lados comparan con tolerancia 1e-9.",
+  "cases": [
+    {
+      "annual_inflation_percent": "2.0",
+      "month_index": 12,
+      "expected_deflator": "0.980392156862745098",
+      "_calc_note": "1/1,02"
+    },
+    {
+      "annual_inflation_percent": "2.0",
+      "month_index": 360,
+      "expected_deflator": "0.552070888979911921",
+      "_calc_note": "1/1,02^30"
+    },
+    {
+      "annual_inflation_percent": "2.5",
+      "month_index": 120,
+      "expected_deflator": "0.781198401725726627",
+      "_calc_note": "1/1,025^10 — el default de #146"
+    },
+    {
+      "annual_inflation_percent": "-2.0",
+      "month_index": 120,
+      "expected_deflator": "1.223881142011411035",
+      "_calc_note": "inflación NEGATIVA: factor > 1 (1/0,98^10) — espejo del gate is_zero(), #146"
+    },
+    {
+      "annual_inflation_percent": "10.0",
+      "month_index": 840,
+      "expected_deflator": "0.001266228367694686",
+      "_calc_note": "el extremo del horizonte: 1/1,1^70"
+    },
+    {
+      "annual_inflation_percent": "0",
+      "month_index": 240,
+      "expected_deflator": "1.000000000000000000",
+      "_calc_note": "inflación 0 = sin ajuste, a cualquier mes"
+    },
+    {
+      "annual_inflation_percent": "3.7",
+      "month_index": 1,
+      "expected_deflator": "0.996976917972129521",
+      "_calc_note": "un solo mes: 1/1,037^(1/12)"
+    }
+  ]
+}

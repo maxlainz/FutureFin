@@ -367,6 +367,10 @@ export type ProjectionSeriesApi = {
   horizon_lifespan_age?: number;
   /** Patrimonio del último mes en euros de HOY (paridad con simulate) — 4.9.0, #149. */
   final_net_worth_real?: string;
+  /** Tasa anual (Decimal-string) con la que el servidor construyó `net_worth_real` y
+   *  `milestones_real` — la fuente del deflactor del chart (#136-4a): re-obtenerla de la
+   *  instalación era un canal de divergencia silenciosa. Ausente en backends < 4.6.0. */
+  deflation_annual_inflation_percent?: string;
   starting_net_worth: string;
   monthly_delta_assumption: string;
   model_note: string;

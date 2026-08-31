@@ -1,0 +1,49 @@
+{
+  "_note": "Fixture cruzado del interés mensual aproximado (#136-6, 4.11.0). El cliente lo calcula en `liabilitiesApproxMonthlyInterestSum` (apps/web/src/lib/ledger.ts: Σ principal × TIN/1200 sobre los pasivos que DEVENGAN) porque no existe campo de hogar que consumir — el servidor publica la TASA (net_return_*) y el interés en € solo por pasivo. La base compartida es el predicado `futurefin_engine::liability_interest_accrues` (#121). Fechas construidas para ser insensibles al día de la corrida: fines o bien null, o bien 2099/2020. Tolerancia 0,01 € en ambos lados.",
+  "cases": [
+    {
+      "name": "ancla de la casa: francés 100k al 3 %",
+      "rows": [
+        { "repayment_model": "french", "principal": "100000", "apr_percent": "3.0", "payment_amount": "500", "payment_end_date": null }
+      ],
+      "expected_monthly_interest": "250.00",
+      "_calc_note": "100000×3/1200 = 250 — el mismo interés del mes 1 del pin french_extinction_at_month_278"
+    },
+    {
+      "name": "mixto: devengan french e interest_only; fixed_payments queda fuera",
+      "rows": [
+        { "repayment_model": "french", "principal": "100000", "apr_percent": "3.0", "payment_amount": "500", "payment_end_date": null },
+        { "repayment_model": "interest_only", "principal": "20000", "apr_percent": "8.0", "payment_amount": "133.33", "payment_end_date": "2099-12-31" },
+        { "repayment_model": "fixed_payments", "principal": "50000", "apr_percent": null, "payment_amount": "400", "payment_end_date": null }
+      ],
+      "expected_monthly_interest": "383.3333333333",
+      "_calc_note": "250 + 20000×8/1200 (=133,3333…) + 0"
+    },
+    {
+      "name": "revolving vivo; el plan vencido con saldo (congelado) no devenga",
+      "rows": [
+        { "repayment_model": "revolving", "principal": "3000", "apr_percent": "18.0", "payment_amount": "90", "payment_end_date": null },
+        { "repayment_model": "french", "principal": "80000", "apr_percent": "2.0", "payment_amount": "600", "payment_end_date": "2020-01-01" }
+      ],
+      "expected_monthly_interest": "45.00",
+      "_calc_note": "3000×18/1200 = 45; el vencido queda fuera (#145: resta en patrimonio, coste 0)"
+    },
+    {
+      "name": "sin TIN o TIN 0 no devenga aunque el modelo lo permita",
+      "rows": [
+        { "repayment_model": "french", "principal": "10000", "apr_percent": null, "payment_amount": "100", "payment_end_date": null },
+        { "repayment_model": "interest_only", "principal": "5000", "apr_percent": "0", "payment_amount": "50", "payment_end_date": null }
+      ],
+      "expected_monthly_interest": "0.00",
+      "_calc_note": "el predicado exige TIN > 0"
+    },
+    {
+      "name": "sin cuota no hay plan vivo",
+      "rows": [
+        { "repayment_model": "french", "principal": "10000", "apr_percent": "5.0", "payment_amount": null, "payment_end_date": null }
+      ],
+      "expected_monthly_interest": "0.00",
+      "_calc_note": "plan_alive exige cuota > 0 — sin plan, el pasivo es resta constante"
+    }
+  ]
+}
