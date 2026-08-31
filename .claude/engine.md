@@ -176,11 +176,16 @@ pub struct ProjectionLiabilityInput {
     pub payment_end: Option<NaiveDate>,
     pub repayment_model: RepaymentModel,   // 4.2.0
     pub apr_percent: Option<Decimal>,      // 4.2.0 — TIN nominal anual en puntos (3 = 3 %/año)
+    pub min_payment_pct: Option<Decimal>,  // 4.7.0 (#144) — cuota mínima revolving: % del saldo de apertura
+    pub min_payment_eur: Option<Decimal>,  // 4.7.0 (#144) — suelo en € de esa cuota mínima
     pub extra_principal_monthly: Decimal,          // 4.4.0 — amortización extra mensual. 0 = pre-4.4.0 bit a bit.
     pub extra_principal_lump_sums: Vec<(u32, Decimal)>, // 4.4.0 — (mes 1-based, importe); varios del mismo mes SUMAN
+    pub early_repayment_fee_pct: Option<Decimal>,  // 4.7.0 (#151) — compensación % del extra; None = 0
+    pub early_repayment_effect: EarlyRepaymentEffect, // 4.7.0 (#151) — ReduceTerm (default) | ReducePayment
 }
 
 pub enum RepaymentModel { FixedPayments, French, InterestOnly, Revolving }
+pub enum EarlyRepaymentEffect { ReduceTerm, ReducePayment } // #[default] ReduceTerm
 ```
 
 `apr_percent` es el **TIN nominal anual**: el tipo mensual es `i = apr_percent / 1200`, la MISMA
@@ -189,28 +194,38 @@ llaman `apr_percent` («TAE») por historia, pero el engine lo trata como **TIN*
 sin desanualizar de forma compuesta. Si algún día se quiere TAE de verdad, es una conversión en el
 handler, no un cambio de fórmula aquí.
 
-`apr_percent` ausente o `≤ 0` ⇒ **sin interés**: cualquier modelo degenera exactamente en
-`FixedPayments` (y `InterestOnly` en un principal congelado). Deliberado: un `.ffbackup` importado
-puede colar un `french` sin TIN y el engine no debe panicar ni fallar — devuelve la serie sin
-intereses. La validación de coherencia vive en el handler (`liabilities.rs`), no aquí.
+`apr_percent` ausente o `≤ 0` ⇒ **sin interés**: cualquier modelo degenera exactamente en la
+recurrencia sin intereses (y `InterestOnly` en un principal congelado). Deliberado: un `.ffbackup`
+importado puede colar un `french` sin TIN y el engine no debe panicar ni fallar — devuelve la
+serie sin intereses. La validación de coherencia vive en el handler (`liabilities.rs`), no aquí —
+y desde 4.7.0 (#144) esa validación cierra el catálogo: el default de columna y formulario es
+`french`, `fixed_payments` RECHAZA el TIN (`apr_forbidden_for_model`) y `revolving` exige sus
+mínimos (`min_payment_pct`/`min_payment_eur`).
 
 **Dos** helpers privados, y **tres** consumidores de ambos desde 4.4.0.
-`liability_month(model, principal, monthly_payment, apr, active) → (cash, closing_principal)`
-resuelve la recurrencia (antes eran tres copias del `min(cuota, principal)`), y
-`liability_extra_principal(liab, k, closing_tras_cuota, active) → Decimal` resuelve la
+`liability_month(liab, principal, monthly_payment, active) → (cash, closing_principal)` resuelve
+la recurrencia (antes eran tres copias del `min(cuota, principal)`; desde #151 la cuota que se le
+pasa es la **efectiva** — un vector/escalar que solo muta «reducir cuota»), y
+`liability_extra_principal(liab, k, closing_tras_cuota, active) → (extra, fee)` resuelve la
 amortización extra: suma `extra_principal_monthly` + todos los lump sums de ese mes, **topa al
-saldo** (`0 ..= closing_tras_cuota`, por eso el cierre nunca es negativo) y devuelve **0 si el plan
-no está activo**. Los tres consumidores son el bucle de simulación, `first_month_allocation` y el
-calendario. El predicado de actividad es también único, `liability_active`: `monthly_payment > 0`
-**y** (`payment_end` ausente o `>= m_start`). Ese gate es lo que impide que un what-if de
-amortización mueva el principal en los modos B/C, donde el handler pone `monthly_payment = 0`.
+saldo** (`0 ..= closing_tras_cuota`, por eso el cierre nunca es negativo), devuelve **(0, 0) si el
+plan no está activo**, y desde #151 devuelve también la **comisión** (`extra ×
+early_repayment_fee_pct/100`) — coste puro que sale de la caja y NO baja el principal, fuera de
+la identidad del calendario. Los tres consumidores son el bucle de simulación,
+`first_month_allocation` y el calendario. El predicado de actividad es único, `liability_active`:
+`monthly_payment > 0` **y** (`payment_end` ausente o `>= m_start`) — es lo que impide que un
+what-if de amortización mueva el principal en los modos B/C, donde el handler pone
+`monthly_payment = 0`. Y el predicado de **devengo** es público desde #121:
+`liability_interest_accrues(model, apr, cuota, fin, mes)` = modelo ≠ `FixedPayments` + TIN > 0 +
+plan vivo — lo consumen el `net_return` de `/v1/summary` y su espejo TS, para que el KPI nunca
+cobre lo que la simulación no cobra.
 
 | Modelo | Caja del mes | Principal de cierre | Notas |
 |---|---|---|---|
-| `FixedPayments` (default) | `min(M, P)` | `P − cash` | Modelo **pre-4.2.0 bit a bit**. Ignora `apr_percent` por completo (test `fixed_payments_with_apr_is_bit_identical_to_the_pre_4_2_0_pin`). |
-| `French` | `min(M, payoff)` | `payoff − cash` | `payoff = P·(1 + i)`: interés sobre el **saldo de apertura**, cuota a **fin de mes**. Misma recurrencia que `theo(y)` en `history.rs`. |
-| `InterestOnly` | `min(M, P)` | `P` (constante) | La cuota declarada YA es el interés; recalcularlo lo cobraría dos veces. El TIN es informativo. |
-| `Revolving` | igual que `French` | igual que `French` | **Recurrencia compartida con `French` en 4.2.0**, a propósito y pineado (`revolving_matches_french_recurrence`). Existe como concepto aparte porque su evolución (disposiciones, cuota mínima como % del saldo) sí diverge. |
+| `French` (default desde 4.7.0) | `min(M, payoff)` | `payoff − cash` | `payoff = P·(1 + i)`: interés sobre el **saldo de apertura**, cuota a **fin de mes**. Misma recurrencia que `theo(y)` en `history.rs`. |
+| `FixedPayments` | `min(M, P)` | `P − cash` | El préstamo **sin intereses** (0 %), bit a bit el modelo pre-4.2.0. Desde #144 el handler le RECHAZA el TIN: el «TIN informativo que el engine ignora» ya no es representable. |
+| `InterestOnly` (#144) | `min(M, P·i)` | `P + P·i − cash` | Carencia real: la cuota del mes ES el interés del período; la declarada solo topa por arriba, y por debajo el déficit **capitaliza**. Nunca amortiza (eso es `extra_principal`). |
+| `Revolving` (#144) | `min(max(pct·P/100, suelo), payoff)` | `payoff − cash` | La cuota es la MÍNIMA real (`min_payment_pct` del saldo de apertura con suelo `min_payment_eur`), no la declarada. Con pct 0 y suelo = cuota declarada degenera bit a bit en la francesa (forma del backfill de la migración, pineado). |
 | cualquiera, **inactivo** | `0` | `P` | Sin plan activo no hay caja, ni amortización, ni **devengo**, **ni amortización extra**. |
 
 **La tabla describe solo la pata de la CUOTA.** Desde 4.4.0 hay una segunda pata: la caja real del
@@ -257,17 +272,24 @@ zeroes `monthly_payment` **and `apr_percent`** in memory, so the principal becom
 net-worth subtraction across the whole horizon — paid cuotas already live inside the raw 12m expense
 average. Zeroing the TIN is **deliberately redundant** (without a payment the engine already accrues
 nothing): it states the mode-B/C contract in one place, so relaxing the accrual gate in the engine
-cannot silently start charging interest in the real modes. The projection input query also filters
-expired liabilities (`payment_end_date IS NULL OR >= today`), same predicate as `/v1/summary`. See
-`build_installation_projection_input` in `apps/api/src/handlers/projection.rs`.
+cannot silently start charging interest in the real modes. The projection input query uses the
+shared visibility predicate (#145): plan vivo **o saldo vivo** (`payment_end_date IS NULL OR >=
+today OR principal > 0`) — el vencido-con-saldo entra congelado (resta constante), same predicate
+as `/v1/summary`. See `build_installation_projection_input` in
+`apps/api/src/handlers/projection.rs`.
 
-**Divergencia histórico ↔ proyección, ahora visible.** La interpolación del pasado
-(`amortized_segment_value`) usa **siempre** amortización francesa cuando hay `LoanTerms`, sin
-consultar `repayment_model` — la curva histórica no tiene modelo, tiene snapshots. Así que un pasivo
-`fixed_payments` tiene curva histórica **francesa** y proyección **lineal**, y las dos se pintan
-unidas en el mismo chart. La divergencia es **preexistente** (el histórico siempre amortizó a la
-francesa); 4.2.0 no la crea, solo la vuelve nombrable — y la cierra para quien declare su deuda como
-`french`.
+**Divergencia histórico ↔ proyección: CERRADA en 4.7.0 (#129).** El modelo de amortización viaja
+ahora en el snapshot (`history_snapshot_items.repayment_model`, `.ffbackup` v11) y
+`amortized_segment_value` elige la ley por el MODELO CAPTURADO (`LoanTerms::repayment_model`):
+solo `french` ⇒ curva compuesta corregida por residuo; `revolving` (el snapshot no guarda sus
+mínimos y la cuota declarada no gobierna su caja desde #144), `fixed_payments`, `interest_only`
+y `None` (snapshot pre-4.7.0) ⇒ la cuerda — exacta para cuota fija (pendiente constante) y la
+interpolación menos comprometida para el resto. El quiebro de pendiente en «hoy» desaparece
+para las fotos NUEVAS (llevan la ley); las fotos 4.2.0–4.6.0 de un pasivo genuinamente francés
+pierden la curva compuesta que hasta ahora se les aplicaba (interior ~300 €/50 k€; extremos
+exactos) — el precio de dejar de aplicársela al default mayoritario, donde era el bug de #129. Además (#130): un item ausente de una captura ARRASTRA su
+último valor (LOCF, `HistoryTimeline::last_is_live_ledger`); solo la ausencia del ledger vivo
+significa cero.
 
 ## Calendario de amortización y amortización extra (4.4.0, Fase 6)
 
@@ -622,12 +644,12 @@ Rules, each load-bearing:
   history, and ignores contributions — it measures the portfolio, not the saving.
 - **Known divergence with the simulation, narrowed in 4.2.0 but not closed**: this KPI charges
   `apr_percent` on **every** non-expired liability, unconditionally. The projection loop only
-  accrues interest on liabilities whose `repayment_model` accrues (`french` / `revolving`) **and**
-  that have an active payment plan, and only in mode A (B/C zero the TIN). So the two still
-  disagree — for a `fixed_payments` debt, or a debt with no live plan, or any household in mode
-  B/C, the KPI stays strictly more conservative than the projected curve. What changed is that a
-  household that declares its mortgage as `french` now sees the two converge. Written down here
-  and in the metric's help text instead of quietly reconciled.
+  accrues interest on liabilities whose model accrues (all but `fixed_payments`, #144) **and**
+  that have an active payment plan, and only in mode A (B/C zero the TIN). Desde 4.7.0 (#121) el
+  KPI usa el MISMO predicado (`liability_interest_accrues`): la fila que no devenga entra al
+  denominador con coste 0. El único residuo de divergencia con la curva proyectada son los modos
+  B/C (anulan el TIN en el engine; el KPI no mira `savings_source`) — declarado aquí y en el
+  texto de ayuda de la métrica.
 
 Worked example (engine-verified, `worked_example_matches_the_documented_figures`): 100.000 at 5 %
 + 50.000 with no rate, minus a 60.000 loan at 3 % APR, inflation 2 % → numerator 3.200 €/year over

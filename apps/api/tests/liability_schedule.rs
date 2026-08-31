@@ -237,9 +237,11 @@ async fn the_window_never_moves_the_aggregates() {
     assert_bad_request_code(&malo, "schedule_window_out_of_range");
 }
 
-/// `fixed_payments` —el default de la columna— no devenga: interés 0 en todos los meses y el total
-/// a pagar es el principal, **con TIN o sin él**. Es la garantía de que el calendario de un pasivo
-/// histórico sigue contando la historia de siempre.
+/// `fixed_payments` no devenga: interés 0 en todos los meses y el total a pagar es el principal.
+/// Es la garantía de que el calendario de un pasivo histórico sigue contando la historia de
+/// siempre. (Ajustado en 4.7.0/#144: ya no se puede declarar un TIN «informativo» sobre este
+/// modelo — el alta lo rechaza y la columna dejó de ser el default, ahora es `french` —, así que
+/// el caso «con TIN o sin él» quedó irrepresentable y este test lo prueba sin TIN.)
 ///
 /// PREDICCIÓN: 1.200 € a 100 €/mes ⇒ extinción en el mes **12**, interés **0**, total **1.200 €**.
 #[tokio::test]
@@ -251,7 +253,6 @@ async fn fixed_payments_schedule_charges_no_interest() {
         &owner,
         json!({
             "principal": "1200",
-            "apr_percent": "9",
             "payment_amount": "100",
             "payment_frequency": "monthly",
         }),
@@ -391,7 +392,7 @@ async fn payoff_absent_reasons_are_distinguishable() {
 /// mutate»: se filtra en `/v1/liabilities`, `/summary`, `/budget`, `/assets` y `/projection`), así
 /// que su calendario es un **404** y no una respuesta vacía que se leería como «no debes nada».
 #[tokio::test]
-async fn an_expired_liability_has_no_schedule() {
+async fn an_expired_liability_with_balance_serves_a_frozen_schedule() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let id = mk_liability(
@@ -412,21 +413,39 @@ async fn an_expired_liability_has_no_schedule() {
         .await;
     assert_eq!(vivo.status, http::StatusCode::OK, "{vivo:?}");
 
-    // …y desaparece de las lecturas cuando vence. Se fuerza en BD porque la API no deja escribir
-    // una fecha pasada.
+    // …y al vencer CON SALDO VIVO sigue existiendo (#145, INVERTIDO en 4.7.0: antes era 404).
+    // El calendario se sirve CONGELADO: cero meses, principal final = de apertura, interés 0 y
+    // `payoff_absent_reason: no_payment_plan` — nada devenga sin plan. Se fuerza en BD porque
+    // la API no deja escribir una fecha pasada.
     sqlx::query("UPDATE liabilities SET payment_end_date = DATE '2020-01-31' WHERE id = $1")
         .bind(uuid::Uuid::parse_str(&id).unwrap())
         .execute(&app.pool)
         .await
         .expect("vencer el pasivo");
 
+    let congelado = app
+        .get_with_cookie(&format!("/v1/liabilities/{id}/schedule"), &owner.cookie)
+        .await;
+    assert_eq!(congelado.status, http::StatusCode::OK, "{congelado:?}");
+    let b = congelado.json();
+    assert_eq!(b["payoff_absent_reason"], "no_payment_plan", "{b}");
+    assert_eq!(b["months"].as_array().unwrap().len(), 0);
+    assert_eq!(b["final_principal"], "1000.0000", "el saldo queda congelado");
+    assert_eq!(b["total_interest_remaining"], "0.0000", "sin plan no hay devengo");
+
+    // El vencido Y SALDADO sí es un 404: esa deuda se extinguió de verdad.
+    sqlx::query("UPDATE liabilities SET principal = 0 WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(&id).unwrap())
+        .execute(&app.pool)
+        .await
+        .expect("saldar el pasivo");
     let muerto = app
         .get_with_cookie(&format!("/v1/liabilities/{id}/schedule"), &owner.cookie)
         .await;
     assert_eq!(
         muerto.status,
         http::StatusCode::NOT_FOUND,
-        "un pasivo vencido no existe para las lecturas: {muerto:?}"
+        "el vencido y saldado no existe para las lecturas: {muerto:?}"
     );
 
     // Y un id inexistente tampoco filtra su ausencia de otra forma.

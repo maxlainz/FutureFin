@@ -290,8 +290,10 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     mejor pasarlo. **Actualizado en 4.2.0**: la derivación ya no es una sola fórmula. Con
     `repayment_model = fixed_payments` sigue siendo `Σ cuotas` (la suma inflada de siempre, bit a
     bit); con `french` es el **valor actual** de esas cuotas al TIN, que sí es el capital pendiente
-    de verdad (`present_value_of_payments`). Las descripciones de `create_liability` y
-    `update_liability` enumeran ahora los cuatro modelos y esa diferencia.
+    de verdad (`present_value_of_payments`). **Re-actualizado en 4.7.0 (#144/#121)**: rama ÚNICA —
+    valor actual al TIN siempre; `fixed_payments` ya no puede llevar TIN (`apr_forbidden_for_model`)
+    así que su Σ exacta ES el caso degenerado de la misma fórmula. Las descripciones de
+    `create_liability` y `update_liability` enumeran los cuatro modelos y esa diferencia.
   - `cap_kind` documentaba un objeto (`{"kind": …, "value": …}`) que el schema **no acepta**: los
     parámetros son planos, así que invitaba a mandar un campo `cap` inexistente — se descartaba, la
     llamada devolvía 200 y el tope no se ponía. `cap_value` no tenía doc: ahora dice su unidad, que
@@ -701,6 +703,21 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   proyección no toca el semáforo. Detalle y tests: [`futurefin-architecture-contract`](skills/futurefin-architecture-contract/SKILL.md).
 - **NO está en OpenAPI a propósito**: no es un recurso REST — es JSON-RPC cuyo contrato define la
   spec MCP y que se autodescribe vía `tools/list`.
+- **Ola 3 (4.7.0) — params nuevos, catálogo intacto en 68 tools**: `create_liability`/
+  `update_liability` ganan `min_payment_pct`/`min_payment_eur` (cuota mínima revolving, exigida
+  por `revolving` y rechazada en los demás modelos) y `update_liability` gana `clear_apr_percent`
+  (guard `apr_percent_set_and_clear` — necesario para volver a `fixed_payments`, que desde #144
+  RECHAZA el TIN; al salir de `revolving` los mínimos se anulan solos). `simulate_projection`
+  gana dos ejes en `liability_overrides` (#151): `early_repayment_fee_pct` (compensación por
+  reembolso anticipado, default **2 %** — la única línea de la ola que cambia el resultado de un
+  caller 4.4.0; opt-out "0"; cota [0,2], `early_repayment_fee_out_of_range`) y
+  `early_repayment_effect` (`reduce_term` default | `reduce_payment`, que conserva EXACTAMENTE el
+  mes de extinción), con la 4ª puerta anti no-op `liability_early_repayment_axis_needs_amortization`
+  y los KPIs `liability_early_repayment_fee_monthly`/`_total` + delta. Los items de
+  `create_snapshot`/`update_snapshot` ganan `repayment_model` (#129, la ley de la interpolación
+  histórica), y `list_liabilities` publica `plan_expired_with_balance` + la regla de visibilidad
+  nueva (#145: el vencido con saldo vivo se sirve marcado). Todo por las cores compartidas; el
+  catálogo congelado (`mcp-catalog.json`) se regeneró conscientemente.
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

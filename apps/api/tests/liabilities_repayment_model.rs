@@ -164,21 +164,20 @@ async fn derive_with_interest_only_or_revolving_is_400() {
     let (cat, exp_cat) = categories(&app, &owner).await;
 
     for model in ["interest_only", "revolving"] {
-        let r = post_liability(
-            &app,
-            &owner,
-            &cat,
-            &exp_cat,
-            json!({
-                "repayment_model": model,
-                "apr_percent": "3",
-                "derive_principal_from_plan": true,
-                "payment_amount": "500",
-                "payment_frequency": "monthly",
-                "payment_end_date": "2040-01-01",
-            }),
-        )
-        .await;
+        let mut extra = json!({
+            "repayment_model": model,
+            "apr_percent": "3",
+            "derive_principal_from_plan": true,
+            "payment_amount": "500",
+            "payment_frequency": "monthly",
+            "payment_end_date": "2040-01-01",
+        });
+        // Desde #144 revolving exige su cuota mínima; sin ella habría DOS problemas y el 400
+        // agregado (`repayment_model_state_invalid`) taparía el código que este test pinea.
+        if model == "revolving" {
+            extra["min_payment_pct"] = json!("3");
+        }
+        let r = post_liability(&app, &owner, &cat, &exp_cat, extra).await;
         assert_bad_request_code(&r, "derive_not_supported_for_model");
     }
 }
@@ -228,10 +227,13 @@ async fn patch_validates_the_merged_state_not_just_the_body() {
     assert_eq!(r.json()["repayment_model"], "french");
 }
 
-/// Volver al modelo histórico es un PATCH normal: la columna es NOT NULL, así que «deshacer» es
-/// mandar `fixed_payments` explícito.
+/// Volver al modelo histórico es un PATCH normal («deshacer» es mandar `fixed_payments`
+/// explícito) — pero desde #144 el modelo sin intereses RECHAZA el TIN, así que el PATCH a
+/// medias (solo el modelo, arrastrando el TIN de la fila) es 400 y el completo (modelo + TIN a
+/// null) es el que pasa. INVERTIDO en 4.7.0: hasta 4.6.0 el PATCH a medias guardaba un
+/// `fixed_payments` con TIN informativo — el «préstamo gratis silencioso» de la auditoría.
 #[tokio::test]
-async fn patch_can_switch_the_model_back_to_fixed_payments() {
+async fn patch_back_to_fixed_payments_requires_dropping_the_apr() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let (cat, exp_cat) = categories(&app, &owner).await;
@@ -254,6 +256,7 @@ async fn patch_can_switch_the_model_back_to_fixed_payments() {
     assert_eq!(created.json()["repayment_model"], "french");
     let id = created.json()["id"].as_str().unwrap().to_string();
 
+    // A medias: el modelo cambia pero el TIN 3 % de la fila se arrastra → 400.
     let r = app
         .patch_json_with_cookie(
             &format!("/v1/liabilities/{id}"),
@@ -261,15 +264,28 @@ async fn patch_can_switch_the_model_back_to_fixed_payments() {
             &owner.cookie,
         )
         .await;
+    assert_bad_request_code(&r, "apr_forbidden_for_model");
+
+    // Completo: modelo + TIN a null (double-option: presente-null limpia) → 200.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            json!({ "repayment_model": "fixed_payments", "apr_percent": null }),
+            &owner.cookie,
+        )
+        .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
     assert_eq!(r.json()["repayment_model"], "fixed_payments");
+    assert!(r.json()["apr_percent"].is_null(), "{r:?}");
 }
 
-/// `fixed_payments` NO impone nada: un TIN configurado es informativo (el engine lo ignora en
-/// ese modelo) y `weekly` sigue siendo válido. Es el contrato de compatibilidad: ningún pasivo
-/// que se pudiera crear antes de 4.2.0 empieza a dar 400.
+/// INVERTIDO en 4.7.0 (#144). Hasta 4.6.0 este test pineaba el contrato de compatibilidad de
+/// 4.2.0 («`fixed_payments` NO impone nada: el TIN es informativo») — exactamente el préstamo
+/// gratis silencioso que la auditoría señaló y que la migración firmada convierte o anula. El
+/// contrato nuevo: el modelo sin intereses rechaza el TIN (`apr_forbidden_for_model`); `weekly`
+/// sigue siendo suyo y de nadie más.
 #[tokio::test]
-async fn fixed_payments_accepts_apr_and_weekly_without_complaining() {
+async fn fixed_payments_rejects_apr_but_keeps_weekly() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let (cat, exp_cat) = categories(&app, &owner).await;
@@ -283,6 +299,22 @@ async fn fixed_payments_accepts_apr_and_weekly_without_complaining() {
             "principal": "100000",
             "repayment_model": "fixed_payments",
             "apr_percent": "3",
+            "payment_amount": "120",
+            "payment_frequency": "weekly",
+        }),
+    )
+    .await;
+    assert_bad_request_code(&r, "apr_forbidden_for_model");
+
+    // Sin TIN, la misma alta semanal entra: weekly sigue siendo válido en el modelo histórico.
+    let r = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({
+            "principal": "100000",
+            "repayment_model": "fixed_payments",
             "payment_amount": "120",
             "payment_frequency": "weekly",
         }),
@@ -477,4 +509,45 @@ async fn a_single_problem_still_yields_its_specific_code() {
     )
     .await;
     assert_bad_request_code(&r, "weekly_not_supported_for_model");
+}
+
+/// El guard de patch vacío conoce los campos nuevos (#144, hallazgo de la verificación
+/// adversarial): un PATCH que SOLO cambia la cuota mínima de una revolving («sube el mínimo del
+/// 3 al 4 %») es una edición legítima, no un `patch_empty`.
+#[tokio::test]
+async fn a_patch_with_only_revolving_minimums_is_not_empty() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cat, exp_cat) = categories(&app, &owner).await;
+
+    let created = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({
+            "principal": "3000",
+            "repayment_model": "revolving",
+            "apr_percent": "18",
+            "payment_amount": "60",
+            "payment_frequency": "monthly",
+            "min_payment_pct": "3",
+            "min_payment_eur": "30",
+        }),
+    )
+    .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            json!({ "min_payment_pct": "4" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    let pct: rust_decimal::Decimal =
+        patched.json()["min_payment_pct"].as_str().unwrap().parse().unwrap();
+    assert_eq!(pct, rust_decimal::Decimal::from(4));
 }

@@ -198,7 +198,7 @@ export type FinancialHealthMetrics = {
   savings_expected_monthly_equivalent?: string;
   /** Rendimiento anual **nominal** esperado del patrimonio neto, ya en PORCENTAJE (`"3.5556"` =
    *  3,5556 %/año), no en fracción como `savings_rate`. Suma de `valor × rentabilidad esperada`
-   *  de todos los activos menos `principal × TAE` de los pasivos vivos, sobre el patrimonio neto.
+   *  de todos los activos menos `principal × TIN` de los pasivos vivos, sobre el patrimonio neto.
    *  Ausente ⟺ el patrimonio neto no es positivo. */
   net_return_nominal_annual_pct?: string | null;
   /** El mismo rendimiento descontada la inflación configurada, dividiendo factores
@@ -436,6 +436,15 @@ export type LiabilityApiRow = {
   payment_amount: string | null;
   payment_frequency: "monthly" | "weekly" | null;
   payment_end_date: string | null;
+  /**
+   * «Plan vencido con saldo» (4.7.0, #145): `payment_end_date < hoy` con `principal > 0`. La
+   * deuda no se extinguió por calendario — sigue visible, congelada y marcada.
+   */
+  plan_expired_with_balance: boolean;
+  /** Cuota mínima revolving: % del saldo de apertura. `null` en los demás modelos (4.7.0). */
+  min_payment_pct: string | null;
+  /** Suelo en euros de la cuota mínima revolving. `null` en los demás modelos (4.7.0). */
+  min_payment_eur: string | null;
   notes: string | null;
   sort_index: number;
 };
@@ -517,6 +526,8 @@ export type HistorySnapshotItemApi = {
   apr_percent?: string;
   payment_amount?: string;
   payment_frequency?: "monthly" | "weekly";
+  /** Modelo del pasivo al capturar la foto (4.7.0, #129); ausente en fotos anteriores. */
+  repayment_model?: LiabilityRepaymentModelApi;
 };
 
 /** Cabecera + ítems de un snapshot. Total derivado (Σ ítems), nunca almacenado. */

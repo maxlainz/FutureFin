@@ -313,10 +313,13 @@ async fn series_amortization_curve_above_chord_and_hits_endpoints() {
     let d1 = add_months_signed(anchor, -12);
     let d2 = add_months_signed(anchor, -2);
     let item_id = Uuid::new_v4().to_string();
+    // `repayment_model` explícito desde #129: la curva compuesta es ahora la ley de los
+    // snapshots que declaran french/revolving; sin modelo, el segmento interpola por la cuerda.
     let terms = |value: &str| {
         serde_json::json!([{
             "item_id": item_id, "label": "Hipoteca", "value": value,
             "apr_percent": "5", "payment_amount": "1200", "payment_frequency": "monthly",
+            "repayment_model": "french",
         }])
     };
     backfill(&app, &owner, "liability", d1, terms("200000")).await;
@@ -802,4 +805,66 @@ async fn household_net_worth_needs_every_member_to_have_snapshotted_liabilities(
         1300.0,
         "household nw k=-1 = 1600 − 300",
     );
+}
+
+// ---------------------------------------------------------------------------
+// #130 — un item ausente de UNA captura no desploma el agregado
+// ---------------------------------------------------------------------------
+
+/// INVERTIDO en 4.7.0 (#130): hasta 4.6.0, un activo de 40.000 € presente en el ledger y en la
+/// primera captura pero AUSENTE de una captura intermedia valía 0 € en todo su tramo — el
+/// agregado del hogar se desplomaba 40.000 € por una foto incompleta (escenario del issue: el
+/// activo cambió de titularidad y una captura no lo incluyó). Ahora arrastra su último valor
+/// (LOCF). La ausencia del LEDGER VIVO sí sigue valiendo cero (`virtual_today` en el engine):
+/// aquí «Beta» (backfill sin fila viva) desaparece tras su última observación.
+#[tokio::test]
+async fn an_item_missing_from_one_capture_does_not_collapse_the_household() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cartera").await;
+
+    // Activo VIVO de 40.000 € (existe hoy y existía entonces).
+    let created = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({ "category_id": cat, "name": "Alpha", "current_value": "40000" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let alpha_id = created.json()["id"].as_str().unwrap().to_string();
+
+    let (today, _) = server_today(&app, &owner.cookie).await;
+    let past1 = today - Duration::days(200);
+    let past2 = today - Duration::days(100);
+
+    backfill(
+        &app,
+        &owner,
+        "asset",
+        past1,
+        serde_json::json!([
+            { "item_id": alpha_id, "label": "Alpha", "value": "40000" },
+            { "label": "Beta", "value": "10000" }
+        ]),
+    )
+    .await;
+    // La captura incompleta: solo Beta — Alpha se quedó fuera de ESTA foto.
+    backfill(
+        &app,
+        &owner,
+        "asset",
+        past2,
+        serde_json::json!([ { "label": "Beta", "value": "10000" } ]),
+    )
+    .await;
+
+    let (body, _, _) = get_series(&app, &owner.cookie, "").await;
+    let k = (past2.year() - today.year()) * 12 + (past2.month() as i32 - today.month() as i32);
+    let p = point_at(&body, k);
+    // Sin snapshots de pasivo `net_worth` viaja null (liabilities_snapshotted = false); la
+    // magnitud que este test vigila es la de ACTIVOS.
+    let total = f64_of(&p["assets_total"]);
+    // Alpha arrastra 40.000 (antes: 0) + Beta 10.000 exactos ⇒ 50.000, no 10.000.
+    assert_close(total, 50_000.0, "el hogar no se desploma por una foto incompleta");
 }

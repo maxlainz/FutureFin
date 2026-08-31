@@ -41,21 +41,27 @@ export function parseYmdUtc(ymd: string): Date {
   return new Date(Date.UTC(ys, ms - 1, ds));
 }
 
-/** Suma 1 mes en UTC; recorta el día si el mes destino tiene menos días. */
-export function addOneMonthUtc(d: Date): Date {
-  const y = d.getUTCFullYear();
-  const m = d.getUTCMonth();
-  const day = d.getUTCDate();
-  const dim = new Date(Date.UTC(y, m + 2, 0)).getUTCDate();
-  const next = new Date(Date.UTC(y, m + 1, 1));
-  next.setUTCDate(Math.min(day, dim));
-  return next;
+/**
+ * Suma `n` meses civiles al ancla, recortando el día al mes de destino — SIN encadenar: el
+ * mes 7 desde el 31-08 vuelve a caer en el 31-03 aunque el 6.º cayera en el 28-02. Espejo de
+ * `payment_interval_count` en `apps/api/src/handlers/liabilities.rs` (#123).
+ */
+export function addMonthsFromAnchorUtc(anchor: Date, n: number): Date {
+  const y = anchor.getUTCFullYear();
+  const m = anchor.getUTCMonth() + n;
+  const day = anchor.getUTCDate();
+  const dim = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  const out = new Date(Date.UTC(y, m, 1));
+  out.setUTCDate(Math.min(day, dim));
+  return out;
 }
 
 /**
  * Cuenta los intervalos de pago entre `startYmd` y `endYmd` (ambos inclusive). Mensual usa
- * pasos de un mes civil; semanal usa `ceil(días/7)`. Devuelve `null` si fechas inválidas, fin
- * < inicio, o más de 1.200 iteraciones (seguro contra infinite loops).
+ * vencimientos `ancla + n meses` — cada uno recalculado desde el ancla (#123): encadenar
+ * `addOneMonthUtc` degradaba el día 29-31 al pasar por un mes corto y contaba una cuota de
+ * más (13 donde el recibo real gira 12). Semanal usa `ceil(días/7)`. Devuelve `null` si
+ * fechas inválidas, fin < inicio, o más de 1.200 iteraciones (seguro contra infinite loops).
  */
 export function paymentIntervalCountUtc(
   freq: "monthly" | "weekly",
@@ -70,11 +76,9 @@ export function paymentIntervalCountUtc(
   if (end.getTime() < start.getTime()) return null;
   if (freq === "monthly") {
     let n = 0;
-    let cur = new Date(start.getTime());
-    while (cur.getTime() <= end.getTime()) {
+    while (addMonthsFromAnchorUtc(start, n).getTime() <= end.getTime()) {
       n += 1;
       if (n > 1200) return null;
-      cur = addOneMonthUtc(cur);
     }
     return n;
   }

@@ -43,7 +43,7 @@ export function formatEditableDecimalString(raw: string | null | undefined): str
  * Existe porque no se hacía en todas partes: en el formulario de activos, «rentabilidad esperada»
  * y «precio de compra» convertían la coma y «valor actual» no, así que teclear `1234,5` en el
  * valor —con un placeholder que invita a usar coma— lo rechazaba el backend con un error en
- * inglés. Lo mismo en pasivos con el principal y la TAE.
+ * inglés. Lo mismo en pasivos con el principal y el TIN.
  */
 export class DecimalInputError extends Error {
   constructor(message: string) {
@@ -67,7 +67,7 @@ export class DecimalInputError extends Error {
  * 2. Sin coma, con los puntos separando grupos de exactamente 3 dígitos → son miles
  *    (`250.000` → `250000`, `1.234.567` → `1234567`).
  * 3. Sin coma, un solo punto que no forma grupo de miles → es el decimal (`2.5` → `2.5`,
- *    `2100.00` → `2100.00`). Este caso importa: los campos de porcentaje (rentabilidad, TAE,
+ *    `2100.00` → `2100.00`). Este caso importa: los campos de porcentaje (rentabilidad, TIN,
  *    inflación) se teclean así de forma natural.
  * 4. Cualquier otra cosa (dos comas, `1.23.4`, letras) → `DecimalInputError`. Adivinar aquí es
  *    exactamente lo que causó el fallo original.
@@ -212,7 +212,7 @@ export function formatPercentDisplaySigned(n: number): string {
   }).format(n)} %`;
 }
 
-/** Tasas en % ya como número API (ej. TAE 3.25 → «3,3 %»). */
+/** Tasas en % ya como número API (ej. TIN 3.25 → «3,3 %»). */
 export function formatPercentAmount(s: string): string {
   const n = parseDisplayDecimal(s);
   if (n === null) return s;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addMonthsCivil,
-  addOneMonthUtc,
+  addMonthsFromAnchorUtc,
   ageCompletedYearsCivil,
   civilDaysInMonth,
   formatDateDm,
@@ -26,22 +26,24 @@ describe("utcTodayYmd + todayYmdInTimeZone", () => {
   });
 });
 
-describe("parseYmdUtc + addOneMonthUtc", () => {
+describe("parseYmdUtc + addMonthsFromAnchorUtc", () => {
   it("parses YYYY-MM-DD as UTC", () => {
     const d = parseYmdUtc("2026-03-15");
     expect(d.getUTCFullYear()).toBe(2026);
     expect(d.getUTCMonth()).toBe(2);
     expect(d.getUTCDate()).toBe(15);
   });
-  it("addOneMonthUtc clamps day when target month is shorter", () => {
-    const next = addOneMonthUtc(parseYmdUtc("2026-01-31"));
-    // Feb 2026 → 28 days
-    expect(next.getUTCFullYear()).toBe(2026);
-    expect(next.getUTCMonth()).toBe(1);
-    expect(next.getUTCDate()).toBe(28);
+  it("recorta el día al mes corto SIN degradar el ancla (31-01 → 28-02 → 31-03)", () => {
+    const anchor = parseYmdUtc("2026-01-31");
+    const feb = addMonthsFromAnchorUtc(anchor, 1);
+    expect([feb.getUTCMonth(), feb.getUTCDate()]).toEqual([1, 28]);
+    // El paso siguiente se calcula desde el ANCLA: marzo recupera el 31. Con el viejo
+    // `addOneMonthUtc` encadenado (retirado en #123) aquí salía 28-03 para siempre.
+    const mar = addMonthsFromAnchorUtc(anchor, 2);
+    expect([mar.getUTCMonth(), mar.getUTCDate()]).toEqual([2, 31]);
   });
-  it("addOneMonthUtc rolls year over December → January", () => {
-    const next = addOneMonthUtc(parseYmdUtc("2026-12-31"));
+  it("cruza diciembre → enero conservando el día", () => {
+    const next = addMonthsFromAnchorUtc(parseYmdUtc("2026-12-31"), 1);
     expect(next.getUTCFullYear()).toBe(2027);
     expect(next.getUTCMonth()).toBe(0);
     expect(next.getUTCDate()).toBe(31);
@@ -51,6 +53,11 @@ describe("parseYmdUtc + addOneMonthUtc", () => {
 describe("paymentIntervalCountUtc", () => {
   it("monthly: full year from Jan to Dec = 12 intervals", () => {
     expect(paymentIntervalCountUtc("monthly", "2026-01-15", "2026-12-15")).toBe(12);
+  });
+  it("ancla 31: 31-08-2026 → 30-08-2027 son 12 recibos, no 13 (issue 123)", () => {
+    // Vencimientos reales: 31-08-2026 … 31-07-2027 (el 31-08-2027 cae tras el fin). La
+    // cadena degradada contaba 13 — 1.000 € de deuda derivada inventada por año.
+    expect(paymentIntervalCountUtc("monthly", "2026-08-31", "2027-08-30")).toBe(12);
   });
   it("weekly: 8 days = ceil(8/7) = 2 intervals", () => {
     expect(paymentIntervalCountUtc("weekly", "2026-01-01", "2026-01-08")).toBe(2);

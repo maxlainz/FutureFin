@@ -22,7 +22,7 @@ pub struct NetReturn {
 /// Rendimiento neto anual esperado sobre el patrimonio neto.
 ///
 /// `assets` son pares `(valor_actual, rentabilidad_anual_%)` y `liabilities` pares
-/// `(principal, TAE_%)`; en ambos, `None` (rentabilidad o TAE sin configurar) cuenta como **0 %**
+/// `(principal, TIN_%)`; en ambos, `None` (rentabilidad o TIN sin configurar) cuenta como **0 %**
 /// — no excluye la fila, que sigue pesando en el patrimonio neto del denominador. El caller es
 /// quien decide qué filas entran: en `GET /v1/summary` son TODOS los activos del scope y los
 /// pasivos **no vencidos**, es decir, exactamente los sumandos de `net_worth`.
@@ -141,7 +141,7 @@ mod tests {
     /// `None` en la tasa cuenta como **0 %**, no excluye la fila: el activo sin rentabilidad
     /// configurada sigue pesando en el denominador y por tanto DILUYE.
     /// 100.000 al 5 % + 100.000 sin tasa = 5.000 sobre 200.000 → **2,5 %**.
-    /// Ídem un pasivo sin TAE: pesa en el patrimonio neto y no cuesta nada.
+    /// Ídem un pasivo sin TIN: pesa en el patrimonio neto y no cuesta nada.
     #[test]
     fn missing_rate_counts_as_zero_and_still_weighs() {
         let sin_tasa = net_return_percentages(
@@ -152,7 +152,7 @@ mod tests {
         .expect("NW positivo");
         assert_eq!(sin_tasa.nominal_pct, Decimal::new(25, 1));
 
-        // 100.000 al 5 % (=5.000) − 50.000 sin TAE (=0) sobre 50.000 → 10 %.
+        // 100.000 al 5 % (=5.000) − 50.000 sin TIN (=0) sobre 50.000 → 10 %.
         let pasivo_sin_apr = net_return_percentages(
             &[(d(100_000), Some(d(5)))],
             &[(d(50_000), None)],

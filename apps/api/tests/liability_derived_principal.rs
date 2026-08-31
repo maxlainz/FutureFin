@@ -33,11 +33,12 @@ async fn server_today(app: &TestApp, owner: &LoggedInOwner) -> NaiveDate {
 /// que caiga en día 29/30/31 las dos formas NO coinciden (chrono clampa a fin de mes y la
 /// iterativa arrastra el clamp), y el test daría 200 o 201 pagos según el día en que se ejecute.
 fn end_date_for_n_monthly_payments(today: NaiveDate, n: u32) -> NaiveDate {
-    let mut d = today;
-    for _ in 1..n {
-        d = d.checked_add_months(Months::new(1)).expect("no overflow");
-    }
-    d
+    // Anclado (#123): `hoy + (n−1) meses` en un solo paso. La versión encadenada producía,
+    // con hoy en día 29-31, una fecha degradada que bajo el conteo anclado vale n−1 cuotas —
+    // este helper habría hecho flaky-por-calendario todos los tests de derivación.
+    today
+        .checked_add_months(Months::new(n - 1))
+        .expect("no overflow")
 }
 
 async fn categories(app: &TestApp, owner: &LoggedInOwner) -> (String, String) {
@@ -108,7 +109,9 @@ async fn fixed_payments_derives_the_plain_sum_of_the_payments() {
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
     assert_eq!(principal_of(&r), expected, "un TIN 0 no descuenta en fixed_payments");
 
-    // Y con un TIN > 0 configurado tampoco: en este modelo el TIN es informativo.
+    // INVERTIDO en 4.7.0 (#144): un TIN > 0 en el modelo sin intereses ya no es «informativo»
+    // — es un alta inválida. El caso «fixed_payments ignora el TIN al derivar» murió con él:
+    // la derivación es una sola rama (valor actual al TIN) y en este modelo el TIN no existe.
     let r = post_liability(
         &app,
         &owner,
@@ -117,8 +120,9 @@ async fn fixed_payments_derives_the_plain_sum_of_the_payments() {
         json!({ "payment_end_date": end.to_string(), "apr_percent": "3" }),
     )
     .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
-    assert_eq!(principal_of(&r), expected, "fixed_payments ignora el TIN al derivar");
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    let msg = r.json()["message"].as_str().unwrap_or_default().to_string();
+    assert!(msg.starts_with("apr_forbidden_for_model"), "{msg}");
 }
 
 /// `french` descuenta: `P = M · (1 − (1 + i)^−n) / i` con `i = 3/1200 = 0,0025` y `n = 200`.
@@ -218,7 +222,8 @@ async fn patching_the_model_rederives_the_principal() {
     let patched = app
         .patch_json_with_cookie(
             &format!("/v1/liabilities/{id}"),
-            json!({ "repayment_model": "fixed_payments" }),
+            // Volver al modelo histórico exige soltar el TIN en el mismo PATCH (#144).
+            json!({ "repayment_model": "fixed_payments", "apr_percent": null }),
             &owner.cookie,
         )
         .await;
@@ -229,4 +234,66 @@ async fn patching_the_model_rederives_the_principal() {
         "100000".parse::<Decimal>().unwrap(),
         "al volver al modelo histórico el principal vuelve a ser Σ cuotas"
     );
+}
+
+/// Verificación adversarial de la Ola 3: una fila con el principal DERIVADO cuyo plan ya venció
+/// (visible desde #145) tiene que seguir siendo editable en los campos que NO tocan la
+/// derivación. Antes, el PATCH re-derivaba SIEMPRE con el flag activo y editar el label
+/// devolvía `payment_end_date_in_past` — una fila atrapada por un campo que el PATCH no tocó.
+/// El principal guardado no se mueve; tocar un input de la derivación sí re-deriva (y con el
+/// plan vencido, falla con su código — comportamiento de siempre, ahora solo cuando toca).
+#[tokio::test]
+async fn editing_a_derived_row_with_an_expired_plan_does_not_rederive() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cat, exp_cat) = categories(&app, &owner).await;
+    let end = end_date_for_n_monthly_payments(server_today(&app, &owner).await, 24);
+
+    let created = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({
+            "payment_end_date": end.to_string(),
+            "repayment_model": "french",
+            "apr_percent": "3",
+        }),
+    )
+    .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let id = created.json()["id"].as_str().unwrap().to_string();
+    let principal_before = principal_of(&created);
+
+    // Vencer el plan por SQL (la API no deja escribir fechas pasadas).
+    sqlx::query("UPDATE liabilities SET payment_end_date = DATE '2020-01-31' WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(&id).unwrap())
+        .execute(&app.pool)
+        .await
+        .expect("vencer el plan");
+
+    // Editar el label NO re-deriva: 200 y el principal intacto.
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            json!({ "label": "Renombrada" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    assert_eq!(principal_of(&patched), principal_before, "el principal no se mueve");
+    assert_eq!(patched.json()["plan_expired_with_balance"], true);
+
+    // Tocar un INPUT de la derivación sí re-deriva — y con el plan vencido, falla con su
+    // código de siempre (no un éxito silencioso con un número imposible).
+    let touched = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            json!({ "apr_percent": "4" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(touched.status, http::StatusCode::BAD_REQUEST, "{touched:?}");
+    let msg = touched.json()["message"].as_str().unwrap_or_default().to_string();
+    assert!(msg.starts_with("payment_end_date_in_past"), "{msg}");
 }

@@ -115,6 +115,11 @@ pub struct ProjectionLiabilityInput {
     /// deliberada: el import de un `.ffbackup` puede colar un pasivo `french` sin TIN, y el
     /// engine jamás debe panicar ni devolver error por eso — devuelve la serie sin intereses.
     pub apr_percent: Option<Decimal>,
+    /// Cuota mínima revolving: porcentaje del saldo de APERTURA (3 = 3 %/mes). Solo lo usa
+    /// `Revolving`; `None` ⇒ 0. (Ola 3/#144.)
+    pub min_payment_pct: Option<Decimal>,
+    /// Suelo en euros de la cuota mínima revolving. Solo `Revolving`; `None` ⇒ 0.
+    pub min_payment_eur: Option<Decimal>,
     /// **Amortización extra mensual** por encima de la cuota (eje what-if, 4.4.0). `0` reproduce
     /// bit a bit el comportamiento anterior.
     ///
@@ -134,6 +139,31 @@ pub struct ProjectionLiabilityInput {
     /// semántica que [`Self::extra_principal_monthly`] pero en un solo mes; varias entradas del
     /// mismo mes se suman. Vacío = ninguna.
     pub extra_principal_lump_sums: Vec<(u32, Decimal)>,
+    /// Compensación por reembolso anticipado (Ley 5/2019 art. 23), en % del capital extra
+    /// amortizado (cota legal [0, 2] a tipo fijo — la valida el handler). Eje del what-if: el
+    /// ensamblado real la deja en `None` (= 0 %); `simulate` aplica su default (2 %). Sale de
+    /// la caja como coste puro: NO amortiza ni baja el principal.
+    pub early_repayment_fee_pct: Option<Decimal>,
+    /// Qué hace la amortización extra con el plan (what-if, #151): acortarlo (`ReduceTerm`,
+    /// default y comportamiento 4.4.0 — la cuota no cambia) o bajar la cuota (`ReducePayment`,
+    /// λ-escala que conserva EXACTAMENTE el mes de extinción; ver el bucle de simulación).
+    pub early_repayment_effect: EarlyRepaymentEffect,
+}
+
+/// Efecto de la amortización anticipada sobre el plan de pago (#151). En una renta francesa el
+/// plazo restante `n` cumple `(1+i)^(−n) = 1 − P·i/M` — depende SOLO del cociente `P·i/M` —,
+/// así que escalar la cuota por el mismo factor que bajó el principal (`M' = λ·M` con
+/// `λ = P'/P`) deja el cociente intacto: «reducir cuota» libera caja mensual sin mover el mes
+/// de extinción **para una amortización PUNTUAL (lump)** — pineado en test. Con amortización
+/// extra RECURRENTE la invariancia es solo un `≤`: el extra es un importe absoluto y cerca del
+/// final cancela antes (verificado: 200 €/mes adelanta el 239 a 232). Nunca alarga.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EarlyRepaymentEffect {
+    /// La cuota no cambia; el préstamo acaba antes (comportamiento histórico del what-if).
+    #[default]
+    ReduceTerm,
+    /// La cuota baja (λ-escala) y el mes de extinción se conserva.
+    ReducePayment,
 }
 
 /// ¿Tiene el pasivo un plan de pago vivo en el mes que empieza en `m_start`?
@@ -145,11 +175,38 @@ pub struct ProjectionLiabilityInput {
 /// patrimonio, que es justo el contrato que explotan los modos B/C del handler (pasan
 /// `monthly_payment = 0` para congelar el principal).
 fn liability_active(liab: &ProjectionLiabilityInput, m_start: NaiveDate) -> bool {
-    liab.monthly_payment > Decimal::ZERO
-        && match liab.payment_end {
+    plan_alive(liab.monthly_payment, liab.payment_end, m_start)
+}
+
+/// ¿Plan de pago vivo? — la mitad reutilizable de [`liability_active`].
+fn plan_alive(monthly_payment: Decimal, payment_end: Option<NaiveDate>, m_start: NaiveDate) -> bool {
+    monthly_payment > Decimal::ZERO
+        && match payment_end {
             None => true,
             Some(end) => end >= m_start,
         }
+}
+
+/// ¿Devenga interés este pasivo en el mes que empieza en `m_start`?
+///
+/// ÚNICA definición del predicado (Ola 3, #121): la cumplen por construcción los brazos de
+/// [`liability_month`], y la consumen el KPI `net_return` de `/v1/summary` y su espejo TS
+/// `liabilityAccruesInterest` (`apps/web/src/lib/ledger.ts`). Antes eran tres copias y las tres
+/// decían cosas distintas: el KPI restaba el TIN de pasivos que la simulación cobraba a 0 €.
+///
+/// Los modelos que devengan son todos menos `FixedPayments` (post-#144 `interest_only` cobra
+/// `P·i` de verdad), siempre que haya TIN > 0 y plan de pago vivo — sin plan, el pasivo es una
+/// resta constante al patrimonio: ni caja, ni amortización, ni devengo.
+pub fn liability_interest_accrues(
+    model: RepaymentModel,
+    apr_percent: Option<Decimal>,
+    monthly_payment: Decimal,
+    payment_end: Option<NaiveDate>,
+    m_start: NaiveDate,
+) -> bool {
+    model != RepaymentModel::FixedPayments
+        && matches!(apr_percent, Some(a) if a > Decimal::ZERO)
+        && plan_alive(monthly_payment, payment_end, m_start)
 }
 
 /// Un mes de vida de un pasivo: devuelve `(caja que sale, principal de cierre)`.
@@ -166,39 +223,72 @@ fn liability_active(liab: &ProjectionLiabilityInput, m_start: NaiveDate) -> bool
 ///
 /// - inactivo → `(0, P)`: ni caja, ni amortización, ni devengo.
 /// - `FixedPayments` → `cash = min(M, P)`, `P' = P − cash`. **Bit-idéntico** al modelo pre-4.2.0.
-/// - `French` / `Revolving` → `payoff = P·(1 + i)`, `cash = min(M, payoff)`, `P' = payoff − cash`.
-///   Con `i = 0` degenera exactamente en `FixedPayments`. El tope de la cuota es el **payoff**,
-///   no el principal: cancelar el préstamo cuesta el saldo *con* el interés del mes.
-/// - `InterestOnly` → `cash = min(M, P)` y `P' = P` (constante). El TIN es informativo aquí: la
-///   cuota que el usuario declara YA es el interés que paga; recalcularlo lo cobraría dos veces.
+///   Sin TIN por contrato desde la Ola 3 (la validación lo rechaza): es el préstamo al 0 %.
+/// - `French` → `payoff = P·(1 + i)`, `cash = min(M, payoff)`, `P' = payoff − cash`. El tope de
+///   la cuota es el **payoff**, no el principal: cancelar el préstamo cuesta el saldo *con* el
+///   interés del mes.
+/// - `InterestOnly` (Ola 3, #144) → `cash = min(M, P·i)`, `P' = P + P·i − cash`. La cuota del
+///   mes ES el interés del período; la declarada solo topa por arriba, y por debajo el déficit
+///   capitaliza (carencia real). Nunca amortiza: eso es `extra_principal_monthly`.
+/// - `Revolving` (Ola 3, #144) → misma recurrencia francesa pero la cuota NO es la declarada:
+///   `m = max(min_payment_pct·P/100, min_payment_eur)`, `cash = min(m, payoff)`. Con pct 0 y
+///   suelo = cuota declarada degenera bit-idéntico en la francesa (forma del backfill).
 ///
 /// **Saturación, nunca pánico**: si el `checked_mul`/`checked_add` del payoff desborda (TIN
 /// absurdo × horizonte largo), se devuelve el principal sin devengar más. La salida sigue siendo
 /// finita y la simulación termina.
 fn liability_month(
-    model: RepaymentModel,
+    liab: &ProjectionLiabilityInput,
     principal: Decimal,
     monthly_payment: Decimal,
-    apr_percent: Option<Decimal>,
     active: bool,
 ) -> (Decimal, Decimal) {
     if !active {
         return (Decimal::ZERO, principal);
     }
-    let i = match apr_percent {
+    let i = match liab.apr_percent {
         Some(apr) if apr > Decimal::ZERO => apr / Decimal::from(1200),
         _ => Decimal::ZERO,
     };
-    match model {
+    match liab.repayment_model {
         RepaymentModel::FixedPayments => {
             let cash = monthly_payment.min(principal).max(Decimal::ZERO);
             (cash, principal - cash)
         }
         RepaymentModel::InterestOnly => {
-            let cash = monthly_payment.min(principal).max(Decimal::ZERO);
-            (cash, principal)
+            // Carencia REAL (Ola 3/#144; contrato en .claude/financial-contracts.md §2.1): la cuota ES el interés del período
+            // (saldo × TIN/1200), no un pago libre. La cuota declarada es un TOPE por arriba:
+            //   M ≥ interés ⇒ cash = interés, principal plano;
+            //   M < interés ⇒ cash = M y el déficit CAPITALIZA (la deuda crece) — como un
+            //   producto español de verdad. Nunca amortiza: adelantar capital en carencia es
+            //   `extra_principal`, no la cuota. Hasta 4.6.0 aquí se aceptaba una cuota
+            //   arbitraria como «interés» (300 €/mes sobre una deuda de 300 €: 252.000 € de
+            //   interés fantasma en 70 años).
+            let interest = principal.checked_mul(i).unwrap_or(Decimal::ZERO);
+            let cash = monthly_payment.min(interest).max(Decimal::ZERO);
+            (cash, principal + interest - cash)
         }
-        RepaymentModel::French | RepaymentModel::Revolving => {
+        RepaymentModel::Revolving => {
+            // Revolving REAL (Ola 3/#144): cuota mínima = max(pct × saldo de APERTURA, suelo €).
+            // La cuota declarada (`monthly_payment`) NO entra en la caja: alimenta el
+            // presupuesto, y esa divergencia está declarada (SCHEDULE_MODEL_NOTE, helpTexts).
+            // Con pct = 0 y suelo = cuota declarada la recurrencia degenera EXACTAMENTE en la
+            // francesa (el backfill de la migración garantiza bit-identidad para lo existente).
+            let payoff = Decimal::ONE
+                .checked_add(i)
+                .and_then(|factor| principal.checked_mul(factor))
+                .unwrap_or(principal);
+            let pct_cuota = liab
+                .min_payment_pct
+                .unwrap_or(Decimal::ZERO)
+                .max(Decimal::ZERO)
+                / Decimal::from(100)
+                * principal;
+            let m = pct_cuota.max(liab.min_payment_eur.unwrap_or(Decimal::ZERO));
+            let cash = m.min(payoff).max(Decimal::ZERO);
+            (cash, payoff - cash)
+        }
+        RepaymentModel::French => {
             let payoff = Decimal::ONE
                 .checked_add(i)
                 .and_then(|factor| principal.checked_mul(factor))
@@ -216,17 +306,21 @@ fn liability_month(
 /// `0 ..= closing_after_payment`, así que sumarla al servicio de deuda y restarla del principal
 /// no puede producir ni caja fantasma ni principal negativo.
 ///
-/// Sin plan de pago activo devuelve 0: amortizar «extra» un pasivo que no cobra cuota no
+/// Sin plan de pago activo devuelve `(0, 0)`: amortizar «extra» un pasivo que no cobra cuota no
 /// adelanta nada (no hay devengo que evitar ni cuota que liberar) y además rompería el contrato
 /// de los modos B/C del handler, donde el principal es una resta CONSTANTE al patrimonio.
+///
+/// Devuelve `(extra, fee)` (#151): `fee = extra × early_repayment_fee_pct / 100` es la
+/// compensación por reembolso anticipado — sale de la caja del mes como coste puro y NO baja el
+/// principal. Sin la comisión, el what-if de amortizar era gratis por construcción.
 fn liability_extra_principal(
     liab: &ProjectionLiabilityInput,
     month: u32,
     closing_after_payment: Decimal,
     active: bool,
-) -> Decimal {
+) -> (Decimal, Decimal) {
     if !active {
-        return Decimal::ZERO;
+        return (Decimal::ZERO, Decimal::ZERO);
     }
     let mut wanted = liab.extra_principal_monthly.max(Decimal::ZERO);
     for (m, amount) in &liab.extra_principal_lump_sums {
@@ -234,9 +328,12 @@ fn liability_extra_principal(
             wanted += (*amount).max(Decimal::ZERO);
         }
     }
-    wanted
+    let extra = wanted
         .min(closing_after_payment.max(Decimal::ZERO))
-        .max(Decimal::ZERO)
+        .max(Decimal::ZERO);
+    let fee = extra * liab.early_repayment_fee_pct.unwrap_or(Decimal::ZERO).max(Decimal::ZERO)
+        / Decimal::from(100);
+    (extra, fee)
 }
 
 /// Valor actual de una renta de `months` cuotas mensuales de `monthly_payment`, descontada al
@@ -335,6 +432,11 @@ pub struct LiabilityScheduleMonth {
     /// Parte de `principal_repaid` que viene de una amortización extra what-if. `0` en el
     /// calendario real de un pasivo guardado.
     pub extra_principal: Decimal,
+    /// Compensación por reembolso anticipado del mes (#151): `extra_principal ×
+    /// early_repayment_fee_pct / 100`. Coste puro — queda FUERA de la identidad
+    /// `payment + extra_principal == interest_accrued + principal_repaid` a propósito: sale de
+    /// la caja pero no amortiza. `0` en el calendario real de un pasivo guardado.
+    pub early_repayment_fee: Decimal,
     /// Caja que sale por la **cuota** (topada al saldo de cancelación del mes: el último mes de un
     /// préstamo es de cuota parcial). No incluye `extra_principal`.
     pub payment: Decimal,
@@ -367,8 +469,10 @@ pub struct LiabilitySchedule {
     pub total_payments: Decimal,
     /// Σ `extra_principal`.
     pub total_extra_principal: Decimal,
-    /// `total_payments + total_extra_principal`: todo lo que sale de la caja. Es el «total a
-    /// pagar» de la pregunta.
+    /// Σ `early_repayment_fee` (#151). `0` sin what-if de amortización o con comisión 0.
+    pub total_early_repayment_fee: Decimal,
+    /// `total_payments + total_extra_principal + total_early_repayment_fee`: todo lo que sale
+    /// de la caja. Es el «total a pagar» de la pregunta.
     pub total_cash_out: Decimal,
     /// Mes en que el saldo llega a **cero exacto**. `Some(0)` ⟺ el pasivo ya estaba saldado al
     /// arrancar. `None` ⟺ hay `payoff_absent`.
@@ -402,6 +506,9 @@ pub fn liability_amortization_schedule(
     let mut total_interest = Decimal::ZERO;
     let mut total_payments = Decimal::ZERO;
     let mut total_extra_principal = Decimal::ZERO;
+    let mut total_early_repayment_fee = Decimal::ZERO;
+    // Cuota efectiva (#151): solo la muta «reducir cuota»; con el default es la declarada.
+    let mut effective_payment = liab.monthly_payment;
     // Un pasivo con saldo 0 ya está extinguido HOY: `Some(0)` y calendario vacío. No se deja caer
     // al bucle porque emitiría meses de ceros que no describen nada.
     let mut payoff_month_index = principal.is_zero().then_some(0u32);
@@ -417,22 +524,26 @@ pub fn liability_amortization_schedule(
                 break;
             }
 
-            let (payment, closing_after_payment) = liability_month(
-                liab.repayment_model,
-                principal,
-                liab.monthly_payment,
-                liab.apr_percent,
-                true,
-            );
-            let extra = liability_extra_principal(liab, k, closing_after_payment, true);
+            let (payment, closing_after_payment) =
+                liability_month(liab, principal, effective_payment, true);
+            let (extra, fee) = liability_extra_principal(liab, k, closing_after_payment, true);
             let closing = closing_after_payment - extra;
 
             // Derivación en este orden a propósito: los saldos mandan, el interés es el residuo.
             // Así `payment + extra == interest + principal_repaid` es exacto por construcción y
-            // no una coincidencia numérica que un cambio de modelo pueda romper.
+            // no una coincidencia numérica que un cambio de modelo pueda romper. La comisión
+            // (#151) queda FUERA de la identidad: es caja sin contrapartida en el principal.
             let repaid_by_payment = principal - closing_after_payment;
             let interest_accrued = payment - repaid_by_payment;
             let principal_repaid = principal - closing;
+
+            // «Reducir cuota» (#151): misma λ-escala que el bucle de simulación.
+            if extra > Decimal::ZERO
+                && liab.early_repayment_effect == EarlyRepaymentEffect::ReducePayment
+                && closing_after_payment > Decimal::ZERO
+            {
+                effective_payment = effective_payment * closing / closing_after_payment;
+            }
 
             months.push(LiabilityScheduleMonth {
                 month_index: k,
@@ -440,12 +551,14 @@ pub fn liability_amortization_schedule(
                 interest_accrued,
                 principal_repaid,
                 extra_principal: extra,
+                early_repayment_fee: fee,
                 payment,
                 closing_principal: closing,
             });
             total_interest += interest_accrued;
             total_payments += payment;
             total_extra_principal += extra;
+            total_early_repayment_fee += fee;
             principal = closing;
 
             if principal.is_zero() {
@@ -474,7 +587,8 @@ pub fn liability_amortization_schedule(
         total_interest,
         total_payments,
         total_extra_principal,
-        total_cash_out: total_payments + total_extra_principal,
+        total_early_repayment_fee,
+        total_cash_out: total_payments + total_extra_principal + total_early_repayment_fee,
         payoff_month_index,
         payoff_absent,
         horizon_months: horizon,
@@ -976,13 +1090,13 @@ pub fn first_month_allocation(
         let active = liability_active(liab, m_start);
         let opening = principals.get(i).copied().unwrap_or(Decimal::ZERO);
         let (cash, closing) = liability_month(
-            liab.repayment_model,
+            liab,
             opening,
             liab.monthly_payment,
-            liab.apr_percent,
             active,
         );
-        debt_service += cash + liability_extra_principal(liab, 1, closing, active);
+        let (extra, fee) = liability_extra_principal(liab, 1, closing, active);
+        debt_service += cash + extra + fee;
     }
 
     let planning_adj = input.planning_monthly_cash_adjustment[0];
@@ -1109,6 +1223,13 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         .iter()
         .map(|l| l.principal.max(Decimal::ZERO))
         .collect();
+    // Cuota efectiva por pasivo (#151): solo la muta «reducir cuota» (λ-escala). Con el efecto
+    // default (`ReduceTerm`) nunca se toca y la simulación es bit-idéntica a 4.6.0.
+    let mut effective_payment: Vec<Decimal> = input
+        .liabilities
+        .iter()
+        .map(|l| l.monthly_payment)
+        .collect();
 
     let start_month_first = month_first_calendar(input.ref_date);
 
@@ -1170,19 +1291,26 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
                 break;
             }
             let active = liability_active(liab, m_start);
-            let (cash, closing) = liability_month(
-                liab.repayment_model,
-                principals[i],
-                liab.monthly_payment,
-                liab.apr_percent,
-                active,
-            );
+            let (cash, closing) =
+                liability_month(liab, principals[i], effective_payment[i], active);
             // Amortización extra (what-if): sale de la caja del mes como servicio de deuda Y baja
             // el principal el mismo importe. Las dos cosas o ninguna — hacer solo la primera
-            // drenaría caja sin reducir deuda, y solo la segunda imprimiría dinero.
-            let extra = liability_extra_principal(liab, k, closing, active);
-            debt_service += cash + extra;
-            closing_principals.push(closing - extra);
+            // drenaría caja sin reducir deuda, y solo la segunda imprimiría dinero. La comisión
+            // (#151) es la excepción asimétrica A PROPÓSITO: sale de la caja y NO baja nada —
+            // es coste puro, lo que hace que el what-if de amortizar deje de ser gratis.
+            let (extra, fee) = liability_extra_principal(liab, k, closing, active);
+            debt_service += cash + extra + fee;
+            let new_closing = closing - extra;
+            // «Reducir cuota» (#151): λ = P'/P sobre el saldo TRAS la cuota del mes. Mismo
+            // cociente P·i/M ⇒ misma extinción para un lump; con extra recurrente solo `≤`
+            // (ver `EarlyRepaymentEffect`).
+            if extra > Decimal::ZERO
+                && liab.early_repayment_effect == EarlyRepaymentEffect::ReducePayment
+                && closing > Decimal::ZERO
+            {
+                effective_payment[i] = effective_payment[i] * new_closing / closing;
+            }
+            closing_principals.push(new_closing);
         }
 
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
@@ -1797,8 +1925,12 @@ mod tests {
             payment_end: Some(NaiveDate::from_ymd_opt(2040, 1, 1).unwrap()),
             repayment_model: RepaymentModel::FixedPayments,
             apr_percent: None,
+            min_payment_pct: None,
+            min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::default(),
         }];
 
         // (a) Sin componente de planning: base == neto recurrente.
@@ -2224,8 +2356,12 @@ mod tests {
             // (a cero: el pin describe un pasivo real, no un what-if).
             repayment_model: RepaymentModel::FixedPayments,
             apr_percent: None,
+            min_payment_pct: None,
+            min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::default(),
         }];
         inp.planning_monthly_cash_adjustment[0] = Decimal::from(250);
         inp.planning_monthly_cash_adjustment[5] = Decimal::from(-100);
@@ -2348,8 +2484,12 @@ mod tests {
             payment_end: None,
             repayment_model: model,
             apr_percent: apr,
+            min_payment_pct: None,
+            min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::default(),
         }];
         inp
     }
@@ -2467,11 +2607,17 @@ mod tests {
         assert_eq!(implicit_principal(&out, 2), dec("101005.0000"));
     }
 
-    /// Solo intereses: el principal no se mueve NUNCA y la caja que sale es la cuota entera —
-    /// que es justo lo que declara el usuario de un préstamo de este tipo. El TIN es informativo
-    /// aquí: la cuota YA es el interés, devengarlo otra vez lo cobraría dos veces.
+    /// INVERTIDO en la Ola 3 (#144). Hasta 4.6.0 este test pineaba «la caja es la cuota
+    /// declarada, entera» — sobre una deuda de 300 € con cuota 500 salían 300 €/mes, y con
+    /// cuota 300 €/mes durante 70 años salían 252.000 € de «interés» sobre 300 € de deuda.
+    /// La carencia real española cobra el interés del período: `cash = min(M, P·i)`.
+    ///
+    /// Números a mano (80.000 € al 6 % ⇒ i = 0,005; interés = 400,00 €/mes exacto):
+    /// - cuota declarada 400 = interés ⇒ caja 400, principal plano;
+    /// - cuota declarada 600 > interés ⇒ caja 400 igualmente (la cuota es tope, no suelo);
+    /// - deuda 300 € al 6 % ⇒ interés 1,50 €/mes; cuota declarada 500 ⇒ caja 1,50, no 300.
     #[test]
-    fn interest_only_principal_constant_and_cash_is_the_quota() {
+    fn interest_only_cash_is_the_period_interest_not_the_declared_quota() {
         let inp = one_liability_input(
             24,
             Decimal::from(80_000),
@@ -2484,17 +2630,30 @@ mod tests {
             assert_eq!(
                 implicit_principal(&out, k),
                 Decimal::from(80_000),
-                "el principal de un interest_only es constante (mes {k})"
+                "con cuota = interés el principal es constante (mes {k})"
             );
         }
         assert_eq!(
             first_month_allocation(&inp).unwrap().debt_service,
             Decimal::from(400),
-            "la caja del mes es la cuota íntegra"
+            "la caja del mes es el interés del período"
         );
 
-        // Con la cuota por encima del saldo, la caja se recorta al saldo (`min`): nadie paga
-        // 500 € por un préstamo del que solo debe 300.
+        // Cuota por ENCIMA del interés: la caja se recorta al interés (600 → 400,00). En
+        // carencia no se amortiza pagando de más — eso es `extra_principal_monthly`.
+        let generoso = one_liability_input(
+            1,
+            Decimal::from(80_000),
+            Decimal::from(600),
+            RepaymentModel::InterestOnly,
+            Some(Decimal::from(6)),
+        );
+        assert_eq!(
+            first_month_allocation(&generoso).unwrap().debt_service,
+            Decimal::from(400)
+        );
+
+        // La deuda pequeña que motivó la inversión: 300 € al 6 % ⇒ 1,50 €/mes, no 300.
         let pequeno = one_liability_input(
             1,
             Decimal::from(300),
@@ -2504,17 +2663,36 @@ mod tests {
         );
         assert_eq!(
             first_month_allocation(&pequeno).unwrap().debt_service,
-            Decimal::from(300)
+            dec("1.500"),
         );
     }
 
-    /// `Revolving` y `French` comparten recurrencia en 4.2.0 — **deliberadamente**. Este test
-    /// pinea esa equivalencia para que no se rompa por accidente: el día que revolving modele lo
-    /// suyo (disposiciones, cuota mínima como % del saldo) este test se cambia A PROPÓSITO, con
-    /// su entrada de CHANGELOG. Mientras tanto, dos etiquetas para la misma matemática es una
-    /// decisión de producto (el usuario nombra su deuda como es), no un descuido.
+    /// Cuota (tope) por DEBAJO del interés en carencia: el déficit capitaliza. 100.000 € al
+    /// 12 % ⇒ devengo 1.000 €/mes, tope declarado 400. A mano:
+    /// mes 1: caja 400, cierre 100.000 + 1.000 − 400 = 100.600;
+    /// mes 2: interés 1.006, caja 400, cierre 100.600 + 1.006 − 400 = 101.206.
     #[test]
-    fn revolving_matches_french_recurrence() {
+    fn interest_only_deficit_capitalizes_like_a_real_carencia() {
+        let inp = one_liability_input(
+            2,
+            Decimal::from(100_000),
+            Decimal::from(400),
+            RepaymentModel::InterestOnly,
+            Some(Decimal::from(12)),
+        );
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(implicit_principal(&out, 1), dec("100600.00"));
+        assert_eq!(implicit_principal(&out, 2), dec("101206.0000"));
+    }
+
+    /// INVERTIDO en la Ola 3 (#144). El test 4.2.0 `revolving_matches_french_recurrence` pineaba
+    /// «revolving = etiqueta de la recurrencia francesa» y su propio comentario anunciaba que
+    /// moriría a propósito el día que revolving modelara lo suyo. Ese día es este: la cuota
+    /// mínima real es `max(pct × saldo de apertura, suelo €)` — lo que queda de la equivalencia
+    /// es el caso degenerado `pct = 0, suelo = cuota declarada`, que es EXACTAMENTE el backfill
+    /// de la migración y por eso se pinea bit-idéntico.
+    #[test]
+    fn revolving_backfill_shape_degenerates_to_french_bit_identical() {
         let frances = one_liability_input(
             120,
             Decimal::from(12_000),
@@ -2522,18 +2700,60 @@ mod tests {
             RepaymentModel::French,
             Some(Decimal::from(18)),
         );
-        let revolving = one_liability_input(
+        let mut revolving = one_liability_input(
             120,
             Decimal::from(12_000),
             Decimal::from(250),
             RepaymentModel::Revolving,
             Some(Decimal::from(18)),
         );
+        revolving.liabilities[0].min_payment_pct = Some(Decimal::ZERO);
+        revolving.liabilities[0].min_payment_eur = Some(Decimal::from(250));
         let a = project_net_worth_series(&frances).unwrap();
         let b = project_net_worth_series(&revolving).unwrap();
         assert_eq!(a.net_worth, b.net_worth);
         assert_eq!(a.contributed_capital, b.contributed_capital);
         assert_eq!(a.per_asset_series, b.per_asset_series);
+    }
+
+    /// La cuota mínima revolving de verdad (#144): `max(pct × saldo de apertura, suelo €)`,
+    /// topada al payoff. A mano, TIN 18 % ⇒ i = 0,015, pct 3 %, suelo 30 €:
+    /// - saldo 3.000 ⇒ max(90, 30) = 90,00; cierre = 3.000·1,015 − 90 = 2.955,00;
+    /// - saldo 800 ⇒ max(24, 30) = 30,00 (manda el suelo); cierre = 800·1,015 − 30 = 782,00.
+    /// La cuota DECLARADA no pinta nada en la caja: se declara 999 y salen 90.
+    #[test]
+    fn revolving_minimum_is_pct_of_opening_balance_with_a_floor() {
+        let mut grande = one_liability_input(
+            1,
+            Decimal::from(3_000),
+            Decimal::from(999),
+            RepaymentModel::Revolving,
+            Some(Decimal::from(18)),
+        );
+        grande.liabilities[0].min_payment_pct = Some(Decimal::from(3));
+        grande.liabilities[0].min_payment_eur = Some(Decimal::from(30));
+        assert_eq!(
+            first_month_allocation(&grande).unwrap().debt_service,
+            dec("90.00")
+        );
+        let out = project_net_worth_series(&grande).unwrap();
+        assert_eq!(implicit_principal(&out, 1), dec("2955.000"));
+
+        let mut pequeno = one_liability_input(
+            1,
+            Decimal::from(800),
+            Decimal::from(999),
+            RepaymentModel::Revolving,
+            Some(Decimal::from(18)),
+        );
+        pequeno.liabilities[0].min_payment_pct = Some(Decimal::from(3));
+        pequeno.liabilities[0].min_payment_eur = Some(Decimal::from(30));
+        assert_eq!(
+            first_month_allocation(&pequeno).unwrap().debt_service,
+            dec("30")
+        );
+        let out = project_net_worth_series(&pequeno).unwrap();
+        assert_eq!(implicit_principal(&out, 1), dec("782.000"));
     }
 
     /// `payment_end` congela el pasivo en los CUATRO modelos: desde el mes siguiente no sale
@@ -2680,13 +2900,95 @@ mod tests {
             payment_end: None,
             repayment_model: model,
             apr_percent: apr,
+            min_payment_pct: None,
+            min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::default(),
         }
     }
 
     fn ref_2026() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()
+    }
+
+    /// #151, números a mano (francés 150.000 € al TIN 2,50 % ⇒ i = 1/480, cuota 800, lump de
+    /// 20.000 € en el mes 12, comisión 2 %):
+    /// - comisión del mes 12 = 20.000 × 2 % = **400,00 €** exactos, FUERA de la identidad
+    ///   cuota+extra = interés+amortizado (coste puro, no baja el principal);
+    /// - `total_cash_out` = cuotas + extra + comisión.
+    #[test]
+    fn early_repayment_fee_is_charged_outside_the_amortization_identity() {
+        let mut l = liab(
+            Decimal::from(150_000),
+            Decimal::from(800),
+            RepaymentModel::French,
+            Some(dec("2.5")),
+        );
+        l.extra_principal_lump_sums = vec![(12, Decimal::from(20_000))];
+        l.early_repayment_fee_pct = Some(Decimal::from(2));
+        let sch = liability_amortization_schedule(&l, ref_2026(), 480);
+
+        let m12 = sch.months.iter().find(|m| m.month_index == 12).unwrap();
+        assert_eq!(m12.extra_principal, Decimal::from(20_000));
+        assert_eq!(m12.early_repayment_fee, Decimal::from(400), "20.000 × 2 % = 400,00");
+        assert_eq!(
+            m12.payment + m12.extra_principal,
+            m12.interest_accrued + m12.principal_repaid,
+            "la identidad se cumple SIN la comisión"
+        );
+        assert_eq!(sch.total_early_repayment_fee, Decimal::from(400));
+        assert_eq!(
+            sch.total_cash_out,
+            sch.total_payments + sch.total_extra_principal + sch.total_early_repayment_fee
+        );
+        // Los meses sin extra no pagan comisión.
+        assert!(sch
+            .months
+            .iter()
+            .filter(|m| m.month_index != 12)
+            .all(|m| m.early_repayment_fee.is_zero()));
+    }
+
+    /// #151 «reducir cuota» — LA INVARIANTE, que no depende de aritmética a mano: en una renta
+    /// francesa el plazo restante depende solo del cociente P·i/M, así que λ-escalar la cuota
+    /// por el factor que bajó el principal conserva EXACTAMENTE el mes de extinción del
+    /// préstamo SIN amortizar. A mano (verificado con la recurrencia a 50 dígitos): baseline
+    /// sin extra extingue en el mes **239**; con 20.000 € en el mes 12 y `reduce_payment`,
+    /// TAMBIÉN en el 239 — y la cuota baja de 800 a **688,9525 €** (caja liberada 111,0475 €/mes).
+    #[test]
+    fn reduce_payment_keeps_the_payoff_month_and_lowers_the_instalment() {
+        let base = liab(
+            Decimal::from(150_000),
+            Decimal::from(800),
+            RepaymentModel::French,
+            Some(dec("2.5")),
+        );
+        let base_sch = liability_amortization_schedule(&base, ref_2026(), 480);
+        assert_eq!(base_sch.payoff_month_index, Some(239), "baseline a mano");
+
+        let mut reduced = base.clone();
+        reduced.extra_principal_lump_sums = vec![(12, Decimal::from(20_000))];
+        reduced.early_repayment_effect = EarlyRepaymentEffect::ReducePayment;
+        let sch = liability_amortization_schedule(&reduced, ref_2026(), 480);
+        assert_eq!(
+            sch.payoff_month_index,
+            base_sch.payoff_month_index,
+            "reducir cuota conserva el mes de extinción"
+        );
+        let m13 = sch.months.iter().find(|m| m.month_index == 13).unwrap();
+        let cuota = m13.payment.round_dp(4);
+        assert_eq!(cuota, dec("688.9525"), "cuota nueva desde el mes 13");
+
+        // El gemelo: con el efecto default (acortar plazo) la cuota NO cambia y el préstamo
+        // acaba antes — a mano, en el mes **200**.
+        let mut shortened = base.clone();
+        shortened.extra_principal_lump_sums = vec![(12, Decimal::from(20_000))];
+        let sch = liability_amortization_schedule(&shortened, ref_2026(), 480);
+        assert_eq!(sch.payoff_month_index, Some(200), "acortar plazo, a mano");
+        let m13 = sch.months.iter().find(|m| m.month_index == 13).unwrap();
+        assert_eq!(m13.payment, Decimal::from(800), "la cuota no se toca");
     }
 
     /// **La identidad contable del calendario**, exacta en `Decimal`, en los cuatro modelos y en

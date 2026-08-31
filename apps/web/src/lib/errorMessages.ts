@@ -190,6 +190,16 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa simulación de deuda no cambia nada: indica amortización extra, una entrega puntual o un TIN.",
   liability_override_needs_payment_plan:
     "Para simular esa deuda hace falta que tenga cuota y periodicidad.",
+  early_repayment_fee_out_of_range:
+    "La compensación por amortizar antes debe estar entre 0 y 2 % (el tope legal a tipo fijo).",
+  early_repayment_effect_invalid:
+    "Ese efecto de amortización no existe. Elige acortar plazo o reducir cuota.",
+  liability_early_repayment_axis_needs_amortization:
+    "La comisión y el efecto de amortizar solo aplican si el escenario amortiza algo. Añade una amortización mensual o puntual.",
+  liability_override_revolving_needs_minimums:
+    "Para simular esa deuda como revolving necesita su cuota mínima (porcentaje del saldo o suelo en euros) guardada en la ficha.",
+  reduce_payment_ignored_by_repayment_model:
+    "Reducir cuota no hace nada en una revolving: su cuota es el mínimo del saldo, no la declarada. Usa acortar plazo.",
   liability_overrides_unavailable_in_real_expense_mode:
     "Con el gasto tomado de tus movimientos reales, la cuota ya está dentro del gasto: simular la deuda aparte la contaría dos veces.",
   liability_repayment_model_needs_apr:
@@ -221,7 +231,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   expense_end_set_and_clear:
     "No se puede poner y borrar la fecha de fin del gasto a la vez. Elige una de las dos cosas.",
   repayment_model_state_invalid:
-    "A esa deuda le faltan varios datos para el modelo elegido: revisa cuota, periodicidad y TAE.",
+    "A esa deuda le faltan varios datos para el modelo elegido: revisa cuota, periodicidad y TIN.",
   window_months_out_of_range:
     "La ventana pedida está fuera del rango permitido. Ajusta el número de meses.",
   due_date_out_of_range:
@@ -372,15 +382,23 @@ export const ERROR_MESSAGES: Record<string, string> = {
   payment_end_date_required_for_derived_principal:
     "Para calcular el capital pendiente a partir del plan hace falta la fecha del último pago.",
   repayment_model_invalid:
-    "Ese modelo de deuda no existe. Elige cuota fija, francés, solo intereses o revolving.",
+    "Ese modelo de deuda no existe. Elige francés, sin intereses, solo intereses o revolving.",
   apr_required_for_model:
-    "Para una deuda francesa o revolving hace falta la TAE (mayor que cero).",
+    "Ese modelo de deuda devenga interés: hace falta el TIN (mayor que cero).",
+  apr_forbidden_for_model:
+    "Una deuda sin intereses no lleva TIN. Quítalo o elige francés, solo intereses o revolving.",
   payment_plan_required_for_model:
     "Ese modelo de deuda necesita plan de pagos: indica cuota y periodicidad.",
   derive_not_supported_for_model:
-    "El capital pendiente solo se puede calcular del plan en cuota fija o francés.",
+    "El capital pendiente solo se puede calcular del plan en las deudas sin intereses o francesas.",
   weekly_not_supported_for_model:
-    "La periodicidad semanal solo vale para deudas de cuota fija.",
+    "La periodicidad semanal solo vale para deudas sin intereses.",
+  revolving_minimum_required:
+    "Una revolving necesita su cuota mínima: porcentaje del saldo o suelo en euros, mayor que cero.",
+  revolving_minimum_forbidden_for_model:
+    "La cuota mínima (porcentaje del saldo y suelo) es solo de las revolving. Quítala en los demás modelos.",
+  apr_percent_set_and_clear:
+    "No se puede fijar el TIN y borrarlo a la vez. Manda solo uno de los dos.",
 
   // ── Presupuesto y próximos ────────────────────────────────────────────────────────────
   budget_entry_category_scope_unsupported:
@@ -479,13 +497,15 @@ export const ERROR_MESSAGES: Record<string, string> = {
   snapshot_value_negative:
     "El valor de un elemento del snapshot no puede ser negativo.",
   snapshot_apr_percent_negative:
-    "La TAE de un elemento del snapshot no puede ser negativa.",
+    "El TIN de un elemento del snapshot no puede ser negativo.",
   snapshot_payment_amount_negative:
     "La cuota de un elemento del snapshot no puede ser negativa.",
   snapshot_payment_frequency_invalid:
     "La periodicidad de un elemento del snapshot solo puede ser mensual o semanal.",
   snapshot_terms_only_for_liabilities:
     "Las condiciones del préstamo solo tienen sentido en un pasivo.",
+  snapshot_repayment_model_invalid:
+    "Ese modelo de deuda no existe en el snapshot. Elige francés, sin intereses, solo intereses o revolving.",
   snapshot_duplicate_item:
     "El snapshot repite un elemento. Deja uno solo de cada.",
   snapshot_date_in_future: "Un snapshot no puede tener fecha futura.",
