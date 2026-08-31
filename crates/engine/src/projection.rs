@@ -1373,15 +1373,25 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         .map(|_| Vec::with_capacity(input.horizon_months as usize + 1))
         .collect();
 
-    // Coste histórico ya invertido (precio de compra) antes del primer mes simulado.
-    let initial_contributed_basis: Decimal = input
+    // #120 (Ola 6): base de coste POR ACTIVO (coste medio, no FIFO — la BD guarda UN
+    // purchase_price por activo). Arranca en el precio de compra (> 0) y desde aquí:
+    // sube con lo que la cascada aporta a ese activo, y BAJA proporcionalmente al valor
+    // drenado (`b·(v−d)/v`): drenar todo un activo deja su base en 0 exacto. La rentabilidad
+    // nunca la toca — el hueco valor−base ES la plusvalía latente.
+    //
+    // `contributed_capital(k) = Σ basis_i(k) + surplus_cash(k)` — IDENTIDAD, no acumulador:
+    // la caja es base pura (entra ya tributada, no compone), así que el sobrante que la
+    // cascada no asigna y el superávit del jubilado cuentan solos, y el déficit que consume
+    // caja también RESTA solo. Consecuencia deliberada: la serie publicada DEJA DE SER
+    // MONÓTONA — «cumulative» murió con #120.
+    let mut basis: Vec<Decimal> = input
         .assets
         .iter()
-        .filter_map(|a| a.purchase_price)
-        .filter(|p| *p > Decimal::ZERO)
-        .sum();
-
-    let mut contributed_cumulative = initial_contributed_basis;
+        .map(|a| a.purchase_price.filter(|p| *p > Decimal::ZERO).unwrap_or(Decimal::ZERO))
+        .collect();
+    let contributed_fn = |basis: &[Decimal], surplus: Decimal| -> Decimal {
+        basis.iter().copied().sum::<Decimal>() + surplus
+    };
     let mut undrained_cumulative = Decimal::ZERO;
     let mut assets_depleted_month_index: Option<u32> = None;
     // Monthly savings not routed when remainder weights sum to zero.
@@ -1414,7 +1424,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         surplus_cash,
     ));
     liquid_series.push(liquid_fn(&values, surplus_cash));
-    contrib_series.push(contributed_cumulative);
+contrib_series.push(contributed_fn(&basis, surplus_cash));
     for (i, s) in per_asset_series.iter_mut().enumerate() {
         s.push(values[i]);
     }
@@ -1529,8 +1539,21 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             surplus_cash -= from_surplus;
             need -= from_surplus;
             if need > Decimal::ZERO {
-                let und = drain_from_assets(&mut values, &liquid, &rates, need, None);
+                let mut taken = vec![Decimal::ZERO; values.len()];
+                let und =
+                    drain_from_assets(&mut values, &liquid, &rates, need, Some(&mut taken));
                 undrained_cumulative += und;
+                // #120: la base baja en proporción al VALOR drenado — b' = b·v_post/v_pre,
+                // multiplicación antes de la división (drenar todo ⇒ b·0/v = 0 exacto).
+                // Guarda v_pre > 0 obligatoria: Decimal / 0 PANICA (precedente task_panic).
+                for i in 0..values.len() {
+                    if taken[i] > Decimal::ZERO {
+                        let v_pre = values[i] + taken[i];
+                        if v_pre > Decimal::ZERO {
+                            basis[i] = basis[i] * values[i] / v_pre;
+                        }
+                    }
+                }
             }
         } else if in_retirement {
             // In retirement any surplus stays as cash buffer; no new contributions are made.
@@ -1547,11 +1570,12 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             );
             for i in 0..values.len() {
                 values[i] += alloc[i];
-                contributed_cumulative += alloc[i];
+                basis[i] += alloc[i];
             }
             if leftover > Decimal::ZERO {
+                // Solo a la caja: la identidad `Σ basis + surplus_cash` ya lo cuenta como
+                // aportado — sumarlo también a una base sería contarlo dos veces.
                 surplus_cash += leftover;
-                contributed_cumulative += leftover;
             }
         }
 
@@ -1578,7 +1602,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         );
         net_series.push(nw);
         liquid_series.push(liquid_fn(&values, surplus_cash));
-        contrib_series.push(contributed_cumulative);
+    contrib_series.push(contributed_fn(&basis, surplus_cash));
         for (i, s) in per_asset_series.iter_mut().enumerate() {
             s.push(values[i]);
         }
@@ -1812,6 +1836,9 @@ mod tests {
         assert!(dips > 100, "el escenario debe vivir bajo el target inflado: dips={dips}");
 
         for k in 0..=120usize {
+            // (#120: el activo no tiene purchase_price y el jubilado va en déficit — base 0,
+            // drenar 0 de base sigue dando 0. Este bucle pinea el LATCH, no la monotonía de
+            // `contributed_capital`, que desde la Ola 6 puede decrecer.)
             assert_eq!(
                 out.contributed_capital[k],
                 Decimal::ZERO,
@@ -3976,14 +4003,17 @@ mod tests {
         });
         assert_eq!(cruce, None, "con gasto indexado e ingresos planos no hay cruce en 70 años");
 
-        // Primer déficit de caja en el mes 247: la aportación del 246 aún entra, la del 247 no.
+        // Primer déficit de caja en el mes 247: la aportación del 246 aún entra; desde el 247
+        // el déficit se cubre VENDIENDO — y con #120 (Ola 6) la base de coste baja con la
+        // venta, así que `contributed_capital` DECRECE (hasta 4.9.0 se congelaba: la serie
+        // era monótona por construcción y este assert pineaba la igualdad).
         assert!(
             out.contributed_capital[246] > out.contributed_capital[245],
             "el mes 246 aún aporta"
         );
-        assert_eq!(
-            out.contributed_capital[247], out.contributed_capital[246],
-            "desde el 247 la caja es deficitaria y no se aporta"
+        assert!(
+            out.contributed_capital[247] < out.contributed_capital[246],
+            "desde el 247 se vende y la base aportada baja (#120)"
         );
         let final_ = out.net_worth[840].round_dp(2);
         assert!(
@@ -4148,5 +4178,54 @@ mod tests {
         let d = build(true, Decimal::from(1_000), im4());
         assert_eq!(d.rules[0].cap_ceiling, Some(Decimal::from(4_000)));
         assert_eq!(d.rules[0].cap_room, Some(Decimal::from(1_000)));
+    }
+
+    /// #120 (Ola 6) — la base baja proporcionalmente al VALOR drenado, por activo. A (10.000,
+    /// base 4.000) se vacía entero → base 0 exacto; B (20.000, base 15.000) vende 5.000 →
+    /// base 15.000·15.000/20.000 = 11.250. `contributed_capital` pasa de 19.000 a **11.250**
+    /// (hasta 4.9.0 se quedaba en 19.000: la serie era monótona por construcción) — y ESO es
+    /// también el guard-rail de contrato: la serie PUEDE decrecer. Plusvalía realizada del mes
+    /// = 15.000 − 7.750 = 7.250 (la que la fase 2 de #140 querría gravar cuando g se derive).
+    #[test]
+    fn basis_falls_proportionally_to_the_value_drained_per_asset() {
+        let mut a = mk_asset(0xE1, Decimal::from(10_000), true, None);
+        a.purchase_price = Some(Decimal::from(4_000));
+        let mut b = mk_asset(0xE2, Decimal::from(20_000), true, None);
+        b.purchase_price = Some(Decimal::from(15_000));
+        let inp = base_input(1, Decimal::ZERO, Decimal::from(15_000), vec![a, b], vec![]);
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.contributed_capital[0], Decimal::from(19_000));
+        assert_eq!(out.contributed_capital[1], Decimal::from(11_250));
+        assert_eq!(out.net_worth[1], Decimal::from(15_000));
+        assert!(
+            out.contributed_capital[1] < out.contributed_capital[0],
+            "la serie deja de ser monótona: vender BAJA lo aportado"
+        );
+        assert_eq!(out.per_asset_series[0][1], Decimal::ZERO, "A se vació entero");
+        assert_eq!(out.per_asset_series[1][1], Decimal::from(15_000));
+    }
+
+    /// #120, bullet 2 — el superávit del jubilado cuenta como aportado. Es el escenario
+    /// H-capital-10 del propio issue: cartera 1.000.000 al 5 %, jubilado desde el mes 1,
+    /// pensión 2.000 / gasto 1.000, 24 meses, sin purchase_price. El sobrante va a
+    /// `surplus_cash` (la cascada no corre en jubilación) y la identidad
+    /// `contributed = Σ basis + surplus_cash` lo cuenta solo: 24 × 1.000 = **24.000**
+    /// (hasta 4.9.0: 0). El activo compone intocado: 1.000.000·1,05² = 1.102.500.
+    #[test]
+    fn retirement_surplus_counts_as_contributed() {
+        let fondo = mk_asset(0xE3, Decimal::from(1_000_000), true, Some(Decimal::from(5)));
+        let mut inp = base_input(24, Decimal::from(3_000), Decimal::from(1_000), vec![fondo], vec![]);
+        inp.retirement_start_month = Some(1);
+        inp.income_retirement_monthly = Decimal::from(2_000);
+        inp.expense_retirement_monthly = Decimal::from(1_000);
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.contributed_capital[0], Decimal::ZERO);
+        assert_eq!(out.contributed_capital[24], Decimal::from(24_000));
+        assert_eq!(
+            out.per_asset_series[0][24].round_dp(2),
+            dec_s("1102500.00"),
+            "1.000.000 × 1,05² — el activo compone intocado"
+        );
+        assert_eq!(out.net_worth[24].round_dp(2), dec_s("1126500.00"));
     }
 }
