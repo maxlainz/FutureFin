@@ -35,7 +35,7 @@ directamente — la protección lo rechaza, y ese es el objetivo.
 > docs y CI, dejando 4.0.1, 4.0.2 y 4.0.3 en el CHANGELOG **sin ninguna imagen detrás**; hubo que
 > colapsarlas en una sola 4.0.1. `./scripts/audit-releases.sh` lista las secciones sin tag.
 
-1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`) y añadir la sección `## [X.Y.Z]` a `CHANGELOG.md`. **La sección debe existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde ahí, y el job `rust` lo comprueba con `./scripts/audit-releases.sh --version`.
+1. En una rama: bumpar `apps/api/Cargo.toml` (sincronizar `Cargo.lock` con `cargo update -p futurefin-api`), añadir la sección `## [X.Y.Z]` a `CHANGELOG.md` y su resumen equivalente (`## X.Y.Z`, sin corchetes ni fecha) a `addon/futurefin/CHANGELOG.md` — en prosa para quien usa el add-on de Home Assistant, no una copia técnica; puede ser una línea si la versión no cambia nada visible desde el add-on. **Las dos secciones deben existir antes de taguear**: `publish-image.yml` redacta las notas del Release desde la primera, la tienda de HA renderiza la segunda (se quedó clavada en 4.3.1 durante cuatro releases porque nada la exigía), y el job `rust` comprueba ambas con `./scripts/audit-releases.sh --version`.
 2. PR → CI verde → merge a `main`.
 3. **El merge del bump ES la publicación** (auto-tag on merge, desde 4.0.6): `publish-image.yml`
    corre en cada push a `main`; si `Cargo.toml` lleva una versión sin tag, ese mismo run espera a
