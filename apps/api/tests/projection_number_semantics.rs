@@ -163,17 +163,9 @@ async fn seed_crossing_household(app: &TestApp, owner: &LoggedInOwner) -> String
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "asset: {r:?}");
-    let asset_id = r.json()["id"].as_str().unwrap().to_string();
-
-    let r = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({ "target_asset_id": asset_id, "kind": "remainder", "priority": 100 }),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "sumidero: {r:?}");
-    asset_id
+    // #150: "Indexado" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
+    r.json()["id"].as_str().unwrap().to_string()
 }
 
 async fn set_inflation(app: &TestApp, owner: &LoggedInOwner, pct: &str) {

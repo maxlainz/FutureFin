@@ -5,6 +5,24 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.11.0
+
+- **Lo vencido ya no desaparece**: un movimiento previsto cuya fecha pasó carga íntegro en el
+  mes en curso (marcado «Vencido · se carga este mes»), igual que la vida real arrastra la
+  deuda. Y el reparto de los previstos sin fecha ya no depende del día en que mires la app.
+- **«Próximos» aprende ingresos y gastos recurrentes con periodo**: un alquiler de 800 €/mes con
+  contrato hasta 2028 se modela tal cual (y deja de cobrarse para siempre — en el ejemplo del
+  programa eran 355.200 € de renta inexistente). Los backups suben de versión: un servidor
+  antiguo te pedirá actualizar antes de importar uno nuevo, nunca perderá el periodo en
+  silencio.
+- **Tu sobrante mensual nace con destino**: al crear tu primer activo, la regla «resto» se crea
+  sola apuntándole — sin ella, 300 €/mes de sobrante eran 108.000 € muertos a 30 años en vez de
+  147.622 € trabajando al 2 %. Si tu instalación es anterior y no tiene regla «resto», la app
+  te lo avisa en Presupuesto → Asignación.
+- El gráfico en «euros de hoy» es ahora más honesto: la línea «aportado» se retira de ese modo
+  (su versión aproximada iba un 27 % corta) y el patrimonio deflactado sale directo del
+  servidor.
+
 ## 4.10.0
 
 - **Vender para vivir ahora paga impuestos, como en la vida real**: la simulación descuenta el

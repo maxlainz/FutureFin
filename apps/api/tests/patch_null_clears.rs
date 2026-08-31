@@ -107,14 +107,17 @@ async fn allocation_cap_null_clears_and_amount_null_hits_the_live_validation() {
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
     let fixed_id = r.json()["id"].as_str().unwrap().to_string();
-    let r = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": a2, "kind": "remainder"}),
+    // #150: "Fondo A" (a1) fue el primer activo del owner → ya sembró el sumidero apuntándole.
+    // Retargeteamos al activo pensado como sumidero ("Sumidero"/a2) en vez de crear uno segundo.
+    let seeded = app.sink_rule_id(&owner.cookie).await;
+    let retarget = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{seeded}"),
+            json!({"target_asset_id": a2}),
             &owner.cookie,
         )
         .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
 
     // ausente → cap intacto
     let r = app

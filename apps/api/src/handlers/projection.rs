@@ -1,6 +1,7 @@
 //! Monthly projection via `futurefin-engine`: presupuesto regular, cuotas de pasivos activos,
 //! aportaciones a activos / drenaje / crecimiento. Los «Próximos» ajustan la caja por mes (fechas
-//! explícitas en su mes civil; sin fecha repartidas en 90 días desde la fecha de referencia).
+//! explícitas en su mes civil, las vencidas íntegras en el mes ancla; sin fecha repartidas en
+//! 90 días desde el día 1 del mes ancla — #126).
 
 use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
@@ -513,13 +514,43 @@ struct LiabEngineRow {
 pub(crate) struct PlanningFlowProjRow {
     pub scope: String,
     pub expected_amount: Decimal,
+    /// `one_off` | `per_month` (#148). Con `per_month`, `expected_amount` son €/MES durante la
+    /// ventana y el flujo carga MES COMPLETO (sin prorrateo por días): todos los términos
+    /// recurrentes del modelo son magnitudes de mes entero, y prorratear solo este devolvería el
+    /// término dependiente del día que #126 retiró.
+    pub amount_basis: String,
     pub due_date: Option<NaiveDate>,
+    pub window_start_date: Option<NaiveDate>,
+    pub window_end_date: Option<NaiveDate>,
     /// Rótulo del flujo. No entra en ninguna cuenta: existe para que
     /// `ProjectionSeriesResponse::events` pueda **nombrar** el salto que produce.
     pub title: String,
 }
 
-/// Días civiles: reparto equitativo del total entre `ref_date` y `ref_date + 89` (90 días inclusive).
+impl PlanningFlowProjRow {
+    /// Constructor de conveniencia para el caso histórico (puntual, sin ventana) — lo usan los
+    /// tests y el flujo sintético del what-if.
+    pub(crate) fn one_off(
+        scope: &str,
+        expected_amount: Decimal,
+        due_date: Option<NaiveDate>,
+        title: &str,
+    ) -> Self {
+        Self {
+            scope: scope.into(),
+            expected_amount,
+            amount_basis: "one_off".into(),
+            due_date,
+            window_start_date: None,
+            window_end_date: None,
+            title: title.into(),
+        }
+    }
+}
+
+/// Días civiles: reparto equitativo del total entre el día 1 del mes ancla y +89 días
+/// (90 días inclusive). Anclado al mes civil desde #126: el vector resultante es idéntico
+/// se pregunte el día que se pregunte dentro del mismo mes.
 const PLANNING_UNDATED_SPREAD_DAYS: i64 = 90;
 const PROJECTION_MILESTONE_MINIMUM: i64 = 1_000;
 const PROJECTION_MILESTONE_SEARCH_COUNT: usize = 64;
@@ -583,6 +614,11 @@ pub struct ProjectionEvent {
     pub amount: Decimal,
     /// `inflow` (categoría de scope `income`) | `outflow` (scope `expense`).
     pub direction: &'static str,
+    /// `true` = el Próximo venció antes del mes ancla y se carga íntegro en el mes 0 (#126: la
+    /// deuda vencida se arrastra, no se borra). El `date_ymd` sigue siendo su fecha REAL
+    /// (pasada): el mes que se señala y la fecha que se muestra dejan de coincidir a propósito,
+    /// y este flag es lo que lo declara.
+    pub overdue: bool,
 }
 
 /// Tope de eventos publicados. Los Próximos son pocos por naturaleza, pero nada en el modelo de
@@ -591,8 +627,9 @@ const PROJECTION_EVENTS_MAX: usize = 100;
 
 /// Eventos de la serie a partir de los flujos ya cargados. **Comparte la regla de mapeo
 /// fecha→mes con `planning_monthly_cash_adjustments_from_flows`** (mismo `anchor_month_first`,
-/// mismo descarte de lo anterior al mes ancla, misma búsqueda del mes que contiene la fecha):
-/// si divergieran, la respuesta señalaría un mes distinto de aquel en el que la curva salta.
+/// misma carga de lo vencido en el mes ancla con `overdue: true`, misma búsqueda del mes que
+/// contiene la fecha): si divergieran, la respuesta señalaría un mes distinto de aquel en el que
+/// la curva salta.
 ///
 /// Devuelve `(eventos, truncados)` ordenados por `month_index` ASC y, dentro del mes, por importe
 /// descendente — el que más mueve la curva primero.
@@ -610,9 +647,26 @@ fn projection_events_from_flows(
             "expense" => "outflow",
             _ => continue,
         };
+        // #148: un `per_month` es una rampa recurrente, no un escalón — misma razón por la que
+        // los sin-fecha nunca entraron aquí.
+        if flow.amount_basis == "per_month" {
+            continue;
+        }
         // Sin fecha no hay escalón: se reparte sobre 90 días (ver el doc de `ProjectionEvent`).
         let Some(due) = flow.due_date else { continue };
         if due < anchor_month_first {
+            // #126: el vencido carga íntegro en el mes ancla, declarado — sin cota de
+            // antigüedad, igual que el instrumento real arrastra la deuda en vez de borrarla.
+            if horizon_months > 0 {
+                out.push(ProjectionEvent {
+                    month_index: 0,
+                    date_ymd: due.format("%Y-%m-%d").to_string(),
+                    title: flow.title.clone(),
+                    amount: money_out(flow.expected_amount.abs()),
+                    direction,
+                    overdue: true,
+                });
+            }
             continue;
         }
         for idx in 0..horizon_months {
@@ -625,6 +679,7 @@ fn projection_events_from_flows(
                     title: flow.title.clone(),
                     amount: money_out(flow.expected_amount.abs()),
                     direction,
+                    overdue: false,
                 });
                 break;
             }
@@ -650,10 +705,13 @@ fn planning_monthly_cash_adjustments_from_flows(
     let mut adj = vec![Decimal::ZERO; horizon_months as usize];
     let anchor_month_first = proj_month_first(ref_date);
 
-    let undated_win_first = ref_date;
-    let undated_win_last = ref_date
+    // #126: la ventana de la rampa sin fecha se ancla al día 1 del mes civil, no al día de la
+    // consulta — el mes civil ES la rejilla del motor, y este era el único término de caja
+    // prorrateado por el día en que se pregunta.
+    let undated_win_first = anchor_month_first;
+    let undated_win_last = anchor_month_first
         .checked_add_signed(Duration::days(PLANNING_UNDATED_SPREAD_DAYS - 1))
-        .unwrap_or(ref_date);
+        .unwrap_or(anchor_month_first);
 
     for flow in flows {
         let signed = match flow.scope.as_str() {
@@ -662,9 +720,31 @@ fn planning_monthly_cash_adjustments_from_flows(
             _ => continue,
         };
 
+        // #148: un flujo `per_month` carga su €/mes en cada mes civil que su ventana toca — MES
+        // COMPLETO, sin prorrateo por días (coherente con presupuesto, servicio de deuda y los
+        // ajustes por end-date; prorratear los meses frontera reintroduciría la dependencia del
+        // día que #126 retiró). `window_end_date` NULL = hasta el horizonte.
+        if flow.amount_basis == "per_month" {
+            let Some(win_start) = flow.window_start_date else { continue };
+            for (idx, slot) in adj.iter_mut().enumerate() {
+                let m_first = proj_add_months(anchor_month_first, idx as u32);
+                let m_last = proj_month_last(m_first);
+                let live = win_start <= m_last
+                    && flow.window_end_date.is_none_or(|e| e >= m_first);
+                if live {
+                    *slot += signed;
+                }
+            }
+            continue;
+        }
+
         match flow.due_date {
             Some(due) => {
                 if due < anchor_month_first {
+                    // #126: lo vencido no desaparece — carga íntegro en el mes ancla.
+                    if let Some(first) = adj.first_mut() {
+                        *first += signed;
+                    }
                     continue;
                 }
                 for idx in 0..horizon_months as usize {
@@ -719,30 +799,18 @@ fn expense_end_date_monthly_adjustments(
     adj
 }
 
+/// Neto de Próximos para el baseline de hitos: los TRES primeros meses ancla del MISMO mapeo
+/// fecha→mes que alimenta la caja del motor (#126). Antes tenía su propia regla (ventana
+/// `[hoy, hoy+89]` para los datados, íntegro para los sin fecha), que era la última superficie
+/// del handler dependiente del día de la consulta.
 fn planning_upcoming_net_for_milestone_baseline(
     ref_date: NaiveDate,
     flows: &[PlanningFlowProjRow],
 ) -> Decimal {
-    let window_last = ref_date
-        .checked_add_signed(Duration::days(PLANNING_UNDATED_SPREAD_DAYS - 1))
-        .unwrap_or(ref_date);
-    let mut baseline = Decimal::ZERO;
-    for flow in flows {
-        let signed = match flow.scope.as_str() {
-            "income" => flow.expected_amount,
-            "expense" => -flow.expected_amount,
-            _ => continue,
-        };
-        match flow.due_date {
-            Some(due) => {
-                if due >= ref_date && due <= window_last {
-                    baseline += signed;
-                }
-            }
-            None => baseline += signed,
-        }
-    }
-    baseline
+    planning_monthly_cash_adjustments_from_flows(ref_date, 3, flows)
+        .iter()
+        .copied()
+        .sum()
 }
 
 fn projection_next_milestone(after: Decimal) -> Decimal {
@@ -1264,7 +1332,7 @@ pub(crate) async fn build_installation_projection_input(
            WHERE {liab_scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph} OR principal > 0)"#
     );
-    let mut liabs: Vec<LiabEngineRow> = view
+    let liabs: Vec<LiabEngineRow> = view
         .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)
         .bind(today)
         .fetch_all(pool)
@@ -1430,7 +1498,8 @@ pub(crate) async fn build_installation_projection_input(
 
     let plan_scope = view.scope_where("p");
     let plan_sql = format!(
-        r#"SELECT c.scope AS scope, p.expected_amount, p.due_date, p.title
+        r#"SELECT c.scope AS scope, p.expected_amount, p.amount_basis, p.due_date,
+                  p.window_start_date, p.window_end_date, p.title
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE {plan_scope}"#
@@ -1598,7 +1667,8 @@ pub(crate) async fn build_installation_projection_input(
 /// los escalares del mes 0).
 pub(crate) struct AssetsProjectionContext {
     /// Asset id → € nominales encaminados en el mes 1 (fixed escalado + parte del remanente).
-    /// **Incluye el tramo de planning flows del mes en curso**, así que varía día a día.
+    /// **Incluye el tramo de planning flows del mes en curso** — desde #126 anclado al mes civil,
+    /// así que es idéntico se consulte el día que se consulte (antes variaba día a día).
     pub nominals: HashMap<Uuid, Decimal>,
     /// Asset id → € que la MISMA cascada encamina sobre el neto **recurrente**
     /// (`income − expense − debt_service`, sin el tramo de planning). Estable y reproducible.
@@ -2974,13 +3044,18 @@ pub(crate) async fn simulate_projection_core(
                 scenario_input.planning_monthly_cash_adjustment[(k - 1) as usize] -= amount;
             }
             (None, Some(date)) => {
-                // Mismo mapeo fecha→mes que un planning flow real con due_date.
-                let synthetic = PlanningFlowProjRow {
-                    scope: "expense".into(),
-                    expected_amount: amount,
-                    due_date: Some(date),
-                    title: "one_off_expense".into(),
-                };
+                // Mismo mapeo fecha→mes que un planning flow real con due_date, con UNA
+                // excepción deliberada: desde #126 el mapeo compartido carga lo vencido en el
+                // mes 0, pero el what-if mantiene su contrato previo («nunca anterior al mes
+                // ancla») — un escenario no modela deuda vencida, y el mes en curso ya es
+                // expresable con month_index = 1. Antes de #126 este rechazo salía gratis del
+                // check de todo-ceros; ahora es explícito, con el mismo código de wire.
+                if date < proj_month_first(ctx.today) {
+                    return Err(ApiError::BadRequest(
+                        "one_off_date_out_of_horizon: one_off_expense.date is outside the projection horizon".into(),
+                    ));
+                }
+                let synthetic = PlanningFlowProjRow::one_off("expense", amount, Some(date), "one_off_expense");
                 let adj = planning_monthly_cash_adjustments_from_flows(
                     ctx.today,
                     months,
@@ -3625,44 +3700,107 @@ mod planning_distribution_tests {
     #[test]
     fn dated_planning_hits_single_calendar_month() {
         let ref_d = NaiveDate::from_ymd_opt(2026, 3, 20).unwrap();
-        let flows = vec![PlanningFlowProjRow {
-            scope: "expense".into(),
-            expected_amount: Decimal::from(500),
-            due_date: Some(NaiveDate::from_ymd_opt(2026, 5, 2).unwrap()),
-            title: "Derrama".into(),
-        }];
+        let flows = vec![PlanningFlowProjRow::one_off(
+            "expense",
+            Decimal::from(500),
+            Some(NaiveDate::from_ymd_opt(2026, 5, 2).unwrap()),
+            "Derrama",
+        )];
         let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 4, &flows);
         assert_eq!(adj[2], Decimal::from(-500));
         assert_eq!(adj[0] + adj[1] + adj[3], Decimal::ZERO);
     }
 
+    /// INVERTIDO a propósito en #126 (antes: `dated_before_anchor_month_is_ignored`, que pineaba
+    /// el descarte silencioso). Un Próximo vencido no desaparece: carga íntegro en el mes ancla,
+    /// declarado con `overdue: true` en `events[]`. Nunca borrar este test.
     #[test]
-    fn dated_before_anchor_month_is_ignored() {
+    fn dated_before_anchor_month_loads_into_month_zero() {
         let ref_d = NaiveDate::from_ymd_opt(2026, 3, 10).unwrap();
-        let flows = vec![PlanningFlowProjRow {
-            scope: "income".into(),
-            expected_amount: Decimal::from(9999),
-            due_date: Some(NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()),
-            title: "Cobro pasado".into(),
-        }];
+        let flows = vec![PlanningFlowProjRow::one_off(
+            "income",
+            Decimal::from(9999),
+            Some(NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()),
+            "Cobro pasado",
+        )];
         let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 3, &flows);
-        assert!(adj.iter().all(|x| *x == Decimal::ZERO));
+        assert_eq!(adj[0], Decimal::from(9999));
+        assert_eq!(adj[1] + adj[2], Decimal::ZERO);
     }
 
     #[test]
-    fn undated_splits_over_ninety_days_from_ref_date() {
+    fn undated_splits_over_ninety_days_from_the_anchor_month_first() {
+        // ref_d es día 1: los valores son idénticos a los del test pre-#126, que arrancaba la
+        // ventana en el propio ref_date. Enero 31 + febrero 28 + marzo 31 = 90 días exactos.
         let ref_d = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let flows = vec![PlanningFlowProjRow {
-            scope: "expense".into(),
-            expected_amount: Decimal::from(900),
-            due_date: None,
-            title: "Sin fecha".into(),
-        }];
+        let flows = vec![PlanningFlowProjRow::one_off("expense", Decimal::from(900), None, "Sin fecha")];
         let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 3, &flows);
         assert_eq!(adj.iter().sum::<Decimal>(), Decimal::from(-900));
         assert_eq!(adj[0], Decimal::from(-310));
         assert_eq!(adj[1], Decimal::from(-280));
         assert_eq!(adj[2], Decimal::from(-310));
+    }
+
+    /// El pin del arreglo (B) de #126: el reparto de la rampa sin fecha ya no depende del día en
+    /// que se consulta. Agosto de 2026 (31 días): 900/90 = 10 €/día → [−310, −300, −290] para
+    /// CUALQUIER ref_date dentro del mes (antes: el mes 0 recibía solo los días restantes —
+    /// −310 el día 1, −20 el día 30, −10 el día 31; rango completo 300 €, un 30 % de una
+    /// aportación tipo de 1.000 €/mes).
+    #[test]
+    fn undated_ramp_is_identical_for_every_day_of_the_anchor_month() {
+        let flows = vec![PlanningFlowProjRow::one_off("expense", Decimal::from(900), None, "Sin fecha")];
+        let expected = vec![
+            Decimal::from(-310),
+            Decimal::from(-300),
+            Decimal::from(-290),
+        ];
+        for day in [1u32, 15, 30, 31] {
+            let ref_d = NaiveDate::from_ymd_opt(2026, 8, day).unwrap();
+            let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 3, &flows);
+            assert_eq!(adj, expected, "ref_date = 2026-08-{day:02}");
+        }
+    }
+
+    /// #148: un `per_month` carga su €/mes en cada mes civil que su ventana TOCA — mes completo,
+    /// sin prorrateo por días en los meses frontera (la ventana arranca el 20/10 y el octubre
+    /// entero cobra los 800).
+    #[test]
+    fn per_month_charges_every_calendar_month_its_window_touches() {
+        let ref_d = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        let flows = vec![PlanningFlowProjRow {
+            scope: "expense".into(),
+            expected_amount: Decimal::from(800),
+            amount_basis: "per_month".into(),
+            due_date: None,
+            window_start_date: Some(NaiveDate::from_ymd_opt(2026, 10, 20).unwrap()),
+            window_end_date: Some(NaiveDate::from_ymd_opt(2027, 1, 5).unwrap()),
+            title: "Alquiler".into(),
+        }];
+        let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 8, &flows);
+        // ago, sep fuera; oct (20/10 ≤ 31/10), nov, dic, ene (5/1 ≥ 1/1) dentro; feb, mar fuera.
+        let expected: Vec<Decimal> = [0, 0, -800, -800, -800, -800, 0, 0]
+            .iter()
+            .map(|v| Decimal::from(*v))
+            .collect();
+        assert_eq!(adj, expected);
+    }
+
+    /// #148: `window_end_date` NULL = abierta — carga hasta el horizonte. Y una ventana que
+    /// arrancó en el pasado carga desde el mes 0 sin mecánica de vencido: es renta corriente.
+    #[test]
+    fn per_month_with_open_window_reaches_the_horizon() {
+        let ref_d = NaiveDate::from_ymd_opt(2026, 8, 15).unwrap();
+        let flows = vec![PlanningFlowProjRow {
+            scope: "income".into(),
+            expected_amount: Decimal::from(500),
+            amount_basis: "per_month".into(),
+            due_date: None,
+            window_start_date: Some(NaiveDate::from_ymd_opt(2026, 7, 1).unwrap()),
+            window_end_date: None,
+            title: "Alquiler cobrado".into(),
+        }];
+        let adj = planning_monthly_cash_adjustments_from_flows(ref_d, 6, &flows);
+        assert_eq!(adj, vec![Decimal::from(500); 6]);
     }
 }
 
@@ -3671,34 +3809,42 @@ mod milestone_tests {
     use super::*;
     use uuid::Uuid;
 
+    /// REESCRITO en #126 (antes: `baseline_adjustment_uses_dated_ninety_days_and_all_undated`,
+    /// que pineaba la tercera regla fecha→mes propia del baseline). Ahora el baseline deriva del
+    /// MISMO mapeo que la caja del motor (tres meses ancla) y por tanto ya no depende del día de
+    /// la consulta.
     #[test]
-    fn baseline_adjustment_uses_dated_ninety_days_and_all_undated() {
-        let ref_d = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    fn baseline_adjustment_derives_from_the_shared_monthly_mapping() {
         let flows = vec![
-            PlanningFlowProjRow {
-                scope: "income".into(),
-                expected_amount: Decimal::from(1200),
-                due_date: Some(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()),
-                title: "Paga extra".into(),
-            },
-            PlanningFlowProjRow {
-                scope: "expense".into(),
-                expected_amount: Decimal::from(300),
-                due_date: Some(NaiveDate::from_ymd_opt(2026, 4, 5).unwrap()),
-                title: "IRPF".into(),
-            },
-            PlanningFlowProjRow {
-                scope: "expense".into(),
-                expected_amount: Decimal::from(100),
-                due_date: None,
-                title: "Varios".into(),
-            },
+            PlanningFlowProjRow::one_off(
+                "income",
+                Decimal::from(1200),
+                Some(NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()),
+                "Paga extra",
+            ),
+            PlanningFlowProjRow::one_off(
+                "expense",
+                Decimal::from(300),
+                Some(NaiveDate::from_ymd_opt(2026, 4, 5).unwrap()),
+                "IRPF",
+            ),
+            // Múltiplo de 90 a propósito: la rampa divide entre 90 en `Decimal` y para importes
+            // no múltiplos deja residuo ~1e-25 € — un assert_eq exacto sobre 100 € fallaría por
+            // la 25.ª cifra decimal, no por el modelo.
+            PlanningFlowProjRow::one_off("expense", Decimal::from(90), None, "Varios"),
         ];
-        // 1200 (dated within 90d) -100 (undated expense); April expense fuera ventana.
-        assert_eq!(
-            planning_upcoming_net_for_milestone_baseline(ref_d, &flows),
-            Decimal::from(1100)
-        );
+        // +1200 (mes 0) − 90 (rampa íntegra en meses 0..2); el gasto de abril cae en el mes 3,
+        // fuera de los tres meses del baseline. Con la regla antigua y ref 20/01 el resultado
+        // habría sido −390 (la paga del 15/01 quedaba fuera de [hoy, hoy+89] y el IRPF dentro):
+        // mismo escenario, cifra distinta según el día — eso es lo que muere aquí.
+        for day in [1u32, 20] {
+            let ref_d = NaiveDate::from_ymd_opt(2026, 1, day).unwrap();
+            assert_eq!(
+                planning_upcoming_net_for_milestone_baseline(ref_d, &flows),
+                Decimal::from(1110),
+                "ref_date = 2026-01-{day:02}"
+            );
+        }
     }
 
     #[test]

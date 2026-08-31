@@ -206,6 +206,43 @@ async fn a_fresh_installation_can_create_an_asset_right_away() {
         )
         .await;
     assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+
+    // #150 (test-cabecera): el PRIMER activo de un scope virgen siembra la regla «resto» y el
+    // 201 lo DECLARA — ninguna escritura implícita viaja en silencio.
+    let body = created.json();
+    let seeded = body["seeded_allocation_rule_id"]
+        .as_str()
+        .expect("el 201 del primer activo declara la regla sembrada")
+        .to_string();
+    let asset_id = body["id"].as_str().unwrap().to_string();
+    let rules = app
+        .get_with_cookie("/v1/allocation-rules", &owner.cookie)
+        .await
+        .json();
+    let rules = rules.as_array().expect("reglas");
+    assert_eq!(rules.len(), 1, "{rules:?}");
+    assert_eq!(rules[0]["id"], seeded.as_str(), "{rules:?}");
+    assert_eq!(rules[0]["kind"], "remainder", "{rules:?}");
+    assert!(rules[0]["cap_kind"].is_null(), "sumidero = remainder SIN tope: {rules:?}");
+    assert_eq!(rules[0]["target_asset_id"], asset_id.as_str(), "{rules:?}");
+
+    // El SEGUNDO activo no siembra (la precondición es scope virgen, no «activo nuevo»).
+    let second = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "category_id": asset_cat,
+                "name": "Fondo indexado",
+                "current_value": "5000",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(second.status, http::StatusCode::CREATED, "{second:?}");
+    assert!(
+        second.json().get("seeded_allocation_rule_id").is_none(),
+        "el segundo activo no siembra: {second:?}"
+    );
 }
 
 /// El asistente de primera vez tiene estado propio: un hogar recién creado lo pide, y el owner

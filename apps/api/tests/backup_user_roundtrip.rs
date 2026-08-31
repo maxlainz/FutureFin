@@ -1487,3 +1487,108 @@ async fn v10_snapshot_items_import_with_a_null_repayment_model() {
     let msg = bad.json()["message"].as_str().unwrap_or_default().to_string();
     assert!(msg.starts_with("snapshot_repayment_model_invalid"), "{msg}");
 }
+
+// ---------------------------------------------------------------------------
+// v12 (4.11.0) — ventana recurrente en los planning flows (#148)
+// ---------------------------------------------------------------------------
+
+/// Roundtrip v12: la base del importe y la ventana sobreviven al export → import. Sin esto, un
+/// usuario que restaura su backup vería su alquiler recurrente convertido en un total suelto y
+/// la proyección cambiaría en silencio.
+#[tokio::test]
+async fn v12_roundtrip_preserves_the_recurring_window() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let inc_cat = app.create_category(&owner, "income", "Alquileres").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/planning/flows",
+            serde_json::json!({
+                "category_id": inc_cat,
+                "title": "Alquiler piso",
+                "expected_amount": "800",
+                "amount_basis": "per_month",
+                "window_start_date": "2026-10-01",
+                "window_end_date": "2029-09-30",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "create per_month: {r:?}");
+    let flow_id = r.json()["id"].as_str().unwrap().to_string();
+
+    let backup = export_ffbackup_b64(&app, &owner.cookie).await;
+
+    // Ensuciar el estado vivo: la ventana pasa a sin fin antes de restaurar.
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/planning/flows/{flow_id}"),
+            serde_json::json!({ "window_end_date": null }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+
+    let applied = import_apply(&app, &owner.cookie, &backup).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v12 import: {applied:?}");
+
+    let rows = app.get_with_cookie("/v1/planning/flows", &owner.cookie).await.json();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["amount_basis"], "per_month");
+    assert_eq!(rows[0]["window_start_date"], "2026-10-01");
+    assert_eq!(
+        rows[0]["window_end_date"], "2029-09-30",
+        "el roundtrip debe conservar el fin de la ventana"
+    );
+}
+
+/// Un `.ffbackup` v11 (pre-#148) no conoce `amount_basis`: sus Próximos eran todos puntuales y
+/// tienen que importar como `one_off` con la ventana vacía — exactamente lo que aquel servidor
+/// modelaba.
+#[tokio::test]
+async fn v11_planning_flows_import_as_one_off() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [
+            { "scope": "expense", "name": "Grandes gastos", "sort_index": 0 }
+        ],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [{
+            "category_ref": { "scope": "expense", "name": "Grandes gastos" },
+            "title": "IRPF",
+            "expected_amount": "900.0000",
+            "due_date": "2027-06-30",
+            "show_in_chart": false,
+            "sort_index": 0
+        }],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [],
+        "categorization_rules": [],
+        "recurring_transaction_rules": [],
+        "transfer_match_rejections": []
+    });
+    let b64 = craft_ffbackup_b64(11, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v11 import: {applied:?}");
+    assert_eq!(applied.json()["imported"]["planning_flows"].as_u64(), Some(1));
+
+    let rows = app.get_with_cookie("/v1/planning/flows", &owner.cookie).await.json();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["title"], "IRPF");
+    assert_eq!(rows[0]["amount_basis"], "one_off", "el flujo v11 es puntual por definición");
+    assert!(rows[0].get("window_start_date").is_none(), "{:?}", rows[0]);
+    assert!(rows[0].get("window_end_date").is_none(), "{:?}", rows[0]);
+}

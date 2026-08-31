@@ -280,6 +280,23 @@ export function ProjectionNetWorthChart({
     return Array.isArray(f) && f.length === series.points.length && f.length > 0;
   }, [series.fire_target_series, series.points.length]);
 
+  // #136-4a: la tasa del deflactor sale de la RESPUESTA (`deflation_annual_inflation_percent`,
+  // la misma con la que el servidor construyó `net_worth_real` y `milestones_real`) y solo cae a
+  // la de la instalación con un backend antiguo — re-obtenerla por otro canal era una vía de
+  // divergencia silenciosa.
+  const deflationPct = useMemo(() => {
+    const s = series.deflation_annual_inflation_percent;
+    const parsed = s !== undefined ? Number(s) : Number.NaN;
+    return Number.isFinite(parsed) ? parsed : installationInflationPct;
+  }, [series.deflation_annual_inflation_percent, installationInflationPct]);
+  const effectivePct = inflationAdjusted && deflationPct !== 0 ? deflationPct : 0;
+  // #136-5a: la serie «aportado en euros de hoy» correcta exige deflactar CADA aportación por su
+  // propio mes, y con densidad hybrid un delta entre puntos abarca hasta 12 meses: la cifra no es
+  // computable desde la serie servida (el factor único que aplicábamos la dejaba ~27 % corta) y
+  // el servidor se niega a publicarla a propósito. La línea SALE del modo ajustado en vez de
+  // dibujarse mal.
+  const ccRetired = effectivePct !== 0;
+
   const layoutDims = useMemo(
     () =>
       buildProjectionChartLayout(
@@ -302,14 +319,18 @@ export function ProjectionNetWorthChart({
     // densidad `hybrid` los puntos no son equidistantes, y con histórico los `month_index` son
     // negativos (el deflactor los AMPLIFICA automáticamente, ×(1+inf)^(−k/12)). `deflationFactorAt`
     // devuelve 1 cuando el pct efectivo es 0. Alineado con `milestones_real` del backend.
-    const effectivePct =
-      inflationAdjusted && installationInflationPct !== 0
-        ? installationInflationPct
-        : 0;
     const deflator = (monthIndex: number) =>
       deflationFactorAt(monthIndex, effectivePct);
     const miAt = (i: number) => pts[i]?.month_index ?? i;
-    const nw = pts.map((p) => p.net_worth * deflator(p.month_index));
+    // #136-4: la línea principal en euros de hoy CONSUME `net_worth_real` del servidor (k ≥ 0);
+    // el helper TS queda para los puntos históricos (k < 0) y el grid fino fraccionario, que el
+    // `deflator_at_month_index` u32 del servidor no puede servir — divergencia aceptada y
+    // pineada por fixture cruzado (`deflator-parity.json`).
+    const nw = pts.map((p) =>
+      effectivePct !== 0 && p.net_worth_real !== undefined
+        ? p.net_worth_real
+        : p.net_worth * deflator(p.month_index),
+    );
     const cc = pts.map((p) => p.contributed_capital * deflator(p.month_index));
     // `fire_target_series` es paralelo a `series.points` (SOLO futuro): se re-mapea a un array de
     // longitud combinada `(number | null)[]`, null en el pasado (k < 0). Solo los vértices no-null
@@ -375,8 +396,7 @@ export function ProjectionNetWorthChart({
     merged.assetSeries,
     merged.futureOffset,
     merged.minNetWorth,
-    inflationAdjusted,
-    installationInflationPct,
+    effectivePct,
   ]);
 
   // ── Modelo de la leyenda (HTML, fuera del SVG) ──
@@ -386,8 +406,9 @@ export function ProjectionNetWorthChart({
         hasFire: hasFireTargetSeries,
         hasHistory: historyStartMonth < 0,
         historyIsAssetsOnly: merged.pastIsAssetsOnly,
+        hasContributed: !ccRetired,
       }),
-    [hasFireTargetSeries, historyStartMonth, merged.pastIsAssetsOnly],
+    [hasFireTargetSeries, historyStartMonth, merged.pastIsAssetsOnly, ccRetired],
   );
 
   // Activos por peak DESC para la leyenda, conservando el color del orden de
@@ -473,10 +494,11 @@ export function ProjectionNetWorthChart({
 
     const nwVisible = visibleIndices.map((i) => nw[i] ?? 0);
     // El "capital aportado" solo existe en el futuro (k ≥ 0). En el pasado el valor es un centinela
-    // 0 que NO debe dibujarse ni contar para el dominio Y.
-    const ccVisibleIndices = visibleIndices.filter(
-      (i) => pts[i]!.month_index >= 0,
-    );
+    // 0 que NO debe dibujarse ni contar para el dominio Y. Y en modo euros de hoy la línea está
+    // RETIRADA entera (#136-5a: la cifra correcta no es computable desde la serie servida).
+    const ccVisibleIndices = ccRetired
+      ? []
+      : visibleIndices.filter((i) => pts[i]!.month_index >= 0);
     const ccVisible = ccVisibleIndices.map((i) => cc[i] ?? 0);
     const fireTargetVisible = fireTarget
       ? visibleIndices.map((i) => fireTarget[i] ?? null)
@@ -639,6 +661,7 @@ export function ProjectionNetWorthChart({
     };
   }, [
     baseSeries,
+    ccRetired,
     xTicksAll,
     pts,
     historyStartMonth,
@@ -845,10 +868,6 @@ export function ProjectionNetWorthChart({
     const daily = valid(cashflowDaily);
     const primary = weekly ?? daily;
     if (!primary) return null;
-    const effectivePct =
-      inflationAdjusted && installationInflationPct !== 0
-        ? installationInflationPct
-        : 0;
     const visEnd = Math.min(0, visibleMonthEnd);
     // La curva fina tiene que medir LO MISMO que la mensual que continúa. Cuando el pasado son
     // activos (`pastIsAssetsOnly`) el servidor manda `fine.net_worth: null` — precisamente porque
@@ -1602,16 +1621,18 @@ export function ProjectionNetWorthChart({
               strokeLinejoin="round"
             />
           )}
-          <polyline
-            points={ccPoints}
-            fill="none"
-            stroke="var(--proj-cc)"
-            strokeWidth={2.1}
-            strokeDasharray="7 5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            opacity={0.92}
-          />
+          {ccPoints !== "" ? (
+            <polyline
+              points={ccPoints}
+              fill="none"
+              stroke="var(--proj-cc)"
+              strokeWidth={2.1}
+              strokeDasharray="7 5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={0.92}
+            />
+          ) : null}
           {firePoints ? (
             <polyline
               points={firePoints}
@@ -1898,7 +1919,7 @@ export function ProjectionNetWorthChart({
               : "Patrimonio neto"}{" "}
             — {formatCurrencyOrDashNumber(nw[hover], currencyIso)}
           </div>
-          {pts[hover]!.month_index >= 0 ? (
+          {!ccRetired && pts[hover]!.month_index >= 0 ? (
             <div>
               Capital aportado —{" "}
               {formatCurrencyOrDashNumber(cc[hover], currencyIso)}

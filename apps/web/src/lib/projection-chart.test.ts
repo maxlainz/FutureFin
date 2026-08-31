@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   deflationFactorAt,
@@ -30,6 +33,40 @@ describe("deflationFactorAt", () => {
   it("inflación negativa en el pasado → factor < 1 (espejo)", () => {
     expect(deflationFactorAt(-12, -2)).toBeCloseTo(0.98, 10);
   });
+});
+
+// #136-4b: fixture cruzado con `deflator_at_month_index` del servidor (suite Rust
+// `deflator_parity.rs`). Si un lado cambia sin actualizar el JSON, SU suite falla — el fixture
+// haciendo su trabajo. Dominio compartido k >= 0 entero; k < 0 y meses fraccionarios son
+// TS-only (divergencia aceptada, declarada en financial-contracts §4).
+describe("paridad del deflactor con el servidor (#136-4b)", () => {
+  const dirname = path.dirname(fileURLToPath(import.meta.url));
+  const fixturePath = path.resolve(
+    dirname,
+    "../../../api/tests/fixtures/deflator-parity.json",
+  );
+  type Case = {
+    annual_inflation_percent: string;
+    month_index: number;
+    expected_deflator: string;
+  };
+  const cases = (
+    JSON.parse(readFileSync(fixturePath, "utf-8")) as { cases: Case[] }
+  ).cases;
+
+  it("el fixture no está vacío", () => {
+    expect(cases.length).toBeGreaterThan(0);
+  });
+
+  for (const c of cases) {
+    it(`k=${c.month_index} al ${c.annual_inflation_percent} %`, () => {
+      const got = deflationFactorAt(
+        c.month_index,
+        Number(c.annual_inflation_percent),
+      );
+      expect(Math.abs(got - Number(c.expected_deflator))).toBeLessThan(1e-9);
+    });
+  }
 });
 
 const DATES_OPTS = {

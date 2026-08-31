@@ -808,12 +808,16 @@ async fn fetch_planning_flows(
         String,
         String,
         Decimal,
+        String,
+        Option<NaiveDate>,
+        Option<NaiveDate>,
         Option<NaiveDate>,
         bool,
         Option<String>,
         i32,
     )> = sqlx::query_as(
-        r#"SELECT c.scope, c.name AS cat_name, p.title, p.expected_amount, p.due_date,
+        r#"SELECT c.scope, c.name AS cat_name, p.title, p.expected_amount, p.amount_basis,
+                  p.due_date, p.window_start_date, p.window_end_date,
                   p.show_in_chart, p.notes, p.sort_index
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
@@ -831,10 +835,13 @@ async fn fetch_planning_flows(
             category_ref: CategoryRef { scope: r.0, name: r.1 },
             title: r.2,
             expected_amount: r.3,
-            due_date: r.4,
-            show_in_chart: r.5,
-            notes: r.6,
-            sort_index: r.7,
+            amount_basis: r.4,
+            due_date: r.5,
+            window_start_date: r.6,
+            window_end_date: r.7,
+            show_in_chart: r.8,
+            notes: r.9,
+            sort_index: r.10,
         })
         .collect())
 }

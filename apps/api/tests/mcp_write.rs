@@ -966,16 +966,10 @@ async fn allocation_rule_update_respects_sink_invariant() {
             &owner.cookie,
         )
         .await;
-    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
-    let rule = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
-    let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+    assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
+    // #150: "Fondo" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
+    let rule_id = app.sink_rule_id(&owner.cookie).await;
 
     // Capar el único sink lo destruiría → mismo error tipado que HTTP.
     let envelope = mcp_post(
@@ -1023,28 +1017,17 @@ async fn allocation_rule_update_never_drops_a_half_cap_silently() {
     let token = create_token(&app, &owner).await;
     let cat = app.create_category(&owner, "asset", "Fondos").await;
 
-    let asset_id = app
+    let asset = app
         .post_json_with_cookie(
             "/v1/assets",
             json!({"category_id": cat, "name": "Fondo", "current_value": "1000"}),
             &owner.cookie,
         )
-        .await
-        .json()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let rule_id = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await
-        .json()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+        .await;
+    assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
+    // #150: "Fondo" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
+    let rule_id = app.sink_rule_id(&owner.cookie).await;
 
     // Las dos medias parejas dan el MISMO error. Antes solo lo daba una de las dos.
     for half in [
@@ -2958,15 +2941,19 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         )
         .await;
     let asset2_id = asset2.json()["id"].as_str().unwrap().to_string();
-    let alloc = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": asset2_id, "kind": "remainder"}),
+    // #150: "Fondo" (asset_id) fue el primer activo del owner → ya sembró el sumidero
+    // apuntándole. Lo retargeteamos a "Colchón" (asset2) en vez de crear uno segundo: el test
+    // necesita el sumidero en un activo APARTE para que el preview de `delete_asset` sobre
+    // "Fondo" no lo arrastre (el comentario original de más arriba, ahora cumplido vía PATCH).
+    let alloc_id = app.sink_rule_id(&owner.cookie).await;
+    let retarget = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{alloc_id}"),
+            json!({"target_asset_id": asset2_id}),
             &owner.cookie,
         )
         .await;
-    assert_eq!(alloc.status, http::StatusCode::CREATED, "{alloc:?}");
-    let alloc_id = alloc.json()["id"].as_str().unwrap().to_string();
+    assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
     let spare_cat = app.create_category(&owner, "expense", "Ocio").await;
 
     // --- Los diecisiete previews. NINGUNO lleva `confirm`, así que nada se escribe.
@@ -3767,4 +3754,107 @@ async fn the_sink_cannot_be_forged_by_editing_a_capped_remainder() {
         r["id"].as_str() == Some(rule_id.as_str()) && !r["cap_kind"].is_null()
     });
     assert!(still_capped, "la regla debe conservar su tope tras el rechazo");
+}
+
+/// #148 — cuarteto de la ventana recurrente sobre create/update_planning_flow. La invalidación
+/// FULL y el toggle `mcp_write_enabled` de estas dos tools ya están cubiertos por los barridos
+/// genéricos de este fichero (líneas «create_planning_flow: FULL» y el sweep del toggle): aquí
+/// van el core compartido, el error de dominio con el mismo código de wire y los tri-estados
+/// nuevos.
+#[tokio::test]
+async fn planning_flow_recurring_window_via_mcp() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "income", "Alquileres").await;
+
+    // (1) Core compartido: la fila creada por MCP es indistinguible de la del POST HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_planning_flow",
+            json!({"title": "Alquiler", "category_id": cat, "expected_amount": "800",
+                   "amount_basis": "per_month", "window_start_date": "2026-09-01",
+                   "window_end_date": "2029-08-31"}),
+        ),
+    )
+    .await;
+    let flow = tool_json(&envelope);
+    assert!(flow["summary"].as_str().unwrap().contains("€/mes"), "{flow}");
+    let flow_id = flow["id"].as_str().unwrap().to_string();
+    let rows = app.get_with_cookie("/v1/planning/flows", &owner.cookie).await.json();
+    assert_eq!(rows[0]["amount_basis"], "per_month", "{rows}");
+    assert_eq!(rows[0]["window_start_date"], "2026-09-01", "{rows}");
+    assert_eq!(rows[0]["window_end_date"], "2029-08-31", "{rows}");
+
+    // (3) Error de dominio compartido: mismo código de wire por las dos superficies.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_planning_flow",
+            json!({"title": "Mal", "category_id": cat, "expected_amount": "10",
+                   "amount_basis": "per_month", "window_start_date": "2027-01-01",
+                   "window_end_date": "2026-01-01"}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+    let http = app
+        .post_json_with_cookie(
+            "/v1/planning/flows",
+            json!({"category_id": cat, "title": "Mal", "expected_amount": "10",
+                   "amount_basis": "per_month", "window_start_date": "2027-01-01",
+                   "window_end_date": "2026-01-01"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(http.status, ::http::StatusCode::BAD_REQUEST, "{http:?}");
+    let msg = http.json()["message"].as_str().unwrap_or_default().to_string();
+    assert!(msg.starts_with("window_end_before_start"), "{msg}");
+
+    // clear_window_end: la ventana pasa a sin fin (tri-estado), y set+clear a la vez es 400.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_planning_flow", json!({"id": flow_id, "clear_window_end": true})),
+    )
+    .await;
+    let updated = tool_json(&envelope);
+    assert!(updated["summary"].as_str().unwrap().contains("sin fin"), "{updated}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_planning_flow",
+            json!({"id": flow_id, "window_end_date": "2030-01-01", "clear_window_end": true}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+
+    // Vuelta a one_off: nada se auto-borra — sin limpiar la ventana el estado resultante es
+    // incoherente y se rechaza; con clear_window_start el cambio entra.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_planning_flow", json!({"id": flow_id, "amount_basis": "one_off"})),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_planning_flow",
+            json!({"id": flow_id, "amount_basis": "one_off", "clear_window_start": true}),
+        ),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    let rows = app.get_with_cookie("/v1/planning/flows", &owner.cookie).await.json();
+    assert_eq!(rows[0]["amount_basis"], "one_off", "{rows}");
+    assert!(rows[0].get("window_start_date").is_none(), "{rows}");
+    assert!(rows[0].get("window_end_date").is_none(), "{rows}");
 }
