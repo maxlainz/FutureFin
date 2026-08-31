@@ -879,6 +879,18 @@ pub struct LiabilityOverrideParam {
     #[serde(default)]
     #[schemars(extend("enum" = ["fixed_payments", "french", "interest_only", "revolving"]))]
     pub repayment_model: Option<String>,
+    /// Compensación por reembolso anticipado en % del capital extra amortizado (Ley 5/2019
+    /// art. 23), string decimal 0-2. OMITIDA = 2 (el techo legal a tipo fijo: el what-if no es
+    /// optimista por defecto); "0" la quita. Solo con extra_monthly_principal o lump_sum.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub early_repayment_fee_pct: Option<String>,
+    /// Qué hace la amortización con el plan: "reduce_term" (default: el préstamo acaba antes,
+    /// misma cuota) o "reduce_payment" (la cuota baja y el mes de extinción NO cambia). Solo
+    /// con extra_monthly_principal o lump_sum.
+    #[serde(default)]
+    #[schemars(extend("enum" = ["reduce_term", "reduce_payment"]))]
+    pub early_repayment_effect: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1016,6 +1028,7 @@ fn parse_snapshot_items(
                     .map(|v| parse_decimal_param("items[].payment_amount", v))
                     .transpose()?,
                 payment_frequency: i.payment_frequency.clone(),
+                repayment_model: i.repayment_model.clone(),
             })
         })
         .collect()
@@ -2064,6 +2077,11 @@ pub struct SnapshotItemParam {
     #[serde(default)]
     #[schemars(extend("enum" = ["monthly", "weekly"]))]
     pub payment_frequency: Option<String>,
+    /// Modelo de amortización del pasivo EN AQUEL MOMENTO (#129). Ausente = no se sabe
+    /// (interpolación lineal). Solo en `kind = "liability"`.
+    #[serde(default)]
+    #[schemars(extend("enum" = ["fixed_payments", "french", "interest_only", "revolving"]))]
+    pub repayment_model: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2641,6 +2659,27 @@ impl FutureFinMcp {
                             .repayment_model
                             .as_deref()
                             .map(crate::handlers::liabilities::RepaymentModel::parse)
+                            .transpose()?,
+                        early_repayment_fee_pct: dec(
+                            "liability_overrides.early_repayment_fee_pct",
+                            &o.early_repayment_fee_pct,
+                        )?,
+                        // Mismo criterio que repayment_model: parse propio con 400 estable, no
+                        // el fallo de deserialización de rmcp.
+                        early_repayment_effect: o
+                            .early_repayment_effect
+                            .as_deref()
+                            .map(|raw| match raw {
+                                "reduce_term" => {
+                                    Ok(futurefin_engine::EarlyRepaymentEffect::ReduceTerm)
+                                }
+                                "reduce_payment" => {
+                                    Ok(futurefin_engine::EarlyRepaymentEffect::ReducePayment)
+                                }
+                                other => Err(ApiError::BadRequest(format!(
+                                    "early_repayment_effect_invalid: liability_overrides[].early_repayment_effect must be reduce_term or reduce_payment (got {other})"
+                                ))),
+                            })
                             .transpose()?,
                     });
                 }

@@ -18,7 +18,8 @@ pub use projection::{
     present_value_of_payments, project_net_worth_series, resolve_cap_ceiling, AllocationCap,
     AllocationKind,
     AllocationRule, AllocationSkipReason, EngineError, FireTarget, FirstMonthAllocation,
-    LiabilityPayoffAbsence, LiabilitySchedule, LiabilityScheduleMonth, ProjectionInput,
+    EarlyRepaymentEffect, LiabilityPayoffAbsence, LiabilitySchedule, LiabilityScheduleMonth,
+    ProjectionInput,
     ProjectionLiabilityInput, ProjectionOutput, RepaymentModel, RuleOutcome, SimAsset,
     MAX_LIABILITY_SCHEDULE_MONTHS,
 };

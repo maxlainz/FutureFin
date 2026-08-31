@@ -59,6 +59,10 @@ pub struct SnapshotItemResponse {
     pub payment_amount: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payment_frequency: Option<String>,
+    /// Modelo de amortización que tenía el pasivo al capturar la foto (#129, 4.7.0). `null` en
+    /// items de activo y en snapshots anteriores (⇒ interpolación lineal, el default de su época).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repayment_model: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -130,6 +134,10 @@ pub struct SnapshotItemBody {
     pub payment_amount: Option<Decimal>,
     #[serde(default)]
     pub payment_frequency: Option<String>,
+    /// Modelo de amortización del pasivo EN AQUEL MOMENTO (#129). Opcional: ausente = no se
+    /// sabe ⇒ interpolación lineal. Solo con kind `liability`.
+    #[serde(default)]
+    pub repayment_model: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -184,6 +192,7 @@ struct SnapshotItemRow {
     apr_percent: Option<Decimal>,
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
+    repayment_model: Option<String>,
 }
 
 /// Item ya validado y listo para insertar.
@@ -194,6 +203,7 @@ struct PreparedItem {
     apr_percent: Option<Decimal>,
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
+    repayment_model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +309,18 @@ fn validate_and_prepare_items(
             None => None,
             Some(f) => Some(normalize_frequency(f)?),
         };
+        // #129: mismo dominio que el CHECK de la columna; «rechazar, no defaultear» (§2.6).
+        let repayment_model = match it.repayment_model.as_deref() {
+            None => None,
+            Some(m @ ("fixed_payments" | "french" | "interest_only" | "revolving")) => {
+                Some(m.to_string())
+            }
+            Some(other) => {
+                return Err(ApiError::BadRequest(format!(
+                    "snapshot_repayment_model_invalid: repayment_model must be one of fixed_payments, french, interest_only, revolving (got {other})"
+                )))
+            }
+        };
 
         let item_id = it.item_id.unwrap_or_else(Uuid::new_v4);
         if !seen.insert(item_id) {
@@ -314,6 +336,7 @@ fn validate_and_prepare_items(
             apr_percent: it.apr_percent,
             payment_amount: it.payment_amount,
             payment_frequency,
+            repayment_model,
         });
     }
     Ok(out)
@@ -358,6 +381,7 @@ fn build_response_with_items(
                     apr_percent: i.apr_percent,
                     payment_amount: i.payment_amount,
                     payment_frequency: i.payment_frequency,
+                    repayment_model: i.repayment_model,
                 })
                 .collect()
         } else {
@@ -385,7 +409,7 @@ async fn load_snapshot_response(
 
     let items: Vec<SnapshotItemRow> = sqlx::query_as(
         r#"SELECT snapshot_id, source_item_id, label, value, apr_percent,
-                  payment_amount, payment_frequency
+                  payment_amount, payment_frequency, repayment_model
            FROM history_snapshot_items
            WHERE snapshot_id = $1
            ORDER BY label ASC"#,
@@ -406,8 +430,8 @@ async fn insert_items(
         sqlx::query(
             r#"INSERT INTO history_snapshot_items
                    (snapshot_id, source_item_id, label, value,
-                    apr_percent, payment_amount, payment_frequency)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                    apr_percent, payment_amount, payment_frequency, repayment_model)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
         )
         .bind(snapshot_id)
         .bind(it.item_id)
@@ -416,6 +440,7 @@ async fn insert_items(
         .bind(it.apr_percent)
         .bind(it.payment_amount)
         .bind(it.payment_frequency.as_deref())
+        .bind(it.repayment_model.as_deref())
         .execute(&mut *conn)
         .await?;
     }
@@ -514,8 +539,8 @@ pub(crate) async fn capture_snapshots_core(
             sqlx::query(
                 r#"INSERT INTO history_snapshot_items
                        (snapshot_id, source_item_id, label, value,
-                        apr_percent, payment_amount, payment_frequency)
-                   SELECT $1, a.id, a.name, a.current_value, NULL, NULL, NULL
+                        apr_percent, payment_amount, payment_frequency, repayment_model)
+                   SELECT $1, a.id, a.name, a.current_value, NULL, NULL, NULL, NULL
                    FROM assets a
                    WHERE a.installation_id = $2 AND a.owner_user_id = $3"#,
             )
@@ -529,9 +554,9 @@ pub(crate) async fn capture_snapshots_core(
             sqlx::query(
                 r#"INSERT INTO history_snapshot_items
                        (snapshot_id, source_item_id, label, value,
-                        apr_percent, payment_amount, payment_frequency)
+                        apr_percent, payment_amount, payment_frequency, repayment_model)
                    SELECT $1, l.id, l.label, l.principal,
-                          l.apr_percent, l.payment_amount, l.payment_frequency
+                          l.apr_percent, l.payment_amount, l.payment_frequency, l.repayment_model
                    FROM liabilities l
                    WHERE l.installation_id = $2 AND l.owner_user_id = $3
                      AND (l.payment_end_date IS NULL OR l.payment_end_date >= $4 OR l.principal > 0)"#,
@@ -705,7 +730,7 @@ pub(crate) async fn list_snapshots_core(
     let ids: Vec<Uuid> = headers.iter().map(|h| h.id).collect();
     let item_rows: Vec<SnapshotItemRow> = sqlx::query_as(
         r#"SELECT snapshot_id, source_item_id, label, value, apr_percent,
-                  payment_amount, payment_frequency
+                  payment_amount, payment_frequency, repayment_model
            FROM history_snapshot_items
            WHERE snapshot_id = ANY($1)
            ORDER BY label ASC"#,
@@ -1175,21 +1200,30 @@ struct LiveLiabilityRow {
     apr_percent: Option<Decimal>,
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
+    repayment_model: String,
     owner_user_id: Uuid,
 }
 
 /// Términos del préstamo de una observación. Sin apr **y** cuota → `None` (el motor
 /// interpola linealmente, mismo resultado que unos términos degenerados). La conversión
 /// `weekly → ×52/12` vive en `projection::monthly_payment_from` (fuente única).
+///
+/// `repayment_model` (#129): el literal capturado en el snapshot. `None` o un literal corrupto
+/// degradan a `None` — el motor lo lee como «no lo sé» ⇒ ley lineal, el default de la época
+/// pre-4.7.0 (misma filosofía de degradar-en-lecturas que `projection.rs`).
 fn loan_terms_of(
     apr_percent: Option<Decimal>,
     payment_amount: Option<Decimal>,
     frequency: Option<&str>,
+    repayment_model: Option<&str>,
 ) -> Option<LoanTerms> {
     match (apr_percent, payment_amount) {
         (Some(apr), Some(pay)) => Some(LoanTerms {
             apr_percent: apr,
             monthly_payment: crate::handlers::projection::monthly_payment_from(pay, frequency),
+            repayment_model: repayment_model
+                .and_then(|m| crate::handlers::liabilities::RepaymentModel::parse(m).ok())
+                .map(crate::handlers::liabilities::RepaymentModel::to_engine),
         }),
         _ => None,
     }
@@ -1299,7 +1333,7 @@ async fn fetch_history_scope(
     let i_scope = view.scope_where("s");
     let items_sql = format!(
         "SELECT i.snapshot_id, i.source_item_id, i.label, i.value,
-                i.apr_percent, i.payment_amount, i.payment_frequency
+                i.apr_percent, i.payment_amount, i.payment_frequency, i.repayment_model
          FROM history_snapshot_items i
          JOIN history_snapshots s ON s.id = i.snapshot_id
          WHERE {i_scope}"
@@ -1327,7 +1361,7 @@ async fn fetch_history_scope(
     let l_today_arg = view.next_arg_index();
     let liabs_sql = format!(
         "SELECT l.id, l.principal, l.apr_percent, l.payment_amount,
-                l.payment_frequency, l.owner_user_id
+                l.payment_frequency, l.repayment_model, l.owner_user_id
          FROM liabilities l
          WHERE {l_scope} AND l.owner_user_id IS NOT NULL
            AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${l_today_arg} OR l.principal > 0)"
@@ -1435,6 +1469,7 @@ fn accumulate_series(
                         it.apr_percent,
                         it.payment_amount,
                         it.payment_frequency.as_deref(),
+                        it.repayment_model.as_deref(),
                     ),
                 });
                 if kind == HistoryItemKind::Asset {
@@ -1466,10 +1501,12 @@ fn accumulate_series(
                         let obs = obs_map.entry(l.id).or_insert_with(|| vec![None; total_len]);
                         obs[last] = Some(HistoryObservation {
                             value: l.principal,
+                            // Observación virtual «hoy» = ledger vivo ⇒ el modelo es el ACTUAL.
                             terms: loan_terms_of(
                                 l.apr_percent,
                                 l.payment_amount,
                                 l.payment_frequency.as_deref(),
+                                Some(l.repayment_model.as_str()),
                             ),
                         });
                     }
@@ -1479,6 +1516,10 @@ fn accumulate_series(
 
         let timeline = HistoryTimeline {
             dates,
+            // #130: el último punto es el ledger vivo ⟺ se añadió la observación virtual «hoy».
+            // Solo esa ausencia significa borrado/vendido; en una captura intermedia, un item
+            // ausente arrastra su último valor (LOCF).
+            last_is_live_ledger: append_virtual,
             items: obs_map
                 .into_iter()
                 .map(|(source_item_id, observations)| HistoryItem {
@@ -2365,6 +2406,7 @@ struct PrefillLiveRow {
     apr_percent: Option<Decimal>,
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
+    repayment_model: Option<String>,
 }
 
 /// Observación de un item en un punto del timeline: valor + términos crudos (para eco en la
@@ -2374,6 +2416,7 @@ struct PrefillObs {
     apr_percent: Option<Decimal>,
     payment_amount: Option<Decimal>,
     payment_frequency: Option<String>,
+    repayment_model: Option<String>,
 }
 
 fn obs_has_terms(o: &PrefillObs) -> bool {
@@ -2423,10 +2466,20 @@ fn prefill_eval_item(
             // Términos de la observación de inicio (fallback a la final), como en la serie.
             // Activos → `None` → el motor interpola linealmente en días civiles.
             let terms = if is_liability {
-                loan_terms_of(lo.apr_percent, lo.payment_amount, lo.payment_frequency.as_deref())
-                    .or_else(|| {
-                        loan_terms_of(ro.apr_percent, ro.payment_amount, ro.payment_frequency.as_deref())
-                    })
+                loan_terms_of(
+                    lo.apr_percent,
+                    lo.payment_amount,
+                    lo.payment_frequency.as_deref(),
+                    lo.repayment_model.as_deref(),
+                )
+                .or_else(|| {
+                    loan_terms_of(
+                        ro.apr_percent,
+                        ro.payment_amount,
+                        ro.payment_frequency.as_deref(),
+                        ro.repayment_model.as_deref(),
+                    )
+                })
             } else {
                 None
             };
@@ -2542,7 +2595,8 @@ pub async fn prefill_snapshot(
     // Filas vivas propias (con plan vivo o saldo vivo, #145), normalizadas a `PrefillLiveRow`.
     let live_rows: Vec<PrefillLiveRow> = if is_liability {
         sqlx::query_as(
-            r#"SELECT id, label, principal AS value, apr_percent, payment_amount, payment_frequency
+            r#"SELECT id, label, principal AS value, apr_percent, payment_amount,
+                      payment_frequency, repayment_model
                FROM liabilities
                WHERE installation_id = $1 AND owner_user_id = $2
                  AND (payment_end_date IS NULL OR payment_end_date >= $3 OR principal > 0)"#,
@@ -2556,7 +2610,7 @@ pub async fn prefill_snapshot(
         sqlx::query_as(
             r#"SELECT id, name AS label, current_value AS value,
                       NULL::numeric AS apr_percent, NULL::numeric AS payment_amount,
-                      NULL::text AS payment_frequency
+                      NULL::text AS payment_frequency, NULL::text AS repayment_model
                FROM assets
                WHERE installation_id = $1 AND owner_user_id = $2"#,
         )
@@ -2594,7 +2648,7 @@ pub async fn prefill_snapshot(
     let ids: Vec<Uuid> = headers.iter().map(|h| h.id).collect();
     let item_rows: Vec<SnapshotItemRow> = sqlx::query_as(
         r#"SELECT snapshot_id, source_item_id, label, value, apr_percent,
-                  payment_amount, payment_frequency
+                  payment_amount, payment_frequency, repayment_model
            FROM history_snapshot_items
            WHERE snapshot_id = ANY($1)"#,
     )
@@ -2629,6 +2683,7 @@ pub async fn prefill_snapshot(
                 apr_percent: it.apr_percent,
                 payment_amount: it.payment_amount,
                 payment_frequency: it.payment_frequency.clone(),
+                repayment_model: it.repayment_model.clone(),
             });
             let slot = latest_label
                 .entry(it.source_item_id)
@@ -2651,6 +2706,7 @@ pub async fn prefill_snapshot(
                 apr_percent: r.apr_percent,
                 payment_amount: r.payment_amount,
                 payment_frequency: r.payment_frequency.clone(),
+                repayment_model: r.repayment_model.clone(),
             });
         }
     }

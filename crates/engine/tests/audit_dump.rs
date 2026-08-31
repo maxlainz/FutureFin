@@ -63,6 +63,8 @@ fn mk_liab(
         min_payment_eur: None,
         extra_principal_monthly: Decimal::ZERO,
         extra_principal_lump_sums: vec![],
+        early_repayment_fee_pct: None,
+        early_repayment_effect: Default::default(),
     }
 }
 

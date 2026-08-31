@@ -95,7 +95,7 @@ describe("mergeProjectionWithHistory — identidad por referencia", () => {
     expect(out.futureOffset).toBe(0);
   });
 
-  it("anchor distinto → identidad (grids desalineadas)", () => {
+  it("anchor de OTRO MES → identidad (grids desalineadas)", () => {
     const series = makeSeries();
     const out = mergeProjectionWithHistory(
       series,
@@ -103,6 +103,31 @@ describe("mergeProjectionWithHistory — identidad por referencia", () => {
     );
     expect(out.pts).toBe(series.points);
     expect(out.markers).toEqual([]);
+  });
+
+  it("cruce de medianoche DENTRO del mes → fusiona (#130: misma rejilla civil)", () => {
+    // El ancla de la serie es 2026-07-06; un histórico respondido «ayer» (2026-07-05) indexa
+    // por el MISMO primero-de-mes ⇒ misma rejilla ⇒ se fusiona. La igualdad estricta de antes
+    // hacía desaparecer el tramo histórico del chart justo al cruzar la medianoche.
+    const series = makeSeries();
+    const out = mergeProjectionWithHistory(
+      series,
+      makeHistory({ anchor_date_ymd: "2026-07-05" }),
+    );
+    expect(out.pts.map((p) => p.month_index)).toEqual([-2, -1, 0, 1]);
+    expect(out.futureOffset).toBe(2);
+  });
+
+  it("cruce de FRONTERA DE MES → identidad, y debe seguir siéndolo", () => {
+    // 2026-06-30 vs 2026-07-06: un día de diferencia pero la rejilla se desplaza UN MES entero
+    // (se indexa por primero-de-mes). Una tolerancia «±1 día» a secas fusionaría rejillas
+    // desalineadas — por eso el criterio es mes civil, no distancia en días.
+    const series = makeSeries();
+    const out = mergeProjectionWithHistory(
+      series,
+      makeHistory({ anchor_date_ymd: "2026-06-30" }),
+    );
+    expect(out.pts).toBe(series.points);
   });
 
   it("series sin anchor_date_ymd → identidad aunque el histórico traiga datos", () => {

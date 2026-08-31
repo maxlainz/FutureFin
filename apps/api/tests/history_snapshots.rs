@@ -772,6 +772,7 @@ async fn prefill_liability_amortized_with_terms() {
         serde_json::json!([{
             "item_id": item_id, "label": "Hipoteca", "value": value,
             "apr_percent": "5", "payment_amount": "1200", "payment_frequency": "monthly",
+            "repayment_model": "french",
         }])
     };
     backfill(&app, &owner.cookie, "liability", d1, terms("200000")).await;

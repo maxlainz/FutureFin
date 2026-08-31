@@ -139,6 +139,29 @@ pub struct ProjectionLiabilityInput {
     /// semántica que [`Self::extra_principal_monthly`] pero en un solo mes; varias entradas del
     /// mismo mes se suman. Vacío = ninguna.
     pub extra_principal_lump_sums: Vec<(u32, Decimal)>,
+    /// Compensación por reembolso anticipado (Ley 5/2019 art. 23), en % del capital extra
+    /// amortizado (cota legal [0, 2] a tipo fijo — la valida el handler). Eje del what-if: el
+    /// ensamblado real la deja en `None` (= 0 %); `simulate` aplica su default (2 %). Sale de
+    /// la caja como coste puro: NO amortiza ni baja el principal.
+    pub early_repayment_fee_pct: Option<Decimal>,
+    /// Qué hace la amortización extra con el plan (what-if, #151): acortarlo (`ReduceTerm`,
+    /// default y comportamiento 4.4.0 — la cuota no cambia) o bajar la cuota (`ReducePayment`,
+    /// λ-escala que conserva EXACTAMENTE el mes de extinción; ver el bucle de simulación).
+    pub early_repayment_effect: EarlyRepaymentEffect,
+}
+
+/// Efecto de la amortización anticipada sobre el plan de pago (#151). En una renta francesa el
+/// plazo restante `n` cumple `(1+i)^(−n) = 1 − P·i/M` — depende SOLO del cociente `P·i/M` —,
+/// así que escalar la cuota por el mismo factor que bajó el principal (`M' = λ·M` con
+/// `λ = P'/P`) deja el cociente intacto y el mes de extinción NO se mueve: «reducir cuota»
+/// libera caja mensual sin acortar (ni alargar) el préstamo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EarlyRepaymentEffect {
+    /// La cuota no cambia; el préstamo acaba antes (comportamiento histórico del what-if).
+    #[default]
+    ReduceTerm,
+    /// La cuota baja (λ-escala) y el mes de extinción se conserva.
+    ReducePayment,
 }
 
 /// ¿Tiene el pasivo un plan de pago vivo en el mes que empieza en `m_start`?
@@ -281,17 +304,21 @@ fn liability_month(
 /// `0 ..= closing_after_payment`, así que sumarla al servicio de deuda y restarla del principal
 /// no puede producir ni caja fantasma ni principal negativo.
 ///
-/// Sin plan de pago activo devuelve 0: amortizar «extra» un pasivo que no cobra cuota no
+/// Sin plan de pago activo devuelve `(0, 0)`: amortizar «extra» un pasivo que no cobra cuota no
 /// adelanta nada (no hay devengo que evitar ni cuota que liberar) y además rompería el contrato
 /// de los modos B/C del handler, donde el principal es una resta CONSTANTE al patrimonio.
+///
+/// Devuelve `(extra, fee)` (#151): `fee = extra × early_repayment_fee_pct / 100` es la
+/// compensación por reembolso anticipado — sale de la caja del mes como coste puro y NO baja el
+/// principal. Sin la comisión, el what-if de amortizar era gratis por construcción.
 fn liability_extra_principal(
     liab: &ProjectionLiabilityInput,
     month: u32,
     closing_after_payment: Decimal,
     active: bool,
-) -> Decimal {
+) -> (Decimal, Decimal) {
     if !active {
-        return Decimal::ZERO;
+        return (Decimal::ZERO, Decimal::ZERO);
     }
     let mut wanted = liab.extra_principal_monthly.max(Decimal::ZERO);
     for (m, amount) in &liab.extra_principal_lump_sums {
@@ -299,9 +326,12 @@ fn liability_extra_principal(
             wanted += (*amount).max(Decimal::ZERO);
         }
     }
-    wanted
+    let extra = wanted
         .min(closing_after_payment.max(Decimal::ZERO))
-        .max(Decimal::ZERO)
+        .max(Decimal::ZERO);
+    let fee = extra * liab.early_repayment_fee_pct.unwrap_or(Decimal::ZERO).max(Decimal::ZERO)
+        / Decimal::from(100);
+    (extra, fee)
 }
 
 /// Valor actual de una renta de `months` cuotas mensuales de `monthly_payment`, descontada al
@@ -400,6 +430,11 @@ pub struct LiabilityScheduleMonth {
     /// Parte de `principal_repaid` que viene de una amortización extra what-if. `0` en el
     /// calendario real de un pasivo guardado.
     pub extra_principal: Decimal,
+    /// Compensación por reembolso anticipado del mes (#151): `extra_principal ×
+    /// early_repayment_fee_pct / 100`. Coste puro — queda FUERA de la identidad
+    /// `payment + extra_principal == interest_accrued + principal_repaid` a propósito: sale de
+    /// la caja pero no amortiza. `0` en el calendario real de un pasivo guardado.
+    pub early_repayment_fee: Decimal,
     /// Caja que sale por la **cuota** (topada al saldo de cancelación del mes: el último mes de un
     /// préstamo es de cuota parcial). No incluye `extra_principal`.
     pub payment: Decimal,
@@ -432,8 +467,10 @@ pub struct LiabilitySchedule {
     pub total_payments: Decimal,
     /// Σ `extra_principal`.
     pub total_extra_principal: Decimal,
-    /// `total_payments + total_extra_principal`: todo lo que sale de la caja. Es el «total a
-    /// pagar» de la pregunta.
+    /// Σ `early_repayment_fee` (#151). `0` sin what-if de amortización o con comisión 0.
+    pub total_early_repayment_fee: Decimal,
+    /// `total_payments + total_extra_principal + total_early_repayment_fee`: todo lo que sale
+    /// de la caja. Es el «total a pagar» de la pregunta.
     pub total_cash_out: Decimal,
     /// Mes en que el saldo llega a **cero exacto**. `Some(0)` ⟺ el pasivo ya estaba saldado al
     /// arrancar. `None` ⟺ hay `payoff_absent`.
@@ -467,6 +504,9 @@ pub fn liability_amortization_schedule(
     let mut total_interest = Decimal::ZERO;
     let mut total_payments = Decimal::ZERO;
     let mut total_extra_principal = Decimal::ZERO;
+    let mut total_early_repayment_fee = Decimal::ZERO;
+    // Cuota efectiva (#151): solo la muta «reducir cuota»; con el default es la declarada.
+    let mut effective_payment = liab.monthly_payment;
     // Un pasivo con saldo 0 ya está extinguido HOY: `Some(0)` y calendario vacío. No se deja caer
     // al bucle porque emitiría meses de ceros que no describen nada.
     let mut payoff_month_index = principal.is_zero().then_some(0u32);
@@ -483,16 +523,25 @@ pub fn liability_amortization_schedule(
             }
 
             let (payment, closing_after_payment) =
-                liability_month(liab, principal, liab.monthly_payment, true);
-            let extra = liability_extra_principal(liab, k, closing_after_payment, true);
+                liability_month(liab, principal, effective_payment, true);
+            let (extra, fee) = liability_extra_principal(liab, k, closing_after_payment, true);
             let closing = closing_after_payment - extra;
 
             // Derivación en este orden a propósito: los saldos mandan, el interés es el residuo.
             // Así `payment + extra == interest + principal_repaid` es exacto por construcción y
-            // no una coincidencia numérica que un cambio de modelo pueda romper.
+            // no una coincidencia numérica que un cambio de modelo pueda romper. La comisión
+            // (#151) queda FUERA de la identidad: es caja sin contrapartida en el principal.
             let repaid_by_payment = principal - closing_after_payment;
             let interest_accrued = payment - repaid_by_payment;
             let principal_repaid = principal - closing;
+
+            // «Reducir cuota» (#151): misma λ-escala que el bucle de simulación.
+            if extra > Decimal::ZERO
+                && liab.early_repayment_effect == EarlyRepaymentEffect::ReducePayment
+                && closing_after_payment > Decimal::ZERO
+            {
+                effective_payment = effective_payment * closing / closing_after_payment;
+            }
 
             months.push(LiabilityScheduleMonth {
                 month_index: k,
@@ -500,12 +549,14 @@ pub fn liability_amortization_schedule(
                 interest_accrued,
                 principal_repaid,
                 extra_principal: extra,
+                early_repayment_fee: fee,
                 payment,
                 closing_principal: closing,
             });
             total_interest += interest_accrued;
             total_payments += payment;
             total_extra_principal += extra;
+            total_early_repayment_fee += fee;
             principal = closing;
 
             if principal.is_zero() {
@@ -534,7 +585,8 @@ pub fn liability_amortization_schedule(
         total_interest,
         total_payments,
         total_extra_principal,
-        total_cash_out: total_payments + total_extra_principal,
+        total_early_repayment_fee,
+        total_cash_out: total_payments + total_extra_principal + total_early_repayment_fee,
         payoff_month_index,
         payoff_absent,
         horizon_months: horizon,
@@ -1041,7 +1093,8 @@ pub fn first_month_allocation(
             liab.monthly_payment,
             active,
         );
-        debt_service += cash + liability_extra_principal(liab, 1, closing, active);
+        let (extra, fee) = liability_extra_principal(liab, 1, closing, active);
+        debt_service += cash + extra + fee;
     }
 
     let planning_adj = input.planning_monthly_cash_adjustment[0];
@@ -1168,6 +1221,13 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         .iter()
         .map(|l| l.principal.max(Decimal::ZERO))
         .collect();
+    // Cuota efectiva por pasivo (#151): solo la muta «reducir cuota» (λ-escala). Con el efecto
+    // default (`ReduceTerm`) nunca se toca y la simulación es bit-idéntica a 4.6.0.
+    let mut effective_payment: Vec<Decimal> = input
+        .liabilities
+        .iter()
+        .map(|l| l.monthly_payment)
+        .collect();
 
     let start_month_first = month_first_calendar(input.ref_date);
 
@@ -1230,13 +1290,24 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             }
             let active = liability_active(liab, m_start);
             let (cash, closing) =
-                liability_month(liab, principals[i], liab.monthly_payment, active);
+                liability_month(liab, principals[i], effective_payment[i], active);
             // Amortización extra (what-if): sale de la caja del mes como servicio de deuda Y baja
             // el principal el mismo importe. Las dos cosas o ninguna — hacer solo la primera
-            // drenaría caja sin reducir deuda, y solo la segunda imprimiría dinero.
-            let extra = liability_extra_principal(liab, k, closing, active);
-            debt_service += cash + extra;
-            closing_principals.push(closing - extra);
+            // drenaría caja sin reducir deuda, y solo la segunda imprimiría dinero. La comisión
+            // (#151) es la excepción asimétrica A PROPÓSITO: sale de la caja y NO baja nada —
+            // es coste puro, lo que hace que el what-if de amortizar deje de ser gratis.
+            let (extra, fee) = liability_extra_principal(liab, k, closing, active);
+            debt_service += cash + extra + fee;
+            let new_closing = closing - extra;
+            // «Reducir cuota» (#151): λ = P'/P sobre el saldo TRAS la cuota del mes. Mismo
+            // cociente P·i/M ⇒ mismo mes de extinción (ver `EarlyRepaymentEffect`).
+            if extra > Decimal::ZERO
+                && liab.early_repayment_effect == EarlyRepaymentEffect::ReducePayment
+                && closing > Decimal::ZERO
+            {
+                effective_payment[i] = effective_payment[i] * new_closing / closing;
+            }
+            closing_principals.push(new_closing);
         }
 
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
@@ -1855,6 +1926,8 @@ mod tests {
             min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::default(),
         }];
 
         // (a) Sin componente de planning: base == neto recurrente.
@@ -2284,6 +2357,8 @@ mod tests {
             min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::default(),
         }];
         inp.planning_monthly_cash_adjustment[0] = Decimal::from(250);
         inp.planning_monthly_cash_adjustment[5] = Decimal::from(-100);
@@ -2410,6 +2485,8 @@ mod tests {
             min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::default(),
         }];
         inp
     }
@@ -2824,11 +2901,91 @@ mod tests {
             min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::default(),
         }
     }
 
     fn ref_2026() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 1, 15).unwrap()
+    }
+
+    /// #151, números a mano (francés 150.000 € al TIN 2,50 % ⇒ i = 1/480, cuota 800, lump de
+    /// 20.000 € en el mes 12, comisión 2 %):
+    /// - comisión del mes 12 = 20.000 × 2 % = **400,00 €** exactos, FUERA de la identidad
+    ///   cuota+extra = interés+amortizado (coste puro, no baja el principal);
+    /// - `total_cash_out` = cuotas + extra + comisión.
+    #[test]
+    fn early_repayment_fee_is_charged_outside_the_amortization_identity() {
+        let mut l = liab(
+            Decimal::from(150_000),
+            Decimal::from(800),
+            RepaymentModel::French,
+            Some(dec("2.5")),
+        );
+        l.extra_principal_lump_sums = vec![(12, Decimal::from(20_000))];
+        l.early_repayment_fee_pct = Some(Decimal::from(2));
+        let sch = liability_amortization_schedule(&l, ref_2026(), 480);
+
+        let m12 = sch.months.iter().find(|m| m.month_index == 12).unwrap();
+        assert_eq!(m12.extra_principal, Decimal::from(20_000));
+        assert_eq!(m12.early_repayment_fee, Decimal::from(400), "20.000 × 2 % = 400,00");
+        assert_eq!(
+            m12.payment + m12.extra_principal,
+            m12.interest_accrued + m12.principal_repaid,
+            "la identidad se cumple SIN la comisión"
+        );
+        assert_eq!(sch.total_early_repayment_fee, Decimal::from(400));
+        assert_eq!(
+            sch.total_cash_out,
+            sch.total_payments + sch.total_extra_principal + sch.total_early_repayment_fee
+        );
+        // Los meses sin extra no pagan comisión.
+        assert!(sch
+            .months
+            .iter()
+            .filter(|m| m.month_index != 12)
+            .all(|m| m.early_repayment_fee.is_zero()));
+    }
+
+    /// #151 «reducir cuota» — LA INVARIANTE, que no depende de aritmética a mano: en una renta
+    /// francesa el plazo restante depende solo del cociente P·i/M, así que λ-escalar la cuota
+    /// por el factor que bajó el principal conserva EXACTAMENTE el mes de extinción del
+    /// préstamo SIN amortizar. A mano (verificado con la recurrencia a 50 dígitos): baseline
+    /// sin extra extingue en el mes **239**; con 20.000 € en el mes 12 y `reduce_payment`,
+    /// TAMBIÉN en el 239 — y la cuota baja de 800 a **688,9525 €** (caja liberada 111,0475 €/mes).
+    #[test]
+    fn reduce_payment_keeps_the_payoff_month_and_lowers_the_instalment() {
+        let base = liab(
+            Decimal::from(150_000),
+            Decimal::from(800),
+            RepaymentModel::French,
+            Some(dec("2.5")),
+        );
+        let base_sch = liability_amortization_schedule(&base, ref_2026(), 480);
+        assert_eq!(base_sch.payoff_month_index, Some(239), "baseline a mano");
+
+        let mut reduced = base.clone();
+        reduced.extra_principal_lump_sums = vec![(12, Decimal::from(20_000))];
+        reduced.early_repayment_effect = EarlyRepaymentEffect::ReducePayment;
+        let sch = liability_amortization_schedule(&reduced, ref_2026(), 480);
+        assert_eq!(
+            sch.payoff_month_index,
+            base_sch.payoff_month_index,
+            "reducir cuota conserva el mes de extinción"
+        );
+        let m13 = sch.months.iter().find(|m| m.month_index == 13).unwrap();
+        let cuota = m13.payment.round_dp(4);
+        assert_eq!(cuota, dec("688.9525"), "cuota nueva desde el mes 13");
+
+        // El gemelo: con el efecto default (acortar plazo) la cuota NO cambia y el préstamo
+        // acaba antes — a mano, en el mes **200**.
+        let mut shortened = base.clone();
+        shortened.extra_principal_lump_sums = vec![(12, Decimal::from(20_000))];
+        let sch = liability_amortization_schedule(&shortened, ref_2026(), 480);
+        assert_eq!(sch.payoff_month_index, Some(200), "acortar plazo, a mano");
+        let m13 = sch.months.iter().find(|m| m.month_index == 13).unwrap();
+        assert_eq!(m13.payment, Decimal::from(800), "la cuota no se toca");
     }
 
     /// **La identidad contable del calendario**, exacta en `Decimal`, en los cuatro modelos y en

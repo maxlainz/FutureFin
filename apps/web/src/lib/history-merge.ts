@@ -77,11 +77,17 @@ export function mergeProjectionWithHistory(
   });
 
   const seriesAnchor = series.anchor_date_ymd;
+  // #130: MISMO MES CIVIL, no igualdad exacta de fechas. Las dos rejillas se indexan por el
+  // primero-de-mes del ancla, así que dos anclas del mismo mes producen la MISMA rejilla y el
+  // día no influye en un solo punto (el merge descarta los k >= 0). La igualdad estricta hacía
+  // que la serie histórica desapareciera del chart al cruzar la medianoche entre la respuesta
+  // del histórico y la de la proyección. Cruzar de MES sí desplaza la rejilla entera ⇒ identidad.
+  const sameGrid = (a: string, b: string) => a.slice(0, 7) === b.slice(0, 7);
   const identity =
     history == null ||
     history.points.length === 0 ||
     seriesAnchor == null ||
-    history.anchor_date_ymd !== seriesAnchor;
+    !sameGrid(history.anchor_date_ymd, seriesAnchor);
 
   if (identity) {
     return identityResult();

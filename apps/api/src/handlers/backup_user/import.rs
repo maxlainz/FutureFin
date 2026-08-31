@@ -732,6 +732,19 @@ async fn insert_payload(
                     ));
                 }
             }
+            // #129 (v11): mismo dominio que el CHECK de la columna. Solo en pasivos.
+            if it.repayment_model.is_some() && !is_liability {
+                return Err(ApiError::BadRequest(
+                    "snapshot_terms_only_for_liabilities: repayment_model is only valid for kind 'liability'".into(),
+                ));
+            }
+            if let Some(model) = it.repayment_model.as_deref() {
+                if !matches!(model, "fixed_payments" | "french" | "interest_only" | "revolving") {
+                    return Err(ApiError::BadRequest(
+                        "snapshot_repayment_model_invalid: repayment_model must be one of fixed_payments, french, interest_only, revolving".into(),
+                    ));
+                }
+            }
 
             // ledger_index present → point at the fresh UUID of the re-created ledger row
             // (asset or liability, per snapshot kind); absent → keep item_key verbatim so
@@ -759,8 +772,8 @@ async fn insert_payload(
             sqlx::query(
                 r#"INSERT INTO history_snapshot_items (
                        snapshot_id, source_item_id, label, value,
-                       apr_percent, payment_amount, payment_frequency
-                   ) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+                       apr_percent, payment_amount, payment_frequency, repayment_model
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
             )
             .bind(snapshot_id)
             .bind(source_item_id)
@@ -769,6 +782,7 @@ async fn insert_payload(
             .bind(it.apr_percent)
             .bind(it.payment_amount)
             .bind(it.payment_frequency.as_deref())
+            .bind(it.repayment_model.as_deref())
             .execute(&mut **tx)
             .await?;
             snapshot_items += 1;

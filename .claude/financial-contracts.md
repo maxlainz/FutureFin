@@ -43,12 +43,31 @@ realidad** o entre superficies, no error de aritmética.
 - **Identidad del calendario**: `payment + extra == interest + principal_repaid` por construcción
   (el interés es residuo de saldos) — `liability_amortization_schedule`. Test:
   `schedule_payment_identity_holds_in_every_model`.
-- **Degeneraciones**: TIN ausente/≤0 ⇒ cualquier modelo colapsa a `fixed_payments`;
-  `fixed_payments` (el **default** de la columna) no devenga jamás; `interest_only` congela el
-  principal con cuota arbitraria; plan vencido con saldo vivo ⇒ resta constante congelada. Las
-  cuatro son divergencias con la realidad (§4: D13, D15).
+- **Catálogo honesto (4.7.0, #144)**: el default es `french` (columna + formulario; la migración
+  firmada convirtió las filas fixed+TIN a `french` y anuló el TIN residual). `fixed_payments` es
+  el préstamo SIN intereses y **rechaza** TIN (`apr_forbidden_for_model`); `interest_only` cobra
+  el interés del período (`cash = min(M, P·i)`, el déficit capitaliza — carencia real);
+  `revolving` cobra `max(min_payment_pct·saldo, min_payment_eur)`, no la cuota declarada. La
+  misma regla firmada se aplica al IMPORT de backups ≤ v10 (tercer sitio del predicado).
+  El párrafo pedagógico del owner (incluir tal cual donde se explique el cambio de default):
+  «200 vs 278 meses» — un préstamo de 200.000 € a 1.000 €/mes que se salda en 200 meses SIN
+  intereses no tiene una «cuota neta equivalente» en un préstamo francés al 3 % que tarda 278
+  meses en extinguirse pagando la MISMA cuota nominal. Bajar la cuota para que el francés dure
+  también 200 meses no reproduce `fixed_payments` — cambia el producto entero. Los dos números
+  NO son intercambiables y el catálogo no debe sugerir que sí.
+- **Degeneración que queda**: TIN ausente/≤0 en datos legacy/import ⇒ el modelo colapsa a la
+  recurrencia sin intereses (garantizada en `liability_month`); plan vencido con saldo vivo ⇒
+  resta constante congelada, ahora VISIBLE y marcada (#145) — la demora no se modela (decisión
+  del owner, §4 aceptadas).
 - **Actividad**: `monthly_payment > 0 AND (payment_end IS NULL OR >= inicio de mes)` — predicado
-  único `liability_active`, compartido por caja, amortización y devengo.
+  único `liability_active`; y **devengo** = modelo con intereses + TIN > 0 + plan vivo, predicado
+  único `liability_interest_accrues` (#121: lo comparten `liability_month`, el `net_return` de
+  `/v1/summary` y su espejo TS `liabilityAccruesInterest`).
+- **Amortización anticipada (what-if, #151)**: compensación legal default 2 % del extra (cota
+  [0,2], Ley 5/2019 art. 23 a tipo fijo; opt-out «0») — coste puro FUERA de la identidad del
+  calendario; `reduce_payment` λ-escala la cuota (`M' = M·P'/P`) y conserva EXACTAMENTE el mes
+  de extinción (el plazo solo depende de `P·i/M`). No se modela: caída al 1,5 % tras el año 10,
+  topes de variable, pérdida financiera del prestamista.
 
 ### 2.2 Capital
 - Crecimiento **después** de los flujos del mes (aportación cobra el mes completo);
@@ -93,12 +112,21 @@ realidad** o entre superficies, no error de aritmética.
   superávit va a `surplus_cash`; la retirada NO tributa (asimetría con el target — §4: D5, decidido).
 
 ### 2.6 Histórico
-- Interpolación entre snapshots: activos lineal en días civiles; pasivos amortización francesa
-  «corregida por residuo» (exacta en los extremos pese a `powd`), con fallback lineal en
-  degenerados. El mes 0 se evalúa en `today` real.
+- Interpolación entre snapshots: activos lineal en días civiles (o anclada a cash-flow); pasivos
+  por la **ley del modelo CAPTURADO** (#129, 4.7.0): `french`/`revolving` ⇒ curva compuesta
+  «corregida por residuo» (exacta en los extremos pese a `powd`); `fixed_payments`,
+  `interest_only` y `None` (snapshot pre-4.7.0) ⇒ la CUERDA — para cuota fija no es aproximación
+  (pendiente constante). El modelo viaja en `history_snapshot_items.repayment_model` y en el
+  `.ffbackup` v11. El mes 0 se evalúa en `today` real.
+- Ausencias (#130, 4.7.0): un item ausente de una captura ARRASTRA su último valor observado
+  (LOCF) — una foto incompleta no desploma el agregado. La ÚNICA ausencia que vale cero es la
+  del ledger vivo (`HistoryTimeline::last_is_live_ledger`): borrado/vendido de verdad.
 - Los snapshots JAMÁS son inputs del engine de proyección (D12 de arquitectura). El empalme con la
-  proyección es solo del frontend (`history-merge.ts`, anclas iguales o identidad).
-- Divergencia declarada: un pasivo `fixed_payments` tiene pasado francés y futuro lineal (§4: D30).
+  proyección es solo del frontend (`history-merge.ts`): **mismo mes civil** del ancla (#130) —
+  cruzar la medianoche dentro del mes fusiona; cruzar la frontera de mes es identidad (la rejilla
+  se desplaza un mes entero, «±1 día» sería incorrecto ahí).
+- El quiebro de pendiente en «hoy» de los pasivos de cuota fija (pasado francés, futuro lineal)
+  desapareció con #129: pasado y futuro usan la misma ley.
 
 ### 2.7 KPIs
 - `net_return`: expectativa (no realizado), ponderada por valor; desde 4.7.0 (#121) resta el TIN
@@ -145,6 +173,15 @@ amortización negativa, razón del objetivo ausente, con paridad MCP), la vista 
 servidor y la forma cerrada TS sustituye a la bisección con el 10.º caso de paridad (#118), el
 drawdown completo para el ya-jubilado (#132), prosa reconciliada + 6 contratos de métrica nuevos
 + importes declarados netos (#131 #133 #134-parcial #138-parcial #147).
+**Resueltas en 4.7.0 (Ola 3 — «La deuda dice la verdad»)**: catálogo de amortización honesto —
+default `french`, migración firmada, carencia y revolving reales, mínimos `min_payment_*` (#144);
+etiqueta TIN donde siempre se calculó TIN (#122); vencimientos contados desde el día ancla (#123);
+el plan vencido con saldo vivo visible, congelado y marcado `plan_expired_with_balance` (#145);
+una sola base de coste de la deuda — `liability_interest_accrues` compartido por motor, Resumen y
+Pasivos (#121); compensación por reembolso anticipado (2 % default) + «reducir cuota» con
+extinción invariante en el what-if (#151); el modelo de amortización viaja al snapshot y al
+`.ffbackup` v11 — la interpolación histórica usa la ley capturada (#129); el item ausente de una
+captura arrastra su último valor y el empalme del chart es por mes civil (#130).
 
 ### Con dirección decidida por el owner (2026-08-30) — pendientes de implementar
 
@@ -155,14 +192,11 @@ drawdown completo para el ya-jubilado (#132), prosa reconciliada + 6 contratos d
 | Gastos indexados al IPC; ingresos planos («las subidas se pelean») | 334 k€ de gasto de jubilación no cobrado a 30 a | [#139](https://github.com/maxlainz/FutureFin/issues/139) |
 | Fiscalidad: retirada simulada grosseada + base plusvalía por fases (g, default 1,0) | 425 k€ de NW ficticio; objetivo −8/−13 % con g=0,5 | [#140](https://github.com/maxlainz/FutureFin/issues/140) |
 | Solo el patrimonio líquido decide el cruce FIRE | falso «FIRE hoy» con déficit real de 383 k€ | [#143](https://github.com/maxlainz/FutureFin/issues/143) |
-| Catálogo de amortización: default `french`, modelos honestos | ≥156 k€ por hipoteca en el default sin interés | [#144](https://github.com/maxlainz/FutureFin/issues/144) |
-| Préstamo vencido con saldo vivo: visible y marcado | +48 k€ de NW de un día para otro; Δ112 k€ a 30 a | [#145](https://github.com/maxlainz/FutureFin/issues/145) |
 | Inflación default 2,5 % + rango [−2, 50] | objetivo −64 % con el default 0 % actual | [#146](https://github.com/maxlainz/FutureFin/issues/146) |
 | Importes del presupuesto declarados «netos» en la GUI | ~103 k€ de objetivo si se teclea la pensión bruta | [#147](https://github.com/maxlainz/FutureFin/issues/147) |
 | «Próximos» con flujos recurrentes con fecha (dirección del owner) | 355 k€ de alquiler perpetuo; 607 k€ de pensión anticipada | [#148](https://github.com/maxlainz/FutureFin/issues/148) |
 | Horizonte: margen visible al final + edad límite configurable | 151-190 k€ de cola no financiada | [#149](https://github.com/maxlainz/FutureFin/issues/149) |
 | Regla remainder obligatoria (default: primer activo) | 360 k€ muertos vs ~1,22 M€ invertidos (30 a) | [#150](https://github.com/maxlainz/FutureFin/issues/150) |
-| Amortización anticipada: compensación legal + «reducir cuota» | ~400 € por operación tipo + opción legal irrepresentable | [#151](https://github.com/maxlainz/FutureFin/issues/151) |
 
 ### Pendientes de decisión de arreglo (issue por divergencia)
 
@@ -171,14 +205,9 @@ drawdown completo para el ya-jubilado (#132), prosa reconciliada + 6 contratos d
 | Gasto medio real: denominador con meses sin clasificar; ventanas desplazadas; euros de años distintos | 300 k€ / 180 k€ / 120 k€ | [#125](https://github.com/maxlainz/FutureFin/issues/125) |
 | Partida de gasto vencida: KPIs y target la suman, el motor la cancela | +150 k€ (+33 %) de objetivo | [#124](https://github.com/maxlainz/FutureFin/issues/124) |
 | «Autonomía: indefinida» ciega a la rentabilidad | etiqueta falsa sobre saldo que se agota en 28,6 a | [#128](https://github.com/maxlainz/FutureFin/issues/128) |
-| Tres bases de interés incompatibles (portada/Pasivos/proyección) | 83 k€ afirmados y nunca cobrados; 3 pp de brecha | [#121](https://github.com/maxlainz/FutureFin/issues/121) |
-| Campo rotulado TAE, consumido como TIN | +11 meses / +11 k€ al 20 % | [#122](https://github.com/maxlainz/FutureFin/issues/122) |
 | `contributed_capital` nunca decrece, 0 sin purchase_price | 720 k€ sin contabilizar; bloquea g de #140 | [#120](https://github.com/maxlainz/FutureFin/issues/120) |
-| Histórico de pasivos siempre francés (repayment_model no viaja al snapshot) | 6 % del principal; quiebro en «hoy» | [#129](https://github.com/maxlainz/FutureFin/issues/129) |
 | sim_kpis vs first_month_allocation: dos «cajas del mes» | 124 k€ explicados con la cifra equivocada | [#127](https://github.com/maxlainz/FutureFin/issues/127) |
 | Planning flows: fecha pasada descartada; rampa dependiente del día | 3 k€ desaparecidos; ±29 % en la cifra del mes 1 | [#126](https://github.com/maxlainz/FutureFin/issues/126) |
-| `payment_interval_count` degrada el día ancla en meses cortos | +1 cuota (~1 k€) | [#123](https://github.com/maxlainz/FutureFin/issues/123) |
-| Histórico: item ausente de una captura cae a 0 € | desplome falso de 40 k€ | [#130](https://github.com/maxlainz/FutureFin/issues/130) |
 | Barridos: prosa contradictoria · métricas sin contrato · validaciones asimétricas · duplicados cliente sin fixture · campos muertos (ref. #96) · convenciones no declaradas | — | [#133](https://github.com/maxlainz/FutureFin/issues/133)-[#138](https://github.com/maxlainz/FutureFin/issues/138) |
 
 ### Aceptadas por el owner (2026-08-30) — sin issue, deuda declarada aquí
@@ -234,4 +263,8 @@ ancla se movió — actualiza esta ficha en el mismo cambio):
 - Paridad tramos altos: `grep -c "tramo" apps/api/tests/fixtures/fire-parity.json` (≥2) y `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"` (≥9)
 - Tramos vigentes por defecto: `grep -n "300000" apps/api/src/handlers/installation.rs`
 - Freezer f64: `cargo test -p futurefin-engine no_f64 -- --list`
+- Predicado único de devengo (#121): `grep -n "pub fn liability_interest_accrues" crates/engine/src/projection.rs` y su espejo `grep -n "liabilityAccruesInterest" apps/web/src/lib/ledger.ts`
+- Ley por modelo en el histórico (#129): `grep -n "repayment_model" crates/engine/src/history.rs | head -3`
+- LOCF del histórico (#130): `grep -n "last_is_live_ledger" crates/engine/src/history.rs apps/api/src/handlers/history.rs | head -3`
+- Comisión de amortización (#151): `grep -n "early_repayment_fee" crates/engine/src/projection.rs | head -3`
 - La tabla de §4: cada fila con estado «pendiente» debe tener issue ABIERTO (`gh issue view <n>`); si el issue se cierra, la fila se actualiza o se borra en el mismo cambio.

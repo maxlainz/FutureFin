@@ -526,6 +526,8 @@ export type HistorySnapshotItemApi = {
   apr_percent?: string;
   payment_amount?: string;
   payment_frequency?: "monthly" | "weekly";
+  /** Modelo del pasivo al capturar la foto (4.7.0, #129); ausente en fotos anteriores. */
+  repayment_model?: LiabilityRepaymentModelApi;
 };
 
 /** Cabecera + ítems de un snapshot. Total derivado (Σ ítems), nunca almacenado. */

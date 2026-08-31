@@ -9,8 +9,9 @@
 //! distintos para la misma pregunta es exactamente el fallo que este repo llama «cifras
 //! plausibles pero mal».
 //!
-//! Los ejes `liability_overrides` en sí se ejercitan en `crates/engine` (mecánica exacta, con
-//! números predichos) y quedarán cubiertos aquí en cuanto la tool MCP publique sus parámetros.
+//! La mecánica exacta de los ejes `liability_overrides` vive en `crates/engine` (números
+//! predichos a mano); aquí se cubre la superficie MCP end-to-end — incluida la compensación por
+//! reembolso anticipado (#151), que es lo que hace que el what-if de amortizar no sea gratis.
 //!
 //! Requiere un Postgres en `TEST_DATABASE_URL` (ver `common/mod.rs`).
 
@@ -310,4 +311,147 @@ async fn a_household_without_liabilities_is_debt_free_at_month_zero() {
     assert_eq!(sim["baseline"]["liability_debt_free_month_index"], 0);
     assert!(sim["baseline"]["liability_debt_free_absent_reason"].is_null());
     assert_eq!(dec(&sim["baseline"]["liability_total_interest"]), 0.0);
+}
+
+/// #151, números a mano sobre la hipoteca del seed (100.000 € / french 3 % / cuota 500):
+/// lump de 20.000 € en el mes 12.
+/// - Comisión DEFAULT (omitida) = 2 % ⇒ `liability_early_repayment_fee_total` = **400,00 €** en
+///   el escenario (0 en el baseline; delta = 400). Es la única línea de la ola que cambia el
+///   resultado de un caller de 4.4.0: antes ese what-if salía gratis.
+/// - Con `early_repayment_fee_pct: "0"` explícito, la comisión desaparece (opt-out).
+/// - `reduce_payment` conserva EXACTAMENTE el mes de extinción del baseline (**278**, el mismo
+///   del calendario); `reduce_term` (default) lo adelanta.
+#[tokio::test]
+async fn the_early_repayment_fee_makes_the_what_if_not_free() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bearer = create_token(&app, &owner).await;
+    let liab_id = seed(&app, &owner).await;
+
+    // Default 2 %.
+    let envelope = mcp_post(
+        &app,
+        &bearer,
+        tool_call(
+            "simulate_projection",
+            json!({
+                "months": 360,
+                "liability_overrides": [
+                    { "liability_id": liab_id, "lump_sum_amount": "20000", "lump_sum_month_index": 12 }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let body = tool_json(&envelope);
+    assert_eq!(
+        body["scenario"]["liability_early_repayment_fee_total"].as_str(),
+        Some("400.0000"),
+        "20.000 × 2 % default: {body}"
+    );
+    assert_eq!(
+        body["baseline"]["liability_early_repayment_fee_total"].as_str(),
+        Some("0.0000"),
+        "el baseline nunca comisiona"
+    );
+    assert_eq!(
+        body["deltas"]["liability_early_repayment_fee_total_delta"].as_str(),
+        Some("400.0000")
+    );
+    let base_free = body["baseline"]["liability_debt_free_month_index"].as_u64().unwrap();
+    assert_eq!(base_free, 278, "el mismo 278 del calendario");
+    let term_free = body["scenario"]["liability_debt_free_month_index"].as_u64().unwrap();
+    assert!(term_free < base_free, "reduce_term (default) acorta el plazo");
+
+    // Opt-out explícito.
+    let envelope = mcp_post(
+        &app,
+        &bearer,
+        tool_call(
+            "simulate_projection",
+            json!({
+                "months": 360,
+                "liability_overrides": [
+                    { "liability_id": liab_id, "lump_sum_amount": "20000",
+                      "lump_sum_month_index": 12, "early_repayment_fee_pct": "0" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let body = tool_json(&envelope);
+    assert_eq!(
+        body["scenario"]["liability_early_repayment_fee_total"].as_str(),
+        Some("0.0000"),
+        "con \"0\" explícito no hay comisión"
+    );
+
+    // «Reducir cuota»: la invariante del plazo.
+    let envelope = mcp_post(
+        &app,
+        &bearer,
+        tool_call(
+            "simulate_projection",
+            json!({
+                "months": 360,
+                "liability_overrides": [
+                    { "liability_id": liab_id, "lump_sum_amount": "20000",
+                      "lump_sum_month_index": 12, "early_repayment_effect": "reduce_payment" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let body = tool_json(&envelope);
+    assert_eq!(
+        body["scenario"]["liability_debt_free_month_index"].as_u64(),
+        Some(278),
+        "reduce_payment conserva el mes de extinción del baseline: {body}"
+    );
+    assert_eq!(body["deltas"]["liability_debt_free_months_delta"].as_i64(), Some(0));
+
+    // Las dos puertas nuevas.
+    let envelope = mcp_post(
+        &app,
+        &bearer,
+        tool_call(
+            "simulate_projection",
+            json!({
+                "months": 120,
+                "liability_overrides": [
+                    { "liability_id": liab_id, "lump_sum_amount": "1000",
+                      "lump_sum_month_index": 3, "early_repayment_fee_pct": "3" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        envelope["result"]["isError"].as_bool().unwrap_or(false)
+            && text.contains("early_repayment_fee_out_of_range"),
+        "3 % supera el techo legal: {envelope}"
+    );
+
+    let envelope = mcp_post(
+        &app,
+        &bearer,
+        tool_call(
+            "simulate_projection",
+            json!({
+                "months": 120,
+                "liability_overrides": [
+                    { "liability_id": liab_id, "early_repayment_effect": "reduce_payment",
+                      "repayment_model": "french", "apr_percent": "3" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        envelope["result"]["isError"].as_bool().unwrap_or(false)
+            && text.contains("liability_early_repayment_axis_needs_amortization"),
+        "efecto sin amortización es un no-op prohibido: {envelope}"
+    );
 }

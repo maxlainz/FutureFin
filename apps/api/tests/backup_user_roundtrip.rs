@@ -1360,3 +1360,110 @@ async fn import_rejects_asset_with_impossible_return_and_rolls_back() {
     // Rollback: no quedó ningún activo a medias.
     assert_eq!(app.count_rows("assets").await, 0);
 }
+
+/// v11 (#129): el modelo de amortización del ITEM DE SNAPSHOT sobrevive al export → import.
+/// Captura real (el pasivo es french ⇒ la foto lo escribe), export, ensuciar, import: el item
+/// del snapshot conserva `french` — sin esto, el histórico de una instalación restaurada
+/// interpolaría lineal (la ley de «no lo sé») en vez de por la curva compuesta.
+#[tokio::test]
+async fn v11_roundtrip_preserves_the_snapshot_repayment_model() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let liab_cat = app.create_category(&owner, "liability", "Préstamos").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
+    let _ = create_liability(&app, &owner.cookie, &liab_cat, &exp_cat, "Hipoteca", "80000").await;
+
+    let r = app
+        .post_json_with_cookie("/v1/history/snapshots/capture", serde_json::json!({}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "capture: {r:?}");
+
+    let backup = export_ffbackup_b64(&app, &owner.cookie).await;
+
+    // Ensuciar: borrar el snapshot y el pasivo — el import debe reconstruirlos.
+    let snaps = app.get_with_cookie("/v1/history/snapshots?kind=liability", &owner.cookie).await.json();
+    let sid = snaps[0]["id"].as_str().unwrap().to_string();
+    let del = app.delete_with_cookie(&format!("/v1/history/snapshots/{sid}"), &owner.cookie).await;
+    assert_eq!(del.status, http::StatusCode::NO_CONTENT, "{del:?}");
+
+    let applied = import_apply(&app, &owner.cookie, &backup).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v11 import: {applied:?}");
+
+    let snaps = app
+        .get_with_cookie("/v1/history/snapshots?kind=liability&include_items=true", &owner.cookie)
+        .await
+        .json();
+    let items = snaps[0]["items"].as_array().expect("items");
+    let hip = items.iter().find(|i| i["label"] == "Hipoteca").expect("item");
+    assert_eq!(
+        hip["repayment_model"], "french",
+        "el modelo capturado sobrevive al roundtrip: {hip}"
+    );
+}
+
+/// El brazo `payload_v10_to_v11` (#129): un `.ffbackup` v10 con snapshots importa con
+/// `repayment_model` NULL en sus items — «no lo sé», que el histórico interpreta como ley
+/// lineal (el default de la época en que se capturó). Y un literal corrupto en un v11 es un
+/// 400 con código, no un 500 del CHECK.
+#[tokio::test]
+async fn v10_snapshot_items_import_with_a_null_repayment_model() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let mk_payload = |model_field: Option<&str>| {
+        let mut item = serde_json::json!({
+            "ledger_index": null,
+            "item_key": "7d9450d8-cf35-4a70-8f3e-111111111111",
+            "label": "Hipoteca vieja",
+            "value": "60000.0000",
+            "apr_percent": "3.0000",
+            "payment_amount": "500.0000",
+            "payment_frequency": "monthly"
+        });
+        if let Some(m) = model_field {
+            item["repayment_model"] = serde_json::json!(m);
+        }
+        serde_json::json!({
+            "user": { "username": "alice", "birth_date": null },
+            "categories_used": [],
+            "assets": [],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": installation_snapshot_json(),
+            "snapshots": [{
+                "kind": "liability",
+                "snapshot_date": "2026-01-15",
+                "source": "backfill",
+                "items": [item]
+            }],
+            "transaction_imports": [],
+            "transactions": [],
+            "categorization_rules": [],
+            "recurring_transaction_rules": [],
+            "transfer_match_rejections": []
+        })
+    };
+
+    let b64 = craft_ffbackup_b64(10, &mk_payload(None), owner.user_id);
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v10 import: {applied:?}");
+    let snaps = app
+        .get_with_cookie("/v1/history/snapshots?kind=liability&include_items=true", &owner.cookie)
+        .await
+        .json();
+    let it = &snaps[0]["items"][0];
+    assert!(
+        it.get("repayment_model").is_none_or(serde_json::Value::is_null),
+        "un item v10 no sabe su modelo: {it}"
+    );
+
+    // Literal corrupto en un v11 → 400 tipado (el import valida ANTES del CHECK de la columna).
+    let b64 = craft_ffbackup_b64(11, &mk_payload(Some("aleman")), owner.user_id);
+    let bad = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(bad.status, http::StatusCode::BAD_REQUEST, "{bad:?}");
+    let msg = bad.json()["message"].as_str().unwrap_or_default().to_string();
+    assert!(msg.starts_with("snapshot_repayment_model_invalid"), "{msg}");
+}

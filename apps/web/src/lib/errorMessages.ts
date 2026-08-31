@@ -190,6 +190,12 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa simulación de deuda no cambia nada: indica amortización extra, una entrega puntual o un TIN.",
   liability_override_needs_payment_plan:
     "Para simular esa deuda hace falta que tenga cuota y periodicidad.",
+  early_repayment_fee_out_of_range:
+    "La compensación por amortizar antes debe estar entre 0 y 2 % (el tope legal a tipo fijo).",
+  early_repayment_effect_invalid:
+    "Ese efecto de amortización no existe. Elige acortar plazo o reducir cuota.",
+  liability_early_repayment_axis_needs_amortization:
+    "La comisión y el efecto de amortizar solo aplican si el escenario amortiza algo. Añade una amortización mensual o puntual.",
   liability_overrides_unavailable_in_real_expense_mode:
     "Con el gasto tomado de tus movimientos reales, la cuota ya está dentro del gasto: simular la deuda aparte la contaría dos veces.",
   liability_repayment_model_needs_apr:
@@ -494,6 +500,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La periodicidad de un elemento del snapshot solo puede ser mensual o semanal.",
   snapshot_terms_only_for_liabilities:
     "Las condiciones del préstamo solo tienen sentido en un pasivo.",
+  snapshot_repayment_model_invalid:
+    "Ese modelo de deuda no existe en el snapshot. Elige francés, sin intereses, solo intereses o revolving.",
   snapshot_duplicate_item:
     "El snapshot repite un elemento. Deja uno solo de cada.",
   snapshot_date_in_future: "Un snapshot no puede tener fecha futura.",

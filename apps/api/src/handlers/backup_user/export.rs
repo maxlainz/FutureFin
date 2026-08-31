@@ -705,9 +705,10 @@ async fn fetch_snapshots(
         Option<Decimal>,
         Option<Decimal>,
         Option<String>,
+        Option<String>,
     )> = sqlx::query_as(
         r#"SELECT snapshot_id, source_item_id, label, value,
-                  apr_percent, payment_amount, payment_frequency
+                  apr_percent, payment_amount, payment_frequency, repayment_model
            FROM history_snapshot_items
            WHERE snapshot_id = ANY($1)
            ORDER BY label ASC"#,
@@ -717,15 +718,16 @@ async fn fetch_snapshots(
     .await?;
 
     // Group items by parent, preserving the label-ASC order within each snapshot.
+    #[allow(clippy::type_complexity)]
     let mut by_parent: HashMap<
         Uuid,
-        Vec<(Uuid, String, Decimal, Option<Decimal>, Option<Decimal>, Option<String>)>,
+        Vec<(Uuid, String, Decimal, Option<Decimal>, Option<Decimal>, Option<String>, Option<String>)>,
     > = HashMap::new();
     for r in item_rows {
         by_parent
             .entry(r.0)
             .or_default()
-            .push((r.1, r.2, r.3, r.4, r.5, r.6));
+            .push((r.1, r.2, r.3, r.4, r.5, r.6, r.7));
     }
 
     let mut out = Vec::with_capacity(headers.len());
@@ -738,7 +740,7 @@ async fn fetch_snapshots(
         };
         let items = rows
             .into_iter()
-            .map(|(source_item_id, label, value, apr, pay, freq)| BackupSnapshotItem {
+            .map(|(source_item_id, label, value, apr, pay, freq, model)| BackupSnapshotItem {
                 ledger_index: idx_map.get(&source_item_id).copied(),
                 item_key: source_item_id,
                 label,
@@ -746,6 +748,7 @@ async fn fetch_snapshots(
                 apr_percent: apr,
                 payment_amount: pay,
                 payment_frequency: freq,
+                repayment_model: model,
             })
             .collect();
         out.push(BackupSnapshot { kind, snapshot_date, source, items });
