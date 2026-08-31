@@ -1,7 +1,7 @@
 {
  "version": 1,
- "_doc": "Casos canónicos compartidos entre el backend (apps/api/tests/fire_parity.rs) y el frontend (apps/web/src/lib/fire.test.ts). Si añades o cambias un caso aquí, los tests de ambos lados deben seguir pasando. Si divergen → uno de los dos cálculos está mal alineado. ALCANCE (4.8.0, #142): esta paridad cubre la BASE del objetivo (gross-up / SWR) — la única matemática duplicada en TS. El término finito de deuda NO se duplica a propósito: vive solo en el servidor (FireTarget.debt_payments_remaining) y el cliente lo consume ya calculado vía fire_target_debt_component; los 10 casos siguen sin pasivos y sus esperados no se mueven.",
- "_formula": "target_nw = gross_up(annual_need_net, brackets, taxes_enabled) / (swr_pct / 100). annual_need_net depende del modo: manual = fire_number_manual_amount; annual_expense = max(0, expense_retirement_monthly - income_retirement_monthly) * 12; current_income = max(0, income_monthly - income_retirement_monthly) * 12.",
+ "_doc": "Casos canónicos compartidos entre el backend (apps/api/tests/fire_parity.rs) y el frontend (apps/web/src/lib/fire.test.ts). Si añades o cambias un caso aquí, los tests de ambos lados deben seguir pasando. Si divergen → uno de los dos cálculos está mal alineado. ALCANCE (4.8.0, #142): esta paridad cubre la BASE del objetivo (gross-up / SWR) — la única matemática duplicada en TS. El término finito de deuda NO se duplica a propósito: vive solo en el servidor (FireTarget.debt_payments_remaining) y el cliente lo consume ya calculado vía fire_target_debt_component; los 10 casos siguen sin pasivos y sus esperados no se mueven. Desde 4.10.0 (#140 fase 2) el eje g (taxable_gain_ratio) entra en el alcance de la paridad; la retirada grosseada del MOTOR no se duplica en TS (solo la fórmula del objetivo).",
+ "_formula": "target_nw = gross_up(annual_need_net, brackets, taxes_enabled, taxable_gain_ratio) / (swr_pct / 100), donde gross_up resuelve G − tax(g·G) = net (g = taxable_gain_ratio, default 1; validez por tramo: g·G ≤ techo). annual_need_net depende del modo: manual = fire_number_manual_amount; annual_expense = max(0, expense_retirement_monthly - income_retirement_monthly) * 12; current_income = max(0, income_monthly - income_retirement_monthly) * 12.",
  "_default_brackets_es": [
   {
    "up_to": "6000",
@@ -348,6 +348,261 @@
    },
    "expected_target_nw": 17142857.143,
    "_calc_note": "tramo único abierto al 80 %: g = 120000/(1−0.80) = 600000 → /0.035 = 17142857.14. La bisección antigua del cliente saturaba en hi = max(4·net, net+200000) = 480000 → 13714285.71 (Δ 3.43 M€): este caso va ROJO con bisección y VERDE con la forma cerrada — es la red que los casos 8-9 no daban."
+  },
+  {
+   "name": "g explícito = 1 — el objetivo NO se mueve (bit-identidad de la fase 2, #140)",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "24000",
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ],
+    "taxable_gain_ratio": "1"
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 863652.803,
+   "_calc_note": "g=1 ⇒ denom=1−r·g=1−r y el test g·G≤techo colapsa a G≤techo: MISMA rama, MISMO número que sin el campo. gross=30227.8481 → /0.035. Es el escenario de coste de #140."
+  },
+  {
+   "name": "g = 0,5 — base plusvalía por fases: el objetivo baja un 11,7 % (#140 fase 2)",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "24000",
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ],
+    "taxable_gain_ratio": "0.5"
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 762330.407,
+   "_calc_note": "tramo 21%: G=(24000+1140−1260)/(1−0.21·0.5)=23880/0.895=26681.5642; base gravable 0.5·G=13340.78 ∈ (6k,50k] ✓; G−tax(0.5·G)=24000 exacto → /0.035. El issue #140 decía ≈762314: estaba 16,41 € bajo (redondeo de un intermedio) y no pasaría la tolerancia de 1 € — corregido en el issue."
+  },
+  {
+   "name": "g = 0 — nada tributa: idéntico a taxes_enabled=false",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "30000",
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ],
+    "taxable_gain_ratio": "0"
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 857142.857,
+   "_calc_note": "g=0 ⇒ denom=1 y en el tramo 1 G=net=30000 a la primera vuelta (base gravable 0 ≤ 6000) → /0.035. Compárese con el caso 2 (mismo net, g=1): 1080650.995."
+  },
+  {
+   "name": "g = 0,5 con salto de DOS tramos — la trampa del techo (g·G ≤ techo, no G ≤ techo)",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "250000",
+    "swr_pct": "4",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ],
+    "taxable_gain_ratio": "0.5"
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 7030508.475,
+   "_calc_note": "A g=1 el bruto (331257.14) cae en el tramo ABIERTO del 30 %; con g=0.5 la base gravable (140610.17) cae en el 23 %. G=(250000+K−r·prev)/(1−0.23·0.5) con K=10380 (=1140+0.21·44000) y prev=50000 → 248880/0.885=281220.3390 → /0.04. ROJO si el test de validez sigue comparando G≤techo."
+  },
+  {
+   "name": "g = 0,5 sobre el tramo único abierto al 80 %",
+   "fire_settings": {
+    "fire_number_mode": "manual",
+    "fire_number_manual_amount": "120000",
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": null,
+      "pct": "80"
+     }
+    ],
+    "taxable_gain_ratio": "0.5"
+   },
+   "monthly": {
+    "income": "0",
+    "income_retirement": "0",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 5714285.714,
+   "_calc_note": "denom = 1−0.80·0.5 = 0.6 ⇒ G = 120000/0.6 = 200000 → /0.035. Gemelo del caso 10 (g=1 ⇒ 17142857.143): el mismo tramo, tres veces menos objetivo."
+  },
+  {
+   "name": "g = 0,5 en modo annual_expense con base no redonda",
+   "fire_settings": {
+    "fire_number_mode": "annual_expense",
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ],
+    "taxable_gain_ratio": "0.5"
+   },
+   "monthly": {
+    "income": "3200",
+    "income_retirement": "0",
+    "expense_retirement": "2137.5"
+   },
+   "expected_target_nw": 815003.99,
+   "_calc_note": "need=2137.5·12=25650 → G=(25650+1140−1260)/0.895=25530/0.895=28525.1397; base 14262.57 ∈ (6k,50k] ✓ → /0.035. Fija que g compone con un Decimal no redondo."
+  },
+  {
+   "name": "g = 0,25 en modo current_income cruzando tramos",
+   "fire_settings": {
+    "fire_number_mode": "current_income",
+    "swr_pct": "3.5",
+    "taxes_enabled": true,
+    "tax_brackets": [
+     {
+      "up_to": "6000",
+      "pct": "19"
+     },
+     {
+      "up_to": "50000",
+      "pct": "21"
+     },
+     {
+      "up_to": "200000",
+      "pct": "23"
+     },
+     {
+      "up_to": "300000",
+      "pct": "27"
+     },
+     {
+      "up_to": null,
+      "pct": "30"
+     }
+    ],
+    "taxable_gain_ratio": "0.25"
+   },
+   "monthly": {
+    "income": "10000",
+    "income_retirement": "500",
+    "expense_retirement": "0"
+   },
+   "expected_target_nw": 3433999.246,
+   "_calc_note": "(10000−500)·12=114000 → G=(114000+1140−1260)/(1−0.21·0.25)=113880/0.9475=120189.9736; base gravable 0.25·G=30047.49 ∈ (6k,50k] (con g=1 llegaba al 23 %) → /0.035."
   }
  ]
 }
