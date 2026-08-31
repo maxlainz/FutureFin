@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Audita la coherencia entre las TRES listas de versiones del proyecto:
+# Audita la coherencia entre las CUATRO listas de versiones del proyecto:
 #
 #   1. secciones `## [X.Y.Z]` de CHANGELOG.md
 #   2. tags git `vX.Y.Z`
 #   3. GitHub Releases            (solo si hay `gh` autenticado)
+#   4. secciones `## X.Y.Z` de addon/futurefin/CHANGELOG.md (lo que renderiza la
+#      tienda de Home Assistant; se quedó clavado en 4.3.1 durante cuatro releases)
 #
 # Existe porque las tres se desincronizaron sin que nadie lo viera: en agosto de
 # 2026 había 38 tags, 48 secciones y solo DOS Releases, y dos secciones
@@ -26,6 +28,12 @@ cd "$repo_root"
 
 changelog_versions() {
   grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '#[] ' | sort -V -u
+}
+
+# Formato del add-on: "## X.Y.Z" SIN corchetes ni fecha (distinto del raíz a propósito —
+# ver addon/futurefin/CHANGELOG.md; no se homogeneiza el formato de las secciones ya escritas).
+addon_changelog_versions() {
+  grep -oE '^## [0-9]+\.[0-9]+\.[0-9]+$' addon/futurefin/CHANGELOG.md | tr -d '# ' | sort -V -u
 }
 
 cargo_version() {
@@ -66,7 +74,19 @@ if [ "${1:-}" = "--version" ]; then
     echo "       Sin ella, publish-image.yml no puede redactar las notas del Release." >&2
     exit 1
   fi
-  echo "OK: la versión $v tiene sección en el CHANGELOG."
+  # Mismo guard, aplicado al changelog del add-on de Home Assistant: sin sección aquí, la
+  # tienda de HA vuelve a quedarse «clavada» en la última versión documentada aunque el
+  # `version:` de config.yaml sí avance (incidente: nada visible más allá de 4.3.1 pese a
+  # cuatro releases reales — 4.4.0, 4.4.1, 4.5.0, 4.6.0 — publicadas de por medio).
+  if ! addon_changelog_versions | grep -qx "$v"; then
+    echo "FALLO: apps/api/Cargo.toml está en $v y addon/futurefin/CHANGELOG.md no tiene su" >&2
+    echo "       sección '## $v'. Sin ella, la tienda de Home Assistant se queda clavada en" >&2
+    echo "       la última versión documentada aunque el add-on sí actualice el binario." >&2
+    echo "       Añade la sección (puede ser una línea si esta versión no cambia nada" >&2
+    echo "       visible desde el add-on) antes de mergear el bump." >&2
+    exit 1
+  fi
+  echo "OK: la versión $v tiene sección en el CHANGELOG y en el changelog del add-on."
   exit 0
 fi
 
