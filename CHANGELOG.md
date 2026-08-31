@@ -24,7 +24,15 @@ mano antes de correr los tests que lo pinean.
   al TIN 3 % pasa de extinguirse en el mes **200 con 0 € de intereses** al mes **278 con
   ≈78.000 €** — el número honesto. Los dos números NO son intercambiables: bajar la cuota para
   que el francés también dure 200 meses cambia el producto entero. El TIN residual inexpresable
-  como francés (cuota semanal o sin plan) se anula — el motor siempre lo ignoró.
+  como francés (cuota semanal o sin plan) se anula — el motor siempre lo ignoró — y un TIN
+  fuera de cota (> 100 %: la errata «350» por «3,50») va al mismo residuo en vez de empezar a
+  componer. Dos flancos más que la verificación adversarial encontró y la migración cubre: la
+  fila convertida que llevaba el principal DERIVADO lo congela como explícito (era Σ cuotas — el
+  número inflado; dejar el flag activo haría que el primer PATCH lo re-derivara a valor actual
+  con una caída silenciosa de decenas de miles), y una `interest_only` SIN TIN (creable entre
+  4.2.0 y 4.6.0) pasa a `fixed_payments` — la misma caja mensual que pagaba, solo que ahora
+  amortiza; bajo el brazo nuevo habría pagado 0 €/mes con la deuda congelada y habría quedado
+  ineditable.
 - `fixed_payments` queda como lo que es —el préstamo **sin intereses (0 %)**— y **rechaza** el
   TIN (`apr_forbidden_for_model`): el «préstamo gratis silencioso» deja de ser representable.
 - **`interest_only` es una carencia real**: la cuota del mes ES el interés del período
@@ -102,10 +110,13 @@ intereses + 9.999 vencido ⇒ **500,00 €** exactos.
   amortizar?» tiene ahora sus dos columnas (interés ahorrado vs comisión pagada). No se modela:
   la caída al 1,5 % tras el año 10, los topes de variable, la pérdida del prestamista.
 - **«Reducir cuota»** (`early_repayment_effect: reduce_payment`): λ-escala la cuota por el factor
-  que bajó el principal — en una renta francesa el plazo depende solo de `P·i/M`, así que el mes
-  de extinción NO se mueve (teorema pineado: francés 150.000 @2,5 %/800 € con lump de 20.000 € en
-  el mes 12 extingue en el **239** con y sin amortizar; la cuota baja a **688,95 €** y libera
-  111,05 €/mes). El default `reduce_term` es bit-idéntico a 4.6.0.
+  que bajó el principal — en una renta francesa el plazo depende solo de `P·i/M`, así que con una
+  amortización PUNTUAL el mes de extinción NO se mueve (teorema pineado: francés 150.000
+  @2,5 %/800 € con lump de 20.000 € en el mes 12 extingue en el **239** con y sin amortizar; la
+  cuota baja a **688,95 €** y libera 111,05 €/mes). Con extra RECURRENTE puede adelantarse algo
+  (nunca atrasarse: el importe fijo cancela antes cerca del final). Sobre una revolving el efecto
+  se rechaza (su caja es la cuota mínima, no la declarada que esto escala). El default
+  `reduce_term` es bit-idéntico a 4.6.0.
 
 ### El modelo viaja al snapshot (#129) — `.ffbackup` 10 → 11
 

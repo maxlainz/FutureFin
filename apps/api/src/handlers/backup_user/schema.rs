@@ -1096,10 +1096,10 @@ fn payload_v9_to_v10(p: BackupPayloadV9) -> BackupPayloadV10 {
     }
 }
 
-/// v10 → v11 (#129): cada item de snapshot gana `repayment_model: None` — un snapshot anterior
-/// a 4.7.0 no sabía el modelo; `None` se reinterpreta como `fixed_payments` (el default de la
-/// columna cuando se capturó) y por tanto como ley LINEAL, que es exactamente la curva que ese
-/// snapshot describía.
+/// v10 → v11 (#129): cada item de snapshot gana `repayment_model: None` — la foto no sabía el
+/// modelo, y `None` interpola por la CUERDA (la ley menos comprometida; el trade-off honesto
+/// está escrito en la migración `20260901120100`: los franceses genuinos pre-4.7.0 pierden la
+/// curva compuesta que se les aplicaba, el default mayoritario deja de heredar el bug de #129).
 fn payload_v10_to_v11(p: BackupPayloadV10) -> BackupPayloadV11 {
     BackupPayloadV11 {
         user: p.user,

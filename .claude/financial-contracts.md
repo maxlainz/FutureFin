@@ -23,7 +23,7 @@ realidad** o entre superficies, no error de aritmética.
 | Magnitud | Unidad/base | Regla |
 |---|---|---|
 | Dinero | `rust_decimal::Decimal` end-to-end; strings decimales en el wire; `f64` SOLO en los arrays de series de chart (D4 del contrato de arquitectura) | El engine no redondea jamás; el redondeo es de presentación (`money_out` 4 dp, ratios 6 dp, histórico 2 dp) |
-| Tipos de interés de pasivos | `apr_percent` = **TIN nominal anual** en puntos (3 = 3 %/año); tipo mensual `i = apr/1200` | Idéntico en proyección (`liability_month`) e histórico (`LoanTerms`) — la misma curva a ambos lados de «hoy». ⚠ la UI lo etiqueta «TAE» (§4) |
+| Tipos de interés de pasivos | `apr_percent` = **TIN nominal anual** en puntos (3 = 3 %/año); tipo mensual `i = apr/1200` | Idéntico en proyección (`liability_month`) e histórico (`LoanTerms`) — la misma curva a ambos lados de «hoy». Desde 4.7.0 (#122) la UI y el schema MCP lo etiquetan **TIN** |
 | Rentabilidad de activos | `expected_annual_return_percent` **nominal**, factor mensual geométrico `(1+p/100)^(1/12)` | Raíz 12ª exacta: 12 meses componen la tasa anual. Negativos componen de verdad; ≤ −100 → factor 0 |
 | Inflación | `annual_inflation_assumption_percent`; factor `(1+i/100)^(m/12)` con exponente en años fraccionarios | La conversión geométrica es la correcta (la lineal x/12 sesga hasta +13,7 % a 30 años) |
 | Tiempo | Meses civiles (`checked_add_months`), mes k = mes civil que empieza en `month_first_calendar(ref_date)+k−1`; interés mensual = 1/12 del año sin importar los días (30/360 español) | `month_index` es un número de MES en la rejilla, jamás una posición de array (densidad `hybrid`) |
@@ -55,18 +55,24 @@ realidad** o entre superficies, no error de aritmética.
   meses en extinguirse pagando la MISMA cuota nominal. Bajar la cuota para que el francés dure
   también 200 meses no reproduce `fixed_payments` — cambia el producto entero. Los dos números
   NO son intercambiables y el catálogo no debe sugerir que sí.
-- **Degeneración que queda**: TIN ausente/≤0 en datos legacy/import ⇒ el modelo colapsa a la
-  recurrencia sin intereses (garantizada en `liability_month`); plan vencido con saldo vivo ⇒
+- **Degeneración que queda**: TIN ausente/≤0 en datos legacy/import ⇒ `french`/`revolving`
+  colapsan a la recurrencia sin intereses y `interest_only` a caja 0 con principal congelado
+  (por eso la migración 3b lo manda a `fixed_payments`); plan vencido con saldo vivo ⇒
   resta constante congelada, ahora VISIBLE y marcada (#145) — la demora no se modela (decisión
   del owner, §4 aceptadas).
 - **Actividad**: `monthly_payment > 0 AND (payment_end IS NULL OR >= inicio de mes)` — predicado
   único `liability_active`; y **devengo** = modelo con intereses + TIN > 0 + plan vivo, predicado
   único `liability_interest_accrues` (#121: lo comparten `liability_month`, el `net_return` de
-  `/v1/summary` y su espejo TS `liabilityAccruesInterest`).
+  `/v1/summary` y su espejo TS `liabilityAccruesInterest`). Granularidad declarada: el motor lo
+  evalúa con el PRIMER día de cada mes simulado y los KPIs con «hoy» — un plan que vence a mitad
+  de mes devenga ese mes en la curva pero ya no en el KPI (ventana ≤ 1 mes, no un bug).
 - **Amortización anticipada (what-if, #151)**: compensación legal default 2 % del extra (cota
   [0,2], Ley 5/2019 art. 23 a tipo fijo; opt-out «0») — coste puro FUERA de la identidad del
-  calendario; `reduce_payment` λ-escala la cuota (`M' = M·P'/P`) y conserva EXACTAMENTE el mes
-  de extinción (el plazo solo depende de `P·i/M`). No se modela: caída al 1,5 % tras el año 10,
+  calendario; `reduce_payment` λ-escala la cuota (`M' = M·P'/P`); con un lump PUNTUAL el mes de
+  extinción se conserva EXACTAMENTE (el plazo solo depende de `P·i/M`, pineado); con extra
+  RECURRENTE la invariancia es un `≤` — el importe absoluto cancela antes cerca del final
+  (verificado: 200 €/mes adelanta 239→232). Nunca alarga. Sobre `revolving` el efecto se
+  RECHAZA (su caja es la cuota mínima, no la declarada). No se modela: caída al 1,5 % tras el año 10,
   topes de variable, pérdida financiera del prestamista.
 
 ### 2.2 Capital
@@ -119,8 +125,10 @@ realidad** o entre superficies, no error de aritmética.
   (pendiente constante). El modelo viaja en `history_snapshot_items.repayment_model` y en el
   `.ffbackup` v11. El mes 0 se evalúa en `today` real.
 - Ausencias (#130, 4.7.0): un item ausente de una captura ARRASTRA su último valor observado
-  (LOCF) — una foto incompleta no desploma el agregado. La ÚNICA ausencia que vale cero es la
-  del ledger vivo (`HistoryTimeline::last_is_live_ledger`): borrado/vendido de verdad.
+  (LOCF) — una foto incompleta no desploma el agregado. Vale cero: la ausencia del ledger vivo
+  (`last_is_live_ledger`, borrado/vendido de verdad) y — matiz pineado — el punto EXACTO de la
+  última fecha del timeline aunque sea una captura manual (rama `a == m−1`: una foto final que
+  omite el item tampoco lo resucita EN su fecha; alcanzable con un snapshot parcial fechado hoy).
 - Los snapshots JAMÁS son inputs del engine de proyección (D12 de arquitectura). El empalme con la
   proyección es solo del frontend (`history-merge.ts`): **mismo mes civil** del ancla (#130) —
   cruzar la medianoche dentro del mes fusiona; cruzar la frontera de mes es identidad (la rejilla

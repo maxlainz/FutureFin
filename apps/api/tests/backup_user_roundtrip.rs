@@ -1219,6 +1219,10 @@ async fn v10_import_normalizes_liabilities_like_the_signed_migration() {
             mk_liab("Era francés", "fixed_payments", "3.0000".into(), "500.0000".into(), "monthly".into(), 0),
             mk_liab("Residuo", "fixed_payments", "3.0000".into(), serde_json::Value::Null, serde_json::Value::Null, 1),
             mk_liab("Tarjeta", "revolving", "18.0000".into(), "250.0000".into(), "monthly".into(), 2),
+            // 3b: interest_only sin TIN (creable entre 4.2.0 y 4.6.0) → fixed_payments, la
+            // misma caja mensual que pagaba — bajo el brazo nuevo pagaría 0 € y quedaría
+            // ineditable (apr_required_for_model).
+            mk_liab("Carencia huérfana", "interest_only", serde_json::Value::Null, "400.0000".into(), "monthly".into(), 3),
         ],
         "budget_entries": [],
         "planning_flows": [],
@@ -1235,7 +1239,7 @@ async fn v10_import_normalizes_liabilities_like_the_signed_migration() {
 
     let applied = import_apply(&app, &owner.cookie, &b64).await;
     assert_eq!(applied.status, http::StatusCode::OK, "v10 import: {applied:?}");
-    assert_eq!(applied.json()["imported"]["liabilities"].as_u64(), Some(3));
+    assert_eq!(applied.json()["imported"]["liabilities"].as_u64(), Some(4));
 
     let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
     let by_label = |l: &str| {
@@ -1257,6 +1261,22 @@ async fn v10_import_normalizes_liabilities_like_the_signed_migration() {
         residuo["apr_percent"].is_null(),
         "el residuo inexpresable pierde el TIN: {residuo:?}"
     );
+
+    let carencia = by_label("Carencia huérfana");
+    assert_eq!(
+        carencia["repayment_model"], "fixed_payments",
+        "interest_only sin TIN → el único destino representable: {carencia:?}"
+    );
+    // Y la fila queda EDITABLE (el motivo del 3b): un PATCH del label pasa.
+    let id = carencia["id"].as_str().unwrap();
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            serde_json::json!({ "label": "Carencia adoptada" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
 
     let tarjeta = by_label("Tarjeta");
     assert_eq!(tarjeta["repayment_model"], "revolving");

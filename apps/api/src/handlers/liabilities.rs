@@ -389,10 +389,10 @@ fn validate_payment_pair(
 /// 1. `payment_plan_required_for_model` — sin cuota no hay ni interés ni amortización: el engine
 ///    exige plan activo para devengar (`liability_active`), así que un `french` sin cuota sería un
 ///    `fixed_payments` disfrazado que no mueve un solo número. Se rechaza en vez de mentir.
-/// 2. `apr_required_for_model` — `french`/`revolving` **exigen** TIN > 0. Un TIN ausente o 0 hace
-///    que el engine degenere exactamente en `fixed_payments` (degeneración deliberada, ver
-///    `ProjectionLiabilityInput::apr_percent`): guardarlo sería ofrecer al usuario un «francés»
-///    que no cobra intereses. `interest_only` NO lo exige: su cuota declarada YA es el interés.
+/// 2. `apr_required_for_model` — todo modelo salvo `fixed_payments` **exige** TIN > 0 (desde
+///    #144 `interest_only` también: su cuota ES el interés del período, saldo × TIN/1200, y sin
+///    TIN pagaría 0 € con la deuda congelada). Un TIN ausente o 0 degenera en la recurrencia
+///    sin intereses: guardarlo sería ofrecer un «francés» que no cobra.
 /// 3. `weekly_not_supported_for_model` — la recurrencia del engine es MENSUAL. Con `weekly` el
 ///    handler convierte la cuota a su equivalente mensual (×52/12), lo que para un modelo sin
 ///    intereses es exacto pero para uno que devenga cambiaría el devengo. No se admite.
@@ -715,7 +715,7 @@ fn row_to_response(r: LiabilityRow, today: NaiveDate) -> Result<LiabilityRespons
         ("view" = Option<String>, Query, description = "`mine` = rows attributed to the signed-in user; omit or other value = full household."),
     ),
     responses(
-        (status = 200, description = "Liabilities (purges rows whose payment_end_date is past)", body = [LiabilityResponse]),
+        (status = 200, description = "Liabilities visibles: plan de pago vivo o saldo vivo (#145); el vencido con saldo viaja marcado plan_expired_with_balance. Nunca borra nada.", body = [LiabilityResponse]),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Not an installation member"),
         (status = 404, description = "Installation missing"),
@@ -974,6 +974,8 @@ pub(crate) async fn patch_liability_core(
         && body.payment_amount.is_none()
         && body.payment_frequency.is_none()
         && body.payment_end_date.is_none()
+        && body.min_payment_pct.is_none()
+        && body.min_payment_eur.is_none()
         && body.notes.is_none()
         && body.sort_index.is_none()
     {
@@ -1105,7 +1107,20 @@ pub(crate) async fn patch_liability_core(
 
     let new_principal_derived = derived_flag;
 
-    let new_principal = if derived_flag {
+    // Re-derivar solo cuando el PATCH toca un INPUT de la derivación (modelo, TIN, cuota,
+    // frecuencia, fecha fin o el propio flag). Es lo que el contrato promete («cambiar el
+    // modelo o el TIN con derive activo RE-DERIVA») — y sin este gate, editar el LABEL de una
+    // fila derivada con el plan ya vencido devolvía `payment_end_date_in_past`: una fila que
+    // #145 volvió visible y editable quedaba atrapada por un campo que el PATCH no tocó.
+    let touches_derivation_inputs = body.repayment_model.is_some()
+        || body.apr_percent.is_some()
+        || body.payment_amount.is_some()
+        || body.payment_frequency.is_some()
+        || body.payment_end_date.is_some()
+        || body.derive_principal_from_plan.is_some()
+        || body.principal.is_some();
+
+    let new_principal = if derived_flag && touches_derivation_inputs {
         let amt = new_pay_amt.ok_or_else(|| {
             ApiError::BadRequest(
                 "payment_amount_required_for_derived_principal: payment_amount is required when principal is derived from plan".into(),
@@ -1622,7 +1637,7 @@ pub(crate) async fn liability_schedule_core(
         (status = 200, description = "Calendario de amortización", body = LiabilityScheduleResponse),
         (status = 400, description = "Parámetros de ventana fuera de rango"),
         (status = 401, description = "Unauthorized"),
-        (status = 404, description = "Pasivo inexistente, fuera de la vista o con el plan ya vencido")
+        (status = 404, description = "Pasivo inexistente, fuera de la vista, o vencido Y saldado (principal 0) — el vencido con saldo vivo sí se sirve, congelado (#145)")
     )
 )]
 pub async fn get_liability_schedule(

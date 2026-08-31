@@ -499,6 +499,9 @@ pub(crate) async fn summary_core(
     let liab_rows: Vec<(Decimal, Option<Decimal>)> = liab_raw
         .iter()
         .map(|(principal, apr, model, payment, end)| {
+            // Degradar en LECTURAS (misma filosofía que projection.rs): un literal corrupto
+            // escrito fuera de la API cae al modelo sin intereses (coste 0) en vez de tumbar
+            // el Resumen entero. La validación ruidosa vive en la escritura.
             let model = crate::handlers::liabilities::RepaymentModel::parse(model)
                 .map(crate::handlers::liabilities::RepaymentModel::to_engine)
                 .unwrap_or(futurefin_engine::RepaymentModel::FixedPayments);

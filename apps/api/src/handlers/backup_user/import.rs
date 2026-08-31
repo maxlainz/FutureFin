@@ -535,14 +535,26 @@ async fn insert_payload(
         //   migración: pct = 0, suelo = la cuota declarada ⇒ max(0·saldo, cuota) = cuota.
         let mut eff_model = l.repayment_model.as_str();
         let mut eff_apr = l.apr_percent;
+        let mut eff_derived = l.principal_derived_from_plan;
         if eff_model == "fixed_payments" && matches!(eff_apr, Some(a) if a > Decimal::ZERO) {
-            if l.payment_frequency.as_deref() == Some("monthly")
+            if matches!(eff_apr, Some(a) if a <= Decimal::from(100))
+                && l.payment_frequency.as_deref() == Some("monthly")
                 && matches!(l.payment_amount, Some(p) if p > Decimal::ZERO)
             {
                 eff_model = "french";
+                // 2b de la migración: el principal derivado era Σ cuotas; congelarlo evita que
+                // el primer PATCH lo re-derive a valor actual con una caída silenciosa.
+                eff_derived = false;
             } else {
+                // Incluye el TIN > 100 (errata es-ES tipo «350» por «3,50»): al residuo, no a
+                // componer al 350 %.
                 eff_apr = None;
             }
+        }
+        // 3b de la migración: interest_only sin TIN pagaría 0 €/mes con la deuda congelada y
+        // quedaría ineditable — a fixed_payments, la misma caja mensual que tenía en 4.6.0.
+        if eff_model == "interest_only" && !matches!(eff_apr, Some(a) if a > Decimal::ZERO) {
+            eff_model = "fixed_payments";
         }
         let (eff_min_pct, eff_min_eur) = if eff_model == "revolving" {
             match (l.min_payment_pct, l.min_payment_eur) {
@@ -572,7 +584,7 @@ async fn insert_payload(
         .bind(&l.label)
         .bind(l.type_tag.as_deref())
         .bind(l.principal)
-        .bind(l.principal_derived_from_plan)
+        .bind(eff_derived)
         .bind(eff_apr)
         .bind(l.payment_amount)
         .bind(l.payment_frequency.as_deref())

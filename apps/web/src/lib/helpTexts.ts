@@ -96,7 +96,8 @@ export const HELP_TEXTS = {
       "Suma de la cuota de cada pasivo, llevada a mensual: la que declaraste mensual se queda " +
       "igual, la semanal se multiplica por 52 semanas y se reparte entre 12 meses. Es la cuota " +
       "que tú registraste, no una estimación de lo que deberías pagar; un pasivo sin cuota o sin " +
-      "frecuencia cuenta como 0 €.",
+      "frecuencia cuenta como 0 €, y un plan ya vencido (aunque siga en la lista con su saldo) " +
+      "tampoco suma: esa cuota ya no se gira — la misma base que usa el presupuesto.",
   },
   "liabilities.weighted_apr": {
     title: "TIN medio ponderado",

@@ -2207,7 +2207,7 @@ pub(crate) struct LiabilityOverrideSpec {
     pub lump_sum_amount: Option<Decimal>,
     pub lump_sum_month_index: Option<u32>,
     pub lump_sum_date: Option<NaiveDate>,
-    /// TIN nominal anual (0..=100). Solo devenga en `french`/`revolving`.
+    /// TIN nominal anual (0..=100). Solo devenga en `french`/`interest_only`/`revolving`.
     pub apr_percent: Option<Decimal>,
     /// Modelo de amortización efectivo del escenario.
     ///
@@ -2671,7 +2671,7 @@ fn sim_kpis(
 /// porque el plan mejore, sino porque el motor capitaliza en NOMINAL y solo el objetivo FIRE crece
 /// con la inflación — bajarla sube la rentabilidad real de todos los activos y congela el objetivo
 /// a la vez, gratis, en el mismo movimiento. Lo mismo, en pequeño, con `swr_pct`.
-const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos del hogar (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. El motor capitaliza en euros NOMINALES y solo el objetivo FIRE se ajusta por inflación, así que bajar `annual_inflation_percent` sube la rentabilidad real de todos los activos Y congela el objetivo al mismo tiempo: puede adelantar la jubilación años sin que nada del plan haya mejorado. Léelo como un cambio de supuesto, no como una mejora. Igual con `swr_pct`: subirlo baja el objetivo por división, no por ahorrar más. Los ejes de caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, no `net_recurring_monthly` ni `savings_rate`. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO salvo por la compensación por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisión sale de la caja y NO amortiza — el what-if deja de ser gratis por defecto. No se modela la caída al 1,5 % tras el año 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el límite de la pérdida financiera del prestamista: si tu préstamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo — conserva EXACTAMENTE el mes de extinción y libera caja mensual. Lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga; compara contra `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
+const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos del hogar (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. El motor capitaliza en euros NOMINALES y solo el objetivo FIRE se ajusta por inflación, así que bajar `annual_inflation_percent` sube la rentabilidad real de todos los activos Y congela el objetivo al mismo tiempo: puede adelantar la jubilación años sin que nada del plan haya mejorado. Léelo como un cambio de supuesto, no como una mejora. Igual con `swr_pct`: subirlo baja el objetivo por división, no por ahorrar más. Los ejes de caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, no `net_recurring_monthly` ni `savings_rate`. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO salvo por la compensación por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisión sale de la caja y NO amortiza — el what-if deja de ser gratis por defecto. No se modela la caída al 1,5 % tras el año 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el límite de la pérdida financiera del prestamista: si tu préstamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo — con una amortización PUNTUAL (lump) el mes de extinción se conserva EXACTAMENTE; con amortización extra RECURRENTE puede adelantarse algo (nunca atrasarse), porque el importe fijo cancela antes cerca del final. Lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga; compara contra `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
 
 /// Decimales de `SimKpis::savings_rate`. Debe seguir siendo el mismo que el `RATIO_DP` de
 /// `handlers/summary.rs`: si divergen, se reabre la incoherencia de precisión entre superficies que
@@ -2991,6 +2991,29 @@ pub(crate) async fn simulate_projection_core(
             {
                 return Err(ApiError::BadRequest(
                     "liability_early_repayment_axis_needs_amortization: early_repayment_fee_pct and early_repayment_effect only apply to an override that amortizes (extra_monthly_principal or lump_sum) — without one they would silently do nothing".into(),
+                ));
+            }
+            // Quinta puerta (verificación adversarial de la Ola 3): simular un pasivo como
+            // `revolving` exige que la fila TENGA su cuota mínima — el brazo revolving cobra
+            // max(pct·saldo, suelo), y con mínimos NULL eso es 0 €/mes: la deuda compondría
+            // hasta el horizonte en silencio. No hay eje de mínimos en el override, así que la
+            // única fuente es la fila guardada.
+            if effective_model == RepaymentModel::Revolving
+                && !(matches!(target.min_payment_pct, Some(p) if p > Decimal::ZERO)
+                    || matches!(target.min_payment_eur, Some(e) if e > Decimal::ZERO))
+            {
+                return Err(ApiError::BadRequest(
+                    "liability_override_revolving_needs_minimums: repayment_model revolving only simulates liabilities that carry min_payment_pct/min_payment_eur (the stored row has neither) — its instalment is max(pct × balance, floor), which would be 0 here and the debt would silently compound".into(),
+                ));
+            }
+            // Sexta puerta: `reduce_payment` no hace nada sobre una revolving — su caja es la
+            // cuota MÍNIMA (pct/suelo), no la declarada que la λ-escala reduce. Rechazar antes
+            // que devolver un escenario bit-idéntico al de `reduce_term` prometiendo lo contrario.
+            if ov.early_repayment_effect == Some(futurefin_engine::EarlyRepaymentEffect::ReducePayment)
+                && effective_model == RepaymentModel::Revolving
+            {
+                return Err(ApiError::BadRequest(
+                    "reduce_payment_ignored_by_repayment_model: early_repayment_effect reduce_payment has no effect on a revolving — its cash leg is the minimum instalment (min_payment_pct/min_payment_eur), not the declared payment that reduce_payment scales; use reduce_term or change the model in the same override".into(),
                 ));
             }
 

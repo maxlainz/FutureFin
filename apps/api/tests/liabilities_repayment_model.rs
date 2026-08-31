@@ -510,3 +510,44 @@ async fn a_single_problem_still_yields_its_specific_code() {
     .await;
     assert_bad_request_code(&r, "weekly_not_supported_for_model");
 }
+
+/// El guard de patch vacío conoce los campos nuevos (#144, hallazgo de la verificación
+/// adversarial): un PATCH que SOLO cambia la cuota mínima de una revolving («sube el mínimo del
+/// 3 al 4 %») es una edición legítima, no un `patch_empty`.
+#[tokio::test]
+async fn a_patch_with_only_revolving_minimums_is_not_empty() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cat, exp_cat) = categories(&app, &owner).await;
+
+    let created = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({
+            "principal": "3000",
+            "repayment_model": "revolving",
+            "apr_percent": "18",
+            "payment_amount": "60",
+            "payment_frequency": "monthly",
+            "min_payment_pct": "3",
+            "min_payment_eur": "30",
+        }),
+    )
+    .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let id = created.json()["id"].as_str().unwrap().to_string();
+
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            json!({ "min_payment_pct": "4" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    let pct: rust_decimal::Decimal =
+        patched.json()["min_payment_pct"].as_str().unwrap().parse().unwrap();
+    assert_eq!(pct, rust_decimal::Decimal::from(4));
+}

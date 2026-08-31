@@ -153,8 +153,10 @@ pub struct ProjectionLiabilityInput {
 /// Efecto de la amortización anticipada sobre el plan de pago (#151). En una renta francesa el
 /// plazo restante `n` cumple `(1+i)^(−n) = 1 − P·i/M` — depende SOLO del cociente `P·i/M` —,
 /// así que escalar la cuota por el mismo factor que bajó el principal (`M' = λ·M` con
-/// `λ = P'/P`) deja el cociente intacto y el mes de extinción NO se mueve: «reducir cuota»
-/// libera caja mensual sin acortar (ni alargar) el préstamo.
+/// `λ = P'/P`) deja el cociente intacto: «reducir cuota» libera caja mensual sin mover el mes
+/// de extinción **para una amortización PUNTUAL (lump)** — pineado en test. Con amortización
+/// extra RECURRENTE la invariancia es solo un `≤`: el extra es un importe absoluto y cerca del
+/// final cancela antes (verificado: 200 €/mes adelanta el 239 a 232). Nunca alarga.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EarlyRepaymentEffect {
     /// La cuota no cambia; el préstamo acaba antes (comportamiento histórico del what-if).
@@ -254,7 +256,7 @@ fn liability_month(
             (cash, principal - cash)
         }
         RepaymentModel::InterestOnly => {
-            // Carencia REAL (Ola 3/#144; contrato en .claude/financial-contracts.md §2.6): la cuota ES el interés del período
+            // Carencia REAL (Ola 3/#144; contrato en .claude/financial-contracts.md §2.1): la cuota ES el interés del período
             // (saldo × TIN/1200), no un pago libre. La cuota declarada es un TOPE por arriba:
             //   M ≥ interés ⇒ cash = interés, principal plano;
             //   M < interés ⇒ cash = M y el déficit CAPITALIZA (la deuda crece) — como un
@@ -1300,7 +1302,8 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             debt_service += cash + extra + fee;
             let new_closing = closing - extra;
             // «Reducir cuota» (#151): λ = P'/P sobre el saldo TRAS la cuota del mes. Mismo
-            // cociente P·i/M ⇒ mismo mes de extinción (ver `EarlyRepaymentEffect`).
+            // cociente P·i/M ⇒ misma extinción para un lump; con extra recurrente solo `≤`
+            // (ver `EarlyRepaymentEffect`).
             if extra > Decimal::ZERO
                 && liab.early_repayment_effect == EarlyRepaymentEffect::ReducePayment
                 && closing > Decimal::ZERO

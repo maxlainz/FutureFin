@@ -14,6 +14,21 @@ UPDATE liabilities
    SET repayment_model = 'french'
  WHERE repayment_model = 'fixed_payments'
    AND apr_percent > 0
+   AND apr_percent <= 100
+   AND payment_frequency = 'monthly'
+   AND payment_amount > 0;
+
+-- 2b) La fila convertida que llevaba el principal DERIVADO del plan lo congela como explícito:
+--    su principal es la Σ de cuotas (el número inflado de #121) y dejar el flag activo haría
+--    que el PRIMER PATCH de cualquier campo lo re-derivara a valor actual — una caída de
+--    decenas de miles de euros en silencio. Congelado, el número guardado no se mueve y el
+--    usuario re-activa la derivación cuando quiera (esta vez a valor actual, a sabiendas).
+UPDATE liabilities
+   SET principal_derived_from_plan = FALSE
+ WHERE repayment_model = 'french'
+   AND principal_derived_from_plan = TRUE
+   AND apr_percent > 0
+   AND apr_percent <= 100
    AND payment_frequency = 'monthly'
    AND payment_amount > 0;
 
@@ -25,6 +40,18 @@ UPDATE liabilities
    SET apr_percent = NULL
  WHERE repayment_model = 'fixed_payments'
    AND apr_percent > 0;
+
+-- 3b) El espejo del residuo en `interest_only` (hallazgo de la verificación adversarial):
+--    entre 4.2.0 y 4.6.0 se podía crear `interest_only` SIN TIN (la validación de entonces no
+--    lo exigía). Bajo el brazo nuevo pagaría 0 €/mes con la deuda congelada (el «préstamo
+--    gratis» que esta ola elimina) y la validación nueva la dejaría ineditable
+--    (`apr_required_for_model`). Pasa a `fixed_payments`: la MISMA caja mensual que pagaba en
+--    4.6.0 (min(cuota, saldo)), solo que ahora amortiza — el único destino representable sin
+--    TIN, y el más cercano en números al comportamiento que tenía.
+UPDATE liabilities
+   SET repayment_model = 'fixed_payments'
+ WHERE repayment_model = 'interest_only'
+   AND (apr_percent IS NULL OR apr_percent <= 0);
 
 -- 4) La cuota mínima revolving real: porcentaje del saldo con suelo en euros. NULLables — solo
 --    'revolving' las usa; el acoplamiento modelo⇔mínimos vive en la validación de escritura

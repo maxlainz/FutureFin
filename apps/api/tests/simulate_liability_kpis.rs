@@ -455,3 +455,62 @@ async fn the_early_repayment_fee_makes_the_what_if_not_free() {
         "efecto sin amortización es un no-op prohibido: {envelope}"
     );
 }
+
+/// Puertas 5.ª y 6.ª (verificación adversarial de la Ola 3), sobre la hipoteca french del seed
+/// (sin mínimos revolving guardados):
+/// - simularla «como revolving» sin mínimos en la fila cobraría max(0·saldo, 0) = 0 €/mes y la
+///   deuda compondría hasta el horizonte en silencio → 400 con código;
+/// - `reduce_payment` sobre una revolving no hace nada (su caja es la cuota MÍNIMA, no la
+///   declarada que la λ-escala reduce) → 400 en vez de un escenario bit-idéntico a reduce_term.
+#[tokio::test]
+async fn revolving_overrides_reject_silent_garbage() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bearer = create_token(&app, &owner).await;
+    let liab_id = seed(&app, &owner).await;
+
+    let envelope = mcp_post(
+        &app,
+        &bearer,
+        tool_call(
+            "simulate_projection",
+            json!({
+                "months": 120,
+                "liability_overrides": [
+                    { "liability_id": liab_id, "repayment_model": "revolving", "apr_percent": "18" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        envelope["result"]["isError"].as_bool().unwrap_or(false)
+            && text.contains("liability_override_revolving_needs_minimums"),
+        "revolving sin mínimos guardados es basura silenciosa: {envelope}"
+    );
+
+    let envelope = mcp_post(
+        &app,
+        &bearer,
+        tool_call(
+            "simulate_projection",
+            json!({
+                "months": 120,
+                "liability_overrides": [
+                    { "liability_id": liab_id, "repayment_model": "revolving", "apr_percent": "18",
+                      "lump_sum_amount": "1000", "lump_sum_month_index": 3,
+                      "early_repayment_effect": "reduce_payment" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        envelope["result"]["isError"].as_bool().unwrap_or(false)
+            && (text.contains("reduce_payment_ignored_by_repayment_model")
+                || text.contains("liability_override_revolving_needs_minimums")),
+        "reduce_payment + revolving es un no-op prohibido: {envelope}"
+    );
+}

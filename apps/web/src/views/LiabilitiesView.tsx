@@ -172,7 +172,10 @@ export function LiabilitiesView({
     : null;
   const liabilitiesMonthlyServiceSum = liabilityMetricsReady
     ? liabilities.reduce(
-        (acc, r) => acc + liabilityPaymentMonthlyEquivalentNum(r),
+        // El plan vencido con saldo (#145) sigue en la lista pero su cuota YA NO SE GIRA: el
+        // servicio mensual solo suma planes vivos — la misma base que el presupuesto.
+        (acc, r) =>
+          acc + (r.plan_expired_with_balance ? 0 : liabilityPaymentMonthlyEquivalentNum(r)),
         0,
       )
     : null;

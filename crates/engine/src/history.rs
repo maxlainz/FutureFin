@@ -11,8 +11,9 @@
 //! Dentro de un segmento `[s_a, s_{a+1}]`: observado en ambos extremos → interpola (activos:
 //! lineal en días civiles o anclada a cash-flow; pasivos: por la ley del MODELO capturado,
 //! [`amortized_segment_value`], #129); observado en un solo extremo → se ARRASTRA el último
-//! valor observado (LOCF, #130) — la única ausencia que vale cero es la del ledger vivo
-//! (`last_is_live_ledger`): ahí el item está borrado/vendido de verdad. Se garantiza
+//! valor observado (LOCF, #130) — vale cero la ausencia del ledger vivo (`last_is_live_ledger`:
+//! borrado/vendido de verdad) y el punto EXACTO de la última fecha del timeline (rama
+//! `a == m−1`, también sobre una captura manual final que omita el item). Se garantiza
 //! **exactitud en cada fecha de snapshot presente** (el total suma exactamente lo observado).
 //!
 //! Sin coma flotante nativa en ningún punto del módulo: sólo `rust_decimal::Decimal` +
@@ -263,17 +264,25 @@ pub fn amortized_segment_value(
         return linear(p_a, p_b, f);
     };
     // #129: la ley la elige el MODELO capturado, no una francesa universal.
-    // - French/Revolving → recurrencia compuesta (abajo), exacta en los extremos.
+    // - French → recurrencia compuesta (abajo), exacta en los extremos.
+    // - Revolving → la CUERDA (verificación adversarial de la ola): su caja real es
+    //   max(pct·saldo, suelo) y el snapshot solo guarda la cuota DECLARADA, que desde #144 no
+    //   gobierna nada — la curva compuesta con esa cuota producía una V no monótona con errores
+    //   interiores de hasta −70 %. Sin los mínimos en la foto, la cuerda es lo único honesto.
     // - FixedPayments → lineal EXACTA, no aproximada: la cuota va íntegra a principal, la
     //   pendiente es constante (−M/mes) y la cuerda entre P_a y P_b ES la curva.
     // - InterestOnly → el principal es constante por contrato; cualquier diferencia entre
     //   extremos vino de algo que el modelo no conoce y la cuerda es la interpolación menos
     //   comprometida que pasa por ambos snapshots.
-    // - None (snapshot pre-4.7.0) → el default de entonces era fixed_payments ⇒ lineal.
+    // - None (snapshot pre-4.7.0) → no se sabe qué era; la cuerda es la ley menos comprometida.
+    //   OJO, matiz honesto: lo que esos snapshots RENDERIZABAN hasta 4.6.0 era la curva francesa
+    //   universal — para un pasivo genuinamente francés la curva vieja era la correcta y aquí
+    //   pierde ~300 €/50 k€ de forma interior (los extremos siguen exactos). Es el precio de
+    //   dejar de aplicarle esa misma curva al default mayoritario (fixed), donde era el bug.
     match terms.repayment_model {
-        Some(crate::projection::RepaymentModel::French)
-        | Some(crate::projection::RepaymentModel::Revolving) => {}
-        Some(crate::projection::RepaymentModel::FixedPayments)
+        Some(crate::projection::RepaymentModel::French) => {}
+        Some(crate::projection::RepaymentModel::Revolving)
+        | Some(crate::projection::RepaymentModel::FixedPayments)
         | Some(crate::projection::RepaymentModel::InterestOnly)
         | None => return linear(p_a, p_b, f),
     }
@@ -566,6 +575,9 @@ mod tests {
         for model in [
             Some(crate::projection::RepaymentModel::FixedPayments),
             Some(crate::projection::RepaymentModel::InterestOnly),
+            // Revolving también por la cuerda: el snapshot no guarda sus mínimos y la cuota
+            // declarada no gobierna su caja desde #144 (la compuesta daba una V no monótona).
+            Some(crate::projection::RepaymentModel::Revolving),
             None,
         ] {
             let mut t = base.clone();

@@ -235,3 +235,65 @@ async fn patching_the_model_rederives_the_principal() {
         "al volver al modelo histórico el principal vuelve a ser Σ cuotas"
     );
 }
+
+/// Verificación adversarial de la Ola 3: una fila con el principal DERIVADO cuyo plan ya venció
+/// (visible desde #145) tiene que seguir siendo editable en los campos que NO tocan la
+/// derivación. Antes, el PATCH re-derivaba SIEMPRE con el flag activo y editar el label
+/// devolvía `payment_end_date_in_past` — una fila atrapada por un campo que el PATCH no tocó.
+/// El principal guardado no se mueve; tocar un input de la derivación sí re-deriva (y con el
+/// plan vencido, falla con su código — comportamiento de siempre, ahora solo cuando toca).
+#[tokio::test]
+async fn editing_a_derived_row_with_an_expired_plan_does_not_rederive() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cat, exp_cat) = categories(&app, &owner).await;
+    let end = end_date_for_n_monthly_payments(server_today(&app, &owner).await, 24);
+
+    let created = post_liability(
+        &app,
+        &owner,
+        &cat,
+        &exp_cat,
+        json!({
+            "payment_end_date": end.to_string(),
+            "repayment_model": "french",
+            "apr_percent": "3",
+        }),
+    )
+    .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let id = created.json()["id"].as_str().unwrap().to_string();
+    let principal_before = principal_of(&created);
+
+    // Vencer el plan por SQL (la API no deja escribir fechas pasadas).
+    sqlx::query("UPDATE liabilities SET payment_end_date = DATE '2020-01-31' WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(&id).unwrap())
+        .execute(&app.pool)
+        .await
+        .expect("vencer el plan");
+
+    // Editar el label NO re-deriva: 200 y el principal intacto.
+    let patched = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            json!({ "label": "Renombrada" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    assert_eq!(principal_of(&patched), principal_before, "el principal no se mueve");
+    assert_eq!(patched.json()["plan_expired_with_balance"], true);
+
+    // Tocar un INPUT de la derivación sí re-deriva — y con el plan vencido, falla con su
+    // código de siempre (no un éxito silencioso con un número imposible).
+    let touched = app
+        .patch_json_with_cookie(
+            &format!("/v1/liabilities/{id}"),
+            json!({ "apr_percent": "4" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(touched.status, http::StatusCode::BAD_REQUEST, "{touched:?}");
+    let msg = touched.json()["message"].as_str().unwrap_or_default().to_string();
+    assert!(msg.starts_with("payment_end_date_in_past"), "{msg}");
+}

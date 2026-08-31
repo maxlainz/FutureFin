@@ -281,10 +281,13 @@ as `/v1/summary`. See `build_installation_projection_input` in
 **Divergencia histórico ↔ proyección: CERRADA en 4.7.0 (#129).** El modelo de amortización viaja
 ahora en el snapshot (`history_snapshot_items.repayment_model`, `.ffbackup` v11) y
 `amortized_segment_value` elige la ley por el MODELO CAPTURADO (`LoanTerms::repayment_model`):
-`french`/`revolving` ⇒ curva compuesta corregida por residuo; `fixed_payments`/`interest_only`/
-`None` (snapshot pre-4.7.0) ⇒ la cuerda — exacta para cuota fija (pendiente constante) y la
-interpolación menos comprometida para carencia. El quiebro de pendiente en «hoy» desapareció:
-pasado y futuro usan la misma ley. Además (#130): un item ausente de una captura ARRASTRA su
+solo `french` ⇒ curva compuesta corregida por residuo; `revolving` (el snapshot no guarda sus
+mínimos y la cuota declarada no gobierna su caja desde #144), `fixed_payments`, `interest_only`
+y `None` (snapshot pre-4.7.0) ⇒ la cuerda — exacta para cuota fija (pendiente constante) y la
+interpolación menos comprometida para el resto. El quiebro de pendiente en «hoy» desaparece
+para las fotos NUEVAS (llevan la ley); las fotos 4.2.0–4.6.0 de un pasivo genuinamente francés
+pierden la curva compuesta que hasta ahora se les aplicaba (interior ~300 €/50 k€; extremos
+exactos) — el precio de dejar de aplicársela al default mayoritario, donde era el bug de #129. Además (#130): un item ausente de una captura ARRASTRA su
 último valor (LOCF, `HistoryTimeline::last_is_live_ledger`); solo la ausencia del ledger vivo
 significa cero.
 

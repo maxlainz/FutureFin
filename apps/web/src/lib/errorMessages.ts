@@ -196,6 +196,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Ese efecto de amortización no existe. Elige acortar plazo o reducir cuota.",
   liability_early_repayment_axis_needs_amortization:
     "La comisión y el efecto de amortizar solo aplican si el escenario amortiza algo. Añade una amortización mensual o puntual.",
+  liability_override_revolving_needs_minimums:
+    "Para simular esa deuda como revolving necesita su cuota mínima (porcentaje del saldo o suelo en euros) guardada en la ficha.",
+  reduce_payment_ignored_by_repayment_model:
+    "Reducir cuota no hace nada en una revolving: su cuota es el mínimo del saldo, no la declarada. Usa acortar plazo.",
   liability_overrides_unavailable_in_real_expense_mode:
     "Con el gasto tomado de tus movimientos reales, la cuota ya está dentro del gasto: simular la deuda aparte la contaría dos veces.",
   liability_repayment_model_needs_apr:
