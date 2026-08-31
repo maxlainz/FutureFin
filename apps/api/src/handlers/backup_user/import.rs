@@ -510,6 +510,19 @@ async fn insert_payload(
         .await?;
     }
 
+    // 4.12.1 (#176): un backup de 4.12.0 o anterior puede traer el sumidero DESHABILITADO —
+    // legal entonces, estructuralmente prohibido ahora (el sobrante ya no tiene caja donde
+    // caer). Mismo espejo que la migración `20260901160000_…reenable_disabled_sinks`.
+    sqlx::query(
+        r#"UPDATE allocation_rules SET enabled = true
+           WHERE installation_id = $1 AND owner_user_id = $2
+             AND kind = 'remainder' AND cap_kind IS NULL AND enabled = false"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+
     // #150/#178 (4.12.0): un backup pre-siembra restaura activos SIN sumidero, y la garantía del
     // owner («si no existe la regla, se crea automáticamente») cubre también esta vía — si no,
     // cada restore de un archivo viejo refabricaría el estado que la migración

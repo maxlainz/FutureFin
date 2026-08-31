@@ -116,7 +116,7 @@ Adds `proptest` as a dev-dependency of `crates/engine` only. Catches silent wron
 - **Obligations**: for each invariant, a one-paragraph proof sketch of WHY it must hold, including its domain of validity.
 - **Candidate invariants** (validity caveats are the hard part — encode them):
   1. *Cascade conservation*: for any pool ≥ 0, `sum(alloc) + leftover == pool` and each `alloc[i] ≥ 0` (`distribute_contributions`). Also: no allocation exceeds cap room.
-  2. *Per-asset decomposition*: with **no liabilities and no deficit months**, `net_worth[k] == sum_i per_asset_series[i][k] + surplus_cash_k`; testable from outputs alone when a `remainder` rule exists and pool is fully absorbed (then implied surplus_cash increments are exactly the leftovers = 0).
+  2. *Per-asset decomposition*: `surplus_cash` retired (4.12.1, #175) simplifies this identity — with **no liabilities and no deficit months (no undrained shortfall)**, `net_worth[k] == sum_i per_asset_series[i][k]` holds directly, no cash term to add back; testable from outputs alone.
   3. *Monotonicity under +income* — **scoped**: with `fire_target = None` and `retirement_start_month = None`, raising `income_regular_monthly` never decreases any `net_worth[k]`. Do NOT assert it globally: more income ⇒ earlier FIRE crossing ⇒ income drops to `income_retirement_monthly` sooner ⇒ later NW can legitimately be LOWER. This non-obvious falsifier is exactly what proptest should also document.
   4. *NW continuity*: `|net_worth[k] − net_worth[k−1]|` bounded by `|net_cash_month| + growth + debt payments` for that month.
   5. *Determinism*: same input twice ⇒ identical output (guards future stochastic work).

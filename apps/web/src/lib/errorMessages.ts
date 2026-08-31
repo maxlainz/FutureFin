@@ -453,7 +453,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   target_asset_not_found:
     "El activo de destino no existe o no se ve en esta vista. Elige otro.",
   remainder_required:
-    "Hace falta una regla que recoja el sobrante. Añade una antes de guardar.",
+    "Esa regla (o ese activo) es tu único sumidero del sobrante: mientras tengas activos no se puede borrar, desactivar ni ponerle tope. Muévelo antes a otro activo.",
   uncapped_remainder_exists:
     "Ya hay una regla de sobrante sin tope: solo puede haber una.",
   sink_must_be_last: "La regla que recoge el sobrante tiene que ir la última.",

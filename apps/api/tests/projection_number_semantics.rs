@@ -120,8 +120,8 @@ async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
 
 /// Hogar que **sí** cruza su número FIRE dentro del horizonte por defecto (360 meses, sin fecha de
 /// nacimiento): ingreso 3.000, gasto 1.000 → 2.000 €/mes de sobrante, un activo líquido de 50.000 al
-/// 7 % y una regla sumidero que encamina TODO el sobrante a ese activo (sin ella el sobrante se
-/// queda en `surplus_cash`, que no capitaliza, y el cruce se va fuera del horizonte con inflación).
+/// 7 % y una regla sumidero que encamina TODO el sobrante a ese activo (sin ella, desde 4.12.1,
+/// el sobrante queda VARADO fuera del balance y el cruce se va fuera del horizonte).
 ///
 /// PREDICCIÓN del objetivo base (modo `annual_expense`, SWR 3,5 %, tramos ES por defecto):
 /// neto anual = 1.000 × 12 = 12.000. Gross-up: tramo 1 (19 %, techo 6.000) da 12.000/0,81 =

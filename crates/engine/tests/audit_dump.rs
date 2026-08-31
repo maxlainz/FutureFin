@@ -134,7 +134,12 @@ fn dump_schedule(case: &str, liab: &ProjectionLiabilityInput, horizon: u32) {
 fn dump_projection(case: &str, input: &ProjectionInput) {
     let out = project_net_worth_series(input).expect("la simulación del caso no debe fallar");
     for (k, nw) in out.net_worth.iter().enumerate() {
-        println!("PROJ,{case},{k},{nw},{}", out.contributed_capital[k]);
+        // Columna 5 (4.12.1): el ahorro varado — escalar final repetido por fila para que el
+        // oráculo pueda cerrar la identidad sin cambiar de forma.
+        println!(
+            "PROJ,{case},{k},{nw},{},{}",
+            out.contributed_capital[k], out.unallocated_savings_total
+        );
     }
 }
 
@@ -301,7 +306,14 @@ fn audit_dump_projection_series() {
             Decimal::from(3_000),
             Decimal::from(2_000),
             vec![mk_asset(1, Decimal::from(10_000), true, Some(Decimal::from(7)))],
-            vec![],
+            // 4.12.1: P5 gana el sumidero — sin él, P3/P5/P6 dejaban de ejercitar la cascada a
+            // la vez y el arnés perdía su única cobertura de superávit invertido.
+            vec![AllocationRule {
+                target_index: 0,
+                kind: futurefin_engine::AllocationKind::Remainder,
+                amount: None,
+                cap: None,
+            }],
         ),
     );
 

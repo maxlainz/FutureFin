@@ -822,8 +822,15 @@ pub(crate) async fn patch_allocation_rule_core(
     // PRE-guardia de I1 que la post-condición NO puede dar: «no te quedes sin el sumidero que
     // tenías». `assert_sink_invariant` acepta cero sumideros (un scope recién creado no tiene
     // ninguno), así que es aquí donde se distingue «nunca hubo» de «acabas de quitarlo».
-    let was_sink = is_sink(&current.kind, current.cap_kind.as_deref());
-    let becomes_sink = is_sink(&new_kind, new_cap_kind.as_deref());
+    //
+    // 4.12.1 (#176, sumidero INDESTRUCTIBLE): el predicado pasa de `is_sink` a
+    // `is_sink && enabled` — desde que `surplus_cash` murió, un sumidero DESHABILITADO deja el
+    // sobrante sin destino (el engine filtra `enabled = true`), así que deshabilitar o degradar
+    // el último sumidero efectivo es quedarse sin él. La salida legal sigue siendo la de
+    // siempre: mover la regla a otro activo (`target_asset_id` es parcheable).
+    let was_sink =
+        is_sink(&current.kind, current.cap_kind.as_deref()) && current.enabled;
+    let becomes_sink = is_sink(&new_kind, new_cap_kind.as_deref()) && new_enabled;
     if was_sink && !becomes_sink {
         let n = count_uncapped_remainder_rules(&mut tx, iid, current.owner_user_id).await?;
         if n <= 1 {
@@ -1210,17 +1217,19 @@ pub struct AllocationResolutionResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub allocated_total: Decimal,
-    /// Lo que ninguna regla absorbió y acaba en `surplus_cash`.
+    /// Lo que ninguna regla absorbió (4.12.1 — antes `leftover_to_surplus_cash`, breaking §5:
+    /// `surplus_cash` murió). Desde esta versión el euro varado NO entra al balance de la
+    /// proyección: se declara aquí y en `unallocated_savings_reason` por qué existe. En
+    /// producción es 0 con activos vivos (sumidero indestructible #176 + retro-siembra).
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
-    pub leftover_to_surplus_cash: Decimal,
-    /// Adónde va el sobrante no absorbido (#150): `"asset"` ⟺ la vista tiene algún sumidero
-    /// HABILITADO (regla `remainder` sin tope); `"cash"` ⟺ no lo hay y el sobrante se queda en
-    /// caja al 0 % — el aviso de la SPA cuelga de este campo. Pregunta del SERVIDOR, no del
-    /// cliente (recalcularla en TS abriría otro caso de #136). Matiz en `household` con varios
-    /// miembros: basta el sumidero de uno para `"asset"` — si otro owner sigue sin él, su fuga
-    /// la delata `leftover_to_surplus_cash > 0`.
-    pub surplus_destination: &'static str,
+    pub leftover_unallocated: Decimal,
+    /// Por qué hay sobrante varado (4.12.1 — sustituye a `surplus_destination`, breaking §5):
+    /// `null` = no lo hay (caso normal); `"no_assets"` = el scope no tiene activos;
+    /// `"no_sink"` = hay activos pero ningún sumidero habilitado (estado residual — la guarda
+    /// #176 lo hace inalcanzable por API con activos vivos).
+    #[schema(value_type = Option<String>)]
+    pub unallocated_savings_reason: Option<&'static str>,
     pub rules: Vec<ResolvedRule>,
     pub per_asset: Vec<ResolvedAssetContribution>,
 }
@@ -1336,20 +1345,61 @@ pub(crate) async fn allocation_resolution_core(
         debt_service_absent_reason: built.debt_service_absent_reason,
         base_includes_transient: !alloc.planning_component.is_zero(),
         allocated_total: allocated_total.round_dp(4),
-        leftover_to_surplus_cash: alloc.leftover.round_dp(4),
-        // Un sumidero deshabilitado NO cuenta: el engine lo salta y el sobrante acaba en caja
-        // igual — el campo describe lo que PASA, no lo que hay configurado.
-        surplus_destination: if meta
-            .iter()
-            .any(|r| r.enabled && is_sink(&r.kind, r.cap_kind.as_deref()))
-        {
-            "asset"
+        leftover_unallocated: alloc.leftover.round_dp(4),
+        // 4.12.1: solo hay DOS causas posibles y es demostrable — un sumidero habilitado no
+        // tiene tope y se lleva `remaining` entero, así que leftover > 0 ⟺ no hay activos o no
+        // hay sumidero alcanzable. (Un sumidero deshabilitado NO cuenta: el engine lo salta —
+        // el campo describe lo que PASA, no lo que hay configurado.)
+        unallocated_savings_reason: if alloc.leftover > Decimal::ZERO {
+            if alloc.per_asset.is_empty() {
+                Some("no_assets")
+            } else {
+                Some("no_sink")
+            }
         } else {
-            "cash"
+            None
         },
         rules,
         per_asset,
     })
+}
+
+/// 4.12.1 (#176) — guarda del BORRADO DE ACTIVO: borrar el activo al que apunta el sumidero se
+/// llevaría la regla en cascada (`allocation_rules.target_asset_id` es `ON DELETE CASCADE`) y el
+/// scope quedaría sin destino para su sobrante — que desde 4.12.1 ya no tiene caja donde caer.
+/// Se rechaza con el MISMO `remainder_required` de las pre-guardias de patch/delete cuando el
+/// borrado dejaría el scope sin sumidero **quedando OTROS activos vivos**; el ÚLTIMO activo del
+/// scope sí se puede borrar (sin activos no hay cascada que proteger — la misma condición de la
+/// siembra). Vive AQUÍ y no en `assets.rs` para no escribir el predicado del sumidero una
+/// tercera vez (la segunda, `asset_delete_effects`, ya está anotada como copia deliberada).
+pub(crate) async fn assert_asset_delete_keeps_the_sink(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    asset_id: Uuid,
+) -> Result<(), ApiError> {
+    let would_orphan: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM allocation_rules r
+               WHERE r.installation_id = $1 AND r.target_asset_id = $2
+                 AND r.kind = 'remainder' AND r.cap_kind IS NULL
+                 AND EXISTS (
+                     SELECT 1 FROM assets a
+                     WHERE a.installation_id = $1
+                       AND a.owner_user_id IS NOT DISTINCT FROM r.owner_user_id
+                       AND a.id <> $2
+                 )
+           )"#,
+    )
+    .bind(iid)
+    .bind(asset_id)
+    .fetch_one(pool)
+    .await?;
+    if would_orphan {
+        return Err(ApiError::BadRequest(
+            "remainder_required: scope must keep one uncapped 'remainder' rule (catch-all sink)".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Nombre en el wire de cada razón. Se mapea a mano (y no con `Serialize` en el engine) para que
@@ -1362,7 +1412,6 @@ fn skip_reason_wire(r: futurefin_engine::AllocationSkipReason) -> &'static str {
         R::CapFull => "cap_full",
         R::ZeroAmount => "zero_amount",
         R::InvalidTarget => "invalid_target",
-        R::InRetirement => "in_retirement",
     }
 }
 

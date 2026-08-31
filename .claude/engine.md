@@ -22,7 +22,7 @@ Only `Decimal` arithmetic. Four modules:
 
 ```rust
 // Main projection: net_worth, liquid_worth and contributed_capital series (len = horizon_months + 1,
-// index 0 = today). contributed_capital = Σ basis por activo + surplus_cash (#120, puede decrecer).
+// index 0 = today). contributed_capital = Σ basis por activo (#120, puede decrecer).
 pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOutput, EngineError>
 
 // Returns nominal contributions routed to each asset in the FIRST simulated month only.
@@ -40,7 +40,7 @@ pub struct FirstMonthAllocation {
     pub recurring_net: Decimal,        // income − expense − debt_service (stable en el camino de lectura)
     pub planning_component: Decimal,   // planning_adjustment[0] − retirement_withdrawal (transient)
     pub debt_service: Decimal,         // 4.4.0: incluye la amortización extra del mes 1 (0 en el camino de lectura)
-    pub leftover: Decimal,             // ends up in `surplus_cash`
+    pub leftover: Decimal,             // lo que ninguna regla absorbió; fuera del balance, contado en unallocated_savings_total
     pub rules: Vec<RuleOutcome>,
 }
 pub fn first_month_allocation(input: &ProjectionInput) -> Result<FirstMonthAllocation, EngineError>
@@ -387,8 +387,19 @@ neutralidad),
 9.281,9223 € == Δ`net_worth[300]`), `extra_principal_lump_sum_lands_on_its_month_and_caps_at_the_balance`,
 `zero_extra_principal_is_bit_identical_to_the_pin` y `extra_principal_needs_an_active_payment_plan`.
 
+**Identidades del motor (4.12.1 — `surplus_cash` retirado, #175/#176)**. Viven exactamente aquí,
+una vez; cualquier otra mención de estas tres magnitudes en este doc remite a este bloque:
+```
+net_worth[k]            = Σ activos(k) − Σ principales(k) − undrained(k)
+liquid_worth[k]         = Σ activos líquidos(k)
+contributed_capital[k]  = Σ basis_i(k)
+```
+`surplus_cash` murió como término de las tres. El sobrante que ninguna regla absorbe (paso 5 del
+bucle) queda FUERA del balance: se cuenta aparte en `unallocated_savings_total` (ver
+[Output](#output)), inalcanzable en producción con activos vivos (sumidero indestructible, #176).
+
 **Matiz honesto sobre «efecto instantáneo cero»**: es exacto **en el balance** (los dos `−E` se
-cancelan en `NW = Σ activos + surplus_cash − Σ principales − undrained`), y por eso el test que la pinea
+cancelan en la identidad del NW de arriba), y por eso el test que la pinea
 usa un activo de rentabilidad **nula**. En la serie de un hogar cuyo activo marginal
 compone a `g` mensual, el mes queda `E·g` por debajo: el euro sale de la caja **antes** del paso de
 crecimiento y el principal baja **después**. Efecto colateral: `contributed_capital` también baja
@@ -445,19 +456,23 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
    and the principal drops after it. In a household whose marginal asset grows at `g`, that month
    ends `E·g` lower (opportunity cost). The engine tests that pin the neutrality use a
    zero-return asset on purpose, to isolate the axis.
-2. Determine `in_retirement` via the **absorbing latch** (4.8.0, #141): `retired = retired || fire_reached || k >= retirement_start_month` — una vez jubilado, SIEMPRE jubilado, aunque el patrimonio caiga después por debajo del objetivo (antes el estado parpadeaba mes a mes con gastos crecientes e ingresos planos, alternando ingreso regular y de jubilación). `fire_reached` compara **`liquid_prev`** — la riqueza LÍQUIDA del mes anterior: Σ de los activos `is_liquid` + `surplus_cash`, BRUTA, sin restar principal (#143; emparejada con el término de deuda del target, ver `FireTarget`) — contra el target FIRE del mes `k`: `base × (1 + inflation/100)^((k-1)/12) + debt_term(k)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares. **El gasto elegido se multiplica por `f(k−1) = inflation_factor_at_month_index(input.annual_inflation_percent, k−1)`** (4.9.0, #139) — el ingreso no.
+2. Determine `in_retirement` via the **absorbing latch** (4.8.0, #141): `retired = retired || fire_reached || k >= retirement_start_month` — una vez jubilado, SIEMPRE jubilado, aunque el patrimonio caiga después por debajo del objetivo (antes el estado parpadeaba mes a mes con gastos crecientes e ingresos planos, alternando ingreso regular y de jubilación). `fire_reached` compara **`liquid_prev`** — la riqueza LÍQUIDA del mes anterior (`liquid_worth[k−1]`, ver identidades arriba): Σ de los activos `is_liquid`, BRUTA, sin restar principal (#143; `surplus_cash` retirado de este término en 4.12.1/#175 — teorema: el cruce solo pudo irse MÁS TARDE con el cambio, nunca adelantarse, y en producción es invariante; emparejada con el término de deuda del target, ver `FireTarget`) — contra el target FIRE del mes `k`: `base × (1 + inflation/100)^((k-1)/12) + debt_term(k)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares. **El gasto elegido se multiplica por `f(k−1) = inflation_factor_at_month_index(input.annual_inflation_percent, k−1)`** (4.9.0, #139) — el ingreso no.
 3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
-5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
-6. If `net_cash <= 0` (deficit): drain `surplus_cash` first **sin grossear** (la caja entró ya
-   tributada como renta — bajo #178 esto es teorema, no excepción: `b = v ⇒ g = 0`); lo que
-   falte se vende **BRUTO** (4.10.0/#140 fase 1 — M1, dentro del bucle, jubilado o no), drenando
+5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)) — **también en jubilación** (4.12.1, #175): es la MISMA cascada del usuario, sin rama especial por estado; los techos de la fase #171 pasan de explicativos a vinculantes también aquí. `AllocationSkipReason::InRetirement` y el literal de wire `in_retirement` MURIERON con la rama que los producía. Lo que ninguna regla absorbe **NO entra en el NW**: se acumula en `unallocated_savings_total` (ver [Output](#output)) — inalcanzable en producción con activos vivos (sumidero indestructible, #176). Lo reinvertido en cada activo, jubilado o no, **sube su base de coste** (`basis[i] += alloc[i]`, `basis_declared[i] = true`) y abarata sus ventas futuras (#178, ver paso 6). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
+6. If `net_cash <= 0` (deficit): **el escalón «caja primero» murió con `surplus_cash`** (4.12.1,
+   #175) — el déficit entero se vende **BRUTO** (`need_assets_net = -net_cash`; 4.10.0/#140 fase 1
+   — M1, dentro del bucle, jubilado o no), drenando
    ALL assets — liquids first, then illiquids, each group lowest-return first (tiebreak by input
    index; orden extraído en `drain_order`, implementación ÚNICA que comparten
-   `drain_from_assets`, esta rama y el runway). **La `g` es POR ACTIVO desde 4.12.0 (#178)**: si
-   el activo declaró coste (`purchase_price` presente, 0 incluido), `g_i = max(0, 1 − b_i/v_i)`
+   `drain_from_assets`, esta rama y el runway). La exención fiscal que tenía la caja no desaparece:
+   la hereda el drenaje natural — la cuenta al 0 % drena primero (`drain_order`) y, si su base fue
+   alimentada por la cascada, deriva `g = 0` (`b = v`). **La `g` es POR ACTIVO desde 4.12.0 (#178)**:
+   si el activo declaró coste (`purchase_price` presente, 0 incluido) **O** su base viva fue
+   alimentada por la propia cascada (`basis_declared[i]` — extensión B de #178, 4.12.1: el euro
+   aportado ES el dato, aunque el activo no declarara `purchase_price`), `g_i = max(0, 1 − b_i/v_i)`
    derivada de su base viva — invariante al drenaje del propio mes (`b'/v_post = b/v_pre`),
-   creciente con el crecimiento (`ρ_k = ρ₀·m^{−k}`) —; si no, el escalar `taxable_gain_ratio`.
+   creciente con el crecimiento (`ρ_k = ρ₀·m^{−k}`) —; si ninguna de las dos aplica, el escalar `taxable_gain_ratio`.
    Con `g` uniforme sobre lo vendible, CORTOCIRCUITO al camino literal de 4.11.0
    (`gross_up_monthly` + `drain_from_assets` + `after_tax_monthly`) — bit-idéntico; con mezcla,
    `gross_up_mixed_monthly` (forma cerrada por tramos sobre la base agregada `Σ g_i·venta_i`;
@@ -477,11 +492,12 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 ```rust
 pub struct ProjectionOutput {
     pub net_worth: Vec<Decimal>,         // nominal, euros del momento, index 0..=horizon_months
-    pub liquid_worth: Vec<Decimal>,      // 4.8.0 (#143): Σ activos is_liquid + surplus_cash (BRUTA) — la base del cruce
-    pub contributed_capital: Vec<Decimal>, // Σ basis por activo + surplus_cash (nominal) — desde 4.10.0/#120 PUEDE DECRECER: vender baja la base (b' = b·v_post/v_pre); «cumulative» murió con la Ola 6
+    pub liquid_worth: Vec<Decimal>,      // 4.8.0 (#143): Σ activos is_liquid (BRUTA) — la base del cruce; surplus_cash retirado del término en 4.12.1 (#175)
+    pub contributed_capital: Vec<Decimal>, // Σ basis por activo (nominal) — desde 4.10.0/#120 PUEDE DECRECER: vender baja la base (b' = b·v_post/v_pre); «cumulative» murió con la Ola 6; surplus_cash retirado del término en 4.12.1 (#175)
     pub per_asset_series: Vec<Vec<Decimal>>, // value per asset per month (nominal)
     pub assets_depleted_month_index: Option<u32>, // 4.6.0 (#119): primer mes con déficit ≥ TODO lo drenable
     pub uncovered_deficit_total: Decimal,         // 4.6.0 (#119): undrained_cumulative final
+    pub unallocated_savings_total: Decimal,       // 4.12.1 (#175): ahorro que ninguna regla absorbió, acumulado — NO entra en net_worth ni en contributed_capital; "0" con activos vivos (sumidero indestructible #176)
 }
 ```
 

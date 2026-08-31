@@ -79,7 +79,9 @@ realidad** o entre superficies, no error de aritmética.
 - Crecimiento **después** de los flujos del mes (aportación cobra el mes completo);
   `values[i] = values[i].checked_mul(m)` — desbordar es error tipado `AssetValueOverflow`, nunca
   panic ni saturación silenciosa.
-- Drenaje en déficit: `surplus_cash` primero y SIN grossear (caja ya tributada como renta); lo
+- Drenaje en déficit (4.12.1): el déficit ENTERO se vende — `surplus_cash` murió; su exención
+  fiscal la hereda la base alimentada por la cascada (`basis_declared`, extensión de #178:
+  b = v ⇒ g = 0 en el sumidero al 0 %); lo
   que falte se vende **BRUTO** (4.10.0/#140: `gross_up_monthly(neto, tramos, enabled, g)` — M1,
   dentro del bucle, en todo drenaje) sobre TODOS los activos — líquidos primero, dentro de cada
   grupo menor rentabilidad primero, desempate por índice de entrada (orden de entrada total:
@@ -87,16 +89,20 @@ realidad** o entre superficies, no error de aritmética.
   Lo no cubierto se acumula en `undrained_cumulative` **NETO** (mide gasto que faltó, no ventas
   que no ocurrieron) y RESTA del patrimonio: la curva puede ser negativa y no se aplana —
   correcto.
-- `surplus_cash` rinde 0 % — realista para cuenta corriente española (~0,15 % TEDR), pero es
-  invisible e ilimitado (§4: D10, decisión: regla remainder obligatoria).
+- **D10 CERRADO en 4.12.1**: `surplus_cash` (caja al 0 %, invisible e ilimitada) se ELIMINÓ del
+  modelo por decisión del owner («antinatural, sin espejo en la realidad — el dinero siempre vive
+  en un activo»): siembra + retro-siembra + sumidero indestructible (#176) hacen que el sobrante
+  siempre tenga destino; el euro sin regla queda FUERA del balance, cuantificado en
+  `unallocated_savings_total` (decisión 3).
 
 ### 2.3 Caja y asignación
 - Orden del mes: servicio de deuda → estado de jubilación (NW(k−1) vs target(k−1)) → caja neta →
   (drenaje | acumulación en jubilación | cascada) → crecimiento → asiento de principales → NW.
 - Cascada: `fixed`/`percent` (sobre el restante del paso)/`remainder`, caps a techo absoluto sobre
   el valor VIVO del activo; conservación exacta `Σ per_asset + leftover = base_cash` (pinneada en
-  `allocation_resolution.rs`). En jubilación la cascada NO corre: `first_month_allocation` lo
-  declara con `skipped_reason: in_retirement` (auditoría 2026-08).
+  `allocation_resolution.rs`). Desde 4.12.1 (#175) la cascada corre TAMBIÉN
+  jubilada — la misma del usuario, con los techos de la fase (#171) gobernando euros de verdad;
+  el literal `in_retirement` murió con ella.
 - Modos de ahorro: A (presupuesto), B (promedio real ambos lados), C (ingreso plan + gasto real);
   fallback por lado. En B/C la cuota vive dentro del promedio (decisión explícita del owner) y el
   principal se congela — la parte «para siempre» es divergencia (§4: D17, decidida).
@@ -107,7 +113,9 @@ realidad** o entre superficies, no error de aritmética.
   DESPUÉS de inflar el gasto; en `manual`/`current_income` la cifra se indexa entera; helpers
   `fire_target_at_month_index` + `fire_target_base_at_month_index`; NO monótono por partida
   doble: término de deuda decreciente y, con pensión, base súper-inflada). Cruce desde 4.8.0/#143: **`líquido(k−1) ≥
-  target(k−1)`** (Σ activos vendibles + surplus_cash, bruto), con latch absorbente (#141).
+  target(k−1)`** (Σ activos vendibles, bruto — sin término de caja desde 4.12.1; teorema: el
+  cruce solo pudo irse MÁS TARDE con ese cambio, y en producción es invariante), con latch
+  absorbente (#141).
 - Gross-up: forma cerrada por tramos (escala **marginal**), tramos por defecto = escala del ahorro
   VIGENTE 2025-26 (19/21/23/27/30 @ 6k/50k/200k/300k — Ley 7/2024). Paridad Rust↔TS por
   `fire-parity.json` (recuenta los casos con `python3 -c "import json;print(len(json.load(open(
@@ -151,7 +159,8 @@ realidad** o entre superficies, no error de aritmética.
 - Tras el cruce: `income_retirement` (partidas `persists_after_retirement`) y `expense_retirement`
   (partidas `!ends_at_retirement`), **del presupuesto en los 3 modos**; desde 4.9.0 (#139) el
   gasto se INDEXA a la inflación de la instalación y los ingresos quedan planos (decisión del
-  owner); el superávit va a `surplus_cash` (y CUENTA como aportado, #120); la retirada TRIBUTA
+  owner); el superávit corre la MISMA cascada del usuario (4.12.1/#175): lo reinvertido sube la
+  base de coste (#120) y abarata las ventas posteriores (#178); la retirada TRIBUTA
   desde 4.10.0/#140 — todo drenaje vende bruto con la MISMA escala de tramos que el objetivo, y
   desde 4.12.0/#178 con la `g` de cada activo derivada de su base real cuando el coste está
   declarado (el escalar rige perpetuidades y activos sin coste — ver §2.4).
@@ -211,7 +220,7 @@ Estado 2026-08-30. «Decidida» = el owner eligió dirección (constan en el iss
 owner decidió no actuar (consta aquí, con fecha). Cifras de escenarios SINTÉTICOS.
 
 **Resueltas en 4.5.0**: overflow del engine tipado (D32-motor), cascada en jubilación con
-`in_retirement` (D27), orden total de activos (D34), parsing de umbrales (D33-tramos), fixture
+orden total de activos (D34), parsing de umbrales (D33-tramos), fixture
 27/30 %, dos erratas de prosa (S1 parcial); más la Ola 1 completa (#95 #96 #97 #99 #105 #113
 #135 #137 — null-que-borra, techo del cap siempre resuelto, MCP en inglés con `id`, owner-only
 en la core, puertas de escritura, campos muertos).
@@ -235,7 +244,7 @@ parpadeo mes a mes (#141); el objetivo FIRE gana el término finito de deuda —
 las cuotas pendientes + cola residual, decreciente al amortizar (el objetivo deja de ser monótono:
 cruce por escaneo lineal), y en B/C la deuda vuelve a amortizar (opción 3 del owner: la cuota
 declarada se RESTA del promedio real, una sola regla contable en los 3 modos) (#142); el cruce se
-decide contra el patrimonio LÍQUIDO bruto (Σ vendibles + surplus_cash), emparejado
+decide contra el patrimonio LÍQUIDO bruto (Σ vendibles — sin caja desde 4.12.1), emparejado
 algebraicamente con el término de cuota completa del objetivo (#143); una partida de presupuesto
 vencida deja de contar EN TODAS PARTES a la vez — sumatorios y `expense_end_entries` juntos, sin
 caja fantasma (#124); el gasto medio real solo divide entre meses con movimientos CLASIFICADOS,
@@ -257,7 +266,7 @@ por encima de lo nominal (#146); la edad límite del horizonte es configurable
 (`fire_settings.horizon_lifespan_age`, 85..=105, default 90; basis `lifespan_age` +
 `horizon_lifespan_age` ecoada; margen al final = último punto + `final_net_worth_real`) (#149).
 **Resueltas en 4.10.0 (Ola 6 — «El impuesto que sí se paga»)**: la base de coste es POR ACTIVO y
-baja al vender (`b' = b·v_post/v_pre`; `contributed = Σ basis + surplus_cash` — el superávit
+baja al vender (`b' = b·v_post/v_pre`; `contributed = Σ basis` desde 4.12.1 — el superávit
 jubilado cuenta y la serie DEJA DE SER MONÓTONA) (#120); la retirada simulada TRIBUTA — todo
 drenaje de activos vende bruto (`gross_up_monthly`, M1, dentro del bucle; la caja no se grossea;
 `undrained` pasa a NETO; el pin de #119 con tramos ES: mes 100/−520.000 → mes 80/−561.200) y la
@@ -282,7 +291,8 @@ contrato a 36 meses deja de cobrarse los 444 meses de más (480 − 36 = 444 × 
 y `.ffbackup` sube a 12 (#148; la cifra «607 k€ de pensión anticipada» que aquí vivió se RETIRÓ:
 no era derivable de ninguna construcción declarada); el primer activo de un scope virgen siembra
 la regla `remainder` por la misma función que la valida, la respuesta lo declara
-(`seeded_allocation_rule_id`) y la resolución publica `surplus_destination` — el escenario 1 del
+(`seeded_allocation_rule_id`) y la resolución publicaba `surplus_destination` (retirado en 4.12.1 junto a la caja —
+`unallocated_savings_reason` lo sustituye) — el escenario 1 del
 issue pasa de 108.000,00 € muertos a **147.622,45 €** (+39.622,45; el issue decía 147.378 en
 convención pospagable — el motor es prepagable, C1 del spike; la cifra «~1,22 M€» que aquí vivió
 exigía un 7,2 % nunca declarado y se retiró) (#150). **Alcance declarado de #150**: el escenario 2
@@ -314,9 +324,30 @@ REVIERTE el «sin retro-siembra» de 4.11.0): migración `20260901150000` — to
 y sin regla `remainder` sin tope la gana, apuntando al LÍQUIDO de menor rentabilidad esperada
 (empate: mayor saldo; sin `created_at` en assets, «el primer activo creado» no es recuperable) —
 y la misma regla corre al importar un backup pre-siembra (import.rs, cross-referenciado). El
-`surplus_cash` residual queda reducido a: déficits (primera fuente, sin grossear — teorema
+`surplus_cash` residual quedó reducido a: déficits (primera fuente, sin grossear — teorema
 `b = v ⇒ g = 0`) y el superávit del JUBILADO
 ([#175](https://github.com/maxlainz/FutureFin/issues/175), decisión de modelo pendiente).
+
+**Resueltas en 4.12.1 (fin de `surplus_cash` — #175 y #176, entrevista de decisiones del owner
+2026-08-31)**: la caja fantasma se ELIMINA del modelo («antinatural, sin espejo en la realidad —
+el dinero siempre vive en un activo»). (1) La MISMA cascada del usuario corre también jubilada
+(#175): el superávit de pensión compone — el ancla del issue, derivada del bucle real y pineada
+en el engine: 500 €/mes al 5 % durante 360 meses = **409.348,92 €** donde antes morían
+180.000,00 € en caja (Δ = +229.348,92, la cifra exacta del issue, entregada); lo reinvertido ES
+base de coste (#120) y abarata las ventas posteriores (#178). (2) El sumidero es INDESTRUCTIBLE
+con activos vivos (#176): borrar su activo quedando otros, deshabilitarlo o degradarlo → 400
+`remainder_required` (el último activo del scope sí se borra); migración
+`20260901160000` reactiva los sumideros apagados (sin ella el upgrade haría desaparecer dinero
+en esos scopes) + espejo en el import de backups. (3) El euro sin destino NO se simula (decisión
+3): fuera del balance, cuantificado en `unallocated_savings_total` + razón
+(`no_assets`|`no_sink`) — inalcanzable en producción con activos vivos. (4) Identidades nuevas:
+`NW = Σ activos − pasivos − descubierto`, `aportado = Σ bases`, `líquido = Σ líquidos`; el
+escalón «caja primero» del déficit murió y su exención fiscal la hereda la extensión
+`basis_declared` de #178 (la base alimentada por la cascada ES dato: un descubierto de 3.000 €
+habría tributado 784,81 € inventados sin ella). Breaking §5: mueren `leftover_to_surplus_cash`
+(→ `leftover_unallocated`), `surplus_destination` (→ `unallocated_savings_reason`) y el
+`skipped_reason: in_retirement`. El pin del escenario A subió a 676.315,04 (+23.044,82): el
+drenaje post-cruce ya solo tributa la ganancia real de la base que la cascada construyó.
 
 ### Aceptadas por el owner (2026-08-30) — sin issue, deuda declarada aquí
 
@@ -328,7 +359,6 @@ y la misma regla corre al importar un backup pre-siembra (import.rs, cross-refer
 | Regla de millares en campos % («7.125» = 7125 %) (D33-%) | proyección rechazada con 400 tipado (tras 4.5.0) | Trampa documentada; el 400 tipado de 4.5.0 la hace ruidosa |
 | Descubierto/`undrained` al 0 % (parte de D9) | agujero subestimado ~220 k€ al 18-20 % TEDR | El agujero se publica (issue #119); su coste financiero no se modela |
 | Duplicados cliente↔servidor que QUEDAN, todos con fixture cruzado (#136, 4.11.0): gross-up de la vista previa (`fire-parity.json`), principal derivado (`liability-derived-principal-parity.json`), deflactor TS para k < 0 y mes fraccionario (`deflator-parity.json` pina el dominio compartido k ≥ 0), interés mensual aprox. (`liability-interest-parity.json`) | 0 € mientras los fixtures estén verdes — una suite roja a solas = deriva detectada | Vista previa sin round-trip posible; el `deflator_at_month_index` u32 del servidor no puede servir el pasado ni el grid fino; no existe campo de hogar para el interés aprox. |
-| Superávit del jubilado en caja al 0 % (la cascada no corre tras el cruce) | 229.348,92 € en 30 años con pensión 1.500/gasto 1.000 al 5 % | Fuera del alcance de #150 (declarado); decisión de modelo pendiente en [#175](https://github.com/maxlainz/FutureFin/issues/175) |
 | Coste medio proporcional en vez de FIFO por participaciones (4.12.0/#178) | Diferencia de CALENDARIO, no de importe total (misma base agregada); FIFO grava más al principio y menos después | La BD lleva UN `purchase_price` por activo, sin lotes; el coste medio es además lo que hace un reembolso real de fondo UCITS |
 | Minusvalías sin compensar (`g_i` clampada a 0; el art. 49 LIRPF permitiría compensar) | Impuesto ligeramente sobreestimado con pérdidas latentes | Mismo signo prudente que el resto del modelo; compensar exigiría estado fiscal anual |
 | Estacionalidad del presupuesto alisada a doceavas (D25) | 0 € al horizonte; sin señal de tesorería | Presupuesto mensual por diseño |
@@ -370,7 +400,7 @@ ancla se movió — actualiza esta ficha en el mismo cambio):
 - Raíz 12ª: `grep -n "fn monthly_multiplier" crates/engine/src/projection.rs`
 - Target móvil único: `grep -rn "fn fire_target_at_month_index" crates/engine/src/projection.rs` y sus ≥2 llamantes en `apps/api/src/handlers/projection.rs`
 - Overflow tipado: `grep -n "AssetValueOverflow" crates/engine/src/projection.rs` (enum + checked_mul + test)
-- Cascada en jubilación declarada: `grep -n "InRetirement" crates/engine/src/projection.rs apps/api/src/handlers/allocation_rules.rs`
+- Cascada también en jubilación (4.12.1): `grep -n "la MISMA cascada" crates/engine/src/projection.rs` y `grep -n "unallocated_savings_total" crates/engine/src/projection.rs` (≥1 y ≥2 hits respectivamente)
 - Orden total de activos: `grep -rn "sort_index ASC, name ASC, id ASC" apps/api/src/handlers/` (2 hits)
 - Paridad tramos altos: `grep -c "tramo" apps/api/tests/fixtures/fire-parity.json` (≥2) y `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"` (≥9)
 - Tramos vigentes por defecto: `grep -n "300000" apps/api/src/handlers/installation.rs`

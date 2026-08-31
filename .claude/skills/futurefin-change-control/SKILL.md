@@ -15,7 +15,16 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 7
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31
+(4.12.1, rama `feat/175-176-fin-del-surplus-cash` — fin de `surplus_cash`, #175/#176 tras la
+entrevista de decisiones del owner)**: **55** migraciones (la 55ª,
+`20260901160000_allocation_rules_reenable_disabled_sinks`, es DATA-CHANGING: reactiva sumideros
+apagados — sin ella el upgrade haría desaparecer dinero), **68** ficheros de test de integración (sin ficheros nuevos)
+(`ls apps/api/tests/*.rs | wc -l`), motor con `unallocated_savings_total` en `ProjectionOutput` y
+la cascada corriendo también jubilada (breaking §5 ×3 en el wire: `leftover_to_surplus_cash`→
+`leftover_unallocated`, `surplus_destination` retirado, `in_retirement` retirado), catálogo MCP
+en 68 tools con presupuesto REMEDIDO (el «126 caracteres de margen» que aquí circuló estaba
+congelado — recuenta siempre con el fixture). Antes, counts refreshed **2026-08-31 (Ola 7
 del programa de la auditoría — la última —, rama `feat/ola7-proximos-y-sobrante`)**: **68**
 ficheros de test de integración (`ls apps/api/tests/*.rs | wc -l`; los dos nuevos son
 `deflator_parity.rs` y `liability_interest_parity.rs`, fixtures cruzados de #136), **53**

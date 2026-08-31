@@ -5,6 +5,17 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.1
+
+- **Tu dinero ya nunca se queda «en caja fantasma»**: al jubilarte, tus reglas de ahorro siguen
+  funcionando exactamente igual — el sobrante de tu pensión se invierte donde tú dijiste, en vez
+  de acumularse a un 0 % invisible. En el escenario tipo son **229.349 € más** a 30 años.
+- La regla «resto» ahora es intocable mientras tengas activos (ni borrarla, ni apagarla, ni
+  ponerle tope — muévela de activo si quieres otro destino), y si la tenías desactivada esta
+  versión la reactiva: sin ella, tu ahorro dejaría de contarse.
+- Si algún ahorro no tuviera destino (sin activos creados), la app te lo dice en voz alta en vez
+  de fingir que rinde: crea tu primera cuenta y la regla nace sola.
+
 ## 4.12.0
 
 - **Los impuestos de vender ahora se calculan sobre tu ganancia real, no sobre todo lo vendido**:
