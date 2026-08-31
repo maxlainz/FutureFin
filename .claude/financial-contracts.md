@@ -98,12 +98,15 @@ realidad** o entre superficies, no error de aritmética.
   principal se congela — la parte «para siempre» es divergencia (§4: D17, decidida).
 
 ### 2.4 FIRE y fiscalidad
-- `target_base = gross_up(need_annual)/(swr/100)`; target del mes k = `base·(1+i/100)^(k/12)`
-  (único helper `fire_target_at_month_index`, compartido engine/handler). Cruce: `NW(k−1) ≥
-  target(k−1)`.
+- `target_base = gross_up(need_annual)/(swr/100)`; target del mes k = `base·(1+i/100)^(k/12) +
+  término_deuda(k)` (único helper `fire_target_at_month_index`; el término finito de deuda es de
+  4.8.0/#142 — el objetivo NO es monótono). Cruce desde 4.8.0/#143: **`líquido(k−1) ≥
+  target(k−1)`** (Σ activos vendibles + surplus_cash, bruto), con latch absorbente (#141).
 - Gross-up: forma cerrada por tramos (escala **marginal**), tramos por defecto = escala del ahorro
   VIGENTE 2025-26 (19/21/23/27/30 @ 6k/50k/200k/300k — Ley 7/2024). Paridad Rust↔TS por
-  `fire-parity.json` (9 casos, tramos 27 % y 30 % incluidos desde 2026-08).
+  `fire-parity.json` (recuenta los casos con `python3 -c "import json;print(len(json.load(open(
+  'apps/api/tests/fixtures/fire-parity.json'))['cases']))"` — el «9» que aquí vivió congelado ya
+  mordió una vez).
 - La base imponible que asume es el **reembolso íntegro**; la ley grava solo la plusvalía con FIFO
   y diferimiento (LIRPF arts. 33/37/94) — §4: D4, decidido: fracción g por fases.
 - Fiscalidad de fondos: la rentabilidad publicada de un fondo YA es neta de TER/transacción
@@ -111,11 +114,13 @@ realidad** o entre superficies, no error de aritmética.
   rebalanceo» es carencia funcional, no fiscal.
 
 ### 2.5 Jubilación
-- Disparador único: cruce patrimonial (el trigger por edad está vetado — failure-archaeology).
-  Sin latch hoy: reversible mes a mes (§4: D7, decidido: absorbente).
+- Disparador único: cruce patrimonial LÍQUIDO (el trigger por edad está vetado —
+  failure-archaeology). Latch absorbente desde 4.8.0 (#141): una vez jubilado, siempre jubilado.
 - Tras el cruce: `income_retirement` (partidas `persists_after_retirement`) y `expense_retirement`
-  (partidas `!ends_at_retirement`), **del presupuesto en los 3 modos**, congeladas en nominal; el
-  superávit va a `surplus_cash`; la retirada NO tributa (asimetría con el target — §4: D5, decidido).
+  (partidas `!ends_at_retirement`), **del presupuesto en los 3 modos**; desde 4.9.0 (#139) el
+  gasto se INDEXA a la inflación de la instalación y los ingresos quedan planos (decisión del
+  owner); el superávit va a `surplus_cash`; la retirada NO tributa (asimetría con el target —
+  §4: D5, decidido en #140, se cierra en la Ola 6).
 
 ### 2.6 Histórico
 - Interpolación entre snapshots: activos lineal en días civiles (o anclada a cash-flow); pasivos
@@ -222,12 +227,10 @@ por encima de lo nominal (#146); la edad límite del horizonte es configurable
 
 | Divergencia | Coste (sintético) | Issue |
 |---|---|---|
-| Deuda en el objetivo: la cuota cuenta los meses que quedan de préstamo, en los 3 modos; en B/C la deuda vuelve a amortizar | hasta 3,28 M€ (+236 %) / 522 k€ / 442 k€ según pata | [#142](https://github.com/maxlainz/FutureFin/issues/142) |
-| Jubilación absorbente (latch, sin re-empleo automático) | 152-266 k€ de patrimonio fantasma (hasta 77 % del NW) | [#141](https://github.com/maxlainz/FutureFin/issues/141) |
 | Fiscalidad: retirada simulada grosseada + base plusvalía por fases (g, default 1,0) | 425 k€ de NW ficticio; objetivo −8/−13 % con g=0,5 | [#140](https://github.com/maxlainz/FutureFin/issues/140) |
+| Base de coste POR ACTIVO: baja al drenar + superávit jubilado cuenta (decidido: «arreglo completo») | 720 k€ sin contabilizar; habilita g derivado (backlog) | [#120](https://github.com/maxlainz/FutureFin/issues/120) |
 | Objetivo FIRE vs pensión plana bajo #139: la necesidad se resta ANTES de inflar (decisión del owner 2026-08-31: SE ARREGLA, con el gross-up ya en el engine — Ola 6) | 166.610,54 € cortos (pensión 1.000 €/mes, 2 %, 20 a) | [#170](https://github.com/maxlainz/FutureFin/issues/170) |
 | `first_month_allocation` publica el techo de cap con el gasto REGULAR en la traza `InRetirement` (Ola 6) | traza engañosa, serie intacta | [#171](https://github.com/maxlainz/FutureFin/issues/171) |
-| Solo el patrimonio líquido decide el cruce FIRE | falso «FIRE hoy» con déficit real de 383 k€ | [#143](https://github.com/maxlainz/FutureFin/issues/143) |
 | Importes del presupuesto declarados «netos» en la GUI | ~103 k€ de objetivo si se teclea la pensión bruta | [#147](https://github.com/maxlainz/FutureFin/issues/147) |
 | «Próximos» con flujos recurrentes con fecha (dirección del owner) | 355 k€ de alquiler perpetuo; 607 k€ de pensión anticipada | [#148](https://github.com/maxlainz/FutureFin/issues/148) |
 | Regla remainder obligatoria (default: primer activo) | 360 k€ muertos vs ~1,22 M€ invertidos (30 a) | [#150](https://github.com/maxlainz/FutureFin/issues/150) |
@@ -236,11 +239,6 @@ por encima de lo nominal (#146); la edad límite del horizonte es configurable
 
 | Divergencia | Coste (sintético) | Issue |
 |---|---|---|
-| Gasto medio real: denominador con meses sin clasificar; ventanas desplazadas; euros de años distintos | 300 k€ / 180 k€ / 120 k€ | [#125](https://github.com/maxlainz/FutureFin/issues/125) |
-| Partida de gasto vencida: KPIs y target la suman, el motor la cancela | +150 k€ (+33 %) de objetivo | [#124](https://github.com/maxlainz/FutureFin/issues/124) |
-| «Autonomía: indefinida» ciega a la rentabilidad | etiqueta falsa sobre saldo que se agota en 28,6 a | [#128](https://github.com/maxlainz/FutureFin/issues/128) |
-| `contributed_capital` nunca decrece, 0 sin purchase_price | 720 k€ sin contabilizar; bloquea g de #140 | [#120](https://github.com/maxlainz/FutureFin/issues/120) |
-| sim_kpis vs first_month_allocation: dos «cajas del mes» | 124 k€ explicados con la cifra equivocada | [#127](https://github.com/maxlainz/FutureFin/issues/127) |
 | Planning flows: fecha pasada descartada; rampa dependiente del día | 3 k€ desaparecidos; ±29 % en la cifra del mes 1 | [#126](https://github.com/maxlainz/FutureFin/issues/126) |
 | Barridos: prosa contradictoria · métricas sin contrato · validaciones asimétricas · duplicados cliente sin fixture · campos muertos (ref. #96) · convenciones no declaradas | — | [#133](https://github.com/maxlainz/FutureFin/issues/133)-[#138](https://github.com/maxlainz/FutureFin/issues/138) |
 

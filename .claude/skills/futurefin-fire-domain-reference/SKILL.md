@@ -293,11 +293,12 @@ form replaced it with **identical results ±0.01 €** — proven by the regress
 `closed_form_matches_binary_search_across_es_brackets` (projection.rs:1583-1613), which keeps
 the old binary search alive as a reference implementation.
 
-**Client**: `apps/web/src/lib/fire.ts` still uses the 90-iteration **binary search** on `number`
-(`grossUpNetAnnualFire`, fire.ts:119-134). That is deliberate (preview-only, float math); do not
-"fix" one side without running both parity suites (§8). `taxOnGrossCapitalAnnual`
-(fire.ts:86-117) mirrors the server's `tax_on_gross_capital_annual` (projection.rs:71-97,
-test-only on the server side).
+**Client**: `apps/web/src/lib/fire.ts` uses the SAME closed form as the server since Ola 2/#118
+(`grossUpNetAnnualFire`, fire.ts:236-272; its own comment records that the old 90-iteration
+binary search SATURATED and published a target ~20 % low — the claim that the bisection was
+"deliberate" died there). Do not change one side without running both parity suites (§8).
+`taxOnGrossCapitalAnnual` mirrors the server's `tax_on_gross_capital_annual` (until the Ola 6
+move to `crates/engine/src/tax.rs`, test-only on the server side).
 
 ## 4. The nominal model (v1.2.0, current)
 
