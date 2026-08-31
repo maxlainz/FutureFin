@@ -134,15 +134,11 @@ pub struct AvgWindowSpec {
     pub mode: AvgWindowMode,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct TaxBracket {
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub up_to: Option<Decimal>,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub pct: Decimal,
-}
+// Desde la Ola 6 (#140) `TaxBracket` vive en el ENGINE (`crates/engine/src/tax.rs`) con la
+// MISMA serde Decimal-as-string — el JSONB almacenado deserializa idéntico — y el `ToSchema`
+// viaja tras la feature `openapi` del crate. Re-export para que todos los consumidores del
+// lado API sigan compilando sin tocar sus imports.
+pub use futurefin_engine::TaxBracket;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(default)]

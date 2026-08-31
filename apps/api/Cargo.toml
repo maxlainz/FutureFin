@@ -27,7 +27,7 @@ chrono-tz = "0.10"
 cookie = "0.18"
 dotenvy = "0.15"
 futurefin-domain = { path = "../../crates/domain" }
-futurefin-engine = { path = "../../crates/engine" }
+futurefin-engine = { path = "../../crates/engine", features = ["openapi"] }
 http = "1"
 # TLS: `rustls-tls` en las DOS dependencias que hablan con Home Assistant (reqwest y
 # tokio-tungstenite). `default-tls` arrastraría OpenSSL, que la imagen runtime NO lleva; y

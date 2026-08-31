@@ -1,6 +1,6 @@
 /**
  * Cálculos FIRE en cliente: defaults, normalización del JSONB de la API, gross-up por tramos
- * españoles (mismo modelo que el motor Rust en `apps/api/src/handlers/projection.rs`).
+ * españoles (mismo modelo que el motor Rust en `crates/engine/src/tax.rs` — mudado ahí en la Ola 6/#140).
  *
  * **Nota**: estos cálculos están duplicados en cliente para el **preview en vivo** del
  * formulario de FIRE (Settings → FIRE). El servidor sigue siendo source of truth en
@@ -239,7 +239,7 @@ export function grossUpNetAnnualFire(
   taxesEnabled: boolean,
 ): number {
   // Forma cerrada por tramos, espejo EXACTO de gross_up_net_annual_fire del servidor
-  // (apps/api/src/handlers/projection.rs) — Ola 2, #118. Hasta 4.6.0 aquí vivía una bisección
+  // (crates/engine/src/tax.rs desde la Ola 6/#140) — Ola 2, #118. Hasta 4.6.0 aquí vivía una bisección
   // de 90 iteraciones con techo mágico max(net·4, net+200.000): con un tramo alto el techo
   // SATURABA en silencio y la vista previa publicaba un objetivo un 20 % más bajo que el del
   // servidor (Δ 3,43 M€ en el caso del fixture nuevo). La forma cerrada no tiene techo: en

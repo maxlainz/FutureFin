@@ -5,9 +5,8 @@ use crate::handlers::installation::{
     installation_calendar_inflation_fire, require_installation_member, SavingsSource,
 };
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::{
-    gross_up_net_annual_fire, resolve_effective_savings_inputs, SavingsAvgBasis,
-};
+use crate::handlers::projection::{resolve_effective_savings_inputs, SavingsAvgBasis};
+use futurefin_engine::gross_up_net_annual_fire;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::summary::transactions_avg;
 use crate::state::AppState;

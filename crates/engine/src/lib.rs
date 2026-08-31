@@ -4,6 +4,7 @@ mod history;
 mod net_return;
 mod projection;
 mod runway;
+mod tax;
 
 pub use history::{
     add_months_signed, amortized_segment_value, anchored_cashflow_segment_value, evaluate_timeline,
@@ -24,6 +25,7 @@ pub use projection::{
     MAX_LIABILITY_SCHEDULE_MONTHS,
 };
 pub use runway::{liquid_runway_months, RunwayOutcome, MAX_RUNWAY_MONTHS};
+pub use tax::{gross_up_net_annual_fire, tax_on_gross_capital_annual, TaxBracket};
 
 #[cfg(test)]
 mod no_f64_in_domain_code {
