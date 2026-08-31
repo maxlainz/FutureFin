@@ -157,7 +157,7 @@ async fn capture_same_day_upserts_and_replaces_items() {
 }
 
 #[tokio::test]
-async fn capture_excludes_shared_and_expired_rows() {
+async fn capture_excludes_shared_rows_but_keeps_expired_with_balance() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let asset_cat = app.create_category(&owner, "asset", "Cash").await;
@@ -220,8 +220,12 @@ async fn capture_excludes_shared_and_expired_rows() {
 
     let liab_snap = find_kind(&body["snapshots"], "liability");
     let l_items = liab_snap["items"].as_array().unwrap();
-    assert_eq!(l_items.len(), 1, "pasivo expirado debe excluirse");
-    assert_eq!(l_items[0]["label"], "Vivo");
+    // INVERTIDO en 4.7.0 (#145): antes esperaba 1 («el expirado se excluye»). Un plan vencido
+    // con saldo vivo sigue siendo deuda y la captura lo fotografía — si no, el histórico
+    // registraría un patrimonio 1.000 € mejor que el que el Resumen enseña ese mismo día.
+    assert_eq!(l_items.len(), 2, "vencido con saldo + vivo: {l_items:?}");
+    let labels: Vec<_> = l_items.iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert!(labels.contains(&"Vencido") && labels.contains(&"Vivo"), "{labels:?}");
 }
 
 // ---------------------------------------------------------------------------

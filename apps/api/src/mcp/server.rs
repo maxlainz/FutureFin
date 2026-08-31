@@ -2468,7 +2468,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_liabilities",
-        description = "Pasivos activos (deudas y préstamos): principal, TIN, cuota y frecuencia de pago, fecha fin del plan y `repayment_model`, que decide cómo los simula la proyección: `fixed_payments` la cuota va íntegra a principal sin intereses; `french` y `revolving` devengan interés al TIN sobre el saldo; `interest_only` el principal no baja. Los pasivos con plan ya vencido se filtran. La cuota de cada uno aparece además como partida de gasto en get_budget.",
+        description = "Pasivos activos (deudas y préstamos): principal, TIN, cuota y frecuencia de pago, fecha fin del plan y `repayment_model`, que decide cómo los simula la proyección: `fixed_payments` la cuota va íntegra a principal sin intereses; `french` y `revolving` devengan interés al TIN sobre el saldo; `interest_only` el principal no baja. Un plan vencido con saldo vivo se sirve marcado `plan_expired_with_balance` (congelado, sin devengo); el vencido y saldado se filtra. La cuota de cada uno aparece además como partida de gasto en get_budget.",
         annotations(title = "Pasivos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_liabilities(

@@ -900,8 +900,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 445,
-      "description_sha256_12": "75f1cff3eb6b",
+      "description_len": 535,
+      "description_sha256_12": "761490317cde",
       "name": "list_liabilities",
       "properties": [
         "view"

@@ -525,7 +525,7 @@ pub(crate) async fn capture_snapshots_core(
             .execute(&mut *tx)
             .await?;
         } else {
-            // Solo pasivos no expirados; se copian los términos del préstamo.
+            // Pasivos con plan vivo o con saldo vivo (#145); se copian los términos.
             sqlx::query(
                 r#"INSERT INTO history_snapshot_items
                        (snapshot_id, source_item_id, label, value,
@@ -534,7 +534,7 @@ pub(crate) async fn capture_snapshots_core(
                           l.apr_percent, l.payment_amount, l.payment_frequency
                    FROM liabilities l
                    WHERE l.installation_id = $2 AND l.owner_user_id = $3
-                     AND (l.payment_end_date IS NULL OR l.payment_end_date >= $4)"#,
+                     AND (l.payment_end_date IS NULL OR l.payment_end_date >= $4 OR l.principal > 0)"#,
             )
             .bind(snapshot_id)
             .bind(iid)
@@ -1322,7 +1322,7 @@ async fn fetch_history_scope(
         .fetch_all(pool)
         .await?;
 
-    // 4) Pasivos vivos no expirados del scope, mismo conjunto extra.
+    // 4) Pasivos del scope con plan vivo o saldo vivo (#145), mismo conjunto extra.
     let l_scope = view.scope_where("l");
     let l_today_arg = view.next_arg_index();
     let liabs_sql = format!(
@@ -1330,7 +1330,7 @@ async fn fetch_history_scope(
                 l.payment_frequency, l.owner_user_id
          FROM liabilities l
          WHERE {l_scope} AND l.owner_user_id IS NOT NULL
-           AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${l_today_arg})"
+           AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${l_today_arg} OR l.principal > 0)"
     );
     let live_liabs: Vec<LiveLiabilityRow> = view
         .bind_scope_as(sqlx::query_as(&liabs_sql), iid, session_user_id)
@@ -2539,13 +2539,13 @@ pub async fn prefill_snapshot(
     .fetch_all(&state.pool)
     .await?;
 
-    // Filas vivas propias no expiradas (assets o liabilities), normalizadas a `PrefillLiveRow`.
+    // Filas vivas propias (con plan vivo o saldo vivo, #145), normalizadas a `PrefillLiveRow`.
     let live_rows: Vec<PrefillLiveRow> = if is_liability {
         sqlx::query_as(
             r#"SELECT id, label, principal AS value, apr_percent, payment_amount, payment_frequency
                FROM liabilities
                WHERE installation_id = $1 AND owner_user_id = $2
-                 AND (payment_end_date IS NULL OR payment_end_date >= $3)"#,
+                 AND (payment_end_date IS NULL OR payment_end_date >= $3 OR principal > 0)"#,
         )
         .bind(iid)
         .bind(user.id.0)

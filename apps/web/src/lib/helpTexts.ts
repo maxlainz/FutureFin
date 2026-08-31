@@ -79,17 +79,17 @@ export const HELP_TEXTS = {
   "summary.debt_to_assets_ratio": {
     title: "Ratio deuda / activos",
     body:
-      "Cuánta deuda tienes por cada euro de activo: tus pasivos entre tus activos totales. Los " +
-      "préstamos ya vencidos no cuentan, igual que en el resto del Resumen —así que puede subir " +
-      "sin que hayas pedido nada nuevo, si simplemente caduca un préstamo que ya no sumaba—. Sin " +
-      "activos registrados, esta cifra no se calcula.",
+      "Cuánta deuda tienes por cada euro de activo: tus pasivos entre tus activos totales. " +
+      "Un préstamo vencido con saldo vivo sigue contando (marcado «plan vencido con saldo»), " +
+      "igual que en el resto del Resumen; solo el vencido y saldado desaparece. Sin activos " +
+      "registrados, esta cifra no se calcula.",
   },
   "liabilities.principal_total": {
     title: "Principal total",
     body:
-      "Suma del principal pendiente de los pasivos de esta lista. Los que ya vencieron no " +
-      "aparecen aquí, así que tampoco suman. No incluye los intereses que te queden por pagar, " +
-      "solo el capital.",
+      "Suma del principal pendiente de los pasivos de esta lista. Un plan vencido con saldo " +
+      "vivo sigue aquí y sigue sumando; solo el vencido y saldado desaparece. No incluye los " +
+      "intereses que te queden por pagar, solo el capital.",
   },
   "liabilities.monthly_service": {
     title: "Servicio mensual equivalente",
@@ -122,8 +122,10 @@ export const HELP_TEXTS = {
   "summary.net_worth": {
     title: "Patrimonio neto",
     body:
-      "Activos totales menos pasivos pendientes. Los préstamos ya vencidos no se cuentan, aunque " +
-      "siguen guardados en tu historial.",
+      "Activos totales menos pasivos pendientes. Un préstamo cuyo plan venció con saldo " +
+      "vivo SIGUE restando —la deuda no se extingue por calendario; aparece marcada como " +
+      "«plan vencido con saldo»—. Solo el vencido y saldado (capital a cero) deja de contar, " +
+      "aunque sigue guardado en tu historial.",
   },
 
   // --- Jubilación -----------------------------------------------------------

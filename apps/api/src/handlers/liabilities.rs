@@ -159,6 +159,10 @@ pub struct LiabilityResponse {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub min_payment_eur: Option<Decimal>,
+    /// «Plan vencido con saldo» (#145): `payment_end_date < hoy` y `principal > 0`. La deuda no
+    /// se extinguió por calendario — el banco reclama, refinancia o lleva a impagado el residuo;
+    /// aquí sigue visible, congelada y marcada. `false` para todo pasivo con plan vivo o saldado.
+    pub plan_expired_with_balance: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
@@ -673,7 +677,7 @@ async fn assert_expense_category(
     Ok(())
 }
 
-fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
+fn row_to_response(r: LiabilityRow, today: NaiveDate) -> Result<LiabilityResponse, ApiError> {
     let payment_frequency = match r.payment_frequency.as_deref() {
         None => None,
         Some(s) => Some(PaymentFrequency::parse(s)?),
@@ -693,6 +697,8 @@ fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
         apr_percent: r.apr_percent,
         payment_amount: r.payment_amount,
         payment_frequency,
+        plan_expired_with_balance: matches!(r.payment_end_date, Some(end) if end < today)
+            && r.principal > Decimal::ZERO,
         payment_end_date: r.payment_end_date,
         min_payment_pct: r.min_payment_pct,
         min_payment_eur: r.min_payment_eur,
@@ -743,7 +749,7 @@ pub(crate) async fn list_liabilities_core(
                   sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur
            FROM liabilities
            WHERE {scope}
-             AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph})
+             AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph} OR principal > 0)
            ORDER BY sort_index ASC, label ASC"#
     );
     let rows: Vec<LiabilityRow> = view
@@ -754,7 +760,7 @@ pub(crate) async fn list_liabilities_core(
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        out.push(row_to_response(r)?);
+        out.push(row_to_response(r, today)?);
     }
     Ok(out)
 }
@@ -912,7 +918,8 @@ pub(crate) async fn create_liability_core(
     .await?;
 
     refresh_projection_after_mutation(&state, iid, user_id).await;
-    row_to_response(row)
+    let today = installation_naive_today(&state.pool, iid).await?;
+    row_to_response(row, today)
 }
 
 #[utoipa::path(
@@ -1171,7 +1178,8 @@ pub(crate) async fn patch_liability_core(
     .await?;
 
     refresh_projection_after_mutation(&state, iid, user_id).await;
-    row_to_response(updated)
+    let today = installation_naive_today(&state.pool, iid).await?;
+    row_to_response(updated, today)
 }
 
 #[utoipa::path(
@@ -1473,9 +1481,10 @@ pub(crate) async fn liability_schedule_core(
     let scope = view.scope_where("");
     let id_ph = view.next_arg_index();
     let today_ph = id_ph + 1;
-    // Mismo filtro de pasivo vencido que TODAS las lecturas (contrato «reads never mutate»): un
-    // pasivo con el plan ya cumplido no existe para las lecturas, así que aquí es un 404 y no un
-    // calendario vacío que se leería como «no debes nada» sin decir por qué.
+    // Mismo predicado de visibilidad que TODAS las lecturas (#145): un plan vencido con SALDO
+    // VIVO sigue existiendo — su calendario se sirve congelado, con `payoff_absent_reason:
+    // no_payment_plan` y cero meses (nada devenga sin plan). Solo el vencido Y saldado
+    // (`principal = 0`) es un 404: esa deuda sí se extinguió.
     let sql = format!(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
@@ -1483,7 +1492,7 @@ pub(crate) async fn liability_schedule_core(
            FROM liabilities
            WHERE {scope}
              AND id = ${id_ph}
-             AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph})"#
+             AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph} OR principal > 0)"#
     );
     let row: LiabilityRow = view
         .bind_scope_as(sqlx::query_as(&sql), iid, user_id)

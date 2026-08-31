@@ -436,6 +436,11 @@ export type LiabilityApiRow = {
   payment_amount: string | null;
   payment_frequency: "monthly" | "weekly" | null;
   payment_end_date: string | null;
+  /**
+   * «Plan vencido con saldo» (4.7.0, #145): `payment_end_date < hoy` con `principal > 0`. La
+   * deuda no se extinguió por calendario — sigue visible, congelada y marcada.
+   */
+  plan_expired_with_balance: boolean;
   /** Cuota mínima revolving: % del saldo de apertura. `null` en los demás modelos (4.7.0). */
   min_payment_pct: string | null;
   /** Suelo en euros de la cuota mínima revolving. `null` en los demás modelos (4.7.0). */

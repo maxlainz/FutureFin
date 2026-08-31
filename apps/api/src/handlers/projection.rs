@@ -1280,7 +1280,7 @@ pub(crate) async fn build_installation_projection_input(
                   apr_percent, repayment_model, min_payment_pct, min_payment_eur
            FROM liabilities
            WHERE {liab_scope}
-             AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph})"#
+             AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph} OR principal > 0)"#
     );
     let mut liabs: Vec<LiabEngineRow> = view
         .bind_scope_as(sqlx::query_as(&liab_sql), iid, session_user_id)

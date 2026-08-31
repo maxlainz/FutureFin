@@ -648,6 +648,17 @@ export function LiabilitiesView({
                                     </span>
                                   </>
                                 ) : null}
+                                {row.plan_expired_with_balance ? (
+                                  <>
+                                    {" "}
+                                    <span
+                                      className="chip"
+                                      title="El plan de pagos terminó con capital pendiente: la deuda no se extingue por calendario. Sigue restando en tu patrimonio, congelada (sin devengo ni cuota). Alarga el plan o registra su refinanciación."
+                                    >
+                                      plan vencido con saldo
+                                    </span>
+                                  </>
+                                ) : null}
                                 {!row.expense_category_id ? (
                                   <span
                                     className="muted"

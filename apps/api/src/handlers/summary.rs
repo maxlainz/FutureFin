@@ -191,8 +191,9 @@ pub struct FinancialHealthMetrics {
     ///
     /// Rendimiento anual **nominal** esperado del patrimonio neto, en porcentaje (`"3.5556"` =
     /// 3,5556 %/año). Numerador: la suma de `current_value × expected_annual_return_percent` de
-    /// TODOS los activos del scope menos la de `principal × apr_percent` de los pasivos **no
-    /// vencidos** (mismo filtro que `total_liabilities`); denominador: `net_worth`. Un activo sin
+    /// TODOS los activos del scope menos la de `principal × apr_percent` de los pasivos
+    /// visibles (mismo predicado que `total_liabilities`: plan vivo o saldo vivo, #145);
+    /// denominador: `net_worth`. Un activo sin
     /// rentabilidad configurada o un pasivo sin TIN cuentan como 0 % pero **siguen pesando** en el
     /// denominador. Se **omite** cuando `net_worth ≤ 0` (el cociente cambiaría de signo o
     /// divergiría). Lo calcula `futurefin_engine::net_return_percentages`.
@@ -299,7 +300,7 @@ async fn load_breakdown_lines(
            FROM liabilities l
            INNER JOIN categories c ON c.id = l.category_id AND c.installation_id = l.installation_id
            WHERE {liab_scope} AND c.scope = 'liability'
-             AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${liab_today_ph})
+             AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${liab_today_ph} OR l.principal > 0)
            GROUP BY c.id, c.name
            HAVING COALESCE(SUM(l.principal), 0) > 0
            ORDER BY total DESC"#
@@ -319,7 +320,7 @@ async fn load_breakdown_lines(
                SUM(l.principal) AS total
            FROM liabilities l
            WHERE {liab_scope}
-             AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${liab_today_ph})
+             AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${liab_today_ph} OR l.principal > 0)
            GROUP BY 1
            HAVING SUM(l.principal) > 0
            ORDER BY total DESC"#
@@ -410,8 +411,8 @@ pub struct SummaryResponse {
     /// Activos por categoría (solo filas con total positivo).
     pub assets_by_category: Vec<CategoryBreakdownLine>,
     pub liabilities_by_category: Vec<CategoryBreakdownLine>,
-    /// Pasivos **no vencidos** agrupados por `type_tag` (el mismo filtro
-    /// `payment_end_date IS NULL OR >= hoy` que `total_liabilities`), solo líneas con
+    /// Pasivos visibles agrupados por `type_tag` (el mismo predicado que `total_liabilities`:
+    /// plan vivo O saldo vivo — #145; solo el vencido y saldado queda fuera), solo líneas con
     /// `SUM(principal) > 0`, orden `total DESC`. La línea con `type_tag: null` agrupa los pasivos
     /// sin etiquetar. Es un corte por una dimensión que el usuario escribe libremente en
     /// `POST`/`PATCH /v1/liabilities` (`type_tag`), no por categoría: el desglose por categoría es
@@ -469,12 +470,12 @@ pub(crate) async fn summary_core(
         r#"SELECT current_value, expected_annual_return_percent, is_liquid
            FROM assets WHERE {asset_scope}"#
     );
-    // Ídem con los pasivos: `(principal, TIN %)` con el filtro de vencidos de siempre — el mismo
-    // `WHERE` que servía la suma escalar, no uno nuevo. `total_liabilities` se suma en Rust.
+    // Ídem con los pasivos: `(principal, TIN %)` con el predicado de visibilidad de #145 (plan
+    // vivo o saldo vivo) — el mismo `WHERE` que sirve la suma escalar. Se suma en Rust.
     let liab_sql = format!(
         r#"SELECT principal, apr_percent FROM liabilities
            WHERE {liab_scope}
-             AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph})"#
+             AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph} OR principal > 0)"#
     );
 
     let asset_rows: Vec<(Decimal, Option<Decimal>, bool)> = view
