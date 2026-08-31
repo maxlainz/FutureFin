@@ -134,8 +134,8 @@
         "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "5512eefd8b12",
-      "description_len": 210,
-      "description_sha256_12": "98bdda9164f9",
+      "description_len": 287,
+      "description_sha256_12": "6ca853356680",
       "name": "create_asset",
       "properties": [
         "category_id",
@@ -446,8 +446,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "55f9daf6f16d",
-      "description_len": 557,
-      "description_sha256_12": "cdabef50c31a",
+      "description_len": 464,
+      "description_sha256_12": "09dc5e2300d5",
       "name": "delete_asset",
       "properties": [
         "confirm",

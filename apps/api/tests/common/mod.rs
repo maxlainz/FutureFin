@@ -346,6 +346,25 @@ impl TestApp {
         found["id"].as_str().expect("category id is string").to_string()
     }
 
+    /// #150: id de la regla **sembrada** — el sumidero (`kind == "remainder"` sin `cap_kind`) que
+    /// `create_asset_core` crea sola al dar de alta el primer activo de un scope virgen. Lee
+    /// `GET /v1/allocation-rules` en vez de fiarse de `seeded_allocation_rule_id` (solo lo trae la
+    /// respuesta del POST que sembró) para que los tests puedan pedirlo en cualquier punto
+    /// posterior. Panic si no hay ninguna: en ese punto del test se asumía un sumidero ya sembrado.
+    pub async fn sink_rule_id(&self, cookie: &str) -> String {
+        let r = self.get_with_cookie("/v1/allocation-rules", cookie).await;
+        assert_eq!(r.status, http::StatusCode::OK, "list allocation-rules: {r:?}");
+        r.json()
+            .as_array()
+            .expect("allocation-rules list is an array")
+            .iter()
+            .find(|rule| rule["kind"] == "remainder" && rule["cap_kind"].is_null())
+            .unwrap_or_else(|| panic!("no uncapped remainder rule (sink) found"))["id"]
+            .as_str()
+            .expect("rule id is string")
+            .to_string()
+    }
+
     /// Cuenta filas en una tabla del schema de tests (sin filtros adicionales).
     pub async fn count_rows(&self, table: &str) -> i64 {
         let q = format!(r#"SELECT COUNT(*)::bigint FROM "{}""#, table.replace('"', ""));

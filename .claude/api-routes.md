@@ -387,6 +387,8 @@ Scopes: `asset`, `liability`, `income`, `expense`. Per-installation.
 ### Assets (`/v1/assets/`)
 Accepts `?view=mine` to filter by `owner_user_id`. The asset record no longer carries contribution fields — those live in `/v1/allocation-rules/`.
 
+**Siembra del sumidero (4.11.0, #150)**: el `POST` (y la tool `create_asset`) del **PRIMER activo de un scope virgen** — cero activos Y cero `allocation_rules` del owner; las DOS condiciones, para no retro-sembrar en instalaciones antiguas — crea además la regla `remainder` sin tope apuntando al activo recién creado, vía la MISMA `create_allocation_rule_core` que valida la invariante del sumidero (cero SQL nuevo, cero invariante duplicada). La respuesta lo **declara** en `seeded_allocation_rule_id` (`skip_serializing_if`; solo viaja en ese create). Límite conocido: la secuencia activo→regla **no es atómica** (el módulo de reglas tiene un único punto de commit custodiado por test estructural) — si la regla falla queda el estado pre-#150, que `surplus_destination: "cash"` de la resolución delata. Instalaciones existentes sin sumidero: **sin retro-siembra** (decisión del owner); las cubre el aviso de la SPA colgado de ese mismo campo. Test-cabecera: `smoke.rs::a_fresh_installation_can_create_an_asset_right_away`.
+
 **Plusvalía latente (4.4.0, Fase 6)** — `AssetResponse` gana cuatro campos, **todos sin `skip_serializing_if`: viajan siempre, con `null` explícito**: `unrealized_pnl` (Decimal-as-string), `unrealized_pnl_absent_reason`, `unrealized_pnl_pct` (Decimal-as-string, 1 decimal) y `unrealized_pnl_pct_absent_reason`. Base: la columna `assets.purchase_price` — **no** aportaciones, **no** snapshots, **no** coste medio ponderado. `pnl = current_value − purchase_price`, `pct = pnl/purchase_price × 100`. **Lo caro no es la resta, es la etiqueta**: no es rentabilidad (no anualiza ni descuenta las aportaciones posteriores a la compra, así que en un activo con reglas de reparto activas el número está inflado), y `purchase_price` es opcional, así que hay que distinguir tres estados — `NULL` ⇒ ambos `null` con `no_purchase_price`; `= 0` ⇒ el pnl es el valor entero y el porcentaje es `null` con `zero_purchase_price`; `> 0` ⇒ ambos. Presente en GET, POST y PATCH (los tres pasan por `row_to_response`); **no** aparece en `/v1/summary`. **Trampa conocida (issue #95)**: el `null` que el doc-comment del PATCH promete para **borrar** `purchase_price` es inalcanzable por HTTP —serde colapsa `null` presente y clave ausente en `None`, así que sale 400 `patch_empty`—; la vía viva es el flag `clear_purchase_price` de la tool MCP. Hay un test que fija ese 400 para que no se lea como descuido de esta feature.
 
 **Objetivo resuelto**: `fetch_asset_resolved_targets` dejó su propio `match cap_kind` y llama a `allocation_rules::resolve_cap_ceiling_eur`, la misma función que el techo del ETA de `/v1/allocation-rules/goals` — el objetivo de la pantalla de activos y el de la ETA son el mismo número por construcción.
@@ -428,7 +430,10 @@ campo.
 Devuelve `base_cash` —lo que la cascada reparte de verdad— **desglosado** en `recurring_net`
 (`income − expense − debt_service`, estable) y `planning_component` (el tramo del mes en curso de
 los planning flows sin fecha — 90 días anclados al día 1 del mes desde 4.11.0/#126, así que es
-**constante dentro del mes** y se agota en ~3 meses), con el flag `base_includes_transient`. Ese
+**constante dentro del mes** y se agota en ~3 meses), con el flag `base_includes_transient`.
+Desde 4.11.0 (#150) publica además **`surplus_destination`** (`"asset"` ⟺ hay sumidero HABILITADO
+en la vista; `"cash"` ⟺ el sobrante no absorbido se queda en caja al 0 % — la señal del aviso de
+la SPA; un sumidero deshabilitado cuenta como `"cash"`, porque el campo describe lo que PASA). Ese
 desglose es el punto: un flag de «sobreasignación» a secas habría dicho «sí» y habría sido igual de
 engañoso — la cascada **no** puede repartir de más (`take` se acota por intención, cap y caja, y el
 bucle corta al agotarse), lo que pasaba es que la base incluye un término transitorio.

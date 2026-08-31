@@ -96,6 +96,12 @@ pub struct AssetResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub owner_user_id: Option<Uuid>,
+    /// #150: si este create SEMBRÓ la regla `remainder` (primer activo de un scope sin cascada),
+    /// aquí viaja su id — ninguna escritura implícita queda silenciosa (política S2). Solo en la
+    /// respuesta del POST/tool `create_asset`; omitido en GET y PATCH.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub seeded_allocation_rule_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -310,6 +316,7 @@ fn row_to_response(
         notes: r.notes,
         sort_index: r.sort_index,
         owner_user_id: r.owner_user_id,
+        seeded_allocation_rule_id: None,
     }
 }
 
@@ -473,6 +480,15 @@ pub(crate) fn assert_return_percent(pct: Option<Decimal>) -> Result<(), ApiError
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_asset`.
 /// Invalidación FULL dentro. Sin owner-check en el ledger de assets (contrato del módulo:
 /// cualquier member edita cualquier fila del hogar).
+///
+/// **#150 — siembra del sumidero.** Si este es el PRIMER activo de un scope sin cascada (cero
+/// activos Y cero reglas del owner), tras el INSERT se crea la regla `remainder` apuntándole,
+/// por la MISMA `create_allocation_rule_core` que valida la invariante — cero SQL nuevo, cero
+/// invariante duplicada. **Límite transaccional conocido y deliberado**: el INSERT del activo va
+/// contra el pool y la regla abre su propia transacción (el módulo de reglas tiene un único
+/// punto de commit, custodiado por test estructural) — la secuencia activo→regla NO es atómica;
+/// si la regla falla, queda un activo sin sumidero (el estado pre-#150, que el aviso
+/// `surplus_destination: "cash"` de la resolución cubre).
 pub(crate) async fn create_asset_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -490,6 +506,21 @@ pub(crate) async fn create_asset_core(
     let notes = normalize_notes(&body.notes)?;
     let is_liquid = body.is_liquid.unwrap_or(true);
     let sort_index = body.sort_index.unwrap_or(0);
+
+    // #150: ¿scope virgen? Las DOS condiciones, no una — «cero reglas» sola retro-sembraría en
+    // scopes antiguos con activos y sin sumidero (el owner descartó la retro-siembra); «cero
+    // activos» sola sembraría en un scope que borró sus activos pero conserva reglas.
+    let bootstrap: bool = sqlx::query_scalar(
+        r#"SELECT NOT EXISTS (
+               SELECT 1 FROM assets WHERE installation_id = $1 AND owner_user_id = $2
+           ) AND NOT EXISTS (
+               SELECT 1 FROM allocation_rules WHERE installation_id = $1 AND owner_user_id = $2
+           )"#,
+    )
+    .bind(iid)
+    .bind(user_id)
+    .fetch_one(&state.pool)
+    .await?;
 
     let row: AssetRow = sqlx::query_as(
         r#"INSERT INTO assets (
@@ -516,6 +547,34 @@ pub(crate) async fn create_asset_core(
     .fetch_one(&state.pool)
     .await?;
 
+    // #150: la siembra usa la MISMA función que crea y valida cualquier regla — arrastra gratis
+    // assert_asset_in_scope, la colocación de prioridad, commit_with_sink_invariant y la
+    // invalidación de cache. Errores aquí se propagan en voz alta (el activo ya existe: el
+    // estado queda como el pre-#150 y la resolución lo declara).
+    let seeded_allocation_rule_id = if bootstrap {
+        Some(
+            crate::handlers::allocation_rules::create_allocation_rule_core(
+                state,
+                iid,
+                user_id,
+                crate::handlers::allocation_rules::CreateAllocationRuleBody {
+                    target_asset_id: row.id,
+                    kind: "remainder".into(),
+                    amount: None,
+                    cap_kind: None,
+                    cap_value: None,
+                    enabled: None,
+                    notes: None,
+                },
+                crate::handlers::allocation_rules::SinkPolicy::Allowed,
+            )
+            .await?
+            .id,
+        )
+    } else {
+        None
+    };
+
     let today = installation_naive_today(&state.pool, iid).await?;
     let ctx =
         assets_projection_context(&state.pool, iid, user_id, LedgerView::Household, today).await?;
@@ -537,7 +596,9 @@ pub(crate) async fn create_asset_core(
     let t = targets.get(&row.id).copied();
 
     refresh_projection_after_mutation(&state, iid, user_id).await;
-    Ok(row_to_response(row, n, rec, t))
+    let mut resp = row_to_response(row, n, rec, t);
+    resp.seeded_allocation_rule_id = seeded_allocation_rule_id;
+    Ok(resp)
 }
 
 #[utoipa::path(

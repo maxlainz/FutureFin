@@ -966,16 +966,10 @@ async fn allocation_rule_update_respects_sink_invariant() {
             &owner.cookie,
         )
         .await;
-    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
-    let rule = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
-    let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+    assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
+    // #150: "Fondo" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
+    let rule_id = app.sink_rule_id(&owner.cookie).await;
 
     // Capar el único sink lo destruiría → mismo error tipado que HTTP.
     let envelope = mcp_post(
@@ -1023,28 +1017,17 @@ async fn allocation_rule_update_never_drops_a_half_cap_silently() {
     let token = create_token(&app, &owner).await;
     let cat = app.create_category(&owner, "asset", "Fondos").await;
 
-    let asset_id = app
+    let asset = app
         .post_json_with_cookie(
             "/v1/assets",
             json!({"category_id": cat, "name": "Fondo", "current_value": "1000"}),
             &owner.cookie,
         )
-        .await
-        .json()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let rule_id = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await
-        .json()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+        .await;
+    assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
+    // #150: "Fondo" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
+    let rule_id = app.sink_rule_id(&owner.cookie).await;
 
     // Las dos medias parejas dan el MISMO error. Antes solo lo daba una de las dos.
     for half in [
@@ -2958,15 +2941,19 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         )
         .await;
     let asset2_id = asset2.json()["id"].as_str().unwrap().to_string();
-    let alloc = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": asset2_id, "kind": "remainder"}),
+    // #150: "Fondo" (asset_id) fue el primer activo del owner → ya sembró el sumidero
+    // apuntándole. Lo retargeteamos a "Colchón" (asset2) en vez de crear uno segundo: el test
+    // necesita el sumidero en un activo APARTE para que el preview de `delete_asset` sobre
+    // "Fondo" no lo arrastre (el comentario original de más arriba, ahora cumplido vía PATCH).
+    let alloc_id = app.sink_rule_id(&owner.cookie).await;
+    let retarget = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{alloc_id}"),
+            json!({"target_asset_id": asset2_id}),
             &owner.cookie,
         )
         .await;
-    assert_eq!(alloc.status, http::StatusCode::CREATED, "{alloc:?}");
-    let alloc_id = alloc.json()["id"].as_str().unwrap().to_string();
+    assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
     let spare_cat = app.create_category(&owner, "expense", "Ocio").await;
 
     // --- Los diecisiete previews. NINGUNO lleva `confirm`, así que nada se escribe.

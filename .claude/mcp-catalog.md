@@ -467,6 +467,14 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     sobre un `remainder` con tope) devuelve el mismo 400 `sink_creation_not_allowed` — la guarda
     vive en la core (`allocation_rules.rs`, comentario junto a `is_sink`), así que la
     `description` de la tool («el SUMIDERO solo se pone desde la app») vuelve a ser verdad.
+    **Excepción ACOTADA desde 4.11.0 (#150, política S2)**: la SIEMBRA del sumidero al crear el
+    PRIMER activo de un scope virgen (cero activos y cero reglas del owner) ocurre en las dos
+    superficies — también cuando el alta llega por la tool `create_asset`. No contradice el
+    porqué de la prohibición: aquí no se «redirige» nada (el sobrante iba a caja muerta, no había
+    cascada que alterar), el destino es el activo que el mismo request acaba de crear, y **la
+    escritura implícita se declara** (`seeded_allocation_rule_id` en la respuesta de
+    `create_asset`, HTTP y tool). `create_allocation_rule`/`update_allocation_rule` siguen con
+    `Forbidden`: la excepción vive en `create_asset_core`, no en las tools de reglas.
   - **`confirm_transfer_match` cierra la omisión de `reconcile_pair` sin reabrirla.** El registro
     §3.1 la excluía como *LLM footgun* con un *revisit trigger* literal: «que exista una tool de
     sugerencias». Existe — y lo que se implementó **no es `reconcile_pair`**: acepta **solo un

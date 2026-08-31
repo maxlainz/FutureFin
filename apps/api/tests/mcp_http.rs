@@ -1152,15 +1152,9 @@ async fn get_allocation_resolution_matches_http_endpoint() {
             &owner.cookie,
         )
         .await;
-    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
-    let r = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            serde_json::json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
+    // #150: "Indexado" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
 
     let http = app
         .get_with_cookie("/v1/allocation-rules/resolution", &owner.cookie)
@@ -1810,7 +1804,6 @@ async fn list_tools_echo_the_applied_view_and_keep_content_parity() {
         )
         .await;
     assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
-    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
 
     let liab = app
         .post_json_with_cookie(
@@ -1836,14 +1829,8 @@ async fn list_tools_echo_the_applied_view_and_keep_content_parity() {
         .await;
     assert_eq!(flow.status, http::StatusCode::CREATED, "{flow:?}");
 
-    let rule = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            serde_json::json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+    // #150: "Fondo" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
 
     let txn = app
         .post_json_with_cookie(

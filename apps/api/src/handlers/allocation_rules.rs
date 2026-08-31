@@ -1214,6 +1214,13 @@ pub struct AllocationResolutionResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub leftover_to_surplus_cash: Decimal,
+    /// Adónde va el sobrante no absorbido (#150): `"asset"` ⟺ la vista tiene algún sumidero
+    /// HABILITADO (regla `remainder` sin tope); `"cash"` ⟺ no lo hay y el sobrante se queda en
+    /// caja al 0 % — el aviso de la SPA cuelga de este campo. Pregunta del SERVIDOR, no del
+    /// cliente (recalcularla en TS abriría otro caso de #136). Matiz en `household` con varios
+    /// miembros: basta el sumidero de uno para `"asset"` — si otro owner sigue sin él, su fuga
+    /// la delata `leftover_to_surplus_cash > 0`.
+    pub surplus_destination: &'static str,
     pub rules: Vec<ResolvedRule>,
     pub per_asset: Vec<ResolvedAssetContribution>,
 }
@@ -1330,6 +1337,16 @@ pub(crate) async fn allocation_resolution_core(
         base_includes_transient: !alloc.planning_component.is_zero(),
         allocated_total: allocated_total.round_dp(4),
         leftover_to_surplus_cash: alloc.leftover.round_dp(4),
+        // Un sumidero deshabilitado NO cuenta: el engine lo salta y el sobrante acaba en caja
+        // igual — el campo describe lo que PASA, no lo que hay configurado.
+        surplus_destination: if meta
+            .iter()
+            .any(|r| r.enabled && is_sink(&r.kind, r.cap_kind.as_deref()))
+        {
+            "asset"
+        } else {
+            "cash"
+        },
         rules,
         per_asset,
     })

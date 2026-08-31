@@ -76,12 +76,17 @@ async fn resolution_explains_the_cascade_and_holds_the_identities() {
         json!({ "target_asset_id": indexado, "kind": "percent", "amount": "40" }),
     )
     .await;
-    let r_rem = rule(
-        &app,
-        &owner.cookie,
-        json!({ "target_asset_id": sumidero, "kind": "remainder" }),
-    )
-    .await;
+    // #150: "Cartera Ahorro" fue el primer activo del owner → ya sembró el sumidero (apuntando a
+    // ella). Lo retargeteamos al activo pensado como sumidero en vez de crear uno segundo.
+    let r_rem = app.sink_rule_id(&owner.cookie).await;
+    let retarget = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{r_rem}"),
+            json!({ "target_asset_id": sumidero }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
 
     let resp = app
         .get_with_cookie("/v1/allocation-rules/resolution", &owner.cookie)
@@ -156,13 +161,9 @@ async fn resolution_flags_the_transient_planning_tranche() {
     let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
     budget(&app, &owner.cookie, &cat_inc, "3000").await;
     budget(&app, &owner.cookie, &cat_exp, "1000").await;
+    // #150: "Sumidero" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
     let sumidero = asset(&app, &owner.cookie, &cat_ast, "Sumidero", "0").await;
-    rule(
-        &app,
-        &owner.cookie,
-        json!({ "target_asset_id": sumidero, "kind": "remainder" }),
-    )
-    .await;
 
     let plan = app
         .post_json_with_cookie(
@@ -229,12 +230,17 @@ async fn resolution_reports_rules_the_cascade_never_reached() {
         json!({ "target_asset_id": a, "kind": "fixed", "amount": "500" }),
     )
     .await;
-    let r_second = rule(
-        &app,
-        &owner.cookie,
-        json!({ "target_asset_id": b_id, "kind": "remainder" }),
-    )
-    .await;
+    // #150: "Primero" fue el primer activo del owner → ya sembró el sumidero apuntándole.
+    // Retargeteamos a "Segundo" en vez de crear un segundo remainder.
+    let r_second = app.sink_rule_id(&owner.cookie).await;
+    let retarget = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{r_second}"),
+            json!({ "target_asset_id": b_id }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
 
     let b = app
         .get_with_cookie("/v1/allocation-rules/resolution", &owner.cookie)

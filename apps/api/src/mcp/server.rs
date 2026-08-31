@@ -3984,7 +3984,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_asset",
-        description = "Da de alta un activo («he abierto un depósito de 10.000 € al 3 %»): nombre, categoría de scope asset, valor actual, liquidez (default true) y rentabilidad esperada opcional (> -100). Mueve la proyección entera.",
+        description = "Da de alta un activo: nombre, categoría scope asset, valor actual, liquidez (default true) y rentabilidad esperada opcional (> -100). El PRIMER activo de un scope sin cascada siembra su regla `remainder` — la respuesta lo declara en seeded_allocation_rule_id. Mueve la proyección entera.",
         annotations(title = "Crear activo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_asset(
@@ -4031,6 +4031,9 @@ impl FutureFinMcp {
                     "id": a.id,
                     "summary": format!("{} · {} ({})", a.name, a.current_value,
                         if a.is_liquid { "líquido" } else { "ilíquido" }),
+                    // #150 (política S2): si este alta sembró el sumidero, se declara — ninguna
+                    // escritura implícita viaja en silencio. `null` = no hubo siembra.
+                    "seeded_allocation_rule_id": a.seeded_allocation_rule_id,
                     "impact": impact,
                 }),
                 vec![a.id],
@@ -4943,7 +4946,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "delete_asset",
-        description = "Borra un activo del hogar. El preview trae los efectos colaterales: los movimientos y lotes de import vinculados quedan DESVINCULADOS (SET NULL), no se borran, pero las reglas de reparto que apuntan a este activo SÍ se borran con él y eso no tiene vuelta atrás — `side_effects.allocation_rules_deleted` dice cuántas y `side_effects.allocation_remainder_rules_deleted` cuántas eran el sumidero de la cascada. Si ese número no es cero, dilo explícitamente antes de confirmar: el sobrante mensual pasará a repartirse de otra manera. Mueve la proyección entera.",
+        description = "Borra un activo del hogar. El preview trae los efectos: movimientos y lotes vinculados quedan DESVINCULADOS (no se borran); las reglas de reparto que apuntan al activo SÍ caen con él, sin vuelta atrás — `allocation_rules_deleted` dice cuántas y `allocation_remainder_rules_deleted` cuántas eran el sumidero. Si esa última no es 0, dilo ANTES de confirmar: el sobrante pasará a caja al 0 % (resolution lo marca surplus_destination=cash). Mueve la proyección entera.",
         annotations(title = "Borrar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn delete_asset(

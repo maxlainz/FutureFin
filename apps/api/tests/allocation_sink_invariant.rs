@@ -64,7 +64,27 @@ async fn rules(app: &TestApp, owner: &common::LoggedInOwner) -> Vec<serde_json::
 #[tokio::test]
 async fn patching_a_rule_into_the_sink_moves_it_last() {
     let app = TestApp::spawn().await;
-    let (owner, a1, a2) = setup(&app).await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Inversión").await;
+    let iid = app.installation_id().await;
+
+    // #150: `create_asset_core` siembra el sumidero SOLO si el owner no tiene ni activos ni
+    // reglas. Este test necesita justo el caso contrario — "hay activos, cero sumidero todavía"
+    // — para seguir ejercitando la reubicación del PATCH; es exactamente el escenario "legacy"
+    // que #150 declaró no retro-sembrar (scope con activos previos a la siembra). Lo simulamos
+    // insertando el primer activo directo en BD, saltándonos `create_asset_core` (y su siembra).
+    let a1: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO assets (installation_id, category_id, name, current_value, is_liquid, owner_user_id)
+           VALUES ($1, $2, 'Fondo', 1000, true, $3) RETURNING id"#,
+    )
+    .bind(iid)
+    .bind(Uuid::parse_str(&cat).expect("category id is uuid"))
+    .bind(owner.user_id)
+    .fetch_one(&app.pool)
+    .await
+    .expect("insert legacy asset (bypassing #150 seeding)");
+    let a1 = a1.to_string();
+    let a2 = create_asset(&app, &owner, &cat, "Colchón").await;
 
     // Dos reglas normales, sin ningún sumidero en el scope: es el estado en el que la guardia de
     // conteo pasaba (`n == 0`) y nadie recolocaba nada.
@@ -116,16 +136,10 @@ async fn patching_a_rule_into_the_sink_moves_it_last() {
 #[tokio::test]
 async fn a_second_uncapped_remainder_is_rejected() {
     let app = TestApp::spawn().await;
-    let (owner, a1, a2) = setup(&app).await;
+    let (owner, _a1, a2) = setup(&app).await;
 
-    let first = create_rule(
-        &app,
-        &owner,
-        serde_json::json!({"target_asset_id": a1, "kind": "remainder"}),
-    )
-    .await;
-    assert_eq!(first.status, http::StatusCode::CREATED, "{first:?}");
-
+    // #150: "Fondo" (a1) fue el primer activo del owner → ya sembró el sumidero sin tope. Un
+    // segundo remainder sin tope se rechaza directamente, sin crear el primero a mano.
     let second = create_rule(
         &app,
         &owner,
@@ -151,15 +165,10 @@ async fn a_second_uncapped_remainder_is_rejected() {
 #[tokio::test]
 async fn deleting_the_only_sink_is_rejected_and_the_rule_survives() {
     let app = TestApp::spawn().await;
-    let (owner, a1, _a2) = setup(&app).await;
+    let (owner, _a1, _a2) = setup(&app).await;
 
-    let sink = create_rule(
-        &app,
-        &owner,
-        serde_json::json!({"target_asset_id": a1, "kind": "remainder"}),
-    )
-    .await;
-    let sink_id = sink.json()["id"].as_str().unwrap().to_string();
+    // #150: "Fondo" (a1) fue el primer activo del owner → ya sembró el sumidero apuntándole.
+    let sink_id = app.sink_rule_id(&owner.cookie).await;
 
     let del = app
         .delete_with_cookie(&format!("/v1/allocation-rules/{sink_id}"), &owner.cookie)
@@ -176,15 +185,10 @@ async fn deleting_the_only_sink_is_rejected_and_the_rule_survives() {
 #[tokio::test]
 async fn a_new_rule_is_inserted_before_the_sink() {
     let app = TestApp::spawn().await;
-    let (owner, a1, a2) = setup(&app).await;
+    let (owner, _a1, a2) = setup(&app).await;
 
-    let sink = create_rule(
-        &app,
-        &owner,
-        serde_json::json!({"target_asset_id": a1, "kind": "remainder"}),
-    )
-    .await;
-    let sink_id = sink.json()["id"].as_str().unwrap().to_string();
+    // #150: "Fondo" (a1) fue el primer activo del owner → ya sembró el sumidero apuntándole.
+    let sink_id = app.sink_rule_id(&owner.cookie).await;
 
     let normal = create_rule(
         &app,
@@ -210,18 +214,10 @@ async fn a_new_rule_is_inserted_before_the_sink() {
 #[tokio::test]
 async fn reorder_in_household_view_still_refuses_to_unseat_the_sink() {
     let app = TestApp::spawn().await;
-    let (owner, a1, a2) = setup(&app).await;
+    let (owner, _a1, a2) = setup(&app).await;
 
-    let sink_id = create_rule(
-        &app,
-        &owner,
-        serde_json::json!({"target_asset_id": a1, "kind": "remainder"}),
-    )
-    .await
-    .json()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // #150: "Fondo" (a1) fue el primer activo del owner → ya sembró el sumidero apuntándole.
+    let sink_id = app.sink_rule_id(&owner.cookie).await;
     let normal_id = create_rule(
         &app,
         &owner,
@@ -273,10 +269,13 @@ async fn creating_and_deleting_a_rule_invalidates_the_projection_cache() {
     app.settle_login_warmup(iid).await;
 
     app.warm_household(&owner.cookie, &key).await;
+    // #150: "Fondo" (a1) ya tiene el sumidero sembrado (remainder sin tope) desde `setup()`; un
+    // segundo remainder chocaría con `uncapped_remainder_exists`. Usamos un `fixed` — lo que este
+    // bloque prueba es que CREAR invalida la caché, no de qué kind es la regla.
     let created = create_rule(
         &app,
         &owner,
-        serde_json::json!({"target_asset_id": a1, "kind": "remainder"}),
+        serde_json::json!({"target_asset_id": a1, "kind": "fixed", "amount": "10"}),
     )
     .await;
     assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
