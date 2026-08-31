@@ -1592,3 +1592,73 @@ async fn v11_planning_flows_import_as_one_off() {
     assert!(rows[0].get("window_start_date").is_none(), "{:?}", rows[0]);
     assert!(rows[0].get("window_end_date").is_none(), "{:?}", rows[0]);
 }
+
+/// #150/#178 (4.12.0) — un backup pre-siembra (activos sin ninguna regla) restaura CON sumidero:
+/// la garantía «si no existe la regla, se crea» cubre también el import, o cada restore viejo
+/// refabricaría el sobrante muerto en caja. Este test es además la ESPECIFICACIÓN EJECUTABLE de
+/// los criterios de la migración `20260901150000` (mismo SQL por cross-referencia): destino = el
+/// LÍQUIDO de menor rentabilidad esperada (NULL = 0), empate al de mayor saldo.
+#[tokio::test]
+async fn importing_a_pre_seed_backup_seeds_the_sink_with_the_owner_criteria() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [{ "scope": "asset", "name": "Fondos", "sort_index": 0 }],
+        "assets": [
+            { "category_ref": { "scope": "asset", "name": "Fondos" }, "name": "Indexado",
+              "current_value": "20000.0000", "purchase_price": null, "is_liquid": true,
+              "expected_annual_return_percent": "7.0000", "notes": null, "sort_index": 0 },
+            { "category_ref": { "scope": "asset", "name": "Fondos" }, "name": "Cuenta chica",
+              "current_value": "1000.0000", "purchase_price": null, "is_liquid": true,
+              "expected_annual_return_percent": null, "notes": null, "sort_index": 1 },
+            { "category_ref": { "scope": "asset", "name": "Fondos" }, "name": "Cuenta gorda",
+              "current_value": "5000.0000", "purchase_price": null, "is_liquid": true,
+              "expected_annual_return_percent": null, "notes": null, "sort_index": 2 },
+            { "category_ref": { "scope": "asset", "name": "Fondos" }, "name": "Piso",
+              "current_value": "250000.0000", "purchase_price": null, "is_liquid": false,
+              "expected_annual_return_percent": null, "notes": null, "sort_index": 3 }
+        ],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [],
+        "categorization_rules": [],
+        "recurring_transaction_rules": [],
+        "transfer_match_rejections": []
+    });
+    let b64 = craft_ffbackup_b64(11, &payload, owner.user_id);
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "import: {applied:?}");
+
+    let rules = app.get_with_cookie("/v1/allocation-rules", &owner.cookie).await.json();
+    let rules = rules.as_array().unwrap();
+    assert_eq!(rules.len(), 1, "un solo sumidero sembrado: {rules:?}");
+    assert_eq!(rules[0]["kind"], "remainder", "{rules:?}");
+    assert!(rules[0]["cap_kind"].is_null(), "{rules:?}");
+    // Criterios del owner: entre los LÍQUIDOS de menor rentabilidad (las dos cuentas al
+    // NULL ≡ 0 %, no el Indexado al 7 % ni el Piso ilíquido), gana la de MAYOR saldo.
+    let assets = app.get_with_cookie("/v1/assets", &owner.cookie).await.json();
+    let gorda = assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "Cuenta gorda")
+        .expect("Cuenta gorda")["id"]
+        .clone();
+    assert_eq!(rules[0]["target_asset_id"], gorda, "{rules:?}");
+
+    // Y un backup que YA trae su sumidero no se doble-siembra: el roundtrip del estado recién
+    // sembrado conserva UNA regla.
+    let backup2 = export_ffbackup_b64(&app, &owner.cookie).await;
+    let applied2 = import_apply(&app, &owner.cookie, &backup2).await;
+    assert_eq!(applied2.status, http::StatusCode::OK, "{applied2:?}");
+    let rules2 = app.get_with_cookie("/v1/allocation-rules", &owner.cookie).await.json();
+    assert_eq!(rules2.as_array().unwrap().len(), 1, "{rules2:?}");
+}

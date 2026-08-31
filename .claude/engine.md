@@ -450,13 +450,23 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
 5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
 6. If `net_cash <= 0` (deficit): drain `surplus_cash` first **sin grossear** (la caja entró ya
-   tributada como renta); lo que falte se vende **BRUTO** (4.10.0/#140 fase 1:
-   `gross_up_monthly(neto, tramos, enabled, g)` — M1, dentro del bucle, en TODO drenaje, jubilado
-   o no), drenando ALL assets — liquids first, then illiquids, each group lowest-return first
-   (tiebreak by input index). La base de coste de cada activo BAJA con lo drenado
-   (`b' = b·v_post/v_pre`, #120) y `undrained_cumulative` acumula el descubierto **NETO** (mide
-   gasto que faltó, no ventas que no ocurrieron); se resta del net worth. El chequeo de
-   agotamiento (#119) compara el BRUTO necesario contra lo vendible.
+   tributada como renta — bajo #178 esto es teorema, no excepción: `b = v ⇒ g = 0`); lo que
+   falte se vende **BRUTO** (4.10.0/#140 fase 1 — M1, dentro del bucle, jubilado o no), drenando
+   ALL assets — liquids first, then illiquids, each group lowest-return first (tiebreak by input
+   index; orden extraído en `drain_order`, implementación ÚNICA que comparten
+   `drain_from_assets`, esta rama y el runway). **La `g` es POR ACTIVO desde 4.12.0 (#178)**: si
+   el activo declaró coste (`purchase_price` presente, 0 incluido), `g_i = max(0, 1 − b_i/v_i)`
+   derivada de su base viva — invariante al drenaje del propio mes (`b'/v_post = b/v_pre`),
+   creciente con el crecimiento (`ρ_k = ρ₀·m^{−k}`) —; si no, el escalar `taxable_gain_ratio`.
+   Con `g` uniforme sobre lo vendible, CORTOCIRCUITO al camino literal de 4.11.0
+   (`gross_up_monthly` + `drain_from_assets` + `after_tax_monthly`) — bit-idéntico; con mezcla,
+   `gross_up_mixed_monthly` (forma cerrada por tramos sobre la base agregada `Σ g_i·venta_i`;
+   sin iteración) decide bruto Y reparto a la vez, y el descubierto sale NETO por construcción.
+   La base de coste de cada activo BAJA con lo drenado (`b' = b·v_post/v_pre`, #120) y
+   `undrained_cumulative` acumula el descubierto **NETO** (mide gasto que faltó, no ventas que
+   no ocurrieron); se resta del net worth. El chequeo de agotamiento (#119) compara el BRUTO
+   necesario contra lo vendible. El OBJETIVO y el umbral SWR siguen con el escalar
+   (perpetuidades — el reparto de regímenes vive en financial-contracts §2.4).
    (Erratum fixed 2026-08: this line used to say only "liquid assets", but `drain_from_assets`
    has always continued into illiquid assets once the liquids run dry.)
 7. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar. `monthly_multiplier` = raíz 12ª del factor anual `1 + p/100`; `None` y `0` → factor 1; **las tasas negativas componen de verdad** (−50 % anual ⇒ ×0,5 en 12 meses); `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs con error tipado).
@@ -577,9 +587,15 @@ to any input order), sub-ms at this scale, no `f64`.
 ## Runway (`runway.rs`)
 
 Pure module (v2.2.0) that answers "how many months do the **liquid** assets cover the monthly
-expense?" while compounding the assets' expected return and inflating the expense. Sole consumer:
+expense?" while compounding the assets' expected return and inflating the expense. Consumers:
 `GET /v1/summary` → `financial_health.runway_months` / `runway_is_indefinite`
-(`apps/api/src/handlers/summary.rs`). Public API in the block above; **16** unit tests in-module
+(`apps/api/src/handlers/summary.rs`) y `sim_kpis` (`handlers/projection.rs`). **#178 (4.12.0)**:
+cada líquido viaja como `(valor, rentabilidad %, base de coste declarada)` — el BUCLE FINITO
+deriva la `g` de cada activo con coste declarado (misma pareja de vías que la rama de déficit:
+uniforme ⇒ camino literal bit-idéntico; mezcla ⇒ `gross_up_mixed_monthly`), mientras el UMBRAL
+SWR sigue con el escalar (perpetuidad — reparto de regímenes en financial-contracts §2.4). El
+mes final fraccionario de la vía mixta se mide en NETO (no existe «el» bruto de un mes mixto);
+la vía uniforme conserva la fracción BRUTA histórica. Public API in the block above; **16** unit tests in-module
 as of 4.8.0 (recount: `grep -c '#\[test\]' crates/engine/src/runway.rs`).
 
 | Input | Meaning |

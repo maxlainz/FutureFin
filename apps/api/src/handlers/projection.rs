@@ -438,6 +438,18 @@ pub struct ProjectionSeriesResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub deflation_annual_inflation_percent: Decimal,
+    /// Qué gobernó la fiscalidad del DRENAJE en esta simulación (#178): `cost_basis` = todos los
+    /// activos declaran coste y la `g` de cada venta se deriva de su base viva; `declared_ratio`
+    /// = ninguno lo declara y rige el escalar `taxable_gain_ratio`; `mixed` = conviven. El
+    /// OBJETIVO y el umbral de Autonomía usan siempre el escalar (perpetuidades — el reparto de
+    /// regímenes está declarado en el contrato financiero §2.4).
+    pub drawdown_gain_basis: &'static str,
+    /// `g₀` de la cartera de HOY — `Σ max(0, v−coste)/Σ v` sobre los activos CON coste declarado
+    /// — **solo informativo** («tu cartera es hoy un 20 % ganancia»); no es la entrada de nada.
+    /// `null` cuando ningún activo declara coste.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub taxable_gain_ratio_today: Option<Decimal>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -803,6 +815,41 @@ fn expense_end_date_monthly_adjustments(
 /// fecha→mes que alimenta la caja del motor (#126). Antes tenía su propia regla (ventana
 /// `[hoy, hoy+89]` para los datados, íntegro para los sin fecha), que era la última superficie
 /// del handler dependiente del día de la consulta.
+/// #178: qué régimen fiscal gobierna el drenaje, derivado de los INPUTS (los mismos que ve el
+/// engine). Un activo «declara coste» ⟺ `purchase_price` presente (incluido 0 — «todo es
+/// ganancia» es una declaración, no una ausencia).
+fn drawdown_gain_basis_of(assets: &[futurefin_engine::SimAsset]) -> &'static str {
+    let declared = assets.iter().filter(|a| a.purchase_price.is_some()).count();
+    if declared == 0 {
+        "declared_ratio"
+    } else if declared == assets.len() {
+        "cost_basis"
+    } else {
+        "mixed"
+    }
+}
+
+/// #178: `g₀` informativa de la cartera de hoy, SOLO sobre activos con coste declarado
+/// (mezclar los no declarados fabricaría una cifra con el escalar dentro). `None` si ninguno
+/// declara o si su valor agregado es ≤ 0.
+fn taxable_gain_ratio_today_of(assets: &[futurefin_engine::SimAsset]) -> Option<Decimal> {
+    let mut total = Decimal::ZERO;
+    let mut gains = Decimal::ZERO;
+    for a in assets {
+        if let Some(pp) = a.purchase_price {
+            if a.value > Decimal::ZERO {
+                total += a.value;
+                gains += (a.value - pp).max(Decimal::ZERO);
+            }
+        }
+    }
+    if total > Decimal::ZERO {
+        Some(money_out(gains / total))
+    } else {
+        None
+    }
+}
+
 fn planning_upcoming_net_for_milestone_baseline(
     ref_date: NaiveDate,
     flows: &[PlanningFlowProjRow],
@@ -2272,6 +2319,8 @@ pub async fn compute_projection_series_response(
         savings_income_basis,
         savings_expense_basis,
         deflation_annual_inflation_percent: money_out(inflation_annual_percent),
+        drawdown_gain_basis: drawdown_gain_basis_of(&projection_input.assets),
+        taxable_gain_ratio_today: taxable_gain_ratio_today_of(&projection_input.assets),
         assets_depleted_month_index: output.assets_depleted_month_index,
         uncovered_deficit_total: money_out(output.uncovered_deficit_total),
         liabilities_negative_amortization,
@@ -2659,11 +2708,19 @@ fn sim_kpis(
     // Runway: misma fórmula que `/v1/summary` (gasto total = regular + servicio de deuda;
     // infinito ⟺ SWR sobre el gasto anual grosseado Y rentabilidad esperada ponderada > 0,
     // drenaje secuencial en el caso finito — #128), evaluada sobre los inputs del lado.
-    let liquid_rows: Vec<(Decimal, Option<Decimal>)> = input
+    // #178: la base declarada (purchase_price) viaja al bucle finito — misma regla que el
+    // summary: None = sin coste ⇒ escalar; el umbral SWR sigue con el escalar (perpetuidad).
+    let liquid_rows: Vec<(Decimal, Option<Decimal>, Option<Decimal>)> = input
         .assets
         .iter()
         .filter(|a| a.is_liquid)
-        .map(|a| (a.value.max(Decimal::ZERO), a.expected_annual_return_percent))
+        .map(|a| {
+            (
+                a.value.max(Decimal::ZERO),
+                a.expected_annual_return_percent,
+                a.purchase_price,
+            )
+        })
         .collect();
     let monthly_expense = input.expense_regular_monthly + debt_service_monthly;
     // #140 fase 2: el umbral del runway pasa g — la misma venta y el mismo impuesto que el

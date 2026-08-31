@@ -507,7 +507,7 @@ pub(crate) async fn summary_core(
     // sirve a los tres consumidores (total, runway, rendimiento) y el filtro `is_liquid` se hace
     // en Rust. El runway sigue recibiendo EXACTAMENTE las mismas filas que antes.
     let assets_sql = format!(
-        r#"SELECT current_value, expected_annual_return_percent, is_liquid
+        r#"SELECT current_value, expected_annual_return_percent, is_liquid, purchase_price
            FROM assets WHERE {asset_scope}"#
     );
     // Ídem con los pasivos: `(principal, TIN %)` con el predicado de visibilidad de #145 (plan
@@ -519,7 +519,7 @@ pub(crate) async fn summary_core(
              AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph} OR principal > 0)"#
     );
 
-    let asset_rows: Vec<(Decimal, Option<Decimal>, bool)> = view
+    let asset_rows: Vec<(Decimal, Option<Decimal>, bool, Option<Decimal>)> = view
         .bind_scope_as(sqlx::query_as(&assets_sql), iid, user_id)
         .fetch_all(pool)
         .await?;
@@ -555,16 +555,18 @@ pub(crate) async fn summary_core(
         })
         .collect();
 
-    let total_assets: Decimal = asset_rows.iter().map(|(v, _, _)| *v).sum();
+    let total_assets: Decimal = asset_rows.iter().map(|(v, _, _, _)| *v).sum();
     let total_liabilities: Decimal = liab_raw.iter().map(|(p, _, _, _, _)| *p).sum();
-    let liquid_rows: Vec<(Decimal, Option<Decimal>)> = asset_rows
+    // #178: la base de coste declarada viaja al bucle finito del runway (None = sin coste ⇒ el
+    // escalar; el UMBRAL sigue con el escalar — perpetuidad, ver financial-contracts §2.4).
+    let liquid_rows: Vec<(Decimal, Option<Decimal>, Option<Decimal>)> = asset_rows
         .iter()
-        .filter(|(_, _, is_liquid)| *is_liquid)
-        .map(|(v, r, _)| (*v, *r))
+        .filter(|(_, _, is_liquid, _)| *is_liquid)
+        .map(|(v, r, _, pp)| (*v, *r, *pp))
         .collect();
-    let liquid_assets: Decimal = liquid_rows.iter().map(|(v, _)| *v).sum();
+    let liquid_assets: Decimal = liquid_rows.iter().map(|(v, _, _)| *v).sum();
     let asset_return_rows: Vec<(Decimal, Option<Decimal>)> =
-        asset_rows.iter().map(|(v, r, _)| (*v, *r)).collect();
+        asset_rows.iter().map(|(v, r, _, _)| (*v, *r)).collect();
 
     let budget_totals = ledger_budget_totals_for_summary(pool, iid, user_id, view, today).await?;
 

@@ -113,10 +113,29 @@ realidad** o entre superficies, no error de aritmética.
   `fire-parity.json` (recuenta los casos con `python3 -c "import json;print(len(json.load(open(
   'apps/api/tests/fixtures/fire-parity.json'))['cases']))"` — el «9» que aquí vivió congelado ya
   mordió una vez).
-- La base imponible es la fracción **`taxable_gain_ratio`** (g, [0,1], default 1 = reembolso
-  íntegro — 4.10.0/#140 fase 2); la ley exacta grava la plusvalía con FIFO y diferimiento (LIRPF
-  arts. 33/37/94) — derivar g de la cartera real (`contributed_capital`, ya por activo desde
-  #120) es backlog declarado del issue.
+- **Una sola fiscalidad, dos regímenes declarados (4.12.0/#178).** La escala de tramos y el
+  switch `taxes_enabled` son únicos (`crates/engine/src/tax.rs`) y los consumen los cuatro
+  sitios. El **objetivo FIRE** y el **umbral SWR del runway** son PERPETUIDADES: usan el escalar
+  `taxable_gain_ratio` (g, [0,1], default 1 — que no es solo prudencia: con la base cayendo
+  proporcional al vender y el valor recreciendo, `ρ_k = ρ₀·m^{−k} → 0`, o sea `g → 1` es el
+  LÍMITE correcto de lo que una perpetuidad dimensiona). El **drenaje del bucle** y el **bucle
+  finito del runway** son TRAYECTORIAS: la `g_i` de cada activo CON coste declarado
+  (`purchase_price` presente, 0 incluido) se DERIVA de su base viva — `g_i = max(0, 1 − b_i/v_i)`,
+  invariante al drenaje del propio mes (teorema: `b' = b·v_post/v_pre ⇒ b'/v_post = b/v_pre`) y
+  creciente con el crecimiento —; el escalar es el valor de los activos SIN coste declarado.
+  Con `g` heterogénea el bruto lo resuelve la forma cerrada por tramos
+  (`gross_up_mixed_monthly`: la base agregada `Σ g_i·venta_i` atraviesa los tramos progresivos —
+  paseo exacto, sin iteración; la familia iterada está RETIRADA por arqueología). La dirección
+  del error residual es la SEGURA: el objetivo dimensiona con g=1 mientras los primeros años del
+  drenaje pagan menos ⇒ se cruza sobrecapitalizado. La respuesta declara qué rigió
+  (`drawdown_gain_basis`) y la `g₀` informativa de hoy (`taxable_gain_ratio_today`).
+- La ley exacta grava con **FIFO por participaciones** y diferimiento (LIRPF arts. 33/37/94); el
+  modelo usa **coste medio proporcional** — lo único que la estructura de datos permite (UN
+  `purchase_price` por activo, sin lotes) y lo que hace un reembolso real de fondo UCITS. La
+  diferencia con FIFO es de CALENDARIO, no de importe total (la base agregada es la misma);
+  divergencia aceptada en §4. Matiz declarado: `g_i` clampada a 0 descarta las minusvalías (el
+  art. 49 permitiría compensarlas) — el modelo sobreestima ligeramente el impuesto con pérdidas
+  latentes, mismo signo prudente de siempre.
 - Fiscalidad de fondos: la rentabilidad publicada de un fondo YA es neta de TER/transacción
   (RD 1082/2012 art. 5; CNMV); los traspasos entre fondos están exentos (art. 94) — por eso «sin
   rebalanceo» es carencia funcional, no fiscal.
@@ -133,7 +152,9 @@ realidad** o entre superficies, no error de aritmética.
   (partidas `!ends_at_retirement`), **del presupuesto en los 3 modos**; desde 4.9.0 (#139) el
   gasto se INDEXA a la inflación de la instalación y los ingresos quedan planos (decisión del
   owner); el superávit va a `surplus_cash` (y CUENTA como aportado, #120); la retirada TRIBUTA
-  desde 4.10.0/#140 — todo drenaje vende bruto con la misma escala y la misma g que el objetivo.
+  desde 4.10.0/#140 — todo drenaje vende bruto con la MISMA escala de tramos que el objetivo, y
+  desde 4.12.0/#178 con la `g` de cada activo derivada de su base real cuando el coste está
+  declarado (el escalar rige perpetuidades y activos sin coste — ver §2.4).
 
 ### 2.6 Histórico
 - Interpolación entre snapshots: activos lineal en días civiles (o anclada a cash-flow); pasivos
@@ -279,6 +300,24 @@ del modo euros de hoy (su cifra correcta —cada aportación deflactada por su m
 el escenario del issue— no es computable desde la serie servida, y la aproximación de un solo
 factor daba 99.372,76 €, un 26,72 % corta; el servidor rechaza publicarla a propósito).
 
+**Resueltas en 4.12.0 (#178 + retro-siembra)**: la fracción de plusvalía gravable del DRENAJE se
+DERIVA de la base de coste real por activo cuando el coste está declarado — `g_i = 1 − b_i/v_i`,
+viva mes a mes, con la forma cerrada por tramos `gross_up_mixed_monthly` para la mezcla (§2.4:
+«una sola fiscalidad, dos regímenes»). El ancla del issue (500 k€ al 80 % de coste, 5 %, 24 k€
+netos/año): agotamiento **mes 403 → 561** (+13,2 años que el default robaba) — y el escalar 0,2
+estático que la ayuda antigua invitaba a poner daba **mes 916** (29,6 años de optimismo: era una
+trampa publicada, no una mejora de precisión; la ayuda quedó reescrita). Bit-identidad
+garantizada por construcción: sin ningún coste declarado, la vía rápida es el camino LITERAL de
+4.11.0 — cero pins movidos. El espejo TS muerto `taxOnGrossCapitalAnnual` (cero llamantes, sin
+fixture) se retiró. **Y la RETRO-SIEMBRA del sumidero** (orden del owner 2026-08-31, que
+REVIERTE el «sin retro-siembra» de 4.11.0): migración `20260901150000` — todo scope con activos
+y sin regla `remainder` sin tope la gana, apuntando al LÍQUIDO de menor rentabilidad esperada
+(empate: mayor saldo; sin `created_at` en assets, «el primer activo creado» no es recuperable) —
+y la misma regla corre al importar un backup pre-siembra (import.rs, cross-referenciado). El
+`surplus_cash` residual queda reducido a: déficits (primera fuente, sin grossear — teorema
+`b = v ⇒ g = 0`) y el superávit del JUBILADO
+([#175](https://github.com/maxlainz/FutureFin/issues/175), decisión de modelo pendiente).
+
 ### Aceptadas por el owner (2026-08-30) — sin issue, deuda declarada aquí
 
 | Divergencia | Coste (sintético) | Razón de aceptación |
@@ -290,6 +329,8 @@ factor daba 99.372,76 €, un 26,72 % corta; el servidor rechaza publicarla a pr
 | Descubierto/`undrained` al 0 % (parte de D9) | agujero subestimado ~220 k€ al 18-20 % TEDR | El agujero se publica (issue #119); su coste financiero no se modela |
 | Duplicados cliente↔servidor que QUEDAN, todos con fixture cruzado (#136, 4.11.0): gross-up de la vista previa (`fire-parity.json`), principal derivado (`liability-derived-principal-parity.json`), deflactor TS para k < 0 y mes fraccionario (`deflator-parity.json` pina el dominio compartido k ≥ 0), interés mensual aprox. (`liability-interest-parity.json`) | 0 € mientras los fixtures estén verdes — una suite roja a solas = deriva detectada | Vista previa sin round-trip posible; el `deflator_at_month_index` u32 del servidor no puede servir el pasado ni el grid fino; no existe campo de hogar para el interés aprox. |
 | Superávit del jubilado en caja al 0 % (la cascada no corre tras el cruce) | 229.348,92 € en 30 años con pensión 1.500/gasto 1.000 al 5 % | Fuera del alcance de #150 (declarado); decisión de modelo pendiente en [#175](https://github.com/maxlainz/FutureFin/issues/175) |
+| Coste medio proporcional en vez de FIFO por participaciones (4.12.0/#178) | Diferencia de CALENDARIO, no de importe total (misma base agregada); FIFO grava más al principio y menos después | La BD lleva UN `purchase_price` por activo, sin lotes; el coste medio es además lo que hace un reembolso real de fondo UCITS |
+| Minusvalías sin compensar (`g_i` clampada a 0; el art. 49 LIRPF permitiría compensar) | Impuesto ligeramente sobreestimado con pérdidas latentes | Mismo signo prudente que el resto del modelo; compensar exigiría estado fiscal anual |
 | Estacionalidad del presupuesto alisada a doceavas (D25) | 0 € al horizonte; sin señal de tesorería | Presupuesto mensual por diseño |
 
 ## 5. Convenciones españolas de referencia (fuentes)

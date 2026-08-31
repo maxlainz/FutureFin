@@ -529,6 +529,22 @@ Vocabulary used below (defined once):
   salida buena no es una advertencia en la descripción — es un esquema en el que el error no se
   puede escribir.
 
+### 2.23 La «g efectiva iterada» — el punto fijo escalar es la bisección con otro nombre (issue #178, 4.12.0)
+
+- **Qué se propuso**: para el gross-up con `g` heterogénea por activo (base agregada
+  `Σ g_i·venta_i` sobre tramos progresivos), iterar `G_{t+1} = gross_up(N, g_eff(G_t))` con la
+  «g efectiva» de la venta candidata, esperando convergencia en 1-2 pasos.
+- **Por qué se RECHAZÓ (spike de #178, medido)**: convergencia lineal con razón ≈ 0,11 — **9
+  iteraciones para 1e-6 €**, ~19 para 1e-12; puede OSCILAR cuando el candidato cruza una
+  frontera de activo (`g_eff` salta a trozos); el caso de capacidad agotada deja el mapa plano;
+  y no es reproducible a mano (el fixture cruzado exige derivación independiente). Es la MISMA
+  familia que el «binary-search tax gross-up» ya retirado — un punto fijo escalar sobre una
+  función lineal a trozos, cuando la función es **invertible exacta por un paseo sobre sus
+  quiebros** (`gross_up_mixed_monthly`, `crates/engine/src/tax.rs`: pendiente `1 − r·g_j` por
+  trozo, termina en ≤ n+|tramos| pasos, sin tolerancias).
+- **Lección**: si la función es lineal a trozos, no la busques — recórrela. Cada solver iterado
+  de fiscalidad que ha entrado en este repo ha salido con un incidente (la bisección TS publicó
+  un objetivo ~20 % bajo por saturación).
 
 ## 3. Designs that were tried and replaced
 

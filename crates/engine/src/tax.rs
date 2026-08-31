@@ -77,6 +77,135 @@ pub fn gross_up_monthly(
     ) / Decimal::from(12u32)
 }
 
+/// Un tramo del drenaje mixto (#178): capacidad vendible MENSUAL (≥ 0, ya clampada por el
+/// caller) y su fracción de plusvalía gravable `g` ∈ [0,1], en el ORDEN de drenaje.
+#[derive(Debug, Clone, Copy)]
+pub struct MixedSegment {
+    pub capacity_monthly: Decimal,
+    pub gain_ratio: Decimal,
+}
+
+/// Resultado del solver mixto (#178). Todo MENSUAL, como el par `gross_up_monthly` /
+/// `after_tax_monthly` al que sustituye en la rama de déficit.
+#[derive(Debug, Clone)]
+pub struct MixedDrawdown {
+    /// Venta bruta total del mes.
+    pub gross_monthly: Decimal,
+    /// Paralelo a `segments`: bruto vendido de cada tramo.
+    pub per_segment_monthly: Vec<Decimal>,
+    /// Neto que las capacidades no llegaron a cubrir (descubierto del mes, en euros de GASTO).
+    pub net_shortfall_monthly: Decimal,
+}
+
+/// Gross-up EXACTO con `g` POR TRAMO (#178): el bruto mínimo que, vendido secuencialmente sobre
+/// `segments`, netea `net_monthly` tras el impuesto por tramos progresivos sobre la base
+/// agregada `Σ g_i·venta_i`.
+///
+/// Es la generalización de `gross_up_net_annual_fire` a `g` heterogénea: el neto
+/// `F(G) = G − tax(B(G))` es lineal a trozos (pendiente `1 − r·g_j` mientras se vacía el tramo
+/// `j` bajo el tipo `r`), y se invierte con un paseo sobre sus puntos de quiebro — fronteras de
+/// capacidad (cambia `g`) y techos de tramo fiscal (cambia `r`) — resolviendo una ecuación afín
+/// por trozo con su test de validez, la misma disciplina de la forma cerrada escalar. Sin
+/// búsqueda binaria ni tolerancias (la familia iterada está retirada por arqueología: el punto
+/// fijo escalar converge a razón ~0,11 — nueve iteraciones para 1e-6 € — y puede oscilar en las
+/// fronteras de activo).
+///
+/// Convención M1, coherente con `gross_up_monthly`: se trabaja en unidades ANUALES
+/// (`12·net`, capacidades `12·cap` — la ficción de M1 es «este mes repetido doce veces», así que
+/// la capacidad anual del activo es `12·v`) y se divide por 12 al devolver.
+///
+/// Casos: `taxes_enabled = false` ⇒ llenado secuencial sin impuesto (identidad, como el resto
+/// del módulo). `g = 0` (activo todo coste) ⇒ vende a euro por euro sin tributar. `den ≤ 0`
+/// (tipo efectivo ≥ 100 % sobre este tramo) ⇒ el RESTO de ese tramo no puede netear nada y se
+/// salta al siguiente — nunca se vende lo que netea ≤ 0 (un tramo posterior con `g` menor aún
+/// puede netear; con `g` uniforme el caller ni llega aquí: cortocircuita al camino escalar).
+///
+/// **El caller decide el cortocircuito**: con `g` uniforme este paseo es ALGEBRAICAMENTE la
+/// forma cerrada escalar, pero no bit-idéntico (trocear un tramo lineal añade divisiones que
+/// `rust_decimal` redondea a 28 dígitos) — la rama de déficit y el runway usan el camino
+/// literal de 4.11.0 cuando todos los `g` coinciden, y este solver solo cuando de verdad hay
+/// mezcla.
+pub fn gross_up_mixed_monthly(
+    net_monthly: Decimal,
+    segments: &[MixedSegment],
+    brackets: &[TaxBracket],
+    taxes_enabled: bool,
+) -> MixedDrawdown {
+    let twelve = Decimal::from(12u32);
+    let mut out = MixedDrawdown {
+        gross_monthly: Decimal::ZERO,
+        per_segment_monthly: vec![Decimal::ZERO; segments.len()],
+        net_shortfall_monthly: Decimal::ZERO,
+    };
+    if net_monthly <= Decimal::ZERO {
+        return out;
+    }
+    let n_annual = net_monthly * twelve;
+
+    if !taxes_enabled {
+        // Llenado secuencial puro: cada euro bruto netea un euro.
+        let mut remaining = n_annual;
+        for (j, s) in segments.iter().enumerate() {
+            if remaining <= Decimal::ZERO {
+                break;
+            }
+            let take = (s.capacity_monthly * twelve).max(Decimal::ZERO).min(remaining);
+            out.per_segment_monthly[j] = take / twelve;
+            out.gross_monthly += take / twelve;
+            remaining -= take;
+        }
+        out.net_shortfall_monthly = remaining.max(Decimal::ZERO) / twelve;
+        return out;
+    }
+
+    let hundred = Decimal::from(100u32);
+    let mut base = Decimal::ZERO; // base imponible ANUAL acumulada
+    let mut net_acc = Decimal::ZERO;
+    let mut gross_annual = Decimal::ZERO;
+    let mut m = 0usize; // índice de tramo fiscal — monótono, nunca retrocede
+
+    for (j, s) in segments.iter().enumerate() {
+        let mut cap = (s.capacity_monthly * twelve).max(Decimal::ZERO);
+        let g = s.gain_ratio.clamp(Decimal::ZERO, Decimal::ONE);
+        let mut taken_annual = Decimal::ZERO;
+        while cap > Decimal::ZERO && net_acc < n_annual && m < brackets.len() {
+            let r = brackets[m].pct / hundred;
+            let den = Decimal::ONE - r * g;
+            if den <= Decimal::ZERO {
+                // Tipo efectivo ≥ 100 % para ESTE g: nada de lo que quede en este tramo netea.
+                break;
+            }
+            // Candidato que completa el neto en este trozo…
+            let mut x = (n_annual - net_acc) / den;
+            // …topado por el techo del tramo fiscal (la base llena el tramo)…
+            if g > Decimal::ZERO {
+                if let Some(ceiling) = brackets[m].up_to {
+                    x = x.min((ceiling - base) / g);
+                }
+            }
+            // …y por la capacidad del activo.
+            x = x.min(cap);
+            if x <= Decimal::ZERO {
+                break;
+            }
+            net_acc += x * den;
+            base += x * g;
+            gross_annual += x;
+            cap -= x;
+            taken_annual += x;
+            if let Some(ceiling) = brackets[m].up_to {
+                if base >= ceiling {
+                    m += 1;
+                }
+            }
+        }
+        out.per_segment_monthly[j] = taken_annual / twelve;
+    }
+    out.gross_monthly = gross_annual / twelve;
+    out.net_shortfall_monthly = (n_annual - net_acc).max(Decimal::ZERO) / twelve;
+    out
+}
+
 /// Inversa mensualizada: lo que NETEA una venta bruta mensual — `gross − tax(12·gross)/12`,
 /// misma anualización M1 que `gross_up_monthly` (par redondo: `after_tax(gross_up(n)) = n`).
 /// La necesita el `undrained` NETO: el descubierto se mide en euros que faltaron por GASTAR,
@@ -343,5 +472,121 @@ mod tests {
             (neteado - Decimal::from(250_000u32)).abs() < Decimal::new(1, 6),
             "G − tax(g·G) debe recuperar el neto: {neteado}"
         );
+    }
+
+    // ── Solver mixto (#178) — números del spike, verificados por TRES fuentes (spike Opus +
+    // réplica independiente en sesión + estos tests). Tramos ES, todo sintético. ──
+
+    fn seg(v: u32, g: &str) -> MixedSegment {
+        MixedSegment {
+            capacity_monthly: Decimal::from(v),
+            gain_ratio: g.parse().unwrap(),
+        }
+    }
+
+    /// Caso 5a: A(10.000, g=0,2) + B(5.000, g=0,8), neto 1.000 €/mes. Cabe entero en el primer
+    /// activo dentro del primer tramo: bruto = 1.000/0,962 y B ni se toca.
+    #[test]
+    fn mixed_two_assets_resolves_in_the_first_segment() {
+        let br = es_brackets_for_tests();
+        let dd = gross_up_mixed_monthly(
+            Decimal::from(1000u32),
+            &[seg(10_000, "0.2"), seg(5_000, "0.8")],
+            &br,
+            true,
+        );
+        assert_eq!(dd.gross_monthly.round_dp(10), "1039.5010395010".parse::<Decimal>().unwrap());
+        assert_eq!(dd.per_segment_monthly[0], dd.gross_monthly);
+        assert_eq!(dd.per_segment_monthly[1], Decimal::ZERO);
+        assert_eq!(dd.net_shortfall_monthly, Decimal::ZERO);
+        // Partida doble: G − tax(base) == neto, con la base agregada real.
+        let base_annual = dd.gross_monthly * Decimal::from(12u32) * "0.2".parse::<Decimal>().unwrap();
+        let netea = dd.gross_monthly * Decimal::from(12u32)
+            - tax_on_gross_capital_annual(base_annual, &br);
+        assert!((netea - Decimal::from(12_000u32)).abs() < Decimal::new(1, 8), "{netea}");
+    }
+
+    /// Caso 5a-bis: la capacidad muerde — A(1.000, g=0,2) se agota dentro del mes y el resto
+    /// sale de B(5.000, g=0,8) a pendiente 0,848. Ningún escalar reproduce este número.
+    #[test]
+    fn mixed_capacity_boundary_switches_slope_mid_month() {
+        let br = es_brackets_for_tests();
+        let dd = gross_up_mixed_monthly(
+            Decimal::from(1000u32),
+            &[seg(1_000, "0.2"), seg(5_000, "0.8")],
+            &br,
+            true,
+        );
+        assert_eq!(dd.gross_monthly.round_dp(10), "1044.8113207547".parse::<Decimal>().unwrap());
+        assert_eq!(dd.per_segment_monthly[0], Decimal::from(1000u32));
+        assert_eq!(
+            dd.per_segment_monthly[1].round_dp(10),
+            "44.8113207547".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(dd.net_shortfall_monthly, Decimal::ZERO);
+    }
+
+    /// Con `g` uniforme el paseo es ALGEBRAICAMENTE la forma cerrada escalar: mismo valor a
+    /// plena precisión. (La bit-identidad de producción la garantiza el cortocircuito del
+    /// caller, que ni llama aquí — este test fija la igualdad de VALOR del solver.)
+    #[test]
+    fn mixed_with_uniform_g_equals_the_scalar_closed_form() {
+        let br = es_brackets_for_tests();
+        for g in ["1", "0.5", "0.2"] {
+            let scalar = gross_up_monthly(
+                Decimal::from(2000u32),
+                &br,
+                true,
+                g.parse().unwrap(),
+            );
+            let dd = gross_up_mixed_monthly(
+                Decimal::from(2000u32),
+                &[seg(1_000_000, g), seg(1_000_000, g)],
+                &br,
+                true,
+            );
+            assert!(
+                (dd.gross_monthly - scalar).abs() < Decimal::new(1, 12),
+                "g={g}: paseo {} vs escalar {scalar}",
+                dd.gross_monthly
+            );
+        }
+    }
+
+    /// `g = 0` (activo todo coste): vende a euro por euro, sin impuesto — y sin tope de tramo,
+    /// porque la base no crece.
+    #[test]
+    fn mixed_all_cost_asset_sells_euro_for_euro() {
+        let br = es_brackets_for_tests();
+        let dd = gross_up_mixed_monthly(Decimal::from(9000u32), &[seg(20_000, "0")], &br, true);
+        assert_eq!(dd.gross_monthly, Decimal::from(9000u32));
+        assert_eq!(dd.net_shortfall_monthly, Decimal::ZERO);
+    }
+
+    /// Capacidad insuficiente: se vende TODO y el descubierto sale NETO por construcción —
+    /// 100 € brutos al 19 % (g=1) netean 81; faltan 919 del gasto.
+    #[test]
+    fn mixed_shortfall_is_net_by_construction() {
+        let br = es_brackets_for_tests();
+        let dd = gross_up_mixed_monthly(Decimal::from(1000u32), &[seg(100, "1")], &br, true);
+        assert_eq!(dd.gross_monthly, Decimal::from(100u32));
+        assert_eq!(dd.net_shortfall_monthly.round_dp(10), Decimal::from(919u32).round_dp(10));
+    }
+
+    /// `taxes_enabled = false`: llenado secuencial puro, identidad — la misma regla que el
+    /// resto del módulo.
+    #[test]
+    fn mixed_with_taxes_off_is_the_identity_fill() {
+        let br = es_brackets_for_tests();
+        let dd = gross_up_mixed_monthly(
+            Decimal::from(1500u32),
+            &[seg(1_000, "0.9"), seg(10_000, "0.1")],
+            &br,
+            false,
+        );
+        assert_eq!(dd.gross_monthly, Decimal::from(1500u32));
+        assert_eq!(dd.per_segment_monthly[0], Decimal::from(1000u32));
+        assert_eq!(dd.per_segment_monthly[1], Decimal::from(500u32));
+        assert_eq!(dd.net_shortfall_monthly, Decimal::ZERO);
     }
 }

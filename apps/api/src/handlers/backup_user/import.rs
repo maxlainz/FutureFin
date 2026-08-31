@@ -510,6 +510,47 @@ async fn insert_payload(
         .await?;
     }
 
+    // #150/#178 (4.12.0): un backup pre-siembra restaura activos SIN sumidero, y la garantía del
+    // owner («si no existe la regla, se crea automáticamente») cubre también esta vía — si no,
+    // cada restore de un archivo viejo refabricaría el estado que la migración
+    // `20260901150000_allocation_rules_retro_seed_sink` retiró. MISMOS criterios de selección
+    // que la migración (cross-referencia obligada: tocar uno exige tocar el otro), acotados al
+    // scope del import (este owner).
+    if !new_asset_ids.is_empty() {
+        sqlx::query(
+            r#"INSERT INTO allocation_rules (
+                   installation_id, owner_user_id, target_asset_id, priority,
+                   kind, amount, cap_kind, cap_value, enabled, notes
+               )
+               SELECT $1, $2, s.target_asset_id,
+                      COALESCE((
+                          SELECT MAX(r.priority) FROM allocation_rules r
+                          WHERE r.installation_id = $1 AND r.owner_user_id = $2
+                      ), 0) + 1,
+                      'remainder', NULL, NULL, NULL, true,
+                      'Regla «resto» sembrada automáticamente al importar el backup: el sobrante mensual deja de quedarse en caja al 0 %.'
+               FROM (
+                   SELECT a.id AS target_asset_id
+                   FROM assets a
+                   WHERE a.installation_id = $1 AND a.owner_user_id = $2
+                   ORDER BY a.is_liquid DESC,
+                            COALESCE(a.expected_annual_return_percent, 0) ASC,
+                            a.current_value DESC,
+                            a.id ASC
+                   LIMIT 1
+               ) s
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM allocation_rules r
+                   WHERE r.installation_id = $1 AND r.owner_user_id = $2
+                     AND r.kind = 'remainder' AND r.cap_kind IS NULL
+               )"#,
+        )
+        .bind(iid)
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
     // Insert liabilities and remember each freshly-minted UUID at the same index as the backup,
     // so snapshot items of kind=liability can be re-linked via their `ledger_index`.
     let mut new_liability_ids: Vec<Uuid> = Vec::with_capacity(payload.liabilities.len());
