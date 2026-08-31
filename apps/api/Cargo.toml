@@ -1,6 +1,6 @@
 [package]
 name = "futurefin-api"
-version = "4.9.0"
+version = "4.10.0"
 edition = "2021"
 description = "FutureFin HTTP API (self-hosted)"
 publish = false
@@ -27,7 +27,7 @@ chrono-tz = "0.10"
 cookie = "0.18"
 dotenvy = "0.15"
 futurefin-domain = { path = "../../crates/domain" }
-futurefin-engine = { path = "../../crates/engine" }
+futurefin-engine = { path = "../../crates/engine", features = ["openapi"] }
 http = "1"
 # TLS: `rustls-tls` en las DOS dependencias que hablan con Home Assistant (reqwest y
 # tokio-tungstenite). `default-tls` arrastraría OpenSSL, que la imagen runtime NO lleva; y

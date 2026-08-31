@@ -813,6 +813,11 @@ pub struct FireSettingsOverrideParam {
     #[serde(default)]
     #[schemars(extend("enum" = ["data", "calendar"]))]
     pub expense_avg_window_mode: Option<String>,
+    /// Fracción de plusvalía gravable (0..=1, string decimal) — simulable sin persistir, como
+    /// `taxes_enabled` y `tax_brackets`.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub taxable_gain_ratio: Option<String>,
 }
 
 impl FireSettingsOverrideParam {
@@ -836,6 +841,11 @@ impl FireSettingsOverrideParam {
             expense_avg_window_months: self.expense_avg_window_months,
             expense_avg_window_mode: parse_enum_param(&self.expense_avg_window_mode)
                 .map_err(|e| ApiError::BadRequest(format!("expense_avg_window_mode: {e}")))?,
+            taxable_gain_ratio: self
+                .taxable_gain_ratio
+                .as_deref()
+                .map(|v| parse_decimal_param("taxable_gain_ratio", v))
+                .transpose()?,
             // El what-if del horizonte ya existe como `months`; la edad límite no se overridea.
             horizon_lifespan_age: None,
             annual_inflation_assumption_percent: None,
@@ -1838,6 +1848,12 @@ pub struct UpdateFireSettingsParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["data", "calendar"]))]
     pub expense_avg_window_mode: Option<String>,
+    /// Fracción de cada euro bruto retirado que es plusvalía gravable (0..=1, string decimal;
+    /// default "1" = reembolso íntegro gravado). Baja el objetivo Y la retirada bruta simulada
+    /// a la vez.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub taxable_gain_ratio: Option<String>,
     /// Edad límite del horizonte derivado (85..=105, default 90): la proyección llega hasta esa
     /// edad del solicitante. OJO: el horizonte sigue acotado a 70 años, así que el eje solo
     /// tiene efecto si la edad actual ≥ edad_límite − 70.
@@ -4643,6 +4659,11 @@ impl FutureFinMcp {
                 .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))?;
             patch.income_avg_window_months = p.income_avg_window_months;
             patch.expense_avg_window_months = p.expense_avg_window_months;
+            patch.taxable_gain_ratio = p
+                .taxable_gain_ratio
+                .as_deref()
+                .map(|v| parse_decimal_param("taxable_gain_ratio", v))
+                .transpose()?;
             patch.horizon_lifespan_age = p.horizon_lifespan_age;
             patch.income_avg_window_mode =
                 parse_enum_param(&p.income_avg_window_mode)

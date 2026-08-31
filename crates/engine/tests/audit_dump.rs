@@ -11,7 +11,7 @@
 //!   `PROJ,<caso>,<mes>,<net_worth>,<contributed_capital>`
 
 use chrono::NaiveDate;
-use futurefin_engine::{
+use futurefin_engine::{FireNeed, 
     liability_amortization_schedule, project_net_worth_series, AllocationRule, FireTarget,
     LiabilityPayoffAbsence, ProjectionInput, ProjectionLiabilityInput, RepaymentModel, SimAsset,
 };
@@ -79,6 +79,9 @@ fn base_input(
         ref_date: ref_date(),
         horizon_months: horizon,
         annual_inflation_percent: Decimal::ZERO,
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
         income_regular_monthly: income,
         expense_regular_monthly: expense,
         assets,
@@ -242,7 +245,11 @@ fn audit_dump_projection_series() {
     p2.income_retirement_monthly = Decimal::ZERO;
     p2.expense_retirement_monthly = Decimal::from(2_000);
     p2.fire_target = Some(FireTarget {
-        base_amount: Decimal::from(800_000),
+        need: FireNeed::Indexed { annual_net_today: Decimal::from(800_000) },
+        swr_pct: Decimal::from(100u32),
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
         annual_inflation_percent: d(25, 1),
         debt_payments_remaining: Vec::new(),
     });
@@ -260,7 +267,11 @@ fn audit_dump_projection_series() {
     p3.income_retirement_monthly = Decimal::from(2_500);
     p3.expense_retirement_monthly = Decimal::from(2_000);
     p3.fire_target = Some(FireTarget {
-        base_amount: Decimal::from(200_000),
+        need: FireNeed::Indexed { annual_net_today: Decimal::from(200_000) },
+        swr_pct: Decimal::from(100u32),
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
         annual_inflation_percent: Decimal::ZERO,
         debt_payments_remaining: Vec::new(),
     });

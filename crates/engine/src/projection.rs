@@ -644,28 +644,58 @@ pub fn liability_amortization_schedule(
     }
 }
 
-/// Target FIRE evaluado mes a mes. `base_amount` es el patrimonio necesario en euros de hoy
-/// (gross-up de impuestos ya aplicado); el target del mes `k` es
-/// `base_amount × (1 + annual_inflation_percent/100)^((k-1)/12)`, lo que preserva el poder
-/// adquisitivo del usuario en el momento de la jubilación. `annual_inflation_percent = 0`
-/// degenera a un target plano (mismo valor en todos los meses).
+/// Target FIRE evaluado mes a mes SOBRE LA NECESIDAD (#170): el objetivo del mes `k` es
+/// `gross_up(need(k)) / SWR + término_deuda(k)`, con la necesidad indexada según su
+/// estructura (`FireNeed`) — no una base pre-calculada que se infla entera.
 #[derive(Debug, Clone)]
 pub struct FireTarget {
-    pub base_amount: Decimal,
+    /// La NECESIDAD, no el resultado (#170): hasta 4.9.0 aquí vivía `base_amount` — una cifra
+    /// ya grosseada, ya dividida por el SWR y con la pensión YA RESTADA antes de inflar. Eso
+    /// infló el neto entero mientras el motor drena `gasto·f(k) − pensión`: el objetivo se
+    /// quedaba corto en `pensión·(f(k)−1)` al mes. Ahora el objetivo se evalúa mes a mes sobre
+    /// los ingredientes.
+    pub need: FireNeed,
+    /// SWR en % (3,5 = 3,5 %). ≤ 0 ⇒ sin objetivo (el handler ya lo rechaza antes; guarda).
+    pub swr_pct: Decimal,
+    /// La MISMA escala y el MISMO switch que el drenaje (#140): objetivo y venta simulada
+    /// hablan del mismo euro bruto.
+    pub tax_brackets: Vec<crate::tax::TaxBracket>,
+    pub taxes_enabled: bool,
+    /// Fracción de cada euro bruto que es plusvalía gravable (g, [0,1] — #140 fase 2).
+    /// `ONE` = histórico (reembolso íntegro gravado); `ZERO` ≡ sin impuestos.
+    pub taxable_gain_ratio: Decimal,
     pub annual_inflation_percent: Decimal,
-    /// Término FINITO de deuda (#142, emparejado con la base LÍQUIDA del cruce de #143):
-    /// `debt_payments_remaining[m]` = Σ de cuotas que quedan por pagar DESPUÉS del mes `m`
-    /// (sobre el calendario completo de cada plan, cota `MAX_LIABILITY_SCHEDULE_MONTHS`) más el
-    /// saldo residual que quede vivo al terminar cada plan (constante — esa deuda no se paga
-    /// sola). En euros NOMINALES: las cuotas son fijas por contrato y NO se inflan. Fuera de
-    /// rango ⇒ el ÚLTIMO valor (la cola residual constante), no 0. Vacío = sin deuda (0).
-    ///
-    /// Por qué cuotas y no solo interés: la base del cruce (#143) son los activos LÍQUIDOS
-    /// BRUTOS, que no restan ningún principal — así que el objetivo debe cubrir la perpetuidad
-    /// del gasto MÁS cada euro de cuota pendiente. (Con la base NW de antes, el término
-    /// equivalente habría sido solo el interés restante: algebraicamente son el MISMO requisito
-    /// sobre activos, y el test de emparejamiento lo fija.)
+    /// Término finito de deuda (#142): ver `debt_payments_remaining_series`.
     pub debt_payments_remaining: Vec<Decimal>,
+}
+
+/// Estructura de la necesidad por modo FIRE (#170) — NO es la misma en los tres modos.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FireNeed {
+    /// Cifra declarada en euros de HOY que se indexa ENTERA (modos `manual` y
+    /// `current_income`: con los ingresos planos de #139, descomponerla crearía un objetivo
+    /// plano — un cambio semántico que nadie pidió).
+    Indexed { annual_net_today: Decimal },
+    /// Gasto de jubilación (euros de hoy, se INDEXA con el gasto del bucle) menos pensión
+    /// (PLANA por decisión de #139) — modo `annual_expense`. Es la necesidad REAL que el
+    /// drenaje ejecuta: `max(0, E·f(k) − I)·12`.
+    ExpenseMinusPension {
+        expense_monthly: Decimal,
+        pension_monthly: Decimal,
+    },
+}
+
+impl FireNeed {
+    /// Necesidad neta ANUAL con el factor de inflación `f` ya evaluado.
+    fn annual_net_at(&self, f: Decimal) -> Decimal {
+        match self {
+            FireNeed::Indexed { annual_net_today } => *annual_net_today * f,
+            FireNeed::ExpenseMinusPension { expense_monthly, pension_monthly } => {
+                (*expense_monthly * f - *pension_monthly).max(Decimal::ZERO)
+                    * Decimal::from(12u32)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -680,6 +710,17 @@ pub struct ProjectionInput {
     /// (el target puede no existir y el gasto se indexa igual); el handler rellena ambos del
     /// MISMO supuesto efectivo, overrides de simulate incluidos.
     pub annual_inflation_percent: Decimal,
+    /// Escala del ahorro con la que se GROSSEA todo drenaje de activos (#140 fase 1): vender un
+    /// fondo para cubrir un déficit realiza plusvalía, jubilado o no — gatear por fase crearía
+    /// un salto artificial del +25,95 % en el cruce. La fase 1 grava el 100 % de lo drenado
+    /// (base íntegra, sin mirar la base de coste de #120 — lectura literal del issue); la caja
+    /// (`surplus_cash`) NUNCA se grossea: entró ya tributada como renta. Vacía ⇒ sin impuesto.
+    pub tax_brackets: Vec<crate::tax::TaxBracket>,
+    /// `false` ⇒ bruto = neto: la rama de déficit es bit-idéntica a 4.9.0.
+    pub taxes_enabled: bool,
+    /// g de #140 fase 2 — la MISMA fracción que el objetivo (`FireTarget.taxable_gain_ratio`):
+    /// el drenaje y el target dimensionan la misma venta bruta.
+    pub taxable_gain_ratio: Decimal,
     pub income_regular_monthly: Decimal,
     pub expense_regular_monthly: Decimal,
     pub assets: Vec<SimAsset>,
@@ -782,9 +823,7 @@ pub(crate) fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
     annual_factor.powd(Decimal::ONE / Decimal::from(12))
 }
 
-/// Target FIRE en el `month_index` indicado (0 = punto de partida, 12 = un año después, etc.),
-/// con inflación anual compuesta capitalizada en pasos de 1/12 de año. `month_index = 0` devuelve
-/// el `base_amount`. Devuelve `None` cuando no hay target o su base es ≤ 0.
+/// Target FIRE en el `month_index` indicado (0 = punto de partida, 12 = un año después, etc.).
 ///
 /// Es la **única fuente de verdad**: tanto el motor (para decidir `fire_reached`) como el
 /// handler de la API (para construir `fire_target_series`) la consumen, evitando off-by-one
@@ -809,35 +848,70 @@ pub fn inflation_factor_at_month_index(annual_percent: Decimal, month_index: u32
     (Decimal::ONE + annual_percent / Decimal::from(100u32)).powd(years)
 }
 
-pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal> {
-    let ft = ft?;
-    if ft.base_amount <= Decimal::ZERO {
+/// La BASE del objetivo (sin el término de deuda) en el mes `month_index` — evaluada sobre la
+/// necesidad REAL del mes (#170): `gross_up(need(k), tramos, g) / SWR`. La puerta de k = 0 vive
+/// AQUÍ y decide para TODA la serie: sin necesidad positiva HOY no hay objetivo en ningún mes —
+/// un `max(0,·)` suelto publicaría `target = 0` y un cruce FIRE inmediato y falso (D-8; el
+/// caso 4 de fire-parity, pensión > gasto, es su regresión). Con deflación la necesidad puede
+/// AGOTARSE dentro del horizonte: entonces la base es 0 y el objetivo queda en solo-deuda —
+/// correcto y con test propio.
+///
+/// El gross-up de la necesidad INFLADA no es el gross-up inflado: la escala es afín, no
+/// homogénea, y los tramos son NOMINALES — retirar más euros nominales dentro de 30 años SÍ cae
+/// en tramos más altos (fiscal drag: +7.140,43 € a 30 años con 24.000 €/año al 2 %, sin
+/// pensión). Por eso la evaluación por mes aplica a los TRES modos, no solo al que resta
+/// pensión.
+pub fn fire_target_base_at_month_index(ft: &FireTarget, month_index: u32) -> Option<Decimal> {
+    if ft.swr_pct <= Decimal::ZERO {
         return None;
     }
+    if ft.need.annual_net_at(Decimal::ONE) <= Decimal::ZERO {
+        return None;
+    }
+    let f = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
+    let net_annual = ft.need.annual_net_at(f);
+    let gross = crate::tax::gross_up_net_annual_fire(
+        net_annual,
+        &ft.tax_brackets,
+        ft.taxes_enabled,
+        ft.taxable_gain_ratio,
+    );
+    Some(gross / (ft.swr_pct / Decimal::from(100u32)))
+}
+
+pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal> {
+    let ft = ft?;
+    let base = fire_target_base_at_month_index(ft, month_index)?;
     // Término finito de deuda (#142): cuotas restantes tras `month_index` + cola residual.
-    // OJO: con él, el objetivo DEJA DE SER MONÓTONO (base creciente + término decreciente) —
-    // cualquier optimización que asuma monotonía (búsqueda binaria del cruce, salida temprana)
-    // quedaría rota en silencio. El escaneo lineal de `fire_crossover_month` sigue siendo
-    // correcto. Con inflación 0 el objetivo pasa de plano a estrictamente decreciente.
+    // OJO: el objetivo NO es monótono, ahora por DOS razones — término de deuda decreciente
+    // (#142) y, con pensión, base que crece MÁS rápido que f(k) (#170: el exceso relativo es
+    // I·(f(k)−1)/(E−I)). Cualquier optimización que asuma monotonía (búsqueda binaria del
+    // cruce, salida temprana) quedaría rota en silencio: escaneo lineal, siempre.
     let debt_term = ft
         .debt_payments_remaining
         .get(month_index as usize)
         .or(ft.debt_payments_remaining.last())
         .copied()
         .unwrap_or(Decimal::ZERO);
-    // Desde la Ola 5 la base se multiplica por el factor único (`inflation_factor_at_month_index`),
-    // que con inflación NEGATIVA decrece (#146: hasta 4.8.0 la rama `<= ZERO` aplanaba el
-    // objetivo; la deflación sostenida ya no colapsa a plano). El término de deuda sigue fuera
-    // del factor: las cuotas son nominales por contrato.
-    let factor = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
-    Some(ft.base_amount * factor + debt_term)
+    Some(base + debt_term)
 }
 
+/// Drena `need` de los activos (líquidos primero, menor rentabilidad primero, empate por
+/// índice) y devuelve el DESCUBIERTO. Con `taken: Some(slice)` acumula además `taken[i] += lo
+/// drenado del activo i` — el reparto que #120 necesita para bajar la base de coste por activo
+/// (mismo patrón económico que el `Option<&mut Vec<RuleOutcome>>` de `distribute_contributions`:
+/// el bucle caliente pasa el slice que ya tiene, sin asignar nada por mes).
+///
+/// Un valor individual NEGATIVO nunca «financia» el drenaje (take clampado a ≥ 0): la escritura
+/// valida `current_value ≥ 0` pero la BD no tiene CHECK, y sin el clamp un negativo colado por
+/// restore/edición directa SUBÍA el valor y la necesidad a la vez (min(v, need) < 0). El
+/// negativo sigue pesando en los totales del caller; simplemente no se vende.
 fn drain_from_assets(
     values: &mut [Decimal],
     liquid: &[bool],
     rates: &[Option<Decimal>],
     mut need: Decimal,
+    mut taken: Option<&mut [Decimal]>,
 ) -> Decimal {
     if need <= Decimal::ZERO {
         return Decimal::ZERO;
@@ -860,9 +934,12 @@ fn drain_from_assets(
         if need <= Decimal::ZERO {
             break;
         }
-        let take = values[idx].min(need);
+        let take = values[idx].max(Decimal::ZERO).min(need);
         values[idx] -= take;
         need -= take;
+        if let Some(t) = taken.as_deref_mut() {
+            t[idx] += take;
+        }
     }
     need
 }
@@ -1254,11 +1331,15 @@ pub fn first_month_allocation(
         for (rule_index, rule) in input.allocation_rules.iter().enumerate() {
             // Mismo criterio que la rama sin sobrante (#96): el techo del cap existe aunque la
             // cascada no corra — se publica resuelto, no como null.
+            // #171 (Ola 6): los escalares de la FASE del mes, no los regulares — la traza de
+            // un jubilado publicaba techos calculados sobre una nómina y un gasto que ya no
+            // existen (months_expense(6) decía 15.000 donde el bucle usaría 12.000; un
+            // income_multiple(4) inflaba ×3). Mismos locales que ya eligió el propio mes 1.
             let (ceiling, room) = rule_cap_ceiling_and_room(
                 rule,
                 &values,
-                input.expense_regular_monthly + debt_service,
-                input.income_regular_monthly,
+                expense + debt_service,
+                income,
             );
             rules_trace.push(RuleOutcome {
                 rule_index,
@@ -1272,12 +1353,14 @@ pub fn first_month_allocation(
         }
         (vec![Decimal::ZERO; n], net_cash_month)
     } else {
+        // #171: también aquí — esta rama es la del jubilado CON DÉFICIT (el estado normal de
+        // un jubilado), y `distribute_contributions` publica los techos aunque no reparta (#96).
         distribute_contributions(
             net_cash_month,
             &input.allocation_rules,
             &values,
-            input.expense_regular_monthly + debt_service,
-            input.income_regular_monthly,
+            expense + debt_service,
+            income,
             Some(&mut rules_trace),
         )
     };
@@ -1353,15 +1436,25 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         .map(|_| Vec::with_capacity(input.horizon_months as usize + 1))
         .collect();
 
-    // Coste histórico ya invertido (precio de compra) antes del primer mes simulado.
-    let initial_contributed_basis: Decimal = input
+    // #120 (Ola 6): base de coste POR ACTIVO (coste medio, no FIFO — la BD guarda UN
+    // purchase_price por activo). Arranca en el precio de compra (> 0) y desde aquí:
+    // sube con lo que la cascada aporta a ese activo, y BAJA proporcionalmente al valor
+    // drenado (`b·(v−d)/v`): drenar todo un activo deja su base en 0 exacto. La rentabilidad
+    // nunca la toca — el hueco valor−base ES la plusvalía latente.
+    //
+    // `contributed_capital(k) = Σ basis_i(k) + surplus_cash(k)` — IDENTIDAD, no acumulador:
+    // la caja es base pura (entra ya tributada, no compone), así que el sobrante que la
+    // cascada no asigna y el superávit del jubilado cuentan solos, y el déficit que consume
+    // caja también RESTA solo. Consecuencia deliberada: la serie publicada DEJA DE SER
+    // MONÓTONA — «cumulative» murió con #120.
+    let mut basis: Vec<Decimal> = input
         .assets
         .iter()
-        .filter_map(|a| a.purchase_price)
-        .filter(|p| *p > Decimal::ZERO)
-        .sum();
-
-    let mut contributed_cumulative = initial_contributed_basis;
+        .map(|a| a.purchase_price.filter(|p| *p > Decimal::ZERO).unwrap_or(Decimal::ZERO))
+        .collect();
+    let contributed_fn = |basis: &[Decimal], surplus: Decimal| -> Decimal {
+        basis.iter().copied().sum::<Decimal>() + surplus
+    };
     let mut undrained_cumulative = Decimal::ZERO;
     let mut assets_depleted_month_index: Option<u32> = None;
     // Monthly savings not routed when remainder weights sum to zero.
@@ -1394,7 +1487,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         surplus_cash,
     ));
     liquid_series.push(liquid_fn(&values, surplus_cash));
-    contrib_series.push(contributed_cumulative);
+contrib_series.push(contributed_fn(&basis, surplus_cash));
     for (i, s) in per_asset_series.iter_mut().enumerate() {
         s.push(values[i]);
     }
@@ -1488,29 +1581,65 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             - retirement_withdrawal;
 
         if net_cash_month <= Decimal::ZERO {
-            let mut need = -net_cash_month;
-            // Mes de agotamiento (#119): el primer mes cuyo déficit iguala o supera TODO lo
-            // drenable (surplus_cash + todos los activos — el drenaje continúa sobre los
-            // ilíquidos). En el caso exacto (need == available) la cartera se VACÍA este mes y
-            // el descubierto empieza el siguiente: por eso el predicado es `>=` y no «primer
-            // mes con undrained > 0», que daría el mes siguiente al vaciado. 200.000 € al 0 %
-            // gastando 2.000 €/mes ⇒ mes 100, y NW(360) = −520.000 solo cuadra así.
-            if need > Decimal::ZERO && assets_depleted_month_index.is_none() {
-                let drainable: Decimal = surplus_cash
-                    + values
-                        .iter()
-                        .map(|v| (*v).max(Decimal::ZERO))
-                        .sum::<Decimal>();
-                if need >= drainable {
+            let need_net = -net_cash_month;
+            // La caja va PRIMERO y sin grossear (#140): `surplus_cash` entró ya tributada como
+            // renta del trabajo — venderla no realiza plusvalía. Grossear el déficit entero
+            // antes de tocarla inventaría un impuesto sobre euros que nunca fueron un fondo.
+            let from_surplus = surplus_cash.min(need_net);
+            surplus_cash -= from_surplus;
+            let need_assets_net = need_net - from_surplus;
+            // #140 fase 1: lo que falta se cubre VENDIENDO, y la venta tributa — el bruto a
+            // drenar es gross_up_monthly(neto) (M1: anualiza, grossea por tramos, divide).
+            // Con `taxes_enabled = false` es la identidad y toda la rama es bit-idéntica a 4.9.0.
+            let need_gross = crate::tax::gross_up_monthly(
+                need_assets_net,
+                &input.tax_brackets,
+                input.taxes_enabled,
+                input.taxable_gain_ratio,
+            );
+            // Mes de agotamiento (#119): el primer mes cuya VENTA BRUTA necesaria iguala o
+            // supera todo lo vendible (la caja ya se restó arriba; el drenaje continúa sobre
+            // los ilíquidos). En el caso exacto la cartera se VACÍA este mes y el descubierto
+            // empieza el siguiente: por eso `>=`. Equivalencia exacta con el predicado
+            // histórico con impuestos apagados: `need ≥ surplus + A ⟺ need − surplus ≥ A`.
+            // 200.000 € al 0 % gastando 2.000 €/mes ⇒ mes 100 sin impuestos (NW(360) −520.000)
+            // y mes 80 con tramos ES (NW(360) −561.200, descubierto NETO).
+            if need_gross > Decimal::ZERO && assets_depleted_month_index.is_none() {
+                let drainable: Decimal = values
+                    .iter()
+                    .map(|v| (*v).max(Decimal::ZERO))
+                    .sum::<Decimal>();
+                if need_gross >= drainable {
                     assets_depleted_month_index = Some(k);
                 }
             }
-            let from_surplus = surplus_cash.min(need);
-            surplus_cash -= from_surplus;
-            need -= from_surplus;
-            if need > Decimal::ZERO {
-                let und = drain_from_assets(&mut values, &liquid, &rates, need);
-                undrained_cumulative += und;
+            if need_gross > Decimal::ZERO {
+                let mut taken = vec![Decimal::ZERO; values.len()];
+                let und_gross =
+                    drain_from_assets(&mut values, &liquid, &rates, need_gross, Some(&mut taken));
+                // El descubierto se acumula NETO (#140 D-4): mide euros de GASTO que faltaron,
+                // no ventas que no ocurrieron — lo vendido de verdad netea after_tax(bruto
+                // obtenido), y lo que falta del gasto es la diferencia. Con impuestos apagados
+                // after_tax es la identidad y esto es exactamente el `und` de siempre.
+                let drawn_gross = need_gross - und_gross;
+                undrained_cumulative += need_assets_net
+                    - crate::tax::after_tax_monthly(
+                        drawn_gross,
+                        &input.tax_brackets,
+                        input.taxes_enabled,
+                        input.taxable_gain_ratio,
+                    );
+                // #120: la base baja en proporción al VALOR drenado — b' = b·v_post/v_pre,
+                // multiplicación antes de la división (drenar todo ⇒ b·0/v = 0 exacto).
+                // Guarda v_pre > 0 obligatoria: Decimal / 0 PANICA (precedente task_panic).
+                for i in 0..values.len() {
+                    if taken[i] > Decimal::ZERO {
+                        let v_pre = values[i] + taken[i];
+                        if v_pre > Decimal::ZERO {
+                            basis[i] = basis[i] * values[i] / v_pre;
+                        }
+                    }
+                }
             }
         } else if in_retirement {
             // In retirement any surplus stays as cash buffer; no new contributions are made.
@@ -1527,11 +1656,12 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             );
             for i in 0..values.len() {
                 values[i] += alloc[i];
-                contributed_cumulative += alloc[i];
+                basis[i] += alloc[i];
             }
             if leftover > Decimal::ZERO {
+                // Solo a la caja: la identidad `Σ basis + surplus_cash` ya lo cuenta como
+                // aportado — sumarlo también a una base sería contarlo dos veces.
                 surplus_cash += leftover;
-                contributed_cumulative += leftover;
             }
         }
 
@@ -1558,7 +1688,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         );
         net_series.push(nw);
         liquid_series.push(liquid_fn(&values, surplus_cash));
-        contrib_series.push(contributed_cumulative);
+    contrib_series.push(contributed_fn(&basis, surplus_cash));
         for (i, s) in per_asset_series.iter_mut().enumerate() {
             s.push(values[i]);
         }
@@ -1616,6 +1746,21 @@ mod tests {
         }
     }
 
+    /// Target «plano equivalente» al histórico `base_amount` pre-#170: `Indexed` con SWR
+    /// 100 % y sin impuestos ⇒ `target(k) = base·f(k) + término_deuda`, EXACTO al contrato
+    /// antiguo — mantiene válidos, sin mover un dígito, los pins escritos contra base_amount.
+    fn ft_flat(base: Decimal, inflation: Decimal) -> FireTarget {
+        FireTarget {
+            need: FireNeed::Indexed { annual_net_today: base },
+            swr_pct: Decimal::from(100u32),
+            tax_brackets: Vec::new(),
+            taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
+            annual_inflation_percent: inflation,
+            debt_payments_remaining: Vec::new(),
+        }
+    }
+
     fn base_input(
         horizon: u32,
         income: Decimal,
@@ -1627,6 +1772,9 @@ mod tests {
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: horizon,
             annual_inflation_percent: Decimal::ZERO,
+            tax_brackets: Vec::new(),
+            taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             income_regular_monthly: income,
             expense_regular_monthly: expense,
             assets,
@@ -1657,11 +1805,7 @@ mod tests {
             vec![casa, fondo],
             vec![rule_remainder(1)],
         );
-        inp.fire_target = Some(FireTarget {
-            base_amount: dec("863652.80"),
-            annual_inflation_percent: Decimal::ZERO,
-            debt_payments_remaining: Vec::new(),
-        });
+        inp.fire_target = Some(ft_flat(dec("863652.80"), Decimal::ZERO));
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(
             out.contributed_capital[1],
@@ -1733,11 +1877,8 @@ mod tests {
         // Plan de 10 meses: paga 5.000, quedan 25.000 congelados.
         l.payment_end = Some(NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
         let serie = debt_payments_remaining_series(std::slice::from_ref(&l), ref_2026());
-        let ft = FireTarget {
-            base_amount: Decimal::from(600_000),
-            annual_inflation_percent: Decimal::ZERO,
-            debt_payments_remaining: serie.clone(),
-        };
+        let mut ft = ft_flat(Decimal::from(600_000), Decimal::ZERO);
+        ft.debt_payments_remaining = serie.clone();
         assert_eq!(
             serie[0],
             Decimal::from(30_000),
@@ -1774,11 +1915,7 @@ mod tests {
         inp.expense_retirement_monthly = Decimal::from(2_000);
         // Como lo cablea el handler: la MISMA inflación en el input (gasto, #139) y en el target.
         inp.annual_inflation_percent = Decimal::from(2);
-        inp.fire_target = Some(FireTarget {
-            base_amount: Decimal::from(500_000),
-            annual_inflation_percent: Decimal::from(2),
-            debt_payments_remaining: Vec::new(),
-        });
+        inp.fire_target = Some(ft_flat(Decimal::from(500_000), Decimal::from(2)));
         let out = project_net_worth_series(&inp).unwrap();
 
         // Sanidad del flap: la serie pasa casi todo el horizonte POR DEBAJO del target inflado
@@ -1792,6 +1929,9 @@ mod tests {
         assert!(dips > 100, "el escenario debe vivir bajo el target inflado: dips={dips}");
 
         for k in 0..=120usize {
+            // (#120: el activo no tiene purchase_price y el jubilado va en déficit — base 0,
+            // drenar 0 de base sigue dando 0. Este bucle pinea el LATCH, no la monotonía de
+            // `contributed_capital`, que desde la Ola 6 puede decrecer.)
             assert_eq!(
                 out.contributed_capital[k],
                 Decimal::ZERO,
@@ -1892,11 +2032,7 @@ mod tests {
         );
         inp.income_retirement_monthly = Decimal::from(2_200);
         inp.expense_retirement_monthly = Decimal::from(1_600);
-        inp.fire_target = Some(FireTarget {
-            base_amount: Decimal::from(100_000),
-            annual_inflation_percent: Decimal::ZERO,
-            debt_payments_remaining: Vec::new(),
-        });
+        inp.fire_target = Some(ft_flat(Decimal::from(100_000), Decimal::ZERO));
 
         let fma = first_month_allocation(&inp).unwrap();
         assert_eq!(fma.per_asset, vec![Decimal::ZERO]);
@@ -2458,11 +2594,7 @@ mod tests {
             vec![rule_remainder(0)],
         );
         inp.planning_monthly_cash_adjustment = vec![Decimal::ZERO; 240];
-        inp.fire_target = Some(FireTarget {
-            base_amount: Decimal::from(50_000),
-            annual_inflation_percent: Decimal::from(10),
-            debt_payments_remaining: Vec::new(),
-        });
+        inp.fire_target = Some(ft_flat(Decimal::from(50_000), Decimal::from(10)));
         let out = project_net_worth_series(&inp).unwrap();
         let cross_idx = out
             .net_worth
@@ -2512,11 +2644,7 @@ mod tests {
 
     #[test]
     fn fire_target_grows_with_inflation_each_month() {
-        let ft = FireTarget {
-            base_amount: Decimal::from(750_000),
-            annual_inflation_percent: Decimal::from(3),
-            debt_payments_remaining: Vec::new(),
-        };
+        let ft = ft_flat(Decimal::from(750_000), Decimal::from(3));
         let t0 = fire_target_at_month_index(Some(&ft), 0).unwrap();
         assert_eq!(t0, Decimal::from(750_000));
         let t20y = fire_target_at_month_index(Some(&ft), 240).unwrap();
@@ -2537,11 +2665,7 @@ mod tests {
 
     #[test]
     fn fire_target_with_zero_inflation_is_flat() {
-        let ft = FireTarget {
-            base_amount: Decimal::from(500_000),
-            annual_inflation_percent: Decimal::ZERO,
-            debt_payments_remaining: Vec::new(),
-        };
+        let ft = ft_flat(Decimal::from(500_000), Decimal::ZERO);
         assert_eq!(
             fire_target_at_month_index(Some(&ft), 0).unwrap(),
             Decimal::from(500_000)
@@ -2558,11 +2682,7 @@ mod tests {
     /// disparaba `fire_reached`. Ahora ambos consumen `fire_target_at_month_index`.
     #[test]
     fn fire_target_helper_matches_compound_factor_at_year_boundaries() {
-        let ft = FireTarget {
-            base_amount: Decimal::from(100_000),
-            annual_inflation_percent: Decimal::from(5),
-            debt_payments_remaining: Vec::new(),
-        };
+        let ft = ft_flat(Decimal::from(100_000), Decimal::from(5));
         let r = Decimal::ONE + Decimal::from(5) / Decimal::from(100u32);
 
         let t1y = fire_target_at_month_index(Some(&ft), 12).unwrap();
@@ -2601,11 +2721,7 @@ mod tests {
             vec![rule_remainder(0)],
         );
         inp.expense_retirement_monthly = Decimal::from(1000);
-        inp.fire_target = Some(FireTarget {
-            base_amount: Decimal::from_str_exact("342857.142857").unwrap(),
-            annual_inflation_percent: Decimal::ZERO,
-            debt_payments_remaining: Vec::new(),
-        });
+        inp.fire_target = Some(ft_flat(Decimal::from_str_exact("342857.142857").unwrap(), Decimal::ZERO));
 
         let out = project_net_worth_series(&inp).expect("simulación");
         assert_eq!(
@@ -2687,11 +2803,7 @@ mod tests {
         }];
         inp.planning_monthly_cash_adjustment[0] = Decimal::from(250);
         inp.planning_monthly_cash_adjustment[5] = Decimal::from(-100);
-        inp.fire_target = Some(FireTarget {
-            base_amount: Decimal::from(1_500_000),
-            annual_inflation_percent: Decimal::new(25, 1),
-            debt_payments_remaining: Vec::new(),
-        });
+        inp.fire_target = Some(ft_flat(Decimal::from(1_500_000), Decimal::new(25, 1)));
         inp
     }
 
@@ -3944,11 +4056,7 @@ mod tests {
             vec![rule_remainder(0)],
         );
         inp.annual_inflation_percent = Decimal::from(2);
-        inp.fire_target = Some(FireTarget {
-            base_amount: Decimal::from(600_000),
-            annual_inflation_percent: Decimal::from(2),
-            debt_payments_remaining: Vec::new(),
-        });
+        inp.fire_target = Some(ft_flat(Decimal::from(600_000), Decimal::from(2)));
         let out = project_net_worth_series(&inp).unwrap();
         let cruce = (0..=840u32).find(|&m| {
             fire_target_at_month_index(inp.fire_target.as_ref(), m)
@@ -3956,14 +4064,17 @@ mod tests {
         });
         assert_eq!(cruce, None, "con gasto indexado e ingresos planos no hay cruce en 70 años");
 
-        // Primer déficit de caja en el mes 247: la aportación del 246 aún entra, la del 247 no.
+        // Primer déficit de caja en el mes 247: la aportación del 246 aún entra; desde el 247
+        // el déficit se cubre VENDIENDO — y con #120 (Ola 6) la base de coste baja con la
+        // venta, así que `contributed_capital` DECRECE (hasta 4.9.0 se congelaba: la serie
+        // era monótona por construcción y este assert pineaba la igualdad).
         assert!(
             out.contributed_capital[246] > out.contributed_capital[245],
             "el mes 246 aún aporta"
         );
-        assert_eq!(
-            out.contributed_capital[247], out.contributed_capital[246],
-            "desde el 247 la caja es deficitaria y no se aporta"
+        assert!(
+            out.contributed_capital[247] < out.contributed_capital[246],
+            "desde el 247 se vende y la base aportada baja (#120)"
         );
         let final_ = out.net_worth[840].round_dp(2);
         assert!(
@@ -4048,11 +4159,7 @@ mod tests {
     /// el producto cabe en los 28 dígitos de Decimal sin redondear).
     #[test]
     fn negative_inflation_shrinks_the_target_instead_of_flattening_it() {
-        let ft = FireTarget {
-            base_amount: dec("863652.80"),
-            annual_inflation_percent: Decimal::from(-2),
-            debt_payments_remaining: Vec::new(),
-        };
+        let ft = ft_flat(dec("863652.80"), Decimal::from(-2));
         let t = |m: u32| fire_target_at_month_index(Some(&ft), m).unwrap();
         assert_eq!(t(0), dec("863652.80"), "mes 0: la base tal cual");
         assert_eq!(t(12), dec_s("846379.7440"), "un año a −2 %: ×0,98 exacto");
@@ -4062,5 +4169,309 @@ mod tests {
             "diez años: ×0,98^10, exacto por checked_powu"
         );
         assert!(t(1) < t(0) && t(6) < t(1) && t(13) < t(12), "estrictamente decreciente");
+    }
+
+    /// #171 (Ola 6): la traza de `first_month_allocation` resuelve los techos con los escalares
+    /// de la FASE del mes — no con los regulares. Cuatro casos, dos ramas (patrón
+    /// context_fields): activo de 3.000, cuota de pasivo 500 (fixed, sin TIN, principal holgado),
+    /// gasto regular 2.000 / de jubilación 1.500, ingreso regular 3.000 / de jubilación 2.500
+    /// (superávit ⇒ rama `InRetirement`) o 1.000 (déficit ⇒ rama `else`, `NoCash`).
+    /// months_expense(6): 6·(2.000+500) = 15.000 sin jubilar; 6·(1.500+500) = 12.000 jubilado
+    /// (hoy publicaba 15.000 — la mentira). income_multiple(4): 4·3.000 = 12.000 sin jubilar;
+    /// 4·1.000 = 4.000 jubilado con déficit (hoy 12.000, factor 3). La serie NO cambia: en
+    /// jubilación el bucle no ejecuta la cascada — es un bug de explicación.
+    #[test]
+    fn the_retirement_trace_resolves_caps_with_the_months_budget() {
+        let build = |retired: bool, income_ret: Decimal, cap: AllocationCap| {
+            let fondo = mk_asset(0xD1, Decimal::from(3_000), true, None);
+            let mut inp = base_input(
+                12,
+                Decimal::from(3_000),
+                Decimal::from(2_000),
+                vec![fondo],
+                vec![AllocationRule {
+                    target_index: 0,
+                    kind: AllocationKind::Remainder,
+                    amount: None,
+                    cap: Some(cap),
+                }],
+            );
+            inp.liabilities = vec![liab(
+                Decimal::from(100_000),
+                Decimal::from(500),
+                RepaymentModel::FixedPayments,
+                None,
+            )];
+            inp.expense_retirement_monthly = Decimal::from(1_500);
+            inp.income_retirement_monthly = income_ret;
+            if retired {
+                inp.retirement_start_month = Some(1);
+            }
+            first_month_allocation(&inp).unwrap()
+        };
+        let me6 = || AllocationCap::MonthsExpense(Decimal::from(6));
+        let im4 = || AllocationCap::IncomeMultiple(Decimal::from(4));
+
+        // A · sin jubilar, months_expense(6): techo 15.000, hueco 12.000.
+        let a = build(false, Decimal::ZERO, me6());
+        assert_eq!(a.rules[0].cap_ceiling, Some(Decimal::from(15_000)));
+        assert_eq!(a.rules[0].cap_room, Some(Decimal::from(12_000)));
+
+        // B · jubilado con SUPERÁVIT (rama InRetirement): techo 12.000, hueco 9.000.
+        let b = build(true, Decimal::from(2_500), me6());
+        assert_eq!(b.rules[0].skipped_reason, Some(AllocationSkipReason::InRetirement));
+        assert_eq!(b.rules[0].cap_ceiling, Some(Decimal::from(12_000)));
+        assert_eq!(b.rules[0].cap_room, Some(Decimal::from(9_000)));
+
+        // B' · jubilado con DÉFICIT (rama else, NoCash): mismos techos de jubilación.
+        let b2 = build(true, Decimal::from(1_000), me6());
+        assert_eq!(b2.rules[0].skipped_reason, Some(AllocationSkipReason::NoCash));
+        assert_eq!(b2.rules[0].cap_ceiling, Some(Decimal::from(12_000)));
+        assert_eq!(b2.rules[0].cap_room, Some(Decimal::from(9_000)));
+
+        // C/D · income_multiple(4): 12.000 sin jubilar; 4.000 jubilado (déficit).
+        let c = build(false, Decimal::ZERO, im4());
+        assert_eq!(c.rules[0].cap_ceiling, Some(Decimal::from(12_000)));
+        let d = build(true, Decimal::from(1_000), im4());
+        assert_eq!(d.rules[0].cap_ceiling, Some(Decimal::from(4_000)));
+        assert_eq!(d.rules[0].cap_room, Some(Decimal::from(1_000)));
+    }
+
+    /// #120 (Ola 6) — la base baja proporcionalmente al VALOR drenado, por activo. A (10.000,
+    /// base 4.000) se vacía entero → base 0 exacto; B (20.000, base 15.000) vende 5.000 →
+    /// base 15.000·15.000/20.000 = 11.250. `contributed_capital` pasa de 19.000 a **11.250**
+    /// (hasta 4.9.0 se quedaba en 19.000: la serie era monótona por construcción) — y ESO es
+    /// también el guard-rail de contrato: la serie PUEDE decrecer. Plusvalía realizada del mes
+    /// = 15.000 − 7.750 = 7.250 (la que la fase 2 de #140 querría gravar cuando g se derive).
+    #[test]
+    fn basis_falls_proportionally_to_the_value_drained_per_asset() {
+        let mut a = mk_asset(0xE1, Decimal::from(10_000), true, None);
+        a.purchase_price = Some(Decimal::from(4_000));
+        let mut b = mk_asset(0xE2, Decimal::from(20_000), true, None);
+        b.purchase_price = Some(Decimal::from(15_000));
+        let inp = base_input(1, Decimal::ZERO, Decimal::from(15_000), vec![a, b], vec![]);
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.contributed_capital[0], Decimal::from(19_000));
+        assert_eq!(out.contributed_capital[1], Decimal::from(11_250));
+        assert_eq!(out.net_worth[1], Decimal::from(15_000));
+        assert!(
+            out.contributed_capital[1] < out.contributed_capital[0],
+            "la serie deja de ser monótona: vender BAJA lo aportado"
+        );
+        assert_eq!(out.per_asset_series[0][1], Decimal::ZERO, "A se vació entero");
+        assert_eq!(out.per_asset_series[1][1], Decimal::from(15_000));
+    }
+
+    /// #120, bullet 2 — el superávit del jubilado cuenta como aportado. Es el escenario
+    /// H-capital-10 del propio issue: cartera 1.000.000 al 5 %, jubilado desde el mes 1,
+    /// pensión 2.000 / gasto 1.000, 24 meses, sin purchase_price. El sobrante va a
+    /// `surplus_cash` (la cascada no corre en jubilación) y la identidad
+    /// `contributed = Σ basis + surplus_cash` lo cuenta solo: 24 × 1.000 = **24.000**
+    /// (hasta 4.9.0: 0). El activo compone intocado: 1.000.000·1,05² = 1.102.500.
+    #[test]
+    fn retirement_surplus_counts_as_contributed() {
+        let fondo = mk_asset(0xE3, Decimal::from(1_000_000), true, Some(Decimal::from(5)));
+        let mut inp = base_input(24, Decimal::from(3_000), Decimal::from(1_000), vec![fondo], vec![]);
+        inp.retirement_start_month = Some(1);
+        inp.income_retirement_monthly = Decimal::from(2_000);
+        inp.expense_retirement_monthly = Decimal::from(1_000);
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.contributed_capital[0], Decimal::ZERO);
+        assert_eq!(out.contributed_capital[24], Decimal::from(24_000));
+        assert_eq!(
+            out.per_asset_series[0][24].round_dp(2),
+            dec_s("1102500.00"),
+            "1.000.000 × 1,05² — el activo compone intocado"
+        );
+        assert_eq!(out.net_worth[24].round_dp(2), dec_s("1126500.00"));
+    }
+
+    /// #140 fase 1 — el escenario de coste del issue, pineado con el número CORREGIDO en el
+    /// propio issue (réplica a 50 dígitos verificada por partida doble): cartera arrancando
+    /// EXACTAMENTE en el objetivo (gross_up(24.000)/0,035 = 863.652,8029) al 5 %, jubilado
+    /// desde el mes 1, gasto 2.000 €/mes, sin pensión, tramos ES. Sin impuestos el drenaje
+    /// neto dejaba NW(360) = 2.095.261,95; grosseando la retirada (bruto mensual
+    /// 30.227,8481/12 = 2.518,9873) queda **1.670.368,13** — el «1.670.367» que circulaba era
+    /// un artefacto de resta entre un truncado y un redondeado. Caída: −424.893,82.
+    #[test]
+    fn the_simulated_withdrawal_also_pays_taxes() {
+        let brackets = crate::tax::es_brackets_for_tests();
+        let objetivo =
+            crate::tax::gross_up_net_annual_fire(Decimal::from(24_000), &brackets, true, Decimal::ONE)
+                / dec_s("0.035");
+        let build = |taxed: bool| {
+            let fondo = mk_asset(0xF7, objetivo, true, Some(Decimal::from(5)));
+            let mut inp = base_input(
+                360,
+                Decimal::from(3_000),
+                Decimal::from(2_000),
+                vec![fondo],
+                vec![],
+            );
+            inp.retirement_start_month = Some(1);
+            inp.income_retirement_monthly = Decimal::ZERO;
+            inp.expense_retirement_monthly = Decimal::from(2_000);
+            inp.tax_brackets = brackets.clone();
+            inp.taxes_enabled = taxed;
+            project_net_worth_series(&inp).unwrap()
+        };
+        let neto = build(false);
+        let bruto = build(true);
+        assert_eq!(neto.net_worth[360].round_dp(2), dec_s("2095261.95"));
+        assert_eq!(bruto.net_worth[360].round_dp(2), dec_s("1670368.13"));
+        assert_eq!(
+            (neto.net_worth[360] - bruto.net_worth[360]).round_dp(2),
+            dec_s("424893.82"),
+            "la caída del titular de #140"
+        );
+    }
+
+    /// #140 fase 1 sobre el pin de #119 — y de paso pinea D-3 (TODO drenaje tributa, también
+    /// el pre-jubilación: aquí no hay jubilación ninguna) y D-4 (`undrained` NETO). 200.000 €
+    /// al 0 % gastando 2.000 €/mes con tramos ES: la venta bruta mensual es
+    /// gross_up(24.000)/12 = 2.518,9873, así que la cartera se vacía en el mes **80** (antes
+    /// 100) y el descubierto acumulado a 360 es NETO: se necesitaban 720.000 € de gasto, lo
+    /// vendido neteó 158.800 (79 × 2.000 + 800 del mes 80) ⇒ NW(360) = **−561.200,00** con
+    /// identidad comprobable. El bruto habría publicado −706.835,44: impuesto sobre ventas que
+    /// nunca ocurrieron.
+    #[test]
+    fn depletion_arrives_earlier_and_the_uncovered_deficit_is_net() {
+        let hucha = mk_asset(0xF8, Decimal::from(200_000), true, None);
+        let mut inp = base_input(
+            360,
+            Decimal::ZERO,
+            Decimal::from(2_000),
+            vec![hucha],
+            vec![],
+        );
+        inp.tax_brackets = crate::tax::es_brackets_for_tests();
+        inp.taxes_enabled = true;
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.assets_depleted_month_index, Some(80), "con bruto se agota antes");
+        assert_eq!(out.net_worth[360].round_dp(2), dec_s("-561200.00"));
+        assert_eq!(out.uncovered_deficit_total.round_dp(2), dec_s("561200.00"));
+    }
+
+    /// #170 — el objetivo sigue la necesidad REAL cuando la pensión queda plana. Caso central
+    /// del issue (E_ret 2.000, pensión 1.000, i = 2 %, SWR 3,5): sin impuestos,
+    /// target(0) = 12·1.000/0,035 = 342.857,14 (LA MISMA cifra de siempre — k=0 degenera
+    /// exacto y la vista previa del formulario no se mueve); target(120) = 493.024,75 (la
+    /// fórmula vieja decía 417.940,94); target(240) = 676.078,21 — el Δ (+166.610,54) es
+    /// EXACTAMENTE la primera fila de la tabla del issue. Con tramos ES: 429.656,42 /
+    /// 619.741,99 / 851.455,24.
+    #[test]
+    fn the_target_tracks_the_real_need_when_the_pension_stays_flat() {
+        let build = |taxed: bool| FireTarget {
+            need: FireNeed::ExpenseMinusPension {
+                expense_monthly: Decimal::from(2_000),
+                pension_monthly: Decimal::from(1_000),
+            },
+            swr_pct: dec_s("3.5"),
+            tax_brackets: if taxed { crate::tax::es_brackets_for_tests() } else { Vec::new() },
+            taxes_enabled: taxed,
+            taxable_gain_ratio: Decimal::ONE,
+            annual_inflation_percent: Decimal::from(2),
+            debt_payments_remaining: Vec::new(),
+        };
+        let t = |ft: &FireTarget, k: u32| fire_target_at_month_index(Some(ft), k).unwrap();
+        let sin = build(false);
+        for (k, esperado) in [(0u32, "342857.1429"), (120, "493024.7451"), (240, "676078.2144")] {
+            let got = t(&sin, k);
+            assert!(
+                (got - dec_s(esperado)).abs() < dec_s("0.01"),
+                "sin impuestos t({k}): esperado {esperado}, got {got}"
+            );
+        }
+        let es = build(true);
+        for (k, esperado) in [(0u32, "429656.4195"), (120, "619741.9920"), (240, "851455.2442")] {
+            let got = t(&es, k);
+            assert!(
+                (got - dec_s(esperado)).abs() < dec_s("0.01"),
+                "ES t({k}): esperado {esperado}, got {got}"
+            );
+        }
+    }
+
+    /// #170, puerta D-8: una pensión que cubre el gasto HOY significa SIN objetivo — para toda
+    /// la serie, no `target = 0` (que con `líquido ≥ 0` siempre cierto daría un cruce FIRE
+    /// inmediato y falso). El caso 4 de fire-parity (pensión 2.000 > gasto 1.500 ⇒ expected
+    /// null) es la regresión API de esta misma puerta.
+    #[test]
+    fn a_covering_pension_means_no_target_ever() {
+        let ft = FireTarget {
+            need: FireNeed::ExpenseMinusPension {
+                expense_monthly: Decimal::from(1_500),
+                pension_monthly: Decimal::from(2_000),
+            },
+            swr_pct: dec_s("3.5"),
+            tax_brackets: Vec::new(),
+            taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
+            annual_inflation_percent: Decimal::from(2),
+            debt_payments_remaining: vec![Decimal::from(9_999)],
+        };
+        for k in [0u32, 1, 120, 480] {
+            assert_eq!(fire_target_at_month_index(Some(&ft), k), None, "k={k}");
+        }
+    }
+
+    /// #170 × #146: con DEFLACIÓN la necesidad puede agotarse dentro del horizonte — el gasto
+    /// decrece y la pensión plana lo alcanza. E 2.000 / pensión 1.900 / i = −2 %: la necesidad
+    /// de HOY es positiva (pasa la puerta), y desde que 2.000·0,98^(k/12) ≤ 1.900 (k ≥ 31) el
+    /// objetivo queda en SOLO el término de deuda: te jubilas cuando tu pensión deflactada
+    /// cubre el gasto. En k = 36 (exponente entero: 0,98³ = 0,941192 exacto) la base es 0.
+    #[test]
+    fn deflation_can_retire_the_need_leaving_only_the_debt_tail() {
+        let ft = FireTarget {
+            need: FireNeed::ExpenseMinusPension {
+                expense_monthly: Decimal::from(2_000),
+                pension_monthly: Decimal::from(1_900),
+            },
+            swr_pct: dec_s("3.5"),
+            tax_brackets: Vec::new(),
+            taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
+            annual_inflation_percent: Decimal::from(-2),
+            debt_payments_remaining: vec![Decimal::from(5_000)],
+        };
+        let t0 = fire_target_at_month_index(Some(&ft), 0).unwrap();
+        assert!(t0 > Decimal::from(5_000), "hoy hay necesidad + cola: {t0}");
+        assert_eq!(
+            fire_target_at_month_index(Some(&ft), 36).unwrap(),
+            Decimal::from(5_000),
+            "gasto deflactado ≤ pensión: queda solo la cola de deuda"
+        );
+    }
+
+    /// #170, el hallazgo ancho: el fiscal drag existe SIN pensión. `gross_up` es afín (término
+    /// independiente en todo tramo salvo el primero), no homogénea: `gross_up(n·f) >
+    /// gross_up(n)·f` para f > 1 — los tramos son NOMINALES y retirar más euros nominales
+    /// dentro de 30 años SÍ cae en tramos más altos. Indexed 24.000 €/año, ES, i = 2 %:
+    /// t(360) = gross_up(24.000·1,02³⁰)/0,035 = **1.571.527,94**, mientras inflar el bruto de
+    /// hoy daba 1.564.387,51 — **+7.140,43 €** que la fórmula vieja no veía.
+    #[test]
+    fn fiscal_drag_the_grossup_of_the_inflated_need_beats_the_inflated_grossup() {
+        let ft = FireTarget {
+            need: FireNeed::Indexed { annual_net_today: Decimal::from(24_000) },
+            swr_pct: dec_s("3.5"),
+            tax_brackets: crate::tax::es_brackets_for_tests(),
+            taxes_enabled: true,
+            taxable_gain_ratio: Decimal::ONE,
+            annual_inflation_percent: Decimal::from(2),
+            debt_payments_remaining: Vec::new(),
+        };
+        let t0 = fire_target_at_month_index(Some(&ft), 0).unwrap();
+        assert!((t0 - dec_s("863652.8029")).abs() < dec_s("0.01"), "k=0 sin mover: {t0}");
+        let t360 = fire_target_at_month_index(Some(&ft), 360).unwrap();
+        assert!(
+            (t360 - dec_s("1571527.9413")).abs() < dec_s("0.01"),
+            "t(360) con drag: {t360}"
+        );
+        let viejo = t0
+            * inflation_factor_at_month_index(Decimal::from(2), 360);
+        assert!(
+            (t360 - viejo - dec_s("7140.43")).abs() < dec_s("0.02"),
+            "el drag es ≈ +7.140,43: nuevo {t360}, viejo {viejo}"
+        );
     }
 }

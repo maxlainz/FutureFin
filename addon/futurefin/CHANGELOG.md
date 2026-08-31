@@ -5,6 +5,20 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.10.0
+
+- **Vender para vivir ahora paga impuestos, como en la vida real**: la simulación descuenta el
+  IRPF del ahorro en cada venta (jubilado o no), así que tu patrimonio proyectado baja — antes
+  era estructuralmente optimista. Puedes ajustar qué parte de cada venta es ganancia gravable
+  (de serie, todo: lo más prudente; si tu cartera es mitad coste, 0,5 es más realista).
+- **Tu objetivo de jubilación se calcula mes a mes sobre lo que de verdad necesitarás**: con
+  pensión declarada e inflación, el objetivo de los años lejanos SUBE (antes se quedaba corto).
+  El número que ves hoy en el formulario no cambia.
+- La línea «aportado» del gráfico ahora BAJA cuando vendes (y el sobrante del jubilado cuenta
+  como aportado), y la tarjeta Autonomía descuenta los mismos impuestos que la simulación.
+- Aviso honesto: patrimonio más bajo + objetivo más alto pueden retrasar tu fecha de jubilación
+  por las dos puntas a la vez. No es un error nuevo — es el optimismo antiguo, retirado.
+
 ## 4.9.0
 
 - **La inflación ahora encarece tu gasto mes a mes** (el de hoy y el de jubilación); tus ingresos

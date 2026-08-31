@@ -54,7 +54,10 @@ function clientTargetNw(c: Case): number | null {
   if (need === null || need <= 0) return null;
   const swr = Number(fs.swr_pct);
   if (!Number.isFinite(swr) || swr <= 0) return null;
-  const gross = grossUpNetAnnualFire(need, fs.tax_brackets, fs.taxes_enabled);
+  // #140 fase 2: el lado TS gana el eje g — sin él, los casos nuevos del fixture irían verdes
+  // por accidente aquí (calculando con g=1) y rojos en Rust: el peor modo de fallo del fixture.
+  const g = Number(fs.taxable_gain_ratio ?? "1");
+  const gross = grossUpNetAnnualFire(need, fs.tax_brackets, fs.taxes_enabled, g);
   return gross / (swr / 100);
 }
 

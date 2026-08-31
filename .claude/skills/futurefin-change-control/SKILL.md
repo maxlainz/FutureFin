@@ -15,7 +15,15 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 5
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 6
+del programa de la auditoría, rama `feat/ola6-el-impuesto`)**: **66** ficheros de test de
+integración (sin ficheros nuevos), **52** migraciones (cero nuevas), `.ffbackup` sigue en **11**
+(los dos ejes nuevos — `taxable_gain_ratio`, `horizon_lifespan_age` — viajan en el JSONB de
+fire_settings), catálogo MCP sigue en **68** tools (dos params nuevos de `taxable_gain_ratio`),
+`ProjectionInput` gana `tax_brackets`/`taxes_enabled`/`taxable_gain_ratio` y `FireTarget` se
+reestructura a `FireNeed` (dos breaking de input del engine, precedente v1.2.0; los pins
+históricos sobreviven vía `ft_flat`), módulo nuevo `crates/engine/src/tax.rs` (el gross-up vive
+en el motor), fixture fire-parity en **17** casos. Antes, counts refreshed **2026-08-31 (Ola 5
 del programa de la auditoría, rama `feat/ola5-inflacion-horizonte`)**: **66** ficheros de test de
 integración (sin ficheros nuevos), **52** migraciones (la 52ª es `20260901130000_inflation_default_2_5`
 — SOLO cambia el DEFAULT de la columna, filas existentes intactas), `.ffbackup` sigue en **11**

@@ -50,6 +50,8 @@ export type FireSettingsApi = {
    *  `budget_income_real_expense`. */
   expense_avg_window_months?: number;
   expense_avg_window_mode?: AvgWindowModeApi;
+  /** Fracción de plusvalía gravable de la retirada (0..=1, string; default "1") — 4.10.0, #140. */
+  taxable_gain_ratio?: string;
   /** Edad límite del horizonte derivado (85..=105, default 90) — 4.9.0, #149. */
   horizon_lifespan_age?: number;
 };

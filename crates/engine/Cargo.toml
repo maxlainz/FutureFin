@@ -10,7 +10,11 @@ description = "Projection and FIRE simulation"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
-rust_decimal = { version = "1.41", features = ["maths"] }
+rust_decimal = { version = "1.41", features = ["maths", "serde-with-str"] }
+utoipa = { version = "5", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[features]
+openapi = ["dep:utoipa"]

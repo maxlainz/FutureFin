@@ -6,8 +6,9 @@ use crate::error::ApiError;
 use crate::handlers::budget::ledger_regular_monthly_income_and_expense;
 use crate::handlers::installation::{
     load_fire_settings, naive_date_in_calendar_tz, require_installation_member,
-    resolve_fire_settings, FireNumberMode, FireSettings, SavingsSource, TaxBracket,
+    resolve_fire_settings, FireNumberMode, FireSettings, SavingsSource,
 };
+use futurefin_engine::gross_up_net_annual_fire;
 use crate::handlers::person_view::LedgerView;
 /// Alias local: `RepaymentModel` a secas es el del **engine** en este fichero (ver el `use` de
 /// `futurefin_engine`); este es el del lado API, que sabe hablar con la columna SQL.
@@ -107,72 +108,7 @@ fn density_month_indices(density: Density, months: u32) -> Vec<u32> {
     }
 }
 
-#[cfg(test)]
-fn tax_on_gross_capital_annual(gross: Decimal, brackets: &[TaxBracket]) -> Decimal {
-    if gross <= Decimal::ZERO || brackets.is_empty() {
-        return Decimal::ZERO;
-    }
-    let mut prev_ceiling = Decimal::ZERO;
-    let mut tax = Decimal::ZERO;
-    for b in brackets {
-        let r = b.pct / Decimal::from(100u32);
-        match b.up_to {
-            None => {
-                let taxable = (gross - prev_ceiling).max(Decimal::ZERO);
-                tax += taxable * r;
-                break;
-            }
-            Some(ceiling) => {
-                let slice_end = gross.min(ceiling);
-                let taxable = (slice_end - prev_ceiling).max(Decimal::ZERO);
-                tax += taxable * r;
-                prev_ceiling = ceiling;
-                if gross <= ceiling {
-                    break;
-                }
-            }
-        }
-    }
-    tax
-}
 
-/// Devuelve el `gross` tal que `gross − tax(gross) == net_annual`, sin búsqueda binaria.
-///
-/// La función `tax(·)` es lineal por tramos: dentro del tramo i con tipo `r_i` y umbral
-/// inferior `prev_i`, `after(g) = g·(1 − r_i) + (r_i·prev_i − K_i)`, donde `K_i` es el impuesto
-/// acumulado de los tramos anteriores. Despejando `g = (net − r_i·prev_i + K_i) / (1 − r_i)` se
-/// obtiene un candidato; si cae dentro del tramo (≤ `ceiling_i`), es la solución; si no, se
-/// avanza al siguiente y se actualiza `K_i`.
-pub(crate) fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBracket], taxes_enabled: bool) -> Decimal {
-    if !taxes_enabled || net_annual <= Decimal::ZERO {
-        return net_annual.max(Decimal::ZERO);
-    }
-    let hundred = Decimal::from(100u32);
-    let mut prev_ceiling = Decimal::ZERO;
-    let mut k_cumulative = Decimal::ZERO;
-    for b in brackets {
-        let r = b.pct / hundred;
-        let denom = Decimal::ONE - r;
-        if denom <= Decimal::ZERO {
-            // Tipo del 100% (o superior): imposible recuperar `net` positivo; degeneración.
-            return prev_ceiling;
-        }
-        let gross = (net_annual + k_cumulative - r * prev_ceiling) / denom;
-        match b.up_to {
-            None => return gross,
-            Some(ceiling) => {
-                if gross <= ceiling {
-                    return gross;
-                }
-                let width = ceiling - prev_ceiling;
-                k_cumulative += r * width;
-                prev_ceiling = ceiling;
-            }
-        }
-    }
-    // Inalcanzable: `validate_tax_brackets` exige que el último tramo tenga `up_to = None`.
-    net_annual
-}
 
 /// Por qué NO hay target FIRE. Devolver `None` a secas se tragaba tres causas muy distintas, y
 /// desde 4.0.0 la simulación puede llegar a ellas por caminos nuevos (un recorte que deja la base
@@ -184,13 +120,17 @@ pub(crate) const FIRE_ABSENT_SWR_NOT_POSITIVE: &str = "swr_not_positive";
 
 /// `Err(razón)` en vez de `None`: el valor ausente y su causa viajan juntos, así que ningún caller
 /// puede publicar el hueco sin poder explicarlo.
-fn compute_fire_target_nw(
+/// La NECESIDAD del objetivo por modo (#170) — devuelve los ingredientes, no el resultado: el
+/// engine evalúa `gross_up(need(k))/SWR` mes a mes. Las tres razones de ausencia se deciden
+/// AQUÍ, una vez, sobre el estado de HOY (la puerta k=0 del engine las respalda).
+fn compute_fire_need(
     fire: &FireSettings,
     income_monthly: Decimal,
     income_retirement_monthly: Decimal,
     expense_monthly: Decimal,
-) -> Result<Decimal, &'static str> {
-    let need_annual = match fire.fire_number_mode {
+) -> Result<futurefin_engine::FireNeed, &'static str> {
+    use futurefin_engine::FireNeed;
+    let need = match fire.fire_number_mode {
         FireNumberMode::Manual => {
             let amt = fire
                 .fire_number_manual_amount
@@ -198,29 +138,34 @@ fn compute_fire_target_nw(
             if amt <= Decimal::ZERO {
                 return Err(FIRE_ABSENT_MANUAL_AMOUNT_MISSING);
             }
-            amt
+            FireNeed::Indexed { annual_net_today: amt }
         }
         FireNumberMode::AnnualExpense => {
             let net = expense_monthly - income_retirement_monthly;
             if net <= Decimal::ZERO {
                 return Err(FIRE_ABSENT_NET_NEED_NOT_POSITIVE);
             }
-            net * Decimal::from(12u32)
+            // El gasto se indexa, la pensión queda plana (#139) — el engine evalúa
+            // `max(0, E·f(k) − I)·12` mes a mes, no un neto pre-restado inflado entero.
+            FireNeed::ExpenseMinusPension {
+                expense_monthly,
+                pension_monthly: income_retirement_monthly,
+            }
         }
         FireNumberMode::CurrentIncome => {
             let net = income_monthly - income_retirement_monthly;
             if net <= Decimal::ZERO {
                 return Err(FIRE_ABSENT_NET_NEED_NOT_POSITIVE);
             }
-            net * Decimal::from(12u32)
+            // Cifra en euros de HOY que se indexa entera: descomponerla con los ingresos
+            // planos de #139 dejaría el objetivo PLANO — cambio semántico que nadie pidió.
+            FireNeed::Indexed { annual_net_today: net * Decimal::from(12u32) }
         }
     };
-    let swr = fire.swr_pct;
-    if swr <= Decimal::ZERO {
+    if fire.swr_pct <= Decimal::ZERO {
         return Err(FIRE_ABSENT_SWR_NOT_POSITIVE);
     }
-    let gross = gross_up_net_annual_fire(need_annual, &fire.tax_brackets, fire.taxes_enabled);
-    Ok(gross / (swr / Decimal::from(100u32)))
+    Ok(need)
 }
 
 /// Serializa un Decimal como f64 (~15 dígitos de precisión, suficiente para
@@ -1085,7 +1030,8 @@ fn fire_crossover_month(
     ft: Option<&futurefin_engine::FireTarget>,
     liquid_worth: &[Decimal],
 ) -> Option<u32> {
-    let ft = ft.filter(|f| f.base_amount > Decimal::ZERO)?;
+    // La puerta (necesidad positiva HOY, SWR > 0) vive en el engine: base None ⇒ sin cruce.
+    let ft = ft.filter(|f| futurefin_engine::fire_target_base_at_month_index(f, 0).is_some())?;
     for (i, lw) in liquid_worth.iter().enumerate() {
         let target = fire_target_at_month_index(Some(ft), i as u32).unwrap_or(Decimal::ZERO);
         if target > Decimal::ZERO && *lw >= target {
@@ -1432,20 +1378,29 @@ pub(crate) async fn build_installation_projection_input(
             None if inputs.expense_from_avg => inputs.expense,
             None => expense_retirement,
         };
-        compute_fire_target_nw(fs, inputs.income, income_retirement, fire_expense)
+        compute_fire_need(fs, inputs.income, income_retirement, fire_expense)
     });
-    let fire_target_base = fire_target_outcome.as_ref().and_then(|r| r.as_ref().ok().copied());
     // `None` cuando no hay `fire_settings` (no hay configuración FIRE que explicar), `Some(razón)`
     // cuando la hay y aun así no sale target.
-    let fire_target_absent_reason = fire_target_outcome.and_then(|r| r.err());
-    let mut fire_target = fire_target_base.map(|base_amount| FireTarget {
-        base_amount,
-        // Sin clamp desde 4.9.0 (#146): el rango [−2, 50] lo garantiza la escritura, y una
-        // inflación negativa DEBE llegar al engine (objetivo decreciente, no plano).
-        annual_inflation_percent: inflation_annual_percent,
-        // El término finito de deuda (#142) se rellena MÁS ABAJO, cuando los pasivos del engine
-        // ya están construidos — necesita sus calendarios completos.
-        debt_payments_remaining: Vec::new(),
+    let fire_target_absent_reason = fire_target_outcome
+        .as_ref()
+        .and_then(|r| r.as_ref().err().copied());
+    let mut fire_target = fire_target_outcome.and_then(|r| r.ok()).map(|need| {
+        let fs = fire_settings.expect("need solo existe con fire_settings");
+        FireTarget {
+            need,
+            swr_pct: fs.swr_pct,
+            // La MISMA escala y el MISMO switch que el drenaje (#140).
+            tax_brackets: fs.tax_brackets.clone(),
+            taxes_enabled: fs.taxes_enabled,
+            taxable_gain_ratio: fs.taxable_gain_ratio,
+            // Sin clamp desde 4.9.0 (#146): el rango [−2, 50] lo garantiza la escritura, y una
+            // inflación negativa DEBE llegar al engine (objetivo decreciente, no plano).
+            annual_inflation_percent: inflation_annual_percent,
+            // El término finito de deuda (#142) se rellena MÁS ABAJO, cuando los pasivos del
+            // engine ya están construidos — necesita sus calendarios completos.
+            debt_payments_remaining: Vec::new(),
+        }
     });
 
     let assets_scope = view.scope_where("");
@@ -1602,6 +1557,13 @@ pub(crate) async fn build_installation_projection_input(
         // #139: el MISMO supuesto efectivo que el target (sin clamp desde #146) — indexa el
         // gasto del bucle aunque no haya objetivo FIRE configurado.
         annual_inflation_percent: inflation_annual_percent,
+        // #140 fase 1: la MISMA escala y el MISMO switch que el objetivo — el drenaje bruto y
+        // el target se dimensionan con una sola fiscalidad. Sin fire_settings: sin impuesto.
+        tax_brackets: fire_settings.map(|f| f.tax_brackets.clone()).unwrap_or_default(),
+        taxes_enabled: fire_settings.map(|f| f.taxes_enabled).unwrap_or(false),
+        taxable_gain_ratio: fire_settings
+            .map(|f| f.taxable_gain_ratio)
+            .unwrap_or(Decimal::ONE),
         income_regular_monthly: inputs.income,
         expense_regular_monthly: inputs.expense,
         assets,
@@ -2119,7 +2081,7 @@ pub async fn compute_projection_series_response(
     let fire_target_ref = projection_input.fire_target.as_ref();
     // #142: el término de hoy (mes 0) para la vista previa del formulario.
     let fire_target_debt_component = fire_target_ref
-        .filter(|ft| ft.base_amount > Decimal::ZERO)
+        .filter(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some())
         .map(|ft| {
             ft.debt_payments_remaining
                 .first()
@@ -2133,7 +2095,7 @@ pub async fn compute_projection_series_response(
         jubilacion_target_net_worth,
         jubilacion_target_net_worth_nominal,
     ) = match fire_target_ref {
-        Some(ft) if ft.base_amount > Decimal::ZERO => {
+        Some(ft) if futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some() => {
             let crossed_at = fire_crossover_month(Some(ft), &output.liquid_worth);
             // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
             // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
@@ -2162,7 +2124,13 @@ pub async fn compute_projection_series_response(
             (
                 series,
                 crossed_at,
-                Some(money_out(ft.base_amount).to_string()),
+                Some(
+                    money_out(
+                        futurefin_engine::fire_target_base_at_month_index(ft, 0)
+                            .unwrap_or(Decimal::ZERO),
+                    )
+                    .to_string(),
+                ),
                 nominal,
             )
         }
@@ -2628,10 +2596,13 @@ fn sim_kpis(
         .map(|a| (a.value.max(Decimal::ZERO), a.expected_annual_return_percent))
         .collect();
     let monthly_expense = input.expense_regular_monthly + debt_service_monthly;
+    // #140 fase 2: el umbral del runway pasa g — la misma venta y el mismo impuesto que el
+    // objetivo; dejarlo a g=1 reabriría la asimetría en otra tarjeta.
     let annual_expense_gross = gross_up_net_annual_fire(
         monthly_expense * Decimal::from(12u32),
         &fs.tax_brackets,
         fs.taxes_enabled,
+        fs.taxable_gain_ratio,
     );
     let (runway_months, runway_is_indefinite) = match futurefin_engine::liquid_runway_months(
         &liquid_rows,
@@ -2639,6 +2610,9 @@ fn sim_kpis(
         inflation_annual_percent,
         fs.swr_pct,
         annual_expense_gross,
+        &fs.tax_brackets,
+        fs.taxes_enabled,
+        fs.taxable_gain_ratio,
     ) {
         futurefin_engine::RunwayOutcome::Months(m) => (Some(m.round_dp(1)), false),
         futurefin_engine::RunwayOutcome::Indefinite => (None, true),
@@ -2715,7 +2689,11 @@ fn sim_kpis(
         jubilacion_age,
         final_net_worth: money_out(final_net_worth),
         final_net_worth_real: money_out(final_net_worth_real),
-        fire_target_base: input.fire_target.as_ref().map(|ft| money_out(ft.base_amount)),
+        fire_target_base: input
+            .fire_target
+            .as_ref()
+            .and_then(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0))
+            .map(money_out),
         runway_months,
         runway_is_indefinite,
         income_monthly: money_out(income_monthly),
@@ -3842,6 +3820,9 @@ mod milestone_tests {
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: 24,
             annual_inflation_percent: Decimal::ZERO,
+            tax_brackets: Vec::new(),
+            taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             income_regular_monthly: Decimal::from(3000),
             expense_regular_monthly: Decimal::from(2500),
             assets: vec![SimAsset {
@@ -3887,6 +3868,9 @@ mod milestone_tests {
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: 24,
             annual_inflation_percent: Decimal::ZERO,
+            tax_brackets: Vec::new(),
+            taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             income_regular_monthly: Decimal::from(1200),
             expense_regular_monthly: Decimal::from(1000),
             assets: vec![SimAsset {
@@ -3916,79 +3900,6 @@ mod milestone_tests {
     }
 }
 
-#[cfg(test)]
-mod gross_up_tests {
-    use super::*;
-
-    fn es_brackets() -> Vec<TaxBracket> {
-        vec![
-            TaxBracket { up_to: Some(Decimal::from(6_000u32)),   pct: Decimal::from(19u32) },
-            TaxBracket { up_to: Some(Decimal::from(50_000u32)),  pct: Decimal::from(21u32) },
-            TaxBracket { up_to: Some(Decimal::from(200_000u32)), pct: Decimal::from(23u32) },
-            TaxBracket { up_to: Some(Decimal::from(300_000u32)), pct: Decimal::from(27u32) },
-            TaxBracket { up_to: None,                            pct: Decimal::from(30u32) },
-        ]
-    }
-
-    /// Versión binaria de referencia (la que tenía el handler antes de Fase 2.4). Sirve para
-    /// confirmar que la forma cerrada es numéricamente equivalente a ≤ 0.01 €.
-    fn gross_up_binary_reference(net_annual: Decimal, brackets: &[TaxBracket]) -> Decimal {
-        if net_annual <= Decimal::ZERO { return net_annual.max(Decimal::ZERO); }
-        let mut lo = net_annual;
-        let mut hi = (net_annual * Decimal::from(4u32))
-            .max(net_annual + Decimal::from(200_000u32));
-        for _ in 0..90 {
-            let mid = (lo + hi) / Decimal::from(2u32);
-            let after = mid - tax_on_gross_capital_annual(mid, brackets);
-            if after < net_annual { lo = mid; } else { hi = mid; }
-        }
-        hi
-    }
-
-    #[test]
-    fn closed_form_matches_binary_search_across_es_brackets() {
-        let brackets = es_brackets();
-        let nets = [
-            Decimal::from(1_000u32),
-            Decimal::from(5_000u32),
-            Decimal::from(20_000u32),
-            Decimal::from(40_000u32),
-            Decimal::from(80_000u32),
-            Decimal::from(150_000u32),
-            Decimal::from(250_000u32),
-            Decimal::from(400_000u32),
-            Decimal::from(1_000_000u32),
-        ];
-        let tol = Decimal::new(1, 2); // 0.01 €
-        for net in nets {
-            let g_closed = gross_up_net_annual_fire(net, &brackets, true);
-            let g_binary = gross_up_binary_reference(net, &brackets);
-            let diff = (g_closed - g_binary).abs();
-            assert!(
-                diff <= tol,
-                "diff {diff} excede tolerancia para net={net}: closed={g_closed}, binary={g_binary}"
-            );
-            // Y verifica que el gross resultante deja después-de-tax ≈ net.
-            let after = g_closed - tax_on_gross_capital_annual(g_closed, &brackets);
-            assert!(
-                (after - net).abs() <= tol,
-                "after-tax({g_closed}) = {after} no recupera net={net}"
-            );
-        }
-    }
-
-    #[test]
-    fn closed_form_handles_taxes_disabled_and_zero_net() {
-        let brackets = es_brackets();
-        assert_eq!(gross_up_net_annual_fire(Decimal::from(50_000u32), &brackets, false), Decimal::from(50_000u32));
-        assert_eq!(gross_up_net_annual_fire(Decimal::ZERO, &brackets, true), Decimal::ZERO);
-        assert_eq!(
-            gross_up_net_annual_fire(-Decimal::from(100u32), &brackets, true),
-            Decimal::ZERO,
-            "net negativo se clipea a 0"
-        );
-    }
-}
 
 #[cfg(test)]
 mod jubilacion_civil_tests {

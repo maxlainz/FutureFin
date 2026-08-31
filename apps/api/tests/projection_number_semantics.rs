@@ -127,6 +127,22 @@ async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
 /// neto anual = 1.000 × 12 = 12.000. Gross-up: tramo 1 (19 %, techo 6.000) da 12.000/0,81 =
 /// 14.814,81 > 6.000 → K = 1.140; tramo 2 (21 %, techo 50.000): (12.000 + 1.140 − 0,21×6.000)/0,79
 /// = 11.880/0,79 = **15.037,9746835443…**. Objetivo = 15.037,97…/0,035 = **429.656,4195 €**.
+fn es_brackets() -> Vec<futurefin_engine::TaxBracket> {
+    [
+        (Some(6_000u32), 19u32),
+        (Some(50_000), 21),
+        (Some(200_000), 23),
+        (Some(300_000), 27),
+        (None, 30),
+    ]
+    .into_iter()
+    .map(|(up, pct)| futurefin_engine::TaxBracket {
+        up_to: up.map(rust_decimal::Decimal::from),
+        pct: rust_decimal::Decimal::from(pct),
+    })
+    .collect()
+}
+
 async fn seed_crossing_household(app: &TestApp, owner: &LoggedInOwner) -> String {
     let cat_inc = app.create_category(owner, "income", "Nomina").await;
     let cat_exp = app.create_category(owner, "expense", "Vida").await;
@@ -251,11 +267,35 @@ async fn jubilacion_series_position_indexes_the_arrays_and_the_nominal_target_is
         }
 
         // --- El objetivo NOMINAL del mes del cruce, exacto ------------------------------------
+        // Desde la Ola 6 (#170) el objetivo se evalúa mes a mes sobre la necesidad REAL:
+        // nominal = gross_up(12.000·1,03^(k/12))/0,035 — el gross-up de la necesidad inflada,
+        // NO la base inflada (gross_up es afín: fiscal drag, los tramos son nominales). El
+        // oráculo es el helper del motor con los MISMOS ingredientes del hogar semilla — que es
+        // exactamente lo que este assert vigila: que el campo sale del motor evaluado en k, no
+        // interpolado de la serie.
         let nominal = dec(&body["jubilacion_target_net_worth_nominal"]);
-        let esperado = base * 1.03_f64.powf(k as f64 / 12.0);
+        let ft = futurefin_engine::FireTarget {
+            need: futurefin_engine::FireNeed::ExpenseMinusPension {
+                expense_monthly: rust_decimal::Decimal::from(1_000),
+                pension_monthly: rust_decimal::Decimal::ZERO,
+            },
+            swr_pct: "3.5".parse().unwrap(),
+            tax_brackets: es_brackets(),
+            taxes_enabled: true,
+            taxable_gain_ratio: rust_decimal::Decimal::ONE,
+            annual_inflation_percent: rust_decimal::Decimal::from(3),
+            debt_payments_remaining: Vec::new(),
+        };
+        let esperado: f64 =
+            futurefin_engine::fire_target_at_month_index(Some(&ft), k as u32)
+                .unwrap()
+                .round_dp(4)
+                .to_string()
+                .parse()
+                .unwrap();
         assert!(
             (nominal - esperado).abs() / esperado < 1e-9,
-            "{density}: objetivo nominal {nominal}, predicho base × 1,03^({k}/12) = {esperado}"
+            "{density}: objetivo nominal {nominal}, predicho gross_up(need·f({k}))/swr = {esperado}"
         );
         // Y es materialmente distinto de la base: ese es el motivo de que exista el campo.
         assert!(
