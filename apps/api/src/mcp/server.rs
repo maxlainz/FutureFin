@@ -869,7 +869,8 @@ pub struct LiabilityOverrideParam {
     #[serde(default)]
     #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub lump_sum_date: Option<String>,
-    /// TIN nominal anual en % (0–100) del escenario. Solo devenga en french/revolving.
+    /// TIN nominal anual en % (0–100) del escenario. Devenga en todos los modelos salvo
+    /// fixed_payments (french, interest_only y revolving).
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub apr_percent: Option<String>,
