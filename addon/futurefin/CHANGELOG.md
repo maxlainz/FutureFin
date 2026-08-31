@@ -5,6 +5,20 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.0
+
+- **Los impuestos de vender ahora se calculan sobre tu ganancia real, no sobre todo lo vendido**:
+  declara el precio de compra en cada activo y la simulación deriva la plusvalía de cada venta
+  mes a mes (y la deja crecer sola, como en la realidad). En el escenario tipo, el default
+  anterior adelantaba el agotamiento de la cartera **13 años**; y el atajo de poner una fracción
+  fija era aún peor (29 años de optimismo). La ayuda de «Plusvalía gravable» queda reescrita: el
+  mejor dato es el precio de compra, no la perilla.
+- **Tu regla «resto» ahora existe sí o sí**: si tu instalación no la tenía, esta versión la crea
+  apuntando a tu activo líquido de menor rentabilidad (el sitio natural del sobrante) — y también
+  al importar backups antiguos. Puedes moverla a otro activo cuando quieras.
+- Si no declaras precios de compra, tus números no se mueven ni un céntimo: todo lo nuevo es
+  opt-in por dato.
+
 ## 4.11.0
 
 - **Lo vencido ya no desaparece**: un movimiento previsto cuya fecha pasó carga íntegro en el

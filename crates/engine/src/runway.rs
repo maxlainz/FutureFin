@@ -85,8 +85,15 @@ pub enum RunwayOutcome {
 ///
 /// Casos límite: `monthly_expense <= 0` → [`RunwayOutcome::NoExpenseBase`]; saldo total ≤ 0 →
 /// `Months(0)`.
+/// Cada líquido viaja como `(valor, rentabilidad esperada %, base de coste declarada)` (#178).
+/// La base `None` = el activo no declaró `purchase_price` ⇒ su `g` es el ESCALAR
+/// `taxable_gain_ratio` (regla de compatibilidad: nadie ve moverse un número sin aportar el
+/// dato); `Some(b)` ⇒ `g_i = 1 − b/v` derivada y VIVA dentro del bucle (baja proporcional al
+/// drenar — invariante — y sube con el crecimiento). El UMBRAL SWR no cambia de régimen: es una
+/// perpetuidad y usa el escalar (mismo reparto que el objetivo FIRE — ver el invariante «una
+/// sola fiscalidad, dos regímenes» de financial-contracts §2.4).
 pub fn liquid_runway_months(
-    liquid_assets: &[(Decimal, Option<Decimal>)],
+    liquid_assets: &[(Decimal, Option<Decimal>, Option<Decimal>)],
     monthly_expense: Decimal,
     annual_inflation_percent: Decimal,
     swr_pct: Decimal,
@@ -99,7 +106,7 @@ pub fn liquid_runway_months(
         return RunwayOutcome::NoExpenseBase;
     }
 
-    let balance_0: Decimal = liquid_assets.iter().map(|(v, _)| *v).sum();
+    let balance_0: Decimal = liquid_assets.iter().map(|(v, _, _)| *v).sum();
     if balance_0 <= Decimal::ZERO {
         // Sin saldo no hay nada que cubrir. (El bucle daría lo mismo para 0, pero un saldo
         // negativo produciría meses negativos: se corta aquí.)
@@ -113,7 +120,7 @@ pub fn liquid_runway_months(
     // `Σ v·r / A > 0` porque aquí `A > 0` (garantizado por la guarda de arriba).
     let weighted_expected_return: Decimal = liquid_assets
         .iter()
-        .map(|(v, r)| *v * r.unwrap_or(Decimal::ZERO))
+        .map(|(v, r, _)| *v * r.unwrap_or(Decimal::ZERO))
         .sum();
     if annual_expense_for_swr * Decimal::from(100u32) <= balance_0 * swr_pct
         && weighted_expected_return > Decimal::ZERO
@@ -125,46 +132,106 @@ pub fn liquid_runway_months(
     // que `drain_from_assets` dentro del grupo líquido. Cada mes: pagar el gasto vaciando en ese
     // orden, y DESPUÉS crecer cada saldo restante con su propio multiplicador (retirada antes de
     // crecimiento, como el bucle de simulación).
-    let mut vals: Vec<Decimal> = liquid_assets.iter().map(|(v, _)| *v).collect();
+    let mut vals: Vec<Decimal> = liquid_assets.iter().map(|(v, _, _)| *v).collect();
+    let mut bases: Vec<Option<Decimal>> = liquid_assets.iter().map(|(_, _, b)| *b).collect();
     let mults: Vec<Decimal> = liquid_assets
         .iter()
-        .map(|(_, r)| monthly_multiplier(*r))
+        .map(|(_, r, _)| monthly_multiplier(*r))
         .collect();
-    let mut order: Vec<usize> = (0..vals.len()).collect();
-    order.sort_by(|&i, &j| {
-        liquid_assets[i]
-            .1
-            .unwrap_or(Decimal::ZERO)
-            .cmp(&liquid_assets[j].1.unwrap_or(Decimal::ZERO))
-            .then_with(|| i.cmp(&j))
-    });
+    // Mismo orden que el bucle de simulación restringido a líquidos: `drain_order` con
+    // `liquid` todo-true degenera en rentabilidad ASC + índice — implementación ÚNICA (#178).
+    let rates: Vec<Option<Decimal>> = liquid_assets.iter().map(|(_, r, _)| *r).collect();
+    let order = crate::projection::drain_order(&vec![true; vals.len()], &rates);
     let m_inf = monthly_multiplier(Some(annual_inflation_percent));
 
     let mut g = monthly_expense;
     for k in 1..=MAX_RUNWAY_MONTHS {
-        // El gemelo de #140 (Ola 6): cubrir el gasto vendiendo líquidos TRIBUTA — hasta 4.9.x
-        // el umbral pedía el gasto grosseado y el bucle lo gastaba libre de impuestos, la misma
-        // asimetría del drain en otra tarjeta. El gross-up va DENTRO del bucle, sobre el gasto
-        // YA inflado del mes (gross_up es afín: grossear fuera y dejar que la inflación escale
-        // el bruto divergiría — D-1). Con `taxes_enabled = false` es la identidad y la
-        // reducción exacta a A/g sigue intacta.
-        let need_gross = crate::tax::gross_up_monthly(g, tax_brackets, taxes_enabled, taxable_gain_ratio);
-        let total: Decimal = vals.iter().sum();
-        if total < need_gross {
-            // Mes final fraccionario: la parte del mes k que el saldo aún cubre.
-            return RunwayOutcome::Months(Decimal::from(k - 1) + total / need_gross);
-        }
-        let mut need = need_gross;
-        for &idx in &order {
-            if need <= Decimal::ZERO {
-                break;
+        // El gemelo de #140 (Ola 6): cubrir el gasto vendiendo líquidos TRIBUTA — el gross-up
+        // va DENTRO del bucle, sobre el gasto YA inflado del mes (gross_up es afín; grossear
+        // fuera y dejar que la inflación escale el bruto divergiría — D-1). Y desde #178 la `g`
+        // de cada activo con coste declarado se DERIVA de su base viva, mes a mes — con la
+        // misma pareja de vías que la rama de déficit del bucle: uniforme ⇒ camino literal
+        // (bit-idéntico a 4.11.0); mixta ⇒ solver por tramos. `taxes_enabled = false` sigue
+        // siendo la identidad y la reducción exacta a A/g sigue intacta.
+        let gains: Vec<Decimal> = vals
+            .iter()
+            .enumerate()
+            .map(|(i, v)| match bases[i] {
+                Some(b) if *v > Decimal::ZERO => {
+                    (Decimal::ONE - b / *v).clamp(Decimal::ZERO, Decimal::ONE)
+                }
+                _ => taxable_gain_ratio,
+            })
+            .collect();
+        let mut uniform: Option<Decimal> = None;
+        let mut is_uniform = true;
+        for i in 0..vals.len() {
+            if vals[i] > Decimal::ZERO {
+                match uniform {
+                    None => uniform = Some(gains[i]),
+                    Some(u) if u == gains[i] => {}
+                    Some(_) => {
+                        is_uniform = false;
+                        break;
+                    }
+                }
             }
-            // Un valor individual negativo no «drena» (take clampado a ≥ 0): con el modelo
-            // antiguo los negativos solo restaban del saldo agregado, y eso sigue siendo su
-            // único efecto (entran en `total`, nunca en la cobertura del gasto).
-            let take = vals[idx].max(Decimal::ZERO).min(need);
-            vals[idx] -= take;
-            need -= take;
+        }
+
+        if is_uniform {
+            let g_scalar = uniform.unwrap_or(taxable_gain_ratio);
+            let need_gross =
+                crate::tax::gross_up_monthly(g, tax_brackets, taxes_enabled, g_scalar);
+            let total: Decimal = vals.iter().sum();
+            if total < need_gross {
+                // Mes final fraccionario: la parte del mes k que el saldo aún cubre.
+                return RunwayOutcome::Months(Decimal::from(k - 1) + total / need_gross);
+            }
+            let mut need = need_gross;
+            for &idx in &order {
+                if need <= Decimal::ZERO {
+                    break;
+                }
+                // Un valor individual negativo no «drena» (take clampado a ≥ 0): con el modelo
+                // antiguo los negativos solo restaban del saldo agregado, y eso sigue siendo su
+                // único efecto (entran en `total`, nunca en la cobertura del gasto).
+                let take = vals[idx].max(Decimal::ZERO).min(need);
+                if take > Decimal::ZERO {
+                    let v_pre = vals[idx];
+                    vals[idx] -= take;
+                    if let Some(b) = bases[idx].as_mut() {
+                        // b' = b·v_post/v_pre (invariante de g; v_pre > 0 porque take > 0).
+                        *b = *b * vals[idx] / v_pre;
+                    }
+                }
+                need -= take;
+            }
+        } else {
+            let segments: Vec<crate::tax::MixedSegment> = order
+                .iter()
+                .map(|&i| crate::tax::MixedSegment {
+                    capacity_monthly: vals[i].max(Decimal::ZERO),
+                    gain_ratio: gains[i],
+                })
+                .collect();
+            let dd =
+                crate::tax::gross_up_mixed_monthly(g, &segments, tax_brackets, taxes_enabled);
+            if dd.net_shortfall_monthly > Decimal::ZERO {
+                // Mes final fraccionario, en NETO (bajo mezcla no existe «el» bruto del mes
+                // completo): la parte del gasto del mes k que las ventas aún netean.
+                let covered = (g - dd.net_shortfall_monthly).max(Decimal::ZERO);
+                return RunwayOutcome::Months(Decimal::from(k - 1) + covered / g);
+            }
+            for (pos, &idx) in order.iter().enumerate() {
+                let take = dd.per_segment_monthly[pos];
+                if take > Decimal::ZERO {
+                    let v_pre = vals[idx];
+                    vals[idx] -= take;
+                    if let Some(b) = bases[idx].as_mut() {
+                        *b = *b * vals[idx] / v_pre;
+                    }
+                }
+            }
         }
         for (v, m) in vals.iter_mut().zip(mults.iter()) {
             *v *= *m;
@@ -192,7 +259,7 @@ mod tests {
 
     /// Llamada con el gasto anual sin gross-up (`12·g`) — el caso de los tests sin impuestos.
     fn runway(
-        assets: &[(Decimal, Option<Decimal>)],
+        assets: &[(Decimal, Option<Decimal>, Option<Decimal>)],
         g: Decimal,
         infl: Decimal,
         swr_pct: Decimal,
@@ -225,10 +292,10 @@ mod tests {
     /// 12.000 / 1.000 = **12** exacto; 10.000 / 3.000 = **10000/3000** exacto (periódico).
     #[test]
     fn zero_return_zero_inflation_equals_plain_division() {
-        let entero = runway(&[(d(12_000), None)], d(1_000), Decimal::ZERO, swr());
+        let entero = runway(&[(d(12_000), None, None)], d(1_000), Decimal::ZERO, swr());
         assert_eq!(entero, RunwayOutcome::Months(d(12)));
 
-        let fraccionario = runway(&[(d(10_000), None)], d(3_000), Decimal::ZERO, swr());
+        let fraccionario = runway(&[(d(10_000), None, None)], d(3_000), Decimal::ZERO, swr());
         assert_eq!(
             fraccionario,
             RunwayOutcome::Months(d(10_000) / d(3_000)),
@@ -241,7 +308,7 @@ mod tests {
     #[test]
     fn positive_return_extends_runway() {
         let con_retorno = months(runway(
-            &[(d(12_000), Some(d(5)))],
+            &[(d(12_000), Some(d(5)), None)],
             d(1_000),
             Decimal::ZERO,
             swr(),
@@ -256,7 +323,7 @@ mod tests {
     /// el gasto del mes k es 1.000·m_inf^(k−1) > 1.000.
     #[test]
     fn inflation_shortens_runway() {
-        let con_inflacion = months(runway(&[(d(12_000), None)], d(1_000), d(3), swr()));
+        let con_inflacion = months(runway(&[(d(12_000), None, None)], d(1_000), d(3), swr()));
         assert!(
             con_inflacion < d(12),
             "esperado < 12 meses, obtenido {con_inflacion}"
@@ -268,7 +335,7 @@ mod tests {
     /// —sobrevivir el cap— este escenario también era indefinido: el pinning cruza el cambio).
     #[test]
     fn withdrawal_within_swr_is_indefinite() {
-        let out = runway(&[(d(1_000_000), Some(d(7)))], d(1_000), Decimal::ZERO, swr());
+        let out = runway(&[(d(1_000_000), Some(d(7)), None)], d(1_000), Decimal::ZERO, swr());
         assert_eq!(out, RunwayOutcome::Indefinite);
     }
 
@@ -289,7 +356,7 @@ mod tests {
         let balance_0 = v_lento + v_rapido;
 
         let secuencial = months(runway(
-            &[(v_lento, None), (v_rapido, Some(d(10)))],
+            &[(v_lento, None, None), (v_rapido, Some(d(10)), None)],
             d(2_000),
             Decimal::ZERO,
             swr(),
@@ -317,7 +384,7 @@ mod tests {
     #[test]
     fn single_asset_matches_the_old_single_multiplier_model() {
         let out = months(runway(
-            &[(d(24_000), Some(d(6)))],
+            &[(d(24_000), Some(d(6)), None)],
             d(1_500),
             Decimal::ZERO,
             swr(),
@@ -331,12 +398,12 @@ mod tests {
     #[test]
     fn negative_return_shortens_runway() {
         let negativo = months(runway(
-            &[(d(12_000), Some(d(-5)))],
+            &[(d(12_000), Some(d(-5)), None)],
             d(1_000),
             Decimal::ZERO,
             swr(),
         ));
-        let sin_tasa = months(runway(&[(d(12_000), None)], d(1_000), Decimal::ZERO, swr()));
+        let sin_tasa = months(runway(&[(d(12_000), None, None)], d(1_000), Decimal::ZERO, swr()));
         assert_eq!(sin_tasa, d(12));
         assert!(
             negativo < sin_tasa,
@@ -354,7 +421,7 @@ mod tests {
     #[test]
     fn zero_expense_is_no_expense_base() {
         assert_eq!(
-            runway(&[(d(12_000), Some(d(5)))], Decimal::ZERO, d(3), swr()),
+            runway(&[(d(12_000), Some(d(5)), None)], Decimal::ZERO, d(3), swr()),
             RunwayOutcome::NoExpenseBase
         );
     }
@@ -367,7 +434,7 @@ mod tests {
             RunwayOutcome::Months(Decimal::ZERO)
         );
         assert_eq!(
-            runway(&[(Decimal::ZERO, Some(d(5)))], d(1_000), Decimal::ZERO, swr()),
+            runway(&[(Decimal::ZERO, Some(d(5)), None)], d(1_000), Decimal::ZERO, swr()),
             RunwayOutcome::Months(Decimal::ZERO)
         );
     }
@@ -381,18 +448,18 @@ mod tests {
     /// la igualdad sigue bastando: la frontera exacta en `Decimal` no cambió.
     #[test]
     fn swr_threshold_equality_needs_positive_expected_return() {
-        let sin_retorno = runway(&[(d(300_000), None)], d(1_000), Decimal::ZERO, d(4));
+        let sin_retorno = runway(&[(d(300_000), None, None)], d(1_000), Decimal::ZERO, d(4));
         assert_eq!(sin_retorno, RunwayOutcome::Months(d(300)));
 
         let cero_explicito = runway(
-            &[(d(300_000), Some(Decimal::ZERO))],
+            &[(d(300_000), Some(Decimal::ZERO), None)],
             d(1_000),
             Decimal::ZERO,
             d(4),
         );
         assert_eq!(cero_explicito, RunwayOutcome::Months(d(300)));
 
-        let con_retorno = runway(&[(d(300_000), Some(d(2)))], d(1_000), Decimal::ZERO, d(4));
+        let con_retorno = runway(&[(d(300_000), Some(d(2)), None)], d(1_000), Decimal::ZERO, d(4));
         assert_eq!(con_retorno, RunwayOutcome::Indefinite);
     }
 
@@ -402,7 +469,7 @@ mod tests {
     /// 300.000/875 = **342,857142… meses** (≈ 28,6 años), y eso es lo que se publica.
     #[test]
     fn parked_cash_at_zero_return_is_never_indefinite() {
-        let out = runway(&[(d(300_000), Some(Decimal::ZERO))], d(875), Decimal::ZERO, swr());
+        let out = runway(&[(d(300_000), Some(Decimal::ZERO), None)], d(875), Decimal::ZERO, swr());
         assert_eq!(out, RunwayOutcome::Months(d(300_000) / d(875)));
     }
 
@@ -414,7 +481,7 @@ mod tests {
     #[test]
     fn mixed_portfolio_matches_the_engines_sequential_drain() {
         let secuencial = months(runway(
-            &[(d(10_000), Some(Decimal::ZERO)), (d(10_000), Some(d(10)))],
+            &[(d(10_000), Some(Decimal::ZERO), None), (d(10_000), Some(d(10)), None)],
             d(1_000),
             Decimal::ZERO,
             swr(),
@@ -437,7 +504,7 @@ mod tests {
     /// rentabilidad ni inflación la reducción exacta a `A/g` sigue intacta: 299.999/1.000.
     #[test]
     fn just_below_swr_threshold_is_finite() {
-        let out = runway(&[(d(299_999), None)], d(1_000), Decimal::ZERO, d(4));
+        let out = runway(&[(d(299_999), None, None)], d(1_000), Decimal::ZERO, d(4));
         assert_eq!(out, RunwayOutcome::Months(d(299_999) / d(1_000)));
     }
 
@@ -447,10 +514,10 @@ mod tests {
     /// almacenado no se revalida al leer.
     #[test]
     fn swr_zero_never_indefinite() {
-        let cero = runway(&[(d(1_000_000), Some(d(7)))], d(1_000), Decimal::ZERO, Decimal::ZERO);
+        let cero = runway(&[(d(1_000_000), Some(d(7)), None)], d(1_000), Decimal::ZERO, Decimal::ZERO);
         assert_eq!(cero, RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)));
 
-        let negativo = runway(&[(d(1_000_000), Some(d(7)))], d(1_000), Decimal::ZERO, d(-1));
+        let negativo = runway(&[(d(1_000_000), Some(d(7)), None)], d(1_000), Decimal::ZERO, d(-1));
         assert_eq!(negativo, RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)));
     }
 
@@ -460,7 +527,7 @@ mod tests {
     /// escenario era `Indefinite` por el cap.)
     #[test]
     fn cap_reached_without_swr_is_months_at_cap() {
-        let out = runway(&[(d(1_000_000), Some(d(7)))], d(4_000), Decimal::ZERO, swr());
+        let out = runway(&[(d(1_000_000), Some(d(7)), None)], d(4_000), Decimal::ZERO, swr());
         assert_eq!(out, RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)));
     }
 
@@ -470,7 +537,7 @@ mod tests {
     /// y no recalcula `12·monthly_expense` por su cuenta.
     #[test]
     fn grossed_expense_raises_threshold() {
-        let assets = [(d(1_000_000), Some(d(7)))];
+        let assets = [(d(1_000_000), Some(d(7)), None)];
         let sin_gross = liquid_runway_months(&assets, d(1_000), Decimal::ZERO, swr(), d(12_000), &[], false, Decimal::ONE);
         assert_eq!(sin_gross, RunwayOutcome::Indefinite);
 
@@ -490,7 +557,7 @@ mod tests {
     /// ≥ 0 y publicaba 12,0 — el engine siempre supo componer hacia abajo.
     #[test]
     fn negative_inflation_lets_the_expense_shrink_and_extends_the_runway() {
-        let out = months(runway(&[(d(12_000), None)], d(1_000), d(-2), swr()));
+        let out = months(runway(&[(d(12_000), None, None)], d(1_000), d(-2), swr()));
         assert!(out > d(12), "más que los 12 exactos de inflación 0, got {out}");
         assert!(
             out > d(12_112) / d(1_000) && out < d(12_113) / d(1_000),
@@ -508,7 +575,7 @@ mod tests {
     fn the_finite_loop_pays_the_same_taxes_as_the_threshold() {
         let es = crate::tax::es_brackets_for_tests();
         let taxed = months(liquid_runway_months(
-            &[(d(12_000), None)],
+            &[(d(12_000), None, None)],
             d(1_000),
             Decimal::ZERO,
             swr(),
@@ -522,7 +589,7 @@ mod tests {
             "esperado ≈9,5758, got {taxed}"
         );
         let g_zero = liquid_runway_months(
-            &[(d(12_000), None)],
+            &[(d(12_000), None, None)],
             d(1_000),
             Decimal::ZERO,
             swr(),
@@ -532,5 +599,48 @@ mod tests {
             Decimal::ZERO,
         );
         assert_eq!(g_zero, RunwayOutcome::Months(d(12)), "g = 0 ≡ sin impuestos: A/g exacto");
+    }
+
+    /// #178 — la base de coste DECLARADA gobierna el bucle finito. El mismo escenario del test
+    /// anterior (12.000 € al 0 %, gasto 1.000, tramos ES) con coste 9.600 (`g = 0,2`, constante
+    /// al 0 % — invariancia): bruto = 1.000/0,962 y el runway es EXACTO
+    /// `12.000·0,962/1.000 = 11,544` meses (con `g = 1` eran ≈9,5758 — +2 meses de verdad).
+    #[test]
+    fn declared_basis_derives_g_in_the_finite_loop() {
+        let es = crate::tax::es_brackets_for_tests();
+        let out = liquid_runway_months(
+            &[(d(12_000), None, Some(d(9_600)))],
+            d(1_000),
+            Decimal::ZERO,
+            swr(),
+            d(12_000),
+            &es,
+            true,
+            Decimal::ONE,
+        );
+        assert_eq!(months(out).round_dp(10), d(11_544) / d(1_000), "exacto salvo el redondeo a 28 dígitos de la cadena de divisiones");
+    }
+
+    /// #178 — vía MIXTA del runway: A(6.000, coste 4.800 ⇒ g=0,2) se agota primero (empate de
+    /// rentabilidad al 0 %, gana por índice) y B(6.000, sin coste ⇒ escalar g=1) paga el resto
+    /// caro. Réplica Decimal-50 en sesión espejando el branching del motor: **10,563262** meses
+    /// — entre el 9,5758 de todo-gravado y el 11,544 de todo-al-coste. Nota: una vez agotado A,
+    /// el mes final corre por la vía UNIFORME y su fracción es la BRUTA (`total/need_gross`, la
+    /// convención histórica); con fracción neta saldría 10,5676 — la diferencia es solo la
+    /// lectura del último mes parcial, y se conserva la histórica.
+    #[test]
+    fn mixed_bases_split_the_runway_between_cheap_and_taxed_tranches() {
+        let es = crate::tax::es_brackets_for_tests();
+        let out = months(liquid_runway_months(
+            &[(d(6_000), None, Some(d(4_800))), (d(6_000), None, None)],
+            d(1_000),
+            Decimal::ZERO,
+            swr(),
+            d(12_000),
+            &es,
+            true,
+            Decimal::ONE,
+        ));
+        assert_eq!(out.round_dp(6), d(10_563_262) / d(1_000_000));
     }
 }

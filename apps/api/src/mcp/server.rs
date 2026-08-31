@@ -813,8 +813,10 @@ pub struct FireSettingsOverrideParam {
     #[serde(default)]
     #[schemars(extend("enum" = ["data", "calendar"]))]
     pub expense_avg_window_mode: Option<String>,
-    /// Fracción de plusvalía gravable (0..=1, string decimal) — simulable sin persistir, como
-    /// `taxes_enabled` y `tax_brackets`.
+    /// Fracción de plusvalía gravable ESCALAR (0..=1, string decimal) — simulable sin
+    /// persistir, como `taxes_enabled` y `tax_brackets`. Desde #178 rige el objetivo, el umbral
+    /// de Autonomía y los activos SIN coste declarado; un activo con purchase_price deriva la g
+    /// de su base real también en el what-if.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub taxable_gain_ratio: Option<String>,
@@ -1909,9 +1911,10 @@ pub struct UpdateFireSettingsParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["data", "calendar"]))]
     pub expense_avg_window_mode: Option<String>,
-    /// Fracción de cada euro bruto retirado que es plusvalía gravable (0..=1, string decimal;
-    /// default "1" = reembolso íntegro gravado). Baja el objetivo Y la retirada bruta simulada
-    /// a la vez.
+    /// Fracción de plusvalía gravable ESCALAR (0..=1, string decimal; default "1"). Desde #178
+    /// gobierna el OBJETIVO y el umbral de Autonomía (perpetuidades) y es el valor de los
+    /// activos SIN purchase_price: la retirada simulada de un activo con coste declarado deriva
+    /// su g de la base real (ver drawdown_gain_basis en get_projection).
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub taxable_gain_ratio: Option<String>,

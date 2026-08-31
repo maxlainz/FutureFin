@@ -648,3 +648,47 @@ async fn mode_b_zero_months_falls_back_to_budget_runway() {
         "sin meses reales el modo B debe devolver exactamente el bloque del modo A"
     );
 }
+
+/// #178 — la base de coste DECLARADA gobierna el bucle finito del runway, end-to-end. Mismo
+/// esqueleto que el baseline (12.000 líquidos al 0 %, gasto 1.000, impuestos ES default, g
+/// escalar 1): SIN coste declarado el runway tributa todo el bruto → 9,5758 → **9,6**; al
+/// declarar `purchase_price = 9.600` (g = 0,2 constante al 0 %) el runway pasa a
+/// 12.000·0,962/1.000 = 11,544 → **11,5**. El umbral SWR no cambia de régimen (perpetuidad).
+#[tokio::test]
+async fn declared_cost_extends_the_runway_end_to_end() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let asset_cat = app.create_category(&owner, "asset", "Cuenta").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({ "category_id": asset_cat, "name": "Fondo", "current_value": "12000",
+                    "is_liquid": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let asset_id = r.json()["id"].as_str().unwrap().to_string();
+    budget(&app, &owner.cookie, &expense_cat, "1000").await;
+
+    let h = health(&app, &owner.cookie).await;
+    assert_eq!(dec(&h["runway_months"]), Decimal::new(96, 1), "sin coste: g escalar 1 → 9,6");
+
+    let p = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{asset_id}"),
+            json!({ "purchase_price": "9600" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(p.status, http::StatusCode::OK, "{p:?}");
+
+    let h = health(&app, &owner.cookie).await;
+    assert_eq!(
+        dec(&h["runway_months"]),
+        Decimal::new(115, 1),
+        "coste declarado: g derivada 0,2 → 11,5 (+2 meses de verdad)"
+    );
+}
