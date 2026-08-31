@@ -337,7 +337,7 @@ export type ProjectionSeriesApi = {
    *  Vacío cuando la inflación es 0 — en ese caso reusa `milestones`. */
   milestones_real?: ProjectionMilestoneApi[];
   compound_outpaces_true_savings_month_index?: number | null;
-  /** Primer mes cuyo déficit de caja iguala o supera TODO lo drenable (`surplus_cash` + todos los
+  /** Primer mes cuya venta bruta necesaria iguala o supera TODO lo drenable (todos los
    *  activos): la cartera se vacía ese mes y desde el siguiente el descubierto se acumula restando
    *  del patrimonio para siempre. Número de MES (misma base que `points[].month_index`), nunca una
    *  posición de array. `null` explícito = no se agota dentro del horizonte, no «no calculado». (#119) */

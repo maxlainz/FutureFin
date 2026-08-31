@@ -53,8 +53,14 @@ puerto; el default documentado sigue siendo el TCP de 5433.
 - **4.5.0 (auditoría del modelo financiero)** añade al inline `mod tests`:
   `absurd_return_overflows_with_typed_error_not_panic` (overflow de crecimiento → `Err(AssetValueOverflow)`,
   predicho a mano: 1.000 € al 1000 % desborda en k ≈ 298) y
-  `first_month_allocation_skips_cascade_in_retirement_like_the_loop` (en jubilación la resolución
-  publica ceros + `InRetirement`, y el bucle coincide: NW(1) = 200.600). Además nace el **arnés de
+  `first_month_allocation_runs_the_cascade_in_retirement_like_the_loop` (INVERTIDO en 4.12.1/#175 —
+  antes `…_skips_cascade_in_retirement_like_the_loop`, la regresión H-cascada-1 que pineaba «en
+  jubilación la cascada no corre»: ahora la MISMA cascada corre jubilado o no, y `surplus_cash`
+  murió. A mano: NW(0) = 200.000 ≥ target 100.000 ⇒ jubilado; caja = 2.200 − 1.600 = 600 ⇒ el
+  sumidero se lleva los 600 — `per_asset = [600]`, `leftover = 0`, sin `skipped_reason` —, y el
+  bucle coincide: NW(1) = 200.600, el MISMO número que antes pero por el mecanismo contrario, el
+  euro vive en el activo (`per_asset_series[0][1] = 200.600`), no en una caja fantasma;
+  `unallocated_savings_total = 0`). Además nace el **arnés de
   auditoría** `crates/engine/tests/audit_dump.rs` (2 tests que no afirman nada: vuelcan CSV de la
   batería de casos límite L1-L6/P1-P6 para compararlos con oráculos externos —
   `cargo test -p futurefin-engine --test audit_dump -- --nocapture`), y el test de integración

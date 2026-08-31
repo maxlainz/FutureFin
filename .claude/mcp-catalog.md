@@ -363,10 +363,13 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     sobra se mueve a un campo de procedencia o al `instructions`. Medida barata, del fixture
     generado (que publica `description_len` por tool):
     `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
-    → hoy `68 23874 596`; era `52 21319 596` al cerrar la Fase 5. **La Fase 6 gastó casi todo el
-    margen**: las 16 tools nuevas llevaron el crudo a **28.884** (+4.884 sobre el tope) y el arreglo
-    fue el que la propia guardia prescribe. Quedan **126 caracteres** — la próxima tool obliga a otra
-    ronda de reequilibrio, así que presupuéstala al planificarla, no al final.
+    → hoy `68 23975 596` (medido en `feat/175-176-fin-del-surplus-cash`, 4.12.1: la muerte de
+    `surplus_cash` movió las descripciones de `delete_asset` y `get_allocation_resolution` y el
+    total subió +101 sobre los `23874` de la ronda anterior); era `52 21319 596` al cerrar la Fase 5.
+    **La Fase 6 gastó casi todo el margen**: las 16 tools nuevas llevaron el crudo a **28.884**
+    (+4.884 sobre el tope) y el arreglo fue el que la propia guardia prescribe. Quedan **25
+    caracteres** — la próxima tool obliga a otra ronda de reequilibrio, así que presupuéstala al
+    planificarla, no al final.
   - **Hallazgo que reordena lo que queda**: medido DESPUÉS del recorte, el `inputSchema` del
     catálogo son ~55 KB, **~2,7× las descripciones** (medida puntual de la auditoría de la Fase 5, no
     una constante congelada: re-derívala con un `tools/list` contra un servidor vivo pesando
@@ -630,7 +633,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `allocation_remainder_rules_deleted`**: las reglas de reparto que apuntan al activo se BORRAN con
   él (`ON DELETE CASCADE`) y eso no tiene vuelta atrás. El preview contaba lo reversible y callaba
   lo irreversible, así que el humano confirmaba un borrado «inocuo» que podía llevarse el sumidero
-  de la cascada y redistribuir el sobrante mensual en todo el horizonte), `delete_liability` (ídem
+  de la cascada y redistribuir el sobrante mensual en todo el horizonte — **desde 4.12.1 (#176) ese
+  borrado concreto ya NO es posible con otros activos vivos en el scope: se rechaza con
+  `remainder_required` antes de llegar al preview** (`assert_asset_delete_keeps_the_sink`; el
+  sobrante ya no tiene `surplus_cash` donde caer, así que perder el sumidero dejaría de repartirse
+  euros en silencio). El conteo de este preview sigue siendo la explicación completa solo para el
+  caso que aún se permite — el ÚLTIMO activo del scope, donde no hay cascada que proteger), `delete_liability` (ídem
   `linked_liability_id` **y, desde la Fase 3, `budget_entry_removed`**: la cuota derivada que
   desaparece de `GET /v1/budget`, con `label`, `monthly_amount` y los cuatro totales
   before/after — `expense_monthly_*` y `net_monthly_*` — del presupuesto del HOGAR completo,

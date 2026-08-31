@@ -78,12 +78,6 @@ export function AllocationRulesPanel({
     (r) => r.kind === "remainder" && !r.cap_kind,
   );
   const hasSink = sinkIndex >= 0;
-  // #150: espejo del `surplus_destination` que publica el servidor en
-  // /v1/allocation-rules/resolution (la señal canónica) — un sumidero DESHABILITADO no cuenta,
-  // porque la cascada lo salta y el sobrante acaba en caja igual.
-  const hasEnabledSink = rules.some(
-    (r) => r.enabled && r.kind === "remainder" && !r.cap_kind,
-  );
 
   return (
     <section
@@ -124,16 +118,6 @@ export function AllocationRulesPanel({
           ) : null}
         </div>
       )}
-      {!busy && assets.length > 0 && !hasEnabledSink ? (
-        // #150: los activos nuevos siembran su regla «resto» solos; este aviso cubre las
-        // instalaciones anteriores (sin retro-siembra, decisión del owner) y el estado al que
-        // se llega borrando el activo del sumidero.
-        <div className="banner info-banner tight-banner">
-          Tu sobrante mensual se está quedando en caja al 0 %: ninguna regla{" "}
-          <strong>resto</strong> lo recoge. Añádela (o reactívala) para que
-          trabaje en un activo.
-        </div>
-      ) : null}
       <p className="muted tight">
         Cascada en orden ascendente. Cada mes, sobre el sobrante (ingresos −
         gastos − cuotas de deuda + flujos puntuales de Próximos), cada regla
@@ -163,14 +147,17 @@ export function AllocationRulesPanel({
         <p className="muted">Cargando…</p>
       ) : rules.length === 0 ? (
         <p className="muted">
-          Sin reglas. El sobrante mensual quedará como efectivo.
+          Sin reglas todavía. Crea tu primer activo y la regla «resto» nace
+          sola con él.
         </p>
       ) : (
         <>
           {!hasSink ? (
-            <div className="banner info-banner">
-              Falta una regla <strong>Resto sin tope</strong> al final: el
-              sobrante no asignado quedará como efectivo.
+            // 4.12.1: estado residual (no debería verse — con activos, el sumidero es
+            // indestructible). Si aparece, el ahorro NO se está simulando: dilo sin rodeos.
+            <div className="banner error-banner">
+              Falta la regla <strong>Resto sin tope</strong>: tu ahorro mensual
+              no tiene destino y la proyección NO lo está contando. Añádela.
             </div>
           ) : hasSink && sinkIndex !== rules.length - 1 ? (
             <div className="banner info-banner">

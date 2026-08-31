@@ -63,11 +63,11 @@ ecoado al lado. (The docs/comments that still described the old model were fixed
 | **Real euros / today-euros** | Nominal divided by `(1+inflation/100)^(years)`. Display-only concept. |
 | **Deflation** | The nominal→real division above. Done in the handler (`deflate_points_to_today`) and in the chart, never inside the engine. |
 | **Jubilación** | Retirement. UI tab name and API field prefix (`jubilacion_month_index`). Triggered **only** by the FIRE crossover — there is no target-age trigger. |
-| **Sobrante / surplus** | Positive monthly net cash (`income − expense − debt_service + planning_adj`). Fed into the allocation cascade. Unrouted surplus accumulates as `surplus_cash` (counted in net worth). |
+| **Sobrante / surplus** | Positive monthly net cash (`income − expense − debt_service + planning_adj`). Fed into the allocation cascade — **also in retirement, the SAME cascade, no exception** (4.12.1, #175). Unrouted surplus does NOT enter net worth: it accumulates in `unallocated_savings_total`, unreachable in production with live assets (indestructible sink, #176). |
 | **Cascade** | The ordered list of `allocation_rules` that distributes the monthly surplus across assets. §6. |
 | **Debt service** | Sum of active liability monthly payments, each capped by remaining principal. |
-| **Contributed capital** | `Σ basis por activo + surplus_cash` (4.10.0/#120): arranca en los `purchase_price`, sube con cada euro que la cascada asigna Y con el superávit (también el del jubilado), y **BAJA al vender** (`b' = b·v_post/v_pre`) — ya NO es monótono. Never includes market growth. |
-| **Drawdown / drain** | In deficit months, cash is pulled from `surplus_cash` first (sin grossear: la caja entró tributada), then from assets (liquid, lowest-return first) — vendiendo **BRUTO** desde 4.10.0/#140 (`gross_up_monthly` con la misma escala y `g` que el objetivo); `undrained` se acumula NETO. Retirement is modelled as income dropping, which creates the deficit. |
+| **Contributed capital** | `Σ basis por activo` (4.10.0/#120; `surplus_cash` retirado del término en 4.12.1/#175): arranca en los `purchase_price`, sube con cada euro que la cascada asigna a un activo — también en jubilación, donde reinvertir SIGUE subiendo la base y abarata las ventas futuras (#178) — y **BAJA al vender** (`b' = b·v_post/v_pre`) — ya NO es monótono. El sobrante que ninguna regla absorbe NO cuenta como aportado: vive fuera del balance, en `unallocated_savings_total`. Never includes market growth. |
+| **Drawdown / drain** | In deficit months **the whole deficit is sold, gross, from assets** — no cash-first step since 4.12.1 (#175, `surplus_cash` retired). Order: liquid first, lowest-return first. `gross_up_monthly`/`gross_up_mixed_monthly` con la misma escala y `g` que el objetivo — **`g` per-asset since 4.12.0/#178**: an asset whose basis was fed by the cascade derives its `g` from that basis even without a declared `purchase_price` (`basis_declared`, extension B of #178 in 4.12.1 — the contributed euro IS the data); `undrained` se acumula NETO. Retirement is modelled as income dropping, which creates the deficit. |
 | **Installation** | The single-household deployment singleton; `fire_settings` and inflation live on its one DB row. |
 | **Runway** | Months the **liquid** assets cover the total monthly expense, compounding their expected return and inflating the expense (§2c). A KPI of `/v1/summary`. It shares two inputs with the FIRE target since v2.3.0 — the same `swr_pct` and the same tax gross-up — because its *infinite* case is exactly a liquidity FIRE number: `Indefinite` ⟺ the grossed-up annual withdrawal ≤ SWR × liquid balance. The finite case remains its own simulation. |
 
@@ -410,7 +410,10 @@ sería doble conteo.
 
 `project_net_worth_series` en `crates/engine/src/projection.rs`. Series index 0 = today's state;
 month `k` (1-based) simulates the calendar month `month_first(ref_date) + (k−1)`. Net worth
-identity: `NW = Σ asset values + surplus_cash − Σ liability principals − undrained_cumulative`.
+identity (4.12.1 — `surplus_cash` retired, #175): `NW = Σ asset values − Σ liability principals −
+undrained_cumulative`. Companion identities: `liquid_worth = Σ liquid asset values` and
+`contributed_capital = Σ basis per asset` — the three live together in
+[`engine.md`](../../engine.md#output).
 
 > **Los números de línea de esta sección estaban obsoletos y se han retirado** (2026-08-28): el
 > fichero creció ~880 líneas con la Fase 6 y cada anclaje apuntaba a otra cosa —
@@ -436,7 +439,9 @@ For each month `k = 1..=horizon_months`:
    cubra**.
 2. **Retirement check (4.8.0)**: `fire_reached = liquid_prev ≥ target(k−1)` via
    `fire_target_at_month_index` — the basis is the **LIQUID** worth of the previous month
-   (Σ `is_liquid` assets + `surplus_cash`, GROSS, no principal subtracted — #143, paired with the
+   (Σ `is_liquid` assets, GROSS, no principal subtracted — #143, `surplus_cash` retired from this
+   term in 4.12.1/#175 — theorem: the crossing could only move LATER with that change, never
+   earlier, and in production it is invariant; paired with the
    target's full-quota debt term of #142), not total NW. The state is an **absorbing latch**
    (#141): `retired = retired || fire_reached || k ≥ retirement_start_month` — once retired,
    always retired, even if worth later dips below the target (until 4.7.x the model re-checked
@@ -449,15 +454,21 @@ For each month `k = 1..=horizon_months`:
    retirement_withdrawal`. Planning flows with a `due_date` land in their calendar month; undated
    ones are spread over 90 days from `ref_date`. Budget expenses with an
    `expense_end_date` are cancelled from the following month via positive adjustments.
-5. **Surplus** (`net_cash > 0`, not retired): run the cascade (§6). Routed euros are
-   added to asset values AND to `contributed_capital`; cascade leftover goes to `surplus_cash`
-   and ALSO counts as contributed. **In retirement** any surplus goes to
-   `surplus_cash` only — no contributions, not counted as contributed capital.
-6. **Deficit** (`net_cash ≤ 0`): drain `surplus_cash` first; remaining need drains
-   assets via `drain_from_assets` — order: **liquid before illiquid, and within each
-   group lowest `expected_annual_return_percent` first** (ties by input order; illiquid assets
-   ARE drained if liquids run out). Any shortfall the assets cannot cover accumulates in
-   `undrained_cumulative`, which is *subtracted* from NW (implicit debt).
+5. **Surplus** (`net_cash > 0`): run the cascade (§6) — **also in retirement, the SAME cascade,
+   no special-case branch** (4.12.1, #175: `AllocationSkipReason::InRetirement` and the
+   `in_retirement` wire literal died with the branch that produced them; the caps of the #171
+   phase now govern euros in retirement too). Routed euros are added to asset values AND to
+   `contributed_capital` (reinvesting raises the cost basis even in retirement — cheaper future
+   sales, #178). Whatever no rule absorbs does **NOT** enter net worth: it accumulates separately
+   in `unallocated_savings_total`, unreachable in production with live assets (indestructible
+   sink, #176).
+6. **Deficit** (`net_cash ≤ 0`): **no cash-first step** — the whole deficit is sold, gross, from
+   assets (4.12.1, #175: the `surplus_cash`-first step died) via `drain_from_assets` — order:
+   **liquid before illiquid, and within each group lowest `expected_annual_return_percent` first**
+   (ties by input order; illiquid assets ARE drained if liquids run out). The tax exemption cash
+   used to carry is inherited by the drain itself: the 0%-return account drains first and, if its
+   basis was fed by the cascade, derives `g = 0` (`b = v`). Any shortfall the assets cannot cover
+   accumulates in `undrained_cumulative`, which is *subtracted* from NW (implicit debt).
 7. **Compound growth**: each asset value ×= monthly multiplier. Growth applies AFTER
    this month's contribution/drain.
 8. **Principal reduction**: each liability is **assigned the closing balance computed in step 1**
@@ -483,14 +494,17 @@ Per rule, in order, over the `remaining` surplus:
 - Intent: `fixed` → `min(amount, remaining)`; `percent` → `remaining × pct/100` (**percent of
   what is left at this step**, not of the original surplus); `remainder` → all of `remaining`.
 - `take = min(intent, cap_room, remaining)`; add to target, subtract from remaining.
-- Whatever no rule absorbs is returned as leftover → `surplus_cash`.
+- Whatever no rule absorbs is returned as leftover → `unallocated_savings_total` (4.12.1, #175) —
+  it does NOT enter net worth; `unallocated_savings_reason` (`null` | `"no_assets"` | `"no_sink"`)
+  explains why (unreachable in production with live assets, indestructible sink #176).
 
 **The uncapped-remainder sink invariant** (enforced by the API handler, not the engine —
 `apps/api/src/handlers/allocation_rules.rs:387-402,563-581,652-658,722-733`): every scope must
 keep **exactly one** `remainder` rule with no cap, and it must be **last** in the cascade. Create
 rejects a second sink, update/delete reject orphaning the scope, reorder rejects a non-last sink.
-The engine itself tolerates zero rules (surplus → cash, test projection.rs:643-653); the
-invariant lives one layer up. (This cascade replaced per-asset contribution config in v1.1.0
+The engine itself tolerates zero rules (surplus → `unallocated_savings_total`, not net worth,
+4.12.1/#175); the invariant lives one layer up — it is what makes that case unreachable by API
+with live assets (#176). (This cascade replaced per-asset contribution config in v1.1.0
 with a signed-off, no-data-migration column drop — see futurefin-change-control.)
 
 ## 7. Display math: deflation, milestones, horizon
