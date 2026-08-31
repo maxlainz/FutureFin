@@ -47,7 +47,9 @@ export const HELP_TEXTS = {
       "el presupuesto, el presupuestado; con los movimientos reales, tu gasto real promediado. " +
       "«Indefinida» exige dos cosas: que tu retirada anual quepa en el SWR y que tus líquidos " +
       "tengan rentabilidad esperada positiva — el dinero parado al 0 % siempre se agota, y aquí " +
-      "se dice en meses. «+100 años» es un suelo, no una medida exacta.",
+      "se dice en meses. Vender para vivir tributa: en los activos con precio de compra " +
+      "declarado, solo su ganancia real; en el resto, la fracción de Plusvalía gravable. " +
+      "«+100 años» es un suelo, no una medida exacta.",
   },
   "summary.net_return": {
     title: "Rendimiento neto",
@@ -188,13 +190,13 @@ export const HELP_TEXTS = {
   "settings.taxable_gain": {
     title: "Plusvalía gravable de la retirada",
     body:
-      "Qué parte de cada euro que vendas en la jubilación es ganancia que tributa (de 0 a 1; de " +
-      "serie, 1 = todo el reembolso tributa, lo más prudente). En la realidad española solo " +
-      "tributa la plusvalía — lo que el fondo ganó desde que compraste —, así que si tu cartera " +
-      "es mitad coste y mitad ganancia, un 0,5 es más realista. Bajarla mueve DOS cosas a la " +
-      "vez: tu objetivo baja (necesitas vender menos bruto para el mismo neto) y la simulación " +
-      "te descuenta menos impuestos al vender. Se aplica igual en el objetivo, en la curva y en " +
-      "la Autonomía — una sola fiscalidad.",
+      "Qué parte de cada euro vendido es ganancia que tributa (de 0 a 1; de serie, 1 = todo " +
+      "tributa, lo más prudente). El mejor dato no es esta perilla: DECLARA el precio de compra " +
+      "en cada activo y la simulación derivará su plusvalía real mes a mes al vender — y la " +
+      "dejará crecer sola, que es lo que hace de verdad (un número fijo aquí se queda corto con " +
+      "los años). Esta fracción gobierna los activos sin coste declarado, tu objetivo y el " +
+      "umbral de Autonomía, que dimensionan a perpetuidad — y a perpetuidad casi todo acaba " +
+      "siendo ganancia, por eso su valor de serie es 1.",
   },
   "settings.horizon_age": {
     title: "Edad límite del horizonte",

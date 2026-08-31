@@ -906,18 +906,13 @@ pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> 
 /// valida `current_value ≥ 0` pero la BD no tiene CHECK, y sin el clamp un negativo colado por
 /// restore/edición directa SUBÍA el valor y la necesidad a la vez (min(v, need) < 0). El
 /// negativo sigue pesando en los totales del caller; simplemente no se vende.
-fn drain_from_assets(
-    values: &mut [Decimal],
-    liquid: &[bool],
-    rates: &[Option<Decimal>],
-    mut need: Decimal,
-    mut taken: Option<&mut [Decimal]>,
-) -> Decimal {
-    if need <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-    let n = values.len();
-    let mut order: Vec<usize> = (0..n).collect();
+/// Orden TOTAL de drenaje: líquidos primero; dentro de cada grupo, menor rentabilidad esperada
+/// primero (`None` cuenta como 0); empate por índice. **Implementación ÚNICA** (#178): la
+/// consumen `drain_from_assets`, la rama de déficit del bucle (que necesita el orden ANTES de
+/// vender para montar los tramos de `g`) y el bucle finito del runway — una segunda copia haría
+/// divergir en silencio la base gravada y la venta ejecutada.
+pub(crate) fn drain_order(liquid: &[bool], rates: &[Option<Decimal>]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..liquid.len()).collect();
     order.sort_by(|&i, &j| {
         let li = liquid[i];
         let lj = liquid[j];
@@ -930,6 +925,20 @@ fn drain_from_assets(
                 .then_with(|| i.cmp(&j)),
         }
     });
+    order
+}
+
+fn drain_from_assets(
+    values: &mut [Decimal],
+    liquid: &[bool],
+    rates: &[Option<Decimal>],
+    mut need: Decimal,
+    mut taken: Option<&mut [Decimal]>,
+) -> Decimal {
+    if need <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+    let order = drain_order(liquid, rates);
     for idx in order {
         if need <= Decimal::ZERO {
             break;
@@ -1588,53 +1597,150 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
             let from_surplus = surplus_cash.min(need_net);
             surplus_cash -= from_surplus;
             let need_assets_net = need_net - from_surplus;
-            // #140 fase 1: lo que falta se cubre VENDIENDO, y la venta tributa — el bruto a
-            // drenar es gross_up_monthly(neto) (M1: anualiza, grossea por tramos, divide).
-            // Con `taxes_enabled = false` es la identidad y toda la rama es bit-idéntica a 4.9.0.
-            let need_gross = crate::tax::gross_up_monthly(
-                need_assets_net,
-                &input.tax_brackets,
-                input.taxes_enabled,
-                input.taxable_gain_ratio,
-            );
-            // Mes de agotamiento (#119): el primer mes cuya VENTA BRUTA necesaria iguala o
-            // supera todo lo vendible (la caja ya se restó arriba; el drenaje continúa sobre
-            // los ilíquidos). En el caso exacto la cartera se VACÍA este mes y el descubierto
-            // empieza el siguiente: por eso `>=`. Equivalencia exacta con el predicado
-            // histórico con impuestos apagados: `need ≥ surplus + A ⟺ need − surplus ≥ A`.
-            // 200.000 € al 0 % gastando 2.000 €/mes ⇒ mes 100 sin impuestos (NW(360) −520.000)
-            // y mes 80 con tramos ES (NW(360) −561.200, descubierto NETO).
-            if need_gross > Decimal::ZERO && assets_depleted_month_index.is_none() {
-                let drainable: Decimal = values
-                    .iter()
-                    .map(|v| (*v).max(Decimal::ZERO))
-                    .sum::<Decimal>();
-                if need_gross >= drainable {
-                    assets_depleted_month_index = Some(k);
+            // #178: la fracción de plusvalía gravable es POR ACTIVO cuando el activo declaró su
+            // coste (`purchase_price` presente, aunque sea 0): `g_i = 1 − b_i/v_i`, clampada a
+            // [0,1] (bajo el agua ⇒ 0; las minusvalías no compensan — divergencia declarada).
+            // Sin coste declarado, el activo usa el ESCALAR configurado — regla de
+            // compatibilidad: nadie ve moverse un número sin haber aportado el dato. `g_i` es
+            // invariante al drenaje del propio mes (b'/v_post = b/v_pre — teorema pineado en
+            // los tests), así que evaluarla aquí, antes de vender, no aproxima nada.
+            let gains: Vec<Decimal> = input
+                .assets
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    if a.purchase_price.is_some() && values[i] > Decimal::ZERO {
+                        (Decimal::ONE - basis[i] / values[i])
+                            .clamp(Decimal::ZERO, Decimal::ONE)
+                    } else {
+                        input.taxable_gain_ratio
+                    }
+                })
+                .collect();
+            // Cortocircuito de `g` uniforme (sobre lo VENDIBLE): camino LITERAL de 4.11.0,
+            // operando a operando — el paseo mixto es algebraicamente igual pero no bit a bit
+            // (trocear un tramo lineal añade divisiones que rust_decimal redondea).
+            let mut uniform_g: Option<Decimal> = None;
+            let mut is_uniform = true;
+            for i in 0..values.len() {
+                if values[i] > Decimal::ZERO {
+                    match uniform_g {
+                        None => uniform_g = Some(gains[i]),
+                        Some(u) if u == gains[i] => {}
+                        Some(_) => {
+                            is_uniform = false;
+                            break;
+                        }
+                    }
                 }
             }
-            if need_gross > Decimal::ZERO {
-                let mut taken = vec![Decimal::ZERO; values.len()];
-                let und_gross =
-                    drain_from_assets(&mut values, &liquid, &rates, need_gross, Some(&mut taken));
-                // El descubierto se acumula NETO (#140 D-4): mide euros de GASTO que faltaron,
-                // no ventas que no ocurrieron — lo vendido de verdad netea after_tax(bruto
-                // obtenido), y lo que falta del gasto es la diferencia. Con impuestos apagados
-                // after_tax es la identidad y esto es exactamente el `und` de siempre.
-                let drawn_gross = need_gross - und_gross;
-                undrained_cumulative += need_assets_net
-                    - crate::tax::after_tax_monthly(
-                        drawn_gross,
-                        &input.tax_brackets,
-                        input.taxes_enabled,
-                        input.taxable_gain_ratio,
+            let effective_uniform = if is_uniform {
+                Some(uniform_g.unwrap_or(input.taxable_gain_ratio))
+            } else {
+                None
+            };
+
+            if let Some(g_scalar) = effective_uniform {
+                // #140 fase 1: lo que falta se cubre VENDIENDO, y la venta tributa — el bruto a
+                // drenar es gross_up_monthly(neto) (M1: anualiza, grossea por tramos, divide).
+                // Con `taxes_enabled = false` es la identidad y la rama es bit-idéntica a 4.9.0;
+                // con todos los activos sin coste declarado, `g_scalar` ES el escalar y la rama
+                // es bit-idéntica a 4.11.0.
+                let need_gross = crate::tax::gross_up_monthly(
+                    need_assets_net,
+                    &input.tax_brackets,
+                    input.taxes_enabled,
+                    g_scalar,
+                );
+                // Mes de agotamiento (#119): el primer mes cuya VENTA BRUTA necesaria iguala o
+                // supera todo lo vendible (la caja ya se restó arriba; el drenaje continúa sobre
+                // los ilíquidos). En el caso exacto la cartera se VACÍA este mes y el descubierto
+                // empieza el siguiente: por eso `>=`. Equivalencia exacta con el predicado
+                // histórico con impuestos apagados: `need ≥ surplus + A ⟺ need − surplus ≥ A`.
+                // 200.000 € al 0 % gastando 2.000 €/mes ⇒ mes 100 sin impuestos (NW(360)
+                // −520.000) y mes 80 con tramos ES (NW(360) −561.200, descubierto NETO).
+                if need_gross > Decimal::ZERO && assets_depleted_month_index.is_none() {
+                    let drainable: Decimal = values
+                        .iter()
+                        .map(|v| (*v).max(Decimal::ZERO))
+                        .sum::<Decimal>();
+                    if need_gross >= drainable {
+                        assets_depleted_month_index = Some(k);
+                    }
+                }
+                if need_gross > Decimal::ZERO {
+                    let mut taken = vec![Decimal::ZERO; values.len()];
+                    let und_gross = drain_from_assets(
+                        &mut values,
+                        &liquid,
+                        &rates,
+                        need_gross,
+                        Some(&mut taken),
                     );
-                // #120: la base baja en proporción al VALOR drenado — b' = b·v_post/v_pre,
-                // multiplicación antes de la división (drenar todo ⇒ b·0/v = 0 exacto).
-                // Guarda v_pre > 0 obligatoria: Decimal / 0 PANICA (precedente task_panic).
-                for i in 0..values.len() {
-                    if taken[i] > Decimal::ZERO {
-                        let v_pre = values[i] + taken[i];
+                    // El descubierto se acumula NETO (#140 D-4): mide euros de GASTO que
+                    // faltaron, no ventas que no ocurrieron — lo vendido de verdad netea
+                    // after_tax(bruto obtenido), y lo que falta del gasto es la diferencia.
+                    // Con impuestos apagados after_tax es la identidad y esto es exactamente
+                    // el `und` de siempre.
+                    let drawn_gross = need_gross - und_gross;
+                    undrained_cumulative += need_assets_net
+                        - crate::tax::after_tax_monthly(
+                            drawn_gross,
+                            &input.tax_brackets,
+                            input.taxes_enabled,
+                            g_scalar,
+                        );
+                    // #120: la base baja en proporción al VALOR drenado — b' = b·v_post/v_pre,
+                    // multiplicación antes de la división (drenar todo ⇒ b·0/v = 0 exacto).
+                    // Guarda v_pre > 0 obligatoria: Decimal / 0 PANICA (precedente task_panic).
+                    for i in 0..values.len() {
+                        if taken[i] > Decimal::ZERO {
+                            let v_pre = values[i] + taken[i];
+                            if v_pre > Decimal::ZERO {
+                                basis[i] = basis[i] * values[i] / v_pre;
+                            }
+                        }
+                    }
+                }
+            } else if need_assets_net > Decimal::ZERO {
+                // Vía MIXTA (#178): el solver por tramos decide venta bruta Y reparto a la vez
+                // — la base agregada `Σ g_i·venta_i` atraviesa los tramos progresivos y ninguna
+                // `g` escalar puede representarla. El orden es EL MISMO de `drain_from_assets`
+                // (implementación única `drain_order`): divergir aquí gravaría una venta que no
+                // ocurre.
+                let order = drain_order(&liquid, &rates);
+                let segments: Vec<crate::tax::MixedSegment> = order
+                    .iter()
+                    .map(|&i| crate::tax::MixedSegment {
+                        capacity_monthly: values[i].max(Decimal::ZERO),
+                        gain_ratio: gains[i],
+                    })
+                    .collect();
+                let dd = crate::tax::gross_up_mixed_monthly(
+                    need_assets_net,
+                    &segments,
+                    &input.tax_brackets,
+                    input.taxes_enabled,
+                );
+                // Agotamiento (#119), misma semántica `>=` de la vía escalar: si la venta
+                // necesaria consume TODO lo vendible (shortfall > 0, o exacto: bruto == Σ
+                // capacidades), la cartera se vacía este mes.
+                if assets_depleted_month_index.is_none() {
+                    let drainable: Decimal =
+                        segments.iter().map(|s| s.capacity_monthly).sum();
+                    if dd.gross_monthly >= drainable {
+                        assets_depleted_month_index = Some(k);
+                    }
+                }
+                // El descubierto sale NETO por construcción del solver — sin segunda llamada:
+                // `after_tax_monthly` con una sola `g` sería incorrecta sobre un bruto mixto.
+                undrained_cumulative += dd.net_shortfall_monthly;
+                for (pos, &i) in order.iter().enumerate() {
+                    let take = dd.per_segment_monthly[pos];
+                    if take > Decimal::ZERO {
+                        values[i] -= take;
+                        // #120: b' = b·v_post/v_pre, mismas guardas que la vía escalar.
+                        let v_pre = values[i] + take;
                         if v_pre > Decimal::ZERO {
                             basis[i] = basis[i] * values[i] / v_pre;
                         }
@@ -4350,6 +4456,94 @@ mod tests {
         assert_eq!(out.assets_depleted_month_index, Some(80), "con bruto se agota antes");
         assert_eq!(out.net_worth[360].round_dp(2), dec_s("-561200.00"));
         assert_eq!(out.uncovered_deficit_total.round_dp(2), dec_s("561200.00"));
+    }
+
+    /// #178 — el GEMELO del test anterior con el coste DECLARADO: mismos 200.000 € al 0 %
+    /// gastando 2.000 €/mes, pero `purchase_price = 160.000` ⇒ `g = 0,2` constante (al 0 % de
+    /// crecimiento ρ es invariante — y que el mes de agotamiento aguante 360 meses ES el pin
+    /// del teorema de invariancia). A mano: bruto = gross_up(24.000, 0,2)/12 =
+    /// 2.079,00207900…/mes; agotamiento en el mes 97 (con g=1 era el 80: +17 meses de verdad);
+    /// el mes 97 vende los 415,80 restantes que netean 400,00 exactos, y el descubierto NETO
+    /// acumulado a 360 es 1.600 + 263×2.000 = 527.600,00 (con g=1: 561.200).
+    #[test]
+    fn declared_cost_derives_g_and_delays_depletion() {
+        let mut hucha = mk_asset(0xF9, Decimal::from(200_000), true, None);
+        hucha.purchase_price = Some(Decimal::from(160_000));
+        let mut inp = base_input(
+            360,
+            Decimal::ZERO,
+            Decimal::from(2_000),
+            vec![hucha],
+            vec![],
+        );
+        inp.tax_brackets = crate::tax::es_brackets_for_tests();
+        inp.taxes_enabled = true;
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.assets_depleted_month_index, Some(97), "g derivada retrasa el agotamiento");
+        assert_eq!(out.net_worth[360].round_dp(2), dec_s("-527600.00"));
+        assert_eq!(out.uncovered_deficit_total.round_dp(2), dec_s("527600.00"));
+    }
+
+    /// #178 — la vía MIXTA de verdad (dos activos con `g` distinta): A(10.000, coste 8.000,
+    /// 2 %) drena primero (líquido, menor rentabilidad) y el mes 1 entero cabe en él dentro
+    /// del primer tramo: bruto = 1.000/0,962 = 1.039,5010395010… — el caso 5a del spike,
+    /// verificado por tres fuentes. NW(1) = (10.000 − 1.039,5010…)·1,02^(1/12) +
+    /// 5.000·1,05^(1/12) = 13.995,6686. B(coste 1.000, g=0,8) ni se toca.
+    #[test]
+    fn mixed_g_drains_the_cheap_asset_first_at_its_own_gain_ratio() {
+        let mut a = mk_asset(0xFA, Decimal::from(10_000), true, Some(Decimal::from(2)));
+        a.purchase_price = Some(Decimal::from(8_000));
+        let mut b = mk_asset(0xFB, Decimal::from(5_000), true, Some(Decimal::from(5)));
+        b.purchase_price = Some(Decimal::from(1_000));
+        let mut inp = base_input(
+            12,
+            Decimal::ZERO,
+            Decimal::from(1_000),
+            vec![a, b],
+            vec![],
+        );
+        inp.tax_brackets = crate::tax::es_brackets_for_tests();
+        inp.taxes_enabled = true;
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth[1].round_dp(4), dec_s("13995.6686"));
+    }
+
+    /// #178 — la trayectoria del ancla del issue: 500.000 € con coste 400.000 (ρ₀ = 0,8) al
+    /// 5 %, gasto 2.000 €/mes neto, inflación 0. La `g` derivada SUBE sola
+    /// (`g_k = 1 − 0,8·m^{−(k−1)}`: 0,2 → 0,37 a 5 años → 0,81 a 30) porque el crecimiento
+    /// añade ganancia mientras la base cae proporcional al vender. Agotamiento en el mes
+    /// **561** (46,7 años) — con el default g=1 de 4.11.0 era el 403 (13,2 años antes) y con
+    /// el escalar 0,2 estático que la ayuda invitaba a poner, el 916 (29,6 años DESPUÉS de la
+    /// verdad). Verificado por tres fuentes (spike Opus + réplica Decimal-50 + este bucle).
+    #[test]
+    fn derived_g_rises_along_the_trajectory_and_sets_the_honest_depletion() {
+        let mut cartera = mk_asset(0xFC, Decimal::from(500_000), true, Some(Decimal::from(5)));
+        cartera.purchase_price = Some(Decimal::from(400_000));
+        let mut inp = base_input(
+            840,
+            Decimal::ZERO,
+            Decimal::from(2_000),
+            vec![cartera],
+            vec![],
+        );
+        inp.tax_brackets = crate::tax::es_brackets_for_tests();
+        inp.taxes_enabled = true;
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.assets_depleted_month_index, Some(561));
+
+        // Contraste con el default 4.11.0 (sin coste declarado ⇒ escalar g = 1): mes 403.
+        let sin_coste = mk_asset(0xFD, Decimal::from(500_000), true, Some(Decimal::from(5)));
+        let mut inp_g1 = base_input(
+            840,
+            Decimal::ZERO,
+            Decimal::from(2_000),
+            vec![sin_coste],
+            vec![],
+        );
+        inp_g1.tax_brackets = crate::tax::es_brackets_for_tests();
+        inp_g1.taxes_enabled = true;
+        let out_g1 = project_net_worth_series(&inp_g1).unwrap();
+        assert_eq!(out_g1.assets_depleted_month_index, Some(403));
     }
 
     /// #170 — el objetivo sigue la necesidad REAL cuando la pensión queda plana. Caso central

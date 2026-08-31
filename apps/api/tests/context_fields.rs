@@ -747,3 +747,57 @@ async fn projection_publishes_the_dated_planning_flows_that_move_the_curve() {
         "el mes del evento NO es un punto servido en hybrid ({mes_reforma} en {servidos:?})"
     );
 }
+
+/// #178 — `drawdown_gain_basis` distingue los TRES regímenes que antes eran indistinguibles
+/// (regla de la casa: un campo de contexto se prueba forzando las ramas que existe para
+/// separar), y `taxable_gain_ratio_today` publica la g₀ informativa SOLO cuando hay coste
+/// declarado del que derivarla.
+#[tokio::test]
+async fn projection_declares_what_governs_the_drawdown_taxation() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Fondos").await;
+
+    let mk = |name: &str, value: &str| {
+        serde_json::json!({ "category_id": cat, "name": name, "current_value": value,
+                            "is_liquid": true })
+    };
+    let a = app.post_json_with_cookie("/v1/assets", mk("A", "10000"), &owner.cookie).await;
+    assert_eq!(a.status, http::StatusCode::CREATED, "{a:?}");
+    let a_id = a.json()["id"].as_str().unwrap().to_string();
+    let b = app.post_json_with_cookie("/v1/assets", mk("B", "5000"), &owner.cookie).await;
+    assert_eq!(b.status, http::StatusCode::CREATED, "{b:?}");
+    let b_id = b.json()["id"].as_str().unwrap().to_string();
+
+    // Caso 1: nadie declara coste → rige el escalar, y la g₀ informativa NO se fabrica.
+    let proj = get(&app, &owner.cookie, "/v1/projection/series").await;
+    assert_eq!(proj["drawdown_gain_basis"], "declared_ratio", "{proj}");
+    assert!(proj["taxable_gain_ratio_today"].is_null(), "{proj}");
+
+    // Caso 2: un activo de dos declara → mixed, y la g₀ sale SOLO de lo declarado:
+    // A(10.000, coste 8.000) ⇒ 2.000/10.000 = 0,2 (B no contamina la cifra).
+    let p = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{a_id}"),
+            serde_json::json!({ "purchase_price": "8000" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(p.status, http::StatusCode::OK, "{p:?}");
+    let proj = get(&app, &owner.cookie, "/v1/projection/series").await;
+    assert_eq!(proj["drawdown_gain_basis"], "mixed", "{proj}");
+    assert_eq!(dec(&proj["taxable_gain_ratio_today"]), 0.2, "{proj}");
+
+    // Caso 3: todos declaran → cost_basis; g₀ agregada = (2.000 + 4.000)/15.000 = 0,4.
+    let p = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{b_id}"),
+            serde_json::json!({ "purchase_price": "1000" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(p.status, http::StatusCode::OK, "{p:?}");
+    let proj = get(&app, &owner.cookie, "/v1/projection/series").await;
+    assert_eq!(proj["drawdown_gain_basis"], "cost_basis", "{proj}");
+    assert_eq!(dec(&proj["taxable_gain_ratio_today"]), 0.4, "{proj}");
+}

@@ -210,39 +210,6 @@ export function runwaySwrParenthetical(
   return `dentro del SWR ${formatPercentAmount(swr)}`;
 }
 
-export function taxOnGrossCapitalAnnual(
-  gross: number,
-  brackets: TaxBracketApi[],
-): number {
-  if (!(gross > 0) || brackets.length === 0) return 0;
-  let prevCeiling = 0;
-  let tax = 0;
-  for (let i = 0; i < brackets.length; i++) {
-    const b = brackets[i];
-    const rate = parseDisplayDecimal(String(b.pct));
-    if (rate === null || !Number.isFinite(rate)) continue;
-    const r = rate / 100;
-    const rawUp = b.up_to;
-    const isOpen =
-      rawUp === null ||
-      rawUp === undefined ||
-      String(rawUp).trim() === "";
-    if (isOpen) {
-      const taxable = Math.max(0, gross - prevCeiling);
-      tax += taxable * r;
-      break;
-    }
-    const ceiling = parseDisplayDecimal(String(rawUp));
-    if (ceiling === null || !Number.isFinite(ceiling)) continue;
-    const sliceEnd = Math.min(gross, ceiling);
-    const taxable = Math.max(0, sliceEnd - prevCeiling);
-    tax += taxable * r;
-    prevCeiling = ceiling;
-    if (gross <= ceiling) break;
-  }
-  return tax;
-}
-
 export function grossUpNetAnnualFire(
   netAnnual: number,
   brackets: TaxBracketApi[],
