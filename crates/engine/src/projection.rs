@@ -3873,4 +3873,63 @@ mod tests {
             "la equivalencia semanal es exacta sin descuento"
         );
     }
+
+    /// Baseline Ola 5 (#139), capturado ANTES de indexar el gasto — pin destinado a INVERTIRSE
+    /// en el commit de la indexación. Hogar del issue: ingreso 3.000, gasto 2.000 (neto
+    /// 1.000 €/mes), activo líquido desde 0 € al 6 % nominal, base FIRE 600.000 € con inflación
+    /// 2 %. Con los flujos CONGELADOS en nominal (contrato 4.8.0), el cruce cae en el mes
+    /// **386**. Nota de registro: el «335» que anunciaba el issue era la alternativa RECHAZADA
+    /// (indexarlo todo, Q1-b); con la decisión firmada (gasto indexado, ingresos planos) este
+    /// hogar NO cruza en 840 meses y entra en déficit el mes 247 — la inversión de este pin lo
+    /// hará explícito (corrección publicada en el issue el 2026-08-31).
+    #[test]
+    fn ola5_baseline_frozen_flows_cross_at_month_386() {
+        let fondo = mk_asset(0xB1, Decimal::ZERO, true, Some(Decimal::from(6)));
+        let mut inp = base_input(
+            840,
+            Decimal::from(3_000),
+            Decimal::from(2_000),
+            vec![fondo],
+            vec![rule_remainder(0)],
+        );
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from(600_000),
+            annual_inflation_percent: Decimal::from(2),
+            debt_payments_remaining: Vec::new(),
+        });
+        let out = project_net_worth_series(&inp).unwrap();
+        let cruce = (0..=840u32).find(|&m| {
+            fire_target_at_month_index(inp.fire_target.as_ref(), m)
+                .is_some_and(|t| out.liquid_worth[m as usize] >= t)
+        });
+        assert_eq!(cruce, Some(386), "cruce con flujos congelados (baseline pre-#139)");
+    }
+
+    /// Baseline Ola 5 (#139), capturado ANTES de indexar el gasto — pin destinado a INVERTIRSE.
+    /// Escenario mínimo del spike §2.2: ingreso 3.000, gasto 2.000, activo al 0 % (multiplicador
+    /// 1), objetivo lejano con inflación 3 % (para que el input LLEVE la inflación y el pin
+    /// demuestre que hoy el gasto la ignora). Congelado: NW(K) = 1.000·K exacto.
+    /// Tras #139 (exponente (k−1)/12): NW(12) = 11.671,7611861425; NW(24) = 22.613,6752078692;
+    /// NW(120) = 81.104,0063772995 (forma cerrada 3000·K − 2000·(1,03^(K/12) − 1)/(q − 1),
+    /// q = 1,03^(1/12); verificada a 50 dígitos contra el bucle).
+    #[test]
+    fn ola5_baseline_frozen_expense_series_is_linear() {
+        let hucha = mk_asset(0xB2, Decimal::ZERO, true, None);
+        let mut inp = base_input(
+            120,
+            Decimal::from(3_000),
+            Decimal::from(2_000),
+            vec![hucha],
+            vec![rule_remainder(0)],
+        );
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from(100_000_000),
+            annual_inflation_percent: Decimal::from(3),
+            debt_payments_remaining: Vec::new(),
+        });
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth[12], Decimal::from(12_000));
+        assert_eq!(out.net_worth[24], Decimal::from(24_000));
+        assert_eq!(out.net_worth[120], Decimal::from(120_000));
+    }
 }
