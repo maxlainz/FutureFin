@@ -150,11 +150,38 @@ pub struct ProjectionLiabilityInput {
 /// patrimonio, que es justo el contrato que explotan los modos B/C del handler (pasan
 /// `monthly_payment = 0` para congelar el principal).
 fn liability_active(liab: &ProjectionLiabilityInput, m_start: NaiveDate) -> bool {
-    liab.monthly_payment > Decimal::ZERO
-        && match liab.payment_end {
+    plan_alive(liab.monthly_payment, liab.payment_end, m_start)
+}
+
+/// ¿Plan de pago vivo? — la mitad reutilizable de [`liability_active`].
+fn plan_alive(monthly_payment: Decimal, payment_end: Option<NaiveDate>, m_start: NaiveDate) -> bool {
+    monthly_payment > Decimal::ZERO
+        && match payment_end {
             None => true,
             Some(end) => end >= m_start,
         }
+}
+
+/// ¿Devenga interés este pasivo en el mes que empieza en `m_start`?
+///
+/// ÚNICA definición del predicado (Ola 3, #121): la cumplen por construcción los brazos de
+/// [`liability_month`], y la consumen el KPI `net_return` de `/v1/summary` y su espejo TS
+/// `liabilityAccruesInterest` (`apps/web/src/lib/ledger.ts`). Antes eran tres copias y las tres
+/// decían cosas distintas: el KPI restaba el TIN de pasivos que la simulación cobraba a 0 €.
+///
+/// Los modelos que devengan son todos menos `FixedPayments` (post-#144 `interest_only` cobra
+/// `P·i` de verdad), siempre que haya TIN > 0 y plan de pago vivo — sin plan, el pasivo es una
+/// resta constante al patrimonio: ni caja, ni amortización, ni devengo.
+pub fn liability_interest_accrues(
+    model: RepaymentModel,
+    apr_percent: Option<Decimal>,
+    monthly_payment: Decimal,
+    payment_end: Option<NaiveDate>,
+    m_start: NaiveDate,
+) -> bool {
+    model != RepaymentModel::FixedPayments
+        && matches!(apr_percent, Some(a) if a > Decimal::ZERO)
+        && plan_alive(monthly_payment, payment_end, m_start)
 }
 
 /// Un mes de vida de un pasivo: devuelve `(caja que sale, principal de cierre)`.

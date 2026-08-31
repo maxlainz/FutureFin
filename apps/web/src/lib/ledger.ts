@@ -74,13 +74,13 @@ export function presentValueOfPayments(
 }
 
 /**
- * Principal derivado de `n` cuotas, por modelo — espejo de `derive_principal_from_payment_plan`
- * (`apps/api/src/handlers/liabilities.rs`):
- *
- * - `fixed_payments` → `Σ cuotas` = `cuota × n` (contrato histórico, sin cambio).
- * - `french` → valor actual de esas cuotas al TIN: el capital pendiente de verdad.
- * - `interest_only` / `revolving` → el servidor rechaza derivar (`derive_not_supported_for_model`),
- *   así que aquí no hay número que enseñar: `null`.
+ * Principal derivado de `n` cuotas — espejo de `derive_principal_from_payment_plan`
+ * (`apps/api/src/handlers/liabilities.rs`), que desde 4.7.0 (#144/#121) es una RAMA ÚNICA:
+ * valor actual de las cuotas al TIN (`presentValueOfPayments`), que sin TIN degenera EXACTO en
+ * `Σ cuotas` — el caso de `fixed_payments`, donde el TIN está prohibido. Devuelve `null` en
+ * toda combinación que el servidor rechazaría: `interest_only`/`revolving` no derivan
+ * (`derive_not_supported_for_model`), `french` exige TIN > 0 (`apr_required_for_model`) y
+ * `fixed_payments` con TIN > 0 es `apr_forbidden_for_model`.
  */
 export function liabilityDerivedPrincipalNum(
   paymentAmount: number,
@@ -91,11 +91,13 @@ export function liabilityDerivedPrincipalNum(
   if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) return null;
   if (!Number.isFinite(intervals) || intervals <= 0) return null;
   if (model === "interest_only" || model === "revolving") return null;
-  if (model === "french") {
-    if (aprPercent === null || !(aprPercent > 0)) return null;
-    return presentValueOfPayments(paymentAmount, intervals, aprPercent);
-  }
-  return paymentAmount * intervals;
+  if (model === "french" && (aprPercent === null || !(aprPercent > 0))) return null;
+  if (model === "fixed_payments" && aprPercent !== null && aprPercent > 0) return null;
+  return presentValueOfPayments(
+    paymentAmount,
+    intervals,
+    model === "french" ? aprPercent : null,
+  );
 }
 
 /**
@@ -177,13 +179,39 @@ export function liabilityPaymentMonthlyEquivalentNum(
   return 0;
 }
 
-/** TIN % medio ponderado por principal (solo pasivos con TIN informado). */
+/**
+ * ¿Devenga interés este pasivo hoy? Espejo EXACTO de
+ * `futurefin_engine::liability_interest_accrues` (#121, la ÚNICA definición): modelo con
+ * intereses (todos menos `fixed_payments`), TIN > 0 y plan de pago vivo (cuota > 0 y fin
+ * ausente o >= hoy). Un pasivo que no devenga sigue siendo deuda (resta en el patrimonio),
+ * pero su coste mensual es 0 — igual que en la simulación y en el net_return del Resumen.
+ */
+export function liabilityAccruesInterest(
+  row: LiabilityApiRow,
+  todayYmd: string,
+): boolean {
+  if (row.repayment_model === "fixed_payments") return false;
+  const apr = parseDisplayDecimal(String(row.apr_percent ?? "").trim());
+  if (apr === null || !Number.isFinite(apr) || apr <= 0) return false;
+  const pay = parseDisplayDecimal(String(row.payment_amount ?? "").trim());
+  if (pay === null || pay <= 0) return false;
+  return row.payment_end_date === null || row.payment_end_date >= todayYmd;
+}
+
+/**
+ * TIN % medio ponderado por principal — SOLO sobre los pasivos que devengan hoy
+ * (`liabilityAccruesInterest`, #121): es «el tipo medio que tu deuda te cuesta», no un
+ * promedio de números declarados. Un plan vencido con saldo (congelado) no entra.
+ */
 export function liabilitiesWeightedAprPercent(
   liabilities: LiabilityApiRow[],
+  installationCalendarTz: string,
 ): number | null {
+  const todayYmd = todayYmdInTimeZone(installationCalendarTz);
   let num = 0;
   let den = 0;
   for (const row of liabilities) {
+    if (!liabilityAccruesInterest(row, todayYmd)) continue;
     const p = parseDisplayDecimal(row.principal);
     const apr = parseDisplayDecimal(String(row.apr_percent ?? "").trim());
     if (p === null || p <= 0 || apr === null || !Number.isFinite(apr)) {
@@ -197,14 +225,18 @@ export function liabilitiesWeightedAprPercent(
 }
 
 /**
- * Suma aproximada de interés mensual (saldo × TIN ÷ 12 por pasivo).
- * No modela amortización; sirve como orden de magnitud.
+ * Suma aproximada de interés mensual (saldo × TIN ÷ 12) de los pasivos que DEVENGAN hoy
+ * (#121: misma base que la simulación y el net_return — antes esta cifra cobraba pasivos que
+ * la proyección simulaba a 0 €). No modela amortización; sirve como orden de magnitud.
  */
 export function liabilitiesApproxMonthlyInterestSum(
   liabilities: LiabilityApiRow[],
+  installationCalendarTz: string,
 ): number {
+  const todayYmd = todayYmdInTimeZone(installationCalendarTz);
   let sum = 0;
   for (const row of liabilities) {
+    if (!liabilityAccruesInterest(row, todayYmd)) continue;
     const p = parseDisplayDecimal(row.principal);
     const apr = parseDisplayDecimal(String(row.apr_percent ?? "").trim());
     if (

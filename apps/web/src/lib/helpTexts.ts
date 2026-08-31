@@ -55,12 +55,11 @@ export const HELP_TEXTS = {
       "que te queda por pagar, todo sobre tu patrimonio neto. Un activo sin rentabilidad puesta " +
       "cuenta como 0 % y sigue restando media. La cifra grande ya descuenta la inflación que " +
       "tengas configurada; el paréntesis es la misma sin descontarla. No es lo que has ganado: es " +
-      "una expectativa, no tu rentabilidad pasada. Aquí cuenta el interés de todas tus deudas; la " +
-      "proyección solo le cobra intereses a las que hayas declarado con un modelo que los devengue " +
-      "(francés o revolving), así que si alguna sigue en cuota fija esta cifra es algo más " +
-      "prudente que la simulación. Y la simulación, además, solo devenga mientras el plan de " +
-      "pagos está vivo: una deuda sin cuota o con el plan vencido no genera intereses en la " +
-      "proyección, aunque aquí sí reste. Tu rentabilidad de activos compone mes a mes; el " +
+      "una expectativa, no tu rentabilidad pasada. Aquí el interés de tus deudas se cuenta con " +
+      "la MISMA base que la simulación: solo devengan las que tienen un modelo con intereses, " +
+      "TIN puesto y plan de pagos vivo. Una deuda sin intereses, sin cuota o con el plan " +
+      "vencido no genera coste, aunque su saldo sí sigue restando en el patrimonio del " +
+      "denominador. Tu rentabilidad de activos compone mes a mes; el " +
       "interés de tus deudas se aplica como un tipo simple sobre lo que debes, y no distingue " +
       "meses cortos de largos —un 3 % de activo y un 3 % de deuda no son la misma velocidad—. " +
       "Si debes más de lo que tienes, la tarjeta desaparece: el " +
@@ -102,22 +101,21 @@ export const HELP_TEXTS = {
   "liabilities.weighted_apr": {
     title: "TIN medio ponderado",
     body:
-      "Media del TIN de tus pasivos, ponderada por el principal de cada uno (el TIN nominal que " +
-      "usa el cuadro de amortización, no la TAE con comisiones de tu contrato). A diferencia " +
-      "del Rendimiento neto del Resumen, aquí un pasivo SIN TIN puesto queda fuera del cálculo " +
-      "entero —no cuenta como 0 %—, así que la media puede moverse solo porque cambia qué " +
-      "pasivos tienen tipo declarado, no porque cambien los tipos.",
+      "El tipo medio que tu deuda te cuesta HOY: media del TIN, ponderada por el principal, " +
+      "solo de los pasivos que devengan interés — modelo con intereses, TIN puesto y plan de " +
+      "pagos vivo, la MISMA base que la simulación y que el Rendimiento neto del Resumen. Un " +
+      "pasivo sin intereses, sin TIN o con el plan vencido (saldo congelado) queda fuera del " +
+      "cálculo entero: sigue siendo deuda, pero no te cuesta tipo. (Es el TIN nominal del " +
+      "cuadro de amortización, no la TAE con comisiones de tu contrato.)",
   },
   "liabilities.approx_monthly_interest": {
     title: "Interés mensual aprox.",
     body:
-      "Estimación de orden de magnitud: para cada pasivo con TIN puesto, tu principal actual × " +
-      "TIN ÷ 12, como si todo ese principal devengara interés cada mes sin descontar " +
-      "amortización. Cuenta TODOS los pasivos con tipo, sea cual sea su modelo de amortización; " +
-      "la proyección, en cambio, solo cobra interés de verdad a los que tienen un modelo que " +
-      "devenga (francés o revolving) con un plan de pagos vivo — así que esta cifra puede ir " +
-      "por delante de lo que tu patrimonio simulado de verdad paga, hasta que se unifiquen " +
-      "ambas bases (issue 121 del repositorio).",
+      "Estimación de orden de magnitud: principal actual × TIN ÷ 12 de cada pasivo que DEVENGA " +
+      "— modelo con intereses, TIN puesto y plan de pagos vivo, la misma base que usa la " +
+      "simulación (antes esta cifra cobraba interés a pasivos que la proyección simulaba a " +
+      "0 €). No descuenta la amortización del mes, así que va ligeramente por encima del " +
+      "interés exacto del calendario.",
   },
   "summary.net_worth": {
     title: "Patrimonio neto",

@@ -16,10 +16,15 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { LiabilityRepaymentModelApi } from "../api/types";
+import type { LiabilityRepaymentModelApi,
+  LiabilityApiRow,
+} from "../api/types";
 import {
   REPAYMENT_MODEL_LABEL,
   REPAYMENT_MODEL_ORDER,
+  liabilitiesApproxMonthlyInterestSum,
+  liabilitiesWeightedAprPercent,
+  liabilityAccruesInterest,
   liabilityDerivedPrincipalNum,
   liabilityDerivedPrincipalPreview,
   presentValueOfPayments,
@@ -170,5 +175,113 @@ describe("etiquetas de modelo", () => {
     for (const m of REPAYMENT_MODEL_ORDER) {
       expect(REPAYMENT_MODEL_LABEL[m]).toBeTruthy();
     }
+  });
+});
+
+describe("liabilityAccruesInterest — el predicado único de #121", () => {
+  const TODAY = "2026-08-31";
+  const base: LiabilityApiRow = {
+    id: "l1",
+    category_id: "c1",
+    label: "Hipoteca",
+    type_tag: null,
+    repayment_model: "french",
+    principal: "50000.0000",
+    apr_percent: "5.0000",
+    payment_amount: "300.0000",
+    payment_frequency: "monthly",
+    payment_end_date: "2031-01-01",
+    plan_expired_with_balance: false,
+    min_payment_pct: null,
+    min_payment_eur: null,
+    notes: null,
+    sort_index: 0,
+  };
+
+  it("francés con TIN y plan vivo devenga", () => {
+    expect(liabilityAccruesInterest(base, TODAY)).toBe(true);
+  });
+
+  it("el modelo sin intereses nunca devenga", () => {
+    expect(
+      liabilityAccruesInterest(
+        { ...base, repayment_model: "fixed_payments", apr_percent: null },
+        TODAY,
+      ),
+    ).toBe(false);
+  });
+
+  it("sin TIN (o TIN 0) no devenga", () => {
+    expect(liabilityAccruesInterest({ ...base, apr_percent: null }, TODAY)).toBe(false);
+    expect(liabilityAccruesInterest({ ...base, apr_percent: "0" }, TODAY)).toBe(false);
+  });
+
+  it("plan vencido (fin < hoy) no devenga — el saldo queda congelado (#145)", () => {
+    expect(
+      liabilityAccruesInterest({ ...base, payment_end_date: "2026-08-30" }, TODAY),
+    ).toBe(false);
+    // El día exacto del fin todavía cuenta (mismo `>=` que el engine y el filtro SQL).
+    expect(
+      liabilityAccruesInterest({ ...base, payment_end_date: "2026-08-31" }, TODAY),
+    ).toBe(true);
+  });
+
+  it("sin cuota no hay plan vivo, no devenga", () => {
+    expect(liabilityAccruesInterest({ ...base, payment_amount: null }, TODAY)).toBe(false);
+  });
+});
+
+describe("las dos KPIs de Pasivos filtran por el predicado (#121)", () => {
+  const TZ = "UTC";
+  const mkRow = (over: Partial<LiabilityApiRow>): LiabilityApiRow => ({
+    id: "x",
+    category_id: "c1",
+    label: "L",
+    type_tag: null,
+    repayment_model: "french",
+    principal: "50000.0000",
+    apr_percent: "5.0000",
+    payment_amount: "300.0000",
+    payment_frequency: "monthly",
+    payment_end_date: "2099-01-01",
+    plan_expired_with_balance: false,
+    min_payment_pct: null,
+    min_payment_eur: null,
+    notes: null,
+    sort_index: 0,
+    ...over,
+  });
+
+  it("el TIN medio ponderado ignora el plan vencido: 5 % vencido + 10 % vivo ⇒ 10,0000 %", () => {
+    // A mano, el pin del spike: dos pasivos de 50.000 € — el del 5 % con plan vencido queda
+    // fuera del cálculo ENTERO, así que la media es la del vivo al 10 %. Hasta 4.6.0 salía
+    // 7,5 % (promediaba números declarados, no coste real).
+    const rows = [
+      mkRow({ id: "a", apr_percent: "5", payment_end_date: "2020-01-01" }),
+      mkRow({ id: "b", apr_percent: "10" }),
+    ];
+    expect(liabilitiesWeightedAprPercent(rows, TZ)).toBeCloseTo(10.0, 4);
+  });
+
+  it("el interés mensual aprox. cobra solo lo que devenga: 100.000 al 6 % vivo ⇒ 500,00 €", () => {
+    // A mano: 100.000 × 6 % ÷ 12 = 500. El sin-intereses de 40.000 y el vencido de 9.999 al
+    // 5 % suman 0 — la misma base que la simulación.
+    const rows = [
+      mkRow({ id: "a", principal: "100000", apr_percent: "6" }),
+      mkRow({
+        id: "b",
+        principal: "40000",
+        repayment_model: "fixed_payments",
+        apr_percent: null,
+      }),
+      mkRow({ id: "c", principal: "9999", apr_percent: "5", payment_end_date: "2020-01-01" }),
+    ];
+    expect(liabilitiesApproxMonthlyInterestSum(rows, TZ)).toBeCloseTo(500.0, 6);
+  });
+});
+
+describe("liabilityDerivedPrincipalNum — la rama única de 4.7.0", () => {
+  it("fixed_payments con TIN > 0 ya no deriva: el servidor lo rechaza (apr_forbidden_for_model)", () => {
+    expect(liabilityDerivedPrincipalNum(500, 200, "fixed_payments", 3)).toBeNull();
   });
 });

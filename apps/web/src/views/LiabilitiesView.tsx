@@ -177,12 +177,13 @@ export function LiabilitiesView({
       )
     : null;
 
+  const calendarTz = installation?.installation.calendar_tz ?? "UTC";
   const liabilitiesWeightedApr = liabilityMetricsReady
-    ? liabilitiesWeightedAprPercent(liabilities)
+    ? liabilitiesWeightedAprPercent(liabilities, calendarTz)
     : null;
 
   const liabilitiesApproxMonthlyInterest = liabilityMetricsReady
-    ? liabilitiesApproxMonthlyInterestSum(liabilities)
+    ? liabilitiesApproxMonthlyInterestSum(liabilities, calendarTz)
     : null;
 
   return (

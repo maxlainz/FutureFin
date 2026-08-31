@@ -78,15 +78,18 @@ fn load() -> (Vec<DerivedCase>, f64) {
     (cases, tolerance)
 }
 
-/// Réplica exacta del `match model` de `derive_principal_from_payment_plan`. El handler no expone
-/// la función (es privada, y con razón: recibe fechas y `PaymentFrequency`), así que el test
-/// reproduce la única rama que el fixture describe — la que va del número de intervalos al
-/// principal— y deja el conteo de intervalos al test de integración.
+/// Réplica exacta de `derive_principal_from_payment_plan` (el handler no expone la función; es
+/// privada, y con razón: recibe fechas y `PaymentFrequency`). Desde 4.7.0 (#144/#121) es una
+/// RAMA ÚNICA — valor actual al TIN — porque el modelo ya no decide nada: `fixed_payments` no
+/// puede llevar TIN, y `present_value_of_payments` sin TIN devuelve `M·n` exacto (retorno
+/// temprano, sin exponencial). El `model` se conserva en la firma solo para vetar los que no
+/// derivan. El conteo de intervalos queda para el test de integración.
 fn derived_principal(model: &str, payment: Decimal, n: u32, apr: Option<Decimal>) -> Decimal {
     match model {
-        "french" => futurefin_engine::present_value_of_payments(payment, Decimal::from(n), apr)
-            .round_dp_with_strategy(4, RoundingStrategy::MidpointAwayFromZero),
-        "fixed_payments" => payment * Decimal::from(n),
+        "french" | "fixed_payments" => {
+            futurefin_engine::present_value_of_payments(payment, Decimal::from(n), apr)
+                .round_dp_with_strategy(4, RoundingStrategy::MidpointAwayFromZero)
+        }
         other => panic!("modelo sin derivación soportada en el fixture: {other}"),
     }
 }
@@ -130,7 +133,10 @@ fn fixed_payments_cases_are_exact_not_approximate() {
             case.name
         );
     }
-    assert!(seen >= 2, "el fixture debe conservar los casos fixed_payments");
+    // Era `>= 2` hasta 4.7.0: el segundo caso («fixed_payments con TIN informado») describía un
+    // estado que #144 hizo irrepresentable y se retiró del fixture (ver su
+    // `_why_no_fixed_payments_with_apr_case`).
+    assert!(seen >= 1, "el fixture debe conservar el caso fixed_payments");
 }
 
 /// El fixture describe SOLO los dos modelos que derivan. `interest_only` y `revolving` los rechaza

@@ -101,9 +101,10 @@ realidad** o entre superficies, no error de aritmética.
 - Divergencia declarada: un pasivo `fixed_payments` tiene pasado francés y futuro lineal (§4: D30).
 
 ### 2.7 KPIs
-- `net_return`: expectativa (no realizado), ponderada por valor; resta la TAE de TODOS los pasivos
-  vivos mientras el engine solo devenga french/revolving con plan activo — deliberadamente más
-  prudente, declarado en su texto de ayuda. Real por Fisher (división de factores, no resta).
+- `net_return`: expectativa (no realizado), ponderada por valor; desde 4.7.0 (#121) resta el TIN
+  SOLO de los pasivos que devengan (`liability_interest_accrues`, el MISMO predicado del engine:
+  modelo con intereses + TIN > 0 + plan vivo); el visible que no devenga pesa en el denominador a
+  coste 0. Real por Fisher (división de factores, no resta).
 - `runway`: retirada-antes-de-crecimiento, multiplicador ponderado por valor (aprox. conservadora
   del drenaje real), «indefinido» ⟺ umbral SWR sobre el saldo líquido; 1200 meses es SUELO.
   Incoherencias con la simulación en §4 (D29).

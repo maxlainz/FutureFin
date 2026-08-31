@@ -191,9 +191,10 @@ pub struct FinancialHealthMetrics {
     ///
     /// Rendimiento anual **nominal** esperado del patrimonio neto, en porcentaje (`"3.5556"` =
     /// 3,5556 %/año). Numerador: la suma de `current_value × expected_annual_return_percent` de
-    /// TODOS los activos del scope menos la de `principal × apr_percent` de los pasivos
-    /// visibles (mismo predicado que `total_liabilities`: plan vivo o saldo vivo, #145);
-    /// denominador: `net_worth`. Un activo sin
+    /// TODOS los activos del scope menos la de `principal × apr_percent` de los pasivos que
+    /// **devengan** (#121: modelo con intereses + TIN > 0 + plan vivo — el mismo predicado del
+    /// motor, `liability_interest_accrues`); los visibles que no devengan (p. ej. plan vencido
+    /// con saldo, #145) pesan solo en el denominador, a coste 0. Denominador: `net_worth`. Un activo sin
     /// rentabilidad configurada o un pasivo sin TIN cuentan como 0 % pero **siguen pesando** en el
     /// denominador. Se **omite** cuando `net_worth ≤ 0` (el cociente cambiaría de signo o
     /// divergiría). Lo calcula `futurefin_engine::net_return_percentages`.
@@ -473,7 +474,8 @@ pub(crate) async fn summary_core(
     // Ídem con los pasivos: `(principal, TIN %)` con el predicado de visibilidad de #145 (plan
     // vivo o saldo vivo) — el mismo `WHERE` que sirve la suma escalar. Se suma en Rust.
     let liab_sql = format!(
-        r#"SELECT principal, apr_percent FROM liabilities
+        r#"SELECT principal, apr_percent, repayment_model, payment_amount, payment_end_date
+           FROM liabilities
            WHERE {liab_scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph} OR principal > 0)"#
     );
@@ -482,14 +484,37 @@ pub(crate) async fn summary_core(
         .bind_scope_as(sqlx::query_as(&assets_sql), iid, user_id)
         .fetch_all(pool)
         .await?;
-    let liab_rows: Vec<(Decimal, Option<Decimal>)> = view
+    let liab_raw: Vec<(Decimal, Option<Decimal>, String, Option<Decimal>, Option<chrono::NaiveDate>)> = view
         .bind_scope_as(sqlx::query_as(&liab_sql), iid, user_id)
         .bind(today)
         .fetch_all(pool)
         .await?;
+    // #121 — una sola base de coste de la deuda: el numerador del net_return solo resta el TIN
+    // de los pasivos que el motor DE VERDAD devenga (`liability_interest_accrues`, el mismo
+    // predicado de `liability_month`). La fila que no devenga NO se excluye: su principal sigue
+    // pesando en el denominador (es deuda de verdad) con coste 0 — exactamente el contrato
+    // «None cuenta como 0 %» de `net_return_percentages`. `payment_frequency` no hace falta:
+    // el predicado solo pregunta si hay cuota > 0, y los modelos que devengan son mensuales
+    // por validación.
+    let liab_rows: Vec<(Decimal, Option<Decimal>)> = liab_raw
+        .iter()
+        .map(|(principal, apr, model, payment, end)| {
+            let model = crate::handlers::liabilities::RepaymentModel::parse(model)
+                .map(crate::handlers::liabilities::RepaymentModel::to_engine)
+                .unwrap_or(futurefin_engine::RepaymentModel::FixedPayments);
+            let accrues = futurefin_engine::liability_interest_accrues(
+                model,
+                *apr,
+                payment.unwrap_or(Decimal::ZERO),
+                *end,
+                today,
+            );
+            (*principal, if accrues { *apr } else { None })
+        })
+        .collect();
 
     let total_assets: Decimal = asset_rows.iter().map(|(v, _, _)| *v).sum();
-    let total_liabilities: Decimal = liab_rows.iter().map(|(p, _)| *p).sum();
+    let total_liabilities: Decimal = liab_raw.iter().map(|(p, _, _, _, _)| *p).sum();
     let liquid_rows: Vec<(Decimal, Option<Decimal>)> = asset_rows
         .iter()
         .filter(|(_, _, is_liquid)| *is_liquid)
@@ -592,7 +617,8 @@ pub(crate) async fn summary_core(
     };
 
     // Rendimiento neto anual esperado del patrimonio: lo que rinden los activos según la
-    // rentabilidad que el usuario configuró en cada uno, menos el interés de los pasivos vivos,
+    // rentabilidad que el usuario configuró en cada uno, menos el interés de los pasivos que
+    // DEVENGAN (#121: mismo predicado que el motor — modelo con intereses, TIN > 0, plan vivo),
     // sobre el patrimonio neto (las mismas filas que producen `total_assets` y
     // `total_liabilities`, así que el denominador ES `net_worth`). `None` ⟺ patrimonio ≤ 0.
     // El redondeo es de publicación (`PCT_DP`): el engine devuelve el valor exacto.

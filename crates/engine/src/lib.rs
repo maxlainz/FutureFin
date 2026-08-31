@@ -14,6 +14,7 @@ pub use net_return::{net_return_percentages, NetReturn};
 pub use projection::{
     fire_target_at_month_index, first_month_allocation,
     first_month_per_asset_contribution_nominals, liability_amortization_schedule,
+    liability_interest_accrues,
     present_value_of_payments, project_net_worth_series, resolve_cap_ceiling, AllocationCap,
     AllocationKind,
     AllocationRule, AllocationSkipReason, EngineError, FireTarget, FirstMonthAllocation,
