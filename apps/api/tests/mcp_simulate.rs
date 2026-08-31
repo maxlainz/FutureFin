@@ -584,8 +584,12 @@ async fn every_side_echoes_the_context_that_produced_it() {
 
     // El horizonte deja de ser un número a ciegas: dice de dónde sale.
     assert_eq!(
-        sim["horizon_basis"], "lifespan_90",
-        "el owner tiene fecha de nacimiento, así que el horizonte llega a los 90: {sim}"
+        sim["horizon_basis"], "lifespan_age",
+        "el owner tiene fecha de nacimiento: horizonte hasta la edad límite configurada: {sim}"
+    );
+    assert_eq!(
+        sim["horizon_lifespan_age"], 90,
+        "la edad límite por defecto viaja al lado del basis (#149): {sim}"
     );
 
     for lado in ["baseline", "scenario"] {

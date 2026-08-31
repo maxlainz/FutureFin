@@ -98,6 +98,7 @@
     "ha_sso_disabled",
     "ha_state_mismatch",
     "history_timeline_invalid",
+    "horizon_lifespan_age_out_of_range",
     "idempotency_key_batch_unsupported",
     "idempotency_key_conflict",
     "idempotency_key_in_flight",

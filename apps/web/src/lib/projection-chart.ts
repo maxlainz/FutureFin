@@ -81,11 +81,14 @@ export function formatProjectionChartHorizonLine(series: ProjectionSeriesApi): s
   const endYearStr = endCivil ? formatProjectionAxisYear(endCivil) : null;
 
   switch (basis) {
-    case "lifespan_90":
+    case "lifespan_age": {
+      // #149: la edad viaja en la respuesta; 90 solo como fallback defensivo del campo ausente.
+      const edad = series.horizon_lifespan_age ?? 90;
       if (endYearStr != null) {
-        return `Horizonte 90 años · fin ${endYearStr}`;
+        return `Horizonte ${edad} años · fin ${endYearStr}`;
       }
-      return `Horizonte 90 años`;
+      return `Horizonte ${edad} años`;
+    }
     case "fallback_no_demographics":
       if (endYearStr != null) {
         return `${spanYears} años de vista · fin ${endYearStr}`;

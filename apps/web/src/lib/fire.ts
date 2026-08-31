@@ -41,6 +41,7 @@ export function defaultFireSettingsApi(): FireSettingsApi {
     income_avg_window_mode: "calendar",
     expense_avg_window_months: 12,
     expense_avg_window_mode: "calendar",
+    horizon_lifespan_age: 90,
   };
 }
 
@@ -108,7 +109,17 @@ export function normalizeInstallationFireSettings(
     income_avg_window_mode: parseAvgWindowMode(raw?.income_avg_window_mode),
     expense_avg_window_months: clampWindowMonths(raw?.expense_avg_window_months, 12),
     expense_avg_window_mode: parseAvgWindowMode(raw?.expense_avg_window_mode),
+    // #149: mismo round-trip obligatorio — sin devolverla, guardar cualquier otro ajuste la
+    // resetearía a 90 en silencio (el PATCH manda el objeto completo). Clamp 85..=105 como el
+    // servidor (`resolve_fire_settings`).
+    horizon_lifespan_age: clampHorizonLifespanAge(raw?.horizon_lifespan_age, 90),
   };
+}
+
+/** Cota de la edad límite del horizonte (85..=105), espejo de `resolve_fire_settings`. */
+export function clampHorizonLifespanAge(v: unknown, fallback: number): number {
+  const n = typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : fallback;
+  return Math.min(105, Math.max(85, n));
 }
 
 /** Allow-list de la semántica de ventana; cualquier otra cosa → `calendar` (el default). */

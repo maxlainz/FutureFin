@@ -313,8 +313,10 @@ pub struct ProjectionSeriesResponse {
     pub horizon_years: u32,
     /// **De dónde sale `months`.** Enumeración cerrada, exactamente tres valores:
     ///
-    /// - `lifespan_90` — derivado de una fecha de nacimiento: los meses que faltan hasta los 90
-    ///   años del solicitante (o del primer miembro del hogar si él no tiene DOB).
+    /// - `lifespan_age` — derivado de una fecha de nacimiento: los meses que faltan hasta los
+    ///   `horizon_lifespan_age` años del solicitante (o del primer miembro del hogar si él no
+    ///   tiene DOB). Hasta 4.8.0 el literal era `lifespan_90` — un número congelado en un enum
+    ///   publicado; con la edad configurable (#149) el valor viaja en el campo de al lado.
     /// - `fallback_no_demographics` — no hay ninguna fecha de nacimiento en el hogar: 30 años
     ///   (360 meses) por convención.
     /// - `months_override` — lo pidió el llamante con `?months=` / `months`, y se sirvió tal cual
@@ -323,6 +325,18 @@ pub struct ProjectionSeriesResponse {
     /// Sin este campo, un horizonte de 360 meses es indistinguible de uno elegido a ciegas, y una
     /// respuesta de 360 meses «porque no sabemos la edad» se lee como una decisión del usuario.
     pub horizon_basis: String,
+    /// La edad límite configurada (`fire_settings.horizon_lifespan_age`, 85..=105, default 90).
+    /// Se ecoa SIEMPRE (también con `months_override` o fallback): es configuración, no derivada.
+    /// El margen al final del horizonte NO tiene campo propio: es `points[último].net_worth`
+    /// (el último punto viaja en ambas densidades) — «el plan NO llegó» ⟺
+    /// `assets_depleted_month_index != null` o `uncovered_deficit_total > 0`.
+    pub horizon_lifespan_age: u32,
+    /// Patrimonio del último mes del horizonte en euros de HOY (paridad con
+    /// `simulate_projection.final_net_worth_real`): el margen es una pregunta de poder
+    /// adquisitivo, no de euros nominales de dentro de 40 años.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub final_net_worth_real: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub starting_net_worth: Decimal,
@@ -1020,12 +1034,18 @@ fn jubilacion_civil(
     (Some(at.format("%Y-%m-%d").to_string()), age)
 }
 
-/// Máximo años hasta los 90 años de edad por fecha de nacimiento; acotado [5, 70]; sin DOB → 30 años.
+/// Máximo años hasta `lifespan_age` años de edad por fecha de nacimiento; acotado [5, 70];
+/// sin DOB → 30 años. Desde 4.9.0 (#149) la edad límite es configurable
+/// (`fire_settings.horizon_lifespan_age`, 85..=105, default 90) y el basis pasa de
+/// `"lifespan_90"` (un número congelado en un literal publicado) a `"lifespan_age"` + el campo
+/// `horizon_lifespan_age` al lado. OJO: el clamp [5, 70] NO se toca, así que el eje solo tiene
+/// efecto si `edad ≥ lifespan_age − 70` — a 105 años, un treintañero ya está contra el techo
+/// del sistema (840 meses).
 pub(crate) fn projection_horizon_months(
     today: NaiveDate,
     birth_dates: &[Option<NaiveDate>],
+    lifespan_age: u32,
 ) -> (u32, &'static str) {
-    const LIFESPAN_AGE: i32 = 90;
     const MIN_YEARS: u32 = 5;
     const MAX_YEARS: u32 = 70;
     const FALLBACK_YEARS: u32 = 30;
@@ -1038,7 +1058,7 @@ pub(crate) fn projection_horizon_months(
         };
         any_birth = true;
         let age = age_completed_years(today, birth);
-        let rem = (LIFESPAN_AGE - age).max(0);
+        let rem = (lifespan_age as i32 - age).max(0);
         max_remaining = Some(max_remaining.map_or(rem, |m| m.max(rem)));
     }
 
@@ -1048,7 +1068,7 @@ pub(crate) fn projection_horizon_months(
 
     let years_raw = max_remaining.unwrap_or(0).max(0) as u32;
     let clamped_years = years_raw.clamp(MIN_YEARS, MAX_YEARS);
-    (clamped_years * 12, "lifespan_90")
+    (clamped_years * 12, "lifespan_age")
 }
 
 pub(crate) fn map_engine_err(e: EngineError) -> ApiError {
@@ -1579,6 +1599,9 @@ pub(crate) async fn build_installation_projection_input(
     let input = ProjectionInput {
         ref_date: today,
         horizon_months,
+        // #139: el MISMO supuesto efectivo que el target (sin clamp desde #146) — indexa el
+        // gasto del bucle aunque no haya objetivo FIRE configurado.
+        annual_inflation_percent: inflation_annual_percent,
         income_regular_monthly: inputs.income,
         expense_regular_monthly: inputs.expense,
         assets,
@@ -1696,7 +1719,7 @@ pub(crate) async fn assets_projection_context(
     tag = "projection",
     params(
         ("view" = Option<String>, Query, description = "`mine` | `household`; ausente = household. Cualquier otro valor → 400 `invalid_view`"),
-        ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840; fuera de rango → 400 `months_out_of_range`); omitir = horizonte derivado (`lifespan_90` | `fallback_no_demographics`), ver `horizon_basis` en la respuesta"),
+        ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840; fuera de rango → 400 `months_out_of_range`); omitir = horizonte derivado (`lifespan_age` | `fallback_no_demographics`), ver `horizon_basis` + `horizon_lifespan_age` en la respuesta"),
         ("density" = Option<String>, Query, description = "`monthly` (default) | `hybrid` (mensual el primer año, anual después). Cualquier otro valor → 400 `invalid_density`"),
     ),
     responses(
@@ -1878,7 +1901,8 @@ pub(crate) async fn resolve_projection_context(
             (m, "months_override".into())
         }
         None => {
-            let (m, b) = projection_horizon_months(today, &birth_dates);
+            let (m, b) =
+                projection_horizon_months(today, &birth_dates, fire_settings.horizon_lifespan_age);
             (m, b.into())
         }
     };
@@ -2162,18 +2186,25 @@ pub async fn compute_projection_series_response(
         jubilacion_month_index,
     );
 
+    let final_nominal = points_full.last().map(|p| p.net_worth).unwrap_or(Decimal::ZERO);
+    let final_month_index = points_full.last().map(|p| p.month_index).unwrap_or(0).max(0) as u32;
+    let final_net_worth_real =
+        final_nominal * deflator_at_month_index(inflation_annual_percent, final_month_index);
+
     Ok(ProjectionSeriesResponse {
         view: view.as_str(),
         points,
         months,
         horizon_years,
         horizon_basis,
+        horizon_lifespan_age: fire_settings.horizon_lifespan_age,
+        final_net_worth_real: money_out(final_net_worth_real),
         starting_net_worth: money_out(starting_net_worth),
         // En modos B/C esto es `sum / meses reales`: sin `money_out` viajaba con ~25 decimales
         // mientras `simulate_projection` publicaba la misma cifra con cuatro.
         monthly_delta_assumption: money_out(monthly_delta_assumption),
         model_note:
-            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos, caja mensual consolidada (ingresos/gastos/aportaciones constantes en euros nominales), crecimiento compuesto por activo en términos nominales. El target FIRE se evalúa mes a mes ajustado por inflación para preservar el poder adquisitivo del usuario."
+            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos, crecimiento compuesto por activo en términos nominales. El GASTO (regular y de jubilación) se indexa mes a mes a la inflación de la instalación; los INGRESOS quedan planos a propósito (las subidas se pelean, no se regalan), y el target FIRE se evalúa mes a mes ajustado por inflación para preservar el poder adquisitivo del usuario."
                 .into(),
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         show_age_mode: show_age_mode.clone(),
@@ -2520,10 +2551,13 @@ pub(crate) struct SimSeries {
 #[derive(Debug, Serialize)]
 pub(crate) struct SimulateProjectionResponse {
     pub horizon_months: u32,
-    /// De dónde sale el horizonte: `lifespan_90` (hasta los 90 por fecha de nacimiento),
-    /// `fallback_no_demographics` (30 años, no hay ninguna) o `months_override` (lo pediste tú).
-    /// Sin él, un horizonte de 360 meses no se distingue de uno elegido a ciegas.
+    /// De dónde sale el horizonte: `lifespan_age` (hasta `horizon_lifespan_age` años por fecha
+    /// de nacimiento — hasta 4.8.0 el literal era `lifespan_90`), `fallback_no_demographics`
+    /// (30 años, no hay ninguna) o `months_override` (lo pediste tú). Sin él, un horizonte de
+    /// 360 meses no se distingue de uno elegido a ciegas.
     pub horizon_basis: String,
+    /// Eco de la edad límite configurada (#149) — misma semántica que en la serie.
+    pub horizon_lifespan_age: u32,
     /// Vista efectivamente aplicada: `household` | `mine`. Eco de `view`.
     pub view: &'static str,
     /// Mes 0 de la simulación (`YYYY-MM-DD`), en el calendario de la instalación. Va aquí para que
@@ -2737,7 +2771,7 @@ fn sim_kpis(
 /// porque el plan mejore, sino porque el motor capitaliza en NOMINAL y solo el objetivo FIRE crece
 /// con la inflación — bajarla sube la rentabilidad real de todos los activos y congela el objetivo
 /// a la vez, gratis, en el mismo movimiento. Lo mismo, en pequeño, con `swr_pct`.
-const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos del hogar (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. El motor capitaliza en euros NOMINALES y solo el objetivo FIRE se ajusta por inflación, así que bajar `annual_inflation_percent` sube la rentabilidad real de todos los activos Y congela el objetivo al mismo tiempo: puede adelantar la jubilación años sin que nada del plan haya mejorado. Léelo como un cambio de supuesto, no como una mejora. Igual con `swr_pct`: subirlo baja el objetivo por división, no por ahorrar más. Los ejes de caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, no `net_recurring_monthly` ni `savings_rate`. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO salvo por la compensación por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisión sale de la caja y NO amortiza — el what-if deja de ser gratis por defecto. No se modela la caída al 1,5 % tras el año 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el límite de la pérdida financiera del prestamista: si tu préstamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo — con una amortización PUNTUAL (lump) el mes de extinción se conserva EXACTAMENTE; con amortización extra RECURRENTE puede adelantarse algo (nunca atrasarse), porque el importe fijo cancela antes cerca del final. Lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga; compara contra `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
+const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos del hogar (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. El motor capitaliza en euros NOMINALES; la inflación indexa el GASTO mes a mes (regular y de jubilación, eje (k−1)/12: el mes 1 cobra el gasto declarado tal cual) y el objetivo FIRE, y deja los INGRESOS planos a propósito (decisión del owner: las subidas se pelean). Bajar `annual_inflation_percent` abarata TODO el gasto futuro, sube la rentabilidad real de los activos Y frena el objetivo a la vez: puede adelantar la jubilación años sin que nada del plan haya mejorado — léelo como un cambio de supuesto, no como una mejora. Admite negativos hasta −2 (deflación sostenida: gasto y objetivo DECRECEN). Igual con `swr_pct`: subirlo baja el objetivo por división, no por ahorrar más. Los ejes de caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, no `net_recurring_monthly` ni `savings_rate`. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO salvo por la compensación por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisión sale de la caja y NO amortiza — el what-if deja de ser gratis por defecto. No se modela la caída al 1,5 % tras el año 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el límite de la pérdida financiera del prestamista: si tu préstamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo — con una amortización PUNTUAL (lump) el mes de extinción se conserva EXACTAMENTE; con amortización extra RECURRENTE puede adelantarse algo (nunca atrasarse), porque el importe fijo cancela antes cerca del final. Lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga; compara contra `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
 
 /// Decimales de `SimKpis::savings_rate`. Debe seguir siendo el mismo que el `RATIO_DP` de
 /// `handlers/summary.rs`: si divergen, se reabre la incoherencia de precisión entre superficies que
@@ -3286,6 +3320,7 @@ pub(crate) async fn simulate_projection_core(
     Ok(SimulateProjectionResponse {
         horizon_months: months,
         horizon_basis: ctx.horizon_basis.clone(),
+        horizon_lifespan_age: ctx.fire_settings.horizon_lifespan_age,
         view: view.as_str(),
         anchor_date_ymd: ctx.today.format("%Y-%m-%d").to_string(),
         show_age_mode: ctx.show_age_mode.clone(),
@@ -3563,30 +3598,45 @@ mod horizon_tests {
     #[test]
     fn horizon_fallback_without_birth_dates() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
-        let (m, basis) = projection_horizon_months(today, &[None]);
+        let (m, basis) = projection_horizon_months(today, &[None], 90);
         assert_eq!(m, 30 * 12);
         assert_eq!(basis, "fallback_no_demographics");
     }
 
     #[test]
-    fn horizon_uses_lifespan_90_from_birth_date() {
+    fn horizon_uses_lifespan_age_from_birth_date() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
         let bd = vec![
             Some(NaiveDate::from_ymd_opt(1990, 1, 1).unwrap()), // age 36 → 54y to 90
             Some(NaiveDate::from_ymd_opt(1985, 1, 1).unwrap()), // age 41 → 49y to 90
         ];
-        let (m, basis) = projection_horizon_months(today, &bd);
+        let (m, basis) = projection_horizon_months(today, &bd, 90);
         assert_eq!(m, 54 * 12); // max of 54 and 49, not clamped (54 < 70)
-        assert_eq!(basis, "lifespan_90");
+        assert_eq!(basis, "lifespan_age");
     }
 
     #[test]
     fn horizon_minimum_five_years_when_already_near_lifespan() {
         let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
         let bd = vec![Some(NaiveDate::from_ymd_opt(1940, 1, 1).unwrap())]; // age 86 → 4y to 90, clamped to 5
-        let (m, basis) = projection_horizon_months(today, &bd);
-        assert_eq!(basis, "lifespan_90");
+        let (m, basis) = projection_horizon_months(today, &bd, 90);
+        assert_eq!(basis, "lifespan_age");
         assert_eq!(m, 5 * 12);
+    }
+
+    /// #149: la edad configurable mueve el horizonte año a año (36 años, límite 100 → 64 años)
+    /// y el techo de 70 sigue mandando (límite 105 sobre 30 años de edad → 840, el tope).
+    #[test]
+    fn horizon_follows_the_configured_lifespan_age() {
+        let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        let bd = vec![Some(NaiveDate::from_ymd_opt(1990, 1, 1).unwrap())]; // age 36
+        let (m, basis) = projection_horizon_months(today, &bd, 100);
+        assert_eq!(m, 64 * 12);
+        assert_eq!(basis, "lifespan_age");
+
+        let joven = vec![Some(NaiveDate::from_ymd_opt(1996, 1, 1).unwrap())]; // age 30
+        let (m, _) = projection_horizon_months(today, &joven, 105);
+        assert_eq!(m, 70 * 12, "el clamp [5,70] no se toca: 75 años pedidos → 840 meses");
     }
 }
 
@@ -3791,6 +3841,7 @@ mod milestone_tests {
         let input = ProjectionInput {
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: 24,
+            annual_inflation_percent: Decimal::ZERO,
             income_regular_monthly: Decimal::from(3000),
             expense_regular_monthly: Decimal::from(2500),
             assets: vec![SimAsset {
@@ -3835,6 +3886,7 @@ mod milestone_tests {
         let input = ProjectionInput {
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: 24,
+            annual_inflation_percent: Decimal::ZERO,
             income_regular_monthly: Decimal::from(1200),
             expense_regular_monthly: Decimal::from(1000),
             assets: vec![SimAsset {

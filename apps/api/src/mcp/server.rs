@@ -836,6 +836,8 @@ impl FireSettingsOverrideParam {
             expense_avg_window_months: self.expense_avg_window_months,
             expense_avg_window_mode: parse_enum_param(&self.expense_avg_window_mode)
                 .map_err(|e| ApiError::BadRequest(format!("expense_avg_window_mode: {e}")))?,
+            // El what-if del horizonte ya existe como `months`; la edad límite no se overridea.
+            horizon_lifespan_age: None,
             annual_inflation_assumption_percent: None,
         })
     }
@@ -1836,6 +1838,11 @@ pub struct UpdateFireSettingsParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["data", "calendar"]))]
     pub expense_avg_window_mode: Option<String>,
+    /// Edad límite del horizonte derivado (85..=105, default 90): la proyección llega hasta esa
+    /// edad del solicitante. OJO: el horizonte sigue acotado a 70 años, así que el eje solo
+    /// tiene efecto si la edad actual ≥ edad_límite − 70.
+    #[serde(default)]
+    pub horizon_lifespan_age: Option<u32>,
     /// "manual" | "annual_expense" | "current_income".
     #[serde(default)]
     #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
@@ -4636,6 +4643,7 @@ impl FutureFinMcp {
                 .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))?;
             patch.income_avg_window_months = p.income_avg_window_months;
             patch.expense_avg_window_months = p.expense_avg_window_months;
+            patch.horizon_lifespan_age = p.horizon_lifespan_age;
             patch.income_avg_window_mode =
                 parse_enum_param(&p.income_avg_window_mode)
                     .map_err(|e| ApiError::BadRequest(format!("income_avg_window_mode: {e}")))?;

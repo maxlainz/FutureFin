@@ -50,6 +50,8 @@ export type FireSettingsApi = {
    *  `budget_income_real_expense`. */
   expense_avg_window_months?: number;
   expense_avg_window_mode?: AvgWindowModeApi;
+  /** Edad límite del horizonte derivado (85..=105, default 90) — 4.9.0, #149. */
+  horizon_lifespan_age?: number;
 };
 
 /** Cómo se cuentan los meses de una ventana del promedio real.
@@ -344,6 +346,10 @@ export type ProjectionSeriesApi = {
   months: number;
   horizon_years: number;
   horizon_basis: string;
+  /** Edad límite configurada del horizonte (85..=105, default 90) — 4.9.0, #149. */
+  horizon_lifespan_age?: number;
+  /** Patrimonio del último mes en euros de HOY (paridad con simulate) — 4.9.0, #149. */
+  final_net_worth_real?: string;
   starting_net_worth: string;
   monthly_delta_assumption: string;
   model_note: string;

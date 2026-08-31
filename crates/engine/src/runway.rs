@@ -52,7 +52,7 @@ pub enum RunwayOutcome {
 /// - **Tasas negativas componen**: herencia documentada de [`monthly_multiplier`] — `None` y 0
 ///   siguen siendo factor 1, pero una rentabilidad negativa (−100 < r < 0) decrece el saldo de
 ///   verdad y por tanto **acorta** el runway (≤ −100 se clampa a factor 0). La inflación del
-///   gasto nunca es negativa aquí (la instalación valida 0..50).
+///   gasto puede ser NEGATIVA desde 4.9.0 (#146, rango [−2, 50]): el gasto entonces DECRECE mes a mes y el runway se alarga.
 /// - **Umbral SWR (caso infinito)**: el runway es `Indefinite` ⟺ la retirada anual no supera el
 ///   SWR sobre el saldo inicial: `annual_expense_for_swr ≤ A·(swr_pct/100)`. Se compara sin
 ///   dividir — `annual_expense_for_swr·100 ≤ A·swr_pct` — para que la frontera sea **exacta** en

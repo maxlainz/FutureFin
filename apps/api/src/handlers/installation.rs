@@ -168,6 +168,12 @@ pub struct FireSettings {
     pub expense_avg_window_months: u32,
     /// Semántica de la ventana de gasto.
     pub expense_avg_window_mode: AvgWindowMode,
+    /// Edad límite del horizonte derivado (#149, 4.9.0): la proyección llega hasta los
+    /// `horizon_lifespan_age` años del solicitante (antes era la constante 90). Rango [85, 105];
+    /// default 90 ⇒ comportamiento idéntico al histórico. OJO: el horizonte sigue acotado a
+    /// [5, 70] años, así que el eje solo muerde si `edad ≥ edad_límite − 70` (a 105, un
+    /// treintañero ya está contra el techo del sistema, 840 meses).
+    pub horizon_lifespan_age: u32,
 }
 
 impl FireSettings {
@@ -213,6 +219,7 @@ pub(crate) fn default_fire_settings() -> FireSettings {
         income_avg_window_mode: AvgWindowMode::Calendar,
         expense_avg_window_months: 12,
         expense_avg_window_mode: AvgWindowMode::Calendar,
+        horizon_lifespan_age: 90,
     }
 }
 
@@ -249,6 +256,12 @@ fn default_es_tax_brackets() -> Vec<TaxBracket> {
 /// por otra vía (restore, edición directa de la BD, un fichero de otra versión) produciría una
 /// ventana de 0 meses → promedio sin denominador → fallback silencioso al presupuesto con la UI
 /// diciendo que está en modo real. Clampar en el consumo lo hace imposible.
+/// Cotas de la edad límite del horizonte (#149). 85 para no cortar por debajo de la esperanza
+/// de vida al nacer; 105 porque más allá el tope [5,70] del horizonte ya decide para cualquier
+/// edad adulta.
+pub(crate) const MIN_HORIZON_LIFESPAN_AGE: u32 = 85;
+pub(crate) const MAX_HORIZON_LIFESPAN_AGE: u32 = 105;
+
 pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSettings {
     let mut fs = match stored {
         None => default_fire_settings(),
@@ -260,6 +273,11 @@ pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSetting
     fs.expense_avg_window_months = fs
         .expense_avg_window_months
         .clamp(MIN_AVG_WINDOW_MONTHS, MAX_AVG_WINDOW_MONTHS);
+    // #149: una edad fuera de rango llegada por vía no validada (restore, BD a mano) produciría
+    // horizontes absurdos o un 90 fantasma; el clamp en el consumo lo hace imposible.
+    fs.horizon_lifespan_age = fs
+        .horizon_lifespan_age
+        .clamp(MIN_HORIZON_LIFESPAN_AGE, MAX_HORIZON_LIFESPAN_AGE);
     fs
 }
 
@@ -293,6 +311,11 @@ pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> 
                 "avg_window_out_of_range: {label} must be between {MIN_AVG_WINDOW_MONTHS} and {MAX_AVG_WINDOW_MONTHS} (months)"
             )));
         }
+    }
+    if !(MIN_HORIZON_LIFESPAN_AGE..=MAX_HORIZON_LIFESPAN_AGE).contains(&fs.horizon_lifespan_age) {
+        return Err(ApiError::BadRequest(format!(
+            "horizon_lifespan_age_out_of_range: horizon_lifespan_age must be between {MIN_HORIZON_LIFESPAN_AGE} and {MAX_HORIZON_LIFESPAN_AGE} (years)"
+        )));
     }
     if fs.taxes_enabled {
         validate_tax_brackets(&fs.tax_brackets)?;
@@ -771,6 +794,8 @@ pub(crate) struct FireSettingsPatch {
     pub income_avg_window_mode: Option<AvgWindowMode>,
     pub expense_avg_window_months: Option<u32>,
     pub expense_avg_window_mode: Option<AvgWindowMode>,
+    /// #149 (4.9.0): edad límite del horizonte derivado.
+    pub horizon_lifespan_age: Option<u32>,
     /// Columna aparte de la instalación (no vive en el JSONB), pero es un eje FIRE más.
     pub annual_inflation_assumption_percent: Option<Decimal>,
 }
@@ -817,6 +842,9 @@ impl FireSettingsPatch {
         if let Some(v) = self.expense_avg_window_mode {
             after.expense_avg_window_mode = v;
         }
+        if let Some(v) = self.horizon_lifespan_age {
+            after.horizon_lifespan_age = v;
+        }
         after
     }
 
@@ -831,6 +859,7 @@ impl FireSettingsPatch {
             && self.income_avg_window_mode.is_none()
             && self.expense_avg_window_months.is_none()
             && self.expense_avg_window_mode.is_none()
+            && self.horizon_lifespan_age.is_none()
             && self.annual_inflation_assumption_percent.is_none()
     }
 }
