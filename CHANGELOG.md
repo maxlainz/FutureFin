@@ -4,6 +4,106 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.8.0] - 2026-08-31
+
+**Ola 4 de la resolución — «El cruce, la base y la jubilación»** (issues #141, #142, #143, #124,
+#125, #127, #128). La ola donde el mes de cruce FIRE se mueve — una sola vez para todo el
+programa. Todo número nuevo está calculado a mano antes de correr los tests que lo pinean; los
+pins canónicos de `projection_pins.rs` NO se movieron, y el porqué exacto está escrito en el
+propio pin (el cruce del escenario cae tras el fin del plan de deuda, donde la pareja nueva y la
+vieja coinciden algebraicamente).
+
+### La jubilación es un estado absorbente (#141)
+
+- Una vez cruzado el objetivo (o alcanzado el mes de retiro), **jubilado para siempre**: el bucle
+  ya no re-evalúa la condición cada mes. Hasta 4.7.x, con gastos crecientes e ingresos planos el
+  estado parpadeaba — un mes jubilado, el siguiente «de vuelta al trabajo» — alternando el
+  presupuesto regular y el de jubilación sin que nada lo dijera.
+- Pin del engine: `retirement_is_an_absorbing_state` — 343.865,59 € finales con aportación 0
+  durante todo el horizonte pese a caídas de más de 100 € bajo el objetivo por el camino.
+
+### El objetivo FIRE cuenta la deuda que queda, y el cruce mira lo que puedes vender (#142, #143)
+
+- **Término finito de deuda en el objetivo**: `target(m) = base_inflada(m) + cuotas_pendientes(m)`,
+  donde el término suma TODOS los pagos que quedan tras el mes m (cuota + amortización extra +
+  comisión) más la **cola residual** (principal que el plan no llega a amortizar, constante). El
+  objetivo **deja de ser monótono** (base creciente + término decreciente); con inflación 0 y
+  deuda viva es estrictamente decreciente — amortizar BAJA tu número.
+- **El cruce compara patrimonio LÍQUIDO bruto** (Σ activos vendibles + caja sobrante, sin restar
+  principal): cruzar con el patrimonio total contaba la vivienda como si pudiera pagar la compra
+  del mes. Las dos mitades van emparejadas y son algebraicamente equivalentes al par
+  «NW neto ≥ base + interés restante» — la identidad
+  `término(m) = principal_vivo(m) + interés_restante(m)` está pineada dígito a dígito
+  (`serie[0] = 138.802,7999147153` para 150.000 € al 3 % con cuota 900).
+- La serie líquida viaja en `points[].net_worth_liquid` y el término del mes 0 en
+  `fire_target_debt_component` (la vista Jubilación lo suma al objetivo del formulario). En
+  `simulate_projection`, el término del escenario se RECONSTRUYE tras aplicar `liability_overrides`
+  — amortizar anticipadamente en el what-if baja el objetivo del escenario, como debe.
+- Pin del engine con números a mano: base 600.000 € → objetivo el mes 0 = 638.802,80 (base +
+  38.802,80 de interés restante + cuotas), y con residual: 30.000 € de globo → cola constante
+  25.000 € (objetivo en el mes 500 = 625.000 exacto).
+- **En B/C la deuda vuelve a amortizar** (opción 3 del owner): el gasto del motor es
+  `max(0, promedio_real − cuotas_declaradas_activas)` — la cuota vive dentro del promedio medido,
+  así que se resta UNA vez y el motor la cobra por su lado con amortización real. La anulación de
+  3.4.0 (pasivos congelados, sin escalón al vencer) queda revertida: dos pins invertidos con nota
+  (`mode_b_no_step_up_at_liability_end` ahora afirma el escalón, >300.000 € en su escenario), y
+  `debt_service_monthly` vuelve a ser un número en los TRES modos
+  (`debt_service_absent_reason` pasa a ser siempre `null`; el literal `included_in_real_expense`
+  se retira con el contrato que lo justificaba).
+
+### Una partida vencida deja de contar en todas partes a la vez (#124)
+
+- Una partida de presupuesto con `expense_end_date` pasada salía del motor pero seguía sumando en
+  KPIs, delta mensual y objetivo. Ahora se filtra en los sumatorios Y en las entradas de fin de
+  gasto **a la vez** — filtrar solo el sumatorio habría creado caja fantasma (+importe/mes desde
+  el mes 0). Pin: partida de 500 € vencida → gasto 1.500, delta 1.500 y objetivo 450.000 €
+  coherentes entre sí (SWR 4 %, sin impuestos).
+
+### El gasto medio real dice la verdad (#125)
+
+- **Denominador clasificado**: solo dividen los meses con ≥1 movimiento real Y clasificado. Seis
+  meses de importaciones sin categorizar partían la media por la mitad (6.000/6 = 1.000 €/mes
+  donde el gasto real era 2.000) — y con ella el objetivo FIRE en modo B, ~300.000 € de menos.
+- **Una sola ventana**: la comparativa de Movimientos ancla su promedio en HOY, como la media que
+  alimenta la proyección — las dos «medias de 6 meses» describían tramos desplazados un mes bajo
+  el mismo rótulo. El mes seleccionado entra en su propio promedio; YTD pasa a ser «meses
+  completos del año en curso»; seleccionar un mes antiguo ya no cambia la media de referencia.
+- **Euros nominales declarados**: los importes se promedian en euros de su fecha, sin deflactar —
+  ahora la ayuda lo dice (tercera pata del issue, aceptada como deuda declarada).
+
+### Las dos «cajas del mes» son una (#127)
+
+- `net_recurring_monthly` y `net_cash_monthly` convergen al primer paso real del motor
+  (`first_month_allocation`): el servicio de deuda es el que se paga de verdad
+  (`min(cuota, payoff)` + extra + comisión) y la caja incluye los Próximos del mes 1. Pin: pasivo
+  de principal 300 € con cuota 900 → las dos cifras dicen 900 (= 3.000 − 1.800 − 300), igual que
+  la resolución de la cascada — antes una decía 300 y la otra el desglose no cuadraba.
+- De paso, con **cero activos** el motor ya no atajea a ceros: la caja del mes 1 existe aunque no
+  haya dónde asignarla.
+
+### «Autonomía: indefinida» exige que el dinero trabaje (#128)
+
+- **Puerta de rentabilidad**: el umbral SWR solo declara «indefinida» si la rentabilidad esperada
+  ponderada de los líquidos es > 0. 300.000 € parados al 0 % con 875 €/mes cumplen el umbral por
+  igualdad exacta y aun así se agotan — ahora la tarjeta dice **342,9 meses** (≈28,6 años) en vez
+  de «indefinida». La misma igualdad con retorno positivo sigue siendo indefinida: la frontera
+  exacta en `Decimal` no cambió, solo ganó una condición.
+- **Drenaje secuencial**: el caso finito vacía primero los líquidos de menor rentabilidad — el
+  MISMO orden que la simulación — en vez de prorratear con un multiplicador ponderado. Cartera
+  mixta 10.000 € al 0 % + 10.000 € al 10 % con gasto 1.000 €/mes: 20,80 → **21,27 meses**;
+  150.000/50.000 al 0/10 % con 2.000 €/mes: 111,39 → **130,96**. Un solo activo: idéntico
+  bit a bit. Pin API del gross-up con la puerta: 270.000 € al 2 % → 612,4 meses con impuestos,
+  indefinida sin ellos.
+
+### Sin cambios
+
+- Cero migraciones y `.ffbackup` sigue en v11: toda la ola es motor + handlers + textos.
+- `fire-parity.json` no se regenera: la paridad cubre la BASE del objetivo (la única matemática
+  duplicada en TS); el término de deuda vive solo en el servidor y el cliente lo consume ya
+  calculado (declarado en el `_doc` del fixture).
+- `avg-window-parity.json` evaluado y sin cambios: pinea cotas y defaults de las ventanas
+  (1/60/3/12), no su ancla.
+
 ## [4.7.0] - 2026-08-31
 
 **Ola 3 de la resolución — «La deuda dice la verdad»** (issues #144, #122, #123, #145, #121,

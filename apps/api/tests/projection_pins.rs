@@ -88,16 +88,26 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
         .await
         .json();
 
-    // a mano: need = 1.200×12 = 14.400 (SIN la cuota — divergencia D17/#142, decidida: contará
-    // los meses restantes del préstamo; este pin SE MOVERÁ en la Ola 4). Gross-up escala ES:
+    // a mano: need = 1.200×12 = 14.400 (SIN la cuota). Gross-up escala ES:
     // tramo 19 %: 14.400/0,81 = 17.777,78 > 6.000 → K = 1.140;
     // tramo 21 %: (14.400 + 1.140 − 0,21×6.000)/0,79 = 14.280/0,79 = 18.075,9494 ≤ 50.000 ✓.
     // target = 18.075,9494 / 0,035 = 516.455,6961.
+    //
+    // OLA 4 (#141/#142/#143): este pin NO se movió, y el porqué es la identidad que la ola
+    // pinea en el engine (`target_and_crossing_base_agree_on_the_liability_accounting`):
+    // `jubilacion_target_net_worth` es la BASE en euros de hoy (el término de deuda viaja
+    // aparte en `fire_target_debt_component`), y el cruce (mes 235) cae DESPUÉS del fin del
+    // plan (mes ~180), donde término = residual = principal congelado — ahí
+    // «líquido ≥ base + término» y el viejo «NW ≥ base» coinciden EXACTAMENTE
+    // (liquid − residual = NW). Tampoco hay parpadeo que el latch (#141) congele: tras el
+    // cruce el retorno del activo (~5 %/a sobre ~570 k€) supera el déficit de 1.200 €/mes y
+    // el patrimonio nunca recae bajo el objetivo. Un cruce DURANTE el plan sí se mueve — eso
+    // lo pinean los tests del engine de la Ola 4.
     let target = dec(&s["jubilacion_target_net_worth"]);
     assert!((target - 516_455.6961).abs() < 0.01, "target: {target}");
 
-    // capturado 4.6.0 (se moverán en las Olas 3-4 — #144 default french ya aplicado aquí a mano,
-    // #142 descongelará la base del objetivo, #124 filtrará vencidas):
+    // capturado 4.6.0 (#144 default french ya aplicado aquí a mano; verificado inmóvil en la
+    // Ola 4 por lo de arriba; #124 no aplica — no hay partidas vencidas):
     let jub = s["jubilacion_month_index"].clone();
     let nw12 = nw_at(&s, 12);
     let nw180 = nw_at(&s, 180);

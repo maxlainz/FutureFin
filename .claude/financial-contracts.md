@@ -190,6 +190,21 @@ Pasivos (#121); compensación por reembolso anticipado (2 % default) + «reducir
 extinción invariante en el what-if (#151); el modelo de amortización viaja al snapshot y al
 `.ffbackup` v11 — la interpolación histórica usa la ley capturada (#129); el item ausente de una
 captura arrastra su último valor y el empalme del chart es por mes civil (#130).
+**Resueltas en 4.8.0 (Ola 4 — «El cruce, la base y la jubilación»)**: la jubilación es un estado
+absorbente — una vez cruzado el objetivo (o alcanzada la edad), jubilado para siempre, sin
+parpadeo mes a mes (#141); el objetivo FIRE gana el término finito de deuda — perpetuidad + TODAS
+las cuotas pendientes + cola residual, decreciente al amortizar (el objetivo deja de ser monótono:
+cruce por escaneo lineal), y en B/C la deuda vuelve a amortizar (opción 3 del owner: la cuota
+declarada se RESTA del promedio real, una sola regla contable en los 3 modos) (#142); el cruce se
+decide contra el patrimonio LÍQUIDO bruto (Σ vendibles + surplus_cash), emparejado
+algebraicamente con el término de cuota completa del objetivo (#143); una partida de presupuesto
+vencida deja de contar EN TODAS PARTES a la vez — sumatorios y `expense_end_entries` juntos, sin
+caja fantasma (#124); el gasto medio real solo divide entre meses con movimientos CLASIFICADOS,
+las dos «medias de N meses» comparten ancla (HOY, la de `transactions_avg`) y los euros nominales
+sin deflactar quedan declarados en la ayuda (#125); `net_recurring_monthly`/`net_cash_monthly`
+convergen al primer paso real del motor (`first_month_allocation`, que ya no atajea a ceros sin
+activos) (#127); «Autonomía: indefinida» exige rentabilidad esperada ponderada > 0 además del
+umbral SWR, y el caso finito drena secuencialmente como la simulación (#128).
 
 ### Con dirección decidida por el owner (2026-08-30) — pendientes de implementar
 

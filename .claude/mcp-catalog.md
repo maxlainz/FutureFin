@@ -57,7 +57,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   Las 10 iniciales: `get_summary`, `get_projection` (density **hybrid fija**,
   `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler;
   `months` declara su rango real 12..840 en el schema y solo la variante sin `months` sale de
-  cache), `get_budget`, `get_transactions_summary` (denominador = `avg_months`, meses reales;
+  cache), `get_budget`, `get_transactions_summary` (denominador = `avg_months`, meses reales **y
+  clasificados**, ventana **anclada a hoy** — la misma media que la proyección, 4.8.0/#125;
   `months_with_data`, `avg_basis` y `avg_unavailable_reason` aparte), `list_transactions` (**paginación en SQL**:
   `limit` 1..500 def 100 + `offset`, filtros `month/kind/category_id/import_id` +
   **búsqueda 3.8.0** `concept_contains/min_amount/max_amount/date_from/date_to`, responde
@@ -118,10 +119,13 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   debt_service_monthly`, la misma base que alimentan el runway y el target FIRE — en modo A la
   cuota de pasivo vive fuera de `expense_regular_monthly` por diseño (`budget.rs`) y entra por el
   servicio de deuda, así que la suma es lo único que cuadra con `expense_total_monthly_equivalent`
-  de `/v1/summary` en los tres modos. Y `net_recurring_monthly` = `income − expense_total`, que **no**
-  es el `net_cash_month` que reparte la cascada: ese lleva además el tramo de planning flows del mes
-  en curso y el one-off donde caiga. `net_cash_monthly` está en medio: recurrente + el ajuste
-  mensual **constante** del escenario, que es la caja estable que ese lado mete en la cascada. `savings_rate_delta` se recalcula desde los componentes exactos, no restando los dos
+  de `/v1/summary` en los tres modos. Y desde 4.8.0 (#127) `net_recurring_monthly` y
+  `net_cash_monthly` **convergen al primer paso real del motor** (`first_month_allocation`):
+  el recurrente usa el servicio de deuda que de verdad se paga el mes 1 (`min(cuota, payoff)` +
+  extra + comisión — coincide con `income − expense_total` en el caso común y diverge a propósito
+  en los meses frontera), y `net_cash_monthly` ES la caja que la cascada reparte el mes 1
+  (`base_cash`: recurrente + Próximos del mes 1 + el ajuste constante del escenario).
+  `savings_rate_delta` se recalcula desde los componentes exactos, no restando los dos
   ratios ya redondeados. Identidades pinneadas en
   `sim_kpis_match_summary_financial_health_in_all_three_modes`. Overrides: `one_off_expense`
   (`amount` + exactamente uno de `month_index`/`date`; mismo mapeo fecha→mes que un planning flow

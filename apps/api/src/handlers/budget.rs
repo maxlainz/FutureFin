@@ -11,7 +11,7 @@ use axum::extract::{Extension, Path, Query};
 use axum::routing::{get, patch};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -380,12 +380,15 @@ pub(crate) async fn fetch_budget_rows_and_derived_liabilities(
 pub(crate) fn ledger_budget_totals_from_parts(
     rows: &[BudgetEntryJoinRow],
     derived_raw: &[LiabilityDerivedRow],
+    today: NaiveDate,
 ) -> Result<BudgetTotalsResponse, ApiError> {
     let mut income_m = Decimal::ZERO;
     let mut income_retirement_m = Decimal::ZERO;
     let mut expense_reg = Decimal::ZERO;
     let mut expense_retirement_m = Decimal::ZERO;
 
+    let month_first_today =
+        NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
     for r in rows {
         let me = r.amount;
         match r.scope.as_str() {
@@ -396,6 +399,13 @@ pub(crate) fn ledger_budget_totals_from_parts(
                 }
             }
             "expense" => {
+                // #124: la partida vencida no se paga — fuera de los totales (misma regla y
+                // misma granularidad de mes que el motor y que el resolver de la proyección).
+                // La FILA sigue visible en `entries` con su `expense_end_date` para que el
+                // usuario la vea, edite o borre; solo los agregados dejan de sumarla.
+                if matches!(r.expense_end_date, Some(end) if month_first_today > end) {
+                    continue;
+                }
                 expense_reg += me;
                 if !r.ends_at_retirement {
                     expense_retirement_m += me;
@@ -483,12 +493,12 @@ pub(crate) async fn budget_line_removed_with_liability(
     let Some(target) = derived.iter().find(|d| d.id == liability_id).cloned() else {
         return Ok(None);
     };
-    let before = ledger_budget_totals_from_parts(&rows, &derived)?;
+    let before = ledger_budget_totals_from_parts(&rows, &derived, today)?;
     let after_derived: Vec<LiabilityDerivedRow> = derived
         .into_iter()
         .filter(|d| d.id != liability_id)
         .collect();
-    let after = ledger_budget_totals_from_parts(&rows, &after_derived)?;
+    let after = ledger_budget_totals_from_parts(&rows, &after_derived, today)?;
 
     Ok(Some(BudgetLineRemoved {
         category_id: target.expense_category_id,
@@ -547,7 +557,7 @@ pub(crate) async fn ledger_budget_totals_for_summary(
 ) -> Result<BudgetTotalsResponse, ApiError> {
     let (rows, derived_raw) =
         fetch_budget_rows_and_derived_liabilities(pool, iid, session_user_id, view, today).await?;
-    ledger_budget_totals_from_parts(&rows, &derived_raw)
+    ledger_budget_totals_from_parts(&rows, &derived_raw, today)
 }
 
 /// Persisted budget rows only (no liability-derived lines), for projection / FIRE expense bases.
@@ -587,6 +597,19 @@ pub(crate) async fn ledger_regular_monthly_income_and_expense(
                 }
             }
             "expense" => {
+                // #124 (4.8.0): una partida cuyo `expense_end_date` ya venció NO se paga — no
+                // entra en el gasto regular, ni en el de jubilación, ni (crucial) en las
+                // entradas de cancelación del motor. El predicado es el MISMO del motor
+                // (`expense_end_date_monthly_adjustments`: cancela cuando `m_first > end`),
+                // a granularidad de MES: filtrar solo del sumatorio y dejar la entrada
+                // compensadora habría creado caja fantasma de +importe/mes desde el mes 0.
+                let month_first_today =
+                    NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+                let already_ended =
+                    matches!(r.expense_end_date, Some(end) if month_first_today > end);
+                if already_ended {
+                    continue;
+                }
                 expense_reg += me;
                 if !r.ends_at_retirement {
                     expense_retirement_m += me;
@@ -644,7 +667,7 @@ pub(crate) async fn budget_snapshot_core(
     )
     .await?;
 
-    let totals = ledger_budget_totals_from_parts(&rows, &derived_raw)?;
+    let totals = ledger_budget_totals_from_parts(&rows, &derived_raw, today)?;
 
     let mut entries = Vec::with_capacity(rows.len() + derived_raw.len());
     for r in rows {

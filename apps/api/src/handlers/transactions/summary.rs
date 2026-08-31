@@ -9,14 +9,19 @@
 //!   excluido del consumo → tiene su propio bloque, nunca entra en `expense`.
 //!
 //! ## Promedio ponderado (`avg`)
-//! El tramo del promedio es el rango medio-abierto `[window_start, selected)` de meses civiles,
-//! elegido con `avg_window` (`3`|`6`|`12`|`ytd`|`all`; alias legado `avg_months` 1..24). De ese
-//! tramo solo promedian los meses REALES (≥1 movimiento con `recurring_rule_id IS NULL`), y lo
-//! hacen enteros: un mes no real queda fuera del numerador Y del denominador. El denominador es
-//! `avg_months`; `months_with_data` (meses con ≥1 movimiento de cualquier tipo) se sigue
-//! publicando aparte porque describe lo que hay, no lo que promedia. Sin meses reales no hay
-//! promedio: `avg_months = 0`, todas las medias 0, `avg_basis = null` y `avg_unavailable_reason`
-//! dice por qué.
+//! El tramo del promedio es el rango medio-abierto `[window_start, first_of_month(today))` de
+//! meses civiles — el MISMO ancla que `transactions_avg`, independiente del mes seleccionado
+//! (#125, Ola 4; hasta 4.7.x terminaba en `selected` y las dos «medias de N meses» de la app
+//! describían tramos desplazados un mes) — elegido con `avg_window` (`3`|`6`|`12`|`ytd`|`all`;
+//! alias legado `avg_months` 1..24). De ese tramo solo promedian los meses REALES (≥1 movimiento
+//! con `recurring_rule_id IS NULL` **y `kind` clasificado** — #125: un mes cuyo único contenido
+//! son importaciones sin clasificar no divide el gasto de los demás), y lo hacen enteros: un mes
+//! no real queda fuera del numerador Y del denominador. El denominador es `avg_months`;
+//! `months_with_data` (meses con ≥1 movimiento de cualquier tipo) se sigue publicando aparte
+//! porque describe lo que hay, no lo que promedia. Sin meses reales no hay promedio:
+//! `avg_months = 0`, todas las medias 0, `avg_basis = null` y `avg_unavailable_reason` dice por
+//! qué. Los importes se promedian en euros NOMINALES de su fecha, sin deflactar (declarado en la
+//! ayuda; con `all`/lookbacks largos, meses de hace años pesan igual que los recientes).
 //!
 //! El denominador es único para todas las líneas, no por categoría: así `Σ avg de categorías`
 //! sigue siendo `totals.expense_avg` y la tasa de ahorro promedio no se infla. La contrapartida
@@ -272,12 +277,14 @@ fn fold_side(
 /// fuera (es parcial y hundiría la media). Dentro de ese tramo, cada lado elige sus meses según
 /// `AvgWindowSpec`.
 ///
-/// **Mes real** = mes con ≥1 transacción `recurring_rule_id IS NULL`. Desde 3.9.0 los recurrentes
-/// solo existen en meses activos, así que en régimen normal «mes real» ≡ «mes con datos»; el
-/// predicado se conserva porque sigue siendo correcto en los casos residuales (p. ej. el mes de
-/// origen de una regla, exento de la poda). Las patas de transferencia CONCILIADAS quedan fuera
-/// del numerador Y del denominador: un mes cuyo único contenido son transferencias internas no es
-/// un mes con flujo.
+/// **Mes real** = mes con ≥1 transacción `recurring_rule_id IS NULL` **con `kind` clasificado**
+/// (#125, Ola 4: un mes cuyo único contenido son importaciones sin clasificar sumaba 0 € al
+/// numerador y 1 al denominador — seis meses así partían la media de gasto por la mitad, y la
+/// ayuda ya prometía lo contrario). Desde 3.9.0 los recurrentes solo existen en meses activos,
+/// así que en régimen normal «mes real» ≡ «mes con datos clasificados»; el predicado se conserva
+/// porque sigue siendo correcto en los casos residuales (p. ej. el mes de origen de una regla,
+/// exento de la poda). Las patas de transferencia CONCILIADAS quedan fuera del numerador Y del
+/// denominador: un mes cuyo único contenido son transferencias internas no es un mes con flujo.
 ///
 /// Signos (magnitudes ≥ 0, como en el summary): `income` positivo → `income_avg = Σ`;
 /// `expense` negativo → `expense_avg = −Σ`. `savings` y `kind NULL` NO entran.
@@ -310,7 +317,7 @@ pub(crate) async fn transactions_avg(
     // restringía el numerador. No hace falta `DISTINCT`: el `GROUP BY ym` ya colapsa por mes.
     let sql = format!(
         "SELECT to_char(t.op_date, 'YYYY-MM') AS ym,
-                COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL)::int AS real_txns,
+                COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL AND t.kind IS NOT NULL)::int AS real_txns,
                 COALESCE(SUM(t.amount) FILTER (WHERE t.kind = 'income'), 0)::numeric AS income_sum,
                 COALESCE(SUM(t.amount) FILTER (WHERE t.kind = 'expense'), 0)::numeric AS expense_sum
          FROM transactions t
@@ -454,15 +461,24 @@ pub(crate) async fn transactions_summary_core(
     let (ny, nm) = shift_month(year, month, 1);
     let month_end = first_of_month(ny, nm);
 
-    // `window_start`: primer día del primer mes del tramo del promedio `[window_start, selected)`.
+    // Ancla de la ventana (#125, Ola 4): el promedio cubre `[window_start, first_of_month(today))`
+    // — el MISMO ancla que `transactions_avg`, independiente del mes seleccionado. Hasta 4.7.x el
+    // tramo terminaba en `selected`, así que con la selección por defecto (último mes completo)
+    // las dos «medias de 6 meses» de la app (proyección/health vs Movimientos) describían tramos
+    // desplazados un mes bajo el mismo rótulo. Consecuencias deliberadas del ancla única: el mes
+    // seleccionado, si es completo y cae dentro de la ventana, SÍ entra en su propio promedio de
+    // comparación; y al navegar a un mes antiguo la comparativa sigue siendo «contra tu media
+    // actual», no contra la media de aquella época.
+    let window_end = first_of_month(today.year(), today.month());
     let window_start = match window {
         AvgWindow::Months(n) => {
-            let (wy, wm) = shift_month(year, month, -(n as i32));
+            let (wy, wm) = shift_month(today.year(), today.month(), -(n as i32));
             first_of_month(wy, wm)
         }
-        // Enero del año del mes seleccionado; con month == 1 coincide con el mes seleccionado → tramo vacío.
-        AvgWindow::Ytd => first_of_month(year, 1),
-        // Primer día del mes de MIN(op_date) del scope; si NULL o ≥ mes seleccionado → tramo vacío.
+        // Enero del año EN CURSO. En enero no hay meses completos del año todavía → tramo vacío
+        // (`avg_unavailable_reason: "empty_window"`), que es la verdad del «año en curso».
+        AvgWindow::Ytd => first_of_month(today.year(), 1),
+        // Primer día del mes de MIN(op_date) del scope; si NULL o ≥ ancla → tramo vacío.
         // Las conciliadas no anclan la ventana: «Todo» no debe arrancar en un mes sin datos visibles.
         AvgWindow::All => {
             let scope = view.scope_where("t");
@@ -481,32 +497,45 @@ pub(crate) async fn transactions_summary_core(
             match min_op {
                 Some(d) => {
                     let candidate = first_of_month(d.year(), d.month());
-                    if candidate < month_start {
+                    if candidate < window_end {
                         candidate
                     } else {
-                        month_start
+                        window_end
                     }
                 }
-                None => month_start,
+                None => window_end,
             }
         }
     };
     let window_start_ym = ym_string(window_start.year(), window_start.month());
-    let window_months = months_between(window_start, month_start);
+    let window_end_ym = ym_string(window_end.year(), window_end.month());
+    let window_months = months_between(window_start, window_end);
 
-    // `ym` pertenece al tramo del promedio (medio-abierto): `window_start_ym <= ym < selected_ym`.
-    // Comparación lexicográfica de "YYYY-MM" = cronológica (padding `{:04}` de `ym_string`).
-    let in_window = |ym: &str| ym >= window_start_ym.as_str() && ym < selected_ym.as_str();
+    // `ym` pertenece al tramo del promedio (medio-abierto): `window_start_ym <= ym < window_end_ym`
+    // (el mes EN CURSO queda siempre fuera: es parcial y hundiría la media — igual que en
+    // `transactions_avg`). Comparación lexicográfica de "YYYY-MM" = cronológica (padding `{:04}`
+    // de `ym_string`).
+    let in_window = |ym: &str| ym >= window_start_ym.as_str() && ym < window_end_ym.as_str();
 
     // ---- Actuals + ventana: transacciones agregadas por (ym, kind, category) ----------------
     // Las transferencias conciliadas siguen VISIBLES en el listado de Movimientos, pero no son
     // gasto ni ingreso → fuera de todos los buckets (actuals, promedio y months_with_data).
+    // `real_txns` exige `kind` clasificado (#125): un movimiento importado sin clasificar no
+    // convierte su mes en «mes real» — sumaría 0 al numerador y 1 al denominador, hundiendo la
+    // media de todas las categorías a la vez.
+    //
+    // Con el ancla en `today` (#125) el mes seleccionado puede caer FUERA de la ventana (mes
+    // antiguo) o después de ella: el barrido debe cubrir la unión de ambos tramos, no
+    // `[window_start, month_end)` a secas — con un mes antiguo seleccionado ese rango dejaría
+    // fuera meses de la propia ventana y el promedio saldría de menos meses en silencio.
+    let fetch_start = window_start.min(month_start);
+    let fetch_end = month_end.max(window_end);
     let scope = view.scope_where("t");
     let arg = view.next_arg_index();
     let sql = format!(
         "SELECT to_char(t.op_date, 'YYYY-MM') AS ym, t.kind AS kind,
                 t.category_id AS category_id, SUM(t.amount) AS total,
-                COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL)::int AS real_txns,
+                COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL AND t.kind IS NOT NULL)::int AS real_txns,
                 COUNT(*)::int AS txns
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
@@ -516,12 +545,12 @@ pub(crate) async fn transactions_summary_core(
     );
     let raw: Vec<BucketRow> = view
         .bind_scope_as(sqlx::query_as(&sql), iid, user_id)
-        .bind(window_start)
-        .bind(month_end)
+        .bind(fetch_start)
+        .bind(fetch_end)
         .fetch_all(pool)
         .await?;
     let mut buckets: HashMap<(String, String, Option<Uuid>), Decimal> = HashMap::new();
-    // Movimientos NO recurrentes por mes, para decidir qué meses son reales.
+    // Movimientos NO recurrentes y CLASIFICADOS por mes, para decidir qué meses son reales (#125).
     let mut real_txns_by_ym: HashMap<String, i32> = HashMap::new();
     // Movimientos de CUALQUIER tipo del mes seleccionado: el contador que distingue «mes a cero»
     // de «mes sin datos».

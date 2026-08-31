@@ -272,6 +272,12 @@ pub struct ProjectionPoint {
     #[serde(serialize_with = "serialize_decimal_as_f64")]
     #[schema(value_type = f64)]
     pub net_worth_real: Decimal,
+    /// Patrimonio LÍQUIDO nominal del mes (4.8.0, #143): Σ activos `is_liquid` + caja sin
+    /// repartir, SIN restar pasivos. **Es la base que decide el cruce FIRE** — la línea que hay
+    /// que comparar contra `fire_target_series`; `net_worth` sigue siendo el total del chart.
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
+    pub net_worth_liquid: Decimal,
 }
 
 /// Punto **interno** para los cálculos que recorren la serie mensual completa (milestones,
@@ -397,6 +403,15 @@ pub struct ProjectionSeriesResponse {
     /// `(1 + inflación%)^(meses/12)`, así que el objetivo nominal el mes de la jubilación es
     /// bastante mayor que esta cifra. `null` cuando no hay configuración FIRE válida.
     pub jubilacion_target_net_worth: Option<String>,
+    /// Término FINITO de deuda del objetivo A DÍA DE HOY (4.8.0, #142): Σ de cuotas que quedan
+    /// por pagar de todos los planes + saldos residuales, en euros nominales. El objetivo de
+    /// cada mes es `base·(1+π)^(k/12) + término(k)`, con el término decreciente (el objetivo ya
+    /// NO es monótono). `"0.0000"` = sin deuda; `null` = no hay objetivo. La vista previa del
+    /// formulario debe SUMARLO a su base recalculada — no puede derivarlo en cliente (necesita
+    /// el calendario completo de cada plan).
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub fire_target_debt_component: Option<Decimal>,
     /// **Posición** (índice de array, base 0) dentro de `points` / `fire_target_series` /
     /// `asset_series[].values` que corresponde al mes de jubilación. `null` ⟺ no hay cruce.
     ///
@@ -1041,14 +1056,17 @@ pub(crate) fn map_engine_err(e: EngineError) -> ApiError {
 /// Primer mes cuyo patrimonio cruza el target FIRE (inflado mes a mes). Se evalúa sobre TODOS
 /// los meses de la serie — nunca sobre puntos decimados — para no perder precisión. Compartido
 /// por `compute_projection_series_response` y `simulate_projection_core`.
+/// Primer mes cuyo patrimonio LÍQUIDO (#143) alcanza el objetivo. Escaneo LINEAL a propósito:
+/// con el término finito de deuda (#142) el objetivo ya NO es monótono, así que una búsqueda
+/// binaria o una salida temprana serían incorrectas en silencio.
 fn fire_crossover_month(
     ft: Option<&futurefin_engine::FireTarget>,
-    net_worth: &[Decimal],
+    liquid_worth: &[Decimal],
 ) -> Option<u32> {
     let ft = ft.filter(|f| f.base_amount > Decimal::ZERO)?;
-    for (i, nw) in net_worth.iter().enumerate() {
+    for (i, lw) in liquid_worth.iter().enumerate() {
         let target = fire_target_at_month_index(Some(ft), i as u32).unwrap_or(Decimal::ZERO);
-        if target > Decimal::ZERO && *nw >= target {
+        if target > Decimal::ZERO && *lw >= target {
             return Some(i as u32);
         }
     }
@@ -1222,17 +1240,13 @@ pub(crate) struct BuiltProjection {
     pub fire_target_absent_reason: Option<&'static str>,
     /// Servicio de deuda mensual de los pasivos **activos** (`payment_end_date` nula o ≥ hoy), con
     /// la cuota nominal normalizada a mensual. No entra en `expense_regular_monthly` (el engine
-    /// amortiza los pasivos aparte); lo consumen los caps `months_expense` de `assets.rs`. En modo
-    /// real (B/C con datos) es **0 por contrato**: la cuota ya vive dentro del promedio de gasto.
+    /// amortiza los pasivos aparte); lo consumen los caps `months_expense` de `assets.rs`. Desde
+    /// 4.8.0 (#142, opción 3) es un importe REAL en los tres modos: en B/C el gasto efectivo ya
+    /// restó la cuota declarada del promedio, así que cobrarla aquí la cuenta UNA vez.
     pub debt_service_monthly: Decimal,
-    /// Por qué `debt_service_monthly` **no es medible** en este ensamblado. `Some("included_in_real_expense")`
-    /// ⟺ la base de gasto salió del promedio real, así que la cuota ya está contada dentro y
-    /// volver a publicarla la duplicaría; `None` ⟺ el cero (o el importe) significa lo que dice.
-    ///
-    /// El gate es `expense_from_avg`, **no** `effective_savings_source.uses_transactions()`: el
-    /// fallback del promedio es POR LADO, así que un modo B con datos de ingreso y sin datos de
-    /// gasto publica `savings_source: "transactions_avg"` y sin embargo **sí** cobra la cuota
-    /// (los pasivos no se anulan). Cablear la razón al modo mentiría exactamente en ese caso.
+    /// Desde 4.8.0 siempre `None`: la cuota es medible en los tres modos (ver arriba). El campo
+    /// sobrevive porque las superficies que lo publican conservan su forma; el literal
+    /// `included_in_real_expense` se retiró con el contrato de 3.4.0 que lo justificaba.
     pub debt_service_absent_reason: Option<&'static str>,
 }
 
@@ -1346,25 +1360,26 @@ pub(crate) async fn build_installation_projection_input(
     let savings_income_basis = inputs.income_basis;
     let savings_expense_basis = inputs.expense_basis;
 
-    // Modo real (B/C con datos): la cuota ya está dentro del promedio de gasto, así que los
-    // pasivos NO tocan la caja de la simulación. Se anula `payment_amount` EN MEMORIA en un único
-    // punto y todo lo que cuelga de las filas hereda el contrato: `debt_service_monthly` queda a 0
-    // (caps `months_expense` sin cuota), y el input del engine lleva `monthly_payment = 0` — con lo
-    // que el engine ni cobra caja ni amortiza, y el principal queda como **resta constante** del
-    // net worth en todo el horizonte (decisión de producto 3.4.0: sin amortización proyectada; la
-    // realidad entra en cada recomputación vía promedio y principal actualizados).
+    // Modo real (B/C con datos), contrato 4.8.0 (#142, opción 3 firmada por el owner): la cuota
+    // SALE del promedio y el plan de pago queda VIVO. El promedio real contiene las cuotas
+    // pagadas; hasta 4.7.0 se anulaba el plan («resta constante»), lo que congelaba la deuda
+    // para siempre y capitalizaba la cuota a perpetuidad en el objetivo. Ahora:
+    //   gasto efectivo = promedio − Σ cuotas activas HOY  (estimación acotada: depende de que
+    //   el promedio contenga ≈ la cuota; el error estructural de las alternativas era mayor),
+    // y el motor cobra la cuota con su modelo, su devengo y su VENCIMIENTO — el paréntesis
+    // literal del owner: «restar la cuota del pasivo a los gastos llegado su vencimiento». La
+    // caja neta es idéntica a la de hoy mientras el plan vive (income − (avg−M) − M) y la cuota
+    // vuelve sola al ahorro cuando el plan muere. Conteo ÚNICO: la base del objetivo nunca
+    // lleva la cuota; la deuda entra solo por el término finito de `FireTarget`.
     if expense_from_avg {
-        for row in &mut liabs {
-            row.payment_amount = None;
-            // REDUNDANTE A PROPÓSITO. Sin cuota el engine ya no devenga (el predicado
-            // `liability_active` gatea también el interés desde 4.2.0), así que anular el TIN no
-            // cambia un solo número. Se anula igualmente para que el contrato del modo real quede
-            // enunciado **en un único punto**: en B/C el pasivo es una resta constante del
-            // patrimonio, sin caja, sin amortización y sin intereses. Si mañana alguien relaja el
-            // gate del devengo en el engine, esta línea impide que el modo real empiece a cobrar
-            // intereses en silencio.
-            row.apr_percent = None;
-        }
+        let active_quotas: Decimal = liabs
+            .iter()
+            .filter(|r| liability_is_active(r.payment_end_date, today))
+            .map(|r| liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()))
+            .filter(|p| *p > Decimal::ZERO)
+            .sum();
+        // Suelo cero: si el promedio no llegaba a las cuotas, restar de más inventaría ahorro.
+        inputs.expense = (inputs.expense - active_quotas).max(Decimal::ZERO);
     }
 
     // Servicio de deuda mensual de los pasivos activos (mismo filtro `payment_end_date` que las
@@ -1377,12 +1392,10 @@ pub(crate) async fn build_installation_projection_input(
         .map(|r| liability_monthly_payment(r.payment_amount, r.payment_frequency.as_deref()))
         .filter(|p| *p > Decimal::ZERO)
         .sum();
-    // Un `0` numérico no puede significar «no aplica»: con la base de gasto salida del promedio
-    // real, la cuota ya es un movimiento dentro de ese promedio y publicarla aparte la contaría dos
-    // veces — así que el 0 no mide un hogar sin deuda, mide que la cifra no existe en este modo.
-    // Se deriva del MISMO `expense_from_avg` que anuló `payment_amount` unas líneas más arriba: una
-    // sola condición gobierna el hecho y su explicación.
-    let debt_service_absent_reason = expense_from_avg.then_some("included_in_real_expense");
+    // Desde 4.8.0 (#142, opción 3) la cuota es servicio de deuda REAL en los tres modos: en B/C
+    // el gasto efectivo ya la ha restado del promedio, así que publicarla aparte es contarla UNA
+    // vez, no dos. El literal `included_in_real_expense` se retira con su modo.
+    let debt_service_absent_reason: Option<&'static str> = None;
 
     let monthly_net_regular = inputs.income - inputs.expense;
 
@@ -1403,9 +1416,12 @@ pub(crate) async fn build_installation_projection_input(
     // `None` cuando no hay `fire_settings` (no hay configuración FIRE que explicar), `Some(razón)`
     // cuando la hay y aun así no sale target.
     let fire_target_absent_reason = fire_target_outcome.and_then(|r| r.err());
-    let fire_target = fire_target_base.map(|base_amount| FireTarget {
+    let mut fire_target = fire_target_base.map(|base_amount| FireTarget {
         base_amount,
         annual_inflation_percent: inflation_annual_percent.max(Decimal::ZERO),
+        // El término finito de deuda (#142) se rellena MÁS ABAJO, cuando los pasivos del engine
+        // ya están construidos — necesita sus calendarios completos.
+        debt_payments_remaining: Vec::new(),
     });
 
     let assets_scope = view.scope_where("");
@@ -1547,6 +1563,14 @@ pub(crate) async fn build_installation_projection_input(
             }
         })
         .collect();
+
+    // #142: el objetivo debe cubrir, además de la perpetuidad del gasto, cada euro de cuota que
+    // quede por pagar (la base del cruce son los LÍQUIDOS BRUTOS de #143, que no restan ningún
+    // principal). Serie por sufijos sobre el calendario COMPLETO — no depende del horizonte.
+    if let Some(ft) = fire_target.as_mut() {
+        ft.debt_payments_remaining =
+            futurefin_engine::debt_payments_remaining_series(&liabilities, today);
+    }
 
     let input = ProjectionInput {
         ref_date: today,
@@ -1988,6 +2012,11 @@ pub async fn compute_projection_series_response(
                 month_index: i,
                 net_worth: *nw,
                 contributed_capital: *cc,
+                net_worth_liquid: output
+                    .liquid_worth
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(Decimal::ZERO),
                 // Deflactado por el `month_index` del punto, JAMÁS por su posición en el array:
                 // con `density=hybrid` los puntos no son equidistantes y la versión ingenua
                 // deflacta 70 años como si fueran 30 — el bug del chart de la v1.4.2, que aquí
@@ -2058,6 +2087,16 @@ pub async fn compute_projection_series_response(
     };
 
     let fire_target_ref = projection_input.fire_target.as_ref();
+    // #142: el término de hoy (mes 0) para la vista previa del formulario.
+    let fire_target_debt_component = fire_target_ref
+        .filter(|ft| ft.base_amount > Decimal::ZERO)
+        .map(|ft| {
+            ft.debt_payments_remaining
+                .first()
+                .copied()
+                .unwrap_or(Decimal::ZERO)
+        })
+        .map(crate::money::money_out);
     let (
         fire_target_series,
         jubilacion_month_index,
@@ -2065,7 +2104,7 @@ pub async fn compute_projection_series_response(
         jubilacion_target_net_worth_nominal,
     ) = match fire_target_ref {
         Some(ft) if ft.base_amount > Decimal::ZERO => {
-            let crossed_at = fire_crossover_month(Some(ft), &output.net_worth);
+            let crossed_at = fire_crossover_month(Some(ft), &output.liquid_worth);
             // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
             // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
             // auditoría MCP §8), así que el paralelismo tiene que ser estructural. Antes `points`
@@ -2143,6 +2182,7 @@ pub async fn compute_projection_series_response(
         jubilacion_date_ymd,
         jubilacion_age,
         jubilacion_target_net_worth,
+        fire_target_debt_component,
         jubilacion_series_position,
         jubilacion_target_net_worth_nominal,
         fire_target_series,
@@ -2271,29 +2311,30 @@ pub(crate) struct SimKpis {
     /// por `debt_service_monthly`.
     #[serde(with = "rust_decimal::serde::str")]
     pub expense_total_monthly: Decimal,
-    /// Cuota mensual de los pasivos activos. **`null` cuando la cifra no aplica**: con la base de
-    /// gasto salida del promedio real (modos B/C con datos de gasto), la cuota ya es un movimiento
-    /// dentro de ese promedio y publicarla aparte la contaría dos veces. Hasta 4.3.1 ese caso
-    /// viajaba como `"0"`, y un `0` numérico no puede significar «no aplica»: un cliente leía «no
-    /// pagas servicio de deuda» de un usuario con un préstamo vivo. `debt_service_absent_reason`
-    /// dice por qué falta.
+    /// Cuota mensual de los pasivos activos. Desde 4.8.0 (#142, opción 3 del owner) **viaja como
+    /// número en los TRES modos**: en B/C la cuota declarada se RESTA del promedio real antes de
+    /// alimentar el motor, así que la deuda vuelve a cobrarse por aquí y publicarla ya no es
+    /// contarla dos veces. (Hasta 4.7.x en B/C era `null` con razón `included_in_real_expense` —
+    /// aquel contrato de 3.4.0 murió con la anulación de la amortización que lo justificaba.)
+    /// Un `0` significa «no hay pasivos con cuota activa».
     #[serde(with = "rust_decimal::serde::str_option")]
     pub debt_service_monthly: Option<Decimal>,
-    /// `included_in_real_expense` ⟺ `debt_service_monthly` es `null`. `null` ⟺ la cuota viaja (y
-    /// entonces un `0` sí significa «no hay pasivos con cuota activa»).
+    /// Desde 4.8.0 siempre `null` (la cuota viaja en los tres modos — ver arriba). El campo se
+    /// conserva por compatibilidad de forma; retirarlo es un breaking §5 aparte.
     pub debt_service_absent_reason: Option<&'static str>,
-    /// `income_monthly − expense_total_monthly`: el neto **recurrente** del lado.
+    /// El neto **recurrente** del lado — desde 4.8.0 (#127), el `recurring_net` del PRIMER PASO
+    /// real del motor (`first_month_allocation`): ingreso − gasto − servicio de deuda REALMENTE
+    /// pagado el mes 1 (`min(cuota, payoff)` + extra + comisión). En el caso común (principal
+    /// holgado, sin extras) coincide con `income_monthly − expense_total_monthly` y la resta
+    /// sigue siendo comprobable a mano; diverge a propósito cuando la cuota nominal ya no es lo
+    /// que se paga (último mes de un plan, payoff parcial) — antes esas dos superficies
+    /// publicaban dos «cajas del mes» distintas para la misma pregunta.
     ///
     /// Se llamaba `net_monthly` y era la trampa más cara de esta tool. `extra_monthly_savings` y
     /// `extra_monthly_cash_adjustment` no tocan el ingreso ni el gasto: entran como ajuste de caja
-    /// mensual (el mismo mecanismo que un Próximo), así que este número salía **idéntico en
-    /// baseline y escenario** y su delta era exactamente 0 — en el campo por el que el usuario
-    /// acababa de preguntar, dentro de un objeto llamado `scenario`. Estaba documentado como
-    /// contrato, y aun así el nombre prometía otra cosa.
-    ///
-    /// La identidad `income_monthly − expense_total_monthly` se conserva a propósito: quien lea la
-    /// respuesta puede comprobarla con una resta. Lo que se movió es el NOMBRE, y lo que faltaba
-    /// es `net_cash_monthly` — ahí abajo — que sí recoge el ajuste.
+    /// mensual (el mismo mecanismo que un Próximo), así que este número sale **idéntico en
+    /// baseline y escenario** y su delta es exactamente 0 — está dicho en el nombre (neto
+    /// RECURRENTE) y el que se mueve es `net_cash_monthly`, ahí abajo.
     #[serde(with = "rust_decimal::serde::str")]
     pub net_recurring_monthly: Decimal,
     /// Ajuste de caja mensual **constante** que los overrides de este lado aplican a TODOS los
@@ -2303,17 +2344,18 @@ pub(crate) struct SimKpis {
     /// no son constantes y ya viven dentro de la simulación.
     #[serde(with = "rust_decimal::serde::str")]
     pub monthly_cash_adjustment: Decimal,
-    /// `net_recurring_monthly + monthly_cash_adjustment − liability_extra_principal_monthly −
-    /// liability_early_repayment_fee_monthly`: la
-    /// caja mensual estable que este lado mete de verdad en la cascada. **Es el campo que se
-    /// mueve** cuando simulas ahorrar 200 € más al mes — o cuando amortizas deuda por encima de la
-    /// cuota, que también deja de estar disponible para aportar.
+    /// La caja que la cascada reparte DE VERDAD el mes 1 — desde 4.8.0 (#127), el `base_cash`
+    /// del motor (`first_month_allocation`): `net_recurring_monthly + planning_component`, donde
+    /// el componente de planning lleva los Próximos del mes 1 Y el ajuste constante de los
+    /// overrides; el extra de amortización y su comisión ya viven dentro del servicio de deuda
+    /// real. **Es el campo que se mueve** cuando simulas ahorrar 200 € más al mes — o cuando
+    /// amortizas deuda por encima de la cuota, que también deja de estar disponible para aportar.
+    /// (Hasta 4.7.x se recalculaba aparte, sin Próximos y con la cuota nominal: 300 € de brecha
+    /// con la resolución de la cascada en el escenario del issue #127.)
     ///
-    /// Sigue sin ser el `net_cash_month` del motor mes a mes, que suma además el tramo de Próximos
-    /// del mes en curso y el one-off donde caiga. Y el término de amortización extra **no dura
-    /// todo el horizonte**: se acaba con la deuda, y desde ese mes la cuota liberada vuelve
-    /// también a la cascada. Así que esta cifra describe los meses CON deuda viva, que es cuando
-    /// el override aprieta.
+    /// Describe el MES 1, no todo el horizonte: el one-off cae en su mes, y el término de
+    /// amortización extra se acaba con la deuda — desde ese mes la cuota liberada vuelve también
+    /// a la cascada.
     #[serde(with = "rust_decimal::serde::str")]
     pub net_cash_monthly: Decimal,
     /// Suma de las amortizaciones extra MENSUALES de `liability_overrides` en este lado.
@@ -2524,7 +2566,7 @@ fn sim_kpis(
     monthly_cash_adjustment: Decimal,
 ) -> SimKpis {
     let debt_service_monthly = built.debt_service_monthly;
-    let jubilacion_month_index = fire_crossover_month(input.fire_target.as_ref(), &output.net_worth);
+    let jubilacion_month_index = fire_crossover_month(input.fire_target.as_ref(), &output.liquid_worth);
     let (jubilacion_date_ymd, jubilacion_age) =
         jubilacion_civil(today, birth_date, jubilacion_month_index);
     let final_net_worth = output.net_worth.last().copied().unwrap_or(Decimal::ZERO);
@@ -2537,7 +2579,8 @@ fn sim_kpis(
         final_net_worth * deflator_at_month_index(inflation_annual_percent, final_month_index);
 
     // Runway: misma fórmula que `/v1/summary` (gasto total = regular + servicio de deuda;
-    // infinito ⟺ SWR sobre el gasto anual grosseado), evaluada sobre los inputs del lado.
+    // infinito ⟺ SWR sobre el gasto anual grosseado Y rentabilidad esperada ponderada > 0,
+    // drenaje secuencial en el caso finito — #128), evaluada sobre los inputs del lado.
     let liquid_rows: Vec<(Decimal, Option<Decimal>)> = input
         .assets
         .iter()
@@ -2563,7 +2606,18 @@ fn sim_kpis(
     };
 
     let income_monthly = input.income_regular_monthly;
-    let net_recurring_monthly = income_monthly - monthly_expense;
+    // #127 (4.8.0): las dos cifras de «caja del mes» convergen al PRIMER PASO real del motor
+    // (`first_month_allocation`): el servicio de deuda es el que se paga de verdad
+    // (min(cuota, payoff) + extra + comisión, no la cuota nominal) y la caja del mes incluye el
+    // tramo de Próximos del mes 1 — antes sim_kpis recalculaba con la cuota nominal y sin
+    // planning flows, y las dos superficies publicaban dos números distintos para la misma
+    // pregunta (300 € de brecha en el escenario del issue). Fallback a la fórmula nominal solo
+    // si el primer paso fallara (misma validación que la serie, que ya pasó — no debería).
+    let fma = futurefin_engine::first_month_allocation(input).ok();
+    let net_recurring_monthly = fma
+        .as_ref()
+        .map(|f| f.recurring_net)
+        .unwrap_or(income_monthly - monthly_expense);
     let savings_rate = (income_monthly > Decimal::ZERO)
         .then(|| (net_recurring_monthly / income_monthly).round_dp(SIM_RATIO_DP));
 
@@ -2636,10 +2690,16 @@ fn sim_kpis(
         debt_service_absent_reason: built.debt_service_absent_reason,
         net_recurring_monthly: money_out(net_recurring_monthly),
         monthly_cash_adjustment: money_out(monthly_cash_adjustment),
+        // #127: la caja que la cascada reparte DE VERDAD el mes 1 (base_cash del motor). La
+        // identidad comprobable pasa a ser `net_cash = recurring_net + planning_component`
+        // (flows del mes + ajuste del override − retirada), con el extra y la comisión ya
+        // dentro del servicio de deuda real.
         net_cash_monthly: money_out(
-            net_recurring_monthly + monthly_cash_adjustment
-                - liability_extra_principal_monthly
-                - liability_early_repayment_fee_monthly,
+            fma.as_ref().map(|f| f.base_cash).unwrap_or(
+                net_recurring_monthly + monthly_cash_adjustment
+                    - liability_extra_principal_monthly
+                    - liability_early_repayment_fee_monthly,
+            ),
         ),
         liability_extra_principal_monthly: money_out(liability_extra_principal_monthly),
         liability_early_repayment_fee_monthly: money_out(liability_early_repayment_fee_monthly),
@@ -3073,6 +3133,18 @@ pub(crate) async fn simulate_projection_core(
             )));
         };
         scenario_input.assets[idx].expected_annual_return_percent = Some(*pct);
+    }
+
+    // #142: los overrides de pasivos (amortización extra, TIN, modelo, comisión) CAMBIAN el
+    // interés/cuotas restantes y por tanto el objetivo del escenario. El término se recomputa
+    // aquí, DESPUÉS de aplicar los overrides — construirlo solo en el build dejaría el objetivo
+    // del escenario calculado con el calendario sin override (bug de ensamblado, no de
+    // matemática; el spike de la ola lo señaló explícitamente).
+    if let Some(ft) = scenario_input.fire_target.as_mut() {
+        ft.debt_payments_remaining = futurefin_engine::debt_payments_remaining_series(
+            &scenario_input.liabilities,
+            scenario_input.ref_date,
+        );
     }
 
     // ---- Doble simulación en el pool blocking (CPU-bound; patrón del marker) -----------------

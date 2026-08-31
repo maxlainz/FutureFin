@@ -14,7 +14,9 @@ Only `Decimal` arithmetic. Four modules:
   [Rendimiento neto](#rendimiento-neto-net_returnrs) below). Consumed by `GET /v1/summary`.
 - `runway.rs` — liquidity runway with compounded return + inflation (v2.2.0; **SWR threshold for the
   infinite case** since v2.3.0 — `Indefinite` ⟺ the grossed-up annual withdrawal fits inside
-  `swr_pct` × liquid balance; see [Runway](#runway-runwayrs) below). Consumed by `GET /v1/summary`.
+  `swr_pct` × liquid balance **AND the portfolio's weighted expected return is > 0** (4.8.0, #128);
+  the finite case drains sequentially, lowest-return first, like the simulation; see
+  [Runway](#runway-runwayrs) below). Consumed by `GET /v1/summary`.
 
 ## Public API
 
@@ -50,6 +52,10 @@ pub fn first_month_allocation(input: &ProjectionInput) -> Result<FirstMonthAlloc
 // la simulación reduce ese mismo mes— y explicaban regla a regla una cascada que no se ejecuta
 // jamás. Sostenido en todo el horizonte, y no es un caso raro: es el estado final del público al
 // que sirve la app.
+// 4.8.0 (#127): con CERO activos ya NO hay atajo a ceros — la caja del mes 1 (ingreso − gasto −
+// deuda) se calcula igual, porque `net_recurring_monthly`/`net_cash_monthly` de la proyección la
+// leen de aquí; solo `per_asset` y la traza quedan vacías. El cruce del mes 1 usa la riqueza
+// LÍQUIDA (#143), igual que el bucle.
 
 // Per-rule trace. `amount_intent` vs `amount_resolved` separates "trimmed by a cap" (not a skip,
 // and the most-asked question) from "skipped". Skip reasons are deliberately NOT collapsed —
@@ -71,12 +77,27 @@ pub struct RuleOutcome {
 // handler (para construir `fire_target_series`). Antes había una fórmula duplicada — el motor
 // usaba `years = (k-1)/12` y el handler `years = month_index/12`, lo que generaba un off-by-one
 // de un mes entre cuándo se disparaba la jubilación y la serie pintada en el chart.
+// 4.8.0 (#142): suma el término finito de deuda (`ft.debt_payments_remaining`, ver FireTarget) —
+// con él, el objetivo DEJA DE SER MONÓTONO: solo vale el escaneo lineal del cruce.
 pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal>
 
-// Liquidity runway (v2.2.0): months the liquid assets cover the monthly expense, compounding the
-// assets' expected return and inflating the expense. See the Runway section below.
+// 4.8.0 (#142): la serie del término de deuda — para cada mes m, Σ de los pagos que quedan
+// ESTRICTAMENTE después de m (cuota efectiva + extra + comisión, calendario real de cada pasivo,
+// cap 840 meses) + la cola residual (principal vivo al final del plan, constante). El handler la
+// pega en `FireTarget.debt_payments_remaining` DESPUÉS de construir las liabilities del engine —
+// y simulate la RECONSTRUYE tras aplicar los overrides (un extra que acorta el plan cambia el
+// término; olvidarlo dejaría el objetivo del escenario con la deuda del baseline).
+pub fn debt_payments_remaining_series(
+    liabilities: &[ProjectionLiabilityInput],
+    ref_date: NaiveDate,
+) -> Vec<Decimal>
+
+// Liquidity runway (v2.2.0): months the liquid assets cover the monthly expense, draining them
+// sequentially (lowest expected return first, like the simulation's drain — 4.8.0, #128),
+// compounding each remaining balance and inflating the expense. See the Runway section below.
 // NOT an infinity sentinel (v2.3.0): the finite loop's cap. Surviving it returns `Months(1200)`,
-// a FLOOR ("at least 100 years"); only the SWR threshold yields `Indefinite`.
+// a FLOOR ("at least 100 years"); only the SWR threshold + the positive-return gate (#128)
+// yield `Indefinite`.
 pub const MAX_RUNWAY_MONTHS: u32 = 1200;
 pub enum RunwayOutcome { Months(Decimal), Indefinite, NoExpenseBase }
 pub fn liquid_runway_months(
@@ -164,6 +185,15 @@ pub struct ProjectionInput {
 pub struct FireTarget {
     pub base_amount: Decimal,             // FIRE en euros de hoy (gross-up de impuestos aplicado)
     pub annual_inflation_percent: Decimal, // 0 = target plano; > 0 = target móvil
+    // 4.8.0 (#142): término FINITO de deuda — `debt_payments_remaining[m]` = Σ de los pagos de
+    // cuota que quedan DESPUÉS del mes m (cuota + extra + comisión) + cola residual (principal
+    // que el plan no llega a amortizar). Índice fuera de rango → last() (la cola es constante).
+    // Lo construye el handler con `debt_payments_remaining_series`; vacío ⇒ término 0.
+    // Emparejado con la base de cruce LÍQUIDA (#143): el objetivo exige cubrir la perpetuidad
+    // (base) MÁS todos los euros de cuota pendientes, y a cambio el cruce compara contra la
+    // riqueza líquida BRUTA (sin restar principal). Algebraicamente equivalente al par
+    // «NW neto vs base + interés restante», pero medible con activos vendibles.
+    pub debt_payments_remaining: Vec<Decimal>,
 }
 ```
 
@@ -371,8 +401,9 @@ en `E` en los meses con sobrante, porque la cascada reparte menos.
 ## Inflación y target FIRE móvil
 - Ingresos, gastos y aportaciones se mantienen **constantes en euros nominales** a lo largo de la simulación (filosofía «haciendo lo que hago ahora, ¿qué tal voy?»). No se inflan.
 - El rendimiento de activos (`expected_annual_return_percent`) es **nominal**, sin deflactar.
-- El **target FIRE crece con la inflación cada mes**: `target(k) = base_amount × (1 + annual_inflation_percent/100)^((k-1)/12)`. Esto preserva el poder adquisitivo del usuario en el momento de jubilarse.
-- `annual_inflation_percent = 0` degenera a un target plano (equivalente a tratar el FIRE como un escalar de euros de hoy).
+- El **target FIRE crece con la inflación cada mes**: `target(k) = base_amount × (1 + annual_inflation_percent/100)^((k-1)/12) + debt_term(k)`, donde `debt_term(k)` es el término finito de deuda de #142 (ver `FireTarget.debt_payments_remaining`; 0 sin pasivos). La base preserva el poder adquisitivo del usuario en el momento de jubilarse; el término **no se infla** (las cuotas son nominales por contrato).
+- `annual_inflation_percent = 0` degenera a una base plana — pero con deuda viva el objetivo completo es **estrictamente decreciente** (el término cae con cada cuota pagada).
+- **El objetivo YA NO ES MONÓTONO** (4.8.0): base creciente + término decreciente. Ninguna optimización puede asumir monotonía (búsqueda binaria del cruce, salida temprana); el cruce se decide por escaneo lineal.
 
 ## SimAsset fields
 - `expected_annual_return_percent`: **nominal** compound growth rate (7 = 7%/year). None = no compound growth.
@@ -412,7 +443,7 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
    and the principal drops after it. In a household whose marginal asset grows at `g`, that month
    ends `E·g` lower (opportunity cost). The engine tests that pin the neutrality use a
    zero-return asset on purpose, to isolate the axis.
-2. Determine `in_retirement = fire_reached || k >= retirement_start_month`. `fire_reached` compara `nw_prev` contra el target FIRE del mes `k`, que es `base × (1 + inflation/100)^((k-1)/12)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares.
+2. Determine `in_retirement` via the **absorbing latch** (4.8.0, #141): `retired = retired || fire_reached || k >= retirement_start_month` — una vez jubilado, SIEMPRE jubilado, aunque el patrimonio caiga después por debajo del objetivo (antes el estado parpadeaba mes a mes con gastos crecientes e ingresos planos, alternando ingreso regular y de jubilación). `fire_reached` compara **`liquid_prev`** — la riqueza LÍQUIDA del mes anterior: Σ de los activos `is_liquid` + `surplus_cash`, BRUTA, sin restar principal (#143; emparejada con el término de deuda del target, ver `FireTarget`) — contra el target FIRE del mes `k`: `base × (1 + inflation/100)^((k-1)/12) + debt_term(k)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares.
 3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
 5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
@@ -429,6 +460,7 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 ```rust
 pub struct ProjectionOutput {
     pub net_worth: Vec<Decimal>,         // nominal, euros del momento, index 0..=horizon_months
+    pub liquid_worth: Vec<Decimal>,      // 4.8.0 (#143): Σ activos is_liquid + surplus_cash (BRUTA) — la base del cruce
     pub contributed_capital: Vec<Decimal>, // cumulative cost basis (nominal)
     pub per_asset_series: Vec<Vec<Decimal>>, // value per asset per month (nominal)
     pub assets_depleted_month_index: Option<u32>, // 4.6.0 (#119): primer mes con déficit ≥ TODO lo drenable
@@ -540,8 +572,8 @@ to any input order), sub-ms at this scale, no `f64`.
 Pure module (v2.2.0) that answers "how many months do the **liquid** assets cover the monthly
 expense?" while compounding the assets' expected return and inflating the expense. Sole consumer:
 `GET /v1/summary` → `financial_health.runway_months` / `runway_is_indefinite`
-(`apps/api/src/handlers/summary.rs`). Public API in the block above; 13 unit tests in-module
-(as of 2026-08-15, v2.3.0).
+(`apps/api/src/handlers/summary.rs`). Public API in the block above; **16** unit tests in-module
+as of 4.8.0 (recount: `grep -c '#\[test\]' crates/engine/src/runway.rs`).
 
 | Input | Meaning |
 |---|---|
@@ -559,10 +591,16 @@ Model (each rule exists for a reason — do not "simplify" one away):
 - **Withdraw-then-grow order**: each month pays the expense first and grows what is left — the same
   order as the simulation loop in `projection.rs` (negative cash flow drains before the multipliers
   apply), so both curves stay coherent.
-- **Value-weighted multiplier**: `m = Σ vₐ·monthly_multiplier(rₐ) / Σ vₐ`, i.e. a **prorated drain**
-  (every asset funds the expense in proportion to its weight). Slightly **conservative** versus the
-  engine's real drain, which empties the lowest-return liquids first and therefore keeps the
-  high-return ones longer. Deliberate: the KPI must not promise more than the simulation.
+- **Sequential drain (4.8.0, #128)**: each month the expense is funded by emptying the assets in
+  the SAME order as `drain_from_assets` in the real simulation — lowest expected return first
+  (`None` counts as 0, ties by index) — and then each remaining balance grows by ITS own
+  multiplier. Until 4.7.x a value-weighted single multiplier (prorated drain) was used,
+  systematically **shorter**: prorating consumes the high-return assets from month 1, while the
+  real drain lets them compound untouched. Single-asset portfolios are bit-identical under both
+  models. Measured: 10.000 € at 0 % + 10.000 € at 10 % vs 1.000 €/month → 21,27 months (weighted
+  gave 20,80); 150.000 € at 0 % + 50.000 € at 10 % vs 2.000 €/month → 130,96 (weighted gave
+  111,39). A negative individual value never "funds" the expense (its take clamps to ≥ 0) — it
+  only subtracts from the total, exactly as it did under the pooled model.
 - **Negative rates compound**: inherited from `monthly_multiplier` (shared with the simulation via
   `pub(crate)`, so the runway uses *exactly* the engine's annual→monthly conversion). A negative
   expected return (−100 < r < 0) now decays the balance for real and **shortens** the runway;
@@ -577,19 +615,24 @@ Model (each rule exists for a reason — do not "simplify" one away):
 - **Check order (contract)**: `NoExpenseBase` (expense ≤ 0) → `Months(0)` (balance ≤ 0) → SWR
   threshold → finite loop. `NoExpenseBase` must come **first**: with expense 0 the inequality
   `0 ≤ A·swr` is trivially true and would report an undefined runway as infinite.
-- **The trigger is deliberately independent of return and inflation**: it looks only at `A`, the
-  grossed expense and the SWR — the definition of SWR already assumes a portfolio whose real return
-  sustains that withdrawal long-term. Return and inflation still govern the **finite** case (the loop
-  below). Accepted consequence: a balance below the threshold with a huge return is no longer
-  "infinite", and one exactly at the threshold with 0 % return is.
+- **Positive-return gate (4.8.0, #128)**: the SWR threshold alone no longer declares `Indefinite` —
+  the liquid portfolio's value-weighted expected return must also be **strictly positive**
+  (`Σ vₐ·rₐ > 0`, `None` = 0; compared without dividing, equivalent to the weighted mean since
+  `A > 0` is guaranteed upstream). The Trinity/Bengen rule was validated for invested portfolios
+  with positive expected real return — never for cash parked at 0 %: 300.000 € at 0 % vs
+  875 €/month meets the threshold by exact equality yet runs dry in 342,86 months, and that is now
+  what gets published. A balance below the threshold with a huge return is still not "infinite"
+  (the threshold still gates), and inflation still only governs the **finite** loop — the SWR
+  definition already carries it inside the portfolio's real return.
 - **100-year cap is a floor, not a sentinel**: surviving `MAX_RUNWAY_MONTHS` (1.200) months without
   meeting the SWR threshold returns `Months(1200)` — read as "at least 100 years", not an exact
   measure and **not** `Indefinite` (the UI renders it «+100 años»). Still no epsilon and no closed
   form: `ln`-based closed forms suffer cancellation exactly at the `A·j → g` boundary; the monthly
   loop avoids it and costs microseconds.
-- **Exact reduction to `A / g`** (when the SWR threshold is *not* met, i.e. the finite branch): with
-  return and inflation 0, `m = m_inf = 1` and the final fractional month reconstructs `A/g` with a
-  single division — bit-exact **inside the engine**, which is where the property lives.
+- **Exact reduction to `A / g`** (the finite branch): with return and inflation 0 every multiplier
+  is 1 and the sequential drain removes exactly `g` from the total each month, so the final
+  fractional month reconstructs `A/g` with a single division — bit-exact **inside the engine**,
+  which is where the property lives.
   Since 3.8.0 the HTTP surface publishes `runway_months` rounded to **1 decimal**
   (`handlers/summary.rs`, aligned with `sim_kpis` in `handlers/projection.rs`, which already did),
   so the baseline tests assert `(A/g).round_dp(1)`: still no tolerance, just the published
@@ -603,11 +646,14 @@ Model (each rule exists for a reason — do not "simplify" one away):
 
 Worked values (engine-verified). Finite branch, 12.000 € liquid vs 1.200 €/month, SWR 3,5 % (all four
 below the threshold, unchanged since v2.2.0): return 0 % / inflation 0 % → 10; 5 % / 0 % → 10,19;
-0 % / 3 % → 9,89; 5 % / 3 % → 10,07 months. Threshold branch (v2.3.0): 240.000 € vs 700 €/month at
-SWR 3,5 % with taxes off → `Indefinite` on the **exact** boundary (840.000 = 840.000); 1.000.000 € at
-7 % vs 4.000 €/month at SWR 3,5 % → `Months(1200)` floor, since 48.000 > 35.000 (it was `Indefinite`
-in v2.2.0, when the cap decided infinity); with the default ES brackets `gross_up(8.400) ≈ 10.481 €`,
-raising the threshold to ≈ 299.457 € of liquid balance.
+0 % / 3 % → 9,89; 5 % / 3 % → 10,07 months. Threshold + gate (4.8.0, #128): 240.000 € **without
+return** vs 700 €/month at SWR 3,5 % with taxes off meets the boundary exactly (840.000 = 840.000)
+but fails the gate → finite, `A/g = 342,857…` (published 342,9; it was `Indefinite` until 4.7.x);
+the same balance at 2 % passes the gate → `Indefinite` on the exact boundary. 1.000.000 € at 7 % vs
+4.000 €/month at SWR 3,5 % → `Months(1200)` floor, since 48.000 > 35.000; with the default ES
+brackets `gross_up(8.400) ≈ 10.481 €`, raising the threshold to ≈ 299.457 € of liquid balance
+(pinned at the API level with 270.000 € at 2 %: taxes on → finite ≈ 612,38 months; taxes off →
+`Indefinite`).
 
 ## Rendimiento neto (`net_return.rs`)
 

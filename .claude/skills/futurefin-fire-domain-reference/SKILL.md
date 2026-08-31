@@ -113,30 +113,41 @@ need and the simulation's monthly net. The gross-up, SWR, moving-target and drai
 - **Window & average**: weighted mean over `[first-of-month(today) − 12 months, first-of-month(today))`
   — the 12 **complete** calendar months before the current one (the running month is excluded).
   Denominator = `months_with_data`, but counting **only real months** — a month in the window with ≥1
-  transaction `recurring_rule_id IS NULL` (any kind, same scope). A pseudo-empty month (only recurring
-  instances, e.g. after backfilling recurring rules) is excluded **entirely** — neither numerator nor
-  denominator; a real month counts **whole**, including its recurring transactions. Since auditoría MCP the Movimientos
-  comparison (`GET /v1/transactions/summary`) applies the **same real-month predicate** — the
-  divergence documented here was closed (auditoría MCP: a recurring-only month sank every category's
-  average). They are still not identical: `transactions_avg` has per-side configurable windows
-  (`AvgWindowSpec`, `data`/`calendar` modes) while the summary is always calendar-windowed, and the
-  summary publishes its denominator as `avg_months` alongside the unchanged `months_with_data`. Worked example (test
-  `pseudo_empty_month_excluded_from_avg`): real month M−2 with manual income 2000 + recurring-only month
-  M−1 with recurring salary 3000 → `months_with_data = 1`, `income_avg = 2000` (before the fix: months=2,
-  avg=2500). Helper `transactions_avg` (`handlers/transactions/summary.rs`); the real-month
-  predicate is the inline `COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL) AS real_txns` of its
+  transaction `recurring_rule_id IS NULL` **with a classified `kind`** (4.8.0, #125: a month whose
+  only content is unclassified imports added 0 € to the numerator and 1 to the denominator — six
+  such months halved the reported average and with it the mode-B FIRE target). A pseudo-empty month
+  (only recurring instances, e.g. after backfilling recurring rules) is excluded **entirely** —
+  neither numerator nor denominator; a real month counts **whole**, including its recurring
+  transactions. Since auditoría MCP the Movimientos comparison (`GET /v1/transactions/summary`)
+  applies the **same real-month predicate**, and since 4.8.0 (#125) also the **same window anchor**
+  (today): the app's two "N-month averages" finally describe the same tranche (until 4.7.x the
+  summary anchored on the selected month, one month off under the same label). They are still not
+  identical: `transactions_avg` has per-side configurable windows (`AvgWindowSpec`,
+  `data`/`calendar` modes) while the summary is always calendar-windowed, and the summary publishes
+  its denominator as `avg_months` alongside the unchanged `months_with_data`. Amounts average in
+  **nominal euros of their date** — no CPI adjustment (declared in the help text; #125's third leg,
+  accepted as declared-only debt). Worked example (test `pseudo_empty_month_excluded_from_avg`):
+  real month M−2 with manual income 2000 + recurring-only month M−1 with recurring salary 3000 →
+  `months_with_data = 1`, `income_avg = 2000` (before the fix: months=2, avg=2500). Helper
+  `transactions_avg` (`handlers/transactions/summary.rs`); the real-month predicate is the inline
+  `COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL AND t.kind IS NOT NULL) AS real_txns` of its
   single query (there is no `real_months` CTE), mirrored by `transactions_summary_core`.
-- **Liabilities in real modes (reform 3.4.0 — the hybrid subtraction is GONE)**: the expense
-  average is used **raw** — paid cuotas already live inside the imported movements (amortization
-  included), so nothing is subtracted and no debt service is re-charged. Liabilities do NOT touch
-  the simulation's cash in B/C: the handler zeroes `monthly_payment` in memory before building the
-  engine input, so each active liability's `principal` is a **constant subtraction** from net worth
-  across the whole horizon (no amortization, no step at `payment_end_date`). Accepted product
-  trade-off (owner, 2026-08-18): the projection is conservative — the cuota keeps weighing on the
-  average past the loan's end and the amortized equity never surfaces — in exchange for a simple
-  model with no dependency on the invisible `linked_liability_id` (now pure metadata). Reality
-  flows in through each recomputation (updated average + updated principal). Pinned by
-  `mode_b_liability_static_nw_subtraction` and `mode_b_no_step_up_at_liability_end`.
+- **Liabilities in real modes (4.8.0, #142 — the 3.4.0 annulment is REVERTED; owner's option 3)**:
+  the engine's expense in B/C is `max(0, expense_avg − Σ cuotas declaradas activas)` — the declared
+  monthly-equivalent quotas of live-plan liabilities are **subtracted from the raw average**, and
+  the liabilities keep their real `monthly_payment` in the engine input: **debt amortizes in all
+  three modes**, with the step at `payment_end_date`, one accounting rule everywhere. Rationale:
+  the paid cuota lives inside the measured average, so charging the engine's debt service on top
+  double-counted it (that was 3.4.0's motive for zeroing payments); subtracting the declared quota
+  removes the duplicate WITHOUT freezing the debt. The residual difference between the real paid
+  cuota inside the average and the declared quota subtracted stays in the expense base (honest:
+  it is spending the declaration does not cover). The summary panel (`/v1/summary`) still shows
+  the **raw** average — the subtraction is an engine-input concern, not a display one. The 3.4.0
+  trade-off prose ("the projection is conservative… no step at the loan's end") no longer holds:
+  `mode_b_no_step_up_at_liability_end` was INVERTED (the curve now steps up when the plan ends,
+  by more than 300 k€ in its scenario), `mode_b_raw_avg_ignores_liability_links` re-pinned
+  (delta 4.000 → 4.800 = 6.000 − (2.000 − 800)), and `mode_b_liability_static_nw_subtraction`
+  survives only via the 0 %-loan identity plus the clamp.
 - **Target**: `annual_expense` uses the raw `expense_avg` as the base (mode A used `expense_retirement`);
   `current_income` uses `income_eff` (`income_avg`) in mode B, and the **budget income** (`income_reg`)
   in mode C; `manual` is unchanged. This is a **deliberate, semantic change of base** — mode A's
@@ -208,26 +219,32 @@ consumed only by `GET /v1/summary` (`financial_health.runway_months` + `runway_i
 full contract in `.claude/engine.md` §Runway.
 
 - **Was** `liquid_assets_total / expense_total`. **Is** a month-by-month `Decimal` loop where the
-  liquid balance grows at the value-weighted mean of the assets' monthly multipliers
-  (`m = Σ vₐ·monthly_multiplier(rₐ) / Σ vₐ`) and the expense grows with
+  expense is funded by **sequential drain** (4.8.0, #128: lowest-expected-return liquid first,
+  `None` = 0, ties by index — the SAME order as `drain_from_assets` in the simulation), each
+  remaining balance compounds its OWN monthly multiplier, and the expense grows with
   `annual_inflation_assumption_percent` (clamped ≥ 0 by the handler).
 - **Same frame as the simulation**: nominal euros, withdraw-then-grow order, and *literally* the
   engine's `monthly_multiplier` (made `pub(crate)` for this) — including how it treats non-positive
   rates (see §4: only `None` and exactly `0` mean factor 1; **negative rates compound**). A KPI that
   used a different annual→monthly conversion would drift from the chart.
-- **Value-weighted = prorated drain**, deliberately *conservative*: the engine's real drain empties
-  the lowest-return liquids first, so it would last slightly longer. The KPI must never promise more
-  than the simulation.
+- **Sequential drain replaced the value-weighted multiplier in 4.8.0 (#128)**: until 4.7.x the
+  balance grew at `m = Σ vₐ·monthly_multiplier(rₐ) / Σ vₐ` (a prorated drain), systematically
+  ~2 % shorter on mixed portfolios because it consumed the high-return assets from month 1. The
+  card now matches what the simulation actually does (mixed 10k@0 % + 10k@10 % vs 1.000 €/mes:
+  20,80 → 21,27 months). Single-asset portfolios are bit-identical under both models.
 - **The infinite case is an SWR threshold, not the cap** (v2.3.0): `RunwayOutcome::Indefinite` ⟺
   `annual_expense_for_swr ≤ A·(swr_pct/100)`, compared without dividing
   (`annual_expense_for_swr·100 ≤ A·swr_pct`) so the boundary is exact in `Decimal`. The handler
   passes `swr_pct` from `fire_settings` (the **same** rate as the target, Jubilación tab) and
   `annual_expense_for_swr = gross_up_net_annual_fire(expense_total·12, tax_brackets, taxes_enabled)`
   — the **same** gross-up as §3. So the liquidity question is the FIRE question restricted to liquid
-  assets: `A ≥ gross_expense / SWR`. `swr_pct ≤ 0` never triggers it. Deliberately independent of
-  return and inflation: SWR already presumes a portfolio whose real return sustains the withdrawal;
-  return and inflation govern only the finite loop. Accepted consequence: below the threshold, an
-  enormous expected return no longer buys "infinite"; at the threshold, a 0 % return still does.
+  assets: `A ≥ gross_expense / SWR`. `swr_pct ≤ 0` never triggers it. **Since 4.8.0 (#128) the
+  threshold alone is not enough**: `Indefinite` also requires the liquid portfolio's value-weighted
+  expected return to be strictly positive (`Σ vₐ·rₐ > 0`) — the Trinity/Bengen rule presumes an
+  invested portfolio, never cash parked at 0 % (300.000 € at 0 % vs 875 €/mes meets the threshold
+  by exact equality and now publishes 342,9 months instead of «indefinida»). Inflation still never
+  touches the trigger (it governs only the finite loop). Below the threshold, an enormous expected
+  return still does not buy "infinite".
 - **Cap 1.200 months (100 years) is a floor, not infinity**: surviving it without meeting the SWR
   threshold returns `Months(1200)`, meaning "at least 100 years" (UI: «+100 años»). Compared to v2.2.0 this
   is the behavioral change that flips scenarios like 1M @ 7 % vs 4.000 €/month from `Indefinite` to
@@ -240,7 +257,9 @@ full contract in `.claude/engine.md` §Runway.
   decided **before** the threshold, or a zero expense would satisfy `0 ≤ A·swr` and report an
   undefined runway as infinite.
 - **Follows `savings_source`**: the expense base is `expense_total_monthly_equivalent`, so in B/C with
-  data it is the raw real spending average (§2b, cuotas included), not budget.
+  data it is the raw real spending average (§2b, cuotas included), not budget. (The #142 quota
+  subtraction is an ENGINE-input concern; the summary's expense base — and hence the runway — stays
+  raw.)
 - **Reduces exactly to `A/g`** with return and inflation 0 **and the SWR threshold unmet** (single
   final division, no tolerances) — that is how the pre-change regression test stayed valid across
   both changes (`runway_pre_change_baseline_liquid_over_expense` is still exact). Since 3.8.0 the
@@ -306,17 +325,23 @@ The single formula — `fire_target_at_month_index` (projection.rs:171-182), pub
 crate and consumed by BOTH the engine and the handler:
 
 ```
-target(month_index) = base_amount × (1 + inflation/100)^(month_index / 12)
-month_index = 0 → base_amount.   inflation = 0 → flat target at every month.
+target(month_index) = base_amount × (1 + inflation/100)^(month_index / 12) + debt_term(month_index)
+month_index = 0 → base_amount + debt_term(0).   inflation = 0 → flat BASE at every month.
+debt_term(m) (4.8.0, #142) = Σ cuota cash-outs remaining AFTER month m + residual tail
+                             (from FireTarget.debt_payments_remaining; 0 with no liabilities).
 ```
+
+**The target is no longer monotonic (4.8.0)**: growing base + decaying debt term. No optimization
+may assume monotonicity (binary-search crossing, early exit); the crossing scan is linear. With
+inflation 0 and live debt the full target is *strictly decreasing*.
 
 **The off-by-one story** (why one helper): before v1.3.0 the engine computed the trigger with
 `years = (k−1)/12` while the handler built `fire_target_series` with `years = month_index/12` as
 a *separate duplicated formula* — the plotted target curve and the actual retirement trigger
-disagreed by one month. Fix: one public helper; the engine passes `k−1` (it compares `nw_prev`,
-the close of month k−1, against the target at that same axis point — projection.rs:475-481), the
-handler passes the point's own `month_index` (projection.rs:1129,1140). Regression test:
-`fire_target_helper_matches_compound_factor_at_year_boundaries` (projection.rs:1092-1113).
+disagreed by one month. Fix: one public helper; the engine passes `k−1` (since 4.8.0 it compares
+`liquid_prev`, the close of month k−1, against the target at that same axis point), the
+handler passes the point's own `month_index`. Regression test:
+`fire_target_helper_matches_compound_factor_at_year_boundaries`.
 
 **What rewrite #1 got wrong** (v1.0.12, "real pure" model — replaced in v1.2.0): it ran the
 whole simulation in today-euros by deflating each asset's return
@@ -327,10 +352,12 @@ the target. Guard test: `fire_target_with_inflation_does_not_trigger_early_drain
 (projection.rs:981-1021). If you ever touch inflation semantics, that history says: pick ONE
 frame (nominal) and keep every series in it.
 
-**Inflation-invariance of the crossing**: `nominal_nw(k) ≥ base × (1+i)^(k/12)` is algebraically
-the same comparison as `deflated_nw(k) ≥ base`. So the jubilación month is identical whether you
-look at the nominal chart with the moving target or the deflated chart with a flat target — the
-"Inflation Adjusted" display toggle never moves the jubilación marker (CHANGELOG v1.4.2).
+**Inflation-invariance of the crossing**: `nominal_liquid(k) ≥ base × (1+i)^(k/12)` is algebraically
+the same comparison as `deflated_liquid(k) ≥ base` — with the 4.8.0 debt term the pure-base
+equivalence picks up a deflated-vs-nominal term mismatch, but the guarantee that matters survives
+intact for a stronger reason: since 4.6.0 the client reads `jubilacion_month_index` from the
+server and never re-derives the crossing, so the "Inflation Adjusted" display toggle cannot move
+the jubilación marker by construction (CHANGELOG v1.4.2 established it; 4.6.0 made it structural).
 (Changing the inflation *value* does move it, of course.) Milestones are NOT invariant: real
 milestones are reached later than nominal ones (test at projection.rs:1446-1482), hence the
 separate `milestones_real` field.
@@ -388,13 +415,15 @@ For each month `k = 1..=horizon_months`:
    conocer: el techo de un cap `months_expense` es `N × (expense + debt_service)`, así que **se mueve**
    en un what-if que amortiza — alcanzable solo desde `simulate_projection` y **sin test que lo
    cubra**.
-2. **Retirement check**: `fire_reached = nw_prev ≥ target(k−1)` via
-   `fire_target_at_month_index`. `in_retirement = fire_reached || k ≥ retirement_start_month`.
-   The handler always passes `retirement_start_month = None` and
-   `retirement_monthly_withdrawal = 0` — FIRE crossover is the sole
-   trigger, and the drain is driven purely by the income drop. Once NW dips below the target
-   again, `in_retirement` can flip back off next month (the model re-checks every month; there
-   is no latch).
+2. **Retirement check (4.8.0)**: `fire_reached = liquid_prev ≥ target(k−1)` via
+   `fire_target_at_month_index` — the basis is the **LIQUID** worth of the previous month
+   (Σ `is_liquid` assets + `surplus_cash`, GROSS, no principal subtracted — #143, paired with the
+   target's full-quota debt term of #142), not total NW. The state is an **absorbing latch**
+   (#141): `retired = retired || fire_reached || k ≥ retirement_start_month` — once retired,
+   always retired, even if worth later dips below the target (until 4.7.x the model re-checked
+   every month and flickered between regular and retirement budgets). The handler always passes
+   `retirement_start_month = None` and `retirement_monthly_withdrawal = 0` — FIRE crossover is
+   the sole trigger, and the drain is driven purely by the income drop.
 3. **Pick the budget**: in retirement use `income_retirement_monthly` /
    `expense_retirement_monthly`; otherwise the regular pair.
 4. **Net cash**: `income − expense − debt_service + planning_adj[k−1] −
@@ -562,9 +591,9 @@ el `closing_principal` que el motor ya derivaba y tiraba.
 Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verify before trusting:
 
 - Single target formula + signature: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs`
-- Trigger uses k−1 / nw_prev: `grep -n "fire_target_at_month_index(input.fire_target" crates/engine/src/projection.rs`
+- Trigger uses k−1 / liquid_prev + absorbing latch (4.8.0): `grep -n "fire_target_at_month_index(input.fire_target\|liquid_prev\|retired = retired" crates/engine/src/projection.rs`
 - FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes the raw `expense_avg` — see §2b)
-- Mode B (`savings_source`) base + liability zeroing: `grep -n "savings_source\|transactions_avg\|expense_from_avg\|payment_amount = None" apps/api/src/handlers/projection.rs`
+- Mode B (`savings_source`) base + quota subtraction (4.8.0, #142 — the 3.4.0 `payment_amount = None` zeroing is GONE): `grep -n "savings_source\|transactions_avg\|expense_from_avg\|active_quotas" apps/api/src/handlers/projection.rs`
 - Mode B/C reach into summary/assets/series: `grep -n "expense_reg\|expense_tot" apps/api/src/handlers/summary.rs` (el patrón anterior —`expense_der = Decimal::ZERO\|expense_tot = avg.expense_avg`— daba **vacío** desde un refactor: `expense_der` solo sobrevive dentro de un comentario y `expense_tot` se deriva de la resolución compartida, no de `avg.expense_avg`); `grep -n "assets_projection_context" apps/api/src/handlers/{projection,assets}.rs`
 - Runway model + cap: `grep -n "pub fn liquid_runway_months\|MAX_RUNWAY_MONTHS\|RunwayOutcome" crates/engine/src/runway.rs` and `grep -n "liquid_runway_months\|runway_is_indefinite" apps/api/src/handlers/summary.rs`
 - Runway infinite case is the SWR threshold, not the cap (v2.3.0): `grep -n "swr_pct" crates/engine/src/runway.rs` (the `Indefinite` branch must compare `annual_expense_for_swr * 100 <= balance_0 * swr_pct`) and `grep -n "annual_expense_gross\|gross_up_net_annual_fire" apps/api/src/handlers/summary.rs` (the handler must reuse the target's gross-up)

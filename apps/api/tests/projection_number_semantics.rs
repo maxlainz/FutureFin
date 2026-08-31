@@ -488,31 +488,18 @@ async fn debt_service_is_null_with_a_reason_when_the_cuota_lives_inside_the_real
             .await
             .json();
 
-        if mode == "budget" {
-            assert_eq!(dec(&k["debt_service_monthly"]), 400.0, "modo A (sim): {k}");
-            assert!(k["debt_service_absent_reason"].is_null(), "modo A (sim): {k}");
-            assert_eq!(dec(&res["debt_service"]), 400.0, "modo A (resolution): {res}");
-            assert!(
-                res["debt_service_absent_reason"].is_null(),
-                "modo A (resolution): {res}"
-            );
-        } else {
-            assert!(
-                k["debt_service_monthly"].is_null(),
-                "modo {mode} (sim): un 0 no puede significar «no aplica»: {k}"
-            );
-            assert_eq!(
-                k["debt_service_absent_reason"], "included_in_real_expense",
-                "modo {mode} (sim): {k}"
-            );
-            assert!(
-                res["debt_service"].is_null(),
-                "modo {mode} (resolution): la misma cifra, la misma ausencia: {res}"
-            );
-            assert_eq!(
-                res["debt_service_absent_reason"], "included_in_real_expense",
-                "modo {mode} (resolution): {res}"
-            );
+        // INVERTIDO en 4.8.0 (#142, opción 3): la cuota es servicio de deuda REAL en los TRES
+        // modos y en las DOS superficies (sim + resolution) — en B/C el gasto efectivo ya la
+        // restó del promedio, así que publicarla es contarla UNA vez. El literal
+        // `included_in_real_expense` se retiró con su modo.
+        assert_eq!(dec(&k["debt_service_monthly"]), 400.0, "modo {mode} (sim): {k}");
+        assert!(k["debt_service_absent_reason"].is_null(), "modo {mode} (sim): {k}");
+        assert_eq!(dec(&res["debt_service"]), 400.0, "modo {mode} (resolution): {res}");
+        assert!(
+            res["debt_service_absent_reason"].is_null(),
+            "modo {mode} (resolution): {res}"
+        );
+        {
             // El pasivo SIGUE vivo: la ausencia no es «no hay deuda».
             let liabs: Value = app
                 .get_with_cookie("/v1/liabilities", &owner.cookie)
@@ -601,4 +588,111 @@ async fn debt_service_stays_a_number_when_only_the_income_side_averages() {
         .json();
     assert_eq!(dec(&res["debt_service"]), 400.0, "misma respuesta en la otra superficie: {res}");
     assert!(res["debt_service_absent_reason"].is_null(), "{res}");
+}
+
+/// #124 (4.8.0), escenario del issue a mano: partida de 500 € cuyo `expense_end_date` venció
+/// hace 6 meses + gasto vivo de 1.500 €, ingreso 3.000 €, SWR 4 %, modo A, sin impuestos.
+/// Hasta 4.7.0 la partida vencida vivía dos vidas: sumaba en el presupuesto (gasto 2.000,
+/// ahorro publicado 1.000, objetivo 600.000) mientras el motor la cancelaba mes a mes (ahorro
+/// real 1.500) — «ahorras 1.000» junto a una serie que ahorra 1.500. Ahora las tres superficies
+/// dicen lo mismo: gasto **1.500**, delta **1.500**, objetivo **450.000** (= 1.500×12/0,04).
+/// La FILA sigue visible en `entries` (no se purga: reads never mutate).
+#[tokio::test]
+async fn an_expired_budget_entry_stops_counting_everywhere_at_once() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat_inc = app.create_category(&owner, "income", "Nomina").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vida").await;
+    budget(&app, &owner.cookie, &cat_inc, "3000").await;
+    budget(&app, &owner.cookie, &cat_exp, "1500").await;
+
+    // La partida que venció: se crea con fin futuro (la API valida) y se vence por SQL.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            json!({ "category_id": cat_exp, "amount": "500", "expense_end_date": "2090-01-01" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let entry_id = r.json()["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE budget_entries SET expense_end_date = DATE '2020-01-31' WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(&entry_id).unwrap())
+        .execute(&app.pool)
+        .await
+        .expect("vencer la partida");
+
+    // SWR 4 % (por defecto es 3,5): objetivo redondo del escenario.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": { "fire_number_mode": "annual_expense", "swr_pct": "4",
+                     "taxes_enabled": false, "tax_brackets": [] } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    // 1) Presupuesto: la vencida no suma; la fila sigue visible.
+    let b = app.get_with_cookie("/v1/budget", &owner.cookie).await.json();
+    let expense: f64 = b["totals"]["expense_regular_monthly_equivalent"].as_str().unwrap().parse().unwrap();
+    assert!((expense - 1_500.0).abs() < 0.001, "gasto sin la vencida: {expense}");
+    let visible = b["entries"].as_array().unwrap().iter().any(|e| e["id"] == entry_id.as_str());
+    assert!(visible, "la fila vencida sigue en entries (no se purga)");
+
+    // 2) Proyección: delta y objetivo alineados — y SIN caja fantasma (la entrada compensadora
+    //    del motor se retiró junto con la partida; con solo medio arreglo el delta sería 2.000).
+    let p = app.get_with_cookie("/v1/projection/series?months=120", &owner.cookie).await.json();
+    let delta: f64 = p["monthly_delta_assumption"].as_str().unwrap().parse().unwrap();
+    assert!((delta - 1_500.0).abs() < 0.001, "delta sin la vencida y sin fantasma: {delta}");
+    let target: f64 = p["jubilacion_target_net_worth"].as_str().unwrap().parse().unwrap();
+    assert!((target - 450_000.0).abs() < 0.001, "objetivo 1.500×12/0,04: {target}");
+}
+
+/// #127 (4.8.0), a mano: ingreso 3.000, gasto 1.800, y un pasivo sin intereses con cuota
+/// NOMINAL 900 pero solo 300 € de saldo — la caja real del mes 1 paga min(900, 300) = 300.
+/// Hasta 4.7.0 `sim_kpis` recalculaba con la cuota nominal (net_cash 300) mientras el motor
+/// repartía 900: dos «cajas del mes» para la misma pregunta. Ahora ambas cifras salen del MISMO
+/// primer paso del motor: **900** en las dos superficies.
+#[tokio::test]
+async fn sim_kpis_cash_converges_to_the_engines_first_month() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat_inc = app.create_category(&owner, "income", "Nomina").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vida").await;
+    let cat_liab = app.create_category(&owner, "liability", "Restos").await;
+    let cat_cuota = app.create_category(&owner, "expense", "Cuotas").await;
+    budget(&app, &owner.cookie, &cat_inc, "3000").await;
+    budget(&app, &owner.cookie, &cat_exp, "1800").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({ "category_id": cat_liab, "expense_category_id": cat_cuota,
+                    "label": "Resto", "principal": "300",
+                    "payment_amount": "900", "payment_frequency": "monthly" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let sim = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    let k = &sim["baseline"];
+    assert!(
+        (dec(&k["net_recurring_monthly"]) - 900.0).abs() < 0.001,
+        "recurring = 3.000 − 1.800 − min(900, 300): {k}"
+    );
+    assert!(
+        (dec(&k["net_cash_monthly"]) - 900.0).abs() < 0.001,
+        "la caja del mes ES la del primer paso del motor: {k}"
+    );
+    // Y la resolución de la cascada (que YA llamaba al motor) dice lo mismo.
+    let res: Value = app
+        .get_with_cookie("/v1/allocation-rules/resolution", &owner.cookie)
+        .await
+        .json();
+    assert!(
+        (dec(&res["recurring_net"]) - 900.0).abs() < 0.001,
+        "las dos superficies convergen: {res}"
+    );
 }
